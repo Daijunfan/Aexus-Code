@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type * as cp from 'node:child_process';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as http from 'node:http';
 import * as net from 'node:net';
@@ -11,18 +12,20 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	buildAgyRolePromptProtoSuffix,
+	createWsFrameTransformer,
 	extractAgyCascadeIdFromProto,
 	injectAgyConnectJsonRolePrompt,
-	injectAgyHtmlForceHttpConnect,
 	injectLlmPayloadSystemPrompt,
 	injectSessionServerSystemField,
 	mergeRolePromptIntoText,
+	observeAgyConnectWsServerMessage,
 	readRoleSyncSnapshotSync,
 	resolveActiveEngineAgent,
 	resolveDshDirectSpawn,
 	ROLE_STATE_ENV_KEY,
 	RoleSyncAgentEntry,
 	RoleSyncSnapshot,
+	transformAgyConnectWsClientMessage,
 } from './roleBridgeShared';
 
 export interface NativeRoleBridgeOptions {
@@ -151,6 +154,13 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 	const agyHooksWorkspaceDir = path.join(bridgeDir, 'agy-hooks');
 	const dshPreloadPath = path.join(distDir, 'dshRolePreload.js');
 	const agyHookPath = path.join(distDir, 'agyRoleHook.js');
+	const adeCliBinDir = path.resolve(distDir, '..', 'bin');
+	/* eslint-disable local/code-no-sync-fs -- one-time check during extension-host preload initialization */
+	const hasAdeCliBin = fsSync.existsSync(path.join(adeCliBinDir, process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade'));
+	/* eslint-enable local/code-no-sync-fs */
+	if (hasAdeCliBin && process.env.PATH && !process.env.PATH.split(path.delimiter).includes(adeCliBinDir)) {
+		process.env.PATH = `${adeCliBinDir}${path.delimiter}${process.env.PATH}`;
+	}
 
 	const cpModule = options?.childProcessModule ?? (require('node:child_process') as typeof cp);
 	const fetchHost = options?.fetchHost ?? globalThis;
@@ -256,6 +266,45 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		bindNativeSession('antigravity', agentId, conversationId);
 	};
 
+	const buildAgyHooksConfig = () => {
+		const command = process.platform === 'win32'
+			? `set ELECTRON_RUN_AS_NODE=1&& set "${ROLE_STATE_ENV_KEY}=${stateFilePath}"&& "${process.execPath}" "${agyHookPath}"`
+			: `ELECTRON_RUN_AS_NODE=1 ${ROLE_STATE_ENV_KEY}=${shellQuoteArg(stateFilePath)} ${shellQuoteArg(process.execPath)} ${shellQuoteArg(agyHookPath)}`;
+		return {
+			'aexus-ade-role-bridge': {
+				PreInvocation: [
+					{
+						type: 'command',
+						command,
+						timeout: 5,
+					},
+				],
+			},
+		};
+	};
+
+	/* eslint-disable local/code-no-sync-fs -- agy --hub reads .agents/hooks.json immediately on process startup */
+	const ensureAgyHooksWorkspaceSync = (): void => {
+		if (agyHooksReady || disposed) {
+			return;
+		}
+		try {
+			if (!fsSync.existsSync(agyHookPath)) {
+				return;
+			}
+			const agentsDir = path.join(agyHooksWorkspaceDir, '.agents');
+			fsSync.mkdirSync(agentsDir, { recursive: true, mode: 0o700 });
+			const target = path.join(agentsDir, 'hooks.json');
+			const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+			fsSync.writeFileSync(tmp, JSON.stringify(buildAgyHooksConfig(), null, 2), { encoding: 'utf8', mode: 0o600 });
+			fsSync.renameSync(tmp, target);
+			agyHooksReady = true;
+		} catch {
+			// Best-effort hook creation only.
+		}
+	};
+	/* eslint-enable local/code-no-sync-fs */
+
 	const ensureAgyHooksWorkspace = async (): Promise<void> => {
 		if (agyHooksReady || disposed) {
 			return;
@@ -268,23 +317,9 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		try {
 			const agentsDir = path.join(agyHooksWorkspaceDir, '.agents');
 			await fs.mkdir(agentsDir, { recursive: true, mode: 0o700 });
-			const command = process.platform === 'win32'
-				? `set ELECTRON_RUN_AS_NODE=1&& "${process.execPath}" "${agyHookPath}"`
-				: `ELECTRON_RUN_AS_NODE=1 ${shellQuoteArg(process.execPath)} ${shellQuoteArg(agyHookPath)}`;
-			const hooksConfig = {
-				'aexus-ade-role-bridge': {
-					PreInvocation: [
-						{
-							type: 'command',
-							command,
-							timeout: 5,
-						},
-					],
-				},
-			};
 			const target = path.join(agentsDir, 'hooks.json');
 			const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-			await fs.writeFile(tmp, JSON.stringify(hooksConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
+			await fs.writeFile(tmp, JSON.stringify(buildAgyHooksConfig(), null, 2), { encoding: 'utf8', mode: 0o600 });
 			await fs.rename(tmp, target);
 			agyHooksReady = true;
 		} catch {
@@ -363,6 +398,16 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 	const initPromise = Promise.all([
 		fs.access(dshPreloadPath).then(() => { hasDshPreload = true; }, () => { }),
 		ensureAgyHooksWorkspace(),
+		fs.readFile(agyBindingsFilePath, 'utf8').then(raw => {
+			const parsed = JSON.parse(raw) as unknown;
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				for (const [convId, agentId] of Object.entries(parsed as Record<string, unknown>)) {
+					if (typeof agentId === 'string' && agentId && !agyBindingsMap[convId]) {
+						agyBindingsMap[convId] = agentId;
+					}
+				}
+			}
+		}, () => { }),
 		isFollower ? refreshFromStateFile() : persistState(),
 	]);
 
@@ -404,15 +449,33 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			}
 		}
 
-		const candidate = resolveActiveEngineAgent(snapshot, shortEngine);
+		const candidate = resolveActiveEngineAgent(snapshot, shortEngine, cwd);
 		if (!candidate) {
 			return undefined;
 		}
 		const existingBoundId = candidate.nativeSessionId ?? agentIdToNativeId.get(candidate.id);
 		if (nativeSessionId && existingBoundId && existingBoundId !== nativeSessionId) {
-			return undefined;
+			const isExplicitlyActiveOrSelected = candidate.id === snapshot.activeAgentId || candidate.id === snapshot.selectedAgentId;
+			const sameEngineCount = snapshot.agents.filter(entry => entry.engineId === expectedEngineId).length;
+			if (!isExplicitlyActiveOrSelected && sameEngineCount > 1) {
+				const unboundMatch = snapshot.agents.find(entry => {
+					if (entry.engineId !== expectedEngineId) {
+						return false;
+					}
+					if (entry.nativeSessionId || agentIdToNativeId.has(entry.id)) {
+						return false;
+					}
+					if (cwd && entry.projectPath) {
+						const resolvedCwd = path.resolve(cwd);
+						const resolvedProj = path.resolve(entry.projectPath);
+						return resolvedCwd === resolvedProj || resolvedCwd.startsWith(resolvedProj + path.sep);
+					}
+					return true;
+				});
+				return unboundMatch;
+			}
 		}
-		if (cwd && candidate.projectPath && snapshot.activeAgentId !== candidate.id) {
+		if (cwd && candidate.projectPath && snapshot.activeAgentId !== candidate.id && snapshot.selectedAgentId !== candidate.id) {
 			const resolvedCwd = path.resolve(cwd);
 			const resolvedProj = path.resolve(candidate.projectPath);
 			if (resolvedCwd !== resolvedProj && !resolvedCwd.startsWith(resolvedProj + path.sep)) {
@@ -492,12 +555,11 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				const rawUrl = req.url ?? '/';
 				const pathname = rawUrl.split('?')[0];
 				const method = (req.method ?? 'GET').toUpperCase();
-				const isRootHtml = method === 'GET' && (pathname === '/' || pathname === '/index.html');
 				const isStartCascade = method === 'POST' && pathname.endsWith('/StartCascade');
 				const isSendCascade = method === 'POST' && pathname.endsWith('/SendUserCascadeMessage');
 
 				const forwardHeaders: http.OutgoingHttpHeaders = { ...req.headers };
-				if (isRootHtml || isStartCascade) {
+				if (isStartCascade) {
 					delete forwardHeaders['accept-encoding'];
 				}
 
@@ -565,20 +627,6 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 					headers: forwardHeaders,
 				}, upRes => {
 					const respContentType = String(upRes.headers['content-type'] ?? '').toLowerCase();
-					if (isRootHtml && respContentType.includes('text/html') && !upRes.headers['content-encoding']) {
-						const chunks: Buffer[] = [];
-						upRes.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-						upRes.once('end', () => {
-							const rawHtml = Buffer.concat(chunks).toString('utf8');
-							const patched = Buffer.from(injectAgyHtmlForceHttpConnect(rawHtml), 'utf8');
-							const outHeaders: http.OutgoingHttpHeaders = { ...upRes.headers, 'content-length': String(patched.length) };
-							delete outHeaders['transfer-encoding'];
-							res.writeHead(upRes.statusCode ?? 200, outHeaders);
-							res.end(patched);
-						});
-						upRes.once('error', () => res.end());
-						return;
-					}
 					if (isStartCascade && (upRes.statusCode ?? 0) >= 200 && (upRes.statusCode ?? 0) < 300) {
 						const chunks: Buffer[] = [];
 						upRes.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
@@ -626,14 +674,24 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				const sock = clientSocket as net.Socket;
 				openSockets.add(sock);
 				sock.once('close', () => openSockets.delete(sock));
+				const upgradePathname = (req.url ?? '/').split('?')[0];
+				const isConnectWs = upgradePathname.endsWith('/connect-websocket');
+				const upHeaders: http.OutgoingHttpHeaders = { ...req.headers };
+				if (isConnectWs) {
+					for (const headerName of Object.keys(upHeaders)) {
+						if (headerName.toLowerCase() === 'sec-websocket-extensions') {
+							delete upHeaders[headerName];
+						}
+					}
+				}
 				const upReq = http.request({
 					hostname: '127.0.0.1',
 					port: upstreamPort,
 					path: req.url ?? '/',
 					method: req.method ?? 'GET',
-					headers: req.headers,
+					headers: upHeaders,
 				});
-				if (head.length > 0) {
+				if (!isConnectWs && head.length > 0) {
 					upReq.write(head);
 				}
 				upReq.on('upgrade', (upRes, upSocket, upHead) => {
@@ -647,11 +705,63 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 					}
 					statusLine += '\r\n';
 					sock.write(statusLine);
-					if (upHead.length > 0) {
-						sock.write(upHead);
+
+					const negotiatedCompression = Boolean(upRes.headers['sec-websocket-extensions']);
+					if (!isConnectWs || negotiatedCompression) {
+						if (isConnectWs && head.length > 0) {
+							upSocket.write(head);
+						}
+						if (upHead.length > 0) {
+							sock.write(upHead);
+						}
+						upSocket.pipe(sock);
+						sock.pipe(upSocket);
+					} else {
+						const startCascadeStreams = new Set<string>();
+						const serverObserver = createWsFrameTransformer({
+							shouldDecodeText: () => startCascadeStreams.size > 0,
+							onTextMessage: text => {
+								observeAgyConnectWsServerMessage(text, startCascadeStreams, cascadeId => {
+									refreshFromStateFileSync();
+									const agent = resolveAgyAgentForCascade(cascadeId);
+									if (agent) {
+										recordAgyBinding(cascadeId, agent.id);
+									}
+								});
+								return undefined;
+							},
+						});
+						const clientTransformer = createWsFrameTransformer({
+							onTextMessage: text => transformAgyConnectWsClientMessage(text, startCascadeStreams, cascadeId => {
+								refreshFromStateFileSync();
+								const agent = resolveAgyAgentForCascade(cascadeId);
+								if (agent && cascadeId) {
+									recordAgyBinding(cascadeId, agent.id);
+								}
+								return agent;
+							}),
+							onChunkOut: out => {
+								if (!upSocket.destroyed) {
+									upSocket.write(out);
+								}
+							},
+						});
+						if (upHead.length > 0) {
+							sock.write(upHead);
+							serverObserver.push(upHead);
+						}
+						upSocket.on('data', chunk => {
+							serverObserver.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+						});
+						upSocket.pipe(sock);
+						if (head.length > 0) {
+							clientTransformer.push(head);
+						}
+						sock.on('data', chunk => {
+							clientTransformer.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+						});
 					}
-					upSocket.pipe(sock);
-					sock.pipe(upSocket);
+
 					sock.on('error', () => upSocket.destroy());
 					upSocket.on('error', () => sock.destroy());
 					sock.on('close', () => upSocket.destroy());
@@ -695,15 +805,26 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		child: cp.ChildProcess,
 		cliSessionId: string | undefined,
 		initialRolePrompt: string | undefined,
-		isResume: boolean,
+		_isResume: boolean,
 		spawnedAgentId?: string,
 		cwdStr?: string,
+		overrideEngine: 'claude' | 'cline' = 'claude',
 	) => {
+		const expectedEngineId = `aexus-${overrideEngine}`;
 		let discoveredSessionId = cliSessionId;
 		let pinnedAgentId = spawnedAgentId;
-		let lastInjectedPrompt = isResume ? undefined : initialRolePrompt;
+		let lastInjectedPrompt = initialRolePrompt;
 
 		const resolveClaudeAgent = (sid: string | undefined): RoleSyncAgentEntry | undefined => {
+			if (overrideEngine === 'cline') {
+				if (pinnedAgentId) {
+					const pinned = snapshot.agents.find(entry => entry.id === pinnedAgentId && entry.engineId === expectedEngineId);
+					if (pinned) {
+						return pinned;
+					}
+				}
+				return resolveActiveEngineAgent(snapshot, 'cline', cwdStr);
+			}
 			if (sid) {
 				const mappedId = nativeKeyToAgentId.get(`claude:${sid}`);
 				if (mappedId) {
@@ -746,14 +867,12 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 								refreshFromStateFileSync();
 								discoveredSessionId = sid.trim();
 								const resolved = resolveClaudeAgent(discoveredSessionId);
-								if (resolved) {
+								if (resolved && overrideEngine === 'claude') {
 									bindNativeSession('claude', resolved.id, discoveredSessionId);
 									if (!lastInjectedPrompt && initialRolePrompt && resolved.isOrchestrated) {
 										lastInjectedPrompt = initialRolePrompt;
 									}
 								}
-								child.stdout?.off('data', onOutData);
-								break;
 							}
 						}
 					} catch {
@@ -773,13 +892,45 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				}
 				try {
 					const pkt = JSON.parse(line) as Record<string, unknown>;
+					// Anthropic Claude Agent SDK sends `control_request` `{ subtype: "initialize", systemPrompt, appendSystemPrompt }`
+					// on stdin immediately after spawn, which overwrites CLI `--append-system-prompt`!
+					if (pkt.type === 'control_request' && pkt.request && typeof pkt.request === 'object') {
+						const req = pkt.request as Record<string, unknown>;
+						if (req.subtype === 'initialize') {
+							refreshFromStateFileSync();
+							const liveAgent = resolveClaudeAgent(discoveredSessionId);
+							if (liveAgent?.isOrchestrated && liveAgent.rolePrompt) {
+								let injectedIntoInit = false;
+								if (req.systemPrompt && typeof req.systemPrompt === 'object' && !Array.isArray(req.systemPrompt)) {
+									const presetObj = { ...(req.systemPrompt as Record<string, unknown>) };
+									const merged = mergeRolePromptIntoText(typeof presetObj.append === 'string' ? presetObj.append : undefined, liveAgent.rolePrompt);
+									presetObj.append = merged.text;
+									req.systemPrompt = presetObj;
+									injectedIntoInit = true;
+								} else if (Array.isArray(req.systemPrompt)) {
+									req.systemPrompt = [...req.systemPrompt, liveAgent.rolePrompt];
+									injectedIntoInit = true;
+								}
+								const mergedAppend = mergeRolePromptIntoText(typeof req.appendSystemPrompt === 'string' ? req.appendSystemPrompt : undefined, liveAgent.rolePrompt);
+								req.appendSystemPrompt = mergedAppend.text;
+								injectedIntoInit = true;
+								if (injectedIntoInit) {
+									lastInjectedPrompt = liveAgent.rolePrompt;
+									return JSON.stringify(pkt);
+								}
+							}
+							// SDK initialize replaced CLI --append-system-prompt without role context -> force injection on first user turn!
+							lastInjectedPrompt = undefined;
+							return line;
+						}
+					}
 					if (pkt.type === 'user' && pkt.message && typeof pkt.message === 'object') {
 						refreshFromStateFileSync();
 						const sid = (typeof pkt.session_id === 'string' && pkt.session_id.trim())
 							? pkt.session_id.trim()
 							: discoveredSessionId;
 						const liveAgent = resolveClaudeAgent(sid);
-						if (liveAgent && sid) {
+						if (liveAgent && sid && overrideEngine === 'claude') {
 							bindNativeSession('claude', liveAgent.id, sid);
 						}
 						if (liveAgent?.isOrchestrated && liveAgent.rolePrompt) {
@@ -838,12 +989,37 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		}
 	};
 
+	const prefixCodexTurnInputWithRole = (rawTurnLine: string, rolePrompt: string): string => {
+		try {
+			const pkt = JSON.parse(rawTurnLine) as { params?: Record<string, unknown> };
+			const params = pkt.params;
+			if (!params || typeof params !== 'object') {
+				return rawTurnLine;
+			}
+			const prefixText = `[Aexus Orchestrated Role Context]\n${rolePrompt}`;
+			if (Array.isArray(params.input)) {
+				params.input = [{ type: 'text', text: prefixText }, ...params.input];
+				return JSON.stringify(pkt);
+			}
+			if (typeof params.text === 'string') {
+				params.text = `${prefixText}\n\n${params.text}`;
+				return JSON.stringify(pkt);
+			}
+		} catch {
+			// Keep original payload if unexpected shape.
+		}
+		return rawTurnLine;
+	};
+
 	const wrapCodexChild = (child: cp.ChildProcess) => {
 		const ephemeralReqIds = new Set<string>();
 		const ephemeralThreadIds = new Set<string>();
 		const injectedPromptByThread = new Map<string, string>();
+		const pendingThreadResumes = new Map<string, { readonly tid: string; readonly rolePrompt: string }>();
 		const pendingInjectBarriers = new Map<string, {
-			readonly payload: string;
+			readonly rawTurnLine: string;
+			readonly tid: string;
+			readonly rolePrompt: string;
 			readonly cb?: (error?: Error | null) => void;
 			readonly timer: ReturnType<typeof setTimeout>;
 		}>();
@@ -854,18 +1030,23 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 
 		const origWrite = child.stdin.write.bind(child.stdin) as (...writeArgs: unknown[]) => boolean;
 
-		const flushBarrier = (injectId: string) => {
+		const flushBarrier = (injectId: string, hadInjectError = false) => {
 			const barrier = pendingInjectBarriers.get(injectId);
 			if (!barrier) {
 				return;
 			}
 			clearTimeout(barrier.timer);
 			pendingInjectBarriers.delete(injectId);
+			let outPayload = barrier.rawTurnLine + '\n';
+			if (hadInjectError) {
+				outPayload = prefixCodexTurnInputWithRole(barrier.rawTurnLine, barrier.rolePrompt) + '\n';
+			}
+			injectedPromptByThread.set(barrier.tid, barrier.rolePrompt);
 			if (!child.stdin?.destroyed) {
 				if (barrier.cb) {
-					origWrite(barrier.payload, 'utf8', barrier.cb);
+					origWrite(outPayload, 'utf8', barrier.cb);
 				} else {
-					origWrite(barrier.payload, 'utf8');
+					origWrite(outPayload, 'utf8');
 				}
 			} else {
 				barrier.cb?.(new Error('Codex stdin stream closed before turn flush.'));
@@ -874,7 +1055,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 
 		const cleanupBarriers = () => {
 			for (const injectId of [...pendingInjectBarriers.keys()]) {
-				flushBarrier(injectId);
+				flushBarrier(injectId, false);
 			}
 		};
 		child.once('close', cleanupBarriers);
@@ -891,18 +1072,29 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				const pkt = JSON.parse(line) as {
 					id?: string | number;
 					method?: string;
+					error?: unknown;
 					params?: { thread?: { id?: string; ephemeral?: boolean } };
 					result?: { thread?: { id?: string } };
 				};
 				if (typeof pkt.id === 'string' && pkt.id.startsWith('__aexus_codex_inject_')) {
-					flushBarrier(pkt.id);
+					flushBarrier(pkt.id, Boolean(pkt.error));
 					return undefined;
 				}
-				if (pkt.id !== undefined && ephemeralReqIds.has(String(pkt.id))) {
-					ephemeralReqIds.delete(String(pkt.id));
-					const tid = pkt.result?.thread?.id;
-					if (typeof tid === 'string') {
-						ephemeralThreadIds.add(tid);
+				if (pkt.id !== undefined) {
+					const idKey = String(pkt.id);
+					if (ephemeralReqIds.has(idKey)) {
+						ephemeralReqIds.delete(idKey);
+						const tid = pkt.result?.thread?.id;
+						if (typeof tid === 'string') {
+							ephemeralThreadIds.add(tid);
+						}
+					}
+					const resumeMeta = pendingThreadResumes.get(idKey);
+					if (resumeMeta) {
+						pendingThreadResumes.delete(idKey);
+						if (!pkt.error) {
+							injectedPromptByThread.set(resumeMeta.tid, resumeMeta.rolePrompt);
+						}
 					}
 				}
 				if (pkt.method === 'thread/started' && pkt.params?.thread?.ephemeral === true && typeof pkt.params.thread.id === 'string') {
@@ -969,7 +1161,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 					};
 					const params = pkt.params;
 
-					if ((pkt.method === 'thread/start' || pkt.method === 'thread/fork') && params?.ephemeral === true && pkt.id !== undefined) {
+					if ((pkt.method === 'thread/start' || pkt.method === 'thread/startAeon' || pkt.method === 'thread/fork') && params?.ephemeral === true && pkt.id !== undefined) {
 						ephemeralReqIds.add(String(pkt.id));
 						immediateOut += clean + '\n';
 						continue;
@@ -985,7 +1177,11 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 								if (agent.isOrchestrated && agent.rolePrompt) {
 									const merged = mergeRolePromptIntoText(typeof params.developerInstructions === 'string' ? params.developerInstructions : undefined, agent.rolePrompt);
 									params.developerInstructions = merged.text;
-									injectedPromptByThread.set(tid, agent.rolePrompt);
+									if (pkt.id !== undefined) {
+										pendingThreadResumes.set(String(pkt.id), { tid, rolePrompt: agent.rolePrompt });
+									} else {
+										injectedPromptByThread.set(tid, agent.rolePrompt);
+									}
 									immediateOut += JSON.stringify(pkt) + '\n';
 									continue;
 								}
@@ -995,7 +1191,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 						continue;
 					}
 
-					if ((pkt.method === 'turn/start' || pkt.method === 'turn/addUserMessage') && typeof params?.threadId === 'string') {
+					if ((pkt.method === 'turn/start' || pkt.method === 'turn/addUserMessage' || pkt.method === 'turn/steer') && typeof params?.threadId === 'string') {
 						const tid = params.threadId;
 						if (!ephemeralThreadIds.has(tid)) {
 							const cwd = typeof params.cwd === 'string' ? params.cwd : undefined;
@@ -1005,9 +1201,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 							}
 							if (agent?.isOrchestrated && agent.rolePrompt && injectedPromptByThread.get(tid) !== agent.rolePrompt) {
 								const injectId = `__aexus_codex_inject_${++injectSeq}`;
-								injectedPromptByThread.set(tid, agent.rolePrompt);
 								const injectPacket = JSON.stringify({
-									jsonrpc: '2.0',
 									id: injectId,
 									method: 'thread/inject_items',
 									params: {
@@ -1026,8 +1220,14 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 									immediateOut = '';
 								}
 								origWrite(injectPacket, 'utf8');
-								const timer = setTimeout(() => flushBarrier(injectId), 1500);
-								pendingInjectBarriers.set(injectId, { payload: clean + '\n', cb, timer });
+								const timer = setTimeout(() => flushBarrier(injectId, false), 1500);
+								pendingInjectBarriers.set(injectId, {
+									rawTurnLine: clean,
+									tid,
+									rolePrompt: agent.rolePrompt,
+									cb,
+									timer,
+								});
 								deferred = true;
 								continue;
 							}
@@ -1052,14 +1252,50 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		} as typeof child.stdin.write;
 	};
 
-	const wrapPiChild = (child: cp.ChildProcess, initialRolePrompt: string | undefined, spawnedAgentId?: string) => {
+	const wrapPiChild = (
+		child: cp.ChildProcess,
+		initialRolePrompt: string | undefined,
+		spawnedAgentId?: string,
+		cliSessionId?: string,
+		cwdStr?: string,
+	) => {
 		if (!child.stdin) {
 			return;
 		}
 		const origWrite = child.stdin.write.bind(child.stdin) as (...writeArgs: unknown[]) => boolean;
 		let lastInjectedPrompt = initialRolePrompt;
-		const pinnedAgentId = spawnedAgentId;
+		let pinnedAgentId = spawnedAgentId;
+		let currentPiSessionId = cliSessionId;
 		let inBuf = '';
+
+		const resolveLivePiAgent = (): RoleSyncAgentEntry | undefined => {
+			if (currentPiSessionId) {
+				const mappedId = nativeKeyToAgentId.get(`pi:${currentPiSessionId}`);
+				if (mappedId) {
+					const found = snapshot.agents.find(entry => entry.id === mappedId && entry.engineId === 'aexus-pi');
+					if (found) {
+						pinnedAgentId = found.id;
+						return found;
+					}
+				}
+			}
+			const activeCandidate = resolveActiveEngineAgent(snapshot, 'pi', cwdStr);
+			if (activeCandidate && (activeCandidate.id === snapshot.activeAgentId || activeCandidate.id === snapshot.selectedAgentId)) {
+				pinnedAgentId = activeCandidate.id;
+				return activeCandidate;
+			}
+			if (pinnedAgentId) {
+				const pinned = snapshot.agents.find(entry => entry.id === pinnedAgentId && entry.engineId === 'aexus-pi');
+				if (pinned) {
+					return pinned;
+				}
+			}
+			const resolved = resolveAgentForEngine('pi', currentPiSessionId, cwdStr);
+			if (resolved) {
+				pinnedAgentId = resolved.id;
+			}
+			return resolved;
+		};
 
 		child.stdin.write = function (chunk: string | Uint8Array, encodingOrCb?: BufferEncoding | ((error?: Error | null) => void), maybeCb?: (error?: Error | null) => void): boolean {
 			refreshFromStateFileSync();
@@ -1077,10 +1313,25 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 					continue;
 				}
 				try {
-					const pkt = JSON.parse(clean) as { type?: string; message?: unknown };
-					if (pkt.type === 'prompt' && typeof pkt.message === 'string') {
-						const liveAgent = (pinnedAgentId ? snapshot.agents.find(entry => entry.id === pinnedAgentId && entry.engineId === 'aexus-pi') : undefined)
-							?? resolveAgentForEngine('pi');
+					const pkt = JSON.parse(clean) as { type?: string; message?: unknown; sessionPath?: unknown; sessionId?: unknown };
+					if (pkt.type === 'new_session' || pkt.type === 'switch_session' || pkt.type === 'fork') {
+						lastInjectedPrompt = undefined;
+						const nextSid = typeof pkt.sessionId === 'string' && pkt.sessionId.trim()
+							? pkt.sessionId.trim()
+							: (typeof pkt.sessionPath === 'string' && pkt.sessionPath.trim() ? pkt.sessionPath.trim() : undefined);
+						currentPiSessionId = nextSid;
+						const nextAgent = resolveLivePiAgent();
+						if (nextAgent && nextSid) {
+							bindNativeSession('pi', nextAgent.id, nextSid);
+						}
+						out += clean + '\n';
+						continue;
+					}
+					if ((pkt.type === 'prompt' || pkt.type === 'steer' || pkt.type === 'follow_up') && typeof pkt.message === 'string') {
+						const liveAgent = resolveLivePiAgent();
+						if (liveAgent && currentPiSessionId) {
+							bindNativeSession('pi', liveAgent.id, currentPiSessionId);
+						}
 						if (liveAgent?.isOrchestrated && liveAgent.rolePrompt) {
 							if (lastInjectedPrompt !== liveAgent.rolePrompt) {
 								pkt.message = `[Aexus Orchestrated Role Context Updated]\n${liveAgent.rolePrompt}\n\n${pkt.message}`;
@@ -1088,8 +1339,11 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 								out += JSON.stringify(pkt) + '\n';
 								continue;
 							}
-						} else if (liveAgent && !liveAgent.isOrchestrated) {
+						} else if (liveAgent && !liveAgent.isOrchestrated && lastInjectedPrompt !== undefined) {
 							lastInjectedPrompt = undefined;
+							pkt.message = `[Aexus Role Cleared: You are now a pure Worker session with no organizational rank or subordinates.]\n\n${pkt.message}`;
+							out += JSON.stringify(pkt) + '\n';
+							continue;
 						}
 					}
 				} catch {
@@ -1122,6 +1376,8 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		}
 
 		const cwdStr = toCwdString(nextOptions?.cwd);
+		const spawnStack = new Error().stack ?? '';
+		const spawnCallerIsCline = spawnStack.includes('claude-dev');
 
 		const isClaudeStream = !nextArgs.includes('--append-system-prompt')
 			&& !nextArgs.includes('--append-system-prompt-file')
@@ -1130,17 +1386,24 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			&& nextArgs.includes('stream-json')
 			&& (isExecutableMatch(nextCommand, ['claude']) || nextArgs.some(a => /(?:^|[\\/])claude(?:-code)?(?:[\\/]cli\.js|\.js|\.cjs|\.mjs|\.exe)?$/i.test(a)));
 
+		const cmdBase = readExecutableBasename(nextCommand);
 		const isCodexAppServer = nextArgs.includes('app-server')
-			&& (isExecutableMatch(nextCommand, ['codex']) || nextArgs.some(a => /(?:^|[\\/])codex(?:\.exe)?$/i.test(a)));
+			&& (isExecutableMatch(nextCommand, ['codex']) || /^codex(?:[-_.]|$)/i.test(cmdBase) || nextArgs.some(a => /(?:^|[\\/])codex(?:[-_.][\w.-]+)?(?:\.exe)?$/i.test(a)));
 
 		const piModeIdx = nextArgs.indexOf('--mode');
+		const isPiScriptArg = (arg: string): boolean =>
+			/(?:^|[\\/])pi(?:\.js|\.cjs|\.mjs|\.exe)?$/i.test(arg)
+			|| /(?:^|[\\/])pi(?:-coding-agent)?[\\/].*\bcli\.(?:c|m)?js$/i.test(arg)
+			|| /@[\w.-]+[\\/]pi-coding-agent[\\/].*\bcli\.(?:c|m)?js$/i.test(arg);
 		const isPiRpc = piModeIdx >= 0
 			&& nextArgs[piModeIdx + 1] === 'rpc'
-			&& (isExecutableMatch(nextCommand, ['pi']) || nextArgs.some(a => /(?:^|[\\/])pi(?:\.js|\.cjs|\.mjs|\.exe)?$/i.test(a)));
+			&& (isExecutableMatch(nextCommand, ['pi']) || /^pi(?:[-_.]|$)/i.test(cmdBase) || nextArgs.some(isPiScriptArg));
 
 		const dshProfileIdx = nextArgs.indexOf('--profile');
 		const dshScriptArgIdx = nextArgs.findIndex(a => /(?:^|[\\/])@deepseek-ai[\\/]dsh(?:[\\/]lib[\\/]bin\.js)?$/i.test(a));
-		const isDshWeb = (isExecutableMatch(nextCommand, ['dsh']) || (isExecutableMatch(nextCommand, ['node']) && dshScriptArgIdx >= 0))
+		const isDshCommandDirect = isExecutableMatch(nextCommand, ['dsh', 'deepseek harness'])
+			|| /(?:^|[\\/])@deepseek-ai[\\/]dsh(?:[\\/]lib[\\/]bin\.js)?$/i.test(nextCommand);
+		const isDshWeb = (isDshCommandDirect || (isExecutableMatch(nextCommand, ['node', 'bun']) && dshScriptArgIdx >= 0))
 			&& !nextArgs.includes('--version')
 			&& !nextArgs.includes('--help')
 			&& !nextArgs.includes('-h')
@@ -1157,6 +1420,8 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		let claudeInitialPrompt: string | undefined;
 		let claudeIsResume = false;
 		let claudeSpawnedAgentId: string | undefined;
+		let claudeOverrideEngine: 'claude' | 'cline' = 'claude';
+		let piCliSid: string | undefined;
 		let piInitialPrompt: string | undefined;
 		let piSpawnedAgentId: string | undefined;
 		let agyProxyTargetPort: number | undefined;
@@ -1167,28 +1432,44 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			const explicitSid = readFlagValue(nextArgs, '--session-id');
 			claudeCliSid = resumeSid ?? explicitSid;
 			claudeIsResume = Boolean(resumeSid);
-			const agent = resolveAgentForEngine('claude', claudeCliSid, cwdStr);
-			if (agent) {
-				claudeSpawnedAgentId = agent.id;
-				if (claudeCliSid) {
-					bindNativeSession('claude', agent.id, claudeCliSid);
+			if (spawnCallerIsCline) {
+				claudeOverrideEngine = 'cline';
+				const clineAgent = resolveActiveEngineAgent(snapshot, 'cline', cwdStr);
+				if (clineAgent) {
+					claudeSpawnedAgentId = clineAgent.id;
+					if (clineAgent.isOrchestrated && clineAgent.rolePrompt) {
+						nextArgs.push('--append-system-prompt', clineAgent.rolePrompt);
+						claudeInitialPrompt = clineAgent.rolePrompt;
+					}
 				}
-				if (agent.isOrchestrated && agent.rolePrompt) {
-					nextArgs.push('--append-system-prompt', agent.rolePrompt);
-					claudeInitialPrompt = agent.rolePrompt;
+			} else {
+				const agent = resolveAgentForEngine('claude', claudeCliSid, cwdStr);
+				if (agent) {
+					claudeSpawnedAgentId = agent.id;
+					if (claudeCliSid) {
+						bindNativeSession('claude', agent.id, claudeCliSid);
+					}
+					if (agent.isOrchestrated && agent.rolePrompt) {
+						nextArgs.push('--append-system-prompt', agent.rolePrompt);
+						claudeInitialPrompt = agent.rolePrompt;
+					}
 				}
 			}
 		} else if (isPiRpc) {
-			const agent = resolveAgentForEngine('pi', undefined, cwdStr);
+			piCliSid = readFlagValue(nextArgs, '--session-id') ?? readFlagValue(nextArgs, '--session');
+			const agent = resolveAgentForEngine('pi', piCliSid, cwdStr);
 			if (agent) {
 				piSpawnedAgentId = agent.id;
+				if (piCliSid) {
+					bindNativeSession('pi', agent.id, piCliSid);
+				}
 				if (agent.isOrchestrated && agent.rolePrompt && !nextArgs.includes('--append-system-prompt')) {
 					nextArgs.push('--append-system-prompt', agent.rolePrompt);
 					piInitialPrompt = agent.rolePrompt;
 				}
 			}
 		} else if (isDshWeb) {
-			if (isExecutableMatch(nextCommand, ['node']) && dshScriptArgIdx >= 0 && hasDshPreload && !nextArgs.includes(dshPreloadPath)) {
+			if (isExecutableMatch(nextCommand, ['node', 'bun']) && dshScriptArgIdx >= 0 && hasDshPreload && !nextArgs.includes(dshPreloadPath)) {
 				nextArgs.splice(dshScriptArgIdx, 0, '--require', dshPreloadPath);
 				nextOptions = {
 					...(nextOptions ?? {}),
@@ -1203,6 +1484,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				}
 			}
 		} else if (isAgyHub) {
+			ensureAgyHooksWorkspaceSync();
 			void ensureAgyHooksWorkspace();
 			nextOptions = {
 				...(nextOptions ?? {}),
@@ -1232,14 +1514,28 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			}
 		}
 
+		if (hasAdeCliBin && nextOptions?.env) {
+			const pathKey = Object.keys(nextOptions.env).find(k => k.toUpperCase() === 'PATH') ?? 'PATH';
+			const rawPath = nextOptions.env[pathKey] ?? '';
+			if (!rawPath.split(path.delimiter).includes(adeCliBinDir)) {
+				nextOptions = {
+					...nextOptions,
+					env: {
+						...nextOptions.env,
+						[pathKey]: rawPath ? `${adeCliBinDir}${path.delimiter}${rawPath}` : adeCliBinDir,
+					},
+				};
+			}
+		}
+
 		const child = origSpawn.call(cpModule, nextCommand, nextArgs, nextOptions ?? {});
 
 		if (isClaudeStream) {
-			wrapClaudeChild(child, claudeCliSid, claudeInitialPrompt, claudeIsResume, claudeSpawnedAgentId, cwdStr);
+			wrapClaudeChild(child, claudeCliSid, claudeInitialPrompt, claudeIsResume, claudeSpawnedAgentId, cwdStr, claudeOverrideEngine);
 		} else if (isCodexAppServer) {
 			wrapCodexChild(child);
 		} else if (isPiRpc) {
-			wrapPiChild(child, piInitialPrompt, piSpawnedAgentId);
+			wrapPiChild(child, piInitialPrompt, piSpawnedAgentId, piCliSid, cwdStr);
 		} else if (isAgyHub && agyProxyTargetPort !== undefined && agyProxyUpstreamPort !== undefined) {
 			startAgyHubProxy(child, agyProxyTargetPort, agyProxyUpstreamPort);
 		}
@@ -1261,13 +1557,21 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			if (isFollower) {
 				await refreshFromStateFile();
 			}
-			const sessionMatch = urlStr.match(/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/session\/([^/?#]+)\/(?:prompt_async|message)(?:[?#]|$)/i);
+			const sessionMatch = urlStr.match(/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/session\/([^/?#]+)\/(?:prompt_async|message|command)(?:[?#]|$)/i);
 			const stack = sessionMatch || resolveActiveEngineAgent(snapshot, 'cline')?.isOrchestrated ? (new Error().stack ?? '') : '';
 
 			if (sessionMatch) {
 				const sessionID = decodeURIComponent(sessionMatch[1]);
-				let shortEngine: 'kilo' | 'opencode' | undefined;
-				if (stack.includes('kilo-code') || stack.includes('kilocode')) {
+				let queryDirectory: string | undefined;
+				try {
+					queryDirectory = new URL(urlStr).searchParams.get('directory') ?? undefined;
+				} catch {
+					queryDirectory = undefined;
+				}
+				let shortEngine: 'kilo' | 'opencode' | 'cline' | undefined;
+				if (stack.includes('claude-dev')) {
+					shortEngine = 'cline';
+				} else if (stack.includes('kilo-code') || stack.includes('kilocode')) {
 					shortEngine = 'kilo';
 				} else if (stack.includes('opencode-vscode-ui') || stack.includes('opencode')) {
 					shortEngine = 'opencode';
@@ -1276,8 +1580,8 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				} else if (nativeKeyToAgentId.has(`opencode:${sessionID}`)) {
 					shortEngine = 'opencode';
 				} else {
-					const activeKilo = resolveActiveEngineAgent(snapshot, 'kilo');
-					const activeOpenCode = resolveActiveEngineAgent(snapshot, 'opencode');
+					const activeKilo = resolveActiveEngineAgent(snapshot, 'kilo', queryDirectory);
+					const activeOpenCode = resolveActiveEngineAgent(snapshot, 'opencode', queryDirectory);
 					if (activeKilo && !activeOpenCode) {
 						shortEngine = 'kilo';
 					} else if (activeOpenCode && !activeKilo) {
@@ -1298,9 +1602,13 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 						try {
 							const parsed = JSON.parse(rawBody) as Record<string, unknown>;
 							if (parsed.noReply !== true) {
-								const agent = resolveAgentForEngine(shortEngine, sessionID);
+								const agent = shortEngine === 'cline'
+									? resolveActiveEngineAgent(snapshot, 'cline', queryDirectory)
+									: resolveAgentForEngine(shortEngine, sessionID, queryDirectory);
 								if (agent) {
-									bindNativeSession(shortEngine, agent.id, sessionID);
+									if (shortEngine !== 'cline') {
+										bindNativeSession(shortEngine, agent.id, sessionID);
+									}
 									if (agent.isOrchestrated && agent.rolePrompt && injectSessionServerSystemField(parsed, agent.rolePrompt)) {
 										const nextBody = JSON.stringify(parsed);
 										if (typeof Request !== 'undefined' && input instanceof Request && init?.body === undefined) {

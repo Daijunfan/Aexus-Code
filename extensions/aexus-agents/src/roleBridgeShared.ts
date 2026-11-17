@@ -91,9 +91,16 @@ export function readRoleSyncSnapshotSync(
 }
 /* eslint-enable local/code-no-sync-fs */
 
+function isPathWithinOrEqual(childPath: string, parentPath: string): boolean {
+	const resolvedChild = path.resolve(childPath);
+	const resolvedParent = path.resolve(parentPath);
+	return resolvedChild === resolvedParent || resolvedChild.startsWith(resolvedParent + path.sep);
+}
+
 export function resolveActiveEngineAgent(
 	snapshot: RoleSyncSnapshot | undefined,
 	shortEngine: string,
+	cwd?: string,
 ): RoleSyncAgentEntry | undefined {
 	if (!snapshot || snapshot.mode !== 'ade') {
 		return undefined;
@@ -102,14 +109,26 @@ export function resolveActiveEngineAgent(
 	const active = snapshot.activeAgentId
 		? snapshot.agents.find(entry => entry.id === snapshot.activeAgentId)
 		: undefined;
-	if (active) {
-		return active.engineId === expectedEngineId ? active : undefined;
+	if (active?.engineId === expectedEngineId) {
+		return active;
 	}
+
 	const selected = snapshot.selectedAgentId
 		? snapshot.agents.find(entry => entry.id === snapshot.selectedAgentId)
 		: undefined;
-	if (selected && selected.engineId === expectedEngineId) {
+	if (selected?.engineId === expectedEngineId) {
 		return selected;
+	}
+
+	const sameEngine = snapshot.agents.filter(entry => entry.engineId === expectedEngineId);
+	if (sameEngine.length === 1) {
+		return sameEngine[0];
+	}
+	if (cwd && sameEngine.length > 1) {
+		const cwdMatches = sameEngine.filter(entry => entry.projectPath && isPathWithinOrEqual(cwd, entry.projectPath));
+		if (cwdMatches.length === 1) {
+			return cwdMatches[0];
+		}
 	}
 	return undefined;
 }
@@ -261,6 +280,16 @@ export function injectLlmPayloadSystemPrompt(url: string, body: Record<string, u
 		return true;
 	}
 
+	// 5. Dify / query-shaped chat endpoints (/chat-messages)
+	if (/\/chat-messages\b/i.test(url) && typeof body.query === 'string') {
+		const merged = mergeRolePromptIntoText(undefined, trimmed);
+		if (!merged.changed || body.query.includes(ROLE_CONTEXT_HEADER)) {
+			return false;
+		}
+		body.query = `${merged.text}\n\n${body.query}`;
+		return true;
+	}
+
 	return false;
 }
 
@@ -310,7 +339,36 @@ export function resolveDshDirectSpawn(
 	} catch {
 		return undefined;
 	}
-	if (!stat.isFile() || stat.size > 64 * 1024) {
+	if (!stat.isFile()) {
+		return undefined;
+	}
+
+	const nextEnv: NodeJS.ProcessEnv = {
+		...(env ?? process.env),
+		ELECTRON_RUN_AS_NODE: '1',
+		[ROLE_STATE_ENV_KEY]: stateFilePath,
+	};
+
+	// Direct Electron binary path (e.g. .../DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness)
+	if (/deepseek harness(?:\.exe)?$/i.test(path.basename(realCommand))) {
+		const appAsarCli = path.resolve(path.dirname(realCommand), '../Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js');
+		if (args.includes('--expose-internals')) {
+			return {
+				command: realCommand,
+				args: args.includes(preloadPath) ? [...args] : ['--require', preloadPath, ...args],
+				env: nextEnv,
+			};
+		}
+		if (fs.existsSync(appAsarCli)) {
+			return {
+				command: realCommand,
+				args: ['--require', preloadPath, '--expose-internals', appAsarCli, ...args],
+				env: nextEnv,
+			};
+		}
+	}
+
+	if (stat.size > 64 * 1024) {
 		return undefined;
 	}
 
@@ -320,12 +378,6 @@ export function resolveDshDirectSpawn(
 	} catch {
 		return undefined;
 	}
-
-	const nextEnv: NodeJS.ProcessEnv = {
-		...(env ?? process.env),
-		ELECTRON_RUN_AS_NODE: '1',
-		[ROLE_STATE_ENV_KEY]: stateFilePath,
-	};
 
 	const match = head.match(/ELECTRON_RUN_AS_NODE=1\s+exec\s+"\$resources\/([^"]+)"\s+--expose-internals\s+"\$resources\/([^"]+)"/);
 	if (match) {
@@ -485,7 +537,7 @@ export async function evaluateAgyPreInvocationHook(
 
 export const AGY_ROLE_PROMPT_SECTION_TITLE = 'aexus_ade_role_context';
 
-const AGY_FORCE_HTTP_CONNECT_SCRIPT = '<script id="aexus-ade-agy-connect">(function(){try{var u=new URL(window.location.href);if(u.searchParams.get("useWebSocket")==="true"){u.searchParams.set("useWebSocket","false");window.history.replaceState(null,"",u.toString());}}catch(_){}})();</script>';
+const AGY_FORCE_HTTP_CONNECT_SCRIPT = '<script id="aexus-ade-agy-connect">(function(){try{var u=new URL(window.location.href);var changed=false;if(u.searchParams.get("useWebSocket")!=="false"){u.searchParams.set("useWebSocket","false");changed=true;}if(u.searchParams.get("wsTransport")==="3"){u.searchParams.set("wsTransport","0");changed=true;}if(changed){window.history.replaceState(null,"",u.toString());}}catch(_){}})();</script>';
 
 export function injectAgyHtmlForceHttpConnect(html: string): string {
 	if (!html || html.includes('id="aexus-ade-agy-connect"')) {
@@ -629,4 +681,267 @@ export function injectAgyConnectJsonRolePrompt(body: Record<string, unknown>, ro
 	cascadeConfig.plannerConfig = plannerConfig;
 	body.cascadeConfig = cascadeConfig;
 	return true;
+}
+
+/**
+ * Encodes a single unfragmented (`FIN=1`, `opcode=0x1`) RFC 6455 WebSocket text frame.
+ * When `maskKey` (4 bytes) is supplied (client -> server frames), masks the UTF-8 payload per RFC 6455 Section 5.3.
+ */
+export function encodeWsTextFrame(text: string, maskKey?: Uint8Array): Buffer {
+	const payload = Buffer.from(text, 'utf8');
+	const len = payload.length;
+	const hasMask = Boolean(maskKey && maskKey.length >= 4);
+	const maskBit = hasMask ? 0x80 : 0x00;
+
+	let header: Buffer;
+	if (len < 126) {
+		header = Buffer.from([0x81, maskBit | len]);
+	} else if (len < 65536) {
+		header = Buffer.allocUnsafe(4);
+		header[0] = 0x81;
+		header[1] = maskBit | 126;
+		header.writeUInt16BE(len, 2);
+	} else {
+		header = Buffer.allocUnsafe(10);
+		header[0] = 0x81;
+		header[1] = maskBit | 127;
+		header.writeBigUInt64BE(BigInt(len), 2);
+	}
+
+	if (!hasMask || !maskKey) {
+		return Buffer.concat([header, payload]);
+	}
+
+	const maskedPayload = Buffer.allocUnsafe(len);
+	for (let i = 0; i < len; i++) {
+		maskedPayload[i] = payload[i] ^ maskKey[i & 3];
+	}
+	return Buffer.concat([header, Buffer.from(maskKey.subarray(0, 4)), maskedPayload]);
+}
+
+export interface WsFrameTransformerOptions {
+	readonly onTextMessage: (text: string) => string | undefined;
+	readonly shouldDecodeText?: () => boolean;
+	readonly onChunkOut?: (chunk: Buffer) => void;
+}
+
+/**
+ * Incremental RFC 6455 WebSocket frame parser/transformer for uncompressed streams
+ * (`sec-websocket-extensions` stripped during loopback HTTP Upgrade).
+ * If any reserved extension bits (`RSV1..3`) are encountered, falls back to raw passthrough immediately.
+ */
+export function createWsFrameTransformer(options: WsFrameTransformerOptions): { readonly push: (chunk: Buffer) => void } {
+	let buf: Buffer = Buffer.alloc(0);
+	let passthroughRaw = false;
+	let fragOpcode = 0;
+	let fragChunks: Buffer[] = [];
+	let fragMaskKey: Buffer | undefined;
+
+	const emit = (out: Buffer) => {
+		if (out.length > 0) {
+			options.onChunkOut?.(out);
+		}
+	};
+
+	const unmaskBytes = (data: Uint8Array, maskKey: Uint8Array | undefined): Buffer => {
+		if (!maskKey || maskKey.length < 4) {
+			return Buffer.from(data);
+		}
+		const out = Buffer.allocUnsafe(data.length);
+		for (let i = 0; i < data.length; i++) {
+			out[i] = data[i] ^ maskKey[i & 3];
+		}
+		return out;
+	};
+
+	return {
+		push(chunk: Buffer): void {
+			if (chunk.length === 0) {
+				return;
+			}
+			if (passthroughRaw) {
+				emit(chunk);
+				return;
+			}
+			buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
+
+			while (buf.length >= 2) {
+				const b0 = buf[0];
+				const b1 = buf[1];
+				const rsv = b0 & 0x70;
+				if (rsv !== 0) {
+					passthroughRaw = true;
+					const rest = buf;
+					buf = Buffer.alloc(0);
+					fragChunks = [];
+					fragOpcode = 0;
+					emit(rest);
+					return;
+				}
+
+				const fin = (b0 & 0x80) !== 0;
+				const opcode = b0 & 0x0f;
+				const masked = (b1 & 0x80) !== 0;
+				const len7 = b1 & 0x7f;
+
+				let offset = 2;
+				let payloadLen = len7;
+				if (len7 === 126) {
+					if (buf.length < 4) {
+						return;
+					}
+					payloadLen = buf.readUInt16BE(2);
+					offset = 4;
+				} else if (len7 === 127) {
+					if (buf.length < 10) {
+						return;
+					}
+					const bigLen = buf.readBigUInt64BE(2);
+					if (bigLen > BigInt(Number.MAX_SAFE_INTEGER)) {
+						passthroughRaw = true;
+						const rest = buf;
+						buf = Buffer.alloc(0);
+						emit(rest);
+						return;
+					}
+					payloadLen = Number(bigLen);
+					offset = 10;
+				}
+
+				let maskKey: Buffer | undefined;
+				if (masked) {
+					if (buf.length < offset + 4) {
+						return;
+					}
+					maskKey = Buffer.from(buf.subarray(offset, offset + 4));
+					offset += 4;
+				}
+
+				const totalLen = offset + payloadLen;
+				if (buf.length < totalLen) {
+					return;
+				}
+
+				const rawFrame = buf.subarray(0, totalLen);
+				const rawPayload = buf.subarray(offset, totalLen);
+				buf = buf.subarray(totalLen);
+
+				// Control frames (close=0x8, ping=0x9, pong=0xa) can be interleaved mid-fragment; forward untouched.
+				if (opcode >= 0x8) {
+					emit(rawFrame);
+					continue;
+				}
+
+				const decodeEnabled = options.shouldDecodeText ? options.shouldDecodeText() : true;
+
+				if (opcode === 0x1) {
+					if (fin) {
+						if (!decodeEnabled) {
+							emit(rawFrame);
+							continue;
+						}
+						const text = unmaskBytes(rawPayload, maskKey).toString('utf8');
+						const nextText = options.onTextMessage(text);
+						if (nextText === undefined || nextText === text) {
+							emit(rawFrame);
+						} else {
+							emit(encodeWsTextFrame(nextText, maskKey));
+						}
+					} else {
+						fragOpcode = 0x1;
+						fragMaskKey = maskKey;
+						fragChunks = [unmaskBytes(rawPayload, maskKey)];
+					}
+				} else if (opcode === 0x0 && fragOpcode === 0x1) {
+					fragChunks.push(unmaskBytes(rawPayload, maskKey));
+					if (fin) {
+						const fullBuf = Buffer.concat(fragChunks);
+						const effectiveMask = fragMaskKey ?? maskKey;
+						fragOpcode = 0;
+						fragChunks = [];
+						fragMaskKey = undefined;
+						const fullText = fullBuf.toString('utf8');
+						const nextText = decodeEnabled ? options.onTextMessage(fullText) : undefined;
+						emit(encodeWsTextFrame(nextText ?? fullText, effectiveMask));
+					}
+				} else {
+					emit(rawFrame);
+				}
+			}
+		},
+	};
+}
+
+/**
+ * Inspects/rewrites a Connect-over-WebSocket (`/connect-websocket`) client -> server JSON frame
+ * for Antigravity (`agy --hub`). Tracks `/StartCascade` stream IDs and injects ADE role prompt
+ * into `/SendUserCascadeMessage` payloads without disturbing WebSocket multiplexing.
+ */
+export function transformAgyConnectWsClientMessage(
+	rawText: string,
+	startCascadeStreams: Set<string>,
+	resolveAgentAndBind: (cascadeId: string | undefined) => { readonly isOrchestrated: boolean; readonly rolePrompt?: string } | undefined,
+): string | undefined {
+	if (!rawText.includes('SendUserCascadeMessage') && !rawText.includes('StartCascade')) {
+		return undefined;
+	}
+	try {
+		const pkt = JSON.parse(rawText) as Record<string, unknown>;
+		if (pkt.type !== 'start' || typeof pkt.procedure !== 'string') {
+			return undefined;
+		}
+		if (pkt.procedure.endsWith('/StartCascade')) {
+			if (typeof pkt.streamId === 'string' && pkt.streamId) {
+				startCascadeStreams.add(pkt.streamId);
+			}
+			return undefined;
+		}
+		if (pkt.procedure.endsWith('/SendUserCascadeMessage') && pkt.payload && typeof pkt.payload === 'object' && !Array.isArray(pkt.payload)) {
+			const payload = { ...(pkt.payload as Record<string, unknown>) };
+			const cascadeId = typeof payload.cascadeId === 'string' && payload.cascadeId.trim()
+				? payload.cascadeId.trim()
+				: (typeof payload.cascade_id === 'string' && payload.cascade_id.trim() ? payload.cascade_id.trim() : undefined);
+			const agent = resolveAgentAndBind(cascadeId);
+			if (agent?.isOrchestrated && agent.rolePrompt && injectAgyConnectJsonRolePrompt(payload, agent.rolePrompt)) {
+				pkt.payload = payload;
+				return JSON.stringify(pkt);
+			}
+		}
+	} catch {
+		// Ignore malformed frames.
+	}
+	return undefined;
+}
+
+/**
+ * Observes a Connect-over-WebSocket (`/connect-websocket`) server -> client JSON frame
+ * to bind newly started `cascadeId`s from `/StartCascade` responses.
+ */
+export function observeAgyConnectWsServerMessage(
+	rawText: string,
+	startCascadeStreams: Set<string>,
+	onCascadeStarted: (cascadeId: string) => void,
+): void {
+	if (startCascadeStreams.size === 0) {
+		return;
+	}
+	try {
+		const pkt = JSON.parse(rawText) as { streamId?: unknown; type?: unknown; payload?: unknown };
+		if (typeof pkt.streamId !== 'string' || !startCascadeStreams.has(pkt.streamId)) {
+			return;
+		}
+		if (pkt.type === 'data' && pkt.payload && typeof pkt.payload === 'object' && !Array.isArray(pkt.payload)) {
+			const rec = pkt.payload as { cascadeId?: unknown; cascade_id?: unknown };
+			const cascadeId = typeof rec.cascadeId === 'string' && rec.cascadeId.trim()
+				? rec.cascadeId.trim()
+				: (typeof rec.cascade_id === 'string' && rec.cascade_id.trim() ? rec.cascade_id.trim() : undefined);
+			if (cascadeId) {
+				onCascadeStarted(cascadeId);
+			}
+		} else if (pkt.type === 'end') {
+			startCascadeStreams.delete(pkt.streamId);
+		}
+	} catch {
+		// Ignore malformed frames.
+	}
 }

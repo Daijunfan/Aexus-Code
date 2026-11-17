@@ -1022,15 +1022,18 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const portOutRect = n1PortOut.getBoundingClientRect();
 		assert.ok(Math.abs((concRect.top + concRect.height / 2) - (portOutRect.top + portOutRect.height / 2)) <= 1.5, 'Output port Y aligns pixel-perfectly with concentric circle center');
 
-		// 2. Verify Zero-Click Hover automatically opens Slide-Out Right Drawer!
+		// 2. Verify Zero-Click Hover automatically opens Anchored Floating Option Popover adjacent to hovered node (NO sidebar drawer!)
 		const nodeN1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;
 		assert.ok(nodeN1El);
-		const drawerEl = host.querySelector('.ade-eng-drawer') as HTMLElement;
-		assert.ok(!drawerEl.classList.contains('open'), 'Drawer starts closed');
+		assert.strictEqual(host.querySelector('.ade-eng-drawer'), null, 'Legacy right-hand sidebar drawer must not exist');
+		const popoverEl = host.querySelector('.ade-eng-popover') as HTMLElement;
+		assert.ok(popoverEl && !popoverEl.classList.contains('open'), 'Floating option popover starts closed');
 
 		nodeN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-		assert.ok(drawerEl.classList.contains('open'), 'Hovering node must open Right Drawer with zero clicks');
-		assert.ok(drawerEl.textContent?.includes('Architecture & Core Contracts'));
+		assert.ok(popoverEl.classList.contains('open'), 'Hovering node must open adjacent floating option list with zero clicks');
+		const popTitleInput = popoverEl.querySelector('input.ade-eng-pop-title-input') as HTMLInputElement;
+		assert.strictEqual(popTitleInput.value, 'Architecture & Core Contracts');
+		assert.strictEqual(popoverEl.querySelectorAll('.ade-eng-engine-opt').length, 8, 'All 8 Coding Agent engine options rendered in adjacent floating menu');
 
 		// 3. Verify Single Left-Click on Task Node jumps directly to Worker session!
 		h.openedLog.length = 0;
@@ -1065,12 +1068,12 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const runningEdgeEl = host.querySelector('.ade-eng-edge-path.status-running');
 		assert.ok(runningEdgeEl, 'Edge feeding active User Gate U1 renders animated green dashed status-running path');
 
-		// Inspect N1 Configure tab -> inputs must be disabled!
+		// Inspect N1 Popover -> inputs & engine options must be disabled!
 		lockedN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-		const configTabBtn = Array.from(drawerEl.querySelectorAll('.ade-eng-drawer-tab')).find(b => b.textContent?.includes('Configure')) as HTMLButtonElement;
-		configTabBtn.click();
-		const lockedTitleInput = drawerEl.querySelector('input.ade-eng-input') as HTMLInputElement;
+		const lockedTitleInput = popoverEl.querySelector('input.ade-eng-input') as HTMLInputElement;
 		assert.strictEqual(lockedTitleInput.disabled, true, 'Completed node configuration inputs must be strictly locked');
+		const lockedEngineBtn = popoverEl.querySelector('button.ade-eng-engine-opt') as HTMLButtonElement;
+		assert.strictEqual(lockedEngineBtn.disabled, true, 'Completed node engine options must be strictly locked');
 
 		// Approve U1 via standalone AdeInboxPanel while holding N2's Worker turn so N2 is actively `worker_running`!
 		const inboxPanel = store.add(new AdeInboxPanel(inboxStandaloneHost, h.inbox, h.engineering, h.instantiation.get(IAdeEditorService)));
@@ -1086,7 +1089,7 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		// Edit running node N2's title in Draft mode and click Confirm -> must trigger IDialogService.confirm!
 		const nodeN2El = host.querySelector('.ade-eng-node[data-node-id="N2"]') as HTMLElement;
 		nodeN2El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-		const n2TitleInput = drawerEl.querySelector('input.ade-eng-input') as HTMLInputElement;
+		const n2TitleInput = popoverEl.querySelector('input.ade-eng-input') as HTMLInputElement;
 		assert.strictEqual(n2TitleInput.disabled, false);
 		n2TitleInput.value = 'Updated Running Task N2';
 		n2TitleInput.dispatchEvent(new mainWindow.Event('change'));

@@ -13,12 +13,10 @@ import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import {
 	AdeEngineeringEdgeVisualStatus,
-	AdeEngineeringNodeVisualStatus,
 	AdeThinkingLevel,
 	IAdeEngineeringBlueprint,
 	IAdeEngineeringBlueprintEdge,
 	IAdeEngineeringBlueprintNode,
-	IAdeEngineeringManagerSegment,
 	IAdeEngineeringNodeRuntimeState,
 	IAdeEngineeringService,
 	IAdeEngineeringTreeSnapshot,
@@ -52,27 +50,30 @@ import { ADE_ENGINEERING_SCHEME, IAdeProjectsService } from '../common/ade.js';
 import { AdeRunningNodesAffectedError } from './adeEngineeringWorkbenchService.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
-const ENGINE_OPTIONS: readonly { readonly value: string; readonly label: string }[] = [
-	{ value: 'claude-code', label: 'Claude Code' },
-	{ value: 'codex', label: 'Codex' },
-	{ value: 'antigravity', label: 'Google Antigravity' },
-	{ value: 'kilo', label: 'Kilo Code' },
-	{ value: 'opencode', label: 'OpenCode' },
-	{ value: 'dsh', label: 'DeepSeek Harness' },
-	{ value: 'cline', label: 'Cline' },
-	{ value: 'pi', label: 'Pi' },
+const ENGINE_OPTIONS: readonly { readonly value: string; readonly label: string; readonly shortLabel: string }[] = [
+	{ value: 'claude-code', label: 'Claude Code', shortLabel: 'Claude Code' },
+	{ value: 'codex', label: 'Codex', shortLabel: 'Codex' },
+	{ value: 'antigravity', label: 'Google Antigravity', shortLabel: 'Antigravity' },
+	{ value: 'kilo', label: 'Kilo Code', shortLabel: 'Kilo Code' },
+	{ value: 'opencode', label: 'OpenCode', shortLabel: 'OpenCode' },
+	{ value: 'dsh', label: 'DeepSeek Harness', shortLabel: 'DeepSeek' },
+	{ value: 'cline', label: 'Cline', shortLabel: 'Cline' },
+	{ value: 'pi', label: 'Pi', shortLabel: 'Pi' },
 ];
 
 const THINKING_OPTIONS: readonly { readonly value: AdeThinkingLevel; readonly label: string }[] = [
 	{ value: 'off', label: 'Off' },
 	{ value: 'low', label: 'Low' },
-	{ value: 'medium', label: 'Medium' },
+	{ value: 'medium', label: 'Med' },
 	{ value: 'high', label: 'High' },
 	{ value: 'max', label: 'Max' },
 ];
 
 const TASK_NODE_DIAMETER = 82;
 const GATE_NODE_WIDTH = 172;
+const POPOVER_WIDTH = 286;
+
+type PopoverTabKind = 'worker' | 'employee' | 'manager' | 'task';
 
 function cloneBlueprint(bp: IAdeEngineeringBlueprint): IAdeEngineeringBlueprint {
 	return {
@@ -146,6 +147,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	private rootEl!: HTMLElement;
 	private toolbarEl!: HTMLElement;
+	private bannerEl!: HTMLElement;
 	private bodyEl!: HTMLElement;
 	private viewportEl!: HTMLElement;
 	private worldEl!: HTMLElement;
@@ -155,13 +157,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private edgesGroupEl!: SVGGElement;
 	private rubberBandPathEl!: SVGPathElement;
 	private nodesLayerEl!: HTMLElement;
-	private drawerEl!: HTMLElement;
-	private drawerContentEl!: HTMLElement;
-	private bannerEl!: HTMLElement;
+	private hudEl!: HTMLElement;
+	private popoverEl!: HTMLElement;
+	private popoverContentEl!: HTMLElement;
 
 	private readonly inputDisposables = this._register(new DisposableStore());
+	private readonly toolbarRenderDisposables = this._register(new DisposableStore());
+	private readonly hudRenderDisposables = this._register(new DisposableStore());
 	private readonly canvasRenderDisposables = this._register(new DisposableStore());
-	private readonly drawerRenderDisposables = this._register(new DisposableStore());
+	private readonly popoverRenderDisposables = this._register(new DisposableStore());
 
 	private activeGovernorId: string | undefined;
 	private snapshot: IAdeEngineeringTreeSnapshot | undefined;
@@ -175,13 +179,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private zoom = 1;
 	private lastDimension: Dimension | undefined;
 
-	private hoveredOrSelectedNodeId: string | undefined;
-	private drawerTab: 'status' | 'config' = 'status';
-	private isPointerInNode = false;
-	private isPointerInDrawer = false;
-	private drawerCloseTimer: ReturnType<typeof setTimeout> | undefined;
+	private activePopoverNodeId: string | undefined;
+	private activePopoverSegmentId: string | undefined;
+	private activePopoverTab: PopoverTabKind = 'worker';
+	private activeAnchorKind: 'worker' | 'employee' | 'manager' | 'gate' = 'worker';
+	private isPointerInAnchor = false;
+	private isPointerInPopover = false;
+	private popoverCloseTimer: ReturnType<typeof setTimeout> | undefined;
 
 	private nodeDomById = new Map<string, HTMLElement>();
+	private nodeAnchorsById = new Map<string, {
+		readonly worker?: HTMLElement;
+		readonly employee?: HTMLElement;
+		readonly gate?: HTMLElement;
+	}>();
+	private segmentHeaderDomById = new Map<string, HTMLElement>();
 	private configuredModelsByEngine: Record<string, readonly { readonly id: string; readonly label: string }[]> = {};
 	private nextDatalistId = 1;
 
@@ -200,7 +212,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		super(AdeEngineeringEditorPane.ID, group, telemetryService, themeService, storageService);
 		this._register(this.themeService.onDidColorThemeChange(() => {
 			this.renderCanvas();
-			this.renderDrawer();
+			this.renderPopover();
 		}));
 		void this.refreshConfiguredModels();
 	}
@@ -212,8 +224,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			);
 			if (fetched && typeof fetched === 'object') {
 				this.configuredModelsByEngine = fetched;
-				if (this.hoveredOrSelectedNodeId) {
-					this.renderDrawer();
+				if (this.activePopoverNodeId) {
+					this.renderPopover();
 				}
 			}
 		} catch {
@@ -222,9 +234,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	override dispose(): void {
-		if (this.drawerCloseTimer !== undefined) {
-			clearTimeout(this.drawerCloseTimer);
-			this.drawerCloseTimer = undefined;
+		if (this.popoverCloseTimer !== undefined) {
+			clearTimeout(this.popoverCloseTimer);
+			this.popoverCloseTimer = undefined;
 		}
 		super.dispose();
 	}
@@ -257,11 +269,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		this.nodesLayerEl = append(this.worldEl, $('.ade-eng-nodes-layer'));
 
-		this.drawerEl = append(this.bodyEl, $('.ade-eng-drawer'));
-		this.drawerContentEl = append(this.drawerEl, $('.ade-eng-drawer-inner'));
+		// Floating Bottom-Right Canvas Controls HUD
+		this.hudEl = append(this.bodyEl, $('.ade-eng-canvas-hud'));
+
+		// Anchored Floating Option Popover right adjacent to hovered engine / node (NO sidebar drawer!)
+		this.popoverEl = append(this.bodyEl, $('.ade-eng-popover'));
+		this.popoverContentEl = append(this.popoverEl, $('.ade-eng-popover-inner'));
 
 		this.installViewportInteractions();
-		this.installDrawerHoverKeep();
+		this.installPopoverHoverKeep();
 	}
 
 	private buildSvgMarkers(): void {
@@ -308,6 +324,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.rubberBandPathEl.style.display = 'none';
 				this.renderCanvas();
 			}
+			this.closePopover();
 			panning = true;
 			startClientX = e.clientX;
 			startClientY = e.clientY;
@@ -316,7 +333,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.viewportEl.classList.add('panning');
 			try {
 				this.viewportEl.setPointerCapture(e.pointerId);
-			} catch { /* synthetic test events may not register pointerId */ }
+			} catch { /* synthetic test events */ }
 		}));
 
 		this._register(addDisposableListener(this.viewportEl, EventType.POINTER_MOVE, (e: PointerEvent) => {
@@ -355,7 +372,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.panX = cursorX - worldX * this.zoom;
 				this.panY = cursorY - worldY * this.zoom;
 				this.applyWorldTransform();
-				this.renderToolbar();
+				this.renderHud();
 			} else {
 				this.panX -= e.deltaX;
 				this.panY -= e.deltaY;
@@ -364,70 +381,192 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}, { passive: false }));
 	}
 
-	private installDrawerHoverKeep(): void {
-		this._register(addDisposableListener(this.drawerEl, EventType.MOUSE_ENTER, () => {
-			this.isPointerInDrawer = true;
-			this.cancelDrawerClose();
+	private installPopoverHoverKeep(): void {
+		this._register(addDisposableListener(this.popoverEl, EventType.MOUSE_ENTER, () => {
+			this.isPointerInPopover = true;
+			this.cancelPopoverClose();
 		}));
-		this._register(addDisposableListener(this.drawerEl, EventType.MOUSE_LEAVE, () => {
-			this.isPointerInDrawer = false;
-			this.scheduleDrawerCloseIfIdle();
+		this._register(addDisposableListener(this.popoverEl, EventType.MOUSE_LEAVE, () => {
+			this.isPointerInPopover = false;
+			this.schedulePopoverCloseIfIdle();
 		}));
-		this._register(addDisposableListener(this.drawerEl, EventType.FOCUS_OUT, () => {
+		this._register(addDisposableListener(this.popoverEl, EventType.FOCUS_OUT, () => {
 			setTimeout(() => {
-				if (!this.isPointerInDrawer && !this.isPointerInNode && !this.isFocusInsideDrawer()) {
-					this.scheduleDrawerCloseIfIdle();
+				if (!this.isPointerInPopover && !this.isPointerInAnchor && !this.isFocusInsidePopover()) {
+					this.schedulePopoverCloseIfIdle();
 				}
 			}, 120);
 		}));
 	}
 
-	private isFocusInsideDrawer(): boolean {
+	private isFocusInsidePopover(): boolean {
 		const active = getWindow(this.rootEl).document.activeElement;
-		return Boolean(active && this.drawerEl.contains(active) && (
+		return Boolean(active && this.popoverEl.contains(active) && (
 			active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT'
 		));
 	}
 
-	private cancelDrawerClose(): void {
-		if (this.drawerCloseTimer !== undefined) {
-			clearTimeout(this.drawerCloseTimer);
-			this.drawerCloseTimer = undefined;
+	private cancelPopoverClose(): void {
+		if (this.popoverCloseTimer !== undefined) {
+			clearTimeout(this.popoverCloseTimer);
+			this.popoverCloseTimer = undefined;
 		}
 	}
 
-	private scheduleDrawerCloseIfIdle(): void {
-		this.cancelDrawerClose();
-		this.drawerCloseTimer = setTimeout(() => {
-			this.drawerCloseTimer = undefined;
-			if (!this.isPointerInNode && !this.isPointerInDrawer && !this.isFocusInsideDrawer()) {
-				this.closeDrawer();
+	private schedulePopoverCloseIfIdle(): void {
+		this.cancelPopoverClose();
+		this.popoverCloseTimer = setTimeout(() => {
+			this.popoverCloseTimer = undefined;
+			if (!this.isPointerInAnchor && !this.isPointerInPopover && !this.isFocusInsidePopover()) {
+				this.closePopover();
 			}
-		}, 340);
+		}, 240);
 	}
 
-	private openDrawerForNode(nodeId: string, preferredTab?: 'status' | 'config'): void {
-		this.cancelDrawerClose();
-		const changedNode = this.hoveredOrSelectedNodeId !== nodeId;
-		this.hoveredOrSelectedNodeId = nodeId;
-		if (preferredTab) {
-			this.drawerTab = preferredTab;
-		} else if (changedNode && this.isDraftDirty) {
-			// Keep current tab preference smoothly
-		}
-		this.drawerEl.classList.add('open');
+	private openPopoverForTarget(params: {
+		readonly nodeId: string;
+		readonly anchorKind: 'worker' | 'employee' | 'manager' | 'gate';
+		readonly tab?: PopoverTabKind;
+		readonly segmentId?: string;
+	}): void {
+		this.cancelPopoverClose();
+		const targetTab: PopoverTabKind = params.tab ?? (params.anchorKind === 'gate' ? 'task' : params.anchorKind);
+		const sameState = this.activePopoverNodeId === params.nodeId
+			&& this.activeAnchorKind === params.anchorKind
+			&& this.activePopoverTab === targetTab
+			&& this.activePopoverSegmentId === params.segmentId
+			&& this.popoverEl.classList.contains('open');
+
+		this.activePopoverNodeId = params.nodeId;
+		this.activeAnchorKind = params.anchorKind;
+		this.activePopoverTab = targetTab;
+		this.activePopoverSegmentId = params.segmentId;
+		this.popoverEl.classList.add('open');
+
 		for (const [id, el] of this.nodeDomById) {
-			el.classList.toggle('inspected', id === nodeId);
+			el.classList.toggle('inspected', id === params.nodeId);
 		}
-		this.renderDrawer();
+		if (!sameState) {
+			this.renderPopover();
+		} else {
+			this.positionPopoverNearAnchor();
+		}
 	}
 
-	private closeDrawer(): void {
-		this.hoveredOrSelectedNodeId = undefined;
-		this.drawerEl.classList.remove('open');
+	private closePopover(): void {
+		this.activePopoverNodeId = undefined;
+		this.activePopoverSegmentId = undefined;
+		this.popoverEl.classList.remove('open', 'flipped-left', 'placed-below', 'placed-above');
+		this.popoverEl.style.maxHeight = '';
 		for (const el of this.nodeDomById.values()) {
 			el.classList.remove('inspected');
 		}
+	}
+
+	private resolveAnchorViewportRect(): { left: number; right: number; top: number; bottom: number; centerY: number } | undefined {
+		if (!this.activePopoverNodeId) {
+			return undefined;
+		}
+		const bodyRect = this.bodyEl.getBoundingClientRect();
+		let anchorDom: HTMLElement | null | undefined;
+
+		if (this.activeAnchorKind === 'manager' && this.activePopoverSegmentId) {
+			anchorDom = this.segmentHeaderDomById.get(this.activePopoverSegmentId);
+		}
+		if (!anchorDom) {
+			const anchors = this.nodeAnchorsById.get(this.activePopoverNodeId);
+			if (anchors) {
+				if (this.activeAnchorKind === 'employee') {
+					anchorDom = anchors.employee ?? anchors.worker;
+				} else if (this.activeAnchorKind === 'gate') {
+					anchorDom = anchors.gate;
+				} else {
+					anchorDom = anchors.worker;
+				}
+			}
+		}
+
+		if (anchorDom) {
+			const r = anchorDom.getBoundingClientRect();
+			if (r.width > 0 && r.height > 0) {
+				const left = r.left - bodyRect.left;
+				const right = r.right - bodyRect.left;
+				const top = r.top - bodyRect.top;
+				const bottom = r.bottom - bodyRect.top;
+				return { left, right, top, bottom, centerY: (top + bottom) / 2 };
+			}
+		}
+
+		// Fallback math for synthetic headless unit tests where getBoundingClientRect() may be 0
+		const node = this.draftBlueprint?.nodes.find(n => n.id === this.activePopoverNodeId);
+		if (!node) {
+			return undefined;
+		}
+		const cx = (node.position?.x ?? 180) * this.zoom + this.panX;
+		const cy = (node.position?.y ?? 240) * this.zoom + this.panY;
+		const halfW = ((node.type === 'user_gate' ? GATE_NODE_WIDTH : TASK_NODE_DIAMETER) / 2) * this.zoom;
+		const halfH = ((node.type === 'user_gate' ? 76 : TASK_NODE_DIAMETER) / 2) * this.zoom;
+		return {
+			left: cx - halfW,
+			right: cx + halfW,
+			top: cy - halfH,
+			bottom: cy + halfH,
+			centerY: cy,
+		};
+	}
+
+	private positionPopoverNearAnchor(): void {
+		if (!this.activePopoverNodeId || !this.popoverEl.classList.contains('open')) {
+			return;
+		}
+		const anchor = this.resolveAnchorViewportRect();
+		if (!anchor) {
+			return;
+		}
+		const bodyW = this.bodyEl.clientWidth || (this.lastDimension?.width ?? 960);
+		const bodyH = Math.max(240, this.bodyEl.clientHeight || ((this.lastDimension?.height ?? 640) - 42));
+		this.popoverEl.style.maxHeight = `${Math.max(200, bodyH - 20)}px`;
+		const popW = Math.min(bodyW - 20, this.popoverEl.offsetWidth || POPOVER_WIDTH);
+		const popH = Math.min(bodyH - 20, this.popoverEl.offsetHeight || 280);
+		const gap = 10;
+
+		let left = anchor.right + gap;
+		let top = Math.max(10, Math.min(bodyH - popH - 10, anchor.centerY - Math.min(96, popH * 0.34)));
+		let flippedLeft = false;
+		let placedBelow = false;
+		let placedAbove = false;
+
+		if (anchor.right + gap + popW <= bodyW - 10) {
+			// Priority 1: Right of hovered engine/node
+			left = anchor.right + gap;
+		} else if (anchor.left - gap - popW >= 10) {
+			// Priority 2: Left of hovered engine/node
+			left = anchor.left - gap - popW;
+			flippedLeft = true;
+		} else {
+			// Priority 3 / 4: Narrow split-pane — place cleanly Below or Above so hovered icon is NEVER covered!
+			const anchorCenterX = (anchor.left + anchor.right) / 2;
+			left = Math.max(10, Math.min(bodyW - popW - 10, anchorCenterX - popW / 2));
+			const spaceBelow = bodyH - anchor.bottom - gap - 10;
+			const spaceAbove = anchor.top - gap - 10;
+			if (spaceBelow >= Math.min(popH, 230) || spaceBelow >= spaceAbove) {
+				placedBelow = true;
+				top = Math.max(10, anchor.bottom + gap);
+				this.popoverEl.style.maxHeight = `${Math.max(180, bodyH - top - 10)}px`;
+			} else {
+				placedAbove = true;
+				const maxAboveH = Math.max(180, anchor.top - gap - 10);
+				this.popoverEl.style.maxHeight = `${maxAboveH}px`;
+				const clampedH = Math.min(popH, maxAboveH);
+				top = Math.max(10, anchor.top - gap - clampedH);
+			}
+		}
+
+		this.popoverEl.classList.toggle('flipped-left', flippedLeft);
+		this.popoverEl.classList.toggle('placed-below', placedBelow);
+		this.popoverEl.classList.toggle('placed-above', placedAbove);
+		this.popoverEl.style.left = `${Math.round(left)}px`;
+		this.popoverEl.style.top = `${Math.round(top)}px`;
 	}
 
 	override async setInput(input: AdeEngineeringEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -437,6 +576,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.isDraftDirty = false;
 		this.connectMode = false;
 		this.connectSourceNodeId = undefined;
+		this.closePopover();
 
 		await this.engineering.whenReady();
 		if (token.isCancellationRequested) {
@@ -460,11 +600,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	override clearInput(): void {
 		this.inputDisposables.clear();
+		this.toolbarRenderDisposables.clear();
+		this.hudRenderDisposables.clear();
 		this.canvasRenderDisposables.clear();
-		this.drawerRenderDisposables.clear();
+		this.popoverRenderDisposables.clear();
 		this.activeGovernorId = undefined;
 		this.snapshot = undefined;
 		this.draftBlueprint = undefined;
+		this.closePopover();
 		super.clearInput();
 	}
 
@@ -487,11 +630,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		this.renderToolbar();
 		this.renderCanvas();
-		if (this.hoveredOrSelectedNodeId) {
-			if (this.draftBlueprint?.nodes.some(n => n.id === this.hoveredOrSelectedNodeId)) {
-				this.renderDrawer();
+		this.renderHud();
+		if (this.activePopoverNodeId) {
+			if (this.draftBlueprint?.nodes.some(n => n.id === this.activePopoverNodeId)) {
+				this.renderPopover();
 			} else {
-				this.closeDrawer();
+				this.closePopover();
 			}
 		}
 	}
@@ -518,8 +662,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.isDraftDirty = true;
 		this.renderToolbar();
 		this.renderCanvas();
-		if (this.hoveredOrSelectedNodeId) {
-			this.renderDrawer();
+		if (this.activePopoverNodeId) {
+			const nextSeg = recomputedManagers.find(m => m.nodeIds.includes(this.activePopoverNodeId!));
+			if (this.activeAnchorKind === 'manager' && nextSeg) {
+				this.activePopoverSegmentId = nextSeg.segmentId;
+			}
+			this.renderPopover();
 		}
 	}
 
@@ -544,6 +692,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.viewportEl.style.backgroundPosition = `${Math.round(this.panX)}px ${Math.round(this.panY)}px`;
 		const gridSize = Math.max(12, Math.round(24 * this.zoom));
 		this.viewportEl.style.backgroundSize = `${gridSize}px ${gridSize}px`;
+		this.positionPopoverNearAnchor();
 	}
 
 	private fitViewportToGraph(): void {
@@ -552,7 +701,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.panY = 36;
 			this.zoom = 1;
 			this.applyWorldTransform();
-			this.renderToolbar();
+			this.renderHud();
 			return;
 		}
 		let minX = Infinity;
@@ -562,24 +711,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		for (const n of this.draftBlueprint.nodes) {
 			const x = n.position?.x ?? 180;
 			const y = n.position?.y ?? 240;
-			minX = Math.min(minX, x - 90);
-			minY = Math.min(minY, y - 80);
+			minX = Math.min(minX, x - 96);
+			minY = Math.min(minY, y - 82);
 			maxX = Math.max(maxX, x + 130);
-			maxY = Math.max(maxY, y + 110);
+			maxY = Math.max(maxY, y + 112);
 		}
-		const availW = Math.max(320, this.lastDimension.width - 80);
-		const availH = Math.max(240, this.lastDimension.height - 110);
+		const availW = Math.max(320, this.lastDimension.width - 72);
+		const availH = Math.max(240, this.lastDimension.height - 96);
 		const graphW = Math.max(200, maxX - minX);
 		const graphH = Math.max(160, maxY - minY);
-		const scale = Math.min(1.15, Math.max(0.45, Math.min(availW / graphW, availH / graphH)));
+		const scale = Math.min(1.12, Math.max(0.45, Math.min(availW / graphW, availH / graphH)));
 		this.zoom = Math.round(scale * 100) / 100;
-		this.panX = Math.round((availW - graphW * this.zoom) / 2 - minX * this.zoom + 40);
-		this.panY = Math.round((availH - graphH * this.zoom) / 2 - minY * this.zoom + 20);
+		this.panX = Math.round((availW - graphW * this.zoom) / 2 - minX * this.zoom + 36);
+		this.panY = Math.round((availH - graphH * this.zoom) / 2 - minY * this.zoom + 18);
 		this.applyWorldTransform();
-		this.renderToolbar();
+		this.renderHud();
 	}
 
 	private renderToolbar(): void {
+		this.toolbarRenderDisposables.clear();
 		clearNode(this.toolbarEl);
 		const snap = this.snapshot;
 		const bp = this.draftBlueprint;
@@ -588,7 +738,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 
-		// Left Cluster: Title + Engineering Pill + Run Status + Progress
+		// Left Cluster: Title + Engineering Pill + Status Pill + Progress
 		const left = append(this.toolbarEl, $('.ade-eng-toolbar-group.left'));
 		const titleIcon = append(left, $('span.ade-eng-title-icon'));
 		titleIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchySub));
@@ -609,25 +759,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		append(
 			left,
-			$('span.ade-eng-progress-pill', {
-				title: localize('adeEngProgressTooltip', "Completed nodes & auto-partitioned Manager segments"),
-			}, `${snap.progress.completedNodes}/${bp.nodes.length} · ${bp.managers.length} Mgr`),
+			$('span.ade-eng-progress-pill', {}, `${snap.progress.completedNodes}/${snap.progress.totalNodes} · ${bp.managers.length} Mgr`),
 		);
 
-		// Center Cluster: Graph Authoring & Layout Controls
-		const center = append(this.toolbarEl, $('.ade-eng-toolbar-group.center'));
+		// Right Cluster: Compact Authoring Pills + Draft Guard + Execution Controls (single crisp row!)
+		const right = append(this.toolbarEl, $('.ade-eng-toolbar-group.right'));
 
 		const makeToolBtn = (icon: ThemeIcon, label: string, onClick: () => void, extraClass = '') => {
-			const btn = append(center, $(`button.ade-eng-tool-btn${extraClass ? `.${extraClass}` : ''}`, {
+			const btn = append(right, $(`button.ade-eng-tool-btn${extraClass ? `.${extraClass}` : ''}`, {
 				type: 'button',
 				title: label,
 			}));
-			const ico = append(btn, $('span'));
+			const ico = append(btn, $('span.ade-eng-tool-ico'));
 			ico.classList.add(...ThemeIcon.asClassNameArray(icon));
-			if (label) {
-				append(btn, $('span.ade-eng-btn-text', {}, label));
-			}
-			this.canvasRenderDisposables.add(addDisposableListener(btn, EventType.CLICK, () => onClick()));
+			append(btn, $('span.ade-eng-tool-label', {}, label));
+			this.toolbarRenderDisposables.add(addDisposableListener(btn, EventType.CLICK, onClick));
 			return btn;
 		};
 
@@ -644,7 +790,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			},
 			this.connectMode ? 'active' : '',
 		);
-		makeToolBtn(Codicon.layout, localize('adeEngAutoLayoutBtn', "Auto Layout"), () => this.runAutoLayoutDraft());
 
 		const isolationBtn = makeToolBtn(
 			bp.metadata.workspaceIsolation === 'worktree' ? Codicon.gitBranch : Codicon.folder,
@@ -661,38 +806,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		);
 		isolationBtn.title = localize('adeEngIsolationTooltip', "Toggle Workspace Parallel Strategy: Shared Root vs Git Worktree Sandbox");
 
-		const zoomOutBtn = append(center, $('button.ade-eng-icon-btn', { type: 'button', title: localize('adeEngZoomOut', "Zoom Out") }));
-		zoomOutBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.zoomOut));
-		this.canvasRenderDisposables.add(addDisposableListener(zoomOutBtn, EventType.CLICK, () => {
-			this.zoom = Math.max(0.38, Math.round((this.zoom - 0.12) * 100) / 100);
-			this.applyWorldTransform();
-			this.renderToolbar();
-		}));
-
-		const zoomLabelBtn = append(center, $('button.ade-eng-zoom-readout', {
-			type: 'button',
-			title: localize('adeEngFitView', "Fit Graph in Viewport"),
-		}, `${Math.round(this.zoom * 100)}%`));
-		this.canvasRenderDisposables.add(addDisposableListener(zoomLabelBtn, EventType.CLICK, () => this.fitViewportToGraph()));
-
-		const zoomInBtn = append(center, $('button.ade-eng-icon-btn', { type: 'button', title: localize('adeEngZoomIn', "Zoom In") }));
-		zoomInBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.zoomIn));
-		this.canvasRenderDisposables.add(addDisposableListener(zoomInBtn, EventType.CLICK, () => {
-			this.zoom = Math.min(2.1, Math.round((this.zoom + 0.12) * 100) / 100);
-			this.applyWorldTransform();
-			this.renderToolbar();
-		}));
-
-		// Right Cluster: Draft Confirm/Cancel Guard + Execution Controls
-		const right = append(this.toolbarEl, $('.ade-eng-toolbar-group.right'));
+		append(right, $('span.ade-eng-toolbar-sep'));
 
 		if (this.isDraftDirty) {
-			append(right, $('span.ade-eng-draft-badge', {}, localize('adeEngDraftUnsaved', "Draft Unsaved")));
+			append(right, $('span.ade-eng-draft-badge', {}, localize('adeEngDraftUnsaved', "Draft")));
 
 			const cancelBtn = append(right, $('button.ade-eng-action-btn.secondary', {
 				type: 'button',
 			}, localize('adeEngCancelDraftBtn', "Cancel")));
-			this.canvasRenderDisposables.add(addDisposableListener(cancelBtn, EventType.CLICK, () => {
+			this.toolbarRenderDisposables.add(addDisposableListener(cancelBtn, EventType.CLICK, () => {
 				this.hideBanner();
 				this.reloadFromService(true);
 			}));
@@ -700,7 +822,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const confirmBtn = append(right, $('button.ade-eng-action-btn.confirm', {
 				type: 'button',
 			}, localize('adeEngConfirmDraftBtn', "Confirm")));
-			this.canvasRenderDisposables.add(addDisposableListener(confirmBtn, EventType.CLICK, () => {
+			this.toolbarRenderDisposables.add(addDisposableListener(confirmBtn, EventType.CLICK, () => {
 				void this.confirmDraftChanges();
 			}));
 		}
@@ -711,7 +833,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const pauseIco = append(pauseBtn, $('span'));
 			pauseIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.debugPause));
 			append(pauseBtn, $('span', {}, localize('adeEngPauseBtn', "Pause")));
-			this.canvasRenderDisposables.add(addDisposableListener(pauseBtn, EventType.CLICK, () => {
+			this.toolbarRenderDisposables.add(addDisposableListener(pauseBtn, EventType.CLICK, () => {
 				if (this.activeGovernorId) {
 					void this.engineering.pauseTree(this.activeGovernorId);
 				}
@@ -721,7 +843,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const stopIco = append(stopBtn, $('span'));
 			stopIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.debugStop));
 			append(stopBtn, $('span', {}, localize('adeEngStopBtn', "Stop")));
-			this.canvasRenderDisposables.add(addDisposableListener(stopBtn, EventType.CLICK, () => {
+			this.toolbarRenderDisposables.add(addDisposableListener(stopBtn, EventType.CLICK, () => {
 				if (this.activeGovernorId) {
 					void this.engineering.stopTree(this.activeGovernorId);
 				}
@@ -731,7 +853,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const resumeIco = append(resumeBtn, $('span'));
 			resumeIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.play));
 			append(resumeBtn, $('span', {}, localize('adeEngResumeBtn', "Resume")));
-			this.canvasRenderDisposables.add(addDisposableListener(resumeBtn, EventType.CLICK, () => {
+			this.toolbarRenderDisposables.add(addDisposableListener(resumeBtn, EventType.CLICK, () => {
 				if (this.activeGovernorId) {
 					void this.engineering.resumeTree(this.activeGovernorId, 'user');
 				}
@@ -741,7 +863,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const stopIco = append(stopBtn, $('span'));
 			stopIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.debugStop));
 			append(stopBtn, $('span', {}, localize('adeEngStopBtn', "Stop")));
-			this.canvasRenderDisposables.add(addDisposableListener(stopBtn, EventType.CLICK, () => {
+			this.toolbarRenderDisposables.add(addDisposableListener(stopBtn, EventType.CLICK, () => {
 				if (this.activeGovernorId) {
 					void this.engineering.stopTree(this.activeGovernorId);
 				}
@@ -754,10 +876,47 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const playIco = append(runBtn, $('span'));
 			playIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.play));
 			append(runBtn, $('span', {}, localize('adeEngRunBtn', "Run")));
-			this.canvasRenderDisposables.add(addDisposableListener(runBtn, EventType.CLICK, () => {
+			this.toolbarRenderDisposables.add(addDisposableListener(runBtn, EventType.CLICK, () => {
 				void this.handleRunClicked();
 			}));
 		}
+	}
+
+	private renderHud(): void {
+		this.hudRenderDisposables.clear();
+		clearNode(this.hudEl);
+		const autoLayoutBtn = append(this.hudEl, $('button.ade-eng-hud-btn', {
+			type: 'button',
+			title: localize('adeEngAutoLayoutTooltip', "Auto-arrange DAG nodes cleanly"),
+		}));
+		const layoutIco = append(autoLayoutBtn, $('span'));
+		layoutIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.layout));
+		append(autoLayoutBtn, $('span', {}, localize('adeEngAutoLayoutBtn', "Auto Layout")));
+		this.hudRenderDisposables.add(addDisposableListener(autoLayoutBtn, EventType.CLICK, () => this.runAutoLayoutDraft()));
+
+		append(this.hudEl, $('span.ade-eng-hud-sep'));
+
+		const zoomOutBtn = append(this.hudEl, $('button.ade-eng-hud-icon-btn', { type: 'button', title: localize('adeEngZoomOut', "Zoom Out") }));
+		zoomOutBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.zoomOut));
+		this.hudRenderDisposables.add(addDisposableListener(zoomOutBtn, EventType.CLICK, () => {
+			this.zoom = Math.max(0.38, Math.round((this.zoom - 0.12) * 100) / 100);
+			this.applyWorldTransform();
+			this.renderHud();
+		}));
+
+		const zoomLabelBtn = append(this.hudEl, $('button.ade-eng-zoom-readout', {
+			type: 'button',
+			title: localize('adeEngFitView', "Fit Graph in Viewport"),
+		}, `${Math.round(this.zoom * 100)}%`));
+		this.hudRenderDisposables.add(addDisposableListener(zoomLabelBtn, EventType.CLICK, () => this.fitViewportToGraph()));
+
+		const zoomInBtn = append(this.hudEl, $('button.ade-eng-hud-icon-btn', { type: 'button', title: localize('adeEngZoomIn', "Zoom In") }));
+		zoomInBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.zoomIn));
+		this.hudRenderDisposables.add(addDisposableListener(zoomInBtn, EventType.CLICK, () => {
+			this.zoom = Math.min(2.1, Math.round((this.zoom + 0.12) * 100) / 100);
+			this.applyWorldTransform();
+			this.renderHud();
+		}));
 	}
 
 	private async handleRunClicked(): Promise<void> {
@@ -802,7 +961,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return true;
 		} catch (err) {
 			if (err instanceof AdeRunningNodesAffectedError) {
-				// Spec 6.4: Prompt user before force-stopping active running Worker(s) and re-partitioning Managers!
 				const confirmed = await this.dialogService.confirm({
 					type: 'warning',
 					message: localize(
@@ -830,8 +988,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					this.hideBanner();
 					this.reloadFromService(true);
 					return true;
-				} catch (retryErr) {
-					this.showBanner(retryErr instanceof Error ? retryErr.message : String(retryErr), 'error');
+				} catch (innerErr) {
+					this.showBanner(innerErr instanceof Error ? innerErr.message : String(innerErr), 'error');
 					return false;
 				}
 			}
@@ -844,9 +1002,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!this.draftBlueprint) {
 			return;
 		}
-		const prefix = type === 'user_gate' ? 'U' : 'N';
-		let index = 1;
 		const existingIds = new Set(this.draftBlueprint.nodes.map(n => n.id));
+		const prefix = type === 'user_gate' ? 'U' : 'N';
+		let index = this.draftBlueprint.nodes.length + 1;
 		while (existingIds.has(`${prefix}${index}`)) {
 			index++;
 		}
@@ -854,8 +1012,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const maxX = this.draftBlueprint.nodes.reduce((acc, n) => Math.max(acc, n.position?.x ?? 180), 100);
 		const pos = {
-			x: this.draftBlueprint.nodes.length === 0 ? 180 : maxX + 250,
-			y: 240 + ((index % 3) - 1) * 70,
+			x: this.draftBlueprint.nodes.length === 0 ? 180 : maxX + 260,
+			y: 240 + ((index % 3) - 1) * 75,
 		};
 
 		const defaultEngine = this.draftBlueprint.nodes.find(n => n.worker)?.worker?.engine ?? 'claude-code';
@@ -884,7 +1042,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			...this.draftBlueprint,
 			nodes: [...this.draftBlueprint.nodes, newNode],
 		});
-		this.openDrawerForNode(newId, 'config');
+		this.openPopoverForTarget({
+			nodeId: newId,
+			anchorKind: type === 'user_gate' ? 'gate' : 'worker',
+			tab: type === 'user_gate' ? 'task' : 'worker',
+		});
 	}
 
 	private deleteDraftNode(nodeId: string): void {
@@ -893,8 +1055,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		const remainingNodes = this.draftBlueprint.nodes.filter(n => n.id !== nodeId);
 		const remainingEdges = this.draftBlueprint.edges.filter(e => e.from !== nodeId && e.to !== nodeId);
-		if (this.hoveredOrSelectedNodeId === nodeId) {
-			this.closeDrawer();
+		if (this.activePopoverNodeId === nodeId) {
+			this.closePopover();
 		}
 		this.markDraftModified({
 			...this.draftBlueprint,
@@ -1007,6 +1169,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.edgesGroupEl.replaceChildren();
 		clearNode(this.nodesLayerEl);
 		this.nodeDomById.clear();
+		this.nodeAnchorsById.clear();
+		this.segmentHeaderDomById.clear();
 
 		this.applyWorldTransform();
 
@@ -1045,11 +1209,29 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 			const header = append(halo, $('button.ade-eng-segment-header', {
 				type: 'button',
-				title: localize('adeEngManagerHeaderTooltip', "Auto-Partitioned Manager Segment [{0}] — Click to open Manager conversation", seg.segmentId),
+				'data-segment-id': seg.segmentId,
+				title: localize('adeEngManagerHeaderTooltip', "Hover to configure Manager [{0}] · Click to open Manager session", seg.segmentId),
 			}));
+			this.segmentHeaderDomById.set(seg.segmentId, header);
 			const mgrGlyph = append(header, $('span'));
 			this.applyEngineIconToElement(mgrGlyph, seg.config.engine);
 			append(header, $('span.ade-eng-segment-label', {}, `Mgr [${seg.segmentId}] · ${seg.config.thinking}`));
+
+			this.canvasRenderDisposables.add(addDisposableListener(header, EventType.MOUSE_ENTER, () => {
+				if (segNodes[0]) {
+					this.isPointerInAnchor = true;
+					this.openPopoverForTarget({
+						nodeId: segNodes[0].id,
+						anchorKind: 'manager',
+						tab: 'manager',
+						segmentId: seg.segmentId,
+					});
+				}
+			}));
+			this.canvasRenderDisposables.add(addDisposableListener(header, EventType.MOUSE_LEAVE, () => {
+				this.isPointerInAnchor = false;
+				this.schedulePopoverCloseIfIdle();
+			}));
 			this.canvasRenderDisposables.add(addDisposableListener(header, EventType.CLICK, e => {
 				EventHelper.stop(e, true);
 				if (this.activeGovernorId && segNodes[0]) {
@@ -1058,10 +1240,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}));
 		}
 
-		// 2. Render Edges (Spec 3.6 Matrix)
+		// 2. Render Edges
 		this.renderEdgesOnly();
 
-		// 3. Render Nodes (Dual-Core Concentric Circles + Hexagonal User Gates)
+		// 3. Render Nodes (Dual-Core Concentric Circles + Shield User Gates)
 		for (const node of bp.nodes) {
 			const runtime: IAdeEngineeringNodeRuntimeState | undefined = runtimes[node.id];
 			const visualStatus = computeNodeVisualStatus(node, runtime);
@@ -1070,7 +1252,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const cx = node.position?.x ?? 180;
 			const cy = node.position?.y ?? 240;
 
-			const nodeEl = append(this.nodesLayerEl, $(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${this.hoveredOrSelectedNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}`, {
+			const nodeEl = append(this.nodesLayerEl, $(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${this.activePopoverNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}`, {
 				'data-node-id': node.id,
 				'data-visual-status': visualStatus,
 			}));
@@ -1078,7 +1260,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			nodeEl.style.top = `${Math.round(cy)}px`;
 			this.nodeDomById.set(node.id, nodeEl);
 
-			// Input & Output Ports
 			const inPort = append(nodeEl, $('div.ade-eng-port.port-in', {
 				title: localize('adeEngPortInTooltip', "Input Port ({0})", node.id),
 			}));
@@ -1090,6 +1271,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 			if (node.type === 'user_gate') {
 				const gateBody = append(nodeEl, $('div.ade-eng-gate-body.ade-pistol-cursor'));
+				this.nodeAnchorsById.set(node.id, { gate: gateBody });
 				const gateIcon = append(gateBody, $('span.ade-eng-gate-icon'));
 				gateIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.verifiedFilled));
 				const gateTextWrap = append(gateBody, $('div.ade-eng-gate-text'));
@@ -1098,10 +1280,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					: localize('adeEngGateKicker', "USER GATE")));
 				append(gateTextWrap, $('span.ade-eng-gate-title', {}, node.title));
 			} else {
-				// Dual-Core Concentric Circle Design (Spec 6.2)
 				const concentric = append(nodeEl, $('div.ade-eng-concentric.ade-pistol-cursor'));
 
-				// Outer Ring SVG (Employee L3 Status Ring + Animated Progress Arc)
 				const ringSvg = concentric.appendChild($.SVG<SVGSVGElement>('svg', {
 					class: 'ade-eng-outer-ring-svg',
 					viewBox: '0 0 88 88',
@@ -1121,28 +1301,36 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					r: '38',
 				}));
 
-				// Inner Core Disc (Worker L4 Native Engine Icon)
 				const innerCore = append(concentric, $('div.ade-eng-inner-core', {
-					title: localize('adeEngWorkerCoreTooltip', "Worker (L4 · Pure Native Context): {0} — Left-click to open Worker session", node.worker?.engine ?? 'codex'),
+					title: localize('adeEngWorkerCoreTooltip', "Worker (L4): {0} — Hover for options · Click to open session", node.worker?.engine ?? 'claude-code'),
 				}));
 				const workerGlyph = append(innerCore, $('span'));
 				this.applyEngineIconToElement(workerGlyph, node.worker?.engine);
 
-				// Outer Ring Satellite Badge (Employee L3 Engine Icon)
 				const empSatellite = append(concentric, $('div.ade-eng-emp-satellite', {
-					title: localize('adeEngEmployeeSatTooltip', "Employee Reviewer (L3): {0} — Click to open Employee session", node.employee?.engine ?? 'claude-code'),
+					title: localize('adeEngEmployeeSatTooltip', "Employee (L3): {0} — Hover for options · Click to open session", node.employee?.engine ?? 'claude-code'),
 				}));
+				this.nodeAnchorsById.set(node.id, { worker: concentric, employee: empSatellite });
 				const empGlyph = append(empSatellite, $('span'));
 				this.applyEngineIconToElement(empGlyph, node.employee?.engine);
 
-				// Critical Star Crown Badge
+				// Hovering directly on Employee satellite switches anchored popover to Employee options!
+				this.canvasRenderDisposables.add(addDisposableListener(empSatellite, EventType.MOUSE_ENTER, e => {
+					e.stopPropagation();
+					this.isPointerInAnchor = true;
+					this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'employee', tab: 'employee' });
+				}));
+				this.canvasRenderDisposables.add(addDisposableListener(innerCore, EventType.MOUSE_ENTER, () => {
+					this.isPointerInAnchor = true;
+					this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'worker', tab: 'worker' });
+				}));
+
 				if (node.critical) {
 					append(concentric, $('span.ade-eng-critical-badge', {
 						title: localize('adeEngCriticalBadgeTooltip', "★ Critical Node — Triggers Segment Manager Secondary Review"),
 					}, '★'));
 				}
 
-				// Completed Check / Lock or Failure Tier Pill on Ring
 				if (isLocked) {
 					const doneBadge = append(concentric, $('span.ade-eng-corner-status.done'));
 					doneBadge.classList.add(...ThemeIcon.asClassNameArray(Codicon.check));
@@ -1154,10 +1342,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					}, `R${runtime.employeeRejectCount}`));
 				}
 
-				// Caption Below Concentric Circle
 				const caption = append(nodeEl, $('div.ade-eng-node-caption'));
 				append(caption, $('span.ade-eng-node-title', {}, `[${node.id}] ${node.title}`));
-				const subMeta = `${node.worker?.engine ?? 'codex'}:${node.worker?.thinking ?? 'high'}`;
+				const subMeta = `${node.worker?.engine ?? 'claude-code'}:${node.worker?.thinking ?? 'high'}`;
 				append(caption, $('span.ade-eng-node-sub', {}, subMeta));
 			}
 
@@ -1271,14 +1458,24 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private installNodeHoverDragAndClick(node: IAdeEngineeringBlueprintNode, nodeEl: HTMLElement): void {
-		// Spec 6.3(a): Zero-click Hover opens Right Drawer automatically
-		this.canvasRenderDisposables.add(addDisposableListener(nodeEl, EventType.MOUSE_ENTER, () => {
-			this.isPointerInNode = true;
-			this.openDrawerForNode(node.id);
+		this.canvasRenderDisposables.add(addDisposableListener(nodeEl, EventType.MOUSE_ENTER, e => {
+			this.isPointerInAnchor = true;
+			const target = e.target as HTMLElement | null;
+			const isEmp = Boolean(target?.closest('.ade-eng-emp-satellite'));
+			if (node.type === 'user_gate') {
+				this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'gate', tab: 'task' });
+			} else {
+				const kind = isEmp ? 'employee' : 'worker';
+				this.openPopoverForTarget({
+					nodeId: node.id,
+					anchorKind: kind,
+					tab: this.activePopoverNodeId === node.id ? this.activePopoverTab : kind,
+				});
+			}
 		}));
 		this.canvasRenderDisposables.add(addDisposableListener(nodeEl, EventType.MOUSE_LEAVE, () => {
-			this.isPointerInNode = false;
-			this.scheduleDrawerCloseIfIdle();
+			this.isPointerInAnchor = false;
+			this.schedulePopoverCloseIfIdle();
 		}));
 
 		let dragging = false;
@@ -1351,6 +1548,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.renderToolbar();
 			}
 			this.renderEdgesOnly();
+			this.positionPopoverNearAnchor();
 		}));
 
 		const finishPointer = (e: PointerEvent) => {
@@ -1363,12 +1561,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			} catch { /* ignore */ }
 
 			if (movedBeyondClickThreshold) {
-				// Re-render segment halos cleanly after drag finishes
 				this.renderCanvas();
+				this.positionPopoverNearAnchor();
 				return;
 			}
 
-			// Spec 6.3(b): Clean Single Left-Click immediately jumps to the node's Coding Agent session!
 			const clickedTarget = e.target as HTMLElement | null;
 			if (node.type === 'task' && this.activeGovernorId) {
 				const clickedEmp = Boolean(clickedTarget?.closest('.ade-eng-emp-satellite'));
@@ -1378,7 +1575,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					clickedEmp ? 'employee' : 'worker',
 				);
 			} else {
-				this.openDrawerForNode(node.id, 'status');
+				this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'gate', tab: 'task' });
 			}
 		};
 
@@ -1386,206 +1583,30 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.canvasRenderDisposables.add(addDisposableListener(nodeEl, 'pointercancel', () => { dragging = false; }));
 	}
 
-	private renderDrawer(): void {
-		this.drawerRenderDisposables.clear();
-		clearNode(this.drawerContentEl);
+	// =========================================================================
+	// Anchored Floating Engine & Node Option Popover (Adjacent to Hovered Icon)
+	// =========================================================================
 
-		const nodeId = this.hoveredOrSelectedNodeId;
+	private renderPopover(): void {
+		this.popoverRenderDisposables.clear();
+		clearNode(this.popoverContentEl);
+
 		const bp = this.draftBlueprint;
 		const snap = this.snapshot;
-		if (!nodeId || !bp || !snap) {
+		const nodeId = this.activePopoverNodeId;
+		if (!bp || !snap || !nodeId) {
 			return;
 		}
-		const node = bp.nodes.find(n => n.id === nodeId);
-		if (!node) {
+		const draftNode = bp.nodes.find(n => n.id === nodeId);
+		if (!draftNode) {
 			return;
 		}
-		const runtime = snap.state.nodes[node.id];
-		const visualStatus: AdeEngineeringNodeVisualStatus = computeNodeVisualStatus(node, runtime);
+
+		const runtime = snap.state.nodes[nodeId];
 		const isLocked = Boolean(runtime?.completed);
-		const seg: IAdeEngineeringManagerSegment | undefined = bp.managers.find(m => m.nodeIds.includes(node.id));
-		const upstreamReports = snap.nodes.find(n => n.node.id === node.id)?.upstreamReports ?? [];
-
-		// Drawer Header
-		const header = append(this.drawerContentEl, $('.ade-eng-drawer-header'));
-		const titleRow = append(header, $('.ade-eng-drawer-title-row'));
-		append(titleRow, $(`span.ade-eng-drawer-badge.status-${visualStatus}`, {}, `[${node.id}] ${visualStatus.toUpperCase()}`));
-		if (isLocked) {
-			append(titleRow, $('span.ade-eng-lock-pill', {}, localize('adeEngLockedNodePill', "Locked (Completed)")));
-		}
-		const closeBtn = append(titleRow, $('button.ade-eng-icon-btn.drawer-close', {
-			type: 'button',
-			title: localize('adeEngCloseDrawer', "Close Drawer"),
-		}));
-		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
-		this.drawerRenderDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.closeDrawer()));
-
-		append(header, $('h3.ade-eng-drawer-heading', {}, node.title));
-
-		// Quick Session Jump Strip (Worker / Employee / Manager)
-		if (node.type === 'task' && this.activeGovernorId) {
-			const govId = this.activeGovernorId;
-			const jumpRow = append(header, $('.ade-eng-drawer-jumps'));
-			const addJump = (label: string, role: 'worker' | 'employee' | 'manager') => {
-				const btn = append(jumpRow, $('button.ade-eng-jump-btn', { type: 'button' }, label));
-				this.drawerRenderDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-					void this.engineering.ensureNodeAgentSessionOpen(govId, node.id, role);
-				}));
-			};
-			addJump(localize('adeEngJumpWorker', "Worker (L4) ↗"), 'worker');
-			addJump(localize('adeEngJumpEmployee', "Employee (L3) ↗"), 'employee');
-			if (seg) {
-				addJump(localize('adeEngJumpManager', "Manager [{0}] ↗", seg.segmentId), 'manager');
-			}
-		}
-
-		// Sub-tabs: Status & Reports | Configure (Draft)
-		const tabsBar = append(this.drawerContentEl, $('.ade-eng-drawer-tabs'));
-		const statusTabBtn = append(tabsBar, $(`button.ade-eng-drawer-tab${this.drawerTab === 'status' ? '.active' : ''}`, {
-			type: 'button',
-		}, localize('adeEngDrawerTabStatus', "Status & Reports")));
-		const configTabBtn = append(tabsBar, $(`button.ade-eng-drawer-tab${this.drawerTab === 'config' ? '.active' : ''}`, {
-			type: 'button',
-		}, localize('adeEngDrawerTabConfig', "Configure (Draft)")));
-
-		this.drawerRenderDisposables.add(addDisposableListener(statusTabBtn, EventType.CLICK, () => {
-			this.drawerTab = 'status';
-			this.renderDrawer();
-		}));
-		this.drawerRenderDisposables.add(addDisposableListener(configTabBtn, EventType.CLICK, () => {
-			this.drawerTab = 'config';
-			this.renderDrawer();
-		}));
-
-		const scrollBody = append(this.drawerContentEl, $('.ade-eng-drawer-scroll'));
-
-		if (this.drawerTab === 'status') {
-			this.renderDrawerStatusTab(scrollBody, node, runtime, seg, upstreamReports, snap);
-		} else {
-			this.renderDrawerConfigTab(scrollBody, node, seg, isLocked);
-		}
-	}
-
-	private renderDrawerStatusTab(
-		host: HTMLElement,
-		node: IAdeEngineeringBlueprintNode,
-		runtime: IAdeEngineeringNodeRuntimeState | undefined,
-		seg: IAdeEngineeringManagerSegment | undefined,
-		upstreamReports: readonly { nodeId: string; nodeTitle: string; summary: string }[],
-		snap: IAdeEngineeringTreeSnapshot,
-	): void {
-		// Telemetry Grid
-		const grid = append(host, $('.ade-eng-kv-grid'));
-		const addKv = (k: string, v: string) => {
-			const cell = append(grid, $('.ade-eng-kv-cell'));
-			append(cell, $('span.ade-eng-kv-key', {}, k));
-			append(cell, $('span.ade-eng-kv-val', {}, v));
-		};
-		addKv(localize('adeEngKvPhase', "Phase"), runtime?.phase ?? 'idle');
-		if (node.type === 'task') {
-			addKv(localize('adeEngKvSegment', "Manager Segment"), seg?.segmentId ?? '—');
-			addKv(localize('adeEngKvInternalRework', "Employee Rework"), `${runtime?.employeeRejectCount ?? 0} / 3`);
-			addKv(localize('adeEngKvFormalFailures', "Manager Failures"), `${runtime?.formalFailureCount ?? 0} / 3`);
-		}
-
-		// User Gate Decision Controls (Spec 3.5)
-		if (node.type === 'user_gate' && this.activeGovernorId) {
-			const govId = this.activeGovernorId;
-			const gateCard = append(host, $('.ade-eng-drawer-section.gate-decision-box'));
-			append(gateCard, $('h4', {}, localize('adeEngGateDecisionHeading', "User Acceptance Gate Decision")));
-			append(gateCard, $('p.ade-eng-muted', {}, node.description || localize('adeEngGateDefaultHint', "Approve to unlock downstream tasks, or surgically roll back along a specific upstream branch.")));
-
-			const approveBtn = append(gateCard, $('button.ade-eng-action-btn.run.full-width', {
-				type: 'button',
-			}, localize('adeEngGateApproveBtn', "Approve & Continue Downstream")));
-			this.drawerRenderDisposables.add(addDisposableListener(approveBtn, EventType.CLICK, () => {
-				void this.engineering.submitGateVerdict({
-					governorSessionId: govId,
-					nodeId: node.id,
-					verdict: 'pass',
-				});
-			}));
-
-			const ancestors = listUpstreamTaskAncestors(node.id, snap.blueprint);
-			if (ancestors.length > 0) {
-				const rbWrap = append(gateCard, $('.ade-eng-rollback-form'));
-				append(rbWrap, $('label.ade-eng-field-label', {}, localize('adeEngRollbackTargetLabel', "Surgical Partial Rollback Target (Parallel branches stay untouched)")));
-				const selectEl = append(rbWrap, $('select.ade-eng-select')) as HTMLSelectElement;
-				for (const anc of ancestors) {
-					const opt = append(selectEl, $('option', { value: anc.id }, `[${anc.id}] ${anc.title}`)) as HTMLOptionElement;
-					if (anc.id === ancestors[ancestors.length - 1].id) {
-						opt.selected = true;
-					}
-				}
-				const fbArea = append(rbWrap, $('textarea.ade-eng-textarea', {
-					rows: 2,
-					placeholder: localize('adeEngRollbackFeedbackPlaceholder', "Feedback instructions for incremental rework…"),
-				})) as HTMLTextAreaElement;
-				const rbBtn = append(rbWrap, $('button.ade-eng-action-btn.danger.full-width', {
-					type: 'button',
-				}, localize('adeEngRollbackSubmitBtn', "Roll Back Selected Path")));
-				this.drawerRenderDisposables.add(addDisposableListener(rbBtn, EventType.CLICK, () => {
-					void this.engineering.submitGateVerdict({
-						governorSessionId: govId,
-						nodeId: node.id,
-						verdict: 'rollback',
-						targetNodeId: selectEl.value,
-						feedback: fbArea.value.trim() || undefined,
-					});
-				}));
-			}
-		}
-
-		// Latest Feedback / Output
-		if (runtime?.lastManagerFeedback || runtime?.lastEmployeeFeedback || runtime?.lastGateFeedback) {
-			const fbSec = append(host, $('.ade-eng-drawer-section'));
-			append(fbSec, $('h4', {}, localize('adeEngLatestFeedbackHeading', "Latest Review / Gate Feedback")));
-			append(fbSec, $('pre.ade-eng-code-box', {}, runtime.lastManagerFeedback || runtime.lastEmployeeFeedback || runtime.lastGateFeedback || ''));
-		}
-
-		// Node's Own Report
-		const ownReport = snap.state.reports[node.id];
-		const repSec = append(host, $('.ade-eng-drawer-section'));
-		append(repSec, $('h4', {}, localize('adeEngOwnReportHeading', "Node Report")));
-		append(
-			repSec,
-			$('div.ade-eng-report-card', {}, ownReport && !ownReport.stale
-				? ownReport.summary
-				: localize('adeEngNoReportYet', "Generated by Employee (L3) after Worker verification passes.")),
-		);
-
-		// Upstream Incremental Report Chain (Spec 3.2)
-		const upSec = append(host, $('.ade-eng-drawer-section'));
-		append(upSec, $('h4', {}, localize('adeEngUpstreamChainHeading', "Upstream Incremental Report Chain ({0})", upstreamReports.length)));
-		if (upstreamReports.length === 0) {
-			append(upSec, $('p.ade-eng-muted', {}, localize('adeEngNoUpstreamReports', "No completed upstream reports yet.")));
-		} else {
-			for (const rep of upstreamReports) {
-				const item = append(upSec, $('.ade-eng-report-card.upstream'));
-				append(item, $('strong', {}, `[${rep.nodeId}] ${rep.nodeTitle}`));
-				append(item, $('p', {}, rep.summary));
-			}
-		}
-
-		// Touched Files Summary
-		if (runtime?.lastChanges && runtime.lastChanges.touchedFiles.length > 0) {
-			const diffSec = append(host, $('.ade-eng-drawer-section'));
-			append(diffSec, $('h4', {}, localize('adeEngTouchedFilesHeading', "Worker Touched Files ({0})", runtime.lastChanges.touchedFiles.length)));
-			for (const f of runtime.lastChanges.touchedFiles) {
-				append(diffSec, $('div.ade-eng-file-pill', {}, `[${f.kind.toUpperCase()}] ${f.relativePath}`));
-			}
-		}
-	}
-
-	private renderDrawerConfigTab(
-		host: HTMLElement,
-		node: IAdeEngineeringBlueprintNode,
-		seg: IAdeEngineeringManagerSegment | undefined,
-		isLocked: boolean,
-	): void {
-		if (isLocked) {
-			append(host, $('div.ade-eng-lock-banner', {}, localize('adeEngCompletedLockNotice', "This node has already completed verification and is strictly locked (Spec 6.4).")));
-		}
+		const visualStatus = computeNodeVisualStatus(draftNode, runtime);
+		const seg = (this.activePopoverSegmentId ? bp.managers.find(m => m.segmentId === this.activePopoverSegmentId) : undefined)
+			?? bp.managers.find(m => m.nodeIds.includes(nodeId));
 
 		const updateNodeDraft = (patch: Partial<IAdeEngineeringBlueprintNode>) => {
 			if (!this.draftBlueprint || isLocked) {
@@ -1593,184 +1614,310 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 			this.markDraftModified({
 				...this.draftBlueprint,
-				nodes: this.draftBlueprint.nodes.map(n => n.id === node.id ? { ...n, ...patch } : n),
+				nodes: this.draftBlueprint.nodes.map(n => n.id === draftNode.id ? { ...n, ...patch } : n),
 			});
 		};
 
-		// Title
-		const titleSec = append(host, $('.ade-eng-drawer-section'));
-		append(titleSec, $('label.ade-eng-field-label', {}, localize('adeEngFieldTitle', "Node Title")));
-		const titleInput = append(titleSec, $('input.ade-eng-input', {
+		// 1. Sleek Compact Header Row: [ID] + Inline Editable Title + ★ Critical + Open Session + Delete
+		const header = append(this.popoverContentEl, $('.ade-eng-pop-header'));
+		append(header, $(`span.ade-eng-pop-id.status-${visualStatus}`, {}, draftNode.id));
+
+		const titleInput = append(header, $('input.ade-eng-pop-title-input.ade-eng-input', {
 			type: 'text',
-			value: node.title,
+			value: draftNode.title,
+			title: draftNode.title,
 			...(isLocked ? { disabled: 'disabled' } : {}),
 		})) as HTMLInputElement;
-		this.drawerRenderDisposables.add(addDisposableListener(titleInput, EventType.CHANGE, () => {
+		this.popoverRenderDisposables.add(addDisposableListener(titleInput, EventType.CHANGE, () => {
 			if (titleInput.value.trim()) {
 				updateNodeDraft({ title: titleInput.value.trim() });
 			}
 		}));
 
-		if (node.type === 'user_gate') {
-			const descSec = append(host, $('.ade-eng-drawer-section'));
-			append(descSec, $('label.ade-eng-field-label', {}, localize('adeEngGateDescLabel', "Gate Inspection Instructions")));
-			const descArea = append(descSec, $('textarea.ade-eng-textarea', {
-				rows: 4,
+		if (draftNode.type === 'task') {
+			const critBtn = append(header, $(`button.ade-eng-pop-icon-btn.crit${draftNode.critical ? '.active' : ''}`, {
+				type: 'button',
+				title: localize('adeEngToggleCritTooltip', "Toggle ★ Critical Gate (triggers Segment Manager secondary review)"),
 				...(isLocked ? { disabled: 'disabled' } : {}),
-			})) as HTMLTextAreaElement;
-			descArea.value = node.description ?? '';
-			this.drawerRenderDisposables.add(addDisposableListener(descArea, EventType.CHANGE, () => {
-				updateNodeDraft({ description: descArea.value });
-			}));
-		} else {
-			// Critical Checkbox
-			const critRow = append(titleSec, $('label.ade-eng-checkbox-row'));
-			const critBox = append(critRow, $('input', {
-				type: 'checkbox',
-				...(isLocked ? { disabled: 'disabled' } : {}),
-			})) as HTMLInputElement;
-			critBox.checked = Boolean(node.critical);
-			append(critRow, $('span', {}, localize('adeEngCriticalCheckbox', "★ Critical Gate (triggers Segment Manager secondary review)")));
-			this.drawerRenderDisposables.add(addDisposableListener(critBox, EventType.CHANGE, () => {
-				updateNodeDraft({ critical: critBox.checked });
-			}));
-
-			// Role Model Config Helper
-			const renderRoleConfigurator = (
-				heading: string,
-				current: { engine: string; model?: string; thinking: AdeThinkingLevel },
-				onChange: (next: { engine: string; model?: string; thinking: AdeThinkingLevel }) => void,
-				disabled = isLocked,
-			) => {
-				const sec = append(host, $('.ade-eng-drawer-section.role-box'));
-				append(sec, $('h4', {}, heading));
-
-				const row = append(sec, $('.ade-eng-form-row'));
-				const engSelect = append(row, $('select.ade-eng-select', {
-					...(disabled ? { disabled: 'disabled' } : {}),
-				})) as HTMLSelectElement;
-				const normCurrentEng = normalizeBlueprintEngine(current.engine);
-				for (const opt of ENGINE_OPTIONS) {
-					const el = append(engSelect, $('option', { value: opt.value }, opt.label)) as HTMLOptionElement;
-					if (opt.value === normCurrentEng) {
-						el.selected = true;
-					}
+			}, '★'));
+			this.popoverRenderDisposables.add(addDisposableListener(critBtn, EventType.CLICK, () => {
+				if (!isLocked) {
+					updateNodeDraft({ critical: !draftNode.critical });
 				}
-
-				const thinkSelect = append(row, $('select.ade-eng-select.compact', {
-					...(disabled ? { disabled: 'disabled' } : {}),
-				})) as HTMLSelectElement;
-				for (const opt of THINKING_OPTIONS) {
-					const el = append(thinkSelect, $('option', { value: opt.value }, opt.label)) as HTMLOptionElement;
-					if (opt.value === current.thinking) {
-						el.selected = true;
-					}
-				}
-
-				const listId = `ade-eng-models-${this.nextDatalistId++}`;
-				const modelInput = append(sec, $('input.ade-eng-input', {
-					type: 'text',
-					list: listId,
-					placeholder: localize('adeEngModelPlaceholder', "Model (optional, e.g. deepseek-flash[1m] / gpt-5-codex)"),
-					value: current.model ?? '',
-					...(disabled ? { disabled: 'disabled' } : {}),
-				})) as HTMLInputElement;
-				const datalistEl = append(sec, $('datalist', { id: listId }));
-				const populateDatalist = (engineKey: string) => {
-					clearNode(datalistEl);
-					for (const m of this.configuredModelsByEngine[engineKey] ?? []) {
-						append(datalistEl, $('option', { value: m.id }, m.label));
-					}
-				};
-				populateDatalist(normCurrentEng);
-
-				const emit = () => {
-					populateDatalist(engSelect.value);
-					onChange({
-						engine: engSelect.value,
-						...(modelInput.value.trim() ? { model: modelInput.value.trim() } : {}),
-						thinking: normalizeThinkingLevel(thinkSelect.value, current.thinking),
-					});
-				};
-				this.drawerRenderDisposables.add(addDisposableListener(engSelect, EventType.CHANGE, emit));
-				this.drawerRenderDisposables.add(addDisposableListener(thinkSelect, EventType.CHANGE, emit));
-				this.drawerRenderDisposables.add(addDisposableListener(modelInput, EventType.CHANGE, emit));
-			};
-
-			renderRoleConfigurator(
-				localize('adeEngWorkerConfigHeading', "Worker (L4 · 100% Pure Native Executor)"),
-				node.worker ?? { engine: 'codex', thinking: 'high' },
-				next => updateNodeDraft({ worker: next }),
-			);
-
-			renderRoleConfigurator(
-				localize('adeEngEmployeeConfigHeading', "Employee (L3 · Single-Node Reviewer)"),
-				node.employee ?? { engine: 'claude-code', thinking: 'medium' },
-				next => updateNodeDraft({ employee: next }),
-			);
-
-			if (seg && this.draftBlueprint) {
-				const bpRef = this.draftBlueprint;
-				renderRoleConfigurator(
-					localize('adeEngManagerConfigHeading', "Segment Manager (L2 · [{0}])", seg.segmentId),
-					seg.config,
-					next => {
-						this.markDraftModified({
-							...bpRef,
-							managers: bpRef.managers.map(m => m.segmentId === seg.segmentId ? { ...m, config: next } : m),
-						});
-					},
-					false,
-				);
-			}
-
-			// Goal & Acceptance Prompts
-			const goalSec = append(host, $('.ade-eng-drawer-section'));
-			append(goalSec, $('label.ade-eng-field-label', {}, localize('adeEngGoalLabel', "Worker Task Goal (Static Business Prompt)")));
-			const goalArea = append(goalSec, $('textarea.ade-eng-textarea', {
-				rows: 4,
-				...(isLocked ? { disabled: 'disabled' } : {}),
-			})) as HTMLTextAreaElement;
-			goalArea.value = node.goal ?? '';
-			this.drawerRenderDisposables.add(addDisposableListener(goalArea, EventType.CHANGE, () => {
-				updateNodeDraft({ goal: goalArea.value });
-			}));
-
-			const accSec = append(host, $('.ade-eng-drawer-section'));
-			append(accSec, $('label.ade-eng-field-label', {}, localize('adeEngAcceptanceLabel', "Acceptance Criteria")));
-			const accArea = append(accSec, $('textarea.ade-eng-textarea', {
-				rows: 3,
-				...(isLocked ? { disabled: 'disabled' } : {}),
-			})) as HTMLTextAreaElement;
-			accArea.value = node.acceptance ?? '';
-			this.drawerRenderDisposables.add(addDisposableListener(accArea, EventType.CHANGE, () => {
-				updateNodeDraft({ acceptance: accArea.value });
 			}));
 		}
 
-		// Outgoing Connections Editor (Draft)
+		if (!isLocked) {
+			const delBtn = append(header, $('button.ade-eng-pop-icon-btn.danger', {
+				type: 'button',
+				title: localize('adeEngDeleteNodeTooltip', "Delete Node"),
+			}));
+			delBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.trash));
+			this.popoverRenderDisposables.add(addDisposableListener(delBtn, EventType.CLICK, () => {
+				this.deleteDraftNode(draftNode.id);
+			}));
+		} else {
+			append(header, $('span.ade-eng-lock-pill', {}, localize('adeEngLockedShort', "Locked")));
+		}
+
+		// 2. User Gate Popover (Compact Gate Options + Direct Approve/Rollback)
+		if (draftNode.type === 'user_gate') {
+			this.renderGatePopoverBody(draftNode, runtime, isLocked, updateNodeDraft);
+			this.positionPopoverNearAnchor();
+			return;
+		}
+
+		// 3. Task Node Segmented Role Option Switcher: Worker | Employee | Manager | Task
+		const segBar = append(this.popoverContentEl, $('.ade-eng-pop-role-tabs'));
+		const tabs: { readonly id: PopoverTabKind; readonly label: string }[] = [
+			{ id: 'worker', label: localize('adeEngPopTabWorker', "Worker") },
+			{ id: 'employee', label: localize('adeEngPopTabEmployee', "Employee") },
+			...(seg ? [{ id: 'manager' as const, label: `Mgr [${seg.segmentId}]` }] : []),
+			{ id: 'task', label: localize('adeEngPopTabTask', "Spec") },
+		];
+		for (const t of tabs) {
+			const btn = append(segBar, $(`button.ade-eng-pop-role-tab${this.activePopoverTab === t.id ? '.active' : ''}`, {
+				type: 'button',
+			}, t.label));
+			this.popoverRenderDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
+				this.activePopoverTab = t.id;
+				this.renderPopover();
+			}));
+		}
+
+		if (this.activePopoverTab === 'task') {
+			this.renderTaskSpecPopoverBody(draftNode, runtime, isLocked, updateNodeDraft);
+		} else if (this.activePopoverTab === 'manager' && seg) {
+			this.renderEngineOptionListBody({
+				roleTitle: localize('adeEngMgrRoleSubtitle', "Segment Manager · L2 [{0}]", seg.segmentId),
+				current: seg.config,
+				disabled: false,
+				onOpenSession: () => {
+					if (this.activeGovernorId) {
+						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, draftNode.id, 'manager');
+					}
+				},
+				onChange: next => {
+					if (!this.draftBlueprint) {
+						return;
+					}
+					this.markDraftModified({
+						...this.draftBlueprint,
+						managers: this.draftBlueprint.managers.map(m => m.segmentId === seg.segmentId ? { ...m, config: next } : m),
+					});
+				},
+				runtime,
+			});
+		} else if (this.activePopoverTab === 'employee') {
+			this.renderEngineOptionListBody({
+				roleTitle: localize('adeEngEmpRoleSubtitle', "Single-Node Reviewer · L3"),
+				current: draftNode.employee ?? { engine: 'claude-code', thinking: 'medium' },
+				disabled: isLocked,
+				onOpenSession: () => {
+					if (this.activeGovernorId) {
+						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, draftNode.id, 'employee');
+					}
+				},
+				onChange: next => updateNodeDraft({ employee: next }),
+				runtime,
+			});
+		} else {
+			this.renderEngineOptionListBody({
+				roleTitle: localize('adeEngWrkRoleSubtitle', "Pure Native Executor · L4"),
+				current: draftNode.worker ?? { engine: 'claude-code', thinking: 'high' },
+				disabled: isLocked,
+				onOpenSession: () => {
+					if (this.activeGovernorId) {
+						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, draftNode.id, 'worker');
+					}
+				},
+				onChange: next => updateNodeDraft({ worker: next }),
+				runtime,
+			});
+		}
+
+		this.positionPopoverNearAnchor();
+	}
+
+	private renderEngineOptionListBody(params: {
+		readonly roleTitle: string;
+		readonly current: { readonly engine: string; readonly model?: string; readonly thinking: AdeThinkingLevel };
+		readonly disabled: boolean;
+		readonly onOpenSession: () => void;
+		readonly onChange: (next: { engine: string; model?: string; thinking: AdeThinkingLevel }) => void;
+		readonly runtime: IAdeEngineeringNodeRuntimeState | undefined;
+	}): void {
+		const normEngine = normalizeBlueprintEngine(params.current.engine);
+		const body = append(this.popoverContentEl, $('.ade-eng-pop-body'));
+
+		// Role Subtitle + Direct Open Session Link
+		const subRow = append(body, $('.ade-eng-pop-subrow'));
+		append(subRow, $('span.ade-eng-pop-role-desc', {}, params.roleTitle));
+		const openBtn = append(subRow, $('button.ade-eng-pop-open-link', {
+			type: 'button',
+		}, localize('adeEngOpenRoleChat', "Open Session ↗")));
+		this.popoverRenderDisposables.add(addDisposableListener(openBtn, EventType.CLICK, params.onOpenSession));
+
+		// 1. Direct Visual Engine Option Grid (2-column compact option list with real engine icons!)
+		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngPopEngineLabel', "Engine")));
+		const engineGrid = append(body, $('.ade-eng-engine-grid'));
+		for (const opt of ENGINE_OPTIONS) {
+			const isSelected = opt.value === normEngine;
+			const itemBtn = append(engineGrid, $(`button.ade-eng-engine-opt${isSelected ? '.selected' : ''}`, {
+				type: 'button',
+				title: opt.label,
+				...(params.disabled ? { disabled: 'disabled' } : {}),
+			}));
+			const glyph = append(itemBtn, $('span'));
+			this.applyEngineIconToElement(glyph, opt.value);
+			append(itemBtn, $('span.ade-eng-engine-opt-name', {}, opt.shortLabel));
+			if (isSelected) {
+				const check = append(itemBtn, $('span.ade-eng-engine-opt-check'));
+				check.classList.add(...ThemeIcon.asClassNameArray(Codicon.check));
+			}
+			this.popoverRenderDisposables.add(addDisposableListener(itemBtn, EventType.CLICK, () => {
+				if (!params.disabled && opt.value !== normEngine) {
+					params.onChange({
+						engine: opt.value,
+						thinking: params.current.thinking,
+					});
+				}
+			}));
+		}
+
+		// 2. Thinking Effort Segmented Pill Bar (Off | Low | Med | High | Max)
+		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngPopThinkingLabel', "Thinking Effort")));
+		const thinkBar = append(body, $('.ade-eng-thinking-bar'));
+		for (const opt of THINKING_OPTIONS) {
+			const active = opt.value === params.current.thinking;
+			const tBtn = append(thinkBar, $(`button.ade-eng-think-opt${active ? '.selected' : ''}`, {
+				type: 'button',
+				...(params.disabled ? { disabled: 'disabled' } : {}),
+			}, opt.label));
+			this.popoverRenderDisposables.add(addDisposableListener(tBtn, EventType.CLICK, () => {
+				if (!params.disabled && opt.value !== params.current.thinking) {
+					params.onChange({
+						engine: normEngine,
+						...(params.current.model ? { model: params.current.model } : {}),
+						thinking: normalizeThinkingLevel(opt.value, params.current.thinking),
+					});
+				}
+			}));
+		}
+
+		// 3. Model Quick-Select Option Chips + Compact Custom Input
+		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngPopModelLabel', "Model")));
+		const configuredModels = this.configuredModelsByEngine[normEngine] ?? [];
+		if (configuredModels.length > 0) {
+			const chipsRow = append(body, $('.ade-eng-model-chips'));
+			const autoChip = append(chipsRow, $(`button.ade-eng-model-chip${!params.current.model ? '.selected' : ''}`, {
+				type: 'button',
+				...(params.disabled ? { disabled: 'disabled' } : {}),
+			}, localize('adeEngModelAuto', "Default")));
+			this.popoverRenderDisposables.add(addDisposableListener(autoChip, EventType.CLICK, () => {
+				if (!params.disabled && params.current.model) {
+					params.onChange({ engine: normEngine, thinking: params.current.thinking });
+				}
+			}));
+			for (const m of configuredModels) {
+				const active = params.current.model === m.id;
+				const mChip = append(chipsRow, $(`button.ade-eng-model-chip${active ? '.selected' : ''}`, {
+					type: 'button',
+					title: m.label,
+					...(params.disabled ? { disabled: 'disabled' } : {}),
+				}, m.id));
+				this.popoverRenderDisposables.add(addDisposableListener(mChip, EventType.CLICK, () => {
+					if (!params.disabled && params.current.model !== m.id) {
+						params.onChange({ engine: normEngine, model: m.id, thinking: params.current.thinking });
+					}
+				}));
+			}
+		}
+
+		const listId = `ade-eng-models-${this.nextDatalistId++}`;
+		const modelInput = append(body, $('input.ade-eng-pop-model-input', {
+			type: 'text',
+			list: listId,
+			placeholder: localize('adeEngModelCompactPlaceholder', "Default model (or enter e.g. deepseek-flash[1m])"),
+			value: params.current.model ?? '',
+			...(params.disabled ? { disabled: 'disabled' } : {}),
+		})) as HTMLInputElement;
+		const datalistEl = append(body, $('datalist', { id: listId }));
+		for (const m of configuredModels) {
+			append(datalistEl, $('option', { value: m.id }, m.label));
+		}
+		this.popoverRenderDisposables.add(addDisposableListener(modelInput, EventType.CHANGE, () => {
+			if (!params.disabled) {
+				params.onChange({
+					engine: normEngine,
+					...(modelInput.value.trim() ? { model: modelInput.value.trim() } : {}),
+					thinking: params.current.thinking,
+				});
+			}
+		}));
+
+		// 4. Compact Runtime Telemetry Strip at Footer
+		if (params.runtime) {
+			append(
+				body,
+				$('div.ade-eng-pop-telemetry', {}, `Phase: ${params.runtime.phase} · Rework ${params.runtime.employeeRejectCount}/3 · Fail ${params.runtime.formalFailureCount}/3`),
+			);
+		}
+	}
+
+	private renderTaskSpecPopoverBody(
+		node: IAdeEngineeringBlueprintNode,
+		runtime: IAdeEngineeringNodeRuntimeState | undefined,
+		isLocked: boolean,
+		updateNodeDraft: (patch: Partial<IAdeEngineeringBlueprintNode>) => void,
+	): void {
+		const body = append(this.popoverContentEl, $('.ade-eng-pop-body.scrollable'));
+		if (isLocked) {
+			append(body, $('div.ade-eng-lock-banner', {}, localize('adeEngCompletedLockNotice', "Completed & locked — task prompt and incoming edges are immutable.")));
+		}
+
+		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngGoalShortLabel', "Worker Task Goal")));
+		const goalArea = append(body, $('textarea.ade-eng-textarea', {
+			rows: 3,
+			...(isLocked ? { disabled: 'disabled' } : {}),
+		})) as HTMLTextAreaElement;
+		goalArea.value = node.goal ?? '';
+		this.popoverRenderDisposables.add(addDisposableListener(goalArea, EventType.CHANGE, () => {
+			updateNodeDraft({ goal: goalArea.value });
+		}));
+
+		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngAccShortLabel', "Acceptance Criteria")));
+		const accArea = append(body, $('textarea.ade-eng-textarea', {
+			rows: 2,
+			...(isLocked ? { disabled: 'disabled' } : {}),
+		})) as HTMLTextAreaElement;
+		accArea.value = node.acceptance ?? '';
+		this.popoverRenderDisposables.add(addDisposableListener(accArea, EventType.CHANGE, () => {
+			updateNodeDraft({ acceptance: accArea.value });
+		}));
+
 		if (this.draftBlueprint) {
-			const connSec = append(host, $('.ade-eng-drawer-section'));
-			append(connSec, $('label.ade-eng-field-label', {}, localize('adeEngOutgoingEdgesLabel', "Downstream Connections")));
+			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngDownstreamShortLabel', "Downstream Edges")));
 			const outgoing = this.draftBlueprint.edges.filter(e => e.from === node.id);
-			const chipsWrap = append(connSec, $('.ade-eng-edge-chips'));
-			for (const edge of outgoing) {
-				const chip = append(chipsWrap, $('span.ade-eng-edge-chip', {}, `→ ${edge.to}`));
-				if (!this.isNodeCompletedLocked(edge.to)) {
-					const rmBtn = append(chip, $('button.ade-eng-chip-rm', { type: 'button', title: localize('adeEngRemoveEdge', "Remove Edge") }, '×'));
-					this.drawerRenderDisposables.add(addDisposableListener(rmBtn, EventType.CLICK, () => {
-						this.removeDraftEdge(edge.from, edge.to);
-					}));
+			if (outgoing.length > 0) {
+				const chipsWrap = append(body, $('.ade-eng-edge-chips'));
+				for (const edge of outgoing) {
+					const chip = append(chipsWrap, $('span.ade-eng-edge-chip', {}, `→ ${edge.to}`));
+					if (!this.isNodeCompletedLocked(edge.to)) {
+						const rmBtn = append(chip, $('button.ade-eng-chip-rm', { type: 'button', title: localize('adeEngRemoveEdge', "Remove Edge") }, '×'));
+						this.popoverRenderDisposables.add(addDisposableListener(rmBtn, EventType.CLICK, () => {
+							this.removeDraftEdge(edge.from, edge.to);
+						}));
+					}
 				}
 			}
-
 			const candidates = this.draftBlueprint.nodes.filter(
 				cand => cand.id !== node.id
 					&& !this.isNodeCompletedLocked(cand.id)
 					&& !outgoing.some(e => e.to === cand.id),
 			);
 			if (candidates.length > 0) {
-				const addRow = append(connSec, $('.ade-eng-form-row'));
+				const addRow = append(body, $('.ade-eng-form-row'));
 				const targetSelect = append(addRow, $('select.ade-eng-select')) as HTMLSelectElement;
 				for (const cand of candidates) {
 					append(targetSelect, $('option', { value: cand.id }, `[${cand.id}] ${cand.title}`));
@@ -1778,7 +1925,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				const addEdgeBtn = append(addRow, $('button.ade-eng-action-btn.secondary', {
 					type: 'button',
 				}, localize('adeEngConnectTargetBtn', "+ Connect")));
-				this.drawerRenderDisposables.add(addDisposableListener(addEdgeBtn, EventType.CLICK, () => {
+				this.popoverRenderDisposables.add(addDisposableListener(addEdgeBtn, EventType.CLICK, () => {
 					if (targetSelect.value) {
 						this.tryAddDraftEdge(node.id, targetSelect.value);
 					}
@@ -1786,15 +1933,74 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 		}
 
-		// Delete Node Button
-		if (!isLocked) {
-			const delSec = append(host, $('.ade-eng-drawer-section'));
-			const delBtn = append(delSec, $('button.ade-eng-action-btn.danger.full-width', {
+		const ownReport = this.snapshot?.state.reports[node.id];
+		if (ownReport && !ownReport.stale) {
+			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngNodeReportShort', "Verified Report")));
+			append(body, $('div.ade-eng-report-card', {}, ownReport.summary));
+		}
+		if (runtime?.lastChanges && runtime.lastChanges.touchedFiles.length > 0) {
+			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngTouchedShort', "Touched Files ({0})", runtime.lastChanges.touchedFiles.length)));
+			for (const f of runtime.lastChanges.touchedFiles) {
+				append(body, $('div.ade-eng-file-pill', {}, `[${f.kind.toUpperCase()}] ${f.relativePath}`));
+			}
+		}
+	}
+
+	private renderGatePopoverBody(
+		node: IAdeEngineeringBlueprintNode,
+		runtime: IAdeEngineeringNodeRuntimeState | undefined,
+		isLocked: boolean,
+		updateNodeDraft: (patch: Partial<IAdeEngineeringBlueprintNode>) => void,
+	): void {
+		const body = append(this.popoverContentEl, $('.ade-eng-pop-body.scrollable'));
+		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngGateDescShort', "Gate Inspection Instructions")));
+		const descArea = append(body, $('textarea.ade-eng-textarea', {
+			rows: 2,
+			...(isLocked ? { disabled: 'disabled' } : {}),
+		})) as HTMLTextAreaElement;
+		descArea.value = node.description ?? '';
+		this.popoverRenderDisposables.add(addDisposableListener(descArea, EventType.CHANGE, () => {
+			updateNodeDraft({ description: descArea.value });
+		}));
+
+		if (runtime?.phase === 'waiting_user_gate' && this.activeGovernorId && this.draftBlueprint) {
+			const govId = this.activeGovernorId;
+			const decisionWrap = append(body, $('.ade-eng-gate-pop-actions'));
+			const approveBtn = append(decisionWrap, $('button.ade-eng-action-btn.run.full-width', {
 				type: 'button',
-			}, localize('adeEngDeleteNodeDraftBtn', "Delete Node (Draft)")));
-			this.drawerRenderDisposables.add(addDisposableListener(delBtn, EventType.CLICK, () => {
-				this.deleteDraftNode(node.id);
+			}, localize('adeEngApproveGatePopBtn', "✓ Approve & Continue Downstream")));
+			this.popoverRenderDisposables.add(addDisposableListener(approveBtn, EventType.CLICK, () => {
+				void this.engineering.submitGateVerdict({
+					governorSessionId: govId,
+					nodeId: node.id,
+					verdict: 'pass',
+				});
 			}));
+
+			const candidates = listUpstreamTaskAncestors(node.id, this.draftBlueprint);
+			if (candidates.length > 0) {
+				const rbRow = append(decisionWrap, $('.ade-eng-form-row'));
+				const targetSelect = append(rbRow, $('select.ade-eng-select')) as HTMLSelectElement;
+				for (const c of candidates) {
+					append(targetSelect, $('option', { value: c.id }, `↩ [${c.id}] ${c.title}`));
+				}
+				const rbBtn = append(rbRow, $('button.ade-eng-action-btn.danger', {
+					type: 'button',
+				}, localize('adeEngRollbackShortBtn', "Rollback")));
+				const fbInput = append(decisionWrap, $('input.ade-eng-pop-model-input', {
+					type: 'text',
+					placeholder: localize('adeEngRollbackReasonPh', "Revision instructions for target Worker..."),
+				})) as HTMLInputElement;
+				this.popoverRenderDisposables.add(addDisposableListener(rbBtn, EventType.CLICK, () => {
+					void this.engineering.submitGateVerdict({
+						governorSessionId: govId,
+						nodeId: node.id,
+						verdict: 'rollback',
+						targetNodeId: targetSelect.value,
+						feedback: fbInput.value.trim() || undefined,
+					});
+				}));
+			}
 		}
 	}
 
@@ -1806,5 +2012,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.lastDimension = dimension;
 		this.rootEl.style.width = `${dimension.width}px`;
 		this.rootEl.style.height = `${dimension.height}px`;
+		this.positionPopoverNearAnchor();
 	}
 }

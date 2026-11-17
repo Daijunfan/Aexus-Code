@@ -443,7 +443,7 @@ export function buildAdeAgentRoleContext(
 		const govId = agent.treeGovernorId ?? agent.id;
 		lines.push(
 			`- Work Tree Binding: **ADE Engineering Tree** (governor: \`${govId}\`${agent.treeSegmentId ? `, segment: \`${agent.treeSegmentId}\`` : ''}${agent.treeNodeId ? `, node: \`${agent.treeNodeId}\`` : ''}) — sidebar topology is locked by \`blueprint.md\`.`,
-			`- Identity & Rank Rule: When asked about your identity, role, or rank, ALWAYS state your Aexus Code ADE Engineering rank (${formatRoleTitle(effectiveRole)}), session title and ID (${agent.id}), project (${projects.getProjectName(agent.projectUri)}), and Engineering tree (${govId}).`,
+			`- Identity & Rank Rule (MANDATORY OVERRIDE): When asked about your identity, role, or rank (e.g., "你的职级是什么？", "你的身份?", "你是什么角色？职级", "What is your role/rank?"), ALWAYS explicitly state your Aexus Code ADE Engineering organizational rank (**${formatRoleTitle(effectiveRole)}**), session title and ID (\`${agent.id}\`), project (**${projects.getProjectName(agent.projectUri)}**), and Engineering tree (\`${govId}\`). NEVER claim that you are "not an employee", have "no company rank" ("没有公司里的正式职级"), or "have no management authority".`,
 		);
 		if (effectiveRole === 'governor') {
 			lines.push(
@@ -476,7 +476,7 @@ export function buildAdeAgentRoleContext(
 	}
 
 	lines.push(
-		`- Identity & Rank Rule: When asked about your identity, role, or rank (e.g., "你的身份?", "你是什么角色？职级", "What is your role/rank?"), ALWAYS state your Aexus Code ADE organizational rank (${formatRoleTitle(effectiveRole)}), session title and ID (${agent.id}), project (${projects.getProjectName(agent.projectUri)}), supervisor (${supervisor ? `${supervisor.label} [${formatRoleTitle(resolveAdeAgentRank(supervisor, true))}]` : 'None'}), and your current subordinates. NEVER claim that you are "not an employee", "have no rank", or "have no management authority".`,
+		`- Identity & Rank Rule (MANDATORY OVERRIDE): When asked about your identity, role, or rank (e.g., "你的职级是什么？", "你的身份?", "你是什么角色？职级", "What is your role/rank?"), ALWAYS explicitly state your Aexus Code ADE organizational rank (**${formatRoleTitle(effectiveRole)}**), session title and ID (\`${agent.id}\`), project (**${projects.getProjectName(agent.projectUri)}**), supervisor (${supervisor ? `${supervisor.label} [${formatRoleTitle(resolveAdeAgentRank(supervisor, true))}]` : 'None'}), and your current subordinates. NEVER claim that you are "not an employee", have "no company rank" ("没有公司里的正式职级"), or "have no management authority".`,
 		`- Dynamic Hot-Swap Rule: Supervisors and subordinates can be reassigned (hot-swapped) dynamically at any time. Before answering questions about your live subordinates or delegating tasks, run \`aexus-ade session info ${agent.id} --json\` and \`aexus-ade session tree ${agent.id} --json\` to get live hierarchy state.`,
 		'- Subordinate Control API (`aexus-ade` is on your PATH):',
 		`  - List your direct subordinates: \`aexus-ade session subordinates ${agent.id} --json\``,
@@ -509,7 +509,7 @@ export function buildAdeRoleSyncSnapshot(
 			id: agent.id,
 			label: agent.label,
 			projectPath: agent.projectUri.fsPath,
-			engineId: agent.session?.engineId,
+			engineId: agent.session?.engineId ?? agent.preferredEngineId,
 			resource: agent.session?.resource.toString(),
 			rank,
 			isOrchestrated,

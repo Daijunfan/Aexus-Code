@@ -90,6 +90,9 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		if (editor instanceof AdeExtensionWebviewEditorInput) {
 			return this.projects.getAgent(editor.agentId) ? editor.agentId : undefined;
 		}
+		if (editor instanceof AdeEngineeringEditorInput) {
+			return this.projects.getAgent(editor.governorSessionId) ? editor.governorSessionId : undefined;
+		}
 		if (editor instanceof ChatEditorInput) {
 			const sessionKey = editor.sessionResource?.toString();
 			if (!sessionKey || editor.sessionResource?.scheme === 'aexus-secretary') {
@@ -306,7 +309,7 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 				const codexUri = URI.from({
 					scheme: 'openai-codex',
 					authority: 'route',
-					path: info?.provisional || info?.unmaterialized || !info?.nativeId ? '/new' : `/local/${info.nativeId}`,
+					path: info?.provisional || info?.unmaterialized || !info?.nativeId ? '/extension/panel/new' : `/local/${info.nativeId}`,
 				});
 				await this.editorService.openEditor({
 					resource: codexUri,
@@ -356,6 +359,22 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 				const singletonViewId = mapping.webviewViewId;
 				const prevAgentId = this.activeSingletonAgentByView.get(singletonViewId);
 				this.activeSingletonAgentByView.set(singletonViewId, agent.id);
+				if (prevAgentId === agent.id) {
+					for (const group of this.editorGroupsService.mainPart.groups) {
+						const existing = group.editors.find(
+							(editor): editor is AdeExtensionWebviewEditorInput =>
+								editor instanceof AdeExtensionWebviewEditorInput
+								&& !editor.isDisposed()
+								&& editor.viewId === singletonViewId
+								&& editor.agentId === agent.id,
+						);
+						if (existing) {
+							await this.editorService.openEditor(existing, { pinned: true }, side ? targetGroup.id : group.id);
+							await this.syncRoleContextToExtHost(agent.id);
+							return true;
+						}
+					}
+				}
 				await this.closeEditors(editor => editor instanceof AdeExtensionWebviewEditorInput && editor.viewId === singletonViewId && editor.agentId !== agent.id);
 				this.viewsService.closeView(singletonViewId);
 				const input = this.instantiationService.createInstance(
