@@ -9,7 +9,7 @@ import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { EngineRuntime, HistoryEntry, JsonLineClient, NativeSession, RpcPacket, withTimeout } from './runtime';
+import { EngineRuntime, EngineSendOptions, HistoryEntry, JsonLineClient, NativeSession, RpcPacket, withTimeout } from './runtime';
 
 interface ThreadItem { type: string; text?: string; command?: string; content?: { type: string; text?: string }[] }
 interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[] }
@@ -253,12 +253,26 @@ export class CodexRuntime implements EngineRuntime {
 		client.write({ jsonrpc: '2.0', id: packet.id, error: { code: -32601, message: vscode.l10n.t('This engine request is not supported: {0}', packet.method ?? '') } });
 	}
 
-	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+	async killSession(session: NativeSession): Promise<void> {
+		if (!this.client.isClosed) {
+			await this.client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
+			this.loaded.delete(session.id);
+		}
+	}
+
+	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		await this.prepareSession(session);
 		this.knownSessions.set(session.id, session);
 		const client = this.client;
 		let turnId: string | undefined;
-		const runSingleTurn = async (modelOverride?: string): Promise<void> => {
+		const mappedEffort = options?.thinking === 'low'
+			? 'low'
+			: options?.thinking === 'medium'
+				? 'medium'
+				: (options?.thinking === 'high' || options?.thinking === 'max')
+					? 'high'
+					: undefined;
+		const runSingleTurn = async (modelOverride?: string, effortOverride?: string): Promise<void> => {
 			let finish!: () => void;
 			let fail!: (error: Error) => void;
 			const completed = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
@@ -282,6 +296,7 @@ export class CodexRuntime implements EngineRuntime {
 					threadId: session.id,
 					input: [{ type: 'text', text, text_elements: [] }],
 					...(modelOverride ? { model: modelOverride } : {}),
+					...(effortOverride ? { effort: effortOverride } : {}),
 				});
 				turnId = started.turn.id;
 				session.provisional = false;
@@ -293,14 +308,18 @@ export class CodexRuntime implements EngineRuntime {
 			}
 		};
 
-		const initialOverride = this.threadModelOverrides.get(session.id);
+		const requestedModel = options?.model && (!this.supportedModels.size || this.supportedModels.has(options.model))
+			? options.model
+			: this.threadModelOverrides.get(session.id);
 		try {
-			await runSingleTurn(initialOverride);
+			await runSingleTurn(requestedModel, mappedEffort);
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
-			if (!initialOverride && this.defaultModel && /model_not_found|not supported when using Codex/i.test(msg)) {
-				this.threadModelOverrides.set(session.id, this.defaultModel);
-				await runSingleTurn(this.defaultModel);
+			if ((requestedModel || mappedEffort) && (this.defaultModel || mappedEffort) && /model_not_found|not supported|effort|invalid/i.test(msg)) {
+				if (this.defaultModel) {
+					this.threadModelOverrides.set(session.id, this.defaultModel);
+				}
+				await runSingleTurn(this.defaultModel, undefined);
 				return;
 			}
 			throw error;

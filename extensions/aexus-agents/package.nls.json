@@ -30,6 +30,9 @@
 	"cmdDoctor": "Run diagnostics on the active Coding Agent engine and CLI.",
 	"cmdDiff": "Summarize current Git changes in the active project.",
 	"cmdSkills": "List discovered project and user slash commands and skills (.claude/commands, .agents/skills).",
+	"cmdEngineering": "List or open ADE Engineering DAG trees (e.g. /engineering).",
+	"cmdInbox": "Show pending ADE Inbox user gates and Governor escalations.",
 	"cmdHelp": "List all available Secretary macro commands and native engine slash commands.",
-	"cliPathsDescription": "Optional paths to the installed Coding Agent executables. Empty entries are discovered from the shell environment. Engine credentials and model configuration remain managed by each engine."
+	"cliPathsDescription": "Optional paths to the installed Coding Agent executables. Empty entries are discovered from the shell environment. Engine credentials and model configuration remain managed by each engine.",
+	"watchdogTimeoutMinutesDescription": "Minutes of streaming inactivity from an active Engineering Worker before Watchdog wakes its Segment Manager (default: 10)."
 }

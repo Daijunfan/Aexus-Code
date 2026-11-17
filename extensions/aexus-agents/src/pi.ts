@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { EngineRuntime, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
+import { EngineRuntime, EngineSendOptions, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
 
 interface PiContentPart {
 	type?: string;
@@ -262,14 +262,32 @@ export class PiRuntime implements EngineRuntime {
 		}
 	}
 
-	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+	async killSession(session: NativeSession): Promise<void> {
+		const active = this.running.get(session.id);
+		if (active) {
+			for (const child of active) {
+				stopEngine(child, 'SIGKILL');
+			}
+			this.running.delete(session.id);
+		}
+	}
+
+	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		if (!session.provisional && !session.file) {
 			session.file = (await this.list(token)).find(item => item.id === session.id)?.file;
 		}
-		const args = session.file
-			? ['--mode', 'rpc', '--session', session.file]
-			: ['--mode', 'rpc', '--session-id', session.id];
-		const child = spawnEngine(this.executable, args, session.cwd);
+		const args = [
+			'--mode', 'rpc',
+			...(options?.model ? ['--model', options.model] : []),
+			...(session.file ? ['--session', session.file] : ['--session-id', session.id]),
+		];
+		const customEnv: NodeJS.ProcessEnv = { ...process.env };
+		if (options?.pureWorker) {
+			delete customEnv.AEXUS_ADE_CALLER;
+		} else if (options?.callerRole) {
+			customEnv.AEXUS_ADE_CALLER = options.callerRole;
+		}
+		const child = spawnEngine(this.executable, args, session.cwd, customEnv);
 		let sessionProcs = this.running.get(session.id);
 		if (!sessionProcs) {
 			sessionProcs = new Set();
@@ -385,6 +403,10 @@ export class PiRuntime implements EngineRuntime {
 				if (state && typeof state.sessionFile === 'string' && state.sessionFile) {
 					session.file = state.sessionFile;
 				}
+			}
+			if (options?.thinking) {
+				const piLevel = options.thinking === 'max' ? 'xhigh' : options.thinking;
+				await sendCommand({ type: 'set_thinking_level', level: piLevel }).catch(() => undefined);
 			}
 			await sendCommand({ type: 'prompt', message: text });
 			if (token.isCancellationRequested) {

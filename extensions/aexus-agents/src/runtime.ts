@@ -23,6 +23,16 @@ export interface NativeSession {
 	readOnly?: boolean;
 }
 
+export type EngineThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
+
+export interface EngineSendOptions {
+	readonly model?: string;
+	readonly thinking?: EngineThinkingLevel;
+	readonly pureWorker?: boolean;
+	readonly callerRole?: string;
+	readonly automatedEngineering?: boolean;
+}
+
 export interface HistoryEntry { id?: string; role: 'user' | 'assistant'; text: string; isSystemInitiated?: boolean }
 export interface EngineRuntime extends vscode.Disposable {
 	readonly id: string;
@@ -33,7 +43,8 @@ export interface EngineRuntime extends vscode.Disposable {
 	create(cwd: string): Promise<NativeSession>;
 	prepareSession?(session: NativeSession): Promise<void>;
 	history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]>;
-	send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void>;
+	send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void>;
+	killSession?(session: NativeSession): Promise<void>;
 	delete(session: NativeSession, token: vscode.CancellationToken): Promise<void>;
 }
 

@@ -9,6 +9,7 @@ import { basename, removeTrailingPathSeparator } from '../../../../base/common/r
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
+import { AdeThinkingLevel, AdeWorkTreeType } from '../../../../platform/ade/common/adeEngineering.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -24,6 +25,8 @@ import {
 	IAdeProjectsService,
 	IAdeSecretary,
 	IAdeSession,
+	IAdeWorkTreeSegmentSpec,
+	IAdeWorkTreeSyncResult,
 } from '../common/ade.js';
 
 interface IStoredProject {
@@ -42,6 +45,14 @@ interface IStoredAgent {
 	unread?: boolean;
 	draft: string;
 	session?: { engineId: string; resource: string };
+	treeType?: AdeWorkTreeType;
+	treeGovernorId?: string;
+	treeSegmentId?: string;
+	treeNodeId?: string;
+	preferredEngineId?: string;
+	preferredModel?: string;
+	preferredThinking?: AdeThinkingLevel;
+	workingDirectoryOverride?: string;
 }
 
 interface IStoredSecretary {
@@ -267,6 +278,14 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			status: statusById?.get(entry.id) ?? 'idle',
 			draft: entry.draft ?? '',
 			session: entry.session ? { engineId: entry.session.engineId, resource: URI.parse(entry.session.resource) } : undefined,
+			treeType: entry.treeType,
+			treeGovernorId: entry.treeGovernorId,
+			treeSegmentId: entry.treeSegmentId,
+			treeNodeId: entry.treeNodeId,
+			preferredEngineId: entry.preferredEngineId,
+			preferredModel: entry.preferredModel,
+			preferredThinking: entry.preferredThinking,
+			workingDirectoryOverride: entry.workingDirectoryOverride,
 		}));
 	}
 
@@ -361,7 +380,15 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					&& agent.draft === prev.draft
 					&& this.uriIdentityService.extUri.isEqual(agent.projectUri, prev.projectUri)
 					&& agent.session?.engineId === prev.session?.engineId
-					&& agent.session?.resource.toString() === prev.session?.resource.toString();
+					&& agent.session?.resource.toString() === prev.session?.resource.toString()
+					&& agent.treeType === prev.treeType
+					&& agent.treeGovernorId === prev.treeGovernorId
+					&& agent.treeSegmentId === prev.treeSegmentId
+					&& agent.treeNodeId === prev.treeNodeId
+					&& agent.preferredEngineId === prev.preferredEngineId
+					&& agent.preferredModel === prev.preferredModel
+					&& agent.preferredThinking === prev.preferredThinking
+					&& agent.workingDirectoryOverride === prev.workingDirectoryOverride;
 			});
 		if (catalogUnchanged && agentsUnchanged) {
 			return;
@@ -694,6 +721,223 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		return false;
 	}
 
+	getWorkTreeGovernor(id: string): IAdeAgent | undefined {
+		const agent = this.getAgent(id);
+		if (!agent) {
+			return undefined;
+		}
+		if (agent.treeGovernorId) {
+			const explicit = this.getAgent(agent.treeGovernorId);
+			if (explicit?.treeType) {
+				return explicit;
+			}
+		}
+		const root = this.getRootAgent(id);
+		return root?.treeType ? root : undefined;
+	}
+
+	isLockedByWorkTree(id: string): boolean {
+		return Boolean(this.getWorkTreeGovernor(id));
+	}
+
+	setAgentWorkTreeTag(governorId: string, treeType: AdeWorkTreeType | undefined): void {
+		const gov = this.getAgent(governorId);
+		if (!gov || gov.parentId) {
+			return;
+		}
+		this.entries = this.entries.map(agent => agent.id === governorId
+			? {
+				...agent,
+				role: treeType ? 'governor' : agent.role,
+				treeType,
+				treeGovernorId: treeType ? governorId : undefined,
+			}
+			: agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	updateAgentEnginePreferences(id: string, prefs: {
+		readonly preferredEngineId?: string;
+		readonly preferredModel?: string;
+		readonly preferredThinking?: AdeThinkingLevel;
+		readonly workingDirectoryOverride?: string;
+	}): void {
+		const current = this.getAgent(id);
+		if (!current) {
+			return;
+		}
+		this.entries = this.entries.map(agent => agent.id === id ? {
+			...agent,
+			...(Object.hasOwn(prefs, 'preferredEngineId') ? { preferredEngineId: prefs.preferredEngineId } : {}),
+			...(Object.hasOwn(prefs, 'preferredModel') ? { preferredModel: prefs.preferredModel } : {}),
+			...(Object.hasOwn(prefs, 'preferredThinking') ? { preferredThinking: prefs.preferredThinking } : {}),
+			...(Object.hasOwn(prefs, 'workingDirectoryOverride') ? { workingDirectoryOverride: prefs.workingDirectoryOverride } : {}),
+		} : agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	syncWorkTreeHierarchy(
+		governorId: string,
+		treeType: AdeWorkTreeType,
+		segments: readonly IAdeWorkTreeSegmentSpec[],
+	): IAdeWorkTreeSyncResult {
+		const gov = this.getAgent(governorId);
+		if (!gov || gov.parentId) {
+			throw new Error(localize('adeWorkTreeGovernorMissing', "Engineering Governor session '{0}' does not exist or is not a top-level session.", governorId));
+		}
+
+		const existingSubtree = this.getSubtree(governorId).slice(1);
+		const existingById = new Map(existingSubtree.map(a => [a.id, a]));
+		const existingManagersBySeg = new Map<string, IAdeAgent>();
+		const existingEmployeesByNode = new Map<string, IAdeAgent>();
+		const existingWorkersByNode = new Map<string, IAdeAgent>();
+
+		for (const item of existingSubtree) {
+			if (item.role === 'manager' && item.treeSegmentId) {
+				existingManagersBySeg.set(item.treeSegmentId, item);
+			} else if (item.role === 'employee' && item.treeNodeId) {
+				existingEmployeesByNode.set(item.treeNodeId, item);
+			} else if (!item.role && item.treeNodeId) {
+				existingWorkersByNode.set(item.treeNodeId, item);
+			}
+		}
+
+		const keptIds = new Set<string>([governorId]);
+		const newSubtreeEntries: IAdeAgent[] = [];
+		const managerAgentsBySegment: Record<string, string> = {};
+		const employeeAgentsByNode: Record<string, string> = {};
+		const workerAgentsByNode: Record<string, string> = {};
+
+		for (const seg of segments) {
+			const prevMgr = (seg.existingManagerAgentId ? existingById.get(seg.existingManagerAgentId) : undefined)
+				?? existingManagersBySeg.get(seg.segmentId);
+			const mgrId = prevMgr?.id ?? generateUuid();
+			keptIds.add(mgrId);
+			managerAgentsBySegment[seg.segmentId] = mgrId;
+
+			const mgrSessionMatchesEngine = prevMgr?.session?.engineId === seg.managerEngineId;
+			newSubtreeEntries.push({
+				id: mgrId,
+				parentId: governorId,
+				projectUri: gov.projectUri,
+				label: seg.label,
+				labelIsCustom: true,
+				role: 'manager',
+				archived: undefined,
+				unread: prevMgr?.unread,
+				status: prevMgr?.status ?? 'idle',
+				draft: prevMgr?.draft ?? '',
+				session: mgrSessionMatchesEngine ? prevMgr?.session : undefined,
+				treeType,
+				treeGovernorId: governorId,
+				treeSegmentId: seg.segmentId,
+				preferredEngineId: seg.managerEngineId,
+				preferredModel: seg.managerModel,
+				preferredThinking: seg.managerThinking,
+				workingDirectoryOverride: seg.workingDirectoryOverride,
+			});
+
+			for (const task of seg.tasks) {
+				const prevEmp = (task.existingEmployeeAgentId ? existingById.get(task.existingEmployeeAgentId) : undefined)
+					?? existingEmployeesByNode.get(task.nodeId);
+				const empId = prevEmp?.id ?? generateUuid();
+				keptIds.add(empId);
+				employeeAgentsByNode[task.nodeId] = empId;
+
+				const empSessionMatches = prevEmp?.session?.engineId === task.employeeEngineId;
+				newSubtreeEntries.push({
+					id: empId,
+					parentId: mgrId,
+					projectUri: gov.projectUri,
+					label: `[${task.nodeId}] ${task.title}`,
+					labelIsCustom: true,
+					role: 'employee',
+					archived: undefined,
+					unread: prevEmp?.unread,
+					status: prevEmp?.status ?? 'idle',
+					draft: prevEmp?.draft ?? '',
+					session: empSessionMatches ? prevEmp?.session : undefined,
+					treeType,
+					treeGovernorId: governorId,
+					treeSegmentId: seg.segmentId,
+					treeNodeId: task.nodeId,
+					preferredEngineId: task.employeeEngineId,
+					preferredModel: task.employeeModel,
+					preferredThinking: task.employeeThinking,
+					workingDirectoryOverride: task.workingDirectoryOverride ?? seg.workingDirectoryOverride,
+				});
+
+				const prevWrk = (task.existingWorkerAgentId ? existingById.get(task.existingWorkerAgentId) : undefined)
+					?? existingWorkersByNode.get(task.nodeId);
+				const wrkId = prevWrk?.id ?? generateUuid();
+				keptIds.add(wrkId);
+				workerAgentsByNode[task.nodeId] = wrkId;
+
+				const wrkSessionMatches = prevWrk?.session?.engineId === task.workerEngineId;
+				newSubtreeEntries.push({
+					id: wrkId,
+					parentId: empId,
+					projectUri: gov.projectUri,
+					label: `${task.title} · Worker`,
+					labelIsCustom: true,
+					role: undefined, // Pure Worker L4!
+					archived: undefined,
+					unread: prevWrk?.unread,
+					status: prevWrk?.status ?? 'idle',
+					draft: prevWrk?.draft ?? '',
+					session: wrkSessionMatches ? prevWrk?.session : undefined,
+					treeType,
+					treeGovernorId: governorId,
+					treeSegmentId: seg.segmentId,
+					treeNodeId: task.nodeId,
+					preferredEngineId: task.workerEngineId,
+					preferredModel: task.workerModel,
+					preferredThinking: task.workerThinking,
+					workingDirectoryOverride: task.workingDirectoryOverride ?? seg.workingDirectoryOverride,
+				});
+			}
+		}
+
+		const oldSubtreeIds = new Set(existingSubtree.map(a => a.id));
+		const removedAgents = existingSubtree.filter(a => !keptIds.has(a.id));
+
+		const nextEntries: IAdeAgent[] = [];
+		for (const entry of this.entries) {
+			if (entry.id === governorId) {
+				nextEntries.push({
+					...entry,
+					role: 'governor',
+					treeType,
+					treeGovernorId: governorId,
+				});
+				nextEntries.push(...newSubtreeEntries);
+			} else if (oldSubtreeIds.has(entry.id)) {
+				continue;
+			} else {
+				nextEntries.push(entry);
+			}
+		}
+
+		this.entries = nextEntries;
+		if (this._selectedAgentId && removedAgents.some(a => a.id === this._selectedAgentId)) {
+			this._selectedAgentId = governorId;
+		}
+		this.saveAgents();
+		if (removedAgents.length > 0) {
+			this.removedAgentsEmitter.fire(removedAgents);
+		}
+		this.changeEmitter.fire();
+
+		return {
+			managerAgentsBySegment,
+			employeeAgentsByNode,
+			workerAgentsByNode,
+			removedAgents,
+		};
+	}
+
 	addProject(uri: URI, label = basename(uri)): IAdeAgent {
 		const normalized = removeTrailingPathSeparator(uri);
 		const addedCatalog = this.ensureCatalogProject(normalized, label);
@@ -809,6 +1053,12 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		if (!agent || id === newParentId) {
 			return false;
 		}
+		if (this.isLockedByWorkTree(id)) {
+			return false;
+		}
+		if (newParentId !== undefined && this.isLockedByWorkTree(newParentId)) {
+			return false;
+		}
 		if (newParentId === undefined) {
 			const nextProj = targetProjectUri ? removeTrailingPathSeparator(targetProjectUri) : agent.projectUri;
 			return Boolean(agent.parentId) || !this.uriIdentityService.extUri.isEqual(agent.projectUri, nextProj);
@@ -915,7 +1165,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 
 	setAgentRole(id: string, role: AdeAgentRole | undefined): void {
 		const current = this.getAgent(id);
-		if (!current || current.role === role) {
+		if (!current || current.role === role || this.isLockedByWorkTree(id)) {
 			return;
 		}
 		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, role } : agent);
@@ -1107,6 +1357,14 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				unread: agent.unread,
 				draft: agent.draft,
 				session: agent.session ? { engineId: agent.session.engineId, resource: agent.session.resource.toString() } : undefined,
+				...(agent.treeType ? { treeType: agent.treeType } : {}),
+				...(agent.treeGovernorId ? { treeGovernorId: agent.treeGovernorId } : {}),
+				...(agent.treeSegmentId ? { treeSegmentId: agent.treeSegmentId } : {}),
+				...(agent.treeNodeId ? { treeNodeId: agent.treeNodeId } : {}),
+				...(agent.preferredEngineId ? { preferredEngineId: agent.preferredEngineId } : {}),
+				...(agent.preferredModel ? { preferredModel: agent.preferredModel } : {}),
+				...(agent.preferredThinking ? { preferredThinking: agent.preferredThinking } : {}),
+				...(agent.workingDirectoryOverride ? { workingDirectoryOverride: agent.workingDirectoryOverride } : {}),
 			}));
 			this.storageService.store('aexus.ade.agents', JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
 		} finally {

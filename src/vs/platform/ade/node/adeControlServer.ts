@@ -66,7 +66,7 @@ export class AdeControlServer extends Disposable {
 	) {
 		super();
 
-		this._controlDir = options?.controlDir || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
+		this._controlDir = options?.controlDir || process.env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
 		this._requestedSocketPath = options?.socketPath
 			|| process.env.AEXUS_ADE_SOCKET
 			|| (isWindows

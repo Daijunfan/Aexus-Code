@@ -150,7 +150,10 @@ import { IMcpGatewayService, McpGatewayChannelName } from '../../platform/mcp/co
 import { McpGatewayService } from '../../platform/mcp/node/mcpGatewayService.js';
 import { McpGatewayChannel } from '../../platform/mcp/node/mcpGatewayChannel.js';
 import { ADE_CONTROL_CHANNEL_NAME } from '../../platform/ade/common/adeControl.js';
+import { ADE_ENGINEERING_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/adeEngineering.js';
+import { AdeEngineeringBackendChannel } from '../../platform/ade/common/adeEngineeringIpc.js';
 import { AdeControlServer } from '../../platform/ade/node/adeControlServer.js';
+import { AdeEngineeringNodeService } from '../../platform/ade/node/adeEngineeringService.js';
 import { IWebContentExtractorService } from '../../platform/webContentExtractor/common/webContentExtractor.js';
 import { NativeWebContentExtractorService } from '../../platform/webContentExtractor/electron-main/webContentExtractorService.js';
 import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../platform/networkFilter/common/networkFilterService.js';
@@ -1616,6 +1619,9 @@ export class CodeApplication extends Disposable {
 			process.env.AEXUS_ADE_SOCKET = adeControlServer.socketPath;
 		}, () => { /* logged in AdeControlServer */ });
 		this._register(this.lifecycleMainService.onWillShutdown(() => adeControlServer.dispose()));
+
+		const adeEngineeringNodeService = this._register(new AdeEngineeringNodeService());
+		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, new AdeEngineeringBackendChannel(adeEngineeringNodeService));
 
 		// Logger
 		const loggerChannel = this._register(new LoggerChannel(accessor.get(ILoggerMainService)));

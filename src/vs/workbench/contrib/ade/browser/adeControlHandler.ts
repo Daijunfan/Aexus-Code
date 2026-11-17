@@ -23,6 +23,11 @@ import {
 	IAdeSessionTreeNode,
 	IAdeSessionTreeResult,
 } from '../../../../platform/ade/common/adeControl.js';
+import {
+	AdeWorkTreeType,
+	IAdeEngineeringService,
+	IAdeInboxService,
+} from '../../../../platform/ade/common/adeEngineering.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
@@ -43,6 +48,7 @@ import { IProjectNavigationService } from '../../files/browser/projectNavigation
 import { ISCMService } from '../../scm/common/scm.js';
 import {
 	ADE_CHANGES_VIEW_ID,
+	ADE_ENGINEERING_SCHEME,
 	ADE_FILES_VIEW_ID,
 	ADE_PROJECTS_VIEW_ID,
 	ADE_SECRETARY_ID,
@@ -232,6 +238,8 @@ function buildProjectSummaries(
 
 function toSessionSummary(projects: IAdeProjectsService, sessions: IAdeSessionsService | undefined, agent: IAdeAgent): IAdeSessionSummary {
 	const hasSubs = projects.hasSubordinates(agent.id);
+	const effectiveEngineId = agent.session?.engineId ?? agent.preferredEngineId;
+	const lockedByWorkTree = Boolean(projects.isLockedByWorkTree?.(agent.id));
 	return {
 		id: agent.id,
 		parentId: agent.parentId,
@@ -241,14 +249,19 @@ function toSessionSummary(projects: IAdeProjectsService, sessions: IAdeSessionsS
 		role: agent.role,
 		rank: resolveAdeAgentRank(agent, hasSubs),
 		isOrchestrated: projects.isOrchestrated(agent),
-		engineId: agent.session?.engineId,
-		engineName: agent.session ? (sessions?.getEngineName(agent.session.engineId) ?? agent.session.engineId) : undefined,
+		engineId: effectiveEngineId,
+		engineName: effectiveEngineId ? (sessions?.getEngineName(effectiveEngineId) ?? effectiveEngineId) : undefined,
 		resource: agent.session?.resource.toString(),
 		...(agent.draft ? { draft: agent.draft } : {}),
 		status: !agent.session ? 'draft' : (agent.status ?? 'idle'),
 		unread: Boolean(agent.unread),
 		archived: projects.isArchived(agent.id),
 		childrenIds: projects.getDirectSubordinates(agent.id).map(child => child.id),
+		...(agent.treeType ? { treeType: agent.treeType } : {}),
+		...(agent.treeGovernorId ? { treeGovernorId: agent.treeGovernorId } : {}),
+		...(agent.treeSegmentId ? { treeSegmentId: agent.treeSegmentId } : {}),
+		...(agent.treeNodeId ? { treeNodeId: agent.treeNodeId } : {}),
+		...(lockedByWorkTree ? { lockedByWorkTree: true } : {}),
 	};
 }
 
@@ -338,6 +351,14 @@ function buildControlStatus(
 				rank: resolveAdeAgentRank(mappedAgent, projects.hasSubordinates(mappedAgent.id)),
 				engineId: mappedAgent.session?.engineId,
 			};
+		} else if (activeInput?.resource?.scheme === ADE_ENGINEERING_SCHEME) {
+			const govId = activeInput.resource.path.replace(/^\/+/, '');
+			activeEditor = {
+				kind: 'engineering',
+				governorSessionId: govId,
+				label: activeInput.getName(),
+				resource: activeInput.resource.toString(),
+			};
 		} else if (activeInput?.resource) {
 			activeEditor = {
 				kind: 'file',
@@ -418,6 +439,42 @@ export function buildAdeAgentRoleContext(
 	} else {
 		lines.push('- Direct Subordinates: None');
 	}
+	if (agent.treeType === 'engineering') {
+		const govId = agent.treeGovernorId ?? agent.id;
+		lines.push(
+			`- Work Tree Binding: **ADE Engineering Tree** (governor: \`${govId}\`${agent.treeSegmentId ? `, segment: \`${agent.treeSegmentId}\`` : ''}${agent.treeNodeId ? `, node: \`${agent.treeNodeId}\`` : ''}) — sidebar topology is locked by \`blueprint.md\`.`,
+			`- Identity & Rank Rule: When asked about your identity, role, or rank, ALWAYS state your Aexus Code ADE Engineering rank (${formatRoleTitle(effectiveRole)}), session title and ID (${agent.id}), project (${projects.getProjectName(agent.projectUri)}), and Engineering tree (${govId}).`,
+		);
+		if (effectiveRole === 'governor') {
+			lines.push(
+				'- Engineering Governor (L1) Charter:',
+				'  - Design task decomposition & DAG parallel topology in `blueprint.md` (`aexus-ade engineering blueprint get/apply`).',
+				'  - Default asleep during normal execution; woken ONLY when a segment hits 3 formal Manager failures (RED Circuit Breaker).',
+				'  - NEVER call `aexus-ade engineering run` yourself (only User or Secretary may start execution).',
+				`  - Read blueprint: \`aexus-ade engineering blueprint get --governor ${govId}\``,
+				`  - Apply blueprint: \`aexus-ade engineering blueprint apply --governor ${govId} --file <path>\``,
+				`  - Inspect live DAG status: \`aexus-ade engineering status --governor ${govId} --json\``,
+				`  - Escalate to human via ADE Inbox: \`aexus-ade inbox post --from ${govId} --message "<situation & decision needed>"\``,
+			);
+		} else if (effectiveRole === 'manager') {
+			lines.push(
+				`- Engineering Segment Manager (L2) Charter (Segment \`${agent.treeSegmentId ?? 'auto'}\`):`,
+				'  - Default asleep; woken ONLY on: (a) segment tail / ★Critical secondary review, (b) 3x consecutive Employee internal rejections (grant 4th chance guidance), or (c) Watchdog Worker stream timeout.',
+				`  - Secondary Review / 4th Chance Guidance: \`aexus-ade engineering review --governor ${govId} --node <nodeId> --role manager --verdict <pass|reject|guidance> [--feedback "<text>"]\``,
+				`  - Watchdog Action (prefer remind first): \`aexus-ade engineering watchdog-action --governor ${govId} --node <nodeId> --action <remind|kill-restart> [--message "<text>"]\``,
+			);
+		} else if (effectiveRole === 'employee') {
+			lines.push(
+				`- Engineering Single-Node Reviewer (L3) Charter (Node \`${agent.treeNodeId ?? 'task'}\`):`,
+				'  - **STRICT PROHIBITION**: NEVER write or edit business code yourself! Your Worker (L4) executes all coding with 100% pure native context.',
+				'  - Woken ONLY after your Worker completes a turn: audit Acceptance Criteria + single-Worker Git Diff, then submit review & concise node report:',
+				`  - Approve & Submit Report: \`aexus-ade engineering review --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'} --role employee --verdict pass --report "<concise summary>"\``,
+				`  - Internal Reject (reuses original Worker, not a formal failure): \`aexus-ade engineering review --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'} --role employee --verdict reject --feedback "<fix instructions>"\``,
+			);
+		}
+		return lines.join('\n');
+	}
+
 	lines.push(
 		`- Identity & Rank Rule: When asked about your identity, role, or rank (e.g., "你的身份?", "你是什么角色？职级", "What is your role/rank?"), ALWAYS state your Aexus Code ADE organizational rank (${formatRoleTitle(effectiveRole)}), session title and ID (${agent.id}), project (${projects.getProjectName(agent.projectUri)}), supervisor (${supervisor ? `${supervisor.label} [${formatRoleTitle(resolveAdeAgentRank(supervisor, true))}]` : 'None'}), and your current subordinates. NEVER claim that you are "not an employee", "have no rank", or "have no management authority".`,
 		`- Dynamic Hot-Swap Rule: Supervisors and subordinates can be reassigned (hot-swapped) dynamically at any time. Before answering questions about your live subordinates or delegating tasks, run \`aexus-ade session info ${agent.id} --json\` and \`aexus-ade session tree ${agent.id} --json\` to get live hierarchy state.`,
@@ -487,6 +544,8 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 	const editors = accessor.get(IAdeEditorService);
 	const uriIdentity = accessor.get(IUriIdentityService);
 	const sessions = tryGetService(accessor, IAdeSessionsService);
+	const engineering = tryGetService(accessor, IAdeEngineeringService);
+	const inbox = tryGetService(accessor, IAdeInboxService);
 
 	const secretaryResource = projects.secretary.session?.resource;
 	if (sessionResource && (sessionResource.scheme === 'aexus-secretary' || (secretaryResource && (uriIdentity.extUri.isEqual(sessionResource, secretaryResource) || sessionResource.toString() === secretaryResource.toString())))) {
@@ -502,9 +561,11 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			? 'None'
 			: status.activeEditor.kind === 'secretary'
 				? `Secretary (${status.activeEditor.engineId ?? 'draft'})`
-				: status.activeEditor.kind === 'session'
-					? `Session "${status.activeEditor.label}" (id=${status.activeEditor.agentId}, role=${status.activeEditor.rank ?? status.activeEditor.role ?? 'worker'}, engine=${status.activeEditor.engineId ?? 'draft'})`
-					: `${status.activeEditor.kind}: ${status.activeEditor.label}${status.activeEditor.resource ? ` (${status.activeEditor.resource})` : ''}`;
+				: status.activeEditor.kind === 'engineering'
+					? `Engineering DAG Canvas (governor=${status.activeEditor.governorSessionId})`
+					: status.activeEditor.kind === 'session'
+						? `Session "${status.activeEditor.label}" (id=${status.activeEditor.agentId}, role=${status.activeEditor.rank ?? status.activeEditor.role ?? 'worker'}, engine=${status.activeEditor.engineId ?? 'draft'})`
+						: `${status.activeEditor.kind}: ${status.activeEditor.label}${status.activeEditor.resource ? ` (${status.activeEditor.resource})` : ''}`;
 
 		const projectLines = summaries.length
 			? summaries.map(project => `  - ${project.name} (${project.path})${project.focused ? ' [FOCUSED]' : project.selected ? ' [SELECTED]' : ''}: ${project.activeSessionCount} active session(s)`).join('\n')
@@ -515,9 +576,11 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 		const renderSessionLine = (agent: IAdeAgent, depth: number) => {
 			const hasSubs = projects.hasSubordinates(agent.id);
 			const rankTitle = formatRoleTitle(resolveAdeAgentRank(agent, hasSubs));
-			const eng = agent.session ? (sessions?.getEngineName(agent.session.engineId) ?? agent.session.engineId) : 'Draft';
-			const st = !agent.session ? 'draft' : (agent.status ?? 'idle');
-			sessionLines.push(`${'  '.repeat(depth + 1)}- [${rankTitle}] "${agent.label}" (id: ${agent.id}, project: ${projects.getProjectName(agent.projectUri)}, engine: ${eng} [${agent.session?.engineId ?? 'draft'}], status: ${st}${agent.unread ? ', UNREAD' : ''})`);
+			const engId = agent.session?.engineId ?? agent.preferredEngineId;
+			const eng = engId ? (sessions?.getEngineName(engId) ?? engId) : 'Draft';
+			const st = !agent.session ? 'lazy' : (agent.status ?? 'idle');
+			const treeBadge = !agent.parentId && agent.treeType ? ` [${agent.treeType.toUpperCase()}]` : '';
+			sessionLines.push(`${'  '.repeat(depth + 1)}- [${rankTitle}]${treeBadge} "${agent.label}" (id: ${agent.id}, project: ${projects.getProjectName(agent.projectUri)}, engine: ${eng} [${engId ?? 'draft'}], status: ${st}${agent.unread ? ', UNREAD' : ''})`);
 			for (const child of projects.getDirectSubordinates(agent.id)) {
 				renderSessionLine(child, depth + 1);
 			}
@@ -527,6 +590,16 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 		}
 		const hierarchyBlock = sessionLines.length ? sessionLines.join('\n') : '  (No active ADE sessions)';
 
+		const engTrees = engineering?.listTrees() ?? [];
+		const engBlock = engTrees.length
+			? engTrees.map(t => `  - [${t.treeType.toUpperCase()}] "${t.governorLabel}" (governor: ${t.governorSessionId}, project: ${t.projectName}, status: ${t.runStatus}, progress: ${t.completedNodes}/${t.totalNodes} nodes, managers: ${t.managerCount}${t.waitingGates > 0 ? `, waiting_gates: ${t.waitingGates}` : ''}${t.failedNodes > 0 ? `, failed: ${t.failedNodes}` : ''})`).join('\n')
+			: '  (No active Engineering trees)';
+
+		const activeInboxItems = inbox?.list({ includeResolved: false }) ?? [];
+		const inboxBlock = activeInboxItems.length
+			? activeInboxItems.map(item => `  - [${item.kind.toUpperCase()}] id=${item.id} (governor=${item.governorSessionId}${item.nodeId ? `, node=${item.nodeId}` : ''}${item.unread ? ', UNREAD' : ''}): ${item.title} — ${item.message.split('\n')[0]}`).join('\n')
+			: '  (ADE Inbox empty)';
+
 		return [
 			'[Aexus ADE Live Viewport & Macro Control Context]',
 			'You are the global **Secretary** in **Aexus Code ADE**, with complete macro-control authority over EVERYTHING inside ADE.',
@@ -535,9 +608,13 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			`- Selected Project: ${selectedLine}`,
 			`- Sidebar State: showArchived=${status.showArchived}`,
 			`- Active ADE Editor: ${activeEditorLine}`,
-			`- Counts: ${status.counts.projects} project(s), ${status.counts.activeRootSessions} root session(s), ${status.counts.totalActiveSessions} total active session(s), ${status.counts.archived} archived`,
+			`- Counts: ${status.counts.projects} project(s), ${status.counts.activeRootSessions} root session(s), ${status.counts.totalActiveSessions} total active session(s), ${status.counts.archived} archived, ${engTrees.length} engineering tree(s), ${inbox?.unreadCount ?? 0} unread inbox item(s)`,
 			'- ADE Projects:',
 			projectLines,
+			'- ADE Engineering Trees:',
+			engBlock,
+			'- ADE Inbox (Pending Gates & Governor Escalations):',
+			inboxBlock,
 			'- Live ADE Session Hierarchy:',
 			hierarchyBlock,
 			'- Complete ADE Macro Control CLI (`aexus-ade` is directly on your PATH; pass `--json` for structured output):',
@@ -545,6 +622,8 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			'  - Projects & Git/Files Inspector: `aexus-ade project list` | `aexus-ade project add <path...> [--name <label>]` | `aexus-ade project select <target>` | `aexus-ade project remove <target>` | `aexus-ade project delete <target> [--sessions] [--files] [--permanent]` | `aexus-ade project focus <target>` | `aexus-ade project home` | `aexus-ade project forward` | `aexus-ade project move <source> (--before <target> | --after <target>)` | `aexus-ade project changes [target]` | `aexus-ade project files [target] [--path <subpath>] [--depth <n>]` | `aexus-ade project open-file <file> [--project <target>] [--side]` | `aexus-ade project open-diff <file> [--project <target>]`',
 			'  - Coding Agent Engines (claude, codex, kilo, opencode, dsh, agy, cline, pi): `aexus-ade engine list` | `aexus-ade engine sessions <engine> [--project <target>] [--limit <n>]`',
 			'  - Sessions & Ranks (governor > manager > employee > worker): `aexus-ade session list [--project <p>] [--parent <id|root>] [--role <r>] [--engine <e>] [--status <s>] [--unread] [--archived] [--all]` | `aexus-ade session info <id>` | `aexus-ade session subordinates [id] [--recursive]` | `aexus-ade session tree [id]` | `aexus-ade session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <r>] [--draft [text]] [--side] [--no-open]` | `aexus-ade session attach --engine <e> --native-id <nid> [--project <p>] [--title <t>] [--parent <id>] [--role <r>] [--side] [--no-open]` | `aexus-ade session connect <id> --engine <e> [--native-id <nid>] [--side] [--no-open]` | `aexus-ade session open <id> [--side]` | `aexus-ade session select <id>` | `aexus-ade session close <id>` | `aexus-ade session mark-read <id|--all>` | `aexus-ade session draft <id> [text|--clear]` | `aexus-ade session rename <id> <title>` | `aexus-ade session role <id> <governor|manager|employee|worker|none>` | `aexus-ade session move <id> <parentId|none> [--project <p>]` | `aexus-ade session reorder <id> (--before <targetId> | --after <targetId>)` | `aexus-ade session send <id> <prompt> [--wait]` | `aexus-ade session history <id> [--limit <n>]` | `aexus-ade session stop <id>` | `aexus-ade session archive <id>` | `aexus-ade session unarchive <id>` | `aexus-ade session detach <id>` | `aexus-ade session delete <id> [--force]`',
+			'  - Engineering DAG Orchestration: `aexus-ade engineering init --governor <id> [--on-children <relocate|delete> --target <id>]` | `aexus-ade engineering list [--project <path>]` | `aexus-ade engineering open --governor <id> [--side]` | `aexus-ade engineering blueprint get --governor <id>` | `aexus-ade engineering blueprint apply --governor <id> --file <path> [--force-stop-running]` | `aexus-ade engineering run --governor <id>` | `aexus-ade engineering pause --governor <id>` | `aexus-ade engineering resume --governor <id>` | `aexus-ade engineering stop --governor <id>` | `aexus-ade engineering status --governor <id> [--node <nodeId>]` | `aexus-ade engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]` | `aexus-ade engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]` | `aexus-ade engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]`',
+			'  - ADE Inbox: `aexus-ade inbox list [--unread-only] [--governor <id>]` | `aexus-ade inbox post --from <governorId> --message <text>` | `aexus-ade inbox resolve --id <msgId>`',
 			'  - Secretary Self-Management: `aexus-ade secretary [status | open [--side] | engine <e> | reset [--engine <e>] | send <prompt> [--wait] | history [--limit <n>] | stop | draft [text|--clear] | mark-read]`',
 		].join('\n');
 	}
@@ -635,13 +714,17 @@ function resolveSupervisorOrSession(projects: IAdeProjectsService, editors: IAde
 const SHORT_ENGINE_ALIASES: Record<string, string> = {
 	codex: 'aexus-codex',
 	claude: 'aexus-claude',
+	'claude-code': 'aexus-claude',
 	kilo: 'aexus-kilo',
 	kilocode: 'aexus-kilo',
+	'kilo-code': 'aexus-kilo',
 	opencode: 'aexus-opencode',
 	dsh: 'aexus-dsh',
 	deepseek: 'aexus-dsh',
+	'deepseek-harness': 'aexus-dsh',
 	agy: 'aexus-antigravity',
 	antigravity: 'aexus-antigravity',
+	'google-antigravity': 'aexus-antigravity',
 	cline: 'aexus-cline',
 	pi: 'aexus-pi',
 };
@@ -729,6 +812,8 @@ export async function executeAdeControlRequest(
 	const scmService = tryGetService(accessor, ISCMService);
 	const viewsService = tryGetService(accessor, IViewsService);
 	const layoutService = tryGetService(accessor, IWorkbenchLayoutService);
+	const engineeringService = tryGetService(accessor, IAdeEngineeringService);
+	const inboxService = tryGetService(accessor, IAdeInboxService);
 
 	const resolveActiveOrTargetProjectUri = (rawTarget: unknown): URI => {
 		if (rawTarget !== undefined && rawTarget !== null && String(rawTarget).trim()) {
@@ -1222,6 +1307,9 @@ export async function executeAdeControlRequest(
 			const parent = typeof rawParentId === 'string' && rawParentId.trim()
 				? resolveAgentFromParams(projects, { id: rawParentId })
 				: undefined;
+			if (parent && projects.isLockedByWorkTree?.(parent.id)) {
+				throw new Error(localize('adeLockedByEngineeringCreate', "Session '{0}' is locked by an Engineering tree. Modify topology via the Engineering canvas or 'aexus-ade engineering blueprint apply'.", parent.label));
+			}
 
 			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
 			const resolvedProjectUri = parent?.projectUri
@@ -1320,6 +1408,9 @@ export async function executeAdeControlRequest(
 			const parent = typeof rawParentId === 'string' && rawParentId.trim()
 				? resolveAgentFromParams(projects, { id: rawParentId })
 				: undefined;
+			if (parent && projects.isLockedByWorkTree?.(parent.id)) {
+				throw new Error(localize('adeLockedByEngineeringCreate', "Session '{0}' is locked by an Engineering tree. Modify topology via the Engineering canvas or 'aexus-ade engineering blueprint apply'.", parent.label));
+			}
 			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
 			const fallbackProjectUri = parent?.projectUri
 				?? (rawProject ? (findMatchingProject(projects, uriIdentity, rawProject)?.uri ?? toUri(rawProject)) : undefined)
@@ -1475,6 +1566,9 @@ export async function executeAdeControlRequest(
 		case 'session.setRole':
 		case 'session.role': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (projects.isLockedByWorkTree?.(agent.id)) {
+				throw new Error(localize('adeLockedByEngineeringRole', "Session '{0}' is locked by an Engineering tree and its role cannot be changed manually.", agent.label));
+			}
 			const nextRole = parseRole(params.role);
 			if (!nextRole && projects.hasSubordinates(agent.id)) {
 				throw new Error(localize('adeCannotClearRoleWithSubordinates', "Cannot clear role while session has subordinate agents."));
@@ -1487,9 +1581,15 @@ export async function executeAdeControlRequest(
 		case 'session.nest':
 		case 'session.move': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (projects.isLockedByWorkTree?.(agent.id)) {
+				throw new Error(localize('adeLockedByEngineeringMove', "Session '{0}' belongs to a locked Engineering tree and cannot be reparented manually.", agent.label));
+			}
 			const rawParent = params.parentId ?? params.parent;
 			const clearParent = rawParent === undefined || rawParent === null || rawParent === '' || rawParent === 'none' || rawParent === 'root';
 			const parentAgent = clearParent ? undefined : resolveAgentFromParams(projects, { id: rawParent });
+			if (parentAgent && projects.isLockedByWorkTree?.(parentAgent.id)) {
+				throw new Error(localize('adeLockedByEngineeringTarget', "Target supervisor '{0}' belongs to a locked Engineering tree.", parentAgent.label));
+			}
 			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
 			const targetProjectUri = rawProject !== undefined
 				? (findMatchingProject(projects, uriIdentity, rawProject)?.uri ?? toUri(rawProject))
@@ -1515,6 +1615,9 @@ export async function executeAdeControlRequest(
 			const wait = Boolean(params.wait);
 			const dispatchKind = await sendMessageToSessionResource(chatService, agent.session.resource, rawMessage, wait);
 			let reply: string | undefined;
+			if (wait) {
+				projects.setAgentStatus(agent.id, 'idle', true);
+			}
 			if (wait && agent.session.engineId.startsWith('aexus-')) {
 				const historyRes = await commandService.executeCommand<{ messages?: Array<{ role: string; text: string }>; lastError?: string }>(
 					'aexus.agentEngines.history',
@@ -1591,7 +1694,13 @@ export async function executeAdeControlRequest(
 
 		case 'session.detach': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
+				throw new Error(localize('adeLockedByEngineeringDetach', "Subordinate session '{0}' is locked by an Engineering tree. Remove or edit nodes via Engineering blueprint.", agent.label));
+			}
 			const subtree = projects.getSubtree(agent.id);
+			if (!agent.parentId && engineeringService?.hasTree(agent.id)) {
+				await engineeringService.removeTree(agent.id);
+			}
 			projects.removeAgent(agent.id);
 			await editors.closeAgents(subtree);
 			return { detached: agent.id, count: subtree.length };
@@ -1599,7 +1708,13 @@ export async function executeAdeControlRequest(
 
 		case 'session.delete': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
+				throw new Error(localize('adeLockedByEngineeringDelete', "Subordinate session '{0}' is locked by an Engineering tree. Remove or edit nodes via Engineering blueprint.", agent.label));
+			}
 			const subtree = projects.getSubtree(agent.id);
+			if (!agent.parentId && engineeringService?.hasTree(agent.id)) {
+				await engineeringService.removeTree(agent.id);
+			}
 			for (const member of subtree) {
 				if (member.session) {
 					await sessions.delete(member.session);
@@ -1743,6 +1858,330 @@ export async function executeAdeControlRequest(
 		case 'secretary.markRead':
 			projects.markSecretaryRead();
 			return { unread: Boolean(projects.secretary.unread) };
+
+		case 'engineering.init': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const onChildren = params.onChildren === 'relocate' || params.onChildren === 'delete'
+				? params.onChildren
+				: undefined;
+			const relocateTarget = typeof params.relocateTargetParentId === 'string' && params.relocateTargetParentId.trim()
+				? resolveAgentFromParams(projects, { id: params.relocateTargetParentId }).id
+				: undefined;
+			const treeType: AdeWorkTreeType = params.treeType === 'research' ? 'research' : 'engineering';
+			const snap = await engineeringService.initTree({
+				governorSessionId: gov.id,
+				treeType,
+				onChildren,
+				relocateTargetParentId: relocateTarget,
+			});
+			if (params.open === true) {
+				await engineeringService.openEngineeringEditor(gov.id, { side: Boolean(params.side) });
+			}
+			return {
+				governorSessionId: snap.governorSessionId,
+				governorLabel: snap.governorLabel,
+				treeType: snap.treeType,
+				runStatus: snap.state.runStatus,
+				managers: snap.blueprint.managers,
+				progress: snap.progress,
+			};
+		}
+
+		case 'engineering.list': {
+			if (!engineeringService) {
+				return [];
+			}
+			await engineeringService.whenReady();
+			const rawProject = params.project ?? params.projectPath ?? params.path;
+			const matchedProject = rawProject ? findMatchingProject(projects, uriIdentity, rawProject) : undefined;
+			const projectPath = matchedProject?.uri.fsPath ?? (typeof rawProject === 'string' && rawProject.trim() ? toUri(rawProject)?.fsPath : undefined);
+			const treeType = params.treeType === 'research' ? 'research' : (params.treeType === 'engineering' ? 'engineering' : undefined);
+			return engineeringService.listTrees(projectPath, treeType);
+		}
+
+		case 'engineering.open': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			if (!engineeringService.hasTree(gov.id)) {
+				await engineeringService.initTree({ governorSessionId: gov.id });
+			}
+			await engineeringService.openEngineeringEditor(gov.id, { side: Boolean(params.side) });
+			return { opened: gov.id, label: gov.label };
+		}
+
+		case 'engineering.blueprint.get': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			await engineeringService.whenReady();
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const text = engineeringService.getBlueprintText(gov.id);
+			if (text === undefined) {
+				throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", gov.id));
+			}
+			return params.raw === true ? text : { governorSessionId: gov.id, blueprint: text };
+		}
+
+		case 'engineering.blueprint.apply': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			let blueprintText = typeof params.text === 'string' ? params.text : undefined;
+			if (blueprintText === undefined && typeof params.file === 'string' && params.file.trim()) {
+				if (!fileService) {
+					throw new Error('File service is unavailable to read blueprint file.');
+				}
+				const fileUri = toUri(params.file);
+				if (!fileUri) {
+					throw new Error(`Invalid blueprint file path: ${params.file}`);
+				}
+				const rawBytes = await fileService.readFile(fileUri);
+				blueprintText = rawBytes.value.toString();
+			}
+			if (!blueprintText || !blueprintText.trim()) {
+				throw new Error('Blueprint markdown content (--file or --text) is required.');
+			}
+			if (!engineeringService.hasTree(gov.id)) {
+				await engineeringService.initTree({ governorSessionId: gov.id });
+			}
+			const snap = await engineeringService.applyBlueprint({
+				governorSessionId: gov.id,
+				blueprintText,
+				forceStopRunning: params.forceStopRunning === true,
+			});
+			return {
+				governorSessionId: snap.governorSessionId,
+				runStatus: snap.state.runStatus,
+				managers: snap.blueprint.managers,
+				nodeCount: snap.blueprint.nodes.length,
+				edgeCount: snap.blueprint.edges.length,
+				progress: snap.progress,
+			};
+		}
+
+		case 'engineering.run': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const caller = typeof params.caller === 'string' ? params.caller : 'secretary';
+			const snap = await engineeringService.runTree(gov.id, caller);
+			return {
+				governorSessionId: snap.governorSessionId,
+				runStatus: snap.state.runStatus,
+				progress: snap.progress,
+			};
+		}
+
+		case 'engineering.pause': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const snap = await engineeringService.pauseTree(gov.id);
+			return { governorSessionId: snap.governorSessionId, runStatus: snap.state.runStatus, progress: snap.progress };
+		}
+
+		case 'engineering.resume': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const caller = typeof params.caller === 'string' ? params.caller : 'secretary';
+			const snap = await engineeringService.resumeTree(gov.id, caller);
+			return { governorSessionId: snap.governorSessionId, runStatus: snap.state.runStatus, progress: snap.progress };
+		}
+
+		case 'engineering.stop': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const snap = await engineeringService.stopTree(gov.id);
+			return { governorSessionId: snap.governorSessionId, runStatus: snap.state.runStatus, progress: snap.progress };
+		}
+
+		case 'engineering.remove': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			await engineeringService.removeTree(gov.id);
+			return { removed: gov.id };
+		}
+
+		case 'engineering.status': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			await engineeringService.whenReady();
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const snap = engineeringService.getTreeSnapshot(gov.id);
+			if (!snap) {
+				throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", gov.id));
+			}
+			const rawNode = params.node ?? params.nodeId;
+			if (typeof rawNode === 'string' && rawNode.trim()) {
+				const nodeStatus = snap.nodes.find(n => n.node.id === rawNode.trim());
+				if (!nodeStatus) {
+					throw new Error(`Node '${rawNode}' not found in Engineering tree '${gov.id}'.`);
+				}
+				return {
+					governorSessionId: snap.governorSessionId,
+					runStatus: snap.state.runStatus,
+					node: nodeStatus,
+				};
+			}
+			return {
+				governorSessionId: snap.governorSessionId,
+				governorLabel: snap.governorLabel,
+				projectPath: snap.projectPath,
+				treeType: snap.treeType,
+				runStatus: snap.state.runStatus,
+				progress: snap.progress,
+				managers: snap.blueprint.managers,
+				nodes: snap.nodes,
+				edges: snap.edges,
+				reports: snap.state.reports,
+				recentEvents: snap.state.events.slice(-20),
+			};
+		}
+
+		case 'engineering.review': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const rawNode = params.node ?? params.nodeId;
+			const nodeId = typeof rawNode === 'string' ? rawNode.trim() : '';
+			const role = params.role === 'manager' ? 'manager' : 'employee';
+			const verdict = params.verdict === 'pass' || params.verdict === 'reject' || params.verdict === 'guidance'
+				? params.verdict
+				: 'reject';
+			const reportText = typeof params.report === 'string'
+				? params.report
+				: (typeof params.summary === 'string' ? params.summary : undefined);
+			const snap = await engineeringService.submitReview({
+				governorSessionId: gov.id,
+				nodeId,
+				role,
+				verdict,
+				report: reportText,
+				feedback: typeof params.feedback === 'string' ? params.feedback : undefined,
+			});
+			const updatedNode = snap.nodes.find(n => n.node.id === nodeId);
+			return {
+				governorSessionId: snap.governorSessionId,
+				runStatus: snap.state.runStatus,
+				node: updatedNode,
+				progress: snap.progress,
+			};
+		}
+
+		case 'engineering.gate': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const rawNode = params.node ?? params.nodeId;
+			const nodeId = typeof rawNode === 'string' ? rawNode.trim() : '';
+			const verdict = params.verdict === 'rollback' ? 'rollback' : 'pass';
+			const rawTargetNode = params.targetNode ?? params.targetNodeId;
+			const snap = await engineeringService.submitGateVerdict({
+				governorSessionId: gov.id,
+				nodeId,
+				verdict,
+				targetNodeId: typeof rawTargetNode === 'string' ? rawTargetNode : undefined,
+				feedback: typeof params.feedback === 'string' ? params.feedback : undefined,
+			});
+			return snap;
+		}
+
+		case 'engineering.watchdogAction':
+		case 'engineering.watchdog-action': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const rawNode = params.node ?? params.nodeId;
+			const nodeId = typeof rawNode === 'string' ? rawNode.trim() : '';
+			const rawAction = params.watchdogAction ?? params.action;
+			const watchdogAction = rawAction === 'kill-restart' ? 'kill-restart' : 'remind';
+			const snap = await engineeringService.executeWatchdogAction({
+				governorSessionId: gov.id,
+				nodeId,
+				action: watchdogAction,
+				message: typeof params.message === 'string' ? params.message : undefined,
+			});
+			return snap;
+		}
+
+		case 'inbox.list': {
+			if (!inboxService) {
+				return [];
+			}
+			const rawGov = params.governor ?? params.governorId;
+			const govFilter = typeof rawGov === 'string' && rawGov.trim()
+				? resolveAgentFromParams(projects, { id: rawGov }).id
+				: undefined;
+			return inboxService.list({
+				unreadOnly: params.unreadOnly === true,
+				governorSessionId: govFilter,
+				includeResolved: params.includeResolved !== false,
+			});
+		}
+
+		case 'inbox.post': {
+			if (!inboxService) {
+				throw new Error('ADE Inbox service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.from ?? params.governor ?? params.governorId ?? params.id });
+			const message = typeof params.message === 'string' ? params.message.trim() : '';
+			if (!message) {
+				throw new Error('Inbox message text is required.');
+			}
+			const rawNode = params.node ?? params.nodeId;
+			return inboxService.postGovernorMessage({
+				governorSessionId: gov.id,
+				message,
+				title: typeof params.title === 'string' ? params.title : undefined,
+				nodeId: typeof rawNode === 'string' ? rawNode : undefined,
+			});
+		}
+
+		case 'inbox.resolve': {
+			if (!inboxService) {
+				throw new Error('ADE Inbox service is not available.');
+			}
+			const id = typeof params.id === 'string' ? params.id.trim() : '';
+			if (!id) {
+				throw new Error('Inbox message ID (--id) is required.');
+			}
+			const resolved = await inboxService.resolveItem(id, typeof params.resolution === 'string' ? params.resolution : undefined);
+			if (!resolved) {
+				throw new Error(`Inbox item not found: ${id}`);
+			}
+			return resolved;
+		}
+
+		case 'inbox.markRead': {
+			if (!inboxService) {
+				throw new Error('ADE Inbox service is not available.');
+			}
+			if (params.all === true) {
+				await inboxService.markRead();
+				return { unreadCount: inboxService.unreadCount };
+			}
+			const id = typeof params.id === 'string' ? params.id.trim() : '';
+			await inboxService.markRead(id || undefined);
+			return { unreadCount: inboxService.unreadCount };
+		}
 
 		default:
 			throw new Error(localize('adeUnknownControlAction', "Unknown ADE control action: {0}", String(action)));

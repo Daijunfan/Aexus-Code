@@ -41,8 +41,10 @@ import { createFileIconThemableTreeContainerScope, IResourceLabel, ResourceLabel
 import { InlineEditInputBox } from '../../../browser/parts/views/inlineEditInputBox.js';
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IEditableData, IViewDescriptorService } from '../../../common/views.js';
+import { IAdeEngineeringService, IAdeInboxService } from '../../../../platform/ade/common/adeEngineering.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_DELETE_PROJECT_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { AdeInboxPanel } from './adeInboxView.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 export type AdeTreeItem =
@@ -91,6 +93,9 @@ export class AdeProjectsDragAndDrop implements ITreeDragAndDrop<AdeTreeItem> {
 	getDragURI(item: AdeTreeItem): string | null {
 		if (item.kind === 'project') {
 			return this.canReorderProjects() ? item.project.uri.toString() : null;
+		}
+		if (this.projects.isLockedByWorkTree?.(item.agent.id)) {
+			return null;
 		}
 		return `ade-agent:${item.agent.id}`;
 	}
@@ -201,6 +206,7 @@ interface IAdeTreeTemplate {
 	readonly editHost: HTMLElement;
 	readonly countBadge: HTMLElement;
 	readonly addSessionBtn: HTMLElement;
+	readonly workTreeBadge: HTMLElement;
 	readonly roleBadge: HTMLElement;
 	readonly statusIndicator: HTMLElement;
 	readonly editDisposables: DisposableStore;
@@ -220,6 +226,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		private readonly onNewProjectSession: (projectUri: URI) => void,
 		private readonly onNewSubSession: (parentId: string) => void,
 		private readonly onSetAgentRole: (agentId: string) => void,
+		private readonly onOpenEngineering: (governorId: string) => void,
 		private readonly getEditableData: (agent: IAdeAgent) => IEditableData | undefined,
 	) { }
 
@@ -240,6 +247,8 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		}));
 		addSessionBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.add));
 		addSessionBtn.hidden = true;
+		const workTreeBadge = append(trailing, $('span.ade-worktree-badge'));
+		workTreeBadge.hidden = true;
 		const roleBadge = append(trailing, $('span.ade-role-badge'));
 		roleBadge.hidden = true;
 		const statusIndicator = append(trailing, $('span.ade-status-dot'));
@@ -252,6 +261,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			editHost,
 			countBadge,
 			addSessionBtn,
+			workTreeBadge,
 			roleBadge,
 			statusIndicator,
 			editDisposables: new DisposableStore(),
@@ -292,6 +302,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		const item = node.element;
 		if (item.kind === 'project') {
 			template.row.classList.add('ade-project-row');
+			template.workTreeBadge.hidden = true;
 			template.roleBadge.hidden = true;
 			const addProjectLabel = localize('adeNewProjectSessionBtn', "New Session in Project...");
 			template.addSessionBtn.hidden = false;
@@ -340,10 +351,11 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		template.countBadge.hidden = true;
 
 		const agent = item.agent;
+		const isLocked = Boolean(this.projects.isLockedByWorkTree?.(agent.id));
 		const hasSubs = this.projects.hasSubordinates(agent.id);
 		const rank = resolveAdeAgentRank(agent, hasSubs);
 		const nextLower = getNextLowerAdeRole(agent.role, hasSubs);
-		if (nextLower.canSpawnSubSession) {
+		if (nextLower.canSpawnSubSession && !isLocked) {
 			const subLabel = formatNewSubSessionLabel(nextLower.childRank);
 			template.addSessionBtn.hidden = false;
 			template.addSessionBtn.setAttribute('aria-label', subLabel);
@@ -356,11 +368,15 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.addSessionBtn.hidden = true;
 		}
 		const session = agent.session;
+		const effectiveEngineId = session?.engineId ?? agent.preferredEngineId;
 		const orchestrated = this.projects.isOrchestrated(agent);
 		template.row.classList.add(orchestrated ? 'ade-orchestrated-agent' : 'ade-pure-worker');
+		if (isLocked) {
+			template.row.classList.add('ade-worktree-locked');
+		}
 
-		const icon = session ? (this.sessions.getIcon(session.engineId) ?? Codicon.commentDiscussion) : Codicon.comment;
-		const engineTitle = session ? this.sessions.getEngineName(session.engineId) : localize('adeDraftSession', "Draft");
+		const icon = effectiveEngineId ? (this.sessions.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
+		const engineTitle = effectiveEngineId ? this.sessions.getEngineName(effectiveEngineId) : localize('adeDraftSession', "Draft");
 		const badgeLabel = formatRoleBadgeLabel(rank);
 
 		this.applyItemIcon(template.iconNode, icon);
@@ -370,21 +386,40 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		}, {
 			hideIcon: true,
 			fileKind: FileKind.FILE,
-			title: `${engineTitle} (${badgeLabel}) • ${agent.projectUri.fsPath}`,
+			title: `${engineTitle} (${badgeLabel}${!session && agent.preferredEngineId ? ' · Lazy' : ''}) • ${agent.projectUri.fsPath}`,
 			extraClasses: ['explorer-item', 'ade-agent-session-row'],
 		});
 
+		if (!agent.parentId && agent.treeType) {
+			const isRes = agent.treeType === 'research';
+			template.workTreeBadge.textContent = isRes ? localize('adeBadgeResearch', "Research") : localize('adeBadgeEngineering', "Engineering");
+			template.workTreeBadge.className = `ade-worktree-badge type-${agent.treeType}`;
+			template.workTreeBadge.hidden = false;
+			const treeTooltip = localize('adeOpenEngineeringBadgeTooltip', "Open {0} DAG Canvas", template.workTreeBadge.textContent);
+			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.workTreeBadge, treeTooltip));
+			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.CLICK, event => {
+				EventHelper.stop(event, true);
+				this.onOpenEngineering(agent.id);
+			}));
+		} else {
+			template.workTreeBadge.hidden = true;
+		}
+
 		template.roleBadge.textContent = badgeLabel;
-		template.roleBadge.className = `ade-role-badge role-${rank}`;
+		template.roleBadge.className = `ade-role-badge role-${rank}${isLocked ? ' locked' : ''}`;
 		template.roleBadge.hidden = false;
-		const roleTooltip = rank === 'worker'
-			? localize('adeWorkerBadgeTooltip', "Role: Worker (Clean Native Context) — Click to change role")
-			: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
+		const roleTooltip = isLocked
+			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel)
+			: rank === 'worker'
+				? localize('adeWorkerBadgeTooltip', "Role: Worker (Clean Native Context) — Click to change role")
+				: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
 		template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.roleBadge, roleTooltip));
-		template.editDisposables.add(addDisposableListener(template.roleBadge, EventType.CLICK, event => {
-			EventHelper.stop(event, true);
-			this.onSetAgentRole(agent.id);
-		}));
+		if (!isLocked) {
+			template.editDisposables.add(addDisposableListener(template.roleBadge, EventType.CLICK, event => {
+				EventHelper.stop(event, true);
+				this.onSetAgentRole(agent.id);
+			}));
+		}
 
 		const ownStatus = agent.status === 'working' ? 'working'
 			: agent.status === 'pending' ? 'pending'
@@ -406,6 +441,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		if (editableData) {
 			template.row.classList.add('editing');
 			template.labelHost.hidden = true;
+			template.workTreeBadge.hidden = true;
 			template.roleBadge.hidden = true;
 			template.editHost.hidden = false;
 			clearNode(template.editHost);
@@ -443,8 +479,15 @@ export class AdeProjectsView extends ViewPane {
 	private secretaryStatusDot: HTMLElement | undefined;
 	private controlsBar: HTMLElement | undefined;
 	private sectionTitleLabel: HTMLElement | undefined;
+	private projectsTabBtn: HTMLElement | undefined;
+	private inboxTabBtn: HTMLElement | undefined;
+	private inboxBadgeEl: HTMLElement | undefined;
 	private archivedToggleButton: HTMLElement | undefined;
 	private treeHost: HTMLElement | undefined;
+	private inboxPanel: AdeInboxPanel | undefined;
+	private sidebarMode: 'projects' | 'inbox' = 'projects';
+	private readonly engineeringService: IAdeEngineeringService | undefined;
+	private readonly inboxService: IAdeInboxService | undefined;
 	private emptyStateHost: HTMLElement | undefined;
 	private emptyStateMessage: HTMLElement | undefined;
 	private readonly emptyActionDisposables = this._register(new DisposableStore());
@@ -489,6 +532,19 @@ export class AdeProjectsView extends ViewPane {
 			this.updateHeaderControls();
 			this.refreshAgentIcons();
 		}));
+
+		const [engSvc, inbSvc] = instantiationService.invokeFunction(accessor => {
+			let eng: IAdeEngineeringService | undefined;
+			let inb: IAdeInboxService | undefined;
+			try { eng = accessor.get(IAdeEngineeringService); } catch { eng = undefined; }
+			try { inb = accessor.get(IAdeInboxService); } catch { inb = undefined; }
+			return [eng, inb] as const;
+		});
+		this.engineeringService = engSvc;
+		this.inboxService = inbSvc;
+		if (this.inboxService) {
+			this._register(this.inboxService.onDidChange(() => this.updateHeaderControls()));
+		}
 	}
 
 	get selectedAgent(): IAdeAgent | undefined {
@@ -512,6 +568,11 @@ export class AdeProjectsView extends ViewPane {
 		this.emptyStateMessage = append(this.emptyStateHost, $('p.ade-projects-empty-text'));
 		this.emptyStateHost.hidden = true;
 
+		if (this.inboxService && this.engineeringService) {
+			this.inboxPanel = this._register(new AdeInboxPanel(contentArea, this.inboxService, this.engineeringService, this.editors));
+			this.inboxPanel.setVisible(false);
+		}
+
 		const treeContainer = this.treeHost = append(contentArea, $('.ade-projects-tree.explorer-folders-view'));
 		this._register(createFileIconThemableTreeContainerScope(treeContainer, this.themeService));
 		const labels = this._register(this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this.onDidChangeBodyVisibility }));
@@ -532,6 +593,7 @@ export class AdeProjectsView extends ViewPane {
 					projectUri => void this.commandService.executeCommand('workbench.action.ade.newSession', projectUri),
 					parentId => void this.commandService.executeCommand('workbench.action.ade.newSubSession', parentId),
 					agentId => void this.commandService.executeCommand('workbench.action.ade.setRole', agentId),
+					governorId => void this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, governorId),
 					agent => this.getEditableData(agent),
 				),
 			],
@@ -772,7 +834,26 @@ export class AdeProjectsView extends ViewPane {
 
 	private renderControlsToolbar(container: HTMLElement): void {
 		const controls = this.controlsBar = append(container, $('.ade-sidebar-controls'));
-		this.sectionTitleLabel = append(controls, $('span.ade-sidebar-section-title'));
+
+		if (this.inboxService) {
+			const segTabs = append(controls, $('.ade-sidebar-seg-tabs'));
+			const projTab = this.projectsTabBtn = append(segTabs, $('button.ade-sidebar-seg-btn.active', {
+				type: 'button',
+			}));
+			this.sectionTitleLabel = append(projTab, $('span.ade-sidebar-section-title', {}, localize('adeProjectsSectionTitle', "Projects")));
+
+			const inbTab = this.inboxTabBtn = append(segTabs, $('button.ade-sidebar-seg-btn', {
+				type: 'button',
+			}));
+			append(inbTab, $('span', {}, localize('adeInboxTabTitle', "Inbox")));
+			this.inboxBadgeEl = append(inbTab, $('span.ade-inbox-count-badge'));
+			this.inboxBadgeEl.hidden = true;
+
+			this._register(addDisposableListener(projTab, EventType.CLICK, () => this.setSidebarMode('projects')));
+			this._register(addDisposableListener(inbTab, EventType.CLICK, () => this.setSidebarMode('inbox')));
+		} else {
+			this.sectionTitleLabel = append(controls, $('span.ade-sidebar-section-title'));
+		}
 
 		const actions = append(controls, $('.ade-sidebar-actions'));
 
@@ -784,8 +865,29 @@ export class AdeProjectsView extends ViewPane {
 		archivedBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.archive));
 		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), archivedBtn, localize('adeToggleArchived', "Toggle Archived Sessions")));
 		this._register(addDisposableListener(archivedBtn, EventType.CLICK, () => {
+			if (this.sidebarMode !== 'projects') {
+				this.setSidebarMode('projects');
+			}
 			this.projects.setShowArchived(!this.projects.showArchived);
 		}));
+	}
+
+	setSidebarMode(mode: 'projects' | 'inbox'): void {
+		this.sidebarMode = mode;
+		this.projectsTabBtn?.classList.toggle('active', mode === 'projects');
+		this.inboxTabBtn?.classList.toggle('active', mode === 'inbox');
+		if (this.archivedToggleButton) {
+			this.archivedToggleButton.hidden = mode === 'inbox';
+		}
+		if (mode === 'inbox') {
+			if (this.treeHost) { this.treeHost.hidden = true; }
+			if (this.emptyStateHost) { this.emptyStateHost.hidden = true; }
+			this.inboxPanel?.setVisible(true);
+		} else {
+			this.inboxPanel?.setVisible(false);
+			void this.refresh();
+		}
+		this.layoutTree();
 	}
 
 	private updateHeaderControls(): void {
@@ -828,6 +930,12 @@ export class AdeProjectsView extends ViewPane {
 		if (this.archivedToggleButton) {
 			this.archivedToggleButton.classList.toggle('active', this.projects.showArchived);
 			this.archivedToggleButton.setAttribute('aria-pressed', String(this.projects.showArchived));
+		}
+
+		if (this.inboxBadgeEl && this.inboxService) {
+			const unread = this.inboxService.unreadCount;
+			this.inboxBadgeEl.textContent = String(unread);
+			this.inboxBadgeEl.hidden = unread <= 0;
 		}
 	}
 
@@ -881,14 +989,38 @@ export class AdeProjectsView extends ViewPane {
 		return actions;
 	}
 
-	private getAgentContextActions(agent: IAdeAgent): IAction[] {
+	getAgentContextActions(agent: IAdeAgent): IAction[] {
 		const agentId = agent.id;
 		const isArchived = this.projects.isArchived(agentId);
 		const hasSubs = this.projects.hasSubordinates(agentId);
+		const rank = resolveAdeAgentRank(agent, hasSubs);
+		const isLocked = Boolean(this.projects.isLockedByWorkTree?.(agentId));
+		const workTreeGov = this.projects.getWorkTreeGovernor?.(agentId);
 		const nextLower = getNextLowerAdeRole(agent.role, hasSubs);
 		const orchestrated = this.projects.isOrchestrated(agent);
+
+		const isTopGovernor = !agent.parentId && rank === 'governor';
+
 		return [
-			...(nextLower.canSpawnSubSession ? [toAction({
+			...(isTopGovernor ? [
+				toAction({
+					id: 'ade.engineering',
+					label: agent.treeType === 'engineering'
+						? localize('adeOpenEngineeringMenu', "Open Engineering")
+						: localize('adeEnableEngineeringMenu', "Engineering"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, agentId),
+				}),
+				new Separator(),
+			] : []),
+			...(isLocked && agent.parentId && workTreeGov ? [
+				toAction({
+					id: 'ade.openOwningEngineering',
+					label: localize('adeOpenOwningEngineeringMenu', "Open Engineering Canvas"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, workTreeGov.id),
+				}),
+				new Separator(),
+			] : []),
+			...(nextLower.canSpawnSubSession && !isLocked ? [toAction({
 				id: 'ade.newSubSession',
 				label: formatNewSubSessionLabel(nextLower.childRank),
 				run: () => this.commandService.executeCommand('workbench.action.ade.newSubSession', agentId),
@@ -907,35 +1039,37 @@ export class AdeProjectsView extends ViewPane {
 						await this.revealAgent(agent.parentId!);
 					},
 				}),
-				toAction({
+				...(!isLocked ? [toAction({
 					id: 'ade.promoteToRoot',
 					label: localize('adeMoveToTopLevel', "Move to Top-Level Session"),
 					run: () => {
 						this.projects.reparentAgent(agentId, undefined);
 					},
-				}),
+				})] : []),
 			] : []),
-			...(!agent.session ? [toAction({
+			...(!agent.session && !agent.preferredEngineId ? [toAction({
 				id: 'ade.connect',
 				label: localize('connectAgent', "Connect Agent Conversation..."),
 				run: () => this.commandService.executeCommand('workbench.action.ade.connectAgent', agentId),
 			})] : []),
-			new Separator(),
-			...(getAdeRoleRankLevel(agent.role, hasSubs) >= 2 ? [toAction({
-				id: 'ade.recruitSubordinate',
-				label: localize('adeRecruitSubordinate', "Recruit Subordinate Agent..."),
-				run: () => this.commandService.executeCommand('workbench.action.ade.addAgent', agentId),
-			})] : []),
-			toAction({
-				id: 'ade.setRole',
-				label: localize('adeSetAgentRole', "Set Agent Role..."),
-				run: () => this.commandService.executeCommand('workbench.action.ade.setRole', agentId),
-			}),
-			toAction({
-				id: 'ade.reparentAgent',
-				label: localize('adeChangeSupervisor', "Change Supervisor..."),
-				run: () => this.commandService.executeCommand('workbench.action.ade.reparentAgent', agentId),
-			}),
+			...(!isLocked ? [
+				new Separator(),
+				...(getAdeRoleRankLevel(agent.role, hasSubs) >= 2 ? [toAction({
+					id: 'ade.recruitSubordinate',
+					label: localize('adeRecruitSubordinate', "Recruit Subordinate Agent..."),
+					run: () => this.commandService.executeCommand('workbench.action.ade.addAgent', agentId),
+				})] : []),
+				toAction({
+					id: 'ade.setRole',
+					label: localize('adeSetAgentRole', "Set Agent Role..."),
+					run: () => this.commandService.executeCommand('workbench.action.ade.setRole', agentId),
+				}),
+				toAction({
+					id: 'ade.reparentAgent',
+					label: localize('adeChangeSupervisor', "Change Supervisor..."),
+					run: () => this.commandService.executeCommand('workbench.action.ade.reparentAgent', agentId),
+				}),
+			] : []),
 			...(orchestrated ? [toAction({
 				id: 'ade.copyRolePrompt',
 				label: localize('adeCopyRolePromptMenu', "Copy Role & Subordinate API Prompt"),
@@ -954,17 +1088,19 @@ export class AdeProjectsView extends ViewPane {
 					: localize('adeArchiveConversation', "Archive Conversation"),
 				run: () => this.commandService.executeCommand(isArchived ? 'workbench.action.ade.restoreAgent' : 'workbench.action.ade.archiveAgent', agentId),
 			})] : []),
-			new Separator(),
-			toAction({
-				id: 'ade.detach',
-				label: localize('adeRemoveFromSidebar', "Remove from Sidebar"),
-				run: () => this.commandService.executeCommand('workbench.action.ade.removeAgent', agentId),
-			}),
-			toAction({
-				id: 'ade.deletePermanently',
-				label: localize('adeDeletePermanently', "Delete Permanently..."),
-				run: () => this.commandService.executeCommand('workbench.action.ade.deleteAgentPermanently', agentId),
-			}),
+			...(!isLocked || !agent.parentId ? [
+				new Separator(),
+				toAction({
+					id: 'ade.detach',
+					label: localize('adeRemoveFromSidebar', "Remove from Sidebar"),
+					run: () => this.commandService.executeCommand('workbench.action.ade.removeAgent', agentId),
+				}),
+				toAction({
+					id: 'ade.deletePermanently',
+					label: localize('adeDeletePermanently', "Delete Permanently..."),
+					run: () => this.commandService.executeCommand('workbench.action.ade.deleteAgentPermanently', agentId),
+				}),
+			] : []),
 		];
 	}
 
@@ -1046,6 +1182,12 @@ export class AdeProjectsView extends ViewPane {
 			if (child !== this.emptyStateMessage) {
 				child.remove();
 			}
+		}
+
+		if (this.sidebarMode === 'inbox') {
+			this.emptyStateHost.hidden = true;
+			this.treeHost.hidden = true;
+			return;
 		}
 
 		if (roots.length > 0) {
@@ -1198,11 +1340,16 @@ export class AdeProjectsView extends ViewPane {
 	}
 
 	private layoutTree(): void {
-		if (!this.tree || this.lastHeight <= 0) {
+		if (this.lastHeight <= 0) {
 			return;
 		}
 		const headerHeight = (this.secretaryBar?.offsetHeight ?? 0) + (this.controlsBar?.offsetHeight ?? 0);
-		this.tree.layout(Math.max(0, this.lastHeight - headerHeight), this.lastWidth);
+		const bodyH = Math.max(0, this.lastHeight - headerHeight);
+		if (this.sidebarMode === 'inbox') {
+			this.inboxPanel?.layout(bodyH);
+			return;
+		}
+		this.tree?.layout(bodyH, this.lastWidth);
 	}
 
 	protected override layoutBody(height: number, width: number): void {

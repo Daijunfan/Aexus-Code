@@ -66,6 +66,11 @@ export interface IAdeSessionSummary {
 	readonly unread: boolean;
 	readonly archived: boolean;
 	readonly childrenIds: readonly string[];
+	readonly treeType?: 'engineering' | 'research';
+	readonly treeGovernorId?: string;
+	readonly treeSegmentId?: string;
+	readonly treeNodeId?: string;
+	readonly lockedByWorkTree?: boolean;
 }
 
 export interface IAdeSessionTreeNode {
@@ -92,8 +97,9 @@ export interface IAdeControlStatus {
 	readonly selectedProject?: { readonly name: string; readonly path: string; readonly uri: string };
 	readonly selectedSession?: IAdeSessionSummary;
 	readonly activeEditor?: {
-		readonly kind: 'secretary' | 'session' | 'file' | 'other';
+		readonly kind: 'secretary' | 'session' | 'engineering' | 'file' | 'other';
 		readonly agentId?: string;
+		readonly governorSessionId?: string;
 		readonly label: string;
 		readonly resource?: string;
 		readonly role?: AdeAgentRole;

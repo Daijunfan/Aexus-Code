@@ -33,6 +33,8 @@
 					{ "name": "status", "description": "%cmdStatus%" },
 					{ "name": "projects", "description": "%cmdProjects%" },
 					{ "name": "sessions", "description": "%cmdSessions%" },
+					{ "name": "engineering", "description": "%cmdEngineering%" },
+					{ "name": "inbox", "description": "%cmdInbox%" },
 					{ "name": "focus", "description": "%cmdFocus%" },
 					{ "name": "home", "description": "%cmdHome%" },
 					{ "name": "new", "description": "%cmdNew%" },
@@ -214,6 +216,13 @@
 						"pi": { "type": "string" }
 					},
 					"additionalProperties": false
+				},
+				"aexus.ade.engineering.watchdogTimeoutMinutes": {
+					"type": "number",
+					"default": 10,
+					"minimum": 0.1,
+					"scope": "window",
+					"description": "%watchdogTimeoutMinutesDescription%"
 				}
 			}
 		}

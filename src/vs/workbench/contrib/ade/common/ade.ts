@@ -6,6 +6,7 @@
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { AdeAgentRole, AdeSessionRank } from '../../../../platform/ade/common/adeControl.js';
+import { AdeThinkingLevel, AdeWorkTreeType } from '../../../../platform/ade/common/adeEngineering.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
@@ -60,9 +61,11 @@ export const ADE_INSPECTOR_CONTAINER_ID = WorkbenchModeViewContainers.adeInspect
 export const ADE_CHANGES_VIEW_ID = 'workbench.ade.changes';
 export const ADE_FILES_VIEW_ID = 'workbench.ade.files';
 export const ADE_SESSION_SCHEME = 'aexus-agent';
+export const ADE_ENGINEERING_SCHEME = 'aexus-engineering';
 export const ADE_SECRETARY_ID = '__secretary__';
 export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProjectFolder';
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
+export const ADE_OPEN_ENGINEERING_COMMAND_ID = 'workbench.action.ade.openEngineering';
 
 export interface IAdeProject {
 	readonly uri: URI;
@@ -86,6 +89,46 @@ export interface IAdeAgent {
 	readonly status?: AdeAgentStatus;
 	readonly draft: string;
 	readonly session?: IAdeSession;
+	readonly treeType?: AdeWorkTreeType;
+	readonly treeGovernorId?: string;
+	readonly treeSegmentId?: string;
+	readonly treeNodeId?: string;
+	readonly preferredEngineId?: string;
+	readonly preferredModel?: string;
+	readonly preferredThinking?: AdeThinkingLevel;
+	readonly workingDirectoryOverride?: string;
+}
+
+export interface IAdeWorkTreeTaskSpec {
+	readonly nodeId: string;
+	readonly title: string;
+	readonly employeeEngineId: string;
+	readonly employeeModel?: string;
+	readonly employeeThinking?: AdeThinkingLevel;
+	readonly workerEngineId: string;
+	readonly workerModel?: string;
+	readonly workerThinking?: AdeThinkingLevel;
+	readonly existingEmployeeAgentId?: string;
+	readonly existingWorkerAgentId?: string;
+	readonly workingDirectoryOverride?: string;
+}
+
+export interface IAdeWorkTreeSegmentSpec {
+	readonly segmentId: string;
+	readonly label: string;
+	readonly managerEngineId: string;
+	readonly managerModel?: string;
+	readonly managerThinking?: AdeThinkingLevel;
+	readonly existingManagerAgentId?: string;
+	readonly workingDirectoryOverride?: string;
+	readonly tasks: readonly IAdeWorkTreeTaskSpec[];
+}
+
+export interface IAdeWorkTreeSyncResult {
+	readonly managerAgentsBySegment: Readonly<Record<string, string>>;
+	readonly employeeAgentsByNode: Readonly<Record<string, string>>;
+	readonly workerAgentsByNode: Readonly<Record<string, string>>;
+	readonly removedAgents: readonly IAdeAgent[];
 }
 
 export interface IAdeSecretary {
@@ -138,6 +181,16 @@ export interface IAdeProjectsService {
 	hasSubordinates(id: string): boolean;
 	isOrchestrated(agentOrId: IAdeAgent | string): boolean;
 	isArchived(id: string): boolean;
+	isLockedByWorkTree?(id: string): boolean;
+	getWorkTreeGovernor?(id: string): IAdeAgent | undefined;
+	setAgentWorkTreeTag?(governorId: string, treeType: AdeWorkTreeType | undefined): void;
+	syncWorkTreeHierarchy?(governorId: string, treeType: AdeWorkTreeType, segments: readonly IAdeWorkTreeSegmentSpec[]): IAdeWorkTreeSyncResult;
+	updateAgentEnginePreferences?(id: string, prefs: {
+		readonly preferredEngineId?: string;
+		readonly preferredModel?: string;
+		readonly preferredThinking?: AdeThinkingLevel;
+		readonly workingDirectoryOverride?: string;
+	}): void;
 
 	addProject(uri: URI, label?: string): IAdeAgent;
 	addAgent(parentId: string, label: string, role?: AdeAgentRole): IAdeAgent;
@@ -172,6 +225,7 @@ export interface IAdeEditorService {
 	getAgentIdForEditor?(editor: EditorInput | undefined): string | undefined;
 	isSessionActive(resource: URI): boolean;
 	openAgent(id: string, options?: { side?: boolean }): Promise<void>;
+	openEngineering?(governorId: string, options?: { side?: boolean }): Promise<void>;
 	openSecretary(options?: { side?: boolean }): Promise<void>;
 	closeAgents(agents: readonly IAdeAgent[]): Promise<void>;
 	openFile(resource: URI, projectUriOrAgentId?: URI | string, options?: IEditorOptions): Promise<void>;

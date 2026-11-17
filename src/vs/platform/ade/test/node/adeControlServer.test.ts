@@ -428,4 +428,85 @@ suite('AdeControlServer', () => {
 			{ action: 'secretary.history', params: { limit: 5 } },
 		]);
 	});
+
+	(isWindows ? test.skip : test)('executes aexus-ade engineering and inbox CLI subcommands end-to-end with blueprint file reading and AEXUS_ADE_CALLER forwarding', async () => {
+		const dispatched: IAdeControlDispatchRequest[] = [];
+		const server = store.add(new AdeControlServer(async req => {
+			dispatched.push(req);
+			return { action: req.action, params: req.params };
+		}, { controlDir: tempDir }));
+		await server.whenReady();
+
+		const sampleBpPath = path.join(tempDir, 'blueprint.md');
+		fs.writeFileSync(sampleBpPath, '# Sample Blueprint\n', 'utf8');
+
+		const repoRoot = path.resolve(FileAccess.asFileUri('').fsPath, '..');
+		const cliBin = path.join(repoRoot, 'extensions', 'aexus-agents', 'bin', 'aexus-ade');
+		const runCli = (args: string[], extraEnv?: Record<string, string>) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+			const child = spawn(cliBin, args, {
+				env: { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath, ...(extraEnv ?? {}) },
+				stdio: ['ignore', 'pipe', 'pipe'],
+			});
+			let stdout = '';
+			let stderr = '';
+			child.stdout.setEncoding('utf8');
+			child.stderr.setEncoding('utf8');
+			child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+			child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+			child.once('error', reject);
+			child.once('close', status => resolve({ status, stdout, stderr }));
+		});
+
+		for (const [args, env] of [
+			[['--json', 'engineering', 'init', '--governor', 'gov-1', '--on-children', 'relocate'], undefined],
+			[['--json', 'engineering', 'list', '--tree-type', 'engineering'], undefined],
+			[['--json', 'engineering', 'open', '--governor', 'gov-1'], undefined],
+			[['--json', 'engineering', 'blueprint', 'get', '--governor', 'gov-1'], undefined],
+			[['--json', 'engineering', 'blueprint', 'apply', '--governor', 'gov-1', '--file', sampleBpPath, '--force-stop-running'], undefined],
+			[['--json', 'engineering', 'run', '--governor', 'gov-1'], { AEXUS_ADE_CALLER: 'secretary' }],
+			[['--json', 'engineering', 'pause', '--governor', 'gov-1'], undefined],
+			[['--json', 'engineering', 'resume', '--governor', 'gov-1'], { AEXUS_ADE_CALLER: 'secretary' }],
+			[['--json', 'engineering', 'stop', '--governor', 'gov-1'], undefined],
+			[['--json', 'engineering', 'status', '--governor', 'gov-1', '--node', 'N1'], undefined],
+			[['--json', 'engineering', 'review', '--governor', 'gov-1', '--node', 'N1', '--role', 'employee', '--verdict', 'pass', '--report', 'Clean diff'], { AEXUS_ADE_CALLER: 'employee' }],
+			[['--json', 'engineering', 'gate', '--governor', 'gov-1', '--node', 'U1', '--verdict', 'rollback', '--target-node', 'N1', '--feedback', 'Fix schema'], undefined],
+			[['--json', 'engineering', 'watchdog-action', '--governor', 'gov-1', '--node', 'N1', '--action', 'kill-restart'], { AEXUS_ADE_CALLER: 'manager' }],
+			[['--json', 'inbox', 'list', '--unread-only'], undefined],
+			[['--json', 'inbox', 'post', '--from', 'gov-1', '--title', 'Need Decision', '--message', 'Approve migration?'], { AEXUS_ADE_CALLER: 'governor' }],
+			[['--json', 'inbox', 'resolve', 'inb-1', '--note', 'Approved'], undefined],
+			[['--json', 'inbox', 'mark-read', 'inb-1'], undefined],
+		] as const) {
+			const res = await runCli([...args], env);
+			assert.strictEqual(res.status, 0, res.stderr);
+		}
+
+		assert.strictEqual(dispatched.length, 17);
+		assert.deepStrictEqual(dispatched[0], {
+			action: 'engineering.init',
+			params: { governor: 'gov-1', onChildren: 'relocate' },
+		});
+		assert.strictEqual(dispatched[4].action, 'engineering.blueprint.apply');
+		assert.strictEqual(dispatched[4].params?.text, '# Sample Blueprint\n');
+		assert.strictEqual(dispatched[4].params?.forceStopRunning, true);
+		assert.deepStrictEqual(dispatched[5], {
+			action: 'engineering.run',
+			params: { governor: 'gov-1', caller: 'secretary' },
+		});
+		assert.deepStrictEqual(dispatched[10], {
+			action: 'engineering.review',
+			params: { governor: 'gov-1', node: 'N1', role: 'employee', verdict: 'pass', report: 'Clean diff', caller: 'employee' },
+		});
+		assert.deepStrictEqual(dispatched[11], {
+			action: 'engineering.gate',
+			params: { governor: 'gov-1', node: 'U1', verdict: 'rollback', targetNode: 'N1', feedback: 'Fix schema' },
+		});
+		assert.deepStrictEqual(dispatched[12], {
+			action: 'engineering.watchdogAction',
+			params: { governor: 'gov-1', node: 'N1', watchdogAction: 'kill-restart', caller: 'manager' },
+		});
+		assert.deepStrictEqual(dispatched[14], {
+			action: 'inbox.post',
+			params: { from: 'gov-1', title: 'Need Decision', message: 'Approve migration?', caller: 'governor' },
+		});
+	});
 });

@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
-import { capture, EngineRuntime, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { capture, EngineRuntime, EngineSendOptions, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 
@@ -359,9 +359,21 @@ export abstract class AcpRuntime implements EngineRuntime {
 		client.write({ jsonrpc: '2.0', id: packet.id, error: { code: -32601, message: vscode.l10n.t('This engine request is not supported: {0}', packet.method ?? '') } });
 	}
 
-	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+	async killSession(session: NativeSession): Promise<void> {
+		if (this.client && !this.client.isClosed) {
+			try {
+				this.client.write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } });
+			} catch { /* ignore */ }
+			await this.closeSession(session.id);
+		}
+	}
+
+	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		const client = await this.ensureClient();
 		await this.ensureSessionOpen(client, session);
+		if (options?.model) {
+			await client.request('session/set_model', { sessionId: session.id, modelId: options.model }).catch(() => { });
+		}
 		this.knownSessions.set(session.id, session);
 		const listener = client.onPacket(packet => {
 			const params = packet.params ?? {};

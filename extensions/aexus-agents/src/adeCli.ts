@@ -115,6 +115,25 @@ Commands:
   secretary stop
   secretary draft [<text> | --clear]
   secretary mark-read
+
+  engineering init --governor <id> [--on-children <relocate|delete> [--target <id>]] [--tree-type <engineering|research>]
+  engineering list [--project <path>] [--tree-type <engineering|research>]
+  engineering open --governor <id> [--side]
+  engineering blueprint get --governor <id>
+  engineering blueprint apply --governor <id> (--file <path> | --text <markdown>) [--force-stop-running]
+  engineering run --governor <id>
+  engineering pause --governor <id>
+  engineering resume --governor <id>
+  engineering stop --governor <id>
+  engineering status --governor <id> [--node <nodeId>]
+  engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]
+  engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]
+  engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]
+
+  inbox list [--unread-only] [--governor <id>]
+  inbox post --from <governorId> --message <text> [--title <title>] [--node <nodeId>]
+  inbox resolve --id <msgId> [--resolution <text>]
+  inbox mark-read [--id <msgId> | --all]
 `;
 
 class CliUsageError extends Error {
@@ -1046,6 +1065,408 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		throw new CliUsageError(`Unknown secretary subcommand: ${sub}`);
 	}
 
+	if (group === 'engineering') {
+		const sub = tail[0] ?? 'list';
+		const args = tail.slice(1);
+
+		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[]): string => {
+			const cur = list[iRef.i];
+			const eqIdx = cur.indexOf('=');
+			if (eqIdx >= 0) {
+				const val = cur.slice(eqIdx + 1);
+				if (!val) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+				return val;
+			}
+			const next = list[++iRef.i];
+			if (next === undefined) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+			return next;
+		};
+
+		if (sub === 'init') {
+			let governor: string | undefined;
+			let onChildren: string | undefined;
+			let targetParentId: string | undefined;
+			let treeType: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--on-children' || arg.startsWith('--on-children=')) {
+					onChildren = takeOptionVal(ref, '--on-children', args).toLowerCase();
+					if (onChildren !== 'relocate' && onChildren !== 'delete') {
+						throw new CliUsageError('Option --on-children must be relocate or delete.');
+					}
+				} else if (arg === '--target' || arg.startsWith('--target=')) {
+					targetParentId = takeOptionVal(ref, '--target', args);
+				} else if (arg === '--tree-type' || arg.startsWith('--tree-type=')) {
+					treeType = takeOptionVal(ref, '--tree-type', args).toLowerCase();
+				} else if (!arg.startsWith('-') && !governor) {
+					governor = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for engineering init: ${arg}`);
+				}
+			}
+			if (!governor) {
+				throw new CliUsageError('Usage: aexus-ade engineering init --governor <id> [--on-children <relocate|delete> --target <id>]');
+			}
+			const params: Record<string, unknown> = { governor };
+			if (onChildren) { params.onChildren = onChildren; }
+			if (targetParentId) { params.relocateTargetParentId = targetParentId; }
+			if (treeType) { params.treeType = treeType; }
+			return { help: false, json, windowId, action: 'engineering.init', params };
+		}
+
+		if (sub === 'list') {
+			let project: string | undefined;
+			let treeType: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--project' || arg.startsWith('--project=')) {
+					project = resolvePathIfRelative(takeOptionVal(ref, '--project', args), cwd);
+				} else if (arg === '--tree-type' || arg.startsWith('--tree-type=')) {
+					treeType = takeOptionVal(ref, '--tree-type', args).toLowerCase();
+				} else {
+					throw new CliUsageError(`Unknown option for engineering list: ${arg}`);
+				}
+			}
+			const params: Record<string, unknown> = {};
+			if (project) { params.project = project; }
+			if (treeType) { params.treeType = treeType; }
+			return { help: false, json, windowId, action: 'engineering.list', params };
+		}
+
+		if (sub === 'open') {
+			let governor: string | undefined;
+			let side = false;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--side') {
+					side = true;
+				} else if (!arg.startsWith('-') && !governor) {
+					governor = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for engineering open: ${arg}`);
+				}
+			}
+			if (!governor) {
+				throw new CliUsageError('Usage: aexus-ade engineering open --governor <id> [--side]');
+			}
+			return { help: false, json, windowId, action: 'engineering.open', params: side ? { governor, side: true } : { governor } };
+		}
+
+		if (sub === 'blueprint') {
+			const bpSub = args[0];
+			const bpArgs = args.slice(1);
+			if (bpSub === 'get') {
+				let governor: string | undefined;
+				for (const ref = { i: 0 }; ref.i < bpArgs.length; ref.i++) {
+					const arg = bpArgs[ref.i];
+					if (arg === '--governor' || arg.startsWith('--governor=')) {
+						governor = takeOptionVal(ref, '--governor', bpArgs);
+					} else if (!arg.startsWith('-') && !governor) {
+						governor = arg;
+					} else {
+						throw new CliUsageError(`Unknown option for engineering blueprint get: ${arg}`);
+					}
+				}
+				if (!governor) {
+					throw new CliUsageError('Usage: aexus-ade engineering blueprint get --governor <id>');
+				}
+				return { help: false, json, windowId, action: 'engineering.blueprint.get', params: { governor } };
+			}
+			if (bpSub === 'apply') {
+				let governor: string | undefined;
+				let file: string | undefined;
+				let text: string | undefined;
+				let forceStopRunning = false;
+				for (const ref = { i: 0 }; ref.i < bpArgs.length; ref.i++) {
+					const arg = bpArgs[ref.i];
+					if (arg === '--governor' || arg.startsWith('--governor=')) {
+						governor = takeOptionVal(ref, '--governor', bpArgs);
+					} else if (arg === '--file' || arg.startsWith('--file=')) {
+						file = resolvePathIfRelative(takeOptionVal(ref, '--file', bpArgs), cwd);
+					} else if (arg === '--text' || arg.startsWith('--text=')) {
+						text = takeOptionVal(ref, '--text', bpArgs);
+					} else if (arg === '--force-stop-running') {
+						forceStopRunning = true;
+					} else {
+						throw new CliUsageError(`Unknown option for engineering blueprint apply: ${arg}`);
+					}
+				}
+				if (!governor || (!file && text === undefined)) {
+					throw new CliUsageError('Usage: aexus-ade engineering blueprint apply --governor <id> (--file <path> | --text <markdown>) [--force-stop-running]');
+				}
+				const params: Record<string, unknown> = { governor };
+				if (file) { params.file = file; }
+				if (text !== undefined) { params.text = text; }
+				if (forceStopRunning) { params.forceStopRunning = true; }
+				return { help: false, json, windowId, action: 'engineering.blueprint.apply', params };
+			}
+			throw new CliUsageError('Usage: aexus-ade engineering blueprint <get | apply> ...');
+		}
+
+		if (sub === 'run' || sub === 'pause' || sub === 'resume' || sub === 'stop' || sub === 'remove') {
+			let governor: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (!arg.startsWith('-') && !governor) {
+					governor = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for engineering ${sub}: ${arg}`);
+				}
+			}
+			if (!governor) {
+				throw new CliUsageError(`Usage: aexus-ade engineering ${sub} --governor <id>`);
+			}
+			return { help: false, json, windowId, action: `engineering.${sub}`, params: { governor } };
+		}
+
+		if (sub === 'status') {
+			let governor: string | undefined;
+			let node: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--node' || arg.startsWith('--node=')) {
+					node = takeOptionVal(ref, '--node', args);
+				} else if (!arg.startsWith('-') && !governor) {
+					governor = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for engineering status: ${arg}`);
+				}
+			}
+			if (!governor) {
+				throw new CliUsageError('Usage: aexus-ade engineering status --governor <id> [--node <nodeId>]');
+			}
+			const params: Record<string, unknown> = { governor };
+			if (node) { params.node = node; }
+			return { help: false, json, windowId, action: 'engineering.status', params };
+		}
+
+		if (sub === 'review') {
+			let governor: string | undefined;
+			let node: string | undefined;
+			let role: string | undefined;
+			let verdict: string | undefined;
+			let report: string | undefined;
+			let feedback: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--node' || arg.startsWith('--node=')) {
+					node = takeOptionVal(ref, '--node', args);
+				} else if (arg === '--role' || arg.startsWith('--role=')) {
+					role = takeOptionVal(ref, '--role', args).toLowerCase();
+					if (role !== 'employee' && role !== 'manager') {
+						throw new CliUsageError('Option --role must be employee or manager.');
+					}
+				} else if (arg === '--verdict' || arg.startsWith('--verdict=')) {
+					verdict = takeOptionVal(ref, '--verdict', args).toLowerCase();
+					if (verdict !== 'pass' && verdict !== 'reject' && verdict !== 'guidance') {
+						throw new CliUsageError('Option --verdict must be pass, reject, or guidance.');
+					}
+				} else if (arg === '--report' || arg.startsWith('--report=')) {
+					report = takeOptionVal(ref, '--report', args);
+				} else if (arg === '--feedback' || arg.startsWith('--feedback=')) {
+					feedback = takeOptionVal(ref, '--feedback', args);
+				} else {
+					throw new CliUsageError(`Unknown option for engineering review: ${arg}`);
+				}
+			}
+			if (!governor || !node || !role || !verdict) {
+				throw new CliUsageError('Usage: aexus-ade engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]');
+			}
+			const params: Record<string, unknown> = { governor, node, role, verdict };
+			if (report !== undefined) { params.report = report; }
+			if (feedback !== undefined) { params.feedback = feedback; }
+			return { help: false, json, windowId, action: 'engineering.review', params };
+		}
+
+		if (sub === 'gate') {
+			let governor: string | undefined;
+			let node: string | undefined;
+			let verdict: string | undefined;
+			let targetNode: string | undefined;
+			let feedback: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--node' || arg.startsWith('--node=')) {
+					node = takeOptionVal(ref, '--node', args);
+				} else if (arg === '--verdict' || arg.startsWith('--verdict=')) {
+					verdict = takeOptionVal(ref, '--verdict', args).toLowerCase();
+					if (verdict !== 'pass' && verdict !== 'rollback') {
+						throw new CliUsageError('Option --verdict must be pass or rollback.');
+					}
+				} else if (arg === '--target-node' || arg.startsWith('--target-node=')) {
+					targetNode = takeOptionVal(ref, '--target-node', args);
+				} else if (arg === '--feedback' || arg.startsWith('--feedback=')) {
+					feedback = takeOptionVal(ref, '--feedback', args);
+				} else {
+					throw new CliUsageError(`Unknown option for engineering gate: ${arg}`);
+				}
+			}
+			if (!governor || !node || !verdict) {
+				throw new CliUsageError('Usage: aexus-ade engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]');
+			}
+			const params: Record<string, unknown> = { governor, node, verdict };
+			if (targetNode) { params.targetNode = targetNode; }
+			if (feedback !== undefined) { params.feedback = feedback; }
+			return { help: false, json, windowId, action: 'engineering.gate', params };
+		}
+
+		if (sub === 'watchdog-action') {
+			let governor: string | undefined;
+			let node: string | undefined;
+			let watchdogAction: string | undefined;
+			let message: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--node' || arg.startsWith('--node=')) {
+					node = takeOptionVal(ref, '--node', args);
+				} else if (arg === '--action' || arg.startsWith('--action=')) {
+					watchdogAction = takeOptionVal(ref, '--action', args).toLowerCase();
+					if (watchdogAction !== 'remind' && watchdogAction !== 'kill-restart') {
+						throw new CliUsageError('Option --action must be remind or kill-restart.');
+					}
+				} else if (arg === '--message' || arg.startsWith('--message=')) {
+					message = takeOptionVal(ref, '--message', args);
+				} else {
+					throw new CliUsageError(`Unknown option for engineering watchdog-action: ${arg}`);
+				}
+			}
+			if (!governor || !node || !watchdogAction) {
+				throw new CliUsageError('Usage: aexus-ade engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]');
+			}
+			const params: Record<string, unknown> = { governor, node, watchdogAction };
+			if (message !== undefined) { params.message = message; }
+			return { help: false, json, windowId, action: 'engineering.watchdogAction', params };
+		}
+
+		throw new CliUsageError(`Unknown engineering subcommand: ${sub}`);
+	}
+
+	if (group === 'inbox') {
+		const sub = tail[0] ?? 'list';
+		const args = tail.slice(1);
+
+		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[]): string => {
+			const cur = list[iRef.i];
+			const eqIdx = cur.indexOf('=');
+			if (eqIdx >= 0) {
+				const val = cur.slice(eqIdx + 1);
+				if (!val) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+				return val;
+			}
+			const next = list[++iRef.i];
+			if (next === undefined) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+			return next;
+		};
+
+		if (sub === 'list') {
+			let unreadOnly = false;
+			let governor: string | undefined;
+			let includeResolved = true;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--unread-only' || arg === '--unread') {
+					unreadOnly = true;
+				} else if (arg === '--active-only') {
+					includeResolved = false;
+				} else if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else {
+					throw new CliUsageError(`Unknown option for inbox list: ${arg}`);
+				}
+			}
+			const params: Record<string, unknown> = {};
+			if (unreadOnly) { params.unreadOnly = true; }
+			if (!includeResolved) { params.includeResolved = false; }
+			if (governor) { params.governor = governor; }
+			return { help: false, json, windowId, action: 'inbox.list', params };
+		}
+
+		if (sub === 'post') {
+			let fromGov: string | undefined;
+			let message: string | undefined;
+			let title: string | undefined;
+			let node: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--from' || arg.startsWith('--from=') || arg === '--governor' || arg.startsWith('--governor=')) {
+					fromGov = takeOptionVal(ref, '--from', args);
+				} else if (arg === '--message' || arg.startsWith('--message=')) {
+					message = takeOptionVal(ref, '--message', args);
+				} else if (arg === '--title' || arg.startsWith('--title=')) {
+					title = takeOptionVal(ref, '--title', args);
+				} else if (arg === '--node' || arg.startsWith('--node=')) {
+					node = takeOptionVal(ref, '--node', args);
+				} else {
+					throw new CliUsageError(`Unknown option for inbox post: ${arg}`);
+				}
+			}
+			if (!fromGov || !message) {
+				throw new CliUsageError('Usage: aexus-ade inbox post --from <governorId> --message <text> [--title <title>]');
+			}
+			const params: Record<string, unknown> = { from: fromGov, message };
+			if (title) { params.title = title; }
+			if (node) { params.node = node; }
+			return { help: false, json, windowId, action: 'inbox.post', params };
+		}
+
+		if (sub === 'resolve') {
+			let id: string | undefined;
+			let resolution: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--id' || arg.startsWith('--id=')) {
+					id = takeOptionVal(ref, '--id', args);
+				} else if (arg === '--resolution' || arg.startsWith('--resolution=') || arg === '--note' || arg.startsWith('--note=')) {
+					resolution = takeOptionVal(ref, '--resolution', args);
+				} else if (!arg.startsWith('-') && !id) {
+					id = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for inbox resolve: ${arg}`);
+				}
+			}
+			if (!id) {
+				throw new CliUsageError('Usage: aexus-ade inbox resolve --id <msgId> [--resolution <text>]');
+			}
+			const params: Record<string, unknown> = { id };
+			if (resolution) { params.resolution = resolution; }
+			return { help: false, json, windowId, action: 'inbox.resolve', params };
+		}
+
+		if (sub === 'mark-read' || sub === 'markRead') {
+			let id: string | undefined;
+			let all = false;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--all') {
+					all = true;
+				} else if (arg === '--id' || arg.startsWith('--id=')) {
+					id = takeOptionVal(ref, '--id', args);
+				} else if (!arg.startsWith('-') && !id) {
+					id = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for inbox mark-read: ${arg}`);
+				}
+			}
+			return { help: false, json, windowId, action: 'inbox.markRead', params: all ? { all: true } : { id } };
+		}
+
+		throw new CliUsageError(`Unknown inbox subcommand: ${sub}`);
+	}
+
 	throw new CliUsageError(`Unknown command: ${group}`);
 }
 
@@ -1055,7 +1476,8 @@ async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: 
 	if (socketOverride && tokenOverride !== undefined) {
 		return { socketPath: socketOverride, token: tokenOverride };
 	}
-	const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME, ADE_CONTROL_META_NAME);
+	const adeHomeDir = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
+	const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(adeHomeDir, ADE_CONTROL_META_NAME);
 	let meta: Partial<IAdeControlConnectionMetadata> | undefined;
 	try {
 		meta = JSON.parse(await fs.readFile(controlFile, 'utf8')) as Partial<IAdeControlConnectionMetadata>;
@@ -1155,6 +1577,9 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 	try {
 		const { socketPath, token } = await resolveConnection(env);
 		const normalizedParams = await canonicalizeParamsPaths(parsed.params);
+		if (parsed.action === 'engineering.blueprint.apply' && normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.text === undefined) {
+			normalizedParams.text = await fs.readFile(normalizedParams.file, 'utf8');
+		}
 		const caller = env.AEXUS_ADE_CALLER?.trim();
 		const effectiveParams = caller
 			? { ...(normalizedParams ?? {}), caller }

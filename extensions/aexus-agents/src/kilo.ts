@@ -6,7 +6,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import * as vscode from 'vscode';
-import { capture, EngineRuntime, HistoryEntry, NativeSession, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { capture, EngineRuntime, EngineSendOptions, HistoryEntry, NativeSession, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
@@ -199,7 +199,13 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
-	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+	async killSession(session: NativeSession): Promise<void> {
+		if (this.endpoint) {
+			await this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST').catch(() => { });
+		}
+	}
+
+	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		this.knownSessions.set(session.id, session);
 		const abort = new AbortController();
 		const url = new URL('/event', await this.getEndpoint());
@@ -246,7 +252,20 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		});
 		try {
 			stream.progress(vscode.l10n.t('{0} is working…', this.name));
-			const result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: [{ type: 'text', text }] }, abort.signal);
+			const payloadBase: Record<string, unknown> = { parts: [{ type: 'text', text }] };
+			if (options?.thinking) {
+				payloadBase.variant = options.thinking;
+			}
+			let result: KiloMessage;
+			try {
+				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal);
+			} catch (err) {
+				if (options?.thinking && !abort.signal.aborted) {
+					result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: [{ type: 'text', text }] }, abort.signal);
+				} else {
+					throw err;
+				}
+			}
 			if (result.info.error) { throw new Error(result.info.error.data?.message || vscode.l10n.t('{0} could not complete this request.', this.name)); }
 			if (!streamed) { for (const part of result.parts) { if (part.type === 'text' && part.text) { stream.markdown(part.text); } } }
 		} finally {

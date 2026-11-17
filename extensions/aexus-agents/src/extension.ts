@@ -14,7 +14,7 @@ import { KiloRuntime, OpenCodeRuntime } from './kilo';
 import { installNativeRoleBridge } from './nativeRoleBridge';
 import { PiRuntime } from './pi';
 import { RoleSyncSnapshot } from './roleBridgeShared';
-import { EngineRuntime, findExecutable, HistoryEntry, NativeSession, setCliBinDirectory } from './runtime';
+import { EngineRuntime, EngineThinkingLevel, findExecutable, HistoryEntry, NativeSession, setCliBinDirectory } from './runtime';
 
 const roleBridge = installNativeRoleBridge({ distDir: __dirname });
 
@@ -134,6 +134,8 @@ function buildSlashHelpMarkdown(isSecretary: boolean, engineName: string, discov
 			'- `/status` — Show live ADE viewport, Focus state, Secretary engine, and session counts',
 			'- `/projects` — List all ADE projects and active session counts',
 			'- `/sessions` — List ADE sessions, ranks, engines, and hierarchy',
+			'- `/engineering` — List ADE Engineering DAG trees and progress',
+			'- `/inbox` — Show pending ADE Inbox user gates and Governor escalations',
 			'- `/focus <project>` — Focus a project in ADE',
 			'- `/home` — Exit Focus back to ADE Home overview',
 			'- `/new [engine] [title]` — Create and open a new ADE Agent session',
@@ -508,6 +510,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			return true;
 		}
 
+		if (cmd === 'engineering') {
+			const trees = await vscode.commands.executeCommand<{ governorSessionId: string; governorLabel: string; projectName: string; runStatus: string; completedNodes: number; totalNodes: number; managerCount: number }[]>('aexus.ade.control.execute', { action: 'engineering.list' });
+			if (!trees?.length) {
+				stream.markdown('No ADE Engineering trees initialized yet.');
+			} else {
+				stream.markdown([
+					`### ADE Engineering Trees (${trees.length})`,
+					...trees.map(t => `- **${t.governorLabel}** (\`${t.governorSessionId}\`) in **${t.projectName}** — status: \`${t.runStatus}\`, progress: **${t.completedNodes}/${t.totalNodes}** nodes (${t.managerCount} Manager segments)`),
+				].join('\n'));
+			}
+			return true;
+		}
+
+		if (cmd === 'inbox') {
+			const items = await vscode.commands.executeCommand<{ id: string; kind: string; title: string; message: string; unread: boolean; resolved: boolean }[]>('aexus.ade.control.execute', { action: 'inbox.list', params: { includeResolved: false } });
+			if (!items?.length) {
+				stream.markdown('ADE Inbox has no pending items.');
+			} else {
+				stream.markdown([
+					`### Pending ADE Inbox Items (${items.length})`,
+					...items.map(it => `- **[${it.kind.toUpperCase()}]** **${it.title}** (\`${it.id}\`${it.unread ? ' · *UNREAD*' : ''})\n  ${it.message.split('\n')[0]}`),
+				].join('\n'));
+			}
+			return true;
+		}
+
 		if (cmd === 'ide') {
 			stream.markdown('Secretary operates strictly within **ADE** and does not switch to or manipulate **IDE** mode.');
 			return true;
@@ -626,6 +654,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				await save();
 			}
 			let streamedMarkdown = '';
+			let lastHeartbeatSent = 0;
+			const emitHeartbeat = () => {
+				const now = Date.now();
+				if (now - lastHeartbeatSent >= 1500) {
+					lastHeartbeatSent = now;
+					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', sessionUri.toString(), now)).catch(() => undefined);
+				}
+			};
 			const proxyTarget: vscode.ChatResponseStream = Object.create(null);
 			const wrappedStream: vscode.ChatResponseStream = new Proxy(proxyTarget, {
 				get(_dummy, prop) {
@@ -634,8 +670,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 							const chunkText = typeof value === 'string' ? value : value.value;
 							if (chunkText) {
 								streamedMarkdown += chunkText;
+								emitHeartbeat();
 							}
 							stream.markdown(value);
+						};
+					}
+					if (prop === 'progress') {
+						return (value: string) => {
+							emitHeartbeat();
+							stream.progress(value);
 						};
 					}
 					const val = Reflect.get(stream, prop, stream);
@@ -646,7 +689,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (isSecretary) {
 				lastTurnErrors.delete(SECRETARY_TYPE);
 			}
-			await engine.send(record, prompt, wrappedStream, turnCancellation.token);
+			const snapEntry = roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+			const callerRole = isSecretary
+				? 'secretary'
+				: (!snapEntry?.isOrchestrated ? undefined : snapEntry.rank);
+			await engine.send(record, prompt, wrappedStream, turnCancellation.token, {
+				pureWorker: !isSecretary && !snapEntry?.isOrchestrated,
+				callerRole,
+			});
 			if (streamedMarkdown.trim()) {
 				lastTurnReplies.set(identity(record), streamedMarkdown.trim());
 				if (isSecretary) {
@@ -922,6 +972,180 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				return { stopped: true };
 			}
 			return { stopped: false };
+		}),
+		vscode.commands.registerCommand('aexus.agentEngines.killSession', async (uri: vscode.Uri) => {
+			const record = findCachedRecord(uri);
+			if (!record) {
+				return { killed: false };
+			}
+			activeTurns.get(identity(record))?.cancel();
+			activeTurns.delete(identity(record));
+			busy.delete(identity(record));
+			if (available.some(entry => entry.id === record.engine && entry.command)) {
+				await runtime(record.engine).killSession?.(record).catch(() => undefined);
+			}
+			controllers.get(record.engine)?.items.add(item(record));
+			return { killed: true };
+		}),
+		vscode.commands.registerCommand('aexus.agentEngines.listConfiguredModels', async (): Promise<Record<string, readonly { readonly id: string; readonly label: string }[]>> => {
+			const out: Record<string, readonly { readonly id: string; readonly label: string }[]> = {};
+			try {
+				const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+				const raw = JSON.parse(await fs.readFile(path.join(claudeConfigDir, 'settings.json'), 'utf8')) as {
+					model?: unknown;
+					modelPicker?: { options?: Array<{ model?: unknown; label?: unknown }> };
+				};
+				const listModels: { id: string; label: string }[] = [];
+				const seen = new Set<string>();
+				const add = (idRaw: unknown, labelRaw?: unknown) => {
+					const id = typeof idRaw === 'string' ? idRaw.trim() : '';
+					if (!id || seen.has(id)) { return; }
+					seen.add(id);
+					const label = typeof labelRaw === 'string' && labelRaw.trim() ? `${labelRaw.trim()} (${id})` : id;
+					listModels.push({ id, label });
+				};
+				if (Array.isArray(raw.modelPicker?.options)) {
+					for (const opt of raw.modelPicker.options) {
+						add(opt?.model, opt?.label);
+					}
+				}
+				add(raw.model);
+				if (listModels.length > 0) {
+					out['claude-code'] = listModels;
+				}
+			} catch { /* ignore */ }
+
+			try {
+				const codexToml = await fs.readFile(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8');
+				const match = codexToml.match(/^\s*model\s*=\s*["']([^"']+)["']/m);
+				if (match?.[1]?.trim()) {
+					out.codex = [{ id: match[1].trim(), label: match[1].trim() }];
+				}
+			} catch { /* ignore */ }
+
+			return out;
+		}),
+		vscode.commands.registerCommand('aexus.agentEngines.dispatchEngineeringTurn', async (
+			uri: vscode.Uri,
+			rawPrompt: string,
+			rawOptions?: {
+				agentId?: string;
+				model?: string;
+				thinking?: EngineThinkingLevel;
+				pureWorker?: boolean;
+				callerRole?: string;
+			},
+		) => {
+			const lookupToken = new vscode.CancellationTokenSource();
+			let record: RecordEntry;
+			try {
+				record = await getRecord(uri, lookupToken.token);
+			} finally {
+				lookupToken.dispose();
+			}
+
+			const recordKey = identity(record);
+			if (busy.has(recordKey)) {
+				activeTurns.get(recordKey)?.cancel();
+				await new Promise(resolve => setTimeout(resolve, 120));
+			}
+
+			const turnCancellation = new vscode.CancellationTokenSource();
+			busy.add(recordKey);
+			activeTurns.set(recordKey, turnCancellation);
+			controllers.get(record.engine)?.items.add(item(record));
+
+			const isPureWorker = Boolean(rawOptions?.pureWorker);
+			let finalPrompt = rawPrompt;
+			let callerRole: string | undefined;
+			if (!isPureWorker) {
+				const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
+					'aexus.ade.resolvePromptContext',
+					rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri,
+				)).catch(() => undefined);
+				if (injected?.trim()) {
+					finalPrompt = `${injected.trim()}\n\n${rawPrompt}`;
+				}
+				const snapEntry = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
+				callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
+			}
+
+			let streamedMarkdown = '';
+			let lastHeartbeatSent = 0;
+			const emitHeartbeat = () => {
+				const now = Date.now();
+				if (now - lastHeartbeatSent >= 1000) {
+					lastHeartbeatSent = now;
+					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', uri.toString(), now)).catch(() => undefined);
+				}
+			};
+
+			const headlessStreamTarget: vscode.ChatResponseStream = Object.create(null);
+			const headlessStream: vscode.ChatResponseStream = new Proxy(headlessStreamTarget, {
+				get(_dummy, prop) {
+					if (prop === 'markdown') {
+						return (value: string | vscode.MarkdownString) => {
+							const textChunk = typeof value === 'string' ? value : value.value;
+							if (textChunk) {
+								streamedMarkdown += textChunk;
+								emitHeartbeat();
+							}
+						};
+					}
+					if (prop === 'progress') {
+						return () => {
+							emitHeartbeat();
+						};
+					}
+					return () => { };
+				},
+			});
+
+			try {
+				const engine = runtime(record.engine);
+				const prevId = record.id;
+				if (engine.prepareSession) {
+					await engine.prepareSession(record);
+					if (record.id !== prevId) {
+						records.delete(key(record.engine, prevId));
+						records.set(key(record.engine, record.id), record);
+					}
+					await save();
+				}
+				lastTurnErrors.delete(recordKey);
+				await engine.send(record, finalPrompt, headlessStream, turnCancellation.token, {
+					model: rawOptions?.model,
+					thinking: rawOptions?.thinking,
+					pureWorker: isPureWorker,
+					callerRole,
+					automatedEngineering: true,
+				});
+				if (streamedMarkdown.trim()) {
+					lastTurnReplies.set(identity(record), streamedMarkdown.trim());
+				}
+				record.updated = Date.now();
+				return {
+					reply: streamedMarkdown.trim(),
+					nativeId: record.id,
+					stopped: turnCancellation.token.isCancellationRequested,
+				};
+			} catch (error) {
+				if (turnCancellation.token.isCancellationRequested) {
+					return { reply: streamedMarkdown.trim(), nativeId: record.id, stopped: true };
+				}
+				const errText = error instanceof Error ? error.message : String(error);
+				lastTurnErrors.set(identity(record), errText);
+				throw error;
+			} finally {
+				turnCancellation.dispose();
+				activeTurns.delete(recordKey);
+				busy.delete(recordKey);
+				if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
+					controllers.get(record.engine)?.items.add(item(record));
+				}
+				await publishHistory(record).catch(() => undefined);
+				await save();
+			}
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.delete', async (uri: vscode.Uri) => {
 			const token = new vscode.CancellationTokenSource();

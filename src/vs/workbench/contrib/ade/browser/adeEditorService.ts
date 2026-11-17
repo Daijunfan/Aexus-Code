@@ -22,6 +22,7 @@ import { ChatModeKind } from '../../chat/common/constants.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
+import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
@@ -390,7 +391,15 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 	}
 
 	async openAgent(id: string, options?: { side?: boolean }): Promise<void> {
-		const agent = this.projects.getAgent(id);
+		let agent = this.projects.getAgent(id);
+		if (agent && !agent.session && agent.preferredEngineId) {
+			const targetCwd = agent.workingDirectoryOverride ? URI.file(agent.workingDirectoryOverride) : agent.projectUri;
+			const materialized = await this.sessions.create(agent.preferredEngineId, targetCwd).catch(() => undefined);
+			if (materialized) {
+				this.projects.bindSession(agent.id, { engineId: materialized.engineId, resource: materialized.resource });
+				agent = this.projects.getAgent(id);
+			}
+		}
 		if (agent) {
 			this.projects.selectAgent(id);
 			this.projects.markRead(id);
@@ -417,6 +426,16 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		if (agent) {
 			await this.closeEditors(editor => editor instanceof AdeSessionEditorInput && (!editor.agentId || (Boolean(agent.session) && editor.agentId === id)));
 		}
+	}
+
+	async openEngineering(governorId: string, options?: { side?: boolean }): Promise<void> {
+		const gov = this.projects.getAgent(governorId);
+		if (gov) {
+			this.projects.selectProject(gov.projectUri);
+		}
+		const targetGroup = this.resolveTargetGroup(options?.side);
+		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, governorId);
+		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
 	}
 
 	async openSecretary(options?: { side?: boolean }): Promise<void> {
@@ -462,6 +481,9 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		const ids = new Set(agents.map(agent => agent.id));
 		const resources = new Set(agents.flatMap(agent => agent.session ? [agent.session.resource.toString()] : []));
 		await this.closeEditors(editor => {
+			if (editor instanceof AdeEngineeringEditorInput) {
+				return ids.has(editor.governorSessionId);
+			}
 			if (editor instanceof AdeSessionEditorInput || editor instanceof AdeExtensionWebviewEditorInput) {
 				return ids.has(editor.agentId);
 			}

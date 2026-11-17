@@ -14,7 +14,14 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import {
+	ADE_WATCHDOG_TIMEOUT_CONFIG_KEY,
+	DEFAULT_WATCHDOG_TIMEOUT_MINUTES,
+	IAdeEngineeringService,
+	IAdeInboxService,
+} from '../../../../platform/ade/common/adeEngineering.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
+import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -22,6 +29,7 @@ import { SyncDescriptor } from '../../../../platform/instantiation/common/descri
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
@@ -46,6 +54,7 @@ import {
 	ADE_DELETE_PROJECT_COMMAND_ID,
 	ADE_FILES_VIEW_ID,
 	ADE_INSPECTOR_CONTAINER_ID,
+	ADE_OPEN_ENGINEERING_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
 	ADE_REMOVE_PROJECT_COMMAND_ID,
 	AdeAgentRole,
@@ -58,6 +67,12 @@ import {
 	resolveAdeAgentRank,
 } from '../common/ade.js';
 import { AdeEditorService } from './adeEditorService.js';
+import {
+	AdeEngineeringEditorInput,
+	AdeEngineeringEditorPane,
+	AdeEngineeringEditorSerializer,
+} from './adeEngineeringEditorPane.js';
+import { AdeEngineeringWorkbenchService, AdeInboxService } from './adeEngineeringWorkbenchService.js';
 import { AdeChangesView, AdeFilesView } from './adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from './adeProjectManagement.js';
 import { AdeProjectsService } from './adeProjectsService.js';
@@ -75,6 +90,8 @@ import { AdeSessionsService, IAdeEngine, IAdeEngineSession, IAdeSessionsService 
 registerSingleton(IAdeProjectsService, AdeProjectsService, InstantiationType.Delayed);
 registerSingleton(IAdeEditorService, AdeEditorService, InstantiationType.Delayed);
 registerSingleton(IAdeSessionsService, AdeSessionsService, InstantiationType.Delayed);
+registerSingleton(IAdeInboxService, AdeInboxService, InstantiationType.Delayed);
+registerSingleton(IAdeEngineeringService, AdeEngineeringWorkbenchService, InstantiationType.Delayed);
 
 class AdeEditorContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.adeEditor';
@@ -82,6 +99,8 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 	constructor(
 		@IAdeEditorService editors: IAdeEditorService,
 		@IAdeProjectsService projects: IAdeProjectsService,
+		@IAdeEngineeringService engineering: IAdeEngineeringService,
+		@IAdeInboxService _inbox: IAdeInboxService,
 		@IChatSessionsService sessions: IChatSessionsService,
 		@IWorkspaceContextService contextService: IWorkspaceContextService,
 		@IUriIdentityService uriIdentity: IUriIdentityService,
@@ -89,6 +108,7 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
+		void engineering.whenReady();
 		this._register(sessions.onDidChangeSessionItems(delta => {
 			for (const item of delta.addedOrUpdated ?? []) {
 				const status = item.status === ChatSessionStatus.InProgress
@@ -206,6 +226,27 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	[new SyncDescriptor(AdeExtensionWebviewEditorInput)],
 );
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeExtensionWebviewEditorInput.ID, AdeExtensionWebviewEditorSerializer);
+
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(AdeEngineeringEditorPane, AdeEngineeringEditorPane.ID, localize('adeEngineeringEditorPaneTitle', "ADE Engineering Workflow")),
+	[new SyncDescriptor(AdeEngineeringEditorInput)],
+);
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeEngineeringEditorInput.ID, AdeEngineeringEditorSerializer);
+
+Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
+	id: 'aexusAdeEngineering',
+	title: localize('adeEngineeringConfigurationTitle', "ADE Engineering"),
+	type: 'object',
+	properties: {
+		[ADE_WATCHDOG_TIMEOUT_CONFIG_KEY]: {
+			type: 'number',
+			default: DEFAULT_WATCHDOG_TIMEOUT_MINUTES,
+			minimum: 1,
+			maximum: 240,
+			description: localize('adeWatchdogTimeoutMinutesDesc', "Minutes of Worker execution inactivity before the ADE Engineering Watchdog wakes the Segment Manager to remind or kill-restart the stalled Worker."),
+		},
+	},
+});
 
 const viewTitleMenu = { id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', ADE_PROJECTS_VIEW_ID), group: 'navigation' };
 
@@ -370,11 +411,16 @@ function sessionPicker(accessor: ServicesAccessor): (projectUri?: URI, mode?: 'c
 
 async function pickAgent(accessor: ServicesAccessor, id?: string): Promise<IAdeAgent | undefined> {
 	const projects = accessor.get(IAdeProjectsService);
-	const views = accessor.get(IViewsService);
+	if (id) {
+		const direct = projects.getAgent(id);
+		if (direct) {
+			return direct;
+		}
+	}
+	const views = tryGetOptionalService<IViewsService>(accessor, IViewsService);
 	const quickInput = accessor.get(IQuickInputService);
-	const view = views.getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
-	return (id && projects.getAgent(id))
-		|| view?.selectedAgent
+	const view = views?.getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
+	return view?.selectedAgent
 		|| (await quickInput.pick(projects.agents.map(agent => ({
 			label: agent.label,
 			description: agent.projectUri.fsPath,
@@ -685,6 +731,113 @@ registerAction2(class AddProjectAgentAction extends Action2 {
 	}
 });
 
+registerAction2(class OpenAdeEngineeringAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_OPEN_ENGINEERING_COMMAND_ID,
+			title: localize2('adeOpenEngineeringActionTitle', "Open ADE Engineering..."),
+			icon: Codicon.typeHierarchySub,
+			f1: true,
+			precondition: WorkbenchModeContext.isEqualTo('ade'),
+		});
+	}
+
+	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+		const projects = accessor.get(IAdeProjectsService);
+		const engineering = accessor.get(IAdeEngineeringService);
+		const dialogs = accessor.get(IDialogService);
+		const notifications = accessor.get(INotificationService);
+		const modes = accessor.get(IWorkbenchModeService);
+
+		const target = await pickAgent(accessor, governorId);
+		if (!target) {
+			return;
+		}
+		if (target.parentId) {
+			notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level Governor session can own an ADE Engineering workflow tree."));
+			return;
+		}
+		const rank = resolveAdeAgentRank(target, projects.hasSubordinates(target.id));
+		if (rank !== 'governor') {
+			notifications.warn(localize('adeEngMustBeGovernorRank', "Promote '{0}' to Governor first before enabling ADE Engineering.", target.label));
+			return;
+		}
+
+		await engineering.whenReady();
+		if (engineering.hasTree(target.id) || target.treeType === 'engineering') {
+			modes.setMode('ade');
+			await engineering.openEngineeringEditor(target.id);
+			return;
+		}
+
+		let onChildren: 'relocate' | 'delete' | undefined;
+		const existingSubs = projects.getDirectSubordinates(target.id);
+		if (existingSubs.length > 0) {
+			const promptRes = await dialogs.prompt<'relocate' | 'delete'>({
+				type: 'warning',
+				message: localize(
+					'adeEngExistingChildrenPromptTitle',
+					"Governor '{0}' already has {1} subordinate session(s). How should ADE Engineering handle them?",
+					target.label,
+					existingSubs.length,
+				),
+				detail: localize(
+					'adeEngExistingChildrenPromptDetail',
+					"An Engineering tree strictly manages its own DAG topology (Governor → Manager → Employee → Worker) and cannot mix with free-form subordinate sessions.",
+				),
+				buttons: [
+					{
+						label: localize('adeEngRelocateChildrenBtn', "&&Move Out to Independent Sessions"),
+						run: () => 'relocate',
+					},
+					{
+						label: localize('adeEngDeleteChildrenBtn', "&&Delete Existing Subordinates"),
+						run: () => 'delete',
+					},
+				],
+				cancelButton: true,
+				custom: true,
+			});
+			if (!promptRes.result) {
+				return;
+			}
+			onChildren = promptRes.result;
+		}
+
+		try {
+			await engineering.initTree({
+				governorSessionId: target.id,
+				treeType: 'engineering',
+				onChildren,
+			});
+			modes.setMode('ade');
+			await engineering.openEngineeringEditor(target.id);
+		} catch (err) {
+			notifications.error(err instanceof Error ? err.message : String(err));
+		}
+	}
+});
+
+registerAction2(class OpenAdeInboxAction extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.action.ade.openInbox',
+			title: localize2('adeOpenInboxActionTitle', "Open ADE Inbox"),
+			icon: Codicon.inbox,
+			f1: true,
+			precondition: WorkbenchModeContext.isEqualTo('ade'),
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const views = accessor.get(IViewsService);
+		const modes = accessor.get(IWorkbenchModeService);
+		modes.setMode('ade');
+		const view = await views.openView<AdeProjectsView>(ADE_PROJECTS_VIEW_ID, true);
+		view?.setSidebarMode('inbox');
+	}
+});
+
 registerAction2(class NewSubSessionAction extends Action2 {
 	constructor() {
 		super({
@@ -702,10 +855,15 @@ registerAction2(class NewSubSessionAction extends Action2 {
 		const modes = accessor.get(IWorkbenchModeService);
 		const views = accessor.get(IViewsService);
 		const quickInput = accessor.get(IQuickInputService);
+		const notifications = accessor.get(INotificationService);
 		const chooseSession = sessionPicker(accessor);
 
 		const parent = await pickAgent(accessor, parentId);
 		if (!parent) {
+			return;
+		}
+		if (projects.isLockedByWorkTree?.(parent.id)) {
+			notifications.info(localize('adeLockedByWorkTreeSubSession', "'{0}' belongs to a locked ADE Engineering tree. Edit its DAG topology on the Engineering canvas.", parent.label));
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
@@ -759,10 +917,15 @@ registerAction2(class RecruitSubordinateAgentAction extends Action2 {
 		const editors = accessor.get(IAdeEditorService);
 		const quickInput = accessor.get(IQuickInputService);
 		const views = accessor.get(IViewsService);
+		const notifications = accessor.get(INotificationService);
 		const chooseSession = sessionPicker(accessor);
 
 		const parent = await pickAgent(accessor, parentId);
 		if (!parent) {
+			return;
+		}
+		if (projects.isLockedByWorkTree?.(parent.id)) {
+			notifications.info(localize('adeLockedByWorkTreeRecruit', "'{0}' belongs to a locked ADE Engineering tree. Edit its DAG topology on the Engineering canvas.", parent.label));
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
@@ -824,8 +987,13 @@ registerAction2(class SetAgentRoleAction extends Action2 {
 	async run(accessor: ServicesAccessor, id?: string): Promise<void> {
 		const projects = accessor.get(IAdeProjectsService);
 		const quickInput = accessor.get(IQuickInputService);
+		const notifications = accessor.get(INotificationService);
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
+			return;
+		}
+		if (projects.isLockedByWorkTree?.(agent.id)) {
+			notifications.info(localize('adeLockedByWorkTreeSetRole', "'{0}' has a fixed organizational rank in an ADE Engineering tree and cannot be changed manually.", agent.label));
 			return;
 		}
 		const subs = projects.getDirectSubordinates(agent.id);
@@ -870,8 +1038,13 @@ registerAction2(class ReparentAgentAction extends Action2 {
 		const projects = accessor.get(IAdeProjectsService);
 		const views = accessor.get(IViewsService);
 		const quickInput = accessor.get(IQuickInputService);
+		const notifications = accessor.get(INotificationService);
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
+			return;
+		}
+		if (projects.isLockedByWorkTree?.(agent.id)) {
+			notifications.info(localize('adeLockedByWorkTreeReparent', "'{0}' belongs to a locked ADE Engineering tree and cannot be moved.", agent.label));
 			return;
 		}
 		interface ISupervisorPickItem extends IQuickPickItem {
@@ -1105,9 +1278,18 @@ registerAction2(class RemoveAgentAction extends Action2 {
 	async run(accessor: ServicesAccessor, id?: string): Promise<void> {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
+		const engineering = accessor.get(IAdeEngineeringService);
+		const notifications = accessor.get(INotificationService);
 		const agent = await pickAgent(accessor, id);
 		if (agent) {
+			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
+				notifications.info(localize('adeLockedByWorkTreeRemoveChild', "'{0}' is managed by an ADE Engineering DAG. Delete or edit its node on the Engineering canvas instead.", agent.label));
+				return;
+			}
 			const subtree = projects.getSubtree(agent.id);
+			if (!agent.parentId && engineering.hasTree(agent.id)) {
+				await engineering.removeTree(agent.id).catch(() => undefined);
+			}
 			projects.removeAgent(agent.id);
 			await editors.closeAgents(subtree);
 		}
@@ -1128,9 +1310,15 @@ registerAction2(class DeleteAgentPermanentlyAction extends Action2 {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
 		const sessions = accessor.get(IAdeSessionsService);
+		const engineering = accessor.get(IAdeEngineeringService);
 		const dialogs = accessor.get(IDialogService);
+		const notifications = accessor.get(INotificationService);
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
+			return;
+		}
+		if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
+			notifications.info(localize('adeLockedByWorkTreeDeleteChild', "'{0}' is managed by an ADE Engineering DAG. Delete or edit its node on the Engineering canvas instead.", agent.label));
 			return;
 		}
 		const subtree = projects.getSubtree(agent.id);
@@ -1144,6 +1332,9 @@ registerAction2(class DeleteAgentPermanentlyAction extends Action2 {
 		});
 		if (!confirmation.confirmed) {
 			return;
+		}
+		if (!agent.parentId && engineering.hasTree(agent.id)) {
+			await engineering.removeTree(agent.id).catch(() => undefined);
 		}
 		for (const member of subtree) {
 			if (member.session) {
