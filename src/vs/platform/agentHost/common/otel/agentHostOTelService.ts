@@ -3,11 +3,10 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { TelemetryConfig } from '@github/copilot-sdk';
 import type { URI } from '../../../../base/common/uri.js';
 import { createDecorator } from '../../../instantiation/common/instantiation.js';
 import { IAgentSessionComparisonMetadata } from '../state/sessionState.js';
-import type { IAgentHostFirstResponseDiagnostic, IAgentHostTurnTimingDiagnostic } from './agentHostTiming.js';
+import type { IAgentHostFirstResponseDiagnostic,IAgentHostTurnTimingDiagnostic } from './agentHostTiming.js';
 import type { IChatUserInteractionTiming } from '../../../otel/common/chatUserInteraction.js';
 
 
@@ -73,7 +72,6 @@ export interface IAgentHostOTelService {
 	 * starting the loopback receiver + store on first call when in DB mode.
 	 * Resolves to `undefined` when telemetry is disabled.
 	 */
-	getSdkTelemetryConfig(): Promise<TelemetryConfig | undefined>;
 
 	/** Resolve provider-neutral native SDK destinations. Logs and metrics always
 	 * use {@link IAgentHostNativeOTelConfig.external}; only traces use the DB loopback. */
@@ -122,7 +120,6 @@ export const NullAgentHostOTelService: IAgentHostOTelService = {
 	emitTurnTiming: () => { },
 	emitFirstResponse: () => { },
 	emitUserInteraction: () => { },
-	getSdkTelemetryConfig: async () => undefined,
 	getNativeSdkTelemetryConfig: async () => undefined,
 	getSessionTraceContext: () => undefined,
 	setSessionComparisonMetadata: () => { },

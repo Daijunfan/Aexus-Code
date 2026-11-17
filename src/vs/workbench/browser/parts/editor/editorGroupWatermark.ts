@@ -9,12 +9,12 @@ import { BaseActionViewItem } from '../../../../base/browser/ui/actionbar/action
 import { renderIcon } from '../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { KeybindingLabel } from '../../../../base/browser/ui/keybindingLabel/keybindingLabel.js';
 import { Action, IAction } from '../../../../base/common/actions.js';
-import { coalesce, shuffle } from '../../../../base/common/arrays.js';
+import { shuffle } from '../../../../base/common/arrays.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { isCancellationError } from '../../../../base/common/errors.js';
 import { ResolvedKeybinding } from '../../../../base/common/keybindings.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
-import { isMacintosh, isWeb, OS } from '../../../../base/common/platform.js';
+import { isWeb, OS } from '../../../../base/common/platform.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
 import { MenuId } from '../../../../platform/actions/common/actions.js';
@@ -60,13 +60,9 @@ const openFile: WatermarkEntry = {
 	text: localize('watermark.openFile', "Open File"), id: 'workbench.action.files.openFile',
 	icon: registerIcon('watermark-open-file', Codicon.goToFile, localize('watermark.openFileIcon', "Icon for opening a file in the editor watermark."))
 };
-const openFolder: WatermarkEntry = {
-	text: localize('watermark.openFolder', "Open Folder"), id: 'workbench.action.files.openFolder',
-	icon: registerIcon('watermark-open-folder', Codicon.folderOpened, localize('watermark.openFolderIcon', "Icon for opening a folder in the editor watermark."))
-};
-const openFileOrFolder: WatermarkEntry = {
-	text: localize('watermark.openFileFolder', "Open File or Folder"), id: 'workbench.action.files.openFileFolder',
-	icon: registerIcon('watermark-open-file-folder', Codicon.folderOpened, localize('watermark.openFileFolderIcon', "Icon for opening a file or folder in the editor watermark."))
+const addProjects: WatermarkEntry = {
+	text: localize('watermark.addProjects', "Add Projects"), id: 'workbench.action.addRootFolder',
+	icon: registerIcon('watermark-add-projects', Codicon.newFolder, localize('watermark.addProjectsIcon', "Icon for adding projects to the home page."))
 };
 const openRecent: WatermarkEntry = {
 	text: localize('watermark.openRecent', "Open Recent"), id: 'workbench.action.openRecent',
@@ -100,12 +96,13 @@ const baseEntries: WatermarkEntry[] = [
 	showCommands,
 ];
 
-const emptyWindowEntries: WatermarkEntry[] = coalesce([
+const emptyWindowEntries: WatermarkEntry[] = [
 	...baseEntries,
 	openRecent,
-	...(isMacintosh && !isWeb ? [openFileOrFolder] : [openFile, openFolder]),
-	isMacintosh && !isWeb ? newUntitledFile : undefined, // fill in one more on macOS to get to 5 entries
-]);
+	addProjects,
+	openFile,
+	newUntitledFile,
+];
 
 const workspaceEntries: WatermarkEntry[] = [
 	...baseEntries,

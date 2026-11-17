@@ -72,6 +72,12 @@
 	align-items: center;
 }
 
+.monaco-workbench .part.titlebar .project-navigation-toolbar {
+	display: flex;
+	align-items: center;
+	-webkit-app-region: no-drag;
+}
+
 .monaco-workbench .part.titlebar > .titlebar-container.has-center > .titlebar-left {
 	order: 0;
 	width: 20%;
@@ -109,6 +115,21 @@
 .monaco-workbench .part.titlebar > .titlebar-container:not(.has-center) > .titlebar-right {
 	flex: 0 0 auto;
 	padding-left: 16px; /* ensure there is some space between title and controls */
+}
+
+/* Development environment selector */
+.monaco-workbench .part.titlebar .workbench-mode-switch {
+	z-index: 2500;
+	-webkit-app-region: no-drag;
+	flex-shrink: 0;
+	margin: 0 var(--vscode-spacing-size80);
+}
+
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented > .monaco-button {
+	flex: 0 0 auto;
+	width: auto;
+	height: var(--vscode-spacing-size200);
+	padding: var(--vscode-spacing-sizeNone) var(--vscode-spacing-size80);
 }
 
 /* Window title text */

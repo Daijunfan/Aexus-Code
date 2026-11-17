@@ -7,29 +7,29 @@ import { distinct } from '../../../base/common/arrays.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import * as semver from '../../../base/common/semver/semver.js';
 import { IStringDictionary } from '../../../base/common/collections.js';
-import { CancellationError, getErrorMessage, isCancellationError } from '../../../base/common/errors.js';
+import { CancellationError,getErrorMessage,isCancellationError } from '../../../base/common/errors.js';
 import { IPager } from '../../../base/common/paging.js';
-import { isWeb, platform } from '../../../base/common/platform.js';
+import { isWeb,platform } from '../../../base/common/platform.js';
 import { arch } from '../../../base/common/process.js';
-import { isBoolean, isNumber, isString } from '../../../base/common/types.js';
+import { isBoolean,isNumber,isString } from '../../../base/common/types.js';
 import { URI } from '../../../base/common/uri.js';
-import { IHeaders, IRequestContext, IRequestOptions, isOfflineError } from '../../../base/parts/request/common/request.js';
+import { IHeaders,IRequestContext,IRequestOptions,isOfflineError } from '../../../base/parts/request/common/request.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
 import { IEnvironmentService } from '../../environment/common/environment.js';
-import { getTargetPlatform, IExtensionGalleryService, IExtensionIdentifier, IExtensionInfo, IGalleryExtension, IGalleryExtensionAsset, IGalleryExtensionAssets, IGalleryExtensionVersion, InstallOperation, IQueryOptions, IExtensionsControlManifest, isNotWebExtensionInWebTargetPlatform, isTargetPlatformCompatible, ITranslation, SortOrder, StatisticType, toTargetPlatform, WEB_EXTENSION_TAG, IExtensionQueryOptions, IDeprecationInfo, ISearchPrefferedResults, ExtensionGalleryError, ExtensionGalleryErrorCode, IProductVersion, IAllowedExtensionsService, EXTENSION_IDENTIFIER_REGEX, SortBy, FilterType, MaliciousExtensionInfo, ExtensionRequestsTimeoutConfigKey, IExtensionBlockingInfo, ExtensionBlockingOrigin, ExtensionBlockingScope } from './extensionManagement.js';
-import { adoptToGalleryExtensionId, areSameExtensions, getGalleryExtensionId, getGalleryExtensionTelemetryData } from './extensionManagementUtil.js';
-import { IExtensionManifest, TargetPlatform } from '../../extensions/common/extensions.js';
+import { getTargetPlatform,IExtensionGalleryService,IExtensionIdentifier,IExtensionInfo,IGalleryExtension,IGalleryExtensionAsset,IGalleryExtensionAssets,IGalleryExtensionVersion,InstallOperation,IQueryOptions,IExtensionsControlManifest,isNotWebExtensionInWebTargetPlatform,isTargetPlatformCompatible,ITranslation,SortOrder,StatisticType,toTargetPlatform,WEB_EXTENSION_TAG,IExtensionQueryOptions,IDeprecationInfo,ISearchPrefferedResults,ExtensionGalleryError,ExtensionGalleryErrorCode,IProductVersion,IAllowedExtensionsService,EXTENSION_IDENTIFIER_REGEX,SortBy,FilterType,MaliciousExtensionInfo,ExtensionRequestsTimeoutConfigKey,IExtensionBlockingInfo,ExtensionBlockingOrigin,ExtensionBlockingScope } from './extensionManagement.js';
+import { adoptToGalleryExtensionId,areSameExtensions,getGalleryExtensionId,getGalleryExtensionTelemetryData } from './extensionManagementUtil.js';
+import { IExtensionManifest,TargetPlatform } from '../../extensions/common/extensions.js';
 import { isEngineValid } from '../../extensions/common/extensionValidator.js';
 import { IFileService } from '../../files/common/files.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
-import { asJson, asTextOrError, IRequestService, isClientError, isServerError, isSuccess } from '../../request/common/request.js';
+import { asJson,asTextOrError,IRequestService,isClientError,isServerError,isSuccess } from '../../request/common/request.js';
 import { resolveMarketplaceHeaders } from '../../externalServices/common/marketplace.js';
 import { IStorageService } from '../../storage/common/storage.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { StopWatch } from '../../../base/common/stopwatch.js';
 import { format2 } from '../../../base/common/strings.js';
-import { ExtensionGalleryResourceType, Flag, getExtensionGalleryManifestResourceUri, IExtensionGalleryManifest, IExtensionGalleryManifestService, ExtensionGalleryManifestStatus } from './extensionGalleryManifest.js';
+import { ExtensionGalleryResourceType,Flag,getExtensionGalleryManifestResourceUri,IExtensionGalleryManifest,IExtensionGalleryManifestService,ExtensionGalleryManifestStatus } from './extensionGalleryManifest.js';
 import { TelemetryTrustedValue } from '../../telemetry/common/telemetryUtils.js';
 
 const CURRENT_TARGET_PLATFORM = isWeb ? TargetPlatform.WEB : getTargetPlatform(platform, arch);
@@ -1226,22 +1226,10 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 		const runQuery = async (query: Query, token: CancellationToken) => {
 			const { extensions, total } = await this.queryGalleryExtensions(query, { targetPlatform: CURRENT_TARGET_PLATFORM, compatible: false, includePreRelease: !!options.includePreRelease, productVersion: options.productVersion ?? { version: this.productService.version, date: this.productService.date } }, extensionGalleryManifest, token);
 
-			const result: IGalleryExtension[] = [];
-			let defaultChatAgentExtension: IGalleryExtension | undefined;
 			for (let index = 0; index < extensions.length; index++) {
-				const extension = extensions[index];
-				setTelemetry(extension, ((query.pageNumber - 1) * query.pageSize) + index, options.source);
-				if (areSameExtensions(extension.identifier, { id: this.productService.defaultChatAgent.extensionId, })) {
-					defaultChatAgentExtension = extension;
-				} else {
-					result.push(extension);
-				}
+				setTelemetry(extensions[index], ((query.pageNumber - 1) * query.pageSize) + index, options.source);
 			}
-			if (defaultChatAgentExtension) {
-				result.push(defaultChatAgentExtension);
-			}
-
-			return { extensions: result, total };
+			return { extensions, total };
 		};
 		const { extensions, total } = await runQuery(query, token);
 		const getPage = async (pageIndex: number, ct: CancellationToken) => {
@@ -2055,15 +2043,6 @@ export abstract class AbstractExtensionGalleryService implements IExtensionGalle
 			}
 		}
 
-		deprecated[this.productService.defaultChatAgent.extensionId.toLowerCase()] = {
-			disallowInstall: true,
-			extension: {
-				id: this.productService.defaultChatAgent.chatExtensionId,
-				displayName: 'GitHub Copilot Chat',
-				autoMigrate: { storage: false, donotDisable: true },
-				preRelease: this.productService.quality !== 'stable'
-			}
-		};
 
 		return { malicious, deprecated, search, autoUpdate };
 	}

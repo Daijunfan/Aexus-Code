@@ -15,7 +15,7 @@ import { Language } from '../../../../base/common/platform.js';
 import { UntitledTextEditorInput } from '../../../services/untitled/common/untitledTextEditorInput.js';
 import { IFileEditorInput, EditorResourceAccessor, IEditorPane, SideBySideEditor } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
-import { Disposable, MutableDisposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable, MutableDisposable, DisposableStore, DisposableMap } from '../../../../base/common/lifecycle.js';
 import { IEditorAction } from '../../../../editor/common/editorCommon.js';
 import { EndOfLineSequence } from '../../../../editor/common/model.js';
 import { TrimTrailingWhitespaceAction } from '../../../../editor/contrib/linesOperations/browser/linesOperations.js';
@@ -382,6 +382,7 @@ class EditorStatus extends Disposable {
 
 		this.registerCommands();
 		this.registerListeners();
+		this.updateStatusBar();
 	}
 
 	private registerListeners(): void {
@@ -942,6 +943,7 @@ class EditorStatus extends Disposable {
 export class EditorStatusContribution extends Disposable implements IWorkbenchContribution {
 
 	static readonly ID = 'workbench.contrib.editorStatus';
+	private readonly statuses = this._register(new DisposableMap<number, { part: IEditorPart; dispose(): void }>());
 
 	constructor(
 		@IEditorGroupsService private readonly editorGroupService: IEditorGroupsService,
@@ -953,11 +955,23 @@ export class EditorStatusContribution extends Disposable implements IWorkbenchCo
 		}
 
 		this._register(editorGroupService.onDidCreateAuxiliaryEditorPart(part => this.createEditorStatus(part)));
+		this._register(editorGroupService.onDidChangeActiveGroup(group => {
+			const part = editorGroupService.getPart(group);
+			void part.whenReady.then(() => {
+				if (editorGroupService.getPart(editorGroupService.activeGroup) === part) {
+					this.createEditorStatus(part);
+				}
+			});
+		}));
 	}
 
 	private createEditorStatus(part: IEditorPart): void {
+		if (this.statuses.get(part.windowId)?.part === part) {
+			return;
+		}
 		const disposables = new DisposableStore();
-		Event.once(part.onWillDispose)(() => disposables.dispose());
+		this.statuses.set(part.windowId, { part, dispose: () => disposables.dispose() });
+		disposables.add(Event.once(part.onWillDispose)(() => this.statuses.deleteAndDispose(part.windowId)));
 
 		const scopedInstantiationService = this.editorGroupService.getScopedInstantiationService(part);
 		disposables.add(scopedInstantiationService.createInstance(EditorStatus, part.windowId));

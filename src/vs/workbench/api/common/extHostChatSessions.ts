@@ -19,7 +19,7 @@ import { SymbolKind, SymbolKinds } from '../../../editor/common/languages.js';
 import { IExtensionDescription } from '../../../platform/extensions/common/extensions.js';
 import { ILogService } from '../../../platform/log/common/log.js';
 import { IChatRequestVariableEntry, IDiagnosticVariableEntryFilterData, ISymbolVariableEntry, PromptFileVariableKind, toPromptFileVariableEntry } from '../../contrib/chat/common/attachments/chatVariableEntries.js';
-import { IChatSessionProviderOptionItem } from '../../contrib/chat/common/chatSessionsService.js';
+import { IChatSessionProviderOptionItem, localChatSessionType } from '../../contrib/chat/common/chatSessionsService.js';
 import { ChatAgentLocation } from '../../contrib/chat/common/constants.js';
 import { getChatSessionType, isUntitledChatSession } from '../../contrib/chat/common/model/chatUri.js';
 import { IChatAgentRequest, IChatAgentResult } from '../../contrib/chat/common/participants/chatAgents.js';
@@ -686,6 +686,7 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 		}
 
 		const sessionDisposables = new DisposableStore();
+		sessionDisposables.add(toDisposable(() => session.dispose?.()));
 		const id = sessionResource.toString();
 		const chatSession = new ExtHostChatSession(session, provider.extension, {
 			sessionResource,
@@ -705,6 +706,11 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 
 		const disposeCts = sessionDisposables.add(new CancellationTokenSource());
 		this._extHostChatSessions.set(sessionResource, { sessionObj: chatSession, disposeCts });
+		const convertHistory = (history: ReadonlyArray<vscode.ChatRequestTurn | vscode.ChatResponseTurn2>) => history.map(turn => turn instanceof extHostTypes.ChatRequestTurn
+			? this.convertRequestTurn(turn) : this.convertResponseTurn(turn as extHostTypes.ChatResponseTurn2, sessionDisposables));
+		if (session.onDidChangeHistory) {
+			sessionDisposables.add(session.onDidChangeHistory(history => this._proxy.$handleHistoryChanged(handle, sessionResource, convertHistory(history))));
+		}
 
 		// Call activeResponseCallback immediately for best user experience
 		if (session.activeResponseCallback) {
@@ -722,13 +728,7 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 			hasForkHandler: !!controllerData?.controller.forkHandler || !!session.forkHandler,
 			supportsInterruption: !!capabilities?.supportsInterruptions,
 			options: session.options,
-			history: session.history.map(turn => {
-				if (turn instanceof extHostTypes.ChatRequestTurn) {
-					return this.convertRequestTurn(turn);
-				} else {
-					return this.convertResponseTurn(turn as extHostTypes.ChatResponseTurn2, sessionDisposables);
-				}
-			})
+			history: convertHistory(session.history)
 		};
 	}
 
@@ -849,7 +849,10 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 			return {};
 		}
 
-		const chatRequest = typeConvert.ChatAgentRequest.to(request, undefined, await this._languageModels.getLanguageModelForRequest(entry.sessionObj.extension, request.userSelectedModelId), request.modelConfiguration, [], new Map(), entry.sessionObj.extension, this._logService);
+		const model = request.userSelectedModelId || getChatSessionType(request.sessionResource) === localChatSessionType
+			? await this._languageModels.getLanguageModelForRequest(entry.sessionObj.extension, request.userSelectedModelId)
+			: await this._languageModels.getDefaultLanguageModel(entry.sessionObj.extension);
+		const chatRequest = typeConvert.ChatAgentRequest.to(request, undefined, model, request.modelConfiguration, [], new Map(), entry.sessionObj.extension, this._logService);
 
 		const stream = entry.sessionObj.getActiveRequestStream(request);
 		await entry.sessionObj.session.requestHandler(chatRequest, { history, yieldRequested: false }, stream.apiObject, token);
@@ -1038,6 +1041,7 @@ export class ExtHostChatSessions extends Disposable implements ExtHostChatSessio
 			variableData: variables.length > 0 ? { variables } : undefined,
 			modelId: turn.modelId,
 			modeInstructions: typeConvert.ChatRequestModeInstructions.from(turn.modeInstructions2),
+			isSystemInitiated: turn.isSystemInitiated,
 		};
 	}
 

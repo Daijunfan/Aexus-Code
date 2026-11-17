@@ -23,6 +23,8 @@ export interface IExplorerService {
 	readonly _serviceBrand: undefined;
 	readonly roots: ExplorerItem[];
 	readonly sortOrderConfiguration: ISortOrderConfiguration;
+	getItemOrder(resource: URI): number | undefined;
+	setItemOrder(parent: URI, resources: readonly URI[]): Promise<void>;
 
 	getContext(respectMultiSelection: boolean, ignoreNestedChildren?: boolean): ExplorerItem[];
 	hasViewFocus(): boolean;

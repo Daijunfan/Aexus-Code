@@ -3,47 +3,46 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { DeferredPromise, timeout } from '../../../base/common/async.js';
-import { bufferToStream, readableToBuffer, VSBuffer, VSBufferReadable } from '../../../base/common/buffer.js';
+import { DeferredPromise,timeout } from '../../../base/common/async.js';
+import { bufferToStream,readableToBuffer,VSBuffer,VSBufferReadable } from '../../../base/common/buffer.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
-import { Emitter, Event } from '../../../base/common/event.js';
+import { Emitter,Event } from '../../../base/common/event.js';
 import { IMarkdownString } from '../../../base/common/htmlContent.js';
 import { Iterable } from '../../../base/common/iterator.js';
-import { Disposable, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
-import { ResourceMap, ResourceSet } from '../../../base/common/map.js';
+import { Disposable,IDisposable,toDisposable } from '../../../base/common/lifecycle.js';
+import { ResourceMap,ResourceSet } from '../../../base/common/map.js';
 import { Schemas } from '../../../base/common/network.js';
 import { observableValue } from '../../../base/common/observable.js';
 import { join } from '../../../base/common/path.js';
-import { isLinux, isMacintosh } from '../../../base/common/platform.js';
-import { basename, isEqual, isEqualAuthority, isEqualOrParent } from '../../../base/common/resources.js';
+import { isLinux,isMacintosh } from '../../../base/common/platform.js';
+import { basename,isEqual,isEqualAuthority,isEqualOrParent } from '../../../base/common/resources.js';
 import { URI } from '../../../base/common/uri.js';
 import { ITextResourcePropertiesService } from '../../../editor/common/services/textResourceConfiguration.js';
 import { IConfigurationService } from '../../../platform/configuration/common/configuration.js';
 import { IResourceEditorInput } from '../../../platform/editor/common/editor.js';
-import { FileChangesEvent, FileOperationEvent, FileSystemProviderCapabilities, IBaseFileStat, ICreateFileOptions, IFileContent, IFileService, IFileStat, IFileStatResult, IFileStatWithMetadata, IFileStatWithPartialMetadata, IFileStreamContent, IFileSystemProvider, IFileSystemProviderActivationEvent, IFileSystemProviderCapabilitiesChangeEvent, IFileSystemWatcher, IReadFileOptions, IReadFileStreamOptions, IResolveFileOptions, IResolveMetadataFileOptions, IWatchOptions, IWatchOptionsWithCorrelation, IWriteFileOptions } from '../../../platform/files/common/files.js';
-import { AbstractLoggerService, ILogger, LogLevel, NullLogger } from '../../../platform/log/common/log.js';
-import { IMarker, IMarkerChangeOptions, IMarkerData, IMarkerService, IResourceMarker, MarkerStatistics } from '../../../platform/markers/common/markers.js';
+import { FileChangesEvent,FileOperationEvent,FileSystemProviderCapabilities,IBaseFileStat,ICreateFileOptions,IFileContent,IFileService,IFileStat,IFileStatResult,IFileStatWithMetadata,IFileStatWithPartialMetadata,IFileStreamContent,IFileSystemProvider,IFileSystemProviderActivationEvent,IFileSystemProviderCapabilitiesChangeEvent,IFileSystemWatcher,IReadFileOptions,IReadFileStreamOptions,IResolveFileOptions,IResolveMetadataFileOptions,IWatchOptions,IWatchOptionsWithCorrelation,IWriteFileOptions } from '../../../platform/files/common/files.js';
+import { AbstractLoggerService,ILogger,LogLevel,NullLogger } from '../../../platform/log/common/log.js';
+import { IMarker,IMarkerChangeOptions,IMarkerData,IMarkerService,IResourceMarker,MarkerStatistics } from '../../../platform/markers/common/markers.js';
 import product from '../../../platform/product/common/product.js';
-import { IProgress, IProgressStep } from '../../../platform/progress/common/progress.js';
-import { InMemoryStorageService, WillSaveStateReason } from '../../../platform/storage/common/storage.js';
+import { IProgress,IProgressStep } from '../../../platform/progress/common/progress.js';
+import { InMemoryStorageService,WillSaveStateReason } from '../../../platform/storage/common/storage.js';
 import { toUserDataProfile } from '../../../platform/userDataProfile/common/userDataProfile.js';
-import { ISingleFolderWorkspaceIdentifier, IWorkspace, IWorkspaceContextService, IWorkspaceFolder, IWorkspaceFoldersChangeEvent, IWorkspaceFoldersWillChangeEvent, IWorkspaceIdentifier, WorkbenchState, Workspace } from '../../../platform/workspace/common/workspace.js';
-import { IWorkspaceTrustEnablementService, IWorkspaceTrustManagementService, IWorkspaceTrustRequestService, IWorkspaceTrustTransitionParticipant, IWorkspaceTrustUriInfo, ResourceTrustRequestOptions, WorkspaceTrustRequestOptions, WorkspaceTrustUriResponse } from '../../../platform/workspace/common/workspaceTrust.js';
+import { ISingleFolderWorkspaceIdentifier,IWorkspace,IWorkspaceContextService,IWorkspaceFolder,IWorkspaceFoldersChangeEvent,IWorkspaceFoldersWillChangeEvent,IWorkspaceIdentifier,WorkbenchState,Workspace } from '../../../platform/workspace/common/workspace.js';
+import { IWorkspaceTrustEnablementService,IWorkspaceTrustManagementService,IWorkspaceTrustRequestService,IWorkspaceTrustTransitionParticipant,IWorkspaceTrustUriInfo,ResourceTrustRequestOptions,WorkspaceTrustRequestOptions,WorkspaceTrustUriResponse } from '../../../platform/workspace/common/workspaceTrust.js';
 import { TestWorkspace } from '../../../platform/workspace/test/common/testWorkspace.js';
-import { GroupIdentifier, IRevertOptions, ISaveOptions, SaveReason } from '../../common/editor.js';
+import { GroupIdentifier,IRevertOptions,ISaveOptions,SaveReason } from '../../common/editor.js';
 import { EditorInput } from '../../common/editor/editorInput.js';
-import { IActivity, IActivityService } from '../../services/activity/common/activity.js';
-import { ChatEntitlement, ChatEntitlementContext, IChatEntitlementService } from '../../services/chat/common/chatEntitlementService.js';
-import { Lazy } from '../../../base/common/lazy.js';
+import { IActivity,IActivityService } from '../../services/activity/common/activity.js';
+import { ChatEntitlement,IChatEntitlementService } from '../../services/chat/common/chatEntitlementService.js';
 import { NullExtensionService } from '../../services/extensions/common/extensions.js';
-import { IAutoSaveConfiguration, IAutoSaveMode, IFilesConfigurationService } from '../../services/filesConfiguration/common/filesConfigurationService.js';
+import { IAutoSaveConfiguration,IAutoSaveMode,IFilesConfigurationService } from '../../services/filesConfiguration/common/filesConfigurationService.js';
 import { IHistoryService } from '../../services/history/common/history.js';
-import { BeforeShutdownErrorEvent, ILifecycleService, InternalBeforeShutdownEvent, LifecyclePhase, ShutdownReason, StartupKind, WillShutdownEvent } from '../../services/lifecycle/common/lifecycle.js';
+import { BeforeShutdownErrorEvent,ILifecycleService,InternalBeforeShutdownEvent,LifecyclePhase,ShutdownReason,StartupKind,WillShutdownEvent } from '../../services/lifecycle/common/lifecycle.js';
 import { IResourceEncoding } from '../../services/textfile/common/textfiles.js';
 import { IUserDataProfileService } from '../../services/userDataProfile/common/userDataProfile.js';
 import { IStoredFileWorkingCopySaveEvent } from '../../services/workingCopy/common/storedFileWorkingCopy.js';
-import { IWorkingCopy, IWorkingCopyBackup, WorkingCopyCapabilities } from '../../services/workingCopy/common/workingCopy.js';
-import { ICopyOperation, ICreateFileOperation, ICreateOperation, IDeleteOperation, IFileOperationUndoRedoInfo, IMoveOperation, IStoredFileWorkingCopySaveParticipant, IStoredFileWorkingCopySaveParticipantContext, IWorkingCopyFileOperationParticipant, IWorkingCopyFileService, WorkingCopyFileEvent } from '../../services/workingCopy/common/workingCopyFileService.js';
+import { IWorkingCopy,IWorkingCopyBackup,WorkingCopyCapabilities } from '../../services/workingCopy/common/workingCopy.js';
+import { ICopyOperation,ICreateFileOperation,ICreateOperation,IDeleteOperation,IFileOperationUndoRedoInfo,IMoveOperation,IStoredFileWorkingCopySaveParticipant,IStoredFileWorkingCopySaveParticipantContext,IWorkingCopyFileOperationParticipant,IWorkingCopyFileService,WorkingCopyFileEvent } from '../../services/workingCopy/common/workingCopyFileService.js';
 
 export class TestLoggerService extends AbstractLoggerService {
 	constructor(logsHome?: URI) {
@@ -805,7 +804,6 @@ export class TestChatEntitlementService implements IChatEntitlementService {
 
 	_serviceBrand: undefined;
 
-	context: Lazy<ChatEntitlementContext> | undefined;
 
 	readonly organisations: undefined;
 	readonly isInternal: boolean = false;

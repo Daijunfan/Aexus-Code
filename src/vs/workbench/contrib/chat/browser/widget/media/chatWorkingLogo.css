@@ -12,6 +12,15 @@
 	vertical-align: middle;
 	pointer-events: none;
 	contain: layout style;
+	background: #000000;
+	border-radius: 3px;
+	box-sizing: border-box;
+}
+
+.chat-working-progress-icon-stable,
+.chat-working-progress-icon-insiders {
+	background: #000000;
+	border-radius: 3px;
 }
 
 .chat-working-logo.chat-working-logo-compact {
@@ -36,7 +45,7 @@
 .chat-working-logo > .chat-working-logo-face,
 .chat-working-logo > .chat-working-logo-draw-container {
 	position: absolute;
-	inset: 0;
+	inset: 2px;
 	transform: none;
 	opacity: 1;
 }

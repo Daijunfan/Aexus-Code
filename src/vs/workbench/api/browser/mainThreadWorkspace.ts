@@ -30,6 +30,9 @@ import { coalesce } from '../../../base/common/arrays.js';
 import { ICanonicalUriService } from '../../../platform/workspace/common/canonicalUri.js';
 import { revive } from '../../../base/common/marshalling.js';
 import { ITextFileService } from '../../services/textfile/common/textfiles.js';
+import { IProjectNavigationService } from '../../contrib/files/browser/projectNavigationService.js';
+import { IWorkbenchModeService } from '../../services/workbenchMode/common/workbenchMode.js';
+import { IEditorGroupsService } from '../../services/editor/common/editorGroupsService.js';
 
 @extHostNamedCustomer(MainContext.MainThreadWorkspace)
 export class MainThreadWorkspace extends Disposable implements MainThreadWorkspaceShape {
@@ -55,10 +58,41 @@ export class MainThreadWorkspace extends Disposable implements MainThreadWorkspa
 		@IWorkspaceTrustManagementService private readonly _workspaceTrustManagementService: IWorkspaceTrustManagementService,
 		@IWorkspaceTrustRequestService private readonly _workspaceTrustRequestService: IWorkspaceTrustRequestService,
 		@ITextFileService private readonly _textFileService: ITextFileService,
+		@IProjectNavigationService projectNavigationService: IProjectNavigationService,
+		@IWorkbenchModeService modeService: IWorkbenchModeService,
+		@IEditorGroupsService editorGroupsService: IEditorGroupsService,
 	) {
 		super();
 		this._queryBuilder = this._instantiationService.createInstance(QueryBuilder);
 		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostWorkspace);
+		this._proxy.$acceptCodingAgentProject(projectNavigationService.selectedProject?.uri);
+		this._register(projectNavigationService.onDidChangeSelectedProject(project => this._proxy.$acceptCodingAgentProject(project?.uri)));
+		for (const [extensionId, project] of projectNavigationService.codingAgentProjects) { this._proxy.$acceptCodingAgentProject(project, extensionId); }
+		this._register(projectNavigationService.onDidBindCodingAgentProject(({ extensionId, project }) => this._proxy.$acceptCodingAgentProject(project, extensionId)));
+		let currentEditor = this._editorService.activeEditor;
+		let editorsRestored = false;
+		const selectEditorProject = (force = false) => {
+			const editor = this._editorService.activeEditor;
+			if (modeService.mode !== 'ide' || !editorsRestored || !force && editor === currentEditor) {
+				return;
+			}
+			currentEditor = editor;
+			const resource = EditorResourceAccessor.getOriginalUri(editor, { supportSideBySide: SideBySideEditor.PRIMARY });
+			if (resource) {
+				projectNavigationService.selectProject(resource);
+			}
+		};
+		this._register(this._editorService.onDidActiveEditorChange(() => selectEditorProject()));
+		editorGroupsService.mainPart.whenRestored.then(() => {
+			if (this._store.isDisposed) {
+				return;
+			}
+			editorsRestored = true;
+			currentEditor = modeService.mode === 'ide' ? this._editorService.activeEditor : editorGroupsService.mainPart.activeGroup.activeEditor ?? undefined;
+			if (!projectNavigationService.selectedProject) {
+				selectEditorProject(true);
+			}
+		});
 		const workspace = this._contextService.getWorkspace();
 		// The workspace file is provided be a unknown file system provider. It might come
 		// from the extension host. So initialize now knowing that `rootPath` is undefined.

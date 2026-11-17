@@ -7,32 +7,31 @@ import { CancellationToken } from '../../../../../../base/common/cancellation.js
 import { CancellationError } from '../../../../../../base/common/errors.js';
 import { Disposable } from '../../../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../../../base/common/map.js';
-import { basename, dirname, isEqual } from '../../../../../../base/common/resources.js';
+import { basename,dirname,isEqual } from '../../../../../../base/common/resources.js';
 import { URI } from '../../../../../../base/common/uri.js';
-import { localize, localize2 } from '../../../../../../nls.js';
-import { Action2 } from '../../../../../../platform/actions/common/actions.js';
+import { localize } from '../../../../../../nls.js';
 import { COPILOT_CLI_AGENT_PROVIDER_ID } from '../../../../../../platform/agentHost/common/agent.js';
 import { IAgentHostConnectionsService } from '../../../../../../platform/agentHost/common/agentHostConnectionsService.js';
-import { AgentHostSavedChatWorkspace, IAgentHostSavedChat } from '../../../../../../platform/agentHost/common/agentHostSavedChat.js';
-import { IAgentHostService, isLocalAgentHostProviderDisabledByPolicy } from '../../../../../../platform/agentHost/common/agentService.js';
+import { AgentHostSavedChatWorkspace,IAgentHostSavedChat } from '../../../../../../platform/agentHost/common/agentHostSavedChat.js';
+import { IAgentHostService,isLocalAgentHostProviderDisabledByPolicy } from '../../../../../../platform/agentHost/common/agentService.js';
 import { supportsAgentHostSavedChatContinuation } from '../../../../../../platform/agentHost/common/meta/agentHostSavedChatMeta.js';
 import { SessionConfigKey } from '../../../../../../platform/agentHost/common/sessionConfigKeys.js';
 import { NotificationType } from '../../../../../../platform/agentHost/common/state/sessionActions.js';
 import { ChatOriginKind } from '../../../../../../platform/agentHost/common/state/sessionState.js';
 import { IConfigurationService } from '../../../../../../platform/configuration/common/configuration.js';
 import { IFileDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
-import { FileOperationResult, IFileService, toFileOperationResult } from '../../../../../../platform/files/common/files.js';
-import { createDecorator, ServicesAccessor } from '../../../../../../platform/instantiation/common/instantiation.js';
-import { IManagedSettingsService, requiresCopilotAgentHost } from '../../../../../../platform/policy/common/copilotManagedSettings.js';
+import { FileOperationResult,IFileService,toFileOperationResult } from '../../../../../../platform/files/common/files.js';
+import { createDecorator } from '../../../../../../platform/instantiation/common/instantiation.js';
+import { IManagedSettingsService,requiresCopilotAgentHost } from '../../../../../../platform/policy/common/copilotManagedSettings.js';
 import { IQuickInputService } from '../../../../../../platform/quickinput/common/quickInput.js';
 import { IUriIdentityService } from '../../../../../../platform/uriIdentity/common/uriIdentity.js';
-import { IWorkspaceTrustManagementService, IWorkspaceTrustRequestService } from '../../../../../../platform/workspace/common/workspaceTrust.js';
+import { IWorkspaceTrustManagementService,IWorkspaceTrustRequestService } from '../../../../../../platform/workspace/common/workspaceTrust.js';
 import { IChatService } from '../../../common/chatService/chatService.js';
-import { IChatSessionsService, SessionType } from '../../../common/chatSessionsService.js';
-import { ChatAgentLocation, CONTINUE_AGENT_HOST_CHAT_IN_COPILOT_ACTION_ID } from '../../../common/constants.js';
+import { IChatSessionsService,SessionType } from '../../../common/chatSessionsService.js';
+import { ChatAgentLocation } from '../../../common/constants.js';
 import { IChatModelInputState } from '../../../common/model/chatModel.js';
-import { IChatWidget, IChatWidgetService } from '../../chat.js';
-import { readAgentHostSavedChat, savedChatDraftInput } from './agentHostPolicyUnavailableSession.js';
+import { IChatWidget,IChatWidgetService } from '../../chat.js';
+import { readAgentHostSavedChat,savedChatDraftInput } from './agentHostPolicyUnavailableSession.js';
 
 export const IAgentHostPolicyContinuationPresenter = createDecorator<IAgentHostPolicyContinuationPresenter>('agentHostPolicyContinuationPresenter');
 
@@ -299,18 +298,5 @@ export class AgentHostPolicyContinuationService extends Disposable implements IA
 			}
 		}
 		return { workingDirectories: [...uniqueDirectories.values()] };
-	}
-}
-
-export class ContinueAgentHostChatInCopilotAction extends Action2 {
-	constructor() {
-		super({ id: CONTINUE_AGENT_HOST_CHAT_IN_COPILOT_ACTION_ID, title: localize2('agentHost.policyContinuation.action', "Continue in Copilot"), f1: false });
-	}
-
-	override run(accessor: ServicesAccessor, resource: unknown): Promise<void> {
-		if (!URI.isUri(resource)) {
-			throw new Error(continuationFailedMessage());
-		}
-		return accessor.get(IAgentHostPolicyContinuationService).continueInCopilot(resource);
 	}
 }

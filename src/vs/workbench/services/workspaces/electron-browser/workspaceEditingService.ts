@@ -11,7 +11,7 @@ import { IJSONEditingService } from '../../configuration/common/jsonEditing.js';
 import { IWorkspacesService } from '../../../../platform/workspaces/common/workspaces.js';
 import { WorkspaceService } from '../../configuration/browser/configurationService.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
-import { IExtensionService } from '../../extensions/common/extensions.js';
+import { ExtensionHostScope, IExtensionService } from '../../extensions/common/extensions.js';
 import { IWorkingCopyBackupService } from '../../workingCopy/common/workingCopyBackup.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { basename } from '../../../../base/common/resources.js';
@@ -176,7 +176,7 @@ export class NativeWorkspaceEditingService extends AbstractWorkspaceEditingServi
 	}
 
 	async enterWorkspace(workspaceUri: URI): Promise<void> {
-		const stopped = await this.extensionService.stopExtensionHosts(localize('restartExtensionHost.reason', "Opening a multi-root workspace"));
+		const stopped = await this.extensionService.stopExtensionHosts(localize('restartExtensionHost.reason', "Opening a multi-root workspace"), undefined, ExtensionHostScope.Workspace);
 		if (!stopped) {
 			return;
 		}
@@ -208,7 +208,7 @@ export class NativeWorkspaceEditingService extends AbstractWorkspaceEditingServi
 			}
 		} catch (error) {
 			try {
-				await this.extensionService.startExtensionHosts();
+				await this.extensionService.startExtensionHosts(undefined, ExtensionHostScope.Workspace);
 			} catch (restartError) {
 				this.logService.error(restartError);
 			}
@@ -223,7 +223,7 @@ export class NativeWorkspaceEditingService extends AbstractWorkspaceEditingServi
 		// Restart the extension host: entering a workspace means a new location for
 		// storage and potentially a change in the workspace.rootPath property.
 		else {
-			this.extensionService.startExtensionHosts();
+			this.extensionService.startExtensionHosts(undefined, ExtensionHostScope.Workspace);
 		}
 	}
 }

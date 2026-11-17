@@ -45,7 +45,33 @@ function createExtHostWorkspace(mainContext: IMainContext, data: IWorkspaceData,
 
 suite('ExtHostWorkspace', function () {
 
-	ensureNoDisposablesAreLeakedInTestSuite();
+	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('gives Coding Agents the selected project while ordinary extensions retain all roots', () => {
+		const alpha = URI.file('/projects/Alpha');
+		const beta = URI.file('/projects/Beta');
+		const ws = createExtHostWorkspace(new TestRPCProtocol(), { id: 'home', folders: [aWorkspaceFolderData(alpha, 0, 'Alpha'), aWorkspaceFolderData(beta, 1, 'Beta')], name: 'Home' }, new NullLogService());
+		const agent = { ...extensionDescriptor, identifier: new ExtensionIdentifier('Anthropic.claude-code') };
+		const changes: { added: string[]; removed: string[] }[] = [];
+		let ordinaryChanges = 0;
+		disposables.add(ws.getWorkspaceFoldersEvent(agent)(change => changes.push({ added: change.added.map(folder => folder.name), removed: change.removed.map(folder => folder.name) })));
+		disposables.add(ws.getWorkspaceFoldersEvent(extensionDescriptor)(() => ordinaryChanges++));
+		ws.$acceptCodingAgentProject(beta);
+		const selected = ws.getWorkspaceFolders(agent)![0];
+		const snapshot = {
+			name: selected.name, index: selected.index, stable: selected === ws.getWorkspaceFolders(agent)![0],
+			ordinary: ws.getWorkspaceFolders(extensionDescriptor)!.map(folder => `${folder.name}:${folder.index}`),
+			rootPath: ws.getPath(agent), relative: ws.getRelativePath(URI.joinPath(beta, 'src/index.ts'), undefined, agent),
+			outside: ws.getWorkspaceFolder(URI.joinPath(alpha, 'index.ts'), undefined, agent),
+		};
+		ws.$acceptCodingAgentProject(alpha);
+		ws.$acceptCodingAgentProject(undefined);
+		assert.deepStrictEqual({ snapshot, changes, ordinaryChanges, restored: ws.getWorkspaceFolders(agent)!.map(folder => folder.name) }, {
+			snapshot: { name: 'Beta', index: 0, stable: true, ordinary: ['Alpha:0', 'Beta:1'], rootPath: beta.fsPath, relative: 'src/index.ts', outside: undefined },
+			changes: [{ added: [], removed: ['Alpha'] }, { added: ['Alpha'], removed: ['Beta'] }, { added: ['Beta'], removed: [] }],
+			ordinaryChanges: 0, restored: ['Alpha', 'Beta'],
+		});
+	});
 
 	function assertAsRelativePath(workspace: ExtHostWorkspace, input: string, expected: string, includeWorkspace?: boolean) {
 		const actual = workspace.getRelativePath(input, includeWorkspace);

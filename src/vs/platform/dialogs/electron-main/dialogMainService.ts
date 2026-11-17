@@ -160,6 +160,10 @@ export class DialogMainService implements IDialogMainService {
 	}
 
 	showMessageBox(rawOptions: electron.MessageBoxOptions, window?: electron.BrowserWindow): Promise<electron.MessageBoxReturnValue> {
+		if (process.env['AEXUS_HIDDEN_WINDOW'] === '1') {
+			this.logService.info(`[AEXUS_HIDDEN_WINDOW] Suppressed showMessageBox: ${rawOptions.message}`);
+			return Promise.resolve({ response: rawOptions.cancelId ?? 0, checkboxChecked: false });
+		}
 		return this.getWindowDialogQueue<electron.MessageBoxReturnValue>(window).queue(async () => {
 			const { options, buttonIndeces } = massageMessageBoxOptions(rawOptions, this.productService);
 

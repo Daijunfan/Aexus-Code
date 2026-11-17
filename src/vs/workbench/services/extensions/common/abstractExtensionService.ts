@@ -20,7 +20,7 @@ import { IConfigurationService } from '../../../../platform/configuration/common
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { InstallOperation } from '../../../../platform/extensionManagement/common/extensionManagement.js';
 import { ImplicitActivationEvents } from '../../../../platform/extensionManagement/common/implicitActivationEvents.js';
-import { ExtensionIdentifier, ExtensionIdentifierMap, IExtension, IExtensionContributions, IExtensionDescription, IExtensionManifest } from '../../../../platform/extensions/common/extensions.js';
+import { ExtensionIdentifier, ExtensionIdentifierMap, ExtensionIdentifierSet, IExtension, IExtensionContributions, IExtensionDescription, IExtensionManifest } from '../../../../platform/extensions/common/extensions.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -46,7 +46,8 @@ import { IResolveAuthorityErrorResult } from './extensionHostProxy.js';
 import { IExtensionManifestPropertiesService } from './extensionManifestPropertiesService.js';
 import { ExtensionRunningLocation, LocalProcessRunningLocation, LocalWebWorkerRunningLocation, RemoteRunningLocation } from './extensionRunningLocation.js';
 import { ExtensionRunningLocationTracker, filterExtensionIdentifiers } from './extensionRunningLocationTracker.js';
-import { ActivationKind, ActivationTimes, ExtensionActivationReason, ExtensionHostStartup, ExtensionPointContribution, IExtensionHost, IExtensionInspectInfo, IExtensionService, IExtensionsStatus, IInternalExtensionService, IMessage, IResponsiveStateChangeEvent, IWillActivateEvent, WillStopExtensionHostsEvent, toExtension, toExtensionDescription } from './extensions.js';
+import { ActivationKind, ActivationTimes, ExtensionActivationReason, ExtensionHostScope, ExtensionHostStartup, ExtensionPointContribution, IExtensionHost, IExtensionInspectInfo, IExtensionService, IExtensionsStatus, IInternalExtensionService, IMessage, IResponsiveStateChangeEvent, IWillActivateEvent, WillStopExtensionHostsEvent, toExtension, toExtensionDescription } from './extensions.js';
+import { isWorkspaceIndependentExtension } from './codingAgentExtensions.js';
 import { ExtensionsProposedApi } from './extensionsProposedApi.js';
 import { ExtensionMessageCollector, ExtensionPoint, ExtensionsRegistry, IExtensionPoint, IExtensionPointUser } from './extensionsRegistry.js';
 import { LazyCreateExtensionHostManager } from './lazyCreateExtensionHostManager.js';
@@ -739,22 +740,30 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 
 	//#region Stopping / Starting / Restarting
 
-	public async stopExtensionHosts(reason: string, auto?: boolean): Promise<boolean> {
+	public async stopExtensionHosts(reason: string, auto?: boolean, scope = ExtensionHostScope.All): Promise<boolean> {
 		await this._initializeIfNeeded();
-		return this._doStopExtensionHostsWithVeto(reason, auto);
+		return this._doStopExtensionHostsWithVeto(reason, auto, scope);
 	}
 
-	protected async _doStopExtensionHosts(): Promise<void> {
+	protected _isWorkspaceIndependentHost(host: IExtensionHostManager): boolean {
+		const extensions = this._runningLocations.filterByExtensionHostManager(this._registry.getAllExtensionDescriptions(), host);
+		return host.kind === ExtensionHostKind.LocalProcess && extensions.length > 0 && extensions.every(isWorkspaceIndependentExtension);
+	}
+
+	protected async _doStopExtensionHosts(scope = ExtensionHostScope.All): Promise<void> {
+		const descriptions = this._registry.getAllExtensionDescriptions();
+		const retainedHosts = scope === ExtensionHostScope.All ? [] : this._extensionHostManagers.filter(host => this._isWorkspaceIndependentHost(host) === (scope === ExtensionHostScope.Workspace));
+		const retainedExtensions = new ExtensionIdentifierSet(retainedHosts.flatMap(host => this._runningLocations.filterByExtensionHostManager(descriptions, host).map(extension => extension.identifier)));
 		const previouslyActivatedExtensionIds: ExtensionIdentifier[] = [];
 		for (const extensionStatus of this._extensionStatus.values()) {
-			if (extensionStatus.activationStarted) {
+			if (extensionStatus.activationStarted && !retainedExtensions.has(extensionStatus.id)) {
 				previouslyActivatedExtensionIds.push(extensionStatus.id);
 			}
 		}
 
-		await this._extensionHostManagers.stopAllInReverse();
+		await this._extensionHostManagers.stopAllInReverse(host => !retainedHosts.includes(host));
 		for (const extensionStatus of this._extensionStatus.values()) {
-			extensionStatus.clearRuntimeStatus();
+			if (!retainedExtensions.has(extensionStatus.id)) { extensionStatus.clearRuntimeStatus(); }
 		}
 
 		if (previouslyActivatedExtensionIds.length > 0) {
@@ -762,7 +771,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 		}
 	}
 
-	private async _doStopExtensionHostsWithVeto(reason: string, auto: boolean = false): Promise<boolean> {
+	private async _doStopExtensionHostsWithVeto(reason: string, auto: boolean = false, scope = ExtensionHostScope.All): Promise<boolean> {
 		if (auto && this._environmentService.isExtensionDevelopment) {
 			return false;
 		}
@@ -773,6 +782,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 		this._onWillStop.fire({
 			reason,
 			auto,
+			scope,
 			veto(value, reason) {
 				vetos.push(value);
 
@@ -794,7 +804,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 
 		const veto = await handleVetos(vetos, error => this._logService.error(error));
 		if (!veto) {
-			await this._doStopExtensionHosts();
+			await this._doStopExtensionHosts(scope);
 		} else {
 			if (!auto) {
 				const vetoReasonsArray = Array.from(vetoReasons);
@@ -887,7 +897,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 	protected _onExtensionHostCrashed(extensionHost: IExtensionHostManager, code: number, signal: string | null): void {
 		console.error(`Extension host (${extensionHost.friendyName}) terminated unexpectedly. Code: ${code}, Signal: ${signal}`);
 		if (extensionHost.kind === ExtensionHostKind.LocalProcess) {
-			this._doStopExtensionHosts();
+			this._doStopExtensionHosts(this._isWorkspaceIndependentHost(extensionHost) ? ExtensionHostScope.WorkspaceIndependent : ExtensionHostScope.Workspace);
 		} else if (extensionHost.kind === ExtensionHostKind.Remote) {
 			if (signal) {
 				this._onRemoteExtensionHostCrashed(extensionHost, signal);
@@ -957,8 +967,9 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 		}
 	}
 
-	public async startExtensionHosts(updates?: { toAdd: IExtension[]; toRemove: string[] }): Promise<void> {
-		await this._doStopExtensionHosts();
+	public async startExtensionHosts(updates?: { toAdd: IExtension[]; toRemove: string[] }, scope = ExtensionHostScope.All): Promise<void> {
+		await this._doStopExtensionHosts(scope);
+		const retainedHosts = new Set(this._extensionHostManagers);
 
 		if (updates) {
 			await this._handleDeltaExtensions(new DeltaExtensionsQueueItem(updates.toAdd, updates.toRemove));
@@ -967,7 +978,7 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 		const lock = await this._registry.acquireLock('startExtensionHosts');
 		try {
 			this._startExtensionHostsIfNecessary(false, Array.from(this._allRequestedActivateEvents.keys()));
-			this._startOnDemandExtensionHosts();
+			this._startOnDemandExtensionHosts(retainedHosts);
 
 			const localProcessExtensionHosts = this._getExtensionHostManagers(ExtensionHostKind.LocalProcess);
 			await Promise.all(localProcessExtensionHosts.map(extHost => extHost.ready()));
@@ -976,10 +987,10 @@ export abstract class AbstractExtensionService extends Disposable implements IEx
 		}
 	}
 
-	private _startOnDemandExtensionHosts(): void {
+	private _startOnDemandExtensionHosts(retainedHosts?: ReadonlySet<IExtensionHostManager>): void {
 		const snapshot = this._registry.getSnapshot();
 		for (const extHostManager of this._extensionHostManagers) {
-			if (extHostManager.startup !== ExtensionHostStartup.EagerAutoStart) {
+			if (!retainedHosts?.has(extHostManager) && extHostManager.startup !== ExtensionHostStartup.EagerAutoStart) {
 				const extensions = this._runningLocations.filterByExtensionHostManager(snapshot.extensions, extHostManager);
 				extHostManager.start(snapshot.versionId, snapshot.extensions, extensions.map(extension => extension.identifier));
 			}
@@ -1334,16 +1345,17 @@ class ExtensionHostCollection extends Disposable {
 		this._extensionHostManagers.push(new ExtensionHostManagerData(extensionHostManager, disposableStore));
 	}
 
-	public async stopAllInReverse(): Promise<void> {
+	public async stopAllInReverse(shouldStop: (host: IExtensionHostManager) => boolean = () => true): Promise<void> {
 		// See https://github.com/microsoft/vscode/issues/152204
 		// Dispose extension hosts in reverse creation order because the local extension host
 		// might be critical in sustaining a connection to the remote extension host
 		for (let i = this._extensionHostManagers.length - 1; i >= 0; i--) {
 			const manager = this._extensionHostManagers[i];
+			if (!shouldStop(manager.extensionHost)) { continue; }
+			this._extensionHostManagers.splice(i, 1);
 			await manager.extensionHost.disconnect();
 			manager.dispose();
 		}
-		this._extensionHostManagers = [];
 	}
 
 	public async stopOne(extensionHostManager: IExtensionHostManager): Promise<void> {

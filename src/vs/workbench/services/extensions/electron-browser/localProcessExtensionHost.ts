@@ -9,6 +9,7 @@ import { CancellationError } from '../../../../base/common/errors.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import * as objects from '../../../../base/common/objects.js';
+import * as path from '../../../../base/common/path.js';
 import * as platform from '../../../../base/common/platform.js';
 import { removeDangerousEnvVariables } from '../../../../base/common/processes.js';
 import { StopWatch } from '../../../../base/common/stopwatch.js';
@@ -18,6 +19,8 @@ import { IMessagePassingProtocol } from '../../../../base/parts/ipc/common/ipc.j
 import { BufferedEmitter } from '../../../../base/parts/ipc/common/ipc.net.js';
 import { acquirePort } from '../../../../base/parts/ipc/electron-browser/ipc.mp.js';
 import * as nls from '../../../../nls.js';
+import { applyHttpProxySettingsToEnv, enrichCodingAgentPath, IAdeHttpProxyConfiguration } from '../../../../platform/ade/common/adeEnv.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IExtensionHostDebugService } from '../../../../platform/debug/common/extensionHostDebug.js';
 import { extensionHostGraceTimeMs, IExtensionHostProcessOptions, IExtensionHostStarter } from '../../../../platform/extensions/common/extensionHostStarter.js';
 import { ILabelService } from '../../../../platform/label/common/label.js';
@@ -138,6 +141,7 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 		@IShellEnvironmentService private readonly _shellEnvironmentService: IShellEnvironmentService,
 		@IExtensionHostStarter private readonly _extensionHostStarter: IExtensionHostStarter,
 		@IDefaultLogLevelsService private readonly _defaultLogLevelsService: IDefaultLogLevelsService,
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
 	) {
 		super();
 		const devOpts = parseExtensionDevOptions(this._environmentService);
@@ -237,6 +241,11 @@ export class NativeLocalProcessExtensionHost extends Disposable implements IExte
 		}
 
 		removeDangerousEnvVariables(env);
+
+		env['PATH'] = enrichCodingAgentPath(env['PATH'] ?? (platform.isWindows ? env['Path'] : undefined), this._environmentService.userHome.fsPath, platform.isMacintosh, platform.isWindows);
+		applyHttpProxySettingsToEnv(env, this._configurationService.getValue<IAdeHttpProxyConfiguration>('http'), platform.isMacintosh || platform.isWindows);
+		env['AEXUS_ADE_WINDOW_KEY'] = `win-${this._nativeHostService.windowId}`;
+		env['AEXUS_ADE_AGENTS_DIST_DIR'] = path.join(this._environmentService.appRoot, 'extensions', 'aexus-agents', 'dist');
 
 		if (this._isExtensionDevHost) {
 			// Unset `VSCODE_CODE_CACHE_PATH` when developing extensions because it might

@@ -64,6 +64,7 @@ import { ITerminalQuickPickItem } from './terminalProfileQuickpick.js';
 import { TerminalTabList } from './terminalTabsList.js';
 import { LayoutModeContext, ResourceContextKey } from '../../../common/contextkeys.js';
 import { SeparatorSelectOption } from '../../../../base/browser/ui/selectBox/selectBox.js';
+import { IProjectTerminalService } from './projectTerminalService.js';
 
 export const switchTerminalShowTabsTitle = localize('showTerminalTabs', "Show Tabs");
 
@@ -1243,7 +1244,7 @@ export function registerTerminalActions() {
 				}
 
 				let instance: ITerminalInstance | undefined;
-				if (folders.length <= 1) {
+				if (folders.length <= 1 || eventOrOptions.cwd || accessor.get(IProjectTerminalService).currentProject) {
 					// Allow terminal service to handle the path when there is only a
 					// single root
 					instance = await c.service.createTerminal(eventOrOptions);

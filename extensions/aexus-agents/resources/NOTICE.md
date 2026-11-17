@@ -1,0 +1,1 @@
+Kilo Code icons are the original engine assets from the Kilo Code extension (kilocode.kilo-code), distributed under its included MIT license. The artwork is used unchanged to identify the connected engine.

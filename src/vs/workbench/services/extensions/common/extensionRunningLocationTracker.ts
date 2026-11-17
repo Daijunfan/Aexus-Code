@@ -15,6 +15,7 @@ import { IExtensionHostManager } from './extensionHostManagers.js';
 import { IExtensionManifestPropertiesService } from './extensionManifestPropertiesService.js';
 import { ExtensionRunningLocation, LocalProcessRunningLocation, LocalWebWorkerRunningLocation, RemoteRunningLocation } from './extensionRunningLocation.js';
 import { isProposedApiEnabled } from './extensions.js';
+import { isWorkspaceIndependentExtension } from './codingAgentExtensions.js';
 
 export class ExtensionRunningLocationTracker {
 
@@ -112,6 +113,7 @@ export class ExtensionRunningLocationTracker {
 					// probably can't execute, so it has no impact
 					continue;
 				}
+				if (isWorkspaceIndependentExtension(extension) || isWorkspaceIndependentExtension(extensions.get(depId)!)) { continue; }
 
 				if (depGroup === myGroup) {
 					// already in the same group
@@ -138,6 +140,7 @@ export class ExtensionRunningLocationTracker {
 					// the extension is not installed or can't execute, so it has no impact
 					continue;
 				}
+				if (isWorkspaceIndependentExtension(extension) || isWorkspaceIndependentExtension(extensions.get(colocateId)!)) { continue; }
 
 				if (colocateGroup === myGroup) {
 					// already in the same group
@@ -168,6 +171,8 @@ export class ExtensionRunningLocationTracker {
 			const configuredExtensionIds = Object.keys(configuredAffinities);
 			const configuredAffinityToResultingAffinity = new Map<number, number>();
 			for (const extensionId of configuredExtensionIds) {
+				const extension = extensions.get(extensionId);
+				if (extension && isWorkspaceIndependentExtension(extension)) { continue; }
 				const configuredAffinity = configuredAffinities[extensionId];
 				if (typeof configuredAffinity !== 'number' || configuredAffinity <= 0 || Math.floor(configuredAffinity) !== configuredAffinity) {
 					this._logService.info(`Ignoring configured affinity for '${extensionId}' because the value is not a positive integer.`);
@@ -209,6 +214,14 @@ export class ExtensionRunningLocationTracker {
 			const group = groups.get(extension.identifier) || 0;
 			const affinity = resultingAffinities.get(group) || 0;
 			result.set(extension.identifier, affinity);
+		}
+
+		// Keep the ADE bridge alone: IDE workspace and trust transitions may restart other hosts.
+		if (extensionHostKind === ExtensionHostKind.LocalProcess) {
+			for (const extension of inputExtensions.filter(isWorkspaceIndependentExtension)) {
+				const affinity = this._runningLocation.get(extension.identifier)?.affinity ?? ++lastAffinity;
+				result.set(extension.identifier, affinity);
+			}
 		}
 
 		if (lastAffinity > 0 && isInitialAllocation) {

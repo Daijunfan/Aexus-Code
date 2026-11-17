@@ -29,6 +29,7 @@ import { editorBackground, editorForeground, inputBackground } from '../../../..
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { AbstractEditorWithViewState } from '../../../../../browser/parts/editor/editorWithViewState.js';
 import { IEditorOpenContext } from '../../../../../common/editor.js';
+import { AdeEditorPartContext } from '../../../../../services/workbenchMode/common/workbenchMode.js';
 import { EditorInput } from '../../../../../common/editor/editorInput.js';
 import { EDITOR_DRAG_AND_DROP_BACKGROUND } from '../../../../../common/theme.js';
 import { IEditorGroup, IEditorGroupsService } from '../../../../../services/editor/common/editorGroupsService.js';
@@ -66,6 +67,8 @@ export interface IChatEditorOptions extends IEditorOptions {
 	sessionTypeSelectionReason?: SessionTypeSelectionReason;
 	target?: { data: IExportableChatData | ISerializableChatData };
 	title?: {
+		/** An explicit display name for this editor, independent of the engine's conversation title. */
+		override?: string;
 		preferred?: string;
 		fallback?: string;
 	};
@@ -234,7 +237,7 @@ export class ChatEditor extends AbstractEditorWithViewState<IChatEditorViewState
 						referencesExpandedWhenEmptyResponse: false,
 						progressMessageAtBottomOfResponse: mode => mode !== ChatModeKind.Ask,
 					},
-					enableImplicitContext: true,
+					enableImplicitContext: !AdeEditorPartContext.getValue(this.contextKeyService),
 					enableWorkingSet: 'explicit',
 					supportsChangingModes: true,
 					enableSessionStateIndicator: true,

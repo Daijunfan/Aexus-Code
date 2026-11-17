@@ -58,6 +58,8 @@ import { safeIntl } from '../../../../base/common/date.js';
 import { IsCompactTitleBarContext, TitleBarVisibleContext } from '../../../common/contextkeys.js';
 import { ServiceCollection } from '../../../../platform/instantiation/common/serviceCollection.js';
 import { WORKBENCH_MENU_MOTION_CLASS, workbenchMenuCloseAnimation } from '../../actions/menuMotion.js';
+import { Radio } from '../../../../base/browser/ui/radio/radio.js';
+import { IWorkbenchModeService } from '../../../services/workbenchMode/common/workbenchMode.js';
 
 export interface ITitleVariable {
 	readonly name: string;
@@ -322,7 +324,8 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 		@IEditorService editorService: IEditorService,
 		@IMenuService private readonly menuService: IMenuService,
 		@IKeybindingService private readonly keybindingService: IKeybindingService,
-		@IActionViewItemService private readonly actionViewItemService: IActionViewItemService
+		@IActionViewItemService private readonly actionViewItemService: IActionViewItemService,
+		@IWorkbenchModeService private readonly workbenchModeService: IWorkbenchModeService,
 	) {
 		super(id, { hasTitle: false }, themeService, storageService, layoutService);
 
@@ -530,6 +533,30 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 
 		// Menubar: install a custom menu bar depending on configuration
 		this.updateMenubarInstallation();
+		if (!this.isAuxiliary && hasCustomTitlebar(this.configurationService, this.titleBarStyle)) {
+			const navigation = append(this.leftContent, $('.project-navigation-toolbar'));
+			this._register(this.instantiationService.createInstance(MenuWorkbenchToolBar, navigation, MenuId.TitleBarProjectNavigation, {
+				toolbarOptions: { primaryGroup: () => true },
+				hoverDelegate: this.hoverDelegate,
+				telemetrySource: 'projectNavigation',
+			}));
+		}
+
+		if (!this.isAuxiliary && hasCustomTitlebar(this.configurationService, this.titleBarStyle)) {
+			const modeSelector = this._register(new Radio({
+				className: 'segmented',
+				ariaLabel: localize('workbenchMode', "Development Environment"),
+				hoverDelegate: this.hoverDelegate,
+				items: [
+					{ text: localize('adeMode', "ADE"), ariaLabel: localize('adeMode', "ADE"), tooltip: localize('adeModeDescription', "Agent Development Environment"), isActive: this.workbenchModeService.mode === 'ade' },
+					{ text: localize('ideMode', "IDE"), ariaLabel: localize('ideMode', "IDE"), tooltip: localize('ideModeDescription', "Integrated Development Environment"), isActive: this.workbenchModeService.mode === 'ide' }
+				]
+			}));
+			this._register(modeSelector.onDidSelect(index => this.workbenchModeService.setMode(index === 0 ? 'ade' : 'ide')));
+			this._register(this.workbenchModeService.onDidChangeMode(mode => modeSelector.setActiveItem(mode === 'ade' ? 0 : 1)));
+			modeSelector.domNode.classList.add('workbench-mode-switch');
+			append(this.centerContent, modeSelector.domNode);
+		}
 
 		// Title
 		this.title = append(this.centerContent, $('div.window-title'));
@@ -951,7 +978,7 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 
 	private get activityActionsEnabled(): boolean {
 		const activityBarPosition = this.configurationService.getValue<ActivityBarPosition>(LayoutSettings.ACTIVITY_BAR_LOCATION);
-		return !this.isCompact && !this.isAuxiliary && (activityBarPosition === ActivityBarPosition.TOP || activityBarPosition === ActivityBarPosition.BOTTOM);
+		return !this.isCompact && !this.isAuxiliary && (activityBarPosition === ActivityBarPosition.TOP || activityBarPosition === ActivityBarPosition.BOTTOM || activityBarPosition === ActivityBarPosition.HIDDEN);
 	}
 
 	private get globalActionsEnabled(): boolean {
@@ -1061,8 +1088,9 @@ export class MainBrowserTitlebarPart extends BrowserTitlebarPart {
 		@IMenuService menuService: IMenuService,
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IActionViewItemService actionViewItemService: IActionViewItemService,
+		@IWorkbenchModeService workbenchModeService: IWorkbenchModeService,
 	) {
-		super(Parts.TITLEBAR_PART, mainWindow, editorGroupService.mainPart, contextMenuService, configurationService, environmentService, instantiationService, themeService, storageService, layoutService, contextKeyService, hostService, editorService, menuService, keybindingService, actionViewItemService);
+		super(Parts.TITLEBAR_PART, mainWindow, editorGroupService.mainPart, contextMenuService, configurationService, environmentService, instantiationService, themeService, storageService, layoutService, contextKeyService, hostService, editorService, menuService, keybindingService, actionViewItemService, workbenchModeService);
 	}
 }
 
@@ -1097,9 +1125,10 @@ export class AuxiliaryBrowserTitlebarPart extends BrowserTitlebarPart implements
 		@IMenuService menuService: IMenuService,
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IActionViewItemService actionViewItemService: IActionViewItemService,
+		@IWorkbenchModeService workbenchModeService: IWorkbenchModeService,
 	) {
 		const id = AuxiliaryBrowserTitlebarPart.COUNTER++;
-		super(`workbench.parts.auxiliaryTitle.${id}`, getWindow(container), editorGroupsContainer, contextMenuService, configurationService, environmentService, instantiationService, themeService, storageService, layoutService, contextKeyService, hostService, editorService, menuService, keybindingService, actionViewItemService);
+		super(`workbench.parts.auxiliaryTitle.${id}`, getWindow(container), editorGroupsContainer, contextMenuService, configurationService, environmentService, instantiationService, themeService, storageService, layoutService, contextKeyService, hostService, editorService, menuService, keybindingService, actionViewItemService, workbenchModeService);
 	}
 
 	override get preventZoom(): boolean {

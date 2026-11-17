@@ -734,6 +734,10 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 	}
 
 	async openExternal(windowId: number | undefined, url: string, defaultApplication?: string): Promise<boolean> {
+		if (process.env['AEXUS_HIDDEN_WINDOW'] === '1') {
+			this.logService.info(`[AEXUS_HIDDEN_WINDOW] Suppressed openExternal: ${url}`);
+			return false;
+		}
 		this.environmentMainService.unsetSnapExportedVariables();
 		try {
 			if (matchesSomeScheme(url, Schemas.http, Schemas.https)) {

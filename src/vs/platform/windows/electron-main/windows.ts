@@ -151,19 +151,22 @@ export function defaultBrowserWindowOptions(accessor: ServicesAccessor, windowSt
 	const environmentMainService = accessor.get(IEnvironmentMainService);
 
 	const windowSettings = configurationService.getValue<IWindowSettings | undefined>('window');
+	const isHiddenWindow = process.env['AEXUS_HIDDEN_WINDOW'] === '1';
 
 	const options: electron.BrowserWindowConstructorOptions & { experimentalDarkMode: boolean; accentColor?: boolean | string } = {
 		backgroundColor: themeMainService.getBackgroundColor(),
 		minWidth: WindowMinimumSize.WIDTH,
 		minHeight: WindowMinimumSize.HEIGHT,
 		title: productService.nameLong,
-		show: windowState.mode !== WindowMode.Maximized && windowState.mode !== WindowMode.Fullscreen, // reduce flicker by showing later
+		show: isHiddenWindow ? false : (windowState.mode !== WindowMode.Maximized && windowState.mode !== WindowMode.Fullscreen), // reduce flicker by showing later
+		paintWhenInitiallyHidden: isHiddenWindow ? true : undefined,
 		x: windowState.x,
 		y: windowState.y,
 		width: windowState.width,
 		height: windowState.height,
 		webPreferences: {
 			...webPreferences,
+			backgroundThrottling: isHiddenWindow ? false : webPreferences?.backgroundThrottling,
 			spellcheck: false,
 			zoomFactor: zoomLevelToZoomFactor(windowState.zoomLevel ?? windowSettings?.zoomLevel),
 			autoplayPolicy: 'user-gesture-required',

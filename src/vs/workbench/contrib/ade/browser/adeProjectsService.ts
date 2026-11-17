@@ -1,0 +1,1131 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { Emitter } from '../../../../base/common/event.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
+import { basename, removeTrailingPathSeparator } from '../../../../base/common/resources.js';
+import { URI } from '../../../../base/common/uri.js';
+import { generateUuid } from '../../../../base/common/uuid.js';
+import { localize } from '../../../../nls.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
+import {
+	AdeAgentRole,
+	AdeAgentStatus,
+	getAdeRoleRankLevel,
+	IAdeAddSessionOptions,
+	IAdeAgent,
+	IAdeAgentTreeNode,
+	IAdeProject,
+	IAdeProjectsService,
+	IAdeSecretary,
+	IAdeSession,
+} from '../common/ade.js';
+
+interface IStoredProject {
+	uri: string;
+	name: string;
+}
+
+interface IStoredAgent {
+	id: string;
+	parentId?: string;
+	projectUri: string;
+	label: string;
+	labelIsCustom?: boolean;
+	role?: AdeAgentRole;
+	archived?: boolean;
+	unread?: boolean;
+	draft: string;
+	session?: { engineId: string; resource: string };
+}
+
+interface IStoredSecretary {
+	label?: string;
+	draft?: string;
+	unread?: boolean;
+	session?: { engineId: string; resource: string };
+}
+
+export class AdeProjectsService extends Disposable implements IAdeProjectsService {
+	declare readonly _serviceBrand: undefined;
+
+	private catalogProjects: IAdeProject[];
+	private entries: IAdeAgent[];
+	private selectedProjectUri: URI | undefined;
+	private _selectedAgentId: string | undefined;
+	private _secretary: IAdeSecretary;
+	private _showArchived: boolean;
+	private suppressNavEvents = false;
+	private suppressWorkspaceSyncCount = 0;
+	private isSavingStorage = false;
+	private lastWorkspaceKeys: string;
+
+	private readonly changeEmitter = this._register(new Emitter<'order' | void>());
+	readonly onDidChange = this.changeEmitter.event;
+	private readonly removedAgentsEmitter = this._register(new Emitter<readonly IAdeAgent[]>());
+	readonly onDidRemoveAgents = this.removedAgentsEmitter.event;
+
+	constructor(
+		@IStorageService private readonly storageService: IStorageService,
+		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
+		@IProjectNavigationService private readonly projectNavigation: IProjectNavigationService,
+		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
+	) {
+		super();
+
+		const catalogInitialized = storageService.getBoolean('aexus.ade.catalogInitialized', StorageScope.PROFILE, false);
+		const hasStoredProjectsKey = storageService.get('aexus.ade.projects', StorageScope.PROFILE) !== undefined;
+		this.catalogProjects = this.loadStoredCatalogProjects();
+		this.entries = this.loadStoredAgents();
+
+		let catalogDirty = false;
+		for (const agent of this.entries) {
+			if (!agent.parentId && this.ensureCatalogProject(agent.projectUri, basename(agent.projectUri), false)) {
+				catalogDirty = true;
+			}
+		}
+
+		const isInternalMirror = this.isInternalMirrorWorkspace();
+		if (!catalogInitialized) {
+			this.mergeIntoCatalog(this.projectNavigation.orderedProjects);
+			if (hasStoredProjectsKey || this.entries.some(agent => !agent.parentId)) {
+				catalogDirty = true;
+			}
+		} else if (!isInternalMirror && this.projectNavigation.orderedProjects.length > 0) {
+			if (this.mergeIntoCatalog(this.projectNavigation.orderedProjects)) {
+				catalogDirty = true;
+			}
+		} else if (isInternalMirror) {
+			this.applyCatalogOrderToNavigation();
+		}
+
+		if (catalogDirty) {
+			this.saveProjects();
+		}
+
+		const storedSelectedProject = storageService.get('aexus.ade.selectedProject', StorageScope.PROFILE);
+		const storedSelectedAgentId = storageService.get('aexus.ade.selectedProjectId', StorageScope.PROFILE);
+		this._selectedAgentId = storedSelectedAgentId;
+		if (storedSelectedProject) {
+			this.selectedProjectUri = removeTrailingPathSeparator(URI.parse(storedSelectedProject));
+		} else if (storedSelectedAgentId) {
+			const legacyAgent = this.entries.find(agent => agent.id === storedSelectedAgentId);
+			this.selectedProjectUri = legacyAgent?.projectUri;
+		} else if (this.projectNavigation.selectedProject) {
+			this.selectedProjectUri = this.projectNavigation.selectedProject.uri;
+		}
+
+		const storedSecretary = storageService.getObject<IStoredSecretary>('aexus.ade.secretary', StorageScope.PROFILE, {});
+		this._secretary = {
+			label: localize('adeSecretaryLabel', "Secretary"),
+			draft: storedSecretary.draft ?? '',
+			status: 'idle',
+			unread: storedSecretary.unread,
+			session: storedSecretary.session ? { engineId: storedSecretary.session.engineId, resource: URI.parse(storedSecretary.session.resource) } : undefined,
+		};
+
+		if (storageService.get('aexus.ade.viewMode', StorageScope.PROFILE) !== undefined) {
+			this.isSavingStorage = true;
+			try {
+				storageService.remove('aexus.ade.viewMode', StorageScope.PROFILE);
+			} finally {
+				this.isSavingStorage = false;
+			}
+		}
+		this._showArchived = storageService.getBoolean('aexus.ade.showArchived', StorageScope.PROFILE, false);
+
+		this.lastWorkspaceKeys = this.computeWorkspaceKeys();
+
+		this._register(this.contextService.onDidChangeWorkspaceFolders(e => {
+			const removedAgents: IAdeAgent[] = [];
+			let catalogChanged = false;
+			if (this.suppressWorkspaceSyncCount === 0) {
+				for (const folder of e?.added ?? []) {
+					if (this.ensureCatalogProject(folder.uri, folder.name, false)) {
+						catalogChanged = true;
+					}
+				}
+				for (const folder of e?.removed ?? []) {
+					const removed = this.doRemoveProject(folder.uri, false);
+					removedAgents.push(...removed.removedAgents);
+					if (removed.projectsChanged) {
+						catalogChanged = true;
+					}
+				}
+				if (this.syncCatalogOrderWith(this.projectNavigation.orderedProjects)) {
+					catalogChanged = true;
+				}
+				if (catalogChanged) {
+					this.saveProjects();
+				}
+			}
+			this.lastWorkspaceKeys = this.computeWorkspaceKeys();
+			if (removedAgents.length > 0) {
+				this.removedAgentsEmitter.fire(removedAgents);
+			}
+			this.changeEmitter.fire();
+		}));
+
+		this._register(this.projectNavigation.onDidChangeProjectOrder(() => {
+			if (this.suppressNavEvents || this.suppressWorkspaceSyncCount > 0) {
+				return;
+			}
+			const nextKeys = this.computeWorkspaceKeys();
+			const structureChanged = nextKeys !== this.lastWorkspaceKeys;
+			this.lastWorkspaceKeys = nextKeys;
+			if (structureChanged) {
+				return;
+			}
+			if (this.syncCatalogOrderWith(this.projectNavigation.orderedProjects)) {
+				this.saveProjects();
+			}
+			this.changeEmitter.fire('order');
+		}));
+
+		this._register(this.projectNavigation.onDidChangeProject(focused => {
+			if (this.suppressNavEvents) {
+				return;
+			}
+			if (focused) {
+				this.selectedProjectUri = focused.uri;
+				this.persistSelectedProject();
+			}
+			this.changeEmitter.fire();
+		}));
+
+		this._register(this.projectNavigation.onDidChangeSelectedProject(selected => {
+			if (this.suppressNavEvents || !selected) {
+				return;
+			}
+			if (!this.uriIdentityService.extUri.isEqual(this.selectedProjectUri, selected.uri)) {
+				this.selectedProjectUri = selected.uri;
+				this.persistSelectedProject();
+				this.changeEmitter.fire();
+			}
+		}));
+
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
+			if (!e.external || this.isSavingStorage) {
+				return;
+			}
+			if (e.key === 'aexus.ade.projects' || e.key === 'aexus.ade.agents') {
+				this.reloadFromExternalStorage();
+			}
+		}));
+	}
+
+	ensureCatalogPersisted(): void {
+		if (!this.storageService.getBoolean('aexus.ade.catalogInitialized', StorageScope.PROFILE, false) && this.catalogProjects.length > 0) {
+			this.saveProjects();
+		}
+	}
+
+	async runWithSuppressedWorkspaceSync<T>(fn: () => Promise<T>): Promise<T> {
+		this.suppressWorkspaceSyncCount++;
+		try {
+			return await fn();
+		} finally {
+			this.suppressWorkspaceSyncCount--;
+		}
+	}
+
+	private isInternalMirrorWorkspace(): boolean {
+		const configUri = this.contextService.getWorkspace()?.configuration;
+		return Boolean(configUri && /\/Projects\/[^/]+\/projects\.code-workspace$/i.test(configUri.path));
+	}
+
+	private loadStoredCatalogProjects(): IAdeProject[] {
+		const seen = new Set<string>();
+		const result: IAdeProject[] = [];
+		for (const item of this.storageService.getObject<IStoredProject[]>('aexus.ade.projects', StorageScope.PROFILE, [])) {
+			const normalized = removeTrailingPathSeparator(URI.parse(item.uri));
+			const key = this.uriIdentityService.extUri.getComparisonKey(normalized);
+			if (!seen.has(key)) {
+				seen.add(key);
+				result.push({ uri: normalized, name: item.name || basename(normalized) });
+			}
+		}
+		return result;
+	}
+
+	private loadStoredAgents(preserveStatusFrom?: readonly IAdeAgent[]): IAdeAgent[] {
+		const statusById = preserveStatusFrom ? new Map(preserveStatusFrom.map(agent => [agent.id, agent.status ?? 'idle'])) : undefined;
+		return this.storageService.getObject<IStoredAgent[]>('aexus.ade.agents', StorageScope.PROFILE, []).map(entry => ({
+			id: entry.id,
+			parentId: entry.parentId,
+			projectUri: removeTrailingPathSeparator(URI.parse(entry.projectUri)),
+			label: entry.label,
+			labelIsCustom: entry.labelIsCustom,
+			role: entry.role,
+			archived: entry.archived,
+			unread: entry.unread,
+			status: statusById?.get(entry.id) ?? 'idle',
+			draft: entry.draft ?? '',
+			session: entry.session ? { engineId: entry.session.engineId, resource: URI.parse(entry.session.resource) } : undefined,
+		}));
+	}
+
+	private mergeIntoCatalog(candidates: readonly { uri: URI; name?: string }[]): boolean {
+		let changed = false;
+		for (const candidate of candidates) {
+			if (this.ensureCatalogProject(candidate.uri, candidate.name, false)) {
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	private syncCatalogOrderWith(ordered: readonly { uri: URI }[]): boolean {
+		const orderedKeys = ordered.map(folder => this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri)));
+		const orderedSet = new Set(orderedKeys);
+		const catalogByKey = new Map(this.catalogProjects.map(project => [this.uriIdentityService.extUri.getComparisonKey(project.uri), project]));
+		const reorderedSubset = orderedKeys.map(key => catalogByKey.get(key)).filter((project): project is IAdeProject => Boolean(project));
+		let subIdx = 0;
+		const nextCatalog = this.catalogProjects.map(project => {
+			const key = this.uriIdentityService.extUri.getComparisonKey(project.uri);
+			return orderedSet.has(key) && subIdx < reorderedSubset.length ? reorderedSubset[subIdx++] : project;
+		});
+		if (nextCatalog.every((project, idx) => project === this.catalogProjects[idx])) {
+			return false;
+		}
+		this.catalogProjects = nextCatalog;
+		return true;
+	}
+
+	private applyCatalogOrderToNavigation(): void {
+		if (typeof this.projectNavigation.moveProjects !== 'function') {
+			return;
+		}
+		const ordered = this.projectNavigation.orderedProjects;
+		if (ordered.length < 2) {
+			return;
+		}
+		const navKeys = new Set(ordered.map(folder => this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri))));
+		const targetOrder = this.catalogProjects.filter(project => navKeys.has(this.uriIdentityService.extUri.getComparisonKey(project.uri)));
+		if (targetOrder.length < 2) {
+			return;
+		}
+		const currentSubsetKeys = ordered
+			.filter(folder => targetOrder.some(project => this.uriIdentityService.extUri.isEqual(folder.uri, project.uri)))
+			.map(folder => this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri)));
+		const targetKeys = targetOrder.map(project => this.uriIdentityService.extUri.getComparisonKey(project.uri));
+		if (currentSubsetKeys.length === targetKeys.length && currentSubsetKeys.every((key, idx) => key === targetKeys[idx])) {
+			return;
+		}
+		this.suppressNavEvents = true;
+		try {
+			const currentFirst = this.projectNavigation.orderedProjects[0]?.uri;
+			if (currentFirst && !this.uriIdentityService.extUri.isEqual(currentFirst, targetOrder[0].uri)) {
+				this.projectNavigation.moveProjects([targetOrder[0].uri], currentFirst, false);
+			}
+			for (let idx = 1; idx < targetOrder.length; idx++) {
+				this.projectNavigation.moveProjects([targetOrder[idx].uri], targetOrder[idx - 1].uri, true);
+			}
+		} finally {
+			this.suppressNavEvents = false;
+		}
+	}
+
+	private reloadFromExternalStorage(): void {
+		const nextCatalog = this.loadStoredCatalogProjects();
+		const nextAgents = this.loadStoredAgents(this.entries);
+		for (const agent of nextAgents) {
+			if (!agent.parentId) {
+				const normalized = removeTrailingPathSeparator(agent.projectUri);
+				if (!nextCatalog.some(project => this.uriIdentityService.extUri.isEqual(project.uri, normalized))) {
+					nextCatalog.push({ uri: normalized, name: basename(normalized) });
+				}
+			}
+		}
+
+		const prevIds = new Set(this.entries.map(agent => agent.id));
+		const nextIds = new Set(nextAgents.map(agent => agent.id));
+		const removedAgents = this.entries.filter(agent => prevIds.has(agent.id) && !nextIds.has(agent.id));
+
+		const catalogUnchanged = nextCatalog.length === this.catalogProjects.length
+			&& nextCatalog.every((project, idx) => project.name === this.catalogProjects[idx].name && this.uriIdentityService.extUri.isEqual(project.uri, this.catalogProjects[idx].uri));
+		const agentsUnchanged = nextAgents.length === this.entries.length
+			&& nextAgents.every((agent, idx) => {
+				const prev = this.entries[idx];
+				return agent.id === prev.id
+					&& agent.parentId === prev.parentId
+					&& agent.label === prev.label
+					&& agent.role === prev.role
+					&& agent.archived === prev.archived
+					&& agent.unread === prev.unread
+					&& agent.draft === prev.draft
+					&& this.uriIdentityService.extUri.isEqual(agent.projectUri, prev.projectUri)
+					&& agent.session?.engineId === prev.session?.engineId
+					&& agent.session?.resource.toString() === prev.session?.resource.toString();
+			});
+		if (catalogUnchanged && agentsUnchanged) {
+			return;
+		}
+
+		this.catalogProjects = nextCatalog;
+		this.entries = nextAgents;
+		if (this._selectedAgentId && !nextIds.has(this._selectedAgentId)) {
+			this._selectedAgentId = undefined;
+		}
+		if (this.selectedProjectUri && !this.catalogProjects.some(project => this.uriIdentityService.extUri.isEqual(project.uri, this.selectedProjectUri))) {
+			this.selectedProjectUri = undefined;
+		}
+		this.applyCatalogOrderToNavigation();
+		if (removedAgents.length > 0) {
+			this.removedAgentsEmitter.fire(removedAgents);
+		}
+		this.changeEmitter.fire();
+	}
+
+	private computeWorkspaceKeys(): string {
+		return [...this.projectNavigation.orderedProjects]
+			.map(folder => this.uriIdentityService.extUri.getComparisonKey(folder.uri))
+			.sort()
+			.join('\n');
+	}
+
+	private isWorkspaceFolder(uri: URI): boolean {
+		return this.projectNavigation.orderedProjects.some(folder => this.uriIdentityService.extUri.isEqual(folder.uri, uri));
+	}
+
+	private ensureCatalogProject(uri: URI, name = basename(uri), persist = true): boolean {
+		const normalized = removeTrailingPathSeparator(uri);
+		if (this.catalogProjects.some(project => this.uriIdentityService.extUri.isEqual(project.uri, normalized))) {
+			return false;
+		}
+		const wsFolder = this.projectNavigation.orderedProjects.find(folder => this.uriIdentityService.extUri.isEqual(folder.uri, normalized));
+		this.catalogProjects.push({ uri: normalized, name: wsFolder?.name || name || basename(normalized) });
+		if (persist) {
+			this.saveProjects();
+		}
+		return true;
+	}
+
+	get projects(): readonly IAdeProject[] {
+		const wsNames = new Map(
+			this.projectNavigation.orderedProjects.map(folder => [
+				this.uriIdentityService.extUri.getComparisonKey(removeTrailingPathSeparator(folder.uri)),
+				folder.name,
+			]),
+		);
+		const seen = new Set<string>();
+		const result: IAdeProject[] = [];
+		const pushProject = (uri: URI, name: string) => {
+			const normalized = removeTrailingPathSeparator(uri);
+			const key = this.uriIdentityService.extUri.getComparisonKey(normalized);
+			if (!seen.has(key)) {
+				seen.add(key);
+				result.push({ uri: normalized, name: wsNames.get(key) || name });
+			}
+		};
+
+		for (const project of this.catalogProjects) {
+			pushProject(project.uri, project.name);
+		}
+		for (const agent of this.entries) {
+			if (!agent.parentId) {
+				pushProject(agent.projectUri, basename(agent.projectUri));
+			}
+		}
+		return result;
+	}
+
+	get agents(): readonly IAdeAgent[] {
+		return this.entries;
+	}
+
+	get selectedAgentId(): string | undefined {
+		return this._selectedAgentId;
+	}
+
+	get selectedProject(): IAdeProject | undefined {
+		if (this.projectNavigation.focusedProject) {
+			return { uri: this.projectNavigation.focusedProject.uri, name: this.projectNavigation.focusedProject.name };
+		}
+		if (this.selectedProjectUri) {
+			const match = this.projects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, this.selectedProjectUri));
+			if (match) {
+				return match;
+			}
+		}
+		if (this.projectNavigation.selectedProject) {
+			return { uri: this.projectNavigation.selectedProject.uri, name: this.projectNavigation.selectedProject.name };
+		}
+		return undefined;
+	}
+
+	get secretary(): IAdeSecretary {
+		return this._secretary;
+	}
+
+	get showArchived(): boolean {
+		return this._showArchived;
+	}
+
+	getProjectName(projectUri: URI): string {
+		const match = this.projects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, projectUri));
+		return match?.name ?? basename(projectUri);
+	}
+
+	registerProject(uri: URI, name = basename(uri)): IAdeProject {
+		const normalized = removeTrailingPathSeparator(uri);
+		const wsFolder = this.projectNavigation.orderedProjects.find(folder => this.uriIdentityService.extUri.isEqual(folder.uri, normalized));
+		const nextName = name || wsFolder?.name || basename(normalized);
+		const existing = this.catalogProjects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, normalized));
+		if (existing) {
+			if (nextName && existing.name !== nextName) {
+				this.catalogProjects = this.catalogProjects.map(project => project === existing ? { uri: normalized, name: nextName } : project);
+				this.saveProjects();
+				this.changeEmitter.fire();
+			}
+			return { uri: normalized, name: nextName || existing.name };
+		}
+		const added: IAdeProject = { uri: normalized, name: nextName };
+		this.catalogProjects.push(added);
+		this.saveProjects();
+		this.changeEmitter.fire();
+		return added;
+	}
+
+	unregisterProject(uri: URI): void {
+		this.removeProject(uri);
+	}
+
+	removeProject(uri: URI): readonly IAdeAgent[] {
+		const { removedAgents } = this.doRemoveProject(uri, true);
+		if (removedAgents.length > 0) {
+			this.removedAgentsEmitter.fire(removedAgents);
+		}
+		this.changeEmitter.fire();
+		return removedAgents;
+	}
+
+	private doRemoveProject(uri: URI, persistProjects = true): { removedAgents: IAdeAgent[]; projectsChanged: boolean } {
+		const normalized = removeTrailingPathSeparator(uri);
+		let projectsChanged = false;
+
+		const removedAgents = this.entries.filter(agent => this.uriIdentityService.extUri.isEqual(agent.projectUri, normalized));
+		if (removedAgents.length > 0) {
+			const removedIds = new Set(removedAgents.map(agent => agent.id));
+			this.entries = this.entries.filter(agent => !removedIds.has(agent.id));
+			if (this._selectedAgentId && removedIds.has(this._selectedAgentId)) {
+				this._selectedAgentId = undefined;
+				this.storageService.remove('aexus.ade.selectedProjectId', StorageScope.PROFILE);
+			}
+			this.saveAgents();
+		}
+
+		const beforeProjects = this.catalogProjects.length;
+		this.catalogProjects = this.catalogProjects.filter(project => !this.uriIdentityService.extUri.isEqual(project.uri, normalized));
+		if (this.catalogProjects.length !== beforeProjects) {
+			projectsChanged = true;
+			if (persistProjects) {
+				this.saveProjects();
+			}
+		}
+
+		if (this.selectedProjectUri && this.uriIdentityService.extUri.isEqual(this.selectedProjectUri, normalized)) {
+			this.selectedProjectUri = undefined;
+			this.persistSelectedProject();
+		}
+
+		return { removedAgents, projectsChanged };
+	}
+
+	moveProjectFolder(sourceUri: URI, targetUri: URI | undefined, after: boolean): void {
+		const normalizedSource = removeTrailingPathSeparator(sourceUri);
+		const normalizedTarget = targetUri ? removeTrailingPathSeparator(targetUri) : undefined;
+		if (normalizedTarget && this.uriIdentityService.extUri.isEqual(normalizedSource, normalizedTarget)) {
+			return;
+		}
+
+		let moved = false;
+		const sourceCatalog = this.catalogProjects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, normalizedSource));
+		if (sourceCatalog && (!normalizedTarget || this.catalogProjects.some(project => this.uriIdentityService.extUri.isEqual(project.uri, normalizedTarget)))) {
+			const remaining = this.catalogProjects.filter(project => project !== sourceCatalog);
+			const index = normalizedTarget
+				? remaining.findIndex(project => this.uriIdentityService.extUri.isEqual(project.uri, normalizedTarget)) + Number(after)
+				: remaining.length;
+			remaining.splice(index, 0, sourceCatalog);
+			if (!remaining.every((project, idx) => project === this.catalogProjects[idx])) {
+				this.catalogProjects = remaining;
+				this.saveProjects();
+				moved = true;
+			}
+		}
+
+		if (this.isWorkspaceFolder(normalizedSource) && (!normalizedTarget || this.isWorkspaceFolder(normalizedTarget))) {
+			const beforeOrder = this.projectNavigation.orderedProjects.map(folder => folder.uri.toString()).join('\n');
+			this.suppressNavEvents = true;
+			try {
+				this.projectNavigation.moveProjects([normalizedSource], normalizedTarget, after);
+			} finally {
+				this.suppressNavEvents = false;
+			}
+			const afterOrder = this.projectNavigation.orderedProjects.map(folder => folder.uri.toString()).join('\n');
+			if (beforeOrder !== afterOrder) {
+				moved = true;
+			}
+		}
+
+		if (moved) {
+			this.changeEmitter.fire('order');
+		}
+	}
+
+	selectProject(resource: URI): void {
+		if (this.projectNavigation.focusedProject) {
+			return;
+		}
+		const target = this.projects
+			.filter(project => this.uriIdentityService.extUri.isEqualOrParent(resource, project.uri))
+			.sort((a, b) => b.uri.path.length - a.uri.path.length)[0];
+
+		const nextUri = target?.uri;
+		const changed = Boolean(nextUri && !this.uriIdentityService.extUri.isEqual(this.selectedProjectUri, nextUri));
+		if (nextUri) {
+			this.selectedProjectUri = nextUri;
+			this.persistSelectedProject();
+		}
+
+		this.suppressNavEvents = true;
+		try {
+			this.projectNavigation.selectProject(nextUri ?? resource);
+		} finally {
+			this.suppressNavEvents = false;
+		}
+
+		if (changed) {
+			this.changeEmitter.fire();
+		}
+	}
+
+	selectAgent(id: string): void {
+		const agent = this.getAgent(id);
+		if (!agent) {
+			return;
+		}
+		this._selectedAgentId = agent.id;
+		this.storageService.store('aexus.ade.selectedProjectId', agent.id, StorageScope.PROFILE, StorageTarget.MACHINE);
+		this.selectProject(agent.projectUri);
+	}
+
+	getAgent(id: string): IAdeAgent | undefined {
+		return this.entries.find(agent => agent.id === id);
+	}
+
+	getRootAgent(id: string): IAdeAgent | undefined {
+		const visited = new Set<string>();
+		let current = this.getAgent(id);
+		while (current?.parentId && !visited.has(current.id)) {
+			visited.add(current.id);
+			const parent = this.getAgent(current.parentId);
+			if (!parent) {
+				break;
+			}
+			current = parent;
+		}
+		return current;
+	}
+
+	getDirectSubordinates(id: string): readonly IAdeAgent[] {
+		return this.entries.filter(agent => agent.parentId === id);
+	}
+
+	getSubtree(id: string): readonly IAdeAgent[] {
+		const root = this.getAgent(id);
+		if (!root) {
+			return [];
+		}
+		const ids = new Set<string>([id]);
+		let added = true;
+		while (added) {
+			added = false;
+			for (const entry of this.entries) {
+				if (entry.parentId && ids.has(entry.parentId) && !ids.has(entry.id)) {
+					ids.add(entry.id);
+					added = true;
+				}
+			}
+		}
+		return this.entries.filter(entry => ids.has(entry.id));
+	}
+
+	getAgentTree(id: string): IAdeAgentTreeNode | undefined {
+		const root = this.getAgent(id);
+		if (!root) {
+			return undefined;
+		}
+		const visited = new Set<string>();
+		const build = (node: IAdeAgent): IAdeAgentTreeNode => {
+			visited.add(node.id);
+			const children = this.getDirectSubordinates(node.id)
+				.filter(child => !visited.has(child.id))
+				.map(child => build(child));
+			return { agent: node, children };
+		};
+		return build(root);
+	}
+
+	hasSubordinates(id: string): boolean {
+		return this.entries.some(agent => agent.parentId === id);
+	}
+
+	isOrchestrated(agentOrId: IAdeAgent | string): boolean {
+		const agent = typeof agentOrId === 'string' ? this.getAgent(agentOrId) : agentOrId;
+		return Boolean(agent && (agent.role || this.hasSubordinates(agent.id)));
+	}
+
+	isArchived(id: string): boolean {
+		const visited = new Set<string>();
+		let current = this.getAgent(id);
+		while (current && !visited.has(current.id)) {
+			if (current.archived) {
+				return true;
+			}
+			visited.add(current.id);
+			current = current.parentId ? this.getAgent(current.parentId) : undefined;
+		}
+		return false;
+	}
+
+	addProject(uri: URI, label = basename(uri)): IAdeAgent {
+		const normalized = removeTrailingPathSeparator(uri);
+		const addedCatalog = this.ensureCatalogProject(normalized, label);
+		const existing = this.entries.find(agent => !agent.parentId && !agent.session && this.uriIdentityService.extUri.isEqual(agent.projectUri, normalized));
+		if (existing) {
+			if (addedCatalog) {
+				this.changeEmitter.fire();
+			}
+			return existing;
+		}
+		return this.add({ id: generateUuid(), projectUri: normalized, label, draft: '', status: 'idle' });
+	}
+
+	addAgent(parentId: string, label: string, role?: AdeAgentRole): IAdeAgent {
+		const parent = this.getAgent(parentId);
+		if (!parent) {
+			throw new Error(localize('agentParentMissing', "The parent Agent no longer exists."));
+		}
+		return this.add({ id: generateUuid(), parentId, projectUri: parent.projectUri, label, role, draft: '', status: 'idle' });
+	}
+
+	addSession(projectUri: URI, session: IAdeSession, label: string, optionsOrParentId?: string | IAdeAddSessionOptions): IAdeAgent {
+		const normalized = removeTrailingPathSeparator(projectUri);
+		const addedCatalog = this.ensureCatalogProject(normalized, basename(normalized));
+		const options: IAdeAddSessionOptions = typeof optionsOrParentId === 'string'
+			? { parentId: optionsOrParentId }
+			: (optionsOrParentId ?? {});
+
+		const existing = this.entries.find(agent => agent.session?.engineId === session.engineId && agent.session.resource.toString() === session.resource.toString());
+		if (existing) {
+			if (options.role && existing.role !== options.role) {
+				this.setAgentRole(existing.id, options.role);
+				return this.getAgent(existing.id)!;
+			}
+			if (addedCatalog) {
+				this.changeEmitter.fire();
+			}
+			return existing;
+		}
+		return this.add({
+			id: generateUuid(),
+			projectUri: normalized,
+			session: { engineId: session.engineId, resource: session.resource },
+			label,
+			labelIsCustom: options.labelIsCustom ?? false,
+			parentId: options.parentId,
+			role: options.role,
+			status: 'idle',
+			draft: '',
+		});
+	}
+
+	private add(agent: IAdeAgent): IAdeAgent {
+		this.entries.push(agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+		return agent;
+	}
+
+	bindSession(id: string, session: IAdeSession): void {
+		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, session: { engineId: session.engineId, resource: session.resource } } : agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	moveProject(id: string, targetId: string | undefined, after: boolean): void {
+		const roots = this.entries.filter(agent => !agent.parentId);
+		const source = roots.find(agent => agent.id === id);
+		const target = targetId ? roots.find(agent => agent.id === targetId) : undefined;
+		if (!source || id === targetId || (targetId && !target)) {
+			return;
+		}
+		const reordered = roots.filter(agent => agent !== source);
+		const index = target ? reordered.findIndex(agent => agent.id === target.id) + Number(after) : reordered.length;
+		reordered.splice(index, 0, source);
+		if (reordered.every((agent, idx) => agent === roots[idx])) {
+			return;
+		}
+		this.entries = [...reordered, ...this.entries.filter(agent => agent.parentId)];
+		this.saveAgents();
+
+		// Synchronize catalog and workspace folder order without double-emitting 'order'
+		if (!target || !this.uriIdentityService.extUri.isEqual(source.projectUri, target.projectUri)) {
+			const sourceCatalog = this.catalogProjects.find(project => this.uriIdentityService.extUri.isEqual(project.uri, source.projectUri));
+			if (sourceCatalog) {
+				const remaining = this.catalogProjects.filter(project => project !== sourceCatalog);
+				const catalogIdx = target
+					? remaining.findIndex(project => this.uriIdentityService.extUri.isEqual(project.uri, target.projectUri)) + Number(after)
+					: remaining.length;
+				if (catalogIdx >= 0) {
+					remaining.splice(catalogIdx, 0, sourceCatalog);
+					if (!remaining.every((project, idx) => project === this.catalogProjects[idx])) {
+						this.catalogProjects = remaining;
+						this.saveProjects();
+					}
+				}
+			}
+			if (this.isWorkspaceFolder(source.projectUri) && (!target || this.isWorkspaceFolder(target.projectUri))) {
+				this.suppressNavEvents = true;
+				try {
+					this.projectNavigation.moveProjects([source.projectUri], target?.projectUri, after);
+				} finally {
+					this.suppressNavEvents = false;
+				}
+			}
+		}
+
+		this.changeEmitter.fire('order');
+	}
+
+	canReparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean {
+		const agent = this.getAgent(id);
+		if (!agent || id === newParentId) {
+			return false;
+		}
+		if (newParentId === undefined) {
+			const nextProj = targetProjectUri ? removeTrailingPathSeparator(targetProjectUri) : agent.projectUri;
+			return Boolean(agent.parentId) || !this.uriIdentityService.extUri.isEqual(agent.projectUri, nextProj);
+		}
+		if (agent.parentId === newParentId) {
+			return false;
+		}
+		const newParent = this.getAgent(newParentId);
+		if (!newParent) {
+			return false;
+		}
+		if (this.getSubtree(id).some(member => member.id === newParentId)) {
+			return false;
+		}
+		const parentRank = getAdeRoleRankLevel(newParent.role, this.hasSubordinates(newParent.id));
+		if (parentRank === 0) {
+			return false;
+		}
+		return true;
+	}
+
+	reparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean {
+		if (!this.canReparentAgent(id, newParentId, targetProjectUri)) {
+			return false;
+		}
+		const agent = this.getAgent(id)!;
+		const subtree = this.getSubtree(id);
+		const subtreeIds = new Set(subtree.map(member => member.id));
+		if (newParentId !== undefined) {
+			const newParent = this.getAgent(newParentId)!;
+			const roleUpdates = new Map<string, AdeAgentRole | undefined>();
+			if (!newParent.parentId && !newParent.role) {
+				roleUpdates.set(newParent.id, 'governor');
+			}
+			const queue: string[] = [id];
+			const seen = new Set<string>();
+			while (queue.length > 0) {
+				const currId = queue.shift()!;
+				if (seen.has(currId)) {
+					continue;
+				}
+				seen.add(currId);
+				const curr = this.getAgent(currId);
+				if (!curr) {
+					continue;
+				}
+				const effParent = currId === id ? newParent : this.getAgent(curr.parentId!);
+				const pRole = effParent && roleUpdates.has(effParent.id) ? roleUpdates.get(effParent.id) : effParent?.role;
+				const pLevel = effParent ? getAdeRoleRankLevel(pRole, true) : 3;
+				const currHasSubs = this.hasSubordinates(curr.id);
+				if (!curr.role && !currHasSubs) {
+					roleUpdates.set(curr.id, undefined);
+				} else {
+					const currLevel = getAdeRoleRankLevel(curr.role, currHasSubs);
+					if (currLevel >= pLevel) {
+						roleUpdates.set(curr.id, pLevel >= 3 ? 'manager' : 'employee');
+					} else {
+						roleUpdates.set(curr.id, curr.role ?? 'governor');
+					}
+				}
+				for (const child of this.getDirectSubordinates(curr.id)) {
+					queue.push(child.id);
+				}
+			}
+			this.entries = this.entries.map(entry => {
+				if (entry.id === id) {
+					return { ...entry, parentId: newParentId, role: roleUpdates.get(entry.id), projectUri: newParent.projectUri, archived: undefined };
+				}
+				if (subtreeIds.has(entry.id)) {
+					return { ...entry, role: roleUpdates.get(entry.id), projectUri: newParent.projectUri, archived: undefined };
+				}
+				if (roleUpdates.has(entry.id)) {
+					return { ...entry, role: roleUpdates.get(entry.id) };
+				}
+				return entry;
+			});
+		} else {
+			const nextProj = targetProjectUri ? removeTrailingPathSeparator(targetProjectUri) : agent.projectUri;
+			this.ensureCatalogProject(nextProj, basename(nextProj));
+			this.entries = this.entries.map(entry => {
+				if (entry.id === id) {
+					return { ...entry, parentId: undefined, projectUri: nextProj };
+				}
+				if (subtreeIds.has(entry.id)) {
+					return { ...entry, projectUri: nextProj };
+				}
+				return entry;
+			});
+		}
+		this.saveAgents();
+		this.changeEmitter.fire();
+		return true;
+	}
+
+	renameAgent(id: string, label: string): void {
+		const trimmed = label.trim();
+		if (!trimmed) {
+			return;
+		}
+		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, label: trimmed, labelIsCustom: true } : agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	setAgentRole(id: string, role: AdeAgentRole | undefined): void {
+		const current = this.getAgent(id);
+		if (!current || current.role === role) {
+			return;
+		}
+		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, role } : agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	setArchived(id: string, archived: boolean): void {
+		const root = this.getRootAgent(id);
+		if (!root || Boolean(root.archived) === archived) {
+			return;
+		}
+		const subtreeIds = new Set(this.getSubtree(root.id).map(item => item.id));
+		this.entries = this.entries.map(agent => {
+			if (agent.id === root.id) {
+				return { ...agent, archived: archived || undefined, unread: archived ? false : agent.unread };
+			}
+			if (archived && subtreeIds.has(agent.id) && agent.unread) {
+				return { ...agent, unread: false };
+			}
+			return agent;
+		});
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	markRead(id: string): void {
+		const current = this.getAgent(id);
+		if (!current?.unread) {
+			return;
+		}
+		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, unread: false } : agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	setAgentStatus(id: string, status: AdeAgentStatus, unread?: boolean): void {
+		const current = this.getAgent(id);
+		if (!current) {
+			return;
+		}
+		const nextUnread = unread !== undefined ? unread : current.unread;
+		if ((current.status ?? 'idle') === status && Boolean(current.unread) === Boolean(nextUnread)) {
+			return;
+		}
+		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, status, unread: nextUnread || undefined } : agent);
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	updateSessionLabel(resource: URI, label: string): void {
+		this.syncSessionItem(resource, { label });
+	}
+
+	syncSessionItem(resource: URI, update: { readonly label?: string; readonly status?: AdeAgentStatus }, isActiveInEditor = false): void {
+		let changed = false;
+		const key = resource.toString();
+
+		if ((this._secretary.session?.resource.toString() === key || resource.scheme === 'aexus-secretary') && update.status) {
+			const nextStatus: 'idle' | 'working' = update.status === 'working' ? 'working' : 'idle';
+			const completedInBackground = this._secretary.status === 'working' && nextStatus === 'idle' && !isActiveInEditor;
+			const nextUnread = isActiveInEditor ? false : (completedInBackground ? true : this._secretary.unread);
+			if (this._secretary.status !== nextStatus || Boolean(this._secretary.unread) !== Boolean(nextUnread)) {
+				this._secretary = { ...this._secretary, status: nextStatus, unread: nextUnread || undefined };
+				this.saveSecretary();
+				changed = true;
+			}
+		}
+
+		const agent = this.entries.find(item => item.session?.resource.toString() === key);
+		if (agent) {
+			const nextLabel = agent.labelIsCustom === false && update.label && update.label !== agent.label ? update.label : agent.label;
+			const prevStatus = agent.status ?? 'idle';
+			const nextStatus = update.status ?? prevStatus;
+			const needsAttention = !isActiveInEditor && ((prevStatus === 'working' && nextStatus === 'idle') || nextStatus === 'pending');
+			const nextUnread = isActiveInEditor ? false : (needsAttention ? true : agent.unread);
+			if (nextLabel !== agent.label || nextStatus !== prevStatus || Boolean(nextUnread) !== Boolean(agent.unread)) {
+				this.entries = this.entries.map(entry => entry.id === agent.id ? { ...entry, label: nextLabel, status: nextStatus, unread: nextUnread || undefined } : entry);
+				this.saveAgents();
+				changed = true;
+			}
+		}
+
+		if (changed) {
+			this.changeEmitter.fire();
+		}
+	}
+
+	removeAgent(id: string): void {
+		const subtree = this.getSubtree(id);
+		if (!subtree.length) {
+			return;
+		}
+		const removed = new Set(subtree.map(agent => agent.id));
+		if (this._selectedAgentId && removed.has(this._selectedAgentId)) {
+			this._selectedAgentId = undefined;
+		}
+		this.entries = this.entries.filter(agent => !removed.has(agent.id));
+		this.saveAgents();
+		this.changeEmitter.fire();
+	}
+
+	setDraft(id: string, draft: string): void {
+		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, draft } : agent);
+		this.saveAgents();
+	}
+
+	configureSecretary(session: IAdeSession): void {
+		this._secretary = {
+			...this._secretary,
+			status: 'idle',
+			unread: undefined,
+			session: { engineId: session.engineId, resource: session.resource },
+		};
+		this.saveSecretary();
+		this.changeEmitter.fire();
+	}
+
+	resetSecretary(session?: IAdeSession): void {
+		this._secretary = {
+			label: localize('adeSecretaryLabel', "Secretary"),
+			draft: '',
+			status: 'idle',
+			unread: undefined,
+			session: session ? { engineId: session.engineId, resource: session.resource } : undefined,
+		};
+		this.saveSecretary();
+		this.changeEmitter.fire();
+	}
+
+	setSecretaryDraft(draft: string): void {
+		this._secretary = { ...this._secretary, draft };
+		this.saveSecretary();
+	}
+
+	markSecretaryRead(): void {
+		if (!this._secretary.unread) {
+			return;
+		}
+		this._secretary = { ...this._secretary, unread: undefined };
+		this.saveSecretary();
+		this.changeEmitter.fire();
+	}
+
+	setShowArchived(showArchived: boolean): void {
+		if (this._showArchived === showArchived) {
+			return;
+		}
+		this._showArchived = showArchived;
+		this.storageService.store('aexus.ade.showArchived', showArchived, StorageScope.PROFILE, StorageTarget.MACHINE);
+		this.changeEmitter.fire();
+	}
+
+	private persistSelectedProject(): void {
+		this.isSavingStorage = true;
+		try {
+			if (this.selectedProjectUri) {
+				this.storageService.store('aexus.ade.selectedProject', this.selectedProjectUri.toString(), StorageScope.PROFILE, StorageTarget.MACHINE);
+			} else {
+				this.storageService.remove('aexus.ade.selectedProject', StorageScope.PROFILE);
+			}
+		} finally {
+			this.isSavingStorage = false;
+		}
+	}
+
+	private saveProjects(): void {
+		this.isSavingStorage = true;
+		try {
+			const stored: IStoredProject[] = this.catalogProjects.map(project => ({ uri: project.uri.toString(), name: project.name }));
+			this.storageService.store('aexus.ade.projects', JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
+			this.storageService.store('aexus.ade.catalogInitialized', true, StorageScope.PROFILE, StorageTarget.MACHINE);
+		} finally {
+			this.isSavingStorage = false;
+		}
+	}
+
+	private saveAgents(): void {
+		this.isSavingStorage = true;
+		try {
+			const stored: IStoredAgent[] = this.entries.map(agent => ({
+				id: agent.id,
+				parentId: agent.parentId,
+				projectUri: agent.projectUri.toString(),
+				label: agent.label,
+				labelIsCustom: agent.labelIsCustom,
+				role: agent.role,
+				archived: agent.archived,
+				unread: agent.unread,
+				draft: agent.draft,
+				session: agent.session ? { engineId: agent.session.engineId, resource: agent.session.resource.toString() } : undefined,
+			}));
+			this.storageService.store('aexus.ade.agents', JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
+		} finally {
+			this.isSavingStorage = false;
+		}
+	}
+
+	private saveSecretary(): void {
+		this.isSavingStorage = true;
+		try {
+			const stored: IStoredSecretary = {
+				label: this._secretary.label,
+				draft: this._secretary.draft,
+				unread: this._secretary.unread,
+				session: this._secretary.session ? { engineId: this._secretary.session.engineId, resource: this._secretary.session.resource.toString() } : undefined,
+			};
+			this.storageService.store('aexus.ade.secretary', JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
+		} finally {
+			this.isSavingStorage = false;
+		}
+	}
+}

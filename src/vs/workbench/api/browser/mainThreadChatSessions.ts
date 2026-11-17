@@ -52,7 +52,7 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 
 	readonly sessionResource: URI;
 	readonly providerHandle: number;
-	readonly history: Array<IChatSessionHistoryItem>;
+	history: readonly IChatSessionHistoryItem[];
 	title?: string;
 	private _options?: ChatSessionOptionsMap;
 	public get options(): ReadonlyChatSessionOptionsMap | undefined {
@@ -60,6 +60,10 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 	}
 	private readonly _progressObservable = observableValue<IChatProgress[]>(this, []);
 	private readonly _isCompleteObservable = observableValue<boolean>(this, false);
+	readonly isReadOnly = observableValue<boolean>(this, false);
+	private readonly historyChanged = this._register(new Emitter<readonly IChatSessionHistoryItem[]>());
+	readonly onDidChangeHistory = this.historyChanged.event;
+	private pendingHistory: readonly IChatSessionHistoryItemDto[] | undefined;
 
 	private readonly _onWillDispose = new Emitter<void>();
 	readonly onWillDispose = this._onWillDispose.event;
@@ -124,6 +128,30 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 		this._dialogService = dialogService;
 	}
 
+	handleHistoryChanged(history: readonly IChatSessionHistoryItemDto[]): void {
+		if (!this._isInitialized) { this.pendingHistory = history; return; }
+		this.replaceHistory(history);
+		this.historyChanged.fire(this.history);
+	}
+
+	private replaceHistory(history: readonly IChatSessionHistoryItemDto[]): void {
+		this.history = history.map(turn => {
+			if (turn.type === 'request') {
+				const variables = turn.variableData?.variables.map(v => {
+					const entry = { ...v, value: revive(v.value) };
+					return entry as IChatRequestVariableEntry;
+				});
+				return {
+					type: 'request' as const, prompt: turn.prompt, participant: turn.participant, command: turn.command,
+					variableData: variables ? { variables } : undefined, id: turn.id, modelId: turn.modelId,
+					modeInstructions: turn.modeInstructions ? revive(turn.modeInstructions) : undefined,
+					isSystemInitiated: turn.isSystemInitiated,
+				} satisfies IChatSessionRequestHistoryItem;
+			}
+			return { type: 'response' as const, parts: turn.parts.map(part => revive(part) as IChatProgress), participant: turn.participant, details: turn.details };
+		});
+	}
+
 	initialize(token: CancellationToken, context: ChatSessionContentContextDto): Promise<void> {
 		if (!this._initializationPromise) {
 			this._initializationPromise = this._doInitializeContent(token, context);
@@ -140,36 +168,9 @@ export class ObservableChatSession extends Disposable implements IChatSession {
 
 			this._options = sessionContent.options ? ChatSessionOptionsMap.fromRecord(sessionContent.options) : undefined;
 			this.title = sessionContent.title;
-			this.history.length = 0;
-			this.history.push(...sessionContent.history.map((turn: IChatSessionHistoryItemDto) => {
-				if (turn.type === 'request') {
-					const variables = turn.variableData?.variables.map(v => {
-						const entry = {
-							...v,
-							value: revive(v.value)
-						};
-						return entry as IChatRequestVariableEntry;
-					});
-
-					return {
-						type: 'request' as const,
-						prompt: turn.prompt,
-						participant: turn.participant,
-						command: turn.command,
-						variableData: variables ? { variables } : undefined,
-						id: turn.id,
-						modelId: turn.modelId,
-						modeInstructions: turn.modeInstructions ? revive(turn.modeInstructions) : undefined,
-					} satisfies IChatSessionRequestHistoryItem;
-				}
-
-				return {
-					type: 'response' as const,
-					parts: turn.parts.map((part: IChatProgressDto) => revive(part) as IChatProgress),
-					participant: turn.participant,
-					details: turn.details,
-				};
-			}));
+			this.isReadOnly.set(!sessionContent.hasRequestHandler, undefined);
+			this.replaceHistory(this.pendingHistory ?? sessionContent.history);
+			this.pendingHistory = undefined;
 
 			if (sessionContent.hasActiveResponseCallback && !this.interruptActiveResponseCallback) {
 				this.interruptActiveResponseCallback = async () => {
@@ -919,6 +920,11 @@ export class MainThreadChatSessions extends Disposable implements MainThreadChat
 		}
 
 		observableSession.handleProgressComplete(requestId);
+	}
+
+	$handleHistoryChanged(handle: number, sessionResource: UriComponents, history: IChatSessionHistoryItemDto[]): void {
+		const session = this._activeSessions.get(URI.revive(sessionResource));
+		if (session?.providerHandle === handle) { session.handleHistoryChanged(history); }
 	}
 
 	$handleAnchorResolve(handle: number, sesssionResource: UriComponents, requestId: string, requestHandle: string, anchor: Dto<IChatContentInlineReference>): void {

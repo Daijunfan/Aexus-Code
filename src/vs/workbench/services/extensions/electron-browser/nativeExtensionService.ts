@@ -49,7 +49,7 @@ import { ExtensionHostExitCode } from '../common/extensionHostProtocol.js';
 import { IExtensionManifestPropertiesService } from '../common/extensionManifestPropertiesService.js';
 import { ExtensionRunningLocation, LocalProcessRunningLocation, LocalWebWorkerRunningLocation } from '../common/extensionRunningLocation.js';
 import { ExtensionRunningLocationTracker, filterExtensionDescriptions } from '../common/extensionRunningLocationTracker.js';
-import { ExtensionHostExtensions, ExtensionHostStartup, IExtensionHost, IExtensionService, WebWorkerExtHostConfigValue, toExtension, webWorkerExtHostConfig } from '../common/extensions.js';
+import { ExtensionHostExtensions, ExtensionHostScope, ExtensionHostStartup, IExtensionHost, IExtensionService, WebWorkerExtHostConfigValue, toExtension, webWorkerExtHostConfig } from '../common/extensions.js';
 import { ExtensionsProposedApi } from '../common/extensionsProposedApi.js';
 import { IRemoteExtensionHostDataProvider, IRemoteExtensionHostInitData, RemoteExtensionHost } from '../common/remoteExtensionHost.js';
 import { CachedExtensionScanner } from './cachedExtensionScanner.js';
@@ -64,6 +64,7 @@ export class NativeExtensionService extends AbstractExtensionService implements 
 
 	private readonly _extensionScanner: CachedExtensionScanner;
 	private readonly _localCrashTracker = new ExtensionHostCrashTracker();
+	private readonly _independentCrashTracker = new ExtensionHostCrashTracker();
 
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
@@ -148,6 +149,7 @@ export class NativeExtensionService extends AbstractExtensionService implements 
 	}
 
 	protected override _onExtensionHostCrashed(extensionHost: IExtensionHostManager, code: number, signal: string | null): void {
+		const restartScope = this._isWorkspaceIndependentHost(extensionHost) ? ExtensionHostScope.WorkspaceIndependent : ExtensionHostScope.Workspace;
 
 		const activatedExtensions: ExtensionIdentifier[] = [];
 		const extensionsStatus = this.getExtensionsStatus();
@@ -182,12 +184,13 @@ export class NativeExtensionService extends AbstractExtensionService implements 
 			this._logExtensionHostCrash(extensionHost);
 			this._sendExtensionHostCrashTelemetry(code, signal, activatedExtensions);
 
-			this._localCrashTracker.registerCrash();
+			const crashTracker = restartScope === ExtensionHostScope.WorkspaceIndependent ? this._independentCrashTracker : this._localCrashTracker;
+			crashTracker.registerCrash();
 
-			if (this._localCrashTracker.shouldAutomaticallyRestart()) {
+			if (crashTracker.shouldAutomaticallyRestart()) {
 				this._logService.info(`Automatically restarting the extension host.`);
 				this._notificationService.status(nls.localize('extensionService.autoRestart', "The extension host terminated unexpectedly. Restarting..."), { hideAfter: 5000 });
-				this.startExtensionHosts();
+				this.startExtensionHosts(undefined, restartScope);
 			} else {
 				const choices: IPromptChoice[] = [];
 				if (this._environmentService.isBuilt) {
@@ -210,7 +213,7 @@ export class NativeExtensionService extends AbstractExtensionService implements 
 				choices.push({
 					telemetryId: NotificationActionTelemetryId.RestartExtensionHost,
 					label: nls.localize('restart', "Restart Extension Host"),
-					run: () => this.startExtensionHosts()
+					run: () => this.startExtensionHosts(undefined, restartScope)
 				});
 
 				if (this._environmentService.isBuilt) {

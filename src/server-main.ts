@@ -12,7 +12,7 @@ import * as os from 'node:os';
 import * as readline from 'node:readline';
 import { performance } from 'node:perf_hooks';
 import minimist from 'minimist';
-import { devInjectNodeModuleLookupPath, removeGlobalNodeJsModuleLookupPaths } from './bootstrap-node.js';
+import { devInjectNodeModuleLookupPath,removeGlobalNodeJsModuleLookupPaths } from './bootstrap-node.js';
 import { bootstrapESM } from './bootstrap-esm.js';
 import { resolveNLSConfiguration } from './vs/base/node/nls.js';
 import { product } from './bootstrap-meta.js';
@@ -45,16 +45,7 @@ const shouldSpawnCli = parsedArgs.help || parsedArgs.version || extensionLookupA
 
 const nlsConfiguration = await resolveNLSConfiguration({ userLocale: 'en', osLocale: 'en', commit: product.commit, nlsMetadataHash: product.nlsMetadataHash, userDataPath: '', nlsMetadataPath: import.meta.dirname });
 
-if (parsedArgs['agent-host-ca'] !== undefined) {
-	try {
-		await bootstrapCode(nlsConfiguration);
-		const { runAgentHostCertificateCommand } = await import('./vs/platform/agentHost/node/copilot/copilotSandboxCertificateCli.js');
-		process.exitCode = await runAgentHostCertificateCommand(parsedArgs['agent-host-ca'], parsedArgs['agent-host-ca-confirm'] === true);
-	} catch (error) {
-		console.error(error);
-		process.exitCode = 1;
-	}
-} else if (shouldSpawnCli) {
+if (shouldSpawnCli) {
 	loadCode(nlsConfiguration).then((mod) => {
 		mod.spawnCli();
 	});

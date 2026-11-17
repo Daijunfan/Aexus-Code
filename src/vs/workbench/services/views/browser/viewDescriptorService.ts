@@ -308,7 +308,8 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 	}
 
 	getDefaultViewContainerLocation(viewContainer: ViewContainer): ViewContainerLocation {
-		return this.viewContainersRegistry.getViewContainerLocation(viewContainer);
+		const location = this.viewContainersRegistry.getViewContainerLocation(viewContainer);
+		return !this.isSessionsWindow && viewContainer.extensionId && location !== ViewContainerLocation.AuxiliaryBar ? ViewContainerLocation.AuxiliaryBar : location;
 	}
 
 	getDefaultContainerById(viewId: string): ViewContainer | null {

@@ -18,7 +18,7 @@ import { IQuickInputService, ItemActivation } from '../../../../platform/quickin
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ITextModel } from '../../../../editor/common/model.js';
 import { IHostService } from '../../../services/host/browser/host.js';
-import { REVEAL_IN_EXPLORER_COMMAND_ID, SAVE_ALL_IN_GROUP_COMMAND_ID, NEW_UNTITLED_FILE_COMMAND_ID } from './fileConstants.js';
+import { DELETE_ROOT_FOLDER_COMMAND_ID, REVEAL_IN_EXPLORER_COMMAND_ID, SAVE_ALL_IN_GROUP_COMMAND_ID, NEW_UNTITLED_FILE_COMMAND_ID } from './fileConstants.js';
 import { ITextModelService, ITextModelContentProvider } from '../../../../editor/common/services/resolverService.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -1035,18 +1035,37 @@ export const renameHandler = async (accessor: ServicesAccessor) => {
 
 export const moveFileToTrashHandler = async (accessor: ServicesAccessor) => {
 	const explorerService = accessor.get(IExplorerService);
-	const stats = explorerService.getContext(true).filter(s => !s.isRoot);
+	const workingCopyFileService = accessor.get(IWorkingCopyFileService);
+	const dialogService = accessor.get(IDialogService);
+	const configurationService = accessor.get(IConfigurationService);
+	const filesConfigurationService = accessor.get(IFilesConfigurationService);
+	const commandService = accessor.get(ICommandService);
+	const contextItems = explorerService.getContext(true);
+	const stats = contextItems.filter(s => !s.isRoot);
+	const roots = contextItems.filter(s => s.isRoot);
 	if (stats.length) {
-		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), accessor.get(IFilesConfigurationService), stats, true);
+		await deleteFiles(explorerService, workingCopyFileService, dialogService, configurationService, filesConfigurationService, stats, true);
+	}
+	if (roots.length) {
+		await commandService.executeCommand(DELETE_ROOT_FOLDER_COMMAND_ID, roots.map(r => r.resource), { permanent: false });
 	}
 };
 
 export const deleteFileHandler = async (accessor: ServicesAccessor) => {
 	const explorerService = accessor.get(IExplorerService);
-	const stats = explorerService.getContext(true).filter(s => !s.isRoot);
-
+	const workingCopyFileService = accessor.get(IWorkingCopyFileService);
+	const dialogService = accessor.get(IDialogService);
+	const configurationService = accessor.get(IConfigurationService);
+	const filesConfigurationService = accessor.get(IFilesConfigurationService);
+	const commandService = accessor.get(ICommandService);
+	const contextItems = explorerService.getContext(true);
+	const stats = contextItems.filter(s => !s.isRoot);
+	const roots = contextItems.filter(s => s.isRoot);
 	if (stats.length) {
-		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), accessor.get(IFilesConfigurationService), stats, false);
+		await deleteFiles(explorerService, workingCopyFileService, dialogService, configurationService, filesConfigurationService, stats, false);
+	}
+	if (roots.length) {
+		await commandService.executeCommand(DELETE_ROOT_FOLDER_COMMAND_ID, roots.map(r => r.resource), { permanent: true });
 	}
 };
 

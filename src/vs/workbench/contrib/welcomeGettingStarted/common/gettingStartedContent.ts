@@ -113,6 +113,17 @@ type GettingStartedStartEntryContent = BuiltinGettingStartedStartEntry[];
 
 export const startEntries: GettingStartedStartEntryContent = [
 	{
+		id: 'addProjects',
+		title: localize('gettingStarted.addProjects.title', "Add Projects..."),
+		description: localize('gettingStarted.addProjects.description', "Add project folders to the sidebar and work across them in this window."),
+		icon: Codicon.add,
+		when: 'enterMultiRootWorkspaceSupport || workbenchState == \'workspace\'',
+		content: {
+			type: 'startEntry',
+			command: 'command:workbench.action.addRootFolder',
+		}
+	},
+	{
 		id: 'welcome.showNewFileEntries',
 		title: localize('gettingStarted.newFile.title', "New File..."),
 		description: localize('gettingStarted.newFile.description', "Open a new untitled text file, notebook, or custom editor."),
@@ -123,47 +134,13 @@ export const startEntries: GettingStartedStartEntryContent = [
 		}
 	},
 	{
-		id: 'topLevelOpenMac',
-		title: localize('gettingStarted.openMac.title', "Open..."),
-		description: localize('gettingStarted.openMac.description', "Open a file or folder to start working"),
-		icon: Codicon.folderOpened,
-		when: '!isWeb && isMac',
-		content: {
-			type: 'startEntry',
-			command: 'command:workbench.action.files.openFileFolder',
-		}
-	},
-	{
 		id: 'topLevelOpenFile',
 		title: localize('gettingStarted.openFile.title', "Open File..."),
 		description: localize('gettingStarted.openFile.description', "Open a file to start working"),
 		icon: Codicon.goToFile,
-		when: 'isWeb || !isMac',
 		content: {
 			type: 'startEntry',
 			command: 'command:workbench.action.files.openFile',
-		}
-	},
-	{
-		id: 'topLevelOpenFolder',
-		title: localize('gettingStarted.openFolder.title', "Open Folder..."),
-		description: localize('gettingStarted.openFolder.description', "Open a folder to start working"),
-		icon: Codicon.folderOpened,
-		when: '!isWeb && !isMac',
-		content: {
-			type: 'startEntry',
-			command: 'command:workbench.action.files.openFolder',
-		}
-	},
-	{
-		id: 'topLevelOpenFolderWeb',
-		title: localize('gettingStarted.openFolder.title', "Open Folder..."),
-		description: localize('gettingStarted.openFolder.description', "Open a folder to start working"),
-		icon: Codicon.folderOpened,
-		when: '!openFolderWorkspaceSupport && workbenchState == \'workspace\'',
-		content: {
-			type: 'startEntry',
-			command: 'command:workbench.action.files.openFolderViaWorkspace',
 		}
 	},
 	{

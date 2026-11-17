@@ -32,6 +32,7 @@ import { IFilesConfigurationService } from '../../../services/filesConfiguration
 import { IDecorationsService } from '../../../services/decorations/common/decorations.js';
 import { ExplorerDecorationsProvider } from './views/explorerDecorationsProvider.js';
 import { IWorkingCopyFileService } from '../../../services/workingCopy/common/workingCopyFileService.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 
 export const UNDO_REDO_SOURCE = new UndoRedoSource();
 
@@ -62,6 +63,7 @@ export class ExplorerService implements IExplorerService {
 	private revealExcludeMatcher: ResourceGlobMatcher;
 	private readonly moveBatches = new Map<number, IExplorerMoveBatch>();
 	private readonly pendingMoveSourceBatches = new Set<IExplorerMoveBatch>();
+	private readonly itemOrders: Map<string, Map<string, number>>;
 
 	constructor(
 		@IFileService private fileService: IFileService,
@@ -77,8 +79,11 @@ export class ExplorerService implements IExplorerService {
 		@IDecorationsService private readonly decorationsService: IDecorationsService,
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
 		@IWorkingCopyFileService workingCopyFileService: IWorkingCopyFileService,
+		@IStorageService private readonly storageService: IStorageService,
 	) {
 		this.config = this.configurationService.getValue('explorer');
+		this.itemOrders = new Map(storageService.getObject<[string, string[]][]>('aexus.explorer.itemOrder', StorageScope.WORKSPACE, [])
+			.map(([parent, order]) => [parent, new Map(order.map((resource, index) => [resource, index]))]));
 
 		this.model = new ExplorerModel(this.contextService, this.uriIdentityService, this.fileService, this.configurationService, this.filesConfigurationService);
 		this.disposables.add(this.model);
@@ -205,6 +210,17 @@ export class ExplorerService implements IExplorerService {
 
 	get roots(): ExplorerItem[] {
 		return this.model.roots;
+	}
+
+	getItemOrder(resource: URI): number | undefined {
+		const order = this.itemOrders.get(this.uriIdentityService.extUri.getComparisonKey(dirname(resource)));
+		return order?.get(this.uriIdentityService.extUri.getComparisonKey(resource));
+	}
+
+	async setItemOrder(parent: URI, resources: readonly URI[]): Promise<void> {
+		this.itemOrders.set(this.uriIdentityService.extUri.getComparisonKey(parent), new Map(resources.map((resource, index) => [this.uriIdentityService.extUri.getComparisonKey(resource), index])));
+		this.storageService.store('aexus.explorer.itemOrder', JSON.stringify([...this.itemOrders].map(([parent, order]) => [parent, [...order.keys()]])), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		await this.view?.refresh(false, this.findClosest(parent) ?? undefined);
 	}
 
 	get sortOrderConfiguration(): ISortOrderConfiguration {

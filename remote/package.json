@@ -13,12 +13,10 @@
   "private": true,
   "dependencies": {
     "@devcontainers/cli": "0.88.0",
-    "@github/copilot-sdk": "1.0.30-preview.0",
     "@hpke/core": "^1.9.0",
     "@microsoft/1ds-core-js": "^3.2.13",
     "@microsoft/1ds-post-js": "^3.2.13",
     "@parcel/watcher": "^2.5.6",
-    "@vscode/copilot-api": "^0.5.2",
     "@vscode/deviceid": "^0.1.1",
     "@vscode/fs-copyfile": "2.0.0",
     "@vscode/iconv-lite-umd": "0.7.1",
@@ -29,6 +27,7 @@
     "@vscode/spdlog": "^0.15.8",
     "@vscode/sqlite3": "5.1.12-vscode",
     "@vscode/tree-sitter-wasm": "^0.3.1",
+    "@vscode/vsce-sign": "2.1.0",
     "@vscode/vscode-languagedetection": "1.0.23",
     "@vscode/windows-process-tree": "^0.8.0",
     "@vscode/windows-registry": "^1.3.0",
@@ -63,6 +62,5 @@
     "yauzl": "^3.3.1",
     "yazl": "^2.4.3",
     "zod": "^4.4.3"
-  },
-  "copilotRuntimeVersion": "1.0.108-0"
+  }
 }

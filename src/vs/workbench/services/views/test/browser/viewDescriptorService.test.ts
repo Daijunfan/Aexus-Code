@@ -18,6 +18,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../../pla
 import { generateUuid } from '../../../../../base/common/uuid.js';
 import { compare } from '../../../../../base/common/strings.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { ExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
 
 const ViewsRegistry = Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry);
 const ViewContainersRegistry = Registry.as<IViewContainersRegistry>(ViewContainerExtensions.ViewContainersRegistry);
@@ -47,6 +48,20 @@ suite('ViewDescriptorService', () => {
 
 	function aViewDescriptorService(): ViewDescriptorService {
 		return disposables.add(instantiationService.createInstance(ViewDescriptorService));
+	}
+
+	for (const originalLocation of [ViewContainerLocation.Sidebar, ViewContainerLocation.Panel]) {
+		test(`extension containers default to the right sidebar from ${ViewContainerLocationToString(originalLocation)}`, () => {
+			const container = ViewContainersRegistry.registerViewContainer({
+				id: `${viewContainerIdPrefix}-${generateUuid()}`,
+				title: nls.localize2('testPlugin', 'Test Plugin'),
+				ctorDescriptor: sidebarContainer.ctorDescriptor,
+				extensionId: new ExtensionIdentifier('test.plugin'),
+			}, originalLocation);
+			disposables.add({ dispose: () => ViewContainersRegistry.deregisterViewContainer(container) });
+			const service = aViewDescriptorService();
+			assert.deepStrictEqual({ default: service.getDefaultViewContainerLocation(container), actual: service.getViewContainerLocation(container) }, { default: ViewContainerLocation.AuxiliaryBar, actual: ViewContainerLocation.AuxiliaryBar });
+		});
 	}
 
 	test('Empty Containers', function () {

@@ -38,7 +38,7 @@ suite('Chat colors', () => {
 			assert.deepStrictEqual([
 				theme.getColor(chatWorkingProgressStableIconForeground)?.toString().toLowerCase(),
 				theme.getColor(chatWorkingProgressInsidersIconForeground)?.toString().toLowerCase(),
-			], isHighContrast(scheme) ? ['#efcd12', '#efcd12'] : ['#007acc', '#24bfa5']);
+			], isHighContrast(scheme) ? ['#efcd12', '#efcd12'] : ['#ffffff', '#ffffff']);
 		});
 
 		test(`session state borders inherit semantic colors in ${scheme}`, () => {

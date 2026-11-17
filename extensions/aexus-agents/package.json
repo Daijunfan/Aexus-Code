@@ -1,0 +1,221 @@
+{
+	"name": "aexus-agents",
+	"displayName": "%displayName%",
+	"description": "%description%",
+	"version": "0.1.0",
+	"publisher": "vscode",
+	"license": "MIT",
+	"engines": { "vscode": "^1.146.0" },
+	"main": "./dist/extension.js",
+	"extensionKind": ["ui"],
+	"activationEvents": ["*"],
+	"enabledApiProposals": ["chatSessionsProvider", "chatParticipantPrivate"],
+	"capabilities": { "virtualWorkspaces": true, "untrustedWorkspaces": { "supported": true } },
+	"contributes": {
+		"chatSessions": [
+			{ "type": "aexus-secretary", "name": "secretary", "displayName": "Secretary", "description": "%secretaryDescription%", "icon": { "light": "resources/aexus-icon.svg", "dark": "resources/aexus-icon.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-codex", "name": "codex", "displayName": "Codex", "description": "%codexDescription%", "icon": "$(openai)", "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-claude", "name": "claude", "displayName": "Claude Code", "description": "%claudeDescription%", "icon": "$(claude)", "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-kilo", "name": "kilo", "displayName": "Kilo Code", "description": "%kiloDescription%", "icon": { "light": "resources/kilo-light.svg", "dark": "resources/kilo-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-opencode", "name": "opencode", "displayName": "OpenCode", "description": "%opencodeDescription%", "icon": { "light": "resources/opencode-light.svg", "dark": "resources/opencode-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-dsh", "name": "dsh", "displayName": "DeepSeek Harness", "description": "%dshDescription%", "icon": { "light": "resources/dsh-light.svg", "dark": "resources/dsh-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-antigravity", "name": "antigravity", "displayName": "Google Antigravity", "description": "%antigravityDescription%", "icon": { "light": "resources/antigravity-light.svg", "dark": "resources/antigravity-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-cline", "name": "cline", "displayName": "Cline", "description": "%clineDescription%", "icon": { "light": "resources/cline-light.svg", "dark": "resources/cline-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true },
+			{ "type": "aexus-pi", "name": "pi", "displayName": "Pi", "description": "%piDescription%", "icon": { "light": "resources/pi-light.svg", "dark": "resources/pi-dark.svg" }, "requiresCopilotSignIn": false, "supportsAutoModel": true, "hideFromSessionTypePicker": true }
+		],
+		"chatParticipants": [
+			{
+				"id": "aexus-secretary",
+				"name": "secretary",
+				"fullName": "Secretary",
+				"description": "%secretaryDescription%",
+				"commands": [
+					{ "name": "status", "description": "%cmdStatus%" },
+					{ "name": "projects", "description": "%cmdProjects%" },
+					{ "name": "sessions", "description": "%cmdSessions%" },
+					{ "name": "focus", "description": "%cmdFocus%" },
+					{ "name": "home", "description": "%cmdHome%" },
+					{ "name": "new", "description": "%cmdNew%" },
+					{ "name": "engine", "description": "%cmdEngine%" },
+					{ "name": "reset", "description": "%cmdReset%" },
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "mcp", "description": "%cmdMcp%" },
+					{ "name": "memory", "description": "%cmdMemory%" },
+					{ "name": "cost", "description": "%cmdCost%" },
+					{ "name": "doctor", "description": "%cmdDoctor%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-codex",
+				"name": "codex",
+				"fullName": "Codex",
+				"description": "%codexDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "mcp", "description": "%cmdMcp%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-claude",
+				"name": "claude",
+				"fullName": "Claude Code",
+				"description": "%claudeDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "mcp", "description": "%cmdMcp%" },
+					{ "name": "memory", "description": "%cmdMemory%" },
+					{ "name": "cost", "description": "%cmdCost%" },
+					{ "name": "doctor", "description": "%cmdDoctor%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-kilo",
+				"name": "kilo",
+				"fullName": "Kilo Code",
+				"description": "%kiloDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-opencode",
+				"name": "opencode",
+				"fullName": "OpenCode",
+				"description": "%opencodeDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-dsh",
+				"name": "dsh",
+				"fullName": "DeepSeek Harness",
+				"description": "%dshDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-antigravity",
+				"name": "antigravity",
+				"fullName": "Google Antigravity",
+				"description": "%antigravityDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-cline",
+				"name": "cline",
+				"fullName": "Cline",
+				"description": "%clineDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			},
+			{
+				"id": "aexus-pi",
+				"name": "pi",
+				"fullName": "Pi",
+				"description": "%piDescription%",
+				"commands": [
+					{ "name": "init", "description": "%cmdInit%" },
+					{ "name": "compact", "description": "%cmdCompact%" },
+					{ "name": "review", "description": "%cmdReview%" },
+					{ "name": "plan", "description": "%cmdPlan%" },
+					{ "name": "clear", "description": "%cmdClear%" },
+					{ "name": "model", "description": "%cmdModel%" },
+					{ "name": "diff", "description": "%cmdDiff%" },
+					{ "name": "skills", "description": "%cmdSkills%" },
+					{ "name": "help", "description": "%cmdHelp%" }
+				]
+			}
+		],
+		"configuration": {
+			"title": "ADE",
+			"properties": {
+				"aexus.ade.cliPaths": {
+					"type": "object",
+					"default": {},
+					"scope": "machine",
+					"description": "%cliPathsDescription%",
+					"properties": {
+						"codex": { "type": "string" },
+						"claude": { "type": "string" },
+						"kilo": { "type": "string" },
+						"opencode": { "type": "string" },
+						"dsh": { "type": "string" },
+						"agy": { "type": "string" },
+						"cline": { "type": "string" },
+						"pi": { "type": "string" }
+					},
+					"additionalProperties": false
+				}
+			}
+		}
+	}
+}

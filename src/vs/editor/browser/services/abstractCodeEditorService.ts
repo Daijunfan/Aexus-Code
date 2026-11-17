@@ -107,7 +107,8 @@ export abstract class AbstractCodeEditorService extends Disposable implements IC
 		const editors = this.listCodeEditors();
 		for (const editor of editors) {
 
-			if (editor.hasTextFocus()) {
+			// A restored editor can retain text focus after its container lost focus.
+			if (editor.hasTextFocus() && editor.hasWidgetFocus()) {
 				// bingo!
 				return editor;
 			}

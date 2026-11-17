@@ -11,7 +11,7 @@ import es from 'event-stream';
 import fancyLog from 'fancy-log';
 import * as fs from 'fs';
 import glob from 'glob';
-import { gulp, filter, plumber, sourcemaps } from './lib/gulp/facade.ts';
+import { gulp,filter,plumber,sourcemaps } from './lib/gulp/facade.ts';
 import * as path from 'path';
 import * as nodeUtil from 'util';
 import * as ext from './lib/extensions.ts';
@@ -19,7 +19,7 @@ import { getVersion } from './lib/getVersion.ts';
 import { createReporter } from './lib/reporter.ts';
 import * as task from './lib/gulp/task.ts';
 import * as tsb from './lib/tsb/index.ts';
-import { createTsgoStream, spawnTsgo } from './lib/tsgo.ts';
+import { createTsgoStream,spawnTsgo } from './lib/tsgo.ts';
 import { getCompilerOptionsFromTsConfig } from './lib/tsconfigUtils.ts';
 import * as util from './lib/util.ts';
 import watcher from './lib/watch/index.ts';
@@ -274,12 +274,6 @@ task.task(compileNonNativeExtensionsBuildTask);
 export const compileNativeExtensionsBuildTask = task.define('compile-native-extensions-build', () => ext.packageNativeLocalExtensionsStream(false).pipe(gulp.dest('.build')));
 task.task(compileNativeExtensionsBuildTask);
 
-/**
- * Compiles the built-in copilot extension for the build.
- * Used by non-CI local builds where copilot is not downloaded as a VSIX.
- */
-export const compileCopilotExtensionBuildTask = task.define('compile-copilot-extension-build', () => ext.packageCopilotExtensionStream().pipe(gulp.dest('.build')));
-task.task(compileCopilotExtensionBuildTask);
 
 /**
  * Compiles the extensions for the build.

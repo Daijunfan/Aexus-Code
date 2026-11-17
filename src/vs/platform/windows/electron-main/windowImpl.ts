@@ -349,6 +349,10 @@ export abstract class BaseWindow extends Disposable implements IBaseWindow {
 			}
 		}
 
+		if (process.env['AEXUS_HIDDEN_WINDOW'] === '1') {
+			return;
+		}
+
 		if (state.mode === WindowMode.Maximized || state.mode === WindowMode.Fullscreen) {
 
 			// this call may or may not show the window, depends
@@ -435,6 +439,9 @@ export abstract class BaseWindow extends Disposable implements IBaseWindow {
 	}
 
 	focus(options?: { mode: FocusMode }): void {
+		if (process.env['AEXUS_HIDDEN_WINDOW'] === '1') {
+			return;
+		}
 		switch (options?.mode ?? FocusMode.Transfer) {
 			case FocusMode.Transfer:
 				this.doFocusWindow();
@@ -1373,7 +1380,7 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 
 		// Make window visible if it did not open in N seconds because this indicates an error
 		// Only do this when running out of sources and not when running tests
-		if (!this.environmentMainService.isBuilt && !this.environmentMainService.extensionTestsLocationURI) {
+		if (!this.environmentMainService.isBuilt && !this.environmentMainService.extensionTestsLocationURI && process.env['AEXUS_HIDDEN_WINDOW'] !== '1') {
 			this._register(new RunOnceScheduler(() => {
 				if (this._win && !this._win.isVisible() && !this._win.isMinimized()) {
 					this._win.show();

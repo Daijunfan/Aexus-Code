@@ -54,9 +54,9 @@ import { IWindowOpenable } from '../../../../platform/window/common/window.js';
 import { IWorkspaceContextService, UNKNOWN_EMPTY_WINDOW_WORKSPACE } from '../../../../platform/workspace/common/workspace.js';
 import { IRecentFolder, IRecentWorkspace, IRecentlyOpened, IWorkspacesService, isRecentFolder, isRecentWorkspace } from '../../../../platform/workspaces/common/workspaces.js';
 import { OpenRecentAction } from '../../../browser/actions/windowActions.js';
-import { OpenFileFolderAction, OpenFolderAction, OpenFolderViaWorkspaceAction } from '../../../browser/actions/workspaceActions.js';
+import { AddRootFolderAction, OpenFileFolderAction, OpenFolderAction } from '../../../browser/actions/workspaceActions.js';
+import { ADD_ROOT_FOLDER_COMMAND_ID } from '../../../browser/actions/workspaceCommands.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
-import { WorkbenchStateContext } from '../../../common/contextkeys.js';
 import { IEditorOpenContext, IEditorSerializer } from '../../../common/editor.js';
 import { IWebviewElement, IWebviewService } from '../../webview/browser/webview.js';
 import './gettingStartedColors.js';
@@ -69,6 +69,7 @@ import { startEntries } from '../common/gettingStartedContent.js';
 import { GroupsOrder, IEditorGroup, IEditorGroupsService, preferredSideBySideGroupDirection } from '../../../services/editor/common/editorGroupsService.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IHostService } from '../../../services/host/browser/host.js';
+import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
 import { IWorkbenchThemeService } from '../../../services/themes/common/workbenchThemeService.js';
 import { GettingStartedIndexList } from './gettingStartedList.js';
 import { createAgentsBanner } from '../../chat/browser/agentSessions/agentSessionsBanner.js';
@@ -213,6 +214,7 @@ export class GettingStartedPage extends EditorPane {
 		@IMarkdownRendererService private readonly markdownRendererService: IMarkdownRendererService,
 		@IChatEntitlementService private readonly chatEntitlementService: IChatEntitlementService,
 		@IDefaultAccountService private readonly defaultAccountService: IDefaultAccountService,
+		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
 	) {
 
 		super(GettingStartedPage.ID, group, telemetryService, themeService, storageService);
@@ -460,12 +462,8 @@ export class GettingStartedPage extends EditorPane {
 				await this.openWalkthroughSelector();
 				break;
 			}
-			case 'openFolder': {
-				if (this.contextService.contextMatchesRules(ContextKeyExpr.and(WorkbenchStateContext.isEqualTo('workspace')))) {
-					this.commandService.executeCommand(OpenFolderViaWorkspaceAction.ID);
-				} else {
-					this.commandService.executeCommand('workbench.action.files.openFolder');
-				}
+			case 'addProjects': {
+				await this.commandService.executeCommand(AddRootFolderAction.ID);
 				break;
 			}
 			case 'selectCategory': {
@@ -941,7 +939,7 @@ export class GettingStartedPage extends EditorPane {
 
 		const header = $('.header', {},
 			$('h1.product-name.caption', {}, this.productService.nameLong),
-			$('p.subtitle.description', {}, localize({ key: 'gettingStarted.editingEvolved', comment: ['Shown as subtitle on the Welcome page.'] }, "Editing evolved"))
+			$('p.subtitle.description', {}, localize('gettingStarted.projectsSubtitle', "Your projects, in one place. Expand a project in the sidebar to start working."))
 		);
 
 		const leftColumn = $('.categories-column.categories-column-left', {},);
@@ -1089,14 +1087,18 @@ export class GettingStartedPage extends EditorPane {
 			link.innerText = name;
 			link.title = fullPath;
 			link.setAttribute('aria-label', localize('welcomePage.openFolderWithPath', "Open folder {0} with path {1}", name, parentPath));
-			link.addEventListener('click', e => {
-				this.telemetryService.publicLog2<GettingStartedActionEvent, GettingStartedActionClassification>('gettingStarted.ActionExecuted', { command: 'openRecent', argument: undefined, walkthroughId: this.currentWalkthrough?.id });
-				this.hostService.openWindow([windowOpenable], {
-					forceNewWindow: e.ctrlKey || e.metaKey,
-					remoteAuthority: recent.remoteAuthority || null // local window if remoteAuthority is not set or can not be deducted from the openable
-				});
+			link.addEventListener('click', async e => {
 				e.preventDefault();
 				e.stopPropagation();
+				this.telemetryService.publicLog2<GettingStartedActionEvent, GettingStartedActionClassification>('gettingStarted.ActionExecuted', { command: 'openRecent', argument: undefined, walkthroughId: this.currentWalkthrough?.id });
+				if (isRecentFolder(recent) && !e.ctrlKey && !e.metaKey && (recent.remoteAuthority || '') === (this.environmentService.remoteAuthority || '')) {
+					await this.commandService.executeCommand(ADD_ROOT_FOLDER_COMMAND_ID, [recent.folderUri]);
+				} else {
+					await this.hostService.openWindow([windowOpenable], {
+						forceNewWindow: e.ctrlKey || e.metaKey,
+						remoteAuthority: recent.remoteAuthority || null
+					});
+				}
 			});
 			li.appendChild(link);
 
@@ -1136,9 +1138,8 @@ export class GettingStartedPage extends EditorPane {
 				klass: 'recently-opened',
 				limit: 5,
 				empty: $('.empty-recent', {},
-					localize('noRecents', "You have no recent folders,"),
-					$('button.button-link', { 'x-dispatch': 'openFolder' }, localize('openFolder', "open a folder")),
-					localize('toStart', "to start.")),
+					localize('noRecentProjects', "No recent projects. "),
+					$('button.button-link', { 'x-dispatch': 'addProjects' }, localize('addProjects', "Add projects"))),
 
 				more: $('.more', {},
 					$('button.button-link',

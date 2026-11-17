@@ -27,6 +27,14 @@
 			"project": "vscode-workbench"
 		},
 		{
+			"name": "vs/workbench/contrib/ade",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/workbenchMode",
+			"project": "vscode-workbench"
+		},
+		{
 			"name": "vs/workbench/api/common",
 			"project": "vscode-workbench"
 		},

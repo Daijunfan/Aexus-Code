@@ -50,7 +50,6 @@ import { chatOfShown, focusedSessionHostServiceOf, ITestSessionsGridState, stubS
 import { ISessionGridPane } from '../../../../../workbench/services/sessions/browser/sessionGridPane.js';
 import { IFocusedSessionHostService, ISessionHost } from '../../../../../workbench/services/sessions/browser/sessionHost.js';
 import { createSessionViewTestServices } from '../../../../test/browser/sessionViewTestUtils.js';
-import { AccountWidgetContribution } from '../../../accountMenu/browser/account.contribution.js';
 import { BaseLayoutController } from '../../../layout/browser/baseSessionLayoutController.js';
 import { BlockedSessionsIndicatorModel } from '../../../sessions/browser/blockedSessionsIndicatorModel.js';
 import { SessionActionFeedback } from '../../../sessions/browser/sessionActionFeedback.js';
@@ -218,7 +217,6 @@ export function createSessionsWorkbenchFixture(context: ComponentFixtureContext,
 		: undefined));
 	disposableStore.add(instantiationService.createInstance(NewSessionActionViewItemContribution));
 	disposableStore.add(instantiationService.createInstance(OpenInVSCodeWidgetContribution));
-	disposableStore.add(instantiationService.createInstance(AccountWidgetContribution));
 
 	const part = disposableStore.add(instantiationService.createInstance(SessionsPart, SessionsGridContent.ID));
 	const content = assertReturnsDefined(part.getContent(SessionsGridContent));

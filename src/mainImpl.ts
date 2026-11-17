@@ -37,6 +37,18 @@ const args = parseCLIArgs();
 // Configure static command line arguments
 perf.mark('code/willConfigureCommandlineSwitches');
 const argvConfig = configureCommandlineSwitchesSync(args);
+if (process.env['AEXUS_HIDDEN_WINDOW'] === '1') {
+	if (!app.commandLine.hasSwitch('password-store')) {
+		app.commandLine.appendSwitch('password-store', 'basic');
+	}
+	if (process.platform === 'darwin') {
+		app.setActivationPolicy?.('accessory');
+		app.dock?.hide();
+		app.whenReady().then(() => {
+			app.dock?.hide();
+		}, () => { /* ignore */ });
+	}
+}
 perf.mark('code/didConfigureCommandlineSwitches');
 // Enable sandbox globally unless
 // 1) disabled via command line using either

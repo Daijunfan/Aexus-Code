@@ -238,7 +238,7 @@ export class RemoveRootFolderAction extends Action2 {
 	constructor() {
 		super({
 			id: RemoveRootFolderAction.ID,
-			title: localize2('globalRemoveFolderFromWorkspace', 'Remove Folder from Workspace...'),
+			title: localize2('removeProject', 'Remove Project...'),
 			category: workspacesCategory,
 			f1: true,
 			precondition: ContextKeyExpr.and(WorkspaceFolderCountContext.notEqualsTo('0'), ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate())
@@ -247,11 +247,10 @@ export class RemoveRootFolderAction extends Action2 {
 
 	override async run(accessor: ServicesAccessor): Promise<void> {
 		const commandService = accessor.get(ICommandService);
-		const workspaceEditingService = accessor.get(IWorkspaceEditingService);
 
 		const folder = await commandService.executeCommand<IWorkspaceFolder>(PICK_WORKSPACE_FOLDER_COMMAND_ID);
 		if (folder) {
-			await workspaceEditingService.removeFolders([folder.uri]);
+			await commandService.executeCommand('removeRootFolder', folder.uri);
 		}
 	}
 }
@@ -390,7 +389,7 @@ MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
 	group: '3_workspace',
 	command: {
 		id: ADD_ROOT_FOLDER_COMMAND_ID,
-		title: localize({ key: 'miAddFolderToWorkspace', comment: ['&& denotes a mnemonic'] }, "A&&dd Folder to Workspace...")
+		title: localize({ key: 'miAddProjects', comment: ['&& denotes a mnemonic'] }, "A&&dd Projects...")
 	},
 	when: ContextKeyExpr.and(ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace')), IsSessionsWindowContext.negate()),
 	order: 1

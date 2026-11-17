@@ -4,63 +4,62 @@
  *--------------------------------------------------------------------------------------------*/
 import assert from 'assert';
 import * as sinon from 'sinon';
-import { IExtensionManagementService, DidUninstallExtensionEvent, ILocalExtension, InstallExtensionEvent, InstallExtensionResult, UninstallExtensionEvent, DidUpdateExtensionMetadata, InstallOperation, IAllowedExtensionsService, AllowedExtensionsConfigKey, IExtensionsControlManifest } from '../../../../../platform/extensionManagement/common/extensionManagement.js';
-import { EnablementState, IExtensionManagementServerService, IExtensionManagementServer, IWorkbenchExtensionManagementService, ExtensionInstallLocation, IProfileAwareExtensionManagementService, DidChangeProfileEvent } from '../../common/extensionManagement.js';
+import { IExtensionManagementService,DidUninstallExtensionEvent,ILocalExtension,InstallExtensionEvent,InstallExtensionResult,UninstallExtensionEvent,DidUpdateExtensionMetadata,InstallOperation,IAllowedExtensionsService,AllowedExtensionsConfigKey,IExtensionsControlManifest } from '../../../../../platform/extensionManagement/common/extensionManagement.js';
+import { EnablementState,IExtensionManagementServerService,IExtensionManagementServer,IWorkbenchExtensionManagementService,ExtensionInstallLocation,IProfileAwareExtensionManagementService,DidChangeProfileEvent } from '../../common/extensionManagement.js';
 import { ExtensionEnablementService } from '../../browser/extensionEnablementService.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
-import { Emitter, Event } from '../../../../../base/common/event.js';
-import { IWorkspace, IWorkspaceContextService, toWorkspaceFolder, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
+import { Emitter,Event } from '../../../../../base/common/event.js';
+import { IWorkspace,IWorkspaceContextService,toWorkspaceFolder,WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
 import { IWorkbenchEnvironmentService } from '../../../environment/common/environmentService.js';
-import { IStorageService, InMemoryStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
-import { EXTENSIONS_AGENTS_WINDOW_AUTO_ENABLE, EXTENSIONS_AGENTS_WINDOW_AUTO_ENABLE_EXTENSIONS, EXTENSIONS_AGENTS_WINDOW_MANAGEMENT, IExtensionContributions, ExtensionType, IExtension, IExtensionManifest, IExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
+import { IStorageService,InMemoryStorageService,StorageScope,StorageTarget } from '../../../../../platform/storage/common/storage.js';
+import { EXTENSIONS_AGENTS_WINDOW_AUTO_ENABLE,EXTENSIONS_AGENTS_WINDOW_AUTO_ENABLE_EXTENSIONS,EXTENSIONS_AGENTS_WINDOW_MANAGEMENT,IExtensionContributions,ExtensionType,IExtension,IExtensionManifest,IExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
 import { isUndefinedOrNull } from '../../../../../base/common/types.js';
 import { areSameExtensions } from '../../../../../platform/extensionManagement/common/extensionManagementUtil.js';
-import { IConfigurationChangeEvent, IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { IConfigurationChangeEvent,IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { Schemas } from '../../../../../base/common/network.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
-import { productService, TestLifecycleService } from '../../../../test/browser/workbenchTestServices.js';
+import { productService,TestLifecycleService } from '../../../../test/browser/workbenchTestServices.js';
 import { GlobalExtensionEnablementService } from '../../../../../platform/extensionManagement/common/extensionEnablementService.js';
-import { IUserDataSyncAccountService, UserDataSyncAccountService } from '../../../../../platform/userDataSync/common/userDataSyncAccount.js';
+import { IUserDataSyncAccountService,UserDataSyncAccountService } from '../../../../../platform/userDataSync/common/userDataSyncAccount.js';
 import { IUserDataSyncEnablementService } from '../../../../../platform/userDataSync/common/userDataSync.js';
 import { ILifecycleService } from '../../../lifecycle/common/lifecycle.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { TestNotificationService } from '../../../../../platform/notification/test/common/testNotificationService.js';
 import { IHostService } from '../../../host/browser/host.js';
-import { mock, upcastPartial } from '../../../../../base/test/common/mock.js';
+import { mock,upcastPartial } from '../../../../../base/test/common/mock.js';
 import { IExtensionBisectService } from '../../browser/extensionBisect.js';
-import { IWorkspaceTrustEnablementService, IWorkspaceTrustManagementService, IWorkspaceTrustRequestService, WorkspaceTrustRequestOptions } from '../../../../../platform/workspace/common/workspaceTrust.js';
-import { EXTENSIONS_SUPPORT_AGENTS_WINDOW, ExtensionManifestPropertiesService, IExtensionManifestPropertiesService } from '../../../extensions/common/extensionManifestPropertiesService.js';
-import { TestChatEntitlementService, TestContextService, TestProductService, TestWorkspaceTrustEnablementService, TestWorkspaceTrustManagementService } from '../../../../test/common/workbenchTestServices.js';
-import { TestWorkspace, Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
+import { IWorkspaceTrustEnablementService,IWorkspaceTrustManagementService,IWorkspaceTrustRequestService,WorkspaceTrustRequestOptions } from '../../../../../platform/workspace/common/workspaceTrust.js';
+import { EXTENSIONS_SUPPORT_AGENTS_WINDOW,ExtensionManifestPropertiesService,IExtensionManifestPropertiesService } from '../../../extensions/common/extensionManifestPropertiesService.js';
+import { TestChatEntitlementService,TestContextService,TestProductService,TestWorkspaceTrustEnablementService,TestWorkspaceTrustManagementService } from '../../../../test/common/workbenchTestServices.js';
+import { TestWorkspace,Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { ExtensionManagementService } from '../../common/extensionManagementService.js';
-import { ILogService, NullLogService } from '../../../../../platform/log/common/log.js';
-import { DisposableStore, toDisposable } from '../../../../../base/common/lifecycle.js';
+import { ILogService,NullLogService } from '../../../../../platform/log/common/log.js';
+import { DisposableStore,toDisposable } from '../../../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { FileService } from '../../../../../platform/files/common/fileService.js';
 import { IProductService } from '../../../../../platform/product/common/productService.js';
 import { AllowedExtensionsService } from '../../../../../platform/extensionManagement/common/allowedExtensionsService.js';
 import { IStringDictionary } from '../../../../../base/common/collections.js';
-import { ChatEntitlementContext, IChatEntitlementService } from '../../../chat/common/chatEntitlementService.js';
-import { Lazy } from '../../../../../base/common/lazy.js';
+import { IChatEntitlementService } from '../../../chat/common/chatEntitlementService.js';
 import { IDefaultAccountService } from '../../../../../platform/defaultAccount/common/defaultAccount.js';
 import { IDefaultAccountAuthenticationProvider } from '../../../../../base/common/defaultAccount.js';
 import { ValidationStatus } from '../../../../../base/common/parsers.js';
 import { platform } from '../../../../../base/common/platform.js';
 import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
-import { parse, TaskConfigSource } from '../../../../contrib/tasks/common/taskConfiguration.js';
+import { parse,TaskConfigSource } from '../../../../contrib/tasks/common/taskConfiguration.js';
 import { ShellExecutionSupportedContext } from '../../../../contrib/tasks/common/taskService.js';
 import { filterEnabledExtensions } from '../../../extensions/common/abstractExtensionService.js';
-import { IExtensionService, toExtensionDescription } from '../../../extensions/common/extensions.js';
-import { ExtensionMessageCollector, ExtensionsRegistry } from '../../../extensions/common/extensionsRegistry.js';
-import { encodeHex, VSBuffer } from '../../../../../base/common/buffer.js';
+import { IExtensionService,toExtensionDescription } from '../../../extensions/common/extensions.js';
+import { ExtensionMessageCollector,ExtensionsRegistry } from '../../../extensions/common/extensionsRegistry.js';
+import { encodeHex,VSBuffer } from '../../../../../base/common/buffer.js';
 import { ICanonicalUriService } from '../../../../../platform/workspace/common/canonicalUri.js';
 import { IRemoteAuthorityResolverService } from '../../../../../platform/remote/common/remoteAuthorityResolver.js';
 import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
 import { UriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentityService.js';
 import { CanonicalUriService } from '../../../workspaces/common/canonicalUriService.js';
-import { WorkspaceTrustManagementService, WORKSPACE_TRUST_STORAGE_KEY } from '../../../workspaces/common/workspaceTrust.js';
+import { WorkspaceTrustManagementService,WORKSPACE_TRUST_STORAGE_KEY } from '../../../workspaces/common/workspaceTrust.js';
 import { ExtensionEnablementWorkspaceTrustTransitionParticipant } from '../../../../contrib/extensions/browser/extensionEnablementWorkspaceTrustTransitionParticipant.js';
 
 function createStorageService(instantiationService: TestInstantiationService, disposableStore: DisposableStore): IStorageService {
@@ -1293,37 +1292,6 @@ suite('ExtensionEnablementService Test', () => {
 		assert.strictEqual(testObject.getEnablementState(extension), EnablementState.DisabledGlobally);
 		assert.strictEqual(target.args[0][0].length, 1);
 		assert.deepStrictEqual((<IExtension>target.args[0][0][0]).identifier, { id: 'pub.a' });
-	});
-
-	test('test chat extension is disabled on profile switch when setup is not completed', async () => {
-		const chatExtensionId = productService.defaultChatAgent!.chatExtensionId;
-		const chatExtension = aLocalExtension(chatExtensionId, undefined, ExtensionType.System);
-		installed.push(chatExtension);
-
-		// Clear migration flag set by the setup() instance so the migration runs fresh
-		let storageService = instantiationService.get(IStorageService);
-		storageService.store('builtinChatExtensionEnablementMigration', false, StorageScope.PROFILE, StorageTarget.MACHINE);
-
-		// Create a chat entitlement service with context where setup is not completed
-		const chatEntitlementService = new TestChatEntitlementService();
-		chatEntitlementService.context = new Lazy(() => ({ state: { completed: false }, onDidChange: Event.None })) as unknown as Lazy<ChatEntitlementContext>;
-
-		testObject = disposableStore.add(new TestExtensionEnablementService(instantiationService, chatEntitlementService));
-		await testObject.waitUntilInitialized();
-
-		// Chat extension should be disabled after initial setup
-		assert.strictEqual(testObject.getEnablementState(chatExtension), EnablementState.DisabledGlobally);
-
-		// Enable the chat extension to simulate it being enabled in a previous profile
-		await testObject.setEnablement([chatExtension], EnablementState.EnabledGlobally);
-		assert.strictEqual(testObject.getEnablementState(chatExtension), EnablementState.EnabledGlobally);
-
-		// Simulate switching to a fresh profile by clearing the migration flag
-		storageService = instantiationService.get(IStorageService);
-		storageService.store('builtinChatExtensionEnablementMigration', false, StorageScope.PROFILE, StorageTarget.MACHINE);
-
-		// Chat extension should be disabled again after computing enablement state
-		assert.strictEqual(testObject.getEnablementState(chatExtension), EnablementState.DisabledGlobally);
 	});
 
 	test('test extension is disabled by allowed list', async () => {

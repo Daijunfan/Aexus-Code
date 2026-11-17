@@ -2631,6 +2631,7 @@ export interface ExtHostTreeViewsShape {
 }
 
 export interface ExtHostWorkspaceShape {
+	$acceptCodingAgentProject(project: UriComponents | undefined, extensionId?: string): void;
 	$initializeWorkspace(workspace: IWorkspaceData | null, trusted: boolean): void;
 	$acceptWorkspaceData(workspace: IWorkspaceData | null): void;
 	$handleTextSearchResult(result: search.IRawFileMatch2, requestId: number): void;
@@ -4065,6 +4066,7 @@ export type IChatSessionHistoryItemDto = {
 	variableData?: Dto<IChatRequestVariableData>;
 	modelId?: string;
 	modeInstructions?: Dto<IChatRequestModeInstructions>;
+	isSystemInitiated?: boolean;
 } | {
 	type: 'response';
 	parts: IChatProgressDto[];
@@ -4125,6 +4127,7 @@ export interface MainThreadChatSessionsShape extends IDisposable {
 	$handleProgressChunk(handle: number, sessionResource: UriComponents, requestId: string, chunks: (IChatProgressDto | [IChatProgressDto, number])[]): Promise<void>;
 	$handleAnchorResolve(handle: number, sessionResource: UriComponents, requestId: string, requestHandle: string, anchor: Dto<IChatContentInlineReference>): void;
 	$handleProgressComplete(handle: number, sessionResource: UriComponents, requestId: string): void;
+	$handleHistoryChanged(handle: number, sessionResource: UriComponents, history: IChatSessionHistoryItemDto[]): void;
 }
 
 export interface ExtHostChatSessionsShape {

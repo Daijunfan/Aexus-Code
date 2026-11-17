@@ -10,6 +10,7 @@ import { ProcessTimeRunOnceScheduler } from '../../../base/common/async.js';
 import { VSBuffer } from '../../../base/common/buffer.js';
 import { PendingMigrationError, isCancellationError, isSigPipeError, onUnexpectedError, onUnexpectedExternalError } from '../../../base/common/errors.js';
 import { Event } from '../../../base/common/event.js';
+import * as path from '../../../base/common/path.js';
 import * as performance from '../../../base/common/performance.js';
 import { IURITransformer } from '../../../base/common/uriIpc.js';
 import { Promises } from '../../../base/node/pfs.js';
@@ -29,6 +30,14 @@ import '../common/extHost.common.services.js';
 import './extHost.node.services.js';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
+
+if (process.env['AEXUS_ADE_AGENTS_DIST_DIR'] && process.env['AEXUS_ADE_WINDOW_KEY']) {
+	try {
+		require(path.join(process.env['AEXUS_ADE_AGENTS_DIST_DIR'], 'extHostRolePreload.js'));
+	} catch {
+		// Ignore when running outside a built extension bundle (e.g. unit tests).
+	}
+}
 
 interface ParsedExtHostArgs {
 	transformURIs?: boolean;

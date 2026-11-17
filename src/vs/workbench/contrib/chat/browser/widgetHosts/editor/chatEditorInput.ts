@@ -199,6 +199,7 @@ export class ChatEditorInput extends EditorInput implements IEditorCloseHandler 
 	 * The title of this chat, or `undefined` if only the generic fallback name is known.
 	 */
 	getKnownTitle(): string | undefined {
+		if (this.options.title?.override) { return this.options.title.override; }
 		// If we have a resolved model, use its title
 		if (this.model?.title) {
 			// Only truncate if the default title is being used (don't truncate custom titles)
@@ -227,6 +228,13 @@ export class ChatEditorInput extends EditorInput implements IEditorCloseHandler 
 
 		// If a preferred title was provided in options, use it
 		return this.options.title?.preferred || undefined;
+	}
+
+	setTitleOverride(title: string | undefined): void {
+		if (this.options.title?.override !== title) {
+			this.options.title = { ...this.options.title, override: title };
+			this._onDidChangeLabel.fire();
+		}
 	}
 
 	override getTitle(verbosity?: Verbosity): string {

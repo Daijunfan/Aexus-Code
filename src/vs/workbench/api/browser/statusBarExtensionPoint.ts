@@ -4,10 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { IJSONSchema, TypeFromJsonSchema } from '../../../base/common/jsonSchema.js';
-import { DisposableStore, IDisposable, toDisposable } from '../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, toDisposable } from '../../../base/common/lifecycle.js';
 import { localize } from '../../../nls.js';
 import { createDecorator } from '../../../platform/instantiation/common/instantiation.js';
-import { isProposedApiEnabled } from '../../services/extensions/common/extensions.js';
+import { IExtensionService, isProposedApiEnabled } from '../../services/extensions/common/extensions.js';
+import { isCodingAgentExtension } from '../../services/extensions/common/codingAgentExtensions.js';
+import { IWorkbenchModeService } from '../../services/workbenchMode/common/workbenchMode.js';
 import { ExtensionsRegistry } from '../../services/extensions/common/extensionsRegistry.js';
 import { IStatusbarService, StatusbarAlignment as MainThreadStatusBarAlignment, IStatusbarEntryAccessor, IStatusbarEntry, StatusbarAlignment, IStatusbarEntryPriority, StatusbarEntryKind } from '../../services/statusbar/browser/statusbar.js';
 import { ThemeColor } from '../../../base/common/themables.js';
@@ -58,21 +60,54 @@ export interface IExtensionStatusBarItemService {
 }
 
 
-class ExtensionStatusBarItemService implements IExtensionStatusBarItemService {
+interface ExtensionStatusBarItem {
+	id: string;
+	accessor: IStatusbarEntryAccessor | undefined;
+	entry: IStatusbarEntry;
+	alignment: MainThreadStatusBarAlignment;
+	priority: number;
+}
+
+export class ExtensionStatusBarItemService extends Disposable implements IExtensionStatusBarItemService {
 
 	declare readonly _serviceBrand: undefined;
 
-	private readonly _entries: Map<string, { accessor: IStatusbarEntryAccessor; entry: IStatusbarEntry; alignment: MainThreadStatusBarAlignment; priority: number; disposable: IDisposable }> = new Map();
+	private readonly _entries = new Map<string, ExtensionStatusBarItem>();
 
-	private readonly _onDidChange = new Emitter<IExtensionStatusBarItemChangeEvent>();
+	private readonly _onDidChange = this._register(new Emitter<IExtensionStatusBarItemChangeEvent>());
 	readonly onDidChange: Event<IExtensionStatusBarItemChangeEvent> = this._onDidChange.event;
 
-	constructor(@IStatusbarService private readonly _statusbarService: IStatusbarService) { }
+	constructor(
+		@IStatusbarService private readonly _statusbarService: IStatusbarService,
+		@IWorkbenchModeService private readonly _modeService: IWorkbenchModeService,
+		@IExtensionService private readonly _extensionService: IExtensionService,
+	) {
+		super();
+		const updateVisibility = () => this._entries.forEach(entry => this.updateVisibility(entry));
+		this._register(_modeService.onDidChangeMode(updateVisibility));
+		this._register(_extensionService.onDidRegisterExtensions(updateVisibility));
+		this._register(_extensionService.onDidChangeExtensions(updateVisibility));
+	}
 
-	dispose(): void {
-		this._entries.forEach(entry => entry.accessor.dispose());
+	override dispose(): void {
+		this._entries.forEach(entry => entry.accessor?.dispose());
 		this._entries.clear();
-		this._onDidChange.dispose();
+		super.dispose();
+	}
+
+	private updateVisibility(item: ExtensionStatusBarItem): void {
+		const extensionId = item.entry.extensionId;
+		const isAgent = extensionId && this._extensionService.extensions.some(extension => ExtensionIdentifier.equals(extension.identifier, extensionId) && isCodingAgentExtension(extension));
+		if (this._modeService.mode === 'ade' && isAgent) {
+			item.accessor?.dispose();
+			item.accessor = undefined;
+		} else if (!item.accessor) {
+			// Use the extension identifier as a secondary sort key for equal priorities.
+			const priority: number | IStatusbarEntryPriority = typeof extensionId === 'string'
+				? { primary: item.priority, secondary: hash(extensionId) }
+				: item.priority;
+			item.accessor = this._statusbarService.addEntry(item.entry, item.id, item.alignment, priority);
+		}
 	}
 
 	setOrUpdateEntry(entryId: string,
@@ -120,45 +155,34 @@ class ExtensionStatusBarItemService implements IExtensionStatusBarItemService {
 
 		// Create new entry if not existing
 		if (!existingEntry) {
-			let entryPriority: number | IStatusbarEntryPriority;
-			if (typeof extensionId === 'string') {
-				// We cannot enforce unique priorities across all extensions, so we
-				// use the extension identifier as a secondary sort key to reduce
-				// the likelyhood of collisions.
-				// See https://github.com/microsoft/vscode/issues/177835
-				// See https://github.com/microsoft/vscode/issues/123827
-				entryPriority = { primary: priority, secondary: hash(extensionId) };
-			} else {
-				entryPriority = priority;
-			}
-
-			const accessor = this._statusbarService.addEntry(entry, id, alignment, entryPriority);
-			this._entries.set(entryId, {
-				accessor,
+			const item: ExtensionStatusBarItem = {
+				id,
+				accessor: undefined,
 				entry,
 				alignment,
 				priority,
-				disposable: toDisposable(() => {
-					accessor.dispose();
-					this._entries.delete(entryId);
-					this._onDidChange.fire({ removed: entryId });
-				})
-			});
+			};
+			this._entries.set(entryId, item);
+			this.updateVisibility(item);
 
 			this._onDidChange.fire({ added: [entryId, { entry, alignment, priority }] });
 			return StatusBarUpdateKind.DidDefine;
 
 		} else {
 			// Otherwise update
-			existingEntry.accessor.update(entry);
+			existingEntry.accessor?.update(entry);
 			existingEntry.entry = entry;
 			return StatusBarUpdateKind.DidUpdate;
 		}
 	}
 
 	unsetEntry(entryId: string): void {
-		this._entries.get(entryId)?.disposable.dispose();
-		this._entries.delete(entryId);
+		const item = this._entries.get(entryId);
+		if (item) {
+			item.accessor?.dispose();
+			this._entries.delete(entryId);
+			this._onDidChange.fire({ removed: entryId });
+		}
 	}
 
 	getEntries(): Iterable<[string, { entry: IStatusbarEntry; alignment: MainThreadStatusBarAlignment; priority: number }]> {

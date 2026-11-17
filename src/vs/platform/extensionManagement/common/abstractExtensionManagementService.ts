@@ -3,35 +3,35 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { distinct, isNonEmptyArray } from '../../../base/common/arrays.js';
-import { Barrier, CancelablePromise, createCancelablePromise } from '../../../base/common/async.js';
+import { distinct,isNonEmptyArray } from '../../../base/common/arrays.js';
+import { Barrier,CancelablePromise,createCancelablePromise } from '../../../base/common/async.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
-import { CancellationError, getErrorMessage, isCancellationError } from '../../../base/common/errors.js';
-import { Emitter, Event } from '../../../base/common/event.js';
-import { Disposable, toDisposable } from '../../../base/common/lifecycle.js';
+import { CancellationError,getErrorMessage,isCancellationError } from '../../../base/common/errors.js';
+import { Emitter,Event } from '../../../base/common/event.js';
+import { Disposable,toDisposable } from '../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../base/common/map.js';
 import { isWeb } from '../../../base/common/platform.js';
 import { URI } from '../../../base/common/uri.js';
 import * as nls from '../../../nls.js';
 import {
-	ExtensionManagementError, IExtensionGalleryService, IExtensionIdentifier, IExtensionManagementParticipant, IGalleryExtension, ILocalExtension, InstallOperation,
-	IExtensionsControlManifest, StatisticType, isTargetPlatformCompatible, TargetPlatformToString, ExtensionManagementErrorCode,
-	InstallOptions, UninstallOptions, Metadata, InstallExtensionEvent, DidUninstallExtensionEvent, InstallExtensionResult, UninstallExtensionEvent, IExtensionManagementService, InstallExtensionInfo, EXTENSION_INSTALL_DEP_PACK_CONTEXT, ExtensionGalleryError,
-	IProductVersion, ExtensionGalleryErrorCode,
-	EXTENSION_INSTALL_SOURCE_CONTEXT,
-	DidUpdateExtensionMetadata,
-	UninstallExtensionInfo,
-	ExtensionSignatureVerificationCode,
-	IAllowedExtensionsService
+ExtensionManagementError,IExtensionGalleryService,IExtensionIdentifier,IExtensionManagementParticipant,IGalleryExtension,ILocalExtension,InstallOperation,
+IExtensionsControlManifest,StatisticType,isTargetPlatformCompatible,TargetPlatformToString,ExtensionManagementErrorCode,
+InstallOptions,UninstallOptions,Metadata,InstallExtensionEvent,DidUninstallExtensionEvent,InstallExtensionResult,UninstallExtensionEvent,IExtensionManagementService,InstallExtensionInfo,EXTENSION_INSTALL_DEP_PACK_CONTEXT,ExtensionGalleryError,
+IProductVersion,ExtensionGalleryErrorCode,
+EXTENSION_INSTALL_SOURCE_CONTEXT,
+DidUpdateExtensionMetadata,
+UninstallExtensionInfo,
+ExtensionSignatureVerificationCode,
+IAllowedExtensionsService
 } from './extensionManagement.js';
-import { areSameExtensions, ExtensionKey, getExtensionBlockedMessage, getGalleryExtensionId, getGalleryExtensionTelemetryData, getLocalExtensionTelemetryData, isMalicious } from './extensionManagementUtil.js';
-import { ExtensionType, IExtensionManifest, isApplicationScopedExtension, TargetPlatform } from '../../extensions/common/extensions.js';
+import { areSameExtensions,ExtensionKey,getExtensionBlockedMessage,getGalleryExtensionId,getGalleryExtensionTelemetryData,getLocalExtensionTelemetryData,isMalicious } from './extensionManagementUtil.js';
+import { ExtensionType,IExtensionManifest,isApplicationScopedExtension,TargetPlatform } from '../../extensions/common/extensions.js';
 import { ILogService } from '../../log/common/log.js';
 import { IProductService } from '../../product/common/productService.js';
 import { ITelemetryService } from '../../telemetry/common/telemetry.js';
 import { IUriIdentityService } from '../../uriIdentity/common/uriIdentity.js';
 import { IUserDataProfilesService } from '../../userDataProfile/common/userDataProfile.js';
-import { escapeUntrustedMarkdown, IMarkdownString, MarkdownString } from '../../../base/common/htmlContent.js';
+import { escapeUntrustedMarkdown,IMarkdownString,MarkdownString } from '../../../base/common/htmlContent.js';
 
 export type InstallableExtension = { readonly manifest: IExtensionManifest; extension: IGalleryExtension | URI; options: InstallOptions };
 
@@ -996,9 +996,6 @@ export abstract class AbstractExtensionManagementService extends CommontExtensio
 
 	private getAllPackExtensionsToUninstall(extension: ILocalExtension, installed: ILocalExtension[], checked: ILocalExtension[] = []): ILocalExtension[] {
 		if (checked.indexOf(extension) !== -1) {
-			return [];
-		}
-		if (areSameExtensions(extension.identifier, { id: this.productService.defaultChatAgent.extensionId })) {
 			return [];
 		}
 		checked.push(extension);

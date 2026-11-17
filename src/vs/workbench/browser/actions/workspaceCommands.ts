@@ -4,9 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize, localize2 } from '../../../nls.js';
-import { hasWorkspaceFileExtension, IWorkspaceContextService } from '../../../platform/workspace/common/workspace.js';
+import { hasWorkspaceFileExtension, IWorkspaceContextService, WorkbenchState } from '../../../platform/workspace/common/workspace.js';
 import { IWorkspaceEditingService } from '../../services/workspaces/common/workspaceEditing.js';
-import { dirname } from '../../../base/common/resources.js';
+import { dirname, joinPath } from '../../../base/common/resources.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { mnemonicButtonLabel } from '../../../base/common/labels.js';
 import { CommandsRegistry, ICommandService } from '../../../platform/commands/common/commands.js';
@@ -24,9 +24,13 @@ import { IFileToOpen, IFolderToOpen, IOpenEmptyWindowOptions, IOpenWindowOptions
 import { IRecent, IWorkspacesService } from '../../../platform/workspaces/common/workspaces.js';
 import { IPathService } from '../../services/path/common/pathService.js';
 import { ILocalizedString } from '../../../platform/action/common/action.js';
+import { distinct } from '../../../base/common/arrays.js';
+import { isNative } from '../../../base/common/platform.js';
+import { IUriIdentityService } from '../../../platform/uriIdentity/common/uriIdentity.js';
+import { IWorkbenchEnvironmentService } from '../../services/environment/common/environmentService.js';
 
 export const ADD_ROOT_FOLDER_COMMAND_ID = 'addRootFolder';
-export const ADD_ROOT_FOLDER_LABEL: ILocalizedString = localize2('addFolderToWorkspace', 'Add Folder to Workspace...');
+export const ADD_ROOT_FOLDER_LABEL: ILocalizedString = localize2('addProjects', 'Add Projects...');
 
 export const SET_ROOT_FOLDER_COMMAND_ID = 'setRootFolder';
 
@@ -61,15 +65,33 @@ CommandsRegistry.registerCommand({
 
 CommandsRegistry.registerCommand({
 	id: ADD_ROOT_FOLDER_COMMAND_ID,
-	handler: async (accessor) => {
+	handler: async (accessor, projectFolders?: URI[]) => {
 		const workspaceEditingService = accessor.get(IWorkspaceEditingService);
+		const contextService = accessor.get(IWorkspaceContextService);
+		const environmentService = accessor.get(IWorkbenchEnvironmentService);
+		const uriIdentityService = accessor.get(IUriIdentityService);
 
-		const folders = await selectWorkspaceFolders(accessor);
+		const folders = Array.isArray(projectFolders) ? projectFolders : await selectWorkspaceFolders(accessor);
 		if (!folders?.length) {
 			return;
 		}
 
-		await workspaceEditingService.addFolders(folders.map(folder => ({ uri: folder })));
+		if (isNative && contextService.getWorkbenchState() !== WorkbenchState.WORKSPACE) {
+			const workspace = contextService.getWorkspace();
+			const projects = distinct([
+				...workspace.folders.map(folder => ({ uri: folder.uri, name: folder.name })),
+				...folders.map(uri => ({ uri }))
+			], folder => uriIdentityService.extUri.getComparisonKey(folder.uri));
+			if (projects.length === workspace.folders.length) {
+				return;
+			}
+
+			// Keep the project list in application data, without asking for a workspace file.
+			const projectWorkspace = joinPath(dirname(environmentService.untitledWorkspacesHome), 'Projects', workspace.id, 'projects.code-workspace');
+			await workspaceEditingService.createAndEnterWorkspace(projects, projectWorkspace);
+		} else {
+			await workspaceEditingService.addFolders(folders.map(uri => ({ uri })));
+		}
 	}
 });
 
@@ -94,7 +116,7 @@ async function selectWorkspaceFolders(accessor: ServicesAccessor): Promise<URI[]
 
 	const folders = await dialogsService.showOpenDialog({
 		openLabel: mnemonicButtonLabel(localize({ key: 'add', comment: ['&& denotes a mnemonic'] }, "&&Add")),
-		title: localize('addFolderToWorkspaceTitle', "Add Folder to Workspace"),
+		title: localize('addProjectsTitle', "Add Projects"),
 		canSelectFolders: true,
 		canSelectMany: true,
 		defaultUri: await dialogsService.defaultFolderPath(),

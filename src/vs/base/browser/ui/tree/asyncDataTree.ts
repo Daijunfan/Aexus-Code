@@ -834,7 +834,20 @@ export class AsyncDataTree<TInput, T, TFilterData = void> implements IDisposable
 	}
 
 	resort(element: TInput | T = this.root.element, recursive = true): void {
-		this.tree.resort(this.getDataNode(element), recursive);
+		const sorter = this.sorter;
+		if (!sorter) {
+			return;
+		}
+		const node = this.getDataNode(element);
+		const sort = (node: IAsyncDataTreeNode<TInput, T>) => {
+			node.children.sort((a, b) => sorter.compare(a.element as T, b.element as T));
+		};
+		if (recursive) {
+			dfs(node, sort);
+		} else {
+			sort(node);
+		}
+		this.render(node);
 	}
 
 	hasNode(element: TInput | T): boolean {

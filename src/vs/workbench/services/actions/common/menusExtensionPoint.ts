@@ -25,6 +25,8 @@ import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { ResolvedKeybinding } from '../../../../base/common/keybindings.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { ApiProposalName } from '../../../../platform/extensions/common/extensionsApiProposals.js';
+import { isCodingAgentExtension, shouldSuppressCodingAgentEditorTitleItem } from '../../extensions/common/codingAgentExtensions.js';
+import { WorkbenchModeContext } from '../../workbenchMode/common/workbenchMode.js';
 
 interface IAPIMenu {
 	readonly key: string;
@@ -958,7 +960,7 @@ commandsExtensionPoint.setHandler(extensions => {
 			shortTitle,
 			tooltip: title,
 			category,
-			precondition: ContextKeyExpr.deserialize(enablement),
+			precondition: ContextKeyExpr.and(ContextKeyExpr.deserialize(enablement), isCodingAgentExtension(extension.description) ? WorkbenchModeContext.notEqualsTo('ade') : undefined),
 			icon: absoluteIcon
 		}));
 	}
@@ -1152,7 +1154,13 @@ menusExtensionPoint.setHandler(extensions => {
 					continue;
 				}
 
-				item.when = ContextKeyExpr.deserialize(menuItem.when);
+				if (menu.id === MenuId.EditorTitle && shouldSuppressCodingAgentEditorTitleItem(extension.description, menuItem.when)) {
+					continue;
+				}
+				item.when = ContextKeyExpr.and(
+					ContextKeyExpr.deserialize(menuItem.when),
+					isCodingAgentExtension(extension.description) && menu.id !== MenuId.EditorTitle ? WorkbenchModeContext.notEqualsTo('ade') : undefined,
+				);
 				_menuRegistrations.add(MenuRegistry.appendMenuItem(menu.id, item));
 			}
 		}

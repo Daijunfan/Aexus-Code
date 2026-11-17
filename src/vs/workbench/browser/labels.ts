@@ -16,7 +16,7 @@ import { DECORATION_BADGE_CLASS, DECORATION_LABEL_COLOR_CLASS, DECORATION_TEXT_B
 import { Schemas } from '../../base/common/network.js';
 import { FileKind, FILES_ASSOCIATIONS_CONFIG } from '../../platform/files/common/files.js';
 import { ITextModel } from '../../editor/common/model.js';
-import { IThemeService } from '../../platform/theme/common/themeService.js';
+import { IThemeService, IFileIconTheme } from '../../platform/theme/common/themeService.js';
 import { Event, Emitter } from '../../base/common/event.js';
 import { ILabelService } from '../../platform/label/common/label.js';
 import { getIconClasses } from '../../editor/common/services/getIconClasses.js';
@@ -27,6 +27,17 @@ import { IRange } from '../../editor/common/core/range.js';
 import { ThemeIcon } from '../../base/common/themables.js';
 import { asCssVariable } from '../../platform/theme/common/colorUtils.js';
 import { INotebookDocumentService, extractCellOutputDetails } from '../services/notebook/common/notebookDocumentService.js';
+
+/** Applies the native file-tree icon theme to any workbench resource tree. */
+export function createFileIconThemableTreeContainerScope(container: HTMLElement, themeService: IThemeService): IDisposable {
+	container.classList.add('file-icon-themable-tree', 'show-file-icons');
+	const update = (theme: IFileIconTheme) => {
+		container.classList.toggle('align-icons-and-twisties', theme.hasFileIcons && !theme.hasFolderIcons);
+		container.classList.toggle('hide-arrows', theme.hidesExplorerArrows === true);
+	};
+	update(themeService.getFileIconTheme());
+	return themeService.onDidFileIconThemeChange(update);
+}
 
 export interface IResourceLabelProps {
 	resource?: URI | { primary?: URI; secondary?: URI };

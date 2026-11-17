@@ -27,19 +27,19 @@ import { IEditorService, SIDE_GROUP, ACTIVE_GROUP } from '../../../../services/e
 import { IViewPaneOptions, ViewPane } from '../../../../browser/parts/views/viewPane.js';
 import { ILabelService } from '../../../../../platform/label/common/label.js';
 import { ExplorerDelegate, ExplorerDataSource, FilesRenderer, ICompressedNavigationController, FilesFilter, FileSorter, FileDragAndDrop, ExplorerCompressionDelegate, isCompressedFolderName, ExplorerFindProvider } from './explorerViewer.js';
-import { IThemeService, IFileIconTheme } from '../../../../../platform/theme/common/themeService.js';
+import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IWorkbenchThemeService } from '../../../../services/themes/common/workbenchThemeService.js';
 import { ITreeContextMenuEvent, TreeVisibility } from '../../../../../base/browser/ui/tree/tree.js';
 import { MenuId, Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { ExplorerItem, NewExplorerItem } from '../../common/explorerModel.js';
-import { ResourceLabels } from '../../../../browser/labels.js';
+import { ResourceLabels, createFileIconThemableTreeContainerScope } from '../../../../browser/labels.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { IAsyncDataTreeViewState } from '../../../../../base/browser/ui/tree/asyncDataTree.js';
 import { FuzzyScore } from '../../../../../base/common/filters.js';
 import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.js';
 import { IFileService, FileSystemProviderCapabilities } from '../../../../../platform/files/common/files.js';
-import { IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+import { toDisposable } from '../../../../../base/common/lifecycle.js';
 import { Event } from '../../../../../base/common/event.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
@@ -51,11 +51,11 @@ import { Codicon } from '../../../../../base/common/codicons.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IEditorResolverService } from '../../../../services/editor/common/editorResolverService.js';
 import { EditorOpenSource } from '../../../../../platform/editor/common/editor.js';
-import { ResourceMap } from '../../../../../base/common/map.js';
 import { AbstractTreePart } from '../../../../../base/browser/ui/tree/abstractTree.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IAccessibilityService } from '../../../../../platform/accessibility/common/accessibility.js';
 import { IEnvironmentService } from '../../../../../platform/environment/common/environment.js';
+import { IProjectNavigationService } from '../projectNavigationService.js';
 
 
 function hasExpandedRootChild(tree: WorkbenchCompressibleAsyncDataTree<ExplorerItem | ExplorerItem[], ExplorerItem, FuzzyScore>, treeInput: ExplorerItem[]): boolean {
@@ -210,6 +210,8 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 	private _autoReveal: boolean | 'force' | 'focusNoScroll' = false;
 	private readonly delegate: IExplorerViewContainerDelegate | undefined;
 	private workspaceTitleContainer: HTMLElement | undefined;
+	private bodyDimension: DOM.Dimension | undefined;
+	private treeStateStorageKey = ExplorerView.TREE_VIEW_STATE_STORAGE_KEY;
 
 	override get singleViewPaneContainerTitle(): string {
 		return this.name;
@@ -240,7 +242,8 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 		@ICommandService protected readonly commandService: ICommandService,
 		@IOpenerService openerService: IOpenerService,
 		@IAccessibilityService private readonly accessibilityService: IAccessibilityService,
-		@IEnvironmentService private readonly environmentService: IEnvironmentService
+		@IEnvironmentService private readonly environmentService: IEnvironmentService,
+		@IProjectNavigationService private readonly projectNavigationService: IProjectNavigationService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -262,6 +265,19 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 
 		this.explorerService.registerView(this);
 		this._register(toDisposable(() => this.clearWorkspaceTitleContainer()));
+		this._register(projectNavigationService.onDidChangeProject(() => {
+			if (this.bodyDimension) {
+				this.layoutBody(this.bodyDimension.height, this.bodyDimension.width);
+			}
+			if (this.tree) {
+				void this.setTreeInput();
+			}
+		}));
+		this._register(projectNavigationService.onDidChangeProjectOrder(() => {
+			if (this.tree && Array.isArray(this.tree.getInput())) {
+				this.tree.resort(undefined, false);
+			}
+		}));
 	}
 
 	get autoReveal() {
@@ -273,7 +289,7 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 	}
 
 	get name(): string {
-		return this.labelService.getWorkspaceLabel(this.contextService.getWorkspace());
+		return this.projectNavigationService.focusedProject?.name ?? nls.localize('projects', "Projects");
 	}
 
 	override get title(): string {
@@ -335,6 +351,7 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 		}));
 		this._register(this.contextService.onDidChangeWorkbenchState(() => this.updateWorkspaceTitleCase()));
 		this._register(this.labelService.onDidChangeFormatters(setHeader));
+		this._register(this.projectNavigationService.onDidChangeProject(() => { setHeader(); this.updateWorkspaceTitleCase(); }));
 		setHeader();
 	}
 
@@ -353,13 +370,14 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 	}
 
 	private updateWorkspaceTitleCase(): void {
-		const preserveWorkspaceNameCase = shouldPreserveWorkspaceNameCase(this.contextService.getWorkbenchState(), this.contextService.getWorkspace(), this.environmentService);
+		const preserveWorkspaceNameCase = !!this.projectNavigationService.focusedProject || shouldPreserveWorkspaceNameCase(this.contextService.getWorkbenchState(), this.contextService.getWorkspace(), this.environmentService);
 		this.element.classList.toggle(PRESERVE_WORKSPACE_NAME_CASE_CLASS, preserveWorkspaceNameCase);
 		this.workspaceTitleContainer?.classList.toggle(PRESERVE_MERGED_WORKSPACE_NAME_CASE_CLASS, preserveWorkspaceNameCase && this.isVisible() && !this.headerVisible);
 	}
 
 	protected override layoutBody(height: number, width: number): void {
 		super.layoutBody(height, width);
+		this.bodyDimension = new DOM.Dimension(width, height);
 		this.tree.layout(height, width);
 	}
 
@@ -440,7 +458,9 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 		const focusedItems = this.tree.getFocusedPart() === AbstractTreePart.StickyScroll ?
 			this.tree.getStickyScrollFocus() :
 			this.tree.getFocus();
-		return getContext(focusedItems, this.tree.getSelection(), respectMultiSelection, this.renderer);
+		const context = getContext(focusedItems, this.tree.getSelection(), respectMultiSelection, this.renderer);
+		const focusedProject = this.projectNavigationService.focusedProject;
+		return !context.length && !respectMultiSelection && focusedProject ? [this.explorerService.findClosestRoot(focusedProject.uri)!] : context;
 	}
 
 	isItemVisible(item: ExplorerItem): boolean {
@@ -595,6 +615,16 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 
 		// Update resource context based on focused element
 		this._register(this.tree.onDidChangeFocus(e => this.onFocusChanged(e.elements)));
+		this._register(this.tree.onDidChangeSelection(e => {
+			if (e.browserEvent && e.elements[0]) {
+				this.projectNavigationService.selectProject(e.elements[0].root.resource);
+			}
+		}));
+		this._register(this.tree.onMouseClick(e => {
+			if (e.element) {
+				this.projectNavigationService.selectProject(e.element.root.resource);
+			}
+		}));
 		this.onFocusChanged([]);
 		// Open when selecting via keyboard
 		this._register(this.tree.onDidOpen(async e => {
@@ -602,6 +632,7 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 			if (!element) {
 				return;
 			}
+			this.projectNavigationService.selectProject(element.root.resource);
 			// Do not react if the user is expanding selection via keyboard.
 			// Check if the item was previously also selected, if yes the user is simply expanding / collapsing current selection #66589.
 			const shiftDown = DOM.isKeyboardEvent(e.browserEvent) && e.browserEvent.shiftKey;
@@ -672,12 +703,14 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 	}
 
 	private storeTreeViewState() {
-		this.storageService.store(ExplorerView.TREE_VIEW_STATE_STORAGE_KEY, JSON.stringify(this.tree.getViewState()), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		if (this.tree?.getInput()) {
+			this.storageService.store(this.treeStateStorageKey, JSON.stringify(this.tree.getViewState()), StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		}
 	}
 
 	private setContextKeys(stat: ExplorerItem | null | undefined): void {
 		const folders = this.contextService.getWorkspace().folders;
-		const resource = stat ? stat.resource : folders[folders.length - 1].uri;
+		const resource = stat ? stat.resource : this.projectNavigationService.focusedProject?.uri ?? folders[folders.length - 1].uri;
 		stat = stat || this.explorerService.findClosest(resource);
 		this.resourceContext.set(resource);
 		this.folderContext.set(!!stat && stat.isDirectory);
@@ -733,7 +766,7 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 			const compressedControllers = this.renderer.getCompressedNavigationController(stat);
 			arg = compressedControllers?.length ? compressedControllers[0].current.resource : stat.resource;
 		} else {
-			arg = roots.length === 1 ? roots[0].resource : {};
+			arg = this.projectNavigationService.focusedProject?.uri ?? (roots.length === 1 ? roots[0].resource : {});
 		}
 
 		this.contextMenuService.showContextMenu({
@@ -846,18 +879,21 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 		if (initialInputSetup) {
 			perf.mark('code/willResolveExplorer');
 		}
-		const roots = this.explorerService.roots;
-		let input: ExplorerItem | ExplorerItem[] = roots[0];
-		if (this.contextService.getWorkbenchState() !== WorkbenchState.FOLDER || roots[0].error) {
-			// Display roots only when multi folder workspace
-			input = roots;
+		const project = this.projectNavigationService.focusedProject;
+		const focusedRoot = project && this.explorerService.roots.find(root => this.uriIdentityService.extUri.isEqual(root.resource, project.uri));
+		const input = focusedRoot || this.explorerService.roots;
+		const stateKey = focusedRoot ? `${ExplorerView.TREE_VIEW_STATE_STORAGE_KEY}.${focusedRoot.resource.toString()}` : ExplorerView.TREE_VIEW_STATE_STORAGE_KEY;
+		const changedScope = stateKey !== this.treeStateStorageKey;
+		if (changedScope) {
+			this.storeTreeViewState();
+			this.treeStateStorageKey = stateKey;
 		}
 
 		let viewState: IAsyncDataTreeViewState | undefined;
-		if (this.tree?.getInput()) {
+		if (this.tree?.getInput() && !changedScope) {
 			viewState = this.tree.getViewState();
 		} else {
-			const rawViewState = this.storageService.get(ExplorerView.TREE_VIEW_STATE_STORAGE_KEY, StorageScope.WORKSPACE);
+			const rawViewState = this.storageService.get(stateKey, StorageScope.WORKSPACE);
 			if (rawViewState) {
 				viewState = JSON.parse(rawViewState);
 			}
@@ -865,37 +901,13 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 
 		const previousInput = this.tree.getInput();
 		const promise = this.tree.setInput(input, viewState).then(async () => {
-			if (Array.isArray(input)) {
-				if (!viewState || previousInput instanceof ExplorerItem) {
-					// There is no view state for this workspace (we transitioned from a folder workspace?), expand up to five roots.
-					// If there are many roots in a workspace, expanding them all would can cause performance issues #176226
-					for (let i = 0; i < Math.min(input.length, 5); i++) {
-						try {
-							await this.tree.expand(input[i]);
-						} catch (e) { }
-					}
-				}
-				// Reloaded or transitioned from an empty workspace, but only have a single folder in the workspace.
-				if (!previousInput && input.length === 1 && this.configurationService.getValue<IFilesConfiguration>().explorer.expandSingleFolderWorkspaces) {
-					await this.tree.expand(input[0]).catch(() => { });
-				}
-				if (Array.isArray(previousInput)) {
-					const previousRoots = new ResourceMap<true>();
-					previousInput.forEach(previousRoot => previousRoots.set(previousRoot.resource, true));
-
-					// Roots added to the explorer -> expand them.
-					await Promise.all(input.map(async item => {
-						if (!previousRoots.has(item.resource)) {
-							try {
-								await this.tree.expand(item);
-							} catch (e) { }
-						}
-					}));
-				}
+			if (!previousInput && Array.isArray(input) && input.length === 1 && this.configurationService.getValue<IFilesConfiguration>().explorer.expandSingleFolderWorkspaces) {
+				await this.tree.expand(input[0]).catch(() => { });
 			}
 			if (initialInputSetup) {
 				perf.mark('code/didResolveExplorer');
 			}
+			this.storeTreeViewState();
 		});
 
 		this.progressService.withProgress({
@@ -913,6 +925,10 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 		}
 
 		if (!resource || !this.isBodyVisible()) {
+			return;
+		}
+		const project = this.projectNavigationService.focusedProject;
+		if (project && !this.uriIdentityService.extUri.isEqualOrParent(resource, project.uri)) {
 			return;
 		}
 
@@ -1078,23 +1094,13 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 	}
 
 	override dispose(): void {
+		this.storeTreeViewState();
 		this.dragHandler?.dispose();
 		super.dispose();
 	}
 }
 
-export function createFileIconThemableTreeContainerScope(container: HTMLElement, themeService: IThemeService): IDisposable {
-	container.classList.add('file-icon-themable-tree');
-	container.classList.add('show-file-icons');
-
-	const onDidChangeFileIconTheme = (theme: IFileIconTheme) => {
-		container.classList.toggle('align-icons-and-twisties', theme.hasFileIcons && !theme.hasFolderIcons);
-		container.classList.toggle('hide-arrows', theme.hidesExplorerArrows === true);
-	};
-
-	onDidChangeFileIconTheme(themeService.getFileIconTheme());
-	return themeService.onDidFileIconThemeChange(onDidChangeFileIconTheme);
-}
+export { createFileIconThemableTreeContainerScope } from '../../../../browser/labels.js';
 
 const CanCreateContext = ContextKeyExpr.or(
 	// Folder: can create unless readonly

@@ -29,7 +29,7 @@ const auxiliaryBarLeftOffIcon = registerIcon('auxiliarybar-left-off-layout-icon'
 export class ToggleAuxiliaryBarAction extends Action2 {
 
 	static readonly ID = 'workbench.action.toggleAuxiliaryBar';
-	static readonly LABEL = localize2('toggleAuxiliaryBar', "Toggle Secondary Side Bar Visibility");
+	static readonly LABEL = localize2('togglePluginSidebarVisibility', "Toggle Plugin Sidebar Visibility");
 
 	constructor() {
 		super({
@@ -37,14 +37,14 @@ export class ToggleAuxiliaryBarAction extends Action2 {
 			title: ToggleAuxiliaryBarAction.LABEL,
 			toggled: {
 				condition: SecondarySideBarVisibleContext,
-				title: localize('closeSecondarySideBar', 'Hide Secondary Side Bar'),
+				title: localize('hidePluginSidebar', 'Hide Plugin Sidebar'),
 				icon: closeIcon,
 				mnemonicTitle: localize({ key: 'miCloseSecondarySideBar', comment: ['&& denotes a mnemonic'] }, "&&Secondary Side Bar"),
 			},
 			icon: closeIcon,
 			category: Categories.View,
 			metadata: {
-				description: localize('openAndCloseAuxiliaryBar', 'Open/Show and Close/Hide Secondary Side Bar'),
+				description: localize('openAndClosePluginSidebar', 'Show or hide the sidebar for installed plugins'),
 			},
 			f1: true,
 			keybinding: {
@@ -136,7 +136,7 @@ MenuRegistry.appendMenuItems([
 			group: 'navigation',
 			command: {
 				id: ToggleAuxiliaryBarAction.ID,
-				title: localize('toggleSecondarySideBar', "Toggle Secondary Side Bar"),
+				title: localize('togglePluginSidebar', "Toggle Plugin Sidebar"),
 				toggled: { condition: AuxiliaryBarVisibleContext, icon: auxiliaryBarLeftIcon },
 				icon: auxiliaryBarLeftOffIcon,
 			},
@@ -155,7 +155,7 @@ MenuRegistry.appendMenuItems([
 			group: 'navigation',
 			command: {
 				id: ToggleAuxiliaryBarAction.ID,
-				title: localize('toggleSecondarySideBar', "Toggle Secondary Side Bar"),
+				title: localize('togglePluginSidebar', "Toggle Plugin Sidebar"),
 				toggled: { condition: AuxiliaryBarVisibleContext, icon: auxiliaryBarRightIcon },
 				icon: auxiliaryBarRightOffIcon,
 			},

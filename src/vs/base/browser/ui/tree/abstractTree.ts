@@ -13,7 +13,7 @@ import { ActionBar } from '../actionbar/actionbar.js';
 import { IContextViewProvider } from '../contextview/contextview.js';
 import { FindInput } from '../findinput/findInput.js';
 import { IInputBoxStyles, IMessage, MessageType, unthemedInboxStyles } from '../inputbox/inputBox.js';
-import { IIdentityProvider, IKeyboardNavigationLabelProvider, IListContextMenuEvent, IListDragAndDrop, IListDragOverReaction, IListElementRenderDetails, IListMouseEvent, IListRenderer, IListTouchEvent, IListVirtualDelegate } from '../list/list.js';
+import { IIdentityProvider, IKeyboardNavigationLabelProvider, IListContextMenuEvent, IListDragAndDrop, IListDragOverReaction, IListElementRenderDetails, IListMouseEvent, IListRenderer, IListTouchEvent, IListVirtualDelegate, ListDragOverEffectPosition } from '../list/list.js';
 import { ElementsDragAndDropData, ListViewTargetSector } from '../list/listView.js';
 import { IListAccessibilityProvider, IListOptions, IListStyles, isActionItem, isButton, isMonacoCustomToggle, isMonacoEditor, isStickyScrollContainer, isStickyScrollElement, List, MouseController, TypeNavigationMode } from '../list/listWidget.js';
 import { IToggleStyles, Toggle, unthemedToggleStyles } from '../toggle/toggle.js';
@@ -137,8 +137,9 @@ class TreeNodeListDragAndDrop<T, TFilterData, TRef> implements IListDragAndDrop<
 		const ref = model.getNodeLocation(targetNode);
 		const start = model.getListIndex(ref);
 		const length = model.getListRenderCount(ref);
-
-		return { ...result, feedback: range(start, start + length) };
+		const position = result.effect?.position;
+		const feedback = position === ListDragOverEffectPosition.Before ? [start] : position === ListDragOverEffectPosition.After ? [start + length - 1] : range(start, start + length);
+		return { ...result, feedback };
 	}
 
 	drop(data: IDragAndDropData, targetNode: ITreeNode<T, TFilterData> | undefined, targetIndex: number | undefined, targetSector: ListViewTargetSector | undefined, originalEvent: DragEvent): void {

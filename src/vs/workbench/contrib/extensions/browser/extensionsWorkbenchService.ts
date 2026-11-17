@@ -5,76 +5,76 @@
 
 import * as nls from '../../../../nls.js';
 import * as semver from '../../../../base/common/semver/semver.js';
-import { Event, Emitter } from '../../../../base/common/event.js';
+import { Event,Emitter } from '../../../../base/common/event.js';
 import { index } from '../../../../base/common/arrays.js';
-import { CancelablePromise, Promises, ThrottledDelayer, createCancelablePromise } from '../../../../base/common/async.js';
-import { CancellationError, getErrorMessage, isCancellationError } from '../../../../base/common/errors.js';
-import { Disposable, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
-import { IPager, singlePagePager } from '../../../../base/common/paging.js';
+import { CancelablePromise,Promises,ThrottledDelayer,createCancelablePromise } from '../../../../base/common/async.js';
+import { CancellationError,getErrorMessage,isCancellationError } from '../../../../base/common/errors.js';
+import { Disposable,MutableDisposable,toDisposable } from '../../../../base/common/lifecycle.js';
+import { IPager,singlePagePager } from '../../../../base/common/paging.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import {
-	IExtensionGalleryService, ILocalExtension, IGalleryExtension, IQueryOptions,
-	InstallExtensionEvent, DidUninstallExtensionEvent, InstallOperation, WEB_EXTENSION_TAG, InstallExtensionResult,
-	IExtensionsControlManifest, IExtensionInfo, IExtensionQueryOptions, IDeprecationInfo, isTargetPlatformCompatible, InstallExtensionInfo, EXTENSION_IDENTIFIER_REGEX,
-	InstallOptions, IProductVersion,
-	UninstallExtensionInfo,
-	TargetPlatformToString,
-	IAllowedExtensionsService,
-	AllowedExtensionsConfigKey,
-	EXTENSION_INSTALL_SKIP_PUBLISHER_TRUST_CONTEXT,
-	ExtensionManagementError,
-	ExtensionManagementErrorCode,
-	MaliciousExtensionInfo,
-	shouldRequireRepositorySignatureFor,
-	IGalleryExtensionVersion,
-	IExtensionBlockingInfo,
-	ExtensionBlockingScope
+IExtensionGalleryService,ILocalExtension,IGalleryExtension,IQueryOptions,
+InstallExtensionEvent,DidUninstallExtensionEvent,InstallOperation,WEB_EXTENSION_TAG,InstallExtensionResult,
+IExtensionsControlManifest,IExtensionInfo,IExtensionQueryOptions,IDeprecationInfo,isTargetPlatformCompatible,InstallExtensionInfo,EXTENSION_IDENTIFIER_REGEX,
+InstallOptions,IProductVersion,
+UninstallExtensionInfo,
+TargetPlatformToString,
+IAllowedExtensionsService,
+AllowedExtensionsConfigKey,
+EXTENSION_INSTALL_SKIP_PUBLISHER_TRUST_CONTEXT,
+ExtensionManagementError,
+ExtensionManagementErrorCode,
+MaliciousExtensionInfo,
+shouldRequireRepositorySignatureFor,
+IGalleryExtensionVersion,
+IExtensionBlockingInfo,
+ExtensionBlockingScope
 } from '../../../../platform/extensionManagement/common/extensionManagement.js';
-import { IWorkbenchExtensionEnablementService, EnablementState, IExtensionManagementServerService, IExtensionManagementServer, IWorkbenchExtensionManagementService, IResourceExtension } from '../../../services/extensionManagement/common/extensionManagement.js';
-import { getGalleryExtensionTelemetryData, getLocalExtensionTelemetryData, areSameExtensions, groupByExtension, getGalleryExtensionId, findMatchingMaliciousEntry, getExtensionBlockedMessage } from '../../../../platform/extensionManagement/common/extensionManagementUtil.js';
+import { IWorkbenchExtensionEnablementService,EnablementState,IExtensionManagementServerService,IExtensionManagementServer,IWorkbenchExtensionManagementService,IResourceExtension } from '../../../services/extensionManagement/common/extensionManagement.js';
+import { getGalleryExtensionTelemetryData,getLocalExtensionTelemetryData,areSameExtensions,groupByExtension,getGalleryExtensionId,findMatchingMaliciousEntry,getExtensionBlockedMessage } from '../../../../platform/extensionManagement/common/extensionManagementUtil.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IHostService } from '../../../services/host/browser/host.js';
 import { URI } from '../../../../base/common/uri.js';
-import { IExtension, ExtensionState, IExtensionsWorkbenchService, AutoUpdateConfigurationKey, AutoUpdateDelayConfigurationKey, AutoCheckUpdatesConfigurationKey, HasOutdatedExtensionsContext, AutoUpdateConfigurationValue, InstallExtensionOptions, ExtensionRuntimeState, ExtensionRuntimeActionType, AutoRestartConfigurationKey, VIEWLET_ID, IExtensionsViewPaneContainer, IExtensionsNotification } from '../common/extensions.js';
-import { ACTIVE_GROUP, IEditorService, MODAL_GROUP, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
-import { IURLService, IURLHandler, IOpenURLOptions } from '../../../../platform/url/common/url.js';
-import { ExtensionsInput, IExtensionEditorOptions } from '../common/extensionsInput.js';
+import { IExtension,ExtensionState,IExtensionsWorkbenchService,AutoUpdateConfigurationKey,AutoUpdateDelayConfigurationKey,AutoCheckUpdatesConfigurationKey,HasOutdatedExtensionsContext,AutoUpdateConfigurationValue,InstallExtensionOptions,ExtensionRuntimeState,ExtensionRuntimeActionType,AutoRestartConfigurationKey,VIEWLET_ID,IExtensionsViewPaneContainer,IExtensionsNotification } from '../common/extensions.js';
+import { ACTIVE_GROUP,IEditorService,MODAL_GROUP,SIDE_GROUP } from '../../../services/editor/common/editorService.js';
+import { IURLService,IURLHandler,IOpenURLOptions } from '../../../../platform/url/common/url.js';
+import { ExtensionsInput,IExtensionEditorOptions } from '../common/extensionsInput.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { IProgressOptions, IProgressService, ProgressLocation } from '../../../../platform/progress/common/progress.js';
-import { INotificationService, NotificationPriority, Severity } from '../../../../platform/notification/common/notification.js';
+import { IProgressOptions,IProgressService,ProgressLocation } from '../../../../platform/progress/common/progress.js';
+import { INotificationService,NotificationPriority,Severity } from '../../../../platform/notification/common/notification.js';
 import { NotificationTelemetryId } from '../../../../platform/notification/common/notificationTelemetry.js';
 import * as resources from '../../../../base/common/resources.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
-import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IStorageService,StorageScope,StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IExtensionManifest, ExtensionType, IExtension as IPlatformExtension, TargetPlatform, ExtensionIdentifier, IExtensionIdentifier, IExtensionDescription, isApplicationScopedExtension } from '../../../../platform/extensions/common/extensions.js';
+import { IExtensionManifest,ExtensionType,IExtension as IPlatformExtension,TargetPlatform,ExtensionIdentifier,IExtensionIdentifier,IExtensionDescription,isApplicationScopedExtension } from '../../../../platform/extensions/common/extensions.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
 import { FileAccess } from '../../../../base/common/network.js';
 import { IIgnoredExtensionsManagementService } from '../../../../platform/userDataSync/common/ignoredExtensions.js';
-import { IUserDataAutoSyncService, IUserDataSyncEnablementService, SyncResource } from '../../../../platform/userDataSync/common/userDataSync.js';
-import { IContextKey, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { isDefined, isString, isUndefined } from '../../../../base/common/types.js';
+import { IUserDataAutoSyncService,IUserDataSyncEnablementService,SyncResource } from '../../../../platform/userDataSync/common/userDataSync.js';
+import { IContextKey,IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
+import { isDefined,isString,isUndefined } from '../../../../base/common/types.js';
 import { IExtensionManifestPropertiesService } from '../../../services/extensions/common/extensionManifestPropertiesService.js';
-import { IExtensionService, IExtensionsStatus as IExtensionRuntimeStatus, toExtension, toExtensionDescription } from '../../../services/extensions/common/extensions.js';
-import { isWeb, language } from '../../../../base/common/platform.js';
+import { IExtensionService,IExtensionsStatus as IExtensionRuntimeStatus,toExtension,toExtensionDescription } from '../../../services/extensions/common/extensions.js';
+import { isWeb,language } from '../../../../base/common/platform.js';
 import { getLocale } from '../../../../platform/languagePacks/common/languagePacks.js';
 import { ILocaleService } from '../../../services/localization/common/locale.js';
 import { TelemetryTrustedValue } from '../../../../platform/telemetry/common/telemetryUtils.js';
-import { ILifecycleService, LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
+import { ILifecycleService,LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
 import { IUserDataProfileService } from '../../../services/userDataProfile/common/userDataProfile.js';
 import { mainWindow } from '../../../../base/browser/window.js';
-import { IDialogService, IFileDialogService, IPromptButton } from '../../../../platform/dialogs/common/dialogs.js';
-import { IUpdateService, StateType } from '../../../../platform/update/common/update.js';
+import { IDialogService,IFileDialogService,IPromptButton } from '../../../../platform/dialogs/common/dialogs.js';
+import { IUpdateService,StateType } from '../../../../platform/update/common/update.js';
 import { isEngineValid } from '../../../../platform/extensions/common/extensionValidator.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ShowCurrentReleaseNotesActionId } from '../../update/common/update.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
-import { escapeUntrustedMarkdown, IMarkdownString, MarkdownString } from '../../../../base/common/htmlContent.js';
-import { ExtensionGalleryResourceType, ExtensionGalleryServiceUrlConfigKey, getExtensionGalleryManifestResourceUri, IExtensionGalleryManifest, IExtensionGalleryManifestService } from '../../../../platform/extensionManagement/common/extensionGalleryManifest.js';
+import { escapeUntrustedMarkdown,IMarkdownString,MarkdownString } from '../../../../base/common/htmlContent.js';
+import { ExtensionGalleryResourceType,ExtensionGalleryServiceUrlConfigKey,getExtensionGalleryManifestResourceUri,IExtensionGalleryManifest,IExtensionGalleryManifestService } from '../../../../platform/extensionManagement/common/extensionGalleryManifest.js';
 import { fromNow } from '../../../../base/common/date.js';
 import { hash } from '../../../../base/common/hash.js';
 import { IUserDataProfilesService } from '../../../../platform/userDataProfile/common/userDataProfile.js';
@@ -2997,11 +2997,9 @@ export class ExtensionsWorkbenchService extends Disposable implements IExtension
 		}
 
 		const extensionsToUninstall: UninstallExtensionInfo[] = [{ extension: extension.local }];
-		if (!areSameExtensions(extension.identifier, { id: this.productService.defaultChatAgent.extensionId })) {
-			for (const packExtension of this.getAllPackedExtensions(extension, this.local)) {
-				if (packExtension.local && !extensionsToUninstall.some(e => areSameExtensions(e.extension.identifier, packExtension.identifier))) {
-					extensionsToUninstall.push({ extension: packExtension.local });
-				}
+		for (const packExtension of this.getAllPackedExtensions(extension, this.local)) {
+			if (packExtension.local && !extensionsToUninstall.some(e => areSameExtensions(e.extension.identifier, packExtension.identifier))) {
+				extensionsToUninstall.push({ extension: packExtension.local });
 			}
 		}
 

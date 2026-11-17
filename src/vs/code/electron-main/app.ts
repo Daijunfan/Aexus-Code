@@ -22,7 +22,7 @@ import { assertType } from '../../base/common/types.js';
 import { URI } from '../../base/common/uri.js';
 import { generateUuid } from '../../base/common/uuid.js';
 import { registerContextMenuListener } from '../../base/parts/contextmenu/electron-main/contextmenu.js';
-import { getDelayedChannel, ProxyChannel, StaticRouter } from '../../base/parts/ipc/common/ipc.js';
+import { Client as IPCClientConnection, getDelayedChannel, IClientRouter, IConnectionHub, ProxyChannel, StaticRouter } from '../../base/parts/ipc/common/ipc.js';
 import { Server as ElectronIPCServer } from '../../base/parts/ipc/electron-main/ipc.electron.js';
 import { Client as MessagePortClient } from '../../base/parts/ipc/electron-main/ipc.mp.js';
 import { Server as NodeIPCServer } from '../../base/parts/ipc/node/ipc.net.js';
@@ -149,6 +149,8 @@ import { NativeMcpDiscoveryHelperService } from '../../platform/mcp/node/nativeM
 import { IMcpGatewayService, McpGatewayChannelName } from '../../platform/mcp/common/mcpGateway.js';
 import { McpGatewayService } from '../../platform/mcp/node/mcpGatewayService.js';
 import { McpGatewayChannel } from '../../platform/mcp/node/mcpGatewayChannel.js';
+import { ADE_CONTROL_CHANNEL_NAME } from '../../platform/ade/common/adeControl.js';
+import { AdeControlServer } from '../../platform/ade/node/adeControlServer.js';
 import { IWebContentExtractorService } from '../../platform/webContentExtractor/common/webContentExtractor.js';
 import { NativeWebContentExtractorService } from '../../platform/webContentExtractor/electron-main/webContentExtractorService.js';
 import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../platform/networkFilter/common/networkFilterService.js';
@@ -1525,6 +1527,95 @@ export class CodeApplication extends Disposable {
 		mainProcessElectronServer.registerChannel(NativeMcpDiscoveryHelperChannelName, mcpDiscoveryChannel);
 		const mcpGatewayChannel = this._register(new McpGatewayChannel(mainProcessElectronServer, accessor.get(IMcpGatewayService), accessor.get(ILoggerMainService)));
 		mainProcessElectronServer.registerChannel(McpGatewayChannelName, mcpGatewayChannel);
+
+		// ADE Control
+		const windowsMainService = accessor.get(IWindowsMainService);
+		const nativeHostMainService = this.nativeHostMainService;
+		const adeActiveWindowManager = this._register(new ActiveWindowManager({
+			onDidOpenMainWindow: nativeHostMainService.onDidOpenMainWindow,
+			onDidFocusMainWindow: nativeHostMainService.onDidFocusMainWindow,
+			getActiveWindowId: () => nativeHostMainService.getActiveWindowId(-1)
+		}));
+		const resolveAdeTargetWindow = async (windowId?: number): Promise<ICodeWindow> => {
+			if (typeof windowId === 'number') {
+				const targetWindow = windowsMainService.getWindowById(windowId);
+				if (!targetWindow || targetWindow.win?.isDestroyed()) {
+					throw new Error(`ADE target window ${windowId} not found`);
+				}
+				if (targetWindow.config?.isSessionsWindow) {
+					throw new Error(`Window ${windowId} is a sessions window and does not support ADE control`);
+				}
+				return targetWindow;
+			}
+
+			const getEligibleWindows = () => windowsMainService.getWindows().filter(w => !w.win?.isDestroyed() && !w.config?.isSessionsWindow);
+			let eligibleWindows = getEligibleWindows();
+			if (eligibleWindows.length === 0 && this.lifecycleMainService.phase < LifecycleMainPhase.AfterWindowOpen) {
+				await this.lifecycleMainService.when(LifecycleMainPhase.AfterWindowOpen);
+				eligibleWindows = getEligibleWindows();
+			}
+
+			const activeClientId = await adeActiveWindowManager.getActiveClientId();
+			if (activeClientId && activeClientId !== 'window:undefined') {
+				const activeMatch = eligibleWindows.find(w => `window:${w.id}` === activeClientId);
+				if (activeMatch) {
+					return activeMatch;
+				}
+			}
+
+			const fallbackWindow = [windowsMainService.getFocusedWindow(), windowsMainService.getLastActiveWindow(), ...eligibleWindows]
+				.find((w): w is ICodeWindow => !!w && eligibleWindows.includes(w));
+			if (fallbackWindow) {
+				return fallbackWindow;
+			}
+
+			throw new Error('No open Aexus Code workbench window available for ADE control');
+		};
+		const adeControlServer = this._register(new AdeControlServer(async (request, windowId) => {
+			if (request.action === 'host.windowVisibility') {
+				return {
+					dockVisible: Boolean(app.dock?.isVisible?.()),
+					windows: BrowserWindow.getAllWindows().map(w => ({
+						id: w.id,
+						isVisible: w.isVisible(),
+						isFocused: w.isFocused(),
+					})),
+				};
+			}
+			const targetWindow = await resolveAdeTargetWindow(windowId);
+			const targetClientId = `window:${targetWindow.id}`;
+			const router: IClientRouter<string> = {
+				routeCall: async (hub: IConnectionHub<string>): Promise<IPCClientConnection<string>> => {
+					const existing = hub.connections.find(c => c.ctx === targetClientId);
+					if (existing) {
+						return existing;
+					}
+					return new Promise<IPCClientConnection<string>>((resolve, reject) => {
+						const routeDisposables = new DisposableStore();
+						routeDisposables.add(hub.onDidAddConnection(connection => {
+							if (connection.ctx === targetClientId) {
+								routeDisposables.dispose();
+								resolve(connection);
+							}
+						}));
+						routeDisposables.add(targetWindow.onDidDestroy(() => {
+							routeDisposables.dispose();
+							reject(new Error(`Target window ${targetWindow.id} closed before ADE IPC connected`));
+						}));
+					});
+				},
+				routeEvent: async (): Promise<IPCClientConnection<string>> => {
+					throw new Error('ADE control channel does not support events');
+				}
+			};
+			const channel = mainProcessElectronServer.getChannel(ADE_CONTROL_CHANNEL_NAME, router);
+			return await channel.call('execute', request);
+		}, { logService: this.logService }));
+		process.env.AEXUS_ADE_CONTROL_FILE = adeControlServer.metaPath;
+		adeControlServer.whenReady().then(() => {
+			process.env.AEXUS_ADE_SOCKET = adeControlServer.socketPath;
+		}, () => { /* logged in AdeControlServer */ });
+		this._register(this.lifecycleMainService.onWillShutdown(() => adeControlServer.dispose()));
 
 		// Logger
 		const loggerChannel = this._register(new LoggerChannel(accessor.get(ILoggerMainService)));

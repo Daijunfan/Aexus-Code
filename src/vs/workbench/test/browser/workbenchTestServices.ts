@@ -58,6 +58,12 @@ import { IFolderBackupInfo, IWorkspaceBackupInfo } from '../../../platform/backu
 import { ConfigurationTarget, IConfigurationService, IConfigurationValue } from '../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../platform/configuration/test/common/testConfigurationService.js';
 import { ContextKeyValue, IContextKeyService } from '../../../platform/contextkey/common/contextkey.js';
+import { IWorkbenchModeService } from '../../services/workbenchMode/common/workbenchMode.js';
+import { WorkbenchModeService } from '../../services/workbenchMode/browser/workbenchModeService.js';
+import { IProjectNavigationService, ProjectNavigationService } from '../../contrib/files/browser/projectNavigationService.js';
+import { IAdeProjectsService } from '../../contrib/ade/common/ade.js';
+import { AdeProjectsService } from '../../contrib/ade/browser/adeProjectsService.js';
+import { IProjectTerminalService, ProjectTerminalService } from '../../contrib/terminal/browser/projectTerminalService.js';
 import { IDefaultAccountService } from '../../../platform/defaultAccount/common/defaultAccount.js';
 import { ContextMenuService } from '../../../platform/contextview/browser/contextMenuService.js';
 import { IContextMenuMenuDelegate, IContextMenuService, IContextViewService } from '../../../platform/contextview/browser/contextView.js';
@@ -310,6 +316,7 @@ export function workbenchInstantiationService(
 	instantiationService.stub(ITextResourceConfigurationService, textResourceConfigurationService);
 	instantiationService.stub(IUntitledTextEditorService, disposables.add(instantiationService.createInstance(UntitledTextEditorService)));
 	instantiationService.stub(IStorageService, disposables.add(new TestStorageService()));
+	instantiationService.stub(IWorkbenchModeService, disposables.add(instantiationService.createInstance(WorkbenchModeService)));
 	instantiationService.stub(IRemoteAgentService, new TestRemoteAgentService());
 	instantiationService.stub(ILanguageDetectionService, new TestLanguageDetectionService());
 	const pathService = overrides?.pathService ? overrides.pathService(instantiationService) : new TestPathService();
@@ -405,6 +412,9 @@ export function workbenchInstantiationService(
 	instantiationService.stub(IChatWidgetService, instantiationService.createInstance(TestChatWidgetService));
 	instantiationService.stub(IDefaultAccountService, DefaultAccountService);
 
+	instantiationService.stub(IProjectNavigationService, disposables.add(instantiationService.createInstance(ProjectNavigationService)));
+	instantiationService.stub(IAdeProjectsService, disposables.add(instantiationService.createInstance(AdeProjectsService)));
+	instantiationService.stub(IProjectTerminalService, instantiationService.createInstance(ProjectTerminalService));
 	return instantiationService;
 }
 

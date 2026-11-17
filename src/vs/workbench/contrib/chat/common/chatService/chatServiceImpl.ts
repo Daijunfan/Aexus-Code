@@ -729,6 +729,11 @@ export class ChatService extends Disposable implements IChatService {
 
 	private async initializeSession(model: ChatModel): Promise<void> {
 		this.trace('initializeSession', `Initialize session ${model.sessionResource}`);
+		const sessionType = getChatSessionType(model.sessionResource);
+		if (sessionType !== localChatSessionType) {
+			await this.extensionService.activateByEvent(`onChatParticipant:${sessionType}`);
+			return;
+		}
 
 		// Activate the default extension provided agent but do not wait
 		// for it to be ready so that the session can be used immediately
@@ -1502,7 +1507,7 @@ export class ChatService extends Disposable implements IChatService {
 		if (requestedAgentId && !requestedAgent) {
 			throw new Error('Unknown agent: ' + requestedAgentId);
 		}
-		const defaultAgent = requestedAgent ?? this.chatAgentService.getDefaultAgent(location, options?.modeInfo?.kind)!;
+		const defaultAgent = requestedAgent ?? this.chatAgentService.getAgent(getChatSessionType(model.sessionResource)) ?? this.chatAgentService.getDefaultAgent(location, options?.modeInfo?.kind)!;
 
 		const preservedRequest = preserveRequestId && request instanceof ChatRequestModel ? request : undefined;
 		if (!preservedRequest) {
@@ -1712,7 +1717,7 @@ export class ChatService extends Disposable implements IChatService {
 
 		const location = options?.location ?? model.initialLocation;
 		const attempt = options?.attempt ?? 0;
-		const defaultAgent = this.chatAgentService.getDefaultAgent(location, options?.modeInfo?.kind);
+		const defaultAgent = this.chatAgentService.getAgent(getChatSessionType(sessionResource)) ?? this.chatAgentService.getDefaultAgent(location, options?.modeInfo?.kind);
 		if (!defaultAgent) {
 			this.logService.warn('sendRequest', `No default agent for location ${location}`);
 			return { kind: 'rejected', reason: 'No default agent available' };
@@ -2491,7 +2496,7 @@ export class ChatService extends Disposable implements IChatService {
 		};
 
 		const location = sendOptions.location ?? sendOptions.locationData?.type ?? model.initialLocation;
-		const defaultAgent = this.chatAgentService.getDefaultAgent(location, sendOptions.modeInfo?.kind);
+		const defaultAgent = this.chatAgentService.getAgent(getChatSessionType(model.sessionResource)) ?? this.chatAgentService.getDefaultAgent(location, sendOptions.modeInfo?.kind);
 		if (!defaultAgent) {
 			this.logService.warn('processNextPendingRequest', `No default agent for location ${location}`);
 			for (const deferred of deferreds) {

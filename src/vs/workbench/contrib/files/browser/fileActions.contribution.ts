@@ -6,16 +6,16 @@
 import * as nls from '../../../../nls.js';
 import { ToggleAutoSaveAction, FocusFilesExplorer, GlobalCompareResourcesAction, ShowActiveFileInExplorer, CompareWithClipboardAction, NEW_FILE_COMMAND_ID, NEW_FILE_LABEL, NEW_FOLDER_COMMAND_ID, NEW_FOLDER_LABEL, TRIGGER_RENAME_LABEL, MOVE_FILE_TO_TRASH_LABEL, COPY_FILE_LABEL, PASTE_FILE_LABEL, FileCopiedContext, renameHandler, moveFileToTrashHandler, copyFileHandler, pasteFileHandler, deleteFileHandler, cutFileHandler, DOWNLOAD_COMMAND_ID, openFilePreserveFocusHandler, DOWNLOAD_LABEL, OpenActiveFileInEmptyWorkspace, UPLOAD_COMMAND_ID, UPLOAD_LABEL, CompareNewUntitledTextFilesAction, SetActiveEditorReadonlyInSession, SetActiveEditorWriteableInSession, ToggleActiveEditorReadonlyInSession, ResetActiveEditorReadonlyInSession } from './fileActions.js';
 import { revertLocalChangesCommand, acceptLocalChangesCommand, CONFLICT_RESOLUTION_CONTEXT } from './editors/textFileSaveErrorHandler.js';
-import { MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ICommandAction } from '../../../../platform/action/common/action.js';
 import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
 import { openWindowCommand, newWindowCommand } from './fileCommands.js';
-import { COPY_PATH_COMMAND_ID, REVEAL_IN_EXPLORER_COMMAND_ID, OPEN_TO_SIDE_COMMAND_ID, REVERT_FILE_COMMAND_ID, SAVE_FILE_COMMAND_ID, SAVE_FILE_LABEL, SAVE_FILE_AS_COMMAND_ID, SAVE_FILE_AS_LABEL, SAVE_ALL_IN_GROUP_COMMAND_ID, OpenEditorsGroupContext, COMPARE_WITH_SAVED_COMMAND_ID, COMPARE_RESOURCE_COMMAND_ID, SELECT_FOR_COMPARE_COMMAND_ID, ResourceSelectedForCompareContext, OpenEditorsDirtyEditorContext, COMPARE_SELECTED_COMMAND_ID, REMOVE_ROOT_FOLDER_COMMAND_ID, REMOVE_ROOT_FOLDER_LABEL, SAVE_FILES_COMMAND_ID, COPY_RELATIVE_PATH_COMMAND_ID, SAVE_FILE_WITHOUT_FORMATTING_COMMAND_ID, SAVE_FILE_WITHOUT_FORMATTING_LABEL, OpenEditorsReadonlyEditorContext, OPEN_WITH_EXPLORER_COMMAND_ID, NEW_UNTITLED_FILE_COMMAND_ID, NEW_UNTITLED_FILE_LABEL, SAVE_ALL_COMMAND_ID, OpenEditorsSelectedFileOrUntitledContext } from './fileConstants.js';
-import { CommandsRegistry, ICommandHandler } from '../../../../platform/commands/common/commands.js';
+import { COPY_PATH_COMMAND_ID, REVEAL_IN_EXPLORER_COMMAND_ID, OPEN_TO_SIDE_COMMAND_ID, REVERT_FILE_COMMAND_ID, SAVE_FILE_COMMAND_ID, SAVE_FILE_LABEL, SAVE_FILE_AS_COMMAND_ID, SAVE_FILE_AS_LABEL, SAVE_ALL_IN_GROUP_COMMAND_ID, OpenEditorsGroupContext, COMPARE_WITH_SAVED_COMMAND_ID, COMPARE_RESOURCE_COMMAND_ID, SELECT_FOR_COMPARE_COMMAND_ID, ResourceSelectedForCompareContext, OpenEditorsDirtyEditorContext, COMPARE_SELECTED_COMMAND_ID, REMOVE_ROOT_FOLDER_COMMAND_ID, REMOVE_ROOT_FOLDER_LABEL, DELETE_ROOT_FOLDER_COMMAND_ID, DELETE_ROOT_FOLDER_LABEL, SAVE_FILES_COMMAND_ID, COPY_RELATIVE_PATH_COMMAND_ID, SAVE_FILE_WITHOUT_FORMATTING_COMMAND_ID, SAVE_FILE_WITHOUT_FORMATTING_LABEL, OpenEditorsReadonlyEditorContext, OPEN_WITH_EXPLORER_COMMAND_ID, NEW_UNTITLED_FILE_COMMAND_ID, NEW_UNTITLED_FILE_LABEL, SAVE_ALL_COMMAND_ID, OpenEditorsSelectedFileOrUntitledContext } from './fileConstants.js';
+import { CommandsRegistry, ICommandHandler, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr, ContextKeyExpression } from '../../../../platform/contextkey/common/contextkey.js';
 import { KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
-import { FilesExplorerFocusCondition, ExplorerRootContext, ExplorerFolderContext, ExplorerResourceWritableContext, ExplorerResourceCut, ExplorerResourceMoveableToTrash, ExplorerResourceAvailableEditorIdsContext, FoldersViewVisibleContext } from '../common/files.js';
-import { ADD_ROOT_FOLDER_COMMAND_ID, ADD_ROOT_FOLDER_LABEL } from '../../../browser/actions/workspaceCommands.js';
+import { FilesExplorerFocusCondition, ExplorerRootContext, ExplorerFolderContext, ExplorerResourceWritableContext, ExplorerResourceCut, ExplorerResourceMoveableToTrash, ExplorerResourceAvailableEditorIdsContext, FoldersViewVisibleContext, VIEW_ID } from '../common/files.js';
+import { ADD_ROOT_FOLDER_COMMAND_ID, ADD_ROOT_FOLDER_LABEL, PICK_WORKSPACE_FOLDER_COMMAND_ID } from '../../../browser/actions/workspaceCommands.js';
 import { CLOSE_SAVED_EDITORS_COMMAND_ID, CLOSE_EDITORS_IN_GROUP_COMMAND_ID, CLOSE_EDITOR_COMMAND_ID, CLOSE_OTHER_EDITORS_IN_GROUP_COMMAND_ID, REOPEN_WITH_COMMAND_ID } from '../../../browser/parts/editor/editorCommands.js';
 import { AutoSaveAfterShortDelayContext } from '../../../services/filesConfiguration/common/filesConfigurationService.js';
 import { WorkbenchListDoubleSelection } from '../../../../platform/list/browser/listService.js';
@@ -27,6 +27,10 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { IExplorerService } from './files.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Categories } from '../../../../platform/action/common/actionCommonCategories.js';
+import { URI } from '../../../../base/common/uri.js';
+import { IWorkspaceFolder } from '../../../../platform/workspace/common/workspace.js';
+import { WorkbenchModeContext } from '../../../services/workbenchMode/common/workbenchMode.js';
+import { IProjectNavigationService, ProjectFocusedContext, ProjectForwardContext } from './projectNavigationService.js';
 
 // Contribute Global Actions
 
@@ -41,6 +45,57 @@ registerAction2(SetActiveEditorReadonlyInSession);
 registerAction2(SetActiveEditorWriteableInSession);
 registerAction2(ToggleActiveEditorReadonlyInSession);
 registerAction2(ResetActiveEditorReadonlyInSession);
+
+registerAction2(class EnterProjectAction extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.action.projects.enter',
+			title: nls.localize2('focusProject', "Focus"),
+			icon: Codicon.folderOpened,
+			f1: true,
+			precondition: WorkbenchModeContext.isEqualTo('ide'),
+			menu: { id: MenuId.ExplorerContext, group: '2_workspace', order: 0, when: ContextKeyExpr.and(ExplorerRootContext, ExplorerFolderContext, ProjectFocusedContext.toNegated()) },
+		});
+	}
+	async run(accessor: ServicesAccessor, resource?: URI): Promise<void> {
+		const navigation = accessor.get(IProjectNavigationService);
+		const commands = accessor.get(ICommandService);
+		const project = URI.isUri(resource) ? resource : (await commands.executeCommand<IWorkspaceFolder>(PICK_WORKSPACE_FOLDER_COMMAND_ID))?.uri;
+		if (project) { navigation.enterProject(project); }
+	}
+});
+
+registerAction2(class GoToProjectHomeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.action.projects.home',
+			title: nls.localize2('projectHome', "Home"),
+			icon: Codicon.home,
+			f1: true,
+			precondition: ProjectFocusedContext,
+			menu: { id: MenuId.TitleBarProjectNavigation, group: 'navigation', order: 0, when: ProjectFocusedContext }
+		});
+	}
+	run(accessor: ServicesAccessor): void {
+		accessor.get(IProjectNavigationService).goHome();
+	}
+});
+
+registerAction2(class GoForwardToProjectAction extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.action.projects.forward',
+			title: nls.localize2('projectForward', "Forward to Project"),
+			icon: Codicon.arrowRight,
+			f1: true,
+			precondition: ProjectForwardContext,
+			menu: { id: MenuId.TitleBarProjectNavigation, group: 'navigation', order: 1, when: ProjectForwardContext }
+		});
+	}
+	run(accessor: ServicesAccessor): void {
+		accessor.get(IProjectNavigationService).goForward();
+	}
+});
 
 // Commands
 CommandsRegistry.registerCommand('_files.windowOpen', openWindowCommand);
@@ -642,13 +697,43 @@ MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {
 });
 
 MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {
-	group: '2_workspace',
+	group: '7_modification',
 	order: 30,
 	command: {
 		id: REMOVE_ROOT_FOLDER_COMMAND_ID,
 		title: REMOVE_ROOT_FOLDER_LABEL,
 	},
-	when: ContextKeyExpr.and(ExplorerRootContext, ExplorerFolderContext, ContextKeyExpr.and(WorkspaceFolderCountContext.notEqualsTo('0'), ContextKeyExpr.or(EnterMultiRootWorkspaceSupportContext, WorkbenchStateContext.isEqualTo('workspace'))))
+	when: ContextKeyExpr.and(ExplorerRootContext, ExplorerFolderContext)
+});
+
+MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {
+	group: '7_modification',
+	order: 40,
+	command: {
+		id: DELETE_ROOT_FOLDER_COMMAND_ID,
+		title: DELETE_ROOT_FOLDER_LABEL,
+	},
+	when: ContextKeyExpr.and(ExplorerRootContext, ExplorerFolderContext)
+});
+
+MenuRegistry.appendMenuItem(MenuId.ViewTitle, {
+	group: '2_workspace',
+	order: 10,
+	command: {
+		id: REMOVE_ROOT_FOLDER_COMMAND_ID,
+		title: REMOVE_ROOT_FOLDER_LABEL,
+	},
+	when: ContextKeyExpr.and(ContextKeyExpr.equals('view', VIEW_ID), WorkspaceFolderCountContext.notEqualsTo('0'))
+});
+
+MenuRegistry.appendMenuItem(MenuId.ViewTitle, {
+	group: '2_workspace',
+	order: 20,
+	command: {
+		id: DELETE_ROOT_FOLDER_COMMAND_ID,
+		title: DELETE_ROOT_FOLDER_LABEL,
+	},
+	when: ContextKeyExpr.and(ContextKeyExpr.equals('view', VIEW_ID), WorkspaceFolderCountContext.notEqualsTo('0'))
 });
 
 MenuRegistry.appendMenuItem(MenuId.ExplorerContext, {

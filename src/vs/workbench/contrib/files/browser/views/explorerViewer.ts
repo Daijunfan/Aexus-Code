@@ -34,10 +34,9 @@ import { Schemas } from '../../../../../base/common/network.js';
 import { NativeDragAndDropData, ExternalElementsDragAndDropData, ElementsDragAndDropData, ListViewTargetSector } from '../../../../../base/browser/ui/list/listView.js';
 import { isMacintosh, isWeb } from '../../../../../base/common/platform.js';
 import { IDialogService, getFileNamesMessage } from '../../../../../platform/dialogs/common/dialogs.js';
-import { IWorkspaceEditingService } from '../../../../services/workspaces/common/workspaceEditing.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
-import { IWorkspaceFolderCreationData } from '../../../../../platform/workspaces/common/workspaces.js';
+import { IProjectNavigationService } from '../projectNavigationService.js';
 import { findValidPasteFileTarget } from '../fileActions.js';
 import { FuzzyScore, createMatches } from '../../../../../base/common/filters.js';
 import { Emitter, Event, EventMultiplexer } from '../../../../../base/common/event.js';
@@ -1416,16 +1415,15 @@ export class FileSorter implements ITreeSorter<ExplorerItem> {
 
 	constructor(
 		@IExplorerService private readonly explorerService: IExplorerService,
-		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService
+		@IProjectNavigationService private readonly projectNavigationService: IProjectNavigationService
 	) { }
 
 	compare(statA: ExplorerItem, statB: ExplorerItem): number {
 		// Do not sort roots
 		if (statA.isRoot) {
 			if (statB.isRoot) {
-				const workspaceA = this.contextService.getWorkspaceFolder(statA.resource);
-				const workspaceB = this.contextService.getWorkspaceFolder(statB.resource);
-				return workspaceA && workspaceB ? (workspaceA.index - workspaceB.index) : -1;
+				const projects = this.projectNavigationService.orderedProjects;
+				return projects.findIndex(folder => folder.uri.toString() === statA.resource.toString()) - projects.findIndex(folder => folder.uri.toString() === statB.resource.toString());
 			}
 
 			return -1;
@@ -1433,6 +1431,12 @@ export class FileSorter implements ITreeSorter<ExplorerItem> {
 
 		if (statB.isRoot) {
 			return 1;
+		}
+		if (statA.parent === statB.parent) {
+			const orderA = this.explorerService.getItemOrder(statA.resource);
+			const orderB = this.explorerService.getItemOrder(statB.resource);
+			const manual = (orderA ?? Number.MAX_SAFE_INTEGER) - (orderB ?? Number.MAX_SAFE_INTEGER);
+			if (manual) { return manual; }
 		}
 
 		const sortOrder = this.explorerService.sortOrderConfiguration.sortOrder;
@@ -1561,7 +1565,7 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
 		@IFileService private fileService: IFileService,
 		@IConfigurationService private configurationService: IConfigurationService,
 		@IInstantiationService private instantiationService: IInstantiationService,
-		@IWorkspaceEditingService private workspaceEditingService: IWorkspaceEditingService,
+		@IProjectNavigationService private readonly projectNavigationService: IProjectNavigationService,
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
 	) {
 		const updateDropEnablement = (e: IConfigurationChangeEvent | undefined) => {
@@ -1615,6 +1619,18 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
 
 	private handleDragOver(data: IDragAndDropData, target: ExplorerItem | undefined, targetIndex: number | undefined, targetSector: ListViewTargetSector | undefined, originalEvent: DragEvent): boolean | ITreeDragOverReaction {
 		const isCopy = originalEvent && ((originalEvent.ctrlKey && !isMacintosh) || (originalEvent.altKey && isMacintosh));
+		if (data instanceof ElementsDragAndDropData) {
+			const items = FileDragAndDrop.getStatsFromDragAndDropData(data);
+			if (!isCopy || items.every(item => item.isRoot)) {
+				const roots = items.length > 0 && items.every(item => item.isRoot);
+				const siblings = !!target?.parent && items.length > 0 && items.every(item => !item.isRoot && item.parent === target.parent);
+				if (!(roots ? !target || target.isRoot : siblings) || items.includes(target!)) { return false; }
+				const after = !target || targetSector === ListViewTargetSector.BOTTOM || targetSector === ListViewTargetSector.CENTER_BOTTOM;
+				return { accept: true, bubble: TreeDragOverBubble.Down, autoExpand: false, effect: {
+					type: ListDragOverEffectType.Move, position: after ? ListDragOverEffectPosition.After : ListDragOverEffectPosition.Before,
+				} };
+			}
+		}
 		const isNative = data instanceof NativeDragAndDropData;
 		const effectType = (isNative || isCopy) ? ListDragOverEffectType.Copy : ListDragOverEffectType.Move;
 		const effect = { type: effectType, position: ListDragOverEffectPosition.Over };
@@ -1696,7 +1712,7 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
 					case ListViewTargetSector.BOTTOM:
 						dropEffectPosition = ListDragOverEffectPosition.After; break;
 				}
-				return { accept: true, effect: { type: ListDragOverEffectType.Move, position: dropEffectPosition } };
+				return { accept: true, bubble: TreeDragOverBubble.Down, effect: { type: ListDragOverEffectType.Move, position: dropEffectPosition } };
 			}
 		}
 
@@ -1757,13 +1773,26 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
 
 	async drop(data: IDragAndDropData, target: ExplorerItem | undefined, targetIndex: number | undefined, targetSector: ListViewTargetSector | undefined, originalEvent: DragEvent): Promise<void> {
 		this.compressedDropTargetDisposable.dispose();
-
-		// Find compressed target
-		if (target) {
-			const compressedTarget = FileDragAndDrop.getCompressedStatFromDragEvent(target, originalEvent);
-
-			if (compressedTarget) {
-				target = compressedTarget;
+		if (target) { target = FileDragAndDrop.getCompressedStatFromDragEvent(target, originalEvent) ?? target; }
+		if (data instanceof ElementsDragAndDropData) {
+			const items = FileDragAndDrop.getStatsFromDragAndDropData(data);
+			if (items.every(item => item.isRoot)) {
+				const after = targetSector === ListViewTargetSector.BOTTOM || targetSector === ListViewTargetSector.CENTER_BOTTOM;
+				if (!target || target.isRoot) { this.projectNavigationService.moveProjects(items.map(item => item.resource), target?.resource, after); }
+				return;
+			}
+			const isCopy = (originalEvent.ctrlKey && !isMacintosh) || (originalEvent.altKey && isMacintosh);
+			if (!isCopy) {
+				const parent = target?.parent;
+				if (!target || !parent || !items.length || items.includes(target) || items.some(item => item.isRoot || item.parent !== parent)) { return; }
+				const sorter = this.instantiationService.createInstance(FileSorter);
+				const siblings = [...parent.children.values()].sort((a, b) => sorter.compare(a, b));
+				const moving = siblings.filter(item => items.includes(item));
+				const remaining = siblings.filter(item => !items.includes(item));
+				const after = targetSector === ListViewTargetSector.BOTTOM || targetSector === ListViewTargetSector.CENTER_BOTTOM;
+				remaining.splice(remaining.indexOf(target) + Number(after), 0, ...moving);
+				await this.explorerService.setItemOrder(parent.resource, remaining.map(item => item.resource));
+				return;
 			}
 		}
 
@@ -1856,7 +1885,8 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
 			}
 		}
 
-		await this.doHandleRootDrop(items.filter(s => s.isRoot), target, targetSector);
+		const after = targetSector === ListViewTargetSector.BOTTOM || targetSector === ListViewTargetSector.CENTER_BOTTOM;
+		this.projectNavigationService.moveProjects(items.filter(item => item.isRoot).map(item => item.resource), target.resource, after);
 
 		const sources = items.filter(s => !s.isRoot);
 		if (isCopy) {
@@ -1864,65 +1894,6 @@ export class FileDragAndDrop implements ITreeDragAndDrop<ExplorerItem> {
 		}
 
 		return this.doHandleExplorerDropOnMove(sources, target);
-	}
-
-	private async doHandleRootDrop(roots: ExplorerItem[], target: ExplorerItem, targetSector: ListViewTargetSector | undefined): Promise<void> {
-		if (roots.length === 0) {
-			return;
-		}
-
-		const folders = this.contextService.getWorkspace().folders;
-		let targetIndex: number | undefined;
-		const sourceIndices: number[] = [];
-		const workspaceCreationData: IWorkspaceFolderCreationData[] = [];
-		const rootsToMove: IWorkspaceFolderCreationData[] = [];
-
-		for (let index = 0; index < folders.length; index++) {
-			const data = {
-				uri: folders[index].uri,
-				name: folders[index].name
-			};
-
-			// Is current target
-			if (target instanceof ExplorerItem && this.uriIdentityService.extUri.isEqual(folders[index].uri, target.resource)) {
-				targetIndex = index;
-			}
-
-			// Is current source
-			for (const root of roots) {
-				if (this.uriIdentityService.extUri.isEqual(folders[index].uri, root.resource)) {
-					sourceIndices.push(index);
-					break;
-				}
-			}
-
-			if (roots.every(r => r.resource.toString() !== folders[index].uri.toString())) {
-				workspaceCreationData.push(data);
-			} else {
-				rootsToMove.push(data);
-			}
-		}
-		if (targetIndex === undefined) {
-			targetIndex = workspaceCreationData.length;
-		} else {
-			switch (targetSector) {
-				case ListViewTargetSector.BOTTOM:
-				case ListViewTargetSector.CENTER_BOTTOM:
-					targetIndex++;
-					break;
-			}
-			// Adjust target index if source was located before target.
-			// The move will cause the index to change
-			for (const sourceIndex of sourceIndices) {
-				if (sourceIndex < targetIndex) {
-					targetIndex--;
-				}
-			}
-		}
-
-		workspaceCreationData.splice(targetIndex, 0, ...rootsToMove);
-
-		return this.workspaceEditingService.updateFolders(0, workspaceCreationData.length, workspaceCreationData);
 	}
 
 	private async doHandleExplorerDropOnCopy(sources: ExplorerItem[], target: ExplorerItem): Promise<void> {

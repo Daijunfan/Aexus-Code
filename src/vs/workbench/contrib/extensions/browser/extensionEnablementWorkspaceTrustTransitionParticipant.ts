@@ -9,7 +9,7 @@ import { IWorkspaceTrustEnablementService, IWorkspaceTrustManagementService, IWo
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
 import { IWorkbenchExtensionEnablementService } from '../../../services/extensionManagement/common/extensionManagement.js';
-import { IExtensionService } from '../../../services/extensions/common/extensions.js';
+import { ExtensionHostScope, IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IHostService } from '../../../services/host/browser/host.js';
 
 export class ExtensionEnablementWorkspaceTrustTransitionParticipant extends Disposable implements IWorkbenchContribution {
@@ -39,10 +39,10 @@ export class ExtensionEnablementWorkspaceTrustTransitionParticipant extends Disp
 							if (environmentService.remoteAuthority) {
 								hostService.reload();
 							} else {
-								const stopped = await extensionService.stopExtensionHosts(localize('restartExtensionHost.reason', "Changing workspace trust"));
+								const stopped = await extensionService.stopExtensionHosts(localize('restartExtensionHost.reason', "Changing workspace trust"), undefined, ExtensionHostScope.Workspace);
 								await extensionEnablementService.updateExtensionsEnablementsWhenWorkspaceTrustChanges();
 								if (stopped) {
-									extensionService.startExtensionHosts();
+									extensionService.startExtensionHosts(undefined, ExtensionHostScope.Workspace);
 								}
 							}
 						}

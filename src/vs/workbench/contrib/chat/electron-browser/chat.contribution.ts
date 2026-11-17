@@ -13,36 +13,36 @@ import { URI } from '../../../../base/common/uri.js';
 import { ipcRenderer } from '../../../../base/parts/sandbox/electron-browser/globals.js';
 import { localize } from '../../../../nls.js';
 import { registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
+import { CommandsRegistry,ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ILocalGitService } from '../../../../platform/git/common/localGitService.js';
-import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
-import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { InstantiationType,registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
+import { IInstantiationService,ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { registerSharedProcessRemoteService } from '../../../../platform/ipc/electron-browser/services.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INativeHostService } from '../../../../platform/native/common/native.js';
 import product from '../../../../platform/product/common/product.js';
 import { IWorkspaceTrustRequestService } from '../../../../platform/workspace/common/workspaceTrust.js';
-import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
+import { WorkbenchPhase,registerWorkbenchContribution2 } from '../../../common/contributions.js';
 import { ViewContainerLocation } from '../../../common/views.js';
 import { IChatEntitlementService } from '../../../services/chat/common/chatEntitlementService.js';
 import { INativeWorkbenchEnvironmentService } from '../../../services/environment/electron-browser/environmentService.js';
-import { IExtensionService } from '../../../services/extensions/common/extensions.js';
+import { ExtensionHostScope, IExtensionService } from '../../../services/extensions/common/extensions.js';
+import { getWorkspaceIndependentSessionTypes } from '../../../services/extensions/common/codingAgentExtensions.js';
 import { IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
-import { ILifecycleService, ShutdownReason } from '../../../services/lifecycle/common/lifecycle.js';
+import { ILifecycleService,ShutdownReason } from '../../../services/lifecycle/common/lifecycle.js';
 import { IUnattendedRestartService } from '../../../services/lifecycle/common/unattendedRestart.js';
-import { ACTION_ID_NEW_CHAT, CHAT_OPEN_ACTION_ID, IChatViewOpenOptions } from '../browser/actions/chatActions.js';
-import '../browser/aiCustomization/copilotCanvases.contribution.js';
+import { ACTION_ID_NEW_CHAT,CHAT_OPEN_ACTION_ID,IChatViewOpenOptions } from '../browser/actions/chatActions.js';
 import './codexCustomizationSettings.contribution.js';
 import './agentSessions/computerUseHelperApp.contribution.js';
-import { AgentSessionProviders, getAgentSessionProviderName } from '../browser/agentSessions/agentSessions.js';
+import { AgentSessionProviders,getAgentSessionProviderName } from '../browser/agentSessions/agentSessions.js';
 import { IAgentSessionsService } from '../browser/agentSessions/agentSessionsService.js';
-import { ChatViewPaneTarget, IChatWidgetService } from '../browser/chat.js';
-import { ChatSessionPosition, openChatSession } from '../browser/chatSessions/chatSessions.contribution.js';
+import { ChatViewPaneTarget,IChatWidgetService } from '../browser/chat.js';
+import { ChatSessionPosition,openChatSession } from '../browser/chatSessions/chatSessions.contribution.js';
 import { CopilotCliSessionLinkOpener } from '../browser/copilotCliSessionLink.js';
 import { IAgentHostService } from '../../../../platform/agentHost/common/agentService.js';
-import { type AgentInfo, type RootState } from '../../../../platform/agentHost/common/state/sessionState.js';
+import { type AgentInfo,type RootState } from '../../../../platform/agentHost/common/state/sessionState.js';
 import { ChatContextKeys } from '../common/actions/chatContextKeys.js';
 import { IChatService } from '../common/chatService/chatService.js';
 import { ChatModeKind } from '../common/constants.js';
@@ -51,11 +51,11 @@ import { registerChatDeveloperActions } from './actions/chatDeveloperActions.js'
 import { registerChatExportZipAction } from './actions/chatExportZip.js';
 import { registerExportAgentTracesDbAction } from './actions/exportAgentTracesDb.js';
 import { registerInstallDictationModelAction } from './actions/installDictationModelAction.js';
-import { confirmSessionShutdown, getChatUnattendedRestartBlocker, getEffectiveSessionShutdownReason, shouldWarnForInFlightSessionShutdown, shouldWarnForSessionShutdown } from './chatLifecycle.js';
-import { HoldToVoiceChatInChatViewAction, InlineVoiceChatAction, KeywordActivationContribution, QuickVoiceChatAction, ReadChatResponseAloud, StartVoiceChatAction, StopListeningAction, StopListeningAndSubmitAction, StopReadAloud, StopReadChatItemAloud, VoiceChatInChatViewAction } from './actions/voiceChatActions.js';
-import { OpenWorkspaceInAgentsWindowAction, OpenWorkspaceInAgentsContribution, OpenAgentsWindowAction, OpenChatSessionInAgentsWindowAction, CopilotHarnessIntroductionContribution, ToggleOpenInAgentsWindowTitleBarAction, OpenWorkspaceInAgentsWindowChatTitleAction, OpenWorkspaceInAgentsWindowTitleBarAction, ResetCopilotHarnessIntroductionAction } from './agentSessions/agentSessionsActions.js';
+import { confirmSessionShutdown,getChatUnattendedRestartBlocker,getEffectiveSessionShutdownReason,shouldWarnForInFlightSessionShutdown,shouldWarnForSessionShutdown } from './chatLifecycle.js';
+import { HoldToVoiceChatInChatViewAction,InlineVoiceChatAction,KeywordActivationContribution,QuickVoiceChatAction,ReadChatResponseAloud,StartVoiceChatAction,StopListeningAction,StopListeningAndSubmitAction,StopReadAloud,StopReadChatItemAloud,VoiceChatInChatViewAction } from './actions/voiceChatActions.js';
+import { OpenWorkspaceInAgentsWindowAction,OpenWorkspaceInAgentsContribution,OpenAgentsWindowAction,OpenChatSessionInAgentsWindowAction,CopilotHarnessIntroductionContribution,ToggleOpenInAgentsWindowTitleBarAction,OpenWorkspaceInAgentsWindowChatTitleAction,OpenWorkspaceInAgentsWindowTitleBarAction,ResetCopilotHarnessIntroductionAction } from './agentSessions/agentSessionsActions.js';
 import { AgentsWindowInvitationContribution } from './agentSessions/agentsWindowInvitation.js';
-import { AgentHostEditorActivity, IAgentHostEditorActivityService } from './agentSessions/agentHostEditorActivity.js';
+import { AgentHostEditorActivity,IAgentHostEditorActivityService } from './agentSessions/agentHostEditorActivity.js';
 import { NativeBuiltinToolsContribution } from './builtInTools/tools.js';
 import { NativePluginGitCommandService } from './pluginGitCommandService.js';
 
@@ -206,20 +206,23 @@ class ChatLifecycleHandler extends Disposable {
 		}));
 
 		this._register(extensionService.onWillStop(e => {
-			e.veto(this.hasSessionThatWillStop(ShutdownReason.CLOSE), localize('chatRequestInProgress', "A session is in progress."));
+			const independentTypes = getWorkspaceIndependentSessionTypes(extensionService.extensions);
+			const willStopType = e.scope === ExtensionHostScope.Workspace ? (type: string) => !independentTypes.has(type)
+				: e.scope === ExtensionHostScope.WorkspaceIndependent ? (type: string) => independentTypes.has(type) : undefined;
+			e.veto(this.hasSessionThatWillStop(ShutdownReason.CLOSE, willStopType), localize('chatRequestInProgress', "A session is in progress."));
 		}));
 	}
 
-	private hasSessionThatWillStop(reason: ShutdownReason): boolean {
+	private hasSessionThatWillStop(reason: ShutdownReason, willStopType: (type: string) => boolean = () => true): boolean {
 		if (this.chatEntitlementService.sentiment.hidden) {
 			return false; // AI features are disabled
 		}
 
-		if (shouldWarnForInFlightSessionShutdown(this.chatService.getPendingRequestSessionTypes(), reason)) {
+		if (shouldWarnForInFlightSessionShutdown(this.chatService.getPendingRequestSessionTypes().filter(willStopType), reason)) {
 			return true;
 		}
 
-		return this.agentSessionsService.model.sessions.some(session => shouldWarnForSessionShutdown(session, reason));
+		return this.agentSessionsService.model.sessions.some(session => willStopType(session.providerType) && shouldWarnForSessionShutdown(session, reason));
 	}
 
 	private async shouldVetoShutdown(reason: ShutdownReason): Promise<boolean> {

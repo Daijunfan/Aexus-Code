@@ -41,7 +41,6 @@ export const separateRoots = [
 	'build',
 	'remote',
 	'extensions',
-	'extensions/copilot',
 ];
 
 /**
@@ -96,7 +95,6 @@ export const separateRootMembers: Readonly<Record<string, readonly string[]>> = 
 		'extensions/vscode-colorize-perf-tests',
 		'extensions/vscode-test-resolver',
 	],
-	'extensions/copilot': ['extensions/copilot/chat-lib'],
 };
 
 /**

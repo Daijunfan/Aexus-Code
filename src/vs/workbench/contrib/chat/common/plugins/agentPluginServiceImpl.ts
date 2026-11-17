@@ -4,60 +4,57 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { RunOnceScheduler } from '../../../../../base/common/async.js';
-import { encodeHex, VSBuffer } from '../../../../../base/common/buffer.js';
 import { Event } from '../../../../../base/common/event.js';
 import { Iterable } from '../../../../../base/common/iterator.js';
-import { ParseError, parse as parseJSONC } from '../../../../../base/common/json.js';
+import { parse as parseJSONC } from '../../../../../base/common/json.js';
 import { untildify } from '../../../../../base/common/labels.js';
-import { Disposable, DisposableStore, MutableDisposable } from '../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../base/common/network.js';
+import { Disposable,DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { equals } from '../../../../../base/common/objects.js';
-import { autorun, derived, derivedOpts, IObservable, IReader, ISettableObservable, ITransaction, observableFromEvent, ObservablePromise, observableSignal, observableValue, transaction } from '../../../../../base/common/observable.js';
+import { autorun,derived,derivedOpts,IObservable,IReader,ISettableObservable,ITransaction,observableFromEvent,ObservablePromise,observableSignal,observableValue,transaction } from '../../../../../base/common/observable.js';
 import {
-	basename, dirname, extUriBiasedIgnorePathCase, isEqual, isEqualOrParent, joinPath
+basename,dirname,isEqual,isEqualOrParent,joinPath
 } from '../../../../../base/common/resources.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
-import { ConfigurationTarget, getConfigValueInTarget, IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
-import { FileChangesEvent, FileChangeType, FileOperationResult, IFileService, toFileOperationResult } from '../../../../../platform/files/common/files.js';
+import { ConfigurationTarget,getConfigValueInTarget,IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { FileOperationResult,IFileService,toFileOperationResult } from '../../../../../platform/files/common/files.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
-import { ContextKeyExpr, ContextKeyExpression, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
+import { ContextKeyExpr,ContextKeyExpression,IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
-import { COPILOT_CLI_AGENT_PROVIDER_ID } from '../../../../../platform/agentHost/common/agent.js';
-import { IAgentHostService } from '../../../../../platform/agentHost/common/agentService.js';
 import { observableConfigValue } from '../../../../../platform/observable/common/platformObservableUtils.js';
 import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { localize } from '../../../../../nls.js';
 import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
-import { ExtensionIdentifier, IExtensionManifest } from '../../../../../platform/extensions/common/extensions.js';
+import { ExtensionIdentifier,IExtensionManifest } from '../../../../../platform/extensions/common/extensions.js';
 import { SyncDescriptor } from '../../../../../platform/instantiation/common/descriptors.js';
 import { Registry } from '../../../../../platform/registry/common/platform.js';
 import {
-	resolvePluginComponentDirs,
-	getPluginManifestComponent,
-	readPluginSkills,
-	readMarkdownComponents,
-	readPluginManifest,
-	readPluginMcpServers,
-	parseMcpServerDefinitionMap,
-	detectPluginFormat,
-	type PluginComponent,
-	type IPluginFormatConfig,
-	type IParsedHookGroup,
+resolvePluginComponentDirs,
+getPluginManifestComponent,
+readPluginSkills,
+readMarkdownComponents,
+readPluginManifest,
+readPluginMcpServers,
+parseMcpServerDefinitionMap,
+detectPluginFormat,
+type PluginComponent,
+type IPluginFormatConfig,
+type IParsedHookGroup,
 } from '../../../../../platform/agentPlugins/common/pluginParsers.js';
-import { Extensions, IExtensionFeaturesRegistry, IExtensionFeatureTableRenderer, IRenderedData, IRowData, ITableData } from '../../../../services/extensionManagement/common/extensionFeatures.js';
+import { Extensions,IExtensionFeaturesRegistry,IExtensionFeatureTableRenderer,IRenderedData,IRowData,ITableData } from '../../../../services/extensionManagement/common/extensionFeatures.js';
 import * as extensionsRegistry from '../../../../services/extensions/common/extensionsRegistry.js';
 import { IPathService } from '../../../../services/path/common/pathService.js';
 import { ChatConfiguration } from '../constants.js';
 import { IEnablementModel } from '../enablement.js';
-import { AUTOMATION_BLUEPRINT_FILE_SUFFIX, parseAutomationBlueprint } from '../automations/automationBlueprint.js';
+import { AUTOMATION_BLUEPRINT_FILE_SUFFIX,parseAutomationBlueprint } from '../automations/automationBlueprint.js';
 import { HookType } from '../promptSyntax/hookTypes.js';
-import { AgentPluginCollisionEnablementModel, getAgentPluginPolicyEnablement, getAgentPluginPolicyId, getCanonicalAgentPluginCollisionGroups, getSortedAgentPlugins, IAgentPluginEnablementService, IDiscoveredAgentPlugins, isAgentPluginBlockedByPolicy, isAgentPluginForceEnabledByPolicy } from './agentPluginEnablement.js';
+import { AgentPluginCollisionEnablementModel,getAgentPluginPolicyEnablement,getAgentPluginPolicyId,getCanonicalAgentPluginCollisionGroups,getSortedAgentPlugins,IAgentPluginEnablementService,IDiscoveredAgentPlugins,isAgentPluginBlockedByPolicy,isAgentPluginForceEnabledByPolicy } from './agentPluginEnablement.js';
 import { IAgentPluginRepositoryService } from './agentPluginRepositoryService.js';
-import { AgentPluginDiscoveryPriority, agentPluginDiscoveryRegistry, CopilotCliPluginInstallSource, IAgentPlugin, IAgentPluginAutomation, IAgentPluginDiscovery, IAgentPluginHook, IAgentPluginInstruction, IAgentPluginService, ICopilotCliPluginInstallation } from './agentPluginService.js';
+import { AgentPluginDiscoveryPriority,agentPluginDiscoveryRegistry,IAgentPlugin,IAgentPluginAutomation,IAgentPluginDiscovery,IAgentPluginHook,IAgentPluginInstruction,IAgentPluginService,ICopilotCliPluginInstallation } from './agentPluginService.js';
 import { IPluginInstallService } from './pluginInstallService.js';
-import { IMarketplacePlugin, IPluginMarketplaceService } from './pluginMarketplaceService.js';
+import { IMarketplacePlugin,IPluginMarketplaceService } from './pluginMarketplaceService.js';
 
 // Re-export shared helpers so existing consumers (including tests) continue to work.
 export { shellQuotePluginRootInCommand, resolveMcpServersMap, convertBareEnvVarsToVsCodeSyntax } from '../../../../../platform/agentPlugins/common/pluginParsers.js';
@@ -683,7 +680,6 @@ export class ConfiguredAgentPluginDiscovery extends AbstractAgentPluginDiscovery
 	protected override async _discoverPluginSources(): Promise<readonly IPluginSource[]> {
 		const sources: IPluginSource[] = [];
 		const userHome = await this._pathService.userHome();
-		const copilotCliRoot = joinPath(userHome, COPILOT_CLI_INSTALLED_PLUGINS_DIR);
 
 		// User-configured filesystem paths in `chat.pluginLocations` — removable
 		// by re-writing the user setting. Filesystem-only; an entry that happens
@@ -694,10 +690,6 @@ export class ConfiguredAgentPluginDiscovery extends AbstractAgentPluginDiscovery
 				continue;
 			}
 			for (const resource of await this._resolvePluginPath(trimmed, userHome)) {
-				if (isEqualOrParent(resource, copilotCliRoot)) {
-					this._logService.debug(`[ConfiguredAgentPluginDiscovery] Skipping redundant Copilot CLI cache path: ${resource.toString()}`);
-					continue;
-				}
 				await this._addPluginSource(sources, resource, 'plugin path', () => this._removePluginPath(key));
 			}
 		}
@@ -861,376 +853,6 @@ export class MarketplaceAgentPluginDiscovery extends AbstractAgentPluginDiscover
 }
 
 // ---------------------------------------------------------------------------
-// Copilot CLI plugin discovery
-// ---------------------------------------------------------------------------
-
-/**
- * Directory under the Copilot CLI home where installed plugins are cached.
- * Layout is two levels deep: `<marketplace>/<plugin>/`. Direct (non-marketplace)
- * installs use the reserved marketplace segment `_direct`.
- *
- * See `src/plugins/manager.ts` in the copilot-agent-runtime repo.
- */
-const COPILOT_CLI_INSTALLED_PLUGINS_DIR = '.copilot/installed-plugins';
-const COPILOT_CLI_CONFIG_FILE = '.copilot/config.json';
-
-interface ICopilotCliInstalledPlugin {
-	readonly uri: URI;
-	readonly name: string;
-	readonly marketplace: string;
-	readonly enabled: boolean;
-	readonly directSourceId?: string;
-	readonly source?: CopilotCliPluginInstallSource;
-	readonly revision: string;
-}
-
-/** Mirrors the Copilot runtime's canonical direct-source identity contract. */
-async function getCopilotCliDirectSourceId(source: unknown): Promise<string | undefined> {
-	const normalized = typeof source === 'string'
-		? { source: 'github', repo: source }
-		: source && typeof source === 'object' && !Array.isArray(source)
-			? source
-			: undefined;
-	if (!normalized) {
-		return undefined;
-	}
-
-	const field = (name: string): string => {
-		const value = Reflect.get(normalized, name);
-		return typeof value === 'string' ? value : '';
-	};
-	const kind = field('source');
-	let canonical: string;
-	if (kind === 'github' || kind === 'url') {
-		const descriptor: Record<string, string> = {
-			source: kind,
-			[kind === 'github' ? 'repo' : 'url']: field(kind === 'github' ? 'repo' : 'url'),
-			ref: field('ref'),
-		};
-		if (typeof Reflect.get(normalized, 'sha') === 'string') {
-			descriptor.sha = field('sha');
-		}
-		descriptor.path = field('path');
-		canonical = JSON.stringify(descriptor);
-	} else if (kind === 'local') {
-		canonical = JSON.stringify({ source: kind, path: field('path') });
-	} else {
-		return undefined;
-	}
-
-	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
-	return encodeHex(VSBuffer.wrap(new Uint8Array(digest)));
-}
-
-function toCopilotCliPluginInstallSource(source: unknown): CopilotCliPluginInstallSource | undefined {
-	const normalized = typeof source === 'string'
-		? { source: 'github', repo: source }
-		: source && typeof source === 'object' && !Array.isArray(source)
-			? source
-			: undefined;
-	if (!normalized) {
-		return undefined;
-	}
-	const field = (name: string): string | undefined => {
-		const value = Reflect.get(normalized, name);
-		return typeof value === 'string' && value ? value : undefined;
-	};
-	const kind = field('source');
-	if (kind === 'github') {
-		const repository = field('repo');
-		return repository ? { kind, repository, ref: field('ref'), sha: field('sha'), path: field('path') } : undefined;
-	}
-	if (kind === 'url') {
-		const url = field('url');
-		return url ? { kind, url, ref: field('ref'), sha: field('sha'), path: field('path') } : undefined;
-	}
-	if (kind === 'local') {
-		const path = field('path');
-		return path ? { kind, path } : undefined;
-	}
-	return undefined;
-}
-
-class CopilotCliInstalledPluginsStore extends Disposable {
-	private readonly _watcher = this._register(new MutableDisposable<DisposableStore>());
-	private readonly _setupWatcherScheduler: RunOnceScheduler;
-	private readonly _refreshScheduler: RunOnceScheduler;
-	private _setupVersion = 0;
-	private _installedPlugins: readonly ICopilotCliInstalledPlugin[] | undefined;
-
-	constructor(
-		private readonly _fileService: IFileService,
-		private readonly _pathService: IPathService,
-		private readonly _logService: ILogService,
-		private readonly _onDidChange: () => void,
-	) {
-		super();
-		this._setupWatcherScheduler = this._register(new RunOnceScheduler(() => {
-			this._setupWatcher().catch(error => this._logService.warn('[CopilotCliInstalledPluginsStore] Failed to watch installed plugin state', error));
-		}, 0));
-		this._refreshScheduler = this._register(new RunOnceScheduler(() => {
-			this._refresh().catch(error => this._logService.warn('[CopilotCliInstalledPluginsStore] Failed to refresh installed plugin state', error));
-		}, 200));
-		this._setupWatcherScheduler.schedule();
-	}
-
-	async getInstalledPlugins(): Promise<readonly ICopilotCliInstalledPlugin[]> {
-		if (!this._installedPlugins) {
-			this._installedPlugins = await this._readInstalledPlugins() ?? [];
-		}
-		return this._installedPlugins;
-	}
-
-	private async _setupWatcher(): Promise<void> {
-		const version = ++this._setupVersion;
-		const configFile = await getCopilotCliConfigFile(this._pathService);
-		const configDirectory = dirname(configFile);
-		let watchRoot = configDirectory;
-		let pathToWatch = configFile;
-		while (!(await this._pathExists(watchRoot))) {
-			pathToWatch = watchRoot;
-			const parent = dirname(watchRoot);
-			if (isEqual(parent, watchRoot)) {
-				return;
-			}
-			watchRoot = parent;
-		}
-		if (version !== this._setupVersion || this._store.isDisposed) {
-			return;
-		}
-
-		const store = new DisposableStore();
-		const onDidChange = (event: FileChangesEvent) => {
-			const watchedPathChanged = event.affects(pathToWatch) || event.contains(watchRoot, FileChangeType.DELETED);
-			if (!watchedPathChanged) {
-				return;
-			}
-			this._refreshScheduler.schedule();
-			if (!isEqual(watchRoot, configDirectory) || event.contains(watchRoot, FileChangeType.DELETED)) {
-				this._setupWatcherScheduler.schedule();
-			}
-		};
-		const watcher = store.add(this._fileService.createWatcher(watchRoot, { recursive: false, excludes: [] }));
-		store.add(watcher.onDidChange(onDidChange));
-		this._watcher.value = store;
-		this._refreshScheduler.schedule(0);
-	}
-
-	private async _refresh(): Promise<void> {
-		const installedPlugins = await this._readInstalledPlugins();
-		if (!installedPlugins || equalsCopilotCliInstalledPlugins(this._installedPlugins, installedPlugins)) {
-			return;
-		}
-		this._installedPlugins = installedPlugins;
-		this._onDidChange();
-	}
-
-	private async _readInstalledPlugins(): Promise<readonly ICopilotCliInstalledPlugin[] | undefined> {
-		const configFile = await getCopilotCliConfigFile(this._pathService);
-		if (!(await this._fileService.exists(configFile))) {
-			return [];
-		}
-
-		let content: string;
-		try {
-			content = (await this._fileService.readFile(configFile)).value.toString();
-		} catch (error) {
-			this._logService.warn(`[CopilotCliInstalledPluginsStore] Failed to read '${configFile.toString()}': ${error instanceof Error ? error.message : String(error)}`);
-			return undefined;
-		}
-
-		const errors: ParseError[] = [];
-		const parsed: unknown = parseJSONC(content, errors);
-		if (errors.length || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-			this._logService.warn(`[CopilotCliInstalledPluginsStore] Ignoring invalid '${configFile.toString()}'`);
-			return undefined;
-		}
-
-		const installedPlugins = Reflect.get(parsed, 'installedPlugins') ?? Reflect.get(parsed, 'installed_plugins');
-		if (installedPlugins === undefined) {
-			return [];
-		}
-		if (!Array.isArray(installedPlugins)) {
-			this._logService.warn(`[CopilotCliInstalledPluginsStore] Ignoring invalid installedPlugins state in '${configFile.toString()}'`);
-			return undefined;
-		}
-
-		const userHome = await this._pathService.userHome();
-		const installedPluginsRoot = joinPath(userHome, COPILOT_CLI_INSTALLED_PLUGINS_DIR);
-		const result: ICopilotCliInstalledPlugin[] = [];
-		const seen = new Set<string>();
-		for (const entry of installedPlugins) {
-			if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-				this._logService.warn('[CopilotCliInstalledPluginsStore] Skipping malformed installed plugin record');
-				continue;
-			}
-			const name = Reflect.get(entry, 'name');
-			const marketplace = Reflect.get(entry, 'marketplace');
-			if (typeof name !== 'string' || !name.trim() || typeof marketplace !== 'string') {
-				this._logService.warn('[CopilotCliInstalledPluginsStore] Skipping installed plugin record without a valid name and marketplace');
-				continue;
-			}
-
-			const cachePath = Reflect.get(entry, 'cache_path');
-			let uri: URI;
-			if (typeof cachePath === 'string' && cachePath.trim()) {
-				uri = toTargetResource(await this._pathService.fileURI(cachePath), userHome);
-			} else if (marketplace) {
-				const canonicalLegacyUri = joinPath(installedPluginsRoot, `${name}@${marketplace}`);
-				const marketplaceLegacyUri = joinPath(installedPluginsRoot, marketplace, name);
-				uri = await this._fileService.exists(canonicalLegacyUri) || !(await this._fileService.exists(marketplaceLegacyUri))
-					? canonicalLegacyUri
-					: marketplaceLegacyUri;
-			} else {
-				this._logService.warn(`[CopilotCliInstalledPluginsStore] Skipping legacy direct plugin '${name}' without a cache path`);
-				continue;
-			}
-			if (!extUriBiasedIgnorePathCase.isEqualOrParent(uri, installedPluginsRoot)) {
-				this._logService.warn(`[CopilotCliInstalledPluginsStore] Skipping plugin cache path outside the installed root: ${uri.toString()}`);
-				continue;
-			}
-
-			const key = extUriBiasedIgnorePathCase.getComparisonKey(uri);
-			if (seen.has(key)) {
-				continue;
-			}
-			seen.add(key);
-			const rawSource = Reflect.get(entry, 'source');
-			const directSourceId = marketplace ? undefined : await getCopilotCliDirectSourceId(rawSource);
-			result.push({
-				uri,
-				name,
-				marketplace,
-				enabled: Reflect.get(entry, 'enabled') !== false,
-				directSourceId,
-				source: toCopilotCliPluginInstallSource(rawSource),
-				revision: JSON.stringify({
-					version: Reflect.get(entry, 'version'),
-					installedAt: Reflect.get(entry, 'installed_at'),
-					sourceSha: Reflect.get(entry, 'source_sha'),
-				}),
-			});
-		}
-		result.sort((a, b) => a.uri.toString().localeCompare(b.uri.toString()));
-		return result;
-	}
-
-	private async _pathExists(resource: URI): Promise<boolean> {
-		try {
-			await this._fileService.resolve(resource);
-			return true;
-		} catch {
-			return false;
-		}
-	}
-}
-
-async function getCopilotCliConfigFile(pathService: IPathService): Promise<URI> {
-	const userHome = await pathService.userHome();
-	return joinPath(userHome, COPILOT_CLI_CONFIG_FILE);
-}
-
-function toTargetResource(uri: URI, userHome: URI): URI {
-	if (userHome.scheme === Schemas.file) {
-		return uri;
-	}
-	const path = uri.authority ? `//${uri.authority}${uri.path}` : uri.path;
-	return userHome.with({ path: path.startsWith('/') ? path : `/${path}` });
-}
-
-function equalsCopilotCliInstalledPlugins(first: readonly ICopilotCliInstalledPlugin[] | undefined, second: readonly ICopilotCliInstalledPlugin[]): boolean {
-	return !!first
-		&& first.length === second.length
-		&& first.every((plugin, index) =>
-			plugin.uri.toString() === second[index].uri.toString()
-			&& plugin.name === second[index].name
-			&& plugin.marketplace === second[index].marketplace
-			&& plugin.enabled === second[index].enabled
-			&& plugin.directSourceId === second[index].directSourceId
-			&& JSON.stringify(plugin.source) === JSON.stringify(second[index].source)
-			&& plugin.revision === second[index].revision
-		);
-}
-
-/**
- * Discovers the plugins committed to the Copilot CLI's installedPlugins state.
- */
-export class CopilotCliAgentPluginDiscovery extends AbstractAgentPluginDiscovery {
-	private readonly _installedPlugins: CopilotCliInstalledPluginsStore;
-	private _refreshScheduler: RunOnceScheduler | undefined;
-
-	constructor(
-		@IFileService fileService: IFileService,
-		@IPathService pathService: IPathService,
-		@ILogService logService: ILogService,
-		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService,
-		@IAgentHostService private readonly _agentHostService: IAgentHostService,
-	) {
-		super(fileService, pathService, logService, workspaceContextService);
-		this._installedPlugins = this._register(new CopilotCliInstalledPluginsStore(
-			this._fileService,
-			this._pathService,
-			this._logService,
-			() => this._refreshScheduler?.schedule(),
-		));
-	}
-
-	public override start(enablementModel: IEnablementModel): void {
-		this._enablementModel = enablementModel;
-		const scheduler = this._register(new RunOnceScheduler(() => this._refreshPlugins(), 200));
-		this._refreshScheduler = scheduler;
-		scheduler.schedule(0);
-	}
-
-	protected override async _discoverPluginSources(): Promise<readonly IPluginSource[]> {
-		const sources: IPluginSource[] = [];
-		for (const installedPlugin of await this._installedPlugins.getInstalledPlugins()) {
-			try {
-				const stat = await this._fileService.resolve(installedPlugin.uri);
-				if (!stat.isDirectory) {
-					continue;
-				}
-				this._enablementModel.setDefaultEnabled?.(stat.resource.toString(), installedPlugin.enabled);
-				const canUninstall = !!installedPlugin.marketplace || !!installedPlugin.directSourceId;
-				sources.push({
-					uri: stat.resource,
-					fromMarketplace: undefined,
-					copilotCliInstallation: {
-						name: installedPlugin.name,
-						marketplace: installedPlugin.marketplace,
-						directSourceId: installedPlugin.directSourceId,
-						source: installedPlugin.source,
-					},
-					watchPluginContents: false,
-					setEnabled: canUninstall ? async enabled => {
-						if (!this._agentHostService.setPluginEnabled) {
-							throw new Error(localize('pluginRuntimeEnablementUnavailable', "Runtime plugin enablement is unavailable."));
-						}
-						const target = installedPlugin.directSourceId ?? `${installedPlugin.name}@${installedPlugin.marketplace}`;
-						await this._agentHostService.setPluginEnabled(COPILOT_CLI_AGENT_PROVIDER_ID, target, enabled);
-					} : undefined,
-					remove: this._agentHostService.uninstallPlugin && canUninstall ? async () => {
-						await this._agentHostService.uninstallPlugin!(COPILOT_CLI_AGENT_PROVIDER_ID, {
-							name: installedPlugin.name,
-							marketplace: installedPlugin.marketplace,
-							...(installedPlugin.directSourceId ? { directSourceId: installedPlugin.directSourceId } : {}),
-						});
-						this._enablementModel.remove(stat.resource.toString());
-						return true;
-					} : undefined,
-				});
-			} catch {
-				continue;
-			}
-		}
-		return sources;
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Extension-contributed plugin discovery
-// ---------------------------------------------------------------------------
-
 interface IRawChatPluginContribution {
 	readonly path: string;
 	readonly when?: string;
@@ -1415,3 +1037,11 @@ Registry.as<IExtensionFeaturesRegistry>(Extensions.ExtensionFeaturesRegistry).re
 	},
 	renderer: new SyncDescriptor(ChatPluginsDataRenderer),
 });
+
+function toTargetResource(uri: URI, userHome: URI): URI {
+	if (userHome.scheme === Schemas.file) {
+		return uri;
+	}
+	const path = uri.authority ? `//${uri.authority}${uri.path}` : uri.path;
+	return userHome.with({ path: path.startsWith('/') ? path : `/${path}` });
+}

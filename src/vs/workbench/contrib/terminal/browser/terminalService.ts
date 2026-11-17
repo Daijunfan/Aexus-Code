@@ -31,6 +31,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { VirtualWorkspaceContext } from '../../../common/contextkeys.js';
 import { ICreateTerminalOptions, IDetachedTerminalInstance, IDetachedXTermOptions, IRequestAddInstanceToGroupEvent, ITerminalConfigurationService, ITerminalEditorService, ITerminalGroup, ITerminalGroupService, ITerminalInstance, ITerminalInstanceHost, ITerminalInstanceService, ITerminalLocationOptions, ITerminalService, ITerminalServiceNativeDelegate, TerminalConnectionState, TerminalEditorLocation } from './terminal.js';
 import { getCwdForSplit } from './terminalActions.js';
+import { IProjectTerminalService } from './projectTerminalService.js';
 import { TerminalEditorInput } from './terminalEditorInput.js';
 import { getColorStyleContent, getUriClasses } from './terminalIcon.js';
 import { TerminalProfileQuickpick } from './terminalProfileQuickpick.js';
@@ -187,7 +188,8 @@ export class TerminalService extends Disposable implements ITerminalService {
 		@ICommandService private readonly _commandService: ICommandService,
 		@IKeybindingService private readonly _keybindingService: IKeybindingService,
 		@ITimerService private readonly _timerService: ITimerService,
-		@IThemeService private readonly _themeService: IThemeService
+		@IThemeService private readonly _themeService: IThemeService,
+		@IProjectTerminalService private readonly _projectTerminals: IProjectTerminalService,
 	) {
 		super();
 
@@ -973,6 +975,22 @@ export class TerminalService extends Disposable implements ITerminalService {
 	}
 
 	async createTerminal(options?: ICreateTerminalOptions): Promise<ITerminalInstance> {
+		options = { ...options };
+		const selectedProject = this._projectTerminals.currentProject;
+		const parent = await this._getSplitParent(options.location);
+		const requested = options.config as IShellLaunchConfig | undefined;
+		const useSelectedProject = !parent && !options.cwd && !options.resource && !requested?.cwd && !requested?.customPtyImplementation && !requested?.attachPersistentProcess && !requested?.isFeatureTerminal && !requested?.hideFromUser && !(options.config && hasKey(options.config, { extensionIdentifier: true }));
+		if (useSelectedProject) {
+			options.cwd = selectedProject?.uri;
+			if (options.cwd && !options.config) {
+				options.skipContributedProfileCheck = true;
+			}
+		}
+		if (parent?.shellLaunchConfig.executable === 'ssh' && parent.shellLaunchConfig.hostLabel && !options.config) {
+			const source = parent.shellLaunchConfig;
+			options.config = { executable: source.executable, args: source.args, cwd: source.cwd, name: source.name, env: source.env, hostLabel: source.hostLabel, icon: source.icon, ignoreConfigurationCwd: true, isRemotePty: true, waitOnExit: source.waitOnExit };
+			options.cwd = source.cwd;
+		}
 		// Await the initialization of available profiles as long as this is not a pty terminal or a
 		// local terminal in a remote workspace as profile won't be used in those cases and these
 		// terminals need to be launched before remote connections are established.
@@ -1012,6 +1030,10 @@ export class TerminalService extends Disposable implements ITerminalService {
 			: typeof options?.location === 'object' ? hasKey(options.location, { parentTerminal: true }) : false;
 
 		await this._resolveCwd(shellLaunchConfig, splitActiveTerminal, options);
+		if (!shellLaunchConfig.name && !shellLaunchConfig.customPtyImplementation && !shellLaunchConfig.attachPersistentProcess) {
+			const project = (useSelectedProject ? selectedProject : undefined) ?? this._projectTerminals.findProject(shellLaunchConfig.cwd);
+			shellLaunchConfig.name = parent?.shellLaunchConfig.name ?? (project ? this._projectTerminals.getLaunchConfig(project).name : undefined);
+		}
 
 		// Launch the contributed profile
 		// If it's a custom pty implementation, we did not await the profiles ready, so
@@ -1080,7 +1102,6 @@ export class TerminalService extends Disposable implements ITerminalService {
 			return instance;
 		}
 
-		const parent = await this._getSplitParent(options?.location);
 		this._terminalHasBeenCreated.set(true);
 		this._extensionService.activateByEvent('onTerminal:*');
 		let instance;
@@ -1277,7 +1298,7 @@ export class TerminalService extends Disposable implements ITerminalService {
 	}
 
 	private _evaluateLocalCwd(shellLaunchConfig: IShellLaunchConfig) {
-		if (this._environmentService.isSessionsWindow) {
+		if (this._environmentService.isSessionsWindow || shellLaunchConfig.hostLabel) {
 			return;
 		}
 

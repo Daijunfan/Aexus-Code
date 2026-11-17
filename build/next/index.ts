@@ -10,19 +10,19 @@ import { promisify } from 'util';
 
 import glob from 'glob';
 import gulpWatch from '../lib/watch/index.ts';
-import { nlsPlugin, createNLSCollector, finalizeNLS, postProcessNLS } from './nls-plugin.ts';
-import { convertPrivateFields, adjustSourceMap, type ConvertPrivateFieldsResult } from './private-to-property.ts';
+import { nlsPlugin,createNLSCollector,finalizeNLS,postProcessNLS } from './nls-plugin.ts';
+import { convertPrivateFields,adjustSourceMap,type ConvertPrivateFieldsResult } from './private-to-property.ts';
 import { rewriteSourceMappingURL } from './source-map-url.ts';
 import { getVersion } from '../lib/getVersion.ts';
 import { getGitCommitDate } from '../lib/date.ts';
-import { getBootstrapEntryPointsForTarget, type BuildTarget } from '../lib/esbuild.ts';
+import { getBootstrapEntryPointsForTarget,type BuildTarget } from '../lib/esbuild.ts';
 import product from '../../product.json' with { type: 'json' };
 import packageJson from '../../package.json' with { type: 'json' };
-import { isWebExtension, type IScannedBuiltinExtension } from '../lib/extensions.ts';
+import { isWebExtension,type IScannedBuiltinExtension } from '../lib/extensions.ts';
 import { runBuildFast } from './build-fast.ts';
-import { bundleDevTunnelsWeb, devTunnelsWebOutDir } from './devTunnelsWeb.ts';
-import { agentHostCryptoOutDir, bundleAgentHostCrypto } from './agentHostCrypto.ts';
-import { copyFile, mapWithConcurrency, MAX_CONCURRENT_FILE_OPERATIONS, transpileFile } from './transpile.ts';
+import { bundleDevTunnelsWeb,devTunnelsWebOutDir } from './devTunnelsWeb.ts';
+import { agentHostCryptoOutDir,bundleAgentHostCrypto } from './agentHostCrypto.ts';
+import { copyFile,mapWithConcurrency,MAX_CONCURRENT_FILE_OPERATIONS,transpileFile } from './transpile.ts';
 import { copyResources } from './resources.ts';
 import { optimizeSvgFiles } from './svg.ts';
 import { getBundleOptions } from './bundle.ts';
@@ -108,7 +108,6 @@ const desktopEntryPoints = [
 	'vs/platform/files/node/watcher/watcherMain',
 	'vs/platform/localTranscription/node/localTranscriptionMain',
 	'vs/platform/terminal/node/ptyHostMain',
-	'vs/platform/agentHost/node/agentHostMain',
 	'vs/platform/agentHost/node/diffWorkerMain',
 	'vs/workbench/api/node/extensionHostProcess',
 ];
@@ -137,7 +136,6 @@ const serverEntryPoints = [
 	'vs/workbench/api/node/extensionHostProcess',
 	'vs/platform/files/node/watcher/watcherMain',
 	'vs/platform/terminal/node/ptyHostMain',
-	'vs/platform/agentHost/node/agentHostMain',
 	'vs/platform/agentHost/node/diffWorkerMain',
 ];
 

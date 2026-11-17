@@ -80,6 +80,7 @@ import { FileUserDataProvider } from '../../platform/userData/common/fileUserDat
 import { addUNCHostToAllowlist, getUNCHost } from '../../base/node/unc.js';
 import { ThemeMainService } from '../../platform/theme/electron-main/themeMainServiceImpl.js';
 import { LINUX_SYSTEM_POLICY_FILE_PATH } from '../../base/common/policy.js';
+import { migrateVsCodeSettingsToAexus, migrateVsCodeStateAndExtensionsToAexus } from '../../platform/ade/node/vscodeConfigMigration.js';
 
 /**
  * The main VS Code entry point.
@@ -137,6 +138,14 @@ class CodeMain {
 				// If this throws an error it means we are not the first
 				// instance of VS Code running and so we would quit.
 				const mainProcessNodeIpcServer = await this.claimInstance(logService, environmentMainService, lifecycleMainService, instantiationService, productService, true);
+
+				if (!environmentMainService.args['user-data-dir'] && !environmentMainService.extensionTestsLocationURI) {
+					await migrateVsCodeStateAndExtensionsToAexus({
+						aexusGlobalStorageDir: userDataProfilesMainService.defaultProfile.globalStorageHome.with({ scheme: Schemas.file }).fsPath,
+						aexusExtensionsDir: environmentMainService.extensionsPath,
+						logService,
+					}).catch(err => logService.warn(`app#startup(): VS Code config migration skipped: ${err}`));
+				}
 
 				// Write a lockfile to indicate an instance is running
 				// (https://github.com/microsoft/vscode/issues/127861#issuecomment-877417451)
@@ -329,10 +338,16 @@ class CodeMain {
 
 			// State service
 			stateService.init(),
-
-			// Configuration service
-			configurationService.initialize()
 		]);
+
+		if (!environmentMainService.args['user-data-dir'] && !environmentMainService.extensionTestsLocationURI) {
+			await migrateVsCodeSettingsToAexus({
+				aexusSettingsPath: userDataProfilesMainService.defaultProfile.settingsResource.with({ scheme: Schemas.file }).fsPath,
+			}).catch(() => undefined);
+		}
+
+		// Configuration service
+		await configurationService.initialize();
 
 		// Initialize user data profiles after initializing the state
 		userDataProfilesMainService.init();

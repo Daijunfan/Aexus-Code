@@ -7,11 +7,11 @@ import * as fs from 'fs';
 import path from 'path';
 import * as os from 'os';
 import * as child_process from 'child_process';
-import { separateRoots, distroRoots } from './dirs.ts';
+import { separateRoots,distroRoots } from './dirs.ts';
 import { ensureElectronTypes } from './electronTypes.ts';
 import { finishCloudSandbox } from './cloudSandbox.ts';
-import { getNativeBuildEnv, nativeBuildKeys } from './pnpm/nativeBuildEnv.ts';
-import { getPinnedPnpmVersion, getPnpmCommand } from '../lib/pnpm.ts';
+import { getNativeBuildEnv,nativeBuildKeys } from './pnpm/nativeBuildEnv.ts';
+import { getPinnedPnpmVersion,getPnpmCommand } from '../lib/pnpm.ts';
 
 const root = fs.realpathSync.native(path.dirname(path.dirname(import.meta.dirname)));
 const pnpm = getPnpmCommand();
@@ -233,9 +233,6 @@ async function main() {
 			nativeTasks.push(install(getRemoteEnv()));
 		} else if (dir === 'extensions') {
 			// extensions/.pnpmfile.mjs sets the native module build variables of the root package.json (Electron).
-			nativeTasks.push(install({ ...process.env }));
-		} else if (dir === 'extensions/copilot') {
-			// No `nativeBuild` field or pnpmfile: builds native modules for Electron with the workspace's variables.
 			nativeTasks.push(install({ ...process.env }));
 		} else if (dir === '.build/distro/npm/remote') {
 			// Distro roots have no `nativeBuild` field or pnpmfile: build for the remote server like remote/.

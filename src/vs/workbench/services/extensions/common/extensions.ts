@@ -388,7 +388,15 @@ export const enum ActivationKind {
 	Immediate = 1
 }
 
+export const enum ExtensionHostScope {
+	All,
+	Workspace,
+	WorkspaceIndependent
+}
+
 export interface WillStopExtensionHostsEvent {
+	/** Hosts affected by this stop. Omitted means all hosts. */
+	readonly scope?: ExtensionHostScope;
 
 	/**
 	 * A human readable reason for stopping the extension hosts
@@ -536,12 +544,12 @@ export interface IExtensionService {
 	 * @returns a promise that resolves to `true` if the extension hosts were stopped, `false`
 	 * if the operation was vetoed by listeners of the `onWillStop` event.
 	 */
-	stopExtensionHosts(reason: string, auto?: boolean): Promise<boolean>;
+	stopExtensionHosts(reason: string, auto?: boolean, scope?: ExtensionHostScope): Promise<boolean>;
 
 	/**
 	 * Starts the extension hosts. If updates are provided, the extension hosts are started with the given updates.
 	 */
-	startExtensionHosts(updates?: { readonly toAdd: readonly IExtension[]; readonly toRemove: readonly string[] }): Promise<void>;
+	startExtensionHosts(updates?: { readonly toAdd: readonly IExtension[]; readonly toRemove: readonly string[] }, scope?: ExtensionHostScope): Promise<void>;
 
 	/**
 	 * Modify the environment of the remote extension host

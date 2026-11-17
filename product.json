@@ -1,9 +1,10 @@
 {
-	"nameShort": "Code - OSS",
-	"nameLong": "Code - OSS",
-	"applicationName": "code-oss",
-	"dataFolderName": ".vscode-oss",
-	"sharedDataFolderName": ".vscode-oss-shared",
+	"nameShort": "Aexus Code",
+	"nameLong": "Aexus Code",
+	"openToWelcomeMainPage": true,
+	"applicationName": "aexus-code",
+	"dataFolderName": ".aexus-code",
+	"sharedDataFolderName": ".aexus-code-shared",
 	"win32MutexName": "vscodeoss",
 	"licenseName": "MIT",
 	"licenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
@@ -11,9 +12,9 @@
 	"serverGreeting": [],
 	"serverLicense": [],
 	"serverLicensePrompt": "",
-	"serverApplicationName": "code-server-oss",
-	"serverDataFolderName": ".vscode-server-oss",
-	"tunnelApplicationName": "code-tunnel-oss",
+	"serverApplicationName": "aexus-code-server",
+	"serverDataFolderName": ".aexus-code-server",
+	"tunnelApplicationName": "aexus-code-tunnel",
 	"win32DirName": "Microsoft Code OSS",
 	"win32NameVersion": "Microsoft Code OSS",
 	"win32RegValueName": "CodeOSS",
@@ -25,16 +26,16 @@
 	"win32ShellNameShort": "C&ode - OSS",
 	"win32TunnelServiceMutex": "vscodeoss-tunnelservice",
 	"win32TunnelMutex": "vscodeoss-tunnel",
-	"darwinBundleIdentifier": "com.visualstudio.code.oss",
+	"darwinBundleIdentifier": "com.aexus.code",
 	"darwinProfileUUID": "47827DD9-4734-49A0-AF80-7E19B11495CC",
 	"darwinProfilePayloadUUID": "CF808BE7-53F3-46C6-A7E2-7EDB98A5E959",
-	"linuxDesktopName": "com.visualstudio.CodeOSS",
-	"linuxIconName": "code-oss",
+	"linuxDesktopName": "com.aexus.Code",
+	"linuxIconName": "aexus-code",
 	"licenseFileName": "LICENSE.txt",
 	"reportIssueUrl": "https://github.com/microsoft/vscode/issues/new",
 	"nodejsArtifactFeed": "",
 	"electronArtifactFeed": "",
-	"urlProtocol": "code-oss",
+	"urlProtocol": "aexus-code",
 	"agentsTelemetryAppName": "agents",
 	"webviewContentExternalBaseUrlTemplate": "https://{{uuid}}.vscode-cdn.net/insider/ef65ac1ba57f57f2a3961bfe94aa20481caca4c6/out/vs/workbench/contrib/webview/browser/pre/",
 	"builtInExtensions": [
@@ -87,82 +88,9 @@
 			}
 		}
 	],
-	"defaultChatAgent": {
-		"extensionId": "GitHub.copilot",
-		"chatExtensionId": "GitHub.copilot-chat",
-		"chatExtensionOutputId": "GitHub.copilot-chat.GitHub Copilot Chat.log",
-		"chatExtensionOutputExtensionStateCommand": "github.copilot.debug.extensionState",
-		"documentationUrl": "https://aka.ms/github-copilot-overview",
-		"termsStatementUrl": "https://aka.ms/github-copilot-terms-statement",
-		"privacyStatementUrl": "https://aka.ms/github-copilot-privacy-statement",
-		"skusDocumentationUrl": "https://aka.ms/github-copilot-plans",
-		"optimizeUsageDocumentationUrl": "https://aka.ms/token-usage-tips",
-		"publicCodeMatchesUrl": "https://aka.ms/github-copilot-match-public-code",
-		"managePlanUrl": "https://aka.ms/github-copilot-manage-plan",
-		"upgradePlanUrl": "https://aka.ms/github-copilot-upgrade-plan",
-		"signUpUrl": "https://aka.ms/github-sign-up",
-		"provider": {
-			"default": {
-				"id": "github",
-				"name": "GitHub"
-			},
-			"enterprise": {
-				"id": "github-enterprise",
-				"name": "GHE"
-			},
-			"google": {
-				"id": "google",
-				"name": "Google"
-			},
-			"apple": {
-				"id": "apple",
-				"name": "Apple"
-			},
-			"microsoft": {
-				"id": "microsoft",
-				"name": "Microsoft"
-			}
-		},
-		"providerExtensionId": "vscode.github-authentication",
-		"providerUriSetting": "github-enterprise.uri",
-		"providerScopes": [
-			[
-				"read:user",
-				"user:email",
-				"repo",
-				"workflow"
-			],
-			[
-				"user:email"
-			],
-			[
-				"read:user"
-			]
-		],
-		"entitlementUrl": "https://api.github.com/copilot_internal/user",
-		"entitlementSignupLimitedUrl": "https://api.github.com/copilot_internal/subscribe_limited_user",
-		"chatQuotaExceededContext": "github.copilot.chat.quotaExceeded",
-		"completionsQuotaExceededContext": "github.copilot.completions.quotaExceeded",
-		"walkthroughCommand": "github.copilot.open.walkthrough",
-		"completionsMenuCommand": "github.copilot.toggleStatusMenu",
-		"chatRefreshTokenCommand": "github.copilot.refreshToken",
-		"generateCommitMessageCommand": "github.copilot.git.generateCommitMessage",
-		"resolveMergeConflictsCommand": "github.copilot.git.resolveMergeConflicts",
-		"completionsAdvancedSetting": "github.copilot.advanced",
-		"completionsEnablementSetting": "github.copilot.enable",
-		"nextEditSuggestionsSetting": "github.copilot.nextEditSuggestions.enabled",
-		"tokenEntitlementUrl": "https://api.github.com/copilot_internal/v2/token",
-		"mcpRegistryDataUrl": "https://api.github.com/copilot/mcp_registry",
-		"mcpConnectorsUrl": "https://api.github.com/copilot-connectors/api/v1",
-		"managedSettingsUrl": "https://api.github.com/copilot_internal/managed_settings"
-	},
 	"trustedExtensionAuthAccess": {
-		"github": [
-			"GitHub.copilot-chat"
-		],
-		"github-enterprise": [
-			"GitHub.copilot-chat"
-		],
+		"github": [],
+		"github-enterprise": [],
 		"microsoft": [
 			"vscode.github-authentication"
 		]
@@ -242,9 +170,347 @@
 			"type": "light"
 		}
 	],
-	"builtInExtensionsEnabledWithAutoUpdates": [
-		"GitHub.copilot-chat"
-	],
+	"builtInExtensionsEnabledWithAutoUpdates": [],
 	"sessionsWindowAllowedExtensions": [],
-	"voiceWsUrl": "wss://falcon-caas.mai.microsoft.com/voice-code/api/v1/realtime/voice"
+	"voiceWsUrl": "wss://falcon-caas.mai.microsoft.com/voice-code/api/v1/realtime/voice",
+	"extensionsGallery": {
+		"nlsBaseUrl": "https://www.vscode-unpkg.net/_lp/",
+		"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery",
+		"itemUrl": "https://marketplace.visualstudio.com/items",
+		"publisherUrl": "https://marketplace.visualstudio.com/publishers",
+		"resourceUrlTemplate": "https://{publisher}.vscode-unpkg.net/{publisher}/{name}/{version}/{path}",
+		"extensionUrlTemplate": "https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest",
+		"controlUrl": "https://main.vscode-cdn.net/extensions/marketplace.json"
+	},
+	"extensionEnabledApiProposals": {
+		"mrleemurray.theme-2026": [
+			"css"
+		],
+		"ms-azuretools.vscode-containers": [
+			"authenticationChallenges"
+		],
+		"ms-azuretools.vscode-azureresourcegroups": [
+			"authenticationChallenges"
+		],
+		"ms-azuretools.vscode-dev-azurecloudshell": [
+			"contribEditSessions",
+			"authenticationChallenges"
+		],
+		"ms-toolsai.vscode-ai": [
+			"authenticationChallenges"
+		],
+		"TeamsDevApp.vscode-ai-foundry": [
+			"authenticationChallenges"
+		],
+		"ms-vscode.vscode-selfhost-test-provider": [
+			"testObserver",
+			"testRelatedCode"
+		],
+		"VisualStudioExptTeam.vscodeintellicode-completions": [
+			"inlineCompletionsAdditions"
+		],
+		"ms-vsliveshare.vsliveshare": [
+			"contribMenuBarHome",
+			"contribShareMenu",
+			"contribStatusBarItems",
+			"diffCommand",
+			"documentFiltersExclusive",
+			"fileSearchProvider",
+			"findTextInFiles",
+			"notebookLiveShare",
+			"terminalDimensions",
+			"terminalDataWriteEvent",
+			"textSearchProvider"
+		],
+		"ms-vscode.js-debug": [
+			"portsAttributes",
+			"findTextInFiles",
+			"workspaceTrust",
+			"tunnels",
+			"browser"
+		],
+		"ms-toolsai.vscode-ai-remote": [
+			"resolvers",
+			"authenticationChallenges"
+		],
+		"ms-windows-ai-studio.vscode-foundry-training": [
+			"resolvers"
+		],
+		"ms-python.python": [
+			"codeActionAI",
+			"contribEditorContentMenu",
+			"quickPickSortByLabel",
+			"portsAttributes",
+			"testObserver",
+			"quickPickItemTooltip",
+			"terminalDataWriteEvent",
+			"terminalExecuteCommandEvent",
+			"notebookReplDocument",
+			"notebookVariableProvider",
+			"terminalShellEnv"
+		],
+		"ms-python.vscode-python-envs": [
+			"terminalShellEnv",
+			"terminalDataWriteEvent",
+			"taskExecutionTerminal"
+		],
+		"ms-dotnettools.dotnet-interactive-vscode": [
+			"notebookMessaging"
+		],
+		"GitHub.codespaces": [
+			"contribEditSessions",
+			"contribMenuBarHome",
+			"contribRemoteHelp",
+			"contribViewsRemote",
+			"resolvers",
+			"tunnels",
+			"terminalDataWriteEvent",
+			"treeViewReveal",
+			"notebookKernelSource"
+		],
+		"ms-vscode.azure-repos": [
+			"extensionRuntime",
+			"fileSearchProvider",
+			"textSearchProvider"
+		],
+		"ms-vscode.remote-repositories": [
+			"canonicalUriProvider",
+			"contribEditSessions",
+			"contribRemoteHelp",
+			"contribMenuBarHome",
+			"contribViewsRemote",
+			"contribViewsWelcome",
+			"contribShareMenu",
+			"documentFiltersExclusive",
+			"editSessionIdentityProvider",
+			"extensionRuntime",
+			"fileSearchProvider",
+			"quickPickSortByLabel",
+			"workspaceTrust",
+			"shareProvider",
+			"scmActionButton",
+			"scmSelectedProvider",
+			"scmValidation",
+			"textSearchProvider"
+		],
+		"ms-vscode-remote.remote-wsl": [
+			"resolvers",
+			"contribRemoteHelp",
+			"contribViewsRemote",
+			"telemetry"
+		],
+		"ms-vscode-remote.remote-ssh": [
+			"resolvers",
+			"tunnels",
+			"terminalDataWriteEvent",
+			"terminalRemoteResolver",
+			"contribRemoteHelp",
+			"contribViewsRemote",
+			"telemetry"
+		],
+		"ms-vscode.remote-server": [
+			"resolvers",
+			"tunnels",
+			"contribViewsWelcome"
+		],
+		"ms-vscode.remote-explorer": [
+			"contribRemoteHelp",
+			"contribViewsRemote",
+			"extensionsAny"
+		],
+		"ms-vscode-remote.remote-containers": [
+			"contribEditSessions",
+			"resolvers",
+			"portsAttributes",
+			"tunnels",
+			"workspaceTrust",
+			"terminalDimensions",
+			"contribRemoteHelp",
+			"contribViewsRemote"
+		],
+		"ms-vscode.js-debug-nightly": [
+			"portsAttributes",
+			"findTextInFiles",
+			"workspaceTrust",
+			"tunnels",
+			"browser"
+		],
+		"ms-vscode.lsif-browser": [
+			"documentFiltersExclusive"
+		],
+		"ms-vscode.vscode-speech": [
+			"speech"
+		],
+		"GitHub.vscode-pull-request-github": [
+			"activeComment",
+			"agentSessionsWorkspace",
+			"authIssuers",
+			"chatContextProvider",
+			"chatParticipantAdditions",
+			"chatParticipantPrivate",
+			"chatSessionsProvider",
+			"codiconDecoration",
+			"codeActionRanges",
+			"commentingRangeHint",
+			"commentReactor",
+			"commentReveal",
+			"commentsDraftState",
+			"commentThreadApplicability",
+			"contribAccessibilityHelpContent",
+			"contribCommentEditorActionsMenu",
+			"contribCommentPeekContext",
+			"contribCommentThreadAdditionalMenu",
+			"contribCommentsViewThreadMenus",
+			"contribEditorContentMenu",
+			"contribMultiDiffEditorMenus",
+			"contribShareMenu",
+			"diffCommand",
+			"externalUriOpener",
+			"languageModelToolResultAudience",
+			"markdownAlertSyntax",
+			"quickDiffProvider",
+			"remoteCodingAgents",
+			"shareProvider",
+			"tabInputMultiDiff",
+			"tabInputTextMerge",
+			"tokenInformation",
+			"treeItemMarkdownLabel",
+			"treeViewMarkdownMessage"
+		],
+		"GitHub.remotehub": [
+			"authIssuers",
+			"contribRemoteHelp",
+			"contribMenuBarHome",
+			"contribViewsRemote",
+			"contribViewsWelcome",
+			"documentFiltersExclusive",
+			"extensionRuntime",
+			"fileSearchProvider",
+			"quickPickSortByLabel",
+			"workspaceTrust",
+			"scmSelectedProvider",
+			"scmValidation",
+			"textSearchProvider"
+		],
+		"ms-python.vscode-pylance": [
+			"terminalShellEnv",
+			"portsAttributes",
+			"codeActionAI"
+		],
+		"ms-python.debugpy": [
+			"contribViewsWelcome",
+			"debugVisualization",
+			"portsAttributes"
+		],
+		"ms-toolsai.jupyter-renderers": [
+			"contribNotebookStaticPreloads"
+		],
+		"ms-toolsai.jupyter": [
+			"notebookDeprecated",
+			"notebookMessaging",
+			"notebookMime",
+			"portsAttributes",
+			"quickPickSortByLabel",
+			"notebookKernelSource",
+			"interactiveWindow",
+			"notebookControllerAffinityHidden",
+			"contribNotebookStaticPreloads",
+			"quickPickItemTooltip",
+			"notebookExecution",
+			"notebookCellExecution",
+			"notebookVariableProvider",
+			"notebookReplDocument"
+		],
+		"donjayamanne.kusto": [
+			"notebookVariableProvider"
+		],
+		"ms-toolsai.tensorboard": [
+			"portsAttributes"
+		],
+		"dbaeumer.vscode-eslint": [],
+		"ms-vscode.azure-sphere-tools-ui": [
+			"tunnels"
+		],
+		"ms-azuretools.vscode-azureappservice": [
+			"terminalDataWriteEvent"
+		],
+		"ms-vscode.anycode": [
+			"extensionsAny"
+		],
+		"ms-vscode.cpptools": [
+			"terminalDataWriteEvent",
+			"chatParticipantAdditions"
+		],
+		"vscjava.vscode-java-pack": [],
+		"ms-dotnettools.csdevkit": [
+			"inlineCompletionsAdditions"
+		],
+		"ms-dotnettools.vscodeintellicode-csharp": [
+			"inlineCompletionsAdditions"
+		],
+		"ms-dotnettools.vscode-dotnet-modernize": [
+			"chatParticipantAdditions",
+			"chatPromptFiles"
+		],
+		"microsoft-IsvExpTools.powerplatform-vscode": [
+			"fileSearchProvider",
+			"textSearchProvider"
+		],
+		"microsoft-IsvExpTools.powerplatform-vscode-preview": [
+			"fileSearchProvider",
+			"textSearchProvider"
+		],
+		"TeamsDevApp.ms-teams-vscode-extension": [
+			"chatParticipantAdditions",
+			"languageModelSystem",
+			"mcpServerDefinitions"
+		],
+		"ms-toolsai.datawrangler": [],
+		"ms-vscode.vscode-commander": [],
+		"ms-autodev.vscode-autodev": [
+			"chatParticipantAdditions"
+		],
+		"vscjava.migrate-java-to-azure": [
+			"chatParticipantAdditions",
+			"chatParticipantPrivate"
+		],
+		"vscjava.vscode-java-upgrade": [
+			"chatParticipantAdditions",
+			"chatParticipantPrivate"
+		],
+		"FoundryLocal.foundry-local-chat": [
+			"chatProvider"
+		],
+		"Microsoft.foundry-local-chat": [
+			"chatProvider"
+		],
+		"ms-wmcp.windows-mcp-server-extension": [
+			"mcpToolDefinitions"
+		],
+		"openai.chatgpt": [
+			"languageModelProxy",
+			"chatSessionsProvider"
+		],
+		"TypeScriptTeam.vscode-typescript": [
+			"editorHoverVerbosityLevel",
+			"multiDocumentHighlightProvider"
+		],
+		"TypeScriptTeam.native-preview": [
+			"editorHoverVerbosityLevel",
+			"multiDocumentHighlightProvider"
+		],
+		"ms-vscode.vscode-eng-codereview": [
+			"chatContextProvider"
+		],
+		"ms-vscode.vscode-chat-customizations-evaluations": [
+			"chatSessionCustomizationProvider",
+			"contribEditorContentMenu"
+		],
+		"ms-vscode.vscode-team-tools": [
+			"externalUriOpener",
+			"chatParticipantPrivate",
+			"terminalCompletionProvider",
+			"terminalShellEnv"
+		]
+	}
 }

@@ -1,0 +1,437 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as net from 'net';
+import * as os from 'os';
+import { toErrorMessage } from '../../../base/common/errorMessage.js';
+import { Disposable } from '../../../base/common/lifecycle.js';
+import * as path from '../../../base/common/path.js';
+import { isWindows } from '../../../base/common/platform.js';
+import { ILogService } from '../../log/common/log.js';
+import {
+	ADE_CONTROL_DIR_NAME,
+	ADE_CONTROL_META_NAME,
+	ADE_CONTROL_SOCKET_NAME,
+	IAdeControlConnectionMetadata,
+	IAdeControlDispatchRequest,
+	IAdeControlWireRequest,
+	IAdeControlWireResponse,
+} from '../common/adeControl.js';
+
+const DEFAULT_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const DEFAULT_SOCKET_TIMEOUT_MS = 120_000;
+const SOCKET_PROBE_TIMEOUT_MS = 300;
+
+export type AdeControlDispatcher = (request: IAdeControlDispatchRequest, windowId?: number) => Promise<unknown>;
+
+export interface IAdeControlServerOptions {
+	readonly controlDir?: string;
+	readonly socketPath?: string;
+	readonly metaPath?: string;
+	readonly logService?: ILogService;
+	readonly maxPayloadBytes?: number;
+	readonly socketTimeoutMs?: number;
+}
+
+/**
+ * Local IPC control server for Aexus Code ADE.
+ *
+ * Exposes a newline-delimited JSON request/response protocol over a `0600` Unix
+ * domain socket (or Windows named pipe) guarded by a 32-byte random hex token.
+ */
+export class AdeControlServer extends Disposable {
+
+	private readonly _controlDir: string;
+	private readonly _requestedSocketPath: string;
+	private _activeSocketPath: string;
+	private readonly _metaPath: string;
+	private readonly _token: string;
+	private readonly _logService: ILogService | undefined;
+	private readonly _maxPayloadBytes: number;
+	private readonly _socketTimeoutMs: number;
+	private readonly _sockets = new Set<net.Socket>();
+	private readonly _readyPromise: Promise<void>;
+
+	private _server: net.Server | undefined;
+	private _disposed = false;
+	private _startupError: unknown;
+
+	constructor(
+		private readonly _dispatcher: AdeControlDispatcher,
+		options?: IAdeControlServerOptions,
+	) {
+		super();
+
+		this._controlDir = options?.controlDir || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
+		this._requestedSocketPath = options?.socketPath
+			|| process.env.AEXUS_ADE_SOCKET
+			|| (isWindows
+				? `\\\\.\\pipe\\aexus-ade-control-${process.pid}`
+				: path.join(this._controlDir, ADE_CONTROL_SOCKET_NAME));
+		this._activeSocketPath = this._requestedSocketPath;
+		this._metaPath = options?.metaPath
+			|| process.env.AEXUS_ADE_CONTROL_FILE
+			|| path.join(this._controlDir, ADE_CONTROL_META_NAME);
+		this._token = crypto.randomBytes(32).toString('hex');
+		this._logService = options?.logService;
+		this._maxPayloadBytes = options?.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
+		this._socketTimeoutMs = options?.socketTimeoutMs ?? DEFAULT_SOCKET_TIMEOUT_MS;
+
+		this._readyPromise = this._start();
+	}
+
+	get socketPath(): string {
+		return this._activeSocketPath;
+	}
+
+	get metaPath(): string {
+		return this._metaPath;
+	}
+
+	get token(): string {
+		return this._token;
+	}
+
+	async whenReady(): Promise<void> {
+		await this._readyPromise;
+		if (this._startupError) {
+			throw this._startupError;
+		}
+	}
+
+	private async _start(): Promise<void> {
+		try {
+			await this._doStart();
+		} catch (err) {
+			this._startupError = err;
+			this._logService?.error('[AdeControlServer] Failed to start ADE control server', err);
+		}
+	}
+
+	private async _doStart(): Promise<void> {
+		await fs.promises.mkdir(this._controlDir, { recursive: true, mode: 0o700 });
+		if (!isWindows) {
+			const socketDir = path.dirname(this._requestedSocketPath);
+			if (socketDir !== this._controlDir) {
+				await fs.promises.mkdir(socketDir, { recursive: true, mode: 0o700 });
+			}
+		}
+		const metaDir = path.dirname(this._metaPath);
+		if (metaDir !== this._controlDir) {
+			await fs.promises.mkdir(metaDir, { recursive: true, mode: 0o700 });
+		}
+
+		if (this._disposed) {
+			return;
+		}
+
+		let listenPath = this._requestedSocketPath;
+		let writeGlobalMeta = true;
+
+		if (!isWindows && await this._pathExists(listenPath)) {
+			const probeResult = await this._probeUnixSocket(listenPath);
+			if (this._disposed) {
+				return;
+			}
+
+			if (probeResult === 'live') {
+				listenPath = path.join(path.dirname(listenPath), `ade-control.${process.pid}.sock`);
+				writeGlobalMeta = false;
+				this._logService?.info(`[AdeControlServer] Live ADE control socket already bound at ${this._requestedSocketPath}; falling back to ${listenPath}`);
+				if (await this._pathExists(listenPath)) {
+					await this._unlinkQuietly(listenPath);
+				}
+			} else {
+				await this._unlinkQuietly(listenPath);
+			}
+		}
+
+		if (this._disposed) {
+			return;
+		}
+
+		this._activeSocketPath = listenPath;
+
+		const server = net.createServer({ allowHalfOpen: true }, socket => this._handleConnection(socket));
+		await new Promise<void>((resolve, reject) => {
+			const onError = (err: Error) => {
+				server.removeListener('listening', onListening);
+				reject(err);
+			};
+			const onListening = () => {
+				server.removeListener('error', onError);
+				resolve();
+			};
+			server.once('error', onError);
+			server.once('listening', onListening);
+			server.listen(listenPath);
+		});
+
+		server.on('error', err => {
+			this._logService?.error('[AdeControlServer] Socket server error', err);
+		});
+		this._server = server;
+
+		if (this._disposed) {
+			server.close();
+			this._server = undefined;
+			if (!isWindows) {
+				await this._unlinkQuietly(listenPath);
+			}
+			return;
+		}
+
+		if (!isWindows) {
+			await fs.promises.chmod(listenPath, 0o600);
+		}
+
+		if (writeGlobalMeta && !this._disposed) {
+			const tmpMetaPath = `${this._metaPath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+			const metadata: IAdeControlConnectionMetadata = {
+				socketPath: listenPath,
+				token: this._token,
+				pid: process.pid,
+			};
+			await fs.promises.writeFile(tmpMetaPath, JSON.stringify(metadata, null, '\t') + '\n', { encoding: 'utf8', mode: 0o600 });
+			if (!isWindows) {
+				await fs.promises.chmod(tmpMetaPath, 0o600);
+			}
+			if (this._disposed) {
+				await this._unlinkQuietly(tmpMetaPath);
+				return;
+			}
+			await fs.promises.rename(tmpMetaPath, this._metaPath);
+		}
+	}
+
+	private async _pathExists(targetPath: string): Promise<boolean> {
+		try {
+			await fs.promises.lstat(targetPath);
+			return true;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+				return false;
+			}
+			return true;
+		}
+	}
+
+	private async _unlinkQuietly(targetPath: string): Promise<void> {
+		try {
+			await fs.promises.unlink(targetPath);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+				throw err;
+			}
+		}
+	}
+
+	private _probeUnixSocket(socketPath: string): Promise<'live' | 'stale'> {
+		return new Promise<'live' | 'stale'>(resolve => {
+			let settled = false;
+			const finish = (state: 'live' | 'stale') => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				probe.destroy();
+				resolve(state);
+			};
+
+			const probe = net.createConnection({ path: socketPath });
+			probe.setTimeout(SOCKET_PROBE_TIMEOUT_MS);
+			probe.once('connect', () => finish('live'));
+			probe.once('timeout', () => finish('live'));
+			probe.once('error', (err: NodeJS.ErrnoException) => {
+				if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT' || err.code === 'ENOTSOCK') {
+					finish('stale');
+				} else {
+					finish('live');
+				}
+			});
+		});
+	}
+
+	private _handleConnection(socket: net.Socket): void {
+		if (this._disposed) {
+			socket.destroy();
+			return;
+		}
+
+		this._sockets.add(socket);
+		socket.once('close', () => {
+			this._sockets.delete(socket);
+		});
+
+		socket.setTimeout(this._socketTimeoutMs);
+		socket.once('timeout', () => {
+			this._writeResponse(socket, { ok: false, error: 'Control socket request timed out' });
+			socket.destroy();
+		});
+		socket.on('error', err => {
+			this._logService?.debug('[AdeControlServer] Client socket error', err);
+			socket.destroy();
+		});
+
+		const chunks: Buffer[] = [];
+		let totalBytes = 0;
+		let handled = false;
+
+		socket.on('data', (chunk: Buffer) => {
+			if (handled) {
+				return;
+			}
+
+			const newlineIndex = chunk.indexOf(0x0a);
+			if (newlineIndex !== -1) {
+				const slice = chunk.subarray(0, newlineIndex);
+				if (totalBytes + slice.byteLength > this._maxPayloadBytes) {
+					handled = true;
+					this._writeResponse(socket, { ok: false, error: `Request exceeds maximum payload size (${this._maxPayloadBytes} bytes)` });
+					return;
+				}
+				chunks.push(slice);
+				handled = true;
+				const line = Buffer.concat(chunks).toString('utf8').replace(/\r$/, '');
+				void this._processRequestLine(socket, line);
+				return;
+			}
+
+			totalBytes += chunk.byteLength;
+			if (totalBytes > this._maxPayloadBytes) {
+				handled = true;
+				this._writeResponse(socket, { ok: false, error: `Request exceeds maximum payload size (${this._maxPayloadBytes} bytes)` });
+				return;
+			}
+			chunks.push(chunk);
+		});
+
+		socket.once('end', () => {
+			if (!handled) {
+				handled = true;
+				if (totalBytes === 0) {
+					socket.end();
+				} else {
+					this._writeResponse(socket, { ok: false, error: 'Malformed request: missing newline delimiter' });
+				}
+			}
+		});
+	}
+
+	private async _processRequestLine(socket: net.Socket, rawLine: string): Promise<void> {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(rawLine);
+		} catch {
+			this._writeResponse(socket, { ok: false, error: 'Invalid JSON request' });
+			return;
+		}
+
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+			this._writeResponse(socket, { ok: false, error: 'Invalid request object' });
+			return;
+		}
+
+		const req = parsed as Partial<IAdeControlWireRequest>;
+		if (typeof req.token !== 'string' || !this._isValidToken(req.token)) {
+			this._writeResponse(socket, { ok: false, error: 'Unauthorized: invalid control token' });
+			return;
+		}
+
+		if (typeof req.action !== 'string' || req.action.trim().length === 0) {
+			this._writeResponse(socket, { ok: false, error: 'Invalid request: action must be a non-empty string' });
+			return;
+		}
+
+		if (req.params !== undefined && (typeof req.params !== 'object' || req.params === null || Array.isArray(req.params))) {
+			this._writeResponse(socket, { ok: false, error: 'Invalid request: params must be an object' });
+			return;
+		}
+
+		if (req.windowId !== undefined && (typeof req.windowId !== 'number' || !Number.isInteger(req.windowId))) {
+			this._writeResponse(socket, { ok: false, error: 'Invalid request: windowId must be an integer' });
+			return;
+		}
+
+		try {
+			const result = await this._dispatcher({ action: req.action, params: req.params }, req.windowId);
+			this._writeResponse(socket, { ok: true, result });
+		} catch (err) {
+			const message = err instanceof Error && err.message ? err.message : toErrorMessage(err, false);
+			this._writeResponse(socket, { ok: false, error: message });
+		}
+	}
+
+	private _isValidToken(candidate: string): boolean {
+		const expectedBytes = Buffer.from(this._token, 'utf8');
+		const candidateBytes = Buffer.from(candidate, 'utf8');
+		if (expectedBytes.byteLength !== candidateBytes.byteLength) {
+			return false;
+		}
+		return crypto.timingSafeEqual(expectedBytes, candidateBytes);
+	}
+
+	private _writeResponse(socket: net.Socket, response: IAdeControlWireResponse): void {
+		if (socket.destroyed || !socket.writable) {
+			return;
+		}
+		let payload: string;
+		try {
+			payload = JSON.stringify(response) + '\n';
+		} catch (err) {
+			const fallback: IAdeControlWireResponse = {
+				ok: false,
+				error: `Failed to serialize ADE response: ${err instanceof Error ? err.message : String(err)}`,
+			};
+			payload = JSON.stringify(fallback) + '\n';
+		}
+		socket.end(payload, 'utf8');
+	}
+
+	override dispose(): void {
+		if (!this._disposed) {
+			this._disposed = true;
+
+			for (const socket of this._sockets) {
+				socket.destroy();
+			}
+			this._sockets.clear();
+
+			if (this._server) {
+				try {
+					this._server.close();
+				} catch {
+					// ignore
+				}
+				this._server = undefined;
+			}
+
+			if (!isWindows && this._activeSocketPath) {
+				try {
+					// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must unlink the Unix domain socket before process exit.
+					fs.unlinkSync(this._activeSocketPath);
+				} catch {
+					// ignore ENOENT
+				}
+			}
+
+			try {
+				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must verify PID ownership before removing metadata on shutdown.
+				const raw = fs.readFileSync(this._metaPath, 'utf8');
+				const parsed = JSON.parse(raw) as Partial<IAdeControlConnectionMetadata>;
+				if (parsed && parsed.pid === process.pid && (parsed.socketPath === undefined || parsed.socketPath === this._activeSocketPath)) {
+					// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must remove owned metadata file before process exit.
+					fs.unlinkSync(this._metaPath);
+				}
+			} catch {
+				// ignore ENOENT or malformed metadata
+			}
+		}
+
+		super.dispose();
+	}
+}

@@ -18,7 +18,6 @@ export class RecordingOTelService implements IAgentHostOTelService {
 	emitFirstResponse(): void { }
 	emitUserInteraction(): void { }
 	readonly titleChanges: Array<{ conversationId: string; sessionUri: string; title: string }> = [];
-	async getSdkTelemetryConfig(): Promise<undefined> { return undefined; }
 	async getNativeSdkTelemetryConfig(): Promise<undefined> { return undefined; }
 	getSessionTraceContext(): undefined { return undefined; }
 	setSessionComparisonMetadata(): void { }

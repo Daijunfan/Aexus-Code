@@ -29,6 +29,8 @@ import { VIEWLET_ID as SCM } from '../../contrib/scm/common/scm.js';
 import { WebviewViewPane } from '../../contrib/webviewView/browser/webviewViewPane.js';
 import { Extensions as ExtensionFeaturesRegistryExtensions, IExtensionFeatureTableRenderer, IExtensionFeaturesRegistry, IRenderedData, IRowData, ITableData } from '../../services/extensionManagement/common/extensionFeatures.js';
 import { isProposedApiEnabled } from '../../services/extensions/common/extensions.js';
+import { isCodingAgentExtension } from '../../services/extensions/common/codingAgentExtensions.js';
+import { WorkbenchModeContext } from '../../services/workbenchMode/common/workbenchMode.js';
 import { ExtensionMessageCollector, ExtensionsRegistry, IExtensionPoint, IExtensionPointUser } from '../../services/extensions/common/extensionsRegistry.js';
 
 export interface IUserFriendlyViewsContainerDescriptor {
@@ -518,9 +520,9 @@ class ViewsExtensionHandler implements IWorkbenchContribution {
 						ctorDescriptor: type === ViewType.Tree ? new SyncDescriptor(TreeViewPane) : new SyncDescriptor(WebviewViewPane),
 						id: item.id,
 						name: { value: item.name, original: item.name },
-						when: ContextKeyExpr.deserialize(item.when),
+						when: ContextKeyExpr.and(ContextKeyExpr.deserialize(item.when), isCodingAgentExtension(extension.description) ? WorkbenchModeContext.notEqualsTo('ade') : undefined),
 						containerIcon: icon || viewContainer?.icon,
-						containerTitle: item.contextualTitle || (viewContainer && (typeof viewContainer.title === 'string' ? viewContainer.title : viewContainer.title.value)),
+						containerTitle: item.contextualTitle || (viewContainer?.id === EXPLORER ? item.name : viewContainer && (typeof viewContainer.title === 'string' ? viewContainer.title : viewContainer.title.value)),
 						canToggleVisibility: true,
 						canMoveView: viewContainer?.id !== REMOTE,
 						treeView: type === ViewType.Tree ? this.instantiationService.createInstance(CustomTreeView, item.id, item.name, extension.description.identifier.value) : undefined,

@@ -599,21 +599,36 @@ CommandsRegistry.registerCommand({
 
 CommandsRegistry.registerCommand({
 	id: REMOVE_ROOT_FOLDER_COMMAND_ID,
-	handler: (accessor, resource: URI | object) => {
+	handler: async (accessor, resource: URI | URI[] | object) => {
 		const contextService = accessor.get(IWorkspaceContextService);
 		const uriIdentityService = accessor.get(IUriIdentityService);
+		const commandService = accessor.get(ICommandService);
+		const workspaceEditingService = accessor.get(IWorkspaceEditingService);
+		const listService = accessor.get(IListService);
+		const editorService = accessor.get(IEditorService);
+		const editorGroupsService = accessor.get(IEditorGroupsService);
+		const explorerService = accessor.get(IExplorerService);
+
 		const workspace = contextService.getWorkspace();
-		const resources = getMultiSelectedResources(resource, accessor.get(IListService), accessor.get(IEditorService), accessor.get(IEditorGroupsService), accessor.get(IExplorerService)).filter(resource =>
-			workspace.folders.some(folder => uriIdentityService.extUri.isEqual(folder.uri, resource)) // Need to verify resources are workspaces since multi selection can trigger this command on some non workspace resources
+		const explicitUris = URI.isUri(resource)
+			? [resource]
+			: Array.isArray(resource)
+				? resource.filter((item): item is URI => URI.isUri(item))
+				: undefined;
+		const candidateUris = explicitUris ?? getMultiSelectedResources(resource, listService, editorService, editorGroupsService, explorerService);
+		const resources = candidateUris.filter(candidate =>
+			workspace.folders.some(folder => uriIdentityService.extUri.isEqual(folder.uri, candidate)) // Need to verify resources are workspaces since multi selection can trigger this command on some non workspace resources
 		);
 
 		if (resources.length === 0) {
-			const commandService = accessor.get(ICommandService);
 			// Show a picker for the user to choose which folder to remove
 			return commandService.executeCommand(RemoveRootFolderAction.ID);
 		}
 
-		const workspaceEditingService = accessor.get(IWorkspaceEditingService);
+		if (CommandsRegistry.getCommand('workbench.action.ade.removeProjectFolder')) {
+			return commandService.executeCommand('workbench.action.ade.removeProjectFolder', resources);
+		}
+
 		return workspaceEditingService.removeFolders(resources);
 	}
 });

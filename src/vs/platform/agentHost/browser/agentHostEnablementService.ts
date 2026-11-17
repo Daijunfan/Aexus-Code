@@ -4,15 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../base/common/lifecycle.js';
-import { derived, IObservable, observableFromEvent } from '../../../base/common/observable.js';
-import { isWeb } from '../../../base/common/platform.js';
+import { derived,IObservable,observableFromEvent } from '../../../base/common/observable.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
 import { ChatAIDisabledSettingId } from '../../chat/common/chatSettings.js';
 import { IContextKeyService } from '../../contextkey/common/contextkey.js';
-import { InstantiationType, registerSingleton } from '../../instantiation/common/extensions.js';
-import { bindContextKey, observableConfigValue } from '../../observable/common/platformObservableUtils.js';
-import { COPILOT_SANDBOX_ALLOW_BYPASS_KEY, COPILOT_SANDBOX_ENABLED_KEY, IManagedSettingsService } from '../../policy/common/copilotManagedSettings.js';
-import { AGENT_HOST_ENABLED_CONTEXT_KEY, IAgentHostEnablementService } from '../common/agentHostEnablementService.js';
+import { InstantiationType,registerSingleton } from '../../instantiation/common/extensions.js';
+import { bindContextKey,observableConfigValue } from '../../observable/common/platformObservableUtils.js';
+import { COPILOT_SANDBOX_ALLOW_BYPASS_KEY,COPILOT_SANDBOX_ENABLED_KEY,IManagedSettingsService } from '../../policy/common/copilotManagedSettings.js';
+import { AGENT_HOST_ENABLED_CONTEXT_KEY,IAgentHostEnablementService } from '../common/agentHostEnablementService.js';
 
 export class AgentHostEnablementService extends Disposable implements IAgentHostEnablementService {
 
@@ -48,7 +47,7 @@ class BrowserAgentHostEnablementService extends AgentHostEnablementService {
 		@IContextKeyService contextKeyService: IContextKeyService,
 		@IManagedSettingsService managedSettingsService: IManagedSettingsService,
 	) {
-		super(!isWeb, configurationService, contextKeyService, managedSettingsService);
+		super(false, configurationService, contextKeyService, managedSettingsService);
 	}
 }
 

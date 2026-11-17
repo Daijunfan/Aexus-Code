@@ -982,7 +982,15 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 					if ('pty' in options) {
 						return extHostTerminalService.createExtensionTerminal(options);
 					}
+					const project = extHostWorkspace.getCodingAgentWorkspaceFolder(extension);
+					if (project && options.cwd === undefined) {
+						options = { ...options, cwd: project.uri };
+					}
 					return extHostTerminalService.createTerminalFromOptions(options, getTerminalInternalOptions(extension, options));
+				}
+				const project = extHostWorkspace.getCodingAgentWorkspaceFolder(extension);
+				if (project) {
+					return extHostTerminalService.createTerminalFromOptions({ name: nameOrOptions, shellPath, shellArgs: typeof shellArgs === 'string' ? shellArgs : shellArgs?.slice(), cwd: project.uri });
 				}
 				return extHostTerminalService.createTerminal(nameOrOptions, shellPath, shellArgs);
 			},
@@ -1148,31 +1156,35 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 		};
 
 		// namespace: workspace
+		const agentPattern = (pattern: vscode.GlobPattern): vscode.GlobPattern => {
+			const project = extHostWorkspace.getCodingAgentWorkspaceFolder(extension);
+			return project && typeof pattern === 'string' ? new extHostTypes.RelativePattern(project.uri, pattern) : pattern;
+		};
 
 		const workspace: typeof vscode.workspace = {
 			get rootPath() {
 				extHostApiDeprecation.report('workspace.rootPath', extension,
 					`Please use 'workspace.workspaceFolders' instead. More details: https://aka.ms/vscode-eliminating-rootpath`);
 
-				return extHostWorkspace.getPath();
+				return extHostWorkspace.getPath(extension);
 			},
 			set rootPath(value) {
 				throw new errors.ReadonlyError('rootPath');
 			},
 			getWorkspaceFolder(resource) {
-				return extHostWorkspace.getWorkspaceFolder(resource);
+				return extHostWorkspace.getWorkspaceFolder(resource, undefined, extension);
 			},
 			get workspaceFolders() {
-				return extHostWorkspace.getWorkspaceFolders();
+				return extHostWorkspace.getWorkspaceFolders(extension);
 			},
 			get name() {
-				return extHostWorkspace.name;
+				return extHostWorkspace.getCodingAgentWorkspaceFolder(extension)?.name ?? extHostWorkspace.name;
 			},
 			set name(value) {
 				throw new errors.ReadonlyError('name');
 			},
 			get workspaceFile() {
-				return extHostWorkspace.workspaceFile;
+				return extHostWorkspace.getCodingAgentWorkspaceFolder(extension) ? undefined : extHostWorkspace.workspaceFile;
 			},
 			set workspaceFile(value) {
 				throw new errors.ReadonlyError('workspaceFile');
@@ -1185,18 +1197,18 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 				return extHostWorkspace.updateWorkspaceFolders(extension, index, deleteCount || 0, ...workspaceFoldersToAdd);
 			},
 			onDidChangeWorkspaceFolders: function (listener, thisArgs?, disposables?) {
-				return _asExtensionEvent(extHostWorkspace.onDidChangeWorkspace)(listener, thisArgs, disposables);
+				return _asExtensionEvent(extHostWorkspace.getWorkspaceFoldersEvent(extension))(listener, thisArgs, disposables);
 			},
 			asRelativePath: (pathOrUri, includeWorkspace?) => {
-				return extHostWorkspace.getRelativePath(pathOrUri, includeWorkspace);
+				return extHostWorkspace.getRelativePath(pathOrUri, includeWorkspace, extension);
 			},
 			findFiles: (include, exclude, maxResults?, token?) => {
 				// Note, undefined/null have different meanings on "exclude"
-				return extHostWorkspace.findFiles(include, exclude, maxResults, extension.identifier, token);
+				return extHostWorkspace.findFiles(agentPattern(include), exclude, maxResults, extension.identifier, token);
 			},
 			findFiles2: (filePattern: vscode.GlobPattern[], options?: vscode.FindFiles2Options, token?: vscode.CancellationToken): Thenable<vscode.Uri[]> => {
 				checkProposedApiEnabled(extension, 'findFiles2');
-				return extHostWorkspace.findFiles2(filePattern, options, extension.identifier, token);
+				return extHostWorkspace.findFiles2(filePattern.map(agentPattern), options, extension.identifier, token);
 			},
 			findTextInFiles: (query: vscode.TextSearchQuery, optionsOrCallback: vscode.FindTextInFilesOptions | ((result: vscode.TextSearchResult) => void), callbackOrToken?: vscode.CancellationToken | ((result: vscode.TextSearchResult) => void), token?: vscode.CancellationToken) => {
 				checkProposedApiEnabled(extension, 'findTextInFiles');
@@ -1212,12 +1224,16 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 					token = callbackOrToken as vscode.CancellationToken;
 				}
 
+				if (extHostWorkspace.getCodingAgentWorkspaceFolder(extension)) {
+					options = { ...options, include: agentPattern(options.include ?? '**/*') };
+				}
 				return extHostWorkspace.findTextInFiles(query, options || {}, callback, extension.identifier, token);
 			},
 			findTextInFiles2: (query: vscode.TextSearchQuery2, options?: vscode.FindTextInFilesOptions2, token?: vscode.CancellationToken): vscode.FindTextInFilesResponse => {
 				checkProposedApiEnabled(extension, 'findTextInFiles2');
 				checkProposedApiEnabled(extension, 'textSearchProvider2');
-				return extHostWorkspace.findTextInFiles2(query, options, extension.identifier, token);
+				const scopedOptions = extHostWorkspace.getCodingAgentWorkspaceFolder(extension) ? { ...options, include: (options?.include ?? ['**/*']).map(agentPattern) } : options;
+				return extHostWorkspace.findTextInFiles2(query, scopedOptions, extension.identifier, token);
 			},
 			getTextDiff(originalDocument: vscode.TextDocument, modifiedDocument: vscode.TextDocument, options?: vscode.TextDiffOptions, token?: vscode.CancellationToken): vscode.TextDiffResponse {
 				checkProposedApiEnabled(extension, 'documentDiff');
@@ -1380,6 +1396,9 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 			},
 			getConfiguration(section?: string, scope?: vscode.ConfigurationScope | null): vscode.WorkspaceConfiguration {
 				scope = arguments.length === 1 ? undefined : scope;
+				if (scope === undefined) {
+					scope = extHostWorkspace.getCodingAgentWorkspaceFolder(extension)?.uri;
+				}
 				return configProvider.getConfiguration(section, scope, extension);
 			},
 			registerTextDocumentContentProvider(scheme: string, provider: vscode.TextDocumentContentProvider) {

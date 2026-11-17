@@ -22,6 +22,7 @@ skills:
 ignoredOptionalDependencies:
   - '@parcel/watcher-*'
 allowBuilds:
+  '@vscode/vsce-sign@2.1.0': true
   '@parcel/watcher@2.5.6': true
   '@vscode/deviceid@0.1.5': true
   '@vscode/fs-copyfile@2.0.0': true

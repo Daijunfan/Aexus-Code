@@ -7,7 +7,7 @@ import es from 'event-stream';
 import fs from 'fs';
 import cp from 'child_process';
 import glob from 'glob';
-import { gulp, filter, rename, buffer, vinylZip, jsonEditor } from './gulp/facade.ts';
+import { gulp,filter,rename,buffer,vinylZip,jsonEditor } from './gulp/facade.ts';
 import path from 'path';
 import crypto from 'crypto';
 import { Stream } from 'stream';
@@ -18,9 +18,9 @@ import fancyLog from 'fancy-log';
 import ansiColors from 'ansi-colors';
 import * as jsoncParser from 'jsonc-parser';
 import { getProductionDependencies } from './dependencies.ts';
-import { type IExtensionDefinition, getExtensionStream } from './builtInExtensions.ts';
-import { fetchUrls, fetchGithub } from './fetch.ts';
-import { createTsgoStream, spawnTsgo } from './tsgo.ts';
+import { type IExtensionDefinition,getExtensionStream } from './builtInExtensions.ts';
+import { fetchUrls,fetchGithub } from './fetch.ts';
+import { createTsgoStream,spawnTsgo } from './tsgo.ts';
 import watcher from './watch/index.ts';
 
 import { createRequire } from 'module';
@@ -337,7 +337,6 @@ const nativeExtensions = [
 ];
 
 const excludedExtensions = [
-	'copilot',
 	'vscode-api-tests',
 	'vscode-colorize-tests',
 	'vscode-colorize-perf-tests',
@@ -541,33 +540,6 @@ function getSharedExtensionDependencyFolders(): { folder: string; destination: s
 		result.set(destination, folder);
 	}
 	return [...result].map(([destination, folder]) => ({ folder: path.relative(root, folder).split(path.sep).join('/'), destination }));
-}
-
-/**
- * Package the built-in copilot extension specifically.
- * This is used by non-CI local builds where copilot is not downloaded as a VSIX
- * but must be compiled from source and included in the build.
- */
-export function packageCopilotExtensionStream(): Stream {
-	const extensionPath = path.join(root, 'extensions', 'copilot');
-	if (!fs.existsSync(extensionPath)) {
-		return es.readArray([]);
-	}
-
-	const localExtensionsStream = minifyExtensionResources(
-		fromLocal(extensionPath, false)
-			.pipe(rename(p => p.dirname = `extensions/copilot/${p.dirname}`))
-	);
-
-	const productionDependencies = getProductionDependencies('extensions/copilot');
-	const dependenciesSrc = productionDependencies.map(d => path.relative(root, d)).map(d => [`${d}/**`, `!${d}/**/{test,tests}/**`]).flat();
-
-	return es.merge(
-		localExtensionsStream,
-		gulp.src(dependenciesSrc, { base: '.' })
-			.pipe(util2.cleanNodeModules(path.join(root, 'build', '.moduleignore')))
-			.pipe(util2.cleanNodeModules(path.join(root, 'build', `.moduleignore.${process.platform}`)))
-	).pipe(util2.setExecutableBit(['**/*.sh']));
 }
 
 export function packageMarketplaceExtensionsStream(forWeb: boolean): Stream {

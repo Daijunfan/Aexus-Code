@@ -451,6 +451,12 @@ declare module 'vscode' {
 		// TODO: link request + response to encourage correct usage?
 		readonly history: ReadonlyArray<ChatRequestTurn | ChatResponseTurn2>;
 
+		/** A new authoritative history snapshot, including changes made by another agent. */
+		readonly onDidChangeHistory?: Event<ReadonlyArray<ChatRequestTurn | ChatResponseTurn2>>;
+
+		/** Releases resources owned by this resolved session when its content is disposed. */
+		dispose?(): void;
+
 		/**
 		 * Options configured for this session as key-value pairs.
 		 * Keys correspond to option group IDs (e.g., 'models', 'subagents').

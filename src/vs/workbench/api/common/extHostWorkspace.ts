@@ -12,11 +12,12 @@ import { StopWatch } from '../../../base/common/stopwatch.js';
 import { TernarySearchTree } from '../../../base/common/ternarySearchTree.js';
 import { Schemas } from '../../../base/common/network.js';
 import { Counter } from '../../../base/common/numbers.js';
-import { basename, basenameOrAuthority, dirname, ExtUri, relativePath } from '../../../base/common/resources.js';
+import { basename, basenameOrAuthority, dirname, ExtUri, isEqualOrParent, relativePath } from '../../../base/common/resources.js';
 import { compare } from '../../../base/common/strings.js';
 import { isUriComponents, URI, UriComponents } from '../../../base/common/uri.js';
 import { localize } from '../../../nls.js';
 import { ExtensionIdentifier, IExtensionDescription } from '../../../platform/extensions/common/extensions.js';
+import { isCodingAgentExtension, isWorkspaceIndependentExtension } from '../../services/extensions/common/codingAgentExtensions.js';
 import { FileSystemProviderCapabilities } from '../../../platform/files/common/files.js';
 import { createDecorator } from '../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../platform/log/common/log.js';
@@ -197,6 +198,10 @@ export class ExtHostWorkspace implements ExtHostWorkspaceShape, IExtHostWorkspac
 
 	private readonly _onDidChangeWorkspace = new Emitter<vscode.WorkspaceFoldersChangeEvent>();
 	readonly onDidChangeWorkspace: Event<vscode.WorkspaceFoldersChangeEvent> = this._onDidChangeWorkspace.event;
+	private readonly _onDidChangeCodingAgentProject = new Emitter<string | undefined>();
+	private _codingAgentProject: URI | undefined;
+	private readonly _codingAgentProjects = new Map<string, URI | undefined>();
+	private readonly _codingAgentFolders = new Map<string, { source: vscode.WorkspaceFolder; folder: vscode.WorkspaceFolder }>();
 
 	private readonly _onDidGrantWorkspaceTrust = new Emitter<void>();
 	readonly onDidGrantWorkspaceTrust: Event<void> = this._onDidGrantWorkspaceTrust.event;
@@ -277,6 +282,56 @@ export class ExtHostWorkspace implements ExtHostWorkspaceShape, IExtHostWorkspac
 
 	// --- workspace ---
 
+	$acceptCodingAgentProject(project: UriComponents | undefined, extensionId?: string): void {
+		const resource = URI.revive(project);
+		const key = extensionId?.toLowerCase();
+		const previous = key ? this._codingAgentProjects.get(key) : this._codingAgentProject;
+		if (previous?.toString() === resource?.toString()) {
+			return;
+		}
+		if (key) {
+			this._codingAgentProjects.set(key, resource);
+			this._codingAgentFolders.delete(key);
+		} else {
+			this._codingAgentProject = resource;
+			this._codingAgentFolders.clear();
+		}
+		this._onDidChangeCodingAgentProject.fire(key);
+	}
+
+	getCodingAgentWorkspaceFolder(extension?: IExtensionDescription): vscode.WorkspaceFolder | undefined {
+		if (!extension || !isCodingAgentExtension(extension) || isWorkspaceIndependentExtension(extension)) {
+			return undefined;
+		}
+		const key = extension.identifier.value.toLowerCase();
+		const project = this._codingAgentProjects.has(key) ? this._codingAgentProjects.get(key) : this._codingAgentProject;
+		if (!project) { return undefined; }
+		const source = this.getWorkspaceFolder(project);
+		if (!source) {
+			return undefined;
+		}
+		let cached = this._codingAgentFolders.get(key);
+		if (cached?.source !== source || cached.folder.name !== source.name) {
+			cached = { source, folder: { uri: source.uri, name: source.name, index: 0 } };
+			this._codingAgentFolders.set(key, cached);
+		}
+		return cached.folder;
+	}
+
+	getWorkspaceFoldersEvent(extension: IExtensionDescription): Event<vscode.WorkspaceFoldersChangeEvent> {
+		if (!isCodingAgentExtension(extension) || isWorkspaceIndependentExtension(extension)) {
+			return this.onDidChangeWorkspace;
+		}
+		let previous = this.getWorkspaceFolders(extension) ?? [];
+		const bindingChanges = Event.filter(this._onDidChangeCodingAgentProject.event, id => id === undefined || id === extension.identifier.value.toLowerCase());
+		return Event.filter(Event.map(Event.any(Event.map(this.onDidChangeWorkspace, () => { }), Event.map(bindingChanges, () => { })), () => {
+			const current = this.getWorkspaceFolders(extension) ?? [];
+			const change = delta(previous, current, compareWorkspaceFolderByUri, this._extHostFileSystemInfo);
+			previous = current;
+			return Object.freeze(change);
+		}), change => change.added.length > 0 || change.removed.length > 0);
+	}
+
 	get workspace(): Workspace | undefined {
 		return this._actualWorkspace;
 	}
@@ -303,7 +358,11 @@ export class ExtHostWorkspace implements ExtHostWorkspaceShape, IExtHostWorkspac
 		return this._unconfirmedWorkspace || this._confirmedWorkspace;
 	}
 
-	getWorkspaceFolders(): vscode.WorkspaceFolder[] | undefined {
+	getWorkspaceFolders(extension?: IExtensionDescription): vscode.WorkspaceFolder[] | undefined {
+		const project = this.getCodingAgentWorkspaceFolder(extension);
+		if (project) {
+			return [project];
+		}
 		if (!this._actualWorkspace) {
 			return undefined;
 		}
@@ -383,7 +442,14 @@ export class ExtHostWorkspace implements ExtHostWorkspaceShape, IExtHostWorkspac
 		return true;
 	}
 
-	getWorkspaceFolder(uri: vscode.Uri, resolveParent?: boolean): vscode.WorkspaceFolder | undefined {
+	getWorkspaceFolder(uri: vscode.Uri, resolveParent?: boolean, extension?: IExtensionDescription): vscode.WorkspaceFolder | undefined {
+		const project = this.getCodingAgentWorkspaceFolder(extension);
+		if (project) {
+			if (resolveParent && isFolderEqual(uri, project.uri, this._extHostFileSystemInfo)) {
+				return undefined;
+			}
+			return isEqualOrParent(uri, project.uri, ignorePathCasing(project.uri, this._extHostFileSystemInfo)) ? project : undefined;
+		}
 		if (!this._actualWorkspace) {
 			return undefined;
 		}
@@ -406,24 +472,11 @@ export class ExtHostWorkspace implements ExtHostWorkspaceShape, IExtHostWorkspac
 		return this._actualWorkspace.resolveWorkspaceFolder(uri);
 	}
 
-	getPath(): string | undefined {
-
-		// this is legacy from the days before having
-		// multi-root and we keep it only alive if there
-		// is just one workspace folder.
-		if (!this._actualWorkspace) {
-			return undefined;
-		}
-
-		const { folders } = this._actualWorkspace;
-		if (folders.length === 0) {
-			return undefined;
-		}
-		// #54483 @Joh Why are we still using fsPath?
-		return folders[0].uri.fsPath;
+	getPath(extension?: IExtensionDescription): string | undefined {
+		return this.getWorkspaceFolders(extension)?.[0]?.uri.fsPath;
 	}
 
-	getRelativePath(pathOrUri: string | vscode.Uri, includeWorkspace?: boolean): string {
+	getRelativePath(pathOrUri: string | vscode.Uri, includeWorkspace?: boolean, extension?: IExtensionDescription): string {
 
 		let resource: URI | undefined;
 		let path: string = '';
@@ -441,7 +494,8 @@ export class ExtHostWorkspace implements ExtHostWorkspaceShape, IExtHostWorkspac
 
 		const folder = this.getWorkspaceFolder(
 			resource,
-			true
+			true,
+			extension
 		);
 
 		if (!folder) {
@@ -449,7 +503,7 @@ export class ExtHostWorkspace implements ExtHostWorkspaceShape, IExtHostWorkspac
 		}
 
 		if (typeof includeWorkspace === 'undefined' && this._actualWorkspace) {
-			includeWorkspace = this._actualWorkspace.folders.length > 1;
+			includeWorkspace = (this.getWorkspaceFolders(extension)?.length ?? 0) > 1;
 		}
 
 		let result = relativePath(folder.uri, resource);

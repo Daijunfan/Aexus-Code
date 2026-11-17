@@ -24,7 +24,8 @@ import { isChatViewTitleActionContext } from '../../contrib/chat/common/actions/
 import { IChatAgentRequest, IChatAgentResult, IChatAgentResultTimings, UserSelectedTools } from '../../contrib/chat/common/participants/chatAgents.js';
 import { ChatAgentVoteDirection, IChatContentReference, IChatFollowup, IChatResponseErrorDetails, IChatUserActionEvent, IChatVoteAction } from '../../contrib/chat/common/chatService/chatService.js';
 import { ChatRequestHooks } from '../../contrib/chat/common/promptSyntax/hookSchema.js';
-import { LocalChatSessionUri } from '../../contrib/chat/common/model/chatUri.js';
+import { getChatSessionType, LocalChatSessionUri } from '../../contrib/chat/common/model/chatUri.js';
+import { localChatSessionType } from '../../contrib/chat/common/chatSessionsService.js';
 import { ChatAgentLocation } from '../../contrib/chat/common/constants.js';
 import { checkProposedApiEnabled, isProposedApiEnabled } from '../../services/extensions/common/extensions.js';
 import { Dto } from '../../services/extensions/common/proxyIdentifier.js';
@@ -1000,8 +1001,11 @@ export class ExtHostChatAgents2 extends Disposable implements ExtHostChatAgentsS
 
 			stream = new ChatAgentResponseStream(agent.extension, request, this._proxy, this._commands.converter, sessionDisposables, this._pendingCarouselResolvers, token);
 
-			const model = await this._languageModels.getLanguageModelForRequest(agent.extension, request.userSelectedModelId);
-			const tools = await this.getToolsForRequest(agent.extension, request.userSelectedTools, model.id, token);
+			// Contributed engines can manage their own model and credentials without a VS Code model provider.
+			const model = request.userSelectedModelId || getChatSessionType(request.sessionResource) === localChatSessionType
+				? await this._languageModels.getLanguageModelForRequest(agent.extension, request.userSelectedModelId)
+				: await this._languageModels.getDefaultLanguageModel(agent.extension);
+			const tools = await this.getToolsForRequest(agent.extension, request.userSelectedTools, model?.id ?? '', token);
 			const extRequest = typeConvert.ChatAgentRequest.to(
 				request,
 				location,

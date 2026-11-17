@@ -1,0 +1,130 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { Codicon } from '../../../../base/common/codicons.js';
+import { Schemas } from '../../../../base/common/network.js';
+import { basename, joinPath } from '../../../../base/common/resources.js';
+import { URI } from '../../../../base/common/uri.js';
+import { localize } from '../../../../nls.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { ILabelService } from '../../../../platform/label/common/label.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IShellLaunchConfig } from '../../../../platform/terminal/common/terminal.js';
+import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { IPathService } from '../../../services/path/common/pathService.js';
+import { IWorkbenchModeService } from '../../../services/workbenchMode/common/workbenchMode.js';
+import { IAdeProjectsService } from '../../ade/common/ade.js';
+import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
+
+export interface IProjectTerminalTarget {
+	readonly uri: URI;
+	readonly name: string;
+	readonly host: string;
+}
+
+interface IStoredSSHProject {
+	host: string;
+	path: string;
+	name: string;
+}
+
+export const SSH_PROJECT_SCHEME = 'aexus-ssh';
+export const IProjectTerminalService = createDecorator<IProjectTerminalService>('projectTerminalService');
+
+export interface IProjectTerminalService {
+	readonly _serviceBrand: undefined;
+	readonly currentProject: IProjectTerminalTarget | undefined;
+	readonly projects: readonly IProjectTerminalTarget[];
+	readonly sshProjects: readonly IProjectTerminalTarget[];
+	addSSHProject(host: string, path: string, name?: string): IProjectTerminalTarget;
+	findProject(cwd: string | URI | undefined): IProjectTerminalTarget | undefined;
+	getLaunchConfig(target: IProjectTerminalTarget): IShellLaunchConfig;
+}
+
+/** Resolves project context at creation time; running terminals retain their own host and cwd. */
+export class ProjectTerminalService implements IProjectTerminalService {
+	declare readonly _serviceBrand: undefined;
+	private _sshEntries: IStoredSSHProject[];
+
+	constructor(
+		@IWorkbenchModeService private readonly _modes: IWorkbenchModeService,
+		@IProjectNavigationService private readonly _ide: IProjectNavigationService,
+		@IAdeProjectsService private readonly _ade: IAdeProjectsService,
+		@IPathService private readonly _paths: IPathService,
+		@ILabelService private readonly _labels: ILabelService,
+		@IUriIdentityService private readonly _uriIdentity: IUriIdentityService,
+		@IStorageService private readonly _storage: IStorageService,
+		@IConfigurationService private readonly _configuration: IConfigurationService,
+	) {
+		this._sshEntries = _storage.getObject<IStoredSSHProject[]>('aexus.terminal.sshProjects', StorageScope.PROFILE, []);
+	}
+
+	private _workspaceTarget(uri: URI, name: string): IProjectTerminalTarget {
+		return { uri, name, host: uri.scheme === Schemas.file ? localize('localHost', "Local") : this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority };
+	}
+
+	get projects(): readonly IProjectTerminalTarget[] {
+		return this._modes.mode === 'ide'
+			? this._ide.orderedProjects.map(folder => this._workspaceTarget(folder.uri, folder.name))
+			: this._ade.projects.map(project => this._workspaceTarget(project.uri, project.name));
+	}
+
+	get currentProject(): IProjectTerminalTarget | undefined {
+		const project = this._modes.mode === 'ide'
+			? this._ide.selectedProject
+			: (this._ide.focusedProject ?? this._ade.selectedProject ?? this._ide.selectedProject);
+		return project ? this._workspaceTarget(project.uri, project.name) : undefined;
+	}
+
+	get sshProjects(): readonly IProjectTerminalTarget[] {
+		return this._sshEntries.map(entry => ({ uri: URI.from({ scheme: SSH_PROJECT_SCHEME, authority: entry.host, path: entry.path }), name: entry.name, host: entry.host }));
+	}
+
+	addSSHProject(host: string, path: string, name = basename(URI.file(path)) || host): IProjectTerminalTarget {
+		this._sshEntries = this._sshEntries.filter(entry => entry.host !== host || entry.path !== path);
+		this._sshEntries.push({ host, path, name });
+		this._storage.store('aexus.terminal.sshProjects', JSON.stringify(this._sshEntries), StorageScope.PROFILE, StorageTarget.MACHINE);
+		return this.sshProjects[this.sshProjects.length - 1];
+	}
+
+	findProject(cwd: string | URI | undefined): IProjectTerminalTarget | undefined {
+		if (!URI.isUri(cwd)) {
+			return undefined;
+		}
+		const projects = [
+			...this.projects,
+			...this._ide.orderedProjects.map(folder => this._workspaceTarget(folder.uri, folder.name)),
+			...this._ade.projects.map(project => this._workspaceTarget(project.uri, project.name)),
+		];
+		return projects
+			.filter(project => this._uriIdentity.extUri.isEqualOrParent(cwd, project.uri))
+			.sort((a, b) => b.uri.path.length - a.uri.path.length)[0];
+	}
+
+	getLaunchConfig(target: IProjectTerminalTarget): IShellLaunchConfig {
+		const name = localize('projectTerminalTitle', "{0} · {1}", target.name, target.host);
+		if (target.uri.scheme !== SSH_PROJECT_SCHEME) {
+			return { name, cwd: target.uri };
+		}
+		// Quote the remote POSIX path without changing its contents or expanding shell expressions.
+		const path = `'${target.uri.path.replace(/'/g, `'\\''`)}'`;
+		let configFile = this._configuration.getValue<string>('remote.SSH.configFile');
+		if (configFile?.startsWith('~/') || configFile?.startsWith('~\\')) {
+			configFile = joinPath(this._paths.userHome({ preferLocal: true }), configFile.slice(2)).fsPath;
+		}
+		return {
+			name,
+			hostLabel: target.host,
+			icon: Codicon.remote,
+			executable: 'ssh',
+			args: [...(configFile ? ['-F', configFile] : []), '-t', '--', target.host, `cd -- ${path} && exec "\${SHELL:-/bin/sh}" -l`],
+			cwd: this._paths.userHome({ preferLocal: true }),
+			ignoreConfigurationCwd: true,
+			isRemotePty: true,
+			waitOnExit: true,
+		};
+	}
+}

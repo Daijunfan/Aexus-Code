@@ -10,31 +10,27 @@ import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
-import { IWorkspaceContextService, UNKNOWN_EMPTY_WINDOW_WORKSPACE, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
+import { IWorkspaceContextService,UNKNOWN_EMPTY_WINDOW_WORKSPACE,WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
-import { ILifecycleService, LifecyclePhase, StartupKind } from '../../../services/lifecycle/common/lifecycle.js';
-import { Disposable, } from '../../../../base/common/lifecycle.js';
+import { ILifecycleService,LifecyclePhase,StartupKind } from '../../../services/lifecycle/common/lifecycle.js';
+import { Disposable,} from '../../../../base/common/lifecycle.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { joinPath } from '../../../../base/common/resources.js';
-import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
-import { GettingStartedEditorOptions, GettingStartedInput, gettingStartedInputTypeId } from './gettingStartedInput.js';
+import { IWorkbenchLayoutService,Parts } from '../../../services/layout/browser/layoutService.js';
+import { GettingStartedEditorOptions,GettingStartedInput,gettingStartedInputTypeId } from './gettingStartedInput.js';
 import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
-import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IStorageService,StorageScope,StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { getTelemetryLevel } from '../../../../platform/telemetry/common/telemetryUtils.js';
 import { TelemetryLevel } from '../../../../platform/telemetry/common/telemetry.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { localize } from '../../../../nls.js';
-import { IEditorResolverService, RegisteredEditorPriority } from '../../../services/editor/common/editorResolverService.js';
+import { IEditorResolverService,RegisteredEditorPriority } from '../../../services/editor/common/editorResolverService.js';
 import { TerminalCommandId } from '../../terminal/common/terminal.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { AuxiliaryBarMaximizedContext } from '../../../common/contextkeys.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { getActiveElement } from '../../../../base/browser/dom.js';
-import { isWeb } from '../../../../base/common/platform.js';
-import { IOnboardingService } from '../../welcomeOnboarding/common/onboardingService.js';
-import { ONBOARDING_STORAGE_KEY } from '../../welcomeOnboarding/common/onboardingTypes.js';
-import { IChatEntitlementService } from '../../../services/chat/common/chatEntitlementService.js';
 
 export const restoreWalkthroughsConfigurationKey = 'workbench.welcomePage.restorableWalkthroughs';
 export type RestoreWalkthroughsConfigurationValue = { folder: string; category?: string; step?: string };
@@ -95,12 +91,9 @@ export class StartupPageRunnerContribution extends Disposable implements IWorkbe
 		@IStorageService private readonly storageService: IStorageService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
-		@IOnboardingService private readonly onboardingService: IOnboardingService,
-		@IChatEntitlementService private readonly chatEntitlementService: IChatEntitlementService,
 	) {
 		super();
 
-		this.tryShowOnboarding();
 		this.run().then(undefined, onUnexpectedError);
 		this._register(this.editorService.onDidCloseEditor((e) => {
 			if (e.editor instanceof GettingStartedInput) {
@@ -233,39 +226,6 @@ export class StartupPageRunnerContribution extends Disposable implements IWorkbe
 		return true; // do not steal focus
 	}
 
-	private tryShowOnboarding(): void {
-		if (this.environmentService.skipWelcome) {
-			return; // skip welcome flag is set
-		}
-
-		if (isWeb) {
-			return; // not supported on web (e.g. codespaces, github.dev)
-		}
-
-		if (!this.configurationService.getValue<boolean>('workbench.welcomePage.experimentalOnboarding')) {
-			return; // experimental onboarding is disabled
-		}
-
-		if (this.chatEntitlementService.sentiment.hidden) {
-			return; // AI features are hidden, do not show AI-focused onboarding
-		}
-
-		if (!this.storageService.isNew(StorageScope.APPLICATION)) {
-			return; // only show onboarding for new users who have never used the product before
-		}
-
-		if (this.storageService.getBoolean(ONBOARDING_STORAGE_KEY, StorageScope.APPLICATION)) {
-			return; // onboarding already completed
-		}
-
-		// Show the onboarding overlay on top of the welcome page
-		this.onboardingService.show();
-
-		// Mark onboarding as completed when dismissed
-		this._register(this.onboardingService.onDidDismiss(() => {
-			this.storageService.store(ONBOARDING_STORAGE_KEY, true, StorageScope.APPLICATION, StorageTarget.USER);
-		}));
-	}
 }
 
 function isStartupPageEnabled(configurationService: IConfigurationService, contextService: IWorkspaceContextService, environmentService: IWorkbenchEnvironmentService) {

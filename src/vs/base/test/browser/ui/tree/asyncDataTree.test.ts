@@ -101,6 +101,33 @@ suite('AsyncDataTree', function () {
 
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
+	test('resorts roots without fetching children or losing expanded state and selection', async () => {
+		const container = document.createElement('div');
+		const calls: string[] = [];
+		const dataSource = new class extends DataSource {
+			override getChildren(element: Element): Promise<Element[]> {
+				calls.push(element.id);
+				return super.getChildren(element);
+			}
+		};
+		const model = new Model({ id: 'root', children: [{ id: 'a', children: [{ id: 'aa' }, { id: 'ab' }] }, { id: 'b', children: [{ id: 'ba' }] }] });
+		let direction = 1;
+		const tree = store.add(new AsyncDataTree<Element, Element>('test', container, new VirtualDelegate(), [new Renderer()], dataSource, {
+			identityProvider: new IdentityProvider(),
+			sorter: { compare: (a, b) => direction * a.id.localeCompare(b.id) },
+		}));
+		tree.layout(40);
+		await tree.setInput(model.root);
+		await tree.expand(model.get('a'));
+		tree.setSelection([model.get('aa')]);
+		tree.scrollTop = 20;
+		direction = -1;
+		tree.resort(undefined, false);
+		assert.deepStrictEqual({ order: tree.getNode().children.map(node => node.element.id), children: tree.getNode(model.get('a')).children.map(node => node.element.id), collapsed: tree.getNode(model.get('a')).collapsed, selection: tree.getSelection().map(element => element.id), scrollTop: tree.scrollTop, calls }, {
+			order: ['b', 'a'], children: ['aa', 'ab'], collapsed: false, selection: ['aa'], scrollTop: 20, calls: ['root', 'a'],
+		});
+	});
+
 	test('Collapse state should be preserved across refresh calls', async () => {
 		const container = document.createElement('div');
 
