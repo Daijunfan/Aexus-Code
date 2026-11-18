@@ -20,4 +20,6 @@ function readAllStdin(): Promise<string> {
 void readAllStdin().then(async stdinText => {
 	const result = await evaluateAgyPreInvocationHook(stdinText, process.env[ROLE_STATE_ENV_KEY]);
 	process.stdout.write(JSON.stringify(result) + '\n');
+}).catch(() => {
+	process.stdout.write('{}\n');
 });

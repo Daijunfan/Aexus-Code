@@ -223,18 +223,21 @@ class AexusSshGitHeadContentProvider implements ITextModelContentProvider {
 		const params = new URLSearchParams(resource.query);
 		const rootPath = params.get('root') || '/';
 		const relPath = params.get('rel') || resource.path.replace(/^\/+/, '');
-		let content = '';
 		try {
-			content = await this.backend.remoteGitShowHead(resource.authority, rootPath, relPath);
+			const content = await this.backend.remoteGitShowHead(resource.authority, rootPath, relPath);
+			if (existing) {
+				existing.setValue(content);
+				return existing;
+			}
+			const langSelection = this.languageService.createByFilepathOrFirstLine(URI.file(resource.path));
+			return this.modelService.createModel(content, langSelection, resource, false);
 		} catch {
-			content = '';
+			if (existing) {
+				return existing;
+			}
+			const langSelection = this.languageService.createByFilepathOrFirstLine(URI.file(resource.path));
+			return this.modelService.createModel('', langSelection, resource, false);
 		}
-		if (existing) {
-			existing.setValue(content);
-			return existing;
-		}
-		const langSelection = this.languageService.createByFilepathOrFirstLine(URI.file(resource.path));
-		return this.modelService.createModel(content, langSelection, resource, false);
 	}
 }
 

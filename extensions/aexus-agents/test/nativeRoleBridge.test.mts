@@ -194,6 +194,151 @@ describe('ADE Native Extension Role Bridge', () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	describe('stripInjectedAdeContextFromUserTurn & filterAndCleanHistoryTurns', () => {
+		const stripPreamble = (text: string): string => sharedModule.stripInjectedAdeContextFromUserTurn(text);
+
+		it('strips a sentinel-delimited preamble stacking Role Context, Cloud Host, Active Goal & keeps the prompt with attached files', () => {
+			const raw = [
+				'[Aexus Orchestrated Role Context]',
+				'You ARE an official orchestrated organizational agent session.',
+				'- Role: Governor',
+				'- Direct Subordinates: Beta Employee (emp-1)',
+				'',
+				'[Aexus Cloud Host Project Context]',
+				'- Active Project is on SSH Cloud Host `prod-eu-1` at remote directory `/srv/alpha` (URI: `vscode-remote://ssh-remote+prod-eu-1/srv/alpha`, OS: `linux`).',
+				'- Execute shell commands, builds, tests, and file edits on the Cloud Host via SSH.',
+				'',
+				'[Autonomous Session Goal Active]',
+				'Goal Condition: Ship the telemetry refactor.',
+				'- Execute thoroughly and verify all requirements end-to-end before stopping.',
+				'- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker `<!-- AEXUS_GOAL_COMPLETE -->` at the very end of your response.',
+				'',
+				sharedModule.AEXUS_PREAMBLE_END_MARKER,
+				'',
+				'Fix the flaky native role bridge test.',
+				'',
+				'Attached files:',
+				'- src/nativeRoleBridge.ts',
+				'- test/nativeRoleBridge.test.mts',
+			].join('\n');
+
+			const expected = [
+				'Fix the flaky native role bridge test.',
+				'',
+				'Attached files:',
+				'- src/nativeRoleBridge.ts',
+				'- test/nativeRoleBridge.test.mts',
+			].join('\n');
+
+			assert.deepStrictEqual(stripPreamble(raw), expected);
+			assert.deepStrictEqual(stripPreamble(expected), expected, 'Expected stripping to be idempotent');
+		});
+
+		it('peels stacked legacy blocks without a sentinel (Role Context, hierarchy delta, Secretary viewport, Cloud Host, multi-paragraph goal)', () => {
+			const raw = [
+				'[Aexus Orchestrated Role Context]',
+				'You ARE an official orchestrated organizational agent session.',
+				'- Role: Governor',
+				'- Direct Subordinates: Beta Employee (emp-1)',
+				'',
+				'[ADE Live Hierarchy State]',
+				'- Governor: Alpha Governor (gov-1)',
+				'- Employee: Beta Employee (emp-1)',
+				'- Worker: Gamma Worker (wrk-1)',
+				'',
+				'[Aexus ADE Live Viewport & Macro Control Context]',
+				'You are the global **Secretary** in **Aexus Code ADE**.',
+				'- Active Project: Alpha',
+				'- Focused Agent: Gamma Worker (wrk-1)',
+				'',
+				'[Aexus Cloud Host Project Context]',
+				'- Shared SSH Cloud Host `prod-eu-1` at remote directory `/srv/alpha`.',
+				'- Network latency budget applies to every remote command.',
+				'',
+				'[Autonomous Session Goal Active]',
+				'Goal Condition: Reconcile the DAG analytics with the live hierarchy.',
+				'',
+				'Every Employee must report its branch status before the next heartbeat, and no Worker may remain idle across two consecutive rounds.',
+				'',
+				'Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker `<!-- AEXUS_GOAL_COMPLETE -->` at the very end of your response.',
+				'',
+				'Re-run the analytics test suite and summarize the delta.',
+			].join('\n');
+
+			assert.deepStrictEqual(stripPreamble(raw), 'Re-run the analytics test suite and summarize the delta.');
+		});
+
+		it('strips the single-newline array-joined Codex fallback with a doubled Role Context header', () => {
+			const raw = [
+				'[Aexus Orchestrated Role Context]',
+				'[Aexus Orchestrated Role Context]',
+				'- Role: Governor',
+				'- Direct Subordinates: Beta Employee (emp-1)',
+				'你的身份?',
+			].join('\n');
+
+			assert.deepStrictEqual(stripPreamble(raw), '你的身份?');
+		});
+
+		it('strips Claude Role Context Updated and Role Cleared turns', () => {
+			const updated = [
+				'[Aexus Orchestrated Role Context Updated]',
+				'- Role: Governor',
+				'- Direct Subordinates: Beta Employee (emp-1)',
+				'- Board: Alpha',
+				'请汇报当前进度',
+			].join('\n');
+			const cleared = [
+				'[Aexus Role Cleared: Governor]',
+				'现在你是一名普通 Worker。',
+			].join('\n');
+
+			assert.deepStrictEqual(
+				[stripPreamble(updated), stripPreamble(cleared)],
+				['请汇报当前进度', '现在你是一名普通 Worker。'],
+			);
+		});
+
+		it('drops the silent role initialization with its assistant ack, even when prefixed by nativeRoleBridge, and condenses goal stop-checks', () => {
+			const turns: Array<{ id: string; role: 'user' | 'assistant'; text: string }> = [
+				{ id: 'u-init', role: 'user', text: `${sharedModule.ROLE_INIT_MARKER}\nSilent warmup: internalize the charter and reply with the exact single token: ACK` },
+				{ id: 'a-init', role: 'assistant', text: 'ACK' },
+				{ id: 'u-prefixed-init', role: 'user', text: '[Aexus Orchestrated Role Context]\n- Role: Governor\n\n[AEXUS_ADE_ROLE_INITIALIZATION]\nReply with the exact single token: ACK' },
+				{ id: 'a-prefixed-init', role: 'assistant', text: 'ACK' },
+				{ id: 'u-prompt', role: 'user', text: 'Now wire the telemetry counter.' },
+				{ id: 'a-prompt', role: 'assistant', text: 'Done.' },
+				{ id: 'u-stop', role: 'user', text: '[Autonomous Goal Stop-Check — Round 2/6]\nActive Goal: Ship the telemetry refactor.\nYou stopped without emitting `<!-- AEXUS_GOAL_COMPLETE -->`.' },
+			];
+
+			assert.deepStrictEqual(sharedModule.filterAndCleanHistoryTurns(turns), [
+				{ id: 'u-prompt', role: 'user', text: 'Now wire the telemetry counter.' },
+				{ id: 'a-prompt', role: 'assistant', text: 'Done.' },
+				{ id: 'u-stop', role: 'user', text: '[Autonomous Goal Verification · Round 2/6]', isSystemInitiated: true },
+			]);
+		});
+
+		it('preserves normal user prompts and turns untouched', () => {
+			const prompts = [
+				'Fix the flaky native role bridge test.',
+				'- not a bullet preamble\nJust a dash-led prompt.',
+				'你好，请总结一下 [Aexus Orchestrated Role Context] 的作用。',
+				'Documentation mentions this sentinel <!-- /AEXUS_ADE_PREAMBLE --> mid-text.',
+				'',
+			];
+			assert.deepStrictEqual(prompts.map(stripPreamble), prompts);
+
+			const turns: Array<{ id: string; role: 'user' | 'assistant'; text: string }> = [
+				{ id: 'u-1', role: 'user', text: 'Summarize the failing test.\n\nAttached files:\n- test/nativeRoleBridge.test.mts' },
+				{ id: 'a-1', role: 'assistant', text: 'The failure is a timeout.' },
+				{ id: 'u-empty', role: 'user', text: '' },
+			];
+			assert.deepStrictEqual(sharedModule.filterAndCleanHistoryTurns(turns), [
+				{ id: 'u-1', role: 'user', text: 'Summarize the failing test.\n\nAttached files:\n- test/nativeRoleBridge.test.mts' },
+				{ id: 'a-1', role: 'assistant', text: 'The failure is a timeout.' },
+			]);
+		});
+	});
+
 	it('injects --append-system-prompt for Claude Governor, tracks session_id & hot-swap updates, and keeps pure Worker clean', async () => {
 		const bridgeDir = path.join(tempDir, 'claude-bridge');
 		const spawns: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; child: MockChildProcess; stdinChunks: string[] }> = [];

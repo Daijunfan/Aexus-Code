@@ -11,7 +11,8 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
-import { capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
+import { capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 
@@ -733,7 +734,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				}
 			}
 			let finalPromptText = text;
-			if (this.id === 'aexus-cline' && options?.mode === 'plan' && !this.cachedModes.some(m => m.id === 'plan')) {
+			if (this.id === 'cline' && options?.mode === 'plan' && !this.cachedModes.some(m => m.id === 'plan')) {
 				finalPromptText = `[Mode: Plan Mode — Analyze the codebase and present a clear step-by-step plan without modifying files until confirmed.]\n\n${text}`;
 			}
 			promptParts.push({ type: 'text', text: finalPromptText });
@@ -1158,6 +1159,9 @@ export class AntigravityRuntime extends AcpRuntime {
 		const seen = new Set<string>();
 		const result: NativeSession[] = [];
 		const query = 'SELECT conversation_id, title, preview, last_modified_time, workspace_uris, parent_conversation_id, last_user_input_time FROM conversation_summaries WHERE parent_conversation_id = \'\' AND killed = 0 ORDER BY last_modified_time DESC;';
+		const sqliteBin = process.platform === 'darwin'
+			? '/usr/bin/sqlite3'
+			: (await findExecutable('sqlite3') ?? 'sqlite3');
 		for (const home of this.agyHomes()) {
 			const dbPath = path.join(home, 'conversation_summaries.db');
 			try {
@@ -1166,7 +1170,7 @@ export class AntigravityRuntime extends AcpRuntime {
 				continue;
 			}
 			try {
-				const { stdout } = await execFile('/usr/bin/sqlite3', ['-json', dbPath, query]);
+				const { stdout } = await execFile(sqliteBin, ['-json', dbPath, query]);
 				if (!stdout.trim()) { continue; }
 				const rows = JSON.parse(stdout) as AgySummaryRow[];
 				for (const row of rows) {
@@ -1181,7 +1185,9 @@ export class AntigravityRuntime extends AcpRuntime {
 					} catch { /* Keep home directory fallback. */ }
 					const now = Date.now();
 					const updated = this.parseTimestamp(row.last_modified_time, this.parseTimestamp(row.last_user_input_time, now));
-					const label = (row.title || row.preview || '').split('\n')[0].slice(0, 100) || vscode.l10n.t('Antigravity Session {0}', row.conversation_id.slice(0, 8));
+					const cleanedTitle = stripInjectedAdeContextFromUserTurn(row.title || row.preview || '');
+					const label = (cleanedTitle.trimStart().startsWith(ROLE_INIT_MARKER) ? '' : cleanedTitle).split('\n')[0].slice(0, 100)
+						|| vscode.l10n.t('Antigravity Session {0}', row.conversation_id.slice(0, 8));
 					const session: NativeSession = { id: row.conversation_id, cwd, label, created: updated, updated, provisional: false };
 					this.knownSessions.set(session.id, session);
 					result.push(session);
@@ -1425,7 +1431,7 @@ export class ClineRuntime extends AcpRuntime {
 	}
 
 	private async fetchHistoryItems(token: vscode.CancellationToken): Promise<ClineHistoryItem[]> {
-		const output = await capture(this.executable, ['history', '--json', '--limit', '500'], token);
+		const output = await withTimeout(capture(this.executable, ['history', '--json', '--limit', '500'], token), 8000);
 		const parsed = readJsonOutput<ClineHistoryItem[] | { sessions?: ClineHistoryItem[]; items?: ClineHistoryItem[] }>(output);
 		return Array.isArray(parsed) ? parsed : (parsed.sessions ?? parsed.items ?? []);
 	}
@@ -1434,7 +1440,8 @@ export class ClineRuntime extends AcpRuntime {
 		const created = item.startedAt ? Date.parse(item.startedAt) : Date.now();
 		const updated = (item.updatedAt ? Date.parse(item.updatedAt) : undefined) || (item.endedAt ? Date.parse(item.endedAt) : undefined) || created;
 		const parentId = item.parentSessionId ?? item.metadata?.parentSessionId;
-		const rawTitle = item.metadata?.title || unwrapClineUserInput(item.prompt ?? '');
+		const cleanedPrompt = stripInjectedAdeContextFromUserTurn(unwrapClineUserInput(item.prompt ?? ''));
+		const rawTitle = item.metadata?.title || (cleanedPrompt.trimStart().startsWith(ROLE_INIT_MARKER) ? '' : cleanedPrompt);
 		const session: NativeSession = {
 			id: item.sessionId,
 			parentId,

@@ -471,10 +471,15 @@ export function buildAdeAgentRoleContext(
 			`- Work Tree Binding: **${treeKindTitle}** (governor: \`${govId}\`${agent.treeSegmentId ? `, segment: \`${agent.treeSegmentId}\`` : ''}${agent.treeNodeId ? `, node: \`${agent.treeNodeId}\`` : ''}) — sidebar topology is locked by \`blueprint.md\`.`,
 			`- Identity & Rank Rule (MANDATORY OVERRIDE): When asked about your identity, role, or rank (e.g., "你的职级是什么？", "你的身份?", "你是什么角色？职级", "What is your role/rank?"), ALWAYS explicitly state your Aexus Code ADE organizational rank (**${formatRoleTitle(effectiveRole)}**), session title and ID (\`${agent.id}\`), project (**${projects.getProjectName(agent.projectUri)}**), and work tree (\`${govId}\`). NEVER claim that you are "not an employee", have "no company rank" ("没有公司里的正式职级"), or "have no management authority".`,
 		);
+		const isResearchTree = agent.treeType === 'research';
 		if (effectiveRole === 'governor') {
 			lines.push(
-				'- Engineering Governor (L1) Charter:',
-				'  - Design task decomposition & DAG parallel topology in `blueprint.md` (`aexus-ade engineering blueprint get/validate/apply`).',
+				isResearchTree
+					? '- Research Governor (L1) Charter:'
+					: '- Engineering Governor (L1) Charter:',
+				isResearchTree
+					? '  - Design multi-track research synthesis & verification DAG topology in `blueprint.md` (`aexus-ade engineering blueprint get/validate/apply`).'
+					: '  - Design task decomposition & DAG parallel topology in `blueprint.md` (`aexus-ade engineering blueprint get/validate/apply`).',
 				'  - Default asleep during normal execution; woken ONLY when a node hits 3 formal Manager failures (RED Circuit Breaker).',
 				'  - NEVER call `aexus-ade engineering run` yourself (only User or Secretary may start execution).',
 				`  - Read blueprint: \`aexus-ade engineering blueprint get --governor ${govId} --raw\``,

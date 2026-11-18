@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, addDisposableListener, append, clearNode, EventType } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, EventType, isHTMLTextAreaElement } from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -25,6 +25,7 @@ export class AdeInboxPanel extends Disposable {
 	private rollbackFeedbackDrafts = new Map<string, string>();
 	private rollbackTargetDrafts = new Map<string, string>();
 	private inFlightItemIds = new Set<string>();
+	private errorBannerText: string | undefined;
 
 	private formatRelativeAge(ts: number): string {
 		const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -45,6 +46,7 @@ export class AdeInboxPanel extends Disposable {
 		private readonly inbox: IAdeInboxService,
 		private readonly engineering: IAdeEngineeringService,
 		private readonly editors: IAdeEditorService,
+		private readonly onError?: (message: string) => void,
 	) {
 		super();
 		this.element = append(container, $('.ade-inbox-panel'));
@@ -69,9 +71,21 @@ export class AdeInboxPanel extends Disposable {
 
 	render(): void {
 		const prevScrollTop = this.listEl.scrollTop;
+		const activeEl = this.element.ownerDocument.activeElement;
+		const activeRollbackCardId = isHTMLTextAreaElement(activeEl)
+			? (activeEl.closest('[data-inbox-id]')?.getAttribute('data-inbox-id') ?? undefined)
+			: undefined;
+		const activeSelectionStart = isHTMLTextAreaElement(activeEl) ? activeEl.selectionStart : null;
+		const activeSelectionEnd = isHTMLTextAreaElement(activeEl) ? activeEl.selectionEnd : null;
+
 		this.renderDisposables.clear();
 		clearNode(this.filterBarEl);
 		clearNode(this.listEl);
+
+		if (this.errorBannerText) {
+			const errBanner = append(this.listEl, $('.ade-inbox-card.kind-governor_alert'));
+			append(errBanner, $('div.ade-inbox-card-message', {}, this.errorBannerText));
+		}
 
 		const leftGroup = append(this.filterBarEl, $('.ade-inbox-toolbar-left'));
 		const pendingToggle = append(leftGroup, $(`button.ade-inbox-filter-btn${!this.showResolved ? '.active' : ''}`, {
@@ -113,19 +127,31 @@ export class AdeInboxPanel extends Disposable {
 		}
 
 		for (const item of items) {
-			this.renderCard(item);
+			this.renderCard(item, activeRollbackCardId, activeSelectionStart, activeSelectionEnd);
 		}
 		this.listEl.scrollTop = prevScrollTop;
 	}
 
-	private renderCard(item: IAdeInboxItem): void {
+	private renderCard(
+		item: IAdeInboxItem,
+		restoreFocusCardId?: string,
+		restoreSelectionStart?: number | null,
+		restoreSelectionEnd?: number | null,
+	): void {
 		const card = append(this.listEl, $(`div.ade-inbox-card.kind-${item.kind}${item.unread ? '.unread' : ''}${item.resolved ? '.resolved' : ''}`, {
 			'data-inbox-id': item.id,
+			tabindex: '0',
 		}));
 
 		this.renderDisposables.add(addDisposableListener(card, EventType.CLICK, () => {
 			if (item.unread) {
-				void this.inbox.markRead(item.id);
+				void this.inbox.markRead(item.id).catch(() => undefined);
+			}
+		}));
+		this.renderDisposables.add(addDisposableListener(card, EventType.KEY_DOWN, (ev: KeyboardEvent) => {
+			if ((ev.key === 'Enter' || ev.key === ' ') && ev.target === card && item.unread) {
+				ev.preventDefault();
+				void this.inbox.markRead(item.id).catch(() => undefined);
 			}
 		}));
 
@@ -176,13 +202,19 @@ export class AdeInboxPanel extends Disposable {
 					return;
 				}
 				this.inFlightItemIds.add(item.id);
+				this.errorBannerText = undefined;
 				approveBtn.disabled = true;
 				void this.engineering.submitGateVerdict({
 					governorSessionId: item.governorSessionId,
 					nodeId,
 					verdict: 'pass',
+				}).catch(err => {
+					const msg = err instanceof Error ? err.message : String(err);
+					this.errorBannerText = msg;
+					this.onError?.(msg);
 				}).finally(() => {
 					this.inFlightItemIds.delete(item.id);
+					this.render();
 				});
 			}));
 
@@ -211,9 +243,19 @@ export class AdeInboxPanel extends Disposable {
 				void this.engineering.openEngineeringEditor(item.governorSessionId);
 			}));
 
+			const dismissGateBtn = append(actionsRow, $('button.ade-inbox-btn.secondary', {
+				type: 'button',
+			}, localize('adeInboxDismissBtn', "Dismiss")));
+			this.renderDisposables.add(addDisposableListener(dismissGateBtn, EventType.CLICK, e => {
+				e.stopPropagation();
+				void this.inbox.resolveItem(item.id, localize('adeInboxDismissedResolution', "Dismissed from Inbox")).catch(() => undefined);
+			}));
+
 			if (this.expandedRollbackIds.has(item.id) && candidates.length > 0) {
 				const rbBox = append(card, $('.ade-inbox-rollback-box'));
-				const selectEl = append(rbBox, $('select.ade-eng-select')) as HTMLSelectElement;
+				const selectEl = append(rbBox, $('select.ade-eng-select', {
+					'aria-label': localize('adeInboxRollbackTargetAria', "Rollback Target Node"),
+				})) as HTMLSelectElement;
 				const savedTarget = this.rollbackTargetDrafts.get(item.id) ?? candidates[candidates.length - 1]?.id;
 				for (const c of candidates) {
 					const opt = append(selectEl, $('option', { value: c.id }, `[${c.id}] ${c.title}`)) as HTMLOptionElement;
@@ -227,8 +269,15 @@ export class AdeInboxPanel extends Disposable {
 				const fbArea = append(rbBox, $('textarea.ade-eng-textarea', {
 					rows: 2,
 					placeholder: localize('adeInboxRollbackFeedbackHint', "Feedback instructions for rework…"),
+					'aria-label': localize('adeInboxRollbackFeedbackAria', "Rollback Feedback Instructions"),
 				})) as HTMLTextAreaElement;
 				fbArea.value = this.rollbackFeedbackDrafts.get(item.id) ?? '';
+				if (restoreFocusCardId === item.id) {
+					fbArea.focus();
+					if (typeof restoreSelectionStart === 'number' && typeof restoreSelectionEnd === 'number') {
+						fbArea.setSelectionRange(restoreSelectionStart, restoreSelectionEnd);
+					}
+				}
 				this.renderDisposables.add(addDisposableListener(fbArea, EventType.INPUT, () => {
 					this.rollbackFeedbackDrafts.set(item.id, fbArea.value);
 				}));
@@ -242,20 +291,27 @@ export class AdeInboxPanel extends Disposable {
 						return;
 					}
 					this.inFlightItemIds.add(item.id);
+					this.errorBannerText = undefined;
 					confirmRbBtn.disabled = true;
 					const chosenTarget = selectEl.value || undefined;
 					const chosenFeedback = fbArea.value.trim() || undefined;
-					this.expandedRollbackIds.delete(item.id);
-					this.rollbackFeedbackDrafts.delete(item.id);
-					this.rollbackTargetDrafts.delete(item.id);
 					void this.engineering.submitGateVerdict({
 						governorSessionId: item.governorSessionId,
 						nodeId,
 						verdict: 'rollback',
 						targetNodeId: chosenTarget,
 						feedback: chosenFeedback,
+					}).then(() => {
+						this.expandedRollbackIds.delete(item.id);
+						this.rollbackFeedbackDrafts.delete(item.id);
+						this.rollbackTargetDrafts.delete(item.id);
+					}).catch(err => {
+						const msg = err instanceof Error ? err.message : String(err);
+						this.errorBannerText = msg;
+						this.onError?.(msg);
 					}).finally(() => {
 						this.inFlightItemIds.delete(item.id);
+						this.render();
 					});
 				}));
 			}

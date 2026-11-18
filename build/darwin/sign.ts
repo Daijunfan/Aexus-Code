@@ -34,10 +34,10 @@ function getKeychainPath(tempDir: string): string {
  * Usage descriptions shown by macOS when the app requests access to protected resources.
  */
 const infoPlistUsageDescriptions: Record<string, string> = {
-	NSAppleEventsUsageDescription: 'An application in Visual Studio Code wants to use AppleScript.',
-	NSMicrophoneUsageDescription: 'An application in Visual Studio Code wants to use the Microphone.',
-	NSCameraUsageDescription: 'An application in Visual Studio Code wants to use the Camera.',
-	NSAudioCaptureUsageDescription: 'An application in Visual Studio Code wants to use Audio Capture.',
+	NSAppleEventsUsageDescription: 'An application in Aexus Code wants to use AppleScript.',
+	NSMicrophoneUsageDescription: 'An application in Aexus Code wants to use the Microphone.',
+	NSCameraUsageDescription: 'An application in Aexus Code wants to use the Camera.',
+	NSAudioCaptureUsageDescription: 'An application in Aexus Code wants to use Audio Capture.',
 	NSLocalNetworkUsageDescription: 'The app uses your local network for DNS resolution and to connect to locally running services.',
 };
 

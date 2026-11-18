@@ -10,6 +10,8 @@ import * as path from 'node:path';
 export type AdeSessionRank = 'governor' | 'manager' | 'employee' | 'subordinate' | 'worker';
 
 export const ROLE_CONTEXT_HEADER = '[Aexus Orchestrated Role Context]';
+export const ROLE_INIT_MARKER = '[AEXUS_ADE_ROLE_INITIALIZATION]';
+export const AEXUS_PREAMBLE_END_MARKER = '<!-- /AEXUS_ADE_PREAMBLE -->';
 export const ROLE_STATE_ENV_KEY = 'AEXUS_ADE_ROLE_STATE_FILE';
 
 export interface RoleSyncAgentEntry {
@@ -133,6 +135,205 @@ export function resolveActiveEngineAgent(
 		}
 	}
 	return undefined;
+}
+
+const PREAMBLE_START_PREFIXES = [
+	'[Aexus Orchestrated Role Context]',
+	'[Aexus Orchestrated Role Context Updated]',
+	'[Aexus Role Cleared:',
+	'[ADE Live Hierarchy State]',
+	'[ADE Live Viewport State]',
+	'[Aexus ADE Live Viewport & Macro Control Context]',
+	'[Aexus Cloud Host Project Context]',
+	'[Autonomous Session Goal Active]',
+	'[Mode: Plan Mode —',
+] as const;
+
+function stripLeadingPreambleBlock(text: string): string | undefined {
+	const normalized = text.replace(/^\r?\n+/, '');
+	if (!normalized) {
+		return undefined;
+	}
+
+	// 1. Single-line notices
+	const roleClearedMatch = normalized.match(/^\[Aexus Role Cleared:[^\n]*\]\r?\n*/);
+	if (roleClearedMatch) {
+		return normalized.slice(roleClearedMatch[0].length);
+	}
+	const planModeMatch = normalized.match(/^\[Mode: Plan Mode —[^\n]*\]\r?\n*/);
+	if (planModeMatch) {
+		return normalized.slice(planModeMatch[0].length);
+	}
+
+	// 2. [Autonomous Session Goal Active] (goal condition may span multiple paragraphs, ends with exact completion-marker rule)
+	if (normalized.startsWith('[Autonomous Session Goal Active]')) {
+		const goalEndRule = 'at the very end of your response.';
+		const endIdx = normalized.indexOf(goalEndRule);
+		if (endIdx >= 0) {
+			let cut = endIdx + goalEndRule.length;
+			while (cut < normalized.length && (normalized[cut] === '\r' || normalized[cut] === '\n')) {
+				cut++;
+			}
+			return normalized.slice(cut);
+		}
+		const blankIdx = normalized.search(/\r?\n\r?\n/);
+		if (blankIdx >= 0) {
+			return normalized.slice(blankIdx).replace(/^\r?\n+/, '');
+		}
+	}
+
+	// 3. [Aexus Cloud Host Project Context] (header + `- ...` lines)
+	if (normalized.startsWith('[Aexus Cloud Host Project Context]')) {
+		const lines = normalized.split(/\r?\n/);
+		let idx = 1;
+		while (idx < lines.length && /^-\s/.test(lines[idx])) {
+			idx++;
+		}
+		if (idx > 1) {
+			while (idx < lines.length && lines[idx].trim() === '') {
+				idx++;
+			}
+			return lines.slice(idx).join('\n');
+		}
+	}
+
+	// 4. [ADE Live Hierarchy State] / [ADE Live Viewport State] (header + `- ...` lines)
+	if (normalized.startsWith('[ADE Live Hierarchy State]') || normalized.startsWith('[ADE Live Viewport State]')) {
+		const lines = normalized.split(/\r?\n/);
+		let idx = 1;
+		while (idx < lines.length && /^-\s/.test(lines[idx])) {
+			idx++;
+		}
+		if (idx > 1) {
+			while (idx < lines.length && lines[idx].trim() === '') {
+				idx++;
+			}
+			return lines.slice(idx).join('\n');
+		}
+	}
+
+	// 5. [Aexus Orchestrated Role Context] / [Aexus Orchestrated Role Context Updated] / [Aexus ADE Live Viewport & Macro Control Context]
+	if (
+		normalized.startsWith('[Aexus Orchestrated Role Context Updated]')
+		|| normalized.startsWith('[Aexus Orchestrated Role Context]')
+		|| normalized.startsWith('[Aexus ADE Live Viewport & Macro Control Context]')
+	) {
+		const lines = normalized.split(/\r?\n/);
+		let idx = 1;
+		while (
+			idx < lines.length
+			&& (lines[idx] === '[Aexus Orchestrated Role Context]' || lines[idx] === '[Aexus Orchestrated Role Context Updated]')
+		) {
+			idx++;
+		}
+		while (idx < lines.length) {
+			const line = lines[idx];
+			if (
+				line.startsWith('You ARE an official orchestrated organizational agent session')
+				|| line.startsWith('You are the global **Secretary** in **Aexus Code ADE**')
+				|| line.startsWith('- ')
+				|| /^ {2,}(?:-\s|\()/.test(line)
+			) {
+				idx++;
+				continue;
+			}
+			break;
+		}
+		if (idx > 1) {
+			while (idx < lines.length && lines[idx].trim() === '') {
+				idx++;
+			}
+			return lines.slice(idx).join('\n');
+		}
+	}
+
+	return undefined;
+}
+
+/**
+ * Strips Aexus ADE internal role charters, live hierarchy/viewport deltas, SSH cloud-host
+ * routing headers, and autonomous goal preambles from a persisted user turn so chat bubbles
+ * and `aexus-ade session history` display only the user's clean message.
+ */
+export function stripInjectedAdeContextFromUserTurn(rawText: string): string {
+	if (!rawText) {
+		return rawText;
+	}
+	const trimmedStart = rawText.trimStart();
+	const hasKnownPrefix = PREAMBLE_START_PREFIXES.some(prefix => trimmedStart.startsWith(prefix))
+		|| rawText.includes(AEXUS_PREAMBLE_END_MARKER);
+	if (!hasKnownPrefix) {
+		return rawText;
+	}
+
+	let working = rawText;
+	// Fast path for sentinel-delimited preambles (strips everything up to the last sentinel, then checks any outer/inner residual blocks)
+	const markerIdx = working.lastIndexOf(AEXUS_PREAMBLE_END_MARKER);
+	if (markerIdx >= 0 && PREAMBLE_START_PREFIXES.some(prefix => working.trimStart().startsWith(prefix))) {
+		working = working.slice(markerIdx + AEXUS_PREAMBLE_END_MARKER.length).replace(/^\r?\n+/, '');
+	}
+
+	// Iteratively peel stacked legacy / nativeRoleBridge blocks in any order
+	for (let guard = 0; guard < 12; guard++) {
+		const next = stripLeadingPreambleBlock(working);
+		if (next === undefined || next === working) {
+			break;
+		}
+		working = next;
+		const nestedMarkerIdx = working.indexOf(AEXUS_PREAMBLE_END_MARKER);
+		if (nestedMarkerIdx === 0) {
+			working = working.slice(AEXUS_PREAMBLE_END_MARKER.length).replace(/^\r?\n+/, '');
+		}
+	}
+
+	return working.trim() ? working : rawText.trim();
+}
+
+export interface CleanableHistoryTurn {
+	readonly id?: string;
+	readonly role: 'user' | 'assistant';
+	readonly text: string;
+	readonly isSystemInitiated?: boolean;
+}
+
+/**
+ * Filters silent warmup turns (`[AEXUS_ADE_ROLE_INITIALIZATION]`), condenses autonomous
+ * goal stop-check turns, and strips injected ADE context preambles from user turns.
+ */
+export function filterAndCleanHistoryTurns<T extends CleanableHistoryTurn>(turns: readonly T[]): T[] {
+	const result: T[] = [];
+	let skipNextAssistantAck = false;
+	for (const turn of turns) {
+		if (!turn.text) {
+			continue;
+		}
+		if (turn.role === 'user') {
+			const cleaned = stripInjectedAdeContextFromUserTurn(turn.text);
+			if (cleaned.trimStart().startsWith(ROLE_INIT_MARKER)) {
+				skipNextAssistantAck = true;
+				continue;
+			}
+			skipNextAssistantAck = false;
+			const goalStopMatch = cleaned.match(/^\[Autonomous Goal Stop-Check — Round (\d+\/\d+)\]/);
+			if (goalStopMatch) {
+				result.push({
+					...turn,
+					text: `[Autonomous Goal Verification · Round ${goalStopMatch[1]}]`,
+					isSystemInitiated: true,
+				});
+				continue;
+			}
+			result.push(cleaned !== turn.text ? { ...turn, text: cleaned } : turn);
+			continue;
+		}
+		if (skipNextAssistantAck && turn.role === 'assistant') {
+			skipNextAssistantAck = false;
+			continue;
+		}
+		skipNextAssistantAck = false;
+		result.push(turn);
+	}
+	return result;
 }
 
 export function mergeRolePromptIntoText(existing: string | undefined, rolePrompt: string): { readonly changed: boolean; readonly text: string } {

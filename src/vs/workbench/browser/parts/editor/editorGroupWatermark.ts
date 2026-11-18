@@ -30,11 +30,13 @@ import { IStorageService, StorageScope, StorageTarget, WillSaveStateReason } fro
 import { defaultKeybindingLabelStyles } from '../../../../platform/theme/browser/defaultStyles.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { IWorkspaceContextService, WorkbenchState } from '../../../../platform/workspace/common/workspace.js';
+import { WorkbenchModeContext } from '../../../services/workbenchMode/common/workbenchMode.js';
 
 interface WatermarkEntry {
 	readonly id: string;
 	readonly text: string;
 	readonly icon: ThemeIcon;
+	readonly allowWithoutKeybinding?: boolean;
 	readonly when?: {
 		native?: ContextKeyExpression;
 		web?: ContextKeyExpression;
@@ -42,6 +44,36 @@ interface WatermarkEntry {
 }
 
 const showChatContextKey = ContextKeyExpr.and(ContextKeyExpr.equals('chatSetupHidden', false), ContextKeyExpr.equals('chatSetupDisabledInWorkspace', false));
+const isAdeModeContextKey = WorkbenchModeContext.isEqualTo('ade');
+
+const openAdeSecretary: WatermarkEntry = {
+	text: localize('watermark.adeOpenSecretary', "Open Secretary"),
+	id: 'workbench.action.ade.openSecretary',
+	icon: registerIcon('watermark-ade-secretary', Codicon.sparkle, localize('watermark.adeSecretaryIcon', "Icon for opening ADE Secretary in the editor watermark.")),
+	allowWithoutKeybinding: true,
+	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
+};
+const addAdeProject: WatermarkEntry = {
+	text: localize('watermark.adeAddProject', "Add Project (Local / Cloud Host)"),
+	id: 'workbench.action.ade.addProjectFolder',
+	icon: registerIcon('watermark-ade-add-project', Codicon.newFolder, localize('watermark.adeAddProjectIcon', "Icon for adding an ADE project folder in the editor watermark.")),
+	allowWithoutKeybinding: true,
+	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
+};
+const newAdeSession: WatermarkEntry = {
+	text: localize('watermark.adeNewSession', "New Agent Session"),
+	id: 'workbench.action.ade.newSession',
+	icon: registerIcon('watermark-ade-new-session', Codicon.commentDiscussion, localize('watermark.adeNewSessionIcon', "Icon for starting a new ADE Coding Agent session in the editor watermark.")),
+	allowWithoutKeybinding: true,
+	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
+};
+const manageAdeCloudHosts: WatermarkEntry = {
+	text: localize('watermark.adeCloudHosts', "Manage SSH Cloud Hosts"),
+	id: 'workbench.action.aexusCloudHosts.manage',
+	icon: registerIcon('watermark-ade-cloud-hosts', Codicon.remote, localize('watermark.adeCloudHostsIcon', "Icon for managing SSH Cloud Hosts in the editor watermark.")),
+	allowWithoutKeybinding: true,
+	when: { native: isAdeModeContextKey, web: isAdeModeContextKey },
+};
 
 const openChat: WatermarkEntry = {
 	text: localize('watermark.openChat', "Open Chat"), id: 'workbench.action.chat.open',
@@ -116,13 +148,25 @@ const otherEntries: WatermarkEntry[] = [
 	openSettings,
 ];
 
-const allEntries: WatermarkEntry[] = [...new Set([...emptyWindowEntries, ...workspaceEntries, ...otherEntries])];
+const adeEntries: WatermarkEntry[] = [
+	openAdeSecretary,
+	addAdeProject,
+	newAdeSession,
+	manageAdeCloudHosts,
+	showCommands,
+];
+
+const allEntries: WatermarkEntry[] = [...new Set([...adeEntries, ...emptyWindowEntries, ...workspaceEntries, ...otherEntries])];
+const allEntryIds = new Set(allEntries.map(entry => entry.id));
 
 function getWhen(entry: WatermarkEntry): ContextKeyExpression | undefined {
 	return isWeb ? entry.when?.web : entry.when?.native;
 }
 
-const whenKeys = new Set(allEntries.flatMap(entry => getWhen(entry)?.keys() ?? []));
+const whenKeys = new Set([
+	WorkbenchModeContext.key,
+	...allEntries.flatMap(entry => getWhen(entry)?.keys() ?? []),
+]);
 
 export class EditorGroupWatermark extends Disposable {
 
@@ -199,8 +243,18 @@ export class EditorGroupWatermark extends Disposable {
 			}
 		}));
 
+		this._register(CommandsRegistry.onDidRegisterCommand(commandId => {
+			if (allEntryIds.has(commandId)) {
+				this.render();
+			}
+		}));
+
 		this._register(this.contextKeyService.onDidChangeContext(e => {
 			if (!e.affectsSome(whenKeys)) {
+				return;
+			}
+			if (e.affectsSome(new Set([WorkbenchModeContext.key]))) {
+				this.render();
 				return;
 			}
 
@@ -248,8 +302,11 @@ export class EditorGroupWatermark extends Disposable {
 			return;
 		}
 
-		const entries = this.filterEntries(this.workbenchState !== WorkbenchState.EMPTY ? workspaceEntries : emptyWindowEntries);
-		if (entries.length < EditorGroupWatermark.MINIMUM_ENTRIES) {
+		const isAdeMode = this.contextKeyService.getContextKeyValue<string>(WorkbenchModeContext.key) === 'ade';
+		const entries = isAdeMode
+			? this.filterEntries(adeEntries)
+			: this.filterEntries(this.workbenchState !== WorkbenchState.EMPTY ? workspaceEntries : emptyWindowEntries);
+		if (!isAdeMode && entries.length < EditorGroupWatermark.MINIMUM_ENTRIES) {
 			const additionalEntries = this.filterEntries(otherEntries);
 			shuffle(additionalEntries);
 			entries.push(...additionalEntries.slice(0, EditorGroupWatermark.MINIMUM_ENTRIES - entries.length));
@@ -261,10 +318,10 @@ export class EditorGroupWatermark extends Disposable {
 			clearNode(box);
 			this.shortcutDisposables.clear();
 
-			const shortcuts = new Map<string, { entry: WatermarkEntry; keybinding: ResolvedKeybinding }>();
+			const shortcuts = new Map<string, { entry: WatermarkEntry; keybinding?: ResolvedKeybinding }>();
 			for (const entry of entries) {
-				const keybinding = this.keybindingService.lookupKeybinding(entry.id);
-				if (keybinding) {
+				const keybinding = this.keybindingService.lookupKeybinding(entry.id) ?? undefined;
+				if (keybinding || entry.allowWithoutKeybinding) {
 					shortcuts.set(entry.id, { entry, keybinding });
 				}
 			}
@@ -300,12 +357,12 @@ export class EditorGroupWatermark extends Disposable {
 					return true; // works without context
 				}
 
-				const matches = !!this.cachedWhen[entry.id] /* cached from previous session */ || this.contextKeyService.contextMatchesRules(contextKey);
+				const matches = (!entry.allowWithoutKeybinding && !!this.cachedWhen[entry.id]) /* cached from previous session */ || this.contextKeyService.contextMatchesRules(contextKey);
 				this.renderedWhenResults.set(entry.id, matches);
 				return matches;
 			})
 			.filter(entry => !!CommandsRegistry.getCommand(entry.id))
-			.filter(entry => !!this.keybindingService.lookupKeybinding(entry.id));
+			.filter(entry => entry.allowWithoutKeybinding || !!this.keybindingService.lookupKeybinding(entry.id));
 
 		return filteredEntries;
 	}
@@ -316,7 +373,7 @@ class WatermarkActionViewItem extends BaseActionViewItem {
 	constructor(
 		action: IAction,
 		private readonly icon: ThemeIcon,
-		private readonly keybinding: ResolvedKeybinding,
+		private readonly keybinding: ResolvedKeybinding | undefined,
 		@IHoverService private readonly hoverService: IHoverService,
 	) {
 		super(undefined, action);
@@ -326,13 +383,17 @@ class WatermarkActionViewItem extends BaseActionViewItem {
 		const row = append(container, $('a.action-label.watermark-entry'));
 		super.render(row);
 		row.setAttribute('role', 'button');
-		row.setAttribute('aria-label', localize('watermark.shortcutAriaLabel', "{0} ({1})", this._action.label, this.keybinding.getAriaLabel()));
+		row.setAttribute('aria-label', this.keybinding
+			? localize('watermark.shortcutAriaLabel', "{0} ({1})", this._action.label, this.keybinding.getAriaLabel())
+			: this._action.label);
 
 		const icon = append(row, renderIcon(this.icon));
 		icon.classList.add('watermark-icon');
 		icon.setAttribute('aria-hidden', 'true');
 		append(row, $('span.watermark-label')).textContent = this._action.label;
-		this._register(new KeybindingLabel(append(row, $('span.watermark-keybinding')), OS, defaultKeybindingLabelStyles)).set(this.keybinding);
+		if (this.keybinding) {
+			this._register(new KeybindingLabel(append(row, $('span.watermark-keybinding')), OS, defaultKeybindingLabelStyles)).set(this.keybinding);
+		}
 		this._register(this.hoverService.setupDelayedHover(row, { content: this._action.label }));
 	}
 }

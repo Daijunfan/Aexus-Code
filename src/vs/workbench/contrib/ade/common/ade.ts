@@ -66,7 +66,9 @@ export const ADE_CLOUD_HOSTS_SCHEME = 'aexus-cloud-hosts';
 export const ADE_SECRETARY_ID = '__secretary__';
 export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProjectFolder';
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
+export const ADE_RENAME_PROJECT_COMMAND_ID = 'workbench.action.ade.renameProjectFolder';
 export const ADE_OPEN_ENGINEERING_COMMAND_ID = 'workbench.action.ade.openEngineering';
+export const ADE_OPEN_RESEARCH_COMMAND_ID = 'workbench.action.ade.openResearch';
 export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHosts.manage';
 export const ADE_ADD_CLOUD_PROJECT_COMMAND_ID = 'workbench.action.aexusCloudHosts.addProject';
 export const ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID = 'workbench.action.aexusCloudHosts.importFromVSCode';
@@ -171,6 +173,7 @@ export interface IAdeProjectsService {
 
 	getProjectName(projectUri: URI): string;
 	registerProject(uri: URI, name?: string): IAdeProject;
+	migrateCloudHostAlias?(oldAlias: string, newAlias: string): number;
 	unregisterProject(uri: URI): void;
 	removeProject(uri: URI): readonly IAdeAgent[];
 	moveProjectFolder(sourceUri: URI, targetUri: URI | undefined, after: boolean): void;

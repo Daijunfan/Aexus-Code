@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
+import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
 import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
@@ -304,14 +305,35 @@ export class ClaudeRuntime implements EngineRuntime {
 			const lines = readline.createInterface({ input, crlfDelay: Infinity });
 			try {
 				let count = 0;
+				let foundId: string | undefined;
+				let foundCwd: string | undefined;
+				let foundLabel: string | undefined;
 				for await (const line of lines) {
 					let event: ClaudeEvent;
 					try { event = JSON.parse(line) as ClaudeEvent; } catch { continue; }
 					if (event.cwd && event.sessionId) {
-						sessions.push({ id: event.sessionId, cwd: event.cwd, label: messageText(event).split('\n')[0].slice(0, 100) || vscode.l10n.t('Claude Session {0}', event.sessionId.slice(0, 8)), created: candidate.stat.birthtimeMs, updated: candidate.stat.mtimeMs, file: candidate.file, provisional: false });
-						break;
+						foundId ??= event.sessionId;
+						foundCwd ??= event.cwd;
+						if (event.type === 'user') {
+							const cleaned = stripInjectedAdeContextFromUserTurn(messageText(event)).trim();
+							if (cleaned && !cleaned.startsWith(ROLE_INIT_MARKER)) {
+								foundLabel = cleaned.split('\n')[0].slice(0, 100);
+								break;
+							}
+						}
 					}
-					if (++count >= 100) { break; }
+					if (++count >= 120) { break; }
+				}
+				if (foundId && foundCwd) {
+					sessions.push({
+						id: foundId,
+						cwd: foundCwd,
+						label: foundLabel || vscode.l10n.t('Claude Session {0}', foundId.slice(0, 8)),
+						created: candidate.stat.birthtimeMs,
+						updated: candidate.stat.mtimeMs,
+						file: candidate.file,
+						provisional: false,
+					});
 				}
 			} finally { lines.close(); input.destroy(); }
 		}
@@ -742,7 +764,8 @@ export class ClaudeRuntime implements EngineRuntime {
 				await runOnce(Boolean(resolvedModel), true);
 				return;
 			}
-			if (resolvedModel && /model|not_found|invalid/i.test(msg)) {
+			if (resolvedModel && /(?:unknown|invalid|unsupported)[ _-]*model|model.*(?:not[ _-]?found|does not exist)/i.test(msg)) {
+				stream.progress(vscode.l10n.t('Model "{0}" was rejected by Claude Code; retrying with default model…', resolvedModel));
 				await runOnce(false);
 				return;
 			}

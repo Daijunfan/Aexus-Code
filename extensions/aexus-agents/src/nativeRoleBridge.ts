@@ -1544,7 +1544,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 	};
 	cpModule.spawn = wrappedSpawn as typeof cpModule.spawn;
 
-	const origFetch = fetchHost.fetch;
+	const origFetch = fetchHost.fetch.bind(fetchHost);
 	const wrappedFetch = async function (input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
 		const urlStr = typeof input === 'string'
 			? input

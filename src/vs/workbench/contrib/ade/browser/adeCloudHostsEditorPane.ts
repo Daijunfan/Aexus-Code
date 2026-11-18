@@ -201,6 +201,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		const importBtn = append(topBtns, $('button.ade-ch-icon-btn', {
 			type: 'button',
 			title: localize('adeChImportVsCodeTooltip', "Sync / Import Cloud Hosts from VS Code & ~/.ssh/config"),
+			'aria-label': localize('adeChImportVsCodeTooltip', "Sync / Import Cloud Hosts from VS Code & ~/.ssh/config"),
 		}));
 		importBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.sync));
 		this._register(addDisposableListener(importBtn, EventType.CLICK, () => {
@@ -225,6 +226,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		this.searchInputEl = append(sideTop, $('input.ade-ch-search-input', {
 			type: 'search',
 			placeholder: localize('adeChSearchPlaceholder', "Filter hosts by alias, IP, or OS..."),
+			'aria-label': localize('adeChSearchAriaLabel', "Filter saved Cloud Hosts"),
 		})) as HTMLInputElement;
 		this._register(addDisposableListener(this.searchInputEl, EventType.INPUT, () => {
 			this.searchQuery = this.searchInputEl.value.trim().toLowerCase();
@@ -431,24 +433,32 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			this.renderDetailDisposables.add(addDisposableListener(testBtn, EventType.CLICK, async () => {
 				this.testingHostId = existingHost.id;
 				this.renderDetailPane();
-				const check = await this.backend.testConnection(existingHost.id);
-				this.testingHostId = undefined;
-				this.statusBanner = check.ok
-					? {
-						kind: 'ok',
-						text: localize(
-							'adeChConnSuccessMsg',
-							"Connected to {0} in {1}ms ({2}{3}).",
-							existingHost.name,
-							check.latencyMs,
-							check.remoteUname ?? existingHost.os,
-							check.remoteHome ? ` · Home: ${check.remoteHome}` : '',
-						),
-					}
-					: {
+				try {
+					const check = await this.backend.testConnection(existingHost.id);
+					this.statusBanner = check.ok
+						? {
+							kind: 'ok',
+							text: localize(
+								'adeChConnSuccessMsg',
+								"Connected to {0} in {1}ms ({2}{3}).",
+								existingHost.name,
+								check.latencyMs,
+								check.remoteUname ?? existingHost.os,
+								check.remoteHome ? ` · Home: ${check.remoteHome}` : '',
+							),
+						}
+						: {
+							kind: 'err',
+							text: localize('adeChConnFailMsg', "Connection check failed ({0}ms): {1}", check.latencyMs, check.error ?? localize('adeChUnknownSshError', "Unknown SSH error")),
+						};
+				} catch (err) {
+					this.statusBanner = {
 						kind: 'err',
-						text: localize('adeChConnFailMsg', "Connection check failed ({0}ms): {1}", check.latencyMs, check.error ?? 'Unknown SSH error'),
+						text: err instanceof Error ? err.message : String(err),
 					};
+				} finally {
+					this.testingHostId = undefined;
+				}
 				await this.reloadHosts(false);
 			}));
 
@@ -460,21 +470,50 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			trashIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.trash));
 			append(delBtn, $('span', {}, localize('adeChDeleteBtn', "Delete")));
 			this.renderDetailDisposables.add(addDisposableListener(delBtn, EventType.CLICK, async () => {
+				const boundProjects = this.adeProjects.projects.filter(
+					p => p.uri.scheme === 'aexus-ssh' && p.uri.authority.toLowerCase() === existingHost.alias.toLowerCase(),
+				);
+				const detailText = boundProjects.length > 0
+					? localize(
+						'adeChConfirmDeleteWithProjectsDetail',
+						"This removes the saved Cloud Host entry AND unlinks {0} ADE project(s) bound to {1} ({2}). Your SSH private key files and remote directories on disk are never deleted.",
+						boundProjects.length,
+						existingHost.alias,
+						boundProjects.map(p => p.name).join(', '),
+					)
+					: localize('adeChConfirmDeleteDetail', "This removes the saved Cloud Host entry from Aexus Code. Your SSH private key files on disk are never deleted.");
 				const confirmed = await this.dialogService.confirm({
 					type: 'warning',
 					message: localize('adeChConfirmDeleteTitle', "Remove Cloud Host '{0}'?", existingHost.name),
-					detail: localize('adeChConfirmDeleteDetail', "This removes the saved Cloud Host entry from Aexus Code. Your SSH private key files on disk are never deleted."),
+					detail: detailText,
 					primaryButton: localize('adeChConfirmDeleteBtn', "&&Delete Cloud Host"),
 					custom: true,
 				});
 				if (!confirmed.confirmed) {
 					return;
 				}
-				await this.backend.deleteHost(existingHost.id);
-				this.statusBanner = {
-					kind: 'info',
-					text: localize('adeChDeletedBanner', "Removed Cloud Host '{0}'.", existingHost.name),
-				};
+				try {
+					const deleted = await this.backend.deleteHost(existingHost.id);
+					if (!deleted) {
+						this.statusBanner = {
+							kind: 'err',
+							text: localize('adeChDeleteNotFoundBanner', "Cloud Host '{0}' was already removed.", existingHost.name),
+						};
+					} else {
+						for (const proj of boundProjects) {
+							this.adeProjects.unregisterProject(proj.uri);
+						}
+						this.statusBanner = {
+							kind: 'info',
+							text: localize('adeChDeletedBanner', "Removed Cloud Host '{0}'.", existingHost.name),
+						};
+					}
+				} catch (err) {
+					this.statusBanner = {
+						kind: 'err',
+						text: err instanceof Error ? err.message : String(err),
+					};
+				}
 				await this.reloadHosts(true);
 			}));
 		}
@@ -686,6 +725,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		this.renderDetailDisposables.add(addDisposableListener(saveBtn, EventType.CLICK, async () => {
 			try {
 				const parsedPort = Number(this.draft.port) || 22;
+				const previousAlias = existingHost?.alias;
 				const saved = await this.backend.upsertHost({
 					id: existingHost?.id,
 					name: this.draft.name.trim() || this.draft.hostName.trim(),
@@ -700,6 +740,9 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 					defaultDirectory: this.draft.defaultDirectory,
 					notes: this.draft.notes,
 				});
+				if (previousAlias && previousAlias.toLowerCase() !== saved.alias.toLowerCase()) {
+					this.adeProjects.migrateCloudHostAlias?.(previousAlias, saved.alias);
+				}
 				this.selectedHostId = saved.id;
 				this.draft = hostToDraftForm(saved);
 				this.statusBanner = {

@@ -256,8 +256,73 @@ function applyHttpConfigurationToEnv(targetEnv: NodeJS.ProcessEnv, explicitEnv?:
 	}
 }
 
+export interface EngineInstallGuide {
+	readonly cliKey: string;
+	readonly binaryName: string;
+	readonly installCommand: string;
+	readonly docsUrl: string;
+}
+
+export const ENGINE_INSTALL_GUIDES: Readonly<Record<string, EngineInstallGuide>> = {
+	claude: {
+		cliKey: 'claude',
+		binaryName: 'claude',
+		installCommand: 'npm install -g @anthropic-ai/claude-code',
+		docsUrl: 'https://docs.anthropic.com/en/docs/claude-code',
+	},
+	codex: {
+		cliKey: 'codex',
+		binaryName: 'codex',
+		installCommand: 'npm install -g @openai/codex',
+		docsUrl: 'https://github.com/openai/codex',
+	},
+	kilo: {
+		cliKey: 'kilo',
+		binaryName: 'kilo',
+		installCommand: 'npm install -g @kilocode/cli',
+		docsUrl: 'https://kilocode.ai/docs',
+	},
+	opencode: {
+		cliKey: 'opencode',
+		binaryName: 'opencode',
+		installCommand: 'npm install -g opencode-ai',
+		docsUrl: 'https://opencode.ai/docs',
+	},
+	dsh: {
+		cliKey: 'dsh',
+		binaryName: 'dsh',
+		installCommand: 'Configure "aexus.ade.cliPaths.dsh" or add DeepSeek Harness (dsh) to PATH',
+		docsUrl: 'https://github.com/Daijunfan/Aexus-Code',
+	},
+	antigravity: {
+		cliKey: 'agy',
+		binaryName: 'agy',
+		installCommand: 'Install Google Antigravity CLI (agy) or configure "aexus.ade.cliPaths.agy"',
+		docsUrl: 'https://antigravity.google',
+	},
+	agy: {
+		cliKey: 'agy',
+		binaryName: 'agy',
+		installCommand: 'Install Google Antigravity CLI (agy) or configure "aexus.ade.cliPaths.agy"',
+		docsUrl: 'https://antigravity.google',
+	},
+	cline: {
+		cliKey: 'cline',
+		binaryName: 'cline',
+		installCommand: 'npm install -g cline',
+		docsUrl: 'https://docs.cline.bot',
+	},
+	pi: {
+		cliKey: 'pi',
+		binaryName: 'pi',
+		installCommand: 'npm install -g @mariozechner/pi-coding-agent',
+		docsUrl: 'https://github.com/badlogic/pi-mono',
+	},
+};
+
 export async function findExecutable(name: string): Promise<string | undefined> {
-	const configured = vscode.workspace.getConfiguration('aexus.ade', null).get<Record<string, string>>('cliPaths', {})[name]?.trim();
+	const cliPaths = vscode.workspace.getConfiguration('aexus.ade', null).get<Record<string, string>>('cliPaths', {});
+	const configured = (cliPaths[name] || (name === 'agy' ? cliPaths.antigravity : undefined))?.trim();
 	const checkBundledExtensions = async (): Promise<string | undefined> => {
 		const extRoot = path.join(os.homedir(), '.aexus-code', 'extensions');
 		try {

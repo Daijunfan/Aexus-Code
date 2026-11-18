@@ -27,8 +27,14 @@ import { CodexRuntime } from './codex';
 import { KiloRuntime, OpenCodeRuntime } from './kilo';
 import { installNativeRoleBridge } from './nativeRoleBridge';
 import { PiRuntime } from './pi';
-import { RoleSyncSnapshot } from './roleBridgeShared';
 import {
+	AEXUS_PREAMBLE_END_MARKER,
+	filterAndCleanHistoryTurns,
+	ROLE_INIT_MARKER,
+	RoleSyncSnapshot,
+} from './roleBridgeShared';
+import {
+	ENGINE_INSTALL_GUIDES,
 	EngineAttachment,
 	EngineRuntime,
 	EngineRuntimeCapabilities,
@@ -124,7 +130,6 @@ interface EngineDefinition {
 const SECRETARY_TYPE = 'aexus-secretary';
 const SECRETARY_URI = vscode.Uri.from({ scheme: SECRETARY_TYPE, path: '/main' });
 const GOAL_COMPLETE_MARKER = '<!-- GOAL_COMPLETE -->';
-const ROLE_INIT_MARKER = '[AEXUS_ADE_ROLE_INITIALIZATION]';
 const ROLE_INIT_ACK = 'ADE_ROLE_READY';
 const MAX_GOAL_ROUNDS = 6;
 
@@ -427,7 +432,80 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const lastTurnReplies = new Map<string, string>();
 	const lastTurnErrors = new Map<string, string>();
 	const opened = new Map<string, { changed: vscode.EventEmitter<vscode.ChatSession['history']>; cancellation: vscode.CancellationTokenSource }>();
-	const available = await Promise.all(definitions.map(async definition => ({ ...definition, command: await findExecutable(definition.executable) })));
+	const available: Array<EngineDefinition & { command: string | undefined }> = await Promise.all(
+		definitions.map(async definition => ({ ...definition, command: await findExecutable(definition.executable) })),
+	);
+
+	const ensureEngineCommand = async (shortEngine: string): Promise<string | undefined> => {
+		const entry = available.find(candidate => candidate.id === shortEngine);
+		if (!entry) {
+			return undefined;
+		}
+		if (entry.command) {
+			return entry.command;
+		}
+		const discovered = await findExecutable(entry.executable);
+		if (discovered) {
+			entry.command = discovered;
+		}
+		return entry.command;
+	};
+
+	const refreshAvailableEngines = async (): Promise<void> => {
+		await Promise.all(available.map(async entry => {
+			const nextCmd = await findExecutable(entry.executable);
+			if (entry.command !== nextCmd) {
+				entry.command = nextCmd;
+				const prevRuntime = runtimes.get(entry.id);
+				if (prevRuntime) {
+					prevRuntime.dispose();
+					runtimes.delete(entry.id);
+				}
+			}
+		}));
+	};
+
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+		if (event.affectsConfiguration('aexus.ade.cliPaths')) {
+			void refreshAvailableEngines();
+		}
+	}));
+
+	const promptConfigureCliPaths = (message: string) => {
+		const configureLabel = vscode.l10n.t('Configure CLI Paths…');
+		void vscode.window.showWarningMessage(message, configureLabel).then(choice => {
+			if (choice === configureLabel) {
+				void vscode.commands.executeCommand('workbench.action.openSettings', 'aexus.ade.cliPaths');
+			}
+		});
+	};
+
+	const formatMissingEngineMessage = (shortEngine: string): string => {
+		const def = available.find(entry => entry.id === shortEngine);
+		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
+		const displayName = def?.name ?? shortEngine;
+		const installCmd = guide?.installCommand ?? `Install ${displayName} CLI`;
+		const cliKey = guide?.cliKey ?? def?.executable ?? shortEngine;
+		return vscode.l10n.t('{0} CLI is not installed ({1}). Configure "aexus.ade.cliPaths.{2}" in Settings or install the CLI first.', displayName, installCmd, cliKey);
+	};
+
+	const buildMissingEngineMarkdown = (shortEngine: string): string => {
+		const def = available.find(entry => entry.id === shortEngine);
+		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
+		const displayName = def?.name ?? shortEngine;
+		const cliKey = guide?.cliKey ?? def?.executable ?? shortEngine;
+		const settingsCmdUri = `command:workbench.action.openSettings?${encodeURIComponent(JSON.stringify(['aexus.ade.cliPaths']))}`;
+		return [
+			`### ${displayName} CLI Not Found`,
+			'',
+			`**Aexus Code** could not locate the \`${def?.executable ?? shortEngine}\` executable on your \`PATH\` or in \`aexus.ade.cliPaths.${cliKey}\`.`,
+			'',
+			...(guide ? [`1. **Install CLI**: \`${guide.installCommand}\` ([Documentation](${guide.docsUrl}))`] : []),
+			`2. **Or Configure Custom Binary Path**: [Open \`aexus.ade.cliPaths\` in Settings](${settingsCmdUri})`,
+			'',
+			`_Once installed or configured, send your message again — no restart required._`,
+		].join('\n');
+	};
 
 	const key = (engine: string, id: string) => `${engine}:${id}`;
 	const identity = (record: RecordEntry) => key(record.engine, record.resourceId ?? record.id);
@@ -496,12 +574,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 	secretaryController = vscode.chat.createChatSessionItemController(SECRETARY_TYPE, async () => refreshSecretaryItem());
 
-	const resolveShortEngine = (raw?: string): string | undefined => {
+	const resolveShortEngine = (raw?: string, strict = false): string | undefined => {
 		if (raw) {
 			const normalized = raw.trim().toLowerCase();
 			const aliased = ENGINE_ALIASES[normalized] ?? (normalized.startsWith('aexus-') ? normalized.slice('aexus-'.length) : normalized);
 			const match = available.find(entry => entry.id === aliased && entry.command);
 			if (match) { return match.id; }
+			if (strict) { return undefined; }
 		}
 		return available.find(entry => entry.command)?.id;
 	};
@@ -549,7 +628,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const runtime = (engine: string): EngineRuntime => {
 		const definition = available.find(entry => entry.id === engine);
 		if (!definition?.command) {
-			throw new Error(vscode.l10n.t('{0} is not installed. Configure ADE CLI Paths or install the engine first.', definition?.name ?? engine));
+			const msg = formatMissingEngineMessage(engine);
+			promptConfigureCliPaths(msg);
+			throw new Error(msg);
 		}
 		let result = runtimes.get(engine);
 		if (!result) {
@@ -599,9 +680,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 
 	const ensureSecretaryRecord = async (preferredEngine?: string, preferredProject?: vscode.Uri, forceNew = false): Promise<RecordEntry> => {
-		const targetEngine = resolveShortEngine(preferredEngine ?? secretaryState?.engine);
+		if (preferredEngine) {
+			const normalized = preferredEngine.trim().toLowerCase();
+			const aliased = ENGINE_ALIASES[normalized] ?? (normalized.startsWith('aexus-') ? normalized.slice('aexus-'.length) : normalized);
+			await ensureEngineCommand(aliased);
+		} else if (!available.some(entry => entry.command)) {
+			await refreshAvailableEngines();
+		}
+		const targetEngine = preferredEngine
+			? resolveShortEngine(preferredEngine, true)
+			: resolveShortEngine(secretaryState?.engine);
 		if (!targetEngine) {
-			throw new Error(vscode.l10n.t('No Coding Agent CLI is installed. Install Claude Code, Codex, Kilo, OpenCode, DSH, Antigravity, Cline, or Pi first.'));
+			if (preferredEngine) {
+				const normalized = preferredEngine.trim().toLowerCase();
+				const aliased = ENGINE_ALIASES[normalized] ?? (normalized.startsWith('aexus-') ? normalized.slice('aexus-'.length) : normalized);
+				const msg = formatMissingEngineMessage(aliased);
+				promptConfigureCliPaths(msg);
+				throw new Error(msg);
+			}
+			const noCliMsg = vscode.l10n.t('No Coding Agent CLI is installed. Install Claude Code, Codex, Kilo, OpenCode, DSH, Antigravity, Cline, or Pi, or configure "aexus.ade.cliPaths" in Settings.');
+			promptConfigureCliPaths(noCliMsg);
+			throw new Error(noCliMsg);
 		}
 		const prevPerEngineConfig = secretaryState?.perEngineConfig ?? {};
 		if (!forceNew && secretaryState && secretaryState.engine === targetEngine) {
@@ -923,28 +1022,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	};
 
-	const filterOutRoleInitTurns = (turns: HistoryEntry[]): HistoryEntry[] => {
-		const filtered: HistoryEntry[] = [];
-		let skipNextAssistantAck = false;
-		for (const turn of turns) {
-			if (!turn.text) {
-				continue;
-			}
-			if (turn.role === 'user' && turn.text.includes(ROLE_INIT_MARKER)) {
-				skipNextAssistantAck = true;
-				continue;
-			}
-			if (skipNextAssistantAck && turn.role === 'assistant') {
-				skipNextAssistantAck = false;
-				continue;
-			}
-			skipNextAssistantAck = false;
-			filtered.push(turn);
-		}
-		return filtered;
-	};
-
-	const history = (turns: HistoryEntry[], participant: string): readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn2)[] => filterOutRoleInitTurns(turns).map(turn => turn.role === 'user'
+	const history = (turns: HistoryEntry[], participant: string): readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn2)[] => filterAndCleanHistoryTurns(turns).map(turn => turn.role === 'user'
 		? new vscode.ChatRequestTurn2(turn.text, undefined, [], participant, [], undefined, turn.id, undefined, undefined, turn.isSystemInitiated)
 		: new vscode.ChatResponseTurn2([new vscode.ChatResponseMarkdownPart(turn.text)], {}, participant));
 
@@ -968,12 +1046,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (busy.has(recordKey)) {
 			return;
 		}
-		if (!available.some(entry => entry.id === record.engine && entry.command)) {
+		if (!await ensureEngineCommand(record.engine)) {
 			return;
 		}
 
 		const roleDisplay = isSecretary ? 'Secretary' : targetRank.charAt(0).toUpperCase() + targetRank.slice(1);
-		const bannerMessage = vscode.l10n.t('正在初始化 {0} 职级与 ADE API 说明文档，请稍候…', roleDisplay);
+		const bannerMessage = vscode.l10n.t('Initializing {0} role & ADE control-plane context…', roleDisplay);
 
 		const runInit = (async () => {
 			const initCts = new vscode.CancellationTokenSource();
@@ -1529,40 +1607,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 
 		const { attachments, fileLines } = extractAttachmentsAndRefs(request.references);
-		let basePrompt = fileLines.length
+		const userPromptWithRefs = fileLines.length
 			? `${effectiveUserPrompt}\n\n${vscode.l10n.t('Attached files:')}\n${fileLines.join('\n')}`
 			: effectiveUserPrompt;
 
-		if (record.activeGoal) {
-			basePrompt = [
-				`[Autonomous Session Goal Active]`,
-				`Goal Condition: ${record.activeGoal}`,
-				`- Execute thoroughly and verify all requirements end-to-end before stopping.`,
-				`- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker \`${GOAL_COMPLETE_MARKER}\` at the very end of your response.`,
-				'',
-				basePrompt,
-			].join('\n');
-		}
-
-		if (record.cloudProjectUri) {
-			const parsedCloud = vscode.Uri.parse(record.cloudProjectUri);
-			const sshInfo = await Promise.resolve(vscode.commands.executeCommand<{ effectiveSshConfigPath?: string; os?: string } | undefined>(
-				'aexus.ade.getCloudHostSshContext',
-				parsedCloud.authority,
-			)).catch(() => undefined);
-			const sshCfgFlag = sshInfo?.effectiveSshConfigPath ? `-F "${sshInfo.effectiveSshConfigPath}" ` : '';
-			const remotePath = parsedCloud.path || '/';
-			const quotedRemotePath = `'${remotePath.replace(/'/g, `'\\''`)}'`;
-			basePrompt = [
-				`[Aexus Cloud Host Project Context]`,
-				`- Active Project is on SSH Cloud Host \`${parsedCloud.authority}\` at remote directory \`${remotePath}\` (URI: \`${record.cloudProjectUri}\`, OS: \`${sshInfo?.os ?? 'linux'}\`).`,
-				`- Local harness staging directory on this Mac: \`${record.cwd}\`.`,
-				`- Execute shell commands, builds, tests, and file edits on the Cloud Host via SSH: \`ssh ${sshCfgFlag}${parsedCloud.authority} "cd -- ${quotedRemotePath} && <command>"\` (or \`scp\`/\`rsync\` when transferring artifacts).`,
-				'',
-				basePrompt,
-			].join('\n');
-		}
-
+		const preambleSections: string[] = [];
 		const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
 		const currentRankForContext = isSecretary ? 'secretary' : (snapForContext?.isOrchestrated ? snapForContext.rank : undefined);
 		const alreadyInitializedForRank = Boolean(
@@ -1577,9 +1626,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				'aexus.ade.resolvePromptContext',
 				alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
 			)).catch(() => undefined);
-		const initialFullPrompt = injected?.trim() ? `${injected.trim()}\n\n${basePrompt}` : basePrompt;
+		if (injected?.trim()) {
+			preambleSections.push(injected.trim());
+		}
+
+		if (record.cloudProjectUri) {
+			const parsedCloud = vscode.Uri.parse(record.cloudProjectUri);
+			const sshInfo = await Promise.resolve(vscode.commands.executeCommand<{ effectiveSshConfigPath?: string; os?: string } | undefined>(
+				'aexus.ade.getCloudHostSshContext',
+				parsedCloud.authority,
+			)).catch(() => undefined);
+			const sshCfgFlag = sshInfo?.effectiveSshConfigPath ? `-F "${sshInfo.effectiveSshConfigPath}" ` : '';
+			const remotePath = parsedCloud.path || '/';
+			const quotedRemotePath = `'${remotePath.replace(/'/g, `'\\''`)}'`;
+			preambleSections.push([
+				`[Aexus Cloud Host Project Context]`,
+				`- Active Project is on SSH Cloud Host \`${parsedCloud.authority}\` at remote directory \`${remotePath}\` (URI: \`${record.cloudProjectUri}\`, OS: \`${sshInfo?.os ?? 'linux'}\`).`,
+				`- Local harness staging directory on this Mac: \`${record.cwd}\`.`,
+				`- Execute shell commands, builds, tests, and file edits on the Cloud Host via SSH: \`ssh ${sshCfgFlag}${parsedCloud.authority} "cd -- ${quotedRemotePath} && <command>"\` (or \`scp\`/\`rsync\` when transferring artifacts).`,
+			].join('\n'));
+		}
+
+		if (record.activeGoal) {
+			preambleSections.push([
+				`[Autonomous Session Goal Active]`,
+				`Goal Condition: ${record.activeGoal}`,
+				`- Execute thoroughly and verify all requirements end-to-end before stopping.`,
+				`- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker \`${GOAL_COMPLETE_MARKER}\` at the very end of your response.`,
+			].join('\n'));
+		}
+
+		const initialFullPrompt = preambleSections.length > 0
+			? `${preambleSections.join('\n\n')}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${userPromptWithRefs}`
+			: userPromptWithRefs;
 
 		try {
+			if (!await ensureEngineCommand(record.engine)) {
+				stream.markdown(buildMissingEngineMarkdown(record.engine));
+				promptConfigureCliPaths(formatMissingEngineMessage(record.engine));
+				return {};
+			}
 			const engine = runtime(record.engine);
 			const prevId = record.id;
 			if (engine.prepareSession) {
@@ -1888,7 +1974,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			},
 			provideChatSessionContent: async (_uri, token) => {
 				const secRecord = await ensureSecretaryRecord();
-				const turns = await runtime(secRecord.engine).history(secRecord, token);
+				const turns = (await ensureEngineCommand(secRecord.engine))
+					? await runtime(secRecord.engine).history(secRecord, token).catch(() => [] as HistoryEntry[])
+					: [];
 				await save();
 				void fetchRuntimeCaps(secRecord.engine, secRecord.cwd, secRecord).then(({ changed }) => {
 					if (changed) {
@@ -1901,10 +1989,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(SECRETARY_TYPE, entry);
-				if (secRecord.provisional && turns.length === 0 && !secRecord.roleInit) {
+				if ((secRecord.provisional || secRecord.unmaterialized) && turns.length === 0 && !secRecord.roleInit) {
 					void ensureRoleInitialized(secRecord, SECRETARY_URI, true);
 				} else if (inFlightRoleInits.has(identity(secRecord))) {
-					setSessionInitializingInUi(SECRETARY_URI, vscode.l10n.t('正在初始化 Secretary 职级与 ADE API 说明文档，请稍候…'));
+					setSessionInitializingInUi(SECRETARY_URI, vscode.l10n.t('Initializing {0} role & ADE control-plane context…', 'Secretary'));
 				}
 				return {
 					title: 'Secretary',
@@ -1928,7 +2016,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	refreshSecretaryItem();
 
 	// Register all 8 Coding Agent engine participants, customization providers & session providers
-	for (const definition of available.filter(entry => entry.command)) {
+	for (const definition of available) {
 		const participantId = definition.type;
 		const optEmitter = new vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>();
 		const providerOptEmitter = new vscode.EventEmitter<void>();
@@ -1970,7 +2058,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			},
 			provideChatSessionContent: async (uri, token) => {
 				const record = await getRecord(uri, token);
-				const turns = await runtime(record.engine).history(record, token);
+				const turns = (await ensureEngineCommand(record.engine))
+					? await runtime(record.engine).history(record, token).catch(() => [] as HistoryEntry[])
+					: [];
 				await save();
 				void fetchRuntimeCaps(record.engine, record.cwd, record).then(({ changed }) => {
 					if (changed) {
@@ -1984,11 +2074,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(identity(record), entry);
 				const snapOnOpen = roleBridge.getSnapshot().agents.find(a => a.resource === uri.toString());
-				if (snapOnOpen?.isOrchestrated && record.provisional && turns.length === 0 && !record.roleInit) {
+				if (snapOnOpen?.isOrchestrated && (record.provisional || record.unmaterialized) && turns.length === 0 && !record.roleInit) {
 					void ensureRoleInitialized(record, uri, false);
 				} else if (inFlightRoleInits.has(identity(record))) {
 					const roleTitle = (snapOnOpen?.rank ?? 'governor').charAt(0).toUpperCase() + (snapOnOpen?.rank ?? 'governor').slice(1);
-					setSessionInitializingInUi(uri, vscode.l10n.t('正在初始化 {0} 职级与 ADE API 说明文档，请稍候…', roleTitle));
+					setSessionInitializingInUi(uri, vscode.l10n.t('Initializing {0} role & ADE control-plane context…', roleTitle));
 				}
 				return {
 					title: record.label,
@@ -2091,7 +2181,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				await save();
 			}
 		}),
-		vscode.commands.registerCommand('aexus.agentEngines.list', () => available.map(definition => ({ id: definition.type, name: definition.name, available: !!definition.command }))),
+		vscode.commands.registerCommand('aexus.agentEngines.list', async () => {
+			if (available.some(entry => !entry.command)) {
+				await refreshAvailableEngines();
+			}
+			return available.map(definition => ({ id: definition.type, name: definition.name, available: !!definition.command }));
+		}),
 		vscode.commands.registerCommand('aexus.agentEngines.ensureSecretary', async (rawEngineId?: string, project?: vscode.Uri, forceReset?: boolean) => {
 			const secRecord = await ensureSecretaryRecord(rawEngineId, project, Boolean(forceReset));
 			void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI);
@@ -2103,6 +2198,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.create', async (engineId: string, project: vscode.Uri) => {
 			const engine = engineId.slice('aexus-'.length);
+			await ensureEngineCommand(engine);
 			const { localCwd, cloudProjectUri } = await resolveProjectLocalCwd(project);
 			const native = await runtime(engine).create(localCwd);
 			const record: RecordEntry = {
@@ -2216,7 +2312,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const token = new vscode.CancellationTokenSource();
 			try {
 				const record = await getRecord(uri, token.token);
-				const turns = await runtime(record.engine).history(record, token.token).catch(() => [] as HistoryEntry[]);
+				const rawTurns = (await ensureEngineCommand(record.engine))
+					? await runtime(record.engine).history(record, token.token).catch(() => [] as HistoryEntry[])
+					: [];
+				const turns = filterAndCleanHistoryTurns(rawTurns);
 				const messages = turns.map(entry => ({ role: entry.role, text: entry.text }));
 				const cachedLast = uri.scheme === SECRETARY_TYPE
 					? (lastTurnReplies.get(SECRETARY_TYPE) ?? lastTurnReplies.get(identity(record)))
@@ -2342,7 +2441,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						: (rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri),
 				)).catch(() => undefined);
 				if (injected?.trim()) {
-					finalPrompt = `${injected.trim()}\n\n${rawPrompt}`;
+					finalPrompt = `${injected.trim()}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${rawPrompt}`;
 				}
 				if (!alreadyInit && callerRole) {
 					record.roleInit = { rank: callerRole, engine: record.engine, initializedAt: Date.now() };
@@ -2709,7 +2808,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					try {
 						const agentUri = vscode.Uri.parse(agentEntry.resource);
 						const rec = findCachedRecord(agentUri);
-						if (rec && rec.provisional && !rec.roleInit) {
+						if (rec && (rec.provisional || rec.unmaterialized) && !rec.roleInit) {
 							void ensureRoleInitialized(rec, agentUri, false);
 						}
 					} catch { /* Ignore malformed URI. */ }

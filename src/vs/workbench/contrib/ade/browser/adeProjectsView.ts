@@ -33,6 +33,7 @@ import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { WorkbenchAsyncDataTree } from '../../../../platform/list/browser/listService.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultStyles.js';
@@ -45,7 +46,7 @@ import { IEditableData, IViewDescriptorService } from '../../../common/views.js'
 import { formatProjectDisplayPath, isCloudProjectUri } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IAdeEngineeringService, IAdeInboxService } from '../../../../platform/ade/common/adeEngineering.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_OPEN_RESEARCH_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
 import { AdeInboxPanel } from './adeInboxView.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
@@ -444,10 +445,21 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 				: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
 		template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.roleBadge, roleTooltip));
 		if (!isLocked) {
+			template.roleBadge.setAttribute('role', 'button');
+			template.roleBadge.setAttribute('tabindex', '0');
 			template.editDisposables.add(addDisposableListener(template.roleBadge, EventType.CLICK, event => {
 				EventHelper.stop(event, true);
 				this.onSetAgentRole(agent.id);
 			}));
+			template.editDisposables.add(addDisposableListener(template.roleBadge, EventType.KEY_DOWN, (event: KeyboardEvent) => {
+				if (event.key === 'Enter' || event.key === ' ') {
+					EventHelper.stop(event, true);
+					this.onSetAgentRole(agent.id);
+				}
+			}));
+		} else {
+			template.roleBadge.removeAttribute('role');
+			template.roleBadge.removeAttribute('tabindex');
 		}
 
 		const ownStatus = agent.status === 'working' ? 'working'
@@ -517,6 +529,7 @@ export class AdeProjectsView extends ViewPane {
 	private sidebarMode: 'projects' | 'inbox' = 'projects';
 	private readonly engineeringService: IAdeEngineeringService | undefined;
 	private readonly inboxService: IAdeInboxService | undefined;
+	private readonly notificationService: INotificationService | undefined;
 	private emptyStateHost: HTMLElement | undefined;
 	private emptyStateMessage: HTMLElement | undefined;
 	private readonly emptyActionDisposables = this._register(new DisposableStore());
@@ -566,15 +579,18 @@ export class AdeProjectsView extends ViewPane {
 			this.refreshAgentIcons();
 		}));
 
-		const [engSvc, inbSvc] = instantiationService.invokeFunction(accessor => {
+		const [engSvc, inbSvc, notifSvc] = instantiationService.invokeFunction(accessor => {
 			let eng: IAdeEngineeringService | undefined;
 			let inb: IAdeInboxService | undefined;
+			let notif: INotificationService | undefined;
 			try { eng = accessor.get(IAdeEngineeringService); } catch { eng = undefined; }
 			try { inb = accessor.get(IAdeInboxService); } catch { inb = undefined; }
-			return [eng, inb] as const;
+			try { notif = accessor.get(INotificationService); } catch { notif = undefined; }
+			return [eng, inb, notif] as const;
 		});
 		this.engineeringService = engSvc;
 		this.inboxService = inbSvc;
+		this.notificationService = notifSvc;
 		if (this.inboxService) {
 			this._register(this.inboxService.onDidChange(() => this.updateHeaderControls()));
 		}
@@ -597,16 +613,21 @@ export class AdeProjectsView extends ViewPane {
 		this.renderControlsToolbar(container);
 
 		const contentArea = append(container, $('.ade-projects-content'));
-		this.emptyStateHost = append(contentArea, $('.ade-projects-empty'));
-		this.emptyStateMessage = append(this.emptyStateHost, $('p.ade-projects-empty-text'));
-		this.emptyStateHost.hidden = true;
-
 		if (this.inboxService && this.engineeringService) {
-			this.inboxPanel = this._register(new AdeInboxPanel(contentArea, this.inboxService, this.engineeringService, this.editors));
+			this.inboxPanel = this._register(new AdeInboxPanel(
+				contentArea,
+				this.inboxService,
+				this.engineeringService,
+				this.editors,
+				msg => this.notificationService?.error(msg),
+			));
 			this.inboxPanel.setVisible(false);
 		}
 
 		const treeContainer = this.treeHost = append(contentArea, $('.ade-projects-tree.explorer-folders-view'));
+		this.emptyStateHost = append(contentArea, $('.ade-projects-empty'));
+		this.emptyStateMessage = append(this.emptyStateHost, $('p.ade-projects-empty-text'));
+		this.emptyStateHost.hidden = true;
 		this._register(createFileIconThemableTreeContainerScope(treeContainer, this.themeService));
 		const labels = this._register(this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this.onDidChangeBodyVisibility }));
 
@@ -708,7 +729,7 @@ export class AdeProjectsView extends ViewPane {
 
 		this._register(tree.onDidChangeSelection(event => {
 			const item = event.elements[0];
-			if (event.browserEvent && item) {
+			if (item) {
 				if (item.kind === 'project') {
 					this.projects.selectProject(item.project.uri);
 				} else {
@@ -778,9 +799,14 @@ export class AdeProjectsView extends ViewPane {
 		this._register(this.storageService.onWillSaveState(() => this.saveTreeState()));
 
 		this.updateHeaderControls();
+		this.updateEmptyState(
+			this.projects.projects.map(project => ({ kind: 'project' as const, project })),
+		);
 		void this.refresh().then(() => this.sessions.getEngines()).then(() => {
 			this.updateHeaderControls();
 			this.refreshAgentIcons();
+		}).catch(() => {
+			this.updateHeaderControls();
 		});
 	}
 
@@ -889,14 +915,18 @@ export class AdeProjectsView extends ViewPane {
 		const controls = this.controlsBar = append(container, $('.ade-sidebar-controls'));
 
 		if (this.inboxService) {
-			const segTabs = append(controls, $('.ade-sidebar-seg-tabs'));
+			const segTabs = append(controls, $('.ade-sidebar-seg-tabs', { role: 'tablist' }));
 			const projTab = this.projectsTabBtn = append(segTabs, $('button.ade-sidebar-seg-btn.active', {
 				type: 'button',
+				role: 'tab',
+				'aria-selected': 'true',
 			}));
 			this.sectionTitleLabel = append(projTab, $('span.ade-sidebar-section-title', {}, localize('adeProjectsSectionTitle', "Projects")));
 
 			const inbTab = this.inboxTabBtn = append(segTabs, $('button.ade-sidebar-seg-btn', {
 				type: 'button',
+				role: 'tab',
+				'aria-selected': 'false',
 			}));
 			append(inbTab, $('span', {}, localize('adeInboxTabTitle', "Inbox")));
 			this.inboxBadgeEl = append(inbTab, $('span.ade-inbox-count-badge'));
@@ -928,7 +958,9 @@ export class AdeProjectsView extends ViewPane {
 	setSidebarMode(mode: 'projects' | 'inbox'): void {
 		this.sidebarMode = mode;
 		this.projectsTabBtn?.classList.toggle('active', mode === 'projects');
+		this.projectsTabBtn?.setAttribute('aria-selected', String(mode === 'projects'));
 		this.inboxTabBtn?.classList.toggle('active', mode === 'inbox');
+		this.inboxTabBtn?.setAttribute('aria-selected', String(mode === 'inbox'));
 		if (this.archivedToggleButton) {
 			this.archivedToggleButton.hidden = mode === 'inbox';
 		}
@@ -1036,6 +1068,17 @@ export class AdeProjectsView extends ViewPane {
 			] : []),
 			new Separator(),
 			toAction({
+				id: 'ade.project.rename',
+				label: localize('adeRenameProjectDisplay', "Rename Display Name..."),
+				run: () => this.commandService.executeCommand(ADE_RENAME_PROJECT_COMMAND_ID, project.uri),
+			}),
+			toAction({
+				id: 'ade.project.refresh',
+				label: localize('adeRefreshProjectView', "Refresh"),
+				run: () => this.refresh(),
+			}),
+			new Separator(),
+			toAction({
 				id: 'ade.project.remove',
 				label: localize('adeRemoveProject', "Remove Project"),
 				run: () => this.commandService.executeCommand(ADE_REMOVE_PROJECT_COMMAND_ID, project.uri),
@@ -1063,20 +1106,32 @@ export class AdeProjectsView extends ViewPane {
 
 		return [
 			...(isTopGovernor ? [
-				toAction({
+				...(agent.treeType !== 'research' ? [toAction({
 					id: 'ade.engineering',
 					label: agent.treeType === 'engineering'
 						? localize('adeOpenEngineeringMenu', "Open Engineering")
 						: localize('adeEnableEngineeringMenu', "Engineering"),
 					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, agentId),
-				}),
+				})] : []),
+				...(agent.treeType !== 'engineering' ? [toAction({
+					id: 'ade.research',
+					label: agent.treeType === 'research'
+						? localize('adeOpenResearchMenu', "Open Research")
+						: localize('adeEnableResearchMenu', "Research"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_RESEARCH_COMMAND_ID, agentId),
+				})] : []),
 				new Separator(),
 			] : []),
 			...(isLocked && agent.parentId && workTreeGov ? [
 				toAction({
 					id: 'ade.openOwningEngineering',
-					label: localize('adeOpenOwningEngineeringMenu', "Open Engineering Canvas"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, workTreeGov.id),
+					label: workTreeGov.treeType === 'research'
+						? localize('adeOpenOwningResearchMenu', "Open Research Canvas")
+						: localize('adeOpenOwningEngineeringMenu', "Open Engineering Canvas"),
+					run: () => this.commandService.executeCommand(
+						workTreeGov.treeType === 'research' ? ADE_OPEN_RESEARCH_COMMAND_ID : ADE_OPEN_ENGINEERING_COMMAND_ID,
+						workTreeGov.id,
+					),
 				}),
 				new Separator(),
 			] : []),
@@ -1257,29 +1312,45 @@ export class AdeProjectsView extends ViewPane {
 			return;
 		}
 
-		if (roots.length > 0) {
+		const focused = this.projectNavigation.focusedProject;
+		const focusedHasNoSessions = Boolean(focused && !this.projects.showArchived && this.getProjectRootAgents(focused.uri).length === 0);
+		if (roots.length > 0 && !focusedHasNoSessions) {
 			this.emptyStateHost.hidden = true;
 			this.treeHost.hidden = false;
 			return;
 		}
 
 		this.emptyStateHost.hidden = false;
-		this.treeHost.hidden = true;
+		this.treeHost.hidden = roots.length === 0;
 
-		const focused = this.projectNavigation.focusedProject;
 		if (this.projects.showArchived) {
 			this.emptyStateMessage.textContent = focused
 				? localize('adeArchivedEmptyFocused', "No archived sessions in {0}.", focused.name)
 				: localize('adeArchivedEmpty', "No archived sessions.");
+			const showActiveBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
+			showActiveBtn.label = localize('adeBackToActiveProjectsBtn', "Back to Active Projects");
+			this.emptyActionDisposables.add(showActiveBtn.onDidClick(() => {
+				this.projects.setShowArchived(false);
+			}));
 			return;
 		}
 
 		if (!focused && this.projects.projects.length === 0) {
-			this.emptyStateMessage.textContent = localize('adeNoProjectsWelcome', "Add a project folder here, then add Coding Agent sessions under any project.");
+			this.emptyStateMessage.textContent = localize('adeNoProjectsWelcome', "Add a local project folder or connect an SSH Cloud Host workspace to orchestrate Coding Agents across 4 organizational tiers.");
 			const addProjectBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, defaultButtonStyles));
 			addProjectBtn.label = localize('adeAddProjectFolderButton', "Add Project Folder...");
 			this.emptyActionDisposables.add(addProjectBtn.onDidClick(() => {
 				void this.commandService.executeCommand('workbench.action.ade.addProjectFolder');
+			}));
+			const cloudHostsBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
+			cloudHostsBtn.label = localize('adeManageCloudHostsEmptyBtn', "Manage SSH Cloud Hosts...");
+			this.emptyActionDisposables.add(cloudHostsBtn.onDidClick(() => {
+				void this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID);
+			}));
+			const openSecBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
+			openSecBtn.label = localize('adeOpenSecretaryEmptyBtn', "Open Secretary");
+			this.emptyActionDisposables.add(openSecBtn.onDidClick(() => {
+				void this.commandService.executeCommand('workbench.action.ade.openSecretary');
 			}));
 			return;
 		}
@@ -1434,6 +1505,10 @@ export class AdeProjectsView extends ViewPane {
 		const bodyH = Math.max(0, this.lastHeight - headerHeight);
 		if (this.sidebarMode === 'inbox') {
 			this.inboxPanel?.layout(bodyH);
+			return;
+		}
+		if (this.treeHost && !this.treeHost.hidden && this.emptyStateHost && !this.emptyStateHost.hidden) {
+			this.tree?.layout(28, this.lastWidth);
 			return;
 		}
 		this.tree?.layout(bodyH, this.lastWidth);

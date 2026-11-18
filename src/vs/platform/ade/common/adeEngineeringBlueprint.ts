@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { localize } from '../../../nls.js';
 import {
 	AdeEngineeringEdgeVisualStatus,
 	AdeEngineeringNodeType,
@@ -1045,8 +1046,10 @@ export function parseEngineeringBlueprint(
 				id: draft.id,
 				title: draft.title || draft.id,
 				type: 'user_gate',
-				critical: false,
+				critical: Boolean(draft.critical),
 				description: draft.description ?? draft.goal ?? '',
+				...(draft.goal ? { goal: draft.goal } : {}),
+				...(draft.acceptance ? { acceptance: draft.acceptance } : {}),
 				...(pos ? { position: pos } : {}),
 			});
 		} else {
@@ -1067,6 +1070,7 @@ export function parseEngineeringBlueprint(
 				worker: workerCfg,
 				goal: draft.goal ?? '',
 				acceptance: draft.acceptance ?? '',
+				...(draft.description ? { description: draft.description } : {}),
 				...(pos ? { position: pos } : {}),
 			});
 		}
@@ -1575,16 +1579,23 @@ export function createStarterBlueprint(
 	treeType: AdeWorkTreeType = 'engineering',
 ): IAdeEngineeringBlueprint {
 	const canonicalEngine = normalizeBlueprintEngine(defaultEngine, 'claude-code');
+	const isResearch = treeType === 'research';
 	const nodes: IAdeEngineeringBlueprintNode[] = [
 		{
 			id: 'N1',
-			title: '架构设计与接口定义',
+			title: isResearch
+				? localize('adeStarterResearchTitle', "Problem Framing & Literature Synthesis")
+				: localize('adeStarterEngineeringTitle', "Architecture & Interface Contract"),
 			type: 'task',
 			critical: true,
 			employee: { engine: canonicalEngine, thinking: 'medium' },
 			worker: { engine: canonicalEngine, thinking: 'high' },
-			goal: '梳理目标模块边界、核心数据结构与接口契约，完成基础骨架代码。',
-			acceptance: '1. 核心接口定义清晰且符合现有分层规范；\n2. 静态检查无错误。',
+			goal: isResearch
+				? localize('adeStarterResearchGoal', "Define key research questions, survey primary sources & baseline benchmarks, and produce structured evidence notes.")
+				: localize('adeStarterEngineeringGoal', "Define target module boundaries, core data structures, and public interface contracts with clean skeleton types."),
+			acceptance: isResearch
+				? localize('adeStarterResearchAcceptance', "1. All claims cite concrete files or primary sources;\n2. Hypotheses and evaluation criteria are explicitly documented.")
+				: localize('adeStarterEngineeringAcceptance', "1. Core interfaces compile cleanly and respect layer boundaries;\n2. Static type and lint checks pass with zero errors."),
 			position: { x: 180, y: 240 },
 		},
 	];

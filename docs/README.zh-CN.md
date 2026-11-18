@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>新一代组织化智能体开发环境（ADE）与镜像对称 IDE 一体化工作台</strong><br/>
-  8 大原生 Coding Agent 引擎 · 四级职责层级编排 · 可视化 Engineering 动态协作 DAG · 免服务端装机的原生 SSH 云主机
+  8 大原生 Coding Agent 引擎 · 四级职责层级编排 · 可视化 Engineering 与 Research 动态协作 DAG · 免服务端装机的原生 SSH 云主机
 </p>
 
 <p align="center">
@@ -35,7 +35,7 @@
 
 1. **ADE ⇄ IDE 镜像对称，零割裂切换**：共享同一套本地与云端项目目录、自定义文件树排序、已打开编辑器与 `Focus ➔ Home ⇄ Forward` 聚焦状态，无需拆窗或复制仓库。
 2. **严格的四级组织化智能体梯队 + 常驻 `✦ Secretary`**：建立 **`Governor（L1 总督）➔ Manager（L2 经理）➔ Employee（L3 正式员工/验收官）➔ Worker（L4 纯净执行层）`** 清晰职级，彻底隔离“编排验收上下文”与“纯净编码上下文”。
-3. **Engineering 可视化动态协作 DAG 画布**：算法自动切分极大无分支路径（Maximal Non-Branching Path）`Manager` 管辖段，双核同心圆任务节点实时呈现 `Worker` 编码与 `Employee` 审查呼吸态、三级失败熔断色阶、`User Gate` 里程碑门禁与分角色实时流式 Token 计量。
+3. **Engineering & Research 可视化动态协作 DAG 画布**：算法自动切分极大无分支路径（Maximal Non-Branching Path）`MGR · L2` 管辖段，**v2 嵌套双壳任务舱（Nested Dual-Shell Task Pods）**以外层 `EMPLOYEE · L3` 验收壳在四边物理包裹内层凹陷的 `WORKER · L4` 执行核，并配备实时 **DAG MAP** 小地图、完整撤销/重做、三级失败熔断色阶、`User Gate` 里程碑门禁、1 键 `+` 下游快速派生与四层 Token 与遥测分析卡。
 4. **8 大本机 Coding Agent 原生直连（自带 CLI，零厂商绑定）**：原生聚合 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 与 **Pi**，剔除一切内置商业订阅强绑组件。
 5. **免远端装机的原生 SSH 云主机（`aexus-ssh://`）**：自动迁移原版 VS Code 云主机与常用远端目录，内置可视化 **Cloud Host Studio**、统一的 `+` 两步式 **选主机 ➔ 实时路径输入与父子目录自动弹窗**，以及本地/云主机并存的原生 SSH 集成终端。
 6. **100% 等价可编程控制面（`aexus-ade` CLI）**：所有界面操作均通过 `0600` 本地鉴权 Unix Socket 暴露给智能体与脚本。
@@ -67,9 +67,9 @@
 
 ---
 
-### 2. ADE Engineering：动态协作 DAG、双层验收状态机与实时 Token 遥测
+### 2. ADE Engineering 与 Research：嵌套双壳任务舱、双层验收状态机与四层 Token 遥测
 
-对任意顶层 `Governor` 右键开启 **`Engineering`**，即可将口头对话升级为**拓扑锁定的可视化工程流水线**（蓝图与运行态完全独立保存在 `~/.aexus-code/engineering/<governor-id>/`，零污染业务 Git 仓库）：
+对任意顶层 `Governor` 右键开启 **`Engineering`**，或执行 **`Open ADE Research...`**，即可将口头对话升级为**拓扑锁定的可视化工程/研究流水线**（蓝图与运行态完全独立保存在 `~/.aexus-code/engineering/<governor-id>/` 与 `~/.aexus-code/research/<governor-id>/`，零污染业务 Git 仓库）：
 
 <table>
   <tr>
@@ -98,13 +98,18 @@
   <img src="assets/04c-engineering-blueprint-drawer.png" width="100%" alt="ADE Engineering 混合 Mermaid + Markdown 蓝图抽屉与实时执行日志" />
 </p>
 
-- **极大无分支路径（Maximal Non-Branching Path）自动切分**：只需编写或拖拽任务节点与连线，系统 100% 自动在分叉前、合流后与 `user_gate` 边界切分 `Manager` 段框，并同步在左栏生成锁定的四级会话树。
-- **双核同心圆动态节点与流动边**：内核代表 `Worker`，外环卫星代表 `Employee`；运行中自动点亮对应子角色呼吸光效与实时阶段计时徽章（`Worker · Ns` / `Emp Review · Ns`），激活边呈现绿色流动虚线。
+- **极大无分支路径（Maximal Non-Branching Path）自动切分**：只需编写或拖拽任务节点与连线，系统 100% 自动在分叉前、合流后与 `user_gate` 边界切分 `MGR · L2` 管辖段框，并同步在左栏生成锁定的四级会话树。
+- **v2 嵌套双壳任务舱（Nested Dual-Shell Task Pods）**：每个任务节点都是一枚完整实体舱——外层 **`EMPLOYEE · L3`** 验收壳自带裁决徽章、实时阶段徽章、汇报按钮与文件页脚，并在**上下左右四边物理包裹**内层凹陷的 **`WORKER · L4`** 执行核；所有任务舱又被自动切分的 **`MGR · L2`** 段框环抱，无需打开检查器即可一眼读懂完整四级层级。运行中对应子角色自动点亮呼吸光效与实时阶段计时徽章（`Worker · Ns` / `Emp Audit · Ns` / `Mgr Review · Ns`），激活边呈现绿色流动虚线。
+- **1 键 `+` 下游快速派生与完整撤销/重做**：悬停任务舱输出端口即浮现 `+` 手柄——单击即自动追加并连线一个下游任务（`Alt+单击` 追加连线的 `User Gate`）。所有画布编辑均可用 `Cmd+Z` 撤销、`Shift+Cmd+Z` 重做，未保存的蓝图变更会以 `Draft` 徽章提示，直至 `Cmd+S` 确认。
+- **实时可交互 DAG MAP 小地图**：悬浮小地图完整渲染全局拓扑与实时视口矩形；单击或拖动即可将镜头飞至对应区域，也可通过工具栏节点选择器直接跳转到任意节点。
+- **吸附对齐辅助线（Snap-to-Alignment Guides）**：拖拽任务舱时，其边缘与中心会自动吸附邻近节点和段框，并显示对齐辅助线（按住 `Alt` 可临时关闭吸附），让大型 DAG 始终整齐。
+- **可按角色过滤的执行日志与语法着色内联 Diff**：`Logs` 面板支持按 `All`、`Worker · L4`、`Employee · L3`、`Manager · L2`、`Gates & Alerts` 过滤实时事件流；带有节点 ID 的事件会渲染可点击的 **`[nodeId]`**，点击即把镜头飞到对应任务舱。汇报卡片内可展开逐回合 Git Diff，并以 `+` 新增 / `-` 删除 / `@@` 区块的语法着色逐行展示。
+- **四层 Token 与遥测分析卡**：点击工具栏 Token 胶囊即可打开实时分析卡，汇总总 Token、回合数、输入、输出、缓存读取与缓存写入，并按 `Governor · L1`、`Manager · L2`、`Employee · L3`、`Worker · L4` 四层分别拆解。
 - **双层验收闭环与三级失败熔断（Circuit Breaker）**：
   - `Employee` 内部打回 1–2 次在原会话增量返工；第 3 次自动唤醒段 `Manager` 评估并可授予第 4 次指导机会；
   - 段尾节点或 `★Critical` 关键节点通过 `Employee` 初审后，自动触发 `Manager` 二次正式验收；
   - `Manager` 正式判定失败呈现三级色阶演进：**浅琥珀（`failure_1`）➔ 深琥珀（`failure_2`）➔ 深红熔断（`failure_3`）**，第 3 次失败立即暂停支路、唤醒 `Governor` 评估并向 **`ADE Inbox`** 投递决策通知。
-- **独立 `User Gate` 用户验收盾牌**：上游完成后亮起醒目琥珀盾牌与顶栏 `Review Gate` 一键定位按钮；支持一键放行下游，或勾选任意上游节点执行**按有向路径交集的精准局部打回**（绝不误伤无关并行支路）。
+- **独立 `User Gate` 用户验收盾牌与内联操作**：上游完成后亮起醒目金色琥珀盾牌与顶栏 `Review Gate` 一键定位按钮。门禁等待期间，卡片上直接内联渲染 **`✓ Approve`** 与 **`Rollback…`** 按钮——一键放行并立即推进下游，或勾选任意上游节点执行**按有向路径交集的精准局部打回**（绝不误伤无关并行支路）。
 - **右键紧邻卡片与流式 Token 计数**：鼠标悬停零干扰，**右键点击**任意节点即在旁弹出 `Worker | Employee | Mgr | Spec | Report` 五栏卡片（支持为不同角色混搭 8 大引擎与思考强度、一键批量同步未锁定角色、直接展开 Worker 改动的源码 Diff）；顶栏与节点内置回合中流式刷新的分角色 Token 统计。
 
 ```mermaid
@@ -116,6 +121,10 @@ flowchart LR
     M -->|"段级通过"| G{{"User Gate / 下游节点"}}
     M -->|"正式失败 1 → 2 → 3 次"| CB["三级熔断 (Amber → Crimson)\n唤醒 Governor + 投递 Inbox"]
 ```
+
+#### ADE Research 模式——与 Engineering 对等的一等能力
+
+Research 树并非独立工具，而是与 Engineering 树完全对等的一等模式。执行 **`Open ADE Research...`**（或 `aexus-ade engineering init --tree-type research --governor <id>`）即可获得与 Engineering 完全一致的四级运行时、嵌套双壳任务舱、段框、门禁、三级熔断、小地图、撤销/重做与四层 Token 遥测，只是蓝图以 `treeType: 'research'` 持久化于 `~/.aexus-code/research/<governor-id>/`，并内置面向研究工作（问题界定、文献综述、基线基准与显式评估标准）的起始规格。多条并行调研支路在综合节点汇合，由 `Employee (L3)` 同行评审与 `User Gate` 检查点把关结论——既适合代码交付，也适合多轨综合与同行评审型 DAG。
 
 ---
 
@@ -186,8 +195,9 @@ GOV_ID=$(aexus-ade session create --project nexus-kv-engine --engine claude --ro
 MGR_ID=$(aexus-ade session create --project nexus-kv-engine --parent "$GOV_ID" --engine codex --title "WAL Track" --no-open --json | jq -r .id)
 aexus-ade session send "$GOV_ID" "拆解 Raft WAL 与无锁 MemTable 并行研发计划" --wait
 
-# 3. 初始化、校验并运行 Engineering 可视化 DAG 工作流
+# 3. 初始化、校验并运行 Engineering（或 Research）可视化 DAG 工作流
 aexus-ade engineering init --governor "$GOV_ID" --open
+aexus-ade engineering init --governor "$GOV_ID" --tree-type research --open
 aexus-ade engineering blueprint apply --governor "$GOV_ID" --file ./blueprint.md
 aexus-ade engineering run --governor "$GOV_ID"
 aexus-ade engineering status --governor "$GOV_ID" --json
@@ -203,7 +213,7 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 | `project` | `list` · `add <path\|host:/path>` · `select` · `remove` · `delete` · `focus` · `home` · `forward` · `move` · `changes` · `files` · `open-file` · `open-diff` |
 | `host` | `list` · `info` · `add` · `update` · `remove` · `test` · `browse` · `import-vscode` · `open` |
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
-| `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `open` · `send [--wait]` · `history` · `stop` · `rename` · `role` · `move` · `reorder` · `archive` · `unarchive` · `delete` |
+| `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
 | `engineering` | `list` · `init` · `open` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
@@ -215,7 +225,7 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 ### 环境要求
 
 - **操作系统**：macOS（Apple Silicon `arm64` 已完成完整打包、签名与端到端验证）
-- **工具链**：仓库内置 `./scripts/aexus-env.sh` 自动固定兼容的 Node.js（`22.x`）与 `pnpm` 环境，加上 Xcode Command Line Tools、Python 3 与系统 OpenSSH
+- **工具链**：仓库内置 `./scripts/aexus-env.sh` 自动固定兼容的 Node.js（`24.22.1`，与 `.nvmrc` 及 `.build/toolchain` 保持一致）与 `pnpm` 环境，加上 Xcode Command Line Tools、Python 3 与系统 OpenSSH
 
 ### 开发运行与独立应用打包
 
@@ -238,8 +248,8 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 
 ## 源码架构导览
 
-- [`src/vs/platform/ade/`](../src/vs/platform/ade/)：跨进程核心协议与 Node 服务（`adeControlServer` 本地鉴权控制面、`adeEngineeringService` 与蓝图解析器、`adeCloudHostService` 多路复用 SSH 传输层与 `vscodeConfigMigration`）。
-- [`src/vs/workbench/contrib/ade/`](../src/vs/workbench/contrib/ade/)：ADE 工作台核心视图与编辑器（`adeProjectsView` 四级会话树与 `Inbox`、`adeEngineeringEditorPane` 可视化 DAG 画布、`adeCloudHostsEditorPane` 云主机面板、`adeCloudHostFileSystemProvider` 远端文件系统与实时路径联动弹窗、`adeInspectorViews`）。
+- [`src/vs/platform/ade/`](../src/vs/platform/ade/)：跨进程核心协议与 Node 服务（`adeControlServer` 本地鉴权控制面、`adeEngineeringService` 与同时支持 Engineering / Research 的蓝图解析器、`adeCloudHostService` 多路复用 SSH 传输层与 `vscodeConfigMigration`）。
+- [`src/vs/workbench/contrib/ade/`](../src/vs/workbench/contrib/ade/)：ADE 工作台核心视图与编辑器（`adeProjectsView` 四级会话树与 `Inbox`、`adeEngineeringEditorPane` 嵌套双壳 DAG 画布（含小地图、撤销/重做与四层分析卡）、`adeCloudHostsEditorPane` 云主机面板、`adeCloudHostFileSystemProvider` 远端文件系统与实时路径联动弹窗、`adeInspectorViews`）。
 - [`src/vs/workbench/contrib/terminal/`](../src/vs/workbench/contrib/terminal/)：按项目自动路由本地 Shell 与远端 SSH PTY 的 `ProjectTerminalService`。
 - [`extensions/aexus-agents/`](../extensions/aexus-agents/)：8 大原生 Coding Agent 运行时适配器、动态角色桥接与 `bin/aexus-ade` CLI。
 
@@ -247,5 +257,6 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 
 ## 隐私安全与开源许可
 
-- **本地优先与零密钥泄露**：控制面仅监听本地 `0600` Unix Socket；SSH 云主机迁移仅解析别名与公开连接参数，绝不读取、拷贝或存储任何私钥文件内容与口令；已彻底移除上游内置 Copilot 专有遥测、令牌与后台组件。
+- **本地优先与零密钥泄露**：控制面仅监听本地 `0600` Unix Socket；SSH 云主机迁移仅解析别名与公开连接参数，绝不读取、拷贝或存储任何私钥文件内容与口令；本构建已不再打包上游内置 Copilot 扩展、CLI shim、订阅/令牌端点与微软专有 Agent 后台，同时保留通用编辑器、Extension Host、扩展 API 及兼容类型。
+- **本地 ad-hoc macOS 签名**：构建产物使用本机 ad-hoc 开发签名，适用于开发与自行安装；面向第三方分发 macOS 应用前，仍需另行完成 Apple Developer ID 签名与公证。
 - **开源许可**：本项目基于 Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) 衍生开发，遵循 **[MIT License](../LICENSE.txt)** 开源许可，完整保留上游版权与许可声明。有关品牌图标与公开扩展市场访问的合规说明，详见 [AEXUS.md](../AEXUS.md)。

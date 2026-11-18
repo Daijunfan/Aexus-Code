@@ -5,6 +5,7 @@
 	"version": "0.1.0",
 	"publisher": "vscode",
 	"license": "MIT",
+	"l10n": "./l10n",
 	"engines": { "vscode": "^1.146.0" },
 	"main": "./dist/extension.js",
 	"extensionKind": ["ui"],
@@ -271,6 +272,7 @@
 						"opencode": { "type": "string" },
 						"dsh": { "type": "string" },
 						"agy": { "type": "string" },
+						"antigravity": { "type": "string" },
 						"cline": { "type": "string" },
 						"pi": { "type": "string" }
 					},

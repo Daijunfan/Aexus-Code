@@ -345,10 +345,21 @@ function decodeVsCodeSshAuthority(rawAuthority: string): { aliasOrHost: string; 
 		user = body.slice(0, atIdx);
 		body = body.slice(atIdx + 1);
 	}
-	const colonIdx = body.lastIndexOf(':');
-	if (colonIdx > 0 && /^\d+$/.test(body.slice(colonIdx + 1))) {
-		port = Number(body.slice(colonIdx + 1));
-		body = body.slice(0, colonIdx);
+	if (body.startsWith('[')) {
+		const closeBracket = body.indexOf(']');
+		if (closeBracket > 0) {
+			const rest = body.slice(closeBracket + 1);
+			if (rest.startsWith(':') && /^\d+$/.test(rest.slice(1))) {
+				port = Number(rest.slice(1));
+			}
+			body = body.slice(1, closeBracket);
+		}
+	} else if (body.indexOf(':') === body.lastIndexOf(':')) {
+		const colonIdx = body.lastIndexOf(':');
+		if (colonIdx > 0 && /^\d+$/.test(body.slice(colonIdx + 1))) {
+			port = Number(body.slice(colonIdx + 1));
+			body = body.slice(0, colonIdx);
+		}
 	}
 	return body ? { aliasOrHost: body, user, port } : undefined;
 }
@@ -409,7 +420,10 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	private ensureInitialized(): Promise<void> {
 		if (!this.initPromise) {
-			this.initPromise = this.doInitialize();
+			this.initPromise = this.doInitialize().catch(err => {
+				this.initPromise = undefined;
+				throw err;
+			});
 		}
 		return this.initPromise;
 	}
@@ -426,6 +440,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
 				this.logService?.warn(`[AdeCloudHosts] Failed to read ${this.storageFilePath}: ${err}`);
+				await fs.copyFile(this.storageFilePath, `${this.storageFilePath}.corrupt-${Date.now()}`).catch(() => undefined);
 			}
 		}
 
@@ -436,7 +451,11 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				this.logService?.warn(`[AdeCloudHosts] Startup VS Code / SSH host import warning: ${err}`);
 			}
 		}
-		await this.syncSshConfigFiles();
+		try {
+			await this.syncSshConfigFiles();
+		} catch (err) {
+			this.logService?.warn(`[AdeCloudHosts] Failed to sync SSH config files on startup: ${err}`);
+		}
 	}
 
 	private enqueuePersist(): Promise<void> {
@@ -610,10 +629,18 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			user = hostName.slice(0, atIdx).trim() || undefined;
 			hostName = hostName.slice(atIdx + 1).trim();
 		}
-		const portMatch = /^([^:]+):(\d+)$/.exec(hostName);
-		if (portMatch && !input.port) {
-			hostName = portMatch[1].trim();
-			port = Number(portMatch[2]);
+		const bracketedIpv6Match = /^\[([^\]]+)\](?::(\d+))?$/.exec(hostName);
+		if (bracketedIpv6Match) {
+			hostName = bracketedIpv6Match[1].trim();
+			if (bracketedIpv6Match[2] && !input.port) {
+				port = Number(bracketedIpv6Match[2]);
+			}
+		} else {
+			const portMatch = /^([^:]+):(\d+)$/.exec(hostName);
+			if (portMatch && !input.port) {
+				hostName = portMatch[1].trim();
+				port = Number(portMatch[2]);
+			}
 		}
 		if (!hostName) {
 			throw new Error('Cloud Host address (HostName or IP) is required.');
@@ -674,7 +701,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		await this.ensureInitialized();
 		const before = this.hosts.length;
 		const needle = idOrAlias.trim().toLowerCase();
-		this.hosts = this.hosts.filter(h => h.id.toLowerCase() !== needle && h.alias.toLowerCase() !== needle);
+		this.hosts = this.hosts.filter(h => h.id.toLowerCase() !== needle && h.alias.toLowerCase() !== needle && h.name.toLowerCase() !== needle);
 		if (this.hosts.length === before) {
 			return false;
 		}
@@ -1096,9 +1123,8 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				// Proceed without ControlMaster if private mux directory cannot be secured
 			}
 		}
-		if (options.host?.strictHostKeyChecking) {
-			sshArgs.push('-o', `StrictHostKeyChecking=${options.host.strictHostKeyChecking}`);
-		}
+		const hostKeyMode = options.host?.strictHostKeyChecking || 'accept-new';
+		sshArgs.push('-o', `StrictHostKeyChecking=${hostKeyMode}`);
 		sshArgs.push('--', target, remoteCommand);
 
 		return new Promise((resolve, reject) => {
@@ -1109,6 +1135,9 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 					SSH_ASKPASS_REQUIRE: 'never',
 					DISPLAY: '',
 				},
+			});
+			child.stdin.on('error', () => {
+				// Prevent unhandled EPIPE if SSH exits before consuming stdin
 			});
 
 			const outChunks: Buffer[] = [];

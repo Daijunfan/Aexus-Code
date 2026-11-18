@@ -646,6 +646,14 @@
 	text-decoration: underline;
 }
 
+.monaco-workbench .ade-sidebar-seg-btn:focus-visible,
+.monaco-workbench .ade-inbox-filter-btn:focus-visible,
+.monaco-workbench .ade-inbox-link-btn:focus-visible,
+.monaco-workbench .ade-inbox-card:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
 .monaco-workbench .ade-inbox-list {
 	flex: 1;
 	min-height: 0;
@@ -3816,7 +3824,9 @@
 }
 
 .monaco-workbench.vs .ade-eng-popover,
-.monaco-workbench.vs .ade-eng-sheet {
+.monaco-workbench.vs .ade-eng-sheet,
+.monaco-workbench.hc-light .ade-eng-popover,
+.monaco-workbench.hc-light .ade-eng-sheet {
 	background: #ffffff;
 	border-color: rgba(0, 0, 0, 0.14);
 	box-shadow: 0 16px 38px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
@@ -3904,7 +3914,8 @@
 	resize: none;
 }
 
-.monaco-workbench.vs .ade-eng-blueprint-editor {
+.monaco-workbench.vs .ade-eng-blueprint-editor,
+.monaco-workbench.hc-light .ade-eng-blueprint-editor {
 	background: #f6f8fa;
 	border-color: rgba(0, 0, 0, 0.14);
 }

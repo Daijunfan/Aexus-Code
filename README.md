@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>An Organizational Agent Development Environment (ADE) &amp; Mirror-Symmetric IDE in One Native Workbench</strong><br/>
-  8 Native Coding Agent Engines · 4-Tier Hierarchical Orchestration · Visual Engineering DAG · Zero-Server SSH Cloud Hosts
+  8 Native Coding Agent Engines · 4-Tier Hierarchical Orchestration · Visual Engineering &amp; Research DAG · Zero-Server SSH Cloud Hosts
 </p>
 
 <p align="center">
@@ -35,7 +35,7 @@ Most AI-enabled editors bolt a single-thread chat sidebar onto a text editor. As
 
 1. **ADE ⇄ IDE Mirror Symmetry** — Switch instantaneously between multi-agent orchestration (`ADE`) and distraction-free code editing (`IDE`). Both modes share the exact same local and remote project catalog, custom file ordering, open editors, and `Focus ➔ Home ⇄ Forward` navigation state with zero workspace duplication.
 2. **4-Tier Organizational Hierarchy + Pinned `✦ Secretary`** — Structure agents into **`Governor (L1) ➔ Manager (L2) ➔ Employee (L3) ➔ Worker (L4)`**, strictly separating orchestration & code-review roles from 100% pure, unpolluted `Worker` coding contexts.
-3. **Visual Engineering Workflow DAG** — Turn any `Governor` into a topology-locked visual pipeline with automatic **Maximal Non-Branching Path (`MNP`)** `Manager` partitioning, dual-core concentric task nodes, a 3-stage amber-to-crimson circuit breaker, targeted-rollback **`User Gate`** shields, and live streaming per-role Token telemetry.
+3. **Visual Engineering & Research Workflow DAG** — Turn any `Governor` into a topology-locked visual pipeline with automatic **Maximal Non-Branching Path (`MNP`)** `MGR · L2` segment lanes, **v2 Nested Dual-Shell Task Pods** (an outer `EMPLOYEE · L3` verification shell physically enclosing the recessed inner `WORKER · L4` execution core), a live **DAG MAP** minimap, full Undo/Redo, a 3-stage amber-to-crimson circuit breaker, targeted-rollback **`User Gate`** shields, and a 4-tier Token & Telemetry analytics breakdown.
 4. **8 First-Class Native Coding Agent Engines (BYO CLI, Zero Lock-In)** — Natively orchestrate **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** side by side with zero mandatory cloud sign-in or Copilot telemetry.
 5. **Zero-Server SSH Cloud Hosts (`aexus-ssh://`)** — Automatically migrate hosts & recent remote folders from VS Code and `~/.ssh/config`, manage multi-OS hosts in **Cloud Host Studio**, add remote workspaces via a unified `+` two-step **Select Host ➔ Live Path Auto-Popup Picker** (with 0ms Backspace parent-folder navigation & Windows multi-drive support), and run SSH PTY terminals right beside local shells.
 6. **100% Scriptable `aexus-ade` Local Control Plane** — Every UI capability is exposed over a token-authenticated `0600` local Unix socket (`~/.aexus-code/ade-control.sock`).
@@ -67,9 +67,9 @@ At the top of the ADE `Sessions` dispatch rail sits **`✦ Secretary`**, a viewp
 
 ---
 
-### 2. ADE Engineering: Dynamic Collaborative DAG, Dual-Layer QA & Live Token Telemetry
+### 2. ADE Engineering & Research: Nested Dual-Shell Task Pods, Dual-Layer QA & 4-Tier Token Telemetry
 
-Right-click any top-level `Governor` and select **`Engineering`** to promote ad-hoc prompting into a **deterministic, topology-locked DAG pipeline** (persisted cleanly under `~/.aexus-code/engineering/<governor-id>/` with zero clutter in your Git repository):
+Right-click any top-level `Governor` and select **`Engineering`** — or invoke **`Open ADE Research...`** — to promote ad-hoc prompting into a **deterministic, topology-locked DAG pipeline** (persisted cleanly under `~/.aexus-code/engineering/<governor-id>/` and `~/.aexus-code/research/<governor-id>/` respectively, with zero clutter in your Git repository):
 
 <table>
   <tr>
@@ -98,13 +98,18 @@ Right-click any top-level `Governor` and select **`Engineering`** to promote ad-
   <img src="docs/assets/04c-engineering-blueprint-drawer.png" width="100%" alt="ADE Engineering Hybrid Mermaid + Markdown Blueprint Drawer &amp; Live Execution Timeline" />
 </p>
 
-- **Algorithmic Maximal Non-Branching Path (`MNP`) Partitioning**: Author nodes visually or in Markdown + Mermaid; Aexus Code automatically partitions linear segments between forks, joins, and `user_gate` boundaries into dedicated `Manager` segments and pre-builds the locked 4-tier sidebar hierarchy.
-- **Dual-Core Concentric Nodes & Flowing Edges**: The inner core represents the `Worker (L4)`; the outer satellite ring represents the `Employee (L3)`. Active sub-roles pulse with emerald breathing highlights, live phase timers (`Worker · Ns` / `Emp Review · Ns`), and animated dashed edges.
+- **Algorithmic Maximal Non-Branching Path (`MNP`) Partitioning**: Author nodes visually or in Markdown + Mermaid; Aexus Code automatically partitions linear segments between forks, joins, and `user_gate` boundaries into dedicated `MGR · L2` segment lanes and pre-builds the locked 4-tier sidebar hierarchy.
+- **v2 Nested Dual-Shell Task Pods**: Every task node is a single physical pod — an outer **`EMPLOYEE · L3`** verification shell with its own verdict chips, live phase badge, report chip, and touched-files footer, **physically enclosing on all four sides** a recessed inner **`WORKER · L4`** execution core. Pods are framed inside auto-partitioned **`MGR · L2`** segment lanes, so the full four-tier hierarchy stays legible at a glance without opening an inspector. Active sub-roles pulse with emerald breathing highlights, live phase timers (`Worker · Ns` / `Emp Audit · Ns` / `Mgr Review · Ns`), and animated dashed edges.
+- **1-Click `+` Downstream Quick-Spawn & Full Undo/Redo**: Hover any pod's output port to reveal a `+` handle — one click appends and auto-wires a connected downstream task (`Alt+Click` appends a connected `User Gate`). Every canvas edit is undoable with `Cmd+Z` and redoable with `Shift+Cmd+Z`, while a `Draft` badge tracks unsaved blueprint changes until `Cmd+S` confirms them.
+- **Live Interactive DAG MAP Minimap**: A floating minimap renders the whole topology with a live viewport rectangle; click or drag anywhere on it to fly the camera to that region, or jump directly to any node from the toolbar picker.
+- **Snap-to-Alignment Guides**: Dragging pods snaps their edges and centers to peer nodes and segment lanes with visible alignment guides (hold `Alt` to bypass), keeping large DAGs tidy.
+- **Role-Filterable Execution Logs & Syntax-Colored Inline Diffs**: The `Logs` sheet filters the live event timeline by `All`, `Worker · L4`, `Employee · L3`, `Manager · L2`, or `Gates & Alerts`; every event carrying a node ID renders a clickable **`[nodeId]`** that flies the camera straight to that pod. Report cards expand per-turn Git diffs with syntax-style colored add/delete/hunk lines (`+` / `-` / `@@`).
+- **4-Tier Token & Telemetry Analytics Breakdown**: A toolbar token pill opens a live analytics card with aggregate totals (turns, input, output, cache read, cache write) plus a per-tier breakdown across `Governor · L1`, `Manager · L2`, `Employee · L3`, and `Worker · L4`.
 - **Dual-Layer Review Loop & 3-Stage Circuit Breaker**:
   - `Employee` internal rejections (attempts 1–2) iterate in-place on the existing `Worker` session; a 3rd rejection escalates to the segment `Manager`, who resets retry counters and grants a guided 4th attempt.
   - Segment-tail nodes and `★Critical` nodes require secondary formal sign-off from the segment `Manager`.
   - Formal `Manager` rejections progress visually from **Light Amber (`failure_1`) ➔ Deep Amber (`failure_2`) ➔ Crimson Circuit-Broken (`failure_3`)**, pausing the branch, waking the `Governor` for root-cause evaluation, and posting an actionable alert to **`ADE Inbox`**.
-- **Directed-Rollback `User Gate` Shields**: Milestone gates glow amber (`Review Gate`) with deduplicated upstream `Employee` reports; approve in one click to unlock downstream tracks, or roll back specific upstream nodes along directed path intersections **without resetting unrelated parallel branches**.
+- **Directed-Rollback `User Gate` Shields with Inline Actions**: Milestone gates glow gold (`Review Gate`) with deduplicated upstream `Employee` reports. While a gate is waiting, its card renders **`✓ Approve`** and **`Rollback…`** buttons directly inline — one click approves and resumes downstream tracks, or rolls back specific upstream nodes along directed path intersections **without resetting unrelated parallel branches**.
 - **Right-Click Role Cards & Streaming Token Counter**: Hovering never obscures the canvas — **right-click** any node or segment header to open a 5-tab inspector (`Worker | Employee | Mgr | Spec | Report`) to mix engines/models/thinking levels across roles, expand per-turn Git diffs, or inspect live streaming token usage across `Governor / Manager / Employee / Worker`.
 
 ```mermaid
@@ -116,6 +121,10 @@ flowchart LR
     M -->|"Segment Approved"| G{{"User Gate / Downstream"}}
     M -->|"Formal Reject 1 → 2 → 3"| CB["Circuit Breaker (Amber → Crimson)\nWake Governor + Post to ADE Inbox"]
 ```
+
+#### ADE Research Mode — First-Class Alongside Engineering
+
+Research trees are a first-class sibling of Engineering trees rather than a separate tool. Run **`Open ADE Research...`** (or `aexus-ade engineering init --tree-type research --governor <id>`) and the same four-tier runtime, Nested Dual-Shell pods, segment lanes, gates, circuit breaker, minimap, Undo/Redo, and 4-tier telemetry apply — with a `treeType: 'research'` blueprint persisted under `~/.aexus-code/research/<governor-id>/` and a starter spec tuned for research work (problem framing, literature synthesis, baseline benchmarks, and explicit evaluation criteria). Parallel investigation tracks converge into synthesis nodes, with `Employee (L3)` peer review and `User Gate` checkpoints guarding conclusions — ideal for multi-track synthesis and peer-review DAGs, not just code changes.
 
 ---
 
@@ -186,8 +195,9 @@ GOV_ID=$(aexus-ade session create --project nexus-kv-engine --engine claude --ro
 MGR_ID=$(aexus-ade session create --project nexus-kv-engine --parent "$GOV_ID" --engine codex --title "WAL Track" --no-open --json | jq -r .id)
 aexus-ade session send "$GOV_ID" "Design parallel Raft WAL and Lock-Free MemTable milestones" --wait
 
-# 3. Initialize, apply & execute a visual Engineering DAG blueprint
+# 3. Initialize, apply & execute a visual Engineering (or Research) DAG blueprint
 aexus-ade engineering init --governor "$GOV_ID" --open
+aexus-ade engineering init --governor "$GOV_ID" --tree-type research --open
 aexus-ade engineering blueprint apply --governor "$GOV_ID" --file ./blueprint.md
 aexus-ade engineering run --governor "$GOV_ID"
 aexus-ade engineering status --governor "$GOV_ID" --json
@@ -203,7 +213,7 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 | `project` | `list` · `add <path\|host:/path>` · `select` · `remove` · `delete` · `focus` · `home` · `forward` · `move` · `changes` · `files` · `open-file` · `open-diff` |
 | `host` | `list` · `info` · `add` · `update` · `remove` · `test` · `browse` · `import-vscode` · `open` |
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
-| `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `open` · `send [--wait]` · `history` · `stop` · `rename` · `role` · `move` · `reorder` · `archive` · `unarchive` · `delete` |
+| `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
 | `engineering` | `list` · `init` · `open` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
@@ -215,7 +225,7 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 ### Prerequisites
 
 - **Platform**: macOS (Apple Silicon `arm64` validated end-to-end for standalone packaging, code signing, and runtime verification)
-- **Toolchain**: `./scripts/aexus-env.sh` automatically pins the compatible Node.js (`22.x`) and `pnpm` toolchain; requires Xcode Command Line Tools, Python 3, and system OpenSSH
+- **Toolchain**: `./scripts/aexus-env.sh` automatically pins the compatible Node.js (`24.22.1`, matching `.nvmrc` and `.build/toolchain`) and `pnpm` toolchain; requires Xcode Command Line Tools, Python 3, and system OpenSSH
 
 ### Quick Start
 
@@ -238,8 +248,8 @@ User settings live in `~/Library/Application Support/Aexus Code` and extensions 
 
 ## Repository Architecture
 
-- [`src/vs/platform/ade/`](src/vs/platform/ade/) — Cross-process contracts & Node services (`adeControlServer`, `adeEngineeringService` & hybrid Markdown/Mermaid blueprint parser, `adeCloudHostService` multiplexed SSH transport, and non-destructive `vscodeConfigMigration`).
-- [`src/vs/workbench/contrib/ade/`](src/vs/workbench/contrib/ade/) — ADE workbench UI & orchestration services (`adeProjectsView` 4-tier session tree & `Inbox`, `adeEngineeringEditorPane` interactive DAG canvas, `adeCloudHostsEditorPane` Cloud Host Studio, `adeCloudHostFileSystemProvider` `aexus-ssh://` provider & live path picker, and `adeInspectorViews`).
+- [`src/vs/platform/ade/`](src/vs/platform/ade/) — Cross-process contracts & Node services (`adeControlServer`, `adeEngineeringService` with the hybrid Markdown/Mermaid blueprint parser for both Engineering and Research trees, `adeCloudHostService` multiplexed SSH transport, and non-destructive `vscodeConfigMigration`).
+- [`src/vs/workbench/contrib/ade/`](src/vs/workbench/contrib/ade/) — ADE workbench UI & orchestration services (`adeProjectsView` 4-tier session tree & `Inbox`, `adeEngineeringEditorPane` interactive Nested Dual-Shell DAG canvas with minimap, Undo/Redo and 4-tier analytics, `adeCloudHostsEditorPane` Cloud Host Studio, `adeCloudHostFileSystemProvider` `aexus-ssh://` provider & live path picker, and `adeInspectorViews`).
 - [`src/vs/workbench/contrib/terminal/`](src/vs/workbench/contrib/terminal/) — `ProjectTerminalService` routing integrated terminals seamlessly between local project shells and remote SSH PTY sessions.
 - [`extensions/aexus-agents/`](extensions/aexus-agents/) — Unified runtime adapters for all 8 native Coding Agent engines, zero-latency role bridges, and the `bin/aexus-ade` CLI.
 
@@ -247,5 +257,6 @@ User settings live in `~/Library/Application Support/Aexus Code` and extensions 
 
 ## Security, Privacy & License
 
-- **Local-First & Zero Credential Exposure**: Orchestration runs strictly over a `0600` local Unix socket with per-launch token authentication. SSH Cloud Host migration reads only public host aliases and directory metadata — private key contents and passphrases are never copied or stored. Built-in upstream Copilot extensions, token endpoints, and proprietary agent backends have been completely removed.
+- **Local-First & Zero Credential Exposure**: Orchestration runs strictly over a `0600` local Unix socket with per-launch token authentication. SSH Cloud Host migration reads only public host aliases and directory metadata — private key contents and passphrases are never copied or stored. Built-in upstream Copilot extensions, CLI shims, token/subscription endpoints, and proprietary agent backends are not bundled in this build; the generic editor, extension host, extension API, and compatible types remain intact.
+- **Local Ad-Hoc macOS Signing**: Packaged builds are signed with a local ad-hoc signature for development and self-installation. Apple Developer ID signing and notarization are a separate step and are required before distributing the macOS application to third parties.
 - **License & Attribution**: Derived from Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) and released under the **[MIT License](LICENSE.txt)** with all upstream copyright notices preserved. See [AEXUS.md](AEXUS.md) for icon attribution and Visual Studio Marketplace compliance notes prior to commercial or public binary redistribution.

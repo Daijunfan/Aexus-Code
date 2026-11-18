@@ -499,7 +499,11 @@ export class CodexRuntime implements EngineRuntime {
 			const listener = client.onPacket(packet => {
 				if (packet.method === 'aexus/connectionClosed') { fail(new Error(String(packet.params?.message))); return; }
 				const params = packet.params as Notification | undefined;
-				if (packet.id !== undefined && params?.threadId && this.belongsTo(params.threadId, session.id)) { void this.handleRequest(client, packet, this.knownSessions.get(params.threadId)!, token, approvalPolicy).catch(fail); return; }
+				if (packet.id !== undefined && params?.threadId && this.belongsTo(params.threadId, session.id)) {
+					const targetSession = this.knownSessions.get(params.threadId) ?? session;
+					void this.handleRequest(client, packet, targetSession, token, approvalPolicy).catch(fail);
+					return;
+				}
 				if (params?.threadId !== session.id) { return; }
 				if (!token.isCancellationRequested && packet.method === 'item/agentMessage/delta' && params.delta) { stream.markdown(params.delta); }
 				if (!token.isCancellationRequested && (packet.method === 'item/reasoning/summaryTextDelta' || packet.method === 'item/reasoning/textDelta')) {

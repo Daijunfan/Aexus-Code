@@ -254,12 +254,23 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	private loadStoredCatalogProjects(): IAdeProject[] {
 		const seen = new Set<string>();
 		const result: IAdeProject[] = [];
-		for (const item of this.storageService.getObject<IStoredProject[]>('aexus.ade.projects', StorageScope.PROFILE, [])) {
-			const normalized = removeTrailingPathSeparator(URI.parse(item.uri));
-			const key = this.uriIdentityService.extUri.getComparisonKey(normalized);
-			if (!seen.has(key)) {
-				seen.add(key);
-				result.push({ uri: normalized, name: item.name || basename(normalized) });
+		const stored = this.storageService.getObject<IStoredProject[]>('aexus.ade.projects', StorageScope.PROFILE, []);
+		if (!Array.isArray(stored)) {
+			return result;
+		}
+		for (const item of stored) {
+			if (!item || typeof item.uri !== 'string' || !item.uri.trim()) {
+				continue;
+			}
+			try {
+				const normalized = removeTrailingPathSeparator(URI.parse(item.uri));
+				const key = this.uriIdentityService.extUri.getComparisonKey(normalized);
+				if (!seen.has(key)) {
+					seen.add(key);
+					result.push({ uri: normalized, name: item.name || basename(normalized) });
+				}
+			} catch {
+				// Skip malformed persisted URI entry rather than aborting startup.
 			}
 		}
 		return result;
@@ -267,27 +278,49 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 
 	private loadStoredAgents(preserveStatusFrom?: readonly IAdeAgent[]): IAdeAgent[] {
 		const statusById = preserveStatusFrom ? new Map(preserveStatusFrom.map(agent => [agent.id, agent.status ?? 'idle'])) : undefined;
-		const parsed: IAdeAgent[] = this.storageService.getObject<IStoredAgent[]>('aexus.ade.agents', StorageScope.PROFILE, []).map(entry => ({
-			id: entry.id,
-			parentId: entry.parentId,
-			projectUri: removeTrailingPathSeparator(URI.parse(entry.projectUri)),
-			label: entry.label,
-			labelIsCustom: entry.labelIsCustom,
-			role: entry.role,
-			archived: entry.archived,
-			unread: entry.unread,
-			status: statusById?.get(entry.id) ?? 'idle',
-			draft: entry.draft ?? '',
-			session: entry.session ? { engineId: entry.session.engineId, resource: URI.parse(entry.session.resource) } : undefined,
-			treeType: entry.treeType,
-			treeGovernorId: entry.treeGovernorId,
-			treeSegmentId: entry.treeSegmentId,
-			treeNodeId: entry.treeNodeId,
-			preferredEngineId: entry.preferredEngineId,
-			preferredModel: entry.preferredModel,
-			preferredThinking: entry.preferredThinking,
-			workingDirectoryOverride: entry.workingDirectoryOverride,
-		}));
+		const stored = this.storageService.getObject<IStoredAgent[]>('aexus.ade.agents', StorageScope.PROFILE, []);
+		if (!Array.isArray(stored)) {
+			return [];
+		}
+		const parsed: IAdeAgent[] = [];
+		for (const entry of stored) {
+			if (!entry || typeof entry.id !== 'string' || typeof entry.projectUri !== 'string') {
+				continue;
+			}
+			try {
+				let parsedSession: { engineId: string; resource: URI } | undefined;
+				if (entry.session && typeof entry.session.engineId === 'string' && typeof entry.session.resource === 'string') {
+					try {
+						parsedSession = { engineId: entry.session.engineId, resource: URI.parse(entry.session.resource) };
+					} catch {
+						parsedSession = undefined;
+					}
+				}
+				parsed.push({
+					id: entry.id,
+					parentId: entry.parentId,
+					projectUri: removeTrailingPathSeparator(URI.parse(entry.projectUri)),
+					label: entry.label || entry.id,
+					labelIsCustom: entry.labelIsCustom,
+					role: entry.role,
+					archived: entry.archived,
+					unread: entry.unread,
+					status: statusById?.get(entry.id) ?? 'idle',
+					draft: entry.draft ?? '',
+					session: parsedSession,
+					treeType: entry.treeType,
+					treeGovernorId: entry.treeGovernorId,
+					treeSegmentId: entry.treeSegmentId,
+					treeNodeId: entry.treeNodeId,
+					preferredEngineId: entry.preferredEngineId,
+					preferredModel: entry.preferredModel,
+					preferredThinking: entry.preferredThinking,
+					workingDirectoryOverride: entry.workingDirectoryOverride,
+				});
+			} catch {
+				// Skip malformed persisted agent entry rather than aborting startup.
+			}
+		}
 		return this.pruneOrphanedAgents(parsed);
 	}
 
@@ -550,6 +583,40 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		this.saveProjects();
 		this.changeEmitter.fire();
 		return added;
+	}
+
+	migrateCloudHostAlias(oldAlias: string, newAlias: string): number {
+		const prev = oldAlias.trim().toLowerCase();
+		const next = newAlias.trim();
+		if (!prev || !next || prev === next.toLowerCase()) {
+			return 0;
+		}
+		let migratedProjects = 0;
+		this.catalogProjects = this.catalogProjects.map(project => {
+			if (project.uri.scheme === 'aexus-ssh' && project.uri.authority.toLowerCase() === prev) {
+				migratedProjects++;
+				return { ...project, uri: project.uri.with({ authority: next }) };
+			}
+			return project;
+		});
+		let migratedAgents = 0;
+		this.entries = this.entries.map(agent => {
+			if (agent.projectUri.scheme === 'aexus-ssh' && agent.projectUri.authority.toLowerCase() === prev) {
+				migratedAgents++;
+				return { ...agent, projectUri: agent.projectUri.with({ authority: next }) };
+			}
+			return agent;
+		});
+		if (migratedProjects > 0) {
+			this.saveProjects();
+		}
+		if (migratedAgents > 0) {
+			this.saveAgents();
+		}
+		if (migratedProjects > 0 || migratedAgents > 0) {
+			this.changeEmitter.fire();
+		}
+		return migratedProjects;
 	}
 
 	unregisterProject(uri: URI): void {

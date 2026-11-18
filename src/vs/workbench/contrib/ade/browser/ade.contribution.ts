@@ -65,8 +65,10 @@ import {
 	ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID,
 	ADE_INSPECTOR_CONTAINER_ID,
 	ADE_OPEN_ENGINEERING_COMMAND_ID,
+	ADE_OPEN_RESEARCH_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
 	ADE_REMOVE_PROJECT_COMMAND_ID,
+	ADE_RENAME_PROJECT_COMMAND_ID,
 	AdeAgentRole,
 	AdeSessionRank,
 	getAdeRoleRankLevel,
@@ -475,12 +477,17 @@ async function pickAgent(accessor: ServicesAccessor, id?: string): Promise<IAdeA
 	const views = tryGetOptionalService<IViewsService>(accessor, IViewsService);
 	const quickInput = accessor.get(IQuickInputService);
 	const view = views?.getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
-	return view?.selectedAgent
-		|| (await quickInput.pick(projects.agents.map(agent => ({
-			label: agent.label,
-			description: formatProjectDisplayPath(agent.projectUri),
-			agent,
-		})), { placeHolder: localize('selectParentAgent', "Select an Agent conversation") }))?.agent;
+	if (view?.selectedAgent) {
+		return view.selectedAgent;
+	}
+	if (projects.agents.length === 0) {
+		return undefined;
+	}
+	return (await quickInput.pick(projects.agents.map(agent => ({
+		label: agent.label,
+		description: formatProjectDisplayPath(agent.projectUri),
+		agent,
+	})), { placeHolder: localize('selectParentAgent', "Select an Agent conversation") }))?.agent;
 }
 
 interface IRolePickItem extends IQuickPickItem {
@@ -607,6 +614,43 @@ registerAction2(class AddAdeProjectFolderAction extends Action2 {
 			projects.selectProject(lastNormalized);
 		}
 		modes.setMode('ade');
+	}
+});
+
+registerAction2(class RenameAdeProjectFolderAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_RENAME_PROJECT_COMMAND_ID,
+			title: localize2('adeRenameProjectFolderTitle', "Rename Project Display Name..."),
+			f1: true,
+			precondition: WorkbenchModeContext.isEqualTo('ade'),
+		});
+	}
+
+	async run(accessor: ServicesAccessor, uri?: URI): Promise<void> {
+		const projects = accessor.get(IAdeProjectsService);
+		const quickInput = accessor.get(IQuickInputService);
+		const uriIdentity = accessor.get(IUriIdentityService);
+		const fileService = tryGetOptionalService<IFileService>(accessor, IFileService);
+		const contextService = tryGetOptionalService<IWorkspaceContextService>(accessor, IWorkspaceContextService);
+		const workspaceEditing = tryGetOptionalService<IWorkspaceEditingService>(accessor, IWorkspaceEditingService);
+		const environmentService = tryGetOptionalService<IWorkbenchEnvironmentService>(accessor, IWorkbenchEnvironmentService);
+
+		const targetUri = URI.isUri(uri) ? uri : projects.selectedProject?.uri;
+		if (!targetUri) {
+			return;
+		}
+		const currentName = projects.getProjectName(targetUri);
+		const nextName = await quickInput.input({
+			title: localize('adeRenameProjectTitle', "Rename Project Display Name"),
+			prompt: localize('adeRenameProjectPrompt', "Enter a custom display name for {0}", formatProjectDisplayPath(targetUri)),
+			value: currentName,
+		});
+		if (!nextName?.trim() || nextName.trim() === currentName) {
+			return;
+		}
+		projects.registerProject(targetUri, nextName.trim());
+		await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
 	}
 });
 
@@ -781,6 +825,87 @@ registerAction2(class AddProjectAgentAction extends Action2 {
 	}
 });
 
+async function openOrInitializeWorkTree(
+	accessor: ServicesAccessor,
+	requestedTreeType: 'engineering' | 'research',
+	governorId?: string,
+): Promise<void> {
+	const projects = accessor.get(IAdeProjectsService);
+	const engineering = accessor.get(IAdeEngineeringService);
+	const dialogs = accessor.get(IDialogService);
+	const notifications = accessor.get(INotificationService);
+	const modes = accessor.get(IWorkbenchModeService);
+
+	const target = await pickAgent(accessor, governorId);
+	if (!target) {
+		return;
+	}
+	const modeLabel = requestedTreeType === 'research' ? 'Research' : 'Engineering';
+	if (target.parentId) {
+		notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level Governor session can own an ADE {0} workflow tree.", modeLabel));
+		return;
+	}
+	const rank = resolveAdeAgentRank(target, projects.hasSubordinates(target.id));
+	if (rank !== 'governor') {
+		notifications.warn(localize('adeEngMustBeGovernorRank', "Promote '{0}' to Governor first before enabling ADE {1}.", target.label, modeLabel));
+		return;
+	}
+
+	await engineering.whenReady();
+	if (engineering.hasTree(target.id) || target.treeType === requestedTreeType) {
+		modes.setMode('ade');
+		await engineering.openEngineeringEditor(target.id);
+		return;
+	}
+
+	let onChildren: 'relocate' | 'delete' | undefined;
+	const existingSubs = projects.getDirectSubordinates(target.id);
+	if (existingSubs.length > 0) {
+		const promptRes = await dialogs.prompt<'relocate' | 'delete'>({
+			type: 'warning',
+			message: localize(
+				'adeEngExistingChildrenPromptTitle',
+				"Governor '{0}' already has {1} subordinate session(s). How should ADE {2} handle them?",
+				target.label,
+				existingSubs.length,
+				modeLabel,
+			),
+			detail: localize(
+				'adeEngExistingChildrenPromptDetail',
+				"A structured DAG work tree strictly manages its own 4-tier topology (Governor → Manager → Employee → Worker) and cannot mix with free-form subordinate sessions.",
+			),
+			buttons: [
+				{
+					label: localize('adeEngRelocateChildrenBtn', "&&Move Out to Independent Sessions"),
+					run: () => 'relocate',
+				},
+				{
+					label: localize('adeEngDeleteChildrenBtn', "&&Delete Existing Subordinates"),
+					run: () => 'delete',
+				},
+			],
+			cancelButton: true,
+			custom: true,
+		});
+		if (!promptRes.result) {
+			return;
+		}
+		onChildren = promptRes.result;
+	}
+
+	try {
+		await engineering.initTree({
+			governorSessionId: target.id,
+			treeType: requestedTreeType,
+			onChildren,
+		});
+		modes.setMode('ade');
+		await engineering.openEngineeringEditor(target.id);
+	} catch (err) {
+		notifications.error(err instanceof Error ? err.message : String(err));
+	}
+}
+
 registerAction2(class OpenAdeEngineeringAction extends Action2 {
 	constructor() {
 		super({
@@ -793,78 +918,23 @@ registerAction2(class OpenAdeEngineeringAction extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
-		const projects = accessor.get(IAdeProjectsService);
-		const engineering = accessor.get(IAdeEngineeringService);
-		const dialogs = accessor.get(IDialogService);
-		const notifications = accessor.get(INotificationService);
-		const modes = accessor.get(IWorkbenchModeService);
+		await openOrInitializeWorkTree(accessor, 'engineering', governorId);
+	}
+});
 
-		const target = await pickAgent(accessor, governorId);
-		if (!target) {
-			return;
-		}
-		if (target.parentId) {
-			notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level Governor session can own an ADE Engineering workflow tree."));
-			return;
-		}
-		const rank = resolveAdeAgentRank(target, projects.hasSubordinates(target.id));
-		if (rank !== 'governor') {
-			notifications.warn(localize('adeEngMustBeGovernorRank', "Promote '{0}' to Governor first before enabling ADE Engineering.", target.label));
-			return;
-		}
+registerAction2(class OpenAdeResearchAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_OPEN_RESEARCH_COMMAND_ID,
+			title: localize2('adeOpenResearchActionTitle', "Open ADE Research..."),
+			icon: Codicon.beaker,
+			f1: true,
+			precondition: WorkbenchModeContext.isEqualTo('ade'),
+		});
+	}
 
-		await engineering.whenReady();
-		if (engineering.hasTree(target.id) || target.treeType === 'engineering') {
-			modes.setMode('ade');
-			await engineering.openEngineeringEditor(target.id);
-			return;
-		}
-
-		let onChildren: 'relocate' | 'delete' | undefined;
-		const existingSubs = projects.getDirectSubordinates(target.id);
-		if (existingSubs.length > 0) {
-			const promptRes = await dialogs.prompt<'relocate' | 'delete'>({
-				type: 'warning',
-				message: localize(
-					'adeEngExistingChildrenPromptTitle',
-					"Governor '{0}' already has {1} subordinate session(s). How should ADE Engineering handle them?",
-					target.label,
-					existingSubs.length,
-				),
-				detail: localize(
-					'adeEngExistingChildrenPromptDetail',
-					"An Engineering tree strictly manages its own DAG topology (Governor → Manager → Employee → Worker) and cannot mix with free-form subordinate sessions.",
-				),
-				buttons: [
-					{
-						label: localize('adeEngRelocateChildrenBtn', "&&Move Out to Independent Sessions"),
-						run: () => 'relocate',
-					},
-					{
-						label: localize('adeEngDeleteChildrenBtn', "&&Delete Existing Subordinates"),
-						run: () => 'delete',
-					},
-				],
-				cancelButton: true,
-				custom: true,
-			});
-			if (!promptRes.result) {
-				return;
-			}
-			onChildren = promptRes.result;
-		}
-
-		try {
-			await engineering.initTree({
-				governorSessionId: target.id,
-				treeType: 'engineering',
-				onChildren,
-			});
-			modes.setMode('ade');
-			await engineering.openEngineeringEditor(target.id);
-		} catch (err) {
-			notifications.error(err instanceof Error ? err.message : String(err));
-		}
+	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+		await openOrInitializeWorkTree(accessor, 'research', governorId);
 	}
 });
 

@@ -107,6 +107,11 @@ export function normalizeRemoteProjectPath(rawPath: string, os: AdeCloudHostOs =
 		if (trimmed === '/') {
 			return '/';
 		}
+		if (/^\/\/[^/]+/.test(trimmed)) {
+			const uncRest = posix.normalize(trimmed.slice(1));
+			const unc = `/${uncRest}`;
+			return unc.length > 2 && unc.endsWith('/') ? unc.slice(0, -1) : unc;
+		}
 		if (/^[A-Za-z]:$/.test(trimmed)) {
 			trimmed = `/${trimmed.toUpperCase()}/`;
 		} else if (/^[A-Za-z]:\//.test(trimmed)) {
@@ -128,6 +133,9 @@ export function toRemoteNativePath(uriPath: string, os: AdeCloudHostOs = 'linux'
 	if (os === 'windows') {
 		if (clean === '/') {
 			return '/';
+		}
+		if (/^\/\/[^/]+/.test(clean)) {
+			return clean.replace(/\//g, '\\');
 		}
 		const m = /^\/([A-Za-z]:(?:\/.*)?)$/.exec(clean);
 		if (m) {
@@ -191,7 +199,7 @@ export function parseLiveRemotePathInput(
 	os: AdeCloudHostOs = 'linux',
 	remoteHome?: string,
 ): IParsedLiveRemotePathInput {
-	let s = rawInput.replace(/\\/g, '/').trimStart();
+	let s = (os === 'windows' ? rawInput.replace(/\\/g, '/') : rawInput).trimStart();
 	if (s === '~' || s.startsWith('~/')) {
 		const homeBase = remoteHome
 			? normalizeRemoteProjectPath(remoteHome, os)

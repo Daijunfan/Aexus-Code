@@ -49,7 +49,7 @@
 
 已同步原版 VS Code 的有效市场插件并补齐全部 8 大本机 Coding Agent 扩展，保留 Aexus 原有的 Prettier 和较新 Codex。应用启动时自动从原版 VS Code 非破坏性迁移网络代理（`http.*`）与 Coding Agent 相关用户配置、`state.vscdb` 中非密钥的扩展全局状态（严格排除 `secret://` 密钥条目）、`globalStorage` 扩展数据与缺失的 Coding Agent 扩展；已有设置与更新状态保持不变。同时将 `http.proxy` / `http.proxySupport` / `http.noProxy` / `http.systemCertificatesNode` 与标准 CLI `PATH` 自动透传至扩展宿主（`NativeLocalProcessExtensionHost`）及 `aexus-agents` 拉起的所有子引擎进程。
 
-Codex、Claude Code、Cline、Kilo Code、DSH、OpenCode 和 Antigravity 的面板已通过隐藏窗口实际打开验证。OpenCode 的侧栏由已安装的 `zgy.opencode-vscode-ui` 提供，`sst-dev.opencode` 同时保留其原有终端命令。
+Codex、Claude Code、Cline、Kilo Code、DSH、OpenCode、Antigravity 和 Pi 的面板均已通过隐藏窗口实际打开验证。OpenCode 的侧栏由已安装的 `zgy.opencode-vscode-ui` 提供，`sst-dev.opencode` 同时保留其原有终端命令。
 
 ## 文件树顺序与项目 Focus
 
@@ -78,11 +78,11 @@ ADE 与 IDE 呈镜像对称架构（单分支同目录协作，无需 Git Worktr
 - **右边栏（`Project Inspector`：`Changes` + `Files`）**：进入 ADE 自动打开项目级源码变更（点击直接打开 ADE Diff）与项目源码文件树；切回 IDE 时自动恢复此前右侧栏面板。
 - **全量等价控制面 CLI（`aexus-ade`）**：通过 `0600` 本地鉴权 Unix Socket（`~/.aexus-code/ade-control.sock`）暴露完备的 ADE 控制指令：`status`、`view`（`status` / `--archived` / `--inspector` / `--refresh`）、`project`（`list` / `add` / `select` / `remove` / `delete` / `focus` / `home` / `forward` / `move` / `changes` / `files` / `open-file` / `open-diff`）、`engine`（`list` / `sessions`）、`session`（`list` / `info` / `subordinates` / `tree` / `create` / `attach` / `connect` / `open` / `select` / `close` / `mark-read` / `draft` / `rename` / `role` / `move` / `reorder` / `send --wait` / `history` / `stop` / `archive` / `unarchive` / `detach` / `delete`）以及 `secretary`（`status` / `open` / `engine` / `reset` / `send --wait` / `history` / `stop` / `draft` / `mark-read`），自动注入编排进程与集成终端 `PATH`（安装包内置于 `Contents/Resources/app/bin/aexus-ade`）。
 - **8 大本机 Coding Agent 原生引擎聚合（`extensions/aexus-agents`）**：原生直连 **Codex**（`codex`）、**Claude Code**（`claude`）、**Kilo Code**（`kilo`）、**OpenCode**（`opencode`）、**DeepSeek Harness**（`dsh`）、**Google Antigravity**（`agy`）、**Cline**（`cline`）与 **Pi**（`pi`），完整支持会话发现、挂载（`attach`）、创建、历史加载、流式对话、中断与永久物理删除；同时通过 `nativeRoleBridge`、`extHostRolePreload`（在原生扩展宿主按窗口作用域零延迟同步快照与会话绑定）、`agy --hub` ConnectRPC 本地代理（拦截 `StartCascade` 与 `SendUserCascadeMessage` 注入 `append_prompt_sections`）、`codex app-server` `thread/inject_items`、`claude` stream-json、`dshRolePreload`、`kilo` / `opencode` / `cline` 请求体注入及 `pi --mode rpc` 将实时职级、上下级树与 `aexus-ade` 直控规范自动同步注入这 8 大原生扩展 UI 会话并绑定原生会话标签，且严格保证纯 `Worker` 角色上下文 100% 原生干净。
-- **ADE Engineering 工作流引擎与可视化 DAG 画布（预留 `Research` 同构底座）**：
-  - **Governor 一对一工程树映射与拓扑锁定**：右键顶层 `Governor` 点击 `Engineering` 初始化或聚焦专属工作流画布；若已有自由子会话，支持迁出为独立会话或删除清理；蓝图保存后在左栏自动预创建 `Governor ➔ Manager ➔ Employee ➔ Worker` 完整结构并严格锁定拖拽、改派与手动增删，底层 CLI 进程按首次唤醒或点击懒加载拉起。
-  - **极大无分支路径（Maximal Non-Branching Path）Manager 自动切分**：100% 算法自动切分分叉前、合流后与 `user_gate` 边界，蓝图持久化于 `~/.aexus-code/engineering/<governor-id>/blueprint.md` 与 `state.json`，零污染用户项目仓库；支持单根目录单 Worker 快照 Diff 提取与可选 Git Worktree 沙盒并行隔离。
-  - **四级状态机、三级失败熔断、局部打回与 Watchdog**：仅允许用户运行按钮或 `✦ Secretary` 启动执行；`Worker（L4）` 保持 100% 纯净业务上下文，递增汇报由 `Employee（L3）` 验收通过后生成并沿拓扑去重透传；Employee 内部打回 1–2 次保持绿灯原会话增量返工，第 3 次唤醒段 `Manager（L2）` 清空重试状态给予第 4 次指导机会；Manager 二次验收正式判定失败呈现三级色彩演进（浅琥珀 `failure_1` ➔ 深琥珀 `failure_2` ➔ 红色熔断 `failure_3` 唤醒 `Governor` 评估并投递收信箱）；独立 `user_gate` 用户验收节点支持一键通过或按有向路径交集精准局部打回（绝不重置无关并行支路）；内置 `aexus.ade.engineering.watchdogTimeoutMinutes`（默认 10 分钟）流式输出心跳看门狗。
-  - **标准 Editor Tab 可视化画布（`AdeEngineeringEditorPane`）、流式实时 Token 计数与 `ADE Inbox` 收信箱**：打开画布自动居中缩放适配全图；双核同心圆任务节点支持运行中活跃子角色呼吸光效（`Worker` 内核 / `Employee` 外环卫星 / `Manager` 段框头）与实时阶段耗时徽章（`Worker · Ns` / `Emp Review · Ns`），独立 `user_gate` 等待验收时呈现醒目琥珀金色盾牌与顶部 `Review Gate` 一键定位按钮；连线支持悬停中点 `×`、双击与右键快速删除；右键（Right-Click）节点/引擎即在紧邻位置弹出专属浮动卡片（鼠标悬停绝不自动弹出，且输入聚焦期间后台流式刷新零丢字、零抢焦点），内含 `Worker | Employee | Mgr | Spec | Report` 五栏（支持一键 `Apply to All Unlocked Roles` 批量同步全图未锁定角色的引擎/模型/思考强度、查看验收汇报与行内源码 Diff 并点击直开文件、单节点或全树 `Reset` 解锁重跑，`User Gate` 卡片内嵌上游递增汇报供就地审批或精准打回）；顶栏内置 `Blueprint`（Markdown 源码直编校验）与 `Logs`（实时事件时间线）浮层面板；全树与单节点分角色（Governor / Manager / Employee / Worker）支持回合中增量流式刷新的精确 Token 计数徽章与明细面板（零重复累加），并在 `aexus-ade engineering`（含 `init --open` / `blueprint get|apply|validate` / `configure` / `reset` / `diff` / `reports` / `remove`）与 `aexus-ade inbox` 提供 100% 闭环的控制面接口。
+- **ADE Engineering & Research 工作流引擎与可视化 DAG 画布（一等双模式）**：
+  - **Governor 一对一工程/研究树映射与拓扑锁定**：右键顶层 `Governor` 点击 `Engineering` 初始化或聚焦专属工作流画布；也可通过 `Open ADE Research...` 或 `aexus-ade engineering init --tree-type research` 创建与 Engineering 完全对等的一等 `Research` 树（`treeType: 'research'`，蓝图持久化于 `~/.aexus-code/research/<governor-id>/`，内置问题界定、文献综述、基线基准与评估标准导向的起始蓝图）。若已有自由子会话，支持迁出为独立会话或删除清理；蓝图保存后在左栏自动预创建 `Governor ➔ Manager ➔ Employee ➔ Worker` 完整结构并严格锁定拖拽、改派与手动增删，底层 CLI 进程按首次唤醒或点击懒加载拉起。
+  - **极大无分支路径（Maximal Non-Branching Path）Manager 自动切分**：100% 算法自动切分分叉前、合流后与 `user_gate` 边界，蓝图持久化于 `~/.aexus-code/engineering/<governor-id>/blueprint.md` 与 `state.json`（Research 树对应 `research/` 目录），零污染用户项目仓库；支持单根目录单 Worker 快照 Diff 提取与可选 Git Worktree 沙盒并行隔离。
+  - **四级状态机、三级失败熔断、局部打回与 Watchdog**：仅允许用户运行按钮或 `✦ Secretary` 启动执行；`Worker（L4）` 保持 100% 纯净业务上下文，递增汇报由 `Employee（L3）` 验收通过后生成并沿拓扑去重透传；Employee 内部打回 1–2 次保持绿灯原会话增量返工，第 3 次唤醒段 `Manager（L2）` 清空重试状态给予第 4 次指导机会；Manager 二次验收正式判定失败呈现三级色彩演进（浅琥珀 `failure_1` ➔ 深琥珀 `failure_2` ➔ 红色熔断 `failure_3` 唤醒 `Governor` 评估并投递收信箱）；独立 `user_gate` 用户验收节点等待期间在卡片上内联渲染 `✓ Approve` 与 `Rollback…` 按钮，支持一键通过或按有向路径交集精准局部打回（绝不重置无关并行支路）；内置 `aexus.ade.engineering.watchdogTimeoutMinutes`（默认 10 分钟）流式输出心跳看门狗。
+  - **标准 Editor Tab 可视化画布（`AdeEngineeringEditorPane`）、v2 嵌套双壳任务舱与四层 Token 遥测**：打开画布自动居中缩放适配全图；任务节点采用 **v2 嵌套双壳（Nested Dual-Shell）任务舱**——外层 **`EMPLOYEE · L3`** 验收壳在上下左右四边物理包裹内层凹陷的 **`WORKER · L4`** 执行核，并整体嵌于自动切分的 **`MGR · L2`** 段框内，运行中呈现活跃子角色呼吸光效与实时阶段耗时徽章（`Worker · Ns` / `Emp Audit · Ns` / `Mgr Review · Ns`）；`user_gate` 等待验收时呈现醒目金色盾牌与内联审批/打回按钮；连线支持悬停中点 `×`、双击与右键快速删除，拖拽节点时提供吸附对齐辅助线（按住 `Alt` 关闭吸附）；输出端口旁的 1 键 `+` 快速派生手柄可追加并自动连线下游任务（`Alt+单击` 追加 `User Gate`），画布内所有编辑支持 `Cmd+Z` / `Shift+Cmd+Z` 完整撤销重做与 `Draft` 状态徽章；浮动 **DAG MAP** 小地图支持点击/拖动镜头导航；工具栏 Token 胶囊打开 **四层 Token 与遥测分析卡**，按 `Governor · L1` / `Manager · L2` / `Employee · L3` / `Worker · L4` 拆解总 Token、回合、输入、输出与缓存读写；`Logs` 面板支持按角色（`All` / `Worker` / `Employee` / `Manager` / `Gates & Alerts`）过滤，事件中的 `[nodeId]` 可点击并直接将镜头飞至对应节点；右键（Right-Click）节点/引擎即在紧邻位置弹出专属浮动卡片（鼠标悬停绝不自动弹出，且输入聚焦期间后台流式刷新零丢字、零抢焦点），内含 `Worker | Employee | Mgr | Spec | Report` 五栏（支持一键 `Apply to All Unlocked Roles` 批量同步全图未锁定角色的引擎/模型/思考强度、查看验收汇报与语法着色（`+` / `-` / `@@`）的内联源码 Diff 并点击直开文件、单节点或全树 `Reset` 解锁重跑，`User Gate` 卡片内嵌上游递增汇报供就地审批或精准打回）；顶栏内置 `Blueprint`（Markdown 源码直编校验）与 `Logs`（实时事件时间线）浮层面板；全树与单节点分角色 Token 计数支持回合中增量流式刷新（零重复累加），并在 `aexus-ade engineering`（含 `init --tree-type <engineering|research>` / `init --open` / `blueprint get|apply|validate` / `configure` / `reset` / `diff` / `reports` / `remove`）与 `aexus-ade inbox` 提供 100% 闭环的控制面接口。
 
 ## Copilot 清理与扩展市场
 
@@ -94,10 +94,14 @@ ADE 与 IDE 呈镜像对称架构（单分支同目录协作，无需 Git Worktr
 
 ## 已完成的验证
 
-- 核心源码和构建工具类型检查通过，构建计划的 18 项测试通过。
-- macOS arm64 独立应用构建、ad-hoc 签名及安装副本签名校验通过。
+- Node 单元测试套件全部通过，覆盖 ADE 核心服务、控制面协议、云主机迁移、Engineering / Research 蓝图解析与四级状态机。
+- 44+ 项 Chromium 环境下的 ADE 浏览器测试通过，覆盖嵌套双壳任务舱四边物理包裹、1 键快速派生、撤销/重做、DAG MAP 小地图、四层 Token 遥测分析与 User Gate 内联审批等真实 DOM 交互。
+- 14 项角色桥接与提示词洁净度测试通过，验证 8 大原生引擎的职级同步与纯 `Worker` 上下文 100% 干净。
+- ESLint、TypeScript 类型检查与 `valid-layers-check` 模块分层校验全部通过。
+- 在隐藏窗口中完成 Retina 视觉验收并通过。
+- macOS arm64（`darwin-arm64`）独立应用构建、本地 ad-hoc 签名、安装副本签名校验及运行时加载验证通过。
 - 官方市场安装 `esbenp.prettier-vscode@12.4.0` 成功，扩展签名验证返回 `Success`，校验保持开启。
-- 安装版 Extension Host 实际加载 Prettier、执行格式化并保存文件；集成终端执行命令并正常退出。运行验收记录位于 `.build/runtime-verification.json`。
+- 安装版 Extension Host 实际加载 Prettier、执行格式化并保存文件；集成终端执行命令并正常退出。
 
 
 图标轮廓取自[官方图标包](https://code.visualstudio.com/assets/branding/visual-studio-code-icons.zip)中的 `vscode-alt.svg`，按要求使用相同轮廓、纯白填充和黑色背景。图标不因源码采用 MIT 许可而自动获得品牌授权；[微软品牌使用说明](https://code.visualstudio.com/brand)对将其用作自有产品图标有限制，公开发行前需另行处理。

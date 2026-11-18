@@ -161,11 +161,14 @@ export class AdeEngineeringEditorInput extends EditorInput {
 	override getName(): string {
 		const gov = this.projects.getAgent(this.governorSessionId);
 		const base = gov?.label ?? localize('adeEngineeringFallbackGov', "Governor");
-		return localize('adeEngineeringTabTitle', "{0} · Engineering", base);
+		return gov?.treeType === 'research'
+			? localize('adeResearchTabTitle', "{0} · Research", base)
+			: localize('adeEngineeringTabTitle', "{0} · Engineering", base);
 	}
 
 	override getIcon(): ThemeIcon {
-		return Codicon.typeHierarchySub;
+		const gov = this.projects.getAgent(this.governorSessionId);
+		return gov?.treeType === 'research' ? Codicon.beaker : Codicon.typeHierarchySub;
 	}
 
 	override matches(other: EditorInput): boolean {
@@ -1081,8 +1084,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (token.isCancellationRequested) {
 			return;
 		}
-		if (!this.engineering.hasTree(input.governorSessionId) && this.projects.getAgent(input.governorSessionId)) {
-			await this.engineering.initTree({ governorSessionId: input.governorSessionId }).catch(err => {
+		const govAgent = this.projects.getAgent(input.governorSessionId);
+		if (!this.engineering.hasTree(input.governorSessionId) && govAgent) {
+			await this.engineering.initTree({
+				governorSessionId: input.governorSessionId,
+				treeType: govAgent.treeType === 'research' ? 'research' : 'engineering',
+			}).catch(err => {
 				this.showBanner(err instanceof Error ? err.message : String(err), 'error');
 			});
 		}

@@ -745,7 +745,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.deepStrictEqual({
 			initialEmptyButtons,
 			initialFolderRowCount,
-			hasRemoveAndDeleteMenu: projectMenuIds.includes('ade.project.remove') && projectMenuIds.includes('ade.project.delete'),
+			hasRemoveAndDeleteMenu: projectMenuIds.includes('ade.project.remove') && projectMenuIds.includes('ade.project.delete') && projectMenuIds.includes('ade.project.rename'),
 			iconsIntact,
 			narrowControlsNoOverlap,
 			homeFolderRowsWithSyncedBeta,
@@ -769,7 +769,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			renamedLabel: h.projects.getAgent(worker.id)?.label,
 			engineRenameSynced: h.executedCommands.some(cmd => cmd.id === 'aexus.agentEngines.rename' && cmd.args[1] === 'Refined Pure Task'),
 		}, {
-			initialEmptyButtons: ['Add Project Folder...'],
+			initialEmptyButtons: ['Add Project Folder...', 'Manage SSH Cloud Hosts...', 'Open Secretary'],
 			initialFolderRowCount: 2,
 			hasRemoveAndDeleteMenu: true,
 			iconsIntact: true,

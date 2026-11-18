@@ -1,0 +1,7 @@
+{
+	"Initializing {0} role & ADE control-plane context…": "正在初始化 {0} 职级与 ADE 控制面说明文档，请稍候…",
+	"Configure CLI Paths…": "配置 CLI 路径…",
+	"{0} CLI is not installed ({1}). Configure \"aexus.ade.cliPaths.{2}\" in Settings or install the CLI first.": "未检测到 {0} CLI（安装指引：{1}）。请在设置中配置 \"aexus.ade.cliPaths.{2}\" 或先安装对应 CLI。",
+	"No Coding Agent CLI is installed. Install Claude Code, Codex, Kilo, OpenCode, DSH, Antigravity, Cline, or Pi, or configure \"aexus.ade.cliPaths\" in Settings.": "尚未安装任何 Coding Agent CLI。请先安装 Claude Code、Codex、Kilo、OpenCode、DSH、Antigravity、Cline 或 Pi，或在设置中配置 \"aexus.ade.cliPaths\"。",
+	"Attached files:": "附加文件："
+}

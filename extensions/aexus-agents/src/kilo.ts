@@ -730,7 +730,12 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					const packet = buffer.slice(0, end); buffer = buffer.slice(end + 2);
 					const raw = packet.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
 					if (!raw) { continue; }
-					const event = JSON.parse(raw) as KiloEvent;
+					let event: KiloEvent;
+					try {
+						event = JSON.parse(raw) as KiloEvent;
+					} catch {
+						continue;
+					}
 					const data = event.properties ?? event.data;
 					if (event.type === 'session.created' && data?.info?.parentID) { this.changed.fire([this.session(data.info as KiloSession)]); }
 					const sessionId = data?.sessionID ?? data?.part?.sessionID ?? data?.info?.sessionID;
@@ -742,7 +747,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					}
 					if (data && sessionId && (event.type === 'permission.asked' || event.type === 'question.asked') && this.belongsTo(sessionId, session.id)) {
 						const autoApprove = Boolean(options?.automatedEngineering) || options?.permissionMode !== 'ask';
-						void this.answer(event, data, this.knownSessions.get(sessionId)!, token, autoApprove).catch(() => { });
+						const targetSession = this.knownSessions.get(sessionId) ?? session;
+						void this.answer(event, data, targetSession, token, autoApprove).catch(() => { });
 					}
 					if (!data || sessionId !== session.id) { continue; }
 					if (event.type === 'message.updated' && data.info?.role) { roles.set(data.info.id, data.info.role); }

@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
 import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, NativeSession, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface PiContentPart {
@@ -309,7 +310,7 @@ export class PiRuntime implements EngineRuntime {
 
 		files.sort((a, b) => b.mtimeMs - a.mtimeMs);
 		const sessions: NativeSession[] = [];
-		for (const candidate of files) {
+		for (const candidate of files.slice(0, 250)) {
 			if (token.isCancellationRequested) { break; }
 			let content: string;
 			try {
@@ -337,8 +338,11 @@ export class PiRuntime implements EngineRuntime {
 				} else if (entry.type === 'session_info' && typeof entry.name === 'string' && entry.name.trim()) {
 					sessionName = entry.name.trim();
 				} else if (!firstUserText && entry.type === 'message' && entry.message?.role === 'user') {
-					const text = piMessageText(entry.message.content).trim();
-					if (text) { firstUserText = text.split('\n')[0].slice(0, 100); }
+					const rawMsg = piMessageText(entry.message.content).trim();
+					const cleanedMsg = stripInjectedAdeContextFromUserTurn(rawMsg).trim();
+					if (cleanedMsg && !cleanedMsg.startsWith(ROLE_INIT_MARKER)) {
+						firstUserText = cleanedMsg.split('\n')[0].slice(0, 100);
+					}
 				}
 			}
 			if (id && cwd) {

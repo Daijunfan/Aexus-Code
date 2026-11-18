@@ -252,7 +252,15 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 					fs.promises.readFile(blueprintPath, 'utf8'),
 					fs.promises.readFile(statePath, 'utf8'),
 				]);
-				const state = JSON.parse(rawState) as IAdeEngineeringTreeState;
+				let state: IAdeEngineeringTreeState;
+				try {
+					state = JSON.parse(rawState) as IAdeEngineeringTreeState;
+				} catch {
+					continue;
+				}
+				if (!state || typeof state !== 'object') {
+					continue;
+				}
 				return {
 					governorSessionId,
 					treeType: state.treeType || kind,
@@ -469,10 +477,12 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			throw new Error(`Git Worktree isolation requires an initialized Git repository with at least one commit (${projectPath}).`);
 		}
 
+		const existing = await this.loadTree(governorSessionId).catch(() => undefined);
+		const treeType: AdeWorkTreeType = existing?.treeType ?? 'engineering';
 		const safeGov = sanitizePathSegment(governorSessionId).slice(0, 12);
 		const safeSeg = sanitizePathSegment(segmentId);
 		const branchName = `aexus-eng/${safeGov}/${safeSeg}`;
-		const worktreePath = path.join(this.getTreeDir(governorSessionId, 'engineering'), 'worktrees', safeSeg);
+		const worktreePath = path.join(this.getTreeDir(governorSessionId, treeType), 'worktrees', safeSeg);
 
 		await fs.promises.mkdir(path.dirname(worktreePath), { recursive: true, mode: 0o700 });
 
