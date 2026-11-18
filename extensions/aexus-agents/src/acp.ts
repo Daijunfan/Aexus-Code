@@ -51,6 +51,7 @@ interface AcpSessionSetupResult {
 	configOptions?: Array<{
 		id?: string;
 		name?: string;
+		currentValue?: unknown;
 		options?: Array<{
 			value?: string;
 			name?: string;
@@ -103,10 +104,12 @@ export abstract class AcpRuntime implements EngineRuntime {
 	protected readonly knownSessions = new Map<string, NativeSession>();
 	protected readonly changed = new vscode.EventEmitter<readonly NativeSession[]>();
 	readonly onDidChangeSessions = this.changed.event;
+	protected cachedDefaultModel: string | undefined;
 	protected cachedModels: Array<{ id: string; name: string; description?: string }> = [];
 	protected cachedModes: Array<{ id: string; name: string; description?: string }> = [];
 	protected cachedCommands: Array<{ name: string; description?: string }> = [];
 	protected cachedConfigOptionIds = new Set<string>();
+	protected cachedModelConfigValues = new Set<string>();
 
 	constructor(
 		protected readonly executable: string,
@@ -117,7 +120,54 @@ export abstract class AcpRuntime implements EngineRuntime {
 		if (!setup) {
 			return;
 		}
-		if (Array.isArray(setup.models?.availableModels)) {
+		if (setup.models?.currentModelId?.trim()) {
+			this.cachedDefaultModel = setup.models.currentModelId.trim();
+		}
+		let sawModelConfigOptions = false;
+		if (Array.isArray(setup.configOptions)) {
+			for (const opt of setup.configOptions) {
+				const optId = (opt.id ?? '').trim();
+				if (optId) {
+					this.cachedConfigOptionIds.add(optId);
+				}
+				const flatOptions = (opt.options ?? []).flatMap(entry => Array.isArray(entry.options) ? entry.options : [entry]);
+				if (optId === 'model') {
+					const rawCur = typeof opt.currentValue === 'string' ? opt.currentValue.trim() : '';
+					if (rawCur && !this.cachedDefaultModel) {
+						try {
+							const tuple = JSON.parse(rawCur) as unknown;
+							this.cachedDefaultModel = Array.isArray(tuple) && typeof tuple[1] === 'string' ? tuple[1] : rawCur;
+						} catch {
+							this.cachedDefaultModel = rawCur;
+						}
+					}
+					if (flatOptions.length > 0) {
+						sawModelConfigOptions = true;
+						const seen = new Set(this.cachedModels.map(m => m.id));
+						for (const item of flatOptions) {
+							const val = (item.value ?? '').trim();
+							if (val) {
+								this.cachedModelConfigValues.add(val);
+								if (!seen.has(val)) {
+									seen.add(val);
+									this.cachedModels.push({ id: val, name: item.name?.trim() || val, description: item.description });
+								}
+							}
+						}
+					}
+				} else if (optId === 'mode') {
+					const seen = new Set(this.cachedModes.map(m => m.id));
+					for (const item of flatOptions) {
+						const val = (item.value ?? '').trim();
+						if (val && !seen.has(val)) {
+							seen.add(val);
+							this.cachedModes.push({ id: val, name: item.name?.trim() || val, description: item.description });
+						}
+					}
+				}
+			}
+		}
+		if (!sawModelConfigOptions && Array.isArray(setup.models?.availableModels)) {
 			const seen = new Set(this.cachedModels.map(m => m.id));
 			for (const m of setup.models.availableModels) {
 				const id = (m.modelId ?? m.id ?? '').trim();
@@ -134,34 +184,6 @@ export abstract class AcpRuntime implements EngineRuntime {
 				if (id && !seen.has(id)) {
 					seen.add(id);
 					this.cachedModes.push({ id, name: m.name?.trim() || id, description: m.description });
-				}
-			}
-		}
-		if (Array.isArray(setup.configOptions)) {
-			for (const opt of setup.configOptions) {
-				const optId = (opt.id ?? '').trim();
-				if (optId) {
-					this.cachedConfigOptionIds.add(optId);
-				}
-				const flatOptions = (opt.options ?? []).flatMap(entry => Array.isArray(entry.options) ? entry.options : [entry]);
-				if (optId === 'model') {
-					const seen = new Set(this.cachedModels.map(m => m.id));
-					for (const item of flatOptions) {
-						const val = (item.value ?? '').trim();
-						if (val && !seen.has(val)) {
-							seen.add(val);
-							this.cachedModels.push({ id: val, name: item.name?.trim() || val, description: item.description });
-						}
-					}
-				} else if (optId === 'mode') {
-					const seen = new Set(this.cachedModes.map(m => m.id));
-					for (const item of flatOptions) {
-						const val = (item.value ?? '').trim();
-						if (val && !seen.has(val)) {
-							seen.add(val);
-							this.cachedModes.push({ id: val, name: item.name?.trim() || val, description: item.description });
-						}
-					}
 				}
 			}
 		}
@@ -471,15 +493,14 @@ export abstract class AcpRuntime implements EngineRuntime {
 	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
 		if (this.cachedModels.length === 0 && this.cachedModes.length === 0 && this.cachedCommands.length === 0 && session && !session.unmaterialized) {
 			try {
-				const client = await withTimeout(this.ensureClient(), 5000);
-				if (this.openSessions.has(session.id)) {
-					// Already open; setup was ingested.
-				} else if (cwd) {
-					await withTimeout(this.ensureSessionOpen(client, session), 5000).catch(() => { });
+				const client = await withTimeout(this.ensureClient(), 8000);
+				if (!this.openSessions.has(session.id) && cwd) {
+					await withTimeout(this.ensureSessionOpen(client, session), 8000).catch(() => { });
 				}
 			} catch { /* Non-fatal capability probe. */ }
 		}
 		return {
+			defaultModel: this.cachedDefaultModel,
 			models: this.cachedModels,
 			modes: this.cachedModes,
 			commands: this.cachedCommands,
@@ -511,7 +532,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			stream.markdown(`### ${this.name} — MCP Servers\n\n${listText}\n`);
 			return true;
 		}
-		if (cmd === 'history' && this.id === 'aexus-cline') {
+		if (cmd === 'history' && this.id === 'cline') {
 			const items = await this.list(token).catch(() => [] as NativeSession[]);
 			const recent = items.slice(0, 10);
 			const lines = recent.length > 0
@@ -527,18 +548,69 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const client = await this.ensureClient();
 		await this.ensureSessionOpen(client, session);
 		if (options?.model && options.model !== 'default') {
-			await client.request('session/set_model', { sessionId: session.id, modelId: options.model }).catch(() => { });
-			if (this.cachedConfigOptionIds.has('model')) {
-				await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: options.model }).catch(() => { });
+			let normalizedModel = options.model.trim();
+			if (this.id === 'dsh' && !normalizedModel.startsWith('[')) {
+				const matchedTuple = this.cachedModels.find(m => {
+					if (m.id === normalizedModel || m.name.toLowerCase() === normalizedModel.toLowerCase()) {
+						return true;
+					}
+					try {
+						const parsed = JSON.parse(m.id) as unknown;
+						return Array.isArray(parsed) && (parsed[1] === normalizedModel || `${parsed[0]}/${parsed[1]}` === normalizedModel);
+					} catch {
+						return false;
+					}
+				});
+				if (matchedTuple) {
+					normalizedModel = matchedTuple.id;
+				} else if (normalizedModel.includes('/')) {
+					const idx = normalizedModel.indexOf('/');
+					normalizedModel = JSON.stringify([normalizedModel.slice(0, idx), normalizedModel.slice(idx + 1)]);
+				} else {
+					normalizedModel = JSON.stringify(['deepseek-official', normalizedModel]);
+				}
+			} else if (this.id === 'cline' && normalizedModel.includes('/')) {
+				const suffix = normalizedModel.slice(normalizedModel.indexOf('/') + 1);
+				if (this.cachedModels.some(m => m.id === suffix)) {
+					normalizedModel = suffix;
+				}
+			}
+			if (this.id === 'dsh') {
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+			} else if (this.id === 'antigravity') {
+				if (this.cachedModelConfigValues.has(normalizedModel)) {
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+				} else {
+					await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }).catch(() => { });
+					if (this.cachedConfigOptionIds.has('model')) {
+						await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+					}
+				}
+			} else {
+				await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }).catch(() => { });
+				if (this.cachedConfigOptionIds.has('model')) {
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+				}
 			}
 		}
 		const effectiveMode = options?.mode && options.mode !== 'default'
 			? options.mode
-			: (this.id === 'aexus-cline' ? 'yolo' : this.id === 'aexus-antigravity' ? 'auto' : undefined);
+			: (this.id === 'cline' ? 'yolo' : this.id === 'antigravity' ? 'auto' : undefined);
 		if (effectiveMode) {
-			await client.request('session/set_mode', { sessionId: session.id, modeId: effectiveMode }).catch(() => { });
-			if (this.cachedConfigOptionIds.has('mode')) {
-				await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: effectiveMode }).catch(() => { });
+			if (this.id === 'cline') {
+				const clineSessionMode = effectiveMode === 'plan' ? 'plan' : 'act';
+				await client.request('session/set_mode', { sessionId: session.id, modeId: clineSessionMode }).catch(() => { });
+				if (this.cachedConfigOptionIds.has('mode')) {
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: clineSessionMode }).catch(() => { });
+				}
+				if (this.cachedConfigOptionIds.has('auto_approve')) {
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'auto_approve', value: effectiveMode === 'yolo' }).catch(() => { });
+				}
+			} else {
+				await client.request('session/set_mode', { sessionId: session.id, modeId: effectiveMode }).catch(() => { });
+				if (this.cachedConfigOptionIds.has('mode')) {
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: effectiveMode }).catch(() => { });
+				}
 			}
 		}
 		if (options?.thinking && options.thinking !== 'default') {

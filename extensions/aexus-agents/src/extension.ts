@@ -42,6 +42,12 @@ import {
 const execFileAsync = promisify(cp.execFile);
 const roleBridge = installNativeRoleBridge({ distDir: __dirname });
 
+interface RoleInitState {
+	rank: string;
+	engine: string;
+	initializedAt: number;
+}
+
 interface RecordEntry extends NativeSession {
 	engine: string;
 	initialTitle?: string;
@@ -49,6 +55,7 @@ interface RecordEntry extends NativeSession {
 	resourceId?: string;
 	sessionConfig?: SessionConfigState;
 	activeGoal?: string;
+	roleInit?: RoleInitState;
 }
 
 interface SecretaryState {
@@ -70,6 +77,8 @@ interface EngineDefinition {
 const SECRETARY_TYPE = 'aexus-secretary';
 const SECRETARY_URI = vscode.Uri.from({ scheme: SECRETARY_TYPE, path: '/main' });
 const GOAL_COMPLETE_MARKER = '<!-- GOAL_COMPLETE -->';
+const ROLE_INIT_MARKER = '[AEXUS_ADE_ROLE_INITIALIZATION]';
+const ROLE_INIT_ACK = 'ADE_ROLE_READY';
 const MAX_GOAL_ROUNDS = 6;
 
 const ENGINE_ALIASES: Record<string, string> = {
@@ -144,7 +153,7 @@ function toEngineType(shortOrFull: string): EngineId {
 	return found ? found.type : 'aexus-claude';
 }
 
-function toVsCodeOptionGroups(discovered: readonly DiscoveredOptionGroup[]): vscode.ChatSessionProviderOptionGroup[] {
+function toVsCodeOptionGroups(discovered: readonly DiscoveredOptionGroup[], sessionType: string): vscode.ChatSessionProviderOptionGroup[] {
 	return discovered.map(group => {
 		const iconId = OPTION_GROUP_ICONS[group.id];
 		const items: vscode.ChatSessionProviderOptionItem[] = group.items.map(opt => ({
@@ -163,6 +172,14 @@ function toVsCodeOptionGroups(discovered: readonly DiscoveredOptionGroup[]): vsc
 			icon: iconId ? new vscode.ThemeIcon(iconId) : undefined,
 			items,
 			selected,
+			...(group.id === 'model' ? {
+				commands: [{
+					command: 'aexus.agents.selectCustomModel',
+					title: vscode.l10n.t('Enter Custom Model ID…'),
+					tooltip: vscode.l10n.t('Enter any custom model identifier supported by the active engine'),
+					arguments: [sessionType],
+				}],
+			} : {}),
 		};
 	});
 }
@@ -387,6 +404,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		void Promise.resolve(vscode.commands.executeCommand('aexus.ade.setSessionGoalBanner', sessionUri, goalText)).catch(() => undefined);
 	};
 
+	const setSessionInitializingInUi = (sessionUri: vscode.Uri, message: string | undefined) => {
+		void Promise.resolve(vscode.commands.executeCommand('aexus.ade.setSessionInitializing', sessionUri, message)).catch(() => undefined);
+	};
+
+	const inFlightRoleInits = new Map<string, Promise<void>>();
+
 	// eslint-disable-next-line prefer-const
 	let secretaryController: vscode.ChatSessionItemController | undefined;
 	const refreshSecretaryItem = () => {
@@ -482,10 +505,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return result;
 	};
 
+	const capsSignature = (c: EngineRuntimeCapabilities | undefined): string =>
+		`${c?.defaultModel ?? ''}:${(c?.models ?? []).map(m => m.id).join(',')}:${(c?.modes ?? []).map(m => m.id).join(',')}:${c?.commands?.length ?? 0}`;
+
 	const fetchRuntimeCaps = async (shortEngine: string, cwd: string, record?: RecordEntry): Promise<{ caps: EngineRuntimeCapabilities; changed: boolean }> => {
 		const cacheKey = `${shortEngine}:${cwd}`;
 		const prev = runtimeCapsCache.get(cacheKey);
-		const prevSig = `${prev?.models?.length ?? 0}:${prev?.modes?.length ?? 0}:${prev?.commands?.length ?? 0}`;
+		const prevSig = capsSignature(prev);
 		const def = available.find(entry => entry.id === shortEngine && entry.command);
 		if (!def) {
 			return { caps: prev ?? {}, changed: false };
@@ -495,10 +521,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (eng.getRuntimeCapabilities) {
 				const caps = await Promise.race([
 					eng.getRuntimeCapabilities(cwd, record),
-					new Promise<EngineRuntimeCapabilities>(resolve => setTimeout(() => resolve(prev ?? {}), 2500)),
+					new Promise<EngineRuntimeCapabilities>(resolve => setTimeout(() => resolve(prev ?? {}), 12000)),
 				]);
 				runtimeCapsCache.set(cacheKey, caps);
-				const nextSig = `${caps.models?.length ?? 0}:${caps.modes?.length ?? 0}:${caps.commands?.length ?? 0}`;
+				runtimeCapsCache.set(`${shortEngine}:*`, caps);
+				const nextSig = capsSignature(caps);
 				return { caps, changed: nextSig !== prevSig };
 			}
 		} catch { /* Fall back to cached or empty runtime capabilities. */ }
@@ -598,23 +625,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		? vscode.workspace.workspaceFolders[0].uri.fsPath
 		: os.homedir();
 
+	const collectCustomModelsForEngine = (shortEng: string, baseModels: EngineRuntimeCapabilities['models']): Array<{ id: string; name: string; description?: string }> => {
+		const merged = [...(baseModels ?? [])];
+		const seen = new Set(merged.map(m => m.id));
+		const addCustom = (m?: string) => {
+			const trimmed = m?.trim();
+			if (trimmed && trimmed !== 'default' && !seen.has(trimmed)) {
+				seen.add(trimmed);
+				merged.push({ id: trimmed, name: trimmed, description: 'Custom model' });
+			}
+		};
+		for (const rec of records.values()) {
+			if (rec.engine === shortEng) {
+				addCustom(rec.sessionConfig?.model);
+			}
+		}
+		addCustom(secretaryState?.perEngineConfig?.[shortEng]?.model);
+		return merged;
+	};
+
 	const computeOptionGroupsForResource = async (sessionType: string, sessionUri?: vscode.Uri): Promise<vscode.ChatSessionProviderOptionGroup[]> => {
 		const isSecretary = sessionType === SECRETARY_TYPE || sessionUri?.scheme === SECRETARY_TYPE;
 		if (isSecretary) {
 			const secRecord = findCachedRecord(SECRETARY_URI) ?? await ensureSecretaryRecord().catch(() => undefined);
 			const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
 			const cwd = secRecord?.cwd ?? defaultCwd();
-			const caps = runtimeCapsCache.get(`${shortEng}:${cwd}`);
+			const rawCaps = runtimeCapsCache.get(`${shortEng}:${cwd}`) ?? runtimeCapsCache.get(`${shortEng}:*`);
+			const caps: EngineRuntimeCapabilities = {
+				...rawCaps,
+				models: collectCustomModelsForEngine(shortEng, rawCaps?.models),
+			};
 			const cfg = secRecord ? getSessionConfig(secRecord, true) : { secretaryEngineId: toEngineType(shortEng) };
-			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', cfg, cwd, caps));
+			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', cfg, cwd, caps), SECRETARY_TYPE);
 		}
 		const engineType = toEngineType(sessionType);
 		const shortEng = engineType.slice('aexus-'.length);
 		const rec = sessionUri ? findCachedRecord(sessionUri) : undefined;
 		const cwd = rec?.cwd ?? defaultCwd();
-		const caps = runtimeCapsCache.get(`${shortEng}:${cwd}`);
+		const rawCaps = runtimeCapsCache.get(`${shortEng}:${cwd}`) ?? runtimeCapsCache.get(`${shortEng}:*`);
+		const caps: EngineRuntimeCapabilities = {
+			...rawCaps,
+			models: collectCustomModelsForEngine(shortEng, rawCaps?.models),
+		};
 		const cfg = rec ? getSessionConfig(rec, false) : {};
-		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, cfg, cwd, caps));
+		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, cfg, cwd, caps), engineType);
 	};
 
 	const trackInputState = (sessionType: string, controller: vscode.ChatSessionItemController, groups: vscode.ChatSessionProviderOptionGroup[]): vscode.ChatSessionInputState => {
@@ -694,6 +748,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						})).catch(() => undefined);
 					}
 					customizationChangedEmitter.fire();
+					if (opened.has(SECRETARY_TYPE)) {
+						void ensureRoleInitialized(record, SECRETARY_URI, true);
+					}
 				}
 				continue;
 			}
@@ -779,8 +836,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		await save();
 
 		if (!fromUiPicker || engineSwitched) {
-			await notifySessionOptionsUpdated(sessionType, sessionUri, engineSwitched);
+			await notifySessionOptionsUpdated(sessionType, sessionUri, true);
 		} else {
+			providerOptionsChangeEmitters.get(sessionType)?.fire();
 			// Record current signature so subsequent checks don't re-emit stale diff
 			const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
 			lastNotifiedOptionsSig.set(
@@ -799,9 +857,140 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	};
 
-	const history = (turns: HistoryEntry[], participant: string): readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn2)[] => turns.filter(turn => turn.text).map(turn => turn.role === 'user'
+	const filterOutRoleInitTurns = (turns: HistoryEntry[]): HistoryEntry[] => {
+		const filtered: HistoryEntry[] = [];
+		let skipNextAssistantAck = false;
+		for (const turn of turns) {
+			if (!turn.text) {
+				continue;
+			}
+			if (turn.role === 'user' && turn.text.includes(ROLE_INIT_MARKER)) {
+				skipNextAssistantAck = true;
+				continue;
+			}
+			if (skipNextAssistantAck && turn.role === 'assistant') {
+				skipNextAssistantAck = false;
+				continue;
+			}
+			skipNextAssistantAck = false;
+			filtered.push(turn);
+		}
+		return filtered;
+	};
+
+	const history = (turns: HistoryEntry[], participant: string): readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn2)[] => filterOutRoleInitTurns(turns).map(turn => turn.role === 'user'
 		? new vscode.ChatRequestTurn2(turn.text, undefined, [], participant, [], undefined, turn.id, undefined, undefined, turn.isSystemInitiated)
 		: new vscode.ChatResponseTurn2([new vscode.ChatResponseMarkdownPart(turn.text)], {}, participant));
+
+	const ensureRoleInitialized = async (record: RecordEntry, sessionUri: vscode.Uri, isSecretary: boolean): Promise<void> => {
+		if (record.readOnly) {
+			return;
+		}
+		const snapEntry = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+		if (!isSecretary && !snapEntry?.isOrchestrated) {
+			return;
+		}
+		const targetRank = isSecretary ? 'secretary' : (snapEntry?.rank ?? 'governor');
+		if (record.roleInit && record.roleInit.engine === record.engine && record.roleInit.rank === targetRank) {
+			return;
+		}
+		const recordKey = identity(record);
+		const existingInit = inFlightRoleInits.get(recordKey);
+		if (existingInit) {
+			return existingInit;
+		}
+		if (busy.has(recordKey)) {
+			return;
+		}
+		if (!available.some(entry => entry.id === record.engine && entry.command)) {
+			return;
+		}
+
+		const roleDisplay = isSecretary ? 'Secretary' : targetRank.charAt(0).toUpperCase() + targetRank.slice(1);
+		const bannerMessage = vscode.l10n.t('正在初始化 {0} 职级与 ADE API 说明文档，请稍候…', roleDisplay);
+
+		const runInit = (async () => {
+			const initCts = new vscode.CancellationTokenSource();
+			busy.add(recordKey);
+			activeTurns.set(recordKey, initCts);
+			controllers.get(record.engine)?.items.add(item(record));
+			if (isSecretary) {
+				refreshSecretaryItem();
+			}
+			setSessionInitializingInUi(sessionUri, bannerMessage);
+			// Re-apply shortly after in case the editor tab widget is still mounting
+			const remountTimer = setTimeout(() => {
+				if (inFlightRoleInits.has(recordKey)) {
+					setSessionInitializingInUi(sessionUri, bannerMessage);
+				}
+			}, 180);
+
+			try {
+				const roleDocs = await Promise.resolve(vscode.commands.executeCommand<string | undefined>('aexus.ade.resolvePromptContext', sessionUri)).catch(() => undefined);
+				if (!roleDocs?.trim()) {
+					return;
+				}
+				const engine = runtime(record.engine);
+				const prevId = record.id;
+				if (engine.prepareSession) {
+					await engine.prepareSession(record);
+					if (record.id !== prevId) {
+						records.delete(key(record.engine, prevId));
+						records.set(key(record.engine, record.id), record);
+					}
+					await save();
+				}
+
+				const initPrompt = [
+					ROLE_INIT_MARKER,
+					`You are initializing as **${roleDisplay}** in **Aexus Code ADE**.`,
+					`Read and internalize your organizational rank, identity override rules, responsibilities, and the \`aexus-ade\` CLI API documentation below so you are immediately ready when the user sends their first message.`,
+					`STRICT INITIALIZATION RULE: Do NOT execute any shell commands, file operations, or tools during this initialization step. Simply internalize the specifications below and reply with the exact single token: ${ROLE_INIT_ACK}`,
+					'',
+					roleDocs.trim(),
+				].join('\n');
+
+				const silentTarget: vscode.ChatResponseStream = Object.create(null);
+				const silentStream: vscode.ChatResponseStream = new Proxy(silentTarget, {
+					get() { return () => { }; },
+				});
+				const cfg = getSessionConfig(record, isSecretary);
+				await engine.send(record, initPrompt, silentStream, initCts.token, toSendOptions(
+					{ ...cfg, thinking: 'low' },
+					{ pureWorker: false, callerRole: targetRank, automatedEngineering: true },
+				));
+
+				if (!initCts.token.isCancellationRequested) {
+					record.roleInit = {
+						rank: targetRank,
+						engine: record.engine,
+						initializedAt: Date.now(),
+					};
+					record.updated = Date.now();
+					await save();
+				}
+			} catch {
+				// Non-fatal: if initialization fails (e.g. offline), the first user turn falls back to full context injection.
+			} finally {
+				clearTimeout(remountTimer);
+				initCts.dispose();
+				inFlightRoleInits.delete(recordKey);
+				activeTurns.delete(recordKey);
+				busy.delete(recordKey);
+				setSessionInitializingInUi(sessionUri, undefined);
+				if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
+					controllers.get(record.engine)?.items.add(item(record));
+				}
+				if (isSecretary) {
+					refreshSecretaryItem();
+				}
+				await publishHistory(record).catch(() => undefined);
+			}
+		})();
+
+		inFlightRoleInits.set(recordKey, runInit);
+		return runInit;
+	};
 
 	const publishHistory = async (record: RecordEntry): Promise<void> => {
 		const entry = opened.get(identity(record));
@@ -924,6 +1113,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					params: { engine: `aexus-${rotated.engine}`, resource: SECRETARY_URI.toString(), open: false },
 				})).catch(() => undefined);
 				stream.markdown(`Secretary conversation context has been reset (**${engineName}**).`);
+				void ensureRoleInitialized(rotated, SECRETARY_URI, true);
 			} else {
 				const preservedConfig = record.sessionConfig;
 				const fresh = await runtime(record.engine).create(record.cwd);
@@ -933,11 +1123,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					resourceId: record.resourceId ?? record.id,
 					sessionConfig: preservedConfig,
 					activeGoal: undefined,
+					roleInit: undefined,
 				});
 				await save();
 				const openEntry = opened.get(identity(record));
 				openEntry?.changed.fire([]);
 				stream.markdown(`Conversation context cleared (**${engineName}**).`);
+				void ensureRoleInitialized(record, sessionUri, false);
 			}
 			return true;
 		}
@@ -1177,6 +1369,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		token: vscode.CancellationToken,
 	): Promise<vscode.ChatResult> => {
 		if (record.readOnly) { throw new Error(vscode.l10n.t('Continue this subagent from its parent conversation.')); }
+		const initialRecordKey = identity(record);
+		const pendingInit = inFlightRoleInits.get(initialRecordKey);
+		if (pendingInit) {
+			stream.progress(vscode.l10n.t('Waiting for role & API initialization to finish…'));
+			await pendingInit;
+		}
 		const recordKey = identity(record);
 		if (busy.has(recordKey)) { throw new Error(vscode.l10n.t('This conversation is already working. Stop or wait for its current response.')); }
 
@@ -1268,7 +1466,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			].join('\n');
 		}
 
-		const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>('aexus.ade.resolvePromptContext', sessionUri)).catch(() => undefined);
+		const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+		const currentRankForContext = isSecretary ? 'secretary' : (snapForContext?.isOrchestrated ? snapForContext.rank : undefined);
+		const alreadyInitializedForRank = Boolean(
+			currentRankForContext
+			&& record.roleInit
+			&& record.roleInit.engine === record.engine
+			&& record.roleInit.rank === currentRankForContext,
+		);
+		const injected = !currentRankForContext
+			? undefined
+			: await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
+				'aexus.ade.resolvePromptContext',
+				alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
+			)).catch(() => undefined);
 		const initialFullPrompt = injected?.trim() ? `${injected.trim()}\n\n${basePrompt}` : basePrompt;
 
 		try {
@@ -1437,6 +1648,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					lastTurnReplies.set(SECRETARY_TYPE, streamedMarkdown.trim());
 				}
 			}
+			if (!alreadyInitializedForRank && currentRankForContext) {
+				record.roleInit = {
+					rank: currentRankForContext,
+					engine: record.engine,
+					initializedAt: Date.now(),
+				};
+			}
 			record.updated = Date.now();
 			if (!isSecretary && !record.customLabel && record.initialTitle && record.label === record.initialTitle) {
 				const titleSource = parsedCmd === 'goal' ? `/goal ${cmdArgText}` : effectiveUserPrompt;
@@ -1580,6 +1798,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(SECRETARY_TYPE, entry);
+				if (secRecord.provisional && turns.length === 0 && !secRecord.roleInit) {
+					void ensureRoleInitialized(secRecord, SECRETARY_URI, true);
+				} else if (inFlightRoleInits.has(identity(secRecord))) {
+					setSessionInitializingInUi(SECRETARY_URI, vscode.l10n.t('正在初始化 Secretary 职级与 ADE API 说明文档，请稍候…'));
+				}
 				return {
 					title: 'Secretary',
 					options: toSessionOptionsRecord(groups),
@@ -1657,6 +1880,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(identity(record), entry);
+				const snapOnOpen = roleBridge.getSnapshot().agents.find(a => a.resource === uri.toString());
+				if (snapOnOpen?.isOrchestrated && record.provisional && turns.length === 0 && !record.roleInit) {
+					void ensureRoleInitialized(record, uri, false);
+				} else if (inFlightRoleInits.has(identity(record))) {
+					const roleTitle = (snapOnOpen?.rank ?? 'governor').charAt(0).toUpperCase() + (snapOnOpen?.rank ?? 'governor').slice(1);
+					setSessionInitializingInUi(uri, vscode.l10n.t('正在初始化 {0} 职级与 ADE API 说明文档，请稍候…', roleTitle));
+				}
 				return {
 					title: record.label,
 					options: toSessionOptionsRecord(groups),
@@ -1674,6 +1904,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}, participant, { supportsInterruptions: true }));
 		refresh(definition.id);
 	}
+
+	context.subscriptions.push(vscode.commands.registerCommand('aexus.agents.selectCustomModel', async (firstArg?: unknown, secondArg?: unknown) => {
+		const sessionUri = firstArg instanceof vscode.Uri ? firstArg : undefined;
+		const fallbackType = typeof firstArg === 'string' ? firstArg : typeof secondArg === 'string' ? secondArg : undefined;
+		const sessionType = sessionUri
+			? (sessionUri.scheme === SECRETARY_TYPE ? SECRETARY_TYPE : toEngineType(sessionUri.scheme))
+			: (fallbackType ?? SECRETARY_TYPE);
+		const targetUri = sessionUri ?? SECRETARY_URI;
+		const isSec = sessionType === SECRETARY_TYPE || targetUri.scheme === SECRETARY_TYPE;
+		const rec = findCachedRecord(targetUri) ?? (isSec ? await ensureSecretaryRecord().catch(() => undefined) : undefined);
+		const currentCfg = rec ? getSessionConfig(rec, isSec) : undefined;
+		const entered = await vscode.window.showInputBox({
+			title: vscode.l10n.t('Enter Custom Model ID'),
+			prompt: vscode.l10n.t('Enter the exact model identifier supported by the active Coding Agent engine (leave "default" to use engine default)'),
+			value: currentCfg?.model && currentCfg.model !== 'default' ? currentCfg.model : '',
+			placeHolder: vscode.l10n.t('e.g. gpt-6.1-sol, deepseek-v4-pro, group-openai/gpt-6'),
+			ignoreFocusOut: true,
+		});
+		if (entered === undefined) {
+			return;
+		}
+		const normalized = entered.trim() || 'default';
+		await applyOptionUpdates(sessionType, targetUri, [{ optionId: 'model', value: normalized }], true, false);
+	}));
 
 	const deleteRecordAndDescendants = async (record: RecordEntry, token: vscode.CancellationToken, deletedKeys: Set<string>): Promise<number> => {
 		const recordKey = key(record.engine, record.id);
@@ -1918,6 +2172,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				lookupToken.dispose();
 			}
 
+			const initialEngRecordKey = identity(record);
+			const pendingEngInit = inFlightRoleInits.get(initialEngRecordKey);
+			if (pendingEngInit) {
+				await pendingEngInit;
+			}
 			const recordKey = identity(record);
 			if (busy.has(recordKey)) {
 				activeTurns.get(recordKey)?.cancel();
@@ -1933,15 +2192,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			let finalPrompt = rawPrompt;
 			let callerRole: string | undefined;
 			if (!isPureWorker) {
+				const snapEntry = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
+				callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
+				const alreadyInit = Boolean(
+					callerRole
+					&& record.roleInit
+					&& record.roleInit.engine === record.engine
+					&& record.roleInit.rank === callerRole,
+				);
 				const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
 					'aexus.ade.resolvePromptContext',
-					rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri,
+					alreadyInit
+						? { ...(rawOptions?.agentId ? { agentId: rawOptions.agentId } : {}), resource: uri, mode: 'delta' }
+						: (rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri),
 				)).catch(() => undefined);
 				if (injected?.trim()) {
 					finalPrompt = `${injected.trim()}\n\n${rawPrompt}`;
 				}
-				const snapEntry = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
-				callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
+				if (!alreadyInit && callerRole) {
+					record.roleInit = { rank: callerRole, engine: record.engine, initializedAt: Date.now() };
+				}
 			}
 
 			let streamedMarkdown = '';
@@ -2240,7 +2510,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (!rawSnapshot || typeof rawSnapshot !== 'object' || !Array.isArray(rawSnapshot.agents)) {
 				return;
 			}
-			await roleBridge.updateSnapshot(await enrichRoleSnapshot(rawSnapshot));
+			const enriched = await enrichRoleSnapshot(rawSnapshot);
+			await roleBridge.updateSnapshot(enriched);
+			if (enriched.mode === 'ade') {
+				for (const agentEntry of enriched.agents) {
+					if (!agentEntry.isOrchestrated || !agentEntry.resource || !agentEntry.engineId?.startsWith('aexus-')) {
+						continue;
+					}
+					try {
+						const agentUri = vscode.Uri.parse(agentEntry.resource);
+						const rec = findCachedRecord(agentUri);
+						if (rec && rec.provisional && !rec.roleInit) {
+							void ensureRoleInitialized(rec, agentUri, false);
+						}
+					} catch { /* Ignore malformed URI. */ }
+				}
+			}
 		}),
 	);
 

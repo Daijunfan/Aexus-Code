@@ -485,6 +485,8 @@ export interface IChatWidget {
 	cancelTranscriptProgress?(): boolean;
 	/** Pins or clears a persistent session goal banner above the chat input. */
 	setPinnedGoalBanner?(goalText: string | undefined, onDismiss?: () => void): void;
+	/** Locks or unlocks chat input during initial role/API documentation initialization, showing a shimmering banner. */
+	setSessionInitializingState?(message: string | undefined): void;
 	readonly domNode: HTMLElement;
 	/** DOM node of the scrollable transcript area, excluding the input part. */
 	readonly transcriptDomNode: HTMLElement;

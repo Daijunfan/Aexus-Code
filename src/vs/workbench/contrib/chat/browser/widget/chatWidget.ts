@@ -541,6 +541,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	private readonly _goalBannerDismissListener = this._register(new MutableDisposable<IDisposable>());
 	private _pinnedGoalBannerText: string | undefined;
 	private _pinnedGoalDismissCallback: (() => void) | undefined;
+	private _sessionInitializingMessage: string | undefined;
 
 	private readonly viewModelDisposables = this._register(new DisposableStore());
 	private _viewModel: ChatViewModel | undefined;
@@ -561,6 +562,9 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		this._viewModel = viewModel;
 		this._requestActiveForStateIndicator = false;
 		this._hasUnvisitedCompletion = false;
+		if (this._sessionInitializingMessage) {
+			this.setSessionInitializingState(undefined);
+		}
 		if (viewModel) {
 			this.viewModelDisposables.add(viewModel);
 			this.logService.debug(`ChatWidget#setViewModel: have viewModel session=${viewModel.sessionResource.toString()} requests=${viewModel.model.getRequests().length}`);
@@ -1659,7 +1663,19 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	}
 
 	get isTranscriptProgressActive(): boolean {
-		return !!this.transcriptProgress?.onCancel;
+		return !!this.transcriptProgress?.onCancel || !!this._sessionInitializingMessage;
+	}
+
+	setSessionInitializingState(message: string | undefined): void {
+		const trimmed = message?.trim() || undefined;
+		if (this._sessionInitializingMessage === trimmed) {
+			return;
+		}
+		this._sessionInitializingMessage = trimmed;
+		this.setTranscriptProgress(trimmed);
+		this.input.setInputEnabled(!this.isTranscriptProgressActive);
+		this._readOnlyContextKey.set(this._readOnly || this.isTranscriptProgressActive);
+		this.transcriptProgressActiveContext.set(this.isTranscriptProgressActive);
 	}
 
 	cancelTranscriptProgress(): boolean {

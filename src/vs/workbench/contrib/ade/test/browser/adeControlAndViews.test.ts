@@ -12,12 +12,13 @@ import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { URI } from '../../../../../base/common/uri.js';
-import { mock } from '../../../../../base/test/common/mock.js';
+import { mock, upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import {
 	ADE_CONTROL_EXECUTE_COMMAND_ID,
 	ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID,
 	ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID,
+	ADE_SET_SESSION_INITIALIZING_COMMAND_ID,
 	ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID,
 	IAdeControlStatus,
 	IAdeProjectSummary,
@@ -49,6 +50,7 @@ import { IWorkbenchModeService } from '../../../../services/workbenchMode/common
 import { IWorkingCopyFileService } from '../../../../services/workingCopy/common/workingCopyFileService.js';
 import { IWorkspaceEditingService } from '../../../../services/workspaces/common/workspaceEditing.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { IChatWidget, IChatWidgetService } from '../../../chat/browser/chat.js';
 import { ChatSendResult, IChatService } from '../../../chat/common/chatService/chatService.js';
 import { IChatSessionsService } from '../../../chat/common/chatSessionsService.js';
 import { IProjectNavigationService, ProjectNavigationService } from '../../../files/browser/projectNavigationService.js';
@@ -236,7 +238,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			closedAgentIds,
 			openedDiffs,
 			executedCommands,
-			resolvePrompt: (target: URI | string | { agentId?: string; resource?: string | URI }) => instantiation.invokeFunction(CommandsRegistry.getCommand(ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID)!.handler, target) as unknown as string | undefined,
+			resolvePrompt: (target: URI | string | { agentId?: string; resource?: string | URI; mode?: 'delta' }) => instantiation.invokeFunction(CommandsRegistry.getCommand(ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID)!.handler, target) as unknown as string | undefined,
 			control: <T = unknown>(action: string, params?: Record<string, unknown>) =>
 				instantiation.invokeFunction(CommandsRegistry.getCommand(ADE_CONTROL_EXECUTE_COMMAND_ID)!.handler, { action, params }) as unknown as Promise<T>,
 		};
@@ -300,6 +302,75 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			mgrShowsSupervisorAndSub: true,
 			empShowsSupervisor: true,
 			secHasViewportAndCli: true,
+		});
+	});
+
+	test('compacts prompt context in delta mode for orchestrated agents and Secretary', () => {
+		const h = createHarness();
+		h.modes.setMode('ade');
+		h.navigation.enterProject(alpha);
+
+		const loneGovernor = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/delta-lone') }, 'Lone Governor', { role: 'governor' });
+		const governor = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/delta-gov') }, 'Delta Governor', { role: 'governor' });
+		const manager = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/delta-mgr') }, 'Delta Manager', { parentId: governor.id, role: 'manager' });
+		const secretaryResource = URI.parse('aexus-claude:/delta-sec');
+		h.projects.configureSecretary({ engineId: 'aexus-claude', resource: secretaryResource });
+
+		const loneDelta = h.resolvePrompt({ resource: loneGovernor.session!.resource, mode: 'delta' });
+		const governorFull = h.resolvePrompt(governor.session!.resource);
+		const governorDelta = h.resolvePrompt({ resource: governor.session!.resource, mode: 'delta' });
+		const secretaryFull = h.resolvePrompt(secretaryResource);
+		const secretaryDelta = h.resolvePrompt({ resource: secretaryResource, mode: 'delta' });
+
+		assert.deepStrictEqual({
+			loneChildlessDeltaIsUndefined: loneDelta === undefined,
+			governorFullIsRoleContext: governorFull?.startsWith('[Aexus Orchestrated Role Context]'),
+			governorFullHasFullManual: governorFull?.includes('Subordinate Control API'),
+			governorDeltaIsHierarchySummary: governorDelta?.startsWith('[ADE Live Hierarchy State]'),
+			governorDeltaShowsSubordinate: governorDelta?.includes(`Delta Manager (${manager.id}, Manager)`),
+			governorDeltaOmitsFullManual: !governorDelta?.includes('Subordinate Control API'),
+			secretaryFullHasFullManual: secretaryFull?.includes('Complete ADE Macro Control CLI'),
+			secretaryDeltaIsViewportSummary: secretaryDelta?.startsWith('[ADE Live Viewport State]'),
+			secretaryDeltaShowsFocus: secretaryDelta?.includes('Focused Project: Alpha'),
+			secretaryDeltaOmitsFullManual: !secretaryDelta?.includes('aexus-ade'),
+		}, {
+			loneChildlessDeltaIsUndefined: true,
+			governorFullIsRoleContext: true,
+			governorFullHasFullManual: true,
+			governorDeltaIsHierarchySummary: true,
+			governorDeltaShowsSubordinate: true,
+			governorDeltaOmitsFullManual: true,
+			secretaryFullHasFullManual: true,
+			secretaryDeltaIsViewportSummary: true,
+			secretaryDeltaShowsFocus: true,
+			secretaryDeltaOmitsFullManual: true,
+		});
+	});
+
+	test('forwards session initializing state to the matching chat widget and clears it', async () => {
+		const h = createHarness();
+		const sessionResource = URI.parse('aexus-claude:/init-widget');
+		const stateCalls: Array<string | undefined> = [];
+		const widget = upcastPartial<IChatWidget>({
+			setSessionInitializingState: message => stateCalls.push(message),
+		});
+		h.instantiation.stub(IChatWidgetService, upcastPartial<IChatWidgetService>({
+			getAllWidgets: () => [],
+			onDidAddWidget: Event.None,
+			getWidgetBySessionResource: resource => resource.toString() === sessionResource.toString() ? widget : undefined,
+		}));
+		const commandService = h.instantiation.get(ICommandService);
+
+		await commandService.executeCommand(ADE_SET_SESSION_INITIALIZING_COMMAND_ID, sessionResource, 'Initializing role documentation…');
+		const stateWhileInitializing = [...stateCalls];
+		await commandService.executeCommand(ADE_SET_SESSION_INITIALIZING_COMMAND_ID, sessionResource, undefined);
+
+		assert.deepStrictEqual({
+			stateWhileInitializing,
+			stateAfterClear: stateCalls,
+		}, {
+			stateWhileInitializing: ['Initializing role documentation…'],
+			stateAfterClear: ['Initializing role documentation…', undefined],
 		});
 	});
 

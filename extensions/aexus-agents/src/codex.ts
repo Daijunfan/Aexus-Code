@@ -175,7 +175,7 @@ export class CodexRuntime implements EngineRuntime {
 		if (!model || model === 'default') {
 			return undefined;
 		}
-		return this.supportedModels.size === 0 || this.supportedModels.has(model) ? model : undefined;
+		return model;
 	}
 
 	private approvalPolicy(permissionMode?: string): ApprovalPolicy {
@@ -529,7 +529,7 @@ export class CodexRuntime implements EngineRuntime {
 				}
 			}
 		} catch { /* skills/list is optional; keep an empty command list. */ }
-		const value: EngineRuntimeCapabilities = { models, commands };
+		const value: EngineRuntimeCapabilities = { defaultModel: this.defaultModel, models, commands };
 		this.capabilitiesCache.set(cwd, { value, expiresAt: Date.now() + 30000 });
 		return value;
 	}

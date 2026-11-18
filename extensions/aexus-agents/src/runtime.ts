@@ -46,6 +46,7 @@ export interface EngineSendOptions {
 }
 
 export interface EngineRuntimeCapabilities {
+	readonly defaultModel?: string;
 	readonly models?: Array<{ id: string; name: string; description?: string }>;
 	readonly modes?: Array<{ id: string; name: string; description?: string }>;
 	readonly commands?: Array<{ name: string; description?: string }>;

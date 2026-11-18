@@ -284,6 +284,7 @@ function readMarkdownMetadata(text: string): MarkdownMetadata {
 
 interface ModelConfigRead {
 	defaultModel?: string;
+	replaceBuiltInOptions?: boolean;
 	models: DiscoveredOptionItem[];
 }
 
@@ -347,8 +348,13 @@ function providerModelItems(providerValue: unknown): DiscoveredOptionItem[] {
 		if (!models) {
 			continue;
 		}
-		for (const modelId of Object.keys(models)) {
-			items.push({ id: `${providerId}/${modelId}`, name: `${providerId}/${modelId}` });
+		for (const [modelId, modelEntry] of Object.entries(models)) {
+			const modelRecord = asRecord(modelEntry);
+			const fullId = `${providerId}/${modelId}`;
+			const displayName = stringValue(modelRecord?.name) ?? stringValue(modelRecord?.label);
+			items.push(displayName && displayName !== fullId
+				? { id: fullId, name: displayName, description: fullId }
+				: { id: fullId, name: fullId });
 		}
 	}
 	return items;
@@ -367,21 +373,18 @@ function readClaudeSettings(text: string): ModelConfigRead {
 			return;
 		}
 		seen.add(id);
-		models.push({ id, name: stringValue(nameRaw) ?? id, description: stringValue(descriptionRaw) });
+		const label = stringValue(nameRaw);
+		const desc = stringValue(descriptionRaw);
+		models.push({
+			id,
+			name: label ?? id,
+			description: label && label !== id ? (desc ? `${id} · ${desc}` : id) : desc,
+		});
 	};
-
-	const model = parsed.model;
-	if (typeof model === 'string') {
-		addModel(model, model);
-	} else {
-		const modelRecord = asRecord(model);
-		if (modelRecord) {
-			addModel(modelRecord.id ?? modelRecord.model, modelRecord.name ?? modelRecord.label, modelRecord.description);
-		}
-	}
 
 	const picker = parsed.modelPicker;
 	const pickerRecord = asRecord(picker);
+	const replaceBuiltInOptions = pickerRecord?.replaceBuiltInOptions === true;
 	const pickerOptions = Array.isArray(picker)
 		? picker
 		: pickerRecord && Array.isArray(pickerRecord.options) ? pickerRecord.options : [];
@@ -397,11 +400,65 @@ function readClaudeSettings(text: string): ModelConfigRead {
 		addModel(optionRecord.model ?? optionRecord.id ?? optionRecord.value, optionRecord.label ?? optionRecord.name, optionRecord.description);
 	}
 
-	for (const item of modelItemsFromUnknown(parsed.modelSettings)) {
-		addModel(item.id, item.name);
+	const model = parsed.model;
+	if (typeof model === 'string') {
+		addModel(model, model);
+	} else {
+		const modelRecord = asRecord(model);
+		if (modelRecord) {
+			addModel(modelRecord.id ?? modelRecord.model, modelRecord.name ?? modelRecord.label, modelRecord.description);
+		}
 	}
 
-	return { defaultModel: stringValue(model), models };
+	const envRecord = asRecord(parsed.env);
+	if (envRecord) {
+		addModel(
+			envRecord.ANTHROPIC_CUSTOM_MODEL_OPTION,
+			envRecord.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME,
+			envRecord.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION,
+		);
+		addModel(envRecord.ANTHROPIC_MODEL);
+		if (!replaceBuiltInOptions) {
+			addModel(envRecord.ANTHROPIC_DEFAULT_SONNET_MODEL, envRecord.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME);
+			addModel(envRecord.ANTHROPIC_DEFAULT_OPUS_MODEL, envRecord.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME);
+			addModel(envRecord.ANTHROPIC_DEFAULT_HAIKU_MODEL, envRecord.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME);
+		}
+	}
+
+	if (!replaceBuiltInOptions) {
+		for (const item of modelItemsFromUnknown(parsed.modelSettings)) {
+			addModel(item.id, item.name);
+		}
+	}
+
+	const resolvedDefault = stringValue(model) ?? stringValue(envRecord?.ANTHROPIC_MODEL);
+	return { defaultModel: resolvedDefault, replaceBuiltInOptions, models };
+}
+
+function readCodexModelsCache(text: string): ModelConfigRead {
+	const parsed = asRecord(parseJsonLoose(text));
+	if (!parsed) {
+		return { models: [] };
+	}
+	const list = Array.isArray(parsed.models) ? parsed.models : Array.isArray(parsed.data) ? parsed.data : [];
+	const models: DiscoveredOptionItem[] = [];
+	const seen = new Set<string>();
+	for (const entry of list) {
+		const rec = asRecord(entry);
+		const id = stringValue(rec?.slug) ?? stringValue(rec?.model) ?? stringValue(rec?.id);
+		if (!id || seen.has(id)) {
+			continue;
+		}
+		seen.add(id);
+		const display = stringValue(rec?.display_name) ?? stringValue(rec?.displayName) ?? id;
+		const desc = stringValue(rec?.description);
+		models.push({
+			id,
+			name: display,
+			description: display !== id ? (desc ? `${id} · ${desc}` : id) : desc,
+		});
+	}
+	return { models };
 }
 
 function readTomlModel(text: string): string | undefined {
@@ -491,10 +548,128 @@ function readDshJson(text: string): ModelConfigRead {
 	return { defaultModel, models };
 }
 
+function readPiModelsJson(text: string): ModelConfigRead {
+	const parsed = asRecord(parseJsonLoose(text));
+	if (!parsed) {
+		return { models: [] };
+	}
+	const providers = asRecord(parsed.providers);
+	if (!providers) {
+		return { models: modelItemsFromUnknown(parsed.models) };
+	}
+	const models: DiscoveredOptionItem[] = [];
+	const seen = new Set<string>();
+	for (const [providerId, providerEntry] of Object.entries(providers)) {
+		const provRec = asRecord(providerEntry);
+		const provModels = Array.isArray(provRec?.models) ? provRec.models : [];
+		for (const m of provModels) {
+			if (typeof m === 'string') {
+				const fullId = m.includes('/') ? m : `${providerId}/${m}`;
+				if (!seen.has(fullId)) {
+					seen.add(fullId);
+					models.push({ id: fullId, name: fullId });
+				}
+				continue;
+			}
+			const mRec = asRecord(m);
+			const rawId = stringValue(mRec?.id) ?? stringValue(mRec?.model);
+			if (!rawId) {
+				continue;
+			}
+			const fullId = rawId.includes('/') ? rawId : `${providerId}/${rawId}`;
+			if (seen.has(fullId)) {
+				continue;
+			}
+			seen.add(fullId);
+			const display = stringValue(mRec?.name) ?? rawId;
+			models.push({
+				id: fullId,
+				name: display === rawId ? fullId : `${display} (${providerId})`,
+				description: display === rawId ? undefined : fullId,
+			});
+		}
+	}
+	return { models };
+}
+
 function readDshYaml(text: string): ModelConfigRead {
-	const match = /^\s*model\s*:\s*["']?([^"'\n#]+)["']?\s*(?:#.*)?$/m.exec(text);
-	const defaultModel = match ? match[1].trim() || undefined : undefined;
-	return { defaultModel, models: defaultModel ? [{ id: defaultModel, name: defaultModel }] : [] };
+	const modelMatch = /^\s*model\s*:\s*["']?([^"'\n#]+)["']?\s*(?:#.*)?$/m.exec(text);
+	const providerMatch = /^\s*provider\s*:\s*["']?([^"'\n#]+)["']?\s*(?:#.*)?$/m.exec(text);
+	const defaultModel = modelMatch ? modelMatch[1].trim() || undefined : undefined;
+	const provider = providerMatch ? providerMatch[1].trim() || undefined : undefined;
+	if (!defaultModel) {
+		return { models: [] };
+	}
+	const tupleId = provider ? JSON.stringify([provider, defaultModel]) : defaultModel;
+	return {
+		defaultModel,
+		models: [{ id: tupleId, name: defaultModel, description: provider ? `${provider}/${defaultModel}` : undefined }],
+	};
+}
+
+function readClineModelsFile(text: string): ModelConfigRead {
+	const parsed = asRecord(parseJsonLoose(text));
+	if (!parsed) {
+		return { models: [] };
+	}
+	const providers = asRecord(parsed.providers);
+	if (!providers) {
+		return { models: [] };
+	}
+	const models: DiscoveredOptionItem[] = [];
+	const seen = new Set<string>();
+	let defaultModel: string | undefined;
+	for (const [providerId, providerEntry] of Object.entries(providers)) {
+		const entryRec = asRecord(providerEntry);
+		const provMeta = asRecord(entryRec?.provider);
+		defaultModel ??= stringValue(provMeta?.defaultModelId);
+		const modelsMap = asRecord(entryRec?.models);
+		if (!modelsMap) {
+			continue;
+		}
+		for (const [modelKey, modelVal] of Object.entries(modelsMap)) {
+			const mRec = asRecord(modelVal);
+			const id = stringValue(mRec?.id) ?? modelKey;
+			if (!id || seen.has(id)) {
+				continue;
+			}
+			seen.add(id);
+			const name = stringValue(mRec?.name) ?? id;
+			models.push({ id, name, description: `${providerId} · ${id}` });
+		}
+	}
+	return { defaultModel, models };
+}
+
+function readClineProvidersFile(text: string): ModelConfigRead {
+	const parsed = asRecord(parseJsonLoose(text));
+	if (!parsed) {
+		return { models: [] };
+	}
+	const lastUsed = stringValue(parsed.lastUsedProvider);
+	const providers = asRecord(parsed.providers);
+	if (!providers) {
+		return { models: [] };
+	}
+	const models: DiscoveredOptionItem[] = [];
+	const seen = new Set<string>();
+	let defaultModel: string | undefined;
+	const orderedEntries = lastUsed && providers[lastUsed]
+		? [[lastUsed, providers[lastUsed]] as const, ...Object.entries(providers).filter(([k]) => k !== lastUsed)]
+		: Object.entries(providers);
+	for (const [providerId, providerEntry] of orderedEntries) {
+		const settings = asRecord(asRecord(providerEntry)?.settings);
+		const model = stringValue(settings?.model);
+		if (!model || seen.has(model)) {
+			continue;
+		}
+		seen.add(model);
+		if (providerId === lastUsed || !defaultModel) {
+			defaultModel = model;
+		}
+		models.push({ id: model, name: model, description: `${providerId} · ${model}` });
+	}
+	return { defaultModel, models };
 }
 
 function readClineGlobalState(text: string): ModelConfigRead {
@@ -552,23 +727,26 @@ const PI_FALLBACK_MODELS: readonly DiscoveredOptionItem[] = [
 ];
 
 const ANTIGRAVITY_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'gemini-4-hydrogen-high', name: 'Gemini 4 Hydrogen (High)' },
-	{ id: 'gemini-4-hydrogen-low', name: 'Gemini 4 Hydrogen (Low)' },
-	{ id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash (Low)' },
-	{ id: 'gemini-pro-orchestrator', name: 'Gemini Pro Orchestrator' },
-	{ id: 'claude-sonnet-5-5-high', name: 'Claude Sonnet 5.5 (High)' },
-	{ id: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
+	{ id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' },
+	{ id: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+	{ id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' },
+	{ id: 'gemini-pro-orchestrator', name: 'Orchestrator (Carbon)' },
+	{ id: 'gemini-pro-orchestrator-argon', name: 'Orchestrator (Argon)' },
+	{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+	{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+	{ id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5' },
+	{ id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
 ];
 
 const DSH_KNOWN_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'deepseek-flash', name: 'DeepSeek Flash' },
-	{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-	{ id: '["deepseek-official","deepseek-v4-flash"]', name: 'DeepSeek Official · V4 Flash', description: 'Routed through the deepseek-official provider' },
+	{ id: '["deepseek-official","deepseek-v4-flash"]', name: 'deepseek-v4-flash', description: 'deepseek-official/deepseek-v4-flash' },
+	{ id: '["deepseek-official","deepseek-flash"]', name: 'DeepSeek-V4.1-Flash', description: 'deepseek-official/deepseek-flash' },
+	{ id: '["deepseek-official","deepseek-v4-pro"]', name: 'DeepSeek-V4-Pro', description: 'deepseek-official/deepseek-v4-pro' },
 ];
 
 const CLINE_KNOWN_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-	{ id: 'deepseek/deepseek-chat', name: 'DeepSeek Chat' },
+	{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+	{ id: 'deepseek-flash', name: 'DeepSeek Flash' },
 	{ id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5' },
 ];
 
@@ -590,7 +768,12 @@ function runtimeModelItems(runtimeModels: Array<{ id: string; name: string; desc
  * Discovers the models an engine can run, including the engine's resolved default model.
  * Only model identifiers are read from configuration files; credentials are never touched.
  */
-export async function discoverEngineModels(engineId: EngineId, cwd: string, runtimeModels: Array<{ id: string; name: string; description?: string }> = []): Promise<DiscoveredOptionItem[]> {
+export async function discoverEngineModels(
+	engineId: EngineId,
+	cwd: string,
+	runtimeModels: Array<{ id: string; name: string; description?: string }> = [],
+	runtimeDefaultModel?: string,
+): Promise<DiscoveredOptionItem[]> {
 	const home = os.homedir();
 	const items: DiscoveredOptionItem[] = [];
 	const seen = new Set<string>();
@@ -602,11 +785,14 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 		case 'aexus-claude': {
 			const projectSettings = await readModelConfigFromCandidates([path.join(cwd, '.claude', 'settings.json')], readClaudeSettings);
 			const homeSettings = await readModelConfigFromCandidates([path.join(home, '.claude', 'settings.json')], readClaudeSettings);
-			resolvedDefault = projectSettings.defaultModel ?? homeSettings.defaultModel;
+			resolvedDefault = projectSettings.defaultModel ?? homeSettings.defaultModel ?? runtimeDefaultModel;
+			const replaceBuiltIns = Boolean(projectSettings.replaceBuiltInOptions || homeSettings.replaceBuiltInOptions);
 			appendRead(projectSettings);
 			appendRead(homeSettings);
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
-			appendOptionItems(items, seen, CLAUDE_ALIAS_MODELS);
+			if (!replaceBuiltIns || items.length === 0) {
+				appendOptionItems(items, seen, CLAUDE_ALIAS_MODELS);
+			}
 			break;
 		}
 		case 'aexus-codex': {
@@ -617,10 +803,17 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 					return { defaultModel: model, models: model ? [{ id: model, name: model }] : [] };
 				},
 			);
-			resolvedDefault = config.defaultModel;
-			appendRead(config);
+			const modelsCache = await readModelConfigFromCandidates(
+				[path.join(cwd, '.codex', 'models_cache.json'), path.join(home, '.codex', 'models_cache.json')],
+				readCodexModelsCache,
+			);
+			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
-			appendOptionItems(items, seen, CODEX_COMMON_MODELS);
+			appendRead(modelsCache);
+			appendRead(config);
+			if (runtimeModels.length === 0 && modelsCache.models.length === 0) {
+				appendOptionItems(items, seen, CODEX_COMMON_MODELS);
+			}
 			break;
 		}
 		case 'aexus-kilo': {
@@ -628,9 +821,9 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 				[path.join(cwd, '.kilo', 'kilo.jsonc'), path.join(home, '.config', 'kilo', 'kilo.jsonc')],
 				readKiloConfig,
 			);
-			resolvedDefault = config.defaultModel;
-			appendRead(config);
+			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
+			appendRead(config);
 			break;
 		}
 		case 'aexus-opencode': {
@@ -645,9 +838,9 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 				],
 				readOpenCodeConfig,
 			);
-			resolvedDefault = config.defaultModel;
-			appendRead(config);
+			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
+			appendRead(config);
 			break;
 		}
 		case 'aexus-pi': {
@@ -655,10 +848,17 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 				[path.join(cwd, '.pi', 'settings.json'), path.join(home, '.pi', 'agent', 'settings.json')],
 				readPiSettings,
 			);
-			resolvedDefault = config.defaultModel;
-			appendRead(config);
+			const modelsFile = await readModelConfigFromCandidates(
+				[path.join(cwd, '.pi', 'models.json'), path.join(home, '.pi', 'agent', 'models.json')],
+				readPiModelsJson,
+			);
+			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
-			appendOptionItems(items, seen, PI_FALLBACK_MODELS);
+			appendRead(modelsFile);
+			appendRead(config);
+			if (runtimeModels.length === 0 && modelsFile.models.length === 0) {
+				appendOptionItems(items, seen, PI_FALLBACK_MODELS);
+			}
 			break;
 		}
 		case 'aexus-antigravity': {
@@ -672,10 +872,12 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 				],
 				readAntigravitySettings,
 			);
-			resolvedDefault = config.defaultModel;
-			appendRead(config);
+			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
-			appendOptionItems(items, seen, ANTIGRAVITY_MODELS);
+			appendRead(config);
+			if (runtimeModels.length === 0) {
+				appendOptionItems(items, seen, ANTIGRAVITY_MODELS);
+			}
 			break;
 		}
 		case 'aexus-dsh': {
@@ -697,15 +899,31 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 				],
 				readDshYaml,
 			);
-			resolvedDefault = jsonConfig.defaultModel ?? yamlConfig.defaultModel;
+			resolvedDefault = jsonConfig.defaultModel ?? yamlConfig.defaultModel ?? runtimeDefaultModel;
+			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
 			appendRead(jsonConfig);
 			appendRead(yamlConfig);
-			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
-			appendOptionItems(items, seen, DSH_KNOWN_MODELS);
+			if (runtimeModels.length === 0) {
+				appendOptionItems(items, seen, DSH_KNOWN_MODELS);
+			}
 			break;
 		}
 		case 'aexus-cline': {
-			const config = await readModelConfigFromCandidates(
+			const modelsCfg = await readModelConfigFromCandidates(
+				[
+					path.join(cwd, '.cline', 'settings', 'models.json'),
+					path.join(home, '.cline', 'data', 'settings', 'models.json'),
+				],
+				readClineModelsFile,
+			);
+			const providersCfg = await readModelConfigFromCandidates(
+				[
+					path.join(cwd, '.cline', 'settings', 'providers.json'),
+					path.join(home, '.cline', 'data', 'settings', 'providers.json'),
+				],
+				readClineProvidersFile,
+			);
+			const globalCfg = await readModelConfigFromCandidates(
 				[
 					path.join(cwd, '.cline', 'globalState.json'),
 					path.join(home, '.cline', 'data', 'globalState.json'),
@@ -713,10 +931,14 @@ export async function discoverEngineModels(engineId: EngineId, cwd: string, runt
 				],
 				readClineGlobalState,
 			);
-			resolvedDefault = config.defaultModel;
-			appendRead(config);
+			resolvedDefault = providersCfg.defaultModel ?? modelsCfg.defaultModel ?? globalCfg.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
-			appendOptionItems(items, seen, CLINE_KNOWN_MODELS);
+			appendRead(modelsCfg);
+			appendRead(providersCfg);
+			appendRead(globalCfg);
+			if (runtimeModels.length === 0 && modelsCfg.models.length === 0 && providersCfg.models.length === 0) {
+				appendOptionItems(items, seen, CLINE_KNOWN_MODELS);
+			}
 			break;
 		}
 	}
@@ -924,7 +1146,7 @@ export async function buildOptionGroupsForSession(
 	targetKind: 'secretary' | EngineId,
 	state: SessionConfigState,
 	cwd: string,
-	runtimeExtras?: { models?: Array<{ id: string; name: string; description?: string }>; modes?: Array<{ id: string; name: string; description?: string }> },
+	runtimeExtras?: { defaultModel?: string; models?: Array<{ id: string; name: string; description?: string }>; modes?: Array<{ id: string; name: string; description?: string }> },
 ): Promise<DiscoveredOptionGroup[]> {
 	const effectiveEngineId: EngineId = targetKind === 'secretary' ? state.secretaryEngineId ?? 'aexus-claude' : targetKind;
 	const groups: DiscoveredOptionGroup[] = [];
@@ -939,7 +1161,7 @@ export async function buildOptionGroupsForSession(
 		});
 	}
 
-	const modelItems = await discoverEngineModels(effectiveEngineId, cwd, runtimeExtras?.models ?? []);
+	const modelItems = await discoverEngineModels(effectiveEngineId, cwd, runtimeExtras?.models ?? [], runtimeExtras?.defaultModel);
 	groups.push(optionGroup('model', 'Model', modelItems, selectedOr(state.model, 'default'), 'Model used for this session', 1));
 
 	const levels = THINKING_LEVELS[effectiveEngineId];

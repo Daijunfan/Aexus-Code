@@ -10,6 +10,7 @@ export const ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID = 'aexus.ade.getRoleSyncSnaps
 export const ADE_BIND_NATIVE_SESSION_COMMAND_ID = 'aexus.ade.bindNativeSession';
 export const ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID = 'aexus.ade.syncSessionPreferences';
 export const ADE_SET_SESSION_GOAL_BANNER_COMMAND_ID = 'aexus.ade.setSessionGoalBanner';
+export const ADE_SET_SESSION_INITIALIZING_COMMAND_ID = 'aexus.ade.setSessionInitializing';
 
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_SOCKET_NAME = 'ade-control.sock';

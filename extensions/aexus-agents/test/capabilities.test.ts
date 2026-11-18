@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
 	buildOptionGroupsForSession,
+	discoverEngineModels,
 	discoverSlashCommands,
 	discoverCustomizationFiles,
 	readSkillOrCommandTemplate,
@@ -85,6 +86,17 @@ function writeWorkspaceFile(relativePath: string, content: string): string {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, content);
 	return filePath;
+}
+
+// Each discovery case gets a fresh directory so cached reads cannot leak between tests.
+function createCaseDir(name: string): string {
+	return fs.mkdtempSync(path.join(testRoot, `${name}-`));
+}
+
+function writeCaseFile(cwd: string, relativePath: string, content: string): void {
+	const filePath = path.join(cwd, relativePath);
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, content);
 }
 
 const skillFilePath = writeWorkspaceFile('.claude/skills/my-skill/SKILL.md', [
@@ -178,6 +190,207 @@ function itemIds(group) {
 function findCommand(commands, name) {
 	return commands.find(command => command.name.toLowerCase() === name.toLowerCase());
 }
+
+describe('discoverEngineModels', () => {
+
+	test('Claude Code replaceBuiltInOptions drops built-in aliases but keeps picker models', async () => {
+		const cwd = createCaseDir('claude-replace');
+		writeCaseFile(cwd, '.claude/settings.json', JSON.stringify({
+			modelPicker: {
+				replaceBuiltInOptions: true,
+				options: [
+					{ model: 'claude-custom-sonnet', label: 'Custom Sonnet', description: 'Team model' },
+					{ model: 'claude-custom-opus', label: 'Custom Opus' },
+				],
+			},
+		}));
+
+		const models = await discoverEngineModels('aexus-claude', cwd);
+		const ids = models.map(model => model.id);
+
+		assert.deepEqual(ids, ['default', 'claude-custom-sonnet', 'claude-custom-opus']);
+		assert.deepEqual(models[1], {
+			id: 'claude-custom-sonnet',
+			name: 'Custom Sonnet',
+			description: 'claude-custom-sonnet · Team model',
+		});
+		assert.equal(models[2].name, 'Custom Opus');
+		assert.equal(models[0].name, 'Default (Engine Config)');
+		for (const alias of ['sonnet', 'opus', 'haiku']) {
+			assert.ok(!ids.includes(alias), `${alias} should be replaced`);
+		}
+	});
+
+	test('Codex discovers models_cache.json entries by slug and display_name', async () => {
+		const cwd = createCaseDir('codex-cache');
+		writeCaseFile(cwd, '.codex/models_cache.json', JSON.stringify({
+			models: [
+				{ slug: 'gpt-6-luna', display_name: 'GPT-6 Luna', description: 'Fast frontier model' },
+				{ slug: 'o3', display_name: 'o3' },
+			],
+		}));
+
+		const models = await discoverEngineModels('aexus-codex', cwd);
+
+		assert.deepEqual(models, [
+			{ id: 'default', name: 'Default (Engine Config)', description: 'Use engine default model from config', default: true },
+			{ id: 'gpt-6-luna', name: 'GPT-6 Luna', description: 'gpt-6-luna · Fast frontier model' },
+			{ id: 'o3', name: 'o3', description: undefined },
+		]);
+	});
+
+	test('Kilo and OpenCode expose provider models with human-readable names', async () => {
+		const kiloCwd = createCaseDir('kilo-models');
+		writeCaseFile(kiloCwd, '.kilo/kilo.jsonc', `{
+			"model": "anthropic/claude-sonnet-4.5",
+			"provider": {
+				"anthropic": {
+					"models": {
+						"claude-sonnet-4.5": {},
+						"claude-opus-4": { "name": "Claude Opus 4" }
+					}
+				}
+			}
+		}`);
+
+		const kiloModels = await discoverEngineModels('aexus-kilo', kiloCwd);
+		assert.equal(kiloModels[0].name, 'Default (anthropic/claude-sonnet-4.5)');
+		assert.deepEqual(kiloModels.find(model => model.id === 'anthropic/claude-opus-4'), {
+			id: 'anthropic/claude-opus-4',
+			name: 'Claude Opus 4',
+			description: 'anthropic/claude-opus-4',
+		});
+		assert.equal(kiloModels.filter(model => model.id === 'anthropic/claude-sonnet-4.5').length, 1);
+
+		const openCodeCwd = createCaseDir('opencode-models');
+		writeCaseFile(openCodeCwd, 'opencode.json', JSON.stringify({
+			model: 'openai/gpt-6',
+			small_model: 'openai/gpt-6-mini',
+			provider: {
+				openai: {
+					models: {
+						'gpt-6': { name: 'GPT-6' },
+						'gpt-6-pro': { name: 'GPT-6 Pro' },
+					},
+				},
+			},
+		}));
+
+		const openCodeModels = await discoverEngineModels('aexus-opencode', openCodeCwd);
+		assert.equal(openCodeModels[0].name, 'Default (openai/gpt-6)');
+		assert.equal(openCodeModels.find(model => model.id === 'openai/gpt-6-mini').name, 'openai/gpt-6-mini (Small)');
+		assert.deepEqual(openCodeModels.find(model => model.id === 'openai/gpt-6-pro'), {
+			id: 'openai/gpt-6-pro',
+			name: 'GPT-6 Pro',
+			description: 'openai/gpt-6-pro',
+		});
+	});
+
+	test('Pi discovers provider/model IDs from models.json', async () => {
+		const cwd = createCaseDir('pi-models');
+		writeCaseFile(cwd, '.pi/models.json', JSON.stringify({
+			providers: {
+				openai: {
+					models: ['gpt-6', { id: 'gpt-5.6', name: 'GPT-5.6' }, { id: 'openai/gpt-6-luna' }],
+				},
+			},
+		}));
+
+		const models = await discoverEngineModels('aexus-pi', cwd);
+
+		assert.deepEqual(models.map(model => [model.id, model.name]), [
+			['default', 'Default (Engine Config)'],
+			['openai/gpt-6', 'openai/gpt-6'],
+			['openai/gpt-5.6', 'GPT-5.6 (openai)'],
+			['openai/gpt-6-luna', 'openai/gpt-6-luna'],
+		]);
+		assert.equal(models.find(model => model.id === 'openai/gpt-5.6').description, 'openai/gpt-5.6');
+	});
+
+	test('DeepSeek Harness reads cordis.patch.yml into provider/model tuple IDs', async () => {
+		const cwd = createCaseDir('dsh-yaml');
+		writeCaseFile(cwd, '.dsh/cordis.patch.yml', [
+			'# DeepSeek Harness configuration',
+			'provider: deepseek-official',
+			'model: deepseek-v4-pro',
+			'',
+		].join('\n'));
+
+		const models = await discoverEngineModels('aexus-dsh', cwd);
+
+		assert.deepEqual(models[0], {
+			id: 'default',
+			name: 'Default (deepseek-v4-pro)',
+			description: 'Use engine default model from config (resolved: deepseek-v4-pro)',
+			default: true,
+		});
+		assert.deepEqual(models[1], {
+			id: '["deepseek-official","deepseek-v4-pro"]',
+			name: 'deepseek-v4-pro',
+			description: 'deepseek-official/deepseek-v4-pro',
+		});
+		assert.equal(models.filter(model => model.id === '["deepseek-official","deepseek-v4-pro"]').length, 1);
+		assert.deepEqual(models.slice(2).map(model => model.id), [
+			'["deepseek-official","deepseek-v4-flash"]',
+			'["deepseek-official","deepseek-flash"]',
+		]);
+	});
+
+	test('Cline discovers models.json and providers.json settings', async () => {
+		const cwd = createCaseDir('cline-models');
+		writeCaseFile(cwd, '.cline/settings/models.json', JSON.stringify({
+			providers: {
+				deepseek: {
+					provider: { defaultModelId: 'deepseek-v4-pro' },
+					models: {
+						'deepseek-v4-pro': { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+						'deepseek-flash': { id: 'deepseek-flash', name: 'DeepSeek Flash' },
+					},
+				},
+			},
+		}));
+		writeCaseFile(cwd, '.cline/settings/providers.json', JSON.stringify({
+			lastUsedProvider: 'anthropic',
+			providers: {
+				anthropic: { settings: { model: 'claude-sonnet-4.5' } },
+				openai: { settings: { model: 'gpt-6' } },
+			},
+		}));
+
+		const models = await discoverEngineModels('aexus-cline', cwd);
+
+		// providers.json is the highest-priority source for the resolved default.
+		assert.equal(models[0].name, 'Default (claude-sonnet-4.5)');
+		assert.deepEqual(models.find(model => model.id === 'deepseek-v4-pro'), {
+			id: 'deepseek-v4-pro',
+			name: 'DeepSeek V4 Pro',
+			description: 'deepseek · deepseek-v4-pro',
+		});
+		assert.deepEqual(models.find(model => model.id === 'claude-sonnet-4.5'), {
+			id: 'claude-sonnet-4.5',
+			name: 'claude-sonnet-4.5',
+			description: 'anthropic · claude-sonnet-4.5',
+		});
+		assert.deepEqual(models.find(model => model.id === 'gpt-6'), {
+			id: 'gpt-6',
+			name: 'gpt-6',
+			description: 'openai · gpt-6',
+		});
+	});
+
+	test('Antigravity reflects a runtime default model in the Default label', async () => {
+		const cwd = createCaseDir('antigravity-default');
+
+		const models = await discoverEngineModels('aexus-antigravity', cwd, [], 'gemini-4-carbon');
+		assert.equal(models[0].id, 'default');
+		assert.equal(models[0].name, 'Default (gemini-4-carbon)');
+		assert.equal(models[0].description, 'Use engine default model from config (resolved: gemini-4-carbon)');
+		assert.ok(models.some(model => model.id === 'gemini-4-carbon'));
+
+		const groups = await buildOptionGroupsForSession('aexus-antigravity', {}, cwd, { defaultModel: 'gemini-4-carbon' });
+		assert.equal(groupById(groups, 'model').items[0].name, 'Default (gemini-4-carbon)');
+	});
+});
 
 describe('buildOptionGroupsForSession', () => {
 

@@ -13,6 +13,7 @@ import {
 	ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID,
 	ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID,
 	ADE_SET_SESSION_GOAL_BANNER_COMMAND_ID,
+	ADE_SET_SESSION_INITIALIZING_COMMAND_ID,
 	ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID,
 	AdeAgentRole,
 	AdeSessionRank,
@@ -533,10 +534,14 @@ export function buildAdeRoleSyncSnapshot(
 export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource: unknown): string | undefined {
 	let explicitAgentId: string | undefined;
 	let candidateResource = rawResource;
-	if (rawResource && typeof rawResource === 'object' && !URI.isUri(rawResource) && (Object.hasOwn(rawResource, 'agentId') || Object.hasOwn(rawResource, 'resource'))) {
-		const targetObj = rawResource as { agentId?: unknown; resource?: unknown };
+	let compactDeltaMode = false;
+	if (rawResource && typeof rawResource === 'object' && !URI.isUri(rawResource) && (Object.hasOwn(rawResource, 'agentId') || Object.hasOwn(rawResource, 'resource') || Object.hasOwn(rawResource, 'mode'))) {
+		const targetObj = rawResource as { agentId?: unknown; resource?: unknown; mode?: unknown };
 		if (typeof targetObj.agentId === 'string' && targetObj.agentId.trim()) {
 			explicitAgentId = targetObj.agentId.trim();
+		}
+		if (targetObj.mode === 'delta') {
+			compactDeltaMode = true;
 		}
 		candidateResource = targetObj.resource;
 	}
@@ -606,6 +611,14 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			? activeInboxItems.map(item => `  - [${item.kind.toUpperCase()}] id=${item.id} (governor=${item.governorSessionId}${item.nodeId ? `, node=${item.nodeId}` : ''}${item.unread ? ', UNREAD' : ''}): ${item.title} — ${item.message.split('\n')[0]}`).join('\n')
 			: '  (ADE Inbox empty)';
 
+		if (compactDeltaMode) {
+			return [
+				'[ADE Live Viewport State]',
+				`- Focus: ${focusLine} | Selected Project: ${selectedLine} | Active Editor: ${activeEditorLine}`,
+				`- Live Counts: ${status.counts.projects} project(s), ${status.counts.totalActiveSessions} active session(s), ${engTrees.length} engineering tree(s), ${inbox?.unreadCount ?? 0} unread inbox item(s)`,
+			].join('\n');
+		}
+
 		return [
 			'[Aexus ADE Live Viewport & Macro Control Context]',
 			'You are the global **Secretary** in **Aexus Code ADE**, with complete macro-control authority over EVERYTHING inside ADE.',
@@ -641,6 +654,27 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 		)) : undefined);
 	if (!agent) {
 		return undefined;
+	}
+
+	if (compactDeltaMode) {
+		const subordinates = projects.getDirectSubordinates(agent.id);
+		if (!agent.role && subordinates.length === 0) {
+			return undefined;
+		}
+		const supervisor = agent.parentId ? projects.getAgent(agent.parentId) : undefined;
+		if (!supervisor && subordinates.length === 0) {
+			return undefined;
+		}
+		const effectiveRole = resolveAdeAgentRank(agent, subordinates.length > 0);
+		const subSummary = subordinates.length > 0
+			? subordinates.map(c => `${c.label} (${c.id}, ${formatRoleTitle(resolveAdeAgentRank(c, projects.hasSubordinates(c.id)))})`).join(', ')
+			: 'None';
+		return [
+			'[ADE Live Hierarchy State]',
+			`- Role: ${formatRoleTitle(effectiveRole)} (session: ${agent.id}, project: ${projects.getProjectName(agent.projectUri)})`,
+			...(supervisor ? [`- Supervisor: ${supervisor.label} (${supervisor.id})`] : []),
+			`- Direct Subordinates: ${subSummary}`,
+		].join('\n');
 	}
 
 	return buildAdeAgentRoleContext(projects, sessions, agent);
@@ -2293,6 +2327,53 @@ CommandsRegistry.registerCommand(ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID, (acces
 	}
 	if (projects.updateAgentEnginePreferences) {
 		projects.updateAgentEnginePreferences(agent.id, prefs);
+	}
+});
+
+const initializingSessionsByResource = new Map<string, string>();
+const observedWidgetsForInit = new WeakSet<object>();
+
+function bindWidgetInitializingObserver(chatWidgetService: IChatWidgetService): void {
+	if (observedWidgetsForInit.has(chatWidgetService)) {
+		return;
+	}
+	observedWidgetsForInit.add(chatWidgetService);
+	const attachWidget = (widget: { readonly viewModel?: { readonly sessionResource: URI }; readonly onDidChangeViewModel: (cb: () => void) => unknown; setSessionInitializingState?: (msg: string | undefined) => void }) => {
+		if (observedWidgetsForInit.has(widget)) {
+			return;
+		}
+		observedWidgetsForInit.add(widget);
+		const sync = () => {
+			const res = widget.viewModel?.sessionResource;
+			const msg = res ? initializingSessionsByResource.get(res.toString()) : undefined;
+			widget.setSessionInitializingState?.(msg);
+		};
+		widget.onDidChangeViewModel(() => sync());
+		sync();
+	};
+	for (const w of chatWidgetService.getAllWidgets()) {
+		attachWidget(w);
+	}
+	chatWidgetService.onDidAddWidget(w => attachWidget(w));
+}
+
+CommandsRegistry.registerCommand(ADE_SET_SESSION_INITIALIZING_COMMAND_ID, (accessor: ServicesAccessor, rawResource: unknown, rawMessage: unknown) => {
+	const sessionResource = toUri(rawResource);
+	if (!sessionResource) {
+		return;
+	}
+	const message = typeof rawMessage === 'string' && rawMessage.trim() ? rawMessage.trim() : undefined;
+	const key = sessionResource.toString();
+	if (message) {
+		initializingSessionsByResource.set(key, message);
+	} else {
+		initializingSessionsByResource.delete(key);
+	}
+	const chatWidgetService = tryGetService(accessor, IChatWidgetService);
+	if (chatWidgetService) {
+		bindWidgetInitializingObserver(chatWidgetService);
+		const widget = chatWidgetService.getWidgetBySessionResource(sessionResource);
+		widget?.setSessionInitializingState?.(message);
 	}
 });
 
