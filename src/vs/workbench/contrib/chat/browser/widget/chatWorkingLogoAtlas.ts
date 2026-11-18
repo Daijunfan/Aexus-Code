@@ -8,7 +8,7 @@ import { timeout } from '../../../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { CancellationError } from '../../../../../base/common/errors.js';
 import { combinedDisposable, Disposable, DisposableMap, DisposableStore, IDisposable, IReference, markAsSingleton, toDisposable } from '../../../../../base/common/lifecycle.js';
-import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_VIEW_BOX, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from './chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_MASK_RECT, applyChatWorkingLogoEmblemFrame, chatWorkingLogoFacePaths, createChatWorkingLogoEmblem, getChatWorkingLogoDrawFrame, getChatWorkingLogoEmblemFrame } from './chatWorkingLogoDraw.js';
 
 export const chatWorkingLogoAtlasFrameCount = 320;
 const columns = 20;
@@ -17,10 +17,14 @@ const padding = 2;
 const maxCacheBytes = 16 * 1024 * 1024;
 
 export interface IChatWorkingLogoAtlasOptions {
-	/** Native pixel dimensions, excluding the two-pixel padding around each tile. */
+	/** Native pixel dimensions of the whole emblem canvas (tile plus bleed), excluding the two-pixel padding around each tile. */
 	readonly width: number;
 	readonly height: number;
 	readonly color: string;
+	/** Resolved hairline color around the tile; defaults to a translucent white highlight. */
+	readonly hairline?: string;
+	/** Whether to bake the orbit arc into the frames; compact emblems leave it out. */
+	readonly orbit?: boolean;
 }
 
 export interface IChatWorkingLogoAtlas extends IDisposable {
@@ -36,7 +40,7 @@ export interface IChatWorkingLogoAtlas extends IDisposable {
 type AtlasFactory = (targetWindow: Window, options: IChatWorkingLogoAtlasOptions, token: CancellationToken) => Promise<IChatWorkingLogoAtlas>;
 
 function getAtlasKey(options: IChatWorkingLogoAtlasOptions): string {
-	return JSON.stringify([options.width, options.height, options.color]);
+	return JSON.stringify([options.width, options.height, options.color, options.hairline ?? null, !!options.orbit]);
 }
 
 class AtlasEntry extends Disposable {
@@ -304,16 +308,17 @@ export async function createChatWorkingLogoAtlas(targetWindow: Window, options: 
 		if (!context || !tileContext) {
 			throw new Error('Draw atlas requires a 2D canvas context');
 		}
-		const svg = $.SVG<SVGSVGElement>('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: CHAT_WORKING_LOGO_VIEW_BOX, width, height });
+		const emblemElements = createChatWorkingLogoEmblem('emblem', { xmlns: 'http://www.w3.org/2000/svg', width, height }, { orbit: !!options.orbit, hairline: options.hairline });
+		const { svg, defs } = emblemElements;
 		svg.style.color = color;
 		if (!svg.style.color) {
 			throw new Error('Draw atlas requires a valid color');
 		}
-		const defs = $.SVG<SVGDefsElement>('defs');
 		const artwork = $.SVG<SVGGElement>('g');
 		const masks: SVGPathElement[] = [];
+		const { x, y, width: maskWidth, height: maskHeight } = CHAT_WORKING_LOGO_MASK_RECT;
 		for (const [index, band] of CHAT_WORKING_LOGO_DRAW_PAINT_ORDER.entries()) {
-			const mask = $.SVG<SVGMaskElement>('mask', { id: band, x: '-12', y: '-12', width: '120', height: '120', maskUnits: 'userSpaceOnUse', 'mask-type': 'alpha' });
+			const mask = $.SVG<SVGMaskElement>('mask', { id: band, x: String(x), y: String(y), width: String(maskWidth), height: String(maskHeight), maskUnits: 'userSpaceOnUse', 'mask-type': 'alpha' });
 			const maskPath = $.SVG<SVGPathElement>('path', { fill: '#fff', stroke: '#fff', 'stroke-width': '4', 'stroke-linejoin': 'round', transform: 'translate(6 6) scale(0.84)' });
 			mask.appendChild(maskPath);
 			defs.appendChild(mask);
@@ -321,7 +326,7 @@ export async function createChatWorkingLogoAtlas(targetWindow: Window, options: 
 			artwork.appendChild($.SVG<SVGPathElement>('path', { d: chatWorkingLogoFacePaths[index], fill: 'currentColor', mask: `url(#${band})` }));
 		}
 		const faces = $.SVG<SVGGElement>('g', {}, ...chatWorkingLogoFacePaths.map(d => $.SVG<SVGPathElement>('path', { d, fill: 'currentColor' })));
-		svg.append(defs, artwork, faces);
+		emblemElements.emblem.append(artwork, faces);
 		const serializer = new XMLSerializer();
 		let previousSvg: string | undefined;
 		let pixels: ImageData | undefined;
@@ -330,7 +335,9 @@ export async function createChatWorkingLogoAtlas(targetWindow: Window, options: 
 			if (index > 0 && index % 32 === 0) {
 				await timeout(0, token);
 			}
-			const frame = getChatWorkingLogoDrawFrame(index / chatWorkingLogoAtlasFrameCount);
+			const progress = index / chatWorkingLogoAtlasFrameCount;
+			const frame = getChatWorkingLogoDrawFrame(progress);
+			applyChatWorkingLogoEmblemFrame(emblemElements, getChatWorkingLogoEmblemFrame(progress));
 			svg.setAttribute('shape-rendering', frame.assembled ? 'auto' : 'geometricPrecision');
 			artwork.setAttribute('display', frame.assembled ? 'none' : 'inline');
 			faces.setAttribute('display', frame.assembled ? 'inline' : 'none');

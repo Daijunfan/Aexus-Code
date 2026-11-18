@@ -6,6 +6,7 @@
 import './media/chat.css';
 import './media/chatAgentHover.css';
 import './media/chatViewWelcome.css';
+import './media/aexusChat.css';
 import * as dom from '../../../../../base/browser/dom.js';
 import { status } from '../../../../../base/browser/ui/aria/aria.js';
 import { IMouseWheelEvent } from '../../../../../base/browser/mouseEvent.js';
@@ -108,7 +109,7 @@ import { IChatListItemTemplate } from './chatListRenderer.js';
 import { ChatListWidget } from './chatListWidget.js';
 import { ChatFindWidget,IChatFindHost } from './chatFind/chatFindWidget.js';
 import { ChatEditorOptions,SESSIONS_CHAT_CONTENT_HORIZONTAL_PADDING } from './chatOptions.js';
-import { ChatViewWelcomePart,IChatViewWelcomeContent } from '../viewsWelcome/chatViewWelcomeController.js';
+import { ChatViewWelcomePart, IChatViewWelcomeContent, IChatViewWelcomeQuickStart } from '../viewsWelcome/chatViewWelcomeController.js';
 import { ChatCustomizationMigrationNotice,IChatCustomizationMigrationNoticeContext } from '../aiCustomization/chatCustomizationMigrationNotice.js';
 import { hasImmutablePrimaryWorkingDirectory,resolveFolderPickerDecisionUpdate,IAgentHostNewSessionFolderService } from '../agentSessions/agentHost/agentHostNewSessionFolderService.js';
 import { IAgentHostCustomizationService } from '../agentSessions/agentHost/agentHostCustomizationService.js';
@@ -1060,6 +1061,8 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	}
 
 	private updateWorkingProgressBorder(): void {
+		// The "Jump to latest" pill pulses while a response streams in below the viewport.
+		this.listWidget?.setStreaming(!!this.viewModel?.model.requestInProgress.get());
 		const inputPart = this.inputPartDisposable.value;
 		if (!inputPart) {
 			return;
@@ -1745,7 +1748,11 @@ export class ChatWidget extends Disposable implements IChatWidget {
 						welcomeContent,
 						{
 							location: this.location,
-							isWidgetAgentWelcomeViewContent: this.input?.currentModeKind === ChatModeKind.Agent
+							isWidgetAgentWelcomeViewContent: this.input?.currentModeKind === ChatModeKind.Agent,
+							onDidSelectQuickStart: quickStart => {
+								this.input.setValue(quickStart.prompt, false);
+								this.input.focus();
+							},
 						}
 					);
 					dom.append(this.welcomeMessageContainer, this.welcomePart.value.element);
@@ -1877,6 +1884,8 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			title,
 			message: new MarkdownString(DISCLAIMER),
 			icon: Codicon.chatSparkle,
+			useAexusEmblem: true,
+			quickStarts: getChatWelcomeQuickStarts(),
 			additionalMessage,
 		};
 	}
@@ -3284,8 +3293,12 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			}
 
 			this.onDidChangeItems(undefined, events);
-			if (events?.some(e => e?.kind === 'addRequest') && this.visible && !this.listWidget.isAutoScrollHeld) {
-				this.listWidget.scrollToEnd();
+			if (events?.some(e => e?.kind === 'addRequest') && this.visible) {
+				// A new request means the user wants to follow it, even if they had scrolled up to read.
+				this.listWidget.resumeAutoScroll();
+				if (!this.listWidget.isAutoScrollHeld) {
+					this.listWidget.scrollToEnd();
+				}
 			}
 			this._onDidChangeFindableContent.fire();
 		})));
@@ -4832,3 +4845,19 @@ export function layoutChatWidgetForInputHeight(widget: Pick<ChatWidget, 'setInpu
 }
 
 const MIN_LIST_HEIGHT = 50;
+
+/** Quick-start prompts for the empty chat, grouped by the role best suited to them. */
+export function getChatWelcomeQuickStarts(): readonly IChatViewWelcomeQuickStart[] {
+	const agent = localize('chatWelcome.group.agent', "Agent");
+	const ask = localize('chatWelcome.group.ask', "Ask");
+	const plan = localize('chatWelcome.group.plan', "Plan");
+	return [
+		{ group: agent, icon: Codicon.tools, label: localize('chatWelcome.implementFeature', "Implement a feature"), prompt: localize('chatWelcome.implementFeature.prompt', "Implement the following feature: ") },
+		{ group: agent, icon: Codicon.beaker, label: localize('chatWelcome.fixTests', "Fix failing tests"), prompt: localize('chatWelcome.fixTests.prompt', "Run the tests, find the failures and fix them.") },
+		{ group: agent, icon: Codicon.wand, label: localize('chatWelcome.refactor', "Refactor code"), prompt: localize('chatWelcome.refactor.prompt', "Refactor the selected code to be simpler and easier to maintain.") },
+		{ group: ask, icon: Codicon.book, label: localize('chatWelcome.explainCodebase', "Explain this codebase"), prompt: localize('chatWelcome.explainCodebase.prompt', "Explain how this codebase is structured and where to start.") },
+		{ group: ask, icon: Codicon.references, label: localize('chatWelcome.findUsages', "Find usages"), prompt: localize('chatWelcome.findUsages.prompt', "Find where the following symbol is used: ") },
+		{ group: plan, icon: Codicon.project, label: localize('chatWelcome.architecturePlan', "Plan the architecture"), prompt: localize('chatWelcome.architecturePlan.prompt', "Draft an architecture plan for: ") },
+		{ group: plan, icon: Codicon.listTree, label: localize('chatWelcome.breakDownIssue', "Break down an issue"), prompt: localize('chatWelcome.breakDownIssue.prompt', "Break the following issue down into small, verifiable steps: ") },
+	];
+}

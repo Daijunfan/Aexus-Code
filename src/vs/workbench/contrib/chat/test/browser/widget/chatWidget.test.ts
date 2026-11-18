@@ -31,6 +31,7 @@ import { NullHoverService } from '../../../../../../platform/hover/test/browser/
 import { TestInstantiationService } from '../../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { NullLogService } from '../../../../../../platform/log/common/log.js';
 import { ILinkDescriptor, ILinkOptions, Link } from '../../../../../../platform/opener/browser/link.js';
+import { IMarkdownRendererService } from '../../../../../../platform/markdown/browser/markdownRenderer.js';
 import { IOpenerService } from '../../../../../../platform/opener/common/opener.js';
 import { COPILOT_TEMPORARY_ALLOW_LOCAL_HARNESS_KEY, NullManagedSettingsService, requiresCopilotAgentHost } from '../../../../../../platform/policy/common/copilotManagedSettings.js';
 import { NullTelemetryService } from '../../../../../../platform/telemetry/common/telemetryUtils.js';
@@ -43,7 +44,7 @@ import { IChatSubmitRequestHandlerService } from '../../../browser/chatSubmitReq
 import { IChatTipService } from '../../../browser/chatTipService.js';
 import { ChatUserInteraction, ChatUserInteractionTimingResult, IChatUserInteractionOptions } from '../../../browser/chatUserInteractionTelemetry.js';
 import { ILanguageModelsService } from '../../../common/languageModels.js';
-import { acceptAndAwaitSentRequest, ChatWidget, computeChatSessionStateIndicatorState, getImmediateSilentSlashCommandPart, IChatWidgetRequestAcceptedEvent, layoutChatWidgetForInputHeight, saveAllBeforeChatSend, shouldShowChatTip, shouldShowChatWelcome, shouldUnlockChatPetQueueOrSteeringMessage, shouldUnlockChatPetRequestRevision } from '../../../browser/widget/chatWidget.js';
+import { acceptAndAwaitSentRequest, ChatWidget, computeChatSessionStateIndicatorState, getChatWelcomeQuickStarts, getImmediateSilentSlashCommandPart, IChatWidgetRequestAcceptedEvent, layoutChatWidgetForInputHeight, saveAllBeforeChatSend, shouldShowChatTip, shouldShowChatWelcome, shouldUnlockChatPetQueueOrSteeringMessage, shouldUnlockChatPetRequestRevision } from '../../../browser/widget/chatWidget.js';
 import { ChatListWidget, IChatListWidgetOptions } from '../../../browser/widget/chatListWidget.js';
 import { IChatListItemTemplate } from '../../../browser/widget/chatListRenderer.js';
 import { ChatViewPaneTarget, IChatAcceptInputOptions, IChatListItemRendererOptions, IChatScrollAnchor, IChatWidget, IChatWidgetService, IChatWidgetViewModelChangeEvent, IChatWidgetViewOptions } from '../../../browser/chat.js';
@@ -74,7 +75,7 @@ import { observePromptTimelineHostWidth } from '../../../browser/promptTimeline/
 import { ChatContentMarkdownRenderer } from '../../../browser/widget/chatContentMarkdownRenderer.js';
 import { CHAT_READ_ONLY_BANNER_HEIGHT, ChatReadOnlyBanner } from '../../../browser/widget/chatReadOnlyBanner.js';
 import { getSubagentEditorResource } from '../../../browser/widget/chatContentParts/chatSubagentOpenChat.js';
-import { IChatViewWelcomeContent } from '../../../browser/viewsWelcome/chatViewWelcomeController.js';
+import { ChatViewWelcomePart, IChatViewWelcomeContent } from '../../../browser/viewsWelcome/chatViewWelcomeController.js';
 import { ChatContextKeys } from '../../../common/actions/chatContextKeys.js';
 import { createChatUserInteractionTestHarness } from '../chatUserInteractionTestUtils.js';
 import { getChatSessionType, LocalChatSessionUri } from '../../../common/model/chatUri.js';
@@ -3598,5 +3599,46 @@ suite('ChatWidget - acceptAndAwaitSentRequest', () => {
 		createList.call(widget, listContainer, {});
 
 		assert.strictEqual(capturedOptions?.stickyProgress, false);
+		assert.strictEqual(listContainer.querySelector('.chat-sticky-progress'), null);
+	});
+
+	test('welcome hero renders the Aexus emblem, normal-flow suggested prompts and clickable quick-start cards', () => {
+		const host = mainWindow.document.body.appendChild(dom.$('.interactive-session'));
+		store.add(toDisposable(() => host.remove()));
+		const welcomeContainer = dom.append(host, dom.$('.chat-welcome-view-container'));
+		const chosen: string[] = [];
+		const quickStarts = getChatWelcomeQuickStarts();
+		const part = store.add(new ChatViewWelcomePart(
+			{ title: 'Build with Agent', message: 'Ready', useAexusEmblem: true, quickStarts },
+			{ location: ChatAgentLocation.Chat, onDidSelectQuickStart: quickStart => chosen.push(quickStart.prompt) },
+			upcastPartial<IOpenerService>({ open: async () => true }),
+			new NullLogService(),
+			upcastPartial<IMarkdownRendererService>({ render: () => Object.assign(toDisposable(() => { }), { element: dom.$('span') }) }),
+		));
+		welcomeContainer.appendChild(part.element);
+		const prompts = dom.append(welcomeContainer, dom.$('.chat-welcome-view-suggested-prompts'));
+		const cards = [...part.element.querySelectorAll<HTMLButtonElement>('.chat-welcome-view-quick-start')];
+		cards[0]?.click();
+
+		const progress = dom.append(host, dom.$('.chat-working-progress'));
+		const anchor = dom.append(host, dom.$('.chat-working-progress-anchor'));
+
+		assert.deepStrictEqual({
+			hasEmblem: !!part.element.querySelector('.chat-welcome-view-emblem .chat-working-logo-tile'),
+			cardCount: cards.length,
+			groups: [...new Set(quickStarts.map(item => item.group))],
+			chosenCount: chosen.length,
+			chosenPrompt: chosen[0],
+			promptsPosition: mainWindow.getComputedStyle(prompts).position,
+			progressPositions: [progress, anchor].map(node => mainWindow.getComputedStyle(node).position),
+		}, {
+			hasEmblem: true,
+			cardCount: quickStarts.length,
+			groups: ['Agent', 'Ask', 'Plan'],
+			chosenCount: 1,
+			chosenPrompt: quickStarts[0].prompt,
+			promptsPosition: 'relative',
+			progressPositions: ['static', 'static'],
+		});
 	});
 });

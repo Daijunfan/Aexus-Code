@@ -16,8 +16,8 @@ import { FuzzyScore } from '../../../../../base/common/filters.js';
 import { KeyCode } from '../../../../../base/common/keyCodes.js';
 import { Disposable, DisposableMap, DisposableStore, IDisposable, MutableDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
 import { Mimes } from '../../../../../base/common/mime.js';
-import { Schemas } from '../../../../../base/common/network.js';
 import { clamp } from '../../../../../base/common/numbers.js';
+import { Schemas } from '../../../../../base/common/network.js';
 import { ScrollEvent } from '../../../../../base/common/scrollable.js';
 import { compare } from '../../../../../base/common/strings.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -408,6 +408,9 @@ export class ChatListWidget extends Disposable {
 	private _mostRecentlyFocusedItemIndex: number = -1;
 	private _scrollLock: boolean = true;
 	private _autoScrollHolds = new AutoScrollHolds();
+	/** Held while the user has scrolled up to read older content, so streaming growth never pulls them back down. */
+	private readonly _userScrollAwayHold = this._register(new MutableDisposable<IDisposable>());
+	private _lastScrollTop = 0;
 	private _settingChangeCounter: number = 0;
 	private _visibleChangeCount: number = 0;
 	private readonly _userToggleResizeTrackers = this._register(new DisposableMap<ChatTreeItem, UserToggleResizeTracker>());
@@ -715,8 +718,9 @@ export class ChatListWidget extends Disposable {
 			this._tree.getHTMLElement().tabIndex = options.tabIndex;
 		}
 
-		// Create scroll-down button
+		// Create the floating "Jump to latest" pill
 		const scrollToBottomLabel = localize('chat.scrollToLatest', "Scroll to Latest");
+		const jumpToLatestLabel = localize('chat.jumpToLatest', "Jump to latest");
 		const scrollToBottomBackground = asCssVariable(editorWidgetBackground);
 		this._scrollDownButton = this._register(new Button(this._container, {
 			...defaultButtonStyles,
@@ -728,13 +732,15 @@ export class ChatListWidget extends Disposable {
 			buttonBorder: asCssVariableWithDefault(editorWidgetBorder, 'transparent'),
 			supportIcons: true,
 		}));
-		this._scrollDownButton.element.classList.add('chat-scroll-down');
-		this._scrollDownButton.label = `$(${chatScrollToLatestIcon.id})`;
+		this._scrollDownButton.element.classList.add('chat-scroll-down', 'chat-jump-to-latest');
+		this._scrollDownButton.label = `$(${chatScrollToLatestIcon.id}) ${jumpToLatestLabel}`;
 		for (const child of this._scrollDownButton.element.children) {
 			if (child.classList.contains('codicon')) {
 				child.setAttribute('aria-hidden', 'true');
 			}
 		}
+		// Pulses while a response is streaming below the viewport.
+		dom.append(this._scrollDownButton.element, dom.$('span.chat-scroll-down-streaming-dot', { 'aria-hidden': 'true' }));
 		this._scrollDownButton.element.style.display = 'none'; // Hidden by default
 
 		this._register(this._scrollDownButton.onDidClick(() => {
@@ -771,6 +777,7 @@ export class ChatListWidget extends Disposable {
 		// Handle scroll events (fire public event and manage scroll-down button)
 		this._register(this._tree.onDidScroll((e) => {
 			this._renderer.updateStickyProgress();
+			this.releaseUserScrollAwayHoldIfReturned();
 			this._onDidScroll.fire(e);
 			this.updateScrollDownButtonVisibility();
 		}));
@@ -788,7 +795,12 @@ export class ChatListWidget extends Disposable {
 				this.trackUserToggleResize(element, e.target);
 			}
 		}));
-		this._register(dom.addDisposableListener(this._container, dom.EventType.WHEEL, () => this.cancelUserToggleScrollRestoration()));
+		this._register(dom.addDisposableListener(this._container, dom.EventType.WHEEL, (e: WheelEvent) => {
+			this.cancelUserToggleScrollRestoration();
+			if (e.deltaY < 0) {
+				this.holdAutoScrollForUserScroll();
+			}
+		}, { passive: true }));
 		this._register(dom.addDisposableListener(this._container, dom.EventType.POINTER_DOWN, () => this.cancelUserToggleScrollRestoration()));
 		this._register(dom.addDisposableListener(this._container, dom.EventType.KEY_DOWN, e => {
 			const keyCode = new StandardKeyboardEvent(e).keyCode;
@@ -799,6 +811,9 @@ export class ChatListWidget extends Disposable {
 				|| keyCode === KeyCode.Home
 				|| keyCode === KeyCode.End) {
 				this.cancelUserToggleScrollRestoration();
+			}
+			if (keyCode === KeyCode.UpArrow || keyCode === KeyCode.PageUp || keyCode === KeyCode.Home) {
+				this.holdAutoScrollForUserScroll();
 			}
 		}, true));
 
@@ -906,7 +921,6 @@ export class ChatListWidget extends Disposable {
 		button.style.display = showButton ? 'flex' : 'none';
 		this._container.classList.toggle('chat-list-at-bottom', atBottom);
 		this._container.classList.toggle('chat-list-scrolled-to-bottom', isScrolledToBottom);
-		// Scrolling cannot move the progress row; layout and its resize observer reposition a shown button.
 		if (showButton !== wasShown) {
 			this.updateScrollDownButtonPosition();
 		}
@@ -918,8 +932,8 @@ export class ChatListWidget extends Disposable {
 	}
 
 	/**
-	 * Centers the scroll-down button on the sticky progress row, which keeps its slot above the
-	 * input even while no progress is shown.
+	 * When `stickyProgress` is explicitly enabled, centers the button on the sticky progress row;
+	 * in standard chat (`stickyProgress: false`), CSS anchors the floating "Jump to latest" pill at `bottom: 12px`.
 	 */
 	private updateScrollDownButtonPosition(): void {
 		const button = this._scrollDownButton.element;
@@ -1510,8 +1524,52 @@ export class ChatListWidget extends Disposable {
 	 * Scroll the list to reveal the last item.
 	 */
 	scrollToEnd(): void {
+		this._userScrollAwayHold.clear();
 		this.clearScrollHeightReservation();
 		this.revealLastItem();
+	}
+
+	/** Whether the user has scrolled up away from the latest content, which suspends auto-scrolling. */
+	get isUserScrolledAway(): boolean {
+		return !!this._userScrollAwayHold.value;
+	}
+
+	/**
+	 * Resumes following the latest content after the user scrolled away, e.g. when they send a new request.
+	 * Other {@link acquireAutoScrollHold} holds are unaffected.
+	 */
+	resumeAutoScroll(): void {
+		this._userScrollAwayHold.clear();
+	}
+
+	/** Shows the streaming pulse on the "Jump to latest" pill while a response is in progress. */
+	setStreaming(streaming: boolean): void {
+		this._scrollDownButton.element.classList.toggle('streaming', streaming);
+	}
+
+	/**
+	 * An upward wheel or keyboard gesture disengages auto-scrolling until the user returns to the bottom or
+	 * jumps to the latest content, so content growth never yanks them back down while they read.
+	 */
+	private holdAutoScrollForUserScroll(): void {
+		this._lastScrollTop = this._tree.scrollTop;
+		if (this._userScrollAwayHold.value || this._tree.scrollTop <= 0 || this._tree.scrollHeight <= this._tree.renderHeight) {
+			return;
+		}
+		this._userScrollAwayHold.value = this.acquireAutoScrollHold();
+	}
+
+	/**
+	 * Releases the user scroll-away hold once the user scrolls back down to the bottom. Only downward scrolls
+	 * count, so a tiny upward trackpad delta that stays within the bottom threshold keeps the hold.
+	 */
+	private releaseUserScrollAwayHoldIfReturned(): void {
+		const scrollTop = this._tree.scrollTop;
+		const movedDown = scrollTop > this._lastScrollTop;
+		this._lastScrollTop = scrollTop;
+		if (this._userScrollAwayHold.value && movedDown && this.isScrolledToBottom) {
+			this._userScrollAwayHold.clear();
+		}
 	}
 
 	private revealLastItem(): void {

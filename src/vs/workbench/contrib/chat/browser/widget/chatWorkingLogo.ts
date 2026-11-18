@@ -17,7 +17,7 @@ import { asCssVariable } from '../../../../../platform/theme/common/colorUtils.j
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { ChatConfiguration, ChatProgressAnimation } from '../../common/constants.js';
 import { chatWorkingProgressInsidersIconForeground, chatWorkingProgressStableIconForeground } from '../../common/widget/chatColors.js';
-import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_VIEW_BOX, ChatWorkingLogoDrawBand, chatWorkingLogoDrawDuration, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from './chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_BLEED_SCALE, CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_MASK_RECT, CHAT_WORKING_LOGO_ORBIT_MIN_SIZE, CHAT_WORKING_LOGO_STATIC_EMBLEM_FRAME, ChatWorkingLogoDrawBand, IChatWorkingLogoEmblemElements, IChatWorkingLogoEmblemFrame, applyChatWorkingLogoEmblemFrame, chatWorkingLogoDrawDuration, chatWorkingLogoFacePaths, createChatWorkingLogoEmblem, getChatWorkingLogoDrawFrame, getChatWorkingLogoEmblemFrame } from './chatWorkingLogoDraw.js';
 import { acquireChatWorkingLogoAtlas, getChatWorkingLogoAtlasKeyframes, hasChatWorkingLogoAtlas, loadChatWorkingLogoAtlasImage } from './chatWorkingLogoAtlas.js';
 import './media/chatWorkingLogo.css';
 
@@ -29,6 +29,7 @@ const fallbackFrameRate = 60;
  */
 const atlasPreparationDelay = 2000;
 let drawMaskIdPool = 0;
+let emblemIdPool = 0;
 
 function isDrawAnimation(animation: ChatProgressAnimation): boolean {
 	return animation === ChatProgressAnimation.Draw || animation === ChatProgressAnimation.DrawMonochrome;
@@ -83,6 +84,9 @@ export class ChatWorkingLogo extends Disposable {
 	private pixelRatio: IPixelRatioMonitor | undefined;
 	private drawPaths: Map<ChatWorkingLogoDrawBand, SVGPathElement> | undefined;
 	private drawPathData: Map<ChatWorkingLogoDrawBand, string> | undefined;
+	/** Emblem layers (static face and Draw fallback) that follow the breathing, sheen and orbit frames. */
+	private readonly emblems: IChatWorkingLogoEmblemElements[] = [];
+	private lastEmblemFrame: IChatWorkingLogoEmblemFrame | undefined;
 	private readonly now: () => number;
 	private readonly scheduleFrame: (targetWindow: Window, runner: () => void) => IDisposable;
 	private readonly isMotionReducedOverride: (() => boolean) | undefined;
@@ -121,8 +125,10 @@ export class ChatWorkingLogo extends Disposable {
 		this.isMotionReducedOverride = animationOptions.isMotionReduced;
 
 		const wrapper = append(this.domNode, $('span.chat-working-logo-face'));
-		wrapper.appendChild($.SVG<SVGSVGElement>('svg', { viewBox: CHAT_WORKING_LOGO_VIEW_BOX, width: '100%', height: '100%', focusable: 'false' },
-			...chatWorkingLogoFacePaths.map(path => $.SVG<SVGPathElement>('path', { d: path, fill: 'currentColor' }))));
+		const face = createChatWorkingLogoEmblem(`chat-working-logo-${++emblemIdPool}`, { width: '100%', height: '100%', focusable: 'false' }, { orbit: true });
+		face.emblem.append(...chatWorkingLogoFacePaths.map(path => $.SVG<SVGPathElement>('path', { d: path, fill: 'currentColor' })));
+		wrapper.appendChild(face.svg);
+		this.emblems.push(face);
 		const visibilityObserver: typeof observeVisibility = animationOptions.observeVisibility ?? observeVisibility;
 		this._register(visibilityObserver(this.domNode, visible => {
 			if (this.visible !== visible) {
@@ -231,10 +237,16 @@ export class ChatWorkingLogo extends Disposable {
 			return;
 		}
 		// Read resolved CSS once per appearance change, including custom theme colors.
-		const color = targetWindow.getComputedStyle(this.domNode).color;
+		const style = targetWindow.getComputedStyle(this.domNode);
+		const color = style.color;
+		const hairline = style.getPropertyValue('--chat-working-logo-hairline').trim() || undefined;
+		const orbit = this.hasOrbit(bounds.width);
+		// The artwork bleeds past the tile (the layout box) so that its corners and orbit are never clipped.
+		const canvasWidth = bounds.width * CHAT_WORKING_LOGO_BLEED_SCALE;
+		const canvasHeight = bounds.height * CHAT_WORKING_LOGO_BLEED_SCALE;
 		const ratio = this.pixelRatio!.value;
-		const options = { width: Math.max(1, Math.round(bounds.width * ratio)), height: Math.max(1, Math.round(bounds.height * ratio)), color };
-		const key = JSON.stringify([bounds.width, bounds.height, options.width, options.height, color]);
+		const options = { width: Math.max(1, Math.round(canvasWidth * ratio)), height: Math.max(1, Math.round(canvasHeight * ratio)), color, hairline, orbit };
+		const key = JSON.stringify([bounds.width, bounds.height, options.width, options.height, color, hairline, orbit]);
 		if (key === this.atlasKey) {
 			return;
 		}
@@ -263,8 +275,8 @@ export class ChatWorkingLogo extends Disposable {
 				viewport.remove();
 				image.removeAttribute('src');
 			}));
-			image.style.width = `${atlas.width * bounds.width / atlas.frameWidth}px`;
-			image.style.height = `${atlas.height * bounds.height / atlas.frameHeight}px`;
+			image.style.width = `${atlas.width * canvasWidth / atlas.frameWidth}px`;
+			image.style.height = `${atlas.height * canvasHeight / atlas.frameHeight}px`;
 			viewport.appendChild(image);
 			await loadChatWorkingLogoAtlasImage(image, atlas.url, cancellation.token);
 			if (request !== this.atlasRequest.value) {
@@ -276,7 +288,7 @@ export class ChatWorkingLogo extends Disposable {
 				return;
 			}
 			this.domNode.appendChild(viewport);
-			const animation = image.animate(getChatWorkingLogoAtlasKeyframes(atlas, bounds.width, bounds.height), {
+			const animation = image.animate(getChatWorkingLogoAtlasKeyframes(atlas, canvasWidth, canvasHeight), {
 				duration: this.drawDurationMs, iterations: Infinity, fill: 'both',
 			});
 			request.add(toDisposable(() => animation.cancel()));
@@ -304,7 +316,13 @@ export class ChatWorkingLogo extends Disposable {
 		this.drawPaths = new Map();
 		this.drawPathData = new Map();
 		const maskId = ++drawMaskIdPool;
-		const defs = $.SVG<SVGDefsElement>('defs');
+		const drawing = createChatWorkingLogoEmblem(`chat-working-logo-draw-${maskId}`, {
+			width: '100%',
+			height: '100%',
+			focusable: 'false',
+			'shape-rendering': 'geometricPrecision',
+		}, { orbit: true });
+		const defs = drawing.defs;
 		const artwork = $.SVG<SVGGElement>('g', { class: 'chat-working-logo-draw-artwork' });
 		for (let index = 0; index < CHAT_WORKING_LOGO_DRAW_PAINT_ORDER.length; index++) {
 			const band = CHAT_WORKING_LOGO_DRAW_PAINT_ORDER[index];
@@ -318,10 +336,10 @@ export class ChatWorkingLogo extends Disposable {
 			});
 			const mask = $.SVG<SVGMaskElement>('mask', {
 				id: `chat-working-logo-draw-mask-${maskId}-${band}`,
-				x: '-12',
-				y: '-12',
-				width: '120',
-				height: '120',
+				x: String(CHAT_WORKING_LOGO_MASK_RECT.x),
+				y: String(CHAT_WORKING_LOGO_MASK_RECT.y),
+				width: String(CHAT_WORKING_LOGO_MASK_RECT.width),
+				height: String(CHAT_WORKING_LOGO_MASK_RECT.height),
 				maskUnits: 'userSpaceOnUse',
 				'mask-type': 'alpha',
 			}, maskPath);
@@ -336,24 +354,21 @@ export class ChatWorkingLogo extends Disposable {
 			this.drawPaths.set(band, maskPath);
 		}
 		const wrapper = append(this.domNode, $('span.chat-working-logo-draw-container'));
-		wrapper.appendChild($.SVG<SVGSVGElement>('svg', {
-			viewBox: CHAT_WORKING_LOGO_VIEW_BOX,
-			width: '100%',
-			height: '100%',
-			focusable: 'false',
-			'shape-rendering': 'geometricPrecision',
-		}, defs, artwork));
-		this.renderDrawFrame(0.5);
+		drawing.emblem.appendChild(artwork);
+		wrapper.appendChild(drawing.svg);
+		this.emblems.push(drawing);
+		this.renderDrawFrame(0.5, true);
 	}
 
 	private restartDrawAnimation(): void {
 		this.animationFrame?.clear();
 		this.clearAtlas();
 		if (!isDrawAnimation(this.animation)) {
+			this.renderEmblemFrame(CHAT_WORKING_LOGO_STATIC_EMBLEM_FRAME);
 			return;
 		}
 		if (!this.active || this.isMotionReduced()) {
-			this.renderDrawFrame(0.5);
+			this.renderDrawFrame(0.5, true);
 			return;
 		}
 		if (!this.visible) {
@@ -382,7 +397,7 @@ export class ChatWorkingLogo extends Disposable {
 			return;
 		}
 		if (this.isMotionReduced()) {
-			this.renderDrawFrame(0.5);
+			this.renderDrawFrame(0.5, true);
 			return;
 		}
 		const now = this.now();
@@ -394,10 +409,11 @@ export class ChatWorkingLogo extends Disposable {
 		this.queueAnimationFrame();
 	}
 
-	private renderDrawFrame(progress: number): void {
+	private renderDrawFrame(progress: number, isStatic = false): void {
 		if (!this.drawPaths) {
 			return;
 		}
+		this.renderEmblemFrame(isStatic ? CHAT_WORKING_LOGO_STATIC_EMBLEM_FRAME : getChatWorkingLogoEmblemFrame(progress));
 		const frame = getChatWorkingLogoDrawFrame(progress);
 		this.domNode.classList.toggle('chat-working-logo-draw-assembled', frame.assembled);
 		if (frame.assembled) {
@@ -411,6 +427,22 @@ export class ChatWorkingLogo extends Disposable {
 			this.drawPaths.get(band)?.setAttribute('d', pathData);
 			this.drawPathData?.set(band, pathData);
 		}
+	}
+
+	private renderEmblemFrame(frame: IChatWorkingLogoEmblemFrame): void {
+		const last = this.lastEmblemFrame;
+		if (last && last.scale === frame.scale && last.sheenOffset === frame.sheenOffset && last.orbitAngle === frame.orbitAngle && last.orbitOpacity === frame.orbitOpacity) {
+			return;
+		}
+		this.lastEmblemFrame = frame;
+		for (const emblem of this.emblems) {
+			applyChatWorkingLogoEmblemFrame(emblem, frame);
+		}
+	}
+
+	/** The orbit is only legible on emblems of at least 18px; compact indicators never draw it. */
+	private hasOrbit(width: number): boolean {
+		return width >= CHAT_WORKING_LOGO_ORBIT_MIN_SIZE && !this.domNode.classList.contains('chat-working-logo-compact');
 	}
 
 	private isMotionReduced(): boolean {

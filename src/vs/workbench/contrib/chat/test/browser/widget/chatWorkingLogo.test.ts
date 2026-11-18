@@ -18,7 +18,7 @@ import { TestConfigurationService } from '../../../../../../platform/configurati
 import { NullLogService } from '../../../../../../platform/log/common/log.js';
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { ChatWorkingLogo, ChatWorkingProgressLogo, getConfiguredProgressAnimation } from '../../../browser/widget/chatWorkingLogo.js';
-import { CHAT_WORKING_LOGO_VIEW_BOX, getChatWorkingLogoDrawFrame } from '../../../browser/widget/chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_MASK_RECT, CHAT_WORKING_LOGO_ORBIT, CHAT_WORKING_LOGO_TILE, CHAT_WORKING_LOGO_VIEW_BOX, getChatWorkingLogoDrawFrame, getChatWorkingLogoEmblemFrame, getChatWorkingLogoTileExtent } from '../../../browser/widget/chatWorkingLogoDraw.js';
 import { ChatConfiguration, ChatProgressAnimation } from '../../../common/constants.js';
 
 suite('ChatWorkingLogo', () => {
@@ -609,5 +609,87 @@ suite('ChatWorkingLogo', () => {
 				drawDisplay: 'none',
 			};
 		}));
+	});
+
+	test('emblem geometry keeps the rounded tile, sheen and orbit unclipped across breathing and reduced motion', () => {
+		const { logo, advanceTo } = createDynamicLogo(ChatProgressAnimation.Draw);
+		const masks = [...logo.domNode.querySelectorAll<SVGMaskElement>('.chat-working-logo-draw-container mask')];
+		const tile = logo.domNode.querySelector<SVGRectElement>('.chat-working-logo-face .chat-working-logo-tile')!;
+		const hairline = logo.domNode.querySelector<SVGRectElement>('.chat-working-logo-face .chat-working-logo-hairline')!;
+		const orbit = logo.domNode.querySelector<SVGCircleElement>('.chat-working-logo-face .chat-working-logo-orbit')!;
+		const [minX, minY, viewWidth, viewHeight] = CHAT_WORKING_LOGO_VIEW_BOX.split(' ').map(Number);
+		const viewHalfExtent = Math.min(48 - minX, minX + viewWidth - 48, 48 - minY, minY + viewHeight - 48);
+		const tileExtent = getChatWorkingLogoTileExtent(1);
+		const orbitInner = CHAT_WORKING_LOGO_ORBIT.r - CHAT_WORKING_LOGO_ORBIT.strokeWidth / 2;
+		const orbitOuter = CHAT_WORKING_LOGO_ORBIT.r + CHAT_WORKING_LOGO_ORBIT.strokeWidth / 2;
+		const samples = Array.from({ length: 40 }, (_, index) => getChatWorkingLogoEmblemFrame(index / 40));
+
+		advanceTo(400);
+		const activeSheenShown = logo.domNode.querySelector<SVGRectElement>('.chat-working-logo-draw-container .chat-working-logo-sheen')!.getAttribute('display') !== 'none';
+		const activeEmblemTransform = logo.domNode.querySelector<SVGGElement>('.chat-working-logo-draw-container .chat-working-logo-emblem')!.getAttribute('transform');
+
+		const { logo: reduced } = createDynamicLogo(ChatProgressAnimation.Draw, true);
+		const compact = store.add(new ChatWorkingLogo(ChatProgressAnimation.Off, 'stable'));
+		compact.domNode.classList.add('chat-working-logo-compact');
+		mainWindow.document.body.appendChild(compact.domNode);
+		const compactOrbitDisplay = mainWindow.getComputedStyle(compact.domNode.querySelector<SVGCircleElement>('.chat-working-logo-orbit')!).display;
+
+		const hcHost = mainWindow.document.body.appendChild($('.hc-light'));
+		hcHost.style.setProperty('--vscode-contrastBorder', 'rgb(12, 34, 56)');
+		store.add(toDisposable(() => hcHost.remove()));
+		const hcLogo = store.add(new ChatWorkingLogo(ChatProgressAnimation.Off, 'stable'));
+		hcHost.appendChild(hcLogo.domNode);
+		const hcHairlineStroke = mainWindow.getComputedStyle(hcLogo.domNode.querySelector<SVGRectElement>('.chat-working-logo-hairline')!).stroke;
+
+		assert.deepStrictEqual({
+			viewBox: CHAT_WORKING_LOGO_VIEW_BOX,
+			maskRects: masks.map(mask => ({
+				x: Number(mask.getAttribute('x')),
+				y: Number(mask.getAttribute('y')),
+				width: Number(mask.getAttribute('width')),
+				height: Number(mask.getAttribute('height')),
+			})),
+			tile: {
+				x: Number(tile.getAttribute('x')),
+				y: Number(tile.getAttribute('y')),
+				width: Number(tile.getAttribute('width')),
+				rx: Number(tile.getAttribute('rx')),
+				fill: tile.getAttribute('fill'),
+			},
+			hairlineWidth: Number(hairline.getAttribute('width')),
+			orbitRadius: Number(orbit.getAttribute('r')),
+			cssBackground: mainWindow.getComputedStyle(logo.domNode).backgroundColor,
+			cssRadius: mainWindow.getComputedStyle(logo.domNode).borderRadius,
+			orbitClearsTile: tileExtent < orbitInner,
+			viewBoxClearsOrbit: orbitOuter < viewHalfExtent,
+			scalesWithinBounds: samples.every(sample => sample.scale >= 0.96 && sample.scale <= 1),
+			sheenSweepsThenRests: samples.some(sample => sample.sheenOffset !== undefined) && samples.some(sample => sample.sheenOffset === undefined),
+			activeSheenShown,
+			activeBreathing: !!activeEmblemTransform && activeEmblemTransform.includes('scale('),
+			reducedStatic: {
+				transform: reduced.domNode.querySelector<SVGGElement>('.chat-working-logo-face .chat-working-logo-emblem')!.getAttribute('transform'),
+				sheenDisplay: mainWindow.getComputedStyle(reduced.domNode.querySelector<SVGRectElement>('.chat-working-logo-face .chat-working-logo-sheen')!).display,
+				orbitOpacity: reduced.domNode.querySelector<SVGCircleElement>('.chat-working-logo-face .chat-working-logo-orbit')!.getAttribute('stroke-opacity'),
+			},
+			compactOrbitDisplay,
+			hcHairlineStroke,
+		}, {
+			viewBox: '-36 -36 168 168',
+			maskRects: Array(3).fill(CHAT_WORKING_LOGO_MASK_RECT),
+			tile: { x: -12, y: -12, width: CHAT_WORKING_LOGO_TILE.size, rx: CHAT_WORKING_LOGO_TILE.radius, fill: CHAT_WORKING_LOGO_TILE.fill },
+			hairlineWidth: 119,
+			orbitRadius: 78,
+			cssBackground: 'rgba(0, 0, 0, 0)',
+			cssRadius: '0px',
+			orbitClearsTile: true,
+			viewBoxClearsOrbit: true,
+			scalesWithinBounds: true,
+			sheenSweepsThenRests: true,
+			activeSheenShown: true,
+			activeBreathing: true,
+			reducedStatic: { transform: null, sheenDisplay: 'none', orbitOpacity: '0.35' },
+			compactOrbitDisplay: 'none',
+			hcHairlineStroke: 'rgb(12, 34, 56)',
+		});
 	});
 });

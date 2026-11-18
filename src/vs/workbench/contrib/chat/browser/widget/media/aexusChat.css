@@ -1,0 +1,285 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Aexus Orbit, Quiet Cards: scoped chat surface refinements.
+ * Every rule here stays inside `.interactive-session` so workbench and extension widgets outside chat are untouched.
+ */
+
+/* #region Natural-flow scroll & "Jump to latest" pill */
+
+/* The working progress row flows with the transcript and never pins to the viewport when scrolling up. */
+.interactive-session :is(.chat-working-progress, .chat-working-progress-anchor) {
+	position: static !important;
+}
+
+.interactive-session .interactive-result-code-block .interactive-result-code-block-toolbar {
+	position: static;
+}
+
+/* Centered glassmorphic "Jump to latest" pill above the composer. */
+.interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest {
+	position: absolute;
+	inset-inline: 0;
+	right: auto;
+	margin-inline: auto;
+	bottom: 12px;
+	width: fit-content;
+	max-width: calc(100% - 24px);
+	height: 26px;
+	padding: 0 11px 0 9px;
+	gap: 5px;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	z-index: 6;
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+	background-color: var(--vscode-editorWidget-background);
+	border: 1px solid var(--vscode-editorWidget-border, color-mix(in srgb, var(--vscode-foreground) 12%, transparent));
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+	backdrop-filter: blur(8px);
+	-webkit-backdrop-filter: blur(8px);
+	transition: opacity 140ms ease, transform 140ms ease, background-color 120ms ease, border-color 120ms ease;
+
+	@starting-style {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+
+	.codicon {
+		font-size: 13px;
+		transform: none;
+	}
+
+	&:hover,
+	&:focus-visible {
+		background-color: var(--vscode-editorWidget-background);
+		background-image: linear-gradient(var(--vscode-toolbar-hoverBackground), var(--vscode-toolbar-hoverBackground));
+		border-color: color-mix(in srgb, var(--vscode-foreground) 22%, var(--vscode-editorWidget-border, transparent));
+	}
+}
+
+.hc-black .interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest,
+.hc-light .interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest {
+	background-color: var(--vscode-editorWidget-background);
+	border-color: var(--vscode-contrastBorder);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+
+.interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest .chat-scroll-down-streaming-dot {
+	display: none;
+	width: 6px;
+	height: 6px;
+	margin-left: 2px;
+	border-radius: 999px;
+	flex-shrink: 0;
+	background-color: var(--vscode-focusBorder, var(--vscode-progressBar-background));
+}
+
+@keyframes chat-jump-to-latest-pulse {
+	0%,
+	100% {
+		opacity: 1;
+		transform: scale(1);
+	}
+	50% {
+		opacity: 0.4;
+		transform: scale(0.82);
+	}
+}
+
+.interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest.streaming .chat-scroll-down-streaming-dot {
+	display: inline-block;
+	animation: chat-jump-to-latest-pulse 1.4s ease-in-out infinite;
+}
+
+.monaco-reduce-motion .interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest,
+.monaco-reduce-motion .interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest.streaming .chat-scroll-down-streaming-dot {
+	transition: none;
+	animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest,
+	.interactive-session:not(:has(.chat-sticky-progress)) .chat-scroll-down.chat-jump-to-latest.streaming .chat-scroll-down-streaming-dot {
+		transition: none;
+		animation: none;
+	}
+}
+
+/* #endregion */
+
+/* #region Turn rhythm, request bubble & markdown typography */
+
+.monaco-workbench .interactive-session .interactive-item-container:not(.chat-sticky-progress) {
+	padding-block: 10px;
+}
+
+.monaco-workbench .interactive-session .interactive-item-container.interactive-response:not(.chat-sticky-progress) {
+	padding-bottom: 20px;
+}
+
+/* Asymmetric speech-tail request bubble with a quiet 1px hairline (sticky-scroll rows keep their merge radii). */
+.interactive-session:not(.chat-widget > .interactive-session) .interactive-item-container.interactive-request:not(.monaco-tree-sticky-row *) .value .rendered-markdown {
+	border-radius: 14px 14px 4px 14px;
+	padding: 8px 14px;
+	max-width: min(88%, 680px);
+	line-height: 1.55;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+	box-sizing: border-box;
+}
+
+.hc-black .interactive-session:not(.chat-widget > .interactive-session) .interactive-item-container.interactive-request .value .rendered-markdown,
+.hc-light .interactive-session:not(.chat-widget > .interactive-session) .interactive-item-container.interactive-request .value .rendered-markdown {
+	border-color: var(--vscode-contrastBorder);
+}
+
+/* Crisp response markdown rhythm and inline-code pills. */
+.monaco-workbench .interactive-session .interactive-response .value .chat-markdown-part.rendered-markdown {
+	line-height: 1.6;
+
+	p + p {
+		margin-top: 0.65em;
+	}
+
+	h1 {
+		font-size: 1.25em;
+		font-weight: 600;
+		line-height: 1.35;
+	}
+
+	h2 {
+		font-size: 1.12em;
+		font-weight: 600;
+		line-height: 1.38;
+	}
+
+	h3 {
+		font-size: 1em;
+		font-weight: 600;
+		line-height: 1.4;
+	}
+
+	:not(pre) > code {
+		background-color: var(--vscode-textCodeBlock-background);
+		border-radius: 4px;
+		padding: 1px 5px;
+		border: 1px solid color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+	}
+}
+
+/* #endregion */
+
+/* #region Thinking disclosure */
+
+.interactive-session .interactive-response .value .chat-thinking-box {
+	.chat-used-context-list.chat-thinking-collapsible {
+		font-size: var(--vscode-chat-font-size-body-s);
+		color: var(--vscode-descriptionForeground);
+		border-left: 2px solid color-mix(in srgb, var(--vscode-focusBorder, var(--vscode-descriptionForeground)) 38%, transparent);
+		padding-left: 10px;
+		margin-left: 6px;
+	}
+
+	.chat-used-context-list.chat-thinking-collapsible.chat-thinking-streaming {
+		max-height: 220px;
+		overflow-y: auto;
+		mask-image: linear-gradient(to bottom, transparent 0px, black 18px);
+		-webkit-mask-image: linear-gradient(to bottom, transparent 0px, black 18px);
+	}
+}
+
+/* In persistent-progress chains, the shared gutter rail already connects steps; avoid doubling the left rail. */
+.interactive-session .interactive-response.chat-persistent-progress .value .chat-thinking-box.chat-thinking-conversation .chat-used-context-list.chat-thinking-collapsible {
+	border-left: none;
+	padding-left: 0;
+	margin-left: 0;
+}
+
+/* #endregion */
+
+/* #region Tool, terminal & file-edit pills, and code blocks */
+
+.interactive-session .chat-codeblock-pill-container .status-indicator-container {
+	min-height: 22px;
+	padding: 0 9px;
+	border-radius: 999px;
+	align-items: center;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background-color: color-mix(in srgb, var(--vscode-editorWidget-background) 60%, transparent);
+	box-sizing: border-box;
+}
+
+.interactive-session .interactive-response .value .chat-thinking-box > .chat-used-context-label > .chat-thinking-title-diff.monaco-button,
+.interactive-session .interactive-response .value .completed-response-summary > .chat-edit-stats.monaco-button {
+	height: 22px;
+	padding: 0 8px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	box-sizing: border-box;
+}
+
+.interactive-session .chat-terminal-content-part .chat-terminal-content-title .chat-terminal-command-block {
+	border-radius: 8px;
+}
+
+/* Code blocks: rounded 8px frame and a resting 0.55 toolbar opacity so Copy/Apply are discoverable without hover. */
+.interactive-session .interactive-result-code-block {
+	border-radius: 8px;
+
+	.interactive-result-code-block-toolbar {
+		opacity: 0.55;
+		pointer-events: auto;
+		transition: opacity 120ms ease;
+	}
+
+	&:hover .interactive-result-code-block-toolbar,
+	&:focus-within .interactive-result-code-block-toolbar,
+	.interactive-result-code-block-toolbar.focused {
+		opacity: 1;
+	}
+}
+
+/* #endregion */
+
+/* #region Tactile composer & option pills */
+
+.monaco-workbench .interactive-session .interactive-input-part:not(.compact) .chat-input-container {
+	--chat-input-own-radius: 12px;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+	transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+/* Soft 4px focus halo, suppressed while `.working` so it never competes with the animated comet border. */
+.monaco-workbench .interactive-session .chat-input-container.focused:not(.working) {
+	border-color: var(--vscode-focusBorder);
+	box-shadow:
+		0 0 0 1px var(--vscode-focusBorder),
+		0 0 0 4px color-mix(in srgb, var(--vscode-focusBorder) 18%, transparent);
+}
+
+.hc-black .monaco-workbench .interactive-session .chat-input-container.focused:not(.working),
+.hc-light .monaco-workbench .interactive-session .chat-input-container.focused:not(.working) {
+	box-shadow: none;
+}
+
+/* Pill-shaped composer option pickers (mode, model, permissions, effort). */
+.interactive-session .chat-input-toolbar .chat-input-picker-item .action-label,
+.interactive-session .chat-secondary-toolbar .chat-input-picker-item .action-label,
+.interactive-session .chat-input-picker-split > .chat-input-picker-split-button {
+	height: 22px;
+	border-radius: 999px;
+}
+
+.interactive-session .chat-input-toolbar .chat-input-picker-item .action-label.model-picker-split {
+	border-radius: 999px;
+}
+
+/* #endregion */

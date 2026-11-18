@@ -3,7 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+/*
+ * The element's box is the emblem tile, so it shares the text gutter with thinking and tool rows exactly as
+ * before. The artwork paints the rounded tile itself and bleeds 20% (24 of 120 draw units) past every edge,
+ * so its corners, hairline, sheen and orbit are never clipped by a CSS border radius.
+ */
 .chat-working-logo {
+	--chat-working-logo-bleed: -20%;
+	--chat-working-logo-hairline: rgba(255, 255, 255, 0.16);
 	display: inline-block;
 	position: relative;
 	width: var(--vscode-codiconFontSize);
@@ -12,18 +19,39 @@
 	vertical-align: middle;
 	pointer-events: none;
 	contain: layout style;
-	background: #000000;
-	border-radius: 22.3%;
 	box-sizing: border-box;
 }
 
-.vs-dark .chat-working-logo {
-	box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.16);
+.hc-black .chat-working-logo,
+.hc-light .chat-working-logo {
+	--chat-working-logo-hairline: var(--vscode-contrastBorder);
 }
 
 .chat-working-logo.chat-working-logo-compact {
 	width: var(--vscode-codiconFontSize-compact);
 	height: var(--vscode-codiconFontSize-compact);
+}
+
+/* The orbit is only legible from 18px; compact indicators keep the quiet tile. */
+.chat-working-logo.chat-working-logo-compact .chat-working-logo-orbit {
+	display: none;
+}
+
+/* The hairline keeps the tile crisp on both dark and light backgrounds and uses contrastBorder in high contrast. */
+.chat-working-logo .chat-working-logo-hairline {
+	stroke: var(--chat-working-logo-hairline);
+	stroke-opacity: 1;
+}
+
+/* Reduced motion: static tile and a static, subtle ring; no sheen. */
+.monaco-reduce-motion .chat-working-logo .chat-working-logo-sheen {
+	display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.chat-working-logo:not(.monaco-enable-motion .chat-working-logo) .chat-working-logo-sheen {
+		display: none;
+	}
 }
 
 .chat-working-logo-monochrome {
@@ -43,7 +71,7 @@
 .chat-working-logo > .chat-working-logo-face,
 .chat-working-logo > .chat-working-logo-draw-container {
 	position: absolute;
-	inset: 0;
+	inset: var(--chat-working-logo-bleed);
 	transform: none;
 	opacity: 1;
 }
@@ -89,8 +117,8 @@
 
 .chat-working-logo-atlas-viewport {
 	position: absolute;
-	inset: 0;
-	border-radius: inherit;
+	inset: var(--chat-working-logo-bleed);
+	border-radius: 0;
 	overflow: clip;
 	contain: strict;
 }

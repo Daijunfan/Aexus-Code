@@ -1104,7 +1104,7 @@ suite('ChatListWidget', () => {
 			const fullRefreshes = () => setChildren.getCalls().filter(call => call.args[0] === null).length;
 			const states: { fullRefreshes: number; requests: string[]; text: boolean }[] = [];
 			const record = async (text: string) => {
-				await timeout(0);
+				await retry(async () => assert.ok(container.textContent?.includes(text)), 100, 30);
 				await waitForStableLayout(widget);
 				states.push({
 					fullRefreshes: fullRefreshes(),
@@ -1300,6 +1300,90 @@ suite('ChatListWidget', () => {
 		]);
 	});
 
+	test('upward user scroll suspends auto-scrolling until returning to the bottom or jumping to latest, and toggles the streaming pill pulse', async () => {
+		const { model, container, widget } = createWidget();
+		for (let i = 0; i < 12; i++) {
+			const text = `turn ${i}`;
+			const request = model.addRequest({
+				text,
+				parts: [new ChatRequestTextPart(new OffsetRange(0, text.length), new Range(1, 1, 1, text.length + 1), text)],
+			}, { variables: [] }, 0);
+			model.acceptResponseProgress(request, { kind: 'markdownContent', content: new MarkdownString(`Reply line ${i}\n\nMore context ${i}.`) });
+			if (i < 11) {
+				request.response?.complete();
+			}
+		}
+		widget.refresh();
+		widget.layout(220, 500);
+		await waitForStableLayout(widget);
+		widget.scrollToEnd();
+		await waitForStableLayout(widget);
+		const activeRequest = model.getRequests().at(-1)!;
+		assert.ok(widget.scrollTop > 40);
+
+		const pill = widget.scrollDownButtonDomNode;
+		widget.setStreaming(true);
+		const streamingClassOn = pill.classList.contains('streaming');
+		const hasStreamingDot = !!pill.querySelector('.chat-scroll-down-streaming-dot');
+
+		// Simulate the user scrolling up with the mouse wheel while a response streams.
+		container.dispatchEvent(new mainWindow.WheelEvent('wheel', { deltaY: -80, bubbles: true }));
+		const readingScrollTop = Math.max(0, widget.scrollTop - 80);
+		widget.scrollTop = readingScrollTop;
+		await waitForStableLayout(widget);
+		const heldWhileReading = widget.isAutoScrollHeld && widget.isUserScrolledAway;
+		const pillShownWhileReading = pill.style.display;
+
+		// Streaming response grows significantly: the user must NOT be yanked back to the bottom.
+		model.acceptResponseProgress(activeRequest, {
+			kind: 'markdownContent',
+			content: new MarkdownString(Array.from({ length: 15 }, (_, index) => `Streamed paragraph ${index}.`).join('\n\n')),
+		});
+		widget.refresh();
+		await waitForStableLayout(widget);
+		const preservedDuringGrowth = widget.scrollTop === readingScrollTop;
+
+		// Clicking "Jump to latest" clears the hold and returns to the bottom.
+		pill.click();
+		await waitForStableLayout(widget);
+		const clearedAfterJump = !widget.isUserScrolledAway && widget.isScrolledToBottom;
+
+		// Upward keyboard navigation also holds auto-scroll, and resumeAutoScroll() releases only that hold.
+		container.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'PageUp', keyCode: 33, bubbles: true }));
+		const externalHold = widget.acquireAutoScrollHold();
+		const heldByKeyboard = widget.isUserScrolledAway;
+		widget.resumeAutoScroll();
+		const externalStillHeld = !widget.isUserScrolledAway && widget.isAutoScrollHeld;
+		externalHold.dispose();
+		widget.setStreaming(false);
+
+		assert.deepStrictEqual({
+			label: pill.textContent?.trim(),
+			hasJumpClass: pill.classList.contains('chat-jump-to-latest'),
+			streamingClassOn,
+			streamingClassOff: pill.classList.contains('streaming'),
+			hasStreamingDot,
+			heldWhileReading,
+			pillShownWhileReading,
+			preservedDuringGrowth,
+			clearedAfterJump,
+			heldByKeyboard,
+			externalStillHeld,
+		}, {
+			label: 'Jump to latest',
+			hasJumpClass: true,
+			streamingClassOn: true,
+			streamingClassOff: false,
+			hasStreamingDot: true,
+			heldWhileReading: true,
+			pillShownWhileReading: 'flex',
+			preservedDuringGrowth: true,
+			clearedAfterJump: true,
+			heldByKeyboard: true,
+			externalStillHeld: true,
+		});
+	});
+
 	for (const isSessionsWindow of [false, true]) {
 		for (const activation of ['click', 'Enter', ' '] as const) {
 			test(`scroll arrow returns to the bottom with ${activation === ' ' ? 'Space' : activation} in ${isSessionsWindow ? 'sessions' : 'workbench'} chat`, async () => {
@@ -1324,7 +1408,7 @@ suite('ChatListWidget', () => {
 					background: buttonStyle.backgroundColor,
 					foreground: buttonStyle.color,
 				}, {
-					label: '',
+					label: 'Jump to latest',
 					ariaLabel: 'Scroll to Latest',
 					role: 'button',
 					tabIndex: 0,
