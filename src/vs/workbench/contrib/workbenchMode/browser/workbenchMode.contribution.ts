@@ -3,17 +3,25 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import './media/workbenchMode.css';
+import { $, append, clearNode } from '../../../../base/browser/dom.js';
+import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
+import { IAction } from '../../../../base/common/actions.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { Event } from '../../../../base/common/event.js';
+import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable, MutableDisposable } from '../../../../base/common/lifecycle.js';
+import { FileAccess } from '../../../../base/common/network.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../nls.js';
+import { ICommandAction } from '../../../../platform/action/common/action.js';
+import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ExtensionIdentifier, ExtensionIdentifierSet } from '../../../../platform/extensions/common/extensions.js';
-import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -34,7 +42,41 @@ import { ExtensionState, IExtensionsWorkbenchService } from '../../extensions/co
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 
 const primaryViews = new Set(['workbench.explorer.fileView', 'workbench.explorer.emptyView', 'workbench.explorer.openEditorsView']);
+const showPluginsCommand = 'workbench.action.aexus.showPlugins';
 const selectPluginProjectCommand = 'workbench.action.aexus.selectPluginProject';
+
+function formatProjectUriLabel(uri: URI): string {
+	return uri.scheme === AEXUS_SSH_SCHEME && uri.authority
+		? `${uri.authority}:${uri.path}`
+		: uri.fsPath;
+}
+
+interface IResolvedPluginProject {
+	readonly project: { readonly name: string; readonly uri: URI } | undefined;
+	readonly isBound: boolean;
+	readonly isRemote: boolean;
+}
+
+function resolvePluginProjectState(
+	projects: IProjectNavigationService,
+	adeProjects: IAdeProjectsService,
+	modes: IWorkbenchModeService,
+	descriptors: IViewDescriptorService,
+	panes: IPaneCompositePartService,
+): IResolvedPluginProject {
+	const owner = getActivePluginOwner(descriptors, panes);
+	const binding = owner && projects.codingAgentProjects.get(ExtensionIdentifier.toKey(owner));
+	const boundProject = binding ? projects.orderedProjects.find(project => project.uri.toString() === binding.toString()) : undefined;
+	const ideProject = binding ? boundProject : projects.selectedProject;
+	const project = modes.mode === 'ide'
+		? ideProject && { name: ideProject.name, uri: ideProject.uri }
+		: (projects.focusedProject ?? adeProjects.selectedProject ?? projects.selectedProject);
+	return {
+		project,
+		isBound: modes.mode === 'ide' && !!boundProject,
+		isRemote: project?.uri.scheme === AEXUS_SSH_SCHEME,
+	};
+}
 
 // Default Aexus Code to highest agent/tool permissions out of the box so users do not have to click Allow on every action.
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerDefaultConfigurations([{
@@ -52,16 +94,179 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 }]);
 
 function getActivePluginOwner(descriptors: IViewDescriptorService, panes: IPaneCompositePartService): ExtensionIdentifier | undefined {
-	const active = panes.getActivePaneComposite(ViewContainerLocation.AuxiliaryBar);
-	const container = active && descriptors.getViewContainerById(active.getId());
-	return container?.extensionId ?? (container ? descriptors.getViewContainerModel(container).activeViewDescriptors
-		.map(view => (view as ICustomViewDescriptor).extensionId).find(owner => !!owner) : undefined);
+	const active = panes.getActivePaneComposite?.(ViewContainerLocation.AuxiliaryBar);
+	const container = active && descriptors.getViewContainerById?.(active.getId());
+	if (!container) {
+		return undefined;
+	}
+	if (container.extensionId) {
+		return container.extensionId;
+	}
+	const model = descriptors.getViewContainerModel?.(container);
+	return model?.activeViewDescriptors
+		.map(view => (view as ICustomViewDescriptor).extensionId).find(owner => !!owner);
+}
+
+class PluginSwitcherViewItem extends BaseActionViewItem {
+	private btnEl: HTMLButtonElement | undefined;
+	private iconEl: HTMLElement | undefined;
+	private nameEl: HTMLElement | undefined;
+
+	constructor(
+		action: IAction,
+		options: IBaseActionViewItemOptions,
+		@IViewDescriptorService private readonly descriptors: IViewDescriptorService,
+		@IPaneCompositePartService private readonly panes: IPaneCompositePartService,
+		@IWorkbenchModeService modes: IWorkbenchModeService,
+		@IExtensionService private readonly extensions: IExtensionService,
+	) {
+		super(undefined, action, options);
+		this._register(Event.any(
+			panes.onDidPaneCompositeOpen ?? Event.None,
+			panes.onDidPaneCompositeClose ?? Event.None,
+			descriptors.onDidChangeViewContainers ?? Event.None,
+			modes.onDidChangeMode ?? Event.None,
+		)(() => this.syncFromActivePane()));
+	}
+
+	override render(container: HTMLElement): void {
+		super.render(container);
+		this.btnEl = append(container, $('button.aexus-plugin-switcher', {
+			type: 'button',
+			tabindex: '-1',
+			'aria-haspopup': 'listbox',
+		})) as HTMLButtonElement;
+		this.iconEl = append(this.btnEl, $('span.aexus-plugin-switcher-icon', { 'aria-hidden': 'true' }));
+		this.nameEl = append(this.btnEl, $('span.aexus-plugin-switcher-name'));
+		const chevron = append(this.btnEl, $('span.aexus-plugin-switcher-chevron', { 'aria-hidden': 'true' }));
+		chevron.classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
+		this.syncFromActivePane();
+	}
+
+	protected override getTooltip(): string | undefined {
+		const activeLabel = this.resolveActivePluginVisual().label;
+		return activeLabel
+			? localize('activePluginTooltip', "Active Plugin: {0} (Click to switch)", activeLabel)
+			: localize('pluginsTooltip', "Switch Installed Plugin");
+	}
+
+	private resolveActivePluginVisual(): { readonly label: string | undefined; readonly icon: ThemeIcon | URI } {
+		const active = this.panes.getActivePaneComposite?.(ViewContainerLocation.AuxiliaryBar);
+		const activeId = active?.getId();
+		if (!activeId || activeId === ADE_INSPECTOR_CONTAINER_ID) {
+			return { label: undefined, icon: Codicon.extensions };
+		}
+		const container = this.descriptors.getViewContainerById?.(activeId);
+		const model = container ? this.descriptors.getViewContainerModel?.(container) : undefined;
+		const owner = container && getActivePluginOwner(this.descriptors, this.panes);
+		const extDesc = owner ? this.extensions.extensions?.find(ext => ExtensionIdentifier.equals(ext.identifier, owner)) : undefined;
+		const label = model?.title || extDesc?.displayName || extDesc?.name;
+		const icon = model?.icon ?? Codicon.extensions;
+		return { label, icon };
+	}
+
+	private syncFromActivePane(): void {
+		if (!this.iconEl || !this.nameEl || !this.btnEl) {
+			return;
+		}
+		const { label, icon } = this.resolveActivePluginVisual();
+		clearNode(this.iconEl);
+		this.iconEl.className = 'aexus-plugin-switcher-icon';
+		if (URI.isUri(icon)) {
+			append(this.iconEl, $('img.aexus-plugin-switcher-img', {
+				src: FileAccess.uriToBrowserUri(icon).toString(true),
+				alt: '',
+			}));
+		} else {
+			this.iconEl.classList.add(...ThemeIcon.asClassNameArray(ThemeIcon.isThemeIcon(icon) ? icon : Codicon.extensions));
+		}
+		const text = label || localize('plugins', "Plugins");
+		this.nameEl.textContent = text;
+		this.btnEl.setAttribute('aria-label', text);
+		this.updateTooltip();
+	}
+}
+
+class PluginProjectBadgeViewItem extends BaseActionViewItem {
+	private btnEl: HTMLButtonElement | undefined;
+	private icoEl: HTMLElement | undefined;
+	private nameEl: HTMLElement | undefined;
+	private linkEl: HTMLElement | undefined;
+
+	constructor(
+		action: IAction,
+		options: IBaseActionViewItemOptions,
+		@IProjectNavigationService private readonly projects: IProjectNavigationService,
+		@IAdeProjectsService private readonly adeProjects: IAdeProjectsService,
+		@IWorkbenchModeService private readonly modes: IWorkbenchModeService,
+		@IPaneCompositePartService private readonly panes: IPaneCompositePartService,
+		@IViewDescriptorService private readonly descriptors: IViewDescriptorService,
+	) {
+		super(undefined, action, options);
+		this._register(Event.any(
+			projects.onDidChangeSelectedProject,
+			projects.onDidChangeProject,
+			projects.onDidBindCodingAgentProject,
+			projects.onDidChangeProjectOrder,
+			adeProjects.onDidChange,
+			modes.onDidChangeMode,
+			panes.onDidPaneCompositeOpen ?? Event.None,
+			panes.onDidPaneCompositeClose ?? Event.None,
+		)(() => this.syncFromState()));
+	}
+
+	override render(container: HTMLElement): void {
+		super.render(container);
+		this.btnEl = append(container, $('button.aexus-plugin-project-badge', {
+			type: 'button',
+			tabindex: '-1',
+		})) as HTMLButtonElement;
+		this.icoEl = append(this.btnEl, $('span.aexus-plugin-project-ico', { 'aria-hidden': 'true' }));
+		this.nameEl = append(this.btnEl, $('span.aexus-plugin-project-name'));
+		this.linkEl = append(this.btnEl, $('span.aexus-plugin-project-link', { 'aria-hidden': 'true' }));
+		this.syncFromState();
+	}
+
+	protected override getTooltip(): string | undefined {
+		const { project, isBound } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes);
+		if (!project) {
+			return localize('selectPluginProject', "Select a project for the plugin sidebar");
+		}
+		return isBound
+			? localize('boundPluginProjectTooltip', "Bound to Agent: {0}\n{1}\nClick to change project", project.name, formatProjectUriLabel(project.uri))
+			: localize('pluginProject', "Plugin Project: {0}\n{1}\nSelect Project", project.name, formatProjectUriLabel(project.uri));
+	}
+
+	private syncFromState(): void {
+		if (!this.btnEl || !this.icoEl || !this.nameEl || !this.linkEl) {
+			return;
+		}
+		const { project, isBound, isRemote } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes);
+		const label = project?.name ?? localize('noPluginProject', "No Project");
+		this.btnEl.dataset.bound = String(isBound);
+		this.btnEl.dataset.remote = String(isRemote);
+		this.btnEl.setAttribute('aria-label', label);
+		this.icoEl.className = 'aexus-plugin-project-ico';
+		this.icoEl.classList.add(...ThemeIcon.asClassNameArray(isRemote ? Codicon.remote : Codicon.folder));
+		this.nameEl.textContent = label;
+		this.linkEl.className = 'aexus-plugin-project-link';
+		if (isBound) {
+			this.linkEl.classList.add(...ThemeIcon.asClassNameArray(Codicon.link));
+		}
+		this.updateTooltip();
+	}
 }
 
 /** Shows the current plugin's real project binding alongside the shared plugin switcher. */
 export class PluginSidebarProjectContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.aexusPluginSidebarProject';
 	private readonly projectMenu = this._register(new MutableDisposable());
+	private readonly hasCustomViewItems: boolean;
+	private readonly projectCommand: { id: string; title: string; tooltip: string } & ICommandAction = {
+		id: selectPluginProjectCommand,
+		title: localize('noPluginProject', "No Project"),
+		tooltip: localize('selectPluginProject', "Select a project for the plugin sidebar"),
+	};
 
 	constructor(
 		@IProjectNavigationService private readonly projects: IProjectNavigationService,
@@ -70,10 +275,36 @@ export class PluginSidebarProjectContribution extends Disposable implements IWor
 		@IPaneCompositePartService private readonly panes: IPaneCompositePartService,
 		@IViewDescriptorService private readonly descriptors: IViewDescriptorService,
 		@IWorkbenchEnvironmentService environment: IWorkbenchEnvironmentService,
+		@IActionViewItemService actionViewItemService: IActionViewItemService,
+		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
 		if (environment.isSessionsWindow) {
+			this.hasCustomViewItems = false;
 			return;
+		}
+		const registered = this._register(new Emitter<void>());
+		this._register(actionViewItemService.register(
+			MenuId.AuxiliaryBarTitle,
+			showPluginsCommand,
+			(action, options) => instantiationService.createInstance(PluginSwitcherViewItem, action, options),
+			registered.event,
+		));
+		this._register(actionViewItemService.register(
+			MenuId.AuxiliaryBarTitle,
+			selectPluginProjectCommand,
+			(action, options) => instantiationService.createInstance(PluginProjectBadgeViewItem, action, options),
+			registered.event,
+		));
+		this.hasCustomViewItems = !!actionViewItemService.lookUp(MenuId.AuxiliaryBarTitle, selectPluginProjectCommand);
+		if (this.hasCustomViewItems) {
+			// Register the AuxiliaryBarTitle menu item once; PluginProjectBadgeViewItem updates its DOM in-place without MenuRegistry churn.
+			this.projectMenu.value = MenuRegistry.appendMenuItem(MenuId.AuxiliaryBarTitle, {
+				command: this.projectCommand,
+				group: 'navigation',
+				order: -1,
+				when: IsSessionsWindowContext.negate(),
+			});
 		}
 		this._register(Event.any(
 			projects.onDidChangeSelectedProject,
@@ -82,31 +313,27 @@ export class PluginSidebarProjectContribution extends Disposable implements IWor
 			projects.onDidChangeProjectOrder,
 			adeProjects.onDidChange,
 			modes.onDidChangeMode,
-			panes.onDidPaneCompositeOpen,
-			panes.onDidPaneCompositeClose,
+			panes.onDidPaneCompositeOpen ?? Event.None,
+			panes.onDidPaneCompositeClose ?? Event.None,
 		)(() => this.updateProject()));
 		this.updateProject();
+		registered.fire();
 	}
 
 	private updateProject(): void {
-		const owner = getActivePluginOwner(this.descriptors, this.panes);
-		const binding = owner && this.projects.codingAgentProjects.get(ExtensionIdentifier.toKey(owner));
-		const ideProject = binding ? this.projects.orderedProjects.find(project => project.uri.toString() === binding.toString()) : this.projects.selectedProject;
-		const project = this.modes.mode === 'ide'
-			? ideProject && { name: ideProject.name, uri: ideProject.uri }
-			: (this.projects.focusedProject ?? this.adeProjects.selectedProject ?? this.projects.selectedProject);
-		this.projectMenu.value = MenuRegistry.appendMenuItem(MenuId.AuxiliaryBarTitle, {
-			command: {
-				id: selectPluginProjectCommand,
-				title: project?.name ?? localize('noPluginProject', "No Project"),
-				tooltip: project
-					? localize('pluginProject', "Plugin Project: {0}\n{1}\nSelect Project", project.name, project.uri.fsPath)
-					: localize('selectPluginProject', "Select a project for the plugin sidebar"),
-			},
-			group: 'navigation',
-			order: -1,
-			when: IsSessionsWindowContext.negate(),
-		});
+		const { project } = resolvePluginProjectState(this.projects, this.adeProjects, this.modes, this.descriptors, this.panes);
+		this.projectCommand.title = project?.name ?? localize('noPluginProject', "No Project");
+		this.projectCommand.tooltip = project
+			? localize('pluginProject', "Plugin Project: {0}\n{1}\nSelect Project", project.name, formatProjectUriLabel(project.uri))
+			: localize('selectPluginProject', "Select a project for the plugin sidebar");
+		if (!this.hasCustomViewItems) {
+			this.projectMenu.value = MenuRegistry.appendMenuItem(MenuId.AuxiliaryBarTitle, {
+				command: { ...this.projectCommand },
+				group: 'navigation',
+				order: -1,
+				when: IsSessionsWindowContext.negate(),
+			});
+		}
 	}
 }
 
@@ -353,8 +580,8 @@ registerAction2(class SelectPluginProjectAction extends Action2 {
 		const extensions = accessor.get(IExtensionService);
 		const quickInput = accessor.get(IQuickInputService);
 		const picks = ide
-			? projects.orderedProjects.map(project => ({ label: project.name, description: project.uri.fsPath, uri: project.uri }))
-			: adeProjects.projects.map(project => ({ label: project.name, description: project.uri.fsPath, uri: project.uri }));
+			? projects.orderedProjects.map(project => ({ label: project.name, description: formatProjectUriLabel(project.uri), uri: project.uri }))
+			: adeProjects.projects.map(project => ({ label: project.name, description: formatProjectUriLabel(project.uri), uri: project.uri }));
 		const pick = await quickInput.pick(picks, { placeHolder: localize('selectPluginProjectPicker', "Select the project for the plugin sidebar"), matchOnDescription: true });
 		if (!pick) {
 			return;

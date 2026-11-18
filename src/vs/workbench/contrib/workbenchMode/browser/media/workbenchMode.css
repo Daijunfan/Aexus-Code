@@ -1,0 +1,140 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Auxiliary Bar (right sidebar) header chips:
+ *  - .aexus-plugin-switcher: active installed plugin icon + name + chevron
+ *  - .aexus-plugin-project-badge: bound/selected project pill with remote & link indicator
+ */
+
+.monaco-workbench .aexus-plugin-switcher,
+.monaco-workbench .aexus-plugin-project-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 22px;
+	padding: 0 8px;
+	box-sizing: border-box;
+	border-radius: var(--aexus-radius-pill, 999px);
+	border: var(--aexus-hairline-width, 1px) solid var(--aexus-hairline, var(--vscode-widget-border, transparent));
+	background: var(--aexus-surface-1, color-mix(in srgb, var(--vscode-foreground) 5%, transparent));
+	box-shadow: var(--aexus-highlight-top, none);
+	color: var(--vscode-foreground);
+	font: inherit;
+	font-size: var(--aexus-text-xs, 11px);
+	line-height: var(--aexus-lh-xs, 16px);
+	font-weight: var(--aexus-weight-medium, 500);
+	white-space: nowrap;
+	cursor: pointer;
+	transition: background-color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease), border-color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease);
+}
+
+.monaco-workbench .aexus-plugin-switcher:hover,
+.monaco-workbench .aexus-plugin-project-badge:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	border-color: var(--aexus-hairline-strong, var(--vscode-widget-border, transparent));
+}
+
+.monaco-workbench .action-item:focus-visible .aexus-plugin-switcher,
+.monaco-workbench .action-item:focus-visible .aexus-plugin-project-badge,
+.monaco-workbench .aexus-plugin-switcher:focus-visible,
+.monaco-workbench .aexus-plugin-project-badge:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.monaco-workbench .aexus-plugin-switcher-icon {
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	border-radius: var(--aexus-radius-xs, 2px);
+	font-size: 13px;
+}
+
+.monaco-workbench .aexus-plugin-switcher-img {
+	width: 14px;
+	height: 14px;
+	border-radius: var(--aexus-radius-xs, 2px);
+	object-fit: contain;
+}
+
+.monaco-workbench .aexus-plugin-switcher-name {
+	max-width: 132px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-plugin-switcher-chevron {
+	flex-shrink: 0;
+	font-size: 11px;
+	opacity: 0.7;
+}
+
+.monaco-workbench .aexus-plugin-project-ico {
+	flex-shrink: 0;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .aexus-plugin-project-badge[data-remote="true"] .aexus-plugin-project-ico {
+	color: var(--aexus-cloud, var(--vscode-focusBorder));
+}
+
+.monaco-workbench .aexus-plugin-project-name {
+	max-width: 140px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-plugin-project-link {
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.monaco-workbench .aexus-plugin-project-badge[data-bound="true"] {
+	border-color: color-mix(in srgb, var(--aexus-status-ok, var(--vscode-testing-iconPassed)) 45%, transparent);
+}
+
+.monaco-workbench .aexus-plugin-project-badge[data-bound="true"] .aexus-plugin-project-link {
+	font-size: 11px;
+	color: var(--aexus-status-ok, var(--vscode-testing-iconPassed));
+}
+
+.monaco-workbench .aexus-plugin-project-badge[data-bound="false"] .aexus-plugin-project-link {
+	width: 6px;
+	height: 6px;
+	box-sizing: border-box;
+	border-radius: 50%;
+	border: 1px solid var(--vscode-descriptionForeground);
+	opacity: 0.75;
+}
+
+.monaco-workbench.hc-black .aexus-plugin-switcher,
+.monaco-workbench.hc-light .aexus-plugin-switcher,
+.monaco-workbench.hc-black .aexus-plugin-project-badge,
+.monaco-workbench.hc-light .aexus-plugin-project-badge {
+	background: transparent;
+	border-color: var(--vscode-contrastBorder);
+	box-shadow: none;
+}
+
+.monaco-workbench.monaco-reduce-motion .aexus-plugin-switcher,
+.monaco-workbench.monaco-reduce-motion .aexus-plugin-project-badge {
+	transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench .aexus-plugin-switcher,
+	.monaco-workbench .aexus-plugin-project-badge {
+		transition: none;
+	}
+}

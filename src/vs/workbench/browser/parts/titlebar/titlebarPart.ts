@@ -543,18 +543,23 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 		}
 
 		if (!this.isAuxiliary && hasCustomTitlebar(this.configurationService, this.titleBarStyle)) {
+			const initialMode = this.workbenchModeService.mode;
 			const modeSelector = this._register(new Radio({
 				className: 'segmented',
 				ariaLabel: localize('workbenchMode', "Development Environment"),
 				hoverDelegate: this.hoverDelegate,
 				items: [
-					{ text: localize('adeMode', "ADE"), ariaLabel: localize('adeMode', "ADE"), tooltip: localize('adeModeDescription', "Agent Development Environment"), isActive: this.workbenchModeService.mode === 'ade' },
-					{ text: localize('ideMode', "IDE"), ariaLabel: localize('ideMode', "IDE"), tooltip: localize('ideModeDescription', "Integrated Development Environment"), isActive: this.workbenchModeService.mode === 'ide' }
+					{ text: localize('ideMode', "IDE"), ariaLabel: localize('ideMode', "IDE"), tooltip: localize('ideModeDescription', "Integrated Development Environment"), isActive: initialMode === 'ide' },
+					{ text: localize('adeMode', "ADE"), ariaLabel: localize('adeMode', "ADE"), tooltip: localize('adeModeDescription', "Agent Development Environment"), isActive: initialMode === 'ade' }
 				]
 			}));
-			this._register(modeSelector.onDidSelect(index => this.workbenchModeService.setMode(index === 0 ? 'ade' : 'ide')));
-			this._register(this.workbenchModeService.onDidChangeMode(mode => modeSelector.setActiveItem(mode === 'ade' ? 0 : 1)));
+			this._register(modeSelector.onDidSelect(index => this.workbenchModeService.setMode(index === 0 ? 'ide' : 'ade')));
+			this._register(this.workbenchModeService.onDidChangeMode(mode => {
+				modeSelector.domNode.dataset.mode = mode;
+				modeSelector.setActiveItem(mode === 'ide' ? 0 : 1);
+			}));
 			modeSelector.domNode.classList.add('workbench-mode-switch');
+			modeSelector.domNode.dataset.mode = initialMode;
 			append(this.centerContent, modeSelector.domNode);
 		}
 

@@ -75,6 +75,7 @@
 .monaco-workbench .part.titlebar .project-navigation-toolbar {
 	display: flex;
 	align-items: center;
+	z-index: var(--aexus-z-titlebar-overlay, 2500);
 	-webkit-app-region: no-drag;
 }
 
@@ -117,19 +118,98 @@
 	padding-left: 16px; /* ensure there is some space between title and controls */
 }
 
-/* Development environment selector */
-.monaco-workbench .part.titlebar .workbench-mode-switch {
-	z-index: 2500;
+/* Development environment selector (IDE | ADE pill switch) */
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented {
+	--ms-h: 20px;
+	z-index: var(--aexus-z-titlebar-overlay, 2500);
 	-webkit-app-region: no-drag;
 	flex-shrink: 0;
+	gap: 0;
+	padding: 2px;
 	margin: 0 var(--vscode-spacing-size80);
+	border-radius: var(--aexus-radius-pill, 999px);
+	border: var(--aexus-hairline-width, 1px) solid var(--vscode-commandCenter-border, var(--aexus-hairline, transparent));
+	background: var(--aexus-surface-sunken, color-mix(in srgb, var(--vscode-titleBar-activeForeground) 7%, transparent));
 }
 
 .monaco-workbench .part.titlebar .workbench-mode-switch.segmented > .monaco-button {
 	flex: 0 0 auto;
 	width: auto;
-	height: var(--vscode-spacing-size200);
-	padding: var(--vscode-spacing-sizeNone) var(--vscode-spacing-size80);
+	min-width: 44px;
+	height: var(--ms-h);
+	padding: 0 12px;
+	border-radius: var(--aexus-radius-pill, 999px);
+	font-size: var(--aexus-text-xs, 11px);
+	letter-spacing: 0.04em;
+	font-variant-numeric: var(--aexus-numeric, tabular-nums);
+	color: color-mix(in srgb, var(--vscode-titleBar-activeForeground) 70%, transparent);
+	transition: color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease);
+}
+
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented > .monaco-button:hover:not(.active) {
+	color: var(--vscode-titleBar-activeForeground);
+	background: transparent;
+}
+
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented > .monaco-button.active,
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented > .monaco-button.active:hover {
+	color: var(--vscode-titleBar-activeForeground);
+}
+
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-button.active,
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-button.active:hover {
+	color: var(--aexus-rank-governor, var(--vscode-titleBar-activeForeground));
+}
+
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented > .monaco-radio-selection {
+	border-radius: var(--aexus-radius-pill, 999px);
+	background: var(--aexus-surface-2, color-mix(in srgb, var(--vscode-titleBar-activeForeground) 12%, transparent));
+	border-color: var(--aexus-hairline-strong, transparent);
+	box-shadow: var(--aexus-shadow-1, 0 1px 2px rgb(0 0 0 / 0.24)), var(--aexus-highlight-top, inset 0 1px 0 rgb(255 255 255 / 0.08));
+}
+
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-radio-selection {
+	background: color-mix(in srgb, var(--aexus-rank-governor, transparent) 12%, var(--aexus-surface-2, transparent));
+	border-color: var(--aexus-rank-governor-border, var(--aexus-hairline-strong, transparent));
+}
+
+.monaco-workbench .part.titlebar .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-radio-selection::after {
+	content: '';
+	position: absolute;
+	left: 10px;
+	right: 10px;
+	bottom: 1px;
+	height: 2px;
+	border-radius: var(--aexus-radius-pill, 999px);
+	background: var(--aexus-rank-governor, transparent);
+	opacity: 0.85;
+}
+
+.monaco-workbench .part.titlebar.inactive .workbench-mode-switch.segmented > .monaco-radio-selection {
+	background: color-mix(in srgb, var(--aexus-surface-2, transparent) 55%, transparent);
+	box-shadow: none;
+}
+
+.monaco-workbench .part.titlebar.inactive .workbench-mode-switch.segmented[data-mode="ade"] > .monaco-radio-selection::after {
+	opacity: 0.4;
+}
+
+.monaco-workbench.hc-black .part.titlebar .workbench-mode-switch.segmented,
+.monaco-workbench.hc-light .part.titlebar .workbench-mode-switch.segmented {
+	background: transparent;
+	border-color: var(--vscode-contrastBorder);
+}
+
+.monaco-workbench.hc-black .part.titlebar .workbench-mode-switch.segmented > .monaco-radio-selection,
+.monaco-workbench.hc-light .part.titlebar .workbench-mode-switch.segmented > .monaco-radio-selection {
+	background: transparent;
+	border-color: var(--vscode-contrastActiveBorder);
+	box-shadow: none;
+}
+
+.monaco-workbench.hc-black .part.titlebar .workbench-mode-switch.segmented > .monaco-radio-selection::after,
+.monaco-workbench.hc-light .part.titlebar .workbench-mode-switch.segmented > .monaco-radio-selection::after {
+	display: none;
 }
 
 /* Window title text */

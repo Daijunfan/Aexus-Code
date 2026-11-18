@@ -4,7 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { $, append, Dimension } from '../../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../../base/browser/window.js';
+import { DeferredPromise } from '../../../../../base/common/async.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
+import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../base/common/network.js';
@@ -17,6 +21,7 @@ import {
 	AEXUS_SSH_SCHEME,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
+	IAdeCloudHostConnectionCheck,
 	IAdeCloudHostUpsertInput,
 	IAdeRemoteDirEntry,
 	IAdeRemoteFileStat,
@@ -48,6 +53,7 @@ import {
 import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService, IWorkspaceFoldersChangeEvent, toWorkspaceFolder, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
+import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
 import { IWorkbenchEnvironmentService } from '../../../../services/environment/common/environmentService.js';
 import { IWorkspaceEditingService } from '../../../../services/workspaces/common/workspaceEditing.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
@@ -55,11 +61,31 @@ import { IProjectNavigationService, ProjectNavigationService } from '../../../fi
 import { IShellLaunchConfig } from '../../../../../platform/terminal/common/terminal.js';
 import { ProjectTerminalService } from '../../../terminal/browser/projectTerminalService.js';
 import { AexusSshFileSystemProvider, pickProjectFoldersWithCloudOption } from '../../browser/adeCloudHostFileSystemProvider.js';
+import {
+	AdeCloudHostsEditorInput,
+	AdeCloudHostsEditorPane,
+	ADE_CLOUD_HOST_STALE_CHECK_MS,
+	buildSshCommandPreview,
+	computeCloudHostKpis,
+	countCloudHostsByOs,
+	countCloudHostsByStatus,
+	emptyDraftForm,
+	filterAndSortCloudHosts,
+	formatCloudHostTargetBadge,
+	getCloudHostLatencyTier,
+	getCloudHostStatus,
+	hostToDraftForm,
+	hostToSshCommand,
+	IAdeCloudHostQuery,
+	isCloudHostCheckStale,
+	isDraftFormEqual,
+	parseProxyJumpChain,
+} from '../../browser/adeCloudHostsEditorPane.js';
 import { executeAdeControlRequest } from '../../browser/adeControlHandler.js';
 import { reconcileIdeWorkspaceWithCatalog } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
 import { IAdeSessionsService } from '../../browser/adeSessionsService.js';
-import { IAdeEditorService, IAdeProjectsService } from '../../common/ade.js';
+import { IAdeEditorService, IAdeProject, IAdeProjectsService } from '../../common/ade.js';
 
 class FakeCloudHostBackend {
 	statResult: IAdeRemoteFileStat = { type: 'file', ctime: 10, mtime: 20, size: 30 };
@@ -402,7 +428,7 @@ suite('ProjectTerminalService cloud host launches', () => {
 				configArgs: ['-F', effectiveSshConfigPath],
 				transportFlags: ['-t', '--'],
 				target: 'cloud-win',
-				command: 'powershell -NoLogo -NoExit -Command "Set-Location -LiteralPath \'C:\\Users\\Admin\\project\'"',
+				command: 'powershell -NoLogo -NoExit -EncodedCommand UwBlAHQALQBMAG8AYwBhAHQAaQBvAG4AIAAtAEwAaQB0AGUAcgBhAGwAUABhAHQAaAAgACcAQwA6AFwAVQBzAGUAcgBzAFwAQQBkAG0AaQBuAFwAcAByAG8AagBlAGMAdAAnAA==',
 				remotePty: true,
 				localCwd: true,
 			},
@@ -1153,5 +1179,597 @@ suite('pickProjectFoldersWithCloudOption', () => {
 				result: ['file:///Users/me/local-project'],
 			},
 		});
+	});
+});
+
+suite('Cloud Host Studio view-model helpers', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	function makeHost(partial: Partial<IAdeCloudHost> & { id: string }): IAdeCloudHost {
+		return {
+			name: partial.id,
+			alias: partial.id,
+			hostName: '10.0.0.1',
+			port: 22,
+			os: 'linux',
+			recentDirectories: [],
+			source: 'user',
+			createdAt: 0,
+			updatedAt: 0,
+			...partial,
+		};
+	}
+
+	test('derives status and latency tiers from the last connection check', () => {
+		assert.deepStrictEqual([
+			getCloudHostStatus({}),
+			getCloudHostStatus({ lastTestStatus: { ok: true, checkedAt: 0, latencyMs: 10 } }),
+			getCloudHostStatus({ lastTestStatus: { ok: false, checkedAt: 0, latencyMs: 10 } }),
+		], ['untested', 'ok', 'err']);
+
+		assert.deepStrictEqual([
+			getCloudHostLatencyTier({}),
+			getCloudHostLatencyTier({ lastTestStatus: { ok: true, checkedAt: 0, latencyMs: 79 } }),
+			getCloudHostLatencyTier({ lastTestStatus: { ok: true, checkedAt: 0, latencyMs: 80 } }),
+			getCloudHostLatencyTier({ lastTestStatus: { ok: true, checkedAt: 0, latencyMs: 249 } }),
+			getCloudHostLatencyTier({ lastTestStatus: { ok: true, checkedAt: 0, latencyMs: 250 } }),
+			getCloudHostLatencyTier({ lastTestStatus: { ok: false, checkedAt: 0, latencyMs: 10 } }),
+		], ['none', 'good', 'warn', 'warn', 'bad', 'bad']);
+	});
+
+	test('flags checks older than 24 hours as stale', () => {
+		const now = 10 * ADE_CLOUD_HOST_STALE_CHECK_MS;
+		const check = (age: number) => ({ lastTestStatus: { ok: true, checkedAt: now - age, latencyMs: 10 } });
+
+		assert.deepStrictEqual([
+			isCloudHostCheckStale({}, now),
+			isCloudHostCheckStale(check(ADE_CLOUD_HOST_STALE_CHECK_MS), now),
+			isCloudHostCheckStale(check(ADE_CLOUD_HOST_STALE_CHECK_MS + 1), now),
+		], [false, false, true]);
+	});
+
+	test('formats target badges and parses proxy jump chains', () => {
+		assert.deepStrictEqual([
+			formatCloudHostTargetBadge({ user: 'dev', hostName: 'server', port: 2222 }),
+			formatCloudHostTargetBadge({ hostName: 'server', port: 22 }),
+			formatCloudHostTargetBadge({ user: 'dev', hostName: 'server', port: 0 }),
+		], ['dev@server:2222', 'server:22', 'dev@server:22']);
+
+		assert.deepStrictEqual([
+			parseProxyJumpChain(undefined),
+			parseProxyJumpChain('  '),
+			parseProxyJumpChain(' bastion , jump2,, jump3 '),
+		], [[], [], ['bastion', 'jump2', 'jump3']]);
+	});
+
+	test('builds ssh command previews for every option', () => {
+		assert.deepStrictEqual([
+			buildSshCommandPreview({ hostName: 'server', user: '', port: '22', identityFile: '', proxyJump: '', strictHostKeyChecking: '' }),
+			buildSshCommandPreview({ hostName: 'server', user: 'dev', port: '2222', identityFile: '', proxyJump: '', strictHostKeyChecking: '' }),
+			buildSshCommandPreview({ hostName: 'server', user: 'dev', port: '22', identityFile: '', proxyJump: 'bastion, jump2', strictHostKeyChecking: '' }),
+			buildSshCommandPreview({ hostName: 'server', user: 'dev', port: '22', identityFile: '/home/me/my key', proxyJump: '', strictHostKeyChecking: 'accept-new' }),
+			buildSshCommandPreview({ hostName: '  ', user: '', port: '22', identityFile: '', proxyJump: '', strictHostKeyChecking: '' }),
+		], [
+			'ssh server',
+			'ssh -p 2222 dev@server',
+			'ssh -J bastion,jump2 dev@server',
+			'ssh -i \'/home/me/my key\' -o StrictHostKeyChecking=accept-new dev@server',
+			'ssh \'<host>\'',
+		]);
+	});
+
+	test('serializes hosts into copy-ready ssh commands', () => {
+		assert.deepStrictEqual([
+			hostToSshCommand(makeHost({ id: 'plain' })),
+			hostToSshCommand(makeHost({ id: 'dev', user: 'dev', port: 2222, proxyJump: 'bastion', strictHostKeyChecking: 'yes' })),
+		], [
+			'ssh 10.0.0.1',
+			'ssh -p 2222 -J bastion -o StrictHostKeyChecking=yes dev@10.0.0.1',
+		]);
+	});
+
+	test('computes fleet KPIs and per-os/status counts', () => {
+		const hosts = [
+			makeHost({ id: 'a', source: 'vscode', lastTestStatus: { ok: true, checkedAt: 10, latencyMs: 10 } }),
+			makeHost({ id: 'b', source: 'ssh-config', lastTestStatus: { ok: true, checkedAt: 20, latencyMs: 21 } }),
+			makeHost({ id: 'c', os: 'macos', lastTestStatus: { ok: false, checkedAt: 30, latencyMs: 50 } }),
+			makeHost({ id: 'd', os: 'windows' }),
+			makeHost({ id: 'e' }),
+		];
+
+		assert.deepStrictEqual(computeCloudHostKpis(hosts), {
+			total: 5,
+			connected: 2,
+			failing: 1,
+			untested: 2,
+			avgLatencyMs: 16,
+			p95LatencyMs: 21,
+			importedFromVsCode: 1,
+			importedFromSshConfig: 1,
+		});
+		assert.deepStrictEqual(computeCloudHostKpis([]), {
+			total: 0,
+			connected: 0,
+			failing: 0,
+			untested: 0,
+			avgLatencyMs: undefined,
+			p95LatencyMs: undefined,
+			importedFromVsCode: 0,
+			importedFromSshConfig: 0,
+		});
+		assert.deepStrictEqual(countCloudHostsByOs(hosts), { all: 5, linux: 3, macos: 1, windows: 1 });
+		assert.deepStrictEqual(countCloudHostsByStatus(hosts), { all: 5, ok: 2, err: 1, untested: 2 });
+	});
+
+	test('filters by text, os and status, and sorts by name/latency/checked', () => {
+		const hosts = [
+			makeHost({ id: 'alpha', name: 'host10', alias: 'alpha-alias', hostName: '10.0.0.10', user: 'alice', os: 'linux', lastTestStatus: { ok: true, checkedAt: 100, latencyMs: 200 } }),
+			makeHost({ id: 'beta', name: 'host2', alias: 'beta-alias', hostName: '10.0.0.2', user: 'bob', os: 'macos', proxyJump: 'jumpbox', lastTestStatus: { ok: true, checkedAt: 300, latencyMs: 50 } }),
+			makeHost({ id: 'gamma', name: 'host1', alias: 'gamma-alias', hostName: '10.0.0.1', os: 'linux', lastTestStatus: { ok: false, checkedAt: 200, latencyMs: 30 } }),
+			makeHost({ id: 'delta', name: 'host3', alias: 'delta-alias', hostName: '10.0.0.3', os: 'windows' }),
+		];
+		const ids = (query: Partial<IAdeCloudHostQuery>) => filterAndSortCloudHosts(hosts, {
+			text: '',
+			os: 'all',
+			status: 'all',
+			sort: 'name',
+			...query,
+		}).map(host => host.id);
+
+		assert.deepStrictEqual([
+			ids({ text: 'jumpbox' }),
+			ids({ text: 'ALICE' }),
+			ids({ text: '10.0.0.2' }),
+			ids({ text: 'host10' }),
+			ids({ text: 'delta-alias' }),
+			ids({ os: 'linux' }),
+			ids({ status: 'ok' }),
+			ids({ sort: 'name' }),
+			ids({ sort: 'latency' }),
+			ids({ sort: 'checked' }),
+		], [
+			['beta'],
+			['alpha'],
+			['beta'],
+			['alpha'],
+			['delta'],
+			['gamma', 'alpha'],
+			['beta', 'alpha'],
+			['gamma', 'beta', 'delta', 'alpha'],
+			['beta', 'alpha', 'gamma', 'delta'],
+			['beta', 'gamma', 'alpha', 'delta'],
+		]);
+	});
+
+	test('maps between hosts and draft forms', () => {
+		assert.deepStrictEqual(emptyDraftForm(), {
+			name: '',
+			alias: '',
+			hostName: '',
+			user: 'ubuntu',
+			port: '22',
+			os: 'linux',
+			identityFile: '',
+			proxyJump: '',
+			strictHostKeyChecking: 'accept-new',
+			defaultDirectory: '',
+			notes: '',
+		});
+
+		assert.deepStrictEqual(hostToDraftForm(makeHost({ id: 'bare' })), {
+			id: 'bare',
+			name: 'bare',
+			alias: 'bare',
+			hostName: '10.0.0.1',
+			user: '',
+			port: '22',
+			os: 'linux',
+			identityFile: '',
+			proxyJump: '',
+			strictHostKeyChecking: '',
+			defaultDirectory: '',
+			notes: '',
+		});
+
+		const host = makeHost({
+			id: 'dev',
+			name: 'Dev box',
+			alias: 'dev',
+			hostName: 'dev.example.com',
+			user: 'dev',
+			port: 2222,
+			os: 'macos',
+			identityFile: '/keys/id',
+			proxyJump: 'bastion',
+			strictHostKeyChecking: 'yes',
+			defaultDirectory: '/srv',
+			notes: 'notes',
+		});
+		const draft = hostToDraftForm(host);
+		assert.deepStrictEqual(draft, {
+			id: 'dev',
+			name: 'Dev box',
+			alias: 'dev',
+			hostName: 'dev.example.com',
+			user: 'dev',
+			port: '2222',
+			os: 'macos',
+			identityFile: '/keys/id',
+			proxyJump: 'bastion',
+			strictHostKeyChecking: 'yes',
+			defaultDirectory: '/srv',
+			notes: 'notes',
+		});
+
+		assert.deepStrictEqual([
+			isDraftFormEqual(draft, { ...draft }),
+			isDraftFormEqual(draft, { ...draft, id: 'other' }),
+			isDraftFormEqual(draft, { ...draft, port: '22' }),
+		], [true, true, false]);
+	});
+});
+
+suite('AdeCloudHostsEditorPane Console Grid & Drawer', () => {
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+	const projectFolder = '/srv/projects/repo-one';
+	const projectUri = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'h1', path: projectFolder });
+
+	function query<T extends Element>(root: ParentNode, selector: string): T {
+		const el = root.querySelector<T>(selector);
+		assert.ok(el, `Missing element: ${selector}`);
+		return el;
+	}
+
+	function queryAll<T extends Element>(root: ParentNode, selector: string): T[] {
+		return [...root.querySelectorAll<T>(selector)];
+	}
+
+	async function waitFor(probe: () => boolean, label: string, timeoutMs = 2000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (!probe()) {
+			assert.ok(Date.now() < deadline, `Timed out waiting for ${label}`);
+			await new Promise<void>(resolve => mainWindow.setTimeout(resolve, 5));
+		}
+	}
+
+	function makePaneHost(partial: Partial<IAdeCloudHost> & { id: string }): IAdeCloudHost {
+		return {
+			name: partial.id,
+			alias: partial.id,
+			hostName: `10.0.0.${partial.id}`,
+			port: 22,
+			os: 'linux',
+			recentDirectories: [],
+			source: 'user',
+			createdAt: 0,
+			updatedAt: 0,
+			...partial,
+		};
+	}
+
+	async function createPaneHarness() {
+		const instantiation = workbenchInstantiationService(undefined, store);
+
+		const hosts: IAdeCloudHost[] = [
+			makePaneHost({
+				id: 'h1',
+				name: 'Alpha GPU',
+				alias: 'h1',
+				hostName: '10.0.0.1',
+				user: 'ubuntu',
+				port: 2222,
+				os: 'linux',
+				proxyJump: 'bastion, jump2',
+				recentDirectories: [`${projectFolder}`, '/srv/projects/repo-two', '/srv/projects/repo-three', '/srv/projects/repo-four', '/srv/archive/old'],
+				source: 'vscode',
+				lastTestStatus: { ok: true, checkedAt: 1, latencyMs: 40 },
+			}),
+			makePaneHost({ id: 'h2', name: 'Beta Mac', hostName: '10.0.0.2', os: 'macos' }),
+			makePaneHost({ id: 'h3', name: 'Gamma Win', hostName: '10.0.0.3', os: 'windows' }),
+			makePaneHost({
+				id: 'h4',
+				name: 'Delta Linux',
+				hostName: '10.0.0.4',
+				os: 'linux',
+				source: 'ssh-config',
+				lastTestStatus: { ok: true, checkedAt: 2, latencyMs: 200 },
+			}),
+			makePaneHost({
+				id: 'h5',
+				name: 'Epsilon Fail',
+				hostName: '10.0.0.5',
+				os: 'windows',
+				lastTestStatus: { ok: false, checkedAt: 3, latencyMs: 500, error: 'timeout' },
+			}),
+		];
+
+		const upsertCalls: IAdeCloudHostUpsertInput[] = [];
+		const registeredProjects: URI[] = [];
+		const selectedProjects: URI[] = [];
+		const recordedDirectories: Array<{ id: string; path: string }> = [];
+		const deferredTests = new Map<string, DeferredPromise<IAdeCloudHostConnectionCheck>>();
+		const projects: IAdeProject[] = [];
+
+		instantiation.stub(IWorkspaceContextService, {
+			getWorkbenchState: () => WorkbenchState.WORKSPACE,
+			getWorkspace: () => new Workspace('cloud-console', [toWorkspaceFolder(projectUri)]),
+			onDidChangeWorkspaceFolders: Event.None,
+		});
+		instantiation.stub(IAdeProjectsService, upcastPartial<IAdeProjectsService>({
+			projects,
+			registerProject: (uri: URI, name?: string) => {
+				const project: IAdeProject = { uri, name: name ?? basename(uri) };
+				projects.push(project);
+				registeredProjects.push(uri);
+				return project;
+			},
+			selectProject: (uri: URI) => { selectedProjects.push(uri); },
+		}));
+		instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
+			onDidChangeHosts: Event.None,
+			listHosts: async () => [...hosts],
+			getHost: async (idOrAlias: string) => hosts.find(host => host.id === idOrAlias || host.alias === idOrAlias),
+			upsertHost: async (input: IAdeCloudHostUpsertInput) => {
+				upsertCalls.push(input);
+				const alias = input.alias ?? input.name;
+				const saved: IAdeCloudHost = {
+					id: input.id ?? alias,
+					name: input.name,
+					alias,
+					hostName: input.hostName,
+					user: input.user,
+					port: input.port ?? 22,
+					os: input.os ?? 'linux',
+					identityFile: input.identityFile,
+					proxyJump: input.proxyJump,
+					strictHostKeyChecking: input.strictHostKeyChecking,
+					defaultDirectory: input.defaultDirectory,
+					recentDirectories: input.recentDirectories ?? [],
+					source: 'user',
+					notes: input.notes,
+					createdAt: 10,
+					updatedAt: 11,
+				};
+				const index = hosts.findIndex(host => host.id === saved.id);
+				if (index === -1) {
+					hosts.push(saved);
+				} else {
+					hosts[index] = saved;
+				}
+				return saved;
+			},
+			recordRecentDirectory: async (idOrAlias: string, path: string) => {
+				recordedDirectories.push({ id: idOrAlias, path });
+				return hosts.find(host => host.id === idOrAlias);
+			},
+			testConnection: (idOrAlias: string) => {
+				const deferred = new DeferredPromise<IAdeCloudHostConnectionCheck>();
+				deferredTests.set(idOrAlias, deferred);
+				return deferred.p;
+			},
+		}));
+
+		const container = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:800px;' }));
+		store.add({ dispose: () => container.remove() });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(instantiation.createInstance(AdeCloudHostsEditorPane, fakeGroup));
+		pane.create(container);
+		pane.layout(new Dimension(1200, 800));
+		const input = store.add(new AdeCloudHostsEditorInput());
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		return {
+			container,
+			hosts,
+			upsertCalls,
+			registeredProjects,
+			selectedProjects,
+			recordedDirectories,
+			resolveTest: (id: string, check: IAdeCloudHostConnectionCheck) => {
+				const index = hosts.findIndex(host => host.id === id);
+				assert.ok(index !== -1, `Unknown host ${id}`);
+				hosts[index] = { ...hosts[index], lastTestStatus: check };
+				const deferred = deferredTests.get(id);
+				assert.ok(deferred, `No pending test for ${id}`);
+				deferred.complete(check);
+			},
+		};
+	}
+
+	function kpi(container: HTMLElement, kind: 'total' | 'connected' | 'latency' | 'imported'): { value: string | null; meta: string | null } {
+		const el = query<HTMLElement>(container, `.ade-ch-kpi[data-kpi="${kind}"]`);
+		return {
+			value: query<HTMLElement>(el, '.ade-ch-kpi-value').textContent,
+			meta: query<HTMLElement>(el, '.ade-ch-kpi-meta').textContent,
+		};
+	}
+
+	const kpiKinds: readonly ('total' | 'connected' | 'latency' | 'imported')[] = ['total', 'connected', 'latency', 'imported'];
+
+	function card(container: HTMLElement, id: string): HTMLElement {
+		return query<HTMLElement>(container, `article.ade-ch-card[data-host-id="${id}"]`);
+	}
+
+	function click(root: ParentNode, selector: string): void {
+		query<HTMLElement>(root, selector).dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+	}
+
+	test('renders the console KPI strip, OS/status chip counts, sort control and view toggle', async () => {
+		const harness = await createPaneHarness();
+		const { container } = harness;
+
+		const studio = query<HTMLElement>(container, '.ade-ch-studio.ade-ch-console');
+		assert.strictEqual(studio.dataset.view, 'grid');
+		assert.strictEqual(queryAll(container, '.ade-ch-kpi').length, 4);
+
+		assert.deepStrictEqual(
+			kpiKinds.map(kind => kpi(container, kind)),
+			[
+				{ value: '5', meta: '2 untested' },
+				{ value: '2/5', meta: '1 failing' },
+				{ value: '120 ms', meta: 'p95 200 ms' },
+				{ value: '1', meta: '+ssh_config 1' },
+			],
+		);
+
+		const osCounts = Object.fromEntries(
+			['all', 'linux', 'macos', 'windows'].map(os => [os, query<HTMLElement>(container, `.ade-ch-os-chip[data-os="${os}"] .ade-ch-os-chip-count`).textContent]),
+		);
+		assert.deepStrictEqual(osCounts, { all: '5', linux: '2', macos: '1', windows: '2' });
+
+		const statusCounts = Object.fromEntries(
+			['all', 'ok', 'err', 'untested'].map(status => [status, query<HTMLElement>(container, `.ade-ch-status-chip[data-status="${status}"] .ade-ch-os-chip-count`).textContent]),
+		);
+		assert.deepStrictEqual(statusCounts, { all: '5', ok: '2', err: '1', untested: '2' });
+
+		const sort = query<HTMLSelectElement>(container, 'select.ade-ch-sort');
+		assert.deepStrictEqual(queryAll<HTMLOptionElement>(sort, 'option').map(option => option.value), ['name', 'latency', 'checked']);
+		assert.strictEqual(queryAll(container, '.ade-ch-view-toggle').length, 1);
+
+		click(container, '.ade-ch-view-toggle [data-view="list"]');
+		assert.strictEqual(studio.dataset.view, 'list');
+		click(container, '.ade-ch-view-toggle [data-view="grid"]');
+		assert.strictEqual(studio.dataset.view, 'grid');
+	});
+
+	test('renders host cards with OS badges, targets, jump chains, latency tiers and project chips', async () => {
+		const harness = await createPaneHarness();
+		const { container } = harness;
+
+		assert.strictEqual(queryAll(container, 'article.ade-ch-card').length, 5);
+		assert.strictEqual(queryAll(container, '.ade-ch-os-badge.os-linux').length, 2);
+		assert.strictEqual(queryAll(container, '.ade-ch-os-badge.os-macos').length, 1);
+		assert.strictEqual(queryAll(container, '.ade-ch-os-badge.os-windows').length, 2);
+
+		assert.deepStrictEqual(
+			['h1', 'h2', 'h3', 'h4', 'h5'].map(id => query<HTMLElement>(card(container, id), 'code.ade-ch-target-badge').textContent),
+			['ubuntu@10.0.0.1:2222', '10.0.0.2:22', '10.0.0.3:22', '10.0.0.4:22', '10.0.0.5:22'],
+		);
+
+		assert.deepStrictEqual(
+			queryAll<HTMLElement>(card(container, 'h1'), '.ade-ch-jump-hop').map(hop => hop.textContent),
+			['bastion', 'jump2', 'h1'],
+		);
+		assert.strictEqual(queryAll(card(container, 'h2'), '.ade-ch-jump-chain').length, 0);
+
+		assert.deepStrictEqual(
+			['h1', 'h2', 'h3', 'h4', 'h5'].map(id => query<HTMLElement>(card(container, id), '.ade-ch-latency').dataset.tier),
+			['good', 'none', 'none', 'warn', 'bad'],
+		);
+
+		const chips = queryAll<HTMLElement>(card(container, 'h1'), '.ade-ch-project-chip');
+		assert.strictEqual(chips.length, 3);
+		assert.strictEqual(query<HTMLElement>(card(container, 'h1'), '.ade-ch-project-more').textContent, '+2');
+		assert.strictEqual(queryAll(card(container, 'h2'), '.ade-ch-project-none').length, 1);
+
+		chips[0].dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+		await waitFor(() => harness.selectedProjects.length > 0, 'cloud project registration');
+
+		assert.deepStrictEqual(harness.registeredProjects.map(uri => uri.toString()), ['aexus-ssh://h1/srv/projects/repo-one']);
+		assert.deepStrictEqual(harness.selectedProjects.map(uri => uri.toString()), ['aexus-ssh://h1/srv/projects/repo-one']);
+		assert.deepStrictEqual(harness.recordedDirectories, [{ id: 'h1', path: projectFolder }]);
+	});
+
+	test('runs per-host test buttons concurrently, patches only the tested cards and updates KPIs on resolve', async () => {
+		const harness = await createPaneHarness();
+		const { container } = harness;
+
+		const h2Btn = query<HTMLButtonElement>(card(container, 'h2'), '.ade-ch-test-btn');
+		const h3Btn = query<HTMLButtonElement>(card(container, 'h3'), '.ade-ch-test-btn');
+		const h1Card = card(container, 'h1');
+		const h4Card = card(container, 'h4');
+		assert.strictEqual(h2Btn.dataset.state, 'idle');
+		assert.strictEqual(h3Btn.dataset.state, 'idle');
+
+		h2Btn.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+		h3Btn.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+		assert.strictEqual(h2Btn.dataset.state, 'testing');
+		assert.strictEqual(h3Btn.dataset.state, 'testing');
+		assert.strictEqual(h2Btn.disabled, true);
+		assert.strictEqual(h3Btn.disabled, true);
+		assert.strictEqual(card(container, 'h1'), h1Card, 'Testing h2/h3 must not rebuild unrelated cards');
+		assert.strictEqual(card(container, 'h4'), h4Card, 'Testing h2/h3 must not rebuild unrelated cards');
+
+		harness.resolveTest('h2', { ok: true, checkedAt: 100, latencyMs: 30 });
+		harness.resolveTest('h3', { ok: false, checkedAt: 100, latencyMs: 500, error: 'boom' });
+
+		await waitFor(() => h2Btn.dataset.state === 'ok' && h3Btn.dataset.state === 'err', 'parallel test results');
+
+		assert.strictEqual(query<HTMLElement>(card(container, 'h2'), '.ade-ch-latency').dataset.tier, 'good');
+		assert.strictEqual(query<HTMLElement>(card(container, 'h2'), '.ade-ch-latency-text').textContent, '30 ms');
+		assert.strictEqual(query<HTMLElement>(card(container, 'h3'), '.ade-ch-latency').dataset.tier, 'bad');
+		assert.strictEqual(query<HTMLElement>(card(container, 'h3'), '.ade-ch-latency-text').textContent, 'failed');
+
+		assert.deepStrictEqual(
+			kpiKinds.map(kind => kpi(container, kind)),
+			[
+				{ value: '5', meta: 'all tested' },
+				{ value: '3/5', meta: '2 failing' },
+				{ value: '90 ms', meta: 'p95 200 ms' },
+				{ value: '1', meta: '+ssh_config 1' },
+			],
+		);
+	});
+
+	test('opens the create-host drawer with live alias sanitizing, ssh preview and save', async () => {
+		const harness = await createPaneHarness();
+		const { container } = harness;
+		const studio = query<HTMLElement>(container, '.ade-ch-studio.ade-ch-console');
+
+		assert.strictEqual(studio.hasAttribute('data-drawer-open'), false);
+		click(container, '.ade-ch-new-host');
+		assert.strictEqual(studio.hasAttribute('data-drawer-open'), true);
+
+		const drawer = query<HTMLElement>(container, 'aside.ade-ch-drawer');
+		assert.strictEqual(drawer.getAttribute('aria-hidden'), 'false');
+		assert.strictEqual(queryAll(drawer, 'fieldset.ade-ch-fieldset').length, 3);
+
+		const field = (name: string) => query<HTMLInputElement>(drawer, `input[data-field="${name}"]`);
+		const typeInto = (name: string, value: string) => {
+			const input = field(name);
+			input.value = value;
+			input.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+		};
+		const preview = () => query<HTMLElement>(drawer, '.ade-ch-ssh-preview-code').textContent;
+
+		typeInto('name', 'GPU Server!');
+		assert.strictEqual(field('alias').value, 'GPU-Server-');
+		assert.strictEqual(preview(), `ssh -o StrictHostKeyChecking=accept-new 'ubuntu@<host>'`);
+
+		typeInto('hostName', '203.0.113.10');
+		typeInto('user', 'root');
+		typeInto('port', '2222');
+		typeInto('proxyJump', 'bastion, jump2');
+		typeInto('identityFile', '~/.ssh/id_ed25519');
+		click(drawer, '.ade-ch-seg-btn[data-value="yes"]');
+
+		assert.strictEqual(preview(), 'ssh -p 2222 -J bastion,jump2 -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes root@203.0.113.10');
+
+		click(drawer, '.save-btn');
+		await waitFor(() => harness.upsertCalls.length > 0, 'backend.upsertHost');
+		await waitFor(() => container.querySelector('article.ade-ch-card[data-host-id="GPU-Server-"]') !== null, 'saved host card');
+
+		assert.deepStrictEqual(harness.upsertCalls[0], {
+			id: undefined,
+			name: 'GPU Server!',
+			alias: 'GPU-Server-',
+			hostName: '203.0.113.10',
+			user: 'root',
+			port: 2222,
+			os: 'linux',
+			identityFile: '~/.ssh/id_ed25519',
+			proxyJump: 'bastion, jump2',
+			strictHostKeyChecking: 'yes',
+			defaultDirectory: '',
+			notes: '',
+		});
+
+		const savedCard = card(container, 'GPU-Server-');
+		assert.strictEqual(query<HTMLElement>(savedCard, '.ade-ch-card-name').textContent, 'GPU Server!');
+		assert.strictEqual(query<HTMLElement>(savedCard, 'code.ade-ch-target-badge').textContent, 'root@203.0.113.10:2222');
 	});
 });

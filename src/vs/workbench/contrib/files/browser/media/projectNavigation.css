@@ -1,0 +1,177 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Titlebar project navigation capsule ("Focus -> Home <-> Forward").
+ * Loaded by contrib/files so titlebarpart.css remains free of contrib specifics.
+ */
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .actions-container:not(:empty) {
+	display: inline-flex;
+	align-items: center;
+	gap: 0;
+	height: 24px;
+	padding: 0 2px;
+	margin-left: 4px;
+	box-sizing: border-box;
+	border-radius: var(--aexus-radius-pill, 999px);
+	border: var(--aexus-hairline-width, 1px) solid var(--vscode-commandCenter-border, var(--aexus-hairline, transparent));
+	background: var(--vscode-commandCenter-background, color-mix(in srgb, var(--vscode-titleBar-activeForeground) 6%, transparent));
+	box-shadow: var(--aexus-highlight-top, none);
+	animation: aexus-nav-in var(--aexus-dur-base, 160ms) var(--aexus-ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .action-item {
+	display: inline-flex;
+	align-items: center;
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .action-item + .action-item {
+	position: relative;
+	padding-left: 3px;
+	margin-left: 2px;
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .action-item + .action-item::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 4px;
+	bottom: 4px;
+	width: var(--aexus-hairline-width, 1px);
+	background: color-mix(in srgb, var(--vscode-titleBar-activeForeground) 12%, transparent);
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .action-label {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 20px;
+	padding: 0;
+	border-radius: var(--aexus-radius-pill, 999px);
+	color: var(--vscode-titleBar-activeForeground);
+	transition: background-color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease), color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease);
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .action-label:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Focused project quick-switcher pill inside the capsule */
+.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 20px;
+	padding: 0 7px 0 8px;
+	box-sizing: border-box;
+	border-radius: var(--aexus-radius-pill, 999px);
+	color: var(--vscode-titleBar-activeForeground);
+	font-size: var(--aexus-text-xs, 11px);
+	line-height: var(--aexus-lh-xs, 16px);
+	font-weight: var(--aexus-weight-semibold, 600);
+	cursor: pointer;
+	-webkit-app-region: no-drag;
+	transition: background-color var(--aexus-dur-fast, 120ms) var(--aexus-ease-out, ease);
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .action-item:focus-visible .aexus-nav-project,
+.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project-dot {
+	flex-shrink: 0;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--vscode-focusBorder);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--vscode-focusBorder) 22%, transparent);
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project[data-remote="true"] .aexus-nav-project-dot {
+	width: auto;
+	height: auto;
+	border-radius: 0;
+	background: transparent;
+	box-shadow: none;
+	font-size: 11px;
+	color: var(--aexus-cloud, var(--vscode-focusBorder));
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project-name {
+	max-width: 180px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project-chevron {
+	flex-shrink: 0;
+	font-size: 11px;
+	opacity: 0.7;
+}
+
+@media (max-width: 900px) {
+	.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project-name {
+		max-width: 96px;
+	}
+}
+
+@media (max-width: 680px) {
+	.monaco-workbench .part.titlebar .project-navigation-toolbar .aexus-nav-project-name {
+		display: none;
+	}
+}
+
+.monaco-workbench .part.titlebar.inactive .project-navigation-toolbar .action-label,
+.monaco-workbench .part.titlebar.inactive .project-navigation-toolbar .aexus-nav-project {
+	color: var(--vscode-titleBar-inactiveForeground);
+}
+
+.monaco-workbench .part.titlebar.inactive .project-navigation-toolbar .aexus-nav-project-dot {
+	box-shadow: none;
+	opacity: 0.65;
+}
+
+.monaco-workbench.hc-black .part.titlebar .project-navigation-toolbar .actions-container:not(:empty),
+.monaco-workbench.hc-light .part.titlebar .project-navigation-toolbar .actions-container:not(:empty) {
+	background: transparent;
+	border-color: var(--vscode-contrastBorder);
+	box-shadow: none;
+}
+
+.monaco-workbench.hc-black .part.titlebar .project-navigation-toolbar .action-item + .action-item::before,
+.monaco-workbench.hc-light .part.titlebar .project-navigation-toolbar .action-item + .action-item::before {
+	background: var(--vscode-contrastBorder);
+}
+
+@keyframes aexus-nav-in {
+	from {
+		opacity: 0;
+		transform: translateX(-4px);
+	}
+
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+.monaco-workbench.monaco-reduce-motion .part.titlebar .project-navigation-toolbar .actions-container:not(:empty) {
+	animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench .part.titlebar .project-navigation-toolbar .actions-container:not(:empty) {
+		animation: none;
+	}
+}

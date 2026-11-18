@@ -3,9 +3,16 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import './media/projectNavigation.css';
 import * as nls from '../../../../nls.js';
+import { $, append } from '../../../../base/browser/dom.js';
+import { BaseActionViewItem, IBaseActionViewItemOptions } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
+import { IAction } from '../../../../base/common/actions.js';
+import { Emitter, Event } from '../../../../base/common/event.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { ToggleAutoSaveAction, FocusFilesExplorer, GlobalCompareResourcesAction, ShowActiveFileInExplorer, CompareWithClipboardAction, NEW_FILE_COMMAND_ID, NEW_FILE_LABEL, NEW_FOLDER_COMMAND_ID, NEW_FOLDER_LABEL, TRIGGER_RENAME_LABEL, MOVE_FILE_TO_TRASH_LABEL, COPY_FILE_LABEL, PASTE_FILE_LABEL, FileCopiedContext, renameHandler, moveFileToTrashHandler, copyFileHandler, pasteFileHandler, deleteFileHandler, cutFileHandler, DOWNLOAD_COMMAND_ID, openFilePreserveFocusHandler, DOWNLOAD_LABEL, OpenActiveFileInEmptyWorkspace, UPLOAD_COMMAND_ID, UPLOAD_LABEL, CompareNewUntitledTextFilesAction, SetActiveEditorReadonlyInSession, SetActiveEditorWriteableInSession, ToggleActiveEditorReadonlyInSession, ResetActiveEditorReadonlyInSession } from './fileActions.js';
 import { revertLocalChangesCommand, acceptLocalChangesCommand, CONFLICT_RESOLUTION_CONTEXT } from './editors/textFileSaveErrorHandler.js';
+import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ICommandAction } from '../../../../platform/action/common/action.js';
 import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
@@ -22,7 +29,10 @@ import { WorkbenchListDoubleSelection } from '../../../../platform/list/browser/
 import { Schemas } from '../../../../base/common/network.js';
 import { DirtyWorkingCopiesContext, EnterMultiRootWorkspaceSupportContext, HasWebFileSystemAccess, IsSessionsWindowContext, WorkbenchStateContext, WorkspaceFolderCountContext, SidebarFocusContext, ActiveEditorCanRevertContext, ActiveEditorContext, ActiveEditorDirtyContext, ResourceContextKey, ActiveEditorAvailableEditorIdsContext, MultipleEditorsSelectedInGroupContext, TwoEditorsSelectedInGroupContext, SelectedEditorsInGroupFileOrUntitledResourceContextKey } from '../../../common/contextkeys.js';
 import { IsWebContext } from '../../../../platform/contextkey/common/contextkeys.js';
-import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
+import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { IExplorerService } from './files.js';
 import { Codicon } from '../../../../base/common/codicons.js';
@@ -65,6 +75,14 @@ registerAction2(class EnterProjectAction extends Action2 {
 	}
 });
 
+const CURRENT_PROJECT_ACTION_ID = 'workbench.action.projects.current';
+
+function formatFocusedProjectTarget(uri: URI): string {
+	return uri.scheme === AEXUS_SSH_SCHEME && uri.authority
+		? `${uri.authority}:${uri.path}`
+		: uri.fsPath;
+}
+
 registerAction2(class GoToProjectHomeAction extends Action2 {
 	constructor() {
 		super({
@@ -81,6 +99,47 @@ registerAction2(class GoToProjectHomeAction extends Action2 {
 	}
 });
 
+registerAction2(class SwitchFocusedProjectAction extends Action2 {
+	constructor() {
+		super({
+			id: CURRENT_PROJECT_ACTION_ID,
+			title: nls.localize2('currentProject', "Switch Focused Project"),
+			f1: true,
+			precondition: ProjectFocusedContext,
+			menu: { id: MenuId.TitleBarProjectNavigation, group: 'navigation', order: 1, when: ProjectFocusedContext }
+		});
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const navigation = accessor.get(IProjectNavigationService);
+		const quickInput = accessor.get(IQuickInputService);
+		const focusedKey = navigation.focusedProject?.uri.toString();
+		const picks: Array<IQuickPickItem & { readonly uri: URI }> = navigation.orderedProjects.map(project => {
+			const isRemote = project.uri.scheme === AEXUS_SSH_SCHEME;
+			const isCurrent = project.uri.toString() === focusedKey;
+			return {
+				label: project.name,
+				description: isCurrent
+					? nls.localize('currentFocusedProjectDesc', "Focused · {0}", formatFocusedProjectTarget(project.uri))
+					: formatFocusedProjectTarget(project.uri),
+				iconClass: ThemeIcon.asClassName(isRemote ? Codicon.remote : Codicon.folder),
+				uri: project.uri,
+			};
+		});
+		if (!picks.length) {
+			return;
+		}
+		const activeItem = picks.find(item => item.uri.toString() === focusedKey);
+		const picked = await quickInput.pick(picks, {
+			placeHolder: nls.localize('switchFocusedProjectPlaceholder', "Switch focused project"),
+			matchOnDescription: true,
+			activeItem,
+		});
+		if (picked) {
+			navigation.enterProject(picked.uri);
+		}
+	}
+});
+
 registerAction2(class GoForwardToProjectAction extends Action2 {
 	constructor() {
 		super({
@@ -89,13 +148,91 @@ registerAction2(class GoForwardToProjectAction extends Action2 {
 			icon: Codicon.arrowRight,
 			f1: true,
 			precondition: ProjectForwardContext,
-			menu: { id: MenuId.TitleBarProjectNavigation, group: 'navigation', order: 1, when: ProjectForwardContext }
+			menu: { id: MenuId.TitleBarProjectNavigation, group: 'navigation', order: 2, when: ProjectForwardContext }
 		});
 	}
 	run(accessor: ServicesAccessor): void {
 		accessor.get(IProjectNavigationService).goForward();
 	}
 });
+
+class CurrentProjectNavViewItem extends BaseActionViewItem {
+	private pillEl: HTMLElement | undefined;
+	private dotEl: HTMLElement | undefined;
+	private nameEl: HTMLElement | undefined;
+
+	constructor(
+		action: IAction,
+		options: IBaseActionViewItemOptions,
+		@IProjectNavigationService private readonly navigation: IProjectNavigationService,
+	) {
+		super(undefined, action, options);
+		this._register(Event.any(
+			this.navigation.onDidChangeProject,
+			this.navigation.onDidChangeProjectOrder,
+		)(() => this.syncFromNavigation()));
+	}
+
+	override render(container: HTMLElement): void {
+		super.render(container);
+		this.pillEl = append(container, $('div.aexus-nav-project', {
+			role: 'button',
+			'aria-haspopup': 'listbox',
+		}));
+		this.dotEl = append(this.pillEl, $('span.aexus-nav-project-dot', { 'aria-hidden': 'true' }));
+		this.nameEl = append(this.pillEl, $('span.aexus-nav-project-name'));
+		const chevron = append(this.pillEl, $('span.aexus-nav-project-chevron', { 'aria-hidden': 'true' }));
+		chevron.classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronDown));
+		this.syncFromNavigation();
+	}
+
+	protected override getTooltip(): string | undefined {
+		const project = this.navigation.focusedProject;
+		if (!project) {
+			return nls.localize('switchFocusedProjectTooltipEmpty', "Switch Focused Project");
+		}
+		return nls.localize('switchFocusedProjectTooltip', "{0}\n{1}\nClick to switch project", project.name, formatFocusedProjectTarget(project.uri));
+	}
+
+	private syncFromNavigation(): void {
+		if (!this.pillEl || !this.dotEl || !this.nameEl) {
+			return;
+		}
+		const project = this.navigation.focusedProject;
+		const isRemote = project?.uri.scheme === AEXUS_SSH_SCHEME;
+		this.pillEl.dataset.remote = String(isRemote);
+		this.pillEl.setAttribute('aria-label', project
+			? nls.localize('focusedProjectAria', "Focused project {0}, switch project", project.name)
+			: nls.localize('switchFocusedProjectTooltipEmpty', "Switch Focused Project"));
+		this.dotEl.className = 'aexus-nav-project-dot';
+		if (isRemote) {
+			this.dotEl.classList.add(...ThemeIcon.asClassNameArray(Codicon.remote));
+		}
+		this.nameEl.textContent = project?.name ?? '';
+		this.updateTooltip();
+	}
+}
+
+class ProjectNavigationTitleBarContribution extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.aexusProjectNavigationTitleBar';
+
+	constructor(
+		@IActionViewItemService actionViewItemService: IActionViewItemService,
+		@IInstantiationService instantiationService: IInstantiationService,
+	) {
+		super();
+		const registered = this._register(new Emitter<void>());
+		this._register(actionViewItemService.register(
+			MenuId.TitleBarProjectNavigation,
+			CURRENT_PROJECT_ACTION_ID,
+			(action, options) => instantiationService.createInstance(CurrentProjectNavViewItem, action, options),
+			registered.event,
+		));
+		registered.fire();
+	}
+}
+
+registerWorkbenchContribution2(ProjectNavigationTitleBarContribution.ID, ProjectNavigationTitleBarContribution, WorkbenchPhase.BlockRestore);
 
 // Commands
 CommandsRegistry.registerCommand('_files.windowOpen', openWindowCommand);

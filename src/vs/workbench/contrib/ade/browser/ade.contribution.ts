@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import './ade.css';
+import './adeColors.js';
 import { formatAdeAgentSubtreeLines } from './adeControlHandler.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';

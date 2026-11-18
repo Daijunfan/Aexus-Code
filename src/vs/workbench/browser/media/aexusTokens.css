@@ -1,0 +1,286 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* Aexus Code design tokens. Workbench-level so titlebar, chat and ADE surfaces can all
+	consume the same --aexus-* variables. Rank/tier, severity and status colors are backed
+	by registered theme colors (see contrib/ade/browser/adeColors.ts), so themes can
+	override them through the standard --vscode-* vars. */
+
+.monaco-workbench {
+	/* ---- Surfaces / elevation (derived → works in any theme) ---- */
+	--aexus-surface-sunken: color-mix(in srgb, #000 14%, var(--vscode-editor-background));
+	--aexus-surface-0: var(--vscode-editor-background);
+	--aexus-surface-1: color-mix(in srgb, var(--vscode-foreground) 3%, var(--aexus-surface-0));
+	--aexus-surface-2: color-mix(in srgb, var(--vscode-foreground) 5.5%, var(--aexus-surface-0));
+	--aexus-surface-3: var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-foreground) 8%, var(--aexus-surface-0)));
+	--aexus-surface-4: var(--vscode-quickInput-background, var(--aexus-surface-3));
+
+	/* ---- 1px hairlines & highlights ---- */
+	--aexus-hairline-width: 1px;
+	--aexus-hairline-subtle: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	--aexus-hairline: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	--aexus-hairline-strong: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	--aexus-highlight-top: inset 0 1px 0 rgb(255 255 255 / 0.06);
+	--aexus-ring-focus: 0 0 0 1px var(--vscode-focusBorder);
+
+	/* ---- Shadows (dark) ---- */
+	--aexus-shadow-1: 0 1px 2px rgb(0 0 0 / 0.24);
+	--aexus-shadow-2: 0 4px 12px -2px rgb(0 0 0 / 0.32), 0 1px 2px rgb(0 0 0 / 0.20);
+	--aexus-shadow-3: 0 12px 32px -8px rgb(0 0 0 / 0.45), 0 2px 6px rgb(0 0 0 / 0.24);
+	--aexus-shadow-4: 0 24px 64px -12px rgb(0 0 0 / 0.55), 0 4px 12px rgb(0 0 0 / 0.28);
+
+	/* Elevation recipe: e<n> = background surface-n + 1px hairline(-strong for n>=2) + highlight-top + shadow-n */
+
+	/* ---- Glass (ONLY popover/sheet/HUD over DAG canvas) ---- */
+	--aexus-glass-bg: color-mix(in srgb, var(--aexus-surface-3) 80%, transparent);
+	--aexus-glass-filter: blur(16px) saturate(1.5);
+
+	/* ---- Radius (aliases of VS Code registry) ---- */
+	--aexus-radius-xs: var(--vscode-cornerRadius-xSmall, 2px);
+	--aexus-radius-sm: var(--vscode-cornerRadius-small, 4px);
+	--aexus-radius-md: var(--vscode-cornerRadius-medium, 6px);
+	--aexus-radius-lg: var(--vscode-cornerRadius-large, 8px);
+	--aexus-radius-xl: var(--vscode-cornerRadius-xLarge, 12px);
+	--aexus-radius-pill: 999px;
+
+	/* ---- Typography (integer px only; maps to VS Code registry) ---- */
+	--aexus-font-ui: var(--vscode-font-family);
+	--aexus-font-mono: var(--vscode-editor-font-family);
+	--aexus-text-2xs: 10px;
+	--aexus-lh-2xs: 14px;
+	--aexus-text-xs: 11px;
+	--aexus-lh-xs: 16px;
+	--aexus-text-sm: 12px;
+	--aexus-lh-sm: 18px;
+	--aexus-text-md: 13px;
+	--aexus-lh-md: 20px;
+	--aexus-text-lg: 15px;
+	--aexus-lh-lg: 22px;
+	--aexus-text-xl: 18px;
+	--aexus-lh-xl: 24px;
+	--aexus-text-2xl: 26px;
+	--aexus-lh-2xl: 32px;
+	--aexus-weight-regular: 400;
+	--aexus-weight-medium: 500;
+	--aexus-weight-semibold: 600;
+	--aexus-weight-bold: 700; /* bold = KPI only; 800 banned */
+	--aexus-numeric: tabular-nums slashed-zero;
+
+	/* ---- Motion (60fps: transform + opacity only) ---- */
+	--aexus-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+	--aexus-ease-in: cubic-bezier(0.4, 0, 1, 1);
+	--aexus-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+	--aexus-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+	--aexus-dur-instant: 80ms;
+	--aexus-dur-fast: 120ms;
+	--aexus-dur-base: 160ms;
+	--aexus-dur-slow: 240ms;
+	--aexus-dur-deliberate: 360ms;
+	--aexus-dur-pulse: 1600ms;
+
+	/* ---- z-index scale (replaces magic numbers) ---- */
+	--aexus-z-node: 5;
+	--aexus-z-node-active: 14;
+	--aexus-z-hud: 20;
+	--aexus-z-popover: 40;
+	--aexus-z-sheet: 50;
+	--aexus-z-titlebar-overlay: 2500;
+
+	/* ---- Ranks (L1–L4). These override the proposal's tier colors. ---- */
+	--aexus-rank-governor: var(--vscode-ade-rank-governor, #F2C35B); /* L1 Sovereign Gold */
+	--aexus-rank-manager: var(--vscode-ade-rank-manager, #818CF8); /* L2 Royal Indigo */
+	--aexus-rank-employee: var(--vscode-ade-rank-employee, #A78BFA); /* L3 Supervisory Violet */
+	--aexus-rank-worker: var(--vscode-ade-rank-worker, #34D399); /* L4 Execution Emerald */
+	--aexus-rank-member: var(--vscode-ade-rank-member, #9AA4B2);
+
+	/* Tier aliases (existing tier grammar → rank tokens) */
+	--aexus-tier-l1: var(--aexus-rank-governor);
+	--aexus-tier-l2: var(--aexus-rank-manager);
+	--aexus-tier-l3: var(--aexus-rank-employee);
+	--aexus-tier-l4: var(--aexus-rank-worker);
+
+	/* Rank tints & borders */
+	--aexus-rank-governor-tint: color-mix(in srgb, var(--aexus-rank-governor) 14%, transparent);
+	--aexus-rank-manager-tint: color-mix(in srgb, var(--aexus-rank-manager) 14%, transparent);
+	--aexus-rank-employee-tint: color-mix(in srgb, var(--aexus-rank-employee) 14%, transparent);
+	--aexus-rank-worker-tint: color-mix(in srgb, var(--aexus-rank-worker) 14%, transparent);
+	--aexus-rank-governor-border: color-mix(in srgb, var(--aexus-rank-governor) 45%, transparent);
+	--aexus-rank-manager-border: color-mix(in srgb, var(--aexus-rank-manager) 45%, transparent);
+	--aexus-rank-employee-border: color-mix(in srgb, var(--aexus-rank-employee) 45%, transparent);
+	--aexus-rank-worker-border: color-mix(in srgb, var(--aexus-rank-worker) 45%, transparent);
+	--aexus-rank-governor-ink: #1A1405;
+
+	/* ---- Severity (orthogonal to rank) ---- */
+	--aexus-severity-critical: var(--vscode-ade-severity-critical, #F87171);
+	--aexus-severity-gate: var(--vscode-ade-severity-gate, #FF7AB8);
+	--aexus-severity-info: var(--vscode-ade-severity-info, #60A5FA);
+	--aexus-cloud: var(--vscode-ade-cloud, #38BDF8);
+
+	/* ---- Status (dots, rings, edges only — never chips) ---- */
+	--aexus-status-ok: var(--vscode-testing-iconPassed, #3FB950);
+	--aexus-status-warn: var(--vscode-editorWarning-foreground, #D29922);
+	--aexus-status-err: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, #F85149));
+}
+
+/* ---- Light ---- */
+
+.monaco-workbench.vs {
+	--aexus-surface-sunken: color-mix(in srgb, var(--vscode-foreground) 4%, var(--vscode-editor-background));
+	--aexus-surface-1: color-mix(in srgb, var(--vscode-foreground) 2.5%, var(--aexus-surface-0));
+	--aexus-surface-2: var(--vscode-editor-background); /* cards go white, separated by shadow + hairline */
+	--aexus-hairline: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	--aexus-highlight-top: inset 0 1px 0 rgb(255 255 255 / 0.8);
+	--aexus-shadow-1: 0 1px 2px rgb(15 23 42 / 0.06);
+	--aexus-shadow-2: 0 4px 12px -2px rgb(15 23 42 / 0.10), 0 1px 2px rgb(15 23 42 / 0.06);
+	--aexus-shadow-3: 0 12px 32px -8px rgb(15 23 42 / 0.14), 0 2px 6px rgb(15 23 42 / 0.06);
+	--aexus-shadow-4: 0 24px 64px -12px rgb(15 23 42 / 0.18);
+
+	/* Light rank fallbacks */
+	--aexus-rank-governor: var(--vscode-ade-rank-governor, #9A6700);
+	--aexus-rank-manager: var(--vscode-ade-rank-manager, #4F46E5);
+	--aexus-rank-employee: var(--vscode-ade-rank-employee, #6D28D9);
+	--aexus-rank-worker: var(--vscode-ade-rank-worker, #059669);
+	--aexus-rank-member: var(--vscode-ade-rank-member, #566070);
+}
+
+/* ---- High contrast ---- */
+
+.monaco-workbench.hc-black,
+.monaco-workbench.hc-light {
+	--aexus-surface-1: var(--vscode-editor-background); /* no tint steps */
+	--aexus-surface-2: var(--vscode-editor-background);
+	--aexus-surface-3: var(--vscode-editor-background);
+	--aexus-surface-4: var(--vscode-editor-background);
+	--aexus-hairline-subtle: var(--vscode-contrastBorder);
+	--aexus-hairline: var(--vscode-contrastBorder);
+	--aexus-hairline-strong: var(--vscode-contrastBorder);
+	--aexus-hairline-width: max(1px, var(--vscode-strokeThickness, 1px));
+	--aexus-highlight-top: none;
+	--aexus-shadow-1: none;
+	--aexus-shadow-2: none;
+	--aexus-shadow-3: none;
+	--aexus-shadow-4: none;
+	--aexus-glass-bg: var(--vscode-editor-background);
+	--aexus-glass-filter: none;
+	--aexus-ring-focus: 0 0 0 2px var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+}
+
+/* Tier chips: transparent fill, HC border, glyph + text always shown. */
+
+.monaco-workbench.hc-black .aexus-tier-chip,
+.monaco-workbench.hc-light .aexus-tier-chip {
+	background: transparent;
+	border-color: var(--vscode-contrastBorder);
+	box-shadow: none;
+	color: var(--vscode-foreground);
+}
+
+/* ---- Reduced motion ---- */
+
+.monaco-workbench.monaco-reduce-motion {
+	--aexus-dur-instant: 0ms;
+	--aexus-dur-fast: 0ms;
+	--aexus-dur-base: 0ms;
+	--aexus-dur-slow: 0ms;
+	--aexus-dur-deliberate: 0ms;
+	--aexus-dur-pulse: 0ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench {
+		--aexus-dur-instant: 0ms;
+		--aexus-dur-fast: 0ms;
+		--aexus-dur-base: 0ms;
+		--aexus-dur-slow: 0ms;
+		--aexus-dur-deliberate: 0ms;
+		--aexus-dur-pulse: 0ms;
+	}
+}
+
+/* ---- Shared keyframes ---- */
+
+@keyframes aexus-enter {
+	from {
+		opacity: 0;
+		transform: translateY(4px) scale(0.985);
+	}
+
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+@keyframes aexus-pulse-ring {
+	0%,
+	100% {
+		opacity: 0.35;
+		transform: scale(1);
+	}
+
+	50% {
+		opacity: 0.9;
+		transform: scale(1.035);
+	}
+}
+
+@keyframes aexus-sheen {
+	from {
+		transform: translateX(-100%);
+	}
+
+	to {
+		transform: translateX(100%);
+	}
+}
+
+/* ---- Shared tier chip (sidebar, DAG, popover, analytics, chat headers) ---- */
+
+.aexus-tier-chip {
+	display: inline-flex;
+	align-items: center;
+	box-sizing: border-box;
+	white-space: nowrap;
+	height: 16px;
+	padding: 0 6px;
+	gap: 4px;
+	border-radius: var(--aexus-radius-sm);
+	font: var(--aexus-weight-semibold) var(--aexus-text-2xs) / var(--aexus-lh-2xs) var(--aexus-font-ui);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	font-variant-numeric: var(--aexus-numeric);
+	border: var(--aexus-hairline-width) solid transparent;
+}
+
+.aexus-tier-chip.l1 {
+	background: var(--aexus-rank-governor);
+	color: var(--aexus-rank-governor-ink);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), 0 0 0 1px var(--aexus-surface-0), 0 0 0 2px var(--aexus-rank-governor);
+	font-weight: var(--aexus-weight-bold);
+	font-variant-numeric: var(--aexus-numeric);
+}
+
+.aexus-tier-chip.l2 {
+	background: var(--aexus-rank-manager-tint);
+	color: var(--aexus-rank-manager);
+	border-color: var(--aexus-rank-manager-border);
+	font-variant-numeric: var(--aexus-numeric);
+}
+
+.aexus-tier-chip.l3 {
+	background: var(--aexus-rank-employee-tint);
+	color: var(--aexus-rank-employee);
+	border-color: var(--aexus-rank-employee-border);
+	box-shadow: inset 0 2px 0 var(--aexus-rank-employee);
+	font-variant-numeric: var(--aexus-numeric);
+}
+
+.aexus-tier-chip.l4 {
+	background: var(--aexus-rank-worker-tint);
+	color: var(--aexus-rank-worker);
+	border-color: var(--aexus-rank-worker-border);
+	font-weight: var(--aexus-weight-medium);
+	font-variant-numeric: var(--aexus-numeric);
+}
