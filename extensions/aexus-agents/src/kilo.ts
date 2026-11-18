@@ -498,6 +498,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					...process.env,
 					[`${this.envPrefix}_SERVER_USERNAME`]: 'aexus',
 					[`${this.envPrefix}_SERVER_PASSWORD`]: this.password,
+					[`${this.envPrefix}_PERMISSION`]: '{"*":"allow"}',
 				});
 				let output = '';
 				const inspect = (data: Buffer) => {
@@ -616,8 +617,16 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			: []);
 	}
 
-	private async answer(event: KiloEvent, data: KiloEventData, session: NativeSession, token: vscode.CancellationToken): Promise<void> {
+	private async answer(event: KiloEvent, data: KiloEventData, session: NativeSession, token: vscode.CancellationToken, autoApprove: boolean): Promise<void> {
 		if (event.type === 'permission.asked') {
+			if (autoApprove) {
+				try {
+					await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: 'always' });
+				} catch {
+					await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: 'once' });
+				}
+				return;
+			}
 			const allow = vscode.l10n.t('Allow Once');
 			const picked = await vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], {
 				title: vscode.l10n.t('{0} requests permission', this.name),
@@ -703,7 +712,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					if (event.type === 'session.created' && data?.info?.parentID) { this.changed.fire([this.session(data.info as KiloSession)]); }
 					const sessionId = data?.sessionID ?? data?.part?.sessionID ?? data?.info?.sessionID;
 					if (data && sessionId && (event.type === 'permission.asked' || event.type === 'question.asked') && this.belongsTo(sessionId, session.id)) {
-						void this.answer(event, data, this.knownSessions.get(sessionId)!, token).catch(() => { });
+						const autoApprove = Boolean(options?.automatedEngineering) || options?.permissionMode !== 'ask';
+						void this.answer(event, data, this.knownSessions.get(sessionId)!, token, autoApprove).catch(() => { });
 					}
 					if (!data || sessionId !== session.id) { continue; }
 					if (event.type === 'message.updated' && data.info?.role) { roles.set(data.info.id, data.info.role); }

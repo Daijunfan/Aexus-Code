@@ -740,25 +740,23 @@ const THINKING_LEVELS: Readonly<Record<EngineId, readonly string[]>> = {
 };
 
 const CLAUDE_PERMISSION_ITEMS: readonly DiscoveredOptionItem[] = [
-	{ id: 'default', name: 'Ask', description: 'Prompt before using tools that need approval' },
+	{ id: 'bypassPermissions', name: 'Bypass All', description: 'Skip all permission prompts', slashCommand: 'bypass' },
+	{ id: 'auto', name: 'Auto Mode', description: 'Automatically approve routine tool use' },
 	{ id: 'acceptEdits', name: 'Auto-Edit', description: 'Automatically accept file edits' },
 	{ id: 'plan', name: 'Plan Mode', description: 'Plan changes without modifying files' },
-	{ id: 'auto', name: 'Auto Mode', description: 'Automatically approve routine tool use' },
-	{ id: 'bypassPermissions', name: 'Bypass All', description: 'Skip all permission prompts', slashCommand: 'bypass' },
+	{ id: 'ask', name: 'Ask', description: 'Prompt before using tools that need approval' },
 ];
 
 const CODEX_APPROVAL_ITEMS: readonly DiscoveredOptionItem[] = [
-	{ id: 'default', name: 'Default', description: 'Use the engine default approval policy' },
-	{ id: 'untrusted', name: 'Untrusted', description: 'Ask before running untrusted commands' },
+	{ id: 'never', name: 'Never Ask', description: 'Never ask for approval (full auto)' },
 	{ id: 'on-request', name: 'On Request', description: 'Ask only when the model requests approval' },
-	{ id: 'never', name: 'Never', description: 'Never ask for approval' },
+	{ id: 'untrusted', name: 'Untrusted', description: 'Ask before running untrusted commands' },
 ];
 
 const CODEX_SANDBOX_ITEMS: readonly DiscoveredOptionItem[] = [
-	{ id: 'default', name: 'Default', description: 'Use the engine default sandbox policy' },
-	{ id: 'read-only', name: 'Read-Only', description: 'Allow reads only' },
+	{ id: 'danger-full-access', name: 'Full Access', description: 'Allow unrestricted reads, writes, and commands' },
 	{ id: 'workspace-write', name: 'Workspace Write', description: 'Allow writes inside the workspace' },
-	{ id: 'danger-full-access', name: 'Full Access', description: 'Allow writes anywhere' },
+	{ id: 'read-only', name: 'Read-Only', description: 'Allow reads only' },
 ];
 
 const CODEX_WEB_SEARCH_ITEMS: readonly DiscoveredOptionItem[] = [
@@ -782,6 +780,11 @@ const OPENCODE_AGENT_ITEMS: readonly DiscoveredOptionItem[] = [
 	{ id: 'explore', name: 'Explore', description: 'Explore the codebase read-only' },
 ];
 
+const GENERAL_PERMISSION_ITEMS: readonly DiscoveredOptionItem[] = [
+	{ id: 'bypassPermissions', name: 'Bypass All', description: 'Approve all tool and command permissions automatically', slashCommand: 'bypass' },
+	{ id: 'ask', name: 'Ask', description: 'Prompt before running commands or external access' },
+];
+
 const PI_TOOL_ITEMS: readonly DiscoveredOptionItem[] = [
 	{ id: 'full', name: 'All Tools', description: 'Read, write, execute, and network tools' },
 	{ id: 'readonly', name: 'Read-Only Tools', description: 'read, grep, find, ls' },
@@ -789,23 +792,24 @@ const PI_TOOL_ITEMS: readonly DiscoveredOptionItem[] = [
 ];
 
 const ANTIGRAVITY_MODE_ITEMS: readonly DiscoveredOptionItem[] = [
+	{ id: 'auto', name: 'Auto', description: 'Automatically approve all tool calls and edits' },
 	{ id: 'accept-edits', name: 'Accept Edits', description: 'Automatically accept file edits' },
-	{ id: 'auto', name: 'Auto', description: 'Automatically approve routine tool use' },
 	{ id: 'plan', name: 'Plan', description: 'Plan changes without modifying files' },
-	{ id: 'default', name: 'Default', description: 'Use the engine default mode' },
+	{ id: 'ask', name: 'Ask', description: 'Prompt before running tools that need approval' },
 ];
 
 const DSH_PERMISSION_ITEMS: readonly DiscoveredOptionItem[] = [
-	{ id: 'default', name: 'Default', description: 'Use the engine default permission policy' },
+	{ id: 'danger-full-access', name: 'Full Access', description: 'Allow unrestricted reads, writes, and commands' },
 	{ id: 'workspace-write', name: 'Workspace Write', description: 'Allow writes inside the workspace' },
 	{ id: 'read-only', name: 'Read-Only', description: 'Allow reads only' },
-	{ id: 'danger-full-access', name: 'Full Access', description: 'Allow writes anywhere' },
+	{ id: 'ask', name: 'Ask', description: 'Prompt before running tools that need approval' },
 ];
 
 const CLINE_MODE_ITEMS: readonly DiscoveredOptionItem[] = [
+	{ id: 'yolo', name: 'Auto-Approve YOLO', description: 'Approve all tool use automatically' },
 	{ id: 'act', name: 'Act Mode', description: 'Execute changes directly' },
 	{ id: 'plan', name: 'Plan Mode', description: 'Plan changes before executing' },
-	{ id: 'yolo', name: 'Auto-Approve YOLO', description: 'Approve all tool use automatically' },
+	{ id: 'ask', name: 'Ask', description: 'Prompt before tool execution' },
 ];
 
 function thinkingDisplayName(level: string): string {
@@ -857,49 +861,57 @@ function selectedOr(value: string | undefined, fallback: string): string {
 	return trimmed ? trimmed : fallback;
 }
 
+function selectedNonDefault(value: string | undefined, fallback: string): string {
+	const trimmed = value?.trim();
+	return trimmed && trimmed !== 'default' ? trimmed : fallback;
+}
+
 function buildEngineSpecificGroups(engineId: EngineId, state: SessionConfigState, runtimeModes?: Array<{ id: string; name: string; description?: string }>): DiscoveredOptionGroup[] {
 	switch (engineId) {
 		case 'aexus-claude':
 			return [
-				optionGroup('permissions', 'Permissions', [...CLAUDE_PERMISSION_ITEMS], selectedOr(state.permissionMode, 'default'), 'Tool permission behavior'),
+				optionGroup('permissions', 'Permissions', [...CLAUDE_PERMISSION_ITEMS], selectedNonDefault(state.permissionMode, 'bypassPermissions'), 'Tool permission behavior'),
 			];
 		case 'aexus-codex':
 			return [
-				optionGroup('permissions', 'Approval', [...CODEX_APPROVAL_ITEMS], selectedOr(state.permissionMode, 'default'), 'When to ask for command approval'),
-				optionGroup('sandbox', 'Sandbox', [...CODEX_SANDBOX_ITEMS], selectedOr(state.sandboxMode, 'default'), 'Filesystem access policy'),
+				optionGroup('permissions', 'Approval', [...CODEX_APPROVAL_ITEMS], selectedNonDefault(state.permissionMode, 'never'), 'When to ask for command approval'),
+				optionGroup('sandbox', 'Sandbox', [...CODEX_SANDBOX_ITEMS], selectedNonDefault(state.sandboxMode, 'danger-full-access'), 'Filesystem access policy'),
 				optionGroup('webSearch', 'Web Search', [...CODEX_WEB_SEARCH_ITEMS], selectedOr(state.webSearch, 'enabled'), 'Whether web search is available'),
 			];
 		case 'aexus-kilo':
 			return [
-				optionGroup('mode', 'Mode', [...KILO_MODE_ITEMS], selectedOr(state.mode, 'code'), 'How Kilo responds and edits'),
+				optionGroup('mode', 'Mode', [...KILO_MODE_ITEMS], selectedNonDefault(state.mode, 'code'), 'How Kilo responds and edits'),
+				optionGroup('permissions', 'Permissions', [...GENERAL_PERMISSION_ITEMS], selectedNonDefault(state.permissionMode, 'bypassPermissions'), 'Tool permission behavior'),
 			];
 		case 'aexus-opencode':
 			return [
-				optionGroup('mode', 'Agent', [...OPENCODE_AGENT_ITEMS], selectedOr(state.mode, 'build'), 'The active OpenCode agent'),
+				optionGroup('mode', 'Agent', [...OPENCODE_AGENT_ITEMS], selectedNonDefault(state.mode, 'build'), 'The active OpenCode agent'),
+				optionGroup('permissions', 'Permissions', [...GENERAL_PERMISSION_ITEMS], selectedNonDefault(state.permissionMode, 'bypassPermissions'), 'Tool permission behavior'),
 			];
 		case 'aexus-pi':
 			return [
-				optionGroup('mode', 'Tools', [...PI_TOOL_ITEMS], selectedOr(state.mode, 'full'), 'Which tools Pi may use'),
+				optionGroup('mode', 'Tools', [...PI_TOOL_ITEMS], selectedNonDefault(state.mode, 'full'), 'Which tools Pi may use'),
+				optionGroup('permissions', 'Permissions', [...GENERAL_PERMISSION_ITEMS], selectedNonDefault(state.permissionMode, 'bypassPermissions'), 'Tool confirmation behavior'),
 			];
 		case 'aexus-antigravity': {
 			const extraModes = (runtimeModes ?? []).map(mode => ({ id: mode.id, name: mode.name, description: mode.description }));
 			return [
-				optionGroup('mode', 'Mode', mergeOptionItems(ANTIGRAVITY_MODE_ITEMS, extraModes), selectedOr(state.mode, 'default'), 'How Antigravity executes work'),
+				optionGroup('mode', 'Mode', mergeOptionItems(ANTIGRAVITY_MODE_ITEMS, extraModes), selectedNonDefault(state.mode, 'auto'), 'How Antigravity executes work'),
 			];
 		}
 		case 'aexus-dsh': {
 			const groups: DiscoveredOptionGroup[] = [
-				optionGroup('permissions', 'Permissions', [...DSH_PERMISSION_ITEMS], selectedOr(state.permissionMode, 'default'), 'Filesystem access policy'),
+				optionGroup('permissions', 'Permissions', [...DSH_PERMISSION_ITEMS], selectedNonDefault(state.permissionMode, 'danger-full-access'), 'Filesystem and tool access policy'),
 			];
 			const extraModes = (runtimeModes ?? []).map(mode => ({ id: mode.id, name: mode.name, description: mode.description }));
 			if (extraModes.length > 0) {
-				groups.push(optionGroup('mode', 'Mode', extraModes, selectedOr(state.mode, extraModes[0].id), 'The active DeepSeek Harness mode'));
+				groups.push(optionGroup('mode', 'Mode', extraModes, selectedNonDefault(state.mode, extraModes[0].id), 'The active DeepSeek Harness mode'));
 			}
 			return groups;
 		}
 		case 'aexus-cline':
 			return [
-				optionGroup('mode', 'Mode', [...CLINE_MODE_ITEMS], selectedOr(state.mode, 'act'), 'How Cline executes work'),
+				optionGroup('mode', 'Mode', [...CLINE_MODE_ITEMS], selectedNonDefault(state.mode, 'yolo'), 'How Cline executes work'),
 			];
 	}
 }

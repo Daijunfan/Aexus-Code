@@ -190,16 +190,15 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
-	private sandboxMode(sandboxMode?: string): SandboxMode | undefined {
+	private sandboxMode(sandboxMode?: string): SandboxMode {
 		switch (sandboxMode?.trim()) {
 			case 'read-only':
 				return 'read-only';
 			case 'workspace-write':
 				return 'workspace-write';
-			case 'danger-full-access':
-				return 'danger-full-access';
 			default:
-				return undefined;
+				// Highest full-access sandbox by default unless the user explicitly restricted it.
+				return 'danger-full-access';
 		}
 	}
 
@@ -394,9 +393,13 @@ export class CodexRuntime implements EngineRuntime {
 		return [...entries.values()];
 	}
 
-	private async handleRequest(client: JsonLineClient, packet: RpcPacket, session: NativeSession, token: vscode.CancellationToken): Promise<void> {
+	private async handleRequest(client: JsonLineClient, packet: RpcPacket, session: NativeSession, token: vscode.CancellationToken, approvalPolicy: ApprovalPolicy): Promise<void> {
 		const params = packet.params ?? {};
 		if (packet.method?.endsWith('/requestApproval')) {
+			if (approvalPolicy === 'never') {
+				client.write({ jsonrpc: '2.0', id: packet.id, result: packet.method === 'item/permissions/requestApproval' ? { permissions: params.permissions ?? {}, scope: 'turn' } : { decision: 'accept' } });
+				return;
+			}
 			const command = typeof params.command === 'string' ? params.command : typeof params.reason === 'string' ? params.reason : packet.method;
 			const allow = vscode.l10n.t('Allow Once');
 			const result = await vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], { title: vscode.l10n.t('Codex requests permission'), placeHolder: `${session.cwd}: ${command}`, ignoreFocusOut: true }, token);
@@ -447,7 +450,7 @@ export class CodexRuntime implements EngineRuntime {
 			const listener = client.onPacket(packet => {
 				if (packet.method === 'aexus/connectionClosed') { fail(new Error(String(packet.params?.message))); return; }
 				const params = packet.params as Notification | undefined;
-				if (packet.id !== undefined && params?.threadId && this.belongsTo(params.threadId, session.id)) { void this.handleRequest(client, packet, this.knownSessions.get(params.threadId)!, token).catch(fail); return; }
+				if (packet.id !== undefined && params?.threadId && this.belongsTo(params.threadId, session.id)) { void this.handleRequest(client, packet, this.knownSessions.get(params.threadId)!, token, approvalPolicy).catch(fail); return; }
 				if (params?.threadId !== session.id) { return; }
 				if (!token.isCancellationRequested && packet.method === 'item/agentMessage/delta' && params.delta) { stream.markdown(params.delta); }
 				if (!token.isCancellationRequested && (packet.method === 'item/reasoning/summaryTextDelta' || packet.method === 'item/reasoning/textDelta')) {

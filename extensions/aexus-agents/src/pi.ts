@@ -611,7 +611,7 @@ export class PiRuntime implements EngineRuntime {
 		return false;
 	}
 
-	private async handleUiRequest(child: ReturnType<typeof spawnEngine>, packet: PiRpcPacket, session: NativeSession, token: vscode.CancellationToken): Promise<void> {
+	private async handleUiRequest(child: ReturnType<typeof spawnEngine>, packet: PiRpcPacket, session: NativeSession, token: vscode.CancellationToken, autoApprove: boolean): Promise<void> {
 		if (!packet.id || child.stdin.destroyed) { return; }
 		const respond = (payload: Record<string, unknown>) => {
 			if (!child.stdin.destroyed) {
@@ -627,6 +627,10 @@ export class PiRuntime implements EngineRuntime {
 			}, token);
 			respond(picked !== undefined ? { value: picked } : { cancelled: true });
 		} else if (packet.method === 'confirm') {
+			if (autoApprove) {
+				respond({ confirmed: true });
+				return;
+			}
 			const confirmLabel = vscode.l10n.t('Allow Once');
 			const picked = await vscode.window.showQuickPick([confirmLabel, vscode.l10n.t('Deny')], {
 				title,
@@ -758,7 +762,8 @@ export class PiRuntime implements EngineRuntime {
 				} else if (packet.type === 'session_info_changed' && typeof packet.name === 'string' && packet.name.trim()) {
 					session.label = packet.name.trim();
 				} else if (packet.type === 'extension_ui_request') {
-					void this.handleUiRequest(child, packet, session, token).catch(() => { });
+					const autoApprove = Boolean(options?.automatedEngineering) || options?.permissionMode !== 'ask';
+					void this.handleUiRequest(child, packet, session, token, autoApprove).catch(() => { });
 				} else if (packet.type === 'agent_end' && Array.isArray(packet.messages)) {
 					const lastMsg = packet.messages.at(-1);
 					if (lastMsg?.stopReason === 'error' && lastMsg.errorMessage) {

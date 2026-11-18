@@ -704,6 +704,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					(secretaryState.perEngineConfig[record.engine] ??= {}))
 				: (record.sessionConfig ??= {});
 
+			const engineType = toEngineType(record.engine);
+			const defaultModeForEngine = engineType === 'aexus-cline' ? 'yolo'
+				: engineType === 'aexus-antigravity' ? 'auto'
+					: engineType === 'aexus-pi' ? 'full'
+						: undefined;
+			const defaultPermissionsForEngine = engineType === 'aexus-codex' ? 'never'
+				: engineType === 'aexus-dsh' ? 'danger-full-access'
+					: 'bypassPermissions';
+			const defaultSandboxForEngine = 'danger-full-access';
+
 			switch (optionId) {
 				case 'model': {
 					const next = value || 'default';
@@ -722,24 +732,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					break;
 				}
 				case 'mode': {
-					const next = value || undefined;
-					if (targetCfg.mode !== next) {
+					const next = value || defaultModeForEngine;
+					const prev = targetCfg.mode && targetCfg.mode !== 'default' ? targetCfg.mode : defaultModeForEngine;
+					if (prev !== next) {
 						targetCfg.mode = next;
 						anyChanged = true;
 					}
 					break;
 				}
 				case 'permissions': {
-					const next = value || 'default';
-					if ((targetCfg.permissionMode || 'default') !== next) {
+					const next = value || defaultPermissionsForEngine;
+					const prev = targetCfg.permissionMode && targetCfg.permissionMode !== 'default' ? targetCfg.permissionMode : defaultPermissionsForEngine;
+					if (prev !== next) {
 						targetCfg.permissionMode = next;
 						anyChanged = true;
 					}
 					break;
 				}
 				case 'sandbox': {
-					const next = value || 'default';
-					if ((targetCfg.sandboxMode || 'default') !== next) {
+					const next = value || defaultSandboxForEngine;
+					const prev = targetCfg.sandboxMode && targetCfg.sandboxMode !== 'default' ? targetCfg.sandboxMode : defaultSandboxForEngine;
+					if (prev !== next) {
 						targetCfg.sandboxMode = next;
 						anyChanged = true;
 					}
@@ -964,8 +977,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			return selectOrPromptOption(sessionType, sessionUri, 'permissions', 'Permissions', argText, stream);
 		}
 		if (cmd === 'bypass') {
-			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'bypassPermissions' }]);
-			stream.markdown('Updated **Permissions** to **Bypass All** (`bypassPermissions`).');
+			if (engineType === 'aexus-codex') {
+				await applyOptionUpdates(sessionType, sessionUri, [
+					{ optionId: 'permissions', value: 'never' },
+					{ optionId: 'sandbox', value: 'danger-full-access' },
+				]);
+				stream.markdown('Updated **Approval** to **Never Ask** (`never`) and **Sandbox** to **Full Access** (`danger-full-access`).');
+			} else if (engineType === 'aexus-dsh') {
+				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'danger-full-access' }]);
+				stream.markdown('Updated **Permissions** to **Full Access** (`danger-full-access`).');
+			} else if (engineType === 'aexus-cline') {
+				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'yolo' }]);
+				stream.markdown('Updated **Mode** to **Auto-Approve YOLO** (`yolo`).');
+			} else if (engineType === 'aexus-antigravity') {
+				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'auto' }]);
+				stream.markdown('Updated **Mode** to **Auto** (`auto`).');
+			} else {
+				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'bypassPermissions' }]);
+				stream.markdown('Updated **Permissions** to **Bypass All** (`bypassPermissions`).');
+			}
 			return true;
 		}
 		if (cmd === 'sandbox') {

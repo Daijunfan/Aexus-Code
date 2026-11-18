@@ -13,11 +13,13 @@ import { MenuWorkbenchToolBar } from '../../../../../platform/actions/browser/to
 import { IMenuService, isIMenuItem, MenuId, MenuRegistry } from '../../../../../platform/actions/common/actions.js';
 import { MenuService } from '../../../../../platform/actions/common/menuService.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyService } from '../../../../../platform/contextkey/browser/contextKeyService.js';
 import { IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
 import { ExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
 import { IQuickInputService, IQuickPickItem } from '../../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../../platform/registry/common/platform.js';
+import { IStorageService, StorageScope } from '../../../../../platform/storage/common/storage.js';
 import { IWorkspaceContextService, toWorkspaceFolder } from '../../../../../platform/workspace/common/workspace.js';
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { IPaneComposite } from '../../../../common/panecomposite.js';
@@ -384,5 +386,16 @@ suite('ADE inspector right sidebar routing', () => {
 			switchedToAde: { auxHidden: false, activeAuxId: ADE_INSPECTOR_CONTAINER_ID },
 			restoredInIde: { auxHidden: false, activeAuxId: 'claude.sidebar' },
 		});
+		const storage = instantiation.get(IStorageService);
+		assert.strictEqual(storage.getBoolean('chat.tools.global.autoApprove.optIn', StorageScope.APPLICATION), true);
+		assert.strictEqual(storage.getBoolean('chat.permissions.autoApprove.dontShowWarningAgain', StorageScope.APPLICATION), true);
+		assert.strictEqual(storage.getBoolean('chat.tools.terminal.autoApprove.warningAccepted', StorageScope.APPLICATION), true);
+
+		const defaults = Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).getConfigurationDefaultsOverrides();
+		assert.strictEqual(defaults.get('chat.permissions.default')?.value, 'autoApprove');
+		assert.strictEqual(defaults.get('chat.tools.global.autoApprove')?.value, true);
+		assert.strictEqual(defaults.get('chat.tools.terminal.enableAutoApprove')?.value, true);
+		assert.strictEqual(defaults.get('security.workspace.trust.enabled')?.value, false);
+		assert.strictEqual(defaults.get('claudeCode.initialPermissionMode')?.value, 'bypassPermissions');
 	});
 });

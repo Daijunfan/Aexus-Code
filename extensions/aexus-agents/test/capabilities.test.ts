@@ -43,13 +43,28 @@ const ENGINE_SIGNATURE_COMMANDS = {
 const ENGINE_SPECIFIC_GROUPS = {
 	'aexus-claude': ['permissions'],
 	'aexus-codex': ['permissions', 'sandbox', 'webSearch'],
-	'aexus-kilo': ['mode'],
-	'aexus-opencode': ['mode'],
+	'aexus-kilo': ['mode', 'permissions'],
+	'aexus-opencode': ['mode', 'permissions'],
 	'aexus-dsh': ['permissions'],
 	'aexus-antigravity': ['mode'],
 	'aexus-cline': ['mode'],
-	'aexus-pi': ['mode'],
+	'aexus-pi': ['mode', 'permissions'],
 };
+
+// The highest-permission default for each engine, keyed by option group.
+const HIGHEST_PERMISSION_DEFAULTS = {
+	secretary: { permissions: 'bypassPermissions' },
+	'aexus-claude': { permissions: 'bypassPermissions' },
+	'aexus-codex': { permissions: 'never', sandbox: 'danger-full-access' },
+	'aexus-kilo': { permissions: 'bypassPermissions' },
+	'aexus-opencode': { permissions: 'bypassPermissions' },
+	'aexus-dsh': { permissions: 'danger-full-access' },
+	'aexus-antigravity': { mode: 'auto' },
+	'aexus-cline': { mode: 'yolo' },
+	'aexus-pi': { permissions: 'bypassPermissions' },
+};
+
+const LEGACY_DEFAULT_STATE = { permissionMode: 'default', sandboxMode: 'default', mode: 'default' };
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_ROOT = path.resolve(TEST_DIR, '..');
@@ -188,44 +203,62 @@ describe('buildOptionGroupsForSession', () => {
 		});
 	}
 
+	test('empty and legacy default state resolve to the highest-permission defaults', async () => {
+		const states = [{}, LEGACY_DEFAULT_STATE];
+		for (const state of states) {
+			for (const targetKind of ['secretary', ...ENGINE_IDS]) {
+				const groups = await buildOptionGroupsForSession(targetKind, state, workspace);
+				for (const [groupId, selectedId] of Object.entries(HIGHEST_PERMISSION_DEFAULTS[targetKind])) {
+					const group = groupById(groups, groupId);
+					assert.ok(group, `${targetKind} is missing group ${groupId} for ${JSON.stringify(state)}`);
+					assert.equal(group.selectedId, selectedId, `${targetKind}.${groupId} for ${JSON.stringify(state)}`);
+				}
+			}
+		}
+	});
+
 	test('switching the secretary engine dynamically rebuilds model, thinking, and engine groups', async () => {
 		const claudeGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-claude' }, workspace);
 		assert.deepEqual(claudeGroups.map(group => group.id), ['engine', 'model', 'thinking', 'permissions']);
-		assert.deepEqual(itemIds(groupById(claudeGroups, 'permissions')), ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
+		assert.deepEqual(itemIds(groupById(claudeGroups, 'permissions')), ['bypassPermissions', 'auto', 'acceptEdits', 'plan', 'ask']);
 
 		const codexGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-codex' }, workspace);
 		assert.deepEqual(codexGroups.map(group => group.id), ['engine', 'model', 'thinking', 'permissions', 'sandbox', 'webSearch']);
 		assert.equal(groupById(codexGroups, 'engine').selectedId, 'aexus-codex');
-		assert.deepEqual(itemIds(groupById(codexGroups, 'sandbox')), ['default', 'read-only', 'workspace-write', 'danger-full-access']);
+		assert.deepEqual(itemIds(groupById(codexGroups, 'permissions')), ['never', 'on-request', 'untrusted']);
+		assert.deepEqual(itemIds(groupById(codexGroups, 'sandbox')), ['danger-full-access', 'workspace-write', 'read-only']);
 		assert.deepEqual(itemIds(groupById(codexGroups, 'webSearch')), ['enabled', 'disabled']);
 		assert.deepEqual(itemIds(groupById(codexGroups, 'thinking')), ['default', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 		const kiloGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-kilo' }, workspace);
-		assert.deepEqual(kiloGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode']);
+		assert.deepEqual(kiloGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode', 'permissions']);
 		assert.ok(itemIds(groupById(kiloGroups, 'mode')).includes('architect'));
 		assert.ok(itemIds(groupById(kiloGroups, 'mode')).includes('orchestrator'));
+		assert.deepEqual(itemIds(groupById(kiloGroups, 'permissions')), ['bypassPermissions', 'ask']);
 
 		const openCodeGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-opencode' }, workspace);
-		assert.deepEqual(openCodeGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode']);
+		assert.deepEqual(openCodeGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode', 'permissions']);
 		assert.equal(groupById(openCodeGroups, 'mode').name, 'Agent');
 		assert.ok(itemIds(groupById(openCodeGroups, 'mode')).includes('build'));
 		assert.ok(itemIds(groupById(openCodeGroups, 'mode')).includes('plan'));
+		assert.deepEqual(itemIds(groupById(openCodeGroups, 'permissions')), ['bypassPermissions', 'ask']);
 
 		const clineGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-cline' }, workspace);
 		assert.deepEqual(clineGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode']);
-		assert.deepEqual(itemIds(groupById(clineGroups, 'mode')), ['act', 'plan', 'yolo']);
+		assert.deepEqual(itemIds(groupById(clineGroups, 'mode')), ['yolo', 'act', 'plan', 'ask']);
 
 		const piGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-pi' }, workspace);
-		assert.deepEqual(piGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode']);
+		assert.deepEqual(piGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode', 'permissions']);
 		assert.deepEqual(itemIds(groupById(piGroups, 'mode')), ['full', 'readonly', 'chat']);
+		assert.deepEqual(itemIds(groupById(piGroups, 'permissions')), ['bypassPermissions', 'ask']);
 
 		const dshGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-dsh' }, workspace);
 		assert.deepEqual(dshGroups.map(group => group.id), ['engine', 'model', 'thinking', 'permissions']);
-		assert.ok(itemIds(groupById(dshGroups, 'permissions')).includes('danger-full-access'));
+		assert.deepEqual(itemIds(groupById(dshGroups, 'permissions')), ['danger-full-access', 'workspace-write', 'read-only', 'ask']);
 
 		const antigravityGroups = await buildOptionGroupsForSession('secretary', { secretaryEngineId: 'aexus-antigravity' }, workspace);
 		assert.deepEqual(antigravityGroups.map(group => group.id), ['engine', 'model', 'thinking', 'mode']);
-		assert.deepEqual(itemIds(groupById(antigravityGroups, 'mode')), ['accept-edits', 'auto', 'plan', 'default']);
+		assert.deepEqual(itemIds(groupById(antigravityGroups, 'mode')), ['auto', 'accept-edits', 'plan', 'ask']);
 	});
 
 	test('custom model IDs that are not defaults are preserved', async () => {

@@ -517,7 +517,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			const lines = recent.length > 0
 				? recent.map(item => `- **${item.label}** (\`${item.id.slice(0, 8)}\` · \`${item.cwd}\`)`).join('\n')
 				: '- *(No recorded Cline tasks yet)*';
-			stream.markdown(`### Cline Recent Tasks\n\n${lines}\n\n- **Active Mode**: \`${options?.mode || 'act'}\`\n- **Active Model**: \`${options?.model || 'default'}\`\n`);
+			stream.markdown(`### Cline Recent Tasks\n\n${lines}\n\n- **Active Mode**: \`${options?.mode || 'yolo'}\`\n- **Active Model**: \`${options?.model || 'default'}\`\n`);
 			return true;
 		}
 		return false;
@@ -532,10 +532,13 @@ export abstract class AcpRuntime implements EngineRuntime {
 				await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: options.model }).catch(() => { });
 			}
 		}
-		if (options?.mode && options.mode !== 'default') {
-			await client.request('session/set_mode', { sessionId: session.id, modeId: options.mode }).catch(() => { });
+		const effectiveMode = options?.mode && options.mode !== 'default'
+			? options.mode
+			: (this.id === 'aexus-cline' ? 'yolo' : this.id === 'aexus-antigravity' ? 'auto' : undefined);
+		if (effectiveMode) {
+			await client.request('session/set_mode', { sessionId: session.id, modeId: effectiveMode }).catch(() => { });
 			if (this.cachedConfigOptionIds.has('mode')) {
-				await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: options.mode }).catch(() => { });
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: effectiveMode }).catch(() => { });
 			}
 		}
 		if (options?.thinking && options.thinking !== 'default') {
@@ -548,13 +551,8 @@ export abstract class AcpRuntime implements EngineRuntime {
 				await client.request('session/set_config_option', { sessionId: session.id, configId: 'reasoning_effort', value: normalizedThinking }).catch(() => { });
 			}
 		}
-		const autoApprove = Boolean(
-			options?.automatedEngineering
-			|| options?.mode === 'yolo'
-			|| options?.mode === 'auto'
-			|| options?.permissionMode === 'bypassPermissions'
-			|| options?.permissionMode === 'danger-full-access'
-		);
+		const autoApprove = Boolean(options?.automatedEngineering)
+			|| (options?.permissionMode !== 'ask' && options?.mode !== 'ask' && options?.mode !== 'plan');
 		this.knownSessions.set(session.id, session);
 		const listener = client.onPacket(packet => {
 			const params = packet.params ?? {};
@@ -563,7 +561,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				if (!targetSessionId || targetSessionId === session.id) {
 					if (packet.method === 'session/request_permission' && autoApprove) {
 						const permOpts = Array.isArray(params.options) ? (params.options as AcpPermissionOption[]) : [];
-						const allowOpt = permOpts.find(opt => opt.kind === 'allow_once') ?? permOpts.find(opt => opt.kind === 'allow_always');
+						const allowOpt = permOpts.find(opt => opt.kind === 'allow_always') ?? permOpts.find(opt => opt.kind === 'allow_once') ?? permOpts[0];
 						if (allowOpt) {
 							client.write({ jsonrpc: '2.0', id: packet.id, result: { outcome: { outcome: 'selected', optionId: allowOpt.optionId } } });
 							return;

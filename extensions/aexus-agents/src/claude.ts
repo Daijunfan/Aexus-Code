@@ -263,7 +263,6 @@ export class ClaudeRuntime implements EngineRuntime {
 	private readonly initBySession = new Map<string, ClaudeInitInfo>();
 	private readonly usageBySession = new Map<string, ClaudeUsageStats>();
 	private lastInit: ClaudeInitInfo | undefined;
-	private settingsDefaultMode: string | null | undefined;
 	constructor(private readonly executable: string) { }
 
 	private configDir(): string {
@@ -398,44 +397,25 @@ export class ClaudeRuntime implements EngineRuntime {
 		}
 	}
 
-	private async readSettingsDefaultMode(): Promise<string | undefined> {
-		if (this.settingsDefaultMode !== undefined) {
-			return this.settingsDefaultMode ?? undefined;
-		}
-		try {
-			const raw = JSON.parse(await fs.readFile(path.join(this.configDir(), 'settings.json'), 'utf8')) as {
-				permissions?: { defaultMode?: unknown };
-				defaultMode?: unknown;
-				permissionMode?: unknown;
-			};
-			const mode = raw.permissions?.defaultMode ?? raw.defaultMode ?? raw.permissionMode;
-			this.settingsDefaultMode = typeof mode === 'string' && mode.trim() ? mode.trim() : null;
-		} catch {
-			this.settingsDefaultMode = null;
-		}
-		return this.settingsDefaultMode ?? undefined;
-	}
-
 	private async resolvePermissionMode(options?: EngineSendOptions): Promise<string | undefined> {
-		const requested = options?.permissionMode?.trim();
-		if (requested && requested !== 'default') {
-			switch (requested) {
-				case 'plan':
-					return 'plan';
-				case 'acceptEdits':
-					return 'acceptEdits';
-				case 'auto':
-				case 'bypassPermissions':
-				case 'dontAsk':
-				default:
-					// Headless `--print` runs must never block on stdin permission prompts.
-					return 'bypassPermissions';
-			}
-		}
 		if (options?.automatedEngineering) {
 			return 'bypassPermissions';
 		}
-		return (await this.readSettingsDefaultMode()) === 'bypassPermissions' ? 'bypassPermissions' : undefined;
+		const requested = options?.permissionMode?.trim();
+		switch (requested) {
+			case 'ask':
+			case 'manual':
+				return 'default';
+			case 'plan':
+				return 'plan';
+			case 'acceptEdits':
+				return 'acceptEdits';
+			case 'auto':
+				return 'auto';
+			default:
+				// Highest permissions by default across all Aexus sessions unless the user explicitly selected Ask/Plan/Auto-Edit/Auto.
+				return 'bypassPermissions';
+		}
 	}
 
 	private async buildUserMessage(text: string, attachments?: readonly EngineAttachment[]): Promise<string | ContentPart[]> {
@@ -663,7 +643,7 @@ export class ClaudeRuntime implements EngineRuntime {
 				}
 				if (event.type === 'control_request' && event.request?.subtype === 'can_use_tool') {
 					const request = event.request;
-					if (isAutoEng || isSafeAdeOrchestratorToolCall(options?.callerRole, request.tool_name, request.input)) {
+					if (bypassPermissions || isAutoEng || isSafeAdeOrchestratorToolCall(options?.callerRole, request.tool_name, request.input)) {
 						if (!child.stdin.destroyed) {
 							child.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: { behavior: 'allow', updatedInput: request.input } } }) + '\n');
 						}
@@ -792,7 +772,7 @@ export class ClaudeRuntime implements EngineRuntime {
 		const rows: Array<[string, string]> = [];
 		rows.push([vscode.l10n.t('Model'), model ?? vscode.l10n.t('Not reported yet')]);
 		rows.push([vscode.l10n.t('Effort'), options?.thinking ?? vscode.l10n.t('Default')]);
-		rows.push([vscode.l10n.t('Permission mode'), options?.permissionMode ?? init?.permissionMode ?? vscode.l10n.t('Configured')]);
+		rows.push([vscode.l10n.t('Permission mode'), options?.permissionMode ?? init?.permissionMode ?? 'bypassPermissions']);
 		rows.push([vscode.l10n.t('Session'), session.id]);
 		rows.push([vscode.l10n.t('Turns'), usage?.numTurns !== undefined ? String(usage.numTurns) : vscode.l10n.t('Not reported yet')]);
 		rows.push([vscode.l10n.t('Duration'), usage?.durationMs !== undefined ? `${(usage.durationMs / 1000).toFixed(1)}s` : vscode.l10n.t('Not reported yet')]);
