@@ -22,7 +22,12 @@ import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { defaultButtonStyles } from '../../../../../platform/theme/browser/defaultStyles.js';
+import { localize } from '../../../../../nls.js';
+import { asCssVariable } from '../../../../../platform/theme/common/colorUtils.js';
 import { ChatAgentLocation } from '../../common/constants.js';
+import { chatWorkingProgressStableIconForeground } from '../../common/widget/chatColors.js';
+import { chatWorkingLogoFacePaths, createChatWorkingLogoEmblem } from '../widget/chatWorkingLogoDraw.js';
+import '../widget/media/chatWorkingLogo.css';
 import { chatViewsWelcomeRegistry, IChatViewsWelcomeDescriptor } from './chatViewsWelcome.js';
 
 const $ = dom.$;
@@ -127,12 +132,26 @@ export interface IChatViewWelcomeContent {
 	tips?: IMarkdownString;
 	readonly inputPart?: HTMLElement;
 	readonly useLargeIcon?: boolean;
+	/** Renders the Aexus emblem as the hero mark instead of {@link icon}. */
+	readonly useAexusEmblem?: boolean;
+	/** Quick-start prompts rendered as a responsive card grid below the hero. */
+	readonly quickStarts?: readonly IChatViewWelcomeQuickStart[];
+}
+
+export interface IChatViewWelcomeQuickStart {
+	/** The mode group the card belongs to, e.g. "Agent", "Ask" or "Plan". */
+	readonly group: string;
+	readonly label: string;
+	readonly prompt: string;
+	readonly icon: ThemeIcon;
 }
 
 export interface IChatViewWelcomeRenderOptions {
 	readonly firstLinkToButton?: boolean;
 	readonly location: ChatAgentLocation;
 	readonly isWidgetAgentWelcomeViewContent?: boolean;
+	/** Invoked when a quick-start card is chosen. */
+	readonly onDidSelectQuickStart?: (quickStart: IChatViewWelcomeQuickStart) => void;
 }
 
 export class ChatViewWelcomePart extends Disposable {
@@ -156,7 +175,10 @@ export class ChatViewWelcomePart extends Disposable {
 			if (content.useLargeIcon) {
 				icon.classList.add('large-icon');
 			}
-			if (content.icon) {
+			if (content.useAexusEmblem) {
+				icon.classList.add('aexus-emblem');
+				icon.appendChild(createChatWelcomeEmblem());
+			} else if (content.icon) {
 				if (ThemeIcon.isThemeIcon(content.icon)) {
 					const iconElement = renderIcon(content.icon);
 					icon.appendChild(iconElement);
@@ -211,8 +233,33 @@ export class ChatViewWelcomePart extends Disposable {
 				button.label = action.label;
 				this._register(button.onDidClick(() => this.openerService.open(action.href, { allowCommands: true })));
 			}
+
+			// Quick-start cards
+			if (content.quickStarts?.length) {
+				this.renderQuickStarts(content.quickStarts, options);
+			}
 		} catch (err) {
 			this.logService.error('Failed to render chat view welcome content', err);
+		}
+	}
+
+	private renderQuickStarts(quickStarts: readonly IChatViewWelcomeQuickStart[], options: IChatViewWelcomeRenderOptions | undefined): void {
+		const grid = dom.append(this.element, $('.chat-welcome-view-quick-starts', { role: 'list', 'aria-label': localize('chatWelcome.quickStarts', "Quick start prompts") }));
+		for (const quickStart of quickStarts) {
+			const card = dom.append(grid, $<HTMLButtonElement>('button.chat-welcome-view-quick-start', { type: 'button', role: 'listitem', title: quickStart.prompt }));
+			const iconElement = renderIcon(quickStart.icon);
+			iconElement.setAttribute('aria-hidden', 'true');
+			card.appendChild(iconElement);
+			const text = dom.append(card, $('span.chat-welcome-view-quick-start-text'));
+			dom.append(text, $('span.chat-welcome-view-quick-start-group', undefined, quickStart.group));
+			dom.append(text, $('span.chat-welcome-view-quick-start-label', undefined, quickStart.label));
+			card.setAttribute('aria-label', localize('chatWelcome.quickStartAria', "{0}: {1}", quickStart.group, quickStart.label));
+			if (options?.onDidSelectQuickStart) {
+				const select = options.onDidSelectQuickStart;
+				this._register(dom.addDisposableListener(card, dom.EventType.CLICK, () => select(quickStart)));
+			} else {
+				card.disabled = true;
+			}
 		}
 	}
 
@@ -220,6 +267,8 @@ export class ChatViewWelcomePart extends Disposable {
 		// Heuristic based on content that changes between states
 		return !!(
 			this.content.title !== content.title ||
+			!!this.content.useAexusEmblem !== !!content.useAexusEmblem ||
+			(this.content.quickStarts?.map(q => q.prompt).join('\n') ?? '') !== (content.quickStarts?.map(q => q.prompt).join('\n') ?? '') ||
 			(typeof this.content.message === 'string' ? this.content.message : this.content.message.value) !== (typeof content.message === 'string' ? content.message : content.message.value) ||
 			this.content.primaryAction?.label !== content.primaryAction?.label ||
 			this.content.primaryAction?.href !== content.primaryAction?.href ||
@@ -244,4 +293,17 @@ export class ChatViewWelcomePart extends Disposable {
 		}
 		return messageResult;
 	}
+}
+
+let welcomeEmblemIdPool = 0;
+
+/** A static Aexus emblem for the welcome hero: the same tile, hairline and orbit as the working indicator. */
+function createChatWelcomeEmblem(): HTMLElement {
+	const emblem = $('span.chat-working-logo.chat-welcome-view-emblem', { 'aria-hidden': 'true' });
+	emblem.style.color = asCssVariable(chatWorkingProgressStableIconForeground);
+	const face = dom.append(emblem, $('span.chat-working-logo-face'));
+	const artwork = createChatWorkingLogoEmblem(`chat-welcome-emblem-${++welcomeEmblemIdPool}`, { width: '100%', height: '100%', focusable: 'false' }, { orbit: true });
+	artwork.emblem.append(...chatWorkingLogoFacePaths.map(d => $.SVG<SVGPathElement>('path', { d, fill: 'currentColor' })));
+	face.appendChild(artwork.svg);
+	return emblem;
 }

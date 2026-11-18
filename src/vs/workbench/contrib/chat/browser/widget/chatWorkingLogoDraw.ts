@@ -3,10 +3,32 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { $ } from '../../../../../base/browser/dom.js';
+
 type Point = [number, number];
 export type ChatWorkingLogoDrawBand = 'leg1' | 'leg3' | 'bar';
 
-export const CHAT_WORKING_LOGO_VIEW_BOX = '-12 -12 120 120';
+/**
+ * The emblem canvas. The tile (the element's layout box) spans -12..108; the canvas adds a 24-unit bleed on
+ * every side so the rounded tile, its hairline and the orbit are painted by the artwork itself and are never
+ * clipped by a CSS border radius.
+ */
+export const CHAT_WORKING_LOGO_VIEW_BOX = '-36 -36 168 168';
+
+/** Mask region for the Draw bands, covering the whole emblem canvas. */
+export const CHAT_WORKING_LOGO_MASK_RECT = { x: -36, y: -36, width: 168, height: 168 } as const;
+
+/** The rounded black tile behind the mark (22.3% corner radius, matching the product icon). */
+export const CHAT_WORKING_LOGO_TILE = { x: -12, y: -12, size: 120, radius: 26.8, fill: '#0b0d12' } as const;
+
+/** The orbital arc around the tile, drawn only when the emblem is at least 18px. */
+export const CHAT_WORKING_LOGO_ORBIT = { cx: 48, cy: 48, r: 78, strokeWidth: 3, dash: '12 88' } as const;
+
+/** Ratio between the emblem canvas and the tile, i.e. how much larger the painted area is than the layout box. */
+export const CHAT_WORKING_LOGO_BLEED_SCALE = CHAT_WORKING_LOGO_MASK_RECT.width / CHAT_WORKING_LOGO_TILE.size;
+
+/** Smallest emblem size, in CSS pixels, at which the orbit is legible. */
+export const CHAT_WORKING_LOGO_ORBIT_MIN_SIZE = 18;
 
 export const chatWorkingLogoFacePaths = [
 	'M87.0275 15.0688L69.7198 6.73546C67.7164 5.77087 65.3223 6.17776 63.75 7.75L7.09081 59.4099C5.56682 60.7994 5.56857 63.1987 7.09459 64.586L11.7227 68.7934C12.9703 69.9275 14.8491 70.011 16.1924 68.992L84.4232 17.2307C86.7122 15.4942 90 17.1268 90 20V19.7991C90 17.7823 88.8447 15.9437 87.0275 15.0688Z',
@@ -466,3 +488,132 @@ export function getChatWorkingLogoDrawFrame(progress: number): IChatWorkingLogoD
 	}
 	return { paths: emptyPaths, tail: drawRibbon.length, head: drawRibbon.length, assembled: false };
 }
+
+// #region Emblem
+
+/** Per-frame state of the emblem around the mark: breathing tile, sheen sweep and orbit. */
+export interface IChatWorkingLogoEmblemFrame {
+	/** Breathing scale of the tile and mark around the centre, between 0.96 and 1. */
+	readonly scale: number;
+	/** Horizontal offset of the sheen band, in draw units; `undefined` hides the sheen. */
+	readonly sheenOffset: number | undefined;
+	/** Rotation of the orbit arc around the centre, in degrees. */
+	readonly orbitAngle: number;
+	readonly orbitOpacity: number;
+}
+
+/** Breathing amplitude; the emblem never grows past its resting size, so the bleed is never exceeded. */
+const breathMinScale = 0.96;
+/** Share of each loop spent sweeping the sheen across the tile. */
+const sheenSweepDuration = 0.45;
+/** Sheen offsets at which the skewed band is entirely left, respectively right, of the tile. */
+const sheenStart = 0;
+const sheenEnd = 210;
+
+/** Static emblem used for reduced motion, inactive indicators and the welcome hero. */
+export const CHAT_WORKING_LOGO_STATIC_EMBLEM_FRAME: IChatWorkingLogoEmblemFrame = Object.freeze({
+	scale: 1,
+	sheenOffset: undefined,
+	orbitAngle: -90,
+	orbitOpacity: 0.35,
+});
+
+export function getChatWorkingLogoEmblemFrame(progress: number): IChatWorkingLogoEmblemFrame {
+	const wrapped = progress >= 0 && progress < 1 ? progress : ((progress % 1) + 1) % 1;
+	const breath = (1 + Math.cos(2 * Math.PI * wrapped)) / 2;
+	const sweep = wrapped / sheenSweepDuration;
+	return {
+		scale: roundTo(breathMinScale + (1 - breathMinScale) * breath, 4),
+		sheenOffset: sweep < 1 ? roundTo(sheenStart + (sheenEnd - sheenStart) * easeInOutSine(sweep), 2) : undefined,
+		orbitAngle: roundTo(-90 + 360 * wrapped, 2),
+		orbitOpacity: 0.55,
+	};
+}
+
+/** The farthest point of the tile from the emblem centre, used to prove that the orbit never touches the tile. */
+export function getChatWorkingLogoTileExtent(scale = 1): number {
+	const half = CHAT_WORKING_LOGO_TILE.size / 2;
+	const r = CHAT_WORKING_LOGO_TILE.radius;
+	return ((half - r) * Math.SQRT2 + r) * scale;
+}
+
+export interface IChatWorkingLogoEmblemElements {
+	readonly svg: SVGSVGElement;
+	readonly defs: SVGDefsElement;
+	/** Breathing group holding the tile, sheen, hairline and the caller's mark. */
+	readonly emblem: SVGGElement;
+	readonly sheen: SVGRectElement;
+	readonly orbit: SVGCircleElement;
+}
+
+/**
+ * Builds the emblem artwork shared by the static face, the SVG Draw fallback and the atlas: a rounded tile with
+ * a hairline, a sheen clipped to the tile, the caller's mark on top, and an orbit outside the tile.
+ */
+export function createChatWorkingLogoEmblem(idPrefix: string, svgAttributes: Record<string, string | number>, options: { readonly orbit: boolean; readonly hairline?: string }): IChatWorkingLogoEmblemElements {
+	const { x, y, size, radius, fill } = CHAT_WORKING_LOGO_TILE;
+	const clipId = `${idPrefix}-tile-clip`;
+	const sheenGradientId = `${idPrefix}-sheen`;
+	const defs = $.SVG<SVGDefsElement>('defs', {},
+		$.SVG('clipPath', { id: clipId },
+			$.SVG('rect', { x, y, width: size, height: size, rx: radius })),
+		$.SVG('linearGradient', { id: sheenGradientId, x1: '0', y1: '0', x2: '1', y2: '0' },
+			$.SVG('stop', { offset: '0', 'stop-color': '#fff', 'stop-opacity': '0' }),
+			$.SVG('stop', { offset: '0.5', 'stop-color': '#fff', 'stop-opacity': '0.22' }),
+			$.SVG('stop', { offset: '1', 'stop-color': '#fff', 'stop-opacity': '0' })));
+	const sheen = $.SVG<SVGRectElement>('rect', {
+		class: 'chat-working-logo-sheen', x: -60, y: -24, width: 40, height: 144, fill: `url(#${sheenGradientId})`, display: 'none',
+	});
+	const hairlineAttributes: Record<string, string | number> = {
+		class: 'chat-working-logo-hairline', x: x + 0.5, y: y + 0.5, width: size - 1, height: size - 1, rx: radius - 0.5,
+		fill: 'none', stroke: options.hairline ?? '#fff', 'stroke-width': 1,
+	};
+	if (!options.hairline) {
+		hairlineAttributes['stroke-opacity'] = 0.16;
+	}
+	const emblem = $.SVG<SVGGElement>('g', { class: 'chat-working-logo-emblem' },
+		$.SVG('rect', { class: 'chat-working-logo-tile', x, y, width: size, height: size, rx: radius, fill }),
+		$.SVG('g', { class: 'chat-working-logo-sheen-clip', 'clip-path': `url(#${clipId})` }, sheen),
+		$.SVG('rect', hairlineAttributes));
+	const { cx, cy, r, strokeWidth, dash } = CHAT_WORKING_LOGO_ORBIT;
+	const orbit = $.SVG<SVGCircleElement>('circle', {
+		class: 'chat-working-logo-orbit', cx, cy, r, fill: 'none', stroke: 'currentColor', 'stroke-width': strokeWidth,
+		'stroke-linecap': 'round', pathLength: 100, 'stroke-dasharray': dash,
+	});
+	if (!options.orbit) {
+		orbit.setAttribute('display', 'none');
+	}
+	const svg = $.SVG<SVGSVGElement>('svg', { viewBox: CHAT_WORKING_LOGO_VIEW_BOX, ...svgAttributes }, defs, orbit, emblem);
+	applyChatWorkingLogoEmblemFrame({ emblem, sheen, orbit }, CHAT_WORKING_LOGO_STATIC_EMBLEM_FRAME);
+	return { svg, defs, emblem, sheen, orbit };
+}
+
+export function applyChatWorkingLogoEmblemFrame(elements: Pick<IChatWorkingLogoEmblemElements, 'emblem' | 'sheen' | 'orbit'>, frame: IChatWorkingLogoEmblemFrame): void {
+	const { cx, cy } = CHAT_WORKING_LOGO_ORBIT;
+	if (frame.scale === 1) {
+		elements.emblem.removeAttribute('transform');
+	} else {
+		elements.emblem.setAttribute('transform', `translate(${cx} ${cy}) scale(${frame.scale}) translate(${-cx} ${-cy})`);
+	}
+	if (frame.sheenOffset === undefined) {
+		elements.sheen.setAttribute('display', 'none');
+		elements.sheen.removeAttribute('transform');
+	} else {
+		elements.sheen.removeAttribute('display');
+		elements.sheen.setAttribute('transform', `translate(${frame.sheenOffset} 0) skewX(-18)`);
+	}
+	elements.orbit.setAttribute('transform', `rotate(${frame.orbitAngle} ${cx} ${cy})`);
+	elements.orbit.setAttribute('stroke-opacity', String(frame.orbitOpacity));
+}
+
+function roundTo(value: number, digits: number): number {
+	const factor = 10 ** digits;
+	const rounded = Math.round(value * factor) / factor;
+	return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+function easeInOutSine(value: number): number {
+	return -(Math.cos(Math.PI * value) - 1) / 2;
+}
+
+// #endregion

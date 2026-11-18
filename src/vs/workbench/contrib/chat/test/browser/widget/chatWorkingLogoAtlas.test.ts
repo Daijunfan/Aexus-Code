@@ -19,7 +19,7 @@ import { NullLogService } from '../../../../../../platform/log/common/log.js';
 import { IColorTheme, IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { TestColorTheme } from '../../../../../../platform/theme/test/common/testThemeService.js';
 import { ChatWorkingLogoAtlasCache, IChatWorkingLogoAtlas, createChatWorkingLogoAtlas, getChatWorkingLogoAtlasKeyframes, hasChatWorkingLogoAtlas, loadChatWorkingLogoAtlasImage } from '../../../browser/widget/chatWorkingLogoAtlas.js';
-import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_VIEW_BOX, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from '../../../browser/widget/chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_BLEED_SCALE, CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, applyChatWorkingLogoEmblemFrame, chatWorkingLogoFacePaths, createChatWorkingLogoEmblem, getChatWorkingLogoDrawFrame, getChatWorkingLogoEmblemFrame } from '../../../browser/widget/chatWorkingLogoDraw.js';
 import { ChatWorkingLogo, ChatWorkingProgressLogo } from '../../../browser/widget/chatWorkingLogo.js';
 import { ChatConfiguration, ChatProgressAnimation } from '../../../common/constants.js';
 
@@ -226,9 +226,11 @@ suite('ChatWorkingLogoAtlas', () => {
 		expected.width = expected.height = 24;
 		const expectedContext = expected.getContext('2d', { willReadFrequently: true });
 		assert.ok(expectedContext);
-		const svg = $.SVG<SVGSVGElement>('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: CHAT_WORKING_LOGO_VIEW_BOX, width: 24, height: 24 },
-			...chatWorkingLogoFacePaths.map(d => $.SVG<SVGPathElement>('path', { d, fill: '#007acc' })));
-		const source = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' }));
+		const heldEmblem = createChatWorkingLogoEmblem('expected', { xmlns: 'http://www.w3.org/2000/svg', width: 24, height: 24 }, { orbit: false });
+		heldEmblem.svg.style.color = '#007acc';
+		heldEmblem.emblem.append(...chatWorkingLogoFacePaths.map(d => $.SVG<SVGPathElement>('path', { d, fill: 'currentColor' })));
+		applyChatWorkingLogoEmblemFrame(heldEmblem, getChatWorkingLogoEmblemFrame(160 / 320));
+		const source = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(heldEmblem.svg)], { type: 'image/svg+xml' }));
 		store.add(toDisposable(() => URL.revokeObjectURL(source)));
 		await loadChatWorkingLogoAtlasImage(image, source, token);
 		expectedContext.drawImage(image, 0, 0);
@@ -240,8 +242,16 @@ suite('ChatWorkingLogoAtlas', () => {
 		animatedSvg.setAttribute('width', '24');
 		animatedSvg.setAttribute('height', '24');
 		animatedSvg.style.color = '#007acc';
-		for (const index of [0, 1, 20, 63, 127, 176, 203, 244, 287, 319]) {
+		const animatedOrbit = animatedSvg.querySelector<SVGCircleElement>('.chat-working-logo-orbit')!;
+		animatedOrbit.setAttribute('display', 'none');
+		const animatedEmblem = {
+			emblem: animatedSvg.querySelector<SVGGElement>('.chat-working-logo-emblem')!,
+			sheen: animatedSvg.querySelector<SVGRectElement>('.chat-working-logo-sheen')!,
+			orbit: animatedOrbit,
+		};
+		for (const index of [0, 1, 20, 63, 127, 203, 244, 287, 319]) {
 			const frame = getChatWorkingLogoDrawFrame(index / 320);
+			applyChatWorkingLogoEmblemFrame(animatedEmblem, getChatWorkingLogoEmblemFrame(index / 320));
 			for (const band of CHAT_WORKING_LOGO_DRAW_PAINT_ORDER) {
 				animatedSvg.querySelector(`.chat-working-logo-draw-band-${band}`)!.setAttribute('d', frame.paths[band]);
 			}
@@ -320,7 +330,7 @@ suite('ChatWorkingLogoAtlas', () => {
 			firstWidth,
 			replacementWidth: image()!.naturalWidth,
 			bounds: [bounds.width, bounds.height],
-		}, { firstWidth: 320, replacementWidth: 680, bounds: [12, 12] });
+		}, { firstWidth: 420, replacementWidth: 920, bounds: [12, 12] });
 	}).timeout(atlasGenerationTimeout);
 
 	test('atlas failure logs once and leaves the SVG fallback active', async () => {
@@ -375,9 +385,14 @@ suite('ChatWorkingLogoAtlas', () => {
 		assert.ok(context);
 		context.drawImage(colored, 0, 0);
 		const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
-		const opaque = data.findIndex((value, index) => index % 4 === 3 && value === 255);
-		assert.ok(opaque >= 3);
-		const rgba = [...data.slice(opaque - 3, opaque + 1)];
+		let rgba: number[] | undefined;
+		for (let index = 0; index < data.length; index += 4) {
+			if (data[index + 3] === 255 && data[index] === 36 && data[index + 1] === 191 && data[index + 2] === 165) {
+				rgba = [...data.slice(index, index + 4)];
+				break;
+			}
+		}
+		assert.ok(rgba);
 		logo.setAnimation(ChatProgressAnimation.DrawMonochromeNoIcon);
 		changed.fire(new TestColorTheme());
 		await timeout(0);
@@ -457,7 +472,9 @@ suite('ChatWorkingLogoAtlas', () => {
 		const first = store.add(new ChatWorkingLogo(ChatProgressAnimation.Draw, 'stable', { pixelRatio, atlasPreparationDelay: 0 }));
 		host.appendChild(first.domNode);
 		await waitForMutation(first.domNode, () => first.domNode.classList.contains('chat-working-logo-atlas'));
-		const options = { width: 12, height: 12, color: mainWindow.getComputedStyle(first.domNode).color };
+		const firstStyle = mainWindow.getComputedStyle(first.domNode);
+		const bleedWidth = Math.round(12 * CHAT_WORKING_LOGO_BLEED_SCALE);
+		const options = { width: bleedWidth, height: bleedWidth, color: firstStyle.color, hairline: firstStyle.getPropertyValue('--chat-working-logo-hairline').trim() || undefined, orbit: false };
 		first.dispose();
 		const retained = hasChatWorkingLogoAtlas(mainWindow, options);
 		const second = store.add(new ChatWorkingLogo(ChatProgressAnimation.Draw, 'stable', { pixelRatio, atlasPreparationDelay: 60_000 }));
