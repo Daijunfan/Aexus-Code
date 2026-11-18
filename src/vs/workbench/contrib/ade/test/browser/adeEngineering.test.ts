@@ -44,8 +44,15 @@ import '../../browser/ade.css';
 import '../../browser/ade.contribution.js';
 import '../../browser/adeControlHandler.js';
 import {
+	ADE_ENG_MAX_PARTICLE_EDGES,
+	ADE_ENG_PARTICLES_PER_EDGE,
+	ADE_ENG_PHASE_SOFT_SLA_MS,
 	AdeEngineeringEditorInput,
 	AdeEngineeringEditorPane,
+	blueprintNodeIdAtOffset,
+	computeEngineeringWorldSize,
+	computeQuickSpawnPosition,
+	computeTokenRatePerMinute,
 } from '../../browser/adeEngineeringEditorPane.js';
 import {
 	ADE_RECORD_TURN_USAGE_COMMAND_ID,
@@ -1652,6 +1659,575 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		await heldN2.started.p;
 		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.state.nodes.N2?.phase, 'worker_running', 'Inline Gate Approve advances downstream task N2 immediately');
 		heldN2.reply.complete('done');
+
+		pane.clearInput();
+	});
+
+	test('Wave 1: Mode theming (.mode-engineering vs .mode-research), dynamic world expansion, parallax grid vars, 268x172 armored pods with 4 clamps, ±0.5px port alignment, phase-manager ribbon, 3-pip failure ladder & over-SLA timer', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1220px;height:780px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		// 1. Dynamic world bounds helper expands beyond 4800×3600 for large graphs
+		assert.deepStrictEqual(computeEngineeringWorldSize([{ position: { x: 240, y: 300 } }]), { width: 4800, height: 3600 });
+		const expandedWorld = computeEngineeringWorldSize([{ position: { x: 5250, y: 3900 } }]);
+		assert.ok(expandedWorld.width >= 5800 && expandedWorld.height >= 4500, 'World bounds expand past 4800×3600 for far nodes');
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const engGov = await createGovernor(h.projects, sessions, 'Armored Eng Gov');
+		await h.engineering.initTree({ governorSessionId: engGov.id, treeType: 'engineering' });
+
+		const critBp = [
+			'---',
+			'version: 1',
+			'treeType: engineering',
+			'workspaceIsolation: shared',
+			'---',
+			'',
+			'```mermaid',
+			'graph LR',
+			'  N1["Critical Core Pod"] --> U1{{"Gate Shield"}}',
+			'  U1 --> N2["Far Horizon Pod"]',
+			'```',
+			'',
+			'## Node: N1',
+			'- Title: Critical Core Pod',
+			'- Type: task',
+			'- Critical: true',
+			'- Position: 240, 300',
+			'- Employee: engine=claude-code, thinking=high',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Build critical core.',
+			'### Acceptance Criteria',
+			'Passes audit.',
+			'',
+			'## Node: U1',
+			'- Title: Gate Shield',
+			'- Type: user_gate',
+			'- Position: 660, 300',
+			'### Description',
+			'Human gate.',
+			'',
+			'## Node: N2',
+			'- Title: Far Horizon Pod',
+			'- Type: task',
+			'- Critical: false',
+			'- Position: 5200, 3900',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Test world expansion.',
+			'### Acceptance Criteria',
+			'Renders cleanly.',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: engGov.id, blueprintText: critBp });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1220, height: 780, top: 0, left: 0 } as never);
+
+		const engInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, engGov.id));
+		await pane.setInput(engInput, undefined, {}, CancellationToken.None);
+
+		const editorEl = host.querySelector('.ade-eng-editor') as HTMLElement;
+		assert.ok(editorEl.classList.contains('mode-engineering') && !editorEl.classList.contains('mode-research'), 'Engineering governor sets .mode-engineering on root');
+
+		const viewportEl = host.querySelector('.ade-eng-viewport') as HTMLElement;
+		assert.ok(viewportEl.style.getPropertyValue('--grid-x').endsWith('px'), 'Viewport sets --grid-x parallax var');
+		assert.ok(viewportEl.style.getPropertyValue('--grid-y').endsWith('px'), 'Viewport sets --grid-y parallax var');
+		assert.ok(Number(viewportEl.style.getPropertyValue('--grid-scale')) > 0, 'Viewport sets --grid-scale parallax var');
+
+		const worldEl = host.querySelector('.ade-eng-world') as HTMLElement;
+		const edgesSvg = host.querySelector('svg.ade-eng-edges-svg') as SVGSVGElement;
+		assert.ok(parseInt(worldEl.style.width, 10) > 4800 && parseInt(worldEl.style.height, 10) > 3600, 'World div expands beyond 4800×3600 for large graphs');
+		assert.strictEqual(edgesSvg.getAttribute('width'), String(parseInt(worldEl.style.width, 10)), 'Edges SVG width matches expanded world');
+
+		// 2. Symmetric 268×172 armored dual-shell pod + 4 L-clamps + ±0.5px port-out center alignment + segment progress strip
+		const n1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;
+		const conc = n1El.querySelector('.ade-eng-concentric') as HTMLElement;
+		const core = conc.querySelector('.ade-eng-inner-core') as HTMLElement;
+		const portOut = n1El.querySelector('.ade-eng-port.port-out') as HTMLElement;
+		const concStyle = mainWindow.getComputedStyle(conc);
+		assert.strictEqual(concStyle.width, '268px', 'Task pod width is 268px');
+		assert.strictEqual(concStyle.height, '172px', 'Task pod height is 172px');
+		assert.strictEqual(conc.querySelectorAll('.ade-eng-shell-clamp').length, 4, 'Task pod renders 4 L-corner clamps');
+		for (const c of ['tl', 'tr', 'bl', 'br']) {
+			assert.ok(conc.querySelector(`.ade-eng-shell-clamp.${c}`), `Clamp .${c} rendered`);
+		}
+		const concRect = conc.getBoundingClientRect();
+		const coreRect = core.getBoundingClientRect();
+		const portRect = portOut.getBoundingClientRect();
+		assert.ok(
+			concRect.top < coreRect.top && concRect.left < coreRect.left && concRect.right > coreRect.right && concRect.bottom > coreRect.bottom,
+			'Armored Employee shell encloses sunken Worker core on all 4 sides',
+		);
+		assert.ok(
+			Math.abs((concRect.top + concRect.height / 2) - (portRect.top + portRect.height / 2)) <= 0.5,
+			'port-out vertical center aligns with 268×172 concentric center within ±0.5px',
+		);
+		assert.strictEqual(host.querySelectorAll('.ade-eng-segment-halo').length, 2);
+		assert.strictEqual(host.querySelectorAll('.ade-eng-segment-halo .ade-eng-segment-progress').length, 2, 'Each MGR lane renders a segment progress strip');
+
+		// 3. Phase progression: phase-worker -> phase-employee -> phase-manager ("MGR REVIEW") -> 3-pip failure ladder + "CIRCUIT BROKEN"
+		const heldWrk1 = h.holdNextWorkerTurn();
+		await h.engineering.runTree(engGov.id, 'user');
+		await heldWrk1.started.p;
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-node[data-node-id="N1"].phase-worker')));
+		const wrkPill = host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-live-phase-pill') as HTMLElement;
+		assert.strictEqual(wrkPill.getAttribute('data-phase-role'), 'wrk', 'Live timer pill tags Worker role');
+
+		// Advance simulated clock past soft SLA on a reload to verify .over-sla escalation
+		const liveRec = h.engineering.getTreeSnapshot(engGov.id)!;
+		assert.ok(liveRec.state.nodes.N1.startedAt);
+		assert.strictEqual(wrkPill.classList.contains('over-sla'), false, 'Fresh active phase pill starts below SLA');
+		const realNow = Date.now;
+		try {
+			Date.now = () => (liveRec.state.nodes.N1.startedAt ?? realNow()) + ADE_ENG_PHASE_SOFT_SLA_MS + 5_000;
+			await pane.setInput(engInput, undefined, {}, CancellationToken.None);
+			assert.ok(
+				host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-live-phase-pill')?.classList.contains('over-sla'),
+				'Live timer pill escalates to .over-sla once elapsed exceeds soft SLA',
+			);
+		} finally {
+			Date.now = realNow;
+		}
+
+		heldWrk1.reply.complete('attempt 1');
+		await waitForNodePhase(h.engineering, engGov.id, 'N1', 'employee_review');
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-node[data-node-id="N1"].phase-employee')));
+		assert.strictEqual(
+			host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-live-phase-pill')?.getAttribute('data-phase-role'),
+			'emp',
+			'Live timer pill tags Employee role during audit',
+		);
+		assert.ok(
+			host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-handoff-chip')?.textContent?.includes('Auditing'),
+			'Employee phase renders ↑ Auditing handoff chip',
+		);
+
+		// Employee pass on critical node N1 -> enters manager_review (.phase-manager + MGR REVIEW ribbon!)
+		await h.engineering.submitReview({ governorSessionId: engGov.id, nodeId: 'N1', role: 'employee', verdict: 'pass', report: 'Attempt 1' });
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-node[data-node-id="N1"].phase-manager')));
+		const mgrRibbon = host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-phase-ribbon.mgr-review') as HTMLElement | null;
+		assert.ok(mgrRibbon && mgrRibbon.textContent === 'MGR REVIEW', 'Manager review phase renders MGR REVIEW ribbon');
+		assert.strictEqual(
+			host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-live-phase-pill')?.getAttribute('data-phase-role'),
+			'mgr',
+		);
+
+		// Formal Failure 1 -> data-fail="1", 1/3 lit pip
+		await h.engineering.submitReview({ governorSessionId: engGov.id, nodeId: 'N1', role: 'manager', verdict: 'reject', feedback: 'F1' });
+		await waitForNodePhase(h.engineering, engGov.id, 'N1', 'employee_review');
+		await waitForDomCondition(() => host.querySelector('.ade-eng-node[data-node-id="N1"]')?.getAttribute('data-fail') === '1');
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node[data-node-id="N1"] .ade-eng-fail-pips i.lit').length, 1, 'Failure 1 lights 1 of 3 pips');
+
+		// Formal Failure 2 -> data-fail="2", 2/3 lit pips
+		await h.engineering.submitReview({ governorSessionId: engGov.id, nodeId: 'N1', role: 'employee', verdict: 'pass', report: 'Attempt 2' });
+		await h.engineering.submitReview({ governorSessionId: engGov.id, nodeId: 'N1', role: 'manager', verdict: 'reject', feedback: 'F2' });
+		await waitForNodePhase(h.engineering, engGov.id, 'N1', 'employee_review');
+		await waitForDomCondition(() => host.querySelector('.ade-eng-node[data-node-id="N1"]')?.getAttribute('data-fail') === '2');
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node[data-node-id="N1"] .ade-eng-fail-pips i.lit').length, 2, 'Failure 2 lights 2 of 3 pips');
+
+		// Formal Failure 3 -> data-fail="3", 3/3 lit pips + CIRCUIT BROKEN ribbon
+		await h.engineering.submitReview({ governorSessionId: engGov.id, nodeId: 'N1', role: 'employee', verdict: 'pass', report: 'Attempt 3' });
+		await h.engineering.submitReview({ governorSessionId: engGov.id, nodeId: 'N1', role: 'manager', verdict: 'reject', feedback: 'F3' });
+		await waitForDomCondition(() => host.querySelector('.ade-eng-node[data-node-id="N1"]')?.getAttribute('data-fail') === '3');
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node[data-node-id="N1"] .ade-eng-fail-pips i.lit').length, 3, 'Failure 3 lights all 3 pips');
+		const cbRibbon = host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-phase-ribbon.circuit-broken') as HTMLElement | null;
+		assert.ok(cbRibbon && cbRibbon.textContent === 'CIRCUIT BROKEN', 'Failure 3 renders CIRCUIT BROKEN ribbon');
+
+		// 4. Switch pane input to a Research governor -> root switches to .mode-research
+		const resGov = await createGovernor(h.projects, sessions, 'Research Lead Gov');
+		await h.engineering.initTree({ governorSessionId: resGov.id, treeType: 'research' });
+		const resInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, resGov.id));
+		await pane.setInput(resInput, undefined, {}, CancellationToken.None);
+		assert.ok(editorEl.classList.contains('mode-research') && !editorEl.classList.contains('mode-engineering'), 'Research governor switches root to .mode-research');
+
+		pane.clearInput();
+	});
+
+	test('Wave 2: Capped SMIL edge particles, hover quick-spawn ghost (+ Alt gate morph) preserving T1 node count, floating 3-island toolbar, minimap legend + dblclick fit, HUD ? shortcuts, G/N hotkeys & focused-button Backspace guard', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:780px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Living Canvas Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const bpText = [
+			'---',
+			'version: 1',
+			'treeType: engineering',
+			'workspaceIsolation: shared',
+			'---',
+			'',
+			'```mermaid',
+			'graph LR',
+			'  N1["Seed Task"] --> U1{{"Checkpoint"}}',
+			'  U1 --> N2["Downstream Task"]',
+			'```',
+			'',
+			'## Node: N1',
+			'- Title: Seed Task',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Seed.',
+			'### Acceptance Criteria',
+			'Seed passes.',
+			'',
+			'## Node: U1',
+			'- Title: Checkpoint',
+			'- Type: user_gate',
+			'### Description',
+			'Inspect seed.',
+			'',
+			'## Node: N2',
+			'- Title: Downstream Task',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Downstream.',
+			'### Acceptance Criteria',
+			'Downstream passes.',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: bpText });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 780, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		const rootEl = host.querySelector('.ade-eng-editor') as HTMLElement;
+		const toolbarEl = host.querySelector('.ade-eng-toolbar') as HTMLElement;
+		assert.strictEqual(rootEl.firstElementChild, toolbarEl, 'Floating toolbar remains rootEl.firstElementChild (T14)');
+		assert.strictEqual(toolbarEl.querySelectorAll('.ade-eng-toolbar-group.island').length, 3, 'Toolbar renders 3 glassmorphic islands');
+
+		// 1. Hovering quick-spawn + reveals .ade-eng-spawn-ghost + .ade-eng-spawn-ghost-edge WITHOUT changing .ade-eng-node count (T1); Alt morphs to gate
+		const n2SpawnBtn = host.querySelector('.ade-eng-node[data-node-id="N2"] .ade-eng-quick-spawn-btn') as HTMLButtonElement;
+		const ghostEl = host.querySelector('.ade-eng-spawn-ghost') as HTMLElement;
+		const ghostEdgeEl = host.querySelector('.ade-eng-spawn-ghost-edge') as SVGPathElement;
+		assert.strictEqual(ghostEl.hidden, true);
+		n2SpawnBtn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, altKey: false }));
+		assert.strictEqual(ghostEl.hidden, false, 'Hovering + reveals spawn ghost');
+		assert.ok(ghostEl.classList.contains('type-task'), 'Default ghost previews a Task pod');
+		assert.notStrictEqual(ghostEdgeEl.style.display, 'none', 'Ghost wiring spline is visible on + hover');
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, 3, 'Spawn ghost NEVER carries .ade-eng-node (T1)');
+
+		const snapBp = h.engineering.getTreeSnapshot(gov.id)!.blueprint;
+		assert.ok(computeQuickSpawnPosition({
+			...snapBp,
+			nodes: snapBp.nodes.map(n => ({ ...n, position: n.position ?? { x: 204, y: 260 } })),
+		}, 'N2'));
+
+		n2SpawnBtn.dispatchEvent(new MouseEvent('mousemove', { bubbles: false, altKey: true }));
+		assert.ok(ghostEl.classList.contains('type-user_gate'), 'Holding Alt morphs spawn ghost into a User Gate preview');
+		n2SpawnBtn.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+		assert.strictEqual(ghostEl.hidden, true, 'Leaving + hides spawn ghost');
+
+		// 2. Minimap legend + double-click to fit + HUD ? shortcuts card
+		assert.strictEqual(host.querySelectorAll('.ade-eng-minimap-legend-item').length, 3, 'Minimap renders 3-item status legend');
+		const minimapEl = host.querySelector('.ade-eng-minimap') as HTMLElement;
+		const worldEl = host.querySelector('.ade-eng-world') as HTMLElement;
+		const mmRect = minimapEl.getBoundingClientRect();
+		minimapEl.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: mmRect.left + 150, clientY: mmRect.top + 95, bubbles: true }));
+		minimapEl.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: mmRect.left + 150, clientY: mmRect.top + 95, bubbles: true }));
+		const pannedTransform = worldEl.style.transform;
+		host.classList.add('monaco-reduce-motion');
+		minimapEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		assert.notStrictEqual(worldEl.style.transform, pannedTransform, 'Double-clicking minimap fits graph in viewport');
+		host.classList.remove('monaco-reduce-motion');
+
+		const shortcutsBtn = host.querySelector('.ade-eng-shortcuts-toggle') as HTMLButtonElement;
+		const shortcutsCard = host.querySelector('.ade-eng-shortcuts-card') as HTMLElement;
+		assert.strictEqual(shortcutsCard.hidden, true);
+		shortcutsBtn.click();
+		assert.strictEqual(shortcutsCard.hidden, false, 'Clicking HUD ? button opens shortcuts card');
+		rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		assert.strictEqual(shortcutsCard.hidden, true, 'Escape closes shortcuts card');
+
+		// 3. Focused button Backspace guard + N quick-spawn hotkey
+		const nodeN2El = host.querySelector('.ade-eng-node[data-node-id="N2"]') as HTMLElement;
+		nodeN2El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		const popoverEl = host.querySelector('.ade-eng-popover') as HTMLElement;
+		assert.strictEqual(popoverEl.classList.contains('open'), true);
+		const critBtn = popoverEl.querySelector('button.ade-eng-pop-icon-btn.crit') as HTMLButtonElement;
+		critBtn.focus();
+		critBtn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, 3, 'Backspace while a button holds focus MUST NOT delete the inspected node');
+
+		rootEl.focus();
+		rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true }));
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, 4, 'N hotkey spawns a connected task from inspected node');
+		assert.ok(host.querySelector('.ade-eng-edge-item[data-edge="N2->N4"]'));
+		(Array.from(host.querySelectorAll<HTMLButtonElement>('.ade-eng-action-btn')).find(b => b.textContent === 'Cancel'))!.click();
+
+		// 4. Running edge renders 3 SMIL particles, respects monaco-reduce-motion, G jumps to waiting gate, and >24 running edges cap at 24*3
+		await h.engineering.runTree(gov.id, 'user');
+		await waitForNodePhase(h.engineering, gov.id, 'N1', 'employee_review');
+		await h.engineering.submitReview({ governorSessionId: gov.id, nodeId: 'N1', role: 'employee', verdict: 'pass', report: 'Seed ok' });
+		await h.engineering.submitReview({ governorSessionId: gov.id, nodeId: 'N1', role: 'manager', verdict: 'pass' });
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-node[data-node-id="U1"].awaiting-gate')));
+
+		// Upstream badge visible on awaiting gate too
+		assert.ok(host.querySelector('.ade-eng-node[data-node-id="U1"] .ade-eng-gate-up-badge')?.textContent?.includes('1 ✓'));
+		const runningEdgeGroup = host.querySelector('.ade-eng-edge-item[data-edge="N1->U1"]') as SVGGElement;
+		const particles = runningEdgeGroup.querySelectorAll('circle.ade-eng-edge-particle');
+		assert.strictEqual(particles.length, ADE_ENG_PARTICLES_PER_EDGE, 'Running edge renders 3 SMIL signal particles');
+
+		host.classList.add('monaco-reduce-motion');
+		assert.strictEqual(mainWindow.getComputedStyle(particles[0]).display, 'none', 'Reduced motion hides SMIL edge particles');
+		host.classList.remove('monaco-reduce-motion');
+
+		// G shortcut jumps to waiting User Gate U1 and opens its inspector
+		popoverEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		rootEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), true, 'G shortcut opens waiting User Gate inspector');
+		assert.strictEqual(popoverEl.querySelector('.ade-eng-pop-id')?.textContent, 'U1');
+
+		// Verify ≤24 animated edge cap on a wide fan-out graph (28 running edges -> 72 particles max)
+		const fanGov = await createGovernor(h.projects, sessions, 'Fanout Cap Gov');
+		await h.engineering.initTree({ governorSessionId: fanGov.id });
+		const gateCount = ADE_ENG_MAX_PARTICLE_EDGES + 4;
+		const mermaidLines = Array.from({ length: gateCount }, (_, i) => `  N0["Hub"] --> G${i + 1}{{"Gate ${i + 1}"}}`);
+		const gateSections = Array.from({ length: gateCount }, (_, i) => [
+			`## Node: G${i + 1}`,
+			`- Title: Gate ${i + 1}`,
+			'- Type: user_gate',
+			'### Description',
+			'Fanout gate.',
+		].join('\n'));
+		const fanoutBp = [
+			'---',
+			'version: 1',
+			'treeType: engineering',
+			'workspaceIsolation: shared',
+			'---',
+			'',
+			'```mermaid',
+			'graph LR',
+			...mermaidLines,
+			'```',
+			'',
+			'## Node: N0',
+			'- Title: Hub',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=low',
+			'- Worker: engine=codex, thinking=low',
+			'### Goal',
+			'Hub.',
+			'### Acceptance Criteria',
+			'Hub ok.',
+			...gateSections,
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: fanGov.id, blueprintText: fanoutBp });
+		const fanInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, fanGov.id));
+		await pane.setInput(fanInput, undefined, {}, CancellationToken.None);
+		await h.engineering.runTree(fanGov.id, 'user');
+		await waitForNodePhase(h.engineering, fanGov.id, 'N0', 'employee_review');
+		await h.engineering.submitReview({ governorSessionId: fanGov.id, nodeId: 'N0', role: 'employee', verdict: 'pass', report: 'Hub ok' });
+		await h.engineering.submitReview({ governorSessionId: fanGov.id, nodeId: 'N0', role: 'manager', verdict: 'pass' });
+		await waitForDomCondition(() => host.querySelectorAll('.ade-eng-edge-path.status-running').length === gateCount);
+		assert.strictEqual(
+			host.querySelectorAll('circle.ade-eng-edge-particle').length,
+			ADE_ENG_MAX_PARTICLE_EDGES * ADE_ENG_PARTICLES_PER_EDGE,
+			'SMIL edge particles cap cleanly at 24 running edges × 3 particles',
+		);
+
+		pane.clearInput();
+	});
+
+	test('Wave 3: 5-tab anchored inspector (caret, 32x20 podmap, ArrowLeft/Right nav, opt-in Pin), right-docked 4-tier analytics card, Split Blueprint editor with gutter & xref, and 3-lane Logs timeline with search & new-events pill', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1220px;height:800px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		assert.strictEqual(computeTokenRatePerMinute([{ t: 0, total: 1000 }, { t: 30_000, total: 4000 }]), 6000);
+		assert.strictEqual(blueprintNodeIdAtOffset('## Node: N1\n### Goal\nHello\n## Node: N2\nWorld', 18), 'N1');
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Mission Control Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const bpText = [
+			'---',
+			'version: 1',
+			'treeType: engineering',
+			'workspaceIsolation: shared',
+			'---',
+			'',
+			'```mermaid',
+			'graph LR',
+			'  N1["API Layer"] --> N2["UI Shell"]',
+			'```',
+			'',
+			'## Node: N1',
+			'- Title: API Layer',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Build API.',
+			'### Acceptance Criteria',
+			'API tests pass.',
+			'',
+			'## Node: N2',
+			'- Title: UI Shell',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Build UI.',
+			'### Acceptance Criteria',
+			'UI tests pass.',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: bpText });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1220, height: 800, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		// 1. Anchored 5-tab Inspector: caret, 32×20 podmap, ←/→ keyboard switching, and opt-in Pin
+		const nodeN1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;
+		const popoverEl = host.querySelector('.ade-eng-popover') as HTMLElement;
+		nodeN1El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popoverEl.classList.contains('open'), true);
+		assert.ok(popoverEl.querySelector('.ade-eng-pop-caret'), 'Inspector renders anchor caret');
+		assert.ok(popoverEl.querySelector('.ade-eng-pop-podmap.active-worker'), '32×20 podmap highlights Worker core initially');
+		assert.strictEqual(popoverEl.querySelector('input.ade-eng-input'), popoverEl.querySelector('input.ade-eng-pop-title-input'), 'First input in popover remains title input (T10)');
+
+		popoverEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+		assert.strictEqual(popoverEl.querySelector('.ade-eng-pop-role-tab.tab-employee')?.getAttribute('aria-selected'), 'true', 'ArrowRight switches to Employee tab');
+		assert.ok(popoverEl.querySelector('.ade-eng-pop-podmap.active-employee'), 'Podmap highlights Employee shell on Employee tab');
+
+		popoverEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+		assert.strictEqual(popoverEl.querySelector('.ade-eng-pop-role-tab.tab-worker')?.getAttribute('aria-selected'), 'true', 'ArrowLeft returns to Worker tab');
+
+		const pinBtn = popoverEl.querySelector('button.ade-eng-pop-icon-btn.pin') as HTMLButtonElement;
+		assert.ok(pinBtn, 'Inspector exposes opt-in Pin button');
+		pinBtn.click();
+		assert.ok(popoverEl.classList.contains('pinned'), 'Clicking Pin marks inspector .pinned');
+
+		const viewportEl = host.querySelector('.ade-eng-viewport') as HTMLElement;
+		viewportEl.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 24, clientY: 200, bubbles: true }));
+		viewportEl.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 24, clientY: 200, bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), true, 'Pinned inspector stays open on outside canvas click');
+		(popoverEl.querySelector('.ade-eng-pop-icon-btn.close') as HTMLButtonElement).click();
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Close button dismisses pinned inspector');
+
+		// 2. Right-docked 4-tier Token Analytics card (.docked, never .ade-eng-drawer)
+		const n1WrkId = h.engineering.getTreeSnapshot(gov.id)!.state.nodes.N1.workerAgentId!;
+		const n1EmpId = h.engineering.getTreeSnapshot(gov.id)!.state.nodes.N1.employeeAgentId!;
+		await h.commandService.executeCommand(ADE_RECORD_TURN_USAGE_COMMAND_ID, {
+			agentId: n1WrkId,
+			usage: { inputTokens: 1500, outputTokens: 500, cacheReadTokens: 0, totalTokens: 2000 },
+		});
+		await h.commandService.executeCommand(ADE_RECORD_TURN_USAGE_COMMAND_ID, {
+			agentId: n1EmpId,
+			usage: { inputTokens: 600, outputTokens: 200, cacheReadTokens: 0, totalTokens: 800 },
+		});
+		await waitForDomCondition(() => Boolean(
+			host.querySelector('.ade-eng-tokens-pill.has-usage')
+			&& host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-node-tokens'),
+		));
+
+		const tokensPill = host.querySelector('.ade-eng-tokens-pill') as HTMLElement;
+		const analyticsCard = host.querySelector('.ade-eng-token-analytics-card.docked') as HTMLElement;
+		assert.ok(analyticsCard, 'Right-docked .ade-eng-token-analytics-card.docked exists');
+		assert.strictEqual(host.querySelector('.ade-eng-drawer'), null, '.ade-eng-drawer must remain null (T7)');
+		assert.strictEqual(analyticsCard.hidden, true);
+		tokensPill.click();
+		assert.strictEqual(analyticsCard.hidden, false, 'Token pill opens docked analytics card');
+		assert.strictEqual(analyticsCard.querySelectorAll('.ade-eng-ta-stack-seg').length, 4, '4-tier stacked bar rendered (Gov/Mgr/Emp/Wrk)');
+		assert.ok(analyticsCard.querySelector('.ade-eng-ta-rate')?.textContent?.includes('tok/min'), 'Live tok/min rate KPI rendered');
+		assert.ok(analyticsCard.querySelector('.ade-eng-ta-seg-row'), 'Per-segment telemetry row rendered');
+		assert.ok(analyticsCard.querySelector('.ade-eng-ta-top-row[data-node-id="N1"]'), 'Clickable top-5 node row rendered');
+		(host.querySelector('.ade-eng-tokens-pill') as HTMLElement).click();
+		assert.strictEqual(analyticsCard.hidden, true);
+
+		// 3. Blueprint Overlay ⇄ Split mode + synced line-number gutter + pod .xref cross-highlight
+		const sheetToggle = host.querySelector('.ade-eng-sheet-toggle') as HTMLButtonElement;
+		sheetToggle.click();
+		const sheet = host.querySelector('.ade-eng-sheet') as HTMLElement;
+		const bodyEl = host.querySelector('.ade-eng-body') as HTMLElement;
+		assert.ok(sheet.classList.contains('open') && sheet.classList.contains('mode-overlay'));
+
+		const modeBtn = sheet.querySelector('button.ade-eng-sheet-mode-btn') as HTMLButtonElement;
+		assert.ok(modeBtn, 'Sheet header exposes Overlay ⇄ Split toggle');
+		modeBtn.click();
+		assert.ok(sheet.classList.contains('mode-split') && bodyEl.classList.contains('split-sheet'), 'Split toggle activates .ade-eng-sheet.mode-split and .ade-eng-body.split-sheet');
+
+		const bpEditor = sheet.querySelector('textarea.ade-eng-blueprint-editor') as HTMLTextAreaElement;
+		const gutterLines = sheet.querySelectorAll('.ade-eng-bp-gutter .ade-eng-bp-line');
+		assert.strictEqual(gutterLines.length, bpEditor.value.split('\n').length, 'Line-number gutter matches Blueprint textarea line count');
+		const n2Idx = bpEditor.value.indexOf('### [N2]');
+		assert.ok(n2Idx >= 0, 'Serialized Blueprint contains ### [N2] heading');
+		bpEditor.setSelectionRange(n2Idx + 4, n2Idx + 4);
+		bpEditor.dispatchEvent(new mainWindow.Event('select'));
+		assert.ok(host.querySelector('.ade-eng-node[data-node-id="N2"]')?.classList.contains('xref'), 'Caret inside ### [N2] section cross-highlights pod N2 with .xref');
+
+		// 4. Role-filtered 3-lane Logs timeline + search input + "↓ new" pill
+		const heldN1 = h.holdNextWorkerTurn();
+		await h.engineering.runTree(gov.id, 'user');
+		await heldN1.started.p;
+		heldN1.reply.complete('API ready');
+		await waitForNodePhase(h.engineering, gov.id, 'N1', 'employee_review');
+
+		const logsTabBtn = Array.from(sheet.querySelectorAll<HTMLButtonElement>('.ade-eng-sheet-tab')).find(b => b.textContent?.includes('Logs'))!;
+		logsTabBtn.click();
+		const eventsBody = sheet.querySelector('.ade-eng-sheet-body.events.timeline') as HTMLElement;
+		assert.ok(eventsBody, 'Logs tab renders 3-lane .timeline body');
+		assert.ok(eventsBody.querySelector('.ade-eng-event-rail-dot'), 'Event rows render 3-lane rail dots');
+
+		const searchInput = sheet.querySelector('input.ade-eng-event-search') as HTMLInputElement;
+		assert.ok(searchInput, 'Logs filter bar renders search input');
+		searchInput.focus();
+		searchInput.value = 'xyznomatch';
+		searchInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+		assert.strictEqual(mainWindow.document.activeElement, searchInput, 'Typing in log search preserves focus');
+		assert.strictEqual(eventsBody.querySelectorAll('.ade-eng-event-row').length, 0);
+		searchInput.value = '';
+		searchInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+		assert.ok(eventsBody.querySelectorAll('.ade-eng-event-row').length > 0);
+
+		// Pin scroll away from live bottom, emit a new event, and verify "↓ N new" pill
+		eventsBody.dataset.pinnedScroll = '1';
+		const heldN2 = h.holdNextWorkerTurn();
+		await h.engineering.submitReview({ governorSessionId: gov.id, nodeId: 'N1', role: 'employee', verdict: 'pass', report: 'API verified' });
+		await heldN2.started.p;
+		await waitForDomCondition(() => {
+			const pill = sheet.querySelector('.ade-eng-event-new-pill') as HTMLElement | null;
+			return Boolean(pill && !pill.hidden);
+		});
+		const newPill = sheet.querySelector('.ade-eng-event-new-pill') as HTMLButtonElement;
+		assert.ok(newPill.textContent?.includes('↓') && newPill.textContent?.includes('new'), 'Scrolled-away timeline displays "↓ N new" pill on fresh events');
+		newPill.click();
+		assert.strictEqual(newPill.hidden, true, 'Clicking "↓ N new" jumps to live edge and hides pill');
+		heldN2.reply.complete('UI ready');
 
 		pane.clearInput();
 	});

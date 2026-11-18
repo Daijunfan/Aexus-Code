@@ -33,6 +33,7 @@ import {
 	listUpstreamTaskAncestors,
 	normalizeBlueprintEngine,
 	normalizeThinkingLevel,
+	parseEngineeringBlueprint,
 	partitionEngineeringManagers,
 	serializeEngineeringBlueprint,
 	toAdeEngineId,
@@ -43,7 +44,7 @@ import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
-import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
@@ -53,6 +54,7 @@ import { IEditorGroup } from '../../../services/editor/common/editorGroupsServic
 import { ADE_ENGINEERING_SCHEME, IAdeProjectsService } from '../common/ade.js';
 import { AdeRunningNodesAffectedError } from './adeEngineeringWorkbenchService.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
+import './media/adeEngineeringStudio.css';
 
 const ENGINE_OPTIONS: readonly { readonly value: string; readonly label: string; readonly shortLabel: string; readonly compact: string }[] = [
 	{ value: 'claude-code', label: 'Claude Code', shortLabel: 'Claude Code', compact: 'claude' },
@@ -73,18 +75,185 @@ const THINKING_OPTIONS: readonly { readonly value: AdeThinkingLevel; readonly la
 	{ value: 'max', label: 'Max' },
 ];
 
-const TASK_POD_WIDTH = 252;
-const TASK_POD_HEIGHT = 156;
+const TASK_POD_WIDTH = 268;
+const TASK_POD_HEIGHT = 172;
+const TASK_POD_RADIUS = 18;
 const GATE_NODE_WIDTH = 220;
 const GATE_NODE_HEIGHT = 96;
 const POPOVER_WIDTH = 304;
 const MAX_UNDO_STACK = 40;
 const MINIMAP_WIDTH = 164;
 const MINIMAP_HEIGHT = 104;
+const MIN_WORLD_WIDTH = 4800;
+const MIN_WORLD_HEIGHT = 3600;
+const WORLD_MARGIN = 640;
+/** Vertical safe inset kept free for the floating glass toolbar islands. */
+const TOOLBAR_SAFE_INSET = 56;
+const QUICK_SPAWN_DX = 410;
+const QUICK_SPAWN_DY = 236;
+const SHORTCUTS_HINT_STORAGE_KEY = 'ade.engineering.shortcutsHintDismissed';
+
+/** At most this many running edges get SMIL signal particles; beyond it edges fall back to the CSS dash flow. */
+export const ADE_ENG_MAX_PARTICLE_EDGES = 24;
+export const ADE_ENG_PARTICLES_PER_EDGE = 3;
+/** Soft SLA: a live phase timer turns amber (`.over-sla`) after this many milliseconds. */
+export const ADE_ENG_PHASE_SOFT_SLA_MS = 10 * 60 * 1000;
 
 type PopoverTabKind = 'worker' | 'employee' | 'manager' | 'task' | 'report';
 type SheetTabKind = 'blueprint' | 'events';
+type SheetModeKind = 'overlay' | 'split';
 type EventFilterKind = 'all' | 'worker' | 'employee' | 'manager' | 'gates';
+type PhaseRoleKind = 'wrk' | 'emp' | 'mgr';
+type EventRoleKind = 'wrk' | 'emp' | 'mgr' | 'gate' | 'sys';
+
+/**
+ * World (canvas) size grows beyond the 4800×3600 baseline so large graphs never clip their edges SVG.
+ */
+export function computeEngineeringWorldSize(nodes: readonly Pick<IAdeEngineeringBlueprintNode, 'position'>[]): { readonly width: number; readonly height: number } {
+	let maxX = 0;
+	let maxY = 0;
+	for (const n of nodes) {
+		maxX = Math.max(maxX, n.position?.x ?? 0);
+		maxY = Math.max(maxY, n.position?.y ?? 0);
+	}
+	return {
+		width: Math.max(MIN_WORLD_WIDTH, Math.ceil((maxX + WORLD_MARGIN) / 200) * 200),
+		height: Math.max(MIN_WORLD_HEIGHT, Math.ceil((maxY + WORLD_MARGIN) / 200) * 200),
+	};
+}
+
+/**
+ * Pure position math shared by quick-spawn (`addDraftNode(…, fromSourceNodeId)`) and the hover spawn ghost preview,
+ * so the ghost lands exactly where the real node will be created.
+ */
+export function computeQuickSpawnPosition(
+	bp: Pick<IAdeEngineeringBlueprint, 'nodes' | 'edges'>,
+	sourceNodeId: string,
+): { readonly x: number; readonly y: number } | undefined {
+	const sourceNode = bp.nodes.find(n => n.id === sourceNodeId);
+	if (!sourceNode?.position) {
+		return undefined;
+	}
+	const existingDownstreamCount = bp.edges.filter(e => e.from === sourceNode.id).length;
+	const offsetY = existingDownstreamCount === 0 ? 0 : (existingDownstreamCount % 2 === 1 ? 1 : -1) * Math.ceil(existingDownstreamCount / 2) * QUICK_SPAWN_DY;
+	return {
+		x: sourceNode.position.x + QUICK_SPAWN_DX,
+		y: Math.max(150, sourceNode.position.y + offsetY),
+	};
+}
+
+export function phaseRoleOf(phase: IAdeEngineeringNodeRuntimeState['phase'] | undefined): PhaseRoleKind | undefined {
+	switch (phase) {
+		case 'worker_running': return 'wrk';
+		case 'employee_review': return 'emp';
+		case 'manager_review':
+		case 'manager_escalation': return 'mgr';
+		default: return undefined;
+	}
+}
+
+export function eventRoleOf(ev: Pick<IAdeEngineeringEventLogEntry, 'event' | 'level'>): EventRoleKind {
+	const kind = ev.event.toLowerCase();
+	if (kind.includes('gate') || kind.includes('circuit') || kind.includes('watchdog') || kind.includes('fail') || ev.level !== 'info') {
+		return 'gate';
+	}
+	if (kind.includes('manager') || kind.includes('segment')) {
+		return 'mgr';
+	}
+	if (kind.includes('employee') || kind.includes('node_passed')) {
+		return 'emp';
+	}
+	if (kind.includes('worker')) {
+		return 'wrk';
+	}
+	return 'sys';
+}
+
+/** Live tokens-per-minute rate computed from `(time, cumulativeTotal)` samples taken on each tree refresh. */
+export function computeTokenRatePerMinute(samples: readonly { readonly t: number; readonly total: number }[]): number {
+	if (samples.length < 2) {
+		return 0;
+	}
+	const first = samples[0];
+	const last = samples[samples.length - 1];
+	const dtMin = (last.t - first.t) / 60_000;
+	if (dtMin <= 1 / 60 || last.total <= first.total) {
+		return 0;
+	}
+	return Math.round((last.total - first.total) / dtMin);
+}
+
+function matchBlueprintNodeHeading(rawLine: string): string | undefined {
+	const trimmed = rawLine.trim();
+	const bracketedH3 = /^###\s*\[([A-Za-z0-9_-]+)\](?:\s+.*)?$/.exec(trimmed);
+	if (bracketedH3) {
+		return bracketedH3[1];
+	}
+	const inlineH2 = /^##\s+Node\s*:\s*\[?([A-Za-z0-9_-]+)\]?(?:\s*[—:-]\s*.*)?$/i.exec(trimmed);
+	return inlineH2?.[1];
+}
+
+/** Returns the `### [id]` or `## Node: id` section enclosing the given caret offset in raw Blueprint Markdown. */
+export function blueprintNodeIdAtOffset(text: string, offset: number): string | undefined {
+	const clamped = Math.max(0, Math.min(text.length, offset));
+	const lineEnd = text.indexOf('\n', clamped);
+	const sliceEnd = lineEnd === -1 ? text.length : lineEnd;
+	const lines = text.slice(0, sliceEnd).split('\n');
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const id = matchBlueprintNodeHeading(lines[i]);
+		if (id) {
+			return id;
+		}
+		if (/^```/.test(lines[i]) || /^---\s*$/.test(lines[i]) || /^##\s+(?!Nodes\b)/i.test(lines[i].trim())) {
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+/** Returns the zero-based line index of a node's `### [id]` or `## Node: id` heading, or -1. */
+export function blueprintNodeSectionLine(text: string, nodeId: string): number {
+	return text.split('\n').findIndex(line => matchBlueprintNodeHeading(line) === nodeId);
+}
+
+function countChangedLines(original: string, edited: string): number {
+	const pool = new Map<string, number>();
+	for (const line of original.split('\n')) {
+		pool.set(line, (pool.get(line) ?? 0) + 1);
+	}
+	let changed = 0;
+	for (const line of edited.split('\n')) {
+		const left = pool.get(line) ?? 0;
+		if (left > 0) {
+			pool.set(line, left - 1);
+		} else {
+			changed++;
+		}
+	}
+	let removed = 0;
+	for (const left of pool.values()) {
+		removed += left;
+	}
+	return Math.max(changed, removed);
+}
+
+function formatRelativeAge(timestamp: number, now = Date.now()): string {
+	const sec = Math.max(0, Math.round((now - timestamp) / 1000));
+	if (sec < 60) {
+		return `${sec}s`;
+	}
+	const min = Math.round(sec / 60);
+	if (min < 60) {
+		return `${min}m`;
+	}
+	return `${Math.round(min / 60)}h`;
+}
+
+function sanitizeSvgId(raw: string): string {
+	return raw.replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+const XLINK_NS = 'http://www.w3.org/1999/xlink';
 
 function formatElapsedCompact(startedAt: number | undefined, now = Date.now()): string {
 	if (!startedAt) {
@@ -222,6 +391,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private popoverContentEl!: HTMLElement;
 	private sheetEl!: HTMLElement;
 	private sheetContentEl!: HTMLElement;
+	private popoverCaretEl!: HTMLElement;
+	private minimapLegendEl!: HTMLElement;
+	private shortcutsCardEl!: HTMLElement;
+	private spawnGhostEl!: HTMLElement;
+	private ghostGroupEl!: SVGGElement;
+	private spawnGhostEdgeEl!: SVGPathElement;
+	private readonly storage: IStorageService;
 
 	private readonly inputDisposables = this._register(new DisposableStore());
 	private readonly toolbarRenderDisposables = this._register(new DisposableStore());
@@ -229,6 +405,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private readonly canvasRenderDisposables = this._register(new DisposableStore());
 	private readonly popoverRenderDisposables = this._register(new DisposableStore());
 	private readonly sheetRenderDisposables = this._register(new DisposableStore());
+	private readonly sheetTimelineDisposables = this._register(new DisposableStore());
 	private readonly tokenAnalyticsDisposables = this._register(new DisposableStore());
 	private readonly bannerDisposables = this._register(new DisposableStore());
 
@@ -253,10 +430,27 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private livePhasePillRefs: { readonly pill: HTMLElement; readonly startedAt: number; readonly phaseLabel: string }[] = [];
 	private popoverTokensCardEl: HTMLElement | undefined;
 	private popoverTelemetryEl: HTMLElement | undefined;
+	private popoverPinBtnEl: HTMLElement | undefined;
+	private readonly popoverTabBtnById = new Map<PopoverTabKind, HTMLElement>();
+	private tokensPillEl: HTMLElement | undefined;
 	private undoBtnEl: HTMLButtonElement | undefined;
 	private blueprintSheetBtnEl: HTMLElement | undefined;
 	private eventsSheetBtnEl: HTMLElement | undefined;
 	private sheetEventsBodyEl: HTMLElement | undefined;
+	private sheetEventsNewPillEl: HTMLElement | undefined;
+	private blueprintEditorEl: HTMLTextAreaElement | undefined;
+	private popoverPinned = false;
+	private popoverDragged = false;
+	private popoverTabOrder: PopoverTabKind[] = [];
+	private sheetMode: SheetModeKind = 'overlay';
+	private eventSearchQuery = '';
+	private eventsSeenCount = 0;
+	private showShortcuts = false;
+	private altPressed = false;
+	private spawnGhostSourceId: string | undefined;
+	private xrefNodeId: string | undefined;
+	private tokenSamples: { readonly t: number; readonly total: number }[] = [];
+	private flashSegmentId: string | undefined;
 
 	private panX = 48;
 	private panY = 36;
@@ -297,6 +491,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super(AdeEngineeringEditorPane.ID, group, telemetryService, storageService ? themeService : themeService, storageService);
+		this.storage = storageService;
 		this._register(this.themeService.onDidColorThemeChange(() => {
 			this.renderCanvas();
 			if (this.activePopoverNodeId && !this.isFocusInsideEditableControl(this.popoverEl)) {
@@ -329,8 +524,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	protected createEditor(parent: HTMLElement): void {
-		this.rootEl = append(parent, $('.ade-eng-editor', { tabindex: 0 }));
-		this.toolbarEl = append(this.rootEl, $('.ade-eng-toolbar'));
+		// NOTE: `.ade-eng-toolbar` MUST stay the first child of the root; the glass "floating" look is CSS-only.
+		this.rootEl = append(parent, $('.ade-eng-editor.mode-engineering', { tabindex: 0 }));
+		this.toolbarEl = append(this.rootEl, $('.ade-eng-toolbar.floating', { role: 'toolbar' }));
 		this.bannerEl = append(this.rootEl, $('.ade-eng-banner', { role: 'status', 'aria-live': 'polite' }));
 		this.bannerEl.hidden = true;
 
@@ -341,14 +537,20 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		this.edgesSvgEl = this.worldEl.appendChild($.SVG<SVGSVGElement>('svg', {
 			class: 'ade-eng-edges-svg',
-			width: '4800',
-			height: '3600',
-			viewBox: '0 0 4800 3600',
+			width: String(MIN_WORLD_WIDTH),
+			height: String(MIN_WORLD_HEIGHT),
+			viewBox: `0 0 ${MIN_WORLD_WIDTH} ${MIN_WORLD_HEIGHT}`,
 		}));
 		this.edgesDefsEl = this.edgesSvgEl.appendChild($.SVG<SVGDefsElement>('defs'));
 		this.buildSvgMarkers();
 		this.guidesGroupEl = this.edgesSvgEl.appendChild($.SVG<SVGGElement>('g', { class: 'ade-eng-guides-group' }));
 		this.edgesGroupEl = this.edgesSvgEl.appendChild($.SVG<SVGGElement>('g', { class: 'ade-eng-edges-group' }));
+		this.ghostGroupEl = this.edgesSvgEl.appendChild($.SVG<SVGGElement>('g', { class: 'ade-eng-ghost-group', 'aria-hidden': 'true' }));
+		this.spawnGhostEdgeEl = this.ghostGroupEl.appendChild($.SVG<SVGPathElement>('path', {
+			class: 'ade-eng-spawn-ghost-edge',
+			d: '',
+		}));
+		this.spawnGhostEdgeEl.style.display = 'none';
 		this.rubberBandPathEl = this.edgesSvgEl.appendChild($.SVG<SVGPathElement>('path', {
 			class: 'ade-eng-edge-path rubber-band',
 			d: '',
@@ -356,6 +558,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.rubberBandPathEl.style.display = 'none';
 
 		this.nodesLayerEl = append(this.worldEl, $('.ade-eng-nodes-layer'));
+
+		// Hover quick-spawn preview ghost (NEVER carries `.ade-eng-node`, so node counts stay exact)
+		this.spawnGhostEl = append(this.worldEl, $('.ade-eng-spawn-ghost.type-task', { 'aria-hidden': 'true' }));
+		this.spawnGhostEl.hidden = true;
 
 		// Empty-state onboarding card & Connect-mode floating guide banner
 		this.emptyStateEl = append(this.bodyEl, $('.ade-eng-empty-canvas'));
@@ -365,7 +571,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		// Interactive Bottom-Left Live Minimap
 		this.minimapEl = append(this.bodyEl, $('.ade-eng-minimap', {
-			title: localize('adeEngMinimapTooltip', "Live DAG Minimap — Click or drag to navigate"),
+			title: localize('adeEngMinimapTooltip', "Live DAG Minimap — Click or drag to navigate · Double-click to fit"),
 		}));
 		const minimapHeader = append(this.minimapEl, $('.ade-eng-minimap-head'));
 		append(minimapHeader, $('span.ade-eng-minimap-title', {}, localize('adeEngMinimapLabel', "DAG MAP")));
@@ -376,27 +582,137 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			height: String(MINIMAP_HEIGHT),
 		}));
 		this.minimapLensEl = append(this.minimapEl, $('.ade-eng-minimap-lens'));
+		this.minimapLegendEl = append(this.minimapEl, $('.ade-eng-minimap-legend'));
+		const addLegend = (cls: string, glyph: string, label: string) => {
+			const item = append(this.minimapLegendEl, $(`span.ade-eng-minimap-legend-item.${cls}`));
+			append(item, $('span.ade-eng-minimap-legend-glyph', { 'aria-hidden': 'true' }, glyph));
+			append(item, $('span.ade-eng-minimap-legend-label', {}, label));
+		};
+		addLegend('run', '●', localize('adeEngMinimapLegendRun', "run"));
+		addLegend('gate', '◆', localize('adeEngMinimapLegendGate', "gate"));
+		addLegend('fail', '✕', localize('adeEngMinimapLegendFail', "fail"));
 
-		// Tree Token & 4-Tier Analytics Popover
-		this.tokenAnalyticsEl = append(this.bodyEl, $('.ade-eng-token-analytics-card'));
+		// Tree Token & 4-Tier Analytics: right-docked telemetry card (class stays `.ade-eng-token-analytics-card`, toggled via `hidden`)
+		this.tokenAnalyticsEl = append(this.bodyEl, $('.ade-eng-token-analytics-card.docked', {
+			role: 'complementary',
+			'aria-label': localize('adeEngTokenAnalyticsAria', "Token and telemetry analytics"),
+		}));
 		this.tokenAnalyticsEl.hidden = true;
 
 		// Floating Bottom-Right Canvas Controls HUD
 		this.hudEl = append(this.bodyEl, $('.ade-eng-canvas-hud'));
 
+		// Keyboard shortcuts cheat-sheet card (toggled with `?`)
+		this.shortcutsCardEl = append(this.bodyEl, $('.ade-eng-shortcuts-card', {
+			role: 'dialog',
+			'aria-label': localize('adeEngShortcutsTitle', "Keyboard Shortcuts"),
+		}));
+		this.shortcutsCardEl.hidden = true;
+		this.buildShortcutsCard();
+
 		// Anchored Floating Option Popover right adjacent to right-clicked / gear-clicked node (NEVER auto-popup on hover!)
 		this.popoverEl = append(this.bodyEl, $('.ade-eng-popover', { 'aria-hidden': 'true', role: 'dialog' }));
 		this.popoverEl.inert = true;
+		this.popoverCaretEl = append(this.popoverEl, $('span.ade-eng-pop-caret', { 'aria-hidden': 'true' }));
 		this.popoverContentEl = append(this.popoverEl, $('.ade-eng-popover-inner'));
 
-		// Floating Blueprint & Live Event Log Overlay Sheet
-		this.sheetEl = append(this.bodyEl, $('.ade-eng-sheet', { 'aria-hidden': 'true', role: 'dialog' }));
+		// Floating Blueprint & Live Event Log Sheet (Overlay ⇄ Split)
+		this.sheetEl = append(this.bodyEl, $('.ade-eng-sheet.mode-overlay', { 'aria-hidden': 'true', role: 'dialog' }));
 		this.sheetEl.inert = true;
 		this.sheetContentEl = append(this.sheetEl, $('.ade-eng-sheet-inner'));
 
 		this.installViewportInteractions();
 		this.installMinimapInteractions();
 		this.installPopoverDismissal();
+		this.installPopoverHeaderDrag();
+	}
+
+	private buildShortcutsCard(): void {
+		clearNode(this.shortcutsCardEl);
+		const head = append(this.shortcutsCardEl, $('.ade-eng-shortcuts-head'));
+		append(head, $('span.ade-eng-shortcuts-title', {}, localize('adeEngShortcutsTitle', "Keyboard Shortcuts")));
+		const closeBtn = append(head, $('button.ade-eng-pop-icon-btn.close', {
+			type: 'button',
+			title: localize('adeEngCloseShortcutsTooltip', "Close (Esc or ?)"),
+		}));
+		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		this._register(addDisposableListener(closeBtn, EventType.CLICK, () => this.toggleShortcuts(false)));
+
+		const list = append(this.shortcutsCardEl, $('dl.ade-eng-shortcuts-list'));
+		const rows: readonly { readonly keys: readonly string[]; readonly label: string }[] = [
+			{ keys: ['Space', 'Drag'], label: localize('adeEngKbPan', "Pan canvas") },
+			{ keys: ['⌘/Ctrl', 'Wheel'], label: localize('adeEngKbZoom', "Zoom around cursor") },
+			{ keys: ['F', '0'], label: localize('adeEngKbFit', "Fit entire DAG") },
+			{ keys: ['L'], label: localize('adeEngKbLayout', "Auto-layout") },
+			{ keys: ['G'], label: localize('adeEngKbGate', "Jump to waiting User Gate") },
+			{ keys: ['N'], label: localize('adeEngKbSpawn', "Quick-spawn task from inspected node") },
+			{ keys: ['⇧', 'N'], label: localize('adeEngKbSpawnGate', "Quick-spawn User Gate") },
+			{ keys: ['←', '→'], label: localize('adeEngKbTabs', "Switch inspector tabs") },
+			{ keys: ['⌘/Ctrl', 'S'], label: localize('adeEngKbConfirm', "Confirm Blueprint draft") },
+			{ keys: ['⌘/Ctrl', 'Z'], label: localize('adeEngKbUndo', "Undo") },
+			{ keys: ['⇧', '⌘/Ctrl', 'Z'], label: localize('adeEngKbRedo', "Redo") },
+			{ keys: ['Del'], label: localize('adeEngKbDelete', "Delete inspected node") },
+			{ keys: ['Esc'], label: localize('adeEngKbClose', "Close surface / cancel wiring") },
+			{ keys: ['?'], label: localize('adeEngKbHelp', "Toggle this card") },
+		];
+		for (const row of rows) {
+			const dt = append(list, $('dt'));
+			row.keys.forEach((k, idx) => {
+				if (idx > 0) {
+					append(dt, $('span.ade-eng-kbd-plus', { 'aria-hidden': 'true' }, '+'));
+				}
+				append(dt, $('kbd.ade-eng-kbd', {}, k));
+			});
+			append(list, $('dd', {}, row.label));
+		}
+	}
+
+	private toggleShortcuts(force?: boolean): void {
+		const next = force ?? !this.showShortcuts;
+		if (next === this.showShortcuts) {
+			return;
+		}
+		this.showShortcuts = next;
+		this.shortcutsCardEl.hidden = !this.showShortcuts;
+		if (this.showShortcuts) {
+			this.storage.store(SHORTCUTS_HINT_STORAGE_KEY, true, StorageScope.PROFILE, StorageTarget.USER);
+		}
+		this.renderHud();
+	}
+
+	private autoLayoutPositions(bp: IAdeEngineeringBlueprint) {
+		const vertical = bp.metadata.flowDirection === 'TD';
+		return computeAutoLayoutPositions(bp, vertical
+			? { horizontalGap: 352, verticalGap: 270 }
+			: { horizontalGap: QUICK_SPAWN_DX, verticalGap: 276 });
+	}
+
+	private viewportHeight(): number {
+		return this.viewportEl.clientHeight || (this.lastDimension?.height ?? 640);
+	}
+
+	private viewportWidth(): number {
+		return this.viewportEl.clientWidth || (this.lastDimension?.width ?? 960);
+	}
+
+	/** Vertical center of the canvas area left free by the floating toolbar. */
+	private viewportCenterY(): number {
+		const h = this.viewportHeight();
+		return TOOLBAR_SAFE_INSET + (h - TOOLBAR_SAFE_INSET) / 2;
+	}
+
+	private prefersReducedMotion(): boolean {
+		if (!this.rootEl) {
+			return false;
+		}
+		if (this.rootEl.closest('.monaco-reduce-motion')) {
+			return true;
+		}
+		try {
+			return getWindow(this.rootEl).matchMedia('(prefers-reduced-motion: reduce)').matches;
+		} catch {
+			return false;
+		}
 	}
 
 	private markerId(status: string): string {
@@ -436,7 +752,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	private animateViewportTo(targetPanX: number, targetPanY: number, targetZoom: number, animate: boolean): void {
 		this.cancelCameraAnimation();
-		if (!animate || !this.rootEl) {
+		if (!animate || !this.rootEl || this.prefersReducedMotion()) {
 			this.panX = targetPanX;
 			this.panY = targetPanY;
 			this.zoom = targetZoom;
@@ -473,8 +789,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private zoomAroundViewportCenter(delta: number): void {
-		const vw = this.viewportEl.clientWidth || (this.lastDimension?.width ?? 960);
-		const vh = this.viewportEl.clientHeight || ((this.lastDimension?.height ?? 640) - 44);
+		const vw = this.viewportWidth();
+		const vh = this.viewportHeight();
 		const centerX = vw / 2;
 		const centerY = vh / 2;
 		const worldX = (centerX - this.panX) / this.zoom;
@@ -516,7 +832,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.rubberBandPathEl.style.display = 'none';
 				this.renderCanvas();
 			}
-			this.closePopover();
+			if (!this.popoverPinned) {
+				this.closePopover();
+			}
 			this.closeTokenAnalytics();
 			panning = true;
 			startClientX = e.clientX;
@@ -586,11 +904,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const ry = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
 			const worldTargetX = this.minimapBounds.minX + rx * this.minimapBounds.width;
 			const worldTargetY = this.minimapBounds.minY + ry * this.minimapBounds.height;
-			const vw = this.viewportEl.clientWidth || (this.lastDimension?.width ?? 960);
-			const vh = this.viewportEl.clientHeight || ((this.lastDimension?.height ?? 640) - 44);
+			const vw = this.viewportWidth();
 			this.cancelCameraAnimation();
 			this.panX = Math.round(vw / 2 - worldTargetX * this.zoom);
-			this.panY = Math.round(vh / 2 - worldTargetY * this.zoom);
+			this.panY = Math.round(this.viewportCenterY() - worldTargetY * this.zoom);
 			this.applyWorldTransform();
 		};
 
@@ -621,6 +938,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		};
 		this._register(addDisposableListener(this.minimapEl, EventType.POINTER_UP, stopMapDrag));
 		this._register(addDisposableListener(this.minimapEl, 'pointercancel', stopMapDrag));
+		this._register(addDisposableListener(this.minimapEl, EventType.DBLCLICK, (e: MouseEvent) => {
+			EventHelper.stop(e, true);
+			this.fitViewportToGraph(true);
+		}));
 	}
 
 	private isFocusInsideEditableControl(container: HTMLElement): boolean {
@@ -636,14 +957,17 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				return;
 			}
 			const target = e.target as HTMLElement | null;
-			if (this.activePopoverNodeId && !target?.closest('.ade-eng-popover') && !target?.closest('.ade-eng-node-cfg-btn') && !target?.closest('.ade-eng-seg-cfg-ico')) {
+			if (this.activePopoverNodeId && !this.popoverPinned && !target?.closest('.ade-eng-popover') && !target?.closest('.ade-eng-node-cfg-btn') && !target?.closest('.ade-eng-seg-cfg-ico')) {
 				this.closePopover();
 			}
 			if (this.showTokenAnalytics && !target?.closest('.ade-eng-token-analytics-card') && !target?.closest('.ade-eng-tokens-pill')) {
 				this.closeTokenAnalytics();
 			}
-			if (this.activeSheetTab && !target?.closest('.ade-eng-sheet') && !target?.closest('.ade-eng-sheet-toggle') && !target?.closest('.ade-eng-tokens-pill') && !target?.closest('.ade-eng-token-analytics-card')) {
+			if (this.activeSheetTab && this.sheetMode === 'overlay' && !target?.closest('.ade-eng-sheet') && !target?.closest('.ade-eng-sheet-toggle') && !target?.closest('.ade-eng-tokens-pill') && !target?.closest('.ade-eng-token-analytics-card')) {
 				this.closeSheet();
+			}
+			if (this.showShortcuts && !target?.closest('.ade-eng-shortcuts-card') && !target?.closest('.ade-eng-shortcuts-toggle')) {
+				this.toggleShortcuts(false);
 			}
 		}, true));
 
@@ -653,12 +977,34 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				return;
 			}
 			EventHelper.stop(e, true);
-			this.closePopover();
+			if (!this.popoverPinned) {
+				this.closePopover();
+			}
+		}));
+
+		this._register(addDisposableListener(getWindow(this.rootEl), EventType.KEY_UP, (e: KeyboardEvent) => {
+			if (e.key === 'Alt' && this.altPressed) {
+				this.altPressed = false;
+				this.updateSpawnGhost();
+			}
+		}));
+		this._register(addDisposableListener(getWindow(this.rootEl), EventType.BLUR, () => {
+			if (this.altPressed) {
+				this.altPressed = false;
+				this.updateSpawnGhost();
+			}
 		}));
 
 		this._register(addDisposableListener(this.rootEl, EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			const targetEl = e.target as HTMLElement | null;
 			const inInput = Boolean(targetEl && (targetEl.tagName === 'INPUT' || targetEl.tagName === 'TEXTAREA' || targetEl.tagName === 'SELECT' || targetEl.isContentEditable));
+			// Focused buttons/tabs/links must never turn Delete/Backspace/Enter into destructive canvas actions.
+			const onControl = Boolean(targetEl && targetEl !== this.rootEl && targetEl.closest('button, a, [role="button"], [role="tab"], [role="menuitem"]'));
+
+			if (e.key === 'Alt' && !this.altPressed) {
+				this.altPressed = true;
+				this.updateSpawnGhost();
+			}
 
 			if (e.code === 'Space' && !inInput) {
 				this.spacePressed = true;
@@ -666,6 +1012,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 
 			if (e.key === 'Escape') {
+				if (this.showShortcuts) {
+					EventHelper.stop(e, true);
+					this.toggleShortcuts(false);
+					return;
+				}
 				if (this.connectMode || this.connectSourceNodeId) {
 					EventHelper.stop(e, true);
 					this.connectMode = false;
@@ -720,7 +1071,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				return;
 			}
 
-			if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+			const plainKey = !e.metaKey && !e.ctrlKey && !e.altKey;
+
+			if ((e.key === 'Delete' || e.key === 'Backspace') && plainKey) {
+				if (onControl) {
+					// e.g. Backspace while a toolbar/HUD/popover button holds focus: never delete the inspected node.
+					return;
+				}
 				if (this.activePopoverNodeId && !this.isNodeCompletedLocked(this.activePopoverNodeId)) {
 					EventHelper.stop(e, true);
 					this.deleteDraftNode(this.activePopoverNodeId);
@@ -728,15 +1085,55 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				return;
 			}
 
-			if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === '0' || e.key.toLowerCase() === 'f')) {
+			if (e.key === '?' && !e.metaKey && !e.ctrlKey) {
+				EventHelper.stop(e, true);
+				this.toggleShortcuts();
+				return;
+			}
+
+			// Inspector keyboard tab switching (←/→ and 1–5) while the popover is open and focus is not in an input
+			if (plainKey && !e.shiftKey && this.activePopoverNodeId && this.popoverEl.classList.contains('open') && this.popoverTabOrder.length > 1) {
+				if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+					EventHelper.stop(e, true);
+					this.cyclePopoverTab(e.key === 'ArrowRight' ? 1 : -1);
+					return;
+				}
+				const digit = Number(e.key);
+				if (Number.isInteger(digit) && digit >= 1 && digit <= this.popoverTabOrder.length) {
+					EventHelper.stop(e, true);
+					this.selectPopoverTab(this.popoverTabOrder[digit - 1]);
+					return;
+				}
+			}
+
+			if (onControl && (e.key === 'Enter' || e.key === ' ')) {
+				return;
+			}
+
+			if (plainKey && (e.key === '0' || e.key.toLowerCase() === 'f')) {
 				EventHelper.stop(e, true);
 				this.fitViewportToGraph(true);
 				return;
 			}
 
-			if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'l') {
+			if (plainKey && e.key.toLowerCase() === 'l') {
 				EventHelper.stop(e, true);
 				this.runAutoLayoutDraft();
+				return;
+			}
+
+			if (plainKey && e.key.toLowerCase() === 'g') {
+				EventHelper.stop(e, true);
+				this.focusWaitingGateNode();
+				return;
+			}
+
+			if (plainKey && e.key.toLowerCase() === 'n') {
+				EventHelper.stop(e, true);
+				const sourceId = this.activePopoverNodeId && this.draftBlueprint?.nodes.some(n => n.id === this.activePopoverNodeId)
+					? this.activePopoverNodeId
+					: undefined;
+				this.addDraftNode(e.shiftKey ? 'user_gate' : 'task', sourceId);
 			}
 		}));
 
@@ -746,6 +1143,90 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.viewportEl.classList.remove('space-pan');
 			}
 		}));
+	}
+
+	/** Pinned inspector cards can be dragged by their header (opt-in; default anchoring is unchanged). */
+	private installPopoverHeaderDrag(): void {
+		let dragging = false;
+		let startX = 0;
+		let startY = 0;
+		let origLeft = 0;
+		let origTop = 0;
+		this._register(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, (e: PointerEvent) => {
+			const target = e.target as HTMLElement | null;
+			if (!this.popoverPinned || e.button !== 0 || !target?.closest('.ade-eng-pop-header') || target.closest('input, button, select, textarea')) {
+				return;
+			}
+			dragging = true;
+			startX = e.clientX;
+			startY = e.clientY;
+			origLeft = this.popoverEl.offsetLeft;
+			origTop = this.popoverEl.offsetTop;
+			this.popoverEl.classList.add('dragging');
+			try {
+				this.popoverEl.setPointerCapture(e.pointerId);
+			} catch { /* synthetic */ }
+		}));
+		this._register(addDisposableListener(this.popoverEl, EventType.POINTER_MOVE, (e: PointerEvent) => {
+			if (!dragging) {
+				return;
+			}
+			const bodyW = this.bodyEl.clientWidth || (this.lastDimension?.width ?? 960);
+			const bodyH = this.bodyEl.clientHeight || (this.lastDimension?.height ?? 640);
+			const nextLeft = Math.max(4, Math.min(bodyW - 60, origLeft + e.clientX - startX));
+			const nextTop = Math.max(4, Math.min(bodyH - 40, origTop + e.clientY - startY));
+			this.popoverDragged = true;
+			this.popoverEl.style.left = `${Math.round(nextLeft)}px`;
+			this.popoverEl.style.top = `${Math.round(nextTop)}px`;
+			this.popoverEl.dataset.caretSide = 'none';
+		}));
+		const stop = (e: PointerEvent) => {
+			if (!dragging) {
+				return;
+			}
+			dragging = false;
+			this.popoverEl.classList.remove('dragging');
+			try {
+				this.popoverEl.releasePointerCapture(e.pointerId);
+			} catch { /* ignore */ }
+		};
+		this._register(addDisposableListener(this.popoverEl, EventType.POINTER_UP, stop));
+		this._register(addDisposableListener(this.popoverEl, 'pointercancel', stop));
+	}
+
+	private selectPopoverTab(tab: PopoverTabKind): void {
+		if (this.activePopoverTab === tab) {
+			return;
+		}
+		this.activePopoverTab = tab;
+		this.renderPopover();
+		this.popoverTabBtnById.get(tab)?.focus();
+	}
+
+	private cyclePopoverTab(delta: number): void {
+		const order = this.popoverTabOrder;
+		if (order.length === 0) {
+			return;
+		}
+		const idx = Math.max(0, order.indexOf(this.activePopoverTab));
+		const next = order[(idx + delta + order.length) % order.length];
+		this.selectPopoverTab(next);
+	}
+
+	private setPopoverPinned(pinned: boolean): void {
+		this.popoverPinned = pinned;
+		if (!pinned) {
+			this.popoverDragged = false;
+		}
+		this.popoverEl.classList.toggle('pinned', pinned);
+		const pinBtn = this.popoverPinBtnEl;
+		if (pinBtn) {
+			pinBtn.classList.toggle('active', pinned);
+			pinBtn.setAttribute('aria-pressed', String(pinned));
+		}
+		if (!pinned) {
+			this.positionPopoverNearAnchor();
+		}
 	}
 
 	private pushUndoSnapshot(coalesceKey?: string): void {
@@ -820,6 +1301,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.showTokenAnalytics = true;
 		this.renderTokenAnalytics();
 		this.tokenAnalyticsEl.hidden = false;
+		this.syncTokensPillState();
+	}
+
+	private syncTokensPillState(): void {
+		const pill = this.tokensPillEl;
+		pill?.classList.toggle('active', this.showTokenAnalytics);
+		pill?.setAttribute('aria-expanded', String(this.showTokenAnalytics));
 	}
 
 	private closeTokenAnalytics(): void {
@@ -829,6 +1317,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.showTokenAnalytics = false;
 		this.tokenAnalyticsEl.hidden = true;
 		this.tokenAnalyticsDisposables.clear();
+		this.syncTokensPillState();
 	}
 
 	private renderTokenAnalytics(): void {
@@ -859,14 +1348,40 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		addKpi(localize('adeEngTaOutput', "Output"), formatCompactTokenCount(tu.total.outputTokens));
 		addKpi(localize('adeEngTaCacheRead', "Cache Read"), formatCompactTokenCount(tu.total.cacheReadTokens));
 		addKpi(localize('adeEngTaCacheWrite', "Cache Write"), formatCompactTokenCount(tu.total.cacheWriteTokens));
+		const ratePerMin = computeTokenRatePerMinute(this.tokenSamples);
+		const isLive = snap.state.runStatus === 'running';
+		const rateCell = append(kpiGrid, $(`.ade-eng-ta-kpi.rate${isLive && ratePerMin > 0 ? '.live' : ''}`, {
+			title: localize('adeEngTaRateTooltip', "Live token burn rate sampled across recent tree refreshes"),
+		}));
+		append(rateCell, $('span.ade-eng-ta-kpi-label', {}, localize('adeEngTaRate', "Rate")));
+		append(rateCell, $('span.ade-eng-ta-kpi-val.ade-eng-ta-rate', {}, localize('adeEngTaRateValue', "{0} tok/min", formatCompactTokenCount(ratePerMin))));
+
+		// Stacked 4-tier bar: Gov / Mgr / Emp / Wrk
+		const tiers: { readonly label: string; readonly short: string; readonly usage: IAdeTokenUsage; readonly cls: string }[] = [
+			{ label: localize('adeEngTierGov', "Governor · L1 (Architect)"), short: localize('adeEngTierGovShort', "Gov"), usage: tu.governor, cls: 'gov' },
+			{ label: localize('adeEngTierMgr', "Manager · L2 (Segment)"), short: localize('adeEngTierMgrShort', "Mgr"), usage: tu.manager, cls: 'mgr' },
+			{ label: localize('adeEngTierEmp', "Employee · L3 (Reviewer)"), short: localize('adeEngTierEmpShort', "Emp"), usage: tu.employee, cls: 'emp' },
+			{ label: localize('adeEngTierWrk', "Worker · L4 (Executor)"), short: localize('adeEngTierWrkShort', "Wrk"), usage: tu.worker, cls: 'wrk' },
+		];
+		const stack = append(this.tokenAnalyticsEl, $('.ade-eng-ta-stack', {
+			role: 'img',
+			'aria-label': tiers.map(t => `${t.short} ${t.usage.totalTokens.toLocaleString()}`).join(' · '),
+		}));
+		for (const tier of tiers) {
+			const pct = tu.total.totalTokens > 0 ? (tier.usage.totalTokens / total) * 100 : 0;
+			const seg = append(stack, $(`span.ade-eng-ta-stack-seg.${tier.cls}`, {
+				title: `${tier.label}: ${tier.usage.totalTokens.toLocaleString()} (${Math.round(pct)}%)`,
+			}));
+			seg.style.flexGrow = String(Math.max(tu.total.totalTokens > 0 ? 0 : 1, pct));
+		}
+		const stackLegend = append(this.tokenAnalyticsEl, $('.ade-eng-ta-stack-legend'));
+		for (const tier of tiers) {
+			const item = append(stackLegend, $(`span.ade-eng-ta-stack-key.${tier.cls}`));
+			append(item, $('i', { 'aria-hidden': 'true' }));
+			append(item, $('span', {}, `${tier.short} ${formatCompactTokenCount(tier.usage.totalTokens)}`));
+		}
 
 		const rolesWrap = append(this.tokenAnalyticsEl, $('.ade-eng-ta-roles'));
-		const tiers: { readonly label: string; readonly usage: IAdeTokenUsage; readonly cls: string }[] = [
-			{ label: localize('adeEngTierWrk', "Worker · L4 (Executor)"), usage: tu.worker, cls: 'wrk' },
-			{ label: localize('adeEngTierEmp', "Employee · L3 (Reviewer)"), usage: tu.employee, cls: 'emp' },
-			{ label: localize('adeEngTierMgr', "Manager · L2 (Segment)"), usage: tu.manager, cls: 'mgr' },
-			{ label: localize('adeEngTierGov', "Governor · L1 (Architect)"), usage: tu.governor, cls: 'gov' },
-		];
 		for (const tier of tiers) {
 			const pct = tu.total.totalTokens > 0 ? Math.round((tier.usage.totalTokens / total) * 100) : 0;
 			const row = append(rolesWrap, $('.ade-eng-ta-role-row'));
@@ -877,6 +1392,105 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const fill = append(track, $(`div.ade-eng-ta-bar-fill.${tier.cls}`));
 			fill.style.width = `${Math.max(tier.usage.totalTokens > 0 ? 4 : 0, pct)}%`;
 		}
+
+		// Per-Manager-segment rows (click = focus lane)
+		const bp = this.draftBlueprint;
+		if (bp && bp.managers.length > 0) {
+			append(this.tokenAnalyticsEl, $('div.ade-eng-ta-section-label', {}, localize('adeEngTaSegmentsLabel', "Manager Lanes")));
+			const segWrap = append(this.tokenAnalyticsEl, $('.ade-eng-ta-segments'));
+			const segRows = bp.managers.map(m => {
+				let tokens = 0;
+				let done = 0;
+				for (const id of m.nodeIds) {
+					const rt = snap.state.nodes[id];
+					tokens += rt?.tokenUsage?.total.totalTokens ?? 0;
+					if (rt?.completed) {
+						done++;
+					}
+				}
+				return { seg: m, tokens, done };
+			});
+			const maxSegTokens = Math.max(1, ...segRows.map(r => r.tokens));
+			for (const r of segRows) {
+				const row = append(segWrap, $('button.ade-eng-ta-seg-row', {
+					type: 'button',
+					'data-segment-id': r.seg.segmentId,
+					title: localize('adeEngTaSegRowTooltip', "Focus Manager lane [{0}] on canvas", r.seg.segmentId),
+				}));
+				append(row, $('span.ade-eng-ta-seg-name', {}, r.seg.segmentId));
+				append(row, $('span.ade-eng-ta-seg-done', {}, `${r.done}/${r.seg.nodeIds.length}`));
+				append(row, $('span.ade-eng-ta-seg-tok', {}, formatCompactTokenCount(r.tokens)));
+				const bar = append(row, $('span.ade-eng-ta-seg-bar'));
+				const barFill = append(bar, $('span.ade-eng-ta-seg-bar-fill'));
+				barFill.style.width = `${Math.round((r.tokens / maxSegTokens) * 100)}%`;
+				this.tokenAnalyticsDisposables.add(addDisposableListener(row, EventType.CLICK, () => this.focusSegmentOnCanvas(r.seg.segmentId)));
+			}
+		}
+
+		// Top-5 most expensive nodes (click = focus node)
+		append(this.tokenAnalyticsEl, $('div.ade-eng-ta-section-label', {}, localize('adeEngTaTopLabel', "Top Nodes by Tokens")));
+		const topWrap = append(this.tokenAnalyticsEl, $('.ade-eng-ta-top'));
+		const topNodes = (bp?.nodes ?? [])
+			.map(n => ({ node: n, tokens: snap.state.nodes[n.id]?.tokenUsage?.total.totalTokens ?? 0 }))
+			.filter(r => r.tokens > 0)
+			.sort((a, b) => b.tokens - a.tokens)
+			.slice(0, 5);
+		if (topNodes.length === 0) {
+			append(topWrap, $('div.ade-eng-empty-hint', {}, localize('adeEngTaTopEmpty', "No node has consumed tokens yet.")));
+		}
+		const maxNodeTokens = Math.max(1, ...topNodes.map(r => r.tokens));
+		topNodes.forEach((r, idx) => {
+			const row = append(topWrap, $('button.ade-eng-ta-top-row', {
+				type: 'button',
+				'data-node-id': r.node.id,
+				title: localize('adeEngTaTopRowTooltip', "Focus [{0}] {1} on canvas", r.node.id, r.node.title),
+			}));
+			append(row, $('span.ade-eng-ta-top-rank', {}, String(idx + 1)));
+			append(row, $('span.ade-eng-node-id-chip', {}, r.node.id));
+			append(row, $('span.ade-eng-ta-top-title', {}, r.node.title));
+			append(row, $('span.ade-eng-ta-top-tok', {}, formatCompactTokenCount(r.tokens)));
+			const bar = append(row, $('span.ade-eng-ta-top-bar'));
+			bar.style.setProperty('--pct', `${Math.round((r.tokens / maxNodeTokens) * 100)}%`);
+			this.tokenAnalyticsDisposables.add(addDisposableListener(row, EventType.CLICK, () => this.focusNodeOnCanvas(r.node.id, false)));
+		});
+	}
+
+	private recordTokenSample(): void {
+		const total = this.snapshot?.tokenUsage.total.totalTokens ?? 0;
+		const now = Date.now();
+		const last = this.tokenSamples[this.tokenSamples.length - 1];
+		if (last && last.total === total && now - last.t < 5_000) {
+			return;
+		}
+		this.tokenSamples.push({ t: now, total });
+		const cutoff = now - 5 * 60_000;
+		while (this.tokenSamples.length > 2 && (this.tokenSamples.length > 40 || this.tokenSamples[0].t < cutoff)) {
+			this.tokenSamples.shift();
+		}
+	}
+
+	private focusSegmentOnCanvas(segmentId: string): void {
+		const seg = this.draftBlueprint?.managers.find(m => m.segmentId === segmentId);
+		const nodes = seg ? seg.nodeIds.map(id => this.draftBlueprint?.nodes.find(n => n.id === id)).filter((n): n is IAdeEngineeringBlueprintNode => Boolean(n)) : [];
+		if (!seg || nodes.length === 0 || !this.lastDimension) {
+			return;
+		}
+		const b = this.computeSegmentBounds(nodes);
+		const cx = (b.minX + b.maxX) / 2;
+		const cy = (b.minY + b.maxY) / 2;
+		this.animateViewportTo(
+			Math.round(this.viewportWidth() * 0.42 - cx * this.zoom),
+			Math.round(this.viewportCenterY() - cy * this.zoom),
+			this.zoom,
+			true,
+		);
+		this.flashSegmentId = segmentId;
+		const halo = this.segmentHaloDomById.get(segmentId);
+		if (halo) {
+			halo.classList.remove('flash');
+			void halo.offsetWidth;
+			halo.classList.add('flash');
+		}
 	}
 
 	private openPopoverForTarget(params: {
@@ -885,10 +1499,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		readonly tab?: PopoverTabKind;
 		readonly segmentId?: string;
 	}): void {
-		if (this.activeSheetTab) {
+		if (this.activeSheetTab && this.sheetMode === 'overlay') {
 			this.closeSheet();
 		}
 		this.closeTokenAnalytics();
+		this.toggleShortcuts(false);
 		const targetTab: PopoverTabKind = params.tab ?? (params.anchorKind === 'gate' ? 'task' : params.anchorKind);
 		const sameState = this.activePopoverNodeId === params.nodeId
 			&& this.activeAnchorKind === params.anchorKind
@@ -896,6 +1511,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			&& this.activePopoverSegmentId === params.segmentId
 			&& this.popoverEl.classList.contains('open');
 
+		if (this.activePopoverNodeId !== params.nodeId) {
+			this.popoverDragged = false;
+		}
 		this.activePopoverNodeId = params.nodeId;
 		this.activeAnchorKind = params.anchorKind;
 		this.activePopoverTab = targetTab;
@@ -903,6 +1521,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.popoverEl.inert = false;
 		this.popoverEl.removeAttribute('aria-hidden');
 		this.popoverEl.classList.add('open');
+		this.popoverEl.dataset.anchor = params.anchorKind;
 
 		for (const [id, el] of this.nodeDomById) {
 			el.classList.toggle('inspected', id === params.nodeId);
@@ -917,7 +1536,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private closePopover(): void {
 		this.activePopoverNodeId = undefined;
 		this.activePopoverSegmentId = undefined;
-		this.popoverEl.classList.remove('open', 'flipped-left', 'placed-below', 'placed-above');
+		this.popoverTabOrder = [];
+		this.popoverPinned = false;
+		this.popoverDragged = false;
+		this.popoverRenderDisposables.clear();
+		this.popoverEl.classList.remove('open', 'flipped-left', 'placed-below', 'placed-above', 'pinned', 'dragging');
 		this.popoverEl.inert = true;
 		this.popoverEl.setAttribute('aria-hidden', 'true');
 		this.popoverEl.style.maxHeight = '';
@@ -931,20 +1554,53 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.eventsSheetBtnEl?.classList.toggle('active', this.activeSheetTab === 'events');
 	}
 
+	private syncSheetModeClasses(): void {
+		const open = Boolean(this.activeSheetTab) && this.sheetEl.classList.contains('open');
+		this.sheetEl.classList.toggle('mode-split', this.sheetMode === 'split');
+		this.sheetEl.classList.toggle('mode-overlay', this.sheetMode === 'overlay');
+		const wasSplit = this.bodyEl.classList.contains('split-sheet');
+		const isSplit = open && this.sheetMode === 'split';
+		this.bodyEl.classList.toggle('split-sheet', isSplit);
+		if (wasSplit !== isSplit) {
+			this.updateMinimapLens();
+			this.positionPopoverNearAnchor();
+		}
+	}
+
+	private setSheetMode(mode: SheetModeKind): void {
+		if (this.sheetMode === mode) {
+			return;
+		}
+		this.sheetMode = mode;
+		this.syncSheetModeClasses();
+		this.renderSheet();
+		if (this.lastDimension && this.draftBlueprint && this.draftBlueprint.nodes.length > 0) {
+			this.fitViewportToGraph(true);
+		}
+	}
+
 	private toggleSheet(tab: SheetTabKind): void {
 		if (this.activeSheetTab === tab && this.sheetEl.classList.contains('open')) {
 			this.closeSheet();
 			return;
 		}
-		if (this.activePopoverNodeId) {
+		if (this.activePopoverNodeId && this.sheetMode === 'overlay') {
 			this.closePopover();
 		}
+		this.toggleShortcuts(false);
 		this.activeSheetTab = tab;
 		this.sheetEl.inert = false;
 		this.sheetEl.removeAttribute('aria-hidden');
 		this.sheetEl.classList.add('open');
 		this.syncSheetToggleActiveState();
+		this.syncSheetModeClasses();
+		if (tab === 'events' && this.snapshot) {
+			this.eventsSeenCount = this.snapshot.state.events.length;
+		}
 		this.renderSheet();
+		if (tab === 'events' && this.sheetEventsBodyEl) {
+			this.sheetEventsBodyEl.scrollTop = this.sheetEventsBodyEl.scrollHeight;
+		}
 	}
 
 	private closeSheet(): void {
@@ -952,10 +1608,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 		this.activeSheetTab = undefined;
+		this.blueprintEditorEl = undefined;
+		this.sheetRenderDisposables.clear();
+		this.sheetTimelineDisposables.clear();
 		this.sheetEl.classList.remove('open');
 		this.sheetEl.inert = true;
 		this.sheetEl.setAttribute('aria-hidden', 'true');
 		this.syncSheetToggleActiveState();
+		this.syncSheetModeClasses();
+		this.setXrefNode(undefined);
+	}
+
+	private setXrefNode(nodeId: string | undefined): void {
+		if (this.xrefNodeId === nodeId) {
+			return;
+		}
+		this.xrefNodeId = nodeId;
+		for (const [id, el] of this.nodeDomById) {
+			el.classList.toggle('xref', id === nodeId);
+		}
 	}
 
 	private resolveAnchorViewportRect(): { left: number; right: number; top: number; bottom: number; centerY: number } | undefined {
@@ -1013,22 +1684,28 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!this.activePopoverNodeId || !this.popoverEl.classList.contains('open')) {
 			return;
 		}
+		if (this.popoverPinned && this.popoverDragged) {
+			this.popoverEl.dataset.caretSide = 'none';
+			return;
+		}
 		const anchor = this.resolveAnchorViewportRect();
 		if (!anchor) {
 			return;
 		}
-		const bodyW = this.bodyEl.clientWidth || (this.lastDimension?.width ?? 960);
-		const bodyH = Math.max(160, this.bodyEl.clientHeight || ((this.lastDimension?.height ?? 640) - 44));
-		this.popoverEl.style.maxHeight = `${Math.max(140, bodyH - 20)}px`;
+		const bodyW = this.viewportWidth();
+		const bodyH = Math.max(160, this.viewportHeight());
+		const topInset = Math.min(TOOLBAR_SAFE_INSET, Math.floor(bodyH * 0.2));
+		this.popoverEl.style.maxHeight = `${Math.max(140, bodyH - topInset - 12)}px`;
 		const popW = Math.min(bodyW - 20, this.popoverEl.offsetWidth || POPOVER_WIDTH);
-		const popH = Math.min(bodyH - 20, this.popoverEl.offsetHeight || 290);
+		const popH = Math.min(bodyH - topInset - 12, this.popoverEl.offsetHeight || 290);
 		const gap = 12;
 
 		let left = anchor.right + gap;
-		let top = Math.max(10, Math.min(bodyH - popH - 10, anchor.centerY - Math.min(110, popH * 0.36)));
+		let top = Math.max(topInset, Math.min(bodyH - popH - 10, anchor.centerY - Math.min(110, popH * 0.36)));
 		let flippedLeft = false;
 		let placedBelow = false;
 		let placedAbove = false;
+		const anchorCenterX = (anchor.left + anchor.right) / 2;
 
 		if (anchor.right + gap + popW <= bodyW - 10) {
 			left = anchor.right + gap;
@@ -1036,20 +1713,19 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			left = anchor.left - gap - popW;
 			flippedLeft = true;
 		} else {
-			const anchorCenterX = (anchor.left + anchor.right) / 2;
 			left = Math.max(10, Math.min(bodyW - popW - 10, anchorCenterX - popW / 2));
 			const spaceBelow = bodyH - anchor.bottom - gap - 10;
-			const spaceAbove = anchor.top - gap - 10;
+			const spaceAbove = anchor.top - gap - topInset;
 			if (spaceBelow >= Math.min(popH, 220) || spaceBelow >= spaceAbove) {
 				placedBelow = true;
-				top = Math.max(10, Math.min(bodyH - 130, anchor.bottom + gap));
+				top = Math.max(topInset, Math.min(bodyH - 130, anchor.bottom + gap));
 				this.popoverEl.style.maxHeight = `${Math.max(120, bodyH - top - 10)}px`;
 			} else {
 				placedAbove = true;
-				const maxAboveH = Math.max(120, Math.min(bodyH - 20, anchor.top - gap - 10));
+				const maxAboveH = Math.max(120, Math.min(bodyH - topInset - 10, anchor.top - gap - topInset));
 				this.popoverEl.style.maxHeight = `${maxAboveH}px`;
 				const clampedH = Math.min(popH, maxAboveH);
-				top = Math.max(10, anchor.top - gap - clampedH);
+				top = Math.max(topInset, anchor.top - gap - clampedH);
 			}
 		}
 
@@ -1058,6 +1734,27 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.popoverEl.classList.toggle('placed-above', placedAbove);
 		this.popoverEl.style.left = `${Math.round(left)}px`;
 		this.popoverEl.style.top = `${Math.round(top)}px`;
+
+		if (placedBelow || placedAbove) {
+			this.popoverEl.dataset.caretSide = placedBelow ? 'top' : 'bottom';
+			const caretX = Math.max(18, Math.min(popW - 18, Math.round(anchorCenterX - left)));
+			this.popoverCaretEl.style.setProperty('--caret-offset', `${caretX}px`);
+		} else {
+			this.popoverEl.dataset.caretSide = flippedLeft ? 'right' : 'left';
+			const caretY = Math.max(18, Math.min(popH - 18, Math.round(anchor.centerY - top)));
+			this.popoverCaretEl.style.setProperty('--caret-offset', `${caretY}px`);
+		}
+	}
+
+	private syncRootModeClass(): void {
+		if (!this.rootEl) {
+			return;
+		}
+		const govAgent = this.activeGovernorId ? this.projects.getAgent(this.activeGovernorId) : undefined;
+		const treeType = this.snapshot?.treeType ?? (govAgent?.treeType === 'research' ? 'research' : 'engineering');
+		const isResearch = treeType === 'research';
+		this.rootEl.classList.toggle('mode-research', isResearch);
+		this.rootEl.classList.toggle('mode-engineering', !isResearch);
 	}
 
 	override async setInput(input: AdeEngineeringEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -1071,10 +1768,17 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.lastCoalesceKey = undefined;
 		this.connectMode = false;
 		this.connectSourceNodeId = undefined;
+		this.spawnGhostSourceId = undefined;
+		this.tokenSamples = [];
+		this.eventsSeenCount = 0;
+		this.eventSearchQuery = '';
+		this.xrefNodeId = undefined;
 		this.hideBanner();
 		this.closePopover();
 		this.closeTokenAnalytics();
 		this.closeSheet();
+		this.toggleShortcuts(false);
+		this.syncRootModeClass();
 		if (switchingGovernor) {
 			this.pendingInitialFit = true;
 		}
@@ -1115,17 +1819,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.canvasRenderDisposables.clear();
 		this.popoverRenderDisposables.clear();
 		this.sheetRenderDisposables.clear();
+		this.sheetTimelineDisposables.clear();
 		this.tokenAnalyticsDisposables.clear();
 		this.activeGovernorId = undefined;
 		this.snapshot = undefined;
 		this.draftBlueprint = undefined;
 		this.undoStack.length = 0;
 		this.redoStack.length = 0;
+		this.tokenSamples = [];
+		this.eventsSeenCount = 0;
+		this.spawnGhostSourceId = undefined;
+		this.xrefNodeId = undefined;
 		this.pendingInitialFit = false;
 		this.hideBanner();
 		this.closePopover();
 		this.closeTokenAnalytics();
 		this.closeSheet();
+		this.toggleShortcuts(false);
 		super.clearInput();
 	}
 
@@ -1148,6 +1858,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				const now = Date.now();
 				for (const item of this.livePhasePillRefs) {
 					item.pill.textContent = `${item.phaseLabel} · ${formatElapsedCompact(item.startedAt, now)}`;
+					item.pill.classList.toggle('over-sla', now - item.startedAt >= ADE_ENG_PHASE_SOFT_SLA_MS);
 				}
 			}, 1000);
 		} else if (!isRunning && this.liveTickTimer !== undefined) {
@@ -1161,19 +1872,22 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		const snap = this.engineering.getTreeSnapshot(this.activeGovernorId);
 		this.snapshot = snap;
+		this.syncRootModeClass();
+		this.recordTokenSample();
 		this.syncLivePhaseTicker();
 		if (snap && (resetDraft || !this.isDraftDirty || !this.draftBlueprint)) {
 			const cloned = cloneBlueprint(snap.blueprint);
-			const autoPos = computeAutoLayoutPositions(cloned);
+			const autoPos = this.autoLayoutPositions(cloned);
 			this.draftBlueprint = {
 				...cloned,
-				nodes: cloned.nodes.map(n => n.position ? n : { ...n, position: autoPos.get(n.id) ?? { x: 196, y: 256 } }),
+				nodes: cloned.nodes.map(n => n.position ? n : { ...n, position: autoPos.get(n.id) ?? { x: 204, y: 260 } }),
 			};
 			if (resetDraft) {
 				this.isDraftDirty = false;
 				this.undoStack.length = 0;
 				this.redoStack.length = 0;
 				this.lastCoalesceKey = undefined;
+				this.eventsSeenCount = snap.state.events.length;
 			}
 		}
 		this.renderToolbar();
@@ -1198,10 +1912,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 		}
 		if (this.activeSheetTab === 'events' && this.sheetEl.classList.contains('open')) {
-			const prevScroll = this.sheetEventsBodyEl?.scrollTop ?? 0;
+			const eventsEl = this.sheetEventsBodyEl;
+			const prevScroll = eventsEl?.scrollTop ?? 0;
+			const wasDatasetPinned = eventsEl?.dataset.pinnedScroll === '1';
+			const distFromBottom = eventsEl ? eventsEl.scrollHeight - prevScroll - eventsEl.clientHeight : 0;
+			const pinnedAwayFromBottom = Boolean(eventsEl && (distFromBottom > 24 || wasDatasetPinned));
 			this.renderSheet();
-			if (this.sheetEventsBodyEl) {
-				this.sheetEventsBodyEl.scrollTop = prevScroll;
+			const nextEventsEl = this.sheetEventsBodyEl;
+			if (nextEventsEl) {
+				if (pinnedAwayFromBottom) {
+					if (wasDatasetPinned) {
+						nextEventsEl.dataset.pinnedScroll = '1';
+					}
+					nextEventsEl.scrollTop = prevScroll;
+					this.syncEventsNewPill();
+				} else {
+					this.eventsSeenCount = snap?.state.events.length ?? 0;
+					nextEventsEl.scrollTop = nextEventsEl.scrollHeight;
+					this.syncEventsNewPill();
+				}
 			}
 		}
 	}
@@ -1335,18 +2064,30 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private applyWorldTransform(): void {
 		this.viewportEl.scrollLeft = 0;
 		this.viewportEl.scrollTop = 0;
-		this.worldEl.style.transform = `translate(${Math.round(this.panX)}px, ${Math.round(this.panY)}px) scale(${this.zoom})`;
-		this.viewportEl.style.backgroundPosition = `${Math.round(this.panX)}px ${Math.round(this.panY)}px`;
-		const gridSize = Math.max(12, Math.round(24 * this.zoom));
-		this.viewportEl.style.backgroundSize = `${gridSize}px ${gridSize}px`;
+		const rx = Math.round(this.panX);
+		const ry = Math.round(this.panY);
+		this.worldEl.style.transform = `translate(${rx}px, ${ry}px) scale(${this.zoom})`;
+		this.viewportEl.style.setProperty('--grid-x', `${rx}px`);
+		this.viewportEl.style.setProperty('--grid-y', `${ry}px`);
+		this.viewportEl.style.setProperty('--grid-scale', String(this.zoom));
 		this.viewportEl.classList.toggle('zoom-compact', this.zoom < 0.58);
+		this.viewportEl.classList.toggle('zoom-macro', this.zoom < 0.5);
 		this.updateMinimapLens();
 		this.positionPopoverNearAnchor();
 	}
 
+	private updateWorldBounds(nodes: readonly Pick<IAdeEngineeringBlueprintNode, 'position'>[]): void {
+		const { width, height } = computeEngineeringWorldSize(nodes);
+		this.worldEl.style.width = `${width}px`;
+		this.worldEl.style.height = `${height}px`;
+		this.edgesSvgEl.setAttribute('width', String(width));
+		this.edgesSvgEl.setAttribute('height', String(height));
+		this.edgesSvgEl.setAttribute('viewBox', `0 0 ${width} ${height}`);
+	}
+
 	private fitViewportToGraph(animate = false): void {
 		if (!this.draftBlueprint || this.draftBlueprint.nodes.length === 0 || !this.lastDimension) {
-			this.animateViewportTo(48, 36, 1, animate);
+			this.animateViewportTo(48, TOOLBAR_SAFE_INSET + 16, 1, animate);
 			return;
 		}
 		let minX = Infinity;
@@ -1354,21 +2095,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		let maxX = -Infinity;
 		let maxY = -Infinity;
 		for (const n of this.draftBlueprint.nodes) {
-			const x = n.position?.x ?? 196;
-			const y = n.position?.y ?? 256;
-			minX = Math.min(minX, x - 156);
-			minY = Math.min(minY, y - 122);
-			maxX = Math.max(maxX, x + 168);
-			maxY = Math.max(maxY, y + 118);
+			const x = n.position?.x ?? 204;
+			const y = n.position?.y ?? 260;
+			minX = Math.min(minX, x - 168);
+			minY = Math.min(minY, y - 134);
+			maxX = Math.max(maxX, x + 180);
+			maxY = Math.max(maxY, y + 128);
 		}
-		const availW = Math.max(320, this.lastDimension.width - 76);
-		const availH = Math.max(240, this.lastDimension.height - 104);
-		const graphW = Math.max(240, maxX - minX);
-		const graphH = Math.max(180, maxY - minY);
+		const vw = this.viewportWidth();
+		const vh = this.viewportHeight();
+		const availW = Math.max(320, vw - 76);
+		const availH = Math.max(220, vh - TOOLBAR_SAFE_INSET - 68);
+		const graphW = Math.max(260, maxX - minX);
+		const graphH = Math.max(196, maxY - minY);
 		const scale = Math.min(1.08, Math.max(0.38, Math.min(availW / graphW, availH / graphH)));
 		const targetZoom = Math.round(scale * 100) / 100;
 		const targetPanX = Math.round((availW - graphW * targetZoom) / 2 - minX * targetZoom + 38);
-		const targetPanY = Math.round((availH - graphH * targetZoom) / 2 - minY * targetZoom + 24);
+		const targetPanY = Math.round(TOOLBAR_SAFE_INSET + (availH - graphH * targetZoom) / 2 - minY * targetZoom + 12);
 		this.animateViewportTo(targetPanX, targetPanY, targetZoom, animate);
 	}
 
@@ -1379,8 +2122,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		if (this.lastDimension && target.position) {
 			const targetZoom = Math.max(0.75, Math.min(1.08, this.zoom));
-			const targetPanX = Math.round(this.lastDimension.width * (openInspector ? 0.36 : 0.5) - target.position.x * targetZoom);
-			const targetPanY = Math.round((this.lastDimension.height - 44) * 0.5 - target.position.y * targetZoom);
+			const targetPanX = Math.round(this.viewportWidth() * (openInspector ? 0.36 : 0.5) - target.position.x * targetZoom);
+			const targetPanY = Math.round(this.viewportCenterY() - target.position.y * targetZoom);
 			this.animateViewportTo(targetPanX, targetPanY, targetZoom, true);
 		}
 		if (openInspector) {
@@ -1403,8 +2146,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 		if (this.lastDimension && waitingGate.position) {
-			const targetPanX = Math.round(this.lastDimension.width * 0.36 - waitingGate.position.x * this.zoom);
-			const targetPanY = Math.round((this.lastDimension.height - 44) * 0.5 - waitingGate.position.y * this.zoom);
+			const targetPanX = Math.round(this.viewportWidth() * 0.36 - waitingGate.position.x * this.zoom);
+			const targetPanY = Math.round(this.viewportCenterY() - waitingGate.position.y * this.zoom);
 			this.animateViewportTo(targetPanX, targetPanY, this.zoom, false);
 		}
 		this.openPopoverForTarget({
@@ -1441,20 +2184,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private renderToolbar(): void {
 		this.toolbarRenderDisposables.clear();
 		clearNode(this.toolbarEl);
+		this.tokensPillEl = undefined;
 		this.undoBtnEl = undefined;
 		this.blueprintSheetBtnEl = undefined;
 		this.eventsSheetBtnEl = undefined;
+		this.syncRootModeClass();
 		const snap = this.snapshot;
 		const bp = this.draftBlueprint;
 		if (!snap || !bp) {
-			append(this.toolbarEl, $('span.ade-eng-toolbar-title', {}, localize('adeEngLoading', "ADE Engineering")));
+			const loadingIsland = append(this.toolbarEl, $('.ade-eng-toolbar-group.left.island'));
+			append(loadingIsland, $('span.ade-eng-toolbar-title', {}, localize('adeEngLoading', "ADE Engineering")));
 			return;
 		}
 
-		// Left Cluster: Title + Mode Pill + Status + Rich Progress Bar + Interactive Token Analytics + Quick Node Jump
-		const left = append(this.toolbarEl, $('.ade-eng-toolbar-group.left'));
+		// Island 1 (Left): Title + Mode Pill + Status + Rich Progress Bar + Interactive Token Analytics + Quick Node Jump
+		const left = append(this.toolbarEl, $('.ade-eng-toolbar-group.left.island'));
 		const titleIcon = append(left, $('span.ade-eng-title-icon'));
-		titleIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchySub));
+		titleIcon.classList.add(...ThemeIcon.asClassNameArray(snap.treeType === 'research' ? Codicon.beaker : Codicon.typeHierarchySub));
 		append(left, $('span.ade-eng-toolbar-title', { title: snap.governorLabel }, snap.governorLabel));
 		append(left, $('span.ade-eng-tree-pill', {
 			title: localize('adeEngTierLegendTooltip', "4-Tier Architecture: Governor (L1) → Segment Manager (L2 Lane) → Outer Employee Shell (L3 Reviewer) → Inner Worker Core (L4 Executor)"),
@@ -1521,6 +2267,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			role: 'button',
 			tabindex: '0',
 		}));
+		this.tokensPillEl = tokensPill;
 		const tokIco = append(tokensPill, $('span.ade-eng-tokens-ico'));
 		tokIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.pulse));
 		append(tokensPill, $('span', {}, `${formatCompactTokenCount(treeTokens.totalTokens)} tok`));
@@ -1545,28 +2292,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}));
 		}
 
-		// Right Cluster: Undo/Redo + Authoring Tools + Sheet Toggles + Draft Guard + Execution Controls
-		const right = append(this.toolbarEl, $('.ade-eng-toolbar-group.right'));
+		// Island 2 (Center): Authoring Tools (Task → User Gate → Connect) + Undo/Redo
+		const center = append(this.toolbarEl, $('.ade-eng-toolbar-group.center.island'));
 
-		const undoBtn = append(right, $('button.ade-eng-icon-btn.ade-eng-undo-btn', {
-			type: 'button',
-			title: localize('adeEngUndoTooltip', "Undo Blueprint Edit (Cmd/Ctrl+Z)"),
-			...(this.undoStack.length === 0 ? { disabled: 'disabled' } : {}),
-		})) as HTMLButtonElement;
-		this.undoBtnEl = undoBtn;
-		undoBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.discard));
-		this.toolbarRenderDisposables.add(addDisposableListener(undoBtn, EventType.CLICK, () => this.undoDraft()));
-
-		const redoBtn = append(right, $('button.ade-eng-icon-btn.ade-eng-redo-btn', {
-			type: 'button',
-			title: localize('adeEngRedoTooltip', "Redo Blueprint Edit (Cmd/Ctrl+Shift+Z)"),
-			...(this.redoStack.length === 0 ? { disabled: 'disabled' } : {}),
-		}));
-		redoBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.redo));
-		this.toolbarRenderDisposables.add(addDisposableListener(redoBtn, EventType.CLICK, () => this.redoDraft()));
-
-		const makeToolBtn = (icon: ThemeIcon, label: string, onClick: () => void, extraClass = '') => {
-			const btn = append(right, $(`button.ade-eng-tool-btn${extraClass ? `.${extraClass}` : ''}`, {
+		const makeToolBtnIn = (host: HTMLElement, icon: ThemeIcon, label: string, onClick: () => void, extraClass = '') => {
+			const btn = append(host, $(`button.ade-eng-tool-btn${extraClass ? `.${extraClass}` : ''}`, {
 				type: 'button',
 				title: label,
 			}));
@@ -1577,13 +2307,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return btn;
 		};
 
-		const addTaskBtn = makeToolBtn(Codicon.add, localize('adeEngAddTaskBtn', "Task"), () => this.addDraftNode('task'));
+		const addTaskBtn = makeToolBtnIn(center, Codicon.add, localize('adeEngAddTaskBtn', "Task"), () => this.addDraftNode('task'), 'primary-spawn');
 		addTaskBtn.title = localize('adeEngAddTaskTooltip', "Add Dual-Layer Task Node (Outer Employee L3 + Inner Worker L4)");
 
-		const addGateBtn = makeToolBtn(Codicon.verified, localize('adeEngAddGateBtn', "User Gate"), () => this.addDraftNode('user_gate'));
+		const addGateBtn = makeToolBtnIn(center, Codicon.verified, localize('adeEngAddGateBtn', "User Gate"), () => this.addDraftNode('user_gate'));
 		addGateBtn.title = localize('adeEngAddGateTooltip', "Add Human Acceptance Checkpoint Gate");
 
-		const connectBtn = makeToolBtn(
+		const connectBtn = makeToolBtnIn(
+			center,
 			Codicon.arrowRight,
 			localize('adeEngConnectBtn', "Connect"),
 			() => {
@@ -1595,6 +2326,29 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.connectMode ? 'active' : '',
 		);
 		connectBtn.title = localize('adeEngConnectTooltip', "Toggle Edge Wiring Mode (or drag directly from any node's right port)");
+
+		append(center, $('span.ade-eng-toolbar-sep'));
+
+		const undoBtn = append(center, $('button.ade-eng-icon-btn.ade-eng-undo-btn', {
+			type: 'button',
+			title: localize('adeEngUndoTooltip', "Undo Blueprint Edit (Cmd/Ctrl+Z)"),
+			...(this.undoStack.length === 0 ? { disabled: 'disabled' } : {}),
+		})) as HTMLButtonElement;
+		this.undoBtnEl = undoBtn;
+		undoBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.discard));
+		this.toolbarRenderDisposables.add(addDisposableListener(undoBtn, EventType.CLICK, () => this.undoDraft()));
+
+		const redoBtn = append(center, $('button.ade-eng-icon-btn.ade-eng-redo-btn', {
+			type: 'button',
+			title: localize('adeEngRedoTooltip', "Redo Blueprint Edit (Cmd/Ctrl+Shift+Z)"),
+			...(this.redoStack.length === 0 ? { disabled: 'disabled' } : {}),
+		}));
+		redoBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.redo));
+		this.toolbarRenderDisposables.add(addDisposableListener(redoBtn, EventType.CLICK, () => this.redoDraft()));
+
+		// Island 3 (Right): Isolation + Blueprint/Logs Sheet Toggles + Draft Guard + Execution Controls
+		const right = append(this.toolbarEl, $('.ade-eng-toolbar-group.right.island'));
+		const makeToolBtn = (icon: ThemeIcon, label: string, onClick: () => void, extraClass = '') => makeToolBtnIn(right, icon, label, onClick, extraClass);
 
 		const isolationBtn = makeToolBtn(
 			bp.metadata.workspaceIsolation === 'worktree' ? Codicon.gitBranch : Codicon.folder,
@@ -1793,16 +2547,30 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.zoomAroundViewportCenter(-0.12);
 		}));
 
+		const zoomPct = Math.round(((this.zoom - 0.35) / (2.1 - 0.35)) * 100);
 		const zoomLabelBtn = append(this.hudEl, $('button.ade-eng-zoom-readout', {
 			type: 'button',
 			title: localize('adeEngFitView', "Fit Graph in Viewport (0 or F)"),
 		}, `${Math.round(this.zoom * 100)}%`));
+		zoomLabelBtn.style.setProperty('--zoom-pct', `${Math.max(4, Math.min(100, zoomPct))}%`);
 		this.hudRenderDisposables.add(addDisposableListener(zoomLabelBtn, EventType.CLICK, () => this.fitViewportToGraph(true)));
 
 		const zoomInBtn = append(this.hudEl, $('button.ade-eng-hud-icon-btn', { type: 'button', title: localize('adeEngZoomIn', "Zoom In") }));
 		zoomInBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.zoomIn));
 		this.hudRenderDisposables.add(addDisposableListener(zoomInBtn, EventType.CLICK, () => {
 			this.zoomAroundViewportCenter(0.12);
+		}));
+
+		append(this.hudEl, $('span.ade-eng-hud-sep'));
+
+		const hintDismissed = this.storage.getBoolean(SHORTCUTS_HINT_STORAGE_KEY, StorageScope.PROFILE, false);
+		const shortcutsBtn = append(this.hudEl, $(`button.ade-eng-hud-icon-btn.ade-eng-shortcuts-toggle${this.showShortcuts ? '.active' : ''}${!hintDismissed && !this.showShortcuts ? '.has-hint' : ''}`, {
+			type: 'button',
+			title: localize('adeEngShortcutsBtnTooltip', "Keyboard Shortcuts (?)"),
+			'aria-expanded': String(this.showShortcuts),
+		}, '?'));
+		this.hudRenderDisposables.add(addDisposableListener(shortcutsBtn, EventType.CLICK, () => {
+			this.toggleShortcuts();
 		}));
 	}
 
@@ -1905,20 +2673,18 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		let pos: { x: number; y: number };
 		const sourceNode = fromSourceNodeId ? this.draftBlueprint.nodes.find(n => n.id === fromSourceNodeId) : undefined;
-		if (sourceNode?.position) {
-			const existingDownstreamCount = this.draftBlueprint.edges.filter(e => e.from === sourceNode.id).length;
-			const offsetY = existingDownstreamCount === 0 ? 0 : (existingDownstreamCount % 2 === 1 ? 1 : -1) * Math.ceil(existingDownstreamCount / 2) * 220;
-			pos = {
-				x: sourceNode.position.x + 356,
-				y: Math.max(150, sourceNode.position.y + offsetY),
-			};
+		const quickPos = fromSourceNodeId ? computeQuickSpawnPosition(this.draftBlueprint, fromSourceNodeId) : undefined;
+		if (quickPos) {
+			pos = { x: quickPos.x, y: quickPos.y };
 		} else {
-			const maxX = this.draftBlueprint.nodes.reduce((acc, n) => Math.max(acc, n.position?.x ?? 196), 100);
+			const maxX = this.draftBlueprint.nodes.reduce((acc, n) => Math.max(acc, n.position?.x ?? 204), 100);
 			pos = {
-				x: this.draftBlueprint.nodes.length === 0 ? 196 : maxX + 340,
-				y: 256 + ((index % 3) - 1) * 90,
+				x: this.draftBlueprint.nodes.length === 0 ? 204 : maxX + 360,
+				y: 260 + ((index % 3) - 1) * 96,
 			};
 		}
+		this.spawnGhostSourceId = undefined;
+		this.updateSpawnGhost();
 
 		const sampleTask = (sourceNode?.type === 'task' ? sourceNode : undefined) ?? this.draftBlueprint.nodes.find(n => n.worker);
 		const defaultEngine = sampleTask?.worker?.engine ?? 'claude-code';
@@ -1958,11 +2724,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		// Ensure newly added node is visible inside viewport if currently off-screen
 		if (this.lastDimension && this.lastDimension.width > 0) {
+			const vw = this.viewportWidth();
+			const vh = this.viewportHeight();
 			const screenX = pos.x * this.zoom + this.panX;
 			const screenY = pos.y * this.zoom + this.panY;
-			if (screenX > this.lastDimension.width - 140 || screenX < 100 || screenY > this.lastDimension.height - 120 || screenY < 80) {
-				const targetPanX = Math.round(this.lastDimension.width * 0.42 - pos.x * this.zoom);
-				const targetPanY = Math.round((this.lastDimension.height - 44) * 0.5 - pos.y * this.zoom);
+			if (screenX > vw - 140 || screenX < 100 || screenY > vh - 120 || screenY < TOOLBAR_SAFE_INSET + 24) {
+				const targetPanX = Math.round(vw * 0.42 - pos.x * this.zoom);
+				const targetPanY = Math.round(this.viewportCenterY() - pos.y * this.zoom);
 				this.animateViewportTo(targetPanX, targetPanY, this.zoom, false);
 			}
 		}
@@ -2033,7 +2801,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 		try {
-			const positions = computeAutoLayoutPositions(this.draftBlueprint);
+			const positions = this.autoLayoutPositions(this.draftBlueprint);
 			this.markDraftModified({
 				...this.draftBlueprint,
 				nodes: this.draftBlueprint.nodes.map(n => ({
@@ -2095,13 +2863,42 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		for (const n of segNodes) {
 			const cx = n.position?.x ?? 204;
 			const cy = n.position?.y ?? 260;
-			const padX = n.type === 'user_gate' ? 128 : 144;
+			const padX = n.type === 'user_gate' ? 132 : 154;
 			minX = Math.min(minX, cx - padX);
-			minY = Math.min(minY, cy - 104);
-			maxX = Math.max(maxX, cx + padX + 6);
-			maxY = Math.max(maxY, cy + 100);
+			minY = Math.min(minY, cy - 114);
+			maxX = Math.max(maxX, cx + padX + 8);
+			maxY = Math.max(maxY, cy + 108);
 		}
 		return { minX, minY, maxX, maxY };
+	}
+
+	private updateSpawnGhost(): void {
+		if (!this.spawnGhostEl || !this.spawnGhostEdgeEl) {
+			return;
+		}
+		const srcId = this.spawnGhostSourceId;
+		const bp = this.draftBlueprint;
+		const srcNode = srcId && bp ? bp.nodes.find(n => n.id === srcId) : undefined;
+		const ghostPos = srcId && bp ? computeQuickSpawnPosition(bp, srcId) : undefined;
+		if (!srcNode || !ghostPos) {
+			this.spawnGhostEl.hidden = true;
+			this.spawnGhostEdgeEl.style.display = 'none';
+			return;
+		}
+		const isGate = this.altPressed;
+		this.spawnGhostEl.className = `ade-eng-spawn-ghost ${isGate ? 'type-user_gate' : 'type-task'}`;
+		this.spawnGhostEl.style.left = `${Math.round(ghostPos.x)}px`;
+		this.spawnGhostEl.style.top = `${Math.round(ghostPos.y)}px`;
+		clearNode(this.spawnGhostEl);
+		append(this.spawnGhostEl, $('span.ade-eng-spawn-ghost-label', {}, isGate
+			? localize('adeEngSpawnGhostGate', "+ User Gate")
+			: localize('adeEngSpawnGhostTask', "+ Task Pod")));
+		this.spawnGhostEl.hidden = false;
+
+		const p1 = this.getNodePorts(srcNode);
+		const ghostInX = ghostPos.x - (isGate ? GATE_NODE_WIDTH : TASK_POD_WIDTH) / 2 - 4;
+		this.spawnGhostEdgeEl.setAttribute('d', this.buildBezierPath(p1.outX, p1.outY, ghostInX, ghostPos.y));
+		this.spawnGhostEdgeEl.style.display = '';
 	}
 
 	private updateSegmentHalosInPlace(): void {
@@ -2204,16 +3001,31 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		for (const n of bp.nodes) {
 			const rt = snap.state.nodes[n.id];
 			const status = computeNodeVisualStatus(n, rt);
-			const w = Math.max(10, ((n.type === 'user_gate' ? GATE_NODE_WIDTH : TASK_POD_WIDTH) / worldW) * MINIMAP_WIDTH);
-			const h = Math.max(7, ((n.type === 'user_gate' ? GATE_NODE_HEIGHT : TASK_POD_HEIGHT) / worldH) * MINIMAP_HEIGHT);
-			this.minimapSvgEl.appendChild($.SVG<SVGRectElement>('rect', {
-				class: `ade-eng-minimap-node status-${status}${n.type === 'user_gate' ? ' gate' : ''}`,
-				x: String((sx(n.position?.x ?? 196) - w / 2).toFixed(1)),
-				y: String((sy(n.position?.y ?? 256) - h / 2).toFixed(1)),
-				width: String(w.toFixed(1)),
-				height: String(h.toFixed(1)),
-				rx: n.type === 'user_gate' ? '3' : '2',
-			}));
+			const mx = sx(n.position?.x ?? 196);
+			const my = sy(n.position?.y ?? 256);
+			if (n.type === 'user_gate') {
+				const side = Math.max(7.5, Math.min(13, (GATE_NODE_HEIGHT / worldH) * MINIMAP_HEIGHT));
+				this.minimapSvgEl.appendChild($.SVG<SVGRectElement>('rect', {
+					class: `ade-eng-minimap-node status-${status} gate${rt?.phase === 'waiting_user_gate' ? ' awaiting' : ''}`,
+					x: String((mx - side / 2).toFixed(1)),
+					y: String((my - side / 2).toFixed(1)),
+					width: String(side.toFixed(1)),
+					height: String(side.toFixed(1)),
+					rx: '1.8',
+					transform: `rotate(45 ${mx.toFixed(1)} ${my.toFixed(1)})`,
+				}));
+			} else {
+				const w = Math.max(10, (TASK_POD_WIDTH / worldW) * MINIMAP_WIDTH);
+				const h = Math.max(7, (TASK_POD_HEIGHT / worldH) * MINIMAP_HEIGHT);
+				this.minimapSvgEl.appendChild($.SVG<SVGRectElement>('rect', {
+					class: `ade-eng-minimap-node status-${status}`,
+					x: String((mx - w / 2).toFixed(1)),
+					y: String((my - h / 2).toFixed(1)),
+					width: String(w.toFixed(1)),
+					height: String(h.toFixed(1)),
+					rx: '2.2',
+				}));
+			}
 		}
 
 		this.updateMinimapLens();
@@ -2223,8 +3035,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!this.minimapLensEl || this.minimapEl.hidden || !this.showMinimap) {
 			return;
 		}
-		const vw = this.viewportEl.clientWidth || (this.lastDimension?.width ?? 960);
-		const vh = this.viewportEl.clientHeight || ((this.lastDimension?.height ?? 640) - 44);
+		const vw = this.viewportWidth();
+		const vh = this.viewportHeight();
 		const viewWorldLeft = -this.panX / this.zoom;
 		const viewWorldTop = -this.panY / this.zoom;
 		const viewWorldW = vw / this.zoom;
@@ -2255,7 +3067,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.segmentHaloDomById.clear();
 		this.segmentHeaderDomById.clear();
 		this.livePhasePillRefs = [];
+		this.spawnGhostSourceId = undefined;
+		this.updateSpawnGhost();
 
+		this.updateWorldBounds(this.draftBlueprint?.nodes ?? []);
 		this.applyWorldTransform();
 
 		const bp = this.draftBlueprint;
@@ -2319,7 +3134,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				segTokens += rt?.tokenUsage?.total.totalTokens ?? 0;
 			}
 
-			const halo = append(this.segmentsLayerEl, $(`div.ade-eng-segment-halo${isManagerActive ? '.role-active' : ''}`, {
+			const halo = append(this.segmentsLayerEl, $(`div.ade-eng-segment-halo${isManagerActive ? '.role-active' : ''}${this.flashSegmentId === seg.segmentId ? '.flash' : ''}`, {
 				'data-segment-id': seg.segmentId,
 			}));
 			halo.style.left = `${Math.round(bounds.minX)}px`;
@@ -2327,6 +3142,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			halo.style.width = `${Math.round(bounds.maxX - bounds.minX)}px`;
 			halo.style.height = `${Math.round(bounds.maxY - bounds.minY)}px`;
 			this.segmentHaloDomById.set(seg.segmentId, halo);
+
+			const segPct = Math.round((segDoneCount / Math.max(1, segNodes.length)) * 100);
+			const progressStrip = append(halo, $('div.ade-eng-segment-progress', { 'aria-hidden': 'true' }));
+			progressStrip.style.setProperty('--pct', `${segPct}%`);
 
 			const header = append(halo, $(`button.ade-eng-segment-header${isManagerActive ? '.role-active' : ''}`, {
 				type: 'button',
@@ -2384,15 +3203,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const isAwaitingGate = node.type === 'user_gate' && runtime?.phase === 'waiting_user_gate';
 			const workerActive = runtime?.phase === 'worker_running';
 			const empActive = runtime?.phase === 'employee_review';
+			const mgrActive = runtime?.phase === 'manager_review' || runtime?.phase === 'manager_escalation';
+			const failCount = Math.min(3, Math.max(0, runtime?.formalFailureCount ?? 0));
+			const phaseName = runtime?.phase ?? 'idle';
 
-			const cx = node.position?.x ?? 196;
-			const cy = node.position?.y ?? 256;
+			const cx = node.position?.x ?? 204;
+			const cy = node.position?.y ?? 260;
+
+			const nodeAriaLabel = node.type === 'user_gate'
+				? localize('adeEngGateAriaLabel', "User Gate {0}: {1}, status {2}", node.id, node.title, visualStatus)
+				: localize('adeEngTaskAriaLabel', "Task {0}: {1}, phase {2}, failure {3} of 3", node.id, node.title, phaseName, failCount);
 
 			const nodeEl = append(
 				this.nodesLayerEl,
-				$(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${isAwaitingGate ? '.awaiting-gate' : ''}${workerActive ? '.phase-worker' : ''}${empActive ? '.phase-employee' : ''}${this.activePopoverNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}`, {
+				$(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${isAwaitingGate ? '.awaiting-gate' : ''}${workerActive ? '.phase-worker' : ''}${empActive ? '.phase-employee' : ''}${mgrActive ? '.phase-manager' : ''}${this.activePopoverNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}${this.xrefNodeId === node.id ? '.xref' : ''}`, {
 					'data-node-id': node.id,
 					'data-visual-status': visualStatus,
+					'data-phase': phaseName,
+					'data-fail': String(failCount),
+					'aria-label': nodeAriaLabel,
 				}),
 			);
 			nodeEl.style.left = `${Math.round(cx)}px`;
@@ -2407,11 +3236,33 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}));
 			this.installPortWiring(node, outPort, inPort);
 
-			// 1-Click Quick-Spawn `+` Handle right beside output port
+			// 1-Click Quick-Spawn `+` Handle right beside output port (hover shows ghost pod + ghost spline)
 			const quickSpawnBtn = append(nodeEl, $('button.ade-eng-quick-spawn-btn', {
 				type: 'button',
 				title: localize('adeEngQuickSpawnTooltip', "Click: + Connected Downstream Task · Alt+Click: + Connected User Gate"),
 			}, '+'));
+			const showGhost = (me?: MouseEvent) => {
+				if (me) {
+					this.altPressed = me.altKey;
+				}
+				this.spawnGhostSourceId = node.id;
+				this.updateSpawnGhost();
+			};
+			const hideGhost = () => {
+				if (this.spawnGhostSourceId === node.id) {
+					this.spawnGhostSourceId = undefined;
+					this.updateSpawnGhost();
+				}
+			};
+			this.canvasRenderDisposables.add(addDisposableListener(quickSpawnBtn, EventType.MOUSE_ENTER, (me: MouseEvent) => showGhost(me)));
+			this.canvasRenderDisposables.add(addDisposableListener(quickSpawnBtn, EventType.MOUSE_MOVE, (me: MouseEvent) => {
+				if (this.altPressed !== me.altKey || this.spawnGhostSourceId !== node.id) {
+					showGhost(me);
+				}
+			}));
+			this.canvasRenderDisposables.add(addDisposableListener(quickSpawnBtn, EventType.FOCUS, () => showGhost()));
+			this.canvasRenderDisposables.add(addDisposableListener(quickSpawnBtn, EventType.MOUSE_LEAVE, hideGhost));
+			this.canvasRenderDisposables.add(addDisposableListener(quickSpawnBtn, EventType.BLUR, hideGhost));
 			this.canvasRenderDisposables.add(addDisposableListener(quickSpawnBtn, EventType.POINTER_DOWN, e => {
 				EventHelper.stop(e, true);
 			}));
@@ -2428,6 +3279,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}));
 				this.nodeAnchorsById.set(node.id, { gate: gateBody });
 
+				const upstreamReports = buildUpstreamReportChain(node.id, bp, snap.state.reports);
 				const gateTop = append(gateBody, $('div.ade-eng-gate-top'));
 				const gateIcon = append(gateTop, $('span.ade-eng-gate-icon'));
 				gateIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.verifiedFilled));
@@ -2436,11 +3288,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				append(kickerRow, $('span.ade-eng-gate-kicker', {}, isAwaitingGate
 					? localize('adeEngGateWaitingKicker', "AWAITING APPROVAL")
 					: localize('adeEngGateKicker', "USER GATE")));
-				append(kickerRow, $('span.ade-eng-node-id-chip', {}, node.id));
+				const kickerChips = append(kickerRow, $('span.ade-eng-gate-kicker-chips'));
+				if (isAwaitingGate && upstreamReports.length > 0) {
+					append(kickerChips, $('span.ade-eng-gate-up-badge', {
+						title: localize('adeEngGateUpstreamCountTooltip', "{0} verified upstream report(s) ready for inspection", upstreamReports.length),
+					}, `${upstreamReports.length} ✓`));
+				}
+				append(kickerChips, $('span.ade-eng-node-id-chip', {}, node.id));
 				const gateTitleEl = append(gateTextWrap, $('span.ade-eng-gate-title', {}, node.title));
 				this.nodeTitleDomById.set(node.id, gateTitleEl);
 
-				const upstreamReports = buildUpstreamReportChain(node.id, bp, snap.state.reports);
 				if (isAwaitingGate && this.activeGovernorId) {
 					const govId = this.activeGovernorId;
 					const inlineActions = append(gateBody, $('div.ade-eng-gate-inline-actions'));
@@ -2504,7 +3361,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					y: '1.5',
 					width: String(TASK_POD_WIDTH - 3),
 					height: String(TASK_POD_HEIGHT - 3),
-					rx: '17',
+					rx: String(TASK_POD_RADIUS - 1),
 				}));
 				ringSvg.appendChild($.SVG<SVGRectElement>('rect', {
 					class: 'ade-eng-ring-indicator',
@@ -2512,9 +3369,22 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					y: '1.5',
 					width: String(TASK_POD_WIDTH - 3),
 					height: String(TASK_POD_HEIGHT - 3),
-					rx: '17',
+					rx: String(TASK_POD_RADIUS - 1),
 					pathLength: '100',
 				}));
+
+				// 4 violet L-corner clamps gripping the recessed Worker well
+				for (const corner of ['tl', 'tr', 'bl', 'br'] as const) {
+					append(concentric, $(`span.ade-eng-shell-clamp.${corner}`, { 'aria-hidden': 'true' }));
+				}
+
+				if (visualStatus === 'failure_3') {
+					append(concentric, $('div.ade-eng-phase-ribbon.circuit-broken', {}, localize('adeEngCircuitBrokenRibbon', "CIRCUIT BROKEN")));
+				} else if (mgrActive) {
+					append(concentric, $('div.ade-eng-phase-ribbon.mgr-review', {}, runtime?.phase === 'manager_escalation'
+						? localize('adeEngMgrEscalationRibbon', "MGR ESCALATION")
+						: localize('adeEngMgrReviewRibbon', "MGR REVIEW")));
+				}
 
 				// 1. OUTER SHELL HEADER = Employee (L3 · Acceptance Reviewer)
 				const empSatellite = append(concentric, $(`div.ade-eng-emp-satellite${empActive ? '.role-active' : ''}${node.critical ? '.has-critical' : ''}`, {
@@ -2542,11 +3412,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					this.canvasRenderDisposables.add(addDisposableListener(doneBadge, EventType.POINTER_DOWN, e => EventHelper.stop(e, true)));
 					this.canvasRenderDisposables.add(addDisposableListener(doneBadge, EventType.CLICK, openRep));
 				} else if (runtime && runtime.formalFailureCount > 0) {
-					const failBadge = append(empSatellite, $(`span.ade-eng-corner-status.fail-${Math.min(3, runtime.formalFailureCount)}`, {
+					const failBadge = append(empSatellite, $(`span.ade-eng-corner-status.fail-${failCount}`, {
 						title: runtime.formalFailureCount >= 3
 							? localize('adeEngCircuitBrokenBadgeTooltip', "Circuit Broken (Formal Failure {0}/3) — Click or right-click to inspect feedback or Reset", runtime.formalFailureCount)
 							: localize('adeEngFormalFailBadgeTooltip', "Formal Failure {0}/3 (Fresh Worker retry) — Click or right-click for feedback", runtime.formalFailureCount),
 					}, `F${runtime.formalFailureCount}`));
+					const pips = append(empSatellite, $('span.ade-eng-fail-pips', { 'aria-hidden': 'true' }));
+					for (let pipIdx = 0; pipIdx < 3; pipIdx++) {
+						append(pips, $(pipIdx < failCount ? 'i.lit' : 'i'));
+					}
 					const openRep = (e: Event) => {
 						EventHelper.stop(e, true);
 						this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'worker', tab: 'report' });
@@ -2638,9 +3512,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				const activePhaseLabel = runtime ? activePhaseLabelMap[runtime.phase] : undefined;
 				if (activePhaseLabel && runtime) {
 					const startedAt = runtime.startedAt || now;
-					const pill = append(footLeft, $('span.ade-eng-live-phase-pill', {
+					const overSla = now - startedAt >= ADE_ENG_PHASE_SOFT_SLA_MS;
+					const role = phaseRoleOf(runtime.phase) ?? 'wrk';
+					const pill = append(footLeft, $(`span.ade-eng-live-phase-pill${overSla ? '.over-sla' : ''}`, {
 						'data-started-at': String(startedAt),
 						'data-phase-label': activePhaseLabel,
+						'data-phase-role': role,
 					}, `${activePhaseLabel} · ${formatElapsedCompact(startedAt, now)}`));
 					this.livePhasePillRefs.push({ pill, startedAt, phaseLabel: activePhaseLabel });
 				} else if (isLocked) {
@@ -2709,6 +3586,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	private renderEdgesOnly(): void {
 		this.edgesGroupEl.replaceChildren();
+		this.buildSvgMarkers();
 		const bp = this.draftBlueprint;
 		const snap = this.snapshot;
 		if (!bp || !snap) {
@@ -2716,18 +3594,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		const nodeById = new Map(bp.nodes.map(n => [n.id, n]));
 		const runtimes = snap.state.nodes;
+		let runningEdgeCount = 0;
 
-		for (const edge of bp.edges) {
+		bp.edges.forEach((edge, edgeIdx) => {
 			const src = nodeById.get(edge.from);
 			const dst = nodeById.get(edge.to);
 			if (!src || !dst) {
-				continue;
+				return;
 			}
 			const p1 = this.getNodePorts(src);
 			const p2 = this.getNodePorts(dst);
 			const d = this.buildBezierPath(p1.outX, p1.outY, p2.inX, p2.inY);
 			const edgeStatus: AdeEngineeringEdgeVisualStatus = computeEdgeVisualStatus(edge, runtimes);
 			const canDelete = !this.isNodeCompletedLocked(edge.to);
+			const edgeUid = `${this.instanceUid}-${edgeIdx}-${sanitizeSvgId(edge.from)}-${sanitizeSvgId(edge.to)}`;
+			const pathId = `ade-edge-path-${edgeUid}`;
 
 			const g = this.edgesGroupEl.appendChild($.SVG<SVGGElement>('g', {
 				class: `ade-eng-edge-item status-${edgeStatus}${canDelete ? ' deletable' : ''}`,
@@ -2735,18 +3616,67 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				'data-edge-status': edgeStatus,
 			}));
 
+			let gradUrl: string | undefined;
 			if (edgeStatus === 'running' || edgeStatus === 'completed') {
+				const gradId = `ade-edge-grad-${edgeUid}`;
+				const grad = $.SVG<SVGLinearGradientElement>('linearGradient', {
+					id: gradId,
+					gradientUnits: 'userSpaceOnUse',
+					x1: String(Math.round(p1.outX)),
+					y1: String(Math.round(p1.outY)),
+					x2: String(Math.round(p2.inX)),
+					y2: String(Math.round(p2.inY)),
+				});
+				grad.appendChild($.SVG<SVGStopElement>('stop', {
+					offset: '0%',
+					'stop-color': edgeStatus === 'running' ? '#10b981' : '#059669',
+					'stop-opacity': '0.62',
+				}));
+				grad.appendChild($.SVG<SVGStopElement>('stop', {
+					offset: '100%',
+					'stop-color': edgeStatus === 'running' ? '#34d399' : '#3fb950',
+					'stop-opacity': '1',
+				}));
+				this.edgesDefsEl.appendChild(grad);
+				gradUrl = `url(#${gradId})`;
+
 				g.appendChild($.SVG<SVGPathElement>('path', {
 					class: `ade-eng-edge-glow status-${edgeStatus}`,
 					d,
 				}));
 			}
 
-			g.appendChild($.SVG<SVGPathElement>('path', {
+			const edgePath = g.appendChild($.SVG<SVGPathElement>('path', {
+				id: pathId,
 				class: `ade-eng-edge-path status-${edgeStatus}`,
 				d,
 				'marker-end': `url(#${this.markerId(edgeStatus)})`,
 			}));
+			if (gradUrl) {
+				edgePath.style.setProperty('--ade-edge-stroke', gradUrl);
+			}
+
+			// Capped SMIL directional signal particles on running edges (≤ 24 animated edges; CSS hides under reduced-motion)
+			if (edgeStatus === 'running') {
+				runningEdgeCount++;
+				if (runningEdgeCount <= ADE_ENG_MAX_PARTICLE_EDGES) {
+					for (let pi = 0; pi < ADE_ENG_PARTICLES_PER_EDGE; pi++) {
+						const particle = g.appendChild($.SVG<SVGCircleElement>('circle', {
+							class: 'ade-eng-edge-particle',
+							r: '2.7',
+						}));
+						const motion = particle.appendChild($.SVG('animateMotion', {
+							dur: '1.6s',
+							begin: `${(pi * 0.53).toFixed(2)}s`,
+							repeatCount: 'indefinite',
+						}));
+						const mpath = motion.appendChild($.SVG('mpath', {
+							href: `#${pathId}`,
+						}));
+						mpath.setAttributeNS(XLINK_NS, 'xlink:href', `#${pathId}`);
+					}
+				}
+			}
 
 			const hitPath = g.appendChild($.SVG<SVGPathElement>('path', {
 				class: 'ade-eng-edge-hit',
@@ -2791,7 +3721,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					this.removeDraftEdge(edge.from, edge.to);
 				}));
 			}
-		}
+		});
 	}
 
 	private installPortWiring(node: IAdeEngineeringBlueprintNode, outPort: HTMLElement, inPort: HTMLElement): void {
@@ -2999,6 +3929,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				return;
 			}
 
+			this.scrollBlueprintEditorToNode(node.id);
 			const clickedTarget = e.target as HTMLElement | null;
 			if (node.type === 'task' && this.activeGovernorId) {
 				const clickedEmp = downClickedEmp || Boolean(clickedTarget?.closest('.ade-eng-emp-satellite'));
@@ -3032,6 +3963,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		clearNode(this.popoverContentEl);
 		this.popoverTokensCardEl = undefined;
 		this.popoverTelemetryEl = undefined;
+		this.popoverPinBtnEl = undefined;
+		this.popoverTabBtnById.clear();
 
 		const bp = this.draftBlueprint;
 		const snap = this.snapshot;
@@ -3122,6 +4055,19 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			append(header, $('span.ade-eng-lock-pill', {}, localize('adeEngLockedShort', "Locked")));
 		}
 
+		const pinBtn = append(header, $(`button.ade-eng-pop-icon-btn.pin${this.popoverPinned ? '.active' : ''}`, {
+			type: 'button',
+			'aria-pressed': String(this.popoverPinned),
+			title: localize('adeEngPinPopoverTooltip', "Pin Inspector (keep open on canvas click & drag by header)"),
+		}));
+		this.popoverPinBtnEl = pinBtn;
+		pinBtn.classList.add(...ThemeIcon.asClassNameArray(this.popoverPinned ? Codicon.pinned : Codicon.pin));
+		this.popoverRenderDisposables.add(addDisposableListener(pinBtn, EventType.CLICK, e => {
+			EventHelper.stop(e, true);
+			this.setPopoverPinned(!this.popoverPinned);
+			this.renderPopover();
+		}));
+
 		const closeBtn = append(header, $('button.ade-eng-pop-icon-btn.close', {
 			type: 'button',
 			title: localize('adeEngClosePopoverTooltip', "Close (Esc)"),
@@ -3134,12 +4080,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		// 2. User Gate Popover
 		if (draftNode.type === 'user_gate') {
+			this.popoverTabOrder = [];
 			this.renderGatePopoverBody(draftNode, runtime, isLocked, updateNodeDraft);
 			this.positionPopoverNearAnchor();
 			return;
 		}
 
-		// 3. Task Node Segmented Role Option Switcher (Color-coded per architectural layer!)
+		// 3. Task Node 32×20 Mini Podmap + Segmented Role Switcher (←/→ & 1–5 keyboard nav)
 		const ownReport = snap.state.reports[draftNode.id];
 		const hasReportOrFeedback = Boolean(
 			ownReport
@@ -3149,25 +4096,50 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			|| runtime?.lastGateFeedback
 			|| (runtime && (runtime.formalFailureCount > 0 || runtime.completed)),
 		);
-		const segBar = append(this.popoverContentEl, $('.ade-eng-pop-role-tabs', { role: 'tablist' }));
-		const tabs: { readonly id: PopoverTabKind; readonly label: string; readonly dot?: boolean }[] = [
+		const reportVerdictCls = runtime?.completed
+			? 'verdict-pass'
+			: (runtime?.formalFailureCount ?? 0) >= 3
+				? 'verdict-fail'
+				: ((runtime?.formalFailureCount ?? 0) > 0 || (runtime?.employeeRejectCount ?? 0) > 0)
+					? 'verdict-warn'
+					: '';
+
+		const tabStripRow = append(this.popoverContentEl, $('.ade-eng-pop-tabstrip'));
+		const podmap = append(tabStripRow, $(`div.ade-eng-pop-podmap.active-${this.activePopoverTab}`, { 'aria-hidden': 'true' }));
+		const pmSvg = podmap.appendChild($.SVG<SVGSVGElement>('svg', {
+			viewBox: '0 0 32 20',
+			width: '32',
+			height: '20',
+		}));
+		pmSvg.appendChild($.SVG<SVGRectElement>('rect', { class: 'pm-lane', x: '1', y: '1', width: '30', height: '18', rx: '4' }));
+		pmSvg.appendChild($.SVG<SVGRectElement>('rect', { class: 'pm-shell', x: '4', y: '3.5', width: '24', height: '13', rx: '3' }));
+		pmSvg.appendChild($.SVG<SVGRectElement>('rect', { class: 'pm-core', x: '7.5', y: '6.5', width: '17', height: '7', rx: '1.8' }));
+
+		const segBar = append(tabStripRow, $('.ade-eng-pop-role-tabs', { role: 'tablist' }));
+		const tabs: { readonly id: PopoverTabKind; readonly label: string; readonly dot?: boolean; readonly extraCls?: string }[] = [
 			{ id: 'worker', label: localize('adeEngPopTabWorker', "Worker") },
 			{ id: 'employee', label: localize('adeEngPopTabEmployee', "Employee") },
 			...(seg ? [{ id: 'manager' as const, label: `Mgr [${seg.segmentId}]` }] : []),
 			{ id: 'task', label: localize('adeEngPopTabTask', "Spec") },
-			{ id: 'report', label: localize('adeEngPopTabReport', "Report"), dot: hasReportOrFeedback },
+			{ id: 'report', label: localize('adeEngPopTabReport', "Report"), dot: hasReportOrFeedback, extraCls: reportVerdictCls },
 		];
+		this.popoverTabOrder = tabs.map(t => t.id);
+		const activeIdx = Math.max(0, tabs.findIndex(t => t.id === this.activePopoverTab));
+		segBar.style.setProperty('--tab-count', String(tabs.length));
+		segBar.style.setProperty('--tab-idx', String(activeIdx));
 		for (const t of tabs) {
 			const isActive = this.activePopoverTab === t.id;
-			const btn = append(segBar, $(`button.ade-eng-pop-role-tab.tab-${t.id}${isActive ? '.active' : ''}${t.dot ? '.has-dot' : ''}`, {
+			const btn = append(segBar, $(`button.ade-eng-pop-role-tab.tab-${t.id}${isActive ? '.active' : ''}${t.dot ? '.has-dot' : ''}${t.extraCls ? `.${t.extraCls}` : ''}`, {
 				type: 'button',
 				role: 'tab',
 				'aria-selected': String(isActive),
+				tabindex: isActive ? '0' : '-1',
 				title: t.label,
 			}, t.label));
 			if (t.dot) {
 				append(btn, $('span.ade-eng-tab-dot'));
 			}
+			this.popoverTabBtnById.set(t.id, btn);
 			this.popoverRenderDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
 				this.activePopoverTab = t.id;
 				this.renderPopover();
@@ -3539,6 +4511,37 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}));
 		}
 
+		if (runtime && (runtime.completed || runtime.formalFailureCount > 0 || runtime.employeeRejectCount > 0 || runtime.phase !== 'idle')) {
+			const verdictStrip = append(body, $('.ade-eng-verdict-strip'));
+			const empVerdict = runtime.completed
+				? { cls: 'pass', text: localize('adeEngEmpVerdictPass', "EMP · PASS") }
+				: runtime.employeeRejectCount > 0
+					? { cls: 'warn', text: localize('adeEngEmpVerdictRework', "EMP · REWORK {0}/3", runtime.employeeRejectCount) }
+					: runtime.phase === 'employee_review'
+						? { cls: 'active', text: localize('adeEngEmpVerdictAudit', "EMP · AUDITING") }
+						: { cls: 'idle', text: localize('adeEngEmpVerdictIdle', "EMP · STANDBY") };
+			append(verdictStrip, $(`span.ade-eng-verdict-pill.${empVerdict.cls}`, {}, empVerdict.text));
+
+			const mgrVerdict = runtime.completed
+				? { cls: 'pass', text: localize('adeEngMgrVerdictPass', "MGR · PASS") }
+				: runtime.formalFailureCount >= 3
+					? { cls: 'fail', text: localize('adeEngMgrVerdictBroken', "MGR · BROKEN") }
+					: runtime.formalFailureCount > 0
+						? { cls: 'warn', text: localize('adeEngMgrVerdictEscalate', "MGR · RETRY {0}/3", runtime.formalFailureCount) }
+						: { cls: 'idle', text: localize('adeEngMgrVerdictIdle', "MGR · OK") };
+			append(verdictStrip, $(`span.ade-eng-verdict-pill.${mgrVerdict.cls}`, {}, mgrVerdict.text));
+
+			if (runtime.formalFailureCount > 0) {
+				const stepper = append(verdictStrip, $('.ade-eng-attempt-stepper', {
+					title: localize('adeEngAttemptStepperTooltip', "Formal failure ladder ({0} of 3 attempts used)", runtime.formalFailureCount),
+				}));
+				for (let step = 1; step <= 3; step++) {
+					const lit = step <= runtime.formalFailureCount;
+					append(stepper, $(`span.ade-eng-attempt-step.step-${step}${lit ? '.lit' : ''}`, {}, `F${step}`));
+				}
+			}
+		}
+
 		if (ownReport) {
 			const repHead = append(body, $('.ade-eng-pop-subrow'));
 			append(repHead, $('div.ade-eng-pop-section-label', {}, ownReport.stale
@@ -3591,6 +4594,20 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}));
 				append(fileBtn, $('span.ade-eng-file-kind', {}, f.kind[0].toUpperCase()));
 				append(fileBtn, $('span.ade-eng-file-path', {}, f.relativePath));
+				if (f.diff) {
+					let addCount = 0;
+					let delCount = 0;
+					for (const dl of f.diff.split('\n')) {
+						if (dl.startsWith('+') && !dl.startsWith('+++')) {
+							addCount++;
+						} else if (dl.startsWith('-') && !dl.startsWith('---')) {
+							delCount++;
+						}
+					}
+					if (addCount > 0 || delCount > 0) {
+						append(fileBtn, $('span.ade-eng-file-diff-stat', {}, `+${addCount} −${delCount}`));
+					}
+				}
 				this.popoverRenderDisposables.add(addDisposableListener(fileBtn, EventType.CLICK, () => {
 					if (govAgent) {
 						void this.commandService.executeCommand('vscode.open', URI.joinPath(govAgent.projectUri, f.relativePath));
@@ -3767,13 +4784,129 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		return kind.includes('gate') || kind.includes('fail') || kind.includes('circuit') || kind.includes('watchdog') || ev.level !== 'info';
 	}
 
+	private matchesEventSearch(ev: IAdeEngineeringEventLogEntry): boolean {
+		const q = this.eventSearchQuery.trim().toLowerCase();
+		if (!q) {
+			return true;
+		}
+		return (
+			ev.event.toLowerCase().includes(q)
+			|| (ev.nodeId?.toLowerCase().includes(q) ?? false)
+			|| (ev.segmentId?.toLowerCase().includes(q) ?? false)
+			|| (ev.detail?.toLowerCase().includes(q) ?? false)
+		);
+	}
+
+	private scrollBlueprintEditorToNode(nodeId: string): void {
+		const editor = this.blueprintEditorEl;
+		if (this.activeSheetTab !== 'blueprint' || !editor || !editor.isConnected) {
+			return;
+		}
+		const lineIdx = blueprintNodeSectionLine(editor.value, nodeId);
+		if (lineIdx < 0) {
+			return;
+		}
+		const lineHeightPx = 17;
+		editor.scrollTop = Math.max(0, (lineIdx - 1) * lineHeightPx);
+		this.setXrefNode(nodeId);
+	}
+
+	private syncEventsNewPill(): void {
+		const pill = this.sheetEventsNewPillEl;
+		if (!pill || !this.snapshot) {
+			return;
+		}
+		const unseen = Math.max(0, this.snapshot.state.events.length - this.eventsSeenCount);
+		if (unseen > 0) {
+			pill.textContent = localize('adeEngEventsNewPill', "↓ {0} new", unseen);
+			pill.hidden = false;
+		} else {
+			pill.hidden = true;
+		}
+	}
+
+	private renderEventTimelineRows(body: HTMLElement, snap: IAdeEngineeringTreeSnapshot): void {
+		this.sheetTimelineDisposables.clear();
+		clearNode(body);
+		const events = snap.state.events.filter(ev => this.matchesEventFilter(ev) && this.matchesEventSearch(ev));
+		if (events.length === 0) {
+			append(body, $('div.ade-eng-empty-hint', {}, localize('adeEngNoEventsYet', "No execution events match this filter yet.")));
+			return;
+		}
+
+		const now = Date.now();
+		let idx = 0;
+		while (idx < events.length) {
+			const first = events[idx];
+			let end = idx + 1;
+			if (first.nodeId) {
+				while (end < events.length && events[end].nodeId === first.nodeId) {
+					end++;
+				}
+			}
+			const slice = events.slice(idx, end);
+			idx = end;
+
+			let rowHost: HTMLElement = body;
+			if (first.nodeId && slice.length > 1) {
+				const groupNodeId = first.nodeId;
+				const group = append(body, $('div.ade-eng-event-group', { 'data-node-id': groupNodeId }));
+				const gHead = append(group, $('button.ade-eng-event-group-head', {
+					type: 'button',
+					'aria-expanded': 'true',
+				}));
+				append(gHead, $('span.ade-eng-node-id-chip', {}, groupNodeId));
+				append(gHead, $('span.ade-eng-event-group-count', {}, localize('adeEngEventGroupCount', "{0} events", slice.length)));
+				const rowsWrap = append(group, $('div.ade-eng-event-group-rows'));
+				this.sheetTimelineDisposables.add(addDisposableListener(gHead, EventType.CLICK, () => {
+					const collapsed = group.classList.toggle('collapsed');
+					gHead.setAttribute('aria-expanded', String(!collapsed));
+				}));
+				rowHost = rowsWrap;
+			}
+
+			for (const ev of slice) {
+				const role = eventRoleOf(ev);
+				const row = append(rowHost, $(`div.ade-eng-event-row.level-${ev.level}.kind-${ev.event}.role-${role}`));
+				const rail = append(row, $('span.ade-eng-event-rail', { 'aria-hidden': 'true' }));
+				append(rail, $(`i.ade-eng-event-rail-dot.role-${role}`));
+
+				const content = append(row, $('div.ade-eng-event-content'));
+				const meta = append(content, $('div.ade-eng-event-meta'));
+				const d = new Date(ev.timestamp);
+				const hhmmss = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+				append(meta, $('span.ade-eng-event-time', {
+					title: hhmmss,
+				}, `${formatRelativeAge(ev.timestamp, now)} · ${hhmmss}`));
+				if (ev.nodeId) {
+					const nodeId = ev.nodeId;
+					const nodeJumpBtn = append(meta, $('button.ade-eng-event-node-btn', {
+						type: 'button',
+						title: localize('adeEngJumpToEventNodeTooltip', "Click to focus [{0}] on canvas", nodeId),
+					}, `[${nodeId}]`));
+					this.sheetTimelineDisposables.add(addDisposableListener(nodeJumpBtn, EventType.CLICK, () => {
+						this.focusNodeOnCanvas(nodeId, false);
+					}));
+				}
+				append(meta, $('span.ade-eng-event-kind', {}, ev.event));
+				if (ev.detail) {
+					append(content, $('div.ade-eng-event-msg', {}, ev.detail));
+				}
+			}
+		}
+	}
+
 	private renderSheet(): void {
 		this.sheetRenderDisposables.clear();
+		this.sheetTimelineDisposables.clear();
 		clearNode(this.sheetContentEl);
 		this.sheetEventsBodyEl = undefined;
+		this.sheetEventsNewPillEl = undefined;
+		this.blueprintEditorEl = undefined;
 		if (!this.activeSheetTab || !this.snapshot) {
 			return;
 		}
+		this.syncSheetModeClasses();
 		const snap = this.snapshot;
 
 		const head = append(this.sheetContentEl, $('.ade-eng-sheet-header'));
@@ -3792,11 +4925,37 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}));
 		this.sheetRenderDisposables.add(addDisposableListener(evTabBtn, EventType.CLICK, () => {
 			this.activeSheetTab = 'events';
+			this.eventsSeenCount = snap.state.events.length;
+			this.setXrefNode(undefined);
 			this.renderToolbar();
 			this.renderSheet();
+			if (this.sheetEventsBodyEl) {
+				this.sheetEventsBodyEl.scrollTop = this.sheetEventsBodyEl.scrollHeight;
+			}
 		}));
 
-		const closeBtn = append(head, $('button.ade-eng-pop-icon-btn.close', {
+		const headRight = append(head, $('.ade-eng-sheet-head-actions'));
+		let diffBadgeEl: HTMLElement | undefined;
+		if (this.activeSheetTab === 'blueprint') {
+			diffBadgeEl = append(headRight, $('span.ade-eng-sheet-diff-badge'));
+			diffBadgeEl.hidden = true;
+		}
+
+		const modeBtn = append(headRight, $(`button.ade-eng-sheet-mode-btn${this.sheetMode === 'split' ? '.active' : ''}`, {
+			type: 'button',
+			'aria-pressed': String(this.sheetMode === 'split'),
+			title: localize('adeEngSheetModeToggleTooltip', "Toggle Overlay ⇄ Side-by-Side Split View"),
+		}));
+		const modeIco = append(modeBtn, $('span'));
+		modeIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.splitHorizontal));
+		append(modeBtn, $('span', {}, this.sheetMode === 'split'
+			? localize('adeEngSheetModeSplit', "Split")
+			: localize('adeEngSheetModeOverlay', "Overlay")));
+		this.sheetRenderDisposables.add(addDisposableListener(modeBtn, EventType.CLICK, () => {
+			this.setSheetMode(this.sheetMode === 'overlay' ? 'split' : 'overlay');
+		}));
+
+		const closeBtn = append(headRight, $('button.ade-eng-pop-icon-btn.close', {
 			type: 'button',
 			title: localize('adeEngCloseSheetTooltip', "Close (Esc)"),
 		}));
@@ -3808,12 +4967,67 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const initialMd = this.draftBlueprint
 				? serializeEngineeringBlueprint(this.draftBlueprint)
 				: snap.blueprintText;
-			const editor = append(body, $('textarea.ade-eng-blueprint-editor', {
+			const baselineMd = serializeEngineeringBlueprint(snap.blueprint);
+
+			const editorWrap = append(body, $('.ade-eng-bp-editor-wrap'));
+			const gutter = append(editorWrap, $('div.ade-eng-bp-gutter', { 'aria-hidden': 'true' }));
+			const gutterInner = append(gutter, $('div.ade-eng-bp-gutter-inner'));
+			const editor = append(editorWrap, $('textarea.ade-eng-blueprint-editor', {
 				spellcheck: 'false',
 			})) as HTMLTextAreaElement;
 			editor.value = initialMd;
+			this.blueprintEditorEl = editor;
 
 			const statusMsg = append(body, $('div.ade-eng-sheet-status'));
+
+			const syncGutterAndStatus = () => {
+				const lines = editor.value.split('\n');
+				const activeId = blueprintNodeIdAtOffset(editor.value, editor.selectionStart ?? 0);
+				this.setXrefNode(activeId);
+				const activeLine = activeId ? blueprintNodeSectionLine(editor.value, activeId) : -1;
+				clearNode(gutterInner);
+				for (let i = 0; i < lines.length; i++) {
+					append(gutterInner, $(`span.ade-eng-bp-line${i === activeLine ? '.active' : ''}`, {}, String(i + 1)));
+				}
+				gutterInner.style.transform = `translateY(${-Math.round(editor.scrollTop)}px)`;
+
+				if (diffBadgeEl) {
+					const diffCount = countChangedLines(baselineMd, editor.value);
+					diffBadgeEl.hidden = diffCount === 0;
+					diffBadgeEl.textContent = localize('adeEngSheetDiffCount', "{0} changes", diffCount);
+				}
+
+				try {
+					const parsed = parseEngineeringBlueprint(editor.value, {
+						governorSessionId: snap.governorSessionId,
+						treeType: snap.treeType,
+					});
+					statusMsg.textContent = localize(
+						'adeEngSheetValidStatus',
+						"✓ Valid Blueprint · {0} nodes · {1} edges",
+						parsed.nodes.length,
+						parsed.edges.length,
+					);
+					statusMsg.className = 'ade-eng-sheet-status ok';
+				} catch (err) {
+					statusMsg.textContent = `⚠ ${err instanceof Error ? err.message : String(err)}`;
+					statusMsg.className = 'ade-eng-sheet-status err';
+				}
+			};
+			syncGutterAndStatus();
+
+			this.sheetRenderDisposables.add(addDisposableListener(editor, EventType.SCROLL, () => {
+				gutterInner.style.transform = `translateY(${-Math.round(editor.scrollTop)}px)`;
+			}));
+			const syncCaret = () => {
+				const activeId = blueprintNodeIdAtOffset(editor.value, editor.selectionStart ?? 0);
+				this.setXrefNode(activeId);
+			};
+			this.sheetRenderDisposables.add(addDisposableListener(editor, EventType.INPUT, syncGutterAndStatus));
+			this.sheetRenderDisposables.add(addDisposableListener(editor, EventType.CLICK, syncCaret));
+			this.sheetRenderDisposables.add(addDisposableListener(editor, EventType.KEY_UP, syncCaret));
+			this.sheetRenderDisposables.add(addDisposableListener(editor, 'select', syncCaret));
+
 			const actions = append(body, $('.ade-eng-sheet-actions'));
 			const copyBtn = append(actions, $('button.ade-eng-action-btn.secondary', {
 				type: 'button',
@@ -3835,7 +5049,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						statusMsg.className = 'ade-eng-sheet-status ok';
 					}
 				} catch (err) {
-					statusMsg.textContent = err instanceof Error ? err.message : String(err);
+					statusMsg.textContent = `⚠ ${err instanceof Error ? err.message : String(err)}`;
 					statusMsg.className = 'ade-eng-sheet-status err';
 				}
 			};
@@ -3867,34 +5081,48 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}));
 			}
 
-			const body = append(this.sheetContentEl, $('.ade-eng-sheet-body.events'));
+			const searchInput = append(filterBar, $('input.ade-eng-event-search', {
+				type: 'search',
+				placeholder: localize('adeEngEventSearchPh', "Filter logs…"),
+				value: this.eventSearchQuery,
+				'aria-label': localize('adeEngEventSearchAria', "Filter execution logs"),
+			})) as HTMLInputElement;
+
+			const laneLegend = append(this.sheetContentEl, $('.ade-eng-event-lane-legend', { 'aria-hidden': 'true' }));
+			append(laneLegend, $('span.lane-key.wrk', {}, 'W'));
+			append(laneLegend, $('span.lane-key.emp', {}, 'E'));
+			append(laneLegend, $('span.lane-key.mgr', {}, 'M'));
+			append(laneLegend, $('span.lane-label', {}, localize('adeEngEventLaneRailLabel', "3-Lane Role Rail · Chronological")));
+
+			const body = append(this.sheetContentEl, $('.ade-eng-sheet-body.events.timeline'));
 			this.sheetEventsBodyEl = body;
-			const events = [...snap.state.events].reverse().filter(ev => this.matchesEventFilter(ev));
-			if (events.length === 0) {
-				append(body, $('div.ade-eng-empty-hint', {}, localize('adeEngNoEventsYet', "No execution events match this filter yet.")));
-			} else {
-				for (const ev of events) {
-					const row = append(body, $(`div.ade-eng-event-row.level-${ev.level}.kind-${ev.event}`));
-					const meta = append(row, $('div.ade-eng-event-meta'));
-					const d = new Date(ev.timestamp);
-					const hhmmss = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-					append(meta, $('span.ade-eng-event-time', {}, hhmmss));
-					if (ev.nodeId) {
-						const nodeId = ev.nodeId;
-						const nodeJumpBtn = append(meta, $('button.ade-eng-event-node-btn', {
-							type: 'button',
-							title: localize('adeEngJumpToEventNodeTooltip', "Click to focus [{0}] on canvas", nodeId),
-						}, `[${nodeId}]`));
-						this.sheetRenderDisposables.add(addDisposableListener(nodeJumpBtn, EventType.CLICK, () => {
-							this.focusNodeOnCanvas(nodeId, false);
-						}));
-					}
-					append(meta, $('span.ade-eng-event-kind', {}, ev.event));
-					if (ev.detail) {
-						append(row, $('div.ade-eng-event-msg', {}, ev.detail));
-					}
+			this.renderEventTimelineRows(body, snap);
+
+			this.sheetRenderDisposables.add(addDisposableListener(searchInput, EventType.INPUT, () => {
+				this.eventSearchQuery = searchInput.value;
+				this.renderEventTimelineRows(body, snap);
+			}));
+
+			const newPill = append(this.sheetContentEl, $('button.ade-eng-event-new-pill', {
+				type: 'button',
+			}));
+			newPill.hidden = true;
+			this.sheetEventsNewPillEl = newPill;
+			this.syncEventsNewPill();
+
+			this.sheetRenderDisposables.add(addDisposableListener(body, EventType.SCROLL, () => {
+				const dist = body.scrollHeight - body.scrollTop - body.clientHeight;
+				if (dist <= 24 && body.dataset.pinnedScroll !== '1') {
+					this.eventsSeenCount = this.snapshot?.state.events.length ?? 0;
+					this.syncEventsNewPill();
 				}
-			}
+			}));
+			this.sheetRenderDisposables.add(addDisposableListener(newPill, EventType.CLICK, () => {
+				delete body.dataset.pinnedScroll;
+				body.scrollTop = body.scrollHeight;
+				this.eventsSeenCount = this.snapshot?.state.events.length ?? 0;
+				this.syncEventsNewPill();
+			}));
 		}
 	}
 
