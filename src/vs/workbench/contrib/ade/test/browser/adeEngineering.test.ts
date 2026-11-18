@@ -1502,4 +1502,157 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 
 		pane.clearInput();
 	});
+
+	test('Nested Dual-Shell architecture (Employee outer shell physically enclosing Worker inner core), quick-spawn +, Undo/Redo, Minimap, Token Analytics & inline Gate Approve', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1180px;height:760px;' }));
+		store.add({
+			dispose: () => {
+				host.remove();
+			},
+		});
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Dual-Shell UX Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const bpText = [
+			'---',
+			'version: 1',
+			'treeType: engineering',
+			'workspaceIsolation: shared',
+			'---',
+			'',
+			'```mermaid',
+			'graph LR',
+			'  N1["Core Engine"] --> U1{{"Checkpoint"}}',
+			'  U1 --> N2["UI Polish"]',
+			'```',
+			'',
+			'## Node: N1',
+			'- Title: Core Engine',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=high',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Build core engine.',
+			'### Acceptance Criteria',
+			'Engine compiles.',
+			'',
+			'## Node: U1',
+			'- Title: Checkpoint',
+			'- Type: user_gate',
+			'### Description',
+			'Verify core engine.',
+			'',
+			'## Node: N2',
+			'- Title: UI Polish',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Polish UI.',
+			'### Acceptance Criteria',
+			'UI renders.',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: bpText });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1180, height: 760, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		// 1. Verify Outer Employee Shell physically encloses Inner Worker Core on all 4 sides with explicit role tags
+		const nodeN1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;
+		assert.ok(nodeN1El);
+		const outerShell = nodeN1El.querySelector('.ade-eng-concentric') as HTMLElement;
+		const empHeader = outerShell.querySelector('.ade-eng-emp-satellite') as HTMLElement;
+		const innerWorkerCore = outerShell.querySelector('.ade-eng-inner-core') as HTMLElement;
+		assert.ok(outerShell && empHeader && innerWorkerCore, 'Task pod renders outer Employee shell header and nested inner Worker core');
+		assert.ok(empHeader.querySelector('.ade-eng-role-tag.emp')?.textContent?.includes('EMPLOYEE'), 'Outer Employee shell displays explicit EMPLOYEE · L3 role tag');
+		assert.ok(innerWorkerCore.querySelector('.ade-eng-role-tag.wrk')?.textContent?.includes('WORKER'), 'Inner Worker core displays explicit WORKER · L4 role tag');
+		assert.ok(host.querySelector('.ade-eng-segment-header .ade-eng-role-tag.mgr'), 'Manager lane header displays explicit MGR · L2 role tag');
+
+		const outerRect = outerShell.getBoundingClientRect();
+		const innerRect = innerWorkerCore.getBoundingClientRect();
+		assert.ok(
+			outerRect.top < innerRect.top
+			&& outerRect.left < innerRect.left
+			&& outerRect.bottom > innerRect.bottom
+			&& outerRect.right > innerRect.right,
+			'Outer Employee shell strictly encloses Inner Worker core on top, left, right, and bottom',
+		);
+
+		// 2. Verify Interactive Minimap & 4-Tier Token Analytics Popover
+		const minimapEl = host.querySelector('.ade-eng-minimap') as HTMLElement;
+		assert.ok(minimapEl && !minimapEl.hidden, 'Live DAG minimap rendered');
+		const worldEl = host.querySelector('.ade-eng-world') as HTMLElement;
+		const prevTransform = worldEl.style.transform;
+		const mmRect = minimapEl.getBoundingClientRect();
+		minimapEl.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: mmRect.left + 120, clientY: mmRect.top + 80, bubbles: true }));
+		minimapEl.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: mmRect.left + 120, clientY: mmRect.top + 80, bubbles: true }));
+		assert.notStrictEqual(worldEl.style.transform, prevTransform, 'Clicking minimap navigates the canvas world');
+
+		const tokensPill = host.querySelector('.ade-eng-tokens-pill') as HTMLElement;
+		const analyticsCard = host.querySelector('.ade-eng-token-analytics-card') as HTMLElement;
+		assert.strictEqual(analyticsCard.hidden, true);
+		tokensPill.click();
+		assert.strictEqual(analyticsCard.hidden, false, 'Clicking toolbar token pill opens 4-tier Token Analytics card');
+		tokensPill.click();
+		assert.strictEqual(analyticsCard.hidden, true, 'Clicking again closes Token Analytics card');
+
+		// 3. Verify explicit gear button opens popover while hover NEVER auto-opens it
+		const popoverEl = host.querySelector('.ade-eng-popover') as HTMLElement;
+		const gearBtn = nodeN1El.querySelector('.ade-eng-node-cfg-btn') as HTMLButtonElement;
+		assert.ok(gearBtn, 'Explicit gear button rendered inside node');
+		gearBtn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Hovering gear button never auto-opens popover');
+		gearBtn.click();
+		assert.strictEqual(popoverEl.classList.contains('open'), true, 'Clicking gear button opens popover');
+		popoverEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false);
+
+		// 4. Verify 1-Click Quick-Spawn `+` creates connected downstream task + Undo/Redo restores cleanly
+		const quickSpawnBtn = host.querySelector('.ade-eng-node[data-node-id="N2"] .ade-eng-quick-spawn-btn') as HTMLButtonElement;
+		assert.ok(quickSpawnBtn, 'Quick-spawn + button rendered');
+		quickSpawnBtn.click();
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, 4, 'Quick-spawn appends a 4th node');
+		assert.ok(host.querySelector('.ade-eng-edge-item[data-edge="N2->N4"]'), 'Quick-spawn auto-wires N2 -> N4');
+
+		const undoBtn = host.querySelector('.ade-eng-undo-btn') as HTMLButtonElement;
+		assert.strictEqual(undoBtn.disabled, false);
+		undoBtn.click();
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, 3, 'Undo removes quick-spawned node');
+		assert.strictEqual(host.querySelector('.ade-eng-draft-badge'), null, 'Undo to initial state clears Draft badge');
+		const redoBtn = host.querySelector('.ade-eng-redo-btn') as HTMLButtonElement;
+		assert.strictEqual(redoBtn.disabled, false);
+		redoBtn.click();
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, 4, 'Redo restores quick-spawned node');
+		const cancelBtn = Array.from(host.querySelectorAll<HTMLButtonElement>('.ade-eng-action-btn')).find(b => b.textContent === 'Cancel')!;
+		cancelBtn.click();
+
+		// 5. Verify Inline 1-Click `✓ Approve` button directly on User Gate card when awaiting approval
+		await h.engineering.runTree(gov.id, 'user');
+		await waitForNodePhase(h.engineering, gov.id, 'N1', 'employee_review');
+		await h.engineering.submitReview({ governorSessionId: gov.id, nodeId: 'N1', role: 'employee', verdict: 'pass', report: 'N1 verified' });
+		await h.engineering.submitReview({ governorSessionId: gov.id, nodeId: 'N1', role: 'manager', verdict: 'pass' });
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-node[data-node-id="U1"] .ade-eng-gate-inline-approve')));
+
+		const heldN2 = h.holdNextWorkerTurn();
+		const inlineApproveBtn = host.querySelector('.ade-eng-node[data-node-id="U1"] .ade-eng-gate-inline-approve') as HTMLButtonElement;
+		assert.ok(inlineApproveBtn, 'Awaiting User Gate renders inline 1-click ✓ Approve button');
+		inlineApproveBtn.click();
+		await heldN2.started.p;
+		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.state.nodes.N2?.phase, 'worker_running', 'Inline Gate Approve advances downstream task N2 immediately');
+		heldN2.reply.complete('done');
+
+		pane.clearInput();
+	});
 });
