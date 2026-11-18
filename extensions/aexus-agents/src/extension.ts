@@ -3,19 +3,43 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as cp from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { AntigravityRuntime, ClineRuntime, DshRuntime } from './acp';
+import {
+	buildOptionGroupsForSession,
+	DiscoveredOptionGroup,
+	DiscoveredSlashCommand,
+	discoverCustomizationFiles,
+	discoverEngineModels,
+	discoverSlashCommands,
+	EngineId,
+	readSkillOrCommandTemplate,
+	SessionConfigState,
+} from './capabilities';
 import { ClaudeRuntime } from './claude';
 import { CodexRuntime } from './codex';
 import { KiloRuntime, OpenCodeRuntime } from './kilo';
 import { installNativeRoleBridge } from './nativeRoleBridge';
 import { PiRuntime } from './pi';
 import { RoleSyncSnapshot } from './roleBridgeShared';
-import { EngineRuntime, EngineThinkingLevel, findExecutable, HistoryEntry, NativeSession, setCliBinDirectory } from './runtime';
+import {
+	EngineAttachment,
+	EngineRuntime,
+	EngineRuntimeCapabilities,
+	EngineSendOptions,
+	EngineThinkingLevel,
+	findExecutable,
+	HistoryEntry,
+	NativeSession,
+	setCliBinDirectory,
+} from './runtime';
 
+const execFileAsync = promisify(cp.execFile);
 const roleBridge = installNativeRoleBridge({ distDir: __dirname });
 
 interface RecordEntry extends NativeSession {
@@ -23,18 +47,21 @@ interface RecordEntry extends NativeSession {
 	initialTitle?: string;
 	customLabel?: boolean;
 	resourceId?: string;
+	sessionConfig?: SessionConfigState;
+	activeGoal?: string;
 }
 
 interface SecretaryState {
 	engine: string;
 	recordKey: string;
+	perEngineConfig?: Record<string, SessionConfigState>;
 }
 
 interface EngineDefinition {
 	readonly id: string;
 	readonly executable: string;
 	readonly name: string;
-	readonly type: string;
+	readonly type: EngineId;
 	readonly themeIcon?: string;
 	readonly svgIcon?: string;
 	readonly create: (command: string) => EngineRuntime;
@@ -42,6 +69,8 @@ interface EngineDefinition {
 
 const SECRETARY_TYPE = 'aexus-secretary';
 const SECRETARY_URI = vscode.Uri.from({ scheme: SECRETARY_TYPE, path: '/main' });
+const GOAL_COMPLETE_MARKER = '<!-- GOAL_COMPLETE -->';
+const MAX_GOAL_ROUNDS = 6;
 
 const ENGINE_ALIASES: Record<string, string> = {
 	codex: 'codex',
@@ -51,14 +80,17 @@ const ENGINE_ALIASES: Record<string, string> = {
 	'aexus-claude': 'claude',
 	kilo: 'kilo',
 	kilocode: 'kilo',
+	'kilo-code': 'kilo',
 	'aexus-kilo': 'kilo',
 	opencode: 'opencode',
 	'aexus-opencode': 'opencode',
 	dsh: 'dsh',
 	deepseek: 'dsh',
+	'deepseek-harness': 'dsh',
 	'aexus-dsh': 'dsh',
 	agy: 'antigravity',
 	antigravity: 'antigravity',
+	'google-antigravity': 'antigravity',
 	'aexus-antigravity': 'antigravity',
 	cline: 'cline',
 	'aexus-cline': 'cline',
@@ -77,6 +109,24 @@ const definitions: readonly EngineDefinition[] = [
 	{ id: 'pi', executable: 'pi', name: 'Pi', type: 'aexus-pi', svgIcon: 'pi', create: command => new PiRuntime(command) },
 ];
 
+const OPTION_GROUP_ICONS: Record<string, string> = {
+	engine: 'server-process',
+	model: 'sparkle',
+	thinking: 'lightbulb',
+	mode: 'layers',
+	permissions: 'shield',
+	sandbox: 'lock',
+	webSearch: 'globe',
+};
+
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+	'.png': 'image/png',
+	'.jpg': 'image/jpeg',
+	'.jpeg': 'image/jpeg',
+	'.webp': 'image/webp',
+	'.gif': 'image/gif',
+};
+
 async function resolveCliBinDir(extensionPath: string): Promise<string> {
 	const binName = process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade';
 	const appBinDir = path.join(vscode.env.appRoot, 'bin');
@@ -88,84 +138,179 @@ async function resolveCliBinDir(extensionPath: string): Promise<string> {
 	}
 }
 
-async function discoverCustomCommandsAndSkills(cwd: string): Promise<{ name: string; source: string }[]> {
-	const found: { name: string; source: string }[] = [];
-	const seen = new Set<string>();
-	const scanMdCommands = async (dir: string, sourceLabel: string) => {
-		try {
-			for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-				if (entry.isFile() && entry.name.endsWith('.md')) {
-					const name = entry.name.slice(0, -3);
-					if (!seen.has(name)) {
-						seen.add(name);
-						found.push({ name: `/${name}`, source: sourceLabel });
-					}
-				}
-			}
-		} catch { /* Directory may not exist. */ }
-	};
-	const scanSkills = async (dir: string, sourceLabel: string) => {
-		try {
-			for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-				if (entry.isDirectory() && !seen.has(entry.name)) {
-					try {
-						await fs.access(path.join(dir, entry.name, 'SKILL.md'));
-						seen.add(entry.name);
-						found.push({ name: entry.name, source: sourceLabel });
-					} catch { /* Not a skill folder. */ }
-				}
-			}
-		} catch { /* Directory may not exist. */ }
-	};
-
-	await scanMdCommands(path.join(cwd, '.claude', 'commands'), 'Project (.claude/commands)');
-	await scanSkills(path.join(cwd, '.agents', 'skills'), 'Project (.agents/skills)');
-	await scanSkills(path.join(cwd, '.claude', 'skills'), 'Project (.claude/skills)');
-	await scanMdCommands(path.join(os.homedir(), '.claude', 'commands'), 'User (~/.claude/commands)');
-	await scanSkills(path.join(os.homedir(), '.agents', 'skills'), 'User (~/.agents/skills)');
-	return found;
+function toEngineType(shortOrFull: string): EngineId {
+	const normalized = shortOrFull.startsWith('aexus-') ? shortOrFull : `aexus-${shortOrFull}`;
+	const found = definitions.find(d => d.type === normalized);
+	return found ? found.type : 'aexus-claude';
 }
 
-function buildSlashHelpMarkdown(isSecretary: boolean, engineName: string, discovered: readonly { name: string; source: string }[]): string {
-	const lines: string[] = [];
-	if (isSecretary) {
-		lines.push(
-			`### Secretary ADE Commands (Current Engine: **${engineName}**)`,
-			'- `/status` — Show live ADE viewport, Focus state, Secretary engine, and session counts',
-			'- `/projects` — List all ADE projects and active session counts',
-			'- `/sessions` — List ADE sessions, ranks, engines, and hierarchy',
-			'- `/engineering` — List ADE Engineering DAG trees and progress',
-			'- `/inbox` — Show pending ADE Inbox user gates and Governor escalations',
-			'- `/focus <project>` — Focus a project in ADE',
-			'- `/home` — Exit Focus back to ADE Home overview',
-			'- `/new [engine] [title]` — Create and open a new ADE Agent session',
-			'- `/engine [name]` — View or switch Secretary\'s underlying Coding Agent engine',
-			'- `/reset` — Reset Secretary conversation context',
-			'',
-		);
+function toVsCodeOptionGroups(discovered: readonly DiscoveredOptionGroup[]): vscode.ChatSessionProviderOptionGroup[] {
+	return discovered.map(group => {
+		const iconId = OPTION_GROUP_ICONS[group.id];
+		const items: vscode.ChatSessionProviderOptionItem[] = group.items.map(opt => ({
+			id: opt.id,
+			name: opt.name,
+			description: opt.description,
+			slashCommand: opt.slashCommand,
+			tooltip: opt.tooltip ?? opt.description,
+			...(iconId ? { icon: new vscode.ThemeIcon(iconId) } : {}),
+		}));
+		const selected = items.find(i => i.id === group.selectedId) ?? items[0];
+		return {
+			id: group.id,
+			name: group.name,
+			description: group.description,
+			icon: iconId ? new vscode.ThemeIcon(iconId) : undefined,
+			items,
+			selected,
+		};
+	});
+}
+
+function toSessionOptionsRecord(groups: readonly vscode.ChatSessionProviderOptionGroup[]): Record<string, vscode.ChatSessionProviderOptionItem> {
+	const out: Record<string, vscode.ChatSessionProviderOptionItem> = {};
+	for (const group of groups) {
+		const selected = group.selected ?? group.items[0];
+		if (selected) {
+			out[group.id] = selected;
+		}
 	}
-	lines.push(
-		`### Native Engine Slash Commands (**${engineName}**)`,
-		'- `/init` — Initialize or update project instructions (`CLAUDE.md` / `AGENTS.md`)',
-		'- `/compact` — Compact conversation context',
-		'- `/review` — Review uncommitted code changes',
-		'- `/plan` — Draft an implementation plan before editing',
-		'- `/clear` — Clear engine conversation history and start fresh',
-		'- `/model` — Inspect or switch model in the engine',
-		'- `/mcp` — Inspect configured MCP servers & tools',
-		'- `/memory` — View or update persistent memory',
-		'- `/cost` — Show token usage & session cost',
-		'- `/doctor` — Run engine diagnostics',
-		'- `/diff` — Summarize uncommitted Git changes',
-		'- `/skills` — List discovered custom project/user commands & skills',
-	);
-	if (discovered.length > 0) {
-		lines.push('', '### Discovered Custom Commands & Skills');
-		for (const item of discovered) {
-			lines.push(`- \`${item.name}\` — *${item.source}*`);
+	return out;
+}
+
+function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?: boolean; callerRole?: string; automatedEngineering?: boolean; attachments?: readonly EngineAttachment[] }): EngineSendOptions {
+	return {
+		model: cfg?.model && cfg.model !== 'default' ? cfg.model : undefined,
+		thinking: cfg?.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined,
+		mode: cfg?.mode && cfg.mode !== 'default' ? cfg.mode : undefined,
+		permissionMode: cfg?.permissionMode && cfg.permissionMode !== 'default' ? cfg.permissionMode : undefined,
+		sandboxMode: cfg?.sandboxMode && cfg.sandboxMode !== 'default' ? cfg.sandboxMode : undefined,
+		webSearch: cfg?.webSearch,
+		attachments: extra.attachments,
+		pureWorker: extra.pureWorker,
+		callerRole: extra.callerRole,
+		automatedEngineering: extra.automatedEngineering,
+	};
+}
+
+function extractAttachmentsAndRefs(references: readonly vscode.ChatPromptReference[]): { attachments: EngineAttachment[]; fileLines: string[] } {
+	const attachments: EngineAttachment[] = [];
+	const fileLines: string[] = [];
+	const seenPaths = new Set<string>();
+	for (const ref of references) {
+		if (ref.value instanceof vscode.Uri && ref.value.scheme === 'file') {
+			const fsPath = ref.value.fsPath;
+			if (seenPaths.has(fsPath)) {
+				continue;
+			}
+			seenPaths.add(fsPath);
+			const ext = path.extname(fsPath).toLowerCase();
+			const imageMime = IMAGE_MIME_BY_EXT[ext];
+			if (imageMime) {
+				attachments.push({ kind: 'image', filePath: fsPath, mimeType: imageMime });
+			} else {
+				attachments.push({ kind: 'file', filePath: fsPath });
+			}
+			fileLines.push(fsPath);
+		} else if (ref.value instanceof vscode.Location && ref.value.uri.scheme === 'file') {
+			const locText = `${ref.value.uri.fsPath}:${ref.value.range.start.line + 1}`;
+			attachments.push({ kind: 'file', filePath: ref.value.uri.fsPath, rangeText: locText });
+			fileLines.push(locText);
+		}
+	}
+	return { attachments, fileLines };
+}
+
+function buildSlashHelpMarkdown(
+	isSecretary: boolean,
+	engineName: string,
+	cfg: SessionConfigState | undefined,
+	activeGoal: string | undefined,
+	commandsList: readonly DiscoveredSlashCommand[],
+): string {
+	const lines: string[] = [
+		`### ${isSecretary ? `Secretary · ${engineName}` : engineName} — Unified Capabilities & Slash Commands`,
+		'',
+		`- **Model**: \`${cfg?.model || 'default'}\` · **Thinking**: \`${cfg?.thinking || 'default'}\`${cfg?.mode ? ` · **Mode**: \`${cfg.mode}\`` : ''}${cfg?.permissionMode ? ` · **Permissions**: \`${cfg.permissionMode}\`` : ''}${cfg?.sandboxMode ? ` · **Sandbox**: \`${cfg.sandboxMode}\`` : ''}`,
+		...(activeGoal ? [`- **Active Goal**: ${activeGoal}`] : []),
+		'',
+	];
+
+	const macros = commandsList.filter(c => c.kind === 'macro');
+	if (macros.length > 0) {
+		lines.push('#### Secretary ADE Macro Commands');
+		for (const c of macros) {
+			lines.push(`- \`/${c.name}\` — ${c.description}`);
+		}
+		lines.push('');
+	}
+
+	const builtins = commandsList.filter(c => c.kind === 'command' && !c.filePath);
+	if (builtins.length > 0) {
+		lines.push(`#### ${engineName} Slash Commands (${builtins.length})`);
+		for (const c of builtins) {
+			lines.push(`- \`/${c.name}\` — ${c.description}`);
+		}
+		lines.push('');
+	}
+
+	const customs = commandsList.filter(c => Boolean(c.filePath) || c.kind === 'skill' || c.kind === 'workflow' || c.kind === 'prompt');
+	if (customs.length > 0) {
+		lines.push(`#### Discovered Skills, Workflows & Custom Commands (${customs.length})`);
+		for (const c of customs) {
+			lines.push(`- \`/${c.name}\` — ${c.description} *(${c.source})*`);
 		}
 	}
 	return lines.join('\n');
+}
+
+function expandBuiltInWorkflowPrompt(cmd: string, argsText: string, engineId: EngineId): string | undefined {
+	const task = argsText.trim();
+	switch (cmd) {
+		case 'compact':
+		case 'smol':
+		case 'summarize':
+			return task
+				? `Compact and summarize our conversation context so far with special focus on: ${task}\nPreserve all critical architectural decisions, file paths, unresolved issues, and next steps concisely.`
+				: 'Compact and summarize our conversation context so far concisely, preserving all key decisions, modified files, constraints, and next steps.';
+		case 'plan':
+		case 'deep-planning':
+			return task
+				? `[Planning Mode] Analyze the codebase thoroughly and produce a clear, step-by-step implementation plan before making destructive edits.\n\nTask: ${task}`
+				: '[Planning Mode] Analyze the current task and workspace, then outline a concrete step-by-step implementation plan with files, risks, and verification steps.';
+		case 'review':
+			return task
+				? `Perform a rigorous code review focused on bugs, regressions, security, edge cases, and maintainability: ${task}`
+				: 'Inspect uncommitted Git changes (`git status` and `git diff`) in this workspace and perform a thorough code review covering correctness, regressions, edge cases, and code quality.';
+		case 'security-review':
+			return task
+				? `Perform a thorough security audit (injection, auth, secrets exposure, path traversal, privilege boundaries) focused on: ${task}`
+				: 'Perform a security review of uncommitted changes in this workspace, checking for secrets, injection risks, auth/permission flaws, and unsafe inputs.';
+		case 'init':
+			return engineId === 'aexus-claude'
+				? `Analyze this repository's structure, build/test commands, and conventions, then initialize or update \`CLAUDE.md\` concisely.${task ? `\n\nAdditional instructions: ${task}` : ''}`
+				: `Analyze this repository's structure, build/test commands, and conventions, then initialize or update \`AGENTS.md\` concisely.${task ? `\n\nAdditional instructions: ${task}` : ''}`;
+		case 'grill-me':
+			return `Interview me interactively with sharp, high-leverage design questions to resolve ambiguities and stress-test our plan${task ? ` for: ${task}` : '.'}`;
+		case 'boost':
+			return `[Deep Strategic Analysis & Verification] Reason deeply from multiple perspectives, verify assumptions against actual code, and execute rigorously${task ? `:\n\n${task}` : '.'}`;
+		case 'teamwork':
+			return `Coordinate parallel workstreams cleanly across modules/subagents and synthesize verified results${task ? ` for:\n\n${task}` : '.'}`;
+		case 'learn':
+			return `Distill the key lessons, setup fixes, or conventions from our recent work so they can be persisted cleanly into project instructions/skills${task ? `:\n\n${task}` : '.'}`;
+		case 'verify':
+			return `Run end-to-end verification (build, lint, tests, and runtime checks) to prove the implementation works cleanly${task ? `:\n\n${task}` : '.'}`;
+		case 'debug':
+			return `Systematically reproduce, isolate root cause, and fix the issue${task ? `:\n\n${task}` : '.'}`;
+		case 'simplify':
+			return `Review recent changes for opportunities to simplify logic, remove duplication, and improve clarity without changing behavior${task ? `:\n\n${task}` : '.'}`;
+		case 'recap':
+			return `Provide a concise recap of what has been accomplished in this session, current workspace state, and remaining next steps${task ? ` (${task})` : '.'}`;
+		case 'deep-research':
+			return `Conduct a thorough, evidence-backed technical investigation across the codebase and available tools${task ? ` on:\n\n${task}` : '.'}`;
+		default:
+			return undefined;
+	}
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -187,7 +332,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	let secretaryState = context.globalState.get<SecretaryState>('secretaryState');
 
 	const runtimes = new Map<string, EngineRuntime>();
+	const runtimeCapsCache = new Map<string, EngineRuntimeCapabilities>();
 	const controllers = new Map<string, vscode.ChatSessionItemController>();
+	const optionChangeEmitters = new Map<string, vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>>();
+	const providerOptionsChangeEmitters = new Map<string, vscode.EventEmitter<void>>();
+	const inputStatesByType = new Map<string, Set<vscode.ChatSessionInputState>>();
+	const customizationChangedEmitter = new vscode.EventEmitter<void>();
+	context.subscriptions.push(customizationChangedEmitter);
+
 	const busy = new Set<string>();
 	const activeTurns = new Map<string, vscode.CancellationTokenSource>();
 	const lastTurnReplies = new Map<string, string>();
@@ -214,6 +366,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const save = async () => {
 		await context.globalState.update('nativeSessions', Object.fromEntries(records));
 		await context.globalState.update('secretaryState', secretaryState);
+	};
+
+	const getSessionConfig = (record: RecordEntry, isSecretary: boolean): SessionConfigState => {
+		if (isSecretary) {
+			secretaryState ??= { engine: record.engine, recordKey: key(record.engine, record.id), perEngineConfig: {} };
+			secretaryState.perEngineConfig ??= {};
+			const perEng = secretaryState.perEngineConfig[record.engine] ?? record.sessionConfig ?? {};
+			secretaryState.perEngineConfig[record.engine] = perEng;
+			return {
+				...perEng,
+				secretaryEngineId: toEngineType(record.engine),
+			};
+		}
+		record.sessionConfig ??= {};
+		return record.sessionConfig;
+	};
+
+	const setGoalBannerInUi = (sessionUri: vscode.Uri, goalText: string | undefined) => {
+		void Promise.resolve(vscode.commands.executeCommand('aexus.ade.setSessionGoalBanner', sessionUri, goalText)).catch(() => undefined);
 	};
 
 	// eslint-disable-next-line prefer-const
@@ -311,11 +482,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return result;
 	};
 
+	const fetchRuntimeCaps = async (shortEngine: string, cwd: string, record?: RecordEntry): Promise<{ caps: EngineRuntimeCapabilities; changed: boolean }> => {
+		const cacheKey = `${shortEngine}:${cwd}`;
+		const prev = runtimeCapsCache.get(cacheKey);
+		const prevSig = `${prev?.models?.length ?? 0}:${prev?.modes?.length ?? 0}:${prev?.commands?.length ?? 0}`;
+		const def = available.find(entry => entry.id === shortEngine && entry.command);
+		if (!def) {
+			return { caps: prev ?? {}, changed: false };
+		}
+		try {
+			const eng = runtime(shortEngine);
+			if (eng.getRuntimeCapabilities) {
+				const caps = await Promise.race([
+					eng.getRuntimeCapabilities(cwd, record),
+					new Promise<EngineRuntimeCapabilities>(resolve => setTimeout(() => resolve(prev ?? {}), 2500)),
+				]);
+				runtimeCapsCache.set(cacheKey, caps);
+				const nextSig = `${caps.models?.length ?? 0}:${caps.modes?.length ?? 0}:${caps.commands?.length ?? 0}`;
+				return { caps, changed: nextSig !== prevSig };
+			}
+		} catch { /* Fall back to cached or empty runtime capabilities. */ }
+		return { caps: prev ?? {}, changed: false };
+	};
+
 	const ensureSecretaryRecord = async (preferredEngine?: string, preferredProject?: vscode.Uri, forceNew = false): Promise<RecordEntry> => {
 		const targetEngine = resolveShortEngine(preferredEngine ?? secretaryState?.engine);
 		if (!targetEngine) {
 			throw new Error(vscode.l10n.t('No Coding Agent CLI is installed. Install Claude Code, Codex, Kilo, OpenCode, DSH, Antigravity, Cline, or Pi first.'));
 		}
+		const prevPerEngineConfig = secretaryState?.perEngineConfig ?? {};
 		if (!forceNew && secretaryState && secretaryState.engine === targetEngine) {
 			const existing = records.get(secretaryState.recordKey);
 			if (existing) {
@@ -323,6 +518,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					existing.cwd = preferredProject.fsPath;
 				}
 				return existing;
+			}
+		}
+		if (!forceNew) {
+			const previousForTarget = [...records.values()]
+				.filter(r => r.engine === targetEngine && r.label === 'Secretary' && r.customLabel)
+				.sort((a, b) => b.updated - a.updated)[0];
+			if (previousForTarget) {
+				if (preferredProject?.scheme === 'file') {
+					previousForTarget.cwd = preferredProject.fsPath;
+				}
+				secretaryState = { engine: targetEngine, recordKey: key(targetEngine, previousForTarget.id), perEngineConfig: prevPerEngineConfig };
+				await save();
+				refreshSecretaryItem();
+				const secOpened = opened.get(SECRETARY_TYPE);
+				if (secOpened) {
+					const turns = await runtime(targetEngine).history(previousForTarget, secOpened.cancellation.token).catch(() => [] as HistoryEntry[]);
+					secOpened.changed.fire(history(turns, SECRETARY_TYPE));
+				}
+				return previousForTarget;
 			}
 		}
 		const cwd = preferredProject?.scheme === 'file'
@@ -336,9 +550,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			label: 'Secretary',
 			customLabel: true,
 			resourceId: native.id,
+			sessionConfig: prevPerEngineConfig[targetEngine] ?? {},
 		};
 		records.set(recordKey, record);
-		secretaryState = { engine: targetEngine, recordKey };
+		secretaryState = { engine: targetEngine, recordKey, perEngineConfig: prevPerEngineConfig };
 		await save();
 		refreshSecretaryItem();
 		const secOpened = opened.get(SECRETARY_TYPE);
@@ -379,6 +594,198 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return record;
 	};
 
+	const defaultCwd = () => vscode.workspace.workspaceFolders?.[0]?.uri.scheme === 'file'
+		? vscode.workspace.workspaceFolders[0].uri.fsPath
+		: os.homedir();
+
+	const computeOptionGroupsForResource = async (sessionType: string, sessionUri?: vscode.Uri): Promise<vscode.ChatSessionProviderOptionGroup[]> => {
+		const isSecretary = sessionType === SECRETARY_TYPE || sessionUri?.scheme === SECRETARY_TYPE;
+		if (isSecretary) {
+			const secRecord = findCachedRecord(SECRETARY_URI) ?? await ensureSecretaryRecord().catch(() => undefined);
+			const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
+			const cwd = secRecord?.cwd ?? defaultCwd();
+			const caps = runtimeCapsCache.get(`${shortEng}:${cwd}`);
+			const cfg = secRecord ? getSessionConfig(secRecord, true) : { secretaryEngineId: toEngineType(shortEng) };
+			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', cfg, cwd, caps));
+		}
+		const engineType = toEngineType(sessionType);
+		const shortEng = engineType.slice('aexus-'.length);
+		const rec = sessionUri ? findCachedRecord(sessionUri) : undefined;
+		const cwd = rec?.cwd ?? defaultCwd();
+		const caps = runtimeCapsCache.get(`${shortEng}:${cwd}`);
+		const cfg = rec ? getSessionConfig(rec, false) : {};
+		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, cfg, cwd, caps));
+	};
+
+	const trackInputState = (sessionType: string, controller: vscode.ChatSessionItemController, groups: vscode.ChatSessionProviderOptionGroup[]): vscode.ChatSessionInputState => {
+		const state = controller.createChatSessionInputState(groups);
+		let set = inputStatesByType.get(sessionType);
+		if (!set) {
+			set = new Set();
+			inputStatesByType.set(sessionType, set);
+		}
+		set.add(state);
+		state.onDidDispose(() => set?.delete(state));
+		return state;
+	};
+
+	const lastNotifiedOptionsSig = new Map<string, string>();
+	const notifySessionOptionsUpdated = async (sessionType: string, sessionUri: vscode.Uri, refreshGroups = false) => {
+		const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
+		const optionsMap = toSessionOptionsRecord(groups);
+		const sig = `${sessionType}:${groups.map(g => `${g.id}=${g.selected?.id ?? ''}[${g.items.length}]`).join('|')}`;
+		const resourceKey = sessionUri.toString();
+		if (!refreshGroups && lastNotifiedOptionsSig.get(resourceKey) === sig) {
+			return;
+		}
+		lastNotifiedOptionsSig.set(resourceKey, sig);
+		if (refreshGroups) {
+			providerOptionsChangeEmitters.get(sessionType)?.fire();
+		}
+		optionChangeEmitters.get(sessionType)?.fire({
+			resource: sessionUri,
+			updates: Object.entries(optionsMap).map(([optionId, value]) => ({ optionId, value })),
+		});
+		const tracked = inputStatesByType.get(sessionType);
+		if (tracked) {
+			for (const inputState of tracked) {
+				if (!inputState.sessionResource || inputState.sessionResource.toString() === resourceKey) {
+					inputState.groups = groups;
+				}
+			}
+		}
+	};
+
+	const applyOptionUpdates = async (
+		sessionType: string,
+		sessionUri: vscode.Uri,
+		updates: ReadonlyArray<{ optionId: string; value: string | undefined }>,
+		syncToAde = true,
+		fromUiPicker = false,
+	): Promise<void> => {
+		const isSecretary = sessionType === SECRETARY_TYPE || sessionUri.scheme === SECRETARY_TYPE;
+		let record = findCachedRecord(sessionUri);
+		if (!record && isSecretary) {
+			record = await ensureSecretaryRecord();
+		}
+		if (!record) {
+			return;
+		}
+
+		let anyChanged = false;
+		let engineSwitched = false;
+
+		for (const { optionId, value } of updates) {
+			if (isSecretary && optionId === 'engine' && value) {
+				const nextShort = resolveShortEngine(value);
+				if (nextShort && nextShort !== record.engine) {
+					record = await ensureSecretaryRecord(nextShort, vscode.Uri.file(record.cwd), false);
+					engineSwitched = true;
+					anyChanged = true;
+					void fetchRuntimeCaps(nextShort, record.cwd, record).then(({ changed }) => {
+						if (changed) {
+							void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
+						}
+					});
+					if (syncToAde) {
+						void Promise.resolve(vscode.commands.executeCommand('aexus.ade.syncSessionPreferences', {
+							resource: SECRETARY_URI.toString(),
+							engineId: `aexus-${nextShort}`,
+						})).catch(() => undefined);
+					}
+					customizationChangedEmitter.fire();
+				}
+				continue;
+			}
+
+			const targetCfg = isSecretary
+				? ((secretaryState ??= { engine: record.engine, recordKey: key(record.engine, record.id), perEngineConfig: {} }),
+					(secretaryState.perEngineConfig ??= {}),
+					(secretaryState.perEngineConfig[record.engine] ??= {}))
+				: (record.sessionConfig ??= {});
+
+			switch (optionId) {
+				case 'model': {
+					const next = value || 'default';
+					if ((targetCfg.model || 'default') !== next) {
+						targetCfg.model = next;
+						anyChanged = true;
+					}
+					break;
+				}
+				case 'thinking': {
+					const next = value || 'default';
+					if ((targetCfg.thinking || 'default') !== next) {
+						targetCfg.thinking = next;
+						anyChanged = true;
+					}
+					break;
+				}
+				case 'mode': {
+					const next = value || undefined;
+					if (targetCfg.mode !== next) {
+						targetCfg.mode = next;
+						anyChanged = true;
+					}
+					break;
+				}
+				case 'permissions': {
+					const next = value || 'default';
+					if ((targetCfg.permissionMode || 'default') !== next) {
+						targetCfg.permissionMode = next;
+						anyChanged = true;
+					}
+					break;
+				}
+				case 'sandbox': {
+					const next = value || 'default';
+					if ((targetCfg.sandboxMode || 'default') !== next) {
+						targetCfg.sandboxMode = next;
+						anyChanged = true;
+					}
+					break;
+				}
+				case 'webSearch': {
+					const next = value || 'enabled';
+					if ((targetCfg.webSearch || 'enabled') !== next) {
+						targetCfg.webSearch = next;
+						anyChanged = true;
+					}
+					break;
+				}
+			}
+		}
+
+		if (!anyChanged && !engineSwitched) {
+			return;
+		}
+
+		record.sessionConfig = isSecretary
+			? { ...(secretaryState?.perEngineConfig?.[record.engine] ?? {}) }
+			: record.sessionConfig;
+		await save();
+
+		if (!fromUiPicker || engineSwitched) {
+			await notifySessionOptionsUpdated(sessionType, sessionUri, engineSwitched);
+		} else {
+			// Record current signature so subsequent checks don't re-emit stale diff
+			const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
+			lastNotifiedOptionsSig.set(
+				sessionUri.toString(),
+				`${sessionType}:${groups.map(g => `${g.id}=${g.selected?.id ?? ''}[${g.items.length}]`).join('|')}`,
+			);
+		}
+
+		if (syncToAde && !isSecretary) {
+			const cfg = record.sessionConfig ?? {};
+			void Promise.resolve(vscode.commands.executeCommand('aexus.ade.syncSessionPreferences', {
+				resource: sessionUri.toString(),
+				model: cfg.model,
+				thinking: cfg.thinking,
+			})).catch(() => undefined);
+		}
+	};
+
 	const history = (turns: HistoryEntry[], participant: string): readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn2)[] => turns.filter(turn => turn.text).map(turn => turn.role === 'user'
 		? new vscode.ChatRequestTurn2(turn.text, undefined, [], participant, [], undefined, turn.id, undefined, undefined, turn.isSystemInitiated)
 		: new vscode.ChatResponseTurn2([new vscode.ChatResponseMarkdownPart(turn.text)], {}, participant));
@@ -402,46 +809,118 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	};
 
+	const selectOrPromptOption = async (
+		sessionType: string,
+		sessionUri: vscode.Uri,
+		groupId: string,
+		groupTitle: string,
+		argText: string,
+		stream: vscode.ChatResponseStream,
+	): Promise<boolean> => {
+		const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
+		const group = groups.find(g => g.id === groupId);
+		if (!group || group.items.length === 0) {
+			return false;
+		}
+		const trimmed = argText.trim();
+		if (trimmed) {
+			const lower = trimmed.toLowerCase();
+			const matched = group.items.find(i => i.id.toLowerCase() === lower || i.name.toLowerCase() === lower)
+				?? group.items.find(i => i.id.toLowerCase().includes(lower) || i.name.toLowerCase().includes(lower));
+			const chosenId = matched ? matched.id : (groupId === 'model' ? trimmed : undefined);
+			if (!chosenId) {
+				stream.markdown([
+					`Unknown ${groupTitle.toLowerCase()} \`${trimmed}\`. Available options:`,
+					...group.items.map(i => `- \`${i.id}\` — ${i.name}${i.description ? ` *(${i.description})*` : ''}`),
+				].join('\n'));
+				return true;
+			}
+			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: groupId, value: chosenId }]);
+			stream.markdown(`Updated **${groupTitle}** to **${matched?.name ?? chosenId}** (\`${chosenId}\`).`);
+			return true;
+		}
+
+		const currentId = group.selected?.id;
+		const picked = await vscode.window.showQuickPick(
+			group.items.map(i => ({
+				label: i.id === currentId ? `$(check) ${i.name}` : i.name,
+				description: i.id,
+				detail: i.description,
+				itemId: i.id,
+				itemName: i.name,
+			})),
+			{
+				title: `Select ${groupTitle}`,
+				placeHolder: `Current: ${group.selected?.name ?? 'Default'}`,
+			},
+		);
+		if (picked) {
+			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: groupId, value: picked.itemId }]);
+			stream.markdown(`Updated **${groupTitle}** to **${picked.itemName}** (\`${picked.itemId}\`).`);
+		} else {
+			stream.markdown([
+				`### ${groupTitle} (Current: **${group.selected?.name ?? 'Default'}**)`,
+				...group.items.map(i => `- \`${i.id}\` — ${i.name}${i.id === currentId ? ' *(active)*' : ''}${i.description ? ` · ${i.description}` : ''}`),
+			].join('\n'));
+		}
+		return true;
+	};
+
 	const handleDirectSlashCommand = async (
 		cmd: string,
 		argText: string,
 		record: RecordEntry,
+		sessionUri: vscode.Uri,
 		isSecretary: boolean,
 		stream: vscode.ChatResponseStream,
+		token: vscode.CancellationToken,
 	): Promise<boolean> => {
+		const sessionType = isSecretary ? SECRETARY_TYPE : `aexus-${record.engine}`;
+		const engineType = toEngineType(record.engine);
 		const engineDef = available.find(entry => entry.id === record.engine);
 		const engineName = engineDef?.name ?? record.engine;
+		const cfg = getSessionConfig(record, isSecretary);
+		const { caps } = await fetchRuntimeCaps(record.engine, record.cwd, record);
+		const allCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands);
 
 		if (cmd === 'help') {
-			const discovered = await discoverCustomCommandsAndSkills(record.cwd);
-			stream.markdown(buildSlashHelpMarkdown(isSecretary, engineName, discovered));
+			stream.markdown(buildSlashHelpMarkdown(isSecretary, engineName, cfg, record.activeGoal, allCommands));
 			return true;
 		}
 
 		if (cmd === 'skills') {
-			const discovered = await discoverCustomCommandsAndSkills(record.cwd);
-			if (discovered.length === 0) {
-				stream.markdown(`No custom commands or skills found in \`${record.cwd}\` (\`.claude/commands\`, \`.agents/skills\`) or \`~/.claude/commands\`.`);
+			const skillsAndWorkflows = allCommands.filter(c => c.kind === 'skill' || c.kind === 'workflow' || c.kind === 'prompt' || Boolean(c.filePath));
+			if (skillsAndWorkflows.length === 0) {
+				stream.markdown(`No custom skills, prompts, or workflows found in \`${record.cwd}\` or user agent directories.`);
 			} else {
 				stream.markdown([
-					`### Discovered Commands & Skills (${discovered.length})`,
-					...discovered.map(s => `- \`${s.name}\` — *${s.source}*`),
+					`### Discovered Skills, Prompts & Workflows (${skillsAndWorkflows.length})`,
+					...skillsAndWorkflows.map(s => `- \`/${s.name}\` — ${s.description} *(${s.source})*`),
 				].join('\n'));
 			}
 			return true;
 		}
 
-		if (cmd === 'clear' || (isSecretary && cmd === 'reset')) {
+		if (cmd === 'clear' || cmd === 'newtask' || (!isSecretary && cmd === 'new') || (isSecretary && cmd === 'reset')) {
+			record.activeGoal = undefined;
+			setGoalBannerInUi(sessionUri, undefined);
 			if (isSecretary) {
 				const rotated = await ensureSecretaryRecord(record.engine, vscode.Uri.file(record.cwd), true);
 				await Promise.resolve(vscode.commands.executeCommand('aexus.ade.control.execute', {
 					action: 'secretary.configure',
 					params: { engine: `aexus-${rotated.engine}`, resource: SECRETARY_URI.toString(), open: false },
 				})).catch(() => undefined);
-				stream.markdown(`Secretary context has been reset (**${engineName}**).`);
+				stream.markdown(`Secretary conversation context has been reset (**${engineName}**).`);
 			} else {
+				const preservedConfig = record.sessionConfig;
 				const fresh = await runtime(record.engine).create(record.cwd);
-				Object.assign(record, fresh, { label: record.label, customLabel: record.customLabel, resourceId: record.resourceId ?? record.id });
+				Object.assign(record, fresh, {
+					label: record.label,
+					customLabel: record.customLabel,
+					resourceId: record.resourceId ?? record.id,
+					sessionConfig: preservedConfig,
+					activeGoal: undefined,
+				});
 				await save();
 				const openEntry = opened.get(identity(record));
 				openEntry?.changed.fire([]);
@@ -450,143 +929,210 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			return true;
 		}
 
-		if (!isSecretary) {
-			return false;
-		}
-
-		if (cmd === 'status') {
-			const status = await vscode.commands.executeCommand<Record<string, unknown>>('aexus.ade.control.execute', { action: 'status' });
-			stream.markdown(`### ADE Live Status\n\`\`\`json\n${JSON.stringify(status, null, 2)}\n\`\`\``);
-			return true;
-		}
-
-		if (cmd === 'focus') {
-			if (!argText) {
-				const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean }[]>('aexus.ade.control.execute', { action: 'project.list' });
+		if (cmd === 'diff' && !argText.trim()) {
+			try {
+				const [statusRes, statRes, diffRes] = await Promise.all([
+					execFileAsync('git', ['status', '--short', '--branch'], { cwd: record.cwd, timeout: 6000 }),
+					execFileAsync('git', ['diff', '--stat'], { cwd: record.cwd, timeout: 6000 }),
+					execFileAsync('git', ['diff', '--no-color'], { cwd: record.cwd, timeout: 6000, maxBuffer: 2 * 1024 * 1024 }),
+				]);
+				const statusText = statusRes.stdout.trim() || '(clean working tree)';
+				const statText = statRes.stdout.trim();
+				const rawPatch = diffRes.stdout.trim();
+				const patchPreview = rawPatch.length > 6000 ? `${rawPatch.slice(0, 6000)}\n... (diff truncated)` : rawPatch;
 				stream.markdown([
-					'Usage: `/focus <project-name-or-path>`',
-					'',
-					...(listRes ?? []).map(p => `- **${p.name}** (\`${p.path}\`)${p.focused ? ' *(Focused)*' : ''}`),
+					`### Git Working Tree Diff (\`${record.cwd}\`)`,
+					'```text',
+					statusText,
+					...(statText ? ['', statText] : []),
+					'```',
+					...(patchPreview ? ['```diff', patchPreview, '```'] : ['*(No unstaged line diffs)*']),
 				].join('\n'));
 				return true;
+			} catch {
+				// Fall through to let the engine inspect the workspace if git is unavailable.
 			}
-			const nav = await vscode.commands.executeCommand<{ focusedProject?: { name: string; path: string } }>('aexus.ade.control.execute', {
-				action: 'project.focus',
-				params: { target: argText },
-			});
-			stream.markdown(`Focused project: **${nav?.focusedProject?.name ?? argText}** (\`${nav?.focusedProject?.path ?? ''}\`).`);
-			return true;
 		}
 
-		if (cmd === 'home') {
-			await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'project.home' });
-			stream.markdown('Returned to **ADE Home** (all projects overview).');
+		if (cmd === 'model' || cmd === 'models') {
+			return selectOrPromptOption(sessionType, sessionUri, 'model', 'Model', argText, stream);
+		}
+		if (cmd === 'effort' || cmd === 'thinking') {
+			return selectOrPromptOption(sessionType, sessionUri, 'thinking', 'Thinking Effort', argText, stream);
+		}
+		if (cmd === 'permissions') {
+			return selectOrPromptOption(sessionType, sessionUri, 'permissions', 'Permissions', argText, stream);
+		}
+		if (cmd === 'bypass') {
+			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'bypassPermissions' }]);
+			stream.markdown('Updated **Permissions** to **Bypass All** (`bypassPermissions`).');
 			return true;
 		}
-
-		if (cmd === 'projects') {
-			const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean; selected: boolean; activeSessionCount: number }[]>('aexus.ade.control.execute', { action: 'project.list' });
-			if (!listRes?.length) {
-				stream.markdown('No ADE projects registered.');
-			} else {
-				stream.markdown([
-					`### ADE Projects (${listRes.length})`,
-					...listRes.map(p => `- **${p.name}** (\`${p.path}\`) — ${p.activeSessionCount} active session(s)${p.focused ? ' *(Focused)*' : p.selected ? ' *(Selected)*' : ''}`),
-				].join('\n'));
-			}
+		if (cmd === 'sandbox') {
+			return selectOrPromptOption(sessionType, sessionUri, 'sandbox', 'Sandbox Policy', argText, stream);
+		}
+		if (cmd === 'search' && (engineType === 'aexus-codex' && (!argText.trim() || ['on', 'off', 'enabled', 'disabled', 'true', 'false'].includes(argText.trim().toLowerCase())))) {
+			const norm = argText.trim().toLowerCase();
+			const mapped = norm === 'on' || norm === 'true' ? 'enabled' : norm === 'off' || norm === 'false' ? 'disabled' : norm;
+			return selectOrPromptOption(sessionType, sessionUri, 'webSearch', 'Web Search', mapped, stream);
+		}
+		if (cmd === 'mode' || (cmd === 'agent' && engineType === 'aexus-opencode')) {
+			return selectOrPromptOption(sessionType, sessionUri, 'mode', engineType === 'aexus-opencode' ? 'Agent' : 'Mode', argText, stream);
+		}
+		if (cmd === 'act' && engineType === 'aexus-cline' && !argText.trim()) {
+			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'act' }]);
+			stream.markdown('Switched Cline to **Act Mode** (`act`).');
 			return true;
 		}
-
-		if (cmd === 'sessions') {
-			const sessionsRes = await vscode.commands.executeCommand<{ id: string; label: string; rank: string; engineName?: string; projectName: string; status: string; parentId?: string }[]>('aexus.ade.control.execute', { action: 'session.list' });
-			if (!sessionsRes?.length) {
-				stream.markdown('No active ADE sessions.');
-			} else {
-				stream.markdown([
-					`### Active ADE Sessions (${sessionsRes.length})`,
-					...sessionsRes.map(s => `- **[${s.rank.toUpperCase()}]** **${s.label}** (\`${s.id}\`) — ${s.engineName ?? 'Draft'} in **${s.projectName}** *(status: ${s.status}${s.parentId ? `, supervisor: ${s.parentId}` : ''})*`),
-				].join('\n'));
-			}
+		if (cmd === 'yolo' && engineType === 'aexus-cline' && !argText.trim()) {
+			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'yolo' }]);
+			stream.markdown('Switched Cline to **Auto-Approve YOLO Mode** (`yolo`).');
 			return true;
 		}
-
-		if (cmd === 'engineering') {
-			const trees = await vscode.commands.executeCommand<{ governorSessionId: string; governorLabel: string; projectName: string; runStatus: string; completedNodes: number; totalNodes: number; managerCount: number }[]>('aexus.ade.control.execute', { action: 'engineering.list' });
-			if (!trees?.length) {
-				stream.markdown('No ADE Engineering trees initialized yet.');
-			} else {
-				stream.markdown([
-					`### ADE Engineering Trees (${trees.length})`,
-					...trees.map(t => `- **${t.governorLabel}** (\`${t.governorSessionId}\`) in **${t.projectName}** — status: \`${t.runStatus}\`, progress: **${t.completedNodes}/${t.totalNodes}** nodes (${t.managerCount} Manager segments)`),
-				].join('\n'));
-			}
-			return true;
-		}
-
-		if (cmd === 'inbox') {
-			const items = await vscode.commands.executeCommand<{ id: string; kind: string; title: string; message: string; unread: boolean; resolved: boolean }[]>('aexus.ade.control.execute', { action: 'inbox.list', params: { includeResolved: false } });
-			if (!items?.length) {
-				stream.markdown('ADE Inbox has no pending items.');
-			} else {
-				stream.markdown([
-					`### Pending ADE Inbox Items (${items.length})`,
-					...items.map(it => `- **[${it.kind.toUpperCase()}]** **${it.title}** (\`${it.id}\`${it.unread ? ' · *UNREAD*' : ''})\n  ${it.message.split('\n')[0]}`),
-				].join('\n'));
-			}
-			return true;
-		}
-
-		if (cmd === 'ide') {
-			stream.markdown('Secretary operates strictly within **ADE** and does not switch to or manipulate **IDE** mode.');
-			return true;
-		}
-
-		if (cmd === 'ade') {
-			await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'mode.set', params: { mode: 'ade' } });
-			stream.markdown('Active in **ADE** mode.');
-			return true;
-		}
-
-		if (cmd === 'engine') {
-			if (!argText) {
-				const installed = available.filter(entry => entry.command);
-				stream.markdown([
-					`Current Secretary engine: **${engineName}** (\`${record.engine}\`)`,
-					'',
-					'Switch with `/engine <name>`. Installed engines:',
-					...installed.map(e => `- \`${e.id}\` — ${e.name}${e.id === record.engine ? ' *(active)*' : ''}`),
-				].join('\n'));
+		if (cmd === 'plan' && !argText.trim()) {
+			const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
+			const modeGroup = groups.find(g => g.id === 'mode');
+			const permGroup = groups.find(g => g.id === 'permissions');
+			const planModeItem = modeGroup?.items.find(i => i.id === 'plan' || i.id === 'architect');
+			if (planModeItem) {
+				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: planModeItem.id }]);
+				stream.markdown(`Switched **Mode** to **${planModeItem.name}** (\`${planModeItem.id}\`). Send your task to generate a plan.`);
 				return true;
 			}
-			const nextShort = resolveShortEngine(argText);
-			const nextDef = available.find(entry => entry.id === nextShort && entry.command);
-			if (!nextDef || !nextShort || nextDef.id !== (ENGINE_ALIASES[argText.trim().toLowerCase()] ?? argText.trim().toLowerCase())) {
-				stream.markdown(`Unknown or uninstalled engine \`${argText}\`. Try \`/engine\` to list installed engines.`);
+			const planPermItem = permGroup?.items.find(i => i.id === 'plan');
+			if (planPermItem) {
+				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'plan' }]);
+				stream.markdown('Switched **Permissions** to **Plan Mode** (`plan`). Send your task to generate a plan.');
 				return true;
 			}
-			await ensureSecretaryRecord(nextDef.id, vscode.Uri.file(record.cwd), true);
-			await Promise.resolve(vscode.commands.executeCommand('aexus.ade.control.execute', {
-				action: 'secretary.configure',
-				params: { engine: nextDef.type, resource: SECRETARY_URI.toString(), open: false },
-			})).catch(() => undefined);
-			stream.markdown(`Switched Secretary engine to **${nextDef.name}** (\`${nextDef.id}\`).`);
-			return true;
 		}
 
-		if (cmd === 'new') {
-			const tokens = argText.split(/\s+/).filter(Boolean);
-			const maybeEngine = tokens[0] ? ENGINE_ALIASES[tokens[0].toLowerCase()] : undefined;
-			const title = (maybeEngine ? tokens.slice(1) : tokens).join(' ') || undefined;
-			const created = await vscode.commands.executeCommand<{ id: string; label: string; projectName: string; engineId?: string }>('aexus.ade.control.execute', {
-				action: 'session.create',
-				params: {
-					...(maybeEngine ? { engine: maybeEngine } : {}),
-					...(title ? { title } : {}),
-					open: true,
-				},
-			});
-			stream.markdown(`Created session **${created?.label ?? 'New Session'}** in project **${created?.projectName ?? ''}**.`);
-			return true;
+		//Secretary-exclusive ADE macro commands
+		if (isSecretary) {
+			if (cmd === 'status') {
+				const status = await vscode.commands.executeCommand<Record<string, unknown>>('aexus.ade.control.execute', { action: 'status' });
+				stream.markdown(`### ADE Live Status\n\`\`\`json\n${JSON.stringify(status, null, 2)}\n\`\`\``);
+				return true;
+			}
+			if (cmd === 'focus') {
+				if (!argText) {
+					const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean }[]>('aexus.ade.control.execute', { action: 'project.list' });
+					stream.markdown([
+						'Usage: `/focus <project-name-or-path>`',
+						'',
+						...(listRes ?? []).map(p => `- **${p.name}** (\`${p.path}\`)${p.focused ? ' *(Focused)*' : ''}`),
+					].join('\n'));
+					return true;
+				}
+				const nav = await vscode.commands.executeCommand<{ focusedProject?: { name: string; path: string } }>('aexus.ade.control.execute', {
+					action: 'project.focus',
+					params: { target: argText },
+				});
+				stream.markdown(`Focused project: **${nav?.focusedProject?.name ?? argText}** (\`${nav?.focusedProject?.path ?? ''}\`).`);
+				return true;
+			}
+			if (cmd === 'home') {
+				await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'project.home' });
+				stream.markdown('Returned to **ADE Home** (all projects overview).');
+				return true;
+			}
+			if (cmd === 'projects') {
+				const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean; selected: boolean; activeSessionCount: number }[]>('aexus.ade.control.execute', { action: 'project.list' });
+				if (!listRes?.length) {
+					stream.markdown('No ADE projects registered.');
+				} else {
+					stream.markdown([
+						`### ADE Projects (${listRes.length})`,
+						...listRes.map(p => `- **${p.name}** (\`${p.path}\`) — ${p.activeSessionCount} active session(s)${p.focused ? ' *(Focused)*' : p.selected ? ' *(Selected)*' : ''}`),
+					].join('\n'));
+				}
+				return true;
+			}
+			if (cmd === 'sessions') {
+				const sessionsRes = await vscode.commands.executeCommand<{ id: string; label: string; rank: string; engineName?: string; projectName: string; status: string; parentId?: string }[]>('aexus.ade.control.execute', { action: 'session.list' });
+				if (!sessionsRes?.length) {
+					stream.markdown('No active ADE sessions.');
+				} else {
+					stream.markdown([
+						`### Active ADE Sessions (${sessionsRes.length})`,
+						...sessionsRes.map(s => `- **[${s.rank.toUpperCase()}]** **${s.label}** (\`${s.id}\`) — ${s.engineName ?? 'Draft'} in **${s.projectName}** *(status: ${s.status}${s.parentId ? `, supervisor: ${s.parentId}` : ''})*`),
+					].join('\n'));
+				}
+				return true;
+			}
+			if (cmd === 'engineering') {
+				const trees = await vscode.commands.executeCommand<{ governorSessionId: string; governorLabel: string; projectName: string; runStatus: string; completedNodes: number; totalNodes: number; managerCount: number }[]>('aexus.ade.control.execute', { action: 'engineering.list' });
+				if (!trees?.length) {
+					stream.markdown('No ADE Engineering trees initialized yet.');
+				} else {
+					stream.markdown([
+						`### ADE Engineering Trees (${trees.length})`,
+						...trees.map(t => `- **${t.governorLabel}** (\`${t.governorSessionId}\`) in **${t.projectName}** — status: \`${t.runStatus}\`, progress: **${t.completedNodes}/${t.totalNodes}** nodes (${t.managerCount} Manager segments)`),
+					].join('\n'));
+				}
+				return true;
+			}
+			if (cmd === 'inbox') {
+				const items = await vscode.commands.executeCommand<{ id: string; kind: string; title: string; message: string; unread: boolean; resolved: boolean }[]>('aexus.ade.control.execute', { action: 'inbox.list', params: { includeResolved: false } });
+				if (!items?.length) {
+					stream.markdown('ADE Inbox has no pending items.');
+				} else {
+					stream.markdown([
+						`### Pending ADE Inbox Items (${items.length})`,
+						...items.map(it => `- **[${it.kind.toUpperCase()}]** **${it.title}** (\`${it.id}\`${it.unread ? ' · *UNREAD*' : ''})\n  ${it.message.split('\n')[0]}`),
+					].join('\n'));
+				}
+				return true;
+			}
+			if (cmd === 'ide') {
+				stream.markdown('Secretary operates strictly within **ADE** and does not switch to or manipulate **IDE** mode.');
+				return true;
+			}
+			if (cmd === 'ade') {
+				await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'mode.set', params: { mode: 'ade' } });
+				stream.markdown('Active in **ADE** mode.');
+				return true;
+			}
+			if (cmd === 'engine') {
+				if (!argText) {
+					return selectOrPromptOption(SECRETARY_TYPE, SECRETARY_URI, 'engine', 'Secretary Engine', '', stream);
+				}
+				const nextShort = resolveShortEngine(argText);
+				const nextDef = available.find(entry => entry.id === nextShort && entry.command);
+				if (!nextDef || !nextShort || nextDef.id !== (ENGINE_ALIASES[argText.trim().toLowerCase()] ?? argText.trim().toLowerCase())) {
+					stream.markdown(`Unknown or uninstalled engine \`${argText}\`. Try \`/engine\` to list installed engines.`);
+					return true;
+				}
+				await applyOptionUpdates(SECRETARY_TYPE, SECRETARY_URI, [{ optionId: 'engine', value: nextDef.type }]);
+				stream.markdown(`Switched Secretary engine to **${nextDef.name}** (\`${nextDef.id}\`).`);
+				return true;
+			}
+			if (cmd === 'new') {
+				const tokens = argText.split(/\s+/).filter(Boolean);
+				const maybeEngine = tokens[0] ? ENGINE_ALIASES[tokens[0].toLowerCase()] : undefined;
+				const title = (maybeEngine ? tokens.slice(1) : tokens).join(' ') || undefined;
+				const created = await vscode.commands.executeCommand<{ id: string; label: string; projectName: string; engineId?: string }>('aexus.ade.control.execute', {
+					action: 'session.create',
+					params: {
+						...(maybeEngine ? { engine: maybeEngine } : {}),
+						...(title ? { title } : {}),
+						open: true,
+					},
+				});
+				stream.markdown(`Created session **${created?.label ?? 'New Session'}** in project **${created?.projectName ?? ''}**.`);
+				return true;
+			}
+		}
+
+		// Delegate native RPC/HTTP/CLI inspection & session commands directly to the active runtime
+		const eng = runtime(record.engine);
+		if (eng.executeCommand) {
+			const normalizedRuntimeCmd = cmd === 'smol' ? 'compact' : cmd;
+			const handledByRuntime = await eng.executeCommand(record, normalizedRuntimeCmd, argText, stream, token, toSendOptions(cfg, {}));
+			if (handledByRuntime) {
+				await save();
+				return true;
+			}
 		}
 
 		return false;
@@ -607,14 +1153,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const trimmedPrompt = request.prompt.trim();
 		let parsedCmd = request.command?.trim().toLowerCase();
 		let cmdArgText = trimmedPrompt;
-		if (!parsedCmd && /^\/[a-zA-Z][\w-]*(?:\s|$)/.test(trimmedPrompt)) {
+		if (!parsedCmd && /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(trimmedPrompt)) {
 			const spaceIdx = trimmedPrompt.indexOf(' ');
 			parsedCmd = (spaceIdx === -1 ? trimmedPrompt.slice(1) : trimmedPrompt.slice(1, spaceIdx)).toLowerCase();
 			cmdArgText = spaceIdx === -1 ? '' : trimmedPrompt.slice(spaceIdx + 1).trim();
 		}
 
-		if (parsedCmd) {
-			const handledDirectly = await handleDirectSlashCommand(parsedCmd, cmdArgText, record, isSecretary, stream);
+		// Handle /goal status & /goal clear immediately before starting a turn
+		if (parsedCmd === 'goal') {
+			const goalArg = cmdArgText.trim();
+			if (!goalArg) {
+				if (record.activeGoal) {
+					setGoalBannerInUi(sessionUri, record.activeGoal);
+					stream.markdown(`### Active Session Goal\n\n> ${record.activeGoal}\n\n- Clear with \`/goal clear\` or set a new goal with \`/goal <condition>\`.`);
+				} else {
+					stream.markdown('### Autonomous Goal Mode (`/goal`)\n\n- **Set & execute a verified goal**: `/goal <objective or completion condition>`\n- **Clear active goal**: `/goal clear`\n\nWhen active, the session verifies all goal requirements before stopping until `<!-- GOAL_COMPLETE -->` is confirmed.');
+				}
+				return {};
+			}
+			if (['clear', 'off', 'none', 'cancel'].includes(goalArg.toLowerCase())) {
+				record.activeGoal = undefined;
+				setGoalBannerInUi(sessionUri, undefined);
+				await save();
+				stream.markdown('Cleared active session goal.');
+				return {};
+			}
+			record.activeGoal = goalArg;
+			setGoalBannerInUi(sessionUri, goalArg);
+			await save();
+		}
+
+		if (parsedCmd && parsedCmd !== 'goal') {
+			const handledDirectly = await handleDirectSlashCommand(parsedCmd, cmdArgText, record, sessionUri, isSecretary, stream, token);
 			if (handledDirectly) {
 				return {};
 			}
@@ -629,18 +1199,47 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			refreshSecretaryItem();
 		}
 
-		const effectiveUserPrompt = request.command
-			? `/${request.command}${trimmedPrompt ? ` ${trimmedPrompt}` : ''}`
-			: request.prompt;
+		const engineType = toEngineType(record.engine);
+		const cfg = getSessionConfig(record, isSecretary);
+		const caps = runtimeCapsCache.get(`${record.engine}:${record.cwd}`);
+		const discoveredCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps?.commands);
 
-		const references = request.references.flatMap(reference => reference.value instanceof vscode.Uri
-			? [reference.value.fsPath]
-			: reference.value instanceof vscode.Location
-				? [`${reference.value.uri.fsPath}:${reference.value.range.start.line + 1}`]
-				: []);
-		const basePrompt = references.length ? `${effectiveUserPrompt}\n\n${vscode.l10n.t('Attached files:')}\n${references.join('\n')}` : effectiveUserPrompt;
+		let effectiveUserPrompt: string;
+		if (parsedCmd === 'goal') {
+			effectiveUserPrompt = cmdArgText;
+		} else if (parsedCmd) {
+			const matchedTemplateCmd = discoveredCommands.find(c => c.name.toLowerCase() === parsedCmd && c.filePath);
+			const expandedTemplate = matchedTemplateCmd ? await readSkillOrCommandTemplate(matchedTemplateCmd, cmdArgText) : undefined;
+			const expandedBuiltin = !expandedTemplate ? expandBuiltInWorkflowPrompt(parsedCmd, cmdArgText, engineType) : undefined;
+			if (expandedTemplate) {
+				effectiveUserPrompt = expandedTemplate;
+			} else if (expandedBuiltin) {
+				effectiveUserPrompt = expandedBuiltin;
+			} else {
+				effectiveUserPrompt = `/${parsedCmd}${cmdArgText ? ` ${cmdArgText}` : ''}`;
+			}
+		} else {
+			effectiveUserPrompt = request.prompt;
+		}
+
+		const { attachments, fileLines } = extractAttachmentsAndRefs(request.references);
+		let basePrompt = fileLines.length
+			? `${effectiveUserPrompt}\n\n${vscode.l10n.t('Attached files:')}\n${fileLines.join('\n')}`
+			: effectiveUserPrompt;
+
+		if (record.activeGoal) {
+			basePrompt = [
+				`[Autonomous Session Goal Active]`,
+				`Goal Condition: ${record.activeGoal}`,
+				`- Execute thoroughly and verify all requirements end-to-end before stopping.`,
+				`- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker \`${GOAL_COMPLETE_MARKER}\` at the very end of your response.`,
+				'',
+				basePrompt,
+			].join('\n');
+		}
+
 		const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>('aexus.ade.resolvePromptContext', sessionUri)).catch(() => undefined);
-		const prompt = injected?.trim() ? `${injected.trim()}\n\n${basePrompt}` : basePrompt;
+		const initialFullPrompt = injected?.trim() ? `${injected.trim()}\n\n${basePrompt}` : basePrompt;
 
 		try {
 			const engine = runtime(record.engine);
@@ -654,12 +1253,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				await save();
 			}
 			let streamedMarkdown = '';
+			let roundMarkdown = '';
+			let pendingGoalText = '';
 			let lastHeartbeatSent = 0;
 			const emitHeartbeat = () => {
 				const now = Date.now();
 				if (now - lastHeartbeatSent >= 1500) {
 					lastHeartbeatSent = now;
 					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', sessionUri.toString(), now)).catch(() => undefined);
+				}
+			};
+			const findMarkerPrefixTailLength = (text: string): number => {
+				const maxLen = Math.min(text.length, GOAL_COMPLETE_MARKER.length);
+				for (let len = maxLen; len >= 1; len--) {
+					const suffix = text.slice(text.length - len);
+					if (GOAL_COMPLETE_MARKER.startsWith(suffix)) {
+						return len;
+					}
+				}
+				return 0;
+			};
+			const flushPendingGoalText = (finalFlush: boolean) => {
+				if (!pendingGoalText) {
+					return;
+				}
+				pendingGoalText = pendingGoalText.replace(new RegExp(`\\n*${GOAL_COMPLETE_MARKER}\\s*`, 'g'), '');
+				if (!pendingGoalText) {
+					return;
+				}
+				if (finalFlush || !record.activeGoal) {
+					const out = pendingGoalText;
+					pendingGoalText = '';
+					if (out) {
+						streamedMarkdown += out;
+						stream.markdown(out);
+					}
+					return;
+				}
+				const holdLen = findMarkerPrefixTailLength(pendingGoalText);
+				// Also hold up to 2 preceding newlines right before a partial marker prefix so trailing blank lines strip cleanly
+				let totalHold = holdLen;
+				if (holdLen > 0) {
+					while (totalHold < pendingGoalText.length && totalHold - holdLen < 2 && pendingGoalText[pendingGoalText.length - totalHold - 1] === '\n') {
+						totalHold++;
+					}
+				}
+				const safeLen = pendingGoalText.length - totalHold;
+				if (safeLen > 0) {
+					const safeOut = pendingGoalText.slice(0, safeLen);
+					pendingGoalText = pendingGoalText.slice(safeLen);
+					streamedMarkdown += safeOut;
+					stream.markdown(safeOut);
 				}
 			};
 			const proxyTarget: vscode.ChatResponseStream = Object.create(null);
@@ -669,10 +1313,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						return (value: string | vscode.MarkdownString) => {
 							const chunkText = typeof value === 'string' ? value : value.value;
 							if (chunkText) {
-								streamedMarkdown += chunkText;
+								roundMarkdown += chunkText;
 								emitHeartbeat();
 							}
-							stream.markdown(value);
+							if (!record.activeGoal) {
+								if (chunkText) {
+									streamedMarkdown += chunkText;
+								}
+								stream.markdown(value);
+								return;
+							}
+							if (typeof value === 'string') {
+								pendingGoalText += value;
+								flushPendingGoalText(false);
+							} else {
+								flushPendingGoalText(true);
+								const cleaned = value.value.replace(new RegExp(`\\n*${GOAL_COMPLETE_MARKER}\\s*`, 'g'), '');
+								if (cleaned) {
+									streamedMarkdown += cleaned;
+									const copy = new vscode.MarkdownString(cleaned, value.supportThemeIcons);
+									copy.isTrusted = value.isTrusted;
+									copy.supportHtml = value.supportHtml;
+									copy.baseUri = value.baseUri;
+									stream.markdown(copy);
+								}
+							}
 						};
 					}
 					if (prop === 'progress') {
@@ -693,10 +1358,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const callerRole = isSecretary
 				? 'secretary'
 				: (!snapEntry?.isOrchestrated ? undefined : snapEntry.rank);
-			await engine.send(record, prompt, wrappedStream, turnCancellation.token, {
+			const sendOptions = toSendOptions(cfg, {
+				attachments,
 				pureWorker: !isSecretary && !snapEntry?.isOrchestrated,
 				callerRole,
 			});
+
+			await engine.send(record, initialFullPrompt, wrappedStream, turnCancellation.token, sendOptions);
+			flushPendingGoalText(true);
+
+			// Autonomous /goal verification & continuation stop-hook loop
+			let goalRound = 1;
+			while (
+				record.activeGoal
+				&& !turnCancellation.token.isCancellationRequested
+				&& !roundMarkdown.includes(GOAL_COMPLETE_MARKER)
+				&& goalRound < MAX_GOAL_ROUNDS
+			) {
+				goalRound++;
+				const currentGoal = record.activeGoal;
+				stream.progress(`Verifying autonomous goal completion (Round ${goalRound}/${MAX_GOAL_ROUNDS})…`);
+				stream.markdown(`\n\n---\n*Goal Check (Round ${goalRound}/${MAX_GOAL_ROUNDS})*\n\n`);
+				roundMarkdown = '';
+				const continuationPrompt = [
+					...(injected?.trim() ? [injected.trim(), ''] : []),
+					`[Autonomous Goal Stop-Check — Round ${goalRound}/${MAX_GOAL_ROUNDS}]`,
+					`Active Goal: ${currentGoal}`,
+					`You stopped without emitting \`${GOAL_COMPLETE_MARKER}\`.`,
+					`1. Audit every requirement of the Active Goal against actual workspace state and verification results.`,
+					`2. If ANY work, edge case, or verification remains incomplete, complete it right now.`,
+					`3. Once 100% of the Active Goal is verified complete, summarize the final verified state and end with \`${GOAL_COMPLETE_MARKER}\`.`,
+				].join('\n');
+				await engine.send(record, continuationPrompt, wrappedStream, turnCancellation.token, {
+					...sendOptions,
+					attachments: undefined,
+				});
+				flushPendingGoalText(true);
+			}
+
+			if (record.activeGoal && roundMarkdown.includes(GOAL_COMPLETE_MARKER)) {
+				record.activeGoal = undefined;
+				setGoalBannerInUi(sessionUri, undefined);
+			}
+
 			if (streamedMarkdown.trim()) {
 				lastTurnReplies.set(identity(record), streamedMarkdown.trim());
 				if (isSecretary) {
@@ -705,8 +1409,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 			record.updated = Date.now();
 			if (!isSecretary && !record.customLabel && record.initialTitle && record.label === record.initialTitle) {
-				record.label = effectiveUserPrompt.split('\n')[0].slice(0, 100) || record.label;
+				const titleSource = parsedCmd === 'goal' ? `/goal ${cmdArgText}` : effectiveUserPrompt;
+				record.label = titleSource.split('\n')[0].slice(0, 100) || record.label;
 			}
+			// Refresh runtime capabilities asynchronously after turn (captures newly discovered init commands/models)
+			void fetchRuntimeCaps(record.engine, record.cwd, record).then(({ changed }) => {
+				if (changed) {
+					void notifySessionOptionsUpdated(isSecretary ? SECRETARY_TYPE : engineType, sessionUri, true);
+					customizationChangedEmitter.fire();
+				}
+			});
 			return {};
 		} catch (error) {
 			if (token.isCancellationRequested || turnCancellation.token.isCancellationRequested) { return {}; }
@@ -731,26 +1443,116 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	};
 
-	// Register unified Secretary participant & session provider with Aexus App Icon
+	const registerCustomizationProviderForType = (sessionType: string, label: string, iconId?: string) => {
+		const api = vscode.chat as typeof vscode.chat & {
+			registerChatSessionCustomizationProvider?: (
+				chatSessionType: string,
+				metadata: vscode.ChatSessionCustomizationProviderMetadata,
+				provider: vscode.ChatSessionCustomizationProvider,
+			) => vscode.Disposable;
+		};
+		if (typeof api.registerChatSessionCustomizationProvider !== 'function') {
+			return;
+		}
+		const mapCustomizationType = (rawType: string): vscode.ChatSessionCustomizationType => {
+			switch (rawType) {
+				case 'skill': return vscode.ChatSessionCustomizationType.Skill;
+				case 'agent': return vscode.ChatSessionCustomizationType.Agent;
+				case 'instructions': return vscode.ChatSessionCustomizationType.Instructions;
+				case 'hook': return vscode.ChatSessionCustomizationType.Hook;
+				case 'plugin': return vscode.ChatSessionCustomizationType.Plugins;
+				default: return vscode.ChatSessionCustomizationType.Prompt;
+			}
+		};
+		context.subscriptions.push(api.registerChatSessionCustomizationProvider(
+			sessionType,
+			{
+				label,
+				iconId,
+				supportedTypes: [
+					vscode.ChatSessionCustomizationType.Skill,
+					vscode.ChatSessionCustomizationType.Prompt,
+					vscode.ChatSessionCustomizationType.Agent,
+					vscode.ChatSessionCustomizationType.Instructions,
+					vscode.ChatSessionCustomizationType.Hook,
+					vscode.ChatSessionCustomizationType.Plugins,
+				],
+			},
+			{
+				onDidChange: customizationChangedEmitter.event,
+				provideChatSessionCustomizations: async (sessionResource, _token) => {
+					const isSec = sessionType === SECRETARY_TYPE || sessionResource.scheme === SECRETARY_TYPE;
+					const rec = findCachedRecord(sessionResource) ?? (isSec ? await ensureSecretaryRecord().catch(() => undefined) : undefined);
+					const shortEng = rec?.engine ?? (isSec ? (resolveShortEngine() ?? 'claude') : sessionType.slice('aexus-'.length));
+					const effectiveEngineType = toEngineType(shortEng);
+					const cwd = rec?.cwd ?? defaultCwd();
+					const { caps } = await fetchRuntimeCaps(shortEng, cwd, rec);
+					const files = await discoverCustomizationFiles(effectiveEngineType, cwd, caps.commands);
+					return files.map((entry): vscode.ChatSessionCustomizationItem => ({
+						uri: entry.uriPath.startsWith('agent-builtin://') ? vscode.Uri.parse(entry.uriPath) : vscode.Uri.file(entry.uriPath),
+						type: mapCustomizationType(entry.type),
+						name: entry.name,
+						description: entry.description,
+						source: entry.source,
+						userInvocable: entry.userInvocable ?? (entry.type === 'skill' || entry.type === 'prompt'),
+					}));
+				},
+			},
+		));
+	};
+
+	// Register unified Secretary participant, customization provider & session provider with Aexus App Icon
 	const aexusAppIconUri = vscode.Uri.joinPath(context.extensionUri, 'resources/aexus-icon.svg');
+	const secretaryOptEmitter = new vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>();
+	const secretaryProviderOptEmitter = new vscode.EventEmitter<void>();
+	optionChangeEmitters.set(SECRETARY_TYPE, secretaryOptEmitter);
+	providerOptionsChangeEmitters.set(SECRETARY_TYPE, secretaryProviderOptEmitter);
+	context.subscriptions.push(secretaryOptEmitter, secretaryProviderOptEmitter);
+
 	const secretaryParticipant = vscode.chat.createChatParticipant(SECRETARY_TYPE, async (request, _chatContext, stream, token) => {
 		const secRecord = await ensureSecretaryRecord();
 		return send(secRecord, SECRETARY_URI, true, request, stream, token);
 	});
 	secretaryParticipant.iconPath = { light: aexusAppIconUri, dark: aexusAppIconUri };
-	secretaryController.getChatSessionInputState = () => secretaryController.createChatSessionInputState([]);
+	secretaryController.getChatSessionInputState = async sessionResource => {
+		const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, sessionResource ?? SECRETARY_URI);
+		return trackInputState(SECRETARY_TYPE, secretaryController!, groups);
+	};
+	registerCustomizationProviderForType(SECRETARY_TYPE, 'Secretary', 'hubot');
 	context.subscriptions.push(
 		secretaryParticipant,
 		secretaryController,
 		vscode.chat.registerChatSessionContentProvider(SECRETARY_TYPE, {
+			onDidChangeChatSessionOptions: secretaryOptEmitter.event,
+			onDidChangeChatSessionProviderOptions: secretaryProviderOptEmitter.event,
+			provideChatSessionProviderOptions: async () => {
+				const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, SECRETARY_URI);
+				return {
+					optionGroups: groups,
+					newSessionOptions: toSessionOptionsRecord(groups),
+				};
+			},
+			provideHandleOptionsChange: (uri, updates) => {
+				void applyOptionUpdates(SECRETARY_TYPE, uri, updates, true, true);
+			},
 			provideChatSessionContent: async (_uri, token) => {
 				const secRecord = await ensureSecretaryRecord();
 				const turns = await runtime(secRecord.engine).history(secRecord, token);
 				await save();
+				void fetchRuntimeCaps(secRecord.engine, secRecord.cwd, secRecord).then(({ changed }) => {
+					if (changed) {
+						void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
+					}
+				});
+				const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, SECRETARY_URI);
+				if (secRecord.activeGoal) {
+					setTimeout(() => setGoalBannerInUi(SECRETARY_URI, secRecord.activeGoal), 80);
+				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(SECRETARY_TYPE, entry);
 				return {
 					title: 'Secretary',
+					options: toSessionOptionsRecord(groups),
 					history: history(turns, SECRETARY_TYPE),
 					onDidChangeHistory: entry.changed.event,
 					requestHandler: async (request, _chatContext, stream, reqToken) => {
@@ -769,9 +1571,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 	refreshSecretaryItem();
 
-	// Register all 8 Coding Agent engine participants & session providers
+	// Register all 8 Coding Agent engine participants, customization providers & session providers
 	for (const definition of available.filter(entry => entry.command)) {
 		const participantId = definition.type;
+		const optEmitter = new vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>();
+		const providerOptEmitter = new vscode.EventEmitter<void>();
+		optionChangeEmitters.set(participantId, optEmitter);
+		providerOptionsChangeEmitters.set(participantId, providerOptEmitter);
+		context.subscriptions.push(optEmitter, providerOptEmitter);
+
 		const participant = vscode.chat.createChatParticipant(participantId, async (request, chatContext, stream, token) => {
 			if (!chatContext.chatSessionContext) { throw new Error(vscode.l10n.t('Open an ADE engine conversation first.')); }
 			const uri = chatContext.chatSessionContext.chatSessionItem.resource;
@@ -785,16 +1593,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			: new vscode.ThemeIcon(definition.themeIcon!);
 		const controller = vscode.chat.createChatSessionItemController(definition.type, async () => refresh(definition.id));
 		controllers.set(definition.id, controller);
-		controller.getChatSessionInputState = () => controller.createChatSessionInputState([]);
+		controller.getChatSessionInputState = async sessionResource => {
+			const groups = await computeOptionGroupsForResource(definition.type, sessionResource);
+			return trackInputState(definition.type, controller, groups);
+		};
+		registerCustomizationProviderForType(definition.type, definition.name, definition.themeIcon);
+
 		context.subscriptions.push(participant, controller, vscode.chat.registerChatSessionContentProvider(definition.type, {
+			onDidChangeChatSessionOptions: optEmitter.event,
+			onDidChangeChatSessionProviderOptions: providerOptEmitter.event,
+			provideChatSessionProviderOptions: async () => {
+				const groups = await computeOptionGroupsForResource(definition.type);
+				return {
+					optionGroups: groups,
+					newSessionOptions: toSessionOptionsRecord(groups),
+				};
+			},
+			provideHandleOptionsChange: (uri, updates) => {
+				void applyOptionUpdates(definition.type, uri, updates, true, true);
+			},
 			provideChatSessionContent: async (uri, token) => {
 				const record = await getRecord(uri, token);
 				const turns = await runtime(record.engine).history(record, token);
 				await save();
+				void fetchRuntimeCaps(record.engine, record.cwd, record).then(({ changed }) => {
+					if (changed) {
+						void notifySessionOptionsUpdated(definition.type, uri, true);
+					}
+				});
+				const groups = await computeOptionGroupsForResource(definition.type, uri);
+				if (record.activeGoal) {
+					setTimeout(() => setGoalBannerInUi(uri, record.activeGoal), 80);
+				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(identity(record), entry);
 				return {
 					title: record.label,
+					options: toSessionOptionsRecord(groups),
 					history: history(turns, participantId),
 					onDidChangeHistory: entry.changed.event,
 					requestHandler: record.readOnly ? undefined : (request, _chatContext, stream, reqToken) => send(record, uri, false, request, stream, reqToken),
@@ -858,9 +1693,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('aexus.agentEngines.clearSessionGoal', async (rawUri?: vscode.Uri | string) => {
+			if (!rawUri) {
+				return;
+			}
+			const uri = typeof rawUri === 'string' ? vscode.Uri.parse(rawUri) : rawUri;
+			const rec = findCachedRecord(uri);
+			if (rec && rec.activeGoal) {
+				rec.activeGoal = undefined;
+				await save();
+			}
+		}),
 		vscode.commands.registerCommand('aexus.agentEngines.list', () => available.map(definition => ({ id: definition.type, name: definition.name, available: !!definition.command }))),
 		vscode.commands.registerCommand('aexus.agentEngines.ensureSecretary', async (rawEngineId?: string, project?: vscode.Uri, forceReset?: boolean) => {
 			const secRecord = await ensureSecretaryRecord(rawEngineId, project, Boolean(forceReset));
+			void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI);
+			customizationChangedEmitter.fire();
 			return {
 				engineId: `aexus-${secRecord.engine}`,
 				resource: SECRETARY_URI,
@@ -869,7 +1717,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('aexus.agentEngines.create', async (engineId: string, project: vscode.Uri) => {
 			const engine = engineId.slice('aexus-'.length);
 			const native = await runtime(engine).create(project.fsPath);
-			const record: RecordEntry = { ...native, engine, initialTitle: native.label, resourceId: native.id };
+			const record: RecordEntry = { ...native, engine, initialTitle: native.label, resourceId: native.id, sessionConfig: {} };
 			records.set(key(engine, native.id), record);
 			await save();
 			refresh(engine);
@@ -940,6 +1788,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					provisional: Boolean(record.provisional),
 					unmaterialized: Boolean(record.unmaterialized),
 					engine: record.engine,
+					sessionConfig: record.sessionConfig,
+					activeGoal: record.activeGoal,
 				};
 			} finally { token.dispose(); }
 		}),
@@ -995,40 +1845,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.listConfiguredModels', async (): Promise<Record<string, readonly { readonly id: string; readonly label: string }[]>> => {
 			const out: Record<string, readonly { readonly id: string; readonly label: string }[]> = {};
-			try {
-				const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-				const raw = JSON.parse(await fs.readFile(path.join(claudeConfigDir, 'settings.json'), 'utf8')) as {
-					model?: unknown;
-					modelPicker?: { options?: Array<{ model?: unknown; label?: unknown }> };
-				};
-				const listModels: { id: string; label: string }[] = [];
-				const seen = new Set<string>();
-				const add = (idRaw: unknown, labelRaw?: unknown) => {
-					const id = typeof idRaw === 'string' ? idRaw.trim() : '';
-					if (!id || seen.has(id)) { return; }
-					seen.add(id);
-					const label = typeof labelRaw === 'string' && labelRaw.trim() ? `${labelRaw.trim()} (${id})` : id;
-					listModels.push({ id, label });
-				};
-				if (Array.isArray(raw.modelPicker?.options)) {
-					for (const opt of raw.modelPicker.options) {
-						add(opt?.model, opt?.label);
+			const cwd = defaultCwd();
+			const legacyKeys: Record<EngineId, string[]> = {
+				'aexus-claude': ['claude-code', 'aexus-claude'],
+				'aexus-codex': ['codex', 'aexus-codex'],
+				'aexus-kilo': ['kilo', 'aexus-kilo'],
+				'aexus-opencode': ['opencode', 'aexus-opencode'],
+				'aexus-dsh': ['dsh', 'aexus-dsh'],
+				'aexus-antigravity': ['antigravity', 'aexus-antigravity'],
+				'aexus-cline': ['cline', 'aexus-cline'],
+				'aexus-pi': ['pi', 'aexus-pi'],
+			};
+			for (const def of definitions) {
+				const caps = runtimeCapsCache.get(`${def.id}:${cwd}`);
+				const items = (await discoverEngineModels(def.type, cwd, caps?.models))
+					.filter(m => m.id !== 'default')
+					.map(m => ({ id: m.id, label: m.name !== m.id ? `${m.name} (${m.id})` : m.id }));
+				if (items.length > 0) {
+					for (const aliasKey of legacyKeys[def.type]) {
+						out[aliasKey] = items;
 					}
 				}
-				add(raw.model);
-				if (listModels.length > 0) {
-					out['claude-code'] = listModels;
-				}
-			} catch { /* ignore */ }
-
-			try {
-				const codexToml = await fs.readFile(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8');
-				const match = codexToml.match(/^\s*model\s*=\s*["']([^"']+)["']/m);
-				if (match?.[1]?.trim()) {
-					out.codex = [{ id: match[1].trim(), label: match[1].trim() }];
-				}
-			} catch { /* ignore */ }
-
+			}
 			return out;
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.dispatchEngineeringTurn', async (
@@ -1119,9 +1957,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					await save();
 				}
 				lastTurnErrors.delete(recordKey);
+				const cfg = record.sessionConfig ?? {};
 				await engine.send(record, finalPrompt, headlessStream, turnCancellation.token, {
-					model: rawOptions?.model,
-					thinking: rawOptions?.thinking,
+					model: rawOptions?.model ?? (cfg.model && cfg.model !== 'default' ? cfg.model : undefined),
+					thinking: rawOptions?.thinking ?? (cfg.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined),
+					mode: cfg.mode && cfg.mode !== 'default' ? cfg.mode : undefined,
+					permissionMode: cfg.permissionMode && cfg.permissionMode !== 'default' ? cfg.permissionMode : undefined,
+					sandboxMode: cfg.sandboxMode && cfg.sandboxMode !== 'default' ? cfg.sandboxMode : undefined,
+					webSearch: cfg.webSearch,
 					pureWorker: isPureWorker,
 					callerRole,
 					automatedEngineering: true,
@@ -1243,7 +2086,47 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		void save();
 	};
 
+	const syncPreferencesFromSnapshot = (snapshot: RoleSyncSnapshot) => {
+		let dirty = false;
+		for (const agentEntry of snapshot.agents) {
+			if (!agentEntry.resource) {
+				continue;
+			}
+			let uri: vscode.Uri;
+			try {
+				uri = vscode.Uri.parse(agentEntry.resource);
+			} catch {
+				continue;
+			}
+			const rec = findCachedRecord(uri);
+			if (!rec) {
+				continue;
+			}
+			const cfg = (rec.sessionConfig ??= {});
+			let recUpdated = false;
+			if (agentEntry.preferredModel && (!cfg.model || cfg.model === 'default') && cfg.model !== agentEntry.preferredModel) {
+				cfg.model = agentEntry.preferredModel;
+				recUpdated = true;
+			}
+			if (agentEntry.preferredThinking && (!cfg.thinking || cfg.thinking === 'default')) {
+				const mappedThinking = agentEntry.preferredThinking === 'none' ? 'off' : agentEntry.preferredThinking;
+				if (cfg.thinking !== mappedThinking) {
+					cfg.thinking = mappedThinking;
+					recUpdated = true;
+				}
+			}
+			if (recUpdated) {
+				dirty = true;
+				void notifySessionOptionsUpdated(`aexus-${rec.engine}`, uri);
+			}
+		}
+		if (dirty) {
+			void save();
+		}
+	};
+
 	const enrichRoleSnapshot = async (raw: RoleSyncSnapshot): Promise<RoleSyncSnapshot> => {
+		syncPreferencesFromSnapshot(raw);
 		const [agyBindings, externalBindings] = await Promise.all([
 			roleBridge.readAgyBindings(),
 			roleBridge.readExternalNativeBindings(),

@@ -636,6 +636,7 @@ suite('SlashCommandCompletions fork variants', () => {
 			chatSessionsService,
 			upcastPartial<IMcpService>({}),
 			new NullLogService(),
+			upcastPartial<IChatAgentService>({ getAgent: () => undefined }),
 		));
 		const model = inputModel ?? store.add(createTextModel('/fo', null, undefined, inputUri));
 		const provider = languageFeaturesService.completionProvider.ordered(model).find(provider => provider._debugDisplayName === 'globalSlashCommands');
@@ -1081,6 +1082,7 @@ suite('prompt slash command matching', () => {
 			new MockChatSessionsService(),
 			upcastPartial<IMcpService>({}),
 			new NullLogService(),
+			upcastPartial<IChatAgentService>({ getAgent: () => undefined }),
 		));
 		const provider = languageFeaturesService.completionProvider.ordered(model).find(provider => provider._debugDisplayName === 'promptSlashCommands');
 		assert.ok(provider);

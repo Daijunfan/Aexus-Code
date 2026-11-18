@@ -22,6 +22,8 @@ export interface RoleSyncAgentEntry {
 	readonly rank: AdeSessionRank;
 	readonly isOrchestrated: boolean;
 	readonly rolePrompt?: string;
+	readonly preferredModel?: string;
+	readonly preferredThinking?: string;
 }
 
 export interface RoleSyncSnapshot {

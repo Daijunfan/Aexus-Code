@@ -405,7 +405,7 @@ export class ChatAgentService extends Disposable implements IChatAgentService {
 			throw new Error(`Agent already has implementation: ${JSON.stringify(id)}`);
 		}
 
-		if (entry.data.isDefault) {
+		if (entry.data.isDefault || id.startsWith('aexus-')) {
 			this._hasDefaultAgent.set(true);
 		}
 

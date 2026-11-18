@@ -4350,12 +4350,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 					return picker;
 				} else if (action.id === ChatSessionPrimaryPickerAction.ID && action instanceof MenuItemAction) {
 					const createPicker = () => {
-						// Cloud sessions render their option-group pickers (e.g. branch) on the primary toolbar
+						// Cloud & Aexus sessions render their option-group pickers on the primary toolbar
 						const widgets = this.createChatSessionPickerWidgets(action, getInputPickerOptions(action.id));
-						return widgets.length === 0 ? undefined : this.instantiationService.createInstance(ChatSessionPickersContainerActionItem, action, widgets);
+						return this.instantiationService.createInstance(ChatSessionPickersContainerActionItem, action, widgets);
 					};
 					inputOverflowPickerHandlers.set(action.id, anchor => showOverflowPicker(createPicker, anchor));
-					return createPicker() ?? new HiddenActionViewItem(action);
+					return createPicker();
 				}
 				return undefined;
 			}
@@ -6199,6 +6199,9 @@ class ChatSessionPickersContainerActionItem extends ActionViewItem {
 
 	override render(container: HTMLElement): void {
 		container.classList.add('chat-sessionPicker-container');
+		if (this.widgets.length === 0) {
+			container.style.display = 'none';
+		}
 		for (const widget of this.widgets) {
 			const itemContainer = dom.$('.action-item.chat-sessionPicker-item');
 			widget.render(itemContainer);

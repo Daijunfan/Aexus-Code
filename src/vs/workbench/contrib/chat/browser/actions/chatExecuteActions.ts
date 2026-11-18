@@ -622,14 +622,17 @@ export class ChatSessionPrimaryPickerAction extends Action2 {
 			precondition: ChatContextKeys.enabled,
 			menu: [
 				{
-					// Cloud sessions: keep on the primary chat input toolbar
+					// Cloud and Aexus unified sessions: render option-group pickers on the primary chat input toolbar
 					id: MenuId.ChatInput,
 					order: 4,
 					group: 'navigation',
 					when:
 						ContextKeyExpr.and(
 							ChatContextKeys.chatSessionHasModels,
-							ChatContextKeys.chatSessionType.isEqualTo(AgentSessionProviders.Cloud),
+							ContextKeyExpr.or(
+								ChatContextKeys.chatSessionType.isEqualTo(AgentSessionProviders.Cloud),
+								ContextKeyExpr.regex(ChatContextKeys.chatSessionType.key, /^aexus-/),
+							),
 							ChatContextKeys.lockedToCodingAgent
 						)
 				},
@@ -645,6 +648,7 @@ export class ChatSessionPrimaryPickerAction extends Action2 {
 						ContextKeyExpr.and(
 							ChatContextKeys.chatSessionHasModels,
 							ChatContextKeys.chatSessionType.notEqualsTo(AgentSessionProviders.Cloud),
+							ContextKeyExpr.regex(ChatContextKeys.chatSessionType.key, /^aexus-/).negate(),
 							ContextKeyExpr.or(
 								IsSessionsWindowContext.negate(),
 								ChatContextKeys.chatSessionType.notEqualsTo(AgentSessionProviders.Background)

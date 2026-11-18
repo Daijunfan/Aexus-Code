@@ -12,6 +12,8 @@ import {
 	ADE_CONTROL_EXECUTE_COMMAND_ID,
 	ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID,
 	ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID,
+	ADE_SET_SESSION_GOAL_BANNER_COMMAND_ID,
+	ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID,
 	AdeAgentRole,
 	AdeSessionRank,
 	IAdeControlDispatchRequest,
@@ -24,6 +26,7 @@ import {
 	IAdeSessionTreeResult,
 } from '../../../../platform/ade/common/adeControl.js';
 import {
+	AdeThinkingLevel,
 	AdeWorkTreeType,
 	IAdeEngineeringService,
 	IAdeInboxService,
@@ -41,6 +44,7 @@ import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IView } from '../../../common/views.js';
 import { IWorkbenchModeService } from '../../../services/workbenchMode/common/workbenchMode.js';
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
+import { IChatWidgetService } from '../../chat/browser/chat.js';
 import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { IChatService } from '../../chat/common/chatService/chatService.js';
 import { ChatAgentLocation } from '../../chat/common/constants.js';
@@ -208,7 +212,7 @@ function toUri(raw: unknown): URI | undefined {
 		if (!trimmed) {
 			return undefined;
 		}
-		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+		if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed)) {
 			return URI.parse(trimmed);
 		}
 		return URI.file(trimmed);
@@ -514,6 +518,8 @@ export function buildAdeRoleSyncSnapshot(
 			rank,
 			isOrchestrated,
 			rolePrompt: isOrchestrated ? buildAdeAgentRoleContext(projects, sessions, agent) : undefined,
+			preferredModel: agent.preferredModel,
+			preferredThinking: agent.preferredThinking,
 		};
 	});
 	return {
@@ -838,7 +844,7 @@ export async function executeAdeControlRequest(
 			throw new Error(localize('adeMissingFilePath', "A file path is required."));
 		}
 		const trimmed = rawFile.trim();
-		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+		if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed)) {
 			return URI.parse(trimmed);
 		}
 		if (trimmed.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(trimmed)) {
@@ -2232,4 +2238,76 @@ CommandsRegistry.registerCommand(ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID, (accesso
 
 CommandsRegistry.registerCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, (accessor: ServicesAccessor, arg1: IAdeControlDispatchRequest | string, arg2?: Record<string, unknown>) => {
 	return executeAdeControlRequest(accessor, arg1, arg2);
+});
+
+CommandsRegistry.registerCommand(ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID, (accessor: ServicesAccessor, rawPayload: unknown) => {
+	if (!rawPayload || typeof rawPayload !== 'object') {
+		return;
+	}
+	const payload = rawPayload as {
+		resource?: unknown;
+		engineId?: unknown;
+		model?: unknown;
+		thinking?: unknown;
+	};
+	const sessionResource = toUri(payload.resource);
+	if (!sessionResource) {
+		return;
+	}
+	const projects = accessor.get(IAdeProjectsService);
+	const uriIdentity = accessor.get(IUriIdentityService);
+	const secretaryResource = projects.secretary.session?.resource;
+	if (sessionResource.scheme === 'aexus-secretary' || (secretaryResource && (uriIdentity.extUri.isEqual(sessionResource, secretaryResource) || sessionResource.toString() === secretaryResource.toString()))) {
+		if (typeof payload.engineId === 'string' && payload.engineId.trim()) {
+			projects.configureSecretary({ engineId: payload.engineId.trim(), resource: secretaryResource ?? sessionResource });
+		}
+		return;
+	}
+	const agent = projects.agents.find(entry => entry.session && (
+		uriIdentity.extUri.isEqual(entry.session.resource, sessionResource)
+		|| entry.session.resource.toString() === sessionResource.toString()
+	));
+	if (!agent) {
+		return;
+	}
+	const prefs: { preferredModel?: string; preferredThinking?: AdeThinkingLevel } = {};
+	if (Object.hasOwn(payload, 'model')) {
+		prefs.preferredModel = typeof payload.model === 'string' && payload.model.trim() && payload.model !== 'default'
+			? payload.model.trim()
+			: undefined;
+	}
+	if (Object.hasOwn(payload, 'thinking')) {
+		const rawThinking = typeof payload.thinking === 'string' ? payload.thinking.trim() : '';
+		const mapped: AdeThinkingLevel | undefined = rawThinking === 'off' || rawThinking === 'none'
+			? 'off'
+			: rawThinking === 'low' || rawThinking === 'minimal'
+				? 'low'
+				: rawThinking === 'medium'
+					? 'medium'
+					: rawThinking === 'max'
+						? 'max'
+						: rawThinking === 'high' || rawThinking === 'xhigh' || rawThinking === 'extra-high'
+							? 'high'
+							: undefined;
+		prefs.preferredThinking = mapped;
+	}
+	if (projects.updateAgentEnginePreferences) {
+		projects.updateAgentEnginePreferences(agent.id, prefs);
+	}
+});
+
+CommandsRegistry.registerCommand(ADE_SET_SESSION_GOAL_BANNER_COMMAND_ID, (accessor: ServicesAccessor, rawResource: unknown, rawGoalText: unknown) => {
+	const sessionResource = toUri(rawResource);
+	if (!sessionResource) {
+		return;
+	}
+	const chatWidgetService = tryGetService(accessor, IChatWidgetService);
+	const commandService = tryGetService(accessor, ICommandService);
+	const widget = chatWidgetService?.getWidgetBySessionResource(sessionResource);
+	const goalText = typeof rawGoalText === 'string' && rawGoalText.trim() ? rawGoalText.trim() : undefined;
+	if (widget?.setPinnedGoalBanner) {
+		widget.setPinnedGoalBanner(goalText, () => {
+			void commandService?.executeCommand('aexus.agentEngines.clearSessionGoal', sessionResource).catch(() => undefined);
+		});
+	}
 });

@@ -539,6 +539,8 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	private _goalSummaryTokenSource: CancellationTokenSource | undefined;
 	private _goalBannerDismissedForCurrentRequest = false;
 	private readonly _goalBannerDismissListener = this._register(new MutableDisposable<IDisposable>());
+	private _pinnedGoalBannerText: string | undefined;
+	private _pinnedGoalDismissCallback: (() => void) | undefined;
 
 	private readonly viewModelDisposables = this._register(new DisposableStore());
 	private _viewModel: ChatViewModel | undefined;
@@ -835,11 +837,11 @@ export class ChatWidget extends Disposable implements IChatWidget {
 
 		this.chatSuggestNextWidget = this._register(this.instantiationService.createInstance(ChatSuggestNextWidget));
 
-		// Clear the autopilot goal banner whenever the active request finishes.
+		// Clear the autopilot goal banner whenever the active request finishes (unless pinned via /goal).
 		this._register(autorun(r => {
 			const viewModel = viewModelObs.read(r);
 			const inProgress = viewModel?.model.requestInProgress.read(r) ?? false;
-			if (!inProgress) {
+			if (!inProgress && !this._pinnedGoalBannerText) {
 				this._cancelGoalSummary();
 				this.inputPartDisposable.value?.clearGoalBanner();
 			}
@@ -956,8 +958,11 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	}
 
 	private _updateAgentCapabilitiesContextKeys(agent: IChatAgentData | undefined): void {
-		// Check if the agent has capabilities defined directly
-		const capabilities = agent?.capabilities ?? (this._lockedAgent ? this.chatSessionsService.getCapabilitiesForSessionType(this._lockedAgent.id) : undefined);
+		// Check if the agent has capabilities defined directly and merge session-type capabilities
+		const sessionCapabilities = this._lockedAgent ? this.chatSessionsService.getCapabilitiesForSessionType(this._lockedAgent.id) : undefined;
+		const capabilities = (agent?.capabilities || sessionCapabilities)
+			? { ...agent?.capabilities, ...sessionCapabilities }
+			: undefined;
 		this._attachmentCapabilities = capabilities ?? supportsAllAttachments;
 
 		const supportsAttachments = Object.keys(filter(this._attachmentCapabilities, (key, value) => value === true)).length > 0;
@@ -3764,9 +3769,36 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		this._goalSummaryTokenSource = undefined;
 	}
 
+	setPinnedGoalBanner(goalText: string | undefined, onDismiss?: () => void): void {
+		const trimmed = goalText?.trim();
+		this._pinnedGoalBannerText = trimmed || undefined;
+		this._pinnedGoalDismissCallback = this._pinnedGoalBannerText ? onDismiss : undefined;
+		const inputPart = this.inputPartDisposable.value;
+		if (!inputPart) {
+			return;
+		}
+		if (this._pinnedGoalBannerText) {
+			this._cancelGoalSummary();
+			this._goalBannerDismissListener.value = inputPart.onDidDismissGoalBanner(() => {
+				const cb = this._pinnedGoalDismissCallback;
+				this._pinnedGoalBannerText = undefined;
+				this._pinnedGoalDismissCallback = undefined;
+				cb?.();
+			});
+			inputPart.setGoalBanner(this._pinnedGoalBannerText);
+		} else {
+			this._goalBannerDismissListener.clear();
+			inputPart.clearGoalBanner();
+		}
+	}
+
 	private _maybeStartGoalSummary(prompt: string): void {
 		const inputPart = this.inputPartDisposable.value;
 		if (!inputPart) {
+			return;
+		}
+		if (this._pinnedGoalBannerText) {
+			inputPart.setGoalBanner(this._pinnedGoalBannerText);
 			return;
 		}
 

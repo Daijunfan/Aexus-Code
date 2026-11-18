@@ -7,17 +7,108 @@ import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { EngineRuntime, EngineSendOptions, HistoryEntry, JsonLineClient, NativeSession, RpcPacket, withTimeout } from './runtime';
+import { emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, HistoryEntry, JsonLineClient, NativeSession, RpcPacket, withTimeout } from './runtime';
 
-interface ThreadItem { type: string; text?: string; command?: string; content?: { type: string; text?: string }[] }
+interface ThreadItem { type: string; text?: string; command?: string; server?: string; tool?: string; query?: string; content?: { type: string; text?: string }[] }
 interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[] }
 interface Thread { id: string; parentThreadId?: string; agentNickname?: string; cwd: string; name?: string; preview: string; path?: string; createdAt: number; updatedAt: number; turns: Turn[] }
 interface RolloutEntry { type: string; payload?: { type?: string; id?: string; content?: { type: string; text?: string }[]; cwd?: string; parent_thread_id?: string; multi_agent_version?: string; agent_nickname?: string; source?: { subagent?: { thread_spawn?: { parent_thread_id: string; agent_nickname?: string } } }; timestamp?: string; message?: string; item?: { type: string; id: string; content?: { type: string; text?: string }[] } } }
 interface SessionIndexEntry { id: string; thread_name: string; updated_at: string }
 interface Notification { threadId?: string; delta?: string; turn?: Turn; item?: ThreadItem; message?: string }
 interface Question { id: string; header: string; question: string; options?: { label: string; description: string }[]; isSecret?: boolean }
+interface SkillEntry { name?: string; id?: string; skill?: string; description?: string; path?: string }
+interface SessionRuntimeSettings { model?: string; effort?: string; approvalPolicy: string; sandbox?: string; webSearch?: string }
+
+type ApprovalPolicy = 'untrusted' | 'on-request' | 'never';
+type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
+function shorten(value: string, max = 140): string {
+	return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function extractSkillEntries(value: unknown, depth = 0): SkillEntry[] {
+	if (depth > 4 || value === null || value === undefined) {
+		return [];
+	}
+	if (Array.isArray(value)) {
+		return value.flatMap(item => extractSkillEntries(item, depth + 1));
+	}
+	if (typeof value !== 'object') {
+		return [];
+	}
+	const record = value as Record<string, unknown>;
+	if (typeof record.name === 'string' || typeof record.path === 'string' || typeof record.skill === 'string') {
+		return [record as SkillEntry];
+	}
+	const collected: SkillEntry[] = [];
+	for (const key of ['data', 'skills', 'cwds', 'items']) {
+		const child = record[key];
+		if (child !== undefined) {
+			collected.push(...extractSkillEntries(child, depth + 1));
+		}
+	}
+	return collected;
+}
+
+function extractReviewText(value: unknown): string | undefined {
+	if (typeof value === 'string') {
+		return value.trim() || undefined;
+	}
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	for (const key of ['output', 'review', 'summary', 'text', 'message']) {
+		const candidate = record[key];
+		if (typeof candidate === 'string' && candidate.trim()) {
+			return candidate.trim();
+		}
+		if (candidate && typeof candidate === 'object') {
+			const nested = extractReviewText(candidate);
+			if (nested) {
+				return nested;
+			}
+		}
+	}
+	const turn = record.turn as Turn | undefined;
+	const text = turn?.items?.filter(item => item.type === 'agentMessage').map(item => item.text ?? '').join('\n').trim();
+	return text || undefined;
+}
+
+function isUnsupportedMethod(error: unknown): boolean {
+	const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+	return message.includes('method not found') || message.includes('not supported') || message.includes('unknown method');
+}
+
+function escapeTableCell(value: string): string {
+	return value.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+}
+
+function mapReasoningEffort(thinking?: EngineThinkingLevel): string | undefined {
+	switch (thinking) {
+		case 'minimal':
+			return 'minimal';
+		case 'low':
+			return 'low';
+		case 'medium':
+			return 'medium';
+		case 'high':
+			return 'high';
+		case 'xhigh':
+		case 'extra-high':
+			return 'xhigh';
+		case 'max':
+			return 'high';
+		case 'off':
+		case 'none':
+			return 'minimal';
+		default:
+			return undefined;
+	}
+}
 
 export class CodexRuntime implements EngineRuntime {
 	readonly id = 'codex';
@@ -32,6 +123,8 @@ export class CodexRuntime implements EngineRuntime {
 	private readonly knownSessions = new Map<string, NativeSession>();
 	private readonly supportedModels = new Set<string>();
 	private readonly threadModelOverrides = new Map<string, string>();
+	private readonly sessionSettings = new Map<string, SessionRuntimeSettings>();
+	private readonly capabilitiesCache = new Map<string, { value: EngineRuntimeCapabilities; expiresAt: number }>();
 	private defaultModel: string | undefined;
 
 	constructor(private readonly executable: string) { this.connect(); }
@@ -39,6 +132,7 @@ export class CodexRuntime implements EngineRuntime {
 	private connect(): void {
 		this.loaded.clear();
 		this.supportedModels.clear();
+		this.capabilitiesCache.clear();
 		this.defaultModel = undefined;
 		const client = this.client = new JsonLineClient(this.executable, ['app-server']);
 		this.sessionListener?.dispose();
@@ -73,6 +167,76 @@ export class CodexRuntime implements EngineRuntime {
 	private recordThreadModelIfUnsupported(threadId: string, model?: string): void {
 		if (this.defaultModel && this.supportedModels.size > 0 && model && !this.supportedModels.has(model)) {
 			this.threadModelOverrides.set(threadId, this.defaultModel);
+		}
+	}
+
+	private requestedModel(options?: EngineSendOptions): string | undefined {
+		const model = options?.model?.trim();
+		if (!model || model === 'default') {
+			return undefined;
+		}
+		return this.supportedModels.size === 0 || this.supportedModels.has(model) ? model : undefined;
+	}
+
+	private approvalPolicy(permissionMode?: string): ApprovalPolicy {
+		switch (permissionMode?.trim()) {
+			case 'untrusted':
+				return 'untrusted';
+			case 'on-request':
+				return 'on-request';
+			default:
+				// Never prompt in non-interactive app-server turns; that would hang the stream.
+				return 'never';
+		}
+	}
+
+	private sandboxMode(sandboxMode?: string): SandboxMode | undefined {
+		switch (sandboxMode?.trim()) {
+			case 'read-only':
+				return 'read-only';
+			case 'workspace-write':
+				return 'workspace-write';
+			case 'danger-full-access':
+				return 'danger-full-access';
+			default:
+				return undefined;
+		}
+	}
+
+	private threadStartParams(cwd: string, options?: EngineSendOptions): Record<string, unknown> {
+		const params: Record<string, unknown> = {
+			cwd,
+			ephemeral: false,
+			approvalPolicy: this.approvalPolicy(options?.permissionMode),
+		};
+		const model = this.requestedModel(options);
+		if (model) {
+			params.model = model;
+		}
+		const sandbox = this.sandboxMode(options?.sandboxMode);
+		if (sandbox) {
+			params.sandbox = sandbox;
+		}
+		if (options?.webSearch === 'disabled') {
+			params.config = { tools: { web_search: false } };
+		}
+		return params;
+	}
+
+	private describeItem(item: ThreadItem): string {
+		switch (item.type) {
+			case 'commandExecution':
+				return item.command ? vscode.l10n.t('Running command: {0}', shorten(item.command)) : vscode.l10n.t('Running a command…');
+			case 'fileChange':
+				return vscode.l10n.t('Applying file changes…');
+			case 'mcpToolCall': {
+				const name = [item.server, item.tool].filter(Boolean).join(':') || vscode.l10n.t('MCP tool');
+				return vscode.l10n.t('Calling MCP tool: {0}', name);
+			}
+			case 'webSearch':
+				return item.query ? vscode.l10n.t('Searching the web: {0}', shorten(item.query)) : vscode.l10n.t('Searching the web…');
+			default:
+				return vscode.l10n.t('Codex is working…');
 		}
 	}
 
@@ -146,12 +310,12 @@ export class CodexRuntime implements EngineRuntime {
 		return (await this.list(token)).filter(child => child.parentId === session.id);
 	}
 
-	async create(cwd: string): Promise<NativeSession> {
+	async create(cwd: string, options?: EngineSendOptions): Promise<NativeSession> {
 		const now = Date.now();
 		try {
 			return await withTimeout((async () => {
 				await this.ensureReady();
-				const result = await this.client.request<{ thread: Thread; model?: string }>('thread/start', { cwd, ephemeral: false });
+				const result = await this.client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(cwd, options));
 				this.loaded.add(result.thread.id);
 				this.recordThreadModelIfUnsupported(result.thread.id, result.model);
 				return { ...this.session(result.thread), provisional: true };
@@ -169,10 +333,10 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
-	async prepareSession(session: NativeSession): Promise<void> {
+	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
 		await this.ensureReady();
 		if (session.unmaterialized) {
-			const result = await this.client.request<{ thread: Thread; model?: string }>('thread/start', { cwd: session.cwd, ephemeral: false });
+			const result = await this.client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options));
 			this.loaded.add(result.thread.id);
 			this.recordThreadModelIfUnsupported(result.thread.id, result.model);
 			Object.assign(session, this.session(result.thread), { provisional: true, unmaterialized: false });
@@ -192,7 +356,7 @@ export class CodexRuntime implements EngineRuntime {
 		} catch (error) {
 			// Empty native threads have no rollout until their first user message.
 			if (!session.provisional || !(error instanceof Error) || !error.message.includes('no rollout found')) { throw error; }
-			Object.assign(session, await this.create(session.cwd));
+			Object.assign(session, await this.create(session.cwd, options));
 		}
 	}
 
@@ -261,17 +425,20 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
-		await this.prepareSession(session);
+		await this.prepareSession(session, options);
 		this.knownSessions.set(session.id, session);
 		const client = this.client;
 		let turnId: string | undefined;
-		const mappedEffort = options?.thinking === 'low'
-			? 'low'
-			: options?.thinking === 'medium'
-				? 'medium'
-				: (options?.thinking === 'high' || options?.thinking === 'max')
-					? 'high'
-					: undefined;
+		const mappedEffort = mapReasoningEffort(options?.thinking);
+		const approvalPolicy = this.approvalPolicy(options?.permissionMode);
+		const sandboxMode = this.sandboxMode(options?.sandboxMode);
+		this.sessionSettings.set(session.id, { model: this.requestedModel(options), effort: mappedEffort, approvalPolicy, sandbox: sandboxMode, webSearch: options?.webSearch });
+		const input: Array<Record<string, unknown>> = [{ type: 'text', text, text_elements: [] }];
+		for (const attachment of options?.attachments ?? []) {
+			if (attachment.kind === 'image') {
+				input.push({ type: 'localImage', path: attachment.filePath });
+			}
+		}
 		const runSingleTurn = async (modelOverride?: string, effortOverride?: string): Promise<void> => {
 			let finish!: () => void;
 			let fail!: (error: Error) => void;
@@ -283,8 +450,11 @@ export class CodexRuntime implements EngineRuntime {
 				if (packet.id !== undefined && params?.threadId && this.belongsTo(params.threadId, session.id)) { void this.handleRequest(client, packet, this.knownSessions.get(params.threadId)!, token).catch(fail); return; }
 				if (params?.threadId !== session.id) { return; }
 				if (!token.isCancellationRequested && packet.method === 'item/agentMessage/delta' && params.delta) { stream.markdown(params.delta); }
-				if (!token.isCancellationRequested && packet.method === 'item/started' && params.item?.type !== 'agentMessage' && params.item?.type !== 'userMessage') {
-					stream.progress(params.item?.command || vscode.l10n.t('Codex is working…'));
+				if (!token.isCancellationRequested && (packet.method === 'item/reasoning/summaryTextDelta' || packet.method === 'item/reasoning/textDelta')) {
+					emitThinkingProgress(stream, String(packet.params?.delta ?? ''), 'codex-thinking');
+				}
+				if (!token.isCancellationRequested && packet.method === 'item/started' && params.item && params.item.type !== 'agentMessage' && params.item.type !== 'userMessage' && params.item.type !== 'reasoning') {
+					stream.progress(this.describeItem(params.item));
 				}
 				if (packet.method === 'turn/completed' && params.turn) {
 					if (params.turn.error) { fail(new Error(params.turn.error.message)); } else { finish(); }
@@ -294,7 +464,8 @@ export class CodexRuntime implements EngineRuntime {
 			try {
 				const started = await client.request<{ turn: Turn }>('turn/start', {
 					threadId: session.id,
-					input: [{ type: 'text', text, text_elements: [] }],
+					input,
+					approvalPolicy,
 					...(modelOverride ? { model: modelOverride } : {}),
 					...(effortOverride ? { effort: effortOverride } : {}),
 				});
@@ -308,9 +479,7 @@ export class CodexRuntime implements EngineRuntime {
 			}
 		};
 
-		const requestedModel = options?.model && (!this.supportedModels.size || this.supportedModels.has(options.model))
-			? options.model
-			: this.threadModelOverrides.get(session.id);
+		const requestedModel = this.requestedModel(options) ?? this.threadModelOverrides.get(session.id);
 		try {
 			await runSingleTurn(requestedModel, mappedEffort);
 		} catch (error) {
@@ -323,6 +492,176 @@ export class CodexRuntime implements EngineRuntime {
 				return;
 			}
 			throw error;
+		}
+	}
+
+	async getRuntimeCapabilities(cwd: string, _session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+		const cached = this.capabilitiesCache.get(cwd);
+		if (cached && cached.expiresAt > Date.now()) {
+			return cached.value;
+		}
+		await this.ensureReady();
+		const models: Array<{ id: string; name: string; description?: string }> = [];
+		try {
+			const response = await withTimeout(this.client.request<{ data?: Array<{ id?: string; model?: string; displayName?: string; description?: string }> }>('model/list', {}), 4000);
+			for (const item of response?.data ?? []) {
+				const id = item.model || item.id;
+				if (!id) {
+					continue;
+				}
+				const name = item.displayName || item.model || item.id || id;
+				models.push(item.description ? { id, name, description: item.description } : { id, name });
+			}
+		} catch { /* model/list is optional; keep going with an empty model list. */ }
+		const commands: Array<{ name: string; description?: string }> = [];
+		const seen = new Set<string>();
+		try {
+			const response = await withTimeout(this.client.request<unknown>('skills/list', { cwds: [cwd] }), 4000);
+			for (const entry of extractSkillEntries(response)) {
+				const raw = entry.name ?? entry.skill ?? entry.id ?? (entry.path ? path.basename(entry.path).replace(/\.(md|json)$/i, '') : '');
+				const name = raw.replace(/^\/+/, '').trim();
+				if (name && !seen.has(name)) {
+					seen.add(name);
+					commands.push(entry.description ? { name, description: entry.description } : { name });
+				}
+			}
+		} catch { /* skills/list is optional; keep an empty command list. */ }
+		const value: EngineRuntimeCapabilities = { models, commands };
+		this.capabilitiesCache.set(cwd, { value, expiresAt: Date.now() + 30000 });
+		return value;
+	}
+
+	async executeCommand(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean> {
+		if (token.isCancellationRequested) {
+			return true;
+		}
+		switch (command.replace(/^\/+/, '').trim().toLowerCase()) {
+			case 'compact':
+				return this.executeCompact(session, stream, token);
+			case 'review':
+				return this.executeReview(session, argsText, stream, token);
+			case 'fork':
+				return this.executeFork(session, stream, token);
+			case 'status':
+			case 'mcp':
+				return this.executeStatus(session, stream, options);
+			default:
+				return false;
+		}
+	}
+
+	private async materializeForCommand(session: NativeSession): Promise<void> {
+		await this.ensureReady();
+		if (session.unmaterialized || session.provisional) {
+			await this.prepareSession(session);
+		}
+	}
+
+	private async executeCompact(session: NativeSession, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<boolean> {
+		try {
+			await this.materializeForCommand(session);
+			if (token.isCancellationRequested) {
+				return true;
+			}
+			await this.client.request('thread/compact/start', { threadId: session.id });
+			stream.markdown(`**${vscode.l10n.t('Compaction started')}**\n\n${vscode.l10n.t('Codex will summarize the conversation history for thread `{0}`.', session.id)}`);
+			return true;
+		} catch (error) {
+			stream.markdown(`**${vscode.l10n.t('Compaction unavailable')}**\n\n${vscode.l10n.t('Codex could not start compaction: {0}', error instanceof Error ? error.message : String(error))}`);
+			return false;
+		}
+	}
+
+	private async executeReview(session: NativeSession, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<boolean> {
+		const instructions = argsText.trim();
+		try {
+			await this.materializeForCommand(session);
+			if (token.isCancellationRequested) {
+				return true;
+			}
+			const result = await this.client.request<Record<string, unknown>>('review/start', {
+				threadId: session.id,
+				target: instructions ? { type: 'custom', instructions } : { type: 'uncommittedChanges' },
+			});
+			const text = extractReviewText(result);
+			stream.markdown(`**${vscode.l10n.t('Codex review')}**\n\n${text ?? vscode.l10n.t('Codex started the review.')}`);
+			return true;
+		} catch (error) {
+			if (isUnsupportedMethod(error)) {
+				return false;
+			}
+			stream.markdown(`**${vscode.l10n.t('Review unavailable')}**\n\n${vscode.l10n.t('Codex could not start the review: {0}', error instanceof Error ? error.message : String(error))}`);
+			return true;
+		}
+	}
+
+	private async executeFork(session: NativeSession, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<boolean> {
+		if (session.provisional) {
+			stream.markdown(vscode.l10n.t('This Codex thread has not started yet, so there is nothing to fork. Send a message first.'));
+			return true;
+		}
+		try {
+			await this.ensureReady();
+			if (token.isCancellationRequested) {
+				return true;
+			}
+			const result = await this.client.request<{ thread?: Thread; threadId?: string }>('thread/fork', { threadId: session.id, cwd: session.cwd });
+			const forkedId = result.thread?.id ?? result.threadId;
+			if (forkedId) {
+				this.loaded.add(forkedId);
+				if (result.thread) {
+					this.changed.fire([this.session(result.thread)]);
+				}
+				stream.markdown(vscode.l10n.t('Forked thread `{0}` from `{1}`.', forkedId, session.id));
+			} else {
+				stream.markdown(vscode.l10n.t('Codex forked the thread but did not report the new thread ID.'));
+			}
+			return true;
+		} catch (error) {
+			stream.markdown(vscode.l10n.t('Codex could not fork this thread: {0}', error instanceof Error ? error.message : String(error)));
+			return true;
+		}
+	}
+
+	private async executeStatus(session: NativeSession, stream: vscode.ChatResponseStream, options?: EngineSendOptions): Promise<boolean> {
+		const settings = this.sessionSettings.get(session.id);
+		const model = this.requestedModel(options) ?? settings?.model ?? this.defaultModel ?? vscode.l10n.t('Unknown');
+		const effort = options?.thinking ?? settings?.effort ?? vscode.l10n.t('Default');
+		const approval = this.approvalPolicy(options?.permissionMode ?? settings?.approvalPolicy);
+		const sandbox = this.sandboxMode(options?.sandboxMode) ?? settings?.sandbox ?? vscode.l10n.t('Codex default');
+		const webSearch = options?.webSearch ?? settings?.webSearch ?? 'enabled';
+		const mcpServers = await this.readMcpServerNames();
+		const rows: Array<[string, string]> = [
+			[vscode.l10n.t('Thread ID'), session.id],
+			[vscode.l10n.t('State'), session.provisional ? vscode.l10n.t('Provisional') : vscode.l10n.t('Started')],
+			[vscode.l10n.t('Model'), model],
+			[vscode.l10n.t('Reasoning effort'), effort],
+			[vscode.l10n.t('Approval policy'), approval],
+			[vscode.l10n.t('Sandbox mode'), sandbox],
+			[vscode.l10n.t('Web search'), webSearch],
+			[vscode.l10n.t('MCP servers'), mcpServers.length ? mcpServers.join(', ') : vscode.l10n.t('none configured')],
+		];
+		stream.markdown(`### ${vscode.l10n.t('Codex session status')}\n\n| ${vscode.l10n.t('Setting')} | ${vscode.l10n.t('Value')} |\n| --- | --- |\n`);
+		for (const [setting, value] of rows) {
+			stream.markdown(`| ${escapeTableCell(setting)} | ${escapeTableCell(value)} |\n`);
+		}
+		return true;
+	}
+
+	private async readMcpServerNames(): Promise<string[]> {
+		const configFile = path.join(this.codexHome || path.join(os.homedir(), '.codex'), 'config.toml');
+		try {
+			const toml = await fs.readFile(configFile, 'utf8');
+			const names = new Set<string>();
+			for (const match of toml.matchAll(/^\s*\[mcp_servers\.(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+))\]/gm)) {
+				const name = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+				if (name) {
+					names.add(name);
+				}
+			}
+			return [...names];
+		} catch {
+			return [];
 		}
 	}
 

@@ -18,6 +18,7 @@ import {
 	ADE_CONTROL_EXECUTE_COMMAND_ID,
 	ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID,
 	ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID,
+	ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID,
 	IAdeControlStatus,
 	IAdeProjectSummary,
 	IAdeRoleSyncSnapshot,
@@ -35,6 +36,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../../pla
 import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService, IWorkspaceFoldersChangeEvent, toWorkspaceFolder, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
+import { IAgentHostEnablementService } from '../../../../../platform/agentHost/common/agentHostEnablementService.js';
 import { API_OPEN_DIFF_EDITOR_COMMAND_ID } from '../../../../browser/parts/editor/editorCommands.js';
 import { EditorInput } from '../../../../common/editor/editorInput.js';
 import { IViewContainerModel, IViewDescriptorService, ViewContainer, ViewContainerLocation } from '../../../../common/views.js';
@@ -48,6 +50,7 @@ import { IWorkingCopyFileService } from '../../../../services/workingCopy/common
 import { IWorkspaceEditingService } from '../../../../services/workspaces/common/workspaceEditing.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { ChatSendResult, IChatService } from '../../../chat/common/chatService/chatService.js';
+import { IChatSessionsService } from '../../../chat/common/chatSessionsService.js';
 import { IProjectNavigationService, ProjectNavigationService } from '../../../files/browser/projectNavigationService.js';
 import { ISCMProvider, ISCMRepository, ISCMResource, ISCMResourceGroup, ISCMService } from '../../../scm/common/scm.js';
 import { IOverlayWebview, IWebviewService } from '../../../webview/browser/webview.js';
@@ -60,6 +63,7 @@ import { AdeChangesView, findProjectScmRepository, openScmResourceInAde } from '
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
 import { AdeProjectsDragAndDrop, AdeProjectsView, AdeTreeItem } from '../../browser/adeProjectsView.js';
+import { ChatEditorInput } from '../../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { AdeExtensionWebviewEditorInput, AdeExtensionWebviewEditorPane, AdeSessionEditorInput } from '../../browser/adeSessionEditor.js';
 import { IAdeEngineSession, IAdeSessionsService } from '../../browser/adeSessionsService.js';
 import { ADE_CHANGES_VIEW_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
@@ -1199,13 +1203,16 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			}
 		}());
 
+		h.instantiation.stub(IChatSessionsService, new class extends mock<IChatSessionsService>() { }());
+		h.instantiation.stub(IAgentHostEnablementService, new class extends mock<IAgentHostEnablementService>() { }());
+
 		const realEditors = store.add(h.instantiation.createInstance(AdeEditorService));
 		h.instantiation.stub(IAdeEditorService, realEditors);
 
 		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/gov-native') }, 'Native Gov', { role: 'governor' });
 		const wrk = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/wrk-native') }, 'Native Worker');
 
-		// 1. Opening Governor syncs rolePrompt before native open and binds the new native tab
+		// 1. Opening Governor syncs rolePrompt before opening and binds a unified ChatEditorInput tab
 		await realEditors.openAgent(gov.id);
 		const preOpenSnapshot = syncedSnapshots.find(s => s.activeAgentId === gov.id && s.agents.some(a => a.id === gov.id));
 		const govEntry = preOpenSnapshot?.agents.find(a => a.id === gov.id);
@@ -1215,12 +1222,15 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		const govSessionActive = realEditors.isSessionActive(gov.session!.resource);
 		const statusWhileGovActive = await h.control<IAdeControlStatus>('status');
 		const pulledSnapshot = h.instantiation.invokeFunction(CommandsRegistry.getCommand(ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID)!.handler) as unknown as IAdeRoleSyncSnapshot;
+		const editorsAfterGovOpen = editors.length;
 
-		// 2. Re-opening Governor reuses existing native tab without calling claude-vscode.editor.open again
+		// 2. Re-opening Governor reuses the existing unified tab without ever opening a 3rd-party extension webview
 		await realEditors.openAgent(gov.id);
 		const claudeCountAfterReopen = claudeOpenCount;
+		const editorsAfterReopen = editors.length;
+		const activeAfterReopen = activeEditor;
 
-		// 3. Opening Worker opens a separate native tab, keeps rolePrompt undefined, and switching tab directly syncs selectedAgentId
+		// 3. Opening Worker opens a distinct unified tab, keeps rolePrompt undefined, and switching tab directly syncs selectedAgentId
 		await realEditors.openAgent(wrk.id);
 		const wrkTab = activeEditor!;
 		const wrkTabBoundId = realEditors.getAgentIdForEditor(wrkTab);
@@ -1228,8 +1238,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		onActiveChange.fire();
 		const selectedAfterSwitchBack = h.projects.selectedAgentId;
 
-		// 4. closeAgents closes the bound native tab and clears the mapping
+		// 4. closeAgents closes the bound unified tab and clears the mapping
 		await realEditors.closeAgents([gov]);
+		const remainingEditors = editors.map(editor => editor === wrkTab ? 'worker' : 'other');
+		await realEditors.closeAgents([wrk]);
 
 		assert.deepStrictEqual({
 			govEntryRole: govEntry?.rank,
@@ -1237,6 +1249,8 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			govHasRolePrompt: Boolean(govEntry?.rolePrompt?.includes('[Aexus Orchestrated Role Context]') && govEntry.rolePrompt.includes('Role: Governor')),
 			wrkEntryOrchestrated: wrkEntry?.isOrchestrated,
 			wrkEntryPrompt: wrkEntry?.rolePrompt,
+			govTabIsChatEditor: govTab instanceof ChatEditorInput,
+			govTabSessionResource: govTab instanceof ChatEditorInput ? govTab.sessionResource?.toString() : undefined,
 			govTabBoundId,
 			govSessionActive,
 			statusKind: statusWhileGovActive.activeEditor?.kind,
@@ -1244,31 +1258,74 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			statusRank: statusWhileGovActive.activeEditor?.rank,
 			pulledActiveId: pulledSnapshot.activeAgentId,
 			claudeCountAfterReopen,
+			reopenReusedSameTab: activeAfterReopen === govTab && editorsAfterReopen === editorsAfterGovOpen,
+			wrkTabIsChatEditor: wrkTab instanceof ChatEditorInput,
+			wrkTabSessionResource: wrkTab instanceof ChatEditorInput ? wrkTab.sessionResource?.toString() : undefined,
 			wrkTabBoundId,
 			tabsDistinct: govTab !== wrkTab,
 			selectedAfterSwitchBack,
 			govTabDisposedOnClose: govTab.isDisposed(),
 			govBoundClearedAfterClose: realEditors.getAgentIdForEditor(govTab),
-			remainingEditorsCount: editors.length,
+			remainingEditors,
+			wrkTabDisposedOnClose: wrkTab.isDisposed(),
+			editorsAfterWorkerClose: editors.length,
 		}, {
 			govEntryRole: 'governor',
 			govEntryOrchestrated: true,
 			govHasRolePrompt: true,
 			wrkEntryOrchestrated: false,
 			wrkEntryPrompt: undefined,
+			govTabIsChatEditor: true,
+			govTabSessionResource: 'aexus-claude:/gov-native',
 			govTabBoundId: gov.id,
 			govSessionActive: true,
 			statusKind: 'session',
 			statusAgentId: gov.id,
 			statusRank: 'governor',
 			pulledActiveId: gov.id,
-			claudeCountAfterReopen: 1,
+			claudeCountAfterReopen: 0,
+			reopenReusedSameTab: true,
+			wrkTabIsChatEditor: true,
+			wrkTabSessionResource: 'aexus-claude:/wrk-native',
 			wrkTabBoundId: wrk.id,
 			tabsDistinct: true,
 			selectedAfterSwitchBack: gov.id,
 			govTabDisposedOnClose: true,
 			govBoundClearedAfterClose: undefined,
-			remainingEditorsCount: 1,
+			remainingEditors: ['worker'],
+			wrkTabDisposedOnClose: true,
+			editorsAfterWorkerClose: 0,
+		});
+	});
+
+	test('syncs session preferences into Secretary engine and agent model/thinking while exposing them on the role sync snapshot', async () => {
+		const h = createHarness();
+		h.modes.setMode('ade');
+		const agent = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/prefs-native') }, 'Prefs Agent');
+		const syncPreferences = CommandsRegistry.getCommand(ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID)!.handler;
+
+		await h.instantiation.invokeFunction(syncPreferences, { resource: URI.parse('aexus-secretary:/main'), engineId: 'aexus-codex' });
+		await h.instantiation.invokeFunction(syncPreferences, { resource: agent.session!.resource, model: 'claude-opus-4', thinking: 'high' });
+
+		const secretary = h.projects.secretary;
+		const updatedAgent = h.projects.getAgent(agent.id);
+		const snapshot = await h.instantiation.invokeFunction(CommandsRegistry.getCommand(ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID)!.handler) as unknown as IAdeRoleSyncSnapshot;
+		const entry = snapshot.agents.find(item => item.id === agent.id);
+
+		assert.deepStrictEqual({
+			secretaryEngineId: secretary.session?.engineId,
+			secretaryResource: secretary.session?.resource.toString(),
+			agentPreferredModel: updatedAgent?.preferredModel,
+			agentPreferredThinking: updatedAgent?.preferredThinking,
+			snapshotPreferredModel: entry?.preferredModel,
+			snapshotPreferredThinking: entry?.preferredThinking,
+		}, {
+			secretaryEngineId: 'aexus-codex',
+			secretaryResource: 'aexus-secretary:/main',
+			agentPreferredModel: 'claude-opus-4',
+			agentPreferredThinking: 'high',
+			snapshotPreferredModel: 'claude-opus-4',
+			snapshotPreferredThinking: 'high',
 		});
 	});
 

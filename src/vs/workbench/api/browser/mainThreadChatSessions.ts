@@ -710,7 +710,7 @@ export class MainThreadChatSessions extends Disposable implements MainThreadChat
 			this._logService.trace(`[MainThreadChatSessions] onRequestNotifyExtension received: sessionType '${sessionType}', handle ${handle}, ${updates.size} update(s)`);
 			if (handle !== undefined) {
 				this.notifyOptionsChange(handle, sessionResource, updates);
-			} else {
+			} else if (this._sessionTypeToHandle.size > 0) {
 				this._logService.warn(`[MainThreadChatSessions] Cannot notify option change for sessionType '${sessionType}': no provider registered. Registered types: [${Array.from(this._sessionTypeToHandle.keys()).join(', ')}]`);
 			}
 		}));

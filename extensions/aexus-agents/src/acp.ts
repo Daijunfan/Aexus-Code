@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
-import { capture, EngineRuntime, EngineSendOptions, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 
@@ -41,6 +41,23 @@ interface AcpSessionUpdate {
 	text?: string;
 	title?: string | null;
 	updatedAt?: string | null;
+	availableCommands?: Array<{ name?: string; description?: string }>;
+}
+
+interface AcpSessionSetupResult {
+	sessionId: string;
+	models?: { availableModels?: Array<{ modelId?: string; id?: string; name?: string; description?: string }>; currentModelId?: string };
+	modes?: { availableModes?: Array<{ id?: string; modeId?: string; name?: string; description?: string }>; currentModeId?: string };
+	configOptions?: Array<{
+		id?: string;
+		name?: string;
+		options?: Array<{
+			value?: string;
+			name?: string;
+			description?: string;
+			options?: Array<{ value?: string; name?: string; description?: string }>;
+		}>;
+	}>;
 }
 
 interface AcpPermissionOption {
@@ -86,11 +103,83 @@ export abstract class AcpRuntime implements EngineRuntime {
 	protected readonly knownSessions = new Map<string, NativeSession>();
 	protected readonly changed = new vscode.EventEmitter<readonly NativeSession[]>();
 	readonly onDidChangeSessions = this.changed.event;
+	protected cachedModels: Array<{ id: string; name: string; description?: string }> = [];
+	protected cachedModes: Array<{ id: string; name: string; description?: string }> = [];
+	protected cachedCommands: Array<{ name: string; description?: string }> = [];
+	protected cachedConfigOptionIds = new Set<string>();
 
 	constructor(
 		protected readonly executable: string,
 		private readonly args: readonly string[],
 	) { }
+
+	protected ingestSessionSetup(setup: Partial<AcpSessionSetupResult> | undefined): void {
+		if (!setup) {
+			return;
+		}
+		if (Array.isArray(setup.models?.availableModels)) {
+			const seen = new Set(this.cachedModels.map(m => m.id));
+			for (const m of setup.models.availableModels) {
+				const id = (m.modelId ?? m.id ?? '').trim();
+				if (id && !seen.has(id)) {
+					seen.add(id);
+					this.cachedModels.push({ id, name: m.name?.trim() || id, description: m.description });
+				}
+			}
+		}
+		if (Array.isArray(setup.modes?.availableModes)) {
+			const seen = new Set(this.cachedModes.map(m => m.id));
+			for (const m of setup.modes.availableModes) {
+				const id = (m.id ?? m.modeId ?? '').trim();
+				if (id && !seen.has(id)) {
+					seen.add(id);
+					this.cachedModes.push({ id, name: m.name?.trim() || id, description: m.description });
+				}
+			}
+		}
+		if (Array.isArray(setup.configOptions)) {
+			for (const opt of setup.configOptions) {
+				const optId = (opt.id ?? '').trim();
+				if (optId) {
+					this.cachedConfigOptionIds.add(optId);
+				}
+				const flatOptions = (opt.options ?? []).flatMap(entry => Array.isArray(entry.options) ? entry.options : [entry]);
+				if (optId === 'model') {
+					const seen = new Set(this.cachedModels.map(m => m.id));
+					for (const item of flatOptions) {
+						const val = (item.value ?? '').trim();
+						if (val && !seen.has(val)) {
+							seen.add(val);
+							this.cachedModels.push({ id: val, name: item.name?.trim() || val, description: item.description });
+						}
+					}
+				} else if (optId === 'mode') {
+					const seen = new Set(this.cachedModes.map(m => m.id));
+					for (const item of flatOptions) {
+						const val = (item.value ?? '').trim();
+						if (val && !seen.has(val)) {
+							seen.add(val);
+							this.cachedModes.push({ id: val, name: item.name?.trim() || val, description: item.description });
+						}
+					}
+				}
+			}
+		}
+	}
+
+	protected ingestAvailableCommands(commands: Array<{ name?: string; description?: string }> | undefined): void {
+		if (!Array.isArray(commands)) {
+			return;
+		}
+		const seen = new Set(this.cachedCommands.map(c => c.name.toLowerCase()));
+		for (const cmd of commands) {
+			const name = (cmd.name ?? '').trim().replace(/^\//, '');
+			if (name && !seen.has(name.toLowerCase())) {
+				seen.add(name.toLowerCase());
+				this.cachedCommands.push({ name, description: cmd.description });
+			}
+		}
+	}
 
 	protected async buildSpawnEnv(): Promise<NodeJS.ProcessEnv | undefined> {
 		return undefined;
@@ -108,6 +197,15 @@ export abstract class AcpRuntime implements EngineRuntime {
 			const env = await this.buildSpawnEnv();
 			const client = new JsonLineClient(this.executable, [...this.args], undefined, env);
 			this.client = client;
+			client.onPacket(packet => {
+				if (packet.method === 'session/update') {
+					const params = packet.params ?? {};
+					const update = (params.update ?? params) as AcpSessionUpdate;
+					if ((update.sessionUpdate ?? update.type) === 'available_commands_update') {
+						this.ingestAvailableCommands(update.availableCommands);
+					}
+				}
+			});
 			const result = await client.request<AcpInitializeResult>('initialize', {
 				protocolVersion: 1,
 				clientInfo: { name: 'aexus-code', title: 'Aexus Code', version: '0.1.0' },
@@ -152,8 +250,9 @@ export abstract class AcpRuntime implements EngineRuntime {
 		try {
 			const created = await withTimeout((async () => {
 				const client = await this.ensureClient();
-				return client.request<{ sessionId: string }>('session/new', { cwd, mcpServers: [] });
+				return client.request<AcpSessionSetupResult>('session/new', { cwd, mcpServers: [] });
 			})(), 15000);
+			this.ingestSessionSetup(created);
 			const session: NativeSession = {
 				id: created.sessionId,
 				cwd,
@@ -184,7 +283,8 @@ export abstract class AcpRuntime implements EngineRuntime {
 			return;
 		}
 		const client = await this.ensureClient();
-		const created = await client.request<{ sessionId: string }>('session/new', { cwd: session.cwd, mcpServers: [] });
+		const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
+		this.ingestSessionSetup(created);
 		session.id = created.sessionId;
 		session.unmaterialized = false;
 		this.openSessions.add(session.id);
@@ -368,18 +468,107 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 	}
 
+	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+		if (this.cachedModels.length === 0 && this.cachedModes.length === 0 && this.cachedCommands.length === 0 && session && !session.unmaterialized) {
+			try {
+				const client = await withTimeout(this.ensureClient(), 5000);
+				if (this.openSessions.has(session.id)) {
+					// Already open; setup was ingested.
+				} else if (cwd) {
+					await withTimeout(this.ensureSessionOpen(client, session), 5000).catch(() => { });
+				}
+			} catch { /* Non-fatal capability probe. */ }
+		}
+		return {
+			models: this.cachedModels,
+			modes: this.cachedModes,
+			commands: this.cachedCommands,
+		};
+	}
+
+	async executeCommand(session: NativeSession, command: string, _argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean> {
+		const cmd = command.trim().toLowerCase();
+		if (cmd === 'mcp') {
+			const configCandidates = [
+				path.join(session.cwd, '.mcp.json'),
+				path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json'),
+				path.join(os.homedir(), '.dsh', 'mcp.json'),
+				path.join(os.homedir(), '.cline', 'data', 'settings', 'cline_mcp_settings.json'),
+			];
+			const serverNames = new Set<string>();
+			for (const candidate of configCandidates) {
+				try {
+					const raw = await fs.readFile(candidate, 'utf8');
+					const parsed = JSON.parse(raw) as { mcpServers?: Record<string, unknown>; servers?: Record<string, unknown> };
+					for (const name of Object.keys(parsed.mcpServers ?? parsed.servers ?? {})) {
+						serverNames.add(name);
+					}
+				} catch { /* Ignore missing config. */ }
+			}
+			const listText = serverNames.size > 0
+				? [...serverNames].map(s => `- \`${s}\``).join('\n')
+				: '- *(No MCP servers configured)*';
+			stream.markdown(`### ${this.name} — MCP Servers\n\n${listText}\n`);
+			return true;
+		}
+		if (cmd === 'history' && this.id === 'aexus-cline') {
+			const items = await this.list(token).catch(() => [] as NativeSession[]);
+			const recent = items.slice(0, 10);
+			const lines = recent.length > 0
+				? recent.map(item => `- **${item.label}** (\`${item.id.slice(0, 8)}\` · \`${item.cwd}\`)`).join('\n')
+				: '- *(No recorded Cline tasks yet)*';
+			stream.markdown(`### Cline Recent Tasks\n\n${lines}\n\n- **Active Mode**: \`${options?.mode || 'act'}\`\n- **Active Model**: \`${options?.model || 'default'}\`\n`);
+			return true;
+		}
+		return false;
+	}
+
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		const client = await this.ensureClient();
 		await this.ensureSessionOpen(client, session);
-		if (options?.model) {
+		if (options?.model && options.model !== 'default') {
 			await client.request('session/set_model', { sessionId: session.id, modelId: options.model }).catch(() => { });
+			if (this.cachedConfigOptionIds.has('model')) {
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: options.model }).catch(() => { });
+			}
 		}
+		if (options?.mode && options.mode !== 'default') {
+			await client.request('session/set_mode', { sessionId: session.id, modeId: options.mode }).catch(() => { });
+			if (this.cachedConfigOptionIds.has('mode')) {
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: options.mode }).catch(() => { });
+			}
+		}
+		if (options?.thinking && options.thinking !== 'default') {
+			const normalizedThinking = options.thinking === 'none' ? 'off' : options.thinking === 'xhigh' || options.thinking === 'extra-high' ? 'high' : options.thinking;
+			if (this.cachedConfigOptionIds.has('thought_level')) {
+				const agyLevel = normalizedThinking === 'off' ? 'low' : (normalizedThinking === 'max' ? 'high' : normalizedThinking);
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'thought_level', value: agyLevel }).catch(() => { });
+			}
+			if (this.cachedConfigOptionIds.has('reasoning_effort')) {
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'reasoning_effort', value: normalizedThinking }).catch(() => { });
+			}
+		}
+		const autoApprove = Boolean(
+			options?.automatedEngineering
+			|| options?.mode === 'yolo'
+			|| options?.mode === 'auto'
+			|| options?.permissionMode === 'bypassPermissions'
+			|| options?.permissionMode === 'danger-full-access'
+		);
 		this.knownSessions.set(session.id, session);
 		const listener = client.onPacket(packet => {
 			const params = packet.params ?? {};
 			if (packet.id !== undefined && packet.method) {
 				const targetSessionId = typeof params.sessionId === 'string' ? params.sessionId : undefined;
 				if (!targetSessionId || targetSessionId === session.id) {
+					if (packet.method === 'session/request_permission' && autoApprove) {
+						const permOpts = Array.isArray(params.options) ? (params.options as AcpPermissionOption[]) : [];
+						const allowOpt = permOpts.find(opt => opt.kind === 'allow_once') ?? permOpts.find(opt => opt.kind === 'allow_always');
+						if (allowOpt) {
+							client.write({ jsonrpc: '2.0', id: packet.id, result: { outcome: { outcome: 'selected', optionId: allowOpt.optionId } } });
+							return;
+						}
+					}
 					void this.handleServerRequest(client, packet, session, token).catch(() => { });
 				}
 				return;
@@ -392,8 +581,16 @@ export abstract class AcpRuntime implements EngineRuntime {
 			if (!token.isCancellationRequested && kind === 'agent_message_chunk') {
 				const chunk = extractAcpText(update);
 				if (chunk) { stream.markdown(chunk); }
-			} else if (!token.isCancellationRequested && kind === 'tool_call') {
-				stream.progress((typeof update.title === 'string' && update.title.trim()) ? update.title : vscode.l10n.t('{0} is working…', this.name));
+			} else if (!token.isCancellationRequested && (kind === 'agent_thought_chunk' || kind === 'thought_chunk')) {
+				const thought = extractAcpText(update);
+				if (thought) { emitThinkingProgress(stream, thought, `${this.id}-thinking`); }
+			} else if (!token.isCancellationRequested && (kind === 'tool_call' || kind === 'tool_call_update')) {
+				const toolTitle = typeof update.title === 'string' && update.title.trim() ? update.title.trim() : undefined;
+				if (toolTitle || kind === 'tool_call') {
+					stream.progress(toolTitle ?? vscode.l10n.t('{0} is working…', this.name));
+				}
+			} else if (kind === 'available_commands_update') {
+				this.ingestAvailableCommands(update.availableCommands);
 			} else if (kind === 'session_info_update' && typeof update.title === 'string' && update.title.trim()) {
 				session.label = update.title.trim();
 				this.changed.fire([session]);
@@ -403,7 +600,27 @@ export abstract class AcpRuntime implements EngineRuntime {
 			try { client.write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } }); } catch { /* Connection may already be closed. */ }
 		});
 		try {
-			await client.request('session/prompt', { sessionId: session.id, prompt: [{ type: 'text', text }] });
+			const promptParts: Array<Record<string, unknown>> = [];
+			if (options?.attachments?.length) {
+				for (const att of options.attachments) {
+					if (att.kind === 'image') {
+						try {
+							const buf = await fs.readFile(att.filePath);
+							promptParts.push({
+								type: 'image',
+								mimeType: att.mimeType || 'image/png',
+								data: buf.toString('base64'),
+							});
+						} catch { /* Ignore unreadable attachment. */ }
+					}
+				}
+			}
+			let finalPromptText = text;
+			if (this.id === 'aexus-cline' && options?.mode === 'plan' && !this.cachedModes.some(m => m.id === 'plan')) {
+				finalPromptText = `[Mode: Plan Mode — Analyze the codebase and present a clear step-by-step plan without modifying files until confirmed.]\n\n${text}`;
+			}
+			promptParts.push({ type: 'text', text: finalPromptText });
+			await client.request('session/prompt', { sessionId: session.id, prompt: promptParts });
 			session.provisional = false;
 		} finally {
 			listener.dispose();

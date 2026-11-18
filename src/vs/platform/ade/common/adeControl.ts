@@ -8,6 +8,8 @@ export const ADE_CONTROL_EXECUTE_COMMAND_ID = 'aexus.ade.control.execute';
 export const ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID = 'aexus.ade.resolvePromptContext';
 export const ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID = 'aexus.ade.getRoleSyncSnapshot';
 export const ADE_BIND_NATIVE_SESSION_COMMAND_ID = 'aexus.ade.bindNativeSession';
+export const ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID = 'aexus.ade.syncSessionPreferences';
+export const ADE_SET_SESSION_GOAL_BANNER_COMMAND_ID = 'aexus.ade.setSessionGoalBanner';
 
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_SOCKET_NAME = 'ade-control.sock';
@@ -131,6 +133,8 @@ export interface IAdeRoleSyncAgentEntry {
 	readonly rank: AdeSessionRank;
 	readonly isOrchestrated: boolean;
 	readonly rolePrompt?: string;
+	readonly preferredModel?: string;
+	readonly preferredThinking?: string;
 }
 
 export interface IAdeRoleSyncSnapshot {

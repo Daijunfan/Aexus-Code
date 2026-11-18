@@ -5,13 +5,186 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as os from 'node:os';
+import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
-import { capture, EngineRuntime, EngineSendOptions, HistoryEntry, NativeSession, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, emitThinkingProgress, HistoryEntry, NativeSession, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
 
-interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number }
+interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
-interface KiloPart { id: string; type: string; text?: string; sessionID?: string }
+interface KiloPart { id: string; type: string; text?: string; sessionID?: string; tool?: string; state?: { status?: string; title?: string } }
 interface KiloMessage { info: { id: string; role: string; error?: { data?: { message?: string } } }; parts: KiloPart[] }
+interface KiloModelInfo { id: string; name: string; description?: string }
+interface KiloModeInfo { id: string; name: string; description?: string }
+interface KiloCommandInfo { name: string; description?: string }
+interface KiloModelSelection { providerID: string; modelID: string }
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+	return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function tableCell(value: string): string {
+	return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+function providerEntries(value: unknown): Array<{ id: string; provider: Record<string, unknown> }> {
+	const container = Array.isArray(value) ? value : (asRecord(value)?.providers ?? value);
+	const entries: Array<{ id: string; provider: Record<string, unknown> }> = [];
+	if (Array.isArray(container)) {
+		for (const item of container) {
+			const provider = asRecord(item);
+			const id = stringValue(provider?.id) ?? stringValue(provider?.name);
+			if (provider && id) {
+				entries.push({ id, provider });
+			}
+		}
+		return entries;
+	}
+	const record = asRecord(container);
+	if (record) {
+		for (const [id, item] of Object.entries(record)) {
+			const provider = asRecord(item);
+			if (provider) {
+				entries.push({ id, provider });
+			}
+		}
+	}
+	return entries;
+}
+
+function extractProviderModels(value: unknown): KiloModelInfo[] {
+	const models: KiloModelInfo[] = [];
+	const seen = new Set<string>();
+	for (const { id: providerID, provider } of providerEntries(value)) {
+		const rawModels = provider.models;
+		const addModel = (modelID: string, raw: unknown): void => {
+			const id = `${providerID}/${modelID}`;
+			if (seen.has(id)) {
+				return;
+			}
+			seen.add(id);
+			const record = asRecord(raw);
+			models.push({
+				id,
+				name: stringValue(record?.name) ?? modelID,
+				description: stringValue(record?.description),
+			});
+		};
+		if (Array.isArray(rawModels)) {
+			for (const item of rawModels) {
+				const record = asRecord(item);
+				const modelID = stringValue(record?.id) ?? stringValue(record?.name);
+				if (modelID) {
+					addModel(modelID, record);
+				}
+			}
+		} else {
+			const record = asRecord(rawModels);
+			if (record) {
+				for (const [modelID, item] of Object.entries(record)) {
+					addModel(modelID, item);
+				}
+			}
+		}
+	}
+	return models;
+}
+
+function extractModes(value: unknown): KiloModeInfo[] {
+	const container = asRecord(value)?.agents ?? value;
+	const modes: KiloModeInfo[] = [];
+	const seen = new Set<string>();
+	const add = (id: string, record: Record<string, unknown> | undefined): void => {
+		if (!id || seen.has(id)) {
+			return;
+		}
+		if (record?.hidden === true || record?.disable === true || stringValue(record?.mode) === 'subagent') {
+			return;
+		}
+		seen.add(id);
+		modes.push({ id, name: stringValue(record?.name) ?? id, description: stringValue(record?.description) });
+	};
+	if (Array.isArray(container)) {
+		for (const item of container) {
+			const record = asRecord(item);
+			add(stringValue(record?.id) ?? stringValue(record?.name) ?? '', record);
+		}
+	} else {
+		const record = asRecord(container);
+		if (record) {
+			for (const [id, item] of Object.entries(record)) {
+				add(id, asRecord(item));
+			}
+		}
+	}
+	return modes;
+}
+
+function extractCommands(value: unknown): KiloCommandInfo[] {
+	const container = Array.isArray(value) ? value : (asRecord(value)?.commands ?? value);
+	const commands: KiloCommandInfo[] = [];
+	const seen = new Set<string>();
+	const add = (name: string, description?: string): void => {
+		if (!name || seen.has(name)) {
+			return;
+		}
+		seen.add(name);
+		commands.push({ name, description });
+	};
+	if (Array.isArray(container)) {
+		for (const item of container) {
+			if (typeof item === 'string') {
+				add(item);
+				continue;
+			}
+			const record = asRecord(item);
+			add(stringValue(record?.name) ?? stringValue(record?.id) ?? '', stringValue(record?.description));
+		}
+	} else {
+		const record = asRecord(container);
+		if (record) {
+			for (const [name, item] of Object.entries(record)) {
+				add(name, stringValue(asRecord(item)?.description));
+			}
+		}
+	}
+	return commands;
+}
+
+function extractMcpServers(value: unknown): Array<{ name: string; status: string; detail?: string }> {
+	const container = Array.isArray(value) ? value : (asRecord(value)?.servers ?? value);
+	const servers: Array<{ name: string; status: string; detail?: string }> = [];
+	const push = (name: string, item: unknown): void => {
+		if (!name) {
+			return;
+		}
+		if (typeof item === 'string') {
+			servers.push({ name, status: item });
+			return;
+		}
+		const record = asRecord(item);
+		const status = stringValue(record?.status) ?? (record?.enabled === false ? 'disabled' : undefined) ?? 'unknown';
+		const detail = stringValue(record?.url) ?? stringValue(record?.command) ?? stringValue(record?.type);
+		servers.push({ name, status, detail });
+	};
+	if (Array.isArray(container)) {
+		for (const item of container) {
+			const record = asRecord(item);
+			push(stringValue(record?.name) ?? stringValue(record?.id) ?? '', item);
+		}
+	} else {
+		const record = asRecord(container);
+		if (record) {
+			for (const [name, item] of Object.entries(record)) {
+				push(name, item);
+			}
+		}
+	}
+	return servers;
+}
 interface KiloEventData {
 	id?: string;
 	sessionID?: string;
@@ -38,8 +211,285 @@ abstract class SharedServerRuntime implements EngineRuntime {
 	private readonly changed = new vscode.EventEmitter<readonly NativeSession[]>();
 	readonly onDidChangeSessions = this.changed.event;
 	protected readonly knownSessions = new Map<string, NativeSession>();
+	private readonly capabilityCache = new Map<string, { expiresAt: number; value: EngineRuntimeCapabilities }>();
+	private readonly capabilityPending = new Map<string, Promise<EngineRuntimeCapabilities>>();
 
 	constructor(protected readonly executable: string) { }
+
+	private async tryRequest<T>(route: string, cwd: string, timeoutMs = 4000): Promise<T | undefined> {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		try {
+			return await this.request<T>(route, cwd, 'GET', undefined, controller.signal);
+		} catch {
+			return undefined;
+		} finally {
+			clearTimeout(timer);
+			if (!controller.signal.aborted) {
+				controller.abort();
+			}
+		}
+	}
+
+	private async serverInfo(cwd: string): Promise<EngineRuntimeCapabilities> {
+		const cached = this.capabilityCache.get(cwd);
+		if (cached && cached.expiresAt > Date.now()) {
+			return cached.value;
+		}
+		const pending = this.capabilityPending.get(cwd);
+		if (pending) {
+			return pending;
+		}
+		const load = (async (): Promise<EngineRuntimeCapabilities> => {
+			const [providers, agents, commands] = await Promise.all([
+				this.tryRequest<unknown>('/config/providers', cwd),
+				this.tryRequest<unknown>('/agent', cwd),
+				this.tryRequest<unknown>('/command', cwd),
+			]);
+			const value: EngineRuntimeCapabilities = {
+				models: extractProviderModels(providers),
+				modes: extractModes(agents),
+				commands: extractCommands(commands),
+			};
+			this.capabilityCache.set(cwd, { expiresAt: Date.now() + 15000, value });
+			return value;
+		})();
+		this.capabilityPending.set(cwd, load);
+		try {
+			return await load;
+		} finally {
+			this.capabilityPending.delete(cwd);
+		}
+	}
+
+	async getRuntimeCapabilities(cwd: string, _session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+		return this.serverInfo(cwd);
+	}
+
+	private async resolveModel(requested: string | undefined, cwd: string): Promise<KiloModelSelection | undefined> {
+		const value = requested?.trim();
+		if (!value || value === 'default') {
+			return undefined;
+		}
+		const separator = value.indexOf('/');
+		if (separator > 0 && separator < value.length - 1) {
+			return { providerID: value.slice(0, separator), modelID: value.slice(separator + 1) };
+		}
+		const info = await this.serverInfo(cwd);
+		const match = (info.models ?? []).find(model => model.id === value || model.id.endsWith(`/${value}`));
+		if (!match) {
+			return undefined;
+		}
+		const index = match.id.indexOf('/');
+		return index > 0 ? { providerID: match.id.slice(0, index), modelID: match.id.slice(index + 1) } : undefined;
+	}
+
+	private async currentModel(cwd: string, requested: string | undefined): Promise<KiloModelSelection | undefined> {
+		const resolved = await this.resolveModel(requested, cwd);
+		if (resolved) {
+			return resolved;
+		}
+		const info = await this.serverInfo(cwd);
+		const first = info.models?.[0]?.id;
+		if (!first) {
+			return undefined;
+		}
+		const index = first.indexOf('/');
+		return index > 0 ? { providerID: first.slice(0, index), modelID: first.slice(index + 1) } : undefined;
+	}
+
+	private modeAliases(mode: string): string[] {
+		if (this.id === 'kilo') {
+			if (mode === 'architect') {
+				return ['architect', 'plan'];
+			}
+			if (mode === 'plan') {
+				return ['plan', 'architect'];
+			}
+		}
+		return [mode];
+	}
+
+	private async resolveMode(requested: string | undefined, cwd: string): Promise<string | undefined> {
+		const value = requested?.trim();
+		if (!value || value === 'default') {
+			return undefined;
+		}
+		const info = await this.serverInfo(cwd);
+		const available = (info.modes ?? []).map(mode => mode.id);
+		for (const alias of this.modeAliases(value.toLowerCase())) {
+			const match = available.find(id => id.toLowerCase() === alias);
+			if (match) {
+				return match;
+			}
+		}
+		return value;
+	}
+
+	private resolveVariant(thinking: string | undefined): string | undefined {
+		const value = thinking?.trim();
+		if (!value || value === 'default') {
+			return undefined;
+		}
+		return this.id === 'kilo' && value === 'off' ? 'none' : value;
+	}
+
+	private messageParts(text: string, attachments?: readonly EngineAttachment[]): object[] {
+		const parts: object[] = [{ type: 'text', text }];
+		for (const attachment of attachments ?? []) {
+			const isImage = attachment.kind === 'image' || Boolean(attachment.mimeType?.startsWith('image/'));
+			if (isImage) {
+				parts.push({ type: 'file', mime: attachment.mimeType || 'image/png', url: pathToFileURL(attachment.filePath).href });
+			} else if (attachment.rangeText) {
+				parts.push({ type: 'text', text: `${attachment.filePath}\n${attachment.rangeText}` });
+			} else {
+				parts.push({ type: 'file', mime: attachment.mimeType || 'text/plain', url: pathToFileURL(attachment.filePath).href });
+			}
+		}
+		return parts;
+	}
+
+	private reportToolProgress(stream: vscode.ChatResponseStream, part: KiloPart, seen: Set<string>): void {
+		if (!part.tool || !part.id) {
+			return;
+		}
+		const status = part.state?.status ?? 'running';
+		if (status !== 'running' && status !== 'pending') {
+			return;
+		}
+		const key = `${part.id}:${status}`;
+		if (seen.has(key)) {
+			return;
+		}
+		seen.add(key);
+		stream.progress(vscode.l10n.t('{0} is running {1}…', this.name, part.tool));
+	}
+
+	private async compactSession(session: NativeSession, stream: vscode.ChatResponseStream, options: EngineSendOptions | undefined, signal: AbortSignal): Promise<void> {
+		if (session.unmaterialized) {
+			stream.markdown(vscode.l10n.t('This session has no messages to compact yet.'));
+			return;
+		}
+		const messages = await this.request<KiloMessage[]>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'GET', undefined, signal).catch(() => [] as KiloMessage[]);
+		if (messages.length === 0) {
+			stream.markdown(vscode.l10n.t('This session has no messages to compact yet.'));
+			return;
+		}
+		const model = await this.currentModel(session.cwd, options?.model);
+		try {
+			await this.request(`/session/${encodeURIComponent(session.id)}/summarize`, session.cwd, 'POST', model ? { providerID: model.providerID, modelID: model.modelID } : {}, signal);
+			stream.markdown(vscode.l10n.t('Compacted the conversation to free up context.'));
+		} catch (error) {
+			if (signal.aborted) {
+				throw error;
+			}
+			const payload: Record<string, unknown> = { parts: [{ type: 'text', text: vscode.l10n.t('Summarize this conversation so far, keeping the decisions, open tasks, and important context.') }] };
+			if (model) {
+				payload.model = model;
+			}
+			await this.request(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payload, signal);
+			stream.markdown(vscode.l10n.t('Compacted the conversation to free up context.'));
+		}
+	}
+
+	private async undoSession(session: NativeSession, stream: vscode.ChatResponseStream, signal: AbortSignal): Promise<void> {
+		if (session.unmaterialized) {
+			stream.markdown(vscode.l10n.t('There is nothing to undo in this session yet.'));
+			return;
+		}
+		const messages = await this.request<KiloMessage[]>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'GET', undefined, signal);
+		const last = messages.at(-1);
+		if (!last) {
+			stream.markdown(vscode.l10n.t('There is nothing to undo in this session yet.'));
+			return;
+		}
+		await this.request(`/session/${encodeURIComponent(session.id)}/revert`, session.cwd, 'POST', { messageID: last.info.id }, signal);
+		stream.markdown(vscode.l10n.t('Reverted the last message ({0}).', last.info.id.slice(0, 8)));
+	}
+
+	private async showMcpServers(session: NativeSession, stream: vscode.ChatResponseStream, signal: AbortSignal): Promise<void> {
+		const servers = extractMcpServers(await this.request<unknown>('/mcp', session.cwd, 'GET', undefined, signal));
+		if (servers.length === 0) {
+			stream.markdown(vscode.l10n.t('No MCP servers are configured for this workspace.'));
+			return;
+		}
+		const header = `| ${vscode.l10n.t('Server')} | ${vscode.l10n.t('Status')} | ${vscode.l10n.t('Details')} |`;
+		const divider = '| --- | --- | --- |';
+		const rows = servers.map(server => `| ${tableCell(server.name)} | ${tableCell(server.status)} | ${tableCell(server.detail ?? '—')} |`);
+		stream.markdown([header, divider, ...rows].join('\n'));
+	}
+
+	private cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {
+		const controller = new AbortController();
+		const subscription = token.onCancellationRequested(() => controller.abort());
+		return { signal: controller.signal, dispose: () => subscription.dispose() };
+	}
+
+	async executeCommand(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean> {
+		const name = command.trim().replace(/^\//, '').toLowerCase();
+		const supported = ['compact', 'summarize', 'undo', 'redo', 'share', 'unshare', 'mcp'];
+		if (!supported.includes(name)) {
+			return false;
+		}
+		if (token.isCancellationRequested) {
+			return true;
+		}
+		const cancellation = this.cancellationSignal(token);
+		const sessionId = encodeURIComponent(session.id);
+		try {
+			switch (name) {
+				case 'compact':
+				case 'summarize': {
+					if (argsText.trim()) {
+						stream.markdown(vscode.l10n.t('Compaction ignores additional instructions; compacting the conversation now.'));
+					}
+					await this.compactSession(session, stream, options, cancellation.signal);
+					return true;
+				}
+				case 'undo': {
+					await this.undoSession(session, stream, cancellation.signal);
+					return true;
+				}
+				case 'redo': {
+					if (session.unmaterialized) {
+						stream.markdown(vscode.l10n.t('There is nothing to redo in this session yet.'));
+						return true;
+					}
+					await this.request(`/session/${sessionId}/unrevert`, session.cwd, 'POST', {}, cancellation.signal);
+					stream.markdown(vscode.l10n.t('Restored the most recently reverted messages.'));
+					return true;
+				}
+				case 'share': {
+					if (session.unmaterialized) {
+						stream.markdown(vscode.l10n.t('Send a message before sharing this session.'));
+						return true;
+					}
+					const shared = await this.request<KiloSession>(`/session/${sessionId}/share`, session.cwd, 'POST', {}, cancellation.signal);
+					const url = shared?.share?.url;
+					stream.markdown(url
+						? vscode.l10n.t('This session is shared at {0}', url)
+						: vscode.l10n.t('This session is now shared.'));
+					return true;
+				}
+				case 'unshare': {
+					if (session.unmaterialized) {
+						stream.markdown(vscode.l10n.t('This session is not shared.'));
+						return true;
+					}
+					await this.request(`/session/${sessionId}/share`, session.cwd, 'DELETE', undefined, cancellation.signal);
+					stream.markdown(vscode.l10n.t('Stopped sharing this session.'));
+					return true;
+				}
+				case 'mcp': {
+					await this.showMcpServers(session, stream, cancellation.signal);
+					return true;
+				}
+			}
+			return false;
+		} finally {
+			cancellation.dispose();
+		}
+	}
 
 	private getEndpoint(): Promise<string> {
 		if (!this.endpoint) {
@@ -215,6 +665,26 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		let streamed = false;
 		const parts = new Map<string, string>();
 		const roles = new Map<string, string>();
+		const reportedTools = new Set<string>();
+		const reasoningText = new Map<string, string>();
+		const emitReasoningDelta = (partId: string, delta: string): void => {
+			if (!partId) { return; }
+			reasoningText.set(partId, (reasoningText.get(partId) ?? '') + delta);
+			emitThinkingProgress(stream, delta, `${this.id}-thinking`);
+		};
+		const emitReasoningSnapshot = (partId: string, text: string): void => {
+			if (!partId) { return; }
+			const previous = reasoningText.get(partId) ?? '';
+			if (text.startsWith(previous)) {
+				reasoningText.set(partId, text);
+				if (text.length > previous.length) {
+					emitThinkingProgress(stream, text.slice(previous.length), `${this.id}-thinking`);
+				}
+			} else if (!previous.startsWith(text)) {
+				reasoningText.set(partId, text);
+				emitThinkingProgress(stream, text, `${this.id}-thinking`);
+			}
+		};
 		const reader = response.body.getReader();
 		const events = (async () => {
 			const decoder = new TextDecoder();
@@ -237,10 +707,22 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					}
 					if (!data || sessionId !== session.id) { continue; }
 					if (event.type === 'message.updated' && data.info?.role) { roles.set(data.info.id, data.info.role); }
-					if (event.type === 'message.part.updated' && data.part) { parts.set(data.part.id, data.part.type); }
-					if (event.type === 'message.part.delta' && data.field === 'text' && data.delta && roles.get(data.messageID!) === 'assistant' && parts.get(data.partID!) === 'text') {
-						streamed = true;
-						stream.markdown(data.delta);
+					if (event.type === 'message.part.updated' && data.part) {
+						parts.set(data.part.id, data.part.type);
+						if (data.part.type === 'tool') {
+							this.reportToolProgress(stream, data.part, reportedTools);
+						} else if (data.part.type === 'reasoning' && data.part.text) {
+							emitReasoningSnapshot(data.part.id, data.part.text);
+						}
+					}
+					if (event.type === 'message.part.delta' && data.field === 'text' && data.delta && roles.get(data.messageID!) === 'assistant') {
+						const partType = parts.get(data.partID!);
+						if (partType === 'text') {
+							streamed = true;
+							stream.markdown(data.delta);
+						} else if (partType === 'reasoning') {
+							emitReasoningDelta(data.partID!, data.delta);
+						}
 					}
 				}
 			}
@@ -252,19 +734,30 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		});
 		try {
 			stream.progress(vscode.l10n.t('{0} is working…', this.name));
-			const payloadBase: Record<string, unknown> = { parts: [{ type: 'text', text }] };
-			if (options?.thinking) {
-				payloadBase.variant = options.thinking;
+			const messageParts = this.messageParts(text, options?.attachments);
+			const payloadBase: Record<string, unknown> = { parts: messageParts };
+			const model = await this.resolveModel(options?.model, session.cwd);
+			if (model) {
+				payloadBase.model = model;
+			}
+			const agent = await this.resolveMode(options?.mode, session.cwd);
+			if (agent) {
+				payloadBase.agent = agent;
+			}
+			const variant = this.resolveVariant(options?.thinking);
+			if (variant) {
+				payloadBase.variant = variant;
 			}
 			let result: KiloMessage;
 			try {
 				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal);
 			} catch (err) {
-				if (options?.thinking && !abort.signal.aborted) {
-					result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: [{ type: 'text', text }] }, abort.signal);
-				} else {
+				const hasOptionalFields = payloadBase.model !== undefined || payloadBase.agent !== undefined || payloadBase.variant !== undefined;
+				if (!hasOptionalFields || abort.signal.aborted) {
 					throw err;
 				}
+				// Retry once without optional routing fields (older servers reject unknown fields), keeping the prompt and attachments.
+				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: messageParts }, abort.signal);
 			}
 			if (result.info.error) { throw new Error(result.info.error.data?.message || vscode.l10n.t('{0} could not complete this request.', this.name)); }
 			if (!streamed) { for (const part of result.parts) { if (part.type === 'text' && part.text) { stream.markdown(part.text); } } }

@@ -110,6 +110,7 @@ export class SlashCommandCompletions extends Disposable {
 		@IChatSessionsService private readonly chatSessionsService: IChatSessionsService,
 		@IMcpService mcpService: IMcpService,
 		@ILogService private readonly logService: ILogService,
+		@IChatAgentService private readonly chatAgentService: IChatAgentService,
 	) {
 		super();
 
@@ -151,6 +152,9 @@ export class SlashCommandCompletions extends Disposable {
 
 				const sessionResource = widget.viewModel.model.sessionResource;
 				const sessionType = getChatSessionType(sessionResource);
+				const isAexusSession = sessionType.startsWith('aexus-');
+				const lockedAgent = widget.lockedAgentId ? this.chatAgentService?.getAgent(widget.lockedAgentId) : undefined;
+				const lockedSubcommandNames = new Set((lockedAgent?.slashCommands ?? []).map(sc => sc.name.toLowerCase()));
 				let forkSupported = false;
 				if (isAgentHostBackedWidget(widget) && slashCommands.some(command => command.command === 'fork')) {
 					try {
@@ -163,6 +167,12 @@ export class SlashCommandCompletions extends Disposable {
 				return {
 					suggestions: slashCommands
 						.filter(c => {
+							if (lockedSubcommandNames.has(c.command.toLowerCase())) {
+								return false;
+							}
+							if (isAexusSession && (c.command === 'vscode-pet' || c.command === 'blobby')) {
+								return false;
+							}
 							if (isAgentHostBackedWidget(widget) && c.command === 'fork' && !forkSupported) {
 								return false;
 							}
@@ -315,8 +325,11 @@ export class SlashCommandCompletions extends Disposable {
 					return null;
 				}
 
+				const lockedAgent = widget.lockedAgentId ? this.chatAgentService?.getAgent(widget.lockedAgentId) : undefined;
+				const lockedSubcommandNames = new Set((lockedAgent?.slashCommands ?? []).map(sc => sc.name.toLowerCase()));
 				const userInvocableCommands = promptCommands
 					.filter(c => c.userInvocable)
+					.filter(c => !lockedSubcommandNames.has(c.name.toLowerCase()))
 					.filter(c => matchesSessionType(c.sessionTypes, currentSessionType));
 				if (userInvocableCommands.length === 0) {
 					return null;
@@ -433,10 +446,11 @@ export class AgentCompletions extends Disposable {
 					suggestions: usedAgent.agent.slashCommands.map((c, i): CompletionItem => {
 						const withSlash = `/${c.name}`;
 						return {
-							label: withSlash,
+							label: c.description ? { label: withSlash, description: c.description } : withSlash,
 							insertText: `${withSlash} `,
 							documentation: c.description,
 							range,
+							sortText: `${c.name === 'goal' ? '0000' : '0001'}_${String(i).padStart(3, '0')}`,
 							kind: CompletionItemKind.Text, // The icons are disabled here anyway
 						};
 					})

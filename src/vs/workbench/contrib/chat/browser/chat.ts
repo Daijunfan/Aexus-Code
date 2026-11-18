@@ -483,6 +483,8 @@ export interface IChatWidget {
 	readonly isTranscriptProgressActive?: boolean;
 	/** Cancels transcript preparation and returns whether it handled cancellation. */
 	cancelTranscriptProgress?(): boolean;
+	/** Pins or clears a persistent session goal banner above the chat input. */
+	setPinnedGoalBanner?(goalText: string | undefined, onDismiss?: () => void): void;
 	readonly domNode: HTMLElement;
 	/** DOM node of the scrollable transcript area, excluding the input part. */
 	readonly transcriptDomNode: HTMLElement;

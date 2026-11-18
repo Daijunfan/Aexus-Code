@@ -23,14 +23,32 @@ export interface NativeSession {
 	readOnly?: boolean;
 }
 
-export type EngineThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
+export type EngineThinkingLevel = 'off' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'extra-high' | 'max' | string;
+
+export interface EngineAttachment {
+	readonly kind: 'file' | 'image';
+	readonly filePath: string;
+	readonly mimeType?: string;
+	readonly rangeText?: string;
+}
 
 export interface EngineSendOptions {
 	readonly model?: string;
 	readonly thinking?: EngineThinkingLevel;
+	readonly mode?: string;
+	readonly permissionMode?: string;
+	readonly sandboxMode?: string;
+	readonly webSearch?: string;
+	readonly attachments?: readonly EngineAttachment[];
 	readonly pureWorker?: boolean;
 	readonly callerRole?: string;
 	readonly automatedEngineering?: boolean;
+}
+
+export interface EngineRuntimeCapabilities {
+	readonly models?: Array<{ id: string; name: string; description?: string }>;
+	readonly modes?: Array<{ id: string; name: string; description?: string }>;
+	readonly commands?: Array<{ name: string; description?: string }>;
 }
 
 export interface HistoryEntry { id?: string; role: 'user' | 'assistant'; text: string; isSystemInitiated?: boolean }
@@ -44,8 +62,23 @@ export interface EngineRuntime extends vscode.Disposable {
 	prepareSession?(session: NativeSession): Promise<void>;
 	history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]>;
 	send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void>;
+	getRuntimeCapabilities?(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities>;
+	executeCommand?(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean>;
 	killSession?(session: NativeSession): Promise<void>;
 	delete(session: NativeSession, token: vscode.CancellationToken): Promise<void>;
+}
+
+export function emitThinkingProgress(stream: vscode.ChatResponseStream, text: string, id = 'thinking'): void {
+	if (!text) {
+		return;
+	}
+	const extended = stream as vscode.ChatResponseStream & { thinkingProgress?: (delta: { text: string; id?: string }) => void };
+	if (typeof extended.thinkingProgress === 'function') {
+		try {
+			extended.thinkingProgress({ text, id });
+			return;
+		} catch { /* Fall back cleanly if unavailable in host. */ }
+	}
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

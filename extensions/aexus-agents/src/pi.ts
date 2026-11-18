@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { EngineRuntime, EngineSendOptions, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
+import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, emitThinkingProgress, HistoryEntry, NativeSession, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface PiContentPart {
 	type?: string;
@@ -52,6 +52,159 @@ interface PiRpcPacket {
 		delta?: string;
 		toolName?: string;
 	};
+	args?: Record<string, unknown>;
+}
+
+interface PiModelInfo { id: string; name: string; description?: string }
+interface PiCommandInfo { name: string; description?: string }
+interface PiToolMode { id: 'full' | 'readonly' | 'chat' }
+
+const PI_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+	return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function modelEntries(value: unknown): PiModelInfo[] {
+	const container = Array.isArray(value) ? value : (asRecord(value)?.models ?? value);
+	const models: PiModelInfo[] = [];
+	const seen = new Set<string>();
+	const add = (provider: string | undefined, rawId: string | undefined, rawName: string | undefined, description?: string): void => {
+		if (!rawId) {
+			return;
+		}
+		const id = provider && !rawId.includes('/') ? `${provider}/${rawId}` : rawId;
+		if (seen.has(id)) {
+			return;
+		}
+		seen.add(id);
+		models.push({ id, name: rawName || rawId, description });
+	};
+	if (Array.isArray(container)) {
+		for (const item of container) {
+			if (typeof item === 'string') {
+				add(undefined, item, item);
+				continue;
+			}
+			const record = asRecord(item);
+			add(stringValue(record?.provider), stringValue(record?.id) ?? stringValue(record?.model), stringValue(record?.name) ?? stringValue(record?.label), stringValue(record?.description));
+		}
+	} else {
+		const record = asRecord(container);
+		if (record) {
+			for (const [id, item] of Object.entries(record)) {
+				const entry = asRecord(item);
+				add(stringValue(entry?.provider), stringValue(entry?.id) ?? id, stringValue(entry?.name) ?? id, stringValue(entry?.description));
+			}
+		}
+	}
+	return models;
+}
+
+function commandEntries(value: unknown): PiCommandInfo[] {
+	const container = Array.isArray(value) ? value : (asRecord(value)?.commands ?? value);
+	const commands: PiCommandInfo[] = [];
+	const seen = new Set<string>();
+	const add = (name: string | undefined, description?: string): void => {
+		const normalized = name?.trim().replace(/^\//, '');
+		if (!normalized || seen.has(normalized)) {
+			return;
+		}
+		seen.add(normalized);
+		commands.push({ name: normalized, description });
+	};
+	if (Array.isArray(container)) {
+		for (const item of container) {
+			if (typeof item === 'string') {
+				add(item);
+				continue;
+			}
+			const record = asRecord(item);
+			add(stringValue(record?.name) ?? stringValue(record?.id), stringValue(record?.description));
+		}
+	} else {
+		const record = asRecord(container);
+		if (record) {
+			for (const [name, item] of Object.entries(record)) {
+				add(name, stringValue(asRecord(item)?.description));
+			}
+		}
+	}
+	return commands;
+}
+
+function forkEntries(value: unknown): Array<{ entryId?: string; text: string }> {
+	const container = Array.isArray(value) ? value : (asRecord(value)?.messages ?? []);
+	const entries: Array<{ entryId?: string; text: string }> = [];
+	if (!Array.isArray(container)) {
+		return entries;
+	}
+	for (const item of container) {
+		if (typeof item === 'string') {
+			entries.push({ text: item });
+			continue;
+		}
+		const record = asRecord(item);
+		const text = stringValue(record?.text) ?? stringValue(record?.preview) ?? stringValue(record?.message) ?? '';
+		const role = stringValue(record?.role);
+		entries.push({
+			entryId: stringValue(record?.entryId) ?? stringValue(record?.id),
+			text: role ? `${role}: ${text}` : text || '—',
+		});
+	}
+	return entries;
+}
+
+function displayValue(value: unknown): string {
+	if (value === undefined || value === null || value === '') {
+		return '—';
+	}
+	if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+		return String(value);
+	}
+	try {
+		return JSON.stringify(value).slice(0, 160);
+	} catch {
+		return String(value);
+	}
+}
+
+function modelName(value: unknown): string | undefined {
+	if (typeof value === 'string') {
+		return value;
+	}
+	const record = asRecord(value);
+	return record ? stringValue(record.id) ?? stringValue(record.name) ?? stringValue(record.model) : undefined;
+}
+
+function piThinkingLevel(thinking: string | undefined): string | undefined {
+	if (!thinking || thinking === 'default') {
+		return undefined;
+	}
+	if (thinking === 'max' || thinking === 'extra-high') {
+		return 'xhigh';
+	}
+	if (thinking === 'none') {
+		return 'off';
+	}
+	return PI_THINKING_LEVELS.has(thinking) ? thinking : undefined;
+}
+
+function toolDetail(args: Record<string, unknown> | undefined): string | undefined {
+	if (!args) {
+		return undefined;
+	}
+	for (const key of ['command', 'path', 'filePath', 'file', 'pattern', 'query', 'url', 'name']) {
+		const value = stringValue(args[key]);
+		if (value) {
+			return value.length > 120 ? `${value.slice(0, 117)}…` : value;
+		}
+	}
+	return undefined;
 }
 
 function piMessageText(content: string | PiContentPart[] | undefined): string {
@@ -68,6 +221,9 @@ export class PiRuntime implements EngineRuntime {
 	readonly id = 'pi';
 	readonly name = 'Pi';
 	private readonly running = new Map<string, Set<ReturnType<typeof spawnEngine>>>();
+	private readonly toolModes = new Map<string, PiToolMode['id']>();
+	private readonly capabilityCache = new Map<string, { expiresAt: number; value: EngineRuntimeCapabilities }>();
+	private readonly capabilityPending = new Map<string, Promise<EngineRuntimeCapabilities>>();
 
 	constructor(private readonly executable: string) { }
 
@@ -228,6 +384,233 @@ export class PiRuntime implements EngineRuntime {
 		return history;
 	}
 
+	private sessionArgs(session: NativeSession): string[] {
+		return session.file ? ['--session', session.file] : ['--session-id', session.id];
+	}
+
+	/**
+	 * Runs a short-lived RPC worker and sends each command once, returning the response data in order.
+	 * Commands that fail or time out resolve to `undefined` so callers can degrade gracefully.
+	 */
+	private async runRpc(cwd: string, extraArgs: readonly string[], commands: ReadonlyArray<Record<string, unknown>>, timeoutMs: number, token?: vscode.CancellationToken): Promise<Array<Record<string, unknown> | undefined>> {
+		const results: Array<Record<string, unknown> | undefined> = commands.map(() => undefined);
+		if (token?.isCancellationRequested) {
+			return results;
+		}
+		const child = spawnEngine(this.executable, ['--mode', 'rpc', ...extraArgs], cwd);
+		const pending = new Map<string, (data: Record<string, unknown> | undefined) => void>();
+		let buffer = '';
+		child.stdout.setEncoding('utf8');
+		child.stdout.on('data', (chunk: string) => {
+			buffer += chunk;
+			let newlineIndex: number;
+			while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+				const rawLine = buffer.slice(0, newlineIndex);
+				buffer = buffer.slice(newlineIndex + 1);
+				const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+				if (!line) { continue; }
+				let packet: PiRpcPacket;
+				try { packet = JSON.parse(line) as PiRpcPacket; } catch { continue; }
+				if (packet.type !== 'response' || !packet.id) { continue; }
+				const resolve = pending.get(packet.id);
+				if (resolve) {
+					pending.delete(packet.id);
+					resolve(packet.success ? packet.data : undefined);
+				}
+			}
+		});
+		const settleAll = () => {
+			const waiting = [...pending.values()];
+			pending.clear();
+			for (const resolve of waiting) { resolve(undefined); }
+		};
+		child.on('error', settleAll);
+		child.on('close', settleAll);
+		const subscription = token?.onCancellationRequested(() => {
+			stopEngine(child, 'SIGKILL');
+			settleAll();
+		});
+		const requests = commands.map((command, index) => new Promise<void>(resolve => {
+			const id = `rpc-${index}`;
+			pending.set(id, data => {
+				results[index] = data;
+				resolve();
+			});
+			if (child.stdin.destroyed) {
+				pending.delete(id);
+				resolve();
+				return;
+			}
+			try {
+				child.stdin.write(JSON.stringify({ ...command, id }) + '\n');
+			} catch {
+				pending.delete(id);
+				resolve();
+			}
+		}));
+		try {
+			await withTimeout(Promise.all(requests), timeoutMs);
+		} catch { /* Time out or exit; return whatever completed. */ }
+		finally {
+			subscription?.dispose();
+			if (!child.stdin.destroyed) { child.stdin.end(); }
+			stopEngine(child, 'SIGKILL');
+		}
+		return results;
+	}
+
+	async getRuntimeCapabilities(cwd: string, _session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+		const cached = this.capabilityCache.get(cwd);
+		if (cached && cached.expiresAt > Date.now()) {
+			return cached.value;
+		}
+		const pending = this.capabilityPending.get(cwd);
+		if (pending) {
+			return pending;
+		}
+		const load = (async (): Promise<EngineRuntimeCapabilities> => {
+			const [models, commands] = await this.runRpc(cwd, [], [{ type: 'get_available_models' }, { type: 'get_commands' }], 8000);
+			const value: EngineRuntimeCapabilities = {
+				models: modelEntries(models),
+				commands: commandEntries(commands),
+			};
+			this.capabilityCache.set(cwd, { expiresAt: Date.now() + 15000, value });
+			return value;
+		})();
+		this.capabilityPending.set(cwd, load);
+		try {
+			return await load;
+		} finally {
+			this.capabilityPending.delete(cwd);
+		}
+	}
+
+	private async readImages(attachments?: readonly EngineAttachment[]): Promise<Array<{ type: string; mimeType: string; data: string }>> {
+		const images: Array<{ type: string; mimeType: string; data: string }> = [];
+		for (const attachment of attachments ?? []) {
+			const isImage = attachment.kind === 'image' || Boolean(attachment.mimeType?.startsWith('image/'));
+			if (!isImage) {
+				continue;
+			}
+			try {
+				const data = await fs.readFile(attachment.filePath);
+				images.push({ type: 'image', mimeType: attachment.mimeType || 'image/png', data: data.toString('base64') });
+			} catch { /* Skip attachments that cannot be read. */ }
+		}
+		return images;
+	}
+
+	private describeToolCall(packet: PiRpcPacket): string {
+		const toolName = stringValue(packet.toolName) ?? this.name;
+		const detail = toolDetail(packet.args);
+		return detail ? `${toolName}: ${detail}` : toolName;
+	}
+
+	private async compactSession(session: NativeSession, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+		if (session.provisional && !session.file) {
+			stream.markdown(vscode.l10n.t('This session has no messages to compact yet.'));
+			return;
+		}
+		const customInstructions = argsText.trim();
+		const [data] = await this.runRpc(session.cwd, this.sessionArgs(session), [{ type: 'compact', ...(customInstructions ? { customInstructions } : {}) }], 90000, token);
+		if (!data) {
+			stream.markdown(vscode.l10n.t('Pi did not report a compaction summary. The conversation may still be compacted.'));
+			return;
+		}
+		const summary = stringValue(data.summary) ?? stringValue(data.text) ?? stringValue(data.result);
+		stream.markdown(summary
+			? vscode.l10n.t('Compacted the conversation.\n\n{0}', summary)
+			: vscode.l10n.t('Compacted the conversation to free up context.'));
+	}
+
+	private async showStats(session: NativeSession, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+		const [statsData, stateData] = await this.runRpc(session.cwd, this.sessionArgs(session), [{ type: 'get_session_stats' }, { type: 'get_state' }], 20000, token);
+		const stats = asRecord(statsData) ?? {};
+		const state = asRecord(stateData) ?? {};
+		const tokenTotals = asRecord(stats.tokens);
+		const messages = stats.messageCount ?? stats.totalMessages ?? stats.message_count ?? (Array.isArray(stats.messages) ? stats.messages.length : undefined);
+		const tokens = stats.totalTokens ?? stats.tokenCount ?? tokenTotals?.total;
+		const cost = stats.cost ?? stats.totalCost;
+		const model = modelName(state.model) ?? modelName(stats.model);
+		const thinking = state.thinkingLevel ?? state.thinking;
+		const autoCompaction = state.autoCompaction ?? state.autoCompactionEnabled;
+		const costText = typeof cost === 'number' ? `$${cost.toFixed(4)}` : displayValue(cost);
+		const rows = [
+			`| ${vscode.l10n.t('Messages')} | ${displayValue(messages)} |`,
+			`| ${vscode.l10n.t('Tokens')} | ${displayValue(tokens)} |`,
+			`| ${vscode.l10n.t('Cost')} | ${costText} |`,
+			`| ${vscode.l10n.t('Model')} | ${displayValue(model)} |`,
+			`| ${vscode.l10n.t('Thinking level')} | ${displayValue(thinking)} |`,
+			`| ${vscode.l10n.t('Auto compaction')} | ${displayValue(autoCompaction)} |`,
+		];
+		stream.markdown([`| ${vscode.l10n.t('Metric')} | ${vscode.l10n.t('Value')} |`, '| --- | --- |', ...rows].join('\n'));
+	}
+
+	private async showTree(session: NativeSession, fork: boolean, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<void> {
+		const [forkData] = await this.runRpc(session.cwd, this.sessionArgs(session), [{ type: 'get_fork_messages' }], 15000, token);
+		const entries = forkEntries(forkData);
+		if (entries.length === 0) {
+			stream.markdown(vscode.l10n.t('This session has no messages to show yet.'));
+			return;
+		}
+		if (!fork) {
+			const lines = entries.map((entry, index) => entry.entryId
+				? `${index + 1}. ${entry.text} (${entry.entryId})`
+				: `${index + 1}. ${entry.text}`);
+			stream.markdown([`### ${vscode.l10n.t('Conversation tree')}`, '', ...lines].join('\n'));
+			return;
+		}
+		const requested = argsText.trim();
+		const entryId = requested || [...entries].reverse().find(entry => entry.entryId)?.entryId;
+		if (!entryId) {
+			stream.markdown(vscode.l10n.t('There is no message to fork from yet.'));
+			return;
+		}
+		const [forked] = await this.runRpc(session.cwd, this.sessionArgs(session), [{ type: 'fork', entryId }], 30000, token);
+		if (!forked) {
+			stream.markdown(vscode.l10n.t('Pi could not fork the conversation at {0}.', entryId));
+			return;
+		}
+		const newSession = stringValue(forked.sessionId) ?? stringValue(forked.newSessionId) ?? stringValue(forked.sessionFile) ?? stringValue(forked.file);
+		stream.markdown(newSession
+			? vscode.l10n.t('Forked the conversation into {0}.', newSession)
+			: vscode.l10n.t('Forked the conversation.'));
+	}
+
+	async executeCommand(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, _options?: EngineSendOptions): Promise<boolean> {
+		const name = command.trim().replace(/^\//, '').toLowerCase();
+		if (!['compact', 'stats', 'cost', 'tree', 'fork', 'reload'].includes(name)) {
+			return false;
+		}
+		if (token.isCancellationRequested) {
+			return true;
+		}
+		switch (name) {
+			case 'compact':
+				await this.compactSession(session, argsText, stream, token);
+				return true;
+			case 'stats':
+			case 'cost':
+				await this.showStats(session, stream, token);
+				return true;
+			case 'tree':
+				await this.showTree(session, false, argsText, stream, token);
+				return true;
+			case 'fork':
+				await this.showTree(session, true, argsText, stream, token);
+				return true;
+			case 'reload': {
+				await this.killSession(session);
+				const [state] = await this.runRpc(session.cwd, this.sessionArgs(session), [{ type: 'get_state' }], 10000, token);
+				stream.markdown(state
+					? vscode.l10n.t('Reloaded Pi. Skills, extensions, and settings will be picked up by the next message.')
+					: vscode.l10n.t('Restarted Pi, but the fresh worker did not report its state. The next message will retry the connection.'));
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private async handleUiRequest(child: ReturnType<typeof spawnEngine>, packet: PiRpcPacket, session: NativeSession, token: vscode.CancellationToken): Promise<void> {
 		if (!packet.id || child.stdin.destroyed) { return; }
 		const respond = (payload: Record<string, unknown>) => {
@@ -276,10 +659,24 @@ export class PiRuntime implements EngineRuntime {
 		if (!session.provisional && !session.file) {
 			session.file = (await this.list(token)).find(item => item.id === session.id)?.file;
 		}
+		const requestedMode = options?.mode?.trim().toLowerCase();
+		const toolMode: PiToolMode['id'] = requestedMode === 'readonly' || requestedMode === 'chat' ? requestedMode : 'full';
+		const previousMode = this.toolModes.get(session.id);
+		this.toolModes.set(session.id, toolMode);
+		if (previousMode && previousMode !== toolMode) {
+			// The tool mode is fixed at worker start, so an in-flight worker from the old mode must be replaced.
+			const stale = this.running.get(session.id);
+			if (stale) {
+				for (const child of stale) { stopEngine(child, 'SIGKILL'); }
+				this.running.delete(session.id);
+			}
+		}
+		const modelOption = options?.model && options.model !== 'default' ? options.model : undefined;
 		const args = [
 			'--mode', 'rpc',
-			...(options?.model ? ['--model', options.model] : []),
-			...(session.file ? ['--session', session.file] : ['--session-id', session.id]),
+			...(modelOption ? ['--model', modelOption] : []),
+			...(toolMode === 'readonly' ? ['--tools', 'read,grep,find,ls'] : toolMode === 'chat' ? ['--no-tools'] : []),
+			...this.sessionArgs(session),
 		];
 		const customEnv: NodeJS.ProcessEnv = { ...process.env };
 		if (options?.pureWorker) {
@@ -351,11 +748,13 @@ export class PiRuntime implements EngineRuntime {
 					const ame = packet.assistantMessageEvent;
 					if (ame?.type === 'text_delta' && typeof ame.delta === 'string' && ame.delta) {
 						stream.markdown(ame.delta);
+					} else if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string' && ame.delta) {
+						emitThinkingProgress(stream, ame.delta, 'pi-thinking');
 					} else if (ame?.type === 'toolcall_start' && typeof ame.toolName === 'string') {
 						stream.progress(ame.toolName);
 					}
 				} else if (packet.type === 'tool_execution_start' && !token.isCancellationRequested) {
-					stream.progress(typeof packet.toolName === 'string' && packet.toolName ? packet.toolName : vscode.l10n.t('Pi is working…'));
+					stream.progress(this.describeToolCall(packet));
 				} else if (packet.type === 'session_info_changed' && typeof packet.name === 'string' && packet.name.trim()) {
 					session.label = packet.name.trim();
 				} else if (packet.type === 'extension_ui_request') {
@@ -404,11 +803,32 @@ export class PiRuntime implements EngineRuntime {
 					session.file = state.sessionFile;
 				}
 			}
-			if (options?.thinking) {
-				const piLevel = options.thinking === 'max' ? 'xhigh' : options.thinking;
+			if (modelOption) {
+				let provider: string | undefined;
+				let modelId: string | undefined;
+				const separator = modelOption.indexOf('/');
+				if (separator > 0 && separator < modelOption.length - 1) {
+					provider = modelOption.slice(0, separator);
+					modelId = modelOption.slice(separator + 1);
+				} else {
+					const listing = await sendCommand<Record<string, unknown> | undefined>({ type: 'get_available_models' }).catch(() => undefined);
+					const match = modelEntries(listing).find(model => model.id === modelOption || model.id.endsWith(`/${modelOption}`) || model.name === modelOption);
+					const matchSeparator = match ? match.id.indexOf('/') : -1;
+					if (match && matchSeparator > 0) {
+						provider = match.id.slice(0, matchSeparator);
+						modelId = match.id.slice(matchSeparator + 1);
+					}
+				}
+				if (provider && modelId) {
+					await sendCommand({ type: 'set_model', provider, modelId }).catch(() => undefined);
+				}
+			}
+			const piLevel = piThinkingLevel(options?.thinking);
+			if (piLevel) {
 				await sendCommand({ type: 'set_thinking_level', level: piLevel }).catch(() => undefined);
 			}
-			await sendCommand({ type: 'prompt', message: text });
+			const images = await this.readImages(options?.attachments);
+			await sendCommand({ type: 'prompt', message: text, ...(images.length > 0 ? { images } : {}) });
 			if (token.isCancellationRequested) {
 				await sendCommand({ type: 'clear_queue' }).catch(() => { });
 				await sendCommand({ type: 'abort' }).catch(() => { });
@@ -432,6 +852,7 @@ export class PiRuntime implements EngineRuntime {
 	}
 
 	async delete(session: NativeSession, token: vscode.CancellationToken): Promise<void> {
+		this.toolModes.delete(session.id);
 		const active = this.running.get(session.id);
 		if (active) {
 			for (const child of active) { stopEngine(child); }
