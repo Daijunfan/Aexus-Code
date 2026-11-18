@@ -584,6 +584,9 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 			autoExpandCompressedChildren: true,
 			expandOnlyOnTwistieClick: (e: unknown) => {
 				if (e instanceof ExplorerItem) {
+					if (e.isRoot) {
+						return false;
+					}
 					if (e.hasNests) {
 						return true;
 					}
@@ -593,6 +596,7 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 				}
 				return false;
 			},
+			stickyScrollToggleOnClick: (e: ExplorerItem) => e.isRoot || (!e.hasNests && this.configurationService.getValue<'singleClick' | 'doubleClick'>('workbench.tree.expandMode') !== 'doubleClick'),
 			paddingBottom: ExplorerDelegate.ITEM_HEIGHT,
 			overrideStyles: this.getLocationBasedColors().listOverrideStyles,
 			findProvider: this.findProvider,
@@ -622,6 +626,12 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 		}));
 		this._register(this.tree.onMouseClick(e => {
 			if (e.element) {
+				if (e.element.isRoot && !e.browserEvent.shiftKey && !e.browserEvent.metaKey && !e.browserEvent.ctrlKey) {
+					const selection = this.tree.getSelection();
+					if (selection.length !== 1 || selection[0] !== e.element) {
+						this.tree.setSelection([e.element]);
+					}
+				}
 				this.projectNavigationService.selectProject(e.element.root.resource);
 			}
 		}));

@@ -11,6 +11,7 @@ import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hover
 import { ListDragOverEffectPosition, ListDragOverEffectType } from '../../../../base/browser/ui/list/list.js';
 import { ElementsDragAndDropData, ListViewTargetSector } from '../../../../base/browser/ui/list/listView.js';
 import { RenderIndentGuides } from '../../../../base/browser/ui/tree/abstractTree.js';
+import { IAsyncDataTreeViewState } from '../../../../base/browser/ui/tree/asyncDataTree.js';
 import { ITreeDragAndDrop, ITreeDragOverReaction, ITreeNode, ITreeRenderer, TreeDragOverBubble } from '../../../../base/browser/ui/tree/tree.js';
 import { IAction, Separator, toAction } from '../../../../base/common/actions.js';
 import { Sequencer } from '../../../../base/common/async.js';
@@ -493,6 +494,7 @@ export class AdeProjectsView extends ViewPane {
 	private readonly emptyActionDisposables = this._register(new DisposableStore());
 	private readonly refreshQueue = new Sequencer();
 	private readonly autoExpandedProjects = new Set<string>();
+	private lastTreeScopeKey: string | undefined;
 	private editingAgentId: string | undefined;
 	private pendingRefresh = false;
 	private lastHeight = 0;
@@ -521,6 +523,9 @@ export class AdeProjectsView extends ViewPane {
 
 		this._register(projects.onDidChange(change => {
 			this.updateHeaderControls();
+			if (change === 'selection') {
+				return;
+			}
 			void this.refresh(change === 'order');
 		}));
 		this._register(projectNavigation.onDidChangeProject(() => {
@@ -636,6 +641,7 @@ export class AdeProjectsView extends ViewPane {
 					getAriaLabel: item => item.kind === 'project' ? item.project.name : item.agent.label,
 				},
 				expandOnlyOnTwistieClick: item => item.kind === 'agent',
+				stickyScrollToggleOnClick: item => item.kind === 'project',
 				hideTwistiesOfChildlessElements: false,
 				renderIndentGuides: RenderIndentGuides.Always,
 				indent: 12,
@@ -694,12 +700,25 @@ export class AdeProjectsView extends ViewPane {
 			}
 		}));
 
+		this._register(tree.onDidChangeCollapseState(event => {
+			const element = event.node.element?.element;
+			if (element && !Array.isArray(element) && tree.hasNode(element)) {
+				tree.rerender(element);
+			}
+		}));
+
 		this._register(tree.onMouseClick(event => {
 			const item = event.element;
 			if (!item) {
 				return;
 			}
 			if (item.kind === 'project') {
+				if (!event.browserEvent.shiftKey && !event.browserEvent.metaKey && !event.browserEvent.ctrlKey) {
+					const selection = tree.getSelection();
+					if (selection.length !== 1 || selection[0] !== item) {
+						tree.setSelection([item]);
+					}
+				}
 				this.projects.selectProject(item.project.uri);
 			} else {
 				this.projects.selectAgent(item.agent.id);
@@ -1285,7 +1304,27 @@ export class AdeProjectsView extends ViewPane {
 			}
 
 			this.updateEmptyState(roots);
-			const state = tree.getInput() ? undefined : this.storageService.getObject('aexus.ade.treeState', StorageScope.PROFILE);
+			const scopeKey = `${focused ? this.uriIdentityService.extUri.getComparisonKey(focused.uri) : 'home'}:${this.projects.showArchived ? 'archived' : 'active'}`;
+			const scopeChanged = scopeKey !== this.lastTreeScopeKey;
+			if (scopeChanged && tree.getInput() && this.lastTreeScopeKey === 'home:active') {
+				this.saveTreeState();
+			}
+			this.lastTreeScopeKey = scopeKey;
+
+			let state: IAsyncDataTreeViewState | undefined;
+			const hadLiveInput = Boolean(tree.getInput()) && !scopeChanged;
+			if (hadLiveInput) {
+				state = tree.getViewState();
+			} else if (!focused && !this.projects.showArchived) {
+				state = this.storageService.getObject<IAsyncDataTreeViewState>('aexus.ade.treeState', StorageScope.PROFILE);
+				if (state?.expanded) {
+					for (const root of roots) {
+						if (root.kind === 'project' && this.getProjectRootAgents(root.project.uri).length > 0) {
+							this.autoExpandedProjects.add(this.uriIdentityService.extUri.getComparisonKey(root.project.uri));
+						}
+					}
+				}
+			}
 			await tree.setInput(roots, state);
 			for (const root of roots) {
 				if (root.kind === 'project' && this.getProjectRootAgents(root.project.uri).length > 0) {

@@ -17,6 +17,7 @@ import { IProjectNavigationService } from '../../files/browser/projectNavigation
 import {
 	AdeAgentRole,
 	AdeAgentStatus,
+	AdeProjectsChangeKind,
 	getAdeRoleRankLevel,
 	IAdeAddSessionOptions,
 	IAdeAgent,
@@ -76,7 +77,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	private isSavingStorage = false;
 	private lastWorkspaceKeys: string;
 
-	private readonly changeEmitter = this._register(new Emitter<'order' | void>());
+	private readonly changeEmitter = this._register(new Emitter<AdeProjectsChangeKind | void>());
 	readonly onDidChange = this.changeEmitter.event;
 	private readonly removedAgentsEmitter = this._register(new Emitter<readonly IAdeAgent[]>());
 	readonly onDidRemoveAgents = this.removedAgentsEmitter.event;
@@ -216,7 +217,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			if (!this.uriIdentityService.extUri.isEqual(this.selectedProjectUri, selected.uri)) {
 				this.selectedProjectUri = selected.uri;
 				this.persistSelectedProject();
-				this.changeEmitter.fire();
+				this.changeEmitter.fire('selection');
 			}
 		}));
 
@@ -660,7 +661,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		}
 
 		if (changed) {
-			this.changeEmitter.fire();
+			this.changeEmitter.fire('selection');
 		}
 	}
 

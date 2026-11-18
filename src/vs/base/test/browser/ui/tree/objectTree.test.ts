@@ -507,6 +507,42 @@ suite('ObjectTree', function () {
 		}
 	});
 
+	test('toggles collapse and selects on first sticky-scroll row click when stickyScrollToggleOnClick is enabled', function () {
+		const container = document.createElement('div');
+		container.style.width = '200px';
+		container.style.height = '100px';
+		const tree = new ObjectTree<number>('test', container, new Delegate(), [new Renderer()], {
+			enableStickyScroll: true,
+			stickyScrollMaxItemCount: 1,
+			expandOnlyOnTwistieClick: false,
+			stickyScrollToggleOnClick: element => element === 0,
+		});
+
+		try {
+			tree.layout(100);
+			tree.setChildren(null, [
+				{ element: 0, collapsible: true, collapsed: false, children: [{ element: 1 }, { element: 2 }, { element: 3 }, { element: 4 }, { element: 5 }, { element: 6 }] },
+				{ element: 10, collapsible: true, collapsed: false, children: [{ element: 11 }] },
+			]);
+			tree.setSelection([10]);
+			tree.scrollTop = 5;
+
+			const stickyRow = container.querySelector<HTMLElement>('.monaco-tree-sticky-row');
+			assert.ok(stickyRow);
+			clickElement(stickyRow);
+
+			assert.deepStrictEqual({
+				selection: tree.getSelection(),
+				collapsedAfterFirstClick: tree.isCollapsed(0),
+			}, {
+				selection: [0],
+				collapsedAfterFirstClick: true,
+			});
+		} finally {
+			tree.dispose();
+		}
+	});
+
 	test('disposing an older render preserves the current node mapping', function () {
 		const onDidChangeTwistieState = new Emitter<number>();
 		const renderer: ITreeRenderer<number, void, void> = {

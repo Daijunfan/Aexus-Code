@@ -152,6 +152,8 @@ export interface IAdeAgentTreeNode {
 
 export const IAdeProjectsService = createDecorator<IAdeProjectsService>('adeProjectsService');
 
+export type AdeProjectsChangeKind = 'order' | 'selection';
+
 export interface IAdeProjectsService {
 	readonly _serviceBrand: undefined;
 	readonly projects: readonly IAdeProject[];
@@ -160,7 +162,7 @@ export interface IAdeProjectsService {
 	readonly selectedAgentId: string | undefined;
 	readonly secretary: IAdeSecretary;
 	readonly showArchived: boolean;
-	readonly onDidChange: Event<'order' | void>;
+	readonly onDidChange: Event<AdeProjectsChangeKind | void>;
 	readonly onDidRemoveAgents?: Event<readonly IAdeAgent[]>;
 
 	getProjectName(projectUri: URI): string;

@@ -2384,6 +2384,7 @@ export interface IAbstractTreeOptionsUpdate<T> extends ITreeRendererOptions<T> {
 	readonly fastScrollSensitivity?: number;
 	readonly expandOnDoubleClick?: boolean;
 	readonly expandOnlyOnTwistieClick?: boolean | ((e: T) => boolean);
+	readonly stickyScrollToggleOnClick?: boolean | ((e: T) => boolean);
 	readonly enableStickyScroll?: boolean;
 	readonly stickyScrollMaxItemCount?: number;
 	readonly stickyScrollMaxNodeHeight?: number;
@@ -2588,11 +2589,18 @@ class TreeNodeListMouseController<T, TFilterData, TRef> extends MouseController<
 		const onTwistie = target.classList.contains('monaco-tl-twistie')
 			|| (target.classList.contains('monaco-icon-label') && target.classList.contains('folder-icon') && e.browserEvent.offsetX < 16);
 		const isStickyElement = isStickyScrollElement(e.browserEvent.target as HTMLElement);
+		const stickyToggle = isStickyElement
+			&& e.browserEvent.detail !== 2
+			&& !isMonacoCustomToggle(target)
+			&& !isActionItem(target)
+			&& (typeof this.tree.stickyScrollToggleOnClick === 'function'
+				? this.tree.stickyScrollToggleOnClick(node.element)
+				: !!this.tree.stickyScrollToggleOnClick);
 
 		let expandOnlyOnTwistieClick = false;
 
 		if (isStickyElement) {
-			expandOnlyOnTwistieClick = true;
+			expandOnlyOnTwistieClick = !stickyToggle;
 		}
 		else if (typeof this.tree.expandOnlyOnTwistieClick === 'function') {
 			expandOnlyOnTwistieClick = this.tree.expandOnlyOnTwistieClick(node.element);
@@ -2612,13 +2620,13 @@ class TreeNodeListMouseController<T, TFilterData, TRef> extends MouseController<
 			this.handleStickyScrollMouseEvent(e, node);
 		}
 
-		if (node.collapsible && (!isStickyElement || onTwistie)) {
+		if (node.collapsible && (!isStickyElement || onTwistie || stickyToggle)) {
 			const location = this.tree.getNodeLocation(node);
 			const recursive = e.browserEvent.altKey;
 			this.tree.setFocus([location]);
 			this.tree.toggleCollapsed(location, recursive);
 
-			if (onTwistie) {
+			if (onTwistie || isStickyElement) {
 				// Do not set this before calling a handler on the super class, because it will reject it as handled
 				e.browserEvent.isHandledByList = true;
 				return;
@@ -2850,6 +2858,7 @@ export abstract class AbstractTree<T, TFilterData, TRef> implements IDisposable 
 
 	get expandOnDoubleClick(): boolean { return typeof this._options.expandOnDoubleClick === 'undefined' ? true : this._options.expandOnDoubleClick; }
 	get expandOnlyOnTwistieClick(): boolean | ((e: T) => boolean) { return typeof this._options.expandOnlyOnTwistieClick === 'undefined' ? true : this._options.expandOnlyOnTwistieClick; }
+	get stickyScrollToggleOnClick(): boolean | ((e: T) => boolean) { return this._options.stickyScrollToggleOnClick ?? false; }
 
 	private readonly _onDidUpdateOptions = new Emitter<IAbstractTreeOptions<T, TFilterData>>();
 	readonly onDidUpdateOptions: Event<IAbstractTreeOptions<T, TFilterData>> = this._onDidUpdateOptions.event;

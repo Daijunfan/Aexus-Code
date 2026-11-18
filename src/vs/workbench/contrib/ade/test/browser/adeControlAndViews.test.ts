@@ -1618,4 +1618,102 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			remainingIds: [],
 		});
 	});
+
+	test('first click on an unselected project in AdeProjectsView simultaneously selects it and toggles expand/collapse without resetting on status updates', async () => {
+		const h = createHarness();
+		const onDidChangeLocation = store.add(new Emitter<{ views: never[]; from: ViewContainerLocation; to: ViewContainerLocation }>());
+		const dummySidebar = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.sidebar.click'; }();
+		h.instantiation.stub(IViewDescriptorService, {
+			getViewLocationById: () => ViewContainerLocation.Sidebar,
+			onDidChangeLocation: onDidChangeLocation.event,
+			getViewDescriptorById: () => null,
+			getViewContainerByViewId: () => dummySidebar,
+			getDefaultContainerById: () => dummySidebar,
+			getViewContainerModel: () => new class extends mock<IViewContainerModel>() {
+				override readonly title = 'Sessions';
+				override readonly onDidChangeContainerInfo = Event.None;
+			}(),
+			onDidChangeContainer: Event.None,
+		});
+
+		const alphaAgent = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/click-alpha') }, 'Alpha Session', { role: 'governor' });
+		const betaAgent = h.projects.addSession(beta, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/click-beta') }, 'Beta Session', { role: 'governor' });
+		h.projects.selectProject(alpha);
+
+		const host = append(document.body, $('.monaco-workbench.ade-projects-click-test-host'));
+		store.add({ dispose: () => host.remove() });
+		host.style.width = '280px';
+		host.style.height = '500px';
+
+		const view = store.add(h.instantiation.createInstance(AdeProjectsView, {
+			id: ADE_PROJECTS_VIEW_ID,
+			title: 'Sessions',
+		}));
+		view.render();
+		host.appendChild(view.element);
+		view.setVisible(true);
+		view.orthogonalSize = 280;
+		view.layout(500);
+		await view.refresh();
+
+		const visibleLabels = () => Array.from(host.querySelectorAll<HTMLElement>('.monaco-list-row .label-name')).map(el => el.textContent?.trim());
+		const findProjectRow = (name: string) => Array.from(host.querySelectorAll<HTMLElement>('.monaco-list-row')).find(row =>
+			row.querySelector('.ade-project-row') && row.textContent?.includes(name)
+		)!;
+
+		const initialVisible = visibleLabels();
+
+		// 1) Alpha is currently selected; Beta is unselected & expanded. First click on Beta's label MUST both select Beta AND collapse Beta immediately!
+		const betaLabel = findProjectRow('Beta').querySelector<HTMLElement>('.ade-project-row')!;
+		betaLabel.dispatchEvent(new mainWindow.MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 }));
+		betaLabel.dispatchEvent(new mainWindow.MouseEvent('mouseup', { bubbles: true, button: 0, detail: 1 }));
+		betaLabel.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+		await timeout(20);
+		const selectedAfterBetaFirstClick = h.projects.selectedProject?.name;
+		const visibleAfterBetaCollapse = visibleLabels();
+
+		// Background session status update on Alpha must NOT wipe out Beta's collapsed state!
+		h.projects.syncSessionItem(alphaAgent.session!.resource, { status: 'working' }, false);
+		await timeout(20);
+		const visibleAfterStatusUpdate = visibleLabels();
+
+		// 2) Select Alpha again (first click on Alpha's twistie must BOTH select Alpha AND collapse Alpha!)
+		const alphaTwistie = findProjectRow('Alpha').querySelector<HTMLElement>('.monaco-tl-twistie')!;
+		alphaTwistie.dispatchEvent(new mainWindow.MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 }));
+		alphaTwistie.dispatchEvent(new mainWindow.MouseEvent('mouseup', { bubbles: true, button: 0, detail: 1 }));
+		alphaTwistie.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+		await timeout(20);
+		const selectedAfterAlphaTwistieClick = h.projects.selectedProject?.name;
+		const visibleAfterAlphaTwistieCollapse = visibleLabels();
+
+		// 3) Now Alpha is selected & Beta is unselected + collapsed. First click on Beta's row MUST both select Beta AND expand Beta immediately!
+		const betaRowAgain = findProjectRow('Beta').querySelector<HTMLElement>('.ade-project-row')!;
+		betaRowAgain.dispatchEvent(new mainWindow.MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 }));
+		betaRowAgain.dispatchEvent(new mainWindow.MouseEvent('mouseup', { bubbles: true, button: 0, detail: 1 }));
+		betaRowAgain.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+		await timeout(20);
+		const selectedAfterBetaExpandClick = h.projects.selectedProject?.name;
+		const visibleAfterBetaExpand = visibleLabels();
+		void betaAgent;
+
+		assert.deepStrictEqual({
+			initialVisible,
+			selectedAfterBetaFirstClick,
+			visibleAfterBetaCollapse,
+			visibleAfterStatusUpdate,
+			selectedAfterAlphaTwistieClick,
+			visibleAfterAlphaTwistieCollapse,
+			selectedAfterBetaExpandClick,
+			visibleAfterBetaExpand,
+		}, {
+			initialVisible: ['Alpha', 'Alpha Session', 'Beta', 'Beta Session'],
+			selectedAfterBetaFirstClick: 'Beta',
+			visibleAfterBetaCollapse: ['Alpha', 'Alpha Session', 'Beta'],
+			visibleAfterStatusUpdate: ['Alpha', 'Alpha Session', 'Beta'],
+			selectedAfterAlphaTwistieClick: 'Alpha',
+			visibleAfterAlphaTwistieCollapse: ['Alpha', 'Beta'],
+			selectedAfterBetaExpandClick: 'Beta',
+			visibleAfterBetaExpand: ['Alpha', 'Beta', 'Beta Session'],
+		});
+	});
 });

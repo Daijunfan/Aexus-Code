@@ -482,6 +482,11 @@ function asObjectTreeOptions<TInput, T, TFilterData>(options?: IAsyncDataTreeOpt
 				((e: IAsyncDataTreeNode<TInput, T>) => (options.expandOnlyOnTwistieClick as ((e: T) => boolean))(e.element as T)) as ((e: unknown) => boolean)
 			)
 		),
+		stickyScrollToggleOnClick: typeof options.stickyScrollToggleOnClick === 'undefined' ? undefined : (
+			typeof options.stickyScrollToggleOnClick !== 'function' ? options.stickyScrollToggleOnClick : (
+				((e: IAsyncDataTreeNode<TInput, T>) => (options.stickyScrollToggleOnClick as ((e: T) => boolean))(e.element as T)) as ((e: unknown) => boolean)
+			)
+		),
 		twistieAdditionalCssClass: typeof options.twistieAdditionalCssClass === 'undefined' ? undefined : (
 			((e: IAsyncDataTreeNode<TInput, T>) => (options.twistieAdditionalCssClass as ((e: T) => string | undefined))(e.element as T)) as ((e: unknown) => string | undefined)
 		),

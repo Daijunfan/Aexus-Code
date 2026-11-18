@@ -1168,6 +1168,7 @@ function workbenchTreeDataPreamble<T, TFilterData, TOptions extends IAbstractTre
 			paddingBottom: paddingBottom,
 			hideTwistiesOfChildlessElements: options.hideTwistiesOfChildlessElements,
 			expandOnlyOnTwistieClick: options.expandOnlyOnTwistieClick ?? (configurationService.getValue<'singleClick' | 'doubleClick'>(treeExpandMode) === 'doubleClick'),
+			stickyScrollToggleOnClick: options.stickyScrollToggleOnClick,
 			contextViewProvider: contextViewService as IContextViewProvider,
 			findWidgetStyles: defaultFindWidgetStyles,
 			enableStickyScroll: options.enableStickyScroll ?? Boolean(configurationService.getValue(treeStickyScroll)),
