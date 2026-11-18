@@ -620,6 +620,8 @@ export class ClaudeRuntime implements EngineRuntime {
 			let sawThinkingDelta = false;
 			let sawResult = false;
 			let interimUsage: UsagePayload | undefined;
+			let lastInterimReportAt = 0;
+			let lastInterimReportedTotal = 0;
 			const seenToolUses = new Set<string>();
 			child.stderr.on('data', data => errorText = (errorText + String(data)).slice(-8000));
 			lines.on('line', line => {
@@ -653,6 +655,18 @@ export class ClaudeRuntime implements EngineRuntime {
 					const assistantUsage = event.message?.usage;
 					if (assistantUsage) {
 						interimUsage = assistantUsage;
+						const onInterimUsage = options?.onInterimUsage;
+						if (onInterimUsage) {
+							const snapshot = turnUsageFromPayload(assistantUsage);
+							const now = Date.now();
+							if (snapshot.totalTokens > lastInterimReportedTotal && now - lastInterimReportAt >= 1000) {
+								lastInterimReportAt = now;
+								lastInterimReportedTotal = snapshot.totalTokens;
+								try {
+									onInterimUsage(snapshot);
+								} catch { /* Live usage reporting must never break the turn. */ }
+							}
+						}
 					}
 					const content = event.message?.content;
 					if (Array.isArray(content)) {

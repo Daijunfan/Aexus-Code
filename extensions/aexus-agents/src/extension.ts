@@ -2283,6 +2283,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			});
 
 			const turnStartedAt = Date.now();
+			const reportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+			let lastInterimReportAt = 0;
+			const reportInterimUsage = (cumulative: EngineTurnTokenUsage) => {
+				const now = Date.now();
+				if (now - lastInterimReportAt < 1200) {
+					return;
+				}
+				const delta = {
+					inputTokens: Math.max(0, cumulative.inputTokens - reportedSoFar.inputTokens),
+					outputTokens: Math.max(0, cumulative.outputTokens - reportedSoFar.outputTokens),
+					cacheReadTokens: Math.max(0, (cumulative.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
+					cacheWriteTokens: Math.max(0, (cumulative.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
+					totalTokens: Math.max(0, cumulative.totalTokens - reportedSoFar.totalTokens),
+				};
+				if (delta.totalTokens === 0 && delta.inputTokens === 0 && delta.outputTokens === 0) {
+					return;
+				}
+				lastInterimReportAt = now;
+				reportedSoFar.inputTokens += delta.inputTokens;
+				reportedSoFar.outputTokens += delta.outputTokens;
+				reportedSoFar.cacheReadTokens += delta.cacheReadTokens;
+				reportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
+				reportedSoFar.totalTokens += delta.totalTokens;
+				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
+					sessionResource: uri.toString(),
+					agentId: rawOptions?.agentId,
+					usage: { ...delta, turns: 0 },
+				})).catch(() => undefined);
+			};
+			const finalizeTurnUsage = (engine: EngineRuntime, replyText: string) => {
+				const finalUsage = resolveCompletedTurnUsage(engine, record.id, finalPrompt, replyText, turnStartedAt);
+				return {
+					inputTokens: Math.max(0, finalUsage.inputTokens - reportedSoFar.inputTokens),
+					outputTokens: Math.max(0, finalUsage.outputTokens - reportedSoFar.outputTokens),
+					cacheReadTokens: Math.max(0, (finalUsage.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
+					cacheWriteTokens: Math.max(0, (finalUsage.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
+					totalTokens: Math.max(0, finalUsage.totalTokens - reportedSoFar.totalTokens),
+					durationMs: finalUsage.durationMs,
+					costUsd: finalUsage.costUsd,
+					turns: 1,
+					estimated: finalUsage.estimated,
+				};
+			};
 			try {
 				const engine = runtime(record.engine);
 				const prevId = record.id;
@@ -2306,6 +2349,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					pureWorker: isPureWorker,
 					callerRole,
 					automatedEngineering: true,
+					onInterimUsage: reportInterimUsage,
 				});
 				if (streamedMarkdown.trim()) {
 					lastTurnReplies.set(identity(record), streamedMarkdown.trim());
@@ -2315,7 +2359,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					reply: streamedMarkdown.trim(),
 					nativeId: record.id,
 					stopped: turnCancellation.token.isCancellationRequested,
-					usage: resolveCompletedTurnUsage(engine, record.id, finalPrompt, streamedMarkdown, turnStartedAt),
+					usage: finalizeTurnUsage(engine, streamedMarkdown),
 				};
 			} catch (error) {
 				if (turnCancellation.token.isCancellationRequested) {
@@ -2323,7 +2367,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						reply: streamedMarkdown.trim(),
 						nativeId: record.id,
 						stopped: true,
-						usage: resolveCompletedTurnUsage(runtime(record.engine), record.id, finalPrompt, streamedMarkdown, turnStartedAt),
+						usage: finalizeTurnUsage(runtime(record.engine), streamedMarkdown),
 					};
 				}
 				const errText = error instanceof Error ? error.message : String(error);

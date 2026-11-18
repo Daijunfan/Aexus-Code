@@ -25,6 +25,7 @@ import {
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
 	AdeBlueprintValidationError,
+	buildUpstreamReportChain,
 	computeAutoLayoutPositions,
 	computeEdgeVisualStatus,
 	computeNodeVisualStatus,
@@ -75,7 +76,21 @@ const TASK_NODE_DIAMETER = 82;
 const GATE_NODE_WIDTH = 172;
 const POPOVER_WIDTH = 286;
 
-type PopoverTabKind = 'worker' | 'employee' | 'manager' | 'task';
+type PopoverTabKind = 'worker' | 'employee' | 'manager' | 'task' | 'report';
+type SheetTabKind = 'blueprint' | 'events';
+
+function formatElapsedCompact(startedAt: number | undefined, now = Date.now()): string {
+	if (!startedAt) {
+		return '0s';
+	}
+	const sec = Math.max(0, Math.floor((now - startedAt) / 1000));
+	if (sec < 60) {
+		return `${sec}s`;
+	}
+	const m = Math.floor(sec / 60);
+	const rem = sec % 60;
+	return `${m}m${rem > 0 ? `${rem}s` : ''}`;
+}
 
 function cloneBlueprint(bp: IAdeEngineeringBlueprint): IAdeEngineeringBlueprint {
 	return {
@@ -146,6 +161,8 @@ export class AdeEngineeringEditorSerializer implements IEditorSerializer {
 
 export class AdeEngineeringEditorPane extends EditorPane {
 	static readonly ID = 'workbench.editor.adeEngineering';
+	private static nextInstanceUid = 1;
+	private readonly instanceUid = AdeEngineeringEditorPane.nextInstanceUid++;
 
 	private rootEl!: HTMLElement;
 	private toolbarEl!: HTMLElement;
@@ -162,12 +179,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private hudEl!: HTMLElement;
 	private popoverEl!: HTMLElement;
 	private popoverContentEl!: HTMLElement;
+	private sheetEl!: HTMLElement;
+	private sheetContentEl!: HTMLElement;
 
 	private readonly inputDisposables = this._register(new DisposableStore());
 	private readonly toolbarRenderDisposables = this._register(new DisposableStore());
 	private readonly hudRenderDisposables = this._register(new DisposableStore());
 	private readonly canvasRenderDisposables = this._register(new DisposableStore());
 	private readonly popoverRenderDisposables = this._register(new DisposableStore());
+	private readonly sheetRenderDisposables = this._register(new DisposableStore());
 
 	private activeGovernorId: string | undefined;
 	private snapshot: IAdeEngineeringTreeSnapshot | undefined;
@@ -175,6 +195,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private isDraftDirty = false;
 	private connectMode = false;
 	private connectSourceNodeId: string | undefined;
+	private pendingInitialFit = false;
+	private liveTickTimer: number | undefined;
+	private livePhasePillRefs: { readonly pill: HTMLElement; readonly startedAt: number; readonly phaseLabel: string }[] = [];
+	private popoverTokensCardEl: HTMLElement | undefined;
+	private popoverTelemetryEl: HTMLElement | undefined;
 
 	private panX = 48;
 	private panY = 36;
@@ -185,6 +210,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private activePopoverSegmentId: string | undefined;
 	private activePopoverTab: PopoverTabKind = 'worker';
 	private activeAnchorKind: 'worker' | 'employee' | 'manager' | 'gate' = 'worker';
+	private activeSheetTab: SheetTabKind | undefined;
+	private expandedDiffFiles = new Set<string>();
+	private gateSubmitting = false;
 
 	private nodeDomById = new Map<string, HTMLElement>();
 	private nodeAnchorsById = new Map<string, {
@@ -232,6 +260,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 	}
 
+	override dispose(): void {
+		this.stopLivePhaseTicker();
+		super.dispose();
+	}
+
 	protected createEditor(parent: HTMLElement): void {
 		this.rootEl = append(parent, $('.ade-eng-editor', { tabindex: 0 }));
 		this.toolbarEl = append(this.rootEl, $('.ade-eng-toolbar'));
@@ -264,18 +297,28 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.hudEl = append(this.bodyEl, $('.ade-eng-canvas-hud'));
 
 		// Anchored Floating Option Popover right adjacent to right-clicked engine / node (NO sidebar drawer, NO auto-popup on hover!)
-		this.popoverEl = append(this.bodyEl, $('.ade-eng-popover'));
+		this.popoverEl = append(this.bodyEl, $('.ade-eng-popover', { 'aria-hidden': 'true' }));
+		this.popoverEl.inert = true;
 		this.popoverContentEl = append(this.popoverEl, $('.ade-eng-popover-inner'));
+
+		// Optional Floating Blueprint & Live Event Log Overlay Sheet
+		this.sheetEl = append(this.bodyEl, $('.ade-eng-sheet', { 'aria-hidden': 'true' }));
+		this.sheetEl.inert = true;
+		this.sheetContentEl = append(this.sheetEl, $('.ade-eng-sheet-inner'));
 
 		this.installViewportInteractions();
 		this.installPopoverDismissal();
 	}
 
+	private markerId(status: string): string {
+		return `ade-arrow-${status}-${this.instanceUid}`;
+	}
+
 	private buildSvgMarkers(): void {
 		this.edgesDefsEl.replaceChildren();
-		const createArrow = (id: string, colorVar: string) => {
+		const createArrow = (status: string, colorVar: string) => {
 			const marker = $.SVG<SVGMarkerElement>('marker', {
-				id,
+				id: this.markerId(status),
 				viewBox: '0 0 10 10',
 				refX: '8.5',
 				refY: '5',
@@ -289,10 +332,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}));
 			this.edgesDefsEl.appendChild(marker);
 		};
-		createArrow('ade-arrow-pending', 'var(--ade-eng-edge-pending, #6e7681)');
-		createArrow('ade-arrow-running', 'var(--ade-eng-green, #3fb950)');
-		createArrow('ade-arrow-completed', 'var(--ade-eng-green, #2ea043)');
-		createArrow('ade-arrow-blocked', 'var(--ade-eng-edge-blocked, #6e7681)');
+		createArrow('pending', 'var(--ade-eng-edge-pending, #6e7681)');
+		createArrow('running', 'var(--ade-eng-green, #3fb950)');
+		createArrow('completed', 'var(--ade-eng-green, #2ea043)');
+		createArrow('blocked', 'var(--ade-eng-edge-blocked, #6e7681)');
 	}
 
 	private installViewportInteractions(): void {
@@ -372,21 +415,30 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}, { passive: false }));
 	}
 
+	private isFocusInsideEditableControl(container: HTMLElement): boolean {
+		const active = getWindow(this.rootEl).document.activeElement;
+		return Boolean(active && container.contains(active) && (
+			active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT'
+		));
+	}
+
 	private installPopoverDismissal(): void {
 		this._register(addDisposableListener(this.rootEl, EventType.POINTER_DOWN, (e: PointerEvent) => {
-			if (!this.activePopoverNodeId || e.button !== 0) {
+			if (e.button !== 0) {
 				return;
 			}
 			const target = e.target as HTMLElement | null;
-			if (target?.closest('.ade-eng-popover')) {
-				return;
+			if (this.activePopoverNodeId && !target?.closest('.ade-eng-popover')) {
+				this.closePopover();
 			}
-			this.closePopover();
+			if (this.activeSheetTab && !target?.closest('.ade-eng-sheet') && !target?.closest('.ade-eng-sheet-toggle')) {
+				this.closeSheet();
+			}
 		}, true));
 
 		this._register(addDisposableListener(this.viewportEl, EventType.CONTEXT_MENU, (e: MouseEvent) => {
 			const target = e.target as HTMLElement | null;
-			if (target?.closest('.ade-eng-node, .ade-eng-segment-header, .ade-eng-popover')) {
+			if (target?.closest('.ade-eng-node, .ade-eng-segment-header, .ade-eng-popover, .ade-eng-edge-item')) {
 				return;
 			}
 			EventHelper.stop(e, true);
@@ -394,9 +446,53 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}));
 
 		this._register(addDisposableListener(this.rootEl, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			if (e.key === 'Escape' && this.activePopoverNodeId) {
+			if (e.key === 'Escape') {
+				if (this.connectMode || this.connectSourceNodeId) {
+					EventHelper.stop(e, true);
+					this.connectMode = false;
+					this.connectSourceNodeId = undefined;
+					this.rubberBandPathEl.style.display = 'none';
+					this.renderToolbar();
+					this.renderCanvas();
+					return;
+				}
+				if (this.activeSheetTab) {
+					EventHelper.stop(e, true);
+					this.closeSheet();
+					return;
+				}
+				if (this.activePopoverNodeId) {
+					EventHelper.stop(e, true);
+					this.closePopover();
+					return;
+				}
+			}
+
+			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
+				if (this.isDraftDirty) {
+					EventHelper.stop(e, true);
+					void this.confirmDraftChanges();
+				}
+				return;
+			}
+
+			const targetEl = e.target as HTMLElement | null;
+			const inInput = Boolean(targetEl && (targetEl.tagName === 'INPUT' || targetEl.tagName === 'TEXTAREA' || targetEl.tagName === 'SELECT' || targetEl.isContentEditable));
+			if (inInput) {
+				return;
+			}
+
+			if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+				if (this.activePopoverNodeId && !this.isNodeCompletedLocked(this.activePopoverNodeId)) {
+					EventHelper.stop(e, true);
+					this.deleteDraftNode(this.activePopoverNodeId);
+				}
+				return;
+			}
+
+			if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key === '0' || e.key.toLowerCase() === 'f')) {
 				EventHelper.stop(e, true);
-				this.closePopover();
+				this.fitViewportToGraph();
 			}
 		}));
 	}
@@ -407,6 +503,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		readonly tab?: PopoverTabKind;
 		readonly segmentId?: string;
 	}): void {
+		if (this.activeSheetTab) {
+			this.closeSheet();
+		}
 		const targetTab: PopoverTabKind = params.tab ?? (params.anchorKind === 'gate' ? 'task' : params.anchorKind);
 		const sameState = this.activePopoverNodeId === params.nodeId
 			&& this.activeAnchorKind === params.anchorKind
@@ -418,6 +517,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.activeAnchorKind = params.anchorKind;
 		this.activePopoverTab = targetTab;
 		this.activePopoverSegmentId = params.segmentId;
+		this.popoverEl.inert = false;
+		this.popoverEl.removeAttribute('aria-hidden');
 		this.popoverEl.classList.add('open');
 
 		for (const [id, el] of this.nodeDomById) {
@@ -434,10 +535,39 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.activePopoverNodeId = undefined;
 		this.activePopoverSegmentId = undefined;
 		this.popoverEl.classList.remove('open', 'flipped-left', 'placed-below', 'placed-above');
+		this.popoverEl.inert = true;
+		this.popoverEl.setAttribute('aria-hidden', 'true');
 		this.popoverEl.style.maxHeight = '';
 		for (const el of this.nodeDomById.values()) {
 			el.classList.remove('inspected');
 		}
+	}
+
+	private toggleSheet(tab: SheetTabKind): void {
+		if (this.activeSheetTab === tab && this.sheetEl.classList.contains('open')) {
+			this.closeSheet();
+			return;
+		}
+		if (this.activePopoverNodeId) {
+			this.closePopover();
+		}
+		this.activeSheetTab = tab;
+		this.sheetEl.inert = false;
+		this.sheetEl.removeAttribute('aria-hidden');
+		this.sheetEl.classList.add('open');
+		this.renderToolbar();
+		this.renderSheet();
+	}
+
+	private closeSheet(): void {
+		if (!this.activeSheetTab && !this.sheetEl?.classList.contains('open')) {
+			return;
+		}
+		this.activeSheetTab = undefined;
+		this.sheetEl.classList.remove('open');
+		this.sheetEl.inert = true;
+		this.sheetEl.setAttribute('aria-hidden', 'true');
+		this.renderToolbar();
 	}
 
 	private resolveAnchorViewportRect(): { left: number; right: number; top: number; bottom: number; centerY: number } | undefined {
@@ -549,18 +679,27 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	override async setInput(input: AdeEngineeringEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 		this.inputDisposables.clear();
+		const switchingGovernor = this.activeGovernorId !== input.governorSessionId;
 		this.activeGovernorId = input.governorSessionId;
 		this.isDraftDirty = false;
 		this.connectMode = false;
 		this.connectSourceNodeId = undefined;
+		this.hideBanner();
 		this.closePopover();
+		this.closeSheet();
+		if (switchingGovernor) {
+			this.pendingInitialFit = true;
+		}
+		void this.refreshConfiguredModels();
 
 		await this.engineering.whenReady();
 		if (token.isCancellationRequested) {
 			return;
 		}
 		if (!this.engineering.hasTree(input.governorSessionId) && this.projects.getAgent(input.governorSessionId)) {
-			await this.engineering.initTree({ governorSessionId: input.governorSessionId }).catch(() => undefined);
+			await this.engineering.initTree({ governorSessionId: input.governorSessionId }).catch(err => {
+				this.showBanner(err instanceof Error ? err.message : String(err), 'error');
+			});
 		}
 
 		this.reloadFromService(true);
@@ -576,16 +715,47 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	override clearInput(): void {
+		this.stopLivePhaseTicker();
 		this.inputDisposables.clear();
 		this.toolbarRenderDisposables.clear();
 		this.hudRenderDisposables.clear();
 		this.canvasRenderDisposables.clear();
 		this.popoverRenderDisposables.clear();
+		this.sheetRenderDisposables.clear();
 		this.activeGovernorId = undefined;
 		this.snapshot = undefined;
 		this.draftBlueprint = undefined;
+		this.pendingInitialFit = false;
+		this.hideBanner();
 		this.closePopover();
+		this.closeSheet();
 		super.clearInput();
+	}
+
+	private stopLivePhaseTicker(): void {
+		if (this.liveTickTimer !== undefined) {
+			getWindow(this.rootEl).clearInterval(this.liveTickTimer);
+			this.liveTickTimer = undefined;
+		}
+	}
+
+	private syncLivePhaseTicker(): void {
+		const isRunning = this.snapshot?.state.runStatus === 'running';
+		if (isRunning && this.liveTickTimer === undefined && this.rootEl) {
+			const win = getWindow(this.rootEl);
+			this.liveTickTimer = win.setInterval(() => {
+				if (this.snapshot?.state.runStatus !== 'running') {
+					this.stopLivePhaseTicker();
+					return;
+				}
+				const now = Date.now();
+				for (const item of this.livePhasePillRefs) {
+					item.pill.textContent = `${item.phaseLabel} · ${formatElapsedCompact(item.startedAt, now)}`;
+				}
+			}, 1000);
+		} else if (!isRunning && this.liveTickTimer !== undefined) {
+			this.stopLivePhaseTicker();
+		}
 	}
 
 	private reloadFromService(resetDraft: boolean): void {
@@ -594,6 +764,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		const snap = this.engineering.getTreeSnapshot(this.activeGovernorId);
 		this.snapshot = snap;
+		this.syncLivePhaseTicker();
 		if (snap && (resetDraft || !this.isDraftDirty || !this.draftBlueprint)) {
 			const cloned = cloneBlueprint(snap.blueprint);
 			const autoPos = computeAutoLayoutPositions(cloned);
@@ -608,16 +779,50 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.renderToolbar();
 		this.renderCanvas();
 		this.renderHud();
+		if (this.pendingInitialFit && this.lastDimension && this.lastDimension.width > 0 && this.draftBlueprint && this.draftBlueprint.nodes.length > 0) {
+			this.pendingInitialFit = false;
+			this.fitViewportToGraph();
+		}
 		if (this.activePopoverNodeId) {
 			if (this.draftBlueprint?.nodes.some(n => n.id === this.activePopoverNodeId)) {
-				this.renderPopover();
+				if (this.isFocusInsideEditableControl(this.popoverEl)) {
+					this.refreshOpenPopoverTelemetryInPlace();
+				} else {
+					this.renderPopover();
+				}
 			} else {
 				this.closePopover();
 			}
 		}
+		if (this.activeSheetTab === 'events' && this.sheetEl.classList.contains('open')) {
+			this.renderSheet();
+		}
 	}
 
-	private markDraftModified(nextBp: IAdeEngineeringBlueprint): void {
+	private refreshOpenPopoverTelemetryInPlace(): void {
+		if (!this.activePopoverNodeId || !this.snapshot) {
+			return;
+		}
+		const runtime = this.snapshot.state.nodes[this.activePopoverNodeId];
+		if (!runtime) {
+			return;
+		}
+		const existingCard = this.popoverTokensCardEl;
+		if (existingCard && existingCard.parentElement) {
+			const tmp = $('div');
+			this.renderNodeTokenUsageCard(tmp, runtime);
+			const freshCard = tmp.firstElementChild as HTMLElement | null;
+			if (freshCard) {
+				existingCard.replaceWith(freshCard);
+				this.popoverTokensCardEl = freshCard;
+			}
+		}
+		if (this.popoverTelemetryEl) {
+			this.popoverTelemetryEl.textContent = `Phase: ${runtime.phase} · Rework ${runtime.employeeRejectCount}/3 · Fail ${runtime.formalFailureCount}/3`;
+		}
+	}
+
+	private markDraftModified(nextBp: IAdeEngineeringBlueprint, options?: { readonly skipPopoverRebuild?: boolean }): void {
 		let recomputedManagers = nextBp.managers;
 		try {
 			recomputedManagers = partitionEngineeringManagers(
@@ -639,13 +844,53 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.isDraftDirty = true;
 		this.renderToolbar();
 		this.renderCanvas();
-		if (this.activePopoverNodeId) {
+		if (this.activePopoverNodeId && !options?.skipPopoverRebuild) {
 			const nextSeg = recomputedManagers.find(m => m.nodeIds.includes(this.activePopoverNodeId!));
 			if (this.activeAnchorKind === 'manager' && nextSeg) {
 				this.activePopoverSegmentId = nextSeg.segmentId;
 			}
 			this.renderPopover();
 		}
+	}
+
+	private applyRolePresetToAllUnlocked(preset: { readonly engine: string; readonly model?: string; readonly thinking: AdeThinkingLevel }): void {
+		if (!this.draftBlueprint) {
+			return;
+		}
+		const nextNodes = this.draftBlueprint.nodes.map(n => {
+			if (n.type !== 'task' || this.isNodeCompletedLocked(n.id)) {
+				return n;
+			}
+			const cleanCfg = {
+				engine: preset.engine,
+				...(preset.model ? { model: preset.model } : {}),
+				thinking: preset.thinking,
+			};
+			return {
+				...n,
+				worker: { ...cleanCfg },
+				employee: { ...cleanCfg },
+			};
+		});
+		const nextManagers = this.draftBlueprint.managers.map(m => {
+			const allLocked = m.nodeIds.every(id => this.isNodeCompletedLocked(id));
+			if (allLocked) {
+				return m;
+			}
+			return {
+				...m,
+				config: {
+					engine: preset.engine,
+					...(preset.model ? { model: preset.model } : {}),
+					thinking: preset.thinking,
+				},
+			};
+		});
+		this.markDraftModified({
+			...this.draftBlueprint,
+			nodes: nextNodes,
+			managers: nextManagers,
+		});
 	}
 
 	private showBanner(message: string, kind: 'info' | 'warn' | 'error'): void {
@@ -688,21 +933,67 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		for (const n of this.draftBlueprint.nodes) {
 			const x = n.position?.x ?? 180;
 			const y = n.position?.y ?? 240;
-			minX = Math.min(minX, x - 96);
-			minY = Math.min(minY, y - 82);
-			maxX = Math.max(maxX, x + 130);
-			maxY = Math.max(maxY, y + 112);
+			minX = Math.min(minX, x - 112);
+			minY = Math.min(minY, y - 92);
+			maxX = Math.max(maxX, x + 140);
+			maxY = Math.max(maxY, y + 142);
 		}
 		const availW = Math.max(320, this.lastDimension.width - 72);
 		const availH = Math.max(240, this.lastDimension.height - 96);
 		const graphW = Math.max(200, maxX - minX);
 		const graphH = Math.max(160, maxY - minY);
-		const scale = Math.min(1.12, Math.max(0.45, Math.min(availW / graphW, availH / graphH)));
+		const scale = Math.min(1.12, Math.max(0.42, Math.min(availW / graphW, availH / graphH)));
 		this.zoom = Math.round(scale * 100) / 100;
 		this.panX = Math.round((availW - graphW * this.zoom) / 2 - minX * this.zoom + 36);
 		this.panY = Math.round((availH - graphH * this.zoom) / 2 - minY * this.zoom + 18);
 		this.applyWorldTransform();
 		this.renderHud();
+	}
+
+	private focusWaitingGateNode(): void {
+		if (!this.draftBlueprint || !this.snapshot) {
+			return;
+		}
+		const waitingGate = this.draftBlueprint.nodes.find(
+			n => n.type === 'user_gate' && this.snapshot?.state.nodes[n.id]?.phase === 'waiting_user_gate',
+		);
+		if (!waitingGate) {
+			return;
+		}
+		if (this.lastDimension && waitingGate.position) {
+			this.panX = Math.round(this.lastDimension.width * 0.38 - waitingGate.position.x * this.zoom);
+			this.panY = Math.round((this.lastDimension.height - 42) * 0.5 - waitingGate.position.y * this.zoom);
+			this.applyWorldTransform();
+		}
+		this.openPopoverForTarget({
+			nodeId: waitingGate.id,
+			anchorKind: 'gate',
+			tab: 'task',
+		});
+	}
+
+	private async handleResetTreeClicked(): Promise<void> {
+		if (!this.activeGovernorId || !this.snapshot) {
+			return;
+		}
+		if (this.snapshot.state.runStatus === 'completed' || this.snapshot.progress.completedNodes > 0) {
+			const confirmed = await this.dialogService.confirm({
+				type: 'question',
+				message: localize('adeEngConfirmResetTreeTitle', "Reset Engineering execution state for '{0}'?", this.snapshot.governorLabel),
+				detail: localize('adeEngConfirmResetTreeDetail', "All nodes will unlock and return to Standby so you can edit or re-run the workflow from scratch. Workspace files are preserved."),
+				primaryButton: localize('adeEngConfirmResetTreeBtn', "&&Reset State"),
+				custom: true,
+			});
+			if (!confirmed.confirmed) {
+				return;
+			}
+		}
+		try {
+			await this.engineering.resetTree({ governorSessionId: this.activeGovernorId });
+			this.reloadFromService(true);
+		} catch (err) {
+			this.notificationService.error(err instanceof Error ? err.message : String(err));
+		}
 	}
 
 	private renderToolbar(): void {
@@ -715,11 +1006,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 
-		// Left Cluster: Title + Engineering Pill + Status Pill + Progress
+		// Left Cluster: Title + Engineering Pill + Status Pill + Progress + Live Tokens
 		const left = append(this.toolbarEl, $('.ade-eng-toolbar-group.left'));
 		const titleIcon = append(left, $('span.ade-eng-title-icon'));
 		titleIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchySub));
-		append(left, $('span.ade-eng-toolbar-title', {}, snap.governorLabel));
+		append(left, $('span.ade-eng-toolbar-title', { title: snap.governorLabel }, snap.governorLabel));
 		append(left, $('span.ade-eng-tree-pill', {}, snap.treeType === 'research' ? 'Research' : 'Engineering'));
 
 		const statusPill = append(left, $(`span.ade-eng-run-pill.status-${snap.state.runStatus}`));
@@ -771,7 +1062,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		tokIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.pulse));
 		append(tokensPill, $('span', {}, `${formatCompactTokenCount(treeTokens.totalTokens)} tok`));
 
-		// Right Cluster: Compact Authoring Pills + Draft Guard + Execution Controls (single crisp row!)
+		// Right Cluster: Compact Authoring Pills + Blueprint/Logs Sheet + Draft Guard + Execution Controls
 		const right = append(this.toolbarEl, $('.ade-eng-toolbar-group.right'));
 
 		const makeToolBtn = (icon: ThemeIcon, label: string, onClick: () => void, extraClass = '') => {
@@ -815,10 +1106,28 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		);
 		isolationBtn.title = localize('adeEngIsolationTooltip', "Toggle Workspace Parallel Strategy: Shared Root vs Git Worktree Sandbox");
 
+		const bpBtn = makeToolBtn(
+			Codicon.fileCode,
+			localize('adeEngBlueprintSheetBtn', "Blueprint"),
+			() => this.toggleSheet('blueprint'),
+			`ade-eng-sheet-toggle${this.activeSheetTab === 'blueprint' ? '.active' : ''}`,
+		);
+		bpBtn.title = localize('adeEngBlueprintSheetTooltip', "View or edit raw Blueprint Markdown");
+
+		const logsBtn = makeToolBtn(
+			Codicon.history,
+			localize('adeEngEventsSheetBtn', "Logs"),
+			() => this.toggleSheet('events'),
+			`ade-eng-sheet-toggle${this.activeSheetTab === 'events' ? '.active' : ''}`,
+		);
+		logsBtn.title = localize('adeEngEventsSheetTooltip', "Inspect live Engineering timeline & execution logs ({0})", snap.state.events.length);
+
 		append(right, $('span.ade-eng-toolbar-sep'));
 
 		if (this.isDraftDirty) {
-			append(right, $('span.ade-eng-draft-badge', {}, localize('adeEngDraftUnsaved', "Draft")));
+			append(right, $('span.ade-eng-draft-badge', {
+				title: localize('adeEngDraftShortcutHint', "Unsaved Blueprint changes (Cmd/Ctrl+S to Confirm)"),
+			}, localize('adeEngDraftUnsaved', "Draft")));
 
 			const cancelBtn = append(right, $('button.ade-eng-action-btn.secondary', {
 				type: 'button',
@@ -830,6 +1139,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 			const confirmBtn = append(right, $('button.ade-eng-action-btn.confirm', {
 				type: 'button',
+				title: localize('adeEngConfirmShortcutHint', "Apply Blueprint changes (Cmd/Ctrl+S)"),
 			}, localize('adeEngConfirmDraftBtn', "Confirm")));
 			this.toolbarRenderDisposables.add(addDisposableListener(confirmBtn, EventType.CLICK, () => {
 				void this.confirmDraftChanges();
@@ -857,7 +1167,28 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					void this.engineering.stopTree(this.activeGovernorId);
 				}
 			}));
-		} else if (runStatus === 'paused' || runStatus === 'waiting_gate') {
+		} else if (runStatus === 'waiting_gate') {
+			const gateBtn = append(right, $('button.ade-eng-action-btn.gate', {
+				type: 'button',
+				title: localize('adeEngReviewGateTooltip', "Jump to the waiting User Gate to approve or roll back"),
+			}));
+			const gateIco = append(gateBtn, $('span'));
+			gateIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.verifiedFilled));
+			append(gateBtn, $('span', {}, localize('adeEngReviewGateBtn', "Review Gate")));
+			this.toolbarRenderDisposables.add(addDisposableListener(gateBtn, EventType.CLICK, () => {
+				this.focusWaitingGateNode();
+			}));
+
+			const stopBtn = append(right, $('button.ade-eng-action-btn.secondary', { type: 'button' }));
+			const stopIco = append(stopBtn, $('span'));
+			stopIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.debugStop));
+			append(stopBtn, $('span', {}, localize('adeEngStopBtn', "Stop")));
+			this.toolbarRenderDisposables.add(addDisposableListener(stopBtn, EventType.CLICK, () => {
+				if (this.activeGovernorId) {
+					void this.engineering.stopTree(this.activeGovernorId);
+				}
+			}));
+		} else if (runStatus === 'paused') {
 			const resumeBtn = append(right, $('button.ade-eng-action-btn.run', { type: 'button' }));
 			const resumeIco = append(resumeBtn, $('span'));
 			resumeIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.play));
@@ -878,9 +1209,22 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}
 			}));
 		} else {
+			if (runStatus === 'completed' || runStatus === 'circuit_broken' || snap.progress.completedNodes > 0) {
+				const resetBtn = append(right, $('button.ade-eng-action-btn.secondary', {
+					type: 'button',
+					title: localize('adeEngResetTreeTooltip', "Unlock completed/failed nodes and reset execution state to Standby"),
+				}));
+				const resetIco = append(resetBtn, $('span'));
+				resetIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.debugRestart));
+				append(resetBtn, $('span', {}, localize('adeEngResetBtn', "Reset")));
+				this.toolbarRenderDisposables.add(addDisposableListener(resetBtn, EventType.CLICK, () => {
+					void this.handleResetTreeClicked();
+				}));
+			}
+
 			const runBtn = append(right, $('button.ade-eng-action-btn.run', {
 				type: 'button',
-				...(this.isDraftDirty ? { title: localize('adeEngConfirmBeforeRunHint', "Confirm or cancel draft changes before starting execution") } : {}),
+				...(this.isDraftDirty ? { title: localize('adeEngConfirmBeforeRunHint', "Confirm & run updated Blueprint") } : {}),
 			}));
 			const playIco = append(runBtn, $('span'));
 			playIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.play));
@@ -915,7 +1259,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const zoomLabelBtn = append(this.hudEl, $('button.ade-eng-zoom-readout', {
 			type: 'button',
-			title: localize('adeEngFitView', "Fit Graph in Viewport"),
+			title: localize('adeEngFitView', "Fit Graph in Viewport (0 or F)"),
 		}, `${Math.round(this.zoom * 100)}%`));
 		this.hudRenderDisposables.add(addDisposableListener(zoomLabelBtn, EventType.CLICK, () => this.fitViewportToGraph()));
 
@@ -1025,7 +1369,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			y: 240 + ((index % 3) - 1) * 75,
 		};
 
-		const defaultEngine = this.draftBlueprint.nodes.find(n => n.worker)?.worker?.engine ?? 'claude-code';
+		const sampleTask = this.draftBlueprint.nodes.find(n => n.worker);
+		const defaultEngine = sampleTask?.worker?.engine ?? 'claude-code';
+		const defaultModel = sampleTask?.worker?.model;
 		const newNode: IAdeEngineeringBlueprintNode = type === 'user_gate'
 			? {
 				id: newId,
@@ -1040,8 +1386,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				title: localize('adeEngNewTaskDefaultTitle', "Task {0}", index),
 				type: 'task',
 				critical: false,
-				employee: { engine: defaultEngine, thinking: 'medium' },
-				worker: { engine: defaultEngine, thinking: 'high' },
+				employee: { engine: defaultEngine, ...(defaultModel ? { model: defaultModel } : {}), thinking: sampleTask?.employee?.thinking ?? 'medium' },
+				worker: { engine: defaultEngine, ...(defaultModel ? { model: defaultModel } : {}), thinking: sampleTask?.worker?.thinking ?? 'high' },
 				goal: localize('adeEngNewTaskDefaultGoal', "Implement task {0} cleanly in the workspace.", newId),
 				acceptance: localize('adeEngNewTaskDefaultAcceptance', "1. Implementation passes static checks and unit tests."),
 				position: pos,
@@ -1173,13 +1519,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	private renderCanvas(): void {
 		this.canvasRenderDisposables.clear();
-		this.renderToolbar();
 		clearNode(this.segmentsLayerEl);
 		this.edgesGroupEl.replaceChildren();
 		clearNode(this.nodesLayerEl);
 		this.nodeDomById.clear();
 		this.nodeAnchorsById.clear();
 		this.segmentHeaderDomById.clear();
+		this.livePhasePillRefs = [];
 
 		this.applyWorldTransform();
 
@@ -1192,7 +1538,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const nodeById = new Map(bp.nodes.map(n => [n.id, n]));
 		const runtimes = snap.state.nodes;
 
-		// 1. Render Auto-Partitioned Manager Segment Enclosures
+		// 1. Render Auto-Partitioned Manager Segment Enclosures (sized generously so token & phase pills NEVER clip!)
 		for (const seg of bp.managers) {
 			const segNodes = seg.nodeIds.map(id => nodeById.get(id)).filter((n): n is IAdeEngineeringBlueprintNode => Boolean(n));
 			if (segNodes.length === 0) {
@@ -1202,21 +1548,26 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			let minY = Infinity;
 			let maxX = -Infinity;
 			let maxY = -Infinity;
+			let isManagerActive = false;
 			for (const n of segNodes) {
 				const cx = n.position?.x ?? 180;
 				const cy = n.position?.y ?? 240;
-				minX = Math.min(minX, cx - 90);
-				minY = Math.min(minY, cy - 72);
-				maxX = Math.max(maxX, cx + 90);
-				maxY = Math.max(maxY, cy + 98);
+				minX = Math.min(minX, cx - 96);
+				minY = Math.min(minY, cy - 76);
+				maxX = Math.max(maxX, cx + 96);
+				maxY = Math.max(maxY, cy + 132);
+				const ph = runtimes[n.id]?.phase;
+				if (ph === 'manager_review' || ph === 'manager_escalation') {
+					isManagerActive = true;
+				}
 			}
-			const halo = append(this.segmentsLayerEl, $('.ade-eng-segment-halo'));
+			const halo = append(this.segmentsLayerEl, $(`div.ade-eng-segment-halo${isManagerActive ? '.role-active' : ''}`));
 			halo.style.left = `${Math.round(minX)}px`;
 			halo.style.top = `${Math.round(minY)}px`;
 			halo.style.width = `${Math.round(maxX - minX)}px`;
 			halo.style.height = `${Math.round(maxY - minY)}px`;
 
-			const header = append(halo, $('button.ade-eng-segment-header', {
+			const header = append(halo, $(`button.ade-eng-segment-header${isManagerActive ? '.role-active' : ''}`, {
 				type: 'button',
 				'data-segment-id': seg.segmentId,
 				title: localize('adeEngManagerHeaderTooltip', "Right-click to configure Manager [{0}] · Click to open Manager session", seg.segmentId),
@@ -1250,18 +1601,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.renderEdgesOnly();
 
 		// 3. Render Nodes (Dual-Core Concentric Circles + Shield User Gates)
+		const now = Date.now();
 		for (const node of bp.nodes) {
 			const runtime: IAdeEngineeringNodeRuntimeState | undefined = runtimes[node.id];
 			const visualStatus = computeNodeVisualStatus(node, runtime);
 			const isLocked = Boolean(runtime?.completed);
+			const isAwaitingGate = node.type === 'user_gate' && runtime?.phase === 'waiting_user_gate';
 
 			const cx = node.position?.x ?? 180;
 			const cy = node.position?.y ?? 240;
 
-			const nodeEl = append(this.nodesLayerEl, $(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${this.activePopoverNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}`, {
-				'data-node-id': node.id,
-				'data-visual-status': visualStatus,
-			}));
+			const nodeEl = append(
+				this.nodesLayerEl,
+				$(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${isAwaitingGate ? '.awaiting-gate' : ''}${this.activePopoverNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}`, {
+					'data-node-id': node.id,
+					'data-visual-status': visualStatus,
+				}),
+			);
 			nodeEl.style.left = `${Math.round(cx)}px`;
 			nodeEl.style.top = `${Math.round(cy)}px`;
 			this.nodeDomById.set(node.id, nodeEl);
@@ -1276,12 +1632,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.installPortWiring(node, outPort, inPort);
 
 			if (node.type === 'user_gate') {
-				const gateBody = append(nodeEl, $('div.ade-eng-gate-body.ade-pistol-cursor'));
+				const gateBody = append(nodeEl, $('div.ade-eng-gate-body.ade-pistol-cursor', {
+					title: isAwaitingGate
+						? localize('adeEngGateReadyTooltip', "Click or right-click to review upstream reports and Approve / Rollback")
+						: localize('adeEngGateIdleTooltip', "Right-click to configure User Gate [{0}]", node.id),
+				}));
 				this.nodeAnchorsById.set(node.id, { gate: gateBody });
 				const gateIcon = append(gateBody, $('span.ade-eng-gate-icon'));
 				gateIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.verifiedFilled));
 				const gateTextWrap = append(gateBody, $('div.ade-eng-gate-text'));
-				append(gateTextWrap, $('span.ade-eng-gate-kicker', {}, runtime?.phase === 'waiting_user_gate'
+				append(gateTextWrap, $('span.ade-eng-gate-kicker', {}, isAwaitingGate
 					? localize('adeEngGateWaitingKicker', "AWAITING APPROVAL")
 					: localize('adeEngGateKicker', "USER GATE")));
 				append(gateTextWrap, $('span.ade-eng-gate-title', {}, node.title));
@@ -1307,13 +1667,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					r: '38',
 				}));
 
-				const innerCore = append(concentric, $('div.ade-eng-inner-core', {
+				const workerActive = runtime?.phase === 'worker_running';
+				const empActive = runtime?.phase === 'employee_review';
+
+				const innerCore = append(concentric, $(`div.ade-eng-inner-core${workerActive ? '.role-active' : ''}`, {
 					title: localize('adeEngWorkerCoreTooltip', "Worker (L4): {0} — Right-click for options · Click to open session", node.worker?.engine ?? 'claude-code'),
 				}));
 				const workerGlyph = append(innerCore, $('span'));
 				this.applyEngineIconToElement(workerGlyph, node.worker?.engine);
 
-				const empSatellite = append(concentric, $('div.ade-eng-emp-satellite', {
+				const empSatellite = append(concentric, $(`div.ade-eng-emp-satellite${empActive ? '.role-active' : ''}`, {
 					title: localize('adeEngEmployeeSatTooltip', "Employee (L3): {0} — Right-click for options · Click to open session", node.employee?.engine ?? 'claude-code'),
 				}));
 				this.nodeAnchorsById.set(node.id, { worker: concentric, employee: empSatellite });
@@ -1337,10 +1700,24 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}
 
 				if (isLocked) {
-					const doneBadge = append(concentric, $('span.ade-eng-corner-status.done'));
+					const doneBadge = append(concentric, $('span.ade-eng-corner-status.done', {
+						title: localize('adeEngDoneBadgeTooltip', "Completed & Locked — Right-click badge to inspect Report & Diff"),
+					}));
 					doneBadge.classList.add(...ThemeIcon.asClassNameArray(Codicon.check));
+					this.canvasRenderDisposables.add(addDisposableListener(doneBadge, EventType.CONTEXT_MENU, e => {
+						EventHelper.stop(e, true);
+						this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'worker', tab: 'report' });
+					}));
 				} else if (runtime && runtime.formalFailureCount > 0) {
-					append(concentric, $(`span.ade-eng-corner-status.fail-${Math.min(3, runtime.formalFailureCount)}`, {}, `F${runtime.formalFailureCount}`));
+					const failBadge = append(concentric, $(`span.ade-eng-corner-status.fail-${Math.min(3, runtime.formalFailureCount)}`, {
+						title: runtime.formalFailureCount >= 3
+							? localize('adeEngCircuitBrokenBadgeTooltip', "Circuit Broken (Formal Failure {0}/3) — Right-click to inspect feedback or Reset", runtime.formalFailureCount)
+							: localize('adeEngFormalFailBadgeTooltip', "Formal Failure {0}/3 (Fresh Worker retry) — Right-click for feedback", runtime.formalFailureCount),
+					}, `F${runtime.formalFailureCount}`));
+					this.canvasRenderDisposables.add(addDisposableListener(failBadge, EventType.CONTEXT_MENU, e => {
+						EventHelper.stop(e, true);
+						this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'worker', tab: 'report' });
+					}));
 				} else if (runtime && runtime.employeeRejectCount > 0) {
 					append(concentric, $('span.ade-eng-corner-status.rework', {
 						title: localize('adeEngInternalReworkBadgeTooltip', "Employee Internal Rework {0}/3 (not a formal failure)", runtime.employeeRejectCount),
@@ -1348,9 +1725,32 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}
 
 				const caption = append(nodeEl, $('div.ade-eng-node-caption'));
-				append(caption, $('span.ade-eng-node-title', {}, `[${node.id}] ${node.title}`));
-				const subMeta = `${node.worker?.engine ?? 'claude-code'}:${node.worker?.thinking ?? 'high'}`;
-				append(caption, $('span.ade-eng-node-sub', {}, subMeta));
+				append(caption, $('span.ade-eng-node-title', {
+					title: `[${node.id}] ${node.title}`,
+				}, `[${node.id}] ${node.title}`));
+				const shortEng = (node.worker?.engine ?? 'claude-code').replace(/^claude-code$/, 'claude');
+				const compactModel = node.worker?.model ? ` · ${node.worker.model.replace(/\[.*\]$/, '')}` : '';
+				const subMeta = `${shortEng}${compactModel}:${node.worker?.thinking ?? 'high'}`;
+				append(caption, $('span.ade-eng-node-sub', {
+					title: `Worker: ${node.worker?.engine ?? 'claude-code'}${node.worker?.model ? ` (${node.worker.model})` : ''} · thinking=${node.worker?.thinking ?? 'high'}`,
+				}, subMeta));
+
+				const activePhaseLabelMap: Partial<Record<IAdeEngineeringNodeRuntimeState['phase'], string>> = {
+					worker_running: 'Worker',
+					employee_review: 'Emp Review',
+					manager_review: 'Mgr Review',
+					manager_escalation: 'Mgr Escalation',
+				};
+				const activePhaseLabel = runtime ? activePhaseLabelMap[runtime.phase] : undefined;
+				if (activePhaseLabel && runtime) {
+					const startedAt = runtime.startedAt || now;
+					const pill = append(caption, $('span.ade-eng-live-phase-pill', {
+						'data-started-at': String(startedAt),
+						'data-phase-label': activePhaseLabel,
+					}, `${activePhaseLabel} · ${formatElapsedCompact(startedAt, now)}`));
+					this.livePhasePillRefs.push({ pill, startedAt, phaseLabel: activePhaseLabel });
+				}
+
 				const nodeTok = runtime?.tokenUsage?.total;
 				if (nodeTok && nodeTok.totalTokens > 0) {
 					const nodeBreakdownTitle = localize(
@@ -1393,9 +1793,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const p2 = this.getNodePorts(dst);
 			const d = this.buildBezierPath(p1.outX, p1.outY, p2.inX, p2.inY);
 			const edgeStatus: AdeEngineeringEdgeVisualStatus = computeEdgeVisualStatus(edge, runtimes);
+			const canDelete = !this.isNodeCompletedLocked(edge.to);
 
 			const g = this.edgesGroupEl.appendChild($.SVG<SVGGElement>('g', {
-				class: `ade-eng-edge-item status-${edgeStatus}`,
+				class: `ade-eng-edge-item status-${edgeStatus}${canDelete ? ' deletable' : ''}`,
 				'data-edge': `${edge.from}->${edge.to}`,
 				'data-edge-status': edgeStatus,
 			}));
@@ -1410,16 +1811,48 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			g.appendChild($.SVG<SVGPathElement>('path', {
 				class: `ade-eng-edge-path status-${edgeStatus}`,
 				d,
-				'marker-end': `url(#ade-arrow-${edgeStatus})`,
+				'marker-end': `url(#${this.markerId(edgeStatus)})`,
 			}));
 
 			const hitPath = g.appendChild($.SVG<SVGPathElement>('path', {
 				class: 'ade-eng-edge-hit',
 				d,
 			}));
-			const canDelete = !this.isNodeCompletedLocked(edge.to);
 			if (canDelete) {
+				hitPath.appendChild($.SVG<SVGTitleElement>('title')).textContent = localize(
+					'adeEngEdgeDeleteHint',
+					"Edge {0} → {1} (Click ×, double-click, or right-click to remove)",
+					edge.from,
+					edge.to,
+				);
 				this.canvasRenderDisposables.add(addDisposableListener(hitPath, EventType.DBLCLICK, e => {
+					EventHelper.stop(e, true);
+					this.removeDraftEdge(edge.from, edge.to);
+				}));
+				this.canvasRenderDisposables.add(addDisposableListener(hitPath, EventType.CONTEXT_MENU, e => {
+					EventHelper.stop(e, true);
+					this.removeDraftEdge(edge.from, edge.to);
+				}));
+
+				const midX = Math.round((p1.outX + p2.inX) / 2);
+				const midY = Math.round((p1.outY + p2.inY) / 2);
+				const delGroup = g.appendChild($.SVG<SVGGElement>('g', {
+					class: 'ade-eng-edge-del-btn',
+					transform: `translate(${midX}, ${midY})`,
+				}));
+				delGroup.appendChild($.SVG<SVGTitleElement>('title')).textContent = localize('adeEngRemoveEdgeBtnTitle', "Remove edge {0} → {1}", edge.from, edge.to);
+				delGroup.appendChild($.SVG<SVGCircleElement>('circle', {
+					r: '9',
+					cx: '0',
+					cy: '0',
+				}));
+				const xText = delGroup.appendChild($.SVG<SVGTextElement>('text', {
+					x: '0',
+					y: '3.5',
+					'text-anchor': 'middle',
+				}));
+				xText.textContent = '×';
+				this.canvasRenderDisposables.add(addDisposableListener(delGroup, EventType.CLICK, e => {
 					EventHelper.stop(e, true);
 					this.removeDraftEdge(edge.from, edge.to);
 				}));
@@ -1593,7 +2026,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					node.id,
 					clickedEmp ? 'employee' : 'worker',
 				);
-			} else if (this.snapshot?.state.nodes[node.id]?.phase === 'waiting_user_gate') {
+			} else if (node.type === 'user_gate') {
 				this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'gate', tab: 'task' });
 			}
 		};
@@ -1609,6 +2042,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private renderPopover(): void {
 		this.popoverRenderDisposables.clear();
 		clearNode(this.popoverContentEl);
+		this.popoverTokensCardEl = undefined;
+		this.popoverTelemetryEl = undefined;
 
 		const bp = this.draftBlueprint;
 		const snap = this.snapshot;
@@ -1627,17 +2062,17 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const seg = (this.activePopoverSegmentId ? bp.managers.find(m => m.segmentId === this.activePopoverSegmentId) : undefined)
 			?? bp.managers.find(m => m.nodeIds.includes(nodeId));
 
-		const updateNodeDraft = (patch: Partial<IAdeEngineeringBlueprintNode>) => {
+		const updateNodeDraft = (patch: Partial<IAdeEngineeringBlueprintNode>, options?: { readonly skipPopoverRebuild?: boolean }) => {
 			if (!this.draftBlueprint || isLocked) {
 				return;
 			}
 			this.markDraftModified({
 				...this.draftBlueprint,
 				nodes: this.draftBlueprint.nodes.map(n => n.id === draftNode.id ? { ...n, ...patch } : n),
-			});
+			}, options);
 		};
 
-		// 1. Sleek Compact Header Row: [ID] + Inline Editable Title + ★ Critical + Open Session + Delete
+		// 1. Sleek Compact Header Row: [ID] + Inline Editable Title + ★ Critical + Delete/Locked + Close
 		const header = append(this.popoverContentEl, $('.ade-eng-pop-header'));
 		append(header, $(`span.ade-eng-pop-id.status-${visualStatus}`, {}, draftNode.id));
 
@@ -1647,9 +2082,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			title: draftNode.title,
 			...(isLocked ? { disabled: 'disabled' } : {}),
 		})) as HTMLInputElement;
+		this.popoverRenderDisposables.add(addDisposableListener(titleInput, EventType.INPUT, () => {
+			if (titleInput.value.trim()) {
+				updateNodeDraft({ title: titleInput.value.trim() }, { skipPopoverRebuild: true });
+			}
+		}));
 		this.popoverRenderDisposables.add(addDisposableListener(titleInput, EventType.CHANGE, () => {
 			if (titleInput.value.trim()) {
-				updateNodeDraft({ title: titleInput.value.trim() });
+				updateNodeDraft({ title: titleInput.value.trim() }, { skipPopoverRebuild: true });
 			}
 		}));
 
@@ -1669,7 +2109,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!isLocked) {
 			const delBtn = append(header, $('button.ade-eng-pop-icon-btn.danger', {
 				type: 'button',
-				title: localize('adeEngDeleteNodeTooltip', "Delete Node"),
+				title: localize('adeEngDeleteNodeTooltip', "Delete Node (Delete / Backspace)"),
 			}));
 			delBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.trash));
 			this.popoverRenderDisposables.add(addDisposableListener(delBtn, EventType.CLICK, () => {
@@ -1681,7 +2121,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const closeBtn = append(header, $('button.ade-eng-pop-icon-btn.close', {
 			type: 'button',
-			title: localize('adeEngClosePopoverTooltip', "Close"),
+			title: localize('adeEngClosePopoverTooltip', "Close (Esc)"),
 		}));
 		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
 		this.popoverRenderDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, e => {
@@ -1689,32 +2129,48 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.closePopover();
 		}));
 
-		// 2. User Gate Popover (Compact Gate Options + Direct Approve/Rollback)
+		// 2. User Gate Popover (Compact Gate Options + Upstream Reports + Direct Approve/Rollback)
 		if (draftNode.type === 'user_gate') {
 			this.renderGatePopoverBody(draftNode, runtime, isLocked, updateNodeDraft);
 			this.positionPopoverNearAnchor();
 			return;
 		}
 
-		// 3. Task Node Segmented Role Option Switcher: Worker | Employee | Manager | Task
+		// 3. Task Node Segmented Role Option Switcher: Worker | Employee | Manager | Spec | Report
+		const ownReport = snap.state.reports[draftNode.id];
+		const hasReportOrFeedback = Boolean(
+			ownReport
+			|| (runtime?.lastChanges && runtime.lastChanges.touchedFiles.length > 0)
+			|| runtime?.lastEmployeeFeedback
+			|| runtime?.lastManagerFeedback
+			|| runtime?.lastGateFeedback
+			|| (runtime && (runtime.formalFailureCount > 0 || runtime.completed)),
+		);
 		const segBar = append(this.popoverContentEl, $('.ade-eng-pop-role-tabs'));
-		const tabs: { readonly id: PopoverTabKind; readonly label: string }[] = [
+		const tabs: { readonly id: PopoverTabKind; readonly label: string; readonly dot?: boolean }[] = [
 			{ id: 'worker', label: localize('adeEngPopTabWorker', "Worker") },
 			{ id: 'employee', label: localize('adeEngPopTabEmployee', "Employee") },
 			...(seg ? [{ id: 'manager' as const, label: `Mgr [${seg.segmentId}]` }] : []),
 			{ id: 'task', label: localize('adeEngPopTabTask', "Spec") },
+			{ id: 'report', label: localize('adeEngPopTabReport', "Report"), dot: hasReportOrFeedback },
 		];
 		for (const t of tabs) {
-			const btn = append(segBar, $(`button.ade-eng-pop-role-tab${this.activePopoverTab === t.id ? '.active' : ''}`, {
+			const btn = append(segBar, $(`button.ade-eng-pop-role-tab${this.activePopoverTab === t.id ? '.active' : ''}${t.dot ? '.has-dot' : ''}`, {
 				type: 'button',
+				title: t.label,
 			}, t.label));
+			if (t.dot) {
+				append(btn, $('span.ade-eng-tab-dot'));
+			}
 			this.popoverRenderDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
 				this.activePopoverTab = t.id;
 				this.renderPopover();
 			}));
 		}
 
-		if (this.activePopoverTab === 'task') {
+		if (this.activePopoverTab === 'report') {
+			this.renderNodeReportPopoverBody(draftNode, runtime);
+		} else if (this.activePopoverTab === 'task') {
 			this.renderTaskSpecPopoverBody(draftNode, runtime, isLocked, updateNodeDraft);
 		} else if (this.activePopoverTab === 'manager' && seg) {
 			this.renderEngineOptionListBody({
@@ -1726,14 +2182,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, draftNode.id, 'manager');
 					}
 				},
-				onChange: next => {
+				onChange: (next, opts) => {
 					if (!this.draftBlueprint) {
 						return;
 					}
 					this.markDraftModified({
 						...this.draftBlueprint,
 						managers: this.draftBlueprint.managers.map(m => m.segmentId === seg.segmentId ? { ...m, config: next } : m),
-					});
+					}, opts);
 				},
 				runtime,
 			});
@@ -1747,7 +2203,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, draftNode.id, 'employee');
 					}
 				},
-				onChange: next => updateNodeDraft({ employee: next }),
+				onChange: (next, opts) => updateNodeDraft({ employee: next }, opts),
 				runtime,
 			});
 		} else {
@@ -1760,7 +2216,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, draftNode.id, 'worker');
 					}
 				},
-				onChange: next => updateNodeDraft({ worker: next }),
+				onChange: (next, opts) => updateNodeDraft({ worker: next }, opts),
 				runtime,
 			});
 		}
@@ -1773,7 +2229,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		readonly current: { readonly engine: string; readonly model?: string; readonly thinking: AdeThinkingLevel };
 		readonly disabled: boolean;
 		readonly onOpenSession: () => void;
-		readonly onChange: (next: { engine: string; model?: string; thinking: AdeThinkingLevel }) => void;
+		readonly onChange: (next: { engine: string; model?: string; thinking: AdeThinkingLevel }, options?: { readonly skipPopoverRebuild?: boolean }) => void;
 		readonly runtime: IAdeEngineeringNodeRuntimeState | undefined;
 	}): void {
 		const normEngine = normalizeBlueprintEngine(params.current.engine);
@@ -1875,31 +2331,62 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		for (const m of configuredModels) {
 			append(datalistEl, $('option', { value: m.id }, m.label));
 		}
+		this.popoverRenderDisposables.add(addDisposableListener(modelInput, EventType.INPUT, () => {
+			if (!params.disabled) {
+				params.onChange({
+					engine: normEngine,
+					...(modelInput.value.trim() ? { model: modelInput.value.trim() } : {}),
+					thinking: params.current.thinking,
+				}, { skipPopoverRebuild: true });
+			}
+		}));
 		this.popoverRenderDisposables.add(addDisposableListener(modelInput, EventType.CHANGE, () => {
 			if (!params.disabled) {
 				params.onChange({
 					engine: normEngine,
 					...(modelInput.value.trim() ? { model: modelInput.value.trim() } : {}),
 					thinking: params.current.thinking,
-				});
+				}, { skipPopoverRebuild: true });
 			}
 		}));
 
+		// 3b. 1-Click Batch Preset across all unlocked Workers, Employees & Manager segments!
+		if (!params.disabled) {
+			const batchBtn = append(body, $('button.ade-eng-batch-apply-btn', {
+				type: 'button',
+				title: localize('adeEngBatchApplyTooltip', "Apply this Engine, Model & Thinking Effort across all unlocked Workers, Employees, and Managers in the Blueprint"),
+			}));
+			const boltIco = append(batchBtn, $('span'));
+			boltIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.sparkle));
+			append(batchBtn, $('span', {}, localize('adeEngBatchApplyLabel', "Apply to All Unlocked Roles")));
+			this.popoverRenderDisposables.add(addDisposableListener(batchBtn, EventType.CLICK, () => {
+				const liveModel = modelInput.value.trim();
+				this.applyRolePresetToAllUnlocked({
+					engine: normEngine,
+					...(liveModel ? { model: liveModel } : {}),
+					thinking: params.current.thinking,
+				});
+			}));
+		}
+
 		// 4. Compact Runtime Telemetry & Token Consumption Card at Footer
 		if (params.runtime) {
-			this.renderNodeTokenUsageCard(body, params.runtime);
-			append(
+			this.popoverTokensCardEl = this.renderNodeTokenUsageCard(body, params.runtime);
+			this.popoverTelemetryEl = append(
 				body,
 				$('div.ade-eng-pop-telemetry', {}, `Phase: ${params.runtime.phase} · Rework ${params.runtime.employeeRejectCount}/3 · Fail ${params.runtime.formalFailureCount}/3`),
 			);
 		}
 	}
 
-	private renderNodeTokenUsageCard(parent: HTMLElement, runtime: IAdeEngineeringNodeRuntimeState): void {
+	private renderNodeTokenUsageCard(parent: HTMLElement, runtime: IAdeEngineeringNodeRuntimeState): HTMLElement {
 		const usage = runtime.tokenUsage;
 		const total: IAdeTokenUsage | undefined = usage?.total;
 		const totalTok = total?.totalTokens ?? 0;
 		const card = append(parent, $(`div.ade-eng-pop-tokens-card${totalTok > 0 ? '.has-usage' : ''}`));
+		if (this.popoverContentEl.contains(parent)) {
+			this.popoverTokensCardEl = card;
+		}
 		const topRow = append(card, $('div.ade-eng-pop-tokens-head'));
 		append(topRow, $('span.ade-eng-pop-tokens-label', {}, localize('adeEngPopTokensHeader', "TOKEN CONSUMPTION")));
 		append(
@@ -1917,13 +2404,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			append(rolesRow, $('span.ade-eng-pop-role-tok', {}, `E: ${formatCompactTokenCount(usage?.employee.totalTokens ?? 0)}`));
 			append(rolesRow, $('span.ade-eng-pop-role-tok', {}, `M: ${formatCompactTokenCount(usage?.manager.totalTokens ?? 0)}`));
 		}
+		return card;
 	}
 
 	private renderTaskSpecPopoverBody(
 		node: IAdeEngineeringBlueprintNode,
 		runtime: IAdeEngineeringNodeRuntimeState | undefined,
 		isLocked: boolean,
-		updateNodeDraft: (patch: Partial<IAdeEngineeringBlueprintNode>) => void,
+		updateNodeDraft: (patch: Partial<IAdeEngineeringBlueprintNode>, options?: { readonly skipPopoverRebuild?: boolean }) => void,
 	): void {
 		const body = append(this.popoverContentEl, $('.ade-eng-pop-body.scrollable'));
 		if (isLocked) {
@@ -1936,8 +2424,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			...(isLocked ? { disabled: 'disabled' } : {}),
 		})) as HTMLTextAreaElement;
 		goalArea.value = node.goal ?? '';
+		this.popoverRenderDisposables.add(addDisposableListener(goalArea, EventType.INPUT, () => {
+			updateNodeDraft({ goal: goalArea.value }, { skipPopoverRebuild: true });
+		}));
 		this.popoverRenderDisposables.add(addDisposableListener(goalArea, EventType.CHANGE, () => {
-			updateNodeDraft({ goal: goalArea.value });
+			updateNodeDraft({ goal: goalArea.value }, { skipPopoverRebuild: true });
 		}));
 
 		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngAccShortLabel', "Acceptance Criteria")));
@@ -1946,8 +2437,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			...(isLocked ? { disabled: 'disabled' } : {}),
 		})) as HTMLTextAreaElement;
 		accArea.value = node.acceptance ?? '';
+		this.popoverRenderDisposables.add(addDisposableListener(accArea, EventType.INPUT, () => {
+			updateNodeDraft({ acceptance: accArea.value }, { skipPopoverRebuild: true });
+		}));
 		this.popoverRenderDisposables.add(addDisposableListener(accArea, EventType.CHANGE, () => {
-			updateNodeDraft({ acceptance: accArea.value });
+			updateNodeDraft({ acceptance: accArea.value }, { skipPopoverRebuild: true });
 		}));
 
 		if (this.draftBlueprint) {
@@ -1987,16 +2481,129 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 		}
 
-		const ownReport = this.snapshot?.state.reports[node.id];
-		if (ownReport && !ownReport.stale) {
-			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngNodeReportShort', "Verified Report")));
-			append(body, $('div.ade-eng-report-card', {}, ownReport.summary));
+		if (runtime) {
+			this.renderNodeTokenUsageCard(body, runtime);
 		}
+	}
+
+	private renderNodeReportPopoverBody(
+		node: IAdeEngineeringBlueprintNode,
+		runtime: IAdeEngineeringNodeRuntimeState | undefined,
+	): void {
+		const body = append(this.popoverContentEl, $('.ade-eng-pop-body.scrollable'));
+		const snap = this.snapshot;
+		const ownReport = snap?.state.reports[node.id];
+
+		// Quick Node Reset & Unlock action when completed, failed, or stuck
+		const canResetNode = Boolean(
+			this.activeGovernorId
+			&& runtime
+			&& (runtime.completed || runtime.formalFailureCount > 0 || runtime.employeeRejectCount > 0 || runtime.phase !== 'idle'),
+		);
+		if (canResetNode && this.activeGovernorId) {
+			const govId = this.activeGovernorId;
+			const resetRow = append(body, $('.ade-eng-pop-subrow'));
+			append(resetRow, $('span.ade-eng-pop-role-desc', {}, runtime?.completed
+				? localize('adeEngReportCompletedStatus', "Completed & Verified")
+				: `Phase: ${runtime?.phase ?? 'idle'}`));
+			const resetNodeBtn = append(resetRow, $('button.ade-eng-pop-reset-node-btn', {
+				type: 'button',
+				title: localize('adeEngResetSingleNodeTooltip', "Unlock and reset [{0}] (+ downstream dependents) so it can be edited or re-run", node.id),
+			}, localize('adeEngResetSingleNodeBtn', "↺ Reset Node")));
+			this.popoverRenderDisposables.add(addDisposableListener(resetNodeBtn, EventType.CLICK, () => {
+				void this.engineering.resetTree({ governorSessionId: govId, nodeId: node.id }).catch(err => {
+					this.notificationService.error(err instanceof Error ? err.message : String(err));
+				});
+			}));
+		}
+
+		if (ownReport) {
+			const repHead = append(body, $('.ade-eng-pop-subrow'));
+			append(repHead, $('div.ade-eng-pop-section-label', {}, ownReport.stale
+				? localize('adeEngNodeReportStaleLabel', "Previous Report (Stale)")
+				: localize('adeEngNodeReportShort', "Verified Report")));
+			const copyBtn = append(repHead, $('button.ade-eng-pop-open-link', {
+				type: 'button',
+			}, localize('adeEngCopyReportBtn', "Copy")));
+			this.popoverRenderDisposables.add(addDisposableListener(copyBtn, EventType.CLICK, () => {
+				void getWindow(this.rootEl).navigator.clipboard?.writeText(ownReport.summary);
+				copyBtn.textContent = localize('adeEngCopiedShort', "Copied ✓");
+			}));
+			append(body, $(`div.ade-eng-report-card${ownReport.stale ? '.stale' : ''}`, {}, ownReport.summary));
+		}
+
+		if (runtime?.lastGateFeedback) {
+			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngLastGateFbLabel', "User Gate Rollback Instructions")));
+			append(body, $('div.ade-eng-feedback-card.warn', {}, runtime.lastGateFeedback));
+		}
+		if (runtime?.lastManagerFeedback) {
+			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngLastMgrFbLabel', "Manager Feedback")));
+			append(body, $('div.ade-eng-feedback-card.error', {}, runtime.lastManagerFeedback));
+		}
+		if (runtime?.lastEmployeeFeedback) {
+			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngLastEmpFbLabel', "Employee Review Feedback")));
+			append(body, $('div.ade-eng-feedback-card.warn', {}, runtime.lastEmployeeFeedback));
+		}
+
 		if (runtime?.lastChanges && runtime.lastChanges.touchedFiles.length > 0) {
-			append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngTouchedShort', "Touched Files ({0})", runtime.lastChanges.touchedFiles.length)));
+			const headRow = append(body, $('.ade-eng-pop-subrow'));
+			append(headRow, $('div.ade-eng-pop-section-label', {}, localize('adeEngTouchedShort', "Touched Files ({0})", runtime.lastChanges.touchedFiles.length)));
+			const previewKey = `${this.activeGovernorId ?? ''}:${node.id}`;
+			const isDiffOpen = this.expandedDiffFiles.has(previewKey);
+			const diffToggleBtn = append(headRow, $('button.ade-eng-pop-open-link', {
+				type: 'button',
+			}, isDiffOpen ? localize('adeEngHideDiffBtn', "Hide Diff") : localize('adeEngShowDiffBtn', "View Diff")));
+
+			const filesWrap = append(body, $('.ade-eng-files-list'));
+			const govAgent = this.activeGovernorId ? this.projects.getAgent(this.activeGovernorId) : undefined;
 			for (const f of runtime.lastChanges.touchedFiles) {
-				append(body, $('div.ade-eng-file-pill', {}, `[${f.kind.toUpperCase()}] ${f.relativePath}`));
+				const fileBtn = append(filesWrap, $(`button.ade-eng-file-pill.kind-${f.kind}`, {
+					type: 'button',
+					title: localize('adeEngOpenFileTooltip', "Click to open {0} in editor", f.relativePath),
+				}));
+				append(fileBtn, $('span.ade-eng-file-kind', {}, f.kind[0].toUpperCase()));
+				append(fileBtn, $('span.ade-eng-file-path', {}, f.relativePath));
+				this.popoverRenderDisposables.add(addDisposableListener(fileBtn, EventType.CLICK, () => {
+					if (govAgent) {
+						void this.commandService.executeCommand('vscode.open', URI.joinPath(govAgent.projectUri, f.relativePath));
+					}
+				}));
 			}
+
+			const diffHolder = append(body, $('.ade-eng-inline-diff-holder'));
+			const lastChanges = runtime.lastChanges;
+			const renderDiffIntoHolder = () => {
+				clearNode(diffHolder);
+				if (!this.expandedDiffFiles.has(previewKey)) {
+					return;
+				}
+				const diffText = lastChanges.combinedDiff?.trim()
+					|| lastChanges.touchedFiles.map(tf => tf.diff?.trim()).filter(Boolean).join('\n\n')
+					|| localize('adeEngEmptyDiff', "(No textual diff available)");
+				append(diffHolder, $('pre.ade-eng-inline-diff', {}, diffText));
+			};
+			this.popoverRenderDisposables.add(addDisposableListener(diffToggleBtn, EventType.CLICK, () => {
+				if (this.expandedDiffFiles.has(previewKey)) {
+					this.expandedDiffFiles.delete(previewKey);
+					diffToggleBtn.textContent = localize('adeEngShowDiffBtn', "View Diff");
+					clearNode(diffHolder);
+				} else {
+					this.expandedDiffFiles.add(previewKey);
+					diffToggleBtn.textContent = localize('adeEngHideDiffBtn', "Hide Diff");
+					renderDiffIntoHolder();
+				}
+			}));
+			if (isDiffOpen) {
+				renderDiffIntoHolder();
+			}
+		}
+
+		if (!ownReport && !runtime?.lastChanges?.touchedFiles.length && !runtime?.lastEmployeeFeedback && !runtime?.lastManagerFeedback && !runtime?.lastGateFeedback) {
+			append(body, $('div.ade-eng-empty-hint', {}, localize('adeEngNoReportYet', "No report or workspace diff recorded for this node yet.")));
+		}
+
+		if (runtime) {
+			this.renderNodeTokenUsageCard(body, runtime);
 		}
 	}
 
@@ -2004,7 +2611,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		node: IAdeEngineeringBlueprintNode,
 		runtime: IAdeEngineeringNodeRuntimeState | undefined,
 		isLocked: boolean,
-		updateNodeDraft: (patch: Partial<IAdeEngineeringBlueprintNode>) => void,
+		updateNodeDraft: (patch: Partial<IAdeEngineeringBlueprintNode>, options?: { readonly skipPopoverRebuild?: boolean }) => void,
 	): void {
 		const body = append(this.popoverContentEl, $('.ade-eng-pop-body.scrollable'));
 		append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngGateDescShort', "Gate Inspection Instructions")));
@@ -2013,22 +2620,51 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			...(isLocked ? { disabled: 'disabled' } : {}),
 		})) as HTMLTextAreaElement;
 		descArea.value = node.description ?? '';
-		this.popoverRenderDisposables.add(addDisposableListener(descArea, EventType.CHANGE, () => {
-			updateNodeDraft({ description: descArea.value });
+		this.popoverRenderDisposables.add(addDisposableListener(descArea, EventType.INPUT, () => {
+			updateNodeDraft({ description: descArea.value }, { skipPopoverRebuild: true });
 		}));
+		this.popoverRenderDisposables.add(addDisposableListener(descArea, EventType.CHANGE, () => {
+			updateNodeDraft({ description: descArea.value }, { skipPopoverRebuild: true });
+		}));
+
+		if (this.draftBlueprint && this.snapshot) {
+			const upstreamChain = buildUpstreamReportChain(node.id, this.draftBlueprint, this.snapshot.state.reports);
+			if (upstreamChain.length > 0) {
+				append(body, $('div.ade-eng-pop-section-label', {}, localize('adeEngGateUpstreamReports', "Upstream Verified Reports ({0})", upstreamChain.length)));
+				const chainWrap = append(body, $('.ade-eng-gate-reports'));
+				for (const r of upstreamChain) {
+					const rCard = append(chainWrap, $('.ade-eng-report-card.compact'));
+					append(rCard, $('div.ade-eng-report-card-title', {}, `[${r.nodeId}] ${r.nodeTitle}`));
+					append(rCard, $('div.ade-eng-report-card-text', {}, r.summary));
+				}
+			}
+		}
 
 		if (runtime?.phase === 'waiting_user_gate' && this.activeGovernorId && this.draftBlueprint) {
 			const govId = this.activeGovernorId;
 			const decisionWrap = append(body, $('.ade-eng-gate-pop-actions'));
 			const approveBtn = append(decisionWrap, $('button.ade-eng-action-btn.run.full-width', {
 				type: 'button',
-			}, localize('adeEngApproveGatePopBtn', "✓ Approve & Continue Downstream")));
-			this.popoverRenderDisposables.add(addDisposableListener(approveBtn, EventType.CLICK, () => {
-				void this.engineering.submitGateVerdict({
-					governorSessionId: govId,
-					nodeId: node.id,
-					verdict: 'pass',
-				});
+				...(this.gateSubmitting ? { disabled: 'disabled' } : {}),
+			}, localize('adeEngApproveGatePopBtn', "✓ Approve & Continue Downstream"))) as HTMLButtonElement;
+			this.popoverRenderDisposables.add(addDisposableListener(approveBtn, EventType.CLICK, async () => {
+				if (this.gateSubmitting) {
+					return;
+				}
+				this.gateSubmitting = true;
+				approveBtn.disabled = true;
+				try {
+					await this.engineering.submitGateVerdict({
+						governorSessionId: govId,
+						nodeId: node.id,
+						verdict: 'pass',
+					});
+					this.closePopover();
+				} catch (err) {
+					this.notificationService.error(err instanceof Error ? err.message : String(err));
+				} finally {
+					this.gateSubmitting = false;
+				}
 			}));
 
 			const candidates = listUpstreamTaskAncestors(node.id, this.draftBlueprint);
@@ -2038,22 +2674,145 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				for (const c of candidates) {
 					append(targetSelect, $('option', { value: c.id }, `↩ [${c.id}] ${c.title}`));
 				}
+				// Default rollback target to the closest immediate upstream task!
+				targetSelect.value = candidates[candidates.length - 1].id;
+
 				const rbBtn = append(rbRow, $('button.ade-eng-action-btn.danger', {
 					type: 'button',
-				}, localize('adeEngRollbackShortBtn', "Rollback")));
-				const fbInput = append(decisionWrap, $('input.ade-eng-pop-model-input', {
-					type: 'text',
+					...(this.gateSubmitting ? { disabled: 'disabled' } : {}),
+				}, localize('adeEngRollbackShortBtn', "Rollback"))) as HTMLButtonElement;
+				const fbInput = append(decisionWrap, $('textarea.ade-eng-textarea', {
+					rows: 2,
 					placeholder: localize('adeEngRollbackReasonPh', "Revision instructions for target Worker..."),
-				})) as HTMLInputElement;
-				this.popoverRenderDisposables.add(addDisposableListener(rbBtn, EventType.CLICK, () => {
-					void this.engineering.submitGateVerdict({
-						governorSessionId: govId,
-						nodeId: node.id,
-						verdict: 'rollback',
-						targetNodeId: targetSelect.value,
-						feedback: fbInput.value.trim() || undefined,
-					});
+				})) as HTMLTextAreaElement;
+				this.popoverRenderDisposables.add(addDisposableListener(rbBtn, EventType.CLICK, async () => {
+					if (this.gateSubmitting) {
+						return;
+					}
+					this.gateSubmitting = true;
+					rbBtn.disabled = true;
+					try {
+						await this.engineering.submitGateVerdict({
+							governorSessionId: govId,
+							nodeId: node.id,
+							verdict: 'rollback',
+							targetNodeId: targetSelect.value,
+							feedback: fbInput.value.trim() || undefined,
+						});
+						this.closePopover();
+					} catch (err) {
+						this.notificationService.error(err instanceof Error ? err.message : String(err));
+					} finally {
+						this.gateSubmitting = false;
+					}
 				}));
+			}
+		}
+	}
+
+	// =========================================================================
+	// Floating Blueprint Markdown & Live Event Log Sheet
+	// =========================================================================
+
+	private renderSheet(): void {
+		this.sheetRenderDisposables.clear();
+		clearNode(this.sheetContentEl);
+		if (!this.activeSheetTab || !this.snapshot) {
+			return;
+		}
+		const snap = this.snapshot;
+
+		const head = append(this.sheetContentEl, $('.ade-eng-sheet-header'));
+		const tabsWrap = append(head, $('.ade-eng-sheet-tabs'));
+		const bpTabBtn = append(tabsWrap, $(`button.ade-eng-sheet-tab${this.activeSheetTab === 'blueprint' ? '.active' : ''}`, {
+			type: 'button',
+		}, localize('adeEngSheetBlueprintTab', "Blueprint Markdown")));
+		const evTabBtn = append(tabsWrap, $(`button.ade-eng-sheet-tab${this.activeSheetTab === 'events' ? '.active' : ''}`, {
+			type: 'button',
+		}, localize('adeEngSheetEventsTab', "Execution Logs ({0})", snap.state.events.length)));
+
+		this.sheetRenderDisposables.add(addDisposableListener(bpTabBtn, EventType.CLICK, () => {
+			this.activeSheetTab = 'blueprint';
+			this.renderToolbar();
+			this.renderSheet();
+		}));
+		this.sheetRenderDisposables.add(addDisposableListener(evTabBtn, EventType.CLICK, () => {
+			this.activeSheetTab = 'events';
+			this.renderToolbar();
+			this.renderSheet();
+		}));
+
+		const closeBtn = append(head, $('button.ade-eng-pop-icon-btn.close', {
+			type: 'button',
+			title: localize('adeEngCloseSheetTooltip', "Close (Esc)"),
+		}));
+		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		this.sheetRenderDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.closeSheet()));
+
+		if (this.activeSheetTab === 'blueprint') {
+			const body = append(this.sheetContentEl, $('.ade-eng-sheet-body'));
+			const initialMd = this.draftBlueprint
+				? serializeEngineeringBlueprint(this.draftBlueprint)
+				: snap.blueprintText;
+			const editor = append(body, $('textarea.ade-eng-blueprint-editor', {
+				spellcheck: 'false',
+			})) as HTMLTextAreaElement;
+			editor.value = initialMd;
+
+			const statusMsg = append(body, $('div.ade-eng-sheet-status'));
+			const actions = append(body, $('.ade-eng-sheet-actions'));
+			const copyBtn = append(actions, $('button.ade-eng-action-btn.secondary', {
+				type: 'button',
+			}, localize('adeEngCopyBlueprintBtn', "Copy Markdown")));
+			this.sheetRenderDisposables.add(addDisposableListener(copyBtn, EventType.CLICK, () => {
+				void getWindow(this.rootEl).navigator.clipboard?.writeText(editor.value);
+				statusMsg.textContent = localize('adeEngCopiedBlueprintMsg', "Blueprint Markdown copied to clipboard.");
+				statusMsg.className = 'ade-eng-sheet-status ok';
+			}));
+
+			const applyBtn = append(actions, $('button.ade-eng-action-btn.confirm', {
+				type: 'button',
+			}, localize('adeEngApplyRawBlueprintBtn', "Validate & Apply")));
+			this.sheetRenderDisposables.add(addDisposableListener(applyBtn, EventType.CLICK, async () => {
+				if (!this.activeGovernorId) {
+					return;
+				}
+				try {
+					await this.engineering.applyBlueprint({
+						governorSessionId: this.activeGovernorId,
+						blueprintText: editor.value,
+						forceStopRunning: false,
+					});
+					this.isDraftDirty = false;
+					this.hideBanner();
+					this.reloadFromService(true);
+					statusMsg.textContent = localize('adeEngBlueprintAppliedMsg', "Blueprint validated & applied.");
+					statusMsg.className = 'ade-eng-sheet-status ok';
+				} catch (err) {
+					statusMsg.textContent = err instanceof Error ? err.message : String(err);
+					statusMsg.className = 'ade-eng-sheet-status err';
+				}
+			}));
+		} else {
+			const body = append(this.sheetContentEl, $('.ade-eng-sheet-body.events'));
+			const events = [...snap.state.events].reverse();
+			if (events.length === 0) {
+				append(body, $('div.ade-eng-empty-hint', {}, localize('adeEngNoEventsYet', "No execution events recorded yet.")));
+			} else {
+				for (const ev of events) {
+					const row = append(body, $(`div.ade-eng-event-row.level-${ev.level}.kind-${ev.event}`));
+					const meta = append(row, $('div.ade-eng-event-meta'));
+					const d = new Date(ev.timestamp);
+					const hhmmss = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+					append(meta, $('span.ade-eng-event-time', {}, hhmmss));
+					if (ev.nodeId) {
+						append(meta, $('span.ade-eng-event-node', {}, `[${ev.nodeId}]`));
+					}
+					append(meta, $('span.ade-eng-event-kind', {}, ev.event));
+					if (ev.detail) {
+						append(row, $('div.ade-eng-event-msg', {}, ev.detail));
+					}
+				}
 			}
 		}
 	}
@@ -2066,6 +2825,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.lastDimension = dimension;
 		this.rootEl.style.width = `${dimension.width}px`;
 		this.rootEl.style.height = `${dimension.height}px`;
-		this.positionPopoverNearAnchor();
+		if (this.pendingInitialFit && dimension.width > 0 && this.draftBlueprint && this.draftBlueprint.nodes.length > 0) {
+			this.pendingInitialFit = false;
+			this.fitViewportToGraph();
+		} else {
+			this.positionPopoverNearAnchor();
+		}
 	}
 }

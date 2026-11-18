@@ -172,6 +172,14 @@ interface IMermaidInlineHints {
 	readonly employeeThinking?: AdeThinkingLevel;
 }
 
+/**
+ * Decodes the entity we use to embed literal `|` characters inside Mermaid labels,
+ * so titles survive a serialize/parse round-trip.
+ */
+function decodeMermaidTitle(text: string): string {
+	return text.replace(/#124;/gi, '|').replace(/#vert;/gi, '|');
+}
+
 function parseMermaidLabelHints(rawLabel: string): IMermaidInlineHints {
 	const parts = rawLabel.split('|').map(s => s.trim()).filter(Boolean);
 	let titlePart = parts[0] ?? rawLabel.trim();
@@ -225,7 +233,7 @@ function parseMermaidLabelHints(rawLabel: string): IMermaidInlineHints {
 	}
 
 	return {
-		title: titlePart || rawLabel.trim(),
+		title: decodeMermaidTitle(titlePart || rawLabel.trim()),
 		critical,
 		workerEngine,
 		workerThinking,
@@ -292,6 +300,44 @@ function splitMermaidChainLine(line: string): { readonly stages: readonly string
 	}
 	stages.push(line.slice(lastStart).trim());
 	return { stages, labels };
+}
+
+/**
+ * Splits a Mermaid statement into `;`-separated statements, ignoring semicolons inside
+ * quoted labels or bracketed node shapes.
+ */
+function splitMermaidStatements(statement: string): string[] {
+	const statements: string[] = [];
+	let inQuotes = false;
+	let squareDepth = 0;
+	let curlyDepth = 0;
+	let parenDepth = 0;
+	let start = 0;
+
+	for (let i = 0; i < statement.length; i++) {
+		const ch = statement[i];
+		if (ch === '"' && statement[i - 1] !== '\\') {
+			inQuotes = !inQuotes;
+			continue;
+		}
+		if (inQuotes) {
+			continue;
+		}
+		if (ch === '[') { squareDepth++; continue; }
+		if (ch === ']') { squareDepth = Math.max(0, squareDepth - 1); continue; }
+		if (ch === '{') { curlyDepth++; continue; }
+		if (ch === '}') { curlyDepth = Math.max(0, curlyDepth - 1); continue; }
+		if (ch === '(') { parenDepth++; continue; }
+		if (ch === ')') { parenDepth = Math.max(0, parenDepth - 1); continue; }
+		if (ch === ';' && squareDepth === 0 && curlyDepth === 0 && parenDepth === 0) {
+			const slice = statement.slice(start, i).trim();
+			if (slice) { statements.push(slice); }
+			start = i + 1;
+		}
+	}
+	const tail = statement.slice(start).trim();
+	if (tail) { statements.push(tail); }
+	return statements.length > 0 ? statements : [statement];
 }
 
 function splitAmpersandGroup(groupText: string): string[] {
@@ -577,15 +623,14 @@ export function partitionEngineeringManagers(
 		const tailId = chain[chain.length - 1];
 		const tailNode = nodeById.get(tailId);
 		const headNode = nodeById.get(head);
-		const inferredModel = tailNode?.employee?.model ?? tailNode?.worker?.model ?? headNode?.employee?.model ?? headNode?.worker?.model;
-		const inferredThinking: AdeThinkingLevel = inferredModel
-			? (tailNode?.employee?.thinking ?? tailNode?.worker?.thinking ?? 'high')
-			: 'high';
+		const inferredRole = tailNode?.employee ?? tailNode?.worker ?? headNode?.employee ?? headNode?.worker;
+		const inferredModel = inferredRole?.model;
+		const inferredThinking: AdeThinkingLevel = inferredRole?.thinking ?? 'high';
 		const matchedConfig = existingBySegmentId.get(segmentId)
 			?? existingByNodeId.get(tailId)
 			?? existingByNodeId.get(head)
 			?? {
-				engine: normalizeBlueprintEngine(tailNode?.employee?.engine ?? tailNode?.worker?.engine ?? defaultEngine),
+				engine: normalizeBlueprintEngine(inferredRole?.engine ?? defaultEngine),
 				...(inferredModel ? { model: inferredModel } : {}),
 				thinking: inferredThinking,
 			};
@@ -670,30 +715,32 @@ export function parseEngineeringBlueprint(
 			flowDirection = (dir === 'TD' || dir === 'TB' || dir === 'BT') ? 'TD' : 'LR';
 			continue;
 		}
-		if (/^(?:subgraph|end|classDef|class|style|linkStyle|direction)\b/i.test(trimmed)) {
+		if (/^(?:subgraph|end|classDef|class|style|linkStyle|direction|click|accTitle|accDescr|note)\b/i.test(trimmed)) {
 			continue;
 		}
 
-		const statement = trimmed.replace(/;$/, '').trim();
-		const chain = splitMermaidChainLine(statement);
-		if (chain) {
-			const stageGroups = chain.stages.map(stage => splitAmpersandGroup(stage).map(tok => {
-				const parsed = parseMermaidNodeEndpoint(tok);
-				ensureDraft(parsed);
-				return parsed.id;
-			}));
-			for (let s = 0; s < stageGroups.length - 1; s++) {
-				const label = chain.labels[s];
-				for (const fromId of stageGroups[s]) {
-					for (const toId of stageGroups[s + 1]) {
-						rawEdges.push({ from: fromId, to: toId, ...(label ? { label } : {}) });
+		const statements = splitMermaidStatements(trimmed.replace(/;$/, '').trim());
+		for (const statement of statements) {
+			const chain = splitMermaidChainLine(statement);
+			if (chain) {
+				const stageGroups = chain.stages.map(stage => splitAmpersandGroup(stage).map(tok => {
+					const parsed = parseMermaidNodeEndpoint(tok);
+					ensureDraft(parsed);
+					return parsed.id;
+				}));
+				for (let s = 0; s < stageGroups.length - 1; s++) {
+					const label = chain.labels[s];
+					for (const fromId of stageGroups[s]) {
+						for (const toId of stageGroups[s + 1]) {
+							rawEdges.push({ from: fromId, to: toId, ...(label ? { label } : {}) });
+						}
 					}
 				}
-			}
-		} else {
-			for (const tok of splitAmpersandGroup(statement)) {
-				const parsed = parseMermaidNodeEndpoint(tok);
-				ensureDraft(parsed);
+			} else {
+				for (const tok of splitAmpersandGroup(statement)) {
+					const parsed = parseMermaidNodeEndpoint(tok);
+					ensureDraft(parsed);
+				}
 			}
 		}
 	}
@@ -909,7 +956,7 @@ export function parseEngineeringBlueprint(
 			const key = kv[1].toLowerCase();
 			const val = kv[2].trim();
 
-			const readBlockScalar = (): string => {
+			const readBlockScalar = (folded: boolean, keepTrailing: boolean): string => {
 				const blockLines: string[] = [];
 				let baseIndent: number | undefined;
 				while (i + 1 < lines.length) {
@@ -932,10 +979,21 @@ export function parseEngineeringBlueprint(
 					blockLines.push(peek.slice(Math.min(indentLen, baseIndent)));
 					i++;
 				}
-				while (blockLines.length > 0 && blockLines[blockLines.length - 1] === '') {
-					blockLines.pop();
+				if (!keepTrailing) {
+					while (blockLines.length > 0 && blockLines[blockLines.length - 1] === '') {
+						blockLines.pop();
+					}
 				}
-				return blockLines.join('\n');
+				const content = folded ? foldBlockScalarLines(blockLines) : blockLines.join('\n');
+				return content.trim() === '(Not specified)' ? '' : content;
+			};
+
+			const readScalarValue = (raw: string): string => {
+				const indicator = raw.match(/^([|>])([+-]?)$/);
+				if (!indicator) {
+					return raw;
+				}
+				return readBlockScalar(indicator[1] === '>', indicator[2] === '+');
 			};
 
 			if (key === 'title' && val) {
@@ -957,11 +1015,11 @@ export function parseEngineeringBlueprint(
 					currentNodeDraft.worker = parseInlineRoleConfig(val, fallbackEngine, 'high');
 				}
 			} else if (key === 'goal') {
-				currentNodeDraft.goal = (val === '|' || val === '>') ? readBlockScalar() : val;
+				currentNodeDraft.goal = readScalarValue(val);
 			} else if (key === 'acceptance') {
-				currentNodeDraft.acceptance = (val === '|' || val === '>') ? readBlockScalar() : val;
+				currentNodeDraft.acceptance = readScalarValue(val);
 			} else if (key === 'description') {
-				currentNodeDraft.description = (val === '|' || val === '>') ? readBlockScalar() : val;
+				currentNodeDraft.description = readScalarValue(val);
 			} else if (key === 'position') {
 				const coords = val.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
 				if (coords) {
@@ -1044,8 +1102,24 @@ export function parseEngineeringBlueprint(
 	};
 }
 
+function foldBlockScalarLines(lines: readonly string[]): string {
+	let folded = '';
+	for (const line of lines) {
+		if (line === '') {
+			folded += '\n';
+			continue;
+		}
+		folded += (folded && !folded.endsWith('\n') ? ' ' : '') + line;
+	}
+	return folded;
+}
+
 function escapeMermaidQuotes(text: string): string {
-	return text.replace(/"/g, '\'').replace(/\r?\n/g, ' ').trim();
+	return text.replace(/\r?\n/g, ' ').replace(/\|/g, '#124;').replace(/"/g, '\'').trim();
+}
+
+function sanitizeHeadingText(text: string): string {
+	return text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function formatMermaidNodeDeclaration(node: IAdeEngineeringBlueprintNode): string {
@@ -1071,7 +1145,7 @@ function formatRoleConfigLine(cfg: IAdeRoleModelConfig): string {
 function formatBlockScalar(fieldName: string, content: string | undefined): string[] {
 	const trimmed = (content ?? '').replace(/\r\n/g, '\n').trim();
 	if (!trimmed) {
-		return [`- ${fieldName}: |`, '    (Not specified)'];
+		return [`- ${fieldName}: |`];
 	}
 	return [
 		`- ${fieldName}: |`,
@@ -1157,18 +1231,18 @@ export function serializeEngineeringBlueprint(blueprint: IAdeEngineeringBlueprin
 
 	const nodeLines: string[] = ['## Nodes'];
 	for (const node of blueprint.nodes) {
-		nodeLines.push(`### [${node.id}] ${node.title}`);
+		nodeLines.push(`### [${node.id}] ${sanitizeHeadingText(node.title)}`);
 		nodeLines.push(`- type: ${node.type}`);
 		if (node.type === 'user_gate') {
-			nodeLines.push(...formatBlockScalar('description', node.description || '人工检查上游节点产物并裁决是否放行进入下一阶段。'));
+			nodeLines.push(...formatBlockScalar('description', node.description));
 		} else {
 			nodeLines.push(`- critical: ${Boolean(node.critical)}`);
 			const emp = node.employee ?? { engine: 'claude-code', thinking: 'medium' };
 			const wrk = node.worker ?? { engine: 'codex', thinking: 'high' };
 			nodeLines.push(`- employee: ${formatRoleConfigLine(emp)}`);
 			nodeLines.push(`- worker: ${formatRoleConfigLine(wrk)}`);
-			nodeLines.push(...formatBlockScalar('goal', node.goal || `完成节点 ${node.title} 的代码实现。`));
-			nodeLines.push(...formatBlockScalar('acceptance', node.acceptance || `1. 功能实现完整且通过静态检查与相关测试。`));
+			nodeLines.push(...formatBlockScalar('goal', node.goal));
+			nodeLines.push(...formatBlockScalar('acceptance', node.acceptance));
 		}
 		nodeLines.push('');
 	}
@@ -1395,12 +1469,11 @@ export function computeEdgeVisualStatus(
 	if (src?.phase === 'circuit_broken' || dst?.phase === 'circuit_broken' || (src?.formalFailureCount ?? 0) >= 3 || (dst?.formalFailureCount ?? 0) >= 3) {
 		return 'blocked';
 	}
-	if (dst?.completed || dst?.phase === 'completed') {
-		return 'completed';
-	}
 	const srcDone = Boolean(src?.completed || src?.phase === 'completed');
-	if (!srcDone) {
-		return 'pending';
+	const dstDone = Boolean(dst?.completed || dst?.phase === 'completed');
+	// An edge is only fully completed once BOTH endpoints have completed.
+	if (srcDone && dstDone) {
+		return 'completed';
 	}
 	const dstActive = dst && (
 		dst.phase === 'worker_running'
@@ -1409,10 +1482,10 @@ export function computeEdgeVisualStatus(
 		|| dst.phase === 'manager_escalation'
 		|| dst.phase === 'waiting_user_gate'
 	);
-	if (dstActive) {
+	if (srcDone && dstActive) {
 		return 'running';
 	}
-	return 'completed';
+	return 'pending';
 }
 
 /**

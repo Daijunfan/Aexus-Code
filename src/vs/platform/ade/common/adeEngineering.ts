@@ -146,6 +146,7 @@ export interface IAdeWorkerTurnChanges {
 	readonly capturedAt: number;
 	readonly touchedFiles: readonly IAdeTouchedFileChange[];
 	readonly combinedDiff: string;
+	readonly truncated?: boolean;
 }
 
 export interface IAdeTokenUsage {
@@ -398,6 +399,7 @@ export interface IAdeWorkspaceSnapshot {
 	readonly rootPath: string;
 	readonly capturedAt: number;
 	readonly entries: Readonly<Record<string, IAdeWorkspaceFileSnapshotEntry>>;
+	readonly truncated?: boolean;
 }
 
 export interface IAdeStoredEngineeringRecord {
@@ -485,6 +487,24 @@ export interface IAdeEngineeringWatchdogActionParams {
 	readonly message?: string;
 }
 
+export interface IAdeEngineeringResetParams {
+	readonly governorSessionId: string;
+	readonly nodeId?: string;
+	readonly keepCompleted?: boolean;
+}
+
+export interface IAdeEngineeringConfigureParams {
+	readonly governorSessionId: string;
+	readonly nodeId?: string;
+	readonly role?: 'worker' | 'employee' | 'manager' | 'all';
+	readonly engine?: string;
+	readonly model?: string;
+	readonly clearModel?: boolean;
+	readonly thinking?: AdeThinkingLevel;
+	readonly workspaceIsolation?: AdeWorkspaceIsolationMode;
+	readonly forceStopRunning?: boolean;
+}
+
 export const IAdeEngineeringService = createDecorator<IAdeEngineeringService>('adeEngineeringService');
 
 export interface IAdeEngineeringService {
@@ -503,6 +523,8 @@ export interface IAdeEngineeringService {
 
 	initTree(options: IAdeInitEngineeringOptions): Promise<IAdeEngineeringTreeSnapshot>;
 	applyBlueprint(options: IAdeApplyBlueprintOptions): Promise<IAdeEngineeringTreeSnapshot>;
+	configureTree(params: IAdeEngineeringConfigureParams): Promise<IAdeEngineeringTreeSnapshot>;
+	resetTree(params: IAdeEngineeringResetParams): Promise<IAdeEngineeringTreeSnapshot>;
 	removeTree(governorSessionId: string): Promise<void>;
 
 	runTree(governorSessionId: string, caller?: 'user' | 'secretary' | string): Promise<IAdeEngineeringTreeSnapshot>;

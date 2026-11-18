@@ -296,6 +296,7 @@ export class AdeControlServer extends Disposable {
 				}
 				chunks.push(slice);
 				handled = true;
+				socket.setTimeout(0);
 				const line = Buffer.concat(chunks).toString('utf8').replace(/\r$/, '');
 				void this._processRequestLine(socket, line);
 				return;

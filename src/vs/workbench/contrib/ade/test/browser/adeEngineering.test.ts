@@ -1210,4 +1210,296 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const embeddedInbox = sidebarHost.querySelector('.ade-inbox-panel') as HTMLElement | null;
 		assert.ok(embeddedInbox && !embeddedInbox.hidden, 'Switching to Inbox tab reveals embedded ADE Inbox panel');
 	});
+
+	test('Unlocked role configuration via service & control commands, batch preset, draft edge deletion, blueprint sheet, verified report reset, and focus-preserving live token refresh', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:820px;' }));
+		store.add({
+			dispose: () => {
+				host.remove();
+			},
+		});
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Live Configuration Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const blueprintText = [
+			'---',
+			'version: 1',
+			'treeType: engineering',
+			'workspaceIsolation: shared',
+			'---',
+			'',
+			'```mermaid',
+			'graph LR',
+			'  N1["Foundation Contracts"] --> N2["Service Layer"]',
+			'  N2 --> N3["UI Polish"]',
+			'```',
+			'',
+			'## Node: N1',
+			'- Title: Foundation Contracts',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Define shared contracts.',
+			'### Acceptance Criteria',
+			'Contracts compile.',
+			'',
+			'## Node: N2',
+			'- Title: Service Layer',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Implement the service layer.',
+			'### Acceptance Criteria',
+			'Service tests pass.',
+			'',
+			'## Node: N3',
+			'- Title: UI Polish',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Polish the UI.',
+			'### Acceptance Criteria',
+			'UI renders cleanly.',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 820, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		// 1. `engineering.configureTree` must patch every unlocked Worker, Employee and Manager segment config.
+		const configured = await h.engineering.configureTree({
+			governorSessionId: gov.id,
+			engine: 'claude-code',
+			model: 'deepseek-flash[1m]',
+			thinking: 'off',
+		});
+		const taskNodes = configured.blueprint.nodes.filter(n => n.type === 'task');
+		assert.strictEqual(taskNodes.length, 3);
+		for (const node of taskNodes) {
+			assert.deepStrictEqual(node.worker, { engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' });
+			assert.deepStrictEqual(node.employee, { engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' });
+		}
+		assert.ok(configured.blueprint.managers.length > 0);
+		for (const manager of configured.blueprint.managers) {
+			assert.deepStrictEqual(manager.config, { engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' });
+		}
+
+		// 2. Control CLI: blueprint validate / configure / reset work; session.connect & session.archive stay locked on Engineering subordinates.
+		const validateRes = await h.commandService.executeCommand<{ valid: boolean; nodeCount: number; edgeCount: number }>(
+			ADE_CONTROL_EXECUTE_COMMAND_ID,
+			'engineering.blueprint.validate',
+			{ text: blueprintText },
+		);
+		assert.ok(validateRes);
+		assert.deepStrictEqual(
+			{ valid: validateRes.valid, nodeCount: validateRes.nodeCount, edgeCount: validateRes.edgeCount },
+			{ valid: true, nodeCount: 3, edgeCount: 2 },
+		);
+
+		const configureRes = await h.commandService.executeCommand<{
+			nodes: readonly {
+				id: string;
+				worker?: { engine: string; model?: string; thinking: string };
+				employee?: { engine: string; model?: string; thinking: string };
+			}[];
+		}>(ADE_CONTROL_EXECUTE_COMMAND_ID, 'engineering.configure', {
+			governor: gov.id,
+			all: true,
+			engine: 'codex',
+			model: 'gpt-5-codex',
+			thinking: 'high',
+		});
+		assert.ok(configureRes);
+		assert.strictEqual(configureRes.nodes.length, 3);
+		for (const node of configureRes.nodes) {
+			assert.deepStrictEqual(node.worker, { engine: 'codex', model: 'gpt-5-codex', thinking: 'high' });
+			assert.deepStrictEqual(node.employee, { engine: 'codex', model: 'gpt-5-codex', thinking: 'high' });
+		}
+
+		const resetRes = await h.commandService.executeCommand<{ governorSessionId: string; runStatus: string }>(
+			ADE_CONTROL_EXECUTE_COMMAND_ID,
+			'engineering.reset',
+			{ governor: gov.id, node: 'N3' },
+		);
+		assert.ok(resetRes);
+		assert.deepStrictEqual(
+			{ governorSessionId: resetRes.governorSessionId, runStatus: resetRes.runStatus },
+			{ governorSessionId: gov.id, runStatus: 'idle' },
+		);
+
+		const managerAgent = h.projects.getDirectSubordinates(gov.id)[0];
+		assert.ok(managerAgent, 'Engineering tree pre-creates a Manager subordinate');
+		await assert.rejects(
+			() => h.commandService.executeCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, 'session.connect', { id: managerAgent.id, engine: 'codex', open: false }),
+			/locked/i,
+		);
+		await assert.rejects(
+			() => h.commandService.executeCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, 'session.archive', { id: managerAgent.id }),
+			/locked/i,
+		);
+
+		const popover = host.querySelector('.ade-eng-popover') as HTMLElement;
+		assert.ok(popover, 'Engineering pane renders the floating option popover');
+
+		// 3a. Clicking `.ade-eng-batch-apply-btn` applies Engine + Model + Thinking across every unlocked role.
+		const nodeN2El = host.querySelector('.ade-eng-node[data-node-id="N2"]') as HTMLElement;
+		assert.ok(nodeN2El);
+		nodeN2El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popover.classList.contains('open'), true);
+
+		const kiloBtn = Array.from(popover.querySelectorAll<HTMLButtonElement>('button.ade-eng-engine-opt')).find(b => b.title === 'Kilo Code');
+		assert.ok(kiloBtn, 'Kilo Code engine option rendered for unlocked node');
+		kiloBtn.click();
+
+		const maxBtn = Array.from(popover.querySelectorAll<HTMLButtonElement>('button.ade-eng-think-opt')).find(b => b.textContent === 'Max');
+		assert.ok(maxBtn, 'Max thinking option rendered for unlocked node');
+		maxBtn.click();
+
+		const modelInput = popover.querySelector('input.ade-eng-pop-model-input') as HTMLInputElement;
+		assert.ok(modelInput);
+		modelInput.value = 'deepseek-flash[1m]';
+		modelInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+
+		const batchBtn = popover.querySelector('button.ade-eng-batch-apply-btn') as HTMLButtonElement;
+		assert.ok(batchBtn, 'Batch preset button rendered');
+		batchBtn.click();
+		assert.ok(host.querySelector('.ade-eng-draft-badge'), 'Batch preset enters Draft Unsaved mode');
+
+		const batchConfirmBtn = host.querySelector('.ade-eng-toolbar .ade-eng-action-btn.confirm') as HTMLButtonElement;
+		assert.ok(batchConfirmBtn);
+		batchConfirmBtn.click();
+		await waitForDomCondition(() => !host.querySelector('.ade-eng-draft-badge'));
+
+		const batchSnap = h.engineering.getTreeSnapshot(gov.id)!;
+		for (const id of ['N1', 'N2', 'N3']) {
+			const node = batchSnap.blueprint.nodes.find(n => n.id === id)!;
+			assert.deepStrictEqual(node.worker, { engine: 'kilo', model: 'deepseek-flash[1m]', thinking: 'max' });
+			assert.deepStrictEqual(node.employee, { engine: 'kilo', model: 'deepseek-flash[1m]', thinking: 'max' });
+		}
+		for (const manager of batchSnap.blueprint.managers) {
+			assert.deepStrictEqual(manager.config, { engine: 'kilo', model: 'deepseek-flash[1m]', thinking: 'max' });
+		}
+
+		// 3b. Clicking `.ade-eng-edge-del-btn` removes an unlocked edge while in draft mode.
+		const edgeGroup = host.querySelector('.ade-eng-edge-item[data-edge="N2->N3"]') as SVGGElement | null;
+		assert.ok(edgeGroup, 'Unlocked edge renders a delete affordance');
+		const edgeDelBtn = edgeGroup.querySelector('.ade-eng-edge-del-btn') as SVGGElement;
+		assert.ok(edgeDelBtn);
+		edgeDelBtn.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+		assert.strictEqual(host.querySelector('.ade-eng-edge-item[data-edge="N2->N3"]'), null, 'Clicking × removes the unlocked draft edge');
+		assert.ok(host.querySelector('.ade-eng-draft-badge'), 'Edge removal enters Draft Unsaved mode');
+
+		const edgeConfirmBtn = host.querySelector('.ade-eng-toolbar .ade-eng-action-btn.confirm') as HTMLButtonElement;
+		assert.ok(edgeConfirmBtn);
+		edgeConfirmBtn.click();
+		await waitForDomCondition(() => !host.querySelector('.ade-eng-draft-badge'));
+		assert.ok(
+			!h.engineering.getTreeSnapshot(gov.id)!.blueprint.edges.some(e => e.from === 'N2' && e.to === 'N3'),
+			'Confirmed draft persists the removed edge',
+		);
+
+		// 3c. Toggling `.ade-eng-sheet-toggle` opens `.ade-eng-sheet.open` with the Blueprint Markdown editor.
+		const sheetToggle = host.querySelector('.ade-eng-sheet-toggle') as HTMLButtonElement;
+		assert.ok(sheetToggle);
+		sheetToggle.click();
+		const sheet = host.querySelector('.ade-eng-sheet') as HTMLElement;
+		assert.ok(sheet.classList.contains('open'), 'Blueprint sheet toggles open');
+		assert.ok(sheet.querySelector('textarea.ade-eng-blueprint-editor'), 'Open sheet renders the Blueprint Markdown editor');
+		const sheetToggleAgain = host.querySelector('.ade-eng-sheet-toggle') as HTMLButtonElement;
+		sheetToggleAgain.click();
+		assert.strictEqual((host.querySelector('.ade-eng-sheet') as HTMLElement).classList.contains('open'), false, 'Toggling again closes the sheet');
+
+		// 3d. Live token updates must refresh telemetry in place without stealing focus or losing an uncommitted input value.
+		const n3WorkerAgentId = h.engineering.getTreeSnapshot(gov.id)!.state.nodes.N3.workerAgentId;
+		assert.ok(n3WorkerAgentId, 'Unlocked N3 exposes its Worker agent id');
+		const nodeN3El = host.querySelector('.ade-eng-node[data-node-id="N3"]') as HTMLElement;
+		assert.ok(nodeN3El);
+		nodeN3El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popover.classList.contains('open'), true);
+
+		const titleInput = popover.querySelector('input.ade-eng-pop-title-input') as HTMLInputElement;
+		assert.ok(titleInput && !titleInput.disabled);
+		titleInput.focus();
+		titleInput.value = 'Uncommitted N3 Title';
+		assert.strictEqual(mainWindow.document.activeElement, titleInput, 'Popover input holds real DOM focus before the usage event');
+
+		await h.commandService.executeCommand(ADE_RECORD_TURN_USAGE_COMMAND_ID, {
+			agentId: n3WorkerAgentId,
+			usage: { inputTokens: 3000, outputTokens: 1321, cacheReadTokens: 0, totalTokens: 4321 },
+		});
+		await waitForDomCondition(() => Boolean(popover.querySelector('.ade-eng-pop-tokens-card.has-usage')));
+		assert.strictEqual(mainWindow.document.activeElement, titleInput, 'Live token refresh MUST NOT steal focus from the popover input');
+		assert.strictEqual(titleInput.value, 'Uncommitted N3 Title', 'Live token refresh MUST preserve the uncommitted input value');
+		assert.strictEqual(popover.classList.contains('open'), true, 'Popover stays open across live token refresh');
+		assert.ok(
+			popover.querySelector('.ade-eng-pop-tokens-total')?.textContent?.includes('4,321'),
+			'Live token refresh updates the open popover token card in place',
+		);
+
+		popover.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		assert.strictEqual(popover.classList.contains('open'), false);
+
+		// 3e. Run N1 to completion, then verify the Report tab, diff/reports commands and node-level reset.
+		await h.engineering.runTree(gov.id, 'user');
+		await waitForNodePhase(h.engineering, gov.id, 'N1', 'employee_review');
+		await h.engineering.submitReview({
+			governorSessionId: gov.id,
+			nodeId: 'N1',
+			role: 'employee',
+			verdict: 'pass',
+			report: 'Verified report for N1',
+		});
+		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.state.nodes.N1.completed, true);
+
+		const diffRes = await h.commandService.executeCommand<{
+			nodeId: string;
+			touchedFiles: readonly { relativePath: string; kind: string }[];
+			combinedDiff: string;
+		}>(ADE_CONTROL_EXECUTE_COMMAND_ID, 'engineering.diff', { governor: gov.id, node: 'N1' });
+		assert.ok(diffRes);
+		assert.strictEqual(diffRes.nodeId, 'N1');
+		assert.deepStrictEqual(diffRes.touchedFiles.map(f => f.relativePath), ['src/auth.ts']);
+		assert.ok(diffRes.combinedDiff.includes('src/auth.ts'), 'Diff command returns the captured Worker diff');
+
+		const reportsRes = await h.commandService.executeCommand<{
+			reports: readonly { nodeId: string; summary: string }[];
+		}>(ADE_CONTROL_EXECUTE_COMMAND_ID, 'engineering.reports', { governor: gov.id });
+		assert.ok(reportsRes);
+		assert.deepStrictEqual(reportsRes.reports.map(r => r.nodeId), ['N1']);
+		assert.strictEqual(reportsRes.reports[0].summary, 'Verified report for N1');
+
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-node[data-node-id="N1"]')?.classList.contains('status-completed')));
+		const nodeN1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;
+		nodeN1El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popover.classList.contains('open'), true);
+		const reportTabBtn = Array.from(popover.querySelectorAll<HTMLButtonElement>('button.ade-eng-pop-role-tab')).find(b => b.textContent?.includes('Report'));
+		assert.ok(reportTabBtn, 'Completed node popover exposes the Report tab');
+		reportTabBtn.click();
+		assert.ok(
+			popover.querySelector('.ade-eng-report-card')?.textContent?.includes('Verified report for N1'),
+			'Report tab renders the verified report',
+		);
+		const touchedFilePaths = Array.from(popover.querySelectorAll('.ade-eng-file-pill .ade-eng-file-path')).map(el => el.textContent);
+		assert.deepStrictEqual(touchedFilePaths, ['src/auth.ts'], 'Report tab renders the touched files list');
+		const resetNodeBtn = popover.querySelector('.ade-eng-pop-reset-node-btn') as HTMLButtonElement | null;
+		assert.ok(resetNodeBtn && resetNodeBtn.textContent === '↺ Reset Node', 'Report tab renders the ↺ Reset Node action');
+
+		pane.clearInput();
+	});
 });

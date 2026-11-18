@@ -22,6 +22,23 @@ export class AdeInboxPanel extends Disposable {
 	private readonly renderDisposables = this._register(new DisposableStore());
 	private showResolved = false;
 	private expandedRollbackIds = new Set<string>();
+	private rollbackFeedbackDrafts = new Map<string, string>();
+	private rollbackTargetDrafts = new Map<string, string>();
+	private inFlightItemIds = new Set<string>();
+
+	private formatRelativeAge(ts: number): string {
+		const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+		if (diffSec < 45) {
+			return localize('adeInboxJustNow', "just now");
+		}
+		if (diffSec < 3600) {
+			return localize('adeInboxMinutesAgo', "{0}m ago", Math.floor(diffSec / 60));
+		}
+		if (diffSec < 86400) {
+			return localize('adeInboxHoursAgo', "{0}h ago", Math.floor(diffSec / 3600));
+		}
+		return localize('adeInboxDaysAgo', "{0}d ago", Math.floor(diffSec / 86400));
+	}
 
 	constructor(
 		container: HTMLElement,
@@ -51,6 +68,7 @@ export class AdeInboxPanel extends Disposable {
 	}
 
 	render(): void {
+		const prevScrollTop = this.listEl.scrollTop;
 		this.renderDisposables.clear();
 		clearNode(this.filterBarEl);
 		clearNode(this.listEl);
@@ -58,9 +76,11 @@ export class AdeInboxPanel extends Disposable {
 		const leftGroup = append(this.filterBarEl, $('.ade-inbox-toolbar-left'));
 		const pendingToggle = append(leftGroup, $(`button.ade-inbox-filter-btn${!this.showResolved ? '.active' : ''}`, {
 			type: 'button',
+			'aria-pressed': String(!this.showResolved),
 		}, localize('adeInboxPendingFilter', "Pending")));
 		const allToggle = append(leftGroup, $(`button.ade-inbox-filter-btn${this.showResolved ? '.active' : ''}`, {
 			type: 'button',
+			'aria-pressed': String(this.showResolved),
 		}, localize('adeInboxAllFilter', "All")));
 
 		this.renderDisposables.add(addDisposableListener(pendingToggle, EventType.CLICK, () => {
@@ -95,6 +115,7 @@ export class AdeInboxPanel extends Disposable {
 		for (const item of items) {
 			this.renderCard(item);
 		}
+		this.listEl.scrollTop = prevScrollTop;
 	}
 
 	private renderCard(item: IAdeInboxItem): void {
@@ -117,17 +138,18 @@ export class AdeInboxPanel extends Disposable {
 			: localize('adeInboxKindGov', "Governor Alert")));
 
 		if (item.projectName) {
-			append(topRow, $('span.ade-inbox-project-pill', {}, item.projectName));
+			append(topRow, $('span.ade-inbox-project-pill', { title: item.projectPath }, item.projectName));
 		}
+		append(topRow, $('span.ade-inbox-age', {}, this.formatRelativeAge(item.createdAt)));
 		if (item.unread) {
 			append(topRow, $('span.ade-inbox-unread-dot'));
 		}
 
 		append(card, $('div.ade-inbox-card-title', {}, item.title));
-		append(card, $('div.ade-inbox-card-meta', {}, `${item.governorLabel}`));
+		append(card, $('div.ade-inbox-card-meta', {}, item.nodeTitle ? `${item.governorLabel} · [${item.nodeId}] ${item.nodeTitle}` : `${item.governorLabel}`));
 		append(card, $('div.ade-inbox-card-message', {}, item.message));
 
-		if (item.upstreamSummary && item.upstreamSummary !== '(None — root task)') {
+		if (item.upstreamSummary && item.upstreamSummary.trim() && !item.upstreamSummary.startsWith('(None')) {
 			const details = append(card, $('details.ade-inbox-upstream-details'));
 			append(details, $('summary', {}, localize('adeInboxUpstreamSummaryToggle', "Upstream Incremental Reports")));
 			append(details, $('pre.ade-inbox-upstream-pre', {}, item.upstreamSummary));
@@ -140,33 +162,46 @@ export class AdeInboxPanel extends Disposable {
 		}
 
 		const actionsRow = append(card, $('.ade-inbox-card-actions'));
+		const isBusy = this.inFlightItemIds.has(item.id);
 
 		if (item.kind === 'user_gate' && !item.resolved && item.nodeId) {
 			const nodeId = item.nodeId;
 			const approveBtn = append(actionsRow, $('button.ade-inbox-btn.primary', {
 				type: 'button',
-			}, localize('adeInboxGateApproveBtn', "Approve")));
+				...(isBusy ? { disabled: 'disabled' } : {}),
+			}, localize('adeInboxGateApproveBtn', "Approve"))) as HTMLButtonElement;
 			this.renderDisposables.add(addDisposableListener(approveBtn, EventType.CLICK, e => {
 				e.stopPropagation();
+				if (this.inFlightItemIds.has(item.id)) {
+					return;
+				}
+				this.inFlightItemIds.add(item.id);
+				approveBtn.disabled = true;
 				void this.engineering.submitGateVerdict({
 					governorSessionId: item.governorSessionId,
 					nodeId,
 					verdict: 'pass',
+				}).finally(() => {
+					this.inFlightItemIds.delete(item.id);
 				});
 			}));
 
-			const rbToggleBtn = append(actionsRow, $('button.ade-inbox-btn.danger-outline', {
-				type: 'button',
-			}, localize('adeInboxGateRollbackToggleBtn', "Roll Back...")));
-			this.renderDisposables.add(addDisposableListener(rbToggleBtn, EventType.CLICK, e => {
-				e.stopPropagation();
-				if (this.expandedRollbackIds.has(item.id)) {
-					this.expandedRollbackIds.delete(item.id);
-				} else {
-					this.expandedRollbackIds.add(item.id);
-				}
-				this.render();
-			}));
+			const candidates = item.rollbackCandidates ?? [];
+			if (candidates.length > 0) {
+				const rbToggleBtn = append(actionsRow, $('button.ade-inbox-btn.danger-outline', {
+					type: 'button',
+					...(isBusy ? { disabled: 'disabled' } : {}),
+				}, localize('adeInboxGateRollbackToggleBtn', "Roll Back...")));
+				this.renderDisposables.add(addDisposableListener(rbToggleBtn, EventType.CLICK, e => {
+					e.stopPropagation();
+					if (this.expandedRollbackIds.has(item.id)) {
+						this.expandedRollbackIds.delete(item.id);
+					} else {
+						this.expandedRollbackIds.add(item.id);
+					}
+					this.render();
+				}));
+			}
 
 			const openCanvasBtn = append(actionsRow, $('button.ade-inbox-btn.ghost', {
 				type: 'button',
@@ -176,32 +211,51 @@ export class AdeInboxPanel extends Disposable {
 				void this.engineering.openEngineeringEditor(item.governorSessionId);
 			}));
 
-			if (this.expandedRollbackIds.has(item.id)) {
+			if (this.expandedRollbackIds.has(item.id) && candidates.length > 0) {
 				const rbBox = append(card, $('.ade-inbox-rollback-box'));
-				const candidates = item.rollbackCandidates ?? [];
 				const selectEl = append(rbBox, $('select.ade-eng-select')) as HTMLSelectElement;
+				const savedTarget = this.rollbackTargetDrafts.get(item.id) ?? candidates[candidates.length - 1]?.id;
 				for (const c of candidates) {
 					const opt = append(selectEl, $('option', { value: c.id }, `[${c.id}] ${c.title}`)) as HTMLOptionElement;
-					if (c.id === candidates[candidates.length - 1]?.id) {
+					if (c.id === savedTarget) {
 						opt.selected = true;
 					}
 				}
+				this.renderDisposables.add(addDisposableListener(selectEl, EventType.CHANGE, () => {
+					this.rollbackTargetDrafts.set(item.id, selectEl.value);
+				}));
 				const fbArea = append(rbBox, $('textarea.ade-eng-textarea', {
 					rows: 2,
 					placeholder: localize('adeInboxRollbackFeedbackHint', "Feedback instructions for rework…"),
 				})) as HTMLTextAreaElement;
+				fbArea.value = this.rollbackFeedbackDrafts.get(item.id) ?? '';
+				this.renderDisposables.add(addDisposableListener(fbArea, EventType.INPUT, () => {
+					this.rollbackFeedbackDrafts.set(item.id, fbArea.value);
+				}));
 				const confirmRbBtn = append(rbBox, $('button.ade-inbox-btn.danger', {
 					type: 'button',
-				}, localize('adeInboxConfirmRollbackBtn', "Confirm Partial Rollback")));
+					...(isBusy ? { disabled: 'disabled' } : {}),
+				}, localize('adeInboxConfirmRollbackBtn', "Confirm Partial Rollback"))) as HTMLButtonElement;
 				this.renderDisposables.add(addDisposableListener(confirmRbBtn, EventType.CLICK, e => {
 					e.stopPropagation();
+					if (this.inFlightItemIds.has(item.id)) {
+						return;
+					}
+					this.inFlightItemIds.add(item.id);
+					confirmRbBtn.disabled = true;
+					const chosenTarget = selectEl.value || undefined;
+					const chosenFeedback = fbArea.value.trim() || undefined;
 					this.expandedRollbackIds.delete(item.id);
+					this.rollbackFeedbackDrafts.delete(item.id);
+					this.rollbackTargetDrafts.delete(item.id);
 					void this.engineering.submitGateVerdict({
 						governorSessionId: item.governorSessionId,
 						nodeId,
 						verdict: 'rollback',
-						targetNodeId: selectEl.value || undefined,
-						feedback: fbArea.value.trim() || undefined,
+						targetNodeId: chosenTarget,
+						feedback: chosenFeedback,
+					}).finally(() => {
+						this.inFlightItemIds.delete(item.id);
 					});
 				}));
 			}
@@ -228,7 +282,7 @@ export class AdeInboxPanel extends Disposable {
 				}, localize('adeInboxResolveBtn', "Resolve")));
 				this.renderDisposables.add(addDisposableListener(resolveBtn, EventType.CLICK, e => {
 					e.stopPropagation();
-					void this.inbox.resolveItem(item.id, 'Acknowledged');
+					void this.inbox.resolveItem(item.id, localize('adeInboxResolvedAck', "Acknowledged"));
 				}));
 			}
 		}

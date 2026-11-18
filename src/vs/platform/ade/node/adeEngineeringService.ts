@@ -60,8 +60,9 @@ function sanitizePathSegment(raw: string): string {
 	return cleaned;
 }
 
-function execGit(cwd: string, args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function execGit(cwd: string, args: readonly string[], timeoutMs = 60_000): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise(resolve => {
+		let settled = false;
 		const child = cp.spawn('git', args, {
 			cwd,
 			windowsHide: true,
@@ -69,6 +70,13 @@ function execGit(cwd: string, args: readonly string[]): Promise<{ code: number; 
 		});
 		let stdout = '';
 		let stderr = '';
+		const timer = setTimeout(() => {
+			if (!settled) {
+				settled = true;
+				try { child.kill('SIGKILL'); } catch { /* ignore */ }
+				resolve({ code: 124, stdout, stderr: `${stderr}\nGit command timed out after ${timeoutMs}ms`.trim() });
+			}
+		}, timeoutMs);
 		child.stdout.on('data', chunk => {
 			if (stdout.length < 256_000) {
 				stdout += String(chunk);
@@ -79,10 +87,24 @@ function execGit(cwd: string, args: readonly string[]): Promise<{ code: number; 
 				stderr += String(chunk);
 			}
 		});
-		child.on('error', err => resolve({ code: 1, stdout: '', stderr: err.message }));
-		child.on('close', code => resolve({ code: code ?? 1, stdout, stderr }));
+		child.on('error', err => {
+			if (!settled) {
+				settled = true;
+				clearTimeout(timer);
+				resolve({ code: 1, stdout: '', stderr: err.message });
+			}
+		});
+		child.on('close', code => {
+			if (!settled) {
+				settled = true;
+				clearTimeout(timer);
+				resolve({ code: code ?? 1, stdout, stderr });
+			}
+		});
 	});
 }
+
+const GIT_FALLBACK_IDENTITY_ARGS = ['-c', 'user.name=Aexus Engineering', '-c', 'user.email=engineering@aexus.local'] as const;
 
 function buildCompactLineDiff(relativePath: string, beforeText: string | undefined, afterText: string | undefined): string {
 	const oldLines = beforeText !== undefined ? beforeText.replace(/\r\n/g, '\n').split('\n') : [];
@@ -232,10 +254,10 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 				]);
 				const state = JSON.parse(rawState) as IAdeEngineeringTreeState;
 				return {
-					governorSessionId: state.governorSessionId || governorSessionId,
+					governorSessionId,
 					treeType: state.treeType || kind,
 					blueprintText,
-					state,
+					state: { ...state, governorSessionId },
 				};
 			} catch (err) {
 				if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -265,14 +287,16 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 	}
 
 	async loadInbox(): Promise<readonly IAdeInboxItem[]> {
+		const inboxPath = this.getInboxPath();
 		try {
-			const raw = await fs.promises.readFile(this.getInboxPath(), 'utf8');
+			const raw = await fs.promises.readFile(inboxPath, 'utf8');
 			const parsed = JSON.parse(raw) as unknown;
 			return Array.isArray(parsed) ? parsed as IAdeInboxItem[] : [];
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
 				return [];
 			}
+			await fs.promises.copyFile(inboxPath, `${inboxPath}.corrupt.${Date.now()}`).catch(() => { });
 			return [];
 		}
 	}
@@ -348,6 +372,7 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			rootPath: cwd,
 			capturedAt: Date.now(),
 			entries,
+			...(count >= MAX_SNAPSHOT_FILES ? { truncated: true } : {}),
 		};
 	}
 
@@ -426,6 +451,7 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			capturedAt: Date.now(),
 			touchedFiles,
 			combinedDiff: diffChunks.join('\n\n'),
+			...((before.truncated || after.truncated || touchedFiles.length > MAX_DIFF_FILES) ? { truncated: true } : {}),
 		};
 	}
 
@@ -466,17 +492,15 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			if (!upstreamBranch || upstreamBranch === branchName) {
 				continue;
 			}
-			const mergeRes = await execGit(worktreePath, ['merge', '--no-edit', upstreamBranch]);
+			const mergeRes = await execGit(worktreePath, [...GIT_FALLBACK_IDENTITY_ARGS, 'merge', '--no-edit', upstreamBranch]);
 			if (mergeRes.code !== 0) {
 				const unmerged = await execGit(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
 				const conflictedFiles = unmerged.stdout.split('\n').map(s => s.trim()).filter(Boolean);
-				if (conflictedFiles.length > 0) {
-					mergeConflict = {
-						conflictedFiles,
-						summary: (mergeRes.stdout + '\n' + mergeRes.stderr).trim(),
-					};
-					break;
-				}
+				mergeConflict = {
+					conflictedFiles: conflictedFiles.length > 0 ? conflictedFiles : [`(${upstreamBranch})`],
+					summary: (mergeRes.stdout + '\n' + mergeRes.stderr).trim(),
+				};
+				break;
 			}
 		}
 
@@ -496,7 +520,7 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 		const status = await execGit(worktreePath, ['status', '--porcelain']);
 		if (status.code === 0 && status.stdout.trim()) {
 			await execGit(worktreePath, ['add', '-A']);
-			await execGit(worktreePath, ['commit', '-m', message]);
+			await execGit(worktreePath, [...GIT_FALLBACK_IDENTITY_ARGS, 'commit', '-m', message]);
 		}
 		const head = await execGit(worktreePath, ['rev-parse', 'HEAD']);
 		return head.code === 0 ? head.stdout.trim() : undefined;
@@ -510,13 +534,14 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			if (!branch) {
 				continue;
 			}
-			const mergeRes = await execGit(projectPath, ['merge', '--no-edit', branch]);
+			const mergeRes = await execGit(projectPath, [...GIT_FALLBACK_IDENTITY_ARGS, 'merge', '--no-edit', branch]);
 			if (mergeRes.code !== 0) {
 				const unmerged = await execGit(projectPath, ['diff', '--name-only', '--diff-filter=U']);
 				const conflictedFiles = unmerged.stdout.split('\n').map(s => s.trim()).filter(Boolean);
+				await execGit(projectPath, ['merge', '--abort']).catch(() => { });
 				return {
 					ok: false,
-					conflictedFiles,
+					conflictedFiles: conflictedFiles.length > 0 ? conflictedFiles : [branch],
 					summary: (mergeRes.stdout + '\n' + mergeRes.stderr).trim(),
 				};
 			}
@@ -525,20 +550,30 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 	}
 
 	async cleanupTreeWorktrees(governorSessionId: string, projectPath: string): Promise<void> {
-		const wtRoot = path.join(this.getTreeDir(governorSessionId, 'engineering'), 'worktrees');
-		let entries: fs.Dirent[] = [];
-		try {
-			entries = await fs.promises.readdir(wtRoot, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			if (entry.isDirectory()) {
-				const wtPath = path.join(wtRoot, entry.name);
-				await execGit(projectPath, ['worktree', 'remove', '--force', wtPath]).catch(() => { });
+		for (const kind of ['engineering', 'research'] as const) {
+			const wtRoot = path.join(this.getTreeDir(governorSessionId, kind), 'worktrees');
+			let entries: fs.Dirent[] = [];
+			try {
+				entries = await fs.promises.readdir(wtRoot, { withFileTypes: true });
+			} catch {
+				entries = [];
 			}
+			for (const entry of entries) {
+				if (entry.isDirectory()) {
+					const wtPath = path.join(wtRoot, entry.name);
+					await execGit(projectPath, ['worktree', 'remove', '--force', wtPath]).catch(() => { });
+				}
+			}
+			await fs.promises.rm(wtRoot, { recursive: true, force: true }).catch(() => { });
 		}
 		await execGit(projectPath, ['worktree', 'prune']).catch(() => { });
-		await fs.promises.rm(wtRoot, { recursive: true, force: true }).catch(() => { });
+		const safeGov = sanitizePathSegment(governorSessionId).slice(0, 12);
+		const branchList = await execGit(projectPath, ['branch', '--list', `aexus-eng/${safeGov}/*`]).catch(() => ({ code: 1, stdout: '', stderr: '' }));
+		if (branchList.code === 0 && branchList.stdout.trim()) {
+			const branches = branchList.stdout.split('\n').map(line => line.replace(/^\*?\s+/, '').trim()).filter(Boolean);
+			for (const b of branches) {
+				await execGit(projectPath, ['branch', '-D', b]).catch(() => { });
+			}
+		}
 	}
 }

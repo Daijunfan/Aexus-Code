@@ -153,7 +153,7 @@ suite('AdeControlServer', () => {
 		const child = spawnSync(
 			process.execPath,
 			['-e', 'const net = require("net"); const s = net.createServer(); s.listen(process.argv[1], () => process.exit(0));', staleSocketPath],
-			{ stdio: 'ignore' }
+			{ stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }
 		);
 		assert.strictEqual(child.status, 0);
 		assert.strictEqual(fs.lstatSync(staleSocketPath).isSocket(), true);
@@ -508,5 +508,80 @@ suite('AdeControlServer', () => {
 			action: 'inbox.post',
 			params: { from: 'gov-1', title: 'Need Decision', message: 'Approve migration?', caller: 'governor' },
 		});
+	});
+
+	(isWindows ? test.skip : test)('parses free-text prompts, engineering options, and inbox mark-read usage end-to-end', async () => {
+		const dispatched: IAdeControlDispatchRequest[] = [];
+		const server = store.add(new AdeControlServer(async req => {
+			dispatched.push(req);
+			return { action: req.action, params: req.params };
+		}, { controlDir: tempDir }));
+		await server.whenReady();
+
+		const repoRoot = path.resolve(FileAccess.asFileUri('').fsPath, '..');
+		const cliBin = path.join(repoRoot, 'extensions', 'aexus-agents', 'bin', 'aexus-ade');
+		const runCli = (args: string[], extraEnv?: Record<string, string>) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+			const child = spawn(cliBin, args, {
+				// Clear the caller by default so parent-process state cannot leak into unrelated assertions.
+				env: { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath, AEXUS_ADE_CALLER: '', ...(extraEnv ?? {}) },
+				stdio: ['ignore', 'pipe', 'pipe'],
+			});
+			let stdout = '';
+			let stderr = '';
+			child.stdout.setEncoding('utf8');
+			child.stderr.setEncoding('utf8');
+			child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+			child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+			child.once('error', reject);
+			child.once('close', status => resolve({ status, stdout, stderr }));
+		});
+
+		// `--json` after the positional prompt is opaque text, never a global flag.
+		const sendRun = await runCli(['session', 'send', 'sess-1', 'Please', 'explain', '--json', 'output']);
+		// Bracketed model IDs and `off` thinking levels pass through verbatim.
+		const configureRun = await runCli(['engineering', 'configure', '--governor', 'g1', '--all', '--engine', 'claude-code', '--model', 'deepseek-flash[1m]', '--thinking', 'off']);
+		const resetRun = await runCli(['engineering', 'reset', '--governor', 'g1', '--node', 'N2']);
+		const diffRun = await runCli(['engineering', 'diff', '--governor', 'g1', '--node', 'N1']);
+		const reportsRun = await runCli(['engineering', 'reports', '--governor', 'g1']);
+		const blueprintGetRun = await runCli(['engineering', 'blueprint', 'get', '--governor', 'g1', '--raw']);
+		const validateText = 'flowchart LR\n  A["Only Node"]';
+		const validateRun = await runCli(['engineering', 'blueprint', 'validate', '--text', validateText]);
+		const bareMarkReadRun = await runCli(['inbox', 'mark-read']);
+		const markReadAllRun = await runCli(['inbox', 'mark-read', '--all']);
+		const runWithCaller = await runCli(['engineering', 'run', '--governor', 'g1'], { AEXUS_ADE_CALLER: 'manager' });
+
+		assert.deepStrictEqual(
+			{
+				statuses: [
+					sendRun.status,
+					configureRun.status,
+					resetRun.status,
+					diffRun.status,
+					reportsRun.status,
+					blueprintGetRun.status,
+					validateRun.status,
+					bareMarkReadRun.status,
+					markReadAllRun.status,
+					runWithCaller.status,
+				],
+				bareMarkReadUsage: bareMarkReadRun.stderr.includes('Usage: aexus-ade inbox mark-read (<id> | --all)'),
+				dispatched,
+			},
+			{
+				statuses: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+				bareMarkReadUsage: true,
+				dispatched: [
+					{ action: 'session.send', params: { id: 'sess-1', prompt: 'Please explain --json output' } },
+					{ action: 'engineering.configure', params: { governor: 'g1', all: true, engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' } },
+					{ action: 'engineering.reset', params: { governor: 'g1', node: 'N2' } },
+					{ action: 'engineering.diff', params: { governor: 'g1', node: 'N1' } },
+					{ action: 'engineering.reports', params: { governor: 'g1' } },
+					{ action: 'engineering.blueprint.get', params: { governor: 'g1', raw: true } },
+					{ action: 'engineering.blueprint.validate', params: { text: validateText } },
+					{ action: 'inbox.markRead', params: { all: true } },
+					{ action: 'engineering.run', params: { governor: 'g1', caller: 'manager' } },
+				],
+			},
+		);
 	});
 });

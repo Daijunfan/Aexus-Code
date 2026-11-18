@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { IAdeEngineeringNodeRuntimeState, IAdeIncrementalReportEntry } from '../../common/adeEngineering.js';
+import { IAdeEngineeringBlueprint, IAdeEngineeringNodeRuntimeState, IAdeIncrementalReportEntry } from '../../common/adeEngineering.js';
 import {
 	AdeBlueprintValidationError,
 	buildUpstreamReportChain,
@@ -285,5 +285,197 @@ suite('AdeEngineeringBlueprintParser', () => {
 		assert.ok(positions.get('N1')!.x < positions.get('N2')!.x);
 		assert.ok(positions.get('N2')!.x < positions.get('U1')!.x);
 		assert.ok(positions.get('U1')!.x < positions.get('N4')!.x);
+	});
+
+	test('round-trips empty goal, acceptance, and user-gate description as empty strings without "(Not specified)" pollution', () => {
+		const md = [
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Empty Fields"] --> U1{{"Empty Gate"}}',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] Empty Fields',
+			'- type: task',
+			'- critical: false',
+			'- employee: engine=claude-code, thinking=medium',
+			'- worker: engine=codex, thinking=high',
+			'- goal: |',
+			'- acceptance: |',
+			'',
+			'### [U1] Empty Gate',
+			'- type: user_gate',
+			'- description: |',
+		].join('\n');
+
+		const parsed = parseEngineeringBlueprint(md);
+		const n1 = parsed.nodes.find(n => n.id === 'N1')!;
+		const u1 = parsed.nodes.find(n => n.id === 'U1')!;
+		assert.deepStrictEqual(
+			{ goal: n1.goal, acceptance: n1.acceptance, description: u1.description },
+			{ goal: '', acceptance: '', description: '' },
+		);
+
+		const reparsed = parseEngineeringBlueprint(serializeEngineeringBlueprint(parsed));
+		assert.deepStrictEqual(reparsed.nodes, parsed.nodes);
+
+		// The literal "(Not specified)" placeholder is normalized away instead of being persisted as goal text.
+		const placeholderMd = md.replace('- goal: |', '- goal: |\n    (Not specified)');
+		assert.strictEqual(parseEngineeringBlueprint(placeholderMd).nodes.find(n => n.id === 'N1')!.goal, '');
+	});
+
+	test('round-trips titles containing pipes and newlines through canonical serialization', () => {
+		const md = [
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Alpha #124; Beta | worker=codex:high"]',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] Alpha | Beta Gamma',
+			'- type: task',
+		].join('\n');
+		assert.strictEqual(parseEngineeringBlueprint(md).nodes[0].title, 'Alpha | Beta Gamma');
+
+		const blueprint: IAdeEngineeringBlueprint = {
+			metadata: {
+				treeType: 'engineering',
+				governorSessionId: 'gov-1',
+				workspaceIsolation: 'shared',
+				watchdogTimeoutMinutes: 10,
+				flowDirection: 'LR',
+			},
+			managers: [],
+			nodes: [{
+				id: 'T1',
+				title: 'Pipe | Newline\nTitle',
+				type: 'task',
+				critical: false,
+				employee: { engine: 'claude-code', thinking: 'medium' },
+				worker: { engine: 'codex', thinking: 'high' },
+				goal: 'goal',
+				acceptance: 'acceptance',
+			}],
+			edges: [],
+		};
+
+		const serialized = serializeEngineeringBlueprint(blueprint);
+		assert.ok(serialized.includes('Pipe #124; Newline Title'));
+		assert.deepStrictEqual(parseEngineeringBlueprint(serialized).nodes.map(n => n.title), ['Pipe | Newline Title']);
+	});
+
+	test('honors YAML block scalar chomping indicators for goal and acceptance', () => {
+		const md = [
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Chomping"] --> N2["Keep"] --> N3["End"]',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] Chomping',
+			'- type: task',
+			'- goal: |-',
+			'    line one',
+			'    line two',
+			'- acceptance: >-',
+			'    folded one',
+			'    folded two',
+			'',
+			'### [N2] Keep',
+			'- type: task',
+			'- goal: |+',
+			'    kept one',
+			'',
+			'### [N3] End',
+			'- type: task',
+		].join('\n');
+
+		const parsed = parseEngineeringBlueprint(md);
+		const byId = new Map(parsed.nodes.map(n => [n.id, n]));
+		assert.deepStrictEqual(
+			{
+				strippedBlock: byId.get('N1')!.goal,
+				foldedBlock: byId.get('N1')!.acceptance,
+				keptBlock: byId.get('N2')!.goal,
+			},
+			{
+				strippedBlock: 'line one\nline two',
+				foldedBlock: 'folded one folded two',
+				keptBlock: 'kept one\n',
+			},
+		);
+	});
+
+	test('splits semicolon-separated Mermaid statements and skips click/note/accTitle directives', () => {
+		const md = [
+			'```mermaid',
+			'flowchart LR',
+			'  A["Start"] --> B["Middle"]; B --> C["End; still one label"]',
+			'  click A "https://example.com"',
+			'  note right of B: inspect this edge',
+			'  accTitle: Ignored title',
+			'```',
+		].join('\n');
+
+		const parsed = parseEngineeringBlueprint(md);
+		assert.deepStrictEqual(
+			{
+				edges: parsed.edges,
+				titles: parsed.nodes.map(n => `${n.id}:${n.title}`),
+			},
+			{
+				edges: [{ from: 'A', to: 'B' }, { from: 'B', to: 'C' }],
+				titles: ['A:Start', 'B:Middle', 'C:End; still one label'],
+			},
+		);
+	});
+
+	test('inherits Manager model and thinking from the tail node of each segment', () => {
+		const md = [
+			'```mermaid',
+			'flowchart LR',
+			'  N1["First"] --> N2["Second"]',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] First',
+			'- type: task',
+			'- employee: engine=claude-code, model=first-model, thinking=medium',
+			'- worker: engine=codex, model=first-worker, thinking=high',
+			'',
+			'### [N2] Second',
+			'- type: task',
+			'- employee: engine=claude-code, model=second-model, thinking=low',
+			'- worker: engine=codex, model=second-worker, thinking=max',
+		].join('\n');
+
+		const parsed = parseEngineeringBlueprint(md);
+		assert.deepStrictEqual(
+			parsed.managers.map(m => ({ segmentId: m.segmentId, nodeIds: m.nodeIds, config: m.config })),
+			[{
+				segmentId: 'N1->N2',
+				nodeIds: ['N1', 'N2'],
+				config: { engine: 'claude-code', model: 'second-model', thinking: 'low' },
+			}],
+		);
+	});
+
+	test('marks an edge completed only when both endpoints are completed', () => {
+		const edge = { from: 'A', to: 'B' };
+		const done = (nodeId: string): IAdeEngineeringNodeRuntimeState => ({ nodeId, phase: 'completed', completed: true, employeeRejectCount: 0, formalFailureCount: 0 });
+		const idle = (nodeId: string): IAdeEngineeringNodeRuntimeState => ({ nodeId, phase: 'idle', completed: false, employeeRejectCount: 0, formalFailureCount: 0 });
+		const running = (nodeId: string): IAdeEngineeringNodeRuntimeState => ({ nodeId, phase: 'worker_running', completed: false, employeeRejectCount: 0, formalFailureCount: 0 });
+
+		assert.deepStrictEqual(
+			[
+				computeEdgeVisualStatus(edge, {}),
+				computeEdgeVisualStatus(edge, { A: done('A') }),
+				computeEdgeVisualStatus(edge, { A: done('A'), B: idle('B') }),
+				computeEdgeVisualStatus(edge, { A: done('A'), B: running('B') }),
+				computeEdgeVisualStatus(edge, { B: done('B') }),
+				computeEdgeVisualStatus(edge, { A: done('A'), B: done('B') }),
+			],
+			['pending', 'pending', 'pending', 'running', 'pending', 'completed'],
+		);
 	});
 });

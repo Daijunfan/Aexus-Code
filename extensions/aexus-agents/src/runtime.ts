@@ -43,6 +43,8 @@ export interface EngineSendOptions {
 	readonly pureWorker?: boolean;
 	readonly callerRole?: string;
 	readonly automatedEngineering?: boolean;
+	/** Reports live (cumulative for the turn) token usage while the engine is still streaming. */
+	readonly onInterimUsage?: (cumulativeTurnUsage: EngineTurnTokenUsage) => void;
 }
 
 export interface EngineRuntimeCapabilities {

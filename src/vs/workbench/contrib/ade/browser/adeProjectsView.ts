@@ -395,12 +395,20 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			const isRes = agent.treeType === 'research';
 			template.workTreeBadge.textContent = isRes ? localize('adeBadgeResearch', "Research") : localize('adeBadgeEngineering', "Engineering");
 			template.workTreeBadge.className = `ade-worktree-badge type-${agent.treeType}`;
+			template.workTreeBadge.setAttribute('role', 'button');
+			template.workTreeBadge.setAttribute('tabindex', '0');
 			template.workTreeBadge.hidden = false;
 			const treeTooltip = localize('adeOpenEngineeringBadgeTooltip', "Open {0} DAG Canvas", template.workTreeBadge.textContent);
 			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.workTreeBadge, treeTooltip));
 			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.CLICK, event => {
 				EventHelper.stop(event, true);
 				this.onOpenEngineering(agent.id);
+			}));
+			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.KEY_DOWN, (event: KeyboardEvent) => {
+				if (event.key === 'Enter' || event.key === ' ') {
+					EventHelper.stop(event, true);
+					this.onOpenEngineering(agent.id);
+				}
 			}));
 		} else {
 			template.workTreeBadge.hidden = true;
