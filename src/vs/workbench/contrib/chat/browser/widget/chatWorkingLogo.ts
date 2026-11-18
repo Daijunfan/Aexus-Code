@@ -17,7 +17,7 @@ import { asCssVariable } from '../../../../../platform/theme/common/colorUtils.j
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { ChatConfiguration, ChatProgressAnimation } from '../../common/constants.js';
 import { chatWorkingProgressInsidersIconForeground, chatWorkingProgressStableIconForeground } from '../../common/widget/chatColors.js';
-import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, ChatWorkingLogoDrawBand, chatWorkingLogoDrawDuration, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from './chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_VIEW_BOX, ChatWorkingLogoDrawBand, chatWorkingLogoDrawDuration, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from './chatWorkingLogoDraw.js';
 import { acquireChatWorkingLogoAtlas, getChatWorkingLogoAtlasKeyframes, hasChatWorkingLogoAtlas, loadChatWorkingLogoAtlasImage } from './chatWorkingLogoAtlas.js';
 import './media/chatWorkingLogo.css';
 
@@ -121,7 +121,7 @@ export class ChatWorkingLogo extends Disposable {
 		this.isMotionReducedOverride = animationOptions.isMotionReduced;
 
 		const wrapper = append(this.domNode, $('span.chat-working-logo-face'));
-		wrapper.appendChild($.SVG<SVGSVGElement>('svg', { viewBox: '6 6 84 84', width: '100%', height: '100%', focusable: 'false' },
+		wrapper.appendChild($.SVG<SVGSVGElement>('svg', { viewBox: CHAT_WORKING_LOGO_VIEW_BOX, width: '100%', height: '100%', focusable: 'false' },
 			...chatWorkingLogoFacePaths.map(path => $.SVG<SVGPathElement>('path', { d: path, fill: 'currentColor' }))));
 		const visibilityObserver: typeof observeVisibility = animationOptions.observeVisibility ?? observeVisibility;
 		this._register(visibilityObserver(this.domNode, visible => {
@@ -318,10 +318,10 @@ export class ChatWorkingLogo extends Disposable {
 			});
 			const mask = $.SVG<SVGMaskElement>('mask', {
 				id: `chat-working-logo-draw-mask-${maskId}-${band}`,
-				x: '0',
-				y: '0',
-				width: '96',
-				height: '96',
+				x: '-12',
+				y: '-12',
+				width: '120',
+				height: '120',
 				maskUnits: 'userSpaceOnUse',
 				'mask-type': 'alpha',
 			}, maskPath);
@@ -337,7 +337,7 @@ export class ChatWorkingLogo extends Disposable {
 		}
 		const wrapper = append(this.domNode, $('span.chat-working-logo-draw-container'));
 		wrapper.appendChild($.SVG<SVGSVGElement>('svg', {
-			viewBox: '6 6 84 84',
+			viewBox: CHAT_WORKING_LOGO_VIEW_BOX,
 			width: '100%',
 			height: '100%',
 			focusable: 'false',

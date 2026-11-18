@@ -8,7 +8,7 @@ import { timeout } from '../../../../../base/common/async.js';
 import { CancellationToken, CancellationTokenSource } from '../../../../../base/common/cancellation.js';
 import { CancellationError } from '../../../../../base/common/errors.js';
 import { combinedDisposable, Disposable, DisposableMap, DisposableStore, IDisposable, IReference, markAsSingleton, toDisposable } from '../../../../../base/common/lifecycle.js';
-import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from './chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_VIEW_BOX, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from './chatWorkingLogoDraw.js';
 
 export const chatWorkingLogoAtlasFrameCount = 320;
 const columns = 20;
@@ -304,7 +304,7 @@ export async function createChatWorkingLogoAtlas(targetWindow: Window, options: 
 		if (!context || !tileContext) {
 			throw new Error('Draw atlas requires a 2D canvas context');
 		}
-		const svg = $.SVG<SVGSVGElement>('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: '6 6 84 84', width, height });
+		const svg = $.SVG<SVGSVGElement>('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: CHAT_WORKING_LOGO_VIEW_BOX, width, height });
 		svg.style.color = color;
 		if (!svg.style.color) {
 			throw new Error('Draw atlas requires a valid color');
@@ -313,7 +313,7 @@ export async function createChatWorkingLogoAtlas(targetWindow: Window, options: 
 		const artwork = $.SVG<SVGGElement>('g');
 		const masks: SVGPathElement[] = [];
 		for (const [index, band] of CHAT_WORKING_LOGO_DRAW_PAINT_ORDER.entries()) {
-			const mask = $.SVG<SVGMaskElement>('mask', { id: band, x: '0', y: '0', width: '96', height: '96', maskUnits: 'userSpaceOnUse', 'mask-type': 'alpha' });
+			const mask = $.SVG<SVGMaskElement>('mask', { id: band, x: '-12', y: '-12', width: '120', height: '120', maskUnits: 'userSpaceOnUse', 'mask-type': 'alpha' });
 			const maskPath = $.SVG<SVGPathElement>('path', { fill: '#fff', stroke: '#fff', 'stroke-width': '4', 'stroke-linejoin': 'round', transform: 'translate(6 6) scale(0.84)' });
 			mask.appendChild(maskPath);
 			defs.appendChild(mask);

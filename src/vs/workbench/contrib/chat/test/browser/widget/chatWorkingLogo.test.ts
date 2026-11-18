@@ -18,7 +18,7 @@ import { TestConfigurationService } from '../../../../../../platform/configurati
 import { NullLogService } from '../../../../../../platform/log/common/log.js';
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { ChatWorkingLogo, ChatWorkingProgressLogo, getConfiguredProgressAnimation } from '../../../browser/widget/chatWorkingLogo.js';
-import { getChatWorkingLogoDrawFrame } from '../../../browser/widget/chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_VIEW_BOX, getChatWorkingLogoDrawFrame } from '../../../browser/widget/chatWorkingLogoDraw.js';
 import { ChatConfiguration, ChatProgressAnimation } from '../../../common/constants.js';
 
 suite('ChatWorkingLogo', () => {
@@ -300,7 +300,7 @@ suite('ChatWorkingLogo', () => {
 			cycleSpeedup: 1.5,
 			sameColor: true,
 			lazyArtwork: [false, true],
-			viewBox: '6 6 84 84',
+			viewBox: CHAT_WORKING_LOGO_VIEW_BOX,
 			shapeRendering: 'geometricPrecision',
 			overflow: 'visible',
 			maskFills: ['#fff', '#fff', '#fff'],

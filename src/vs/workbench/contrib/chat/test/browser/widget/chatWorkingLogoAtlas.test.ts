@@ -19,7 +19,7 @@ import { NullLogService } from '../../../../../../platform/log/common/log.js';
 import { IColorTheme, IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { TestColorTheme } from '../../../../../../platform/theme/test/common/testThemeService.js';
 import { ChatWorkingLogoAtlasCache, IChatWorkingLogoAtlas, createChatWorkingLogoAtlas, getChatWorkingLogoAtlasKeyframes, hasChatWorkingLogoAtlas, loadChatWorkingLogoAtlasImage } from '../../../browser/widget/chatWorkingLogoAtlas.js';
-import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from '../../../browser/widget/chatWorkingLogoDraw.js';
+import { CHAT_WORKING_LOGO_DRAW_PAINT_ORDER, CHAT_WORKING_LOGO_VIEW_BOX, chatWorkingLogoFacePaths, getChatWorkingLogoDrawFrame } from '../../../browser/widget/chatWorkingLogoDraw.js';
 import { ChatWorkingLogo, ChatWorkingProgressLogo } from '../../../browser/widget/chatWorkingLogo.js';
 import { ChatConfiguration, ChatProgressAnimation } from '../../../common/constants.js';
 
@@ -213,11 +213,20 @@ suite('ChatWorkingLogoAtlas', () => {
 			],
 		});
 		const held = context.getImageData(0 * 28 + 2, 8 * 28 + 2, 24, 24).data;
+		let tileEdgeClipped = false;
+		for (let y = 0; y < 24; y++) {
+			for (let x = 0; x < 24; x++) {
+				if (x < 2 || x >= 22 || y < 2 || y >= 22) {
+					tileEdgeClipped ||= held[(y * 24 + x) * 4 + 3] !== 0;
+				}
+			}
+		}
+		assert.strictEqual(tileEdgeClipped, false, 'Expected inset breathing room around all 4 edges of the Aexus Code mark');
 		const expected = $<HTMLCanvasElement>('canvas');
 		expected.width = expected.height = 24;
 		const expectedContext = expected.getContext('2d', { willReadFrequently: true });
 		assert.ok(expectedContext);
-		const svg = $.SVG<SVGSVGElement>('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: '6 6 84 84', width: 24, height: 24 },
+		const svg = $.SVG<SVGSVGElement>('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: CHAT_WORKING_LOGO_VIEW_BOX, width: 24, height: 24 },
 			...chatWorkingLogoFacePaths.map(d => $.SVG<SVGPathElement>('path', { d, fill: '#007acc' })));
 		const source = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' }));
 		store.add(toDisposable(() => URL.revokeObjectURL(source)));

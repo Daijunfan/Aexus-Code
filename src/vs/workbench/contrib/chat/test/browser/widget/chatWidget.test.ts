@@ -44,6 +44,7 @@ import { IChatTipService } from '../../../browser/chatTipService.js';
 import { ChatUserInteraction, ChatUserInteractionTimingResult, IChatUserInteractionOptions } from '../../../browser/chatUserInteractionTelemetry.js';
 import { ILanguageModelsService } from '../../../common/languageModels.js';
 import { acceptAndAwaitSentRequest, ChatWidget, computeChatSessionStateIndicatorState, getImmediateSilentSlashCommandPart, IChatWidgetRequestAcceptedEvent, layoutChatWidgetForInputHeight, saveAllBeforeChatSend, shouldShowChatTip, shouldShowChatWelcome, shouldUnlockChatPetQueueOrSteeringMessage, shouldUnlockChatPetRequestRevision } from '../../../browser/widget/chatWidget.js';
+import { ChatListWidget, IChatListWidgetOptions } from '../../../browser/widget/chatListWidget.js';
 import { IChatListItemTemplate } from '../../../browser/widget/chatListRenderer.js';
 import { ChatViewPaneTarget, IChatAcceptInputOptions, IChatListItemRendererOptions, IChatScrollAnchor, IChatWidget, IChatWidgetService, IChatWidgetViewModelChangeEvent, IChatWidgetViewOptions } from '../../../browser/chat.js';
 import { ChatInputPart } from '../../../browser/widget/input/chatInputPart.js';
@@ -3494,7 +3495,7 @@ suite('ChatWidget - first visible progress lifecycle', () => {
 
 suite('ChatWidget - acceptAndAwaitSentRequest', () => {
 
-	ensureNoDisposablesAreLeakedInTestSuite();
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
 	function sentResult(): ChatSendResultSent {
 		return { kind: 'sent', data: {} as IChatSendRequestData };
@@ -3549,5 +3550,53 @@ suite('ChatWidget - acceptAndAwaitSentRequest', () => {
 		const result = sentResult();
 
 		assert.strictEqual(await acceptAndAwaitSentRequest(result), result);
+	});
+
+	test('createList keeps working progress inline rather than pinning it at the bottom on wheel-up', () => {
+		let capturedOptions: IChatListWidgetOptions | undefined;
+		const disposables = store.add(new DisposableStore());
+		const listContainer = mainWindow.document.createElement('div');
+		const widget = Object.create(ChatWidget.prototype, {
+			_register: { value: <T extends IDisposable>(value: T) => disposables.add(value) },
+			_readOnly: { value: false },
+			transcriptProgressAction: { value: observableValue('action', undefined) },
+			backgroundActivityPillSections: { value: observableValue('pills', undefined) },
+			viewOptions: { value: { renderInputOnTop: false } },
+			styles: { value: {} },
+			input: { value: { currentModeKind: ChatModeKind.Agent, currentModeInfo: { kind: ChatModeKind.Agent, isBuiltin: true }, getPromptText: () => '', focus: () => { } } },
+			viewModel: { value: undefined },
+			editorOptions: { value: {} },
+			location: { value: ChatAgentLocation.Chat },
+			getSelectedModelRequestOptions: { value: () => undefined },
+			_getListPaddingBottom: { value: () => 0 },
+			inputPart: { value: { persistentContentContainerElement: mainWindow.document.createElement('div') } },
+			_onDidChangeContentHeight: { value: disposables.add(new Emitter<void>()) },
+			_onDidFocus: { value: disposables.add(new Emitter<void>()) },
+			_onDidScroll: { value: disposables.add(new Emitter<void>()) },
+			instantiationService: {
+				value: {
+					createInstance: (ctor: unknown, _container: HTMLElement, options: IChatListWidgetOptions) => {
+						assert.strictEqual(ctor, ChatListWidget);
+						capturedOptions = options;
+						return {
+							dispose: () => { },
+							setStickyProgressContainer: () => { },
+							onDidClickRequest: Event.None,
+							onDidRerender: Event.None,
+							onDidDispose: Event.None,
+							onDidFocusOutside: Event.None,
+							onDidClickFollowup: Event.None,
+							onDidChangeContentHeight: Event.None,
+							onDidFocus: Event.None,
+							onDidScroll: Event.None,
+						};
+					},
+				},
+			},
+		});
+		const createList = (ChatWidget.prototype as unknown as { createList(container: HTMLElement, options: IChatListItemRendererOptions): void }).createList;
+		createList.call(widget, listContainer, {});
+
+		assert.strictEqual(capturedOptions?.stickyProgress, false);
 	});
 });

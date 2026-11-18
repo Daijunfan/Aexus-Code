@@ -2474,7 +2474,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 						backgroundShells: derived(reader => this.backgroundActivityPillSections.read(reader)?.backgroundShells?.read(reader) ?? []),
 					},
 				},
-				stickyProgress: !this.viewOptions.renderInputOnTop && options.renderStyle !== 'minimal',
+				stickyProgress: false,
 				defaultElementHeight: this.viewOptions.defaultElementHeight ?? 200,
 				overflowWidgetsDomNode: overflowWidgetsContainer,
 				styles: {
