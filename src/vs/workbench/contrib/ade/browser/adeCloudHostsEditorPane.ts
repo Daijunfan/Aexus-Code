@@ -1324,7 +1324,8 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		this.drawerEl.setAttribute('aria-hidden', 'false');
 		this.drawerEl.inert = false;
 		this.renderDrawer();
-		this.drawerFirstInputEl?.focus();
+		this.drawerFirstInputEl?.focus({ preventScroll: true });
+		this.rootEl.scrollLeft = 0;
 	}
 
 	private closeDrawer(restoreFocus = true): void {
@@ -1344,8 +1345,9 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		if (restoreFocus) {
 			const selected = this.selectedHostId ? this.cards.get(this.selectedHostId)?.el : undefined;
 			const target = this.drawerReturnFocus?.isConnected ? this.drawerReturnFocus : selected;
-			target?.focus();
+			target?.focus({ preventScroll: true });
 		}
+		this.rootEl.scrollLeft = 0;
 		this.drawerReturnFocus = undefined;
 	}
 
@@ -1698,7 +1700,8 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 	override focus(): void {
 		super.focus();
 		if (this.drawer) {
-			this.drawerFirstInputEl?.focus();
+			this.drawerFirstInputEl?.focus({ preventScroll: true });
+			this.rootEl.scrollLeft = 0;
 			return;
 		}
 		const selected = this.selectedHostId ? this.cards.get(this.selectedHostId)?.el : undefined;

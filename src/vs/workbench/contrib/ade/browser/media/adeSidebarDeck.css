@@ -286,8 +286,13 @@
  * ============================================================================ */
 
 .monaco-workbench .ade-inbox-count-badge.critical {
-	background: var(--ade-deck-severity-critical);
+	background: #DC2626;
 	color: #ffffff;
+}
+
+.monaco-workbench.hc-black .ade-inbox-count-badge.critical,
+.monaco-workbench.hc-light .ade-inbox-count-badge.critical {
+	border: 1px solid var(--vscode-contrastBorder, currentColor);
 }
 
 .monaco-workbench .ade-sidebar-seg-btn.has-critical:not(.active) {
@@ -485,10 +490,44 @@
 .monaco-workbench .ade-worktree-badge {
 	display: inline-flex;
 	align-items: center;
-	gap: 3px;
+	gap: 2px;
+	height: 15px;
+	padding: 0 4px;
+	font-size: 9px;
+	line-height: 13px;
+	box-sizing: border-box;
 	color: var(--ade-deck-severity-info);
 	background: color-mix(in srgb, var(--ade-deck-severity-info) 14%, transparent);
 	border-color: color-mix(in srgb, var(--ade-deck-severity-info) 42%, transparent);
+}
+
+/* Preserve readable Governor session title when both worktree badge and role badge share trailing space */
+.monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-tree-label-host {
+	min-width: 68px;
+}
+
+.monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-tree-trailing {
+	gap: 3px;
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-worktree-badge {
+	max-width: 62px;
+	min-width: 22px;
+	flex: 0 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-role-badge {
+	padding: 0 4px;
+	gap: 2px;
+	flex: 0 1 auto;
+	min-width: 38px;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .monaco-workbench .ade-worktree-badge:hover {

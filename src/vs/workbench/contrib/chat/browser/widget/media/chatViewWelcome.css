@@ -16,13 +16,15 @@
 
 .interactive-session.chat-view-getting-started-disabled {
 
-	/* hide most welcome pieces when we show recent sessions to make some space */
-	.chat-welcome-view .chat-welcome-view-icon,
-	.chat-welcome-view .chat-welcome-view-title,
-	.chat-welcome-view .chat-welcome-view-message,
-	.chat-welcome-view .chat-welcome-view-disclaimer,
-	.chat-welcome-view .chat-welcome-view-tips {
-		display: none;
+	/* hide most welcome pieces when we show recent sessions to make some space (preserve the Aexus Welcome Hero when quick-starts are present) */
+	.chat-welcome-view:not(:has(.chat-welcome-view-quick-starts)) {
+		.chat-welcome-view-icon,
+		.chat-welcome-view-title,
+		.chat-welcome-view-message,
+		.chat-welcome-view-disclaimer,
+		.chat-welcome-view-tips {
+			display: none;
+		}
 	}
 }
 
@@ -225,23 +227,24 @@ div.chat-welcome-view {
 	}
 }
 
-/* Suggested prompts section - normal-flow grid so short panels never overlap the hero */
+/* Suggested prompts section - base pill styling shared with chatSuggestNextWidget outside welcome view */
 .chat-welcome-view-suggested-prompts {
 	position: relative;
-	width: 100%;
-	max-width: 680px;
 	box-sizing: border-box;
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-start;
 	gap: 8px;
-	padding: 8px 16px;
+	padding: 32px 16px 8px 16px;
 	background: transparent;
 
 	.chat-welcome-view-suggested-prompts-title {
-		grid-column: 1 / -1;
+		position: absolute;
+		top: 8px;
+		left: 16px;
 		font-size: 12px;
 		color: var(--vscode-descriptionForeground);
-		margin: 0 0 2px;
+		margin: 0;
 		text-align: left;
 	}
 
@@ -255,7 +258,7 @@ div.chat-welcome-view {
 		background-color: var(--vscode-editorWidget-background);
 		cursor: pointer;
 		border: 1px solid var(--vscode-chat-requestBorder, color-mix(in srgb, var(--vscode-foreground) 10%, transparent));
-		width: 100%;
+		width: fit-content;
 		max-width: 100%;
 		margin: 0;
 		box-sizing: border-box;
@@ -273,6 +276,25 @@ div.chat-welcome-view {
 
 	> .chat-welcome-view-suggested-prompt:hover {
 		background-color: var(--vscode-list-hoverBackground);
+	}
+}
+
+/* Normal-flow grid scoped to welcome view so short panels never overlap the hero while chatSuggestNextWidget keeps fit-content pills */
+:is(.chat-welcome-view, .chat-welcome-view-container) .chat-welcome-view-suggested-prompts:not(.chat-suggest-next-widget) {
+	width: 100%;
+	max-width: 680px;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+	padding: 8px 16px;
+
+	.chat-welcome-view-suggested-prompts-title {
+		position: static;
+		grid-column: 1 / -1;
+		margin: 0 0 2px;
+	}
+
+	> .chat-welcome-view-suggested-prompt {
+		width: 100%;
 	}
 }
 
@@ -406,8 +428,4 @@ div.chat-welcome-view:has(> .chat-welcome-view-icon.aexus-emblem) > .chat-welcom
 	line-height: 1.35;
 	color: var(--vscode-foreground);
 	overflow-wrap: anywhere;
-}
-
-.interactive-session.chat-view-getting-started-disabled .chat-welcome-view .chat-welcome-view-quick-starts {
-	display: none;
 }

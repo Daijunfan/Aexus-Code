@@ -1590,7 +1590,7 @@
 	--ade-inbox-info: var(--vscode-ade-severity-info, #2563EB);
 }
 
-.monaco-workbench.vs .ade-inbox-card {
+.monaco-workbench.vs .ade-inbox-card:not(.sev-critical):not(.kind-governor_alert) {
 	background: var(--vscode-editor-background);
 }
 
