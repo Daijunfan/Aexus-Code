@@ -5,7 +5,8 @@
 
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
+import { matchesFuzzy } from '../../../../base/common/filters.js';
+import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { posix } from '../../../../base/common/path.js';
 import { basename, joinPath } from '../../../../base/common/resources.js';
@@ -25,9 +26,13 @@ import {
 	AEXUS_SSH_SCHEME,
 	buildCloudProjectUri,
 	formatCloudHostTargetLabel,
+	formatLiveRemoteDirInput,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
+	IAdeRemoteDirEntry,
 	normalizeRemoteProjectPath,
+	parseLiveRemotePathInput,
+	resolveInitialCloudHostDirectory,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
@@ -400,10 +405,15 @@ export async function promptQuickUpsertCloudHost(
 		proxyJump = manualJump.trim() || undefined;
 	}
 
+	const smartDefaultGuess = osPick.os === 'windows'
+		? (parsedUser ? `/C:/Users/${parsedUser}` : '/C:/Users')
+		: (osPick.os === 'macos'
+			? (parsedUser ? `/Users/${parsedUser}` : '/Users')
+			: (parsedUser === 'root' ? '/root' : (parsedUser ? `/home/${parsedUser}` : '/')));
 	const defaultDir = await quickInput.input({
 		title: localize('adeCloudHostDefaultDirTitle', "Default Remote Project Directory (Optional)"),
-		prompt: localize('adeCloudHostDefaultDirPrompt', "Default folder when browsing projects on this host"),
-		value: existing?.defaultDirectory ?? (osPick.os === 'windows' ? 'C:/Users' : (parsedUser ? `/home/${parsedUser}` : '/root')),
+		prompt: localize('adeCloudHostDefaultDirPrompt', "Default starting folder when browsing projects on this host (leave blank to auto-detect home)"),
+		value: existing?.defaultDirectory ?? smartDefaultGuess,
 		ignoreFocusLost: true,
 	});
 	if (defaultDir === undefined) {
@@ -444,200 +454,609 @@ async function browseRemoteFolderOnCloudHostWithBack(
 		return undefined;
 	}
 
-	let currentDir = normalizeRemoteProjectPath(
-		host.defaultDirectory || host.recentDirectories[0] || (host.os === 'windows' ? '/C:/' : (host.user ? `/home/${host.user}` : '/')),
-		host.os,
-	);
-
 	type BrowseActionItem = IQuickPickItem & {
-		readonly action: 'select-current' | 'select-recent' | 'enter-dir' | 'parent' | 'manual' | 'mkdir' | 'switch-host';
+		readonly action: 'select-current' | 'select-path' | 'select-recent' | 'enter-dir' | 'parent' | 'mkdir-and-enter' | 'mkdir-and-select' | 'switch-host';
 		readonly targetPath?: string;
 	};
 
-	while (true) {
-		let dirEntries: readonly { name: string; type: string }[] = [];
-		let browseError: string | undefined;
-		try {
-			dirEntries = await backend.remoteReadDir(host.alias, currentDir);
-		} catch (err) {
-			browseError = err instanceof Error ? err.message.replace(/^\[[A-Z]+\]\s*/, '') : String(err);
-		}
+	let hostOs: AdeCloudHostOs = host.os;
+	let discoveredHome: string | undefined = host.lastTestStatus?.remoteHome;
+	let showDotFolders = false;
 
-		const subFolders = dirEntries
-			.filter(e => e.type === 'directory' && !e.name.startsWith('.'))
-			.sort((a, b) => a.name.localeCompare(b.name));
-		const hiddenFolders = dirEntries
-			.filter(e => e.type === 'directory' && e.name.startsWith('.'))
-			.sort((a, b) => a.name.localeCompare(b.name));
+	const dirCache = new Map<string, readonly IAdeRemoteDirEntry[]>();
+	const dirErrors = new Map<string, string>();
 
-		const items: (BrowseActionItem | IQuickPickSeparator)[] = [];
+	const addAsProjectInlineBtn: IQuickInputButton = {
+		iconClass: ThemeIcon.asClassName(Codicon.check),
+		tooltip: localize('adeCloudAddSubfolderDirectlyTooltip', "Add This Folder as Project Workspace"),
+	};
+	const toggleDotBtn = (): IQuickInputButton => ({
+		iconClass: ThemeIcon.asClassName(showDotFolders ? Codicon.eye : Codicon.eyeClosed),
+		tooltip: showDotFolders
+			? localize('adeCloudHideDotFoldersTooltip', "Hide Hidden (.dot) Folders")
+			: localize('adeCloudShowDotFoldersTooltip', "Show Hidden (.dot) Folders"),
+	});
+	const newFolderHeaderBtn: IQuickInputButton = {
+		iconClass: ThemeIcon.asClassName(Codicon.newFolder),
+		tooltip: localize('adeCloudNewFolderHeaderTooltip', "Create New Folder in Current Path"),
+	};
+	const refreshHeaderBtn: IQuickInputButton = {
+		iconClass: ThemeIcon.asClassName(Codicon.refresh),
+		tooltip: localize('adeCloudRefreshFoldersTooltip', "Refresh Remote Folders"),
+	};
 
-		if (!browseError) {
-			items.push({
-				label: localize('adeCloudUseCurrentFolder', "Open This Folder: {0}", currentDir),
-				description: localize('adeCloudAddAsProjectDesc', "Add {0}:{1} as Project Workspace", host.alias, currentDir),
-				iconClass: ThemeIcon.asClassName(Codicon.check),
-				alwaysShow: true,
-				action: 'select-current',
-				targetPath: currentDir,
-			});
-		}
+	const initialDir = resolveInitialCloudHostDirectory(host);
+	const hadExplicitInitialDir = Boolean(
+		host.defaultDirectory?.trim() || host.recentDirectories[0]?.trim() || host.lastTestStatus?.remoteHome?.trim(),
+	);
 
-		items.push({
-			label: localize('adeCloudEnterPathManually', "Enter Remote Folder Path Manually..."),
-			description: browseError
-				? localize('adeCloudBrowseOfflineHint', "Direct path input (Live browse unavailable: {0})", browseError.slice(0, 72))
-				: localize('adeCloudEnterPathDesc', "Type or paste any remote folder path"),
-			iconClass: ThemeIcon.asClassName(Codicon.edit),
-			alwaysShow: true,
-			action: 'manual',
-		});
+	return new Promise<URI | 'switch-host' | undefined>(resolve => {
+		const store = new DisposableStore();
+		const qp = store.add(quickInput.createQuickPick<BrowseActionItem>({ useSeparators: true }));
 
-		if (!browseError) {
-			items.push({
-				label: localize('adeCloudCreateFolderHere', "New Folder in {0}...", currentDir),
-				iconClass: ThemeIcon.asClassName(Codicon.newFolder),
-				action: 'mkdir',
-			});
-		}
+		let settled = false;
+		let suppressValueChange = false;
+		let userHasEditedValue = false;
+		let requestSeq = 0;
+		let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
-		if (allowSwitchHost) {
-			items.push({
-				label: localize('adeCloudSwitchHostItem', "Switch Host..."),
-				description: localize('adeCloudSwitchHostItemDesc', "Go back to select Local or another Cloud Host"),
-				iconClass: ThemeIcon.asClassName(Codicon.arrowLeft),
-				alwaysShow: true,
-				action: 'switch-host',
-			});
-		}
-
-		if (host.recentDirectories.length > 0) {
-			items.push({ type: 'separator', label: localize('adeCloudRecentFoldersSep', "Recent & Migrated VS Code Folders") });
-			for (const recPath of host.recentDirectories) {
-				items.push({
-					label: basename(URI.from({ scheme: AEXUS_SSH_SCHEME, authority: host.alias, path: recPath })) || recPath,
-					description: `${host.alias}:${recPath}`,
-					iconClass: ThemeIcon.asClassName(Codicon.history),
-					action: 'select-recent',
-					targetPath: recPath,
-				});
+		const clearDebounce = () => {
+			if (debounceTimer !== undefined) {
+				clearTimeout(debounceTimer);
+				debounceTimer = undefined;
 			}
-		}
+		};
+		store.add({ dispose: clearDebounce });
 
-		if (!browseError) {
-			items.push({ type: 'separator', label: localize('adeCloudSubfoldersSep', "Folders in {0}", currentDir) });
-			if (currentDir !== '/' && !/^\/[A-Za-z]:\/?$/.test(currentDir)) {
-				const parentPath = posix.dirname(currentDir);
-				items.push({
-					label: '..',
-					description: localize('adeCloudParentFolderDesc', "Up to {0}", parentPath),
-					iconClass: ThemeIcon.asClassName(Codicon.arrowUp),
-					alwaysShow: true,
-					action: 'parent',
-					targetPath: parentPath,
-				});
+		const finish = (outcome: URI | 'switch-host' | undefined) => {
+			if (settled) {
+				return;
 			}
-			for (const sub of [...subFolders, ...hiddenFolders]) {
-				const nextPath = posix.join(currentDir, sub.name);
-				items.push({
+			settled = true;
+			clearDebounce();
+			qp.hide();
+			store.dispose();
+			resolve(outcome);
+		};
+
+		const updateHeaderButtons = () => {
+			const btns: IQuickInputButton[] = [];
+			if (allowSwitchHost) {
+				btns.push(quickInput.backButton);
+			}
+			btns.push(toggleDotBtn(), newFolderHeaderBtn, refreshHeaderBtn);
+			qp.buttons = btns;
+		};
+
+		const setInputValueProgrammatically = (nextVal: string, selectionRange?: readonly [number, number]) => {
+			suppressValueChange = true;
+			try {
+				qp.value = nextVal;
+				qp.valueSelection = selectionRange ?? [nextVal.length, nextVal.length];
+			} finally {
+				suppressValueChange = false;
+			}
+		};
+
+		const warmParentCache = (parentDir: string | undefined) => {
+			if (!parentDir || dirCache.has(parentDir) || dirErrors.has(parentDir)) {
+				return;
+			}
+			void backend.remoteReadDir(host.alias, parentDir).then(
+				entries => {
+					if (!settled) {
+						dirCache.set(parentDir, entries);
+					}
+				},
+				() => { /* ignore background prefetch error */ },
+			);
+		};
+
+		const confirmAndFinishWithPath = async (rawTargetPath: string) => {
+			const norm = normalizeRemoteProjectPath(rawTargetPath, hostOs);
+			if (hostOs === 'windows' && norm === '/') {
+				qp.validationMessage = localize('adeCloudPickWinDriveValidation', "Please select a Windows drive (e.g. /C:/) or folder first.");
+				return;
+			}
+			qp.busy = true;
+			try {
+				const st = await backend.remoteStat(host.alias, norm);
+				if (st.type === 'file') {
+					qp.busy = false;
+					qp.validationMessage = localize('adeCloudTargetIsFileValidation', "'{0}' is a file. Please select a folder.", norm);
+					return;
+				}
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				if (msg.includes('[EISDIR]')) {
+					// Directory confirmed
+				} else if (msg.includes('[ENOTDIR]')) {
+					qp.busy = false;
+					qp.validationMessage = localize('adeCloudTargetIsFileValidation', "'{0}' is a file. Please select a folder.", norm);
+					return;
+				} else if (msg.includes('[ENOENT]')) {
+					qp.busy = false;
+					qp.validationMessage = localize('adeCloudFolderDoesNotExistValidation', "Folder '{0}' does not exist yet — select 'Create & Add as Project' below or edit the path.", norm);
+					return;
+				}
+				// For offline/unimplemented stat stubs, allow confirming the normalized path directly.
+			}
+			await backend.recordRecentDirectory(host.id, norm);
+			finish(buildCloudProjectUri(host.alias, norm, hostOs));
+		};
+
+		const shortSepPath = (p: string): string => p.length <= 28 ? p : `…/${posix.basename(p) || p.slice(-20)}`;
+
+		const renderItemsForState = (rawInput: string) => {
+			const parsed = parseLiveRemotePathInput(rawInput, hostOs, discoveredHome);
+			const dirEntries = dirCache.get(parsed.browseDir) ?? [];
+			const browseError = dirErrors.get(parsed.browseDir);
+			const sepDirLabel = shortSepPath(parsed.browseDir);
+
+			const includeDots = showDotFolders || parsed.filterPrefix.startsWith('.');
+			const allDirs = dirEntries
+				.filter(e => e.type === 'directory' && (includeDots || !e.name.startsWith('.')))
+				.sort((a, b) => a.name.localeCompare(b.name));
+
+			const makeDirItem = (sub: IAdeRemoteDirEntry, highlights?: { label?: { start: number; end: number }[] }): BrowseActionItem => {
+				const nextPath = posix.join(parsed.browseDir, sub.name);
+				const isDriveItem = parsed.isWindowsDriveRoot && /^[A-Za-z]:$/.test(sub.name);
+				return {
 					label: `${sub.name}/`,
-					description: nextPath,
-					iconClass: ThemeIcon.asClassName(Codicon.folder),
+					description: isDriveItem ? localize('adeCloudWindowsDriveDesc', "Windows Drive ({0}\\)", sub.name) : nextPath,
+					iconClass: ThemeIcon.asClassName(isDriveItem ? Codicon.vm : Codicon.folder),
+					highlights,
+					buttons: isDriveItem ? undefined : [addAsProjectInlineBtn],
 					action: 'enter-dir',
 					targetPath: nextPath,
+				};
+			};
+
+			const items: (BrowseActionItem | IQuickPickSeparator)[] = [];
+			const needle = parsed.filterPrefix.trim();
+
+			if (needle) {
+				const lowerNeedle = needle.toLowerCase().replace(/:$/, '');
+				const matched: { entry: IAdeRemoteDirEntry; rank: number; ranges?: { start: number; end: number }[] }[] = [];
+				const unmatched: IAdeRemoteDirEntry[] = [];
+
+				for (const sub of allDirs) {
+					const cleanSub = sub.name.replace(/:$/, '');
+					const lowerName = sub.name.toLowerCase();
+					const lowerClean = cleanSub.toLowerCase();
+					if (lowerName === needle.toLowerCase() || lowerClean === lowerNeedle) {
+						matched.push({ entry: sub, rank: 0, ranges: [{ start: 0, end: Math.min(sub.name.length, needle.length) }] });
+					} else if (lowerName.startsWith(needle.toLowerCase()) || lowerClean.startsWith(lowerNeedle)) {
+						matched.push({ entry: sub, rank: 1, ranges: [{ start: 0, end: Math.min(sub.name.length, needle.length) }] });
+					} else {
+						const subIdx = lowerName.indexOf(needle.toLowerCase());
+						if (subIdx >= 0) {
+							matched.push({ entry: sub, rank: 2, ranges: [{ start: subIdx, end: subIdx + needle.length }] });
+						} else {
+							const fuzzy = matchesFuzzy(needle, sub.name, true);
+							if (fuzzy) {
+								matched.push({ entry: sub, rank: 3, ranges: fuzzy });
+							} else {
+								unmatched.push(sub);
+							}
+						}
+					}
+				}
+				matched.sort((a, b) => a.rank - b.rank || a.entry.name.localeCompare(b.entry.name));
+
+				if (matched.length > 0) {
+					items.push({
+						type: 'separator',
+						label: parsed.isWindowsDriveRoot
+							? localize('adeCloudMatchingDrivesSep', "Matching Drives on {0}", host.name)
+							: localize('adeCloudMatchingFoldersSep', "Matching Folders in {0}", sepDirLabel),
+					});
+					for (const m of matched) {
+						items.push(makeDirItem(m.entry, m.ranges ? { label: m.ranges } : undefined));
+					}
+				}
+
+				if (!parsed.isWindowsDriveRoot) {
+					const exactDirExists = allDirs.some(d => d.name.toLowerCase() === needle.toLowerCase());
+					items.push({
+						type: 'separator',
+						label: localize('adeCloudTargetActionsSep', "Target Path Actions"),
+					});
+					if (exactDirExists || browseError) {
+						items.push({
+							label: localize('adeCloudOpenTypedFolderItem', "Open This Folder: {0}", parsed.targetPath),
+							description: localize('adeCloudAddAsProjectDesc', "Add {0}:{1} as Project Workspace", host.alias, parsed.targetPath),
+							iconClass: ThemeIcon.asClassName(Codicon.check),
+							action: 'select-path',
+							targetPath: parsed.targetPath,
+						});
+					} else {
+						items.push({
+							label: localize('adeCloudCreateAndAddFolderItem', "Create & Add as Project: {0}", parsed.targetPath),
+							description: localize('adeCloudCreateAndAddFolderDesc', "Create remote folder on {0} and open as workspace", host.alias),
+							iconClass: ThemeIcon.asClassName(Codicon.check),
+							action: 'mkdir-and-select',
+							targetPath: parsed.targetPath,
+						});
+						items.push({
+							label: localize('adeCloudCreateAndEnterFolderItem', "Create & Enter Folder: {0}/", parsed.targetPath),
+							description: localize('adeCloudCreateAndEnterFolderDesc', "Create remote folder and continue browsing inside it"),
+							iconClass: ThemeIcon.asClassName(Codicon.newFolder),
+							action: 'mkdir-and-enter',
+							targetPath: parsed.targetPath,
+						});
+					}
+				}
+
+				if (unmatched.length > 0 || parsed.parentDir !== undefined) {
+					items.push({
+						type: 'separator',
+						label: parsed.isWindowsDriveRoot
+							? localize('adeCloudOtherDrivesSep', "All Drives on {0}", host.name)
+							: localize('adeCloudOtherFoldersInParentSep', "Other Folders in {0}", sepDirLabel),
+					});
+					if (parsed.parentDir !== undefined) {
+						items.push({
+							label: '..',
+							description: localize('adeCloudParentFolderDesc', "Up to {0}", shortSepPath(parsed.parentDir)),
+							iconClass: ThemeIcon.asClassName(Codicon.arrowUp),
+							action: 'parent',
+							targetPath: parsed.parentDir,
+						});
+					}
+					for (const sub of unmatched) {
+						items.push(makeDirItem(sub));
+					}
+				}
+			} else {
+				if (!parsed.isWindowsDriveRoot && !browseError) {
+					items.push({
+						label: localize('adeCloudUseCurrentFolder', "Open This Folder: {0}", parsed.browseDir),
+						description: localize('adeCloudAddAsProjectDesc', "Add {0}:{1} as Project Workspace", host.alias, parsed.browseDir),
+						iconClass: ThemeIcon.asClassName(Codicon.check),
+						action: 'select-current',
+						targetPath: parsed.browseDir,
+					});
+				} else if (!parsed.isWindowsDriveRoot && browseError) {
+					items.push({
+						label: localize('adeCloudUseTypedPathOffline', "Open This Folder: {0}", parsed.browseDir),
+						description: localize('adeCloudOfflineFolderHint', "Live listing unavailable ({0}) — add path directly or edit above", browseError.slice(0, 64)),
+						iconClass: ThemeIcon.asClassName(Codicon.check),
+						action: 'select-path',
+						targetPath: parsed.browseDir,
+					});
+				}
+
+				items.push({
+					type: 'separator',
+					label: parsed.isWindowsDriveRoot
+						? localize('adeCloudWindowsDrivesSep', "Drives on {0}", host.name)
+						: localize('adeCloudSubfoldersSep', "Folders in {0}", sepDirLabel),
+				});
+
+				if (parsed.parentDir !== undefined) {
+					items.push({
+						label: '..',
+						description: localize('adeCloudParentFolderDesc', "Up to {0}", shortSepPath(parsed.parentDir)),
+						iconClass: ThemeIcon.asClassName(Codicon.arrowUp),
+						action: 'parent',
+						targetPath: parsed.parentDir,
+					});
+				}
+
+				for (const sub of allDirs) {
+					items.push(makeDirItem(sub));
+				}
+
+				if (host.recentDirectories.length > 0) {
+					items.push({ type: 'separator', label: localize('adeCloudRecentFoldersSep', "Recent & Migrated VS Code Folders") });
+					for (const recPath of host.recentDirectories) {
+						if (recPath === parsed.browseDir) {
+							continue;
+						}
+						items.push({
+							label: basename(URI.from({ scheme: AEXUS_SSH_SCHEME, authority: host.alias, path: recPath })) || recPath,
+							description: `${host.alias}:${recPath}`,
+							iconClass: ThemeIcon.asClassName(Codicon.history),
+							action: 'select-recent',
+							targetPath: recPath,
+						});
+					}
+				}
+			}
+
+			if (allowSwitchHost) {
+				items.push({ type: 'separator', label: localize('adeCloudHostNavSep', "Host") });
+				items.push({
+					label: localize('adeCloudSwitchHostItem', "Switch Host..."),
+					description: localize('adeCloudSwitchHostItemDesc', "Go back to select Local or another Cloud Host"),
+					iconClass: ThemeIcon.asClassName(Codicon.arrowLeft),
+					action: 'switch-host',
 				});
 			}
-		}
 
-		const picked = await new Promise<{ item?: BrowseActionItem; back?: boolean }>(resolve => {
-			const qp = quickInput.createQuickPick<BrowseActionItem>({ useSeparators: true });
-			qp.title = allowSwitchHost
-				? localize('adeBrowseCloudHostStep2Title', "Add Project (2/2) — Select Folder on {0}", host.name)
-				: localize('adeBrowseCloudHostTitle', "Select Remote Project Folder on {0}", host.name);
-			qp.placeholder = browseError
-				? localize('adeCloudBrowseOfflinePlaceholder', "Choose a recent folder or enter a remote path on {0}", host.name)
-				: localize('adeCloudBrowsePlaceholder', "Navigate folders or select Open This Folder ({0}:{1})", host.alias, currentDir);
-			qp.matchOnDescription = true;
-			if (allowSwitchHost) {
-				qp.buttons = [quickInput.backButton];
-			}
+			qp.prompt = browseError
+				? localize('adeCloudLivePathErrorPrompt', "Cannot list {0} ({1}) — Backspace for parent folder", sepDirLabel, browseError.slice(0, 56))
+				: localize('adeCloudLivePathHintPrompt', "Type path or Backspace for parent folders · Enter opens folder · Click 'Open' to add");
 			qp.items = items;
-			let settled = false;
-			qp.onDidTriggerButton(btn => {
-				if (btn === quickInput.backButton) {
-					settled = true;
-					qp.hide();
-					resolve({ back: true });
+		};
+
+		const ensureDirLoadedAndRender = async (rawInput: string, forceNetwork = false, allowInitialFallback = false) => {
+			if (settled) {
+				return;
+			}
+			const parsed = parseLiveRemotePathInput(rawInput, hostOs, discoveredHome);
+			if (!forceNetwork && dirCache.has(parsed.browseDir)) {
+				qp.busy = false;
+				renderItemsForState(qp.value);
+				warmParentCache(parsed.parentDir);
+				return;
+			}
+
+			const seq = ++requestSeq;
+			qp.busy = true;
+			renderItemsForState(rawInput);
+
+			try {
+				const entries = await backend.remoteReadDir(host.alias, parsed.browseDir);
+				if (settled) {
+					return;
 				}
-			});
-			qp.onDidAccept(() => {
-				settled = true;
-				const sel = qp.selectedItems[0];
-				qp.hide();
-				resolve({ item: sel });
-			});
-			qp.onDidHide(() => {
-				qp.dispose();
-				if (!settled) {
-					resolve({});
+				dirCache.set(parsed.browseDir, entries);
+				dirErrors.delete(parsed.browseDir);
+				if (seq === requestSeq) {
+					qp.busy = false;
+					renderItemsForState(qp.value);
+					warmParentCache(parsed.parentDir);
 				}
-			});
-			qp.show();
-		});
+			} catch (err) {
+				if (settled) {
+					return;
+				}
+				const cleanErr = err instanceof Error ? err.message.replace(/^\[[A-Z]+\]\s*/, '') : String(err);
 
-		if (picked.back || picked.item?.action === 'switch-host') {
-			return 'switch-host';
-		}
+				// On initial open before user edits, auto-discover real remote home / OS or walk up to existing parent folder!
+				if (allowInitialFallback && !userHasEditedValue) {
+					if (!hadExplicitInitialDir) {
+						try {
+							const check = await backend.testConnection(host.id);
+							if (!settled && !userHasEditedValue && check.ok) {
+								if (check.os) {
+									hostOs = check.os;
+								}
+								if (check.remoteHome) {
+									discoveredHome = check.remoteHome;
+									const realHome = normalizeRemoteProjectPath(check.remoteHome, hostOs);
+									if (realHome !== parsed.browseDir) {
+										const nextDisplay = formatLiveRemoteDirInput(realHome, hostOs, false);
+										setInputValueProgrammatically(nextDisplay);
+										await ensureDirLoadedAndRender(nextDisplay, true, true);
+										return;
+									}
+								}
+							}
+						} catch {
+							// proceed to parent walk-up
+						}
+					}
+					if (!settled && !userHasEditedValue && parsed.parentDir !== undefined && parsed.parentDir !== parsed.browseDir) {
+						const parentDisplay = formatLiveRemoteDirInput(parsed.parentDir, hostOs, parsed.omitLeadingSlashOnWindows);
+						setInputValueProgrammatically(parentDisplay);
+						await ensureDirLoadedAndRender(parentDisplay, true, true);
+						return;
+					}
+				}
 
-		if (!picked.item) {
-			return undefined;
-		}
+				dirErrors.set(parsed.browseDir, cleanErr);
+				dirCache.delete(parsed.browseDir);
+				if (seq === requestSeq) {
+					qp.busy = false;
+					renderItemsForState(qp.value);
+					warmParentCache(parsed.parentDir);
+				}
+			}
+		};
 
-		if (picked.item.action === 'select-current' || picked.item.action === 'select-recent') {
-			const finalPath = picked.item.targetPath ?? currentDir;
-			await backend.recordRecentDirectory(host.id, finalPath);
-			return buildCloudProjectUri(host.alias, finalPath, host.os);
-		}
+		const navigateToDirectory = (dirPath: string) => {
+			const curParsed = parseLiveRemotePathInput(qp.value, hostOs, discoveredHome);
+			const formatted = formatLiveRemoteDirInput(dirPath, hostOs, curParsed.omitLeadingSlashOnWindows);
+			qp.validationMessage = undefined;
+			clearDebounce();
+			setInputValueProgrammatically(formatted);
+			void ensureDirLoadedAndRender(formatted, false, false);
+		};
 
-		if (picked.item.action === 'parent' || picked.item.action === 'enter-dir') {
-			currentDir = picked.item.targetPath ?? currentDir;
-			continue;
-		}
+		qp.title = allowSwitchHost
+			? localize('adeBrowseCloudHostStep2Title', "Add Project (2/2) — Select Folder on {0}", host.name)
+			: localize('adeBrowseCloudHostTitle', "Select Remote Project Folder on {0}", host.name);
+		qp.placeholder = hostOs === 'windows'
+			? localize('adeCloudLiveWinPathPlaceholder', "Type remote path (e.g. /C:/Users/...) or select a folder below")
+			: localize('adeCloudLivePosixPathPlaceholder', "Type remote path (e.g. /home/...) or select a folder below");
+		qp.matchOnLabel = false;
+		qp.matchOnDescription = false;
+		qp.matchOnDetail = false;
+		qp.sortByLabel = false;
+		qp.keepScrollPosition = false;
+		qp.ignoreFocusOut = true;
+		qp.customButton = true;
+		qp.customLabel = localize('adeCloudConfirmAddProjectBtn', "Open");
+		qp.customHover = localize('adeCloudConfirmAddProjectHover', "Add the folder path in the input box as a Project Workspace");
+		updateHeaderButtons();
 
-		if (picked.item.action === 'mkdir') {
-			const folderName = await quickInput.input({
-				title: localize('adeCloudNewFolderTitle', "Create Remote Folder in {0}", currentDir),
-				prompt: localize('adeCloudNewFolderPrompt', "New folder name"),
-				validateInput: async v => v.trim() && !v.includes('/') ? undefined : localize('adeCloudValidFolderName', "Enter a valid folder name."),
-			});
-			if (folderName?.trim()) {
-				const createdPath = posix.join(currentDir, folderName.trim());
+		const initialDisplay = formatLiveRemoteDirInput(initialDir, hostOs, false);
+		setInputValueProgrammatically(initialDisplay);
+
+		store.add(qp.onDidChangeValue(val => {
+			if (suppressValueChange || settled) {
+				return;
+			}
+			userHasEditedValue = true;
+			qp.validationMessage = undefined;
+			clearDebounce();
+
+			const parsed = parseLiveRemotePathInput(val, hostOs, discoveredHome);
+			if (dirCache.has(parsed.browseDir)) {
+				// Instant 0ms popup when typing/filtering or pressing Backspace into a cached parent directory!
+				requestSeq++;
+				qp.busy = false;
+				renderItemsForState(val);
+				warmParentCache(parsed.parentDir);
+				return;
+			}
+
+			renderItemsForState(val);
+			debounceTimer = setTimeout(() => {
+				debounceTimer = undefined;
+				void ensureDirLoadedAndRender(qp.value, false, false);
+			}, 60);
+		}));
+
+		store.add(qp.onDidTriggerButton(btn => {
+			if (settled) {
+				return;
+			}
+			if (btn === quickInput.backButton) {
+				finish('switch-host');
+				return;
+			}
+			if (btn === newFolderHeaderBtn) {
+				const parsed = parseLiveRemotePathInput(qp.value, hostOs, discoveredHome);
+				if (parsed.isWindowsDriveRoot) {
+					qp.validationMessage = localize('adeCloudPickWinDriveBeforeMkdir', "Open a drive (e.g. /C:/) first before creating a new folder.");
+					return;
+				}
+				const base = formatLiveRemoteDirInput(parsed.browseDir, hostOs, parsed.omitLeadingSlashOnWindows);
+				const draftLeaf = 'new-folder';
+				const nextVal = `${base}${draftLeaf}`;
+				qp.validationMessage = undefined;
+				userHasEditedValue = true;
+				setInputValueProgrammatically(nextVal, [base.length, nextVal.length]);
+				renderItemsForState(nextVal);
+				return;
+			}
+			if (btn === refreshHeaderBtn) {
+				const parsed = parseLiveRemotePathInput(qp.value, hostOs, discoveredHome);
+				dirCache.delete(parsed.browseDir);
+				dirErrors.delete(parsed.browseDir);
+				void ensureDirLoadedAndRender(qp.value, true, false);
+				return;
+			}
+			// Toggle dot folders button
+			showDotFolders = !showDotFolders;
+			updateHeaderButtons();
+			renderItemsForState(qp.value);
+		}));
+
+		store.add(qp.onDidTriggerItemButton(ev => {
+			if (settled) {
+				return;
+			}
+			if (ev.button === addAsProjectInlineBtn && ev.item.targetPath) {
+				void confirmAndFinishWithPath(ev.item.targetPath);
+			}
+		}));
+
+		store.add(qp.onDidCustom(() => {
+			if (settled) {
+				return;
+			}
+			const parsed = parseLiveRemotePathInput(qp.value, hostOs, discoveredHome);
+			void confirmAndFinishWithPath(parsed.targetPath);
+		}));
+
+		store.add(qp.onDidAccept(async () => {
+			if (settled) {
+				return;
+			}
+			const sel = qp.selectedItems[0] ?? qp.activeItems[0];
+			if (!sel) {
+				const parsed = parseLiveRemotePathInput(qp.value, hostOs, discoveredHome);
+				await confirmAndFinishWithPath(parsed.targetPath);
+				return;
+			}
+
+			if (sel.action === 'switch-host') {
+				finish('switch-host');
+				return;
+			}
+
+			if (sel.action === 'enter-dir' || sel.action === 'parent') {
+				if (sel.targetPath) {
+					navigateToDirectory(sel.targetPath);
+				}
+				return;
+			}
+
+			if (sel.action === 'select-current' || sel.action === 'select-path' || sel.action === 'select-recent') {
+				const parsed = parseLiveRemotePathInput(qp.value, hostOs, discoveredHome);
+				await confirmAndFinishWithPath(sel.targetPath ?? parsed.targetPath);
+				return;
+			}
+
+			if ((sel.action === 'mkdir-and-enter' || sel.action === 'mkdir-and-select') && sel.targetPath) {
+				const targetToCreate = normalizeRemoteProjectPath(sel.targetPath, hostOs);
+				qp.busy = true;
 				try {
-					await backend.remoteMkdir(host.alias, createdPath);
-					currentDir = createdPath;
+					await backend.remoteMkdir(host.alias, targetToCreate);
+					dirCache.delete(posix.dirname(targetToCreate));
+					if (sel.action === 'mkdir-and-select') {
+						await backend.recordRecentDirectory(host.id, targetToCreate);
+						finish(buildCloudProjectUri(host.alias, targetToCreate, hostOs));
+					} else {
+						navigateToDirectory(targetToCreate);
+					}
 				} catch (err) {
-					notifications?.error(err instanceof Error ? err.message : String(err));
+					qp.busy = false;
+					const msg = err instanceof Error ? err.message : String(err);
+					qp.validationMessage = msg;
+					notifications?.error(msg);
 				}
 			}
-			continue;
-		}
+		}));
 
-		if (picked.item.action === 'manual') {
-			const manualPath = await quickInput.input({
-				title: localize('adeCloudManualPathTitle', "Remote Project Folder on {0}", host.name),
-				prompt: localize('adeCloudManualPathPrompt', "Enter absolute path on {0}", formatCloudHostTargetLabel(host)),
-				value: currentDir,
-				placeHolder: host.os === 'windows' ? 'C:/Users/Administrator/project' : '/home/ubuntu/project',
-				validateInput: async v => v.trim() ? undefined : localize('adeCloudManualPathReq', "Remote folder path is required."),
-			});
-			if (!manualPath?.trim()) {
-				continue;
+		store.add(qp.onDidHide(() => {
+			if (!settled) {
+				finish(undefined);
 			}
-			const norm = normalizeRemoteProjectPath(manualPath.trim(), host.os);
-			await backend.recordRecentDirectory(host.id, norm);
-			return buildCloudProjectUri(host.alias, norm, host.os);
+		}));
+
+		qp.show();
+		// Re-apply end-of-input cursor placement right after show() so QuickInput doesn't select-all the initial path!
+		qp.valueSelection = [initialDisplay.length, initialDisplay.length];
+
+		if (!hadExplicitInitialDir) {
+			// Probe remote home & OS first on hosts without an explicit saved folder so we jump directly into actual $HOME / %USERPROFILE%!
+			qp.busy = true;
+			void backend.testConnection(host.id).then(
+				check => {
+					if (settled) {
+						return;
+					}
+					if (!userHasEditedValue && check.ok) {
+						if (check.os) {
+							hostOs = check.os;
+						}
+						if (check.remoteHome) {
+							discoveredHome = check.remoteHome;
+							const realHome = normalizeRemoteProjectPath(check.remoteHome, hostOs);
+							const homeDisplay = formatLiveRemoteDirInput(realHome, hostOs, false);
+							setInputValueProgrammatically(homeDisplay);
+							void ensureDirLoadedAndRender(homeDisplay, false, true);
+							return;
+						}
+					}
+					void ensureDirLoadedAndRender(qp.value, false, true);
+				},
+				() => {
+					if (!settled) {
+						void ensureDirLoadedAndRender(qp.value, false, true);
+					}
+				},
+			);
+		} else {
+			void ensureDirLoadedAndRender(initialDisplay, false, true);
 		}
-	}
+	});
 }
 
 export async function pickCloudHostProjectFolder(

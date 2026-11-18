@@ -364,7 +364,8 @@ function posixQuote(value: string): string {
 }
 
 function encodePowerShellScript(script: string): string {
-	return Buffer.from(script, 'utf16le').toString('base64');
+	const withUtf8 = `$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; ${script}`;
+	return Buffer.from(withUtf8, 'utf16le').toString('base64');
 }
 
 export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHostBackendService {
@@ -1157,11 +1158,18 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 	async testConnection(idOrAlias: string): Promise<IAdeCloudHostConnectionCheck> {
 		const startedAt = Date.now();
 		const { target, os: declaredOs, host } = await this.resolveHostTarget(idOrAlias);
+		const winProbeCmd = `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(`$ErrorActionPreference='Stop'; Write-Output ('WINDOWS|' + $env:USERPROFILE)`)}`;
+		const posixProbeCmd = `sh -c 'printf "%s|%s\\n" "$(uname -s 2>/dev/null || echo Linux)" "$HOME"'`;
 		try {
-			const cmd = declaredOs === 'windows'
-				? `powershell -NoProfile -NonInteractive -Command "$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; Write-Output ('WINDOWS|' + $env:USERPROFILE)"`
-				: `sh -c 'printf "%s|%s\\n" "$(uname -s 2>/dev/null || echo Linux)" "$HOME"'`;
-			const res = await this.runSshRaw(target, cmd, { timeoutMs: 12_000, host });
+			const primaryCmd = declaredOs === 'windows' ? winProbeCmd : posixProbeCmd;
+			let res = await this.runSshRaw(target, primaryCmd, { timeoutMs: 12_000, host });
+			if (res.code !== 0 && !/permission denied|connection refused|timed out|could not resolve|no route to host|host key verification failed/i.test(res.stderr)) {
+				const altCmd = declaredOs === 'windows' ? posixProbeCmd : winProbeCmd;
+				const altRes = await this.runSshRaw(target, altCmd, { timeoutMs: 10_000, host });
+				if (altRes.code === 0) {
+					res = altRes;
+				}
+			}
 			const latencyMs = Date.now() - startedAt;
 			if (res.code !== 0) {
 				const check: IAdeCloudHostConnectionCheck = {
@@ -1177,7 +1185,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			const [unameRaw, homeRaw] = line.split('|');
 			const detectedOs: AdeCloudHostOs = /windows/i.test(unameRaw)
 				? 'windows'
-				: (/darwin/i.test(unameRaw) ? 'macos' : declaredOs);
+				: (/darwin/i.test(unameRaw) ? 'macos' : (/linux/i.test(unameRaw) ? 'linux' : declaredOs));
 			const check: IAdeCloudHostConnectionCheck = {
 				ok: true,
 				checkedAt: Date.now(),
@@ -1209,10 +1217,20 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			return;
 		}
 		const cur = this.hosts[idx];
+		const nextOs = status.os ?? cur.os;
+		const existingDefaultIncompatible = Boolean(
+			cur.defaultDirectory && (
+				(nextOs === 'windows' && !/^\/[A-Za-z]:/.test(cur.defaultDirectory))
+				|| (nextOs !== 'windows' && /^\/[A-Za-z]:/.test(cur.defaultDirectory))
+			),
+		);
+		const nextDefaultDir = (!cur.defaultDirectory || existingDefaultIncompatible)
+			? (discoveredHome ? normalizeRemoteProjectPath(discoveredHome, nextOs) : cur.defaultDirectory)
+			: cur.defaultDirectory;
 		this.hosts[idx] = {
 			...cur,
-			os: status.os ?? cur.os,
-			defaultDirectory: cur.defaultDirectory ?? (discoveredHome ? normalizeRemoteProjectPath(discoveredHome, status.os ?? cur.os) : undefined),
+			os: nextOs,
+			defaultDirectory: nextDefaultDir,
 			lastTestStatus: status,
 		};
 		await this.enqueuePersist();
@@ -1244,6 +1262,9 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 
 		if (hostOs === 'windows') {
+			if (norm === '/') {
+				return { type: 'directory', ctime: 0, mtime: 0, size: 0 };
+			}
 			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
 			const ps = [
 				`$ErrorActionPreference='Stop';`,
@@ -1300,6 +1321,18 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 
 		if (hostOs === 'windows') {
+			if (norm === '/') {
+				const drivePs = `$ErrorActionPreference='Stop'; [IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady } | ForEach-Object { Write-Output ('directory' + [char]9 + $_.Name.TrimEnd('\\').TrimEnd('/')) }`;
+				const driveRes = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(drivePs)}`, { host });
+				if (driveRes.code !== 0) {
+					this.throwMappedRemoteError(driveRes, target, norm);
+				}
+				return driveRes.stdout.toString('utf8').split(/\r?\n/).filter(Boolean).map(line => {
+					const tabIdx = line.indexOf('\t');
+					const name = tabIdx >= 0 ? line.slice(tabIdx + 1).trim() : line.trim();
+					return { name, type: 'directory' as const };
+				}).filter(e => /^[A-Za-z]:$/.test(e.name));
+			}
 			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
 			const ps = [
 				`$ErrorActionPreference='Stop';`,
@@ -1451,7 +1484,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 		if (hostOs === 'windows') {
 			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
-			const ps = `$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Path '${winPath}' -Force | Out-Null`;
+			const ps = `$ErrorActionPreference='Stop'; [IO.Directory]::CreateDirectory('${winPath}') | Out-Null`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { host });
 			if (res.code !== 0) {
 				this.throwMappedRemoteError(res, target, norm);

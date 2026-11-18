@@ -604,19 +604,46 @@ class TestCloudHostQuickPick extends mock<IQuickPick<IQuickPickItem, { useSepara
 	private readonly disposables = new DisposableStore();
 	private readonly hideEmitter = this.disposables.add(new Emitter<IQuickInputHideEvent>());
 	private readonly acceptEmitter = this.disposables.add(new Emitter<IQuickPickDidAcceptEvent>());
+	private readonly valueChangeEmitter = this.disposables.add(new Emitter<string>());
+	private readonly customEmitter = this.disposables.add(new Emitter<void>());
 
 	override readonly onDidHide: Event<IQuickInputHideEvent> = (listener, thisArgs, disposables) => this.disposables.add(this.hideEmitter.event(listener, thisArgs, disposables));
 	override readonly onDidAccept: Event<IQuickPickDidAcceptEvent> = (listener, thisArgs, disposables) => this.disposables.add(this.acceptEmitter.event(listener, thisArgs, disposables));
+	override readonly onDidChangeValue: Event<string> = this.valueChangeEmitter.event;
+	override readonly onDidCustom: Event<void> = this.customEmitter.event;
 	override readonly onDidTriggerButton: Event<IQuickInputButton> = Event.None;
 	override readonly onDidTriggerItemButton: Event<IQuickPickItemButtonEvent<IQuickPickItem>> = Event.None;
 	override items: readonly (IQuickPickItem | IQuickPickSeparator)[] = [];
 	override selectedItems: readonly IQuickPickItem[] = [];
+	override activeItems: readonly IQuickPickItem[] = [];
 	override title: string | undefined = undefined;
 	override placeholder: string | undefined = undefined;
+	override prompt: string | undefined = undefined;
+	override valueSelection: Readonly<[number, number]> | undefined = undefined;
+	override busy = false;
+	override validationMessage: string | undefined = undefined;
 	override matchOnDescription = false;
+	override matchOnLabel = false;
+	override matchOnDetail = false;
+	override sortByLabel = false;
+	override keepScrollPosition = false;
+	override ignoreFocusOut = false;
+	override customButton = false;
+	override customLabel: string | undefined = undefined;
+	override customHover: string | undefined = undefined;
 	override buttons: ReadonlyArray<IQuickInputButton> = [];
 
 	private shown = false;
+	private _value = '';
+
+	override get value(): string {
+		return this._value;
+	}
+
+	override set value(next: string) {
+		this._value = next;
+		this.valueChangeEmitter.fire(next);
+	}
 
 	override show(): void {
 		this.shown = true;
@@ -637,6 +664,14 @@ class TestCloudHostQuickPick extends mock<IQuickPick<IQuickPickItem, { useSepara
 
 	labels(): string[] {
 		return this.items.map(item => item.label ?? '');
+	}
+
+	typeValue(next: string): void {
+		this.value = next;
+	}
+
+	fireCustomButton(): void {
+		this.customEmitter.fire();
 	}
 
 	acceptItemByLabel(label: string): void {
@@ -667,19 +702,30 @@ async function waitForQuickPick(quickPicks: TestCloudHostQuickPick[], count: num
 	return quickPicks[count - 1];
 }
 
-function snapshotQuickPick(quickPick: TestCloudHostQuickPick) {
-	return { title: quickPick.title, items: quickPick.labels() };
+async function waitForLabels(quickPick: TestCloudHostQuickPick, expected: readonly string[]): Promise<void> {
+	const deadline = Date.now() + 1000;
+	while (!expected.every(label => quickPick.labels().includes(label))) {
+		if (Date.now() > deadline) {
+			assert.fail(`Quick pick did not show ${JSON.stringify(expected)}. Items: ${JSON.stringify(quickPick.labels())}`);
+		}
+		await new Promise(resolve => setTimeout(resolve, 5));
+	}
 }
 
-function makeCloudHost(alias: string, os: AdeCloudHostOs): IAdeCloudHost {
+function snapshotQuickPick(quickPick: TestCloudHostQuickPick) {
+	return { title: quickPick.title, value: quickPick.value, items: quickPick.labels() };
+}
+
+function makeCloudHost(alias: string, os: AdeCloudHostOs, defaultDirectory?: string, user?: string): IAdeCloudHost {
 	return {
 		id: alias,
 		name: alias,
 		alias,
 		hostName: alias,
+		user,
 		port: 22,
 		os,
-		defaultDirectory: '/srv/projects',
+		defaultDirectory,
 		recentDirectories: [],
 		source: 'user',
 		createdAt: 0,
@@ -687,24 +733,42 @@ function makeCloudHost(alias: string, os: AdeCloudHostOs): IAdeCloudHost {
 	};
 }
 
+function directories(...names: string[]): IAdeRemoteDirEntry[] {
+	return names.map(name => ({ name, type: 'directory' }));
+}
+
 suite('pickProjectFoldersWithCloudOption', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	test('walks the two-step + flow: immediate host list, remote folder browsing with Switch Host, and local delegation', async () => {
+	interface IPickerHarness {
+		readonly quickPicks: TestCloudHostQuickPick[];
+		readonly remoteReads: Array<{ authority: string; path: string }>;
+		readonly statCalls: Array<{ authority: string; path: string }>;
+		readonly recordedDirectories: Array<{ id: string; path: string }>;
+		readonly dialogOptions: IOpenDialogOptions[];
+		readonly pick: () => Promise<URI[] | undefined>;
+	}
+
+	function createHarness(remoteReadDir: (authority: string, path: string) => Promise<readonly IAdeRemoteDirEntry[]>): IPickerHarness {
 		const instantiation = workbenchInstantiationService(undefined, store);
 		const quickPicks = stubQuickInput(instantiation);
 
 		const remoteReads: Array<{ authority: string; path: string }> = [];
+		const statCalls: Array<{ authority: string; path: string }> = [];
 		const recordedDirectories: Array<{ id: string; path: string }> = [];
 		instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
 			onDidChangeHosts: Event.None,
-			listHosts: async () => [makeCloudHost('cloud-linux', 'linux'), makeCloudHost('cloud-win', 'windows')],
+			listHosts: async () => [
+				makeCloudHost('cloud-linux', 'linux', '/srv/projects', 'ubuntu'),
+				makeCloudHost('cloud-win', 'windows', 'C:\\Users\\djf', 'djf'),
+			],
 			remoteReadDir: async (authority: string, path: string) => {
 				remoteReads.push({ authority, path });
-				return [
-					{ name: 'repo-one', type: 'directory' },
-					{ name: 'notes.txt', type: 'file' },
-				];
+				return remoteReadDir(authority, path);
+			},
+			remoteStat: async (authority: string, path: string) => {
+				statCalls.push({ authority, path });
+				return { type: 'directory', ctime: 0, mtime: 0, size: 0 };
 			},
 			recordRecentDirectory: async (id: string, path: string) => { recordedDirectories.push({ id, path }); },
 		}));
@@ -723,49 +787,335 @@ suite('pickProjectFoldersWithCloudOption', () => {
 			executeCommand: async () => undefined,
 		}));
 
-		const pick = () => instantiation.invokeFunction(accessor => pickProjectFoldersWithCloudOption(accessor));
+		return {
+			quickPicks,
+			remoteReads,
+			statCalls,
+			recordedDirectories,
+			dialogOptions,
+			pick: () => instantiation.invokeFunction(accessor => pickProjectFoldersWithCloudOption(accessor)),
+		};
+	}
 
-		const remotePick = pick();
-		const step1 = await waitForQuickPick(quickPicks, 1);
-		const step1Snapshot = snapshotQuickPick(step1);
+	test('pre-fills the host folder, drills into cached folders, backspaces across the slash, and confirms Open This Folder', async () => {
+		const harness = createHarness(async (_authority, path) => {
+			switch (path) {
+				case '/srv/projects':
+					return [...directories('repo-one', 'repo-two'), { name: 'notes.txt', type: 'file' }];
+				case '/srv/projects/repo-one':
+					return directories('packages', 'apps');
+				case '/srv/projects/repo-two':
+					return directories('docs');
+				default:
+					return [];
+			}
+		});
+
+		const remotePick = harness.pick();
+		const step1 = await waitForQuickPick(harness.quickPicks, 1);
 		step1.acceptItemByLabel('cloud-linux');
 
-		const step2 = await waitForQuickPick(quickPicks, 2);
-		const step2Snapshot = snapshotQuickPick(step2);
-		step2.acceptItemByLabel('Switch Host...');
+		// Step 2 keeps a single QuickPick instance open for the whole browse session.
+		const step2 = await waitForQuickPick(harness.quickPicks, 2);
+		await waitForLabels(step2, ['repo-one/', 'repo-two/']);
+		const prefill = snapshotQuickPick(step2);
 
-		const backToStep1 = await waitForQuickPick(quickPicks, 3);
-		const backToStep1Snapshot = snapshotQuickPick(backToStep1);
-		backToStep1.acceptItemByLabel('cloud-linux');
+		step2.acceptItemByLabel('repo-one/');
+		await waitForLabels(step2, ['packages/', 'apps/']);
+		const drilled = snapshotQuickPick(step2);
 
-		const step2Again = await waitForQuickPick(quickPicks, 4);
-		const step2AgainSnapshot = snapshotQuickPick(step2Again);
-		step2Again.acceptItemByLabel('repo-one/');
+		// Backspace crosses the trailing slash into the cached parent: the folder list updates synchronously from cache.
+		step2.typeValue('/srv/projects/repo-one');
+		const deletingLeaf = snapshotQuickPick(step2);
+		step2.typeValue('/srv/projects/repo');
+		const deletingAcrossSlash = { ...snapshotQuickPick(step2), busy: step2.busy };
 
-		const navigatedStep2 = await waitForQuickPick(quickPicks, 5);
-		const navigatedStep2Snapshot = snapshotQuickPick(navigatedStep2);
-		navigatedStep2.acceptItemByLabel('Open This Folder: /srv/projects/repo-one');
-
+		step2.typeValue('/srv/projects/repo-one/');
+		await waitForLabels(step2, ['packages/', 'apps/']);
+		step2.acceptItemByLabel('Open This Folder: /srv/projects/repo-one');
 		const remoteResult = await remotePick;
 
-		const localPick = pick();
-		const localStep = await waitForQuickPick(quickPicks, 6);
+		assert.deepStrictEqual({
+			quickPickCount: harness.quickPicks.length,
+			step1: snapshotQuickPick(step1),
+			prefill,
+			drilled,
+			deletingLeaf,
+			deletingAcrossSlash,
+			remoteResult: remoteResult?.map(uri => uri.toString()),
+			remoteReads: harness.remoteReads,
+			statCalls: harness.statCalls,
+			recordedDirectories: harness.recordedDirectories,
+		}, {
+			quickPickCount: 2,
+			step1: {
+				title: 'Add Project (1/2) — Select Host',
+				value: '',
+				items: [
+					'Local Host',
+					'Local (This Computer)',
+					'Cloud Hosts (SSH) · 2',
+					'cloud-linux',
+					'cloud-win',
+					'Cloud Host Management',
+					'Add New Cloud Host...',
+					'Manage Saved Cloud Hosts...',
+					'Sync / Import Cloud Hosts from VS Code & ~/.ssh/config',
+				],
+			},
+			prefill: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				value: '/srv/projects/',
+				items: [
+					'Open This Folder: /srv/projects',
+					'Folders in /srv/projects',
+					'..',
+					'repo-one/',
+					'repo-two/',
+					'Host',
+					'Switch Host...',
+				],
+			},
+			drilled: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				value: '/srv/projects/repo-one/',
+				items: [
+					'Open This Folder: /srv/projects/repo-one',
+					'Folders in /srv/projects/repo-one',
+					'..',
+					'apps/',
+					'packages/',
+					'Host',
+					'Switch Host...',
+				],
+			},
+			deletingLeaf: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				value: '/srv/projects/repo-one',
+				items: [
+					'Matching Folders in /srv/projects',
+					'repo-one/',
+					'Target Path Actions',
+					'Open This Folder: /srv/projects/repo-one',
+					'Other Folders in /srv/projects',
+					'..',
+					'repo-two/',
+					'Host',
+					'Switch Host...',
+				],
+			},
+			deletingAcrossSlash: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				value: '/srv/projects/repo',
+				items: [
+					'Matching Folders in /srv/projects',
+					'repo-one/',
+					'repo-two/',
+					'Target Path Actions',
+					'Create & Add as Project: /srv/projects/repo',
+					'Create & Enter Folder: /srv/projects/repo/',
+					'Other Folders in /srv/projects',
+					'..',
+					'Host',
+					'Switch Host...',
+				],
+				busy: false,
+			},
+			remoteResult: ['aexus-ssh://cloud-linux/srv/projects/repo-one'],
+			remoteReads: [
+				{ authority: 'cloud-linux', path: '/srv/projects' },
+				{ authority: 'cloud-linux', path: '/srv' },
+				{ authority: 'cloud-linux', path: '/srv/projects/repo-one' },
+			],
+			statCalls: [{ authority: 'cloud-linux', path: '/srv/projects/repo-one' }],
+			recordedDirectories: [{ id: 'cloud-linux', path: '/srv/projects/repo-one' }],
+		});
+	});
+
+	test('confirms the typed folder when the Add Project custom button is triggered', async () => {
+		const harness = createHarness(async (_authority, path) => {
+			switch (path) {
+				case '/srv/projects':
+					return directories('repo-one', 'repo-two');
+				case '/srv/projects/repo-two':
+					return directories('docs');
+				default:
+					return [];
+			}
+		});
+
+		const customPick = harness.pick();
+		const step1 = await waitForQuickPick(harness.quickPicks, 1);
+		step1.acceptItemByLabel('cloud-linux');
+
+		const step2 = await waitForQuickPick(harness.quickPicks, 2);
+		await waitForLabels(step2, ['repo-one/', 'repo-two/']);
+		step2.typeValue('/srv/projects/repo-two');
+		const typed = snapshotQuickPick(step2);
+		const customLabel = step2.customLabel;
+		step2.fireCustomButton();
+		const customResult = await customPick;
+
+		assert.deepStrictEqual({
+			quickPickCount: harness.quickPicks.length,
+			customLabel,
+			typed,
+			customResult: customResult?.map(uri => uri.toString()),
+			statCalls: harness.statCalls,
+			recordedDirectories: harness.recordedDirectories,
+		}, {
+			quickPickCount: 2,
+			customLabel: 'Open',
+			typed: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				value: '/srv/projects/repo-two',
+				items: [
+					'Matching Folders in /srv/projects',
+					'repo-two/',
+					'Target Path Actions',
+					'Open This Folder: /srv/projects/repo-two',
+					'Other Folders in /srv/projects',
+					'..',
+					'repo-one/',
+					'Host',
+					'Switch Host...',
+				],
+			},
+			customResult: ['aexus-ssh://cloud-linux/srv/projects/repo-two'],
+			statCalls: [{ authority: 'cloud-linux', path: '/srv/projects/repo-two' }],
+			recordedDirectories: [{ id: 'cloud-linux', path: '/srv/projects/repo-two' }],
+		});
+	});
+
+	test('backs a Windows host out to the drive root and lists drives from remoteReadDir("/")', async () => {
+		const harness = createHarness(async (_authority, path) => {
+			switch (path) {
+				case '/C:/Users/djf':
+					return directories('Desktop', 'work');
+				case '/C:/Users':
+					return directories('Public', 'djf');
+				case '/C:':
+					return directories('Users', 'Windows');
+				case '/':
+					return directories('C:', 'D:');
+				default:
+					return [];
+			}
+		});
+
+		const windowsPick = harness.pick();
+		const step1 = await waitForQuickPick(harness.quickPicks, 1);
+		step1.acceptItemByLabel('cloud-win');
+
+		const step2 = await waitForQuickPick(harness.quickPicks, 2);
+		await waitForLabels(step2, ['Desktop/', 'work/']);
+		const prefill = snapshotQuickPick(step2);
+
+		step2.typeValue('/C:/Users/djf');
+		step2.typeValue('/C:/');
+		await waitForLabels(step2, ['Users/', 'Windows/']);
+		const driveFolder = snapshotQuickPick(step2);
+
+		step2.typeValue('/C:');
+		await waitForLabels(step2, ['C:/', 'D:/']);
+		const filteredDrives = snapshotQuickPick(step2);
+
+		// '/' is already cached, so the drive list pops up synchronously.
+		step2.typeValue('/');
+		const slashRoot = { ...snapshotQuickPick(step2), busy: step2.busy };
+
+		step2.typeValue('/C:/Users/djf/');
+		await waitForLabels(step2, ['Desktop/', 'work/']);
+		step2.acceptItemByLabel('Open This Folder: /C:/Users/djf');
+		const windowsResult = await windowsPick;
+
+		assert.deepStrictEqual({
+			quickPickCount: harness.quickPicks.length,
+			prefill,
+			driveFolder,
+			filteredDrives,
+			slashRoot,
+			windowsResult: windowsResult?.map(uri => uri.toString()),
+			remoteReads: harness.remoteReads,
+			statCalls: harness.statCalls,
+			recordedDirectories: harness.recordedDirectories,
+		}, {
+			quickPickCount: 2,
+			prefill: {
+				title: 'Add Project (2/2) — Select Folder on cloud-win',
+				value: '/C:/Users/djf/',
+				items: [
+					'Open This Folder: /C:/Users/djf',
+					'Folders in /C:/Users/djf',
+					'..',
+					'Desktop/',
+					'work/',
+					'Host',
+					'Switch Host...',
+				],
+			},
+			driveFolder: {
+				title: 'Add Project (2/2) — Select Folder on cloud-win',
+				value: '/C:/',
+				items: [
+					'Open This Folder: /C:',
+					'Folders in /C:',
+					'..',
+					'Users/',
+					'Windows/',
+					'Host',
+					'Switch Host...',
+				],
+			},
+			filteredDrives: {
+				title: 'Add Project (2/2) — Select Folder on cloud-win',
+				value: '/C:',
+				items: [
+					'Matching Drives on cloud-win',
+					'C:/',
+					'All Drives on cloud-win',
+					'D:/',
+					'Host',
+					'Switch Host...',
+				],
+			},
+			slashRoot: {
+				title: 'Add Project (2/2) — Select Folder on cloud-win',
+				value: '/',
+				items: [
+					'Drives on cloud-win',
+					'C:/',
+					'D:/',
+					'Host',
+					'Switch Host...',
+				],
+				busy: false,
+			},
+			windowsResult: ['aexus-ssh://cloud-win/c%3A/Users/djf'],
+			remoteReads: [
+				{ authority: 'cloud-win', path: '/C:/Users/djf' },
+				{ authority: 'cloud-win', path: '/C:/Users' },
+				{ authority: 'cloud-win', path: '/C:' },
+				{ authority: 'cloud-win', path: '/' },
+			],
+			statCalls: [{ authority: 'cloud-win', path: '/C:/Users/djf' }],
+			recordedDirectories: [{ id: 'cloud-win', path: '/C:/Users/djf' }],
+		});
+	});
+
+	test('delegates to the local folder dialog when Local (This Computer) is selected', async () => {
+		const harness = createHarness(async () => []);
+
+		const localPick = harness.pick();
+		const localStep = await waitForQuickPick(harness.quickPicks, 1);
 		const localStepSnapshot = snapshotQuickPick(localStep);
 		localStep.acceptItemByLabel('Local (This Computer)');
 		const localResult = await localPick;
 
 		assert.deepStrictEqual({
-			step1: step1Snapshot,
-			step2: step2Snapshot,
-			backToStep1: backToStep1Snapshot,
-			step2Again: step2AgainSnapshot,
-			navigatedStep2: navigatedStep2Snapshot,
-			remoteResult: remoteResult?.map(uri => uri.toString()),
-			remoteReads,
-			recordedDirectories,
 			localStep: localStepSnapshot,
 			localDialog: {
-				options: dialogOptions.map(options => ({
+				options: harness.dialogOptions.map(options => ({
 					title: options.title,
 					canSelectFiles: options.canSelectFiles,
 					canSelectFolders: options.canSelectFolders,
@@ -776,79 +1126,9 @@ suite('pickProjectFoldersWithCloudOption', () => {
 				result: localResult?.map(uri => uri.toString()),
 			},
 		}, {
-			step1: {
-				title: 'Add Project (1/2) — Select Host',
-				items: [
-					'Local Host',
-					'Local (This Computer)',
-					'Cloud Hosts (SSH) · 2',
-					'cloud-linux',
-					'cloud-win',
-					'Cloud Host Management',
-					'Add New Cloud Host...',
-					'Manage Saved Cloud Hosts...',
-					'Sync / Import Cloud Hosts from VS Code & ~/.ssh/config',
-				],
-			},
-			step2: {
-				title: 'Add Project (2/2) — Select Folder on cloud-linux',
-				items: [
-					'Open This Folder: /srv/projects',
-					'Enter Remote Folder Path Manually...',
-					'New Folder in /srv/projects...',
-					'Switch Host...',
-					'Folders in /srv/projects',
-					'..',
-					'repo-one/',
-				],
-			},
-			backToStep1: {
-				title: 'Add Project (1/2) — Select Host',
-				items: [
-					'Local Host',
-					'Local (This Computer)',
-					'Cloud Hosts (SSH) · 2',
-					'cloud-linux',
-					'cloud-win',
-					'Cloud Host Management',
-					'Add New Cloud Host...',
-					'Manage Saved Cloud Hosts...',
-					'Sync / Import Cloud Hosts from VS Code & ~/.ssh/config',
-				],
-			},
-			step2Again: {
-				title: 'Add Project (2/2) — Select Folder on cloud-linux',
-				items: [
-					'Open This Folder: /srv/projects',
-					'Enter Remote Folder Path Manually...',
-					'New Folder in /srv/projects...',
-					'Switch Host...',
-					'Folders in /srv/projects',
-					'..',
-					'repo-one/',
-				],
-			},
-			navigatedStep2: {
-				title: 'Add Project (2/2) — Select Folder on cloud-linux',
-				items: [
-					'Open This Folder: /srv/projects/repo-one',
-					'Enter Remote Folder Path Manually...',
-					'New Folder in /srv/projects/repo-one...',
-					'Switch Host...',
-					'Folders in /srv/projects/repo-one',
-					'..',
-					'repo-one/',
-				],
-			},
-			remoteResult: ['aexus-ssh://cloud-linux/srv/projects/repo-one'],
-			remoteReads: [
-				{ authority: 'cloud-linux', path: '/srv/projects' },
-				{ authority: 'cloud-linux', path: '/srv/projects' },
-				{ authority: 'cloud-linux', path: '/srv/projects/repo-one' },
-			],
-			recordedDirectories: [{ id: 'cloud-linux', path: '/srv/projects/repo-one' }],
 			localStep: {
 				title: 'Add Project (1/2) — Select Host',
+				value: '',
 				items: [
 					'Local Host',
 					'Local (This Computer)',

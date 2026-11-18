@@ -42,6 +42,7 @@ import {
 	ADE_CLOUD_HOSTS_SCHEME,
 	IAdeProjectsService,
 } from '../common/ade.js';
+import { browseRemoteFolderOnCloudHost } from './adeCloudHostFileSystemProvider.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
 
 export class AdeCloudHostsEditorInput extends EditorInput {
@@ -177,6 +178,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
 		@IWorkspaceEditingService private readonly workspaceEditing: IWorkspaceEditingService,
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super(AdeCloudHostsEditorPane.ID, group, telemetryService, themeService, storageService);
 		this._register(this.backend.onDidChangeHosts(() => {
@@ -632,14 +634,27 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			localize('adeChFieldDefaultDirHint', "Initial directory when browsing projects or opening a Cloud Host terminal"),
 			true,
 		);
-		const dirInput = append(dirWrap, $('input.ade-ch-input', {
+		const dirRow = append(dirWrap, $('.ade-ch-inline-row'));
+		const dirInput = append(dirRow, $('input.ade-ch-input', {
 			type: 'text',
-			placeholder: '/home/ubuntu/develop',
+			placeholder: this.draft.os === 'windows' ? '/C:/Users/Administrator' : '/home/ubuntu/develop',
 			value: this.draft.defaultDirectory,
 		})) as HTMLInputElement;
 		this.renderDetailDisposables.add(addDisposableListener(dirInput, EventType.INPUT, () => {
 			this.draft.defaultDirectory = dirInput.value;
 		}));
+		if (existingHost) {
+			const browseDirBtn = append(dirRow, $('button.ade-ch-action-btn.secondary', {
+				type: 'button',
+			}, localize('adeChBrowseRemoteDirBtn', "Browse Remote...")));
+			this.renderDetailDisposables.add(addDisposableListener(browseDirBtn, EventType.CLICK, async () => {
+				const pickedUri = await this.instantiationService.invokeFunction(acc => browseRemoteFolderOnCloudHost(acc, existingHost));
+				if (pickedUri) {
+					this.draft.defaultDirectory = pickedUri.path;
+					dirInput.value = pickedUri.path;
+				}
+			}));
+		}
 
 		const notesWrap = makeField(localize('adeChFieldNotes', "Notes (Optional)"), '', true);
 		const notesInput = append(notesWrap, $('input.ade-ch-input', {
