@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
-import { capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 
@@ -42,6 +42,42 @@ interface AcpSessionUpdate {
 	title?: string | null;
 	updatedAt?: string | null;
 	availableCommands?: Array<{ name?: string; description?: string }>;
+	usage?: unknown;
+}
+
+function readTokenCount(record: Record<string, unknown>, ...keys: string[]): number {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+	}
+	return 0;
+}
+
+function extractAcpTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
+	if (!value || typeof value !== 'object' || depth > 3) {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
+		const nested = record[key];
+		if (nested && typeof nested === 'object') {
+			const usage = extractAcpTurnUsage(nested, depth + 1);
+			if (usage) {
+				return usage;
+			}
+		}
+	}
+	const inputTokens = readTokenCount(record, 'inputTokens', 'input_tokens', 'input');
+	const outputTokens = readTokenCount(record, 'outputTokens', 'output_tokens', 'output');
+	const cacheReadTokens = readTokenCount(record, 'cacheReadTokens', 'cache_read_input_tokens', 'cachedInputTokens', 'cacheRead');
+	const cacheWriteTokens = readTokenCount(record, 'cacheWriteTokens', 'cache_creation_input_tokens', 'cacheWrite');
+	const totalTokens = readTokenCount(record, 'totalTokens', 'total_tokens', 'total') || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+	if (totalTokens <= 0) {
+		return undefined;
+	}
+	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
 }
 
 interface AcpSessionSetupResult {
@@ -110,6 +146,13 @@ export abstract class AcpRuntime implements EngineRuntime {
 	protected cachedCommands: Array<{ name: string; description?: string }> = [];
 	protected cachedConfigOptionIds = new Set<string>();
 	protected cachedModelConfigValues = new Set<string>();
+	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
+
+	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
+		const usage = this.lastTurnUsageBySession.get(sessionId);
+		this.lastTurnUsageBySession.delete(sessionId);
+		return usage;
+	}
 
 	constructor(
 		protected readonly executable: string,
@@ -647,6 +690,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 				return;
 			}
 			const update = (params.update ?? params) as AcpSessionUpdate;
+			const updateUsage = extractAcpTurnUsage(update.usage ?? params.usage);
+			if (updateUsage) {
+				this.lastTurnUsageBySession.set(session.id, updateUsage);
+			}
 			const kind = update.sessionUpdate ?? update.type;
 			if (!token.isCancellationRequested && kind === 'agent_message_chunk') {
 				const chunk = extractAcpText(update);

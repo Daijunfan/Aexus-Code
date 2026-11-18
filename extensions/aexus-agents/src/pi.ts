@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, emitThinkingProgress, HistoryEntry, NativeSession, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, NativeSession, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface PiContentPart {
 	type?: string;
@@ -53,6 +53,43 @@ interface PiRpcPacket {
 		toolName?: string;
 	};
 	args?: Record<string, unknown>;
+	usage?: unknown;
+	tokens?: unknown;
+}
+
+function readTokenCount(record: Record<string, unknown>, ...keys: string[]): number {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+	}
+	return 0;
+}
+
+function extractPiTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
+	if (!value || typeof value !== 'object' || depth > 3) {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
+		const nested = record[key];
+		if (nested && typeof nested === 'object') {
+			const usage = extractPiTurnUsage(nested, depth + 1);
+			if (usage) {
+				return usage;
+			}
+		}
+	}
+	const inputTokens = readTokenCount(record, 'inputTokens', 'input_tokens', 'input');
+	const outputTokens = readTokenCount(record, 'outputTokens', 'output_tokens', 'output');
+	const cacheReadTokens = readTokenCount(record, 'cacheReadTokens', 'cache_read_input_tokens', 'cachedInputTokens', 'cacheRead');
+	const cacheWriteTokens = readTokenCount(record, 'cacheWriteTokens', 'cache_creation_input_tokens', 'cacheWrite');
+	const totalTokens = readTokenCount(record, 'totalTokens', 'total_tokens', 'total') || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+	if (totalTokens <= 0) {
+		return undefined;
+	}
+	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
 }
 
 interface PiModelInfo { id: string; name: string; description?: string }
@@ -224,6 +261,13 @@ export class PiRuntime implements EngineRuntime {
 	private readonly toolModes = new Map<string, PiToolMode['id']>();
 	private readonly capabilityCache = new Map<string, { expiresAt: number; value: EngineRuntimeCapabilities }>();
 	private readonly capabilityPending = new Map<string, Promise<EngineRuntimeCapabilities>>();
+	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
+
+	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
+		const usage = this.lastTurnUsageBySession.get(sessionId);
+		this.lastTurnUsageBySession.delete(sessionId);
+		return usage;
+	}
 
 	constructor(private readonly executable: string) { }
 
@@ -734,6 +778,11 @@ export class PiRuntime implements EngineRuntime {
 				if (!line) { continue; }
 				let packet: PiRpcPacket;
 				try { packet = JSON.parse(line) as PiRpcPacket; } catch { continue; }
+
+				const packetUsage = extractPiTurnUsage(packet.usage ?? packet.tokens ?? packet.data?.usage);
+				if (packetUsage) {
+					this.lastTurnUsageBySession.set(session.id, packetUsage);
+				}
 
 				if (packet.type === 'response' && packet.id) {
 					const req = pending.get(packet.id);

@@ -33,6 +33,7 @@ import {
 	EngineRuntimeCapabilities,
 	EngineSendOptions,
 	EngineThinkingLevel,
+	EngineTurnTokenUsage,
 	findExecutable,
 	HistoryEntry,
 	NativeSession,
@@ -207,6 +208,24 @@ function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?
 		pureWorker: extra.pureWorker,
 		callerRole: extra.callerRole,
 		automatedEngineering: extra.automatedEngineering,
+	};
+}
+
+function resolveCompletedTurnUsage(engine: EngineRuntime, sessionId: string, promptText: string, replyText: string, startedAt: number): EngineTurnTokenUsage {
+	const reported = engine.consumeLastTurnUsage?.(sessionId);
+	if (reported && reported.totalTokens > 0) {
+		return reported;
+	}
+	const inputTokens = Math.ceil(promptText.length / 4);
+	const outputTokens = Math.ceil(replyText.length / 4);
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		totalTokens: inputTokens + outputTokens,
+		durationMs: Math.max(0, Date.now() - startedAt),
+		estimated: true,
 	};
 }
 
@@ -955,10 +974,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					get() { return () => { }; },
 				});
 				const cfg = getSessionConfig(record, isSecretary);
+				const effectiveInitModel = (cfg.model && cfg.model !== 'default') ? cfg.model : snapEntry?.preferredModel;
+				const effectiveInitThinking: EngineThinkingLevel = (cfg.thinking === 'off' || snapEntry?.preferredThinking === 'off') ? 'off' : 'low';
+				const initStartedAt = Date.now();
 				await engine.send(record, initPrompt, silentStream, initCts.token, toSendOptions(
-					{ ...cfg, thinking: 'low' },
+					{ ...cfg, ...(effectiveInitModel ? { model: effectiveInitModel } : {}), thinking: effectiveInitThinking },
 					{ pureWorker: false, callerRole: targetRank, automatedEngineering: true },
 				));
+				if (!isSecretary) {
+					const initUsage = resolveCompletedTurnUsage(engine, record.id, initPrompt, ROLE_INIT_ACK, initStartedAt);
+					if (initUsage.totalTokens > 0) {
+						void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
+							sessionResource: sessionUri.toString(),
+							usage: initUsage,
+						})).catch(() => undefined);
+					}
+				}
 
 				if (!initCts.token.isCancellationRequested) {
 					record.roleInit = {
@@ -1605,6 +1636,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				callerRole,
 			});
 
+			const turnStartedAt = Date.now();
 			await engine.send(record, initialFullPrompt, wrappedStream, turnCancellation.token, sendOptions);
 			flushPendingGoalText(true);
 
@@ -1640,6 +1672,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (record.activeGoal && roundMarkdown.includes(GOAL_COMPLETE_MARKER)) {
 				record.activeGoal = undefined;
 				setGoalBannerInUi(sessionUri, undefined);
+			}
+
+			const turnUsage = resolveCompletedTurnUsage(engine, record.id, initialFullPrompt, streamedMarkdown, turnStartedAt);
+			if (!isSecretary && turnUsage.totalTokens > 0) {
+				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', { sessionResource: sessionUri.toString(), usage: turnUsage })).catch(() => undefined);
 			}
 
 			if (streamedMarkdown.trim()) {
@@ -2245,6 +2282,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				},
 			});
 
+			const turnStartedAt = Date.now();
 			try {
 				const engine = runtime(record.engine);
 				const prevId = record.id;
@@ -2277,10 +2315,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					reply: streamedMarkdown.trim(),
 					nativeId: record.id,
 					stopped: turnCancellation.token.isCancellationRequested,
+					usage: resolveCompletedTurnUsage(engine, record.id, finalPrompt, streamedMarkdown, turnStartedAt),
 				};
 			} catch (error) {
 				if (turnCancellation.token.isCancellationRequested) {
-					return { reply: streamedMarkdown.trim(), nativeId: record.id, stopped: true };
+					return {
+						reply: streamedMarkdown.trim(),
+						nativeId: record.id,
+						stopped: true,
+						usage: resolveCompletedTurnUsage(runtime(record.engine), record.id, finalPrompt, streamedMarkdown, turnStartedAt),
+					};
 				}
 				const errText = error instanceof Error ? error.message : String(error);
 				lastTurnErrors.set(identity(record), errText);

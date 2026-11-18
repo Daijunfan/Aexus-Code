@@ -575,12 +575,19 @@ export function partitionEngineeringManagers(
 
 		const segmentId = formatManagerSegmentId(chain);
 		const tailId = chain[chain.length - 1];
+		const tailNode = nodeById.get(tailId);
+		const headNode = nodeById.get(head);
+		const inferredModel = tailNode?.employee?.model ?? tailNode?.worker?.model ?? headNode?.employee?.model ?? headNode?.worker?.model;
+		const inferredThinking: AdeThinkingLevel = inferredModel
+			? (tailNode?.employee?.thinking ?? tailNode?.worker?.thinking ?? 'high')
+			: 'high';
 		const matchedConfig = existingBySegmentId.get(segmentId)
 			?? existingByNodeId.get(tailId)
 			?? existingByNodeId.get(head)
 			?? {
-				engine: normalizeBlueprintEngine(defaultEngine),
-				thinking: 'high' as AdeThinkingLevel,
+				engine: normalizeBlueprintEngine(tailNode?.employee?.engine ?? tailNode?.worker?.engine ?? defaultEngine),
+				...(inferredModel ? { model: inferredModel } : {}),
+				thinking: inferredThinking,
 			};
 
 		segments.push({

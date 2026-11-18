@@ -148,6 +148,110 @@ export interface IAdeWorkerTurnChanges {
 	readonly combinedDiff: string;
 }
 
+export interface IAdeTokenUsage {
+	readonly inputTokens: number;
+	readonly outputTokens: number;
+	readonly cacheReadTokens: number;
+	readonly cacheWriteTokens: number;
+	readonly totalTokens: number;
+	readonly turns: number;
+	readonly durationMs: number;
+	readonly costUsd?: number;
+	readonly estimated?: boolean;
+}
+
+export interface IAdeNodeRoleTokenBreakdown {
+	readonly worker: IAdeTokenUsage;
+	readonly employee: IAdeTokenUsage;
+	readonly manager: IAdeTokenUsage;
+	readonly total: IAdeTokenUsage;
+}
+
+export interface IAdeTreeTokenUsageSummary {
+	readonly governor: IAdeTokenUsage;
+	readonly manager: IAdeTokenUsage;
+	readonly employee: IAdeTokenUsage;
+	readonly worker: IAdeTokenUsage;
+	readonly total: IAdeTokenUsage;
+}
+
+export function createEmptyTokenUsage(): IAdeTokenUsage {
+	return {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		totalTokens: 0,
+		turns: 0,
+		durationMs: 0,
+	};
+}
+
+export function createEmptyNodeRoleTokenBreakdown(): IAdeNodeRoleTokenBreakdown {
+	const z = createEmptyTokenUsage();
+	return { worker: z, employee: z, manager: z, total: z };
+}
+
+export function createEmptyTreeTokenUsageSummary(): IAdeTreeTokenUsageSummary {
+	const z = createEmptyTokenUsage();
+	return { governor: z, manager: z, employee: z, worker: z, total: z };
+}
+
+export function normalizeTokenUsageDelta(raw: Partial<IAdeTokenUsage> | undefined, countTurn = true): IAdeTokenUsage {
+	const inputTokens = Math.max(0, Math.round(Number(raw?.inputTokens) || 0));
+	const outputTokens = Math.max(0, Math.round(Number(raw?.outputTokens) || 0));
+	const cacheReadTokens = Math.max(0, Math.round(Number(raw?.cacheReadTokens) || 0));
+	const cacheWriteTokens = Math.max(0, Math.round(Number(raw?.cacheWriteTokens) || 0));
+	const computedTotal = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+	const explicitTotal = Math.max(0, Math.round(Number(raw?.totalTokens) || 0));
+	const totalTokens = Math.max(computedTotal, explicitTotal);
+	const turns = raw?.turns !== undefined ? Math.max(0, Math.round(Number(raw.turns) || 0)) : (countTurn && totalTokens > 0 ? 1 : 0);
+	const durationMs = Math.max(0, Math.round(Number(raw?.durationMs) || 0));
+	const costUsd = typeof raw?.costUsd === 'number' && Number.isFinite(raw.costUsd) && raw.costUsd > 0 ? raw.costUsd : undefined;
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens,
+		turns,
+		durationMs,
+		...(costUsd !== undefined ? { costUsd } : {}),
+		...(raw?.estimated ? { estimated: true } : {}),
+	};
+}
+
+export function accumulateTokenUsage(base: IAdeTokenUsage | undefined, deltaRaw: Partial<IAdeTokenUsage> | undefined, countTurn = true): IAdeTokenUsage {
+	const b = base ?? createEmptyTokenUsage();
+	const d = normalizeTokenUsageDelta(deltaRaw, countTurn);
+	if (d.totalTokens === 0 && d.turns === 0 && d.durationMs === 0) {
+		return b;
+	}
+	const costSum = (b.costUsd ?? 0) + (d.costUsd ?? 0);
+	return {
+		inputTokens: b.inputTokens + d.inputTokens,
+		outputTokens: b.outputTokens + d.outputTokens,
+		cacheReadTokens: b.cacheReadTokens + d.cacheReadTokens,
+		cacheWriteTokens: b.cacheWriteTokens + d.cacheWriteTokens,
+		totalTokens: b.totalTokens + d.totalTokens,
+		turns: b.turns + d.turns,
+		durationMs: b.durationMs + d.durationMs,
+		...(costSum > 0 ? { costUsd: Math.round(costSum * 1_000_000) / 1_000_000 } : {}),
+		...((b.estimated || d.estimated) ? { estimated: Boolean(b.totalTokens === 0 ? d.estimated : (b.estimated && d.estimated)) } : {}),
+	};
+}
+
+export function formatCompactTokenCount(tokens: number): string {
+	const n = Math.max(0, Math.round(Number(tokens) || 0));
+	if (n >= 1_000_000) {
+		return `${(n / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`;
+	}
+	if (n >= 1_000) {
+		return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1).replace(/\.0$/, '')}k`;
+	}
+	return String(n);
+}
+
 export interface IAdeEngineeringNodeRuntimeState {
 	readonly nodeId: string;
 	readonly phase: AdeEngineeringNodePhase;
@@ -168,6 +272,7 @@ export interface IAdeEngineeringNodeRuntimeState {
 	readonly startedAt?: number;
 	readonly completedAt?: number;
 	readonly lastChanges?: IAdeWorkerTurnChanges;
+	readonly tokenUsage?: IAdeNodeRoleTokenBreakdown;
 }
 
 export interface IAdeEngineeringEventLogEntry {
@@ -198,6 +303,7 @@ export interface IAdeEngineeringTreeState {
 	readonly nodes: Readonly<Record<string, IAdeEngineeringNodeRuntimeState>>;
 	readonly reports: Readonly<Record<string, IAdeIncrementalReportEntry>>;
 	readonly worktrees?: Readonly<Record<string, IAdeSegmentWorktreeInfo>>;
+	readonly tokenUsage?: IAdeTreeTokenUsageSummary;
 	readonly events: readonly IAdeEngineeringEventLogEntry[];
 }
 
@@ -236,6 +342,7 @@ export interface IAdeEngineeringTreeSnapshot {
 		readonly failedNodes: number;
 		readonly waitingGates: number;
 	};
+	readonly tokenUsage: IAdeTreeTokenUsageSummary;
 }
 
 export interface IAdeEngineeringTreeSummary {
@@ -252,6 +359,7 @@ export interface IAdeEngineeringTreeSummary {
 	readonly runningNodes: number;
 	readonly failedNodes: number;
 	readonly waitingGates: number;
+	readonly tokenUsage?: IAdeTokenUsage;
 	readonly updatedAt: number;
 }
 
@@ -407,6 +515,7 @@ export interface IAdeEngineeringService {
 	executeWatchdogAction(params: IAdeEngineeringWatchdogActionParams): Promise<IAdeEngineeringTreeSnapshot>;
 
 	recordWorkerStreamHeartbeat(sessionResource: string, timestamp?: number): void;
+	recordSessionTurnUsage(params: { readonly sessionResource?: string; readonly agentId?: string; readonly usage: Partial<IAdeTokenUsage> }): void;
 	openEngineeringEditor(governorSessionId: string, options?: { side?: boolean }): Promise<void>;
 	ensureNodeAgentSessionOpen(governorSessionId: string, nodeId: string, role?: 'worker' | 'employee' | 'manager', options?: { side?: boolean }): Promise<string | undefined>;
 }

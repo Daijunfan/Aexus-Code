@@ -919,7 +919,8 @@
 
 .monaco-workbench .ade-eng-tree-pill,
 .monaco-workbench .ade-eng-run-pill,
-.monaco-workbench .ade-eng-progress-pill {
+.monaco-workbench .ade-eng-progress-pill,
+.monaco-workbench .ade-eng-tokens-pill {
 	flex-shrink: 0;
 	white-space: nowrap;
 }
@@ -1051,6 +1052,31 @@
 	border-radius: 5px;
 	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
 	white-space: nowrap;
+}
+
+.monaco-workbench .ade-eng-tokens-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	color: var(--vscode-descriptionForeground);
+	padding: 2px 8px;
+	border-radius: 5px;
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-eng-tokens-pill.has-usage {
+	color: var(--ade-eng-green, #3fb950);
+	background: color-mix(in srgb, #2ea043 13%, transparent);
+	border-color: color-mix(in srgb, #2ea043 28%, transparent);
+}
+
+.monaco-workbench .ade-eng-tokens-pill .ade-eng-tokens-ico {
+	font-size: 12px;
+	line-height: 1;
 }
 
 .monaco-workbench .ade-eng-tool-btn,
@@ -1631,6 +1657,18 @@
 	font-size: 10px;
 	color: var(--vscode-descriptionForeground);
 	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.monaco-workbench .ade-eng-node-tokens {
+	font-size: 10px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	color: var(--ade-eng-green, #3fb950);
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: color-mix(in srgb, #2ea043 15%, var(--vscode-editor-background));
+	border: 1px solid color-mix(in srgb, #2ea043 30%, transparent);
+	white-space: nowrap;
 }
 
 /* Hexagonal / Shield User Gate Node */
@@ -2223,6 +2261,66 @@
 .monaco-workbench .ade-eng-textarea:focus-visible {
 	outline: 1px solid var(--vscode-focusBorder);
 	outline-offset: -1px;
+}
+
+.monaco-workbench .ade-eng-pop-tokens-card {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 6px;
+	padding: 6px 8px;
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-eng-pop-tokens-card.has-usage {
+	border-color: color-mix(in srgb, #2ea043 28%, transparent);
+	background: color-mix(in srgb, #2ea043 9%, transparent);
+}
+
+.monaco-workbench .ade-eng-pop-tokens-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-eng-pop-tokens-label {
+	font-size: 9px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-pop-tokens-total {
+	font-size: 11px;
+	font-weight: 700;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-eng-pop-tokens-card.has-usage .ade-eng-pop-tokens-total {
+	color: var(--ade-eng-green, #3fb950);
+}
+
+.monaco-workbench .ade-eng-pop-tokens-io {
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-pop-tokens-roles {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 5px;
+}
+
+.monaco-workbench .ade-eng-pop-role-tok {
+	font-size: 9.5px;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+	color: var(--vscode-foreground);
 }
 
 .monaco-workbench .ade-eng-pop-telemetry {

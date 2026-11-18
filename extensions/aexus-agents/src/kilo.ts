@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
-import { capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, emitThinkingProgress, HistoryEntry, NativeSession, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, NativeSession, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
@@ -185,6 +185,7 @@ function extractMcpServers(value: unknown): Array<{ name: string; status: string
 	}
 	return servers;
 }
+interface KiloTokens { input?: number; output?: number; cache?: { read?: number; write?: number } }
 interface KiloEventData {
 	id?: string;
 	sessionID?: string;
@@ -195,10 +196,25 @@ interface KiloEventData {
 	permission?: string;
 	patterns?: string[];
 	part?: KiloPart;
-	info?: Partial<KiloSession> & { id: string; role?: string; sessionID?: string };
+	info?: Partial<KiloSession> & { id: string; role?: string; sessionID?: string; tokens?: KiloTokens };
 	questions?: { header: string; question: string; options: { label: string; description: string }[]; multiple?: boolean }[];
 }
 interface KiloEvent { type: string; properties?: KiloEventData; data?: KiloEventData }
+
+function turnUsageFromKiloTokens(tokens: KiloTokens | undefined): EngineTurnTokenUsage | undefined {
+	if (!tokens) {
+		return undefined;
+	}
+	const inputTokens = tokens.input ?? 0;
+	const outputTokens = tokens.output ?? 0;
+	const cacheReadTokens = tokens.cache?.read ?? 0;
+	const cacheWriteTokens = tokens.cache?.write ?? 0;
+	const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+	if (totalTokens <= 0) {
+		return undefined;
+	}
+	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
+}
 
 abstract class SharedServerRuntime implements EngineRuntime {
 	abstract readonly id: string;
@@ -213,6 +229,13 @@ abstract class SharedServerRuntime implements EngineRuntime {
 	protected readonly knownSessions = new Map<string, NativeSession>();
 	private readonly capabilityCache = new Map<string, { expiresAt: number; value: EngineRuntimeCapabilities }>();
 	private readonly capabilityPending = new Map<string, Promise<EngineRuntimeCapabilities>>();
+	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
+
+	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
+		const usage = this.lastTurnUsageBySession.get(sessionId);
+		this.lastTurnUsageBySession.delete(sessionId);
+		return usage;
+	}
 
 	constructor(protected readonly executable: string) { }
 
@@ -711,6 +734,12 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					const data = event.properties ?? event.data;
 					if (event.type === 'session.created' && data?.info?.parentID) { this.changed.fire([this.session(data.info as KiloSession)]); }
 					const sessionId = data?.sessionID ?? data?.part?.sessionID ?? data?.info?.sessionID;
+					if (sessionId && data?.info?.tokens) {
+						const usage = turnUsageFromKiloTokens(data.info.tokens);
+						if (usage) {
+							this.lastTurnUsageBySession.set(sessionId, usage);
+						}
+					}
 					if (data && sessionId && (event.type === 'permission.asked' || event.type === 'question.asked') && this.belongsTo(sessionId, session.id)) {
 						const autoApprove = Boolean(options?.automatedEngineering) || options?.permissionMode !== 'ask';
 						void this.answer(event, data, this.knownSessions.get(sessionId)!, token, autoApprove).catch(() => { });

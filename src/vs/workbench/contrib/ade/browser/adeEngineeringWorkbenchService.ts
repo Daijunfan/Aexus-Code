@@ -36,9 +36,15 @@ import {
 	IAdeInboxService,
 	IAdeInitEngineeringOptions,
 	IAdeIncrementalReportEntry,
+	IAdeNodeRoleTokenBreakdown,
 	IAdeStoredEngineeringRecord,
+	IAdeTokenUsage,
+	IAdeTreeTokenUsageSummary,
 	IAdeWorkerTurnChanges,
 	IAdeWorkspaceSnapshot,
+	accumulateTokenUsage,
+	createEmptyNodeRoleTokenBreakdown,
+	createEmptyTreeTokenUsageSummary,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
 	AdeBlueprintValidationError,
@@ -71,6 +77,7 @@ import {
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 export const ADE_WORKER_HEARTBEAT_COMMAND_ID = 'aexus.ade.engineering.workerHeartbeat';
+export const ADE_RECORD_TURN_USAGE_COMMAND_ID = 'aexus.ade.engineering.recordTurnUsage';
 
 export class AdeExistingSubordinatesError extends Error {
 	constructor(
@@ -600,6 +607,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				runningNodes: snap.progress.runningNodes,
 				failedNodes: snap.progress.failedNodes,
 				waitingGates: snap.progress.waitingGates,
+				tokenUsage: snap.tokenUsage.total,
 				updatedAt: entry.state.updatedAt,
 			});
 		}
@@ -681,6 +689,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			visualStatus: computeEdgeVisualStatus(edge, entry.state.nodes),
 		}));
 
+		const resolvedTreeUsage = this.computeResolvedTreeTokenUsage(entry.state);
+
 		return {
 			governorSessionId: entry.governorSessionId,
 			governorLabel: gov?.label ?? entry.governorSessionId,
@@ -701,7 +711,85 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				failedNodes,
 				waitingGates,
 			},
+			tokenUsage: resolvedTreeUsage,
 		};
+	}
+
+	private computeResolvedTreeTokenUsage(state: IAdeEngineeringTreeState): IAdeTreeTokenUsageSummary {
+		if (state.tokenUsage) {
+			return state.tokenUsage;
+		}
+		const empty = createEmptyTreeTokenUsageSummary();
+		let worker = empty.worker;
+		let employee = empty.employee;
+		let manager = empty.manager;
+		for (const nState of Object.values(state.nodes)) {
+			if (!nState.tokenUsage) {
+				continue;
+			}
+			worker = accumulateTokenUsage(worker, nState.tokenUsage.worker, false);
+			employee = accumulateTokenUsage(employee, nState.tokenUsage.employee, false);
+			manager = accumulateTokenUsage(manager, nState.tokenUsage.manager, false);
+		}
+		let total = accumulateTokenUsage(empty.total, worker, false);
+		total = accumulateTokenUsage(total, employee, false);
+		total = accumulateTokenUsage(total, manager, false);
+		return {
+			governor: empty.governor,
+			manager,
+			employee,
+			worker,
+			total,
+		};
+	}
+
+	private applyTurnTokenUsage(
+		entry: IManagedTreeEntry,
+		role: 'worker' | 'employee' | 'manager' | 'governor',
+		rawDelta: Partial<IAdeTokenUsage> | undefined,
+		nodeId?: string,
+	): boolean {
+		if (!rawDelta) {
+			return false;
+		}
+		const prevTreeUsage = this.computeResolvedTreeTokenUsage(entry.state);
+		const updatedRoleBucket = accumulateTokenUsage(prevTreeUsage[role], rawDelta, true);
+		if (updatedRoleBucket === prevTreeUsage[role]) {
+			return false;
+		}
+		const updatedTreeTotal = accumulateTokenUsage(prevTreeUsage.total, rawDelta, true);
+		const nextTreeUsage: IAdeTreeTokenUsageSummary = {
+			...prevTreeUsage,
+			[role]: updatedRoleBucket,
+			total: updatedTreeTotal,
+		};
+
+		let nextNodes = entry.state.nodes;
+		if (nodeId && role !== 'governor' && entry.state.nodes[nodeId]) {
+			const prevNodeState = entry.state.nodes[nodeId];
+			const prevNodeUsage: IAdeNodeRoleTokenBreakdown = prevNodeState.tokenUsage ?? createEmptyNodeRoleTokenBreakdown();
+			const nextNodeRole = accumulateTokenUsage(prevNodeUsage[role], rawDelta, true);
+			const nextNodeTotal = accumulateTokenUsage(prevNodeUsage.total, rawDelta, true);
+			nextNodes = {
+				...entry.state.nodes,
+				[nodeId]: {
+					...prevNodeState,
+					tokenUsage: {
+						...prevNodeUsage,
+						[role]: nextNodeRole,
+						total: nextNodeTotal,
+					},
+				},
+			};
+		}
+
+		entry.state = {
+			...entry.state,
+			nodes: nextNodes,
+			tokenUsage: nextTreeUsage,
+			updatedAt: Date.now(),
+		};
+		return true;
 	}
 
 	private syncSidebarHierarchy(entry: IManagedTreeEntry): void {
@@ -1238,6 +1326,11 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			readonly thinking?: AdeThinkingLevel;
 			readonly pureWorker: boolean;
 			readonly cwdOverride?: string;
+			readonly usageContext?: {
+				readonly entry: IManagedTreeEntry;
+				readonly role: 'worker' | 'employee' | 'manager' | 'governor';
+				readonly nodeId?: string;
+			};
 		},
 	): Promise<{ reply: string; stopped?: boolean }> {
 		const agent = await this.ensureAgentMaterialized(agentId, options.cwdOverride);
@@ -1247,12 +1340,13 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		const resolvedCallerRole = options.pureWorker
 			? 'worker'
 			: (agent.role ?? 'employee');
+		const turnStartedAt = Date.now();
 		this.projects.setAgentStatus(agent.id, 'working');
 		try {
-			let extResult: { reply?: string; stopped?: boolean } | undefined;
+			let extResult: { reply?: string; stopped?: boolean; usage?: Partial<IAdeTokenUsage> } | undefined;
 			let commandMissing = false;
 			try {
-				extResult = await this.commandService.executeCommand<{ reply?: string; stopped?: boolean }>(
+				extResult = await this.commandService.executeCommand<{ reply?: string; stopped?: boolean; usage?: Partial<IAdeTokenUsage> }>(
 					'aexus.agentEngines.dispatchEngineeringTurn',
 					agent.session.resource,
 					prompt,
@@ -1275,8 +1369,20 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			}
 
 			if (!commandMissing && extResult && typeof extResult === 'object') {
+				const replyText = extResult.reply ?? '';
+				if (options.usageContext) {
+					const fallbackUsage: Partial<IAdeTokenUsage> = extResult.usage ?? {
+						inputTokens: Math.ceil(prompt.length / 4),
+						outputTokens: Math.ceil(replyText.length / 4),
+						durationMs: Math.max(0, Date.now() - turnStartedAt),
+						estimated: true,
+					};
+					if (this.applyTurnTokenUsage(options.usageContext.entry, options.usageContext.role, fallbackUsage, options.usageContext.nodeId)) {
+						await this.persistEntry(options.usageContext.entry).catch(() => undefined);
+					}
+				}
 				return {
-					reply: extResult.reply ?? '',
+					reply: replyText,
 					stopped: extResult.stopped,
 				};
 			}
@@ -1296,6 +1402,17 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					}
 				} finally {
 					loadedRef?.dispose();
+				}
+				if (options.usageContext) {
+					const fallbackSimUsage: Partial<IAdeTokenUsage> = {
+						inputTokens: Math.max(1, Math.ceil(prompt.length / 4)),
+						outputTokens: 16,
+						durationMs: Math.max(0, Date.now() - turnStartedAt),
+						estimated: true,
+					};
+					if (this.applyTurnTokenUsage(options.usageContext.entry, options.usageContext.role, fallbackSimUsage, options.usageContext.nodeId)) {
+						await this.persistEntry(options.usageContext.entry).catch(() => undefined);
+					}
 				}
 			}
 			return { reply: '' };
@@ -1614,6 +1731,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				thinking: node.worker?.thinking ?? 'high',
 				pureWorker: true,
 				cwdOverride: effectiveCwd,
+				usageContext: { entry, role: 'worker', nodeId: node.id },
 			});
 
 			// Abort if stopped, paused, or superseded by another runToken
@@ -1738,12 +1856,14 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		options: { readonly model?: string; readonly thinking?: AdeThinkingLevel; readonly cwdOverride?: string },
 		nudgePrompt: string,
 	): Promise<void> {
+		const reviewerRole: 'employee' | 'manager' = expectedPhase === 'employee_review' ? 'employee' : 'manager';
 		try {
 			const res = await this.dispatchSessionTurn(reviewerAgentId, prompt, {
 				model: options.model,
 				thinking: options.thinking,
 				pureWorker: false,
 				cwdOverride: options.cwdOverride,
+				usageContext: { entry, role: reviewerRole, nodeId },
 			});
 			if (
 				!res.stopped
@@ -1758,6 +1878,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					thinking: options.thinking,
 					pureWorker: false,
 					cwdOverride: options.cwdOverride,
+					usageContext: { entry, role: reviewerRole, nodeId },
 				});
 			}
 		} catch (err) {
@@ -1890,6 +2011,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			thinking: seg.config.thinking,
 			pureWorker: false,
 			cwdOverride: worktreePath,
+			usageContext: { entry, role: 'manager', nodeId: node.id },
 		}).catch(() => undefined);
 	}
 
@@ -1922,6 +2044,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		void this.dispatchSessionTurn(gov.id, prompt, {
 			thinking: 'high',
 			pureWorker: false,
+			usageContext: { entry, role: 'governor', nodeId: node.id },
 		}).catch(() => undefined);
 	}
 
@@ -2385,6 +2508,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 						model: seg.config.model,
 						thinking: seg.config.thinking,
 						pureWorker: false,
+						usageContext: { entry, role: 'manager', nodeId: node.id },
 					}).catch(() => undefined);
 				}
 			}
@@ -2452,6 +2576,56 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		return this.buildSnapshot(entry);
 	}
 
+	recordSessionTurnUsage(params: {
+		readonly sessionResource?: string;
+		readonly agentId?: string;
+		readonly usage: Partial<IAdeTokenUsage>;
+	}): void {
+		const resStr = params.sessionResource?.trim();
+		const targetAgent = params.agentId
+			? this.projects.getAgent(params.agentId)
+			: (resStr ? this.projects.agents.find(a => a.session?.resource.toString() === resStr) : undefined);
+		if (!targetAgent) {
+			return;
+		}
+		const govId = this.getOwningGovernorId(targetAgent.id);
+		const entry = govId ? this.trees.get(govId) : undefined;
+		if (!entry) {
+			return;
+		}
+		let role: 'worker' | 'employee' | 'manager' | 'governor' = 'worker';
+		let nodeId: string | undefined;
+		if (targetAgent.id === entry.governorSessionId) {
+			role = 'governor';
+		} else {
+			for (const [nid, rState] of Object.entries(entry.state.nodes)) {
+				if (rState.workerAgentId === targetAgent.id) {
+					role = 'worker';
+					nodeId = nid;
+					break;
+				}
+				if (rState.employeeAgentId === targetAgent.id) {
+					role = 'employee';
+					nodeId = nid;
+					break;
+				}
+				if (rState.managerAgentId === targetAgent.id) {
+					role = 'manager';
+					nodeId = targetAgent.treeNodeId ?? nid;
+					break;
+				}
+			}
+			if (!nodeId && targetAgent.role === 'manager') {
+				role = 'manager';
+			} else if (!nodeId && targetAgent.role === 'employee') {
+				role = 'employee';
+			}
+		}
+		if (this.applyTurnTokenUsage(entry, role, params.usage, nodeId)) {
+			void this.persistEntry(entry).catch(() => undefined);
+		}
+	}
+
 	async openEngineeringEditor(governorSessionId: string, options?: { side?: boolean }): Promise<void> {
 		await this.readyPromise;
 		this.modeService.setMode('ade');
@@ -2494,6 +2668,28 @@ CommandsRegistry.registerCommand(ADE_WORKER_HEARTBEAT_COMMAND_ID, (accessor: Ser
 		if (resStr) {
 			eng.recordWorkerStreamHeartbeat(resStr, typeof rawTimestamp === 'number' ? rawTimestamp : Date.now());
 		}
+	} catch {
+		// Ignore when engineering service is not yet instantiated
+	}
+});
+
+CommandsRegistry.registerCommand(ADE_RECORD_TURN_USAGE_COMMAND_ID, (accessor: ServicesAccessor, rawPayload: unknown) => {
+	try {
+		if (!rawPayload || typeof rawPayload !== 'object') {
+			return;
+		}
+		const p = rawPayload as { sessionResource?: unknown; agentId?: unknown; usage?: Partial<IAdeTokenUsage> };
+		if (!p.usage || typeof p.usage !== 'object') {
+			return;
+		}
+		const eng = accessor.get(IAdeEngineeringService);
+		eng.recordSessionTurnUsage({
+			sessionResource: typeof p.sessionResource === 'string'
+				? p.sessionResource
+				: (URI.isUri(p.sessionResource) ? p.sessionResource.toString() : undefined),
+			agentId: typeof p.agentId === 'string' ? p.agentId : undefined,
+			usage: p.usage,
+		});
 	} catch {
 		// Ignore when engineering service is not yet instantiated
 	}

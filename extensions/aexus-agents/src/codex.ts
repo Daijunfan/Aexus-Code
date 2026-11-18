@@ -10,14 +10,14 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, HistoryEntry, JsonLineClient, NativeSession, RpcPacket, withTimeout } from './runtime';
+import { emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, JsonLineClient, NativeSession, RpcPacket, withTimeout } from './runtime';
 
 interface ThreadItem { type: string; text?: string; command?: string; server?: string; tool?: string; query?: string; content?: { type: string; text?: string }[] }
-interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[] }
+interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[]; usage?: unknown }
 interface Thread { id: string; parentThreadId?: string; agentNickname?: string; cwd: string; name?: string; preview: string; path?: string; createdAt: number; updatedAt: number; turns: Turn[] }
 interface RolloutEntry { type: string; payload?: { type?: string; id?: string; content?: { type: string; text?: string }[]; cwd?: string; parent_thread_id?: string; multi_agent_version?: string; agent_nickname?: string; source?: { subagent?: { thread_spawn?: { parent_thread_id: string; agent_nickname?: string } } }; timestamp?: string; message?: string; item?: { type: string; id: string; content?: { type: string; text?: string }[] } } }
 interface SessionIndexEntry { id: string; thread_name: string; updated_at: string }
-interface Notification { threadId?: string; delta?: string; turn?: Turn; item?: ThreadItem; message?: string }
+interface Notification { threadId?: string; delta?: string; turn?: Turn; item?: ThreadItem; message?: string; usage?: unknown; tokenUsage?: unknown }
 interface Question { id: string; header: string; question: string; options?: { label: string; description: string }[]; isSecret?: boolean }
 interface SkillEntry { name?: string; id?: string; skill?: string; description?: string; path?: string }
 interface SessionRuntimeSettings { model?: string; effort?: string; approvalPolicy: string; sandbox?: string; webSearch?: string }
@@ -27,6 +27,41 @@ type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 function shorten(value: string, max = 140): string {
 	return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function readTokenCount(record: Record<string, unknown>, ...keys: string[]): number {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+	}
+	return 0;
+}
+
+function extractTurnTokenUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
+	if (!value || typeof value !== 'object' || depth > 3) {
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
+		const nested = record[key];
+		if (nested && typeof nested === 'object') {
+			const usage = extractTurnTokenUsage(nested, depth + 1);
+			if (usage) {
+				return usage;
+			}
+		}
+	}
+	const inputTokens = readTokenCount(record, 'inputTokens', 'input_tokens', 'input');
+	const outputTokens = readTokenCount(record, 'outputTokens', 'output_tokens', 'output');
+	const cacheReadTokens = readTokenCount(record, 'cachedInputTokens', 'cache_read_input_tokens', 'cacheReadTokens', 'cacheRead');
+	const cacheWriteTokens = readTokenCount(record, 'cacheWriteTokens', 'cache_creation_input_tokens', 'cacheWrite');
+	const totalTokens = readTokenCount(record, 'totalTokens', 'total_tokens', 'total') || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+	if (totalTokens <= 0) {
+		return undefined;
+	}
+	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
 }
 
 function extractSkillEntries(value: unknown, depth = 0): SkillEntry[] {
@@ -125,6 +160,7 @@ export class CodexRuntime implements EngineRuntime {
 	private readonly threadModelOverrides = new Map<string, string>();
 	private readonly sessionSettings = new Map<string, SessionRuntimeSettings>();
 	private readonly capabilitiesCache = new Map<string, { value: EngineRuntimeCapabilities; expiresAt: number }>();
+	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
 	private defaultModel: string | undefined;
 
 	constructor(private readonly executable: string) { this.connect(); }
@@ -137,6 +173,13 @@ export class CodexRuntime implements EngineRuntime {
 		const client = this.client = new JsonLineClient(this.executable, ['app-server']);
 		this.sessionListener?.dispose();
 		this.sessionListener = client.onPacket(packet => {
+			const params = packet.params as Notification | undefined;
+			if ((packet.method === 'thread/tokenUsage/updated' || packet.method === 'turn/completed') && params?.threadId) {
+				const usage = extractTurnTokenUsage(params.tokenUsage ?? params.usage ?? params.turn?.usage);
+				if (usage) {
+					this.lastTurnUsageBySession.set(params.threadId, usage);
+				}
+			}
 			if (packet.method === 'thread/started') {
 				const thread = (packet.params as { thread: Thread }).thread;
 				this.loaded.add(thread.id);
@@ -162,6 +205,12 @@ export class CodexRuntime implements EngineRuntime {
 		void this.ready.catch(() => {
 			client.dispose();
 		});
+	}
+
+	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
+		const usage = this.lastTurnUsageBySession.get(sessionId);
+		this.lastTurnUsageBySession.delete(sessionId);
+		return usage;
 	}
 
 	private recordThreadModelIfUnsupported(threadId: string, model?: string): void {

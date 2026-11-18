@@ -53,6 +53,19 @@ export interface EngineRuntimeCapabilities {
 }
 
 export interface HistoryEntry { id?: string; role: 'user' | 'assistant'; text: string; isSystemInitiated?: boolean }
+
+/** Token usage accounted for a single completed engine turn. */
+export interface EngineTurnTokenUsage {
+	readonly inputTokens: number;
+	readonly outputTokens: number;
+	readonly cacheReadTokens?: number;
+	readonly cacheWriteTokens?: number;
+	readonly totalTokens: number;
+	readonly durationMs?: number;
+	readonly costUsd?: number;
+	readonly estimated?: boolean;
+}
+
 export interface EngineRuntime extends vscode.Disposable {
 	readonly id: string;
 	readonly name: string;
@@ -66,6 +79,8 @@ export interface EngineRuntime extends vscode.Disposable {
 	getRuntimeCapabilities?(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities>;
 	executeCommand?(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean>;
 	killSession?(session: NativeSession): Promise<void>;
+	/** Retrieves and clears the token usage of the most recently completed turn for a session, when the engine can report it. */
+	consumeLastTurnUsage?(sessionId: string): EngineTurnTokenUsage | undefined;
 	delete(session: NativeSession, token: vscode.CancellationToken): Promise<void>;
 }
 

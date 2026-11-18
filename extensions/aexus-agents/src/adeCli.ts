@@ -1571,7 +1571,44 @@ function formatHumanOutput(action: string | undefined, result: unknown): string 
 		}
 		return `${verb} session '${id}'.`;
 	}
-	return JSON.stringify(result, null, 2);
+	const tokenSummary = formatEngineeringTokenSummary(action, result);
+	const json = JSON.stringify(result, null, 2);
+	return tokenSummary ? `${json}\n${tokenSummary}` : json;
+}
+
+function recordTokenTotal(value: unknown): number | undefined {
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const tokenUsage = (value as Record<string, unknown>).tokenUsage;
+	if (!tokenUsage || typeof tokenUsage !== 'object') {
+		return undefined;
+	}
+	const usage = tokenUsage as Record<string, unknown>;
+	if (typeof usage.totalTokens === 'number') {
+		return usage.totalTokens;
+	}
+	const total = usage.total;
+	if (total && typeof total === 'object' && typeof (total as Record<string, unknown>).totalTokens === 'number') {
+		return (total as Record<string, unknown>).totalTokens as number;
+	}
+	return undefined;
+}
+
+function formatEngineeringTokenSummary(action: string | undefined, result: unknown): string | undefined {
+	if (action !== 'engineering.list' && action !== 'engineering.status') {
+		return undefined;
+	}
+	if (Array.isArray(result)) {
+		const totals = result.map(recordTokenTotal).filter((value): value is number => typeof value === 'number');
+		if (totals.length === 0) {
+			return undefined;
+		}
+		const total = totals.reduce((sum, value) => sum + value, 0);
+		return `Token usage: ${total} token${total === 1 ? '' : 's'} across ${totals.length} item${totals.length === 1 ? '' : 's'}.`;
+	}
+	const total = recordTokenTotal(result);
+	return total === undefined ? undefined : `Token usage: ${total} token${total === 1 ? '' : 's'}.`;
 }
 
 export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promise<number> {

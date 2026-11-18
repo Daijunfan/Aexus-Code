@@ -20,6 +20,8 @@ import {
 	IAdeEngineeringNodeRuntimeState,
 	IAdeEngineeringService,
 	IAdeEngineeringTreeSnapshot,
+	IAdeTokenUsage,
+	formatCompactTokenCount,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
 	AdeBlueprintValidationError,
@@ -737,6 +739,38 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			$('span.ade-eng-progress-pill', {}, `${snap.progress.completedNodes}/${snap.progress.totalNodes} · ${bp.managers.length} Mgr`),
 		);
 
+		const treeTokens = snap.tokenUsage.total;
+		const tokenTooltipLines = [
+			localize(
+				'adeEngTokensTotalTooltip',
+				"Total Token Consumption: {0} tokens ({1} turns)",
+				treeTokens.totalTokens.toLocaleString(),
+				treeTokens.turns,
+			),
+			localize(
+				'adeEngTokensIoTooltip',
+				"Input: {0} · Output: {1} · Cache Read: {2} · Cache Write: {3}",
+				treeTokens.inputTokens.toLocaleString(),
+				treeTokens.outputTokens.toLocaleString(),
+				treeTokens.cacheReadTokens.toLocaleString(),
+				treeTokens.cacheWriteTokens.toLocaleString(),
+			),
+			localize(
+				'adeEngTokensByRoleTooltip',
+				"By Role — Worker (L4): {0} · Employee (L3): {1} · Manager (L2): {2} · Governor (L1): {3}",
+				snap.tokenUsage.worker.totalTokens.toLocaleString(),
+				snap.tokenUsage.employee.totalTokens.toLocaleString(),
+				snap.tokenUsage.manager.totalTokens.toLocaleString(),
+				snap.tokenUsage.governor.totalTokens.toLocaleString(),
+			),
+		];
+		const tokensPill = append(left, $(`span.ade-eng-tokens-pill${treeTokens.totalTokens > 0 ? '.has-usage' : ''}`, {
+			title: tokenTooltipLines.join('\n'),
+		}));
+		const tokIco = append(tokensPill, $('span.ade-eng-tokens-ico'));
+		tokIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.pulse));
+		append(tokensPill, $('span', {}, `${formatCompactTokenCount(treeTokens.totalTokens)} tok`));
+
 		// Right Cluster: Compact Authoring Pills + Draft Guard + Execution Controls (single crisp row!)
 		const right = append(this.toolbarEl, $('.ade-eng-toolbar-group.right'));
 
@@ -1317,6 +1351,22 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				append(caption, $('span.ade-eng-node-title', {}, `[${node.id}] ${node.title}`));
 				const subMeta = `${node.worker?.engine ?? 'claude-code'}:${node.worker?.thinking ?? 'high'}`;
 				append(caption, $('span.ade-eng-node-sub', {}, subMeta));
+				const nodeTok = runtime?.tokenUsage?.total;
+				if (nodeTok && nodeTok.totalTokens > 0) {
+					const nodeBreakdownTitle = localize(
+						'adeEngNodeTokensTooltip',
+						"Node [{0}] Tokens: {1} total (In {2} · Out {3} · Cache {4})\nWorker (L4): {5} · Employee (L3): {6} · Manager (L2): {7}",
+						node.id,
+						nodeTok.totalTokens.toLocaleString(),
+						nodeTok.inputTokens.toLocaleString(),
+						nodeTok.outputTokens.toLocaleString(),
+						nodeTok.cacheReadTokens.toLocaleString(),
+						(runtime?.tokenUsage?.worker.totalTokens ?? 0).toLocaleString(),
+						(runtime?.tokenUsage?.employee.totalTokens ?? 0).toLocaleString(),
+						(runtime?.tokenUsage?.manager.totalTokens ?? 0).toLocaleString(),
+					);
+					append(caption, $('span.ade-eng-node-tokens', { title: nodeBreakdownTitle }, `${formatCompactTokenCount(nodeTok.totalTokens)} tok`));
+				}
 			}
 
 			this.installNodeInteractions(node, nodeEl);
@@ -1835,12 +1885,37 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 		}));
 
-		// 4. Compact Runtime Telemetry Strip at Footer
+		// 4. Compact Runtime Telemetry & Token Consumption Card at Footer
 		if (params.runtime) {
+			this.renderNodeTokenUsageCard(body, params.runtime);
 			append(
 				body,
 				$('div.ade-eng-pop-telemetry', {}, `Phase: ${params.runtime.phase} · Rework ${params.runtime.employeeRejectCount}/3 · Fail ${params.runtime.formalFailureCount}/3`),
 			);
+		}
+	}
+
+	private renderNodeTokenUsageCard(parent: HTMLElement, runtime: IAdeEngineeringNodeRuntimeState): void {
+		const usage = runtime.tokenUsage;
+		const total: IAdeTokenUsage | undefined = usage?.total;
+		const totalTok = total?.totalTokens ?? 0;
+		const card = append(parent, $(`div.ade-eng-pop-tokens-card${totalTok > 0 ? '.has-usage' : ''}`));
+		const topRow = append(card, $('div.ade-eng-pop-tokens-head'));
+		append(topRow, $('span.ade-eng-pop-tokens-label', {}, localize('adeEngPopTokensHeader', "TOKEN CONSUMPTION")));
+		append(
+			topRow,
+			$('span.ade-eng-pop-tokens-total', {}, `${totalTok.toLocaleString()} tok${total?.turns ? ` · ${total.turns}t` : ''}`),
+		);
+
+		if (total && totalTok > 0) {
+			append(
+				card,
+				$('div.ade-eng-pop-tokens-io', {}, `In ${formatCompactTokenCount(total.inputTokens)} · Out ${formatCompactTokenCount(total.outputTokens)}${total.cacheReadTokens > 0 ? ` · Cache ${formatCompactTokenCount(total.cacheReadTokens)}` : ''}`),
+			);
+			const rolesRow = append(card, $('div.ade-eng-pop-tokens-roles'));
+			append(rolesRow, $('span.ade-eng-pop-role-tok', {}, `W: ${formatCompactTokenCount(usage?.worker.totalTokens ?? 0)}`));
+			append(rolesRow, $('span.ade-eng-pop-role-tok', {}, `E: ${formatCompactTokenCount(usage?.employee.totalTokens ?? 0)}`));
+			append(rolesRow, $('span.ade-eng-pop-role-tok', {}, `M: ${formatCompactTokenCount(usage?.manager.totalTokens ?? 0)}`));
 		}
 	}
 

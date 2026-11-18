@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
+import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
 interface ContentBlock { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }
@@ -25,7 +25,7 @@ interface ClaudeEvent {
 	isMeta?: boolean;
 	cwd?: string;
 	timestamp?: string;
-	message?: { content: string | ContentBlock[] };
+	message?: { content: string | ContentBlock[]; usage?: UsagePayload };
 	event?: { type: string; delta?: { type?: string; text?: string; thinking?: string }; content_block?: ContentBlock };
 	request_id?: string;
 	request?: { subtype: string; tool_name: string; input: object };
@@ -66,6 +66,23 @@ interface ClaudeUsageStats {
 function messageText(event: ClaudeEvent): string {
 	const content = event.message?.content;
 	return typeof content === 'string' ? content : (content ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join('\n');
+}
+
+function turnUsageFromPayload(usage: UsagePayload | undefined, durationMs?: number, costUsd?: number): EngineTurnTokenUsage {
+	const inputTokens = usage?.input_tokens ?? 0;
+	const outputTokens = usage?.output_tokens ?? 0;
+	const cacheReadTokens = usage?.cache_read_input_tokens ?? 0;
+	const cacheWriteTokens = usage?.cache_creation_input_tokens ?? 0;
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+		durationMs,
+		costUsd,
+		estimated: false,
+	};
 }
 
 function stringList(value: unknown): string[] {
@@ -262,6 +279,7 @@ export class ClaudeRuntime implements EngineRuntime {
 	private readonly runningBySession = new Map<string, Set<ReturnType<typeof spawnEngine>>>();
 	private readonly initBySession = new Map<string, ClaudeInitInfo>();
 	private readonly usageBySession = new Map<string, ClaudeUsageStats>();
+	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
 	private lastInit: ClaudeInitInfo | undefined;
 	constructor(private readonly executable: string) { }
 
@@ -468,6 +486,12 @@ export class ClaudeRuntime implements EngineRuntime {
 		});
 	}
 
+	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
+		const usage = this.lastTurnUsageBySession.get(sessionId);
+		this.lastTurnUsageBySession.delete(sessionId);
+		return usage;
+	}
+
 	async listConfiguredModels(): Promise<readonly { readonly id: string; readonly label: string }[]> {
 		try {
 			const settingsPath = path.join(this.configDir(), 'settings.json');
@@ -594,6 +618,8 @@ export class ClaudeRuntime implements EngineRuntime {
 			let resultError: string | undefined;
 			let wroteText = false;
 			let sawThinkingDelta = false;
+			let sawResult = false;
+			let interimUsage: UsagePayload | undefined;
 			const seenToolUses = new Set<string>();
 			child.stderr.on('data', data => errorText = (errorText + String(data)).slice(-8000));
 			lines.on('line', line => {
@@ -624,6 +650,10 @@ export class ClaudeRuntime implements EngineRuntime {
 					}
 				}
 				if (!fromChild && !token.isCancellationRequested && event.type === 'assistant') {
+					const assistantUsage = event.message?.usage;
+					if (assistantUsage) {
+						interimUsage = assistantUsage;
+					}
 					const content = event.message?.content;
 					if (Array.isArray(content)) {
 						for (const block of content) {
@@ -657,7 +687,9 @@ export class ClaudeRuntime implements EngineRuntime {
 					});
 				}
 				if (!fromChild && event.type === 'result') {
+					sawResult = true;
 					this.recordUsage(session.id, event);
+					this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd)));
 					if (event.is_error) { resultError = event.result || vscode.l10n.t('Claude Code could not complete this request.'); }
 					if (!event.is_error) { session.provisional = false; }
 					child.stdin.end();
@@ -670,6 +702,12 @@ export class ClaudeRuntime implements EngineRuntime {
 					child.on('error', reject);
 					child.on('close', code => token.isCancellationRequested ? resolve() : resultError || code !== 0 ? reject(new Error(resultError || errorText || vscode.l10n.t('Claude Code exited with code {0}.', String(code)))) : resolve());
 				});
+				if (!sawResult && interimUsage) {
+					const fallbackUsage = turnUsageFromPayload(interimUsage);
+					if (fallbackUsage.totalTokens > 0) {
+						this.lastTurnUsageBySession.set(session.id, fallbackUsage);
+					}
+				}
 			} finally {
 				cancellation.dispose();
 				lines.close();

@@ -48,6 +48,7 @@ import {
 	AdeEngineeringEditorPane,
 } from '../../browser/adeEngineeringEditorPane.js';
 import {
+	ADE_RECORD_TURN_USAGE_COMMAND_ID,
 	ADE_WORKER_HEARTBEAT_COMMAND_ID,
 	AdeEngineeringWorkbenchService,
 	AdeExistingSubordinatesError,
@@ -91,6 +92,14 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 	): Promise<void> {
 		while (engineering.getTreeSnapshot(govId)?.state.nodes[nodeId]?.phase !== expectedPhase) {
 			await Event.toPromise(engineering.onDidChangeTree);
+		}
+	}
+
+	async function waitForDomCondition(probe: () => boolean, timeoutMs = 2000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (!probe()) {
+			assert.ok(Date.now() < deadline, 'Timed out waiting for the Engineering DOM to re-render');
+			await new Promise<void>(resolve => mainWindow.setTimeout(resolve, 5));
 		}
 	}
 
@@ -1006,6 +1015,12 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
 		await pane.setInput(input, undefined, {}, CancellationToken.None);
 
+		// 0. Verify the Engineering toolbar renders the Token Consumption pill and starts empty before any turn runs
+		const tokensPill = host.querySelector('.ade-eng-tokens-pill') as HTMLElement | null;
+		assert.ok(tokensPill, 'Engineering toolbar renders the token consumption pill');
+		assert.strictEqual(tokensPill.textContent, '0 tok', 'Token pill starts at 0 tokens before any turn executes');
+		assert.strictEqual(tokensPill.classList.contains('has-usage'), false, 'Token pill has no usage class before any turn executes');
+
 		// 1. Verify Dual-Core Concentric Task Nodes, User Gate Node, Pistol Cursor, Manager Segment Halos & Computed CSS Geometry
 		const concentricNodes = host.querySelectorAll('.ade-eng-concentric.ade-pistol-cursor');
 		assert.strictEqual(concentricNodes.length, 2, 'Renders 2 dual-core concentric task nodes with pistol cursor');
@@ -1086,15 +1101,39 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const runningEdgeEl = host.querySelector('.ade-eng-edge-path.status-running');
 		assert.ok(runningEdgeEl, 'Edge feeding active User Gate U1 renders animated green dashed status-running path');
 
+		// 5b. Verify Engineering Token Counting: recording a turn's usage accumulates onto the tree, the Worker role bucket and node N1
+		const n1WorkerAgentId = h.engineering.getTreeSnapshot(gov.id)?.state.nodes.N1.workerAgentId;
+		assert.ok(n1WorkerAgentId, 'Completed N1 exposes its Worker agent id for turn usage attribution');
+		await h.commandService.executeCommand(ADE_RECORD_TURN_USAGE_COMMAND_ID, {
+			agentId: n1WorkerAgentId,
+			usage: { inputTokens: 1200, outputTokens: 300, cacheReadTokens: 500, totalTokens: 2000 },
+		});
+
+		const usageSnap = h.engineering.getTreeSnapshot(gov.id)!;
+		assert.ok(usageSnap.tokenUsage.total.totalTokens >= 2000, 'Tree token total includes the recorded 2000-token turn');
+		assert.ok(usageSnap.tokenUsage.worker.totalTokens >= 2000, 'Worker (L4) token bucket includes the recorded 2000-token turn');
+		assert.ok((usageSnap.state.nodes.N1.tokenUsage?.total.totalTokens ?? 0) >= 2000, 'Node N1 token breakdown includes the recorded 2000-token turn');
+
+		await waitForDomCondition(() => Boolean(
+			host.querySelector('.ade-eng-tokens-pill.has-usage')
+			&& host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-node-tokens'),
+		));
+		const refreshedTokensPill = host.querySelector('.ade-eng-tokens-pill') as HTMLElement;
+		assert.ok(refreshedTokensPill.classList.contains('has-usage'), 'Toolbar token pill switches to has-usage once turns are accounted');
+		assert.ok(host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-node-tokens'), 'Completed N1 caption renders its compact token count');
+		const refreshedN1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;
+
 		// Inspect N1 Popover via right-click -> inputs & engine options must be disabled!
-		lockedN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+		refreshedN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
 		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Hovering the completed node must not open the popover');
-		lockedN1El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		refreshedN1El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
 		assert.strictEqual(popoverEl.classList.contains('open'), true, 'Right-clicking the completed node must open its popover');
 		const lockedTitleInput = popoverEl.querySelector('input.ade-eng-input') as HTMLInputElement;
 		assert.strictEqual(lockedTitleInput.disabled, true, 'Completed node configuration inputs must be strictly locked');
 		const lockedEngineBtn = popoverEl.querySelector('button.ade-eng-engine-opt') as HTMLButtonElement;
 		assert.strictEqual(lockedEngineBtn.disabled, true, 'Completed node engine options must be strictly locked');
+		assert.ok(popoverEl.querySelector('.ade-eng-pop-tokens-card.has-usage'), 'Completed N1 popover renders the token consumption card with usage');
+		assert.strictEqual(popoverEl.querySelectorAll('.ade-eng-pop-role-tok').length, 3, 'Token card renders Worker, Employee and Manager role breakdowns');
 
 		// Clicking outside the popover on the canvas viewport must dismiss the open popover cleanly
 		const viewportEl = host.querySelector('.ade-eng-viewport') as HTMLElement;

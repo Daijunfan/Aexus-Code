@@ -2113,6 +2113,7 @@ export async function executeAdeControlRequest(
 				return {
 					governorSessionId: snap.governorSessionId,
 					runStatus: snap.state.runStatus,
+					tokenUsage: snap.tokenUsage,
 					node: nodeStatus,
 				};
 			}
@@ -2123,6 +2124,7 @@ export async function executeAdeControlRequest(
 				treeType: snap.treeType,
 				runStatus: snap.state.runStatus,
 				progress: snap.progress,
+				tokenUsage: snap.tokenUsage,
 				managers: snap.blueprint.managers,
 				nodes: snap.nodes,
 				edges: snap.edges,
