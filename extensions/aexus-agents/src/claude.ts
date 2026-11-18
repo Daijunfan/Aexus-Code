@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
+import { isPathWithinOrEqual, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
 import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
@@ -264,11 +264,12 @@ function isSafeAdeOrchestratorToolCall(
 	const input = (rawInput ?? {}) as Record<string, unknown>;
 	if (toolName === 'Write' || toolName === 'Edit') {
 		const fp = typeof input.file_path === 'string' ? input.file_path : '';
-		return fp.startsWith('/tmp/') || fp.startsWith('/private/tmp/') || fp.startsWith(os.tmpdir());
+		if (!fp) { return false; }
+		return fp.startsWith('/tmp/') || fp.startsWith('/private/tmp/') || isPathWithinOrEqual(fp, os.tmpdir());
 	}
 	if (toolName === 'Bash') {
 		const cmd = typeof input.command === 'string' ? input.command.trim() : '';
-		return /^(?:[A-Z_][A-Z0-9_]*=\S+\s+)*aexus-ade(?:\s|$)/.test(cmd);
+		return /^(?:[A-Z_][A-Z0-9_]*=\S+\s+)*aexus-ade(?:\.(?:cmd|exe|ps1|bat))?(?:\s|$)/i.test(cmd);
 	}
 	return false;
 }

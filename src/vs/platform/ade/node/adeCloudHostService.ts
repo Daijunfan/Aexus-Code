@@ -6,7 +6,7 @@
 import { spawn } from 'child_process';
 import * as crypto from 'crypto';
 import type { Database } from '@vscode/sqlite3';
-import { promises as fs } from 'fs';
+import { existsSync, promises as fs } from 'fs';
 import * as os from 'os';
 import { VSBuffer } from '../../../base/common/buffer.js';
 import { Emitter } from '../../../base/common/event.js';
@@ -379,6 +379,32 @@ function encodePowerShellScript(script: string): string {
 	return Buffer.from(withUtf8, 'utf16le').toString('base64');
 }
 
+/* eslint-disable local/code-no-sync-fs -- one-time ssh.exe path resolution on Windows service construction */
+function resolveDefaultSshExecutable(): string {
+	if (!isWindows) {
+		return 'ssh';
+	}
+	const sysRoot = process.env['SystemRoot'] || 'C:\\Windows';
+	const progFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+	const progFiles86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+	const candidates = [
+		path.win32.join(sysRoot, 'System32', 'OpenSSH', 'ssh.exe'),
+		path.win32.join(sysRoot, 'Sysnative', 'OpenSSH', 'ssh.exe'),
+		path.win32.join(progFiles, 'OpenSSH', 'ssh.exe'),
+		path.win32.join(progFiles, 'Git', 'usr', 'bin', 'ssh.exe'),
+		path.win32.join(progFiles86, 'Git', 'usr', 'bin', 'ssh.exe'),
+	];
+	for (const candidate of candidates) {
+		try {
+			if (existsSync(candidate)) {
+				return candidate;
+			}
+		} catch { /* ignore */ }
+	}
+	return 'ssh';
+}
+/* eslint-enable local/code-no-sync-fs */
+
 export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHostBackendService {
 	declare readonly _serviceBrand: undefined;
 
@@ -410,7 +436,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		this.defaultSshConfigPath = options.sshConfigPath ?? path.join(this.homedir, '.ssh', 'config');
 		this.syncUserSshDir = options.syncUserSshDir ?? !options.userDataPath;
 		this.autoImportOnFirstLoad = options.autoImportOnFirstLoad ?? true;
-		this.sshExecutable = options.sshExecutable ?? 'ssh';
+		this.sshExecutable = options.sshExecutable ?? resolveDefaultSshExecutable();
 		this.logService = options.logService;
 
 		this.storageFilePath = path.join(this.userDataPath, 'cloud-hosts.json');
@@ -1129,6 +1155,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 		return new Promise((resolve, reject) => {
 			const child = spawn(this.sshExecutable, sshArgs, {
+				windowsHide: true,
 				stdio: ['pipe', 'pipe', 'pipe'],
 				env: {
 					...process.env,
@@ -1609,12 +1636,16 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	async remoteGitStatus(authority: string, projectPath: string): Promise<readonly IAdeRemoteScmStatusEntry[]> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
-		if (hostOs === 'windows') {
-			return [];
-		}
 		const norm = normalizeRemoteProjectPath(projectPath, hostOs);
-		const script = `cd -- ${posixQuote(norm)} 2>/dev/null && git status --porcelain=v1 -z 2>/dev/null || true`;
-		const res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 12_000, host });
+		let res: { code: number | null; stdout: Buffer; stderr: string };
+		if (hostOs === 'windows') {
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const ps = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git status --porcelain=v1 -z 2>$null }`;
+			res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 12_000, host });
+		} else {
+			const script = `cd -- ${posixQuote(norm)} 2>/dev/null && git status --porcelain=v1 -z 2>/dev/null || true`;
+			res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 12_000, host });
+		}
 		if (res.code !== 0 || res.stdout.length === 0) {
 			return [];
 		}
@@ -1652,11 +1683,15 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	async remoteGitShowHead(authority: string, projectPath: string, relativePath: string): Promise<string> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
-		if (hostOs === 'windows') {
-			return '';
-		}
 		const norm = normalizeRemoteProjectPath(projectPath, hostOs);
-		const cleanRel = relativePath.replace(/^\/+/, '');
+		const cleanRel = relativePath.replace(/^[\\/]+/, '').replace(/\\/g, '/');
+		if (hostOs === 'windows') {
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const escapedRel = cleanRel.replace(/'/g, `''`);
+			const ps = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git show ('HEAD:' + '${escapedRel}') 2>$null }`;
+			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 12_000, host });
+			return res.stdout.toString('utf8');
+		}
 		const script = `cd -- ${posixQuote(norm)} && git show ${posixQuote(`HEAD:${cleanRel}`)} 2>/dev/null || true`;
 		const res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 12_000, host });
 		return res.stdout.toString('utf8');

@@ -378,6 +378,14 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder))
 					.pipe(rename(function (f) { f.basename = product.applicationName; })));
 
+				result = es.merge(result, gulp.src('resources/win32/versioned/bin/aexus-ade.cmd', { base: 'resources/win32/versioned' })
+					.pipe(replace('@@NAME@@', product.nameShort))
+					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder)));
+
+				result = es.merge(result, gulp.src('resources/win32/versioned/bin/aexus-ade.ps1', { base: 'resources/win32/versioned' })
+					.pipe(replace('@@NAME@@', product.nameShort))
+					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder)));
+
 				result = es.merge(result, gulp.src('resources/win32/versioned/bin/code.sh', { base: 'resources/win32/versioned' })
 					.pipe(replace('@@NAME@@', product.nameShort))
 					.pipe(replace('@@PRODNAME@@', product.nameLong))
@@ -388,10 +396,21 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@SERVERDATAFOLDER@@', product.serverDataFolderName || '.vscode-remote'))
 					.pipe(replace('@@QUALITY@@', quality!))
 					.pipe(rename(function (f) { f.basename = product.applicationName; f.extname = ''; })));
+
+				result = es.merge(result, gulp.src('resources/win32/versioned/bin/aexus-ade.sh', { base: 'resources/win32/versioned' })
+					.pipe(replace('@@NAME@@', product.nameShort))
+					.pipe(replace('@@VERSIONFOLDER@@', versionedResourcesFolder))
+					.pipe(rename(function (f) { f.basename = 'aexus-ade'; f.extname = ''; })));
 			} else {
 				result = es.merge(result, gulp.src('resources/win32/bin/code.cmd', { base: 'resources/win32' })
 					.pipe(replace('@@NAME@@', product.nameShort))
 					.pipe(rename(function (f) { f.basename = product.applicationName; })));
+
+				result = es.merge(result, gulp.src('resources/win32/bin/aexus-ade.cmd', { base: 'resources/win32' })
+					.pipe(replace('@@NAME@@', product.nameShort)));
+
+				result = es.merge(result, gulp.src('resources/win32/bin/aexus-ade.ps1', { base: 'resources/win32' })
+					.pipe(replace('@@NAME@@', product.nameShort)));
 
 				result = es.merge(result, gulp.src('resources/win32/bin/code.sh', { base: 'resources/win32' })
 					.pipe(replace('@@NAME@@', product.nameShort))
@@ -402,6 +421,10 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@SERVERDATAFOLDER@@', product.serverDataFolderName || '.vscode-remote'))
 					.pipe(replace('@@QUALITY@@', String(quality)))
 					.pipe(rename(function (f) { f.basename = product.applicationName; f.extname = ''; })));
+
+				result = es.merge(result, gulp.src('resources/win32/bin/aexus-ade.sh', { base: 'resources/win32' })
+					.pipe(replace('@@NAME@@', product.nameShort))
+					.pipe(rename(function (f) { f.basename = 'aexus-ade'; f.extname = ''; })));
 			}
 
 			result = es.merge(result, gulp.src('resources/win32/VisualElementsManifest.xml', { base: 'resources/win32' })
@@ -433,6 +456,12 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 				.pipe(replace('@@PRODNAME@@', product.nameLong))
 				.pipe(replace('@@APPNAME@@', product.applicationName))
 				.pipe(rename('bin/' + product.applicationName)));
+
+			result = es.merge(result, gulp.src('resources/linux/bin/aexus-ade.sh', { base: '.' })
+				.pipe(replace('@@PRODNAME@@', product.nameLong))
+				.pipe(replace('@@APPNAME@@', product.applicationName))
+				.pipe(rename('bin/aexus-ade'))
+				.pipe(util.setExecutableBit()));
 		}
 
 		result = inlineMeta(result, {
@@ -447,10 +476,44 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 	return task;
 }
 
-function hasAuthenticodeSignature(filePath: string): Promise<boolean> {
+let cachedSignToolExe: string | undefined;
+
+async function resolveSignToolExecutable(): Promise<string> {
+	if (cachedSignToolExe) {
+		return cachedSignToolExe;
+	}
+	if (process.platform === 'win32') {
+		const kitsBin = path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Windows Kits', '10', 'bin');
+		try {
+			const entries = (await fs.promises.readdir(kitsBin)).filter(name => /^\d+\.\d+\.\d+\.\d+$/.test(name)).sort().reverse();
+			const archOrder = process.arch === 'arm64' ? ['arm64', 'x64'] : ['x64', 'x86'];
+			for (const ver of entries) {
+				for (const subArch of archOrder) {
+					const candidate = path.join(kitsBin, ver, subArch, 'signtool.exe');
+					const st = await fs.promises.stat(candidate).catch(() => undefined);
+					if (st?.isFile()) {
+						cachedSignToolExe = candidate;
+						return candidate;
+					}
+				}
+			}
+		} catch { /* fallback to PATH */ }
+	}
+	cachedSignToolExe = 'signtool.exe';
+	return cachedSignToolExe;
+}
+
+async function hasAuthenticodeSignature(filePath: string): Promise<boolean> {
+	const signToolExe = await resolveSignToolExecutable();
 	return new Promise((resolve, reject) => {
-		const proc = cp.spawn('signtool.exe', ['verify', '/pa', filePath]);
-		proc.on('error', reject);
+		const proc = cp.spawn(signToolExe, ['verify', '/pa', filePath]);
+		proc.on('error', (err: NodeJS.ErrnoException) => {
+			if (err.code === 'ENOENT') {
+				resolve(false);
+			} else {
+				reject(err);
+			}
+		});
 		proc.on('exit', code => resolve(code === 0));
 	});
 }
@@ -462,8 +525,9 @@ async function stripAuthenticodeSignature(filePath: string): Promise<void> {
 	if (!await hasAuthenticodeSignature(filePath)) {
 		return;
 	}
+	const signToolExe = await resolveSignToolExecutable();
 	await new Promise<void>((resolve, reject) => {
-		const proc = cp.spawn('signtool.exe', ['remove', '/s', filePath]);
+		const proc = cp.spawn(signToolExe, ['remove', '/s', filePath]);
 		let out = '';
 		proc.stdout?.on('data', chunk => out += chunk.toString());
 		proc.stderr?.on('data', chunk => out += chunk.toString());
@@ -504,11 +568,11 @@ function patchWin32DependenciesTask(destinationFolderName: string) {
 			await rcedit(fullPath, {
 				'file-version': baseVersion,
 				'version-string': {
-					'CompanyName': 'Microsoft Corporation',
+					'CompanyName': 'Aexus',
 					'FileDescription': product.nameLong,
 					'FileVersion': packageJson.version,
 					'InternalName': basename,
-					'LegalCopyright': 'Copyright (C) 2026 Microsoft. All rights reserved',
+					'LegalCopyright': 'Copyright (C) 2026 Aexus. All rights reserved.',
 					'OriginalFilename': basename,
 					'ProductName': product.nameLong,
 					'ProductVersion': packageJson.version,

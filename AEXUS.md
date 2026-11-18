@@ -1,29 +1,29 @@
 # Aexus Code
 
-基于 Microsoft 官方 [VS Code 1.146.0](https://github.com/microsoft/vscode/releases/tag/1.146.0) 的 macOS Apple Silicon 开发基线。上游提交：`69047191fc427f2f92828279aae1d90d8eeda7ab`，本地开发分支：`aexus/main`。
+基于 Microsoft 官方 [VS Code 1.146.0](https://github.com/microsoft/vscode/releases/tag/1.146.0) 的跨平台（Windows 10/11 `x64`/`arm64`、macOS `arm64`/`x64`、Linux `x64`/`arm64`）商业级原生 Agent 开发基线。上游提交：`69047191fc427f2f92828279aae1d90d8eeda7ab`，本地开发分支：`aexus/main`。
 
 ## 开发与构建
 
-构建工具安装在本仓库忽略目录 `.build/toolchain/`：Node.js `24.22.1`、pnpm `12.16.0`。以下包装脚本让命令使用这些版本，不修改系统 Node.js。
+构建工具固定为 Node.js `24.22.1`、pnpm `12.16.0`。macOS/Linux 通过 `./scripts/aexus-env.sh`、Windows 通过 `.\scripts\aexus-env.ps1`（或 `.\scripts\aexus-env.cmd`）运行命令，无需污染系统全局 Node.js：
 
 ```sh
-# 安装依赖（初次安装或依赖发生变化时）
+# macOS / Linux：安装依赖、快速构建并启动开发版
 ./scripts/aexus-env.sh pnpm install --frozen-lockfile
-
-# 编译开发版
 ./scripts/aexus-env.sh pnpm run build-fast
-
-# 从当前源码运行
 ./scripts/aexus-env.sh ./scripts/code.sh
 
-# 持续编译，修改源码后在应用中执行 Developer: Reload Window
-./scripts/aexus-env.sh pnpm run watch
-
-# 构建独立 macOS arm64 应用
+# macOS：打包并安装独立应用至 /Applications/Aexus Code.app（Linux 使用 vscode-linux-x64 / vscode-linux-arm64）
 ./scripts/aexus-env.sh pnpm run gulp vscode-darwin-arm64
-
-# 退出已运行的 Aexus Code 后，后台签名并安装（不自动打开窗口）
 ./scripts/aexus-install.sh
+```
+
+```powershell
+# Windows PowerShell：安装依赖（含原生 C++ 模块编译）、快速构建、打包并安装独立应用至 %LOCALAPPDATA%\Programs\Aexus Code
+.\scripts\aexus-env.ps1 pnpm install --frozen-lockfile
+.\scripts\aexus-env.ps1 pnpm run build-fast
+.\scripts\aexus-env.ps1 .\scripts\code.bat
+.\scripts\aexus-env.ps1 pnpm run gulp vscode-win32-x64
+.\scripts\aexus-install.ps1
 ```
 
 独立应用临时输出到相邻目录 `../VSCode-darwin-arm64/Aexus Code.app`。安装校验成功后，脚本会删除该构建副本及 `.build/electron/Aexus Code.app` 开发运行副本，唯一保留 `/Applications/Aexus Code.app` 的最新版本，不保留旧版或备份应用包。安装副本不会随着源码修改自动更新，需要重新构建并安装。单独运行源码产生的临时应用包，也必须在开发验证结束后清理。
@@ -76,7 +76,7 @@ ADE 与 IDE 呈镜像对称架构（单分支同目录协作，无需 Git Worktr
   - **四级职级体系与下属直控能力（严格区分 `Employee [L3] ≠ Worker [L4]`）**：建立清晰的 `Governor（L1）➔ Manager（L2）➔ Employee（L3）➔ Worker（L4 最低级）` 职级梯队。其中 **`Employee（L3）` 绝不是 `Worker（L4）`**：`Employee（L3）` 属于正式编排管理与验收职级（持有 `aexus-ade` 下属控制 API，负责调度、管理并验收下级 `Worker` 产出，在 Engineering 工程树中专职单节点验收与汇报撰写、绝不亲自写业务代码），而 **`Worker（L4）`** 位于 `Employee` 之下，是唯一不注入任何编排提示词与 API、不可再向下嵌套子会话的 **100% 原生纯净编码执行层**。新建顶层会话时可显式选定职级，在会话内新建子会话自动降一级分配（`Governor ➔ Manager ➔ Employee ➔ Worker`）；支持将下级会话拖拽到同项目或跨项目的任意上级会话或项目文件夹下实现热拔插改派（或右键 **Change Supervisor...**），系统自动级联调整职级并保持 `Worker` 100% 原生干净上下文；编排角色（`Governor` / `Manager` / `Employee` / `Secretary`）在创建时即自动锁定输入框进行短暂的角色与 API 说明文档预热阅读，后续用户发消息零文档拼接负担。
   - **四大原生会话动作**：文件夹级无缝行内重命名（`F2` / 右键 `Rename...`）、团队整树归档与恢复（`Archive / Restore`）、从侧栏移除但保留引擎历史（`Remove from Sidebar`）、以及连同底层引擎原生历史一并彻底销毁（`Delete Permanently`），支持右键 `Copy Role & Subordinate API Prompt` 与 `Change Supervisor...`。
 - **右边栏（`Project Inspector`：`Changes` + `Files`）**：进入 ADE 自动打开项目级源码变更（点击直接打开 ADE Diff）与项目源码文件树；切回 IDE 时自动恢复此前右侧栏面板。
-- **全量等价控制面 CLI（`aexus-ade`）**：通过 `0600` 本地鉴权 Unix Socket（`~/.aexus-code/ade-control.sock`）暴露完备的 ADE 控制指令：`status`、`view`（`status` / `--archived` / `--inspector` / `--refresh`）、`project`（`list` / `add` / `select` / `remove` / `delete` / `focus` / `home` / `forward` / `move` / `changes` / `files` / `open-file` / `open-diff`）、`engine`（`list` / `sessions`）、`session`（`list` / `info` / `subordinates` / `tree` / `create` / `attach` / `connect` / `open` / `select` / `close` / `mark-read` / `draft` / `rename` / `role` / `move` / `reorder` / `send --wait` / `history` / `stop` / `archive` / `unarchive` / `detach` / `delete`）以及 `secretary`（`status` / `open` / `engine` / `reset` / `send --wait` / `history` / `stop` / `draft` / `mark-read`），自动注入编排进程与集成终端 `PATH`（安装包内置于 `Contents/Resources/app/bin/aexus-ade`）。
+- **全量等价控制面 CLI（`aexus-ade`）**：通过 `0600` 本地鉴权 Unix Socket（macOS/Linux `~/.aexus-code/ade-control.sock`）与本机鉴权 Windows Named Pipe（`\\.\pipe\aexus-ade-control-<pid>`）暴露完备的 ADE 控制指令：`status`、`view`（`status` / `--archived` / `--inspector` / `--refresh`）、`project`（`list` / `add` / `select` / `remove` / `delete` / `focus` / `home` / `forward` / `move` / `changes` / `files` / `open-file` / `open-diff`）、`engine`（`list` / `sessions`）、`session`（`list` / `info` / `subordinates` / `tree` / `create` / `attach` / `connect` / `open` / `select` / `close` / `mark-read` / `draft` / `rename` / `role` / `move` / `reorder` / `send --wait` / `history` / `stop` / `archive` / `unarchive` / `detach` / `delete`）以及 `secretary`（`status` / `open` / `engine` / `reset` / `send --wait` / `history` / `stop` / `draft` / `mark-read`），自动注入编排进程与集成终端 `PATH`（macOS 内置于 `Contents/Resources/app/bin/aexus-ade`，Windows 内置于 `bin\aexus-ade.cmd`、`bin\aexus-ade.ps1`、`bin\aexus-ade`（Git Bash / WSL）与 `bin\aexus-code.cmd`，Linux 内置于 `bin/aexus-ade`）。
 - **8 大本机 Coding Agent 原生引擎聚合（`extensions/aexus-agents`）**：原生直连 **Codex**（`codex`）、**Claude Code**（`claude`）、**Kilo Code**（`kilo`）、**OpenCode**（`opencode`）、**DeepSeek Harness**（`dsh`）、**Google Antigravity**（`agy`）、**Cline**（`cline`）与 **Pi**（`pi`），完整支持会话发现、挂载（`attach`）、创建、历史加载、流式对话、中断与永久物理删除；同时通过 `nativeRoleBridge`、`extHostRolePreload`（在原生扩展宿主按窗口作用域零延迟同步快照与会话绑定）、`agy --hub` ConnectRPC 本地代理（拦截 `StartCascade` 与 `SendUserCascadeMessage` 注入 `append_prompt_sections`）、`codex app-server` `thread/inject_items`、`claude` stream-json、`dshRolePreload`、`kilo` / `opencode` / `cline` 请求体注入及 `pi --mode rpc` 将实时职级、上下级树与 `aexus-ade` 直控规范自动同步注入这 8 大原生扩展 UI 会话并绑定原生会话标签，且严格保证纯 `Worker` 角色上下文 100% 原生干净。
 - **ADE Engineering & Research 工作流引擎与可视化 DAG 画布（一等双模式）**：
   - **Governor 一对一工程/研究树映射与拓扑锁定**：右键顶层 `Governor` 点击 `Engineering` 初始化或聚焦专属工作流画布；也可通过 `Open ADE Research...` 或 `aexus-ade engineering init --tree-type research` 创建与 Engineering 完全对等的一等 `Research` 树（`treeType: 'research'`，蓝图持久化于 `~/.aexus-code/research/<governor-id>/`，内置问题界定、文献综述、基线基准与评估标准导向的起始蓝图）。若已有自由子会话，支持迁出为独立会话或删除清理；蓝图保存后在左栏自动预创建 `Governor ➔ Manager ➔ Employee ➔ Worker` 完整结构并严格锁定拖拽、改派与手动增删，底层 CLI 进程按首次唤醒或点击懒加载拉起。

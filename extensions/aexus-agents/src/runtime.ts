@@ -117,9 +117,28 @@ export function setCliBinDirectory(dir: string): void {
 
 function getStandardCliDirectories(): string[] {
 	const home = os.homedir();
+	if (process.platform === 'win32') {
+		const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+		const localAppData = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+		const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+		return [
+			path.join(appData, 'npm'),
+			path.join(home, '.local', 'bin'),
+			path.join(home, '.local', 'node-current'),
+			path.join(home, '.cargo', 'bin'),
+			path.join(home, '.npm-global', 'bin'),
+			path.join(home, '.gemini', 'bin'),
+			path.join(home, '.opencode', 'bin'),
+			path.join(localAppData, 'Microsoft', 'WinGet', 'Links'),
+			path.join(localAppData, 'Programs', 'claude'),
+			path.join(localAppData, 'Programs', 'DeepSeek Harness'),
+			path.join(programFiles, 'nodejs'),
+		];
+	}
 	return [
 		path.join(home, '.npm-global', 'bin'),
 		path.join(home, '.local', 'bin'),
+		path.join(home, '.cargo', 'bin'),
 		path.join(home, '.gemini', 'bin'),
 		path.join(home, '.opencode', 'bin'),
 		'/opt/homebrew/bin',
@@ -133,7 +152,7 @@ function mergeCliPath(existingPath: string | undefined, prependDir?: string): st
 	const result: string[] = [];
 	const normalize = (entry: string) => process.platform === 'win32' ? entry.toLowerCase() : entry;
 	const addEntry = (rawEntry: string) => {
-		const trimmed = rawEntry.trim();
+		const trimmed = rawEntry.trim().replace(/^"+|"+$/g, '');
 		if (!trimmed) {
 			return;
 		}
@@ -356,16 +375,41 @@ export async function findExecutable(name: string): Promise<string | undefined> 
 			return bundledCodex;
 		}
 	}
+	const rawPathEnv = process.env.PATH ?? (process.platform === 'win32' ? process.env.Path : undefined) ?? '';
 	const directories = [
-		...(process.env.PATH ?? '').split(path.delimiter),
+		...rawPathEnv.split(path.delimiter).map(d => d.trim().replace(/^"+|"+$/g, '')),
 		...getStandardCliDirectories(),
-	];
+	].filter(Boolean);
+	const winSuffixes = (() => {
+		const fromEnv = (process.env.PATHEXT ?? '')
+			.split(';')
+			.map(ext => ext.trim().toLowerCase())
+			.filter(ext => ext.startsWith('.'));
+		const ordered = ['.exe', '.cmd', '.bat', '.com', '.ps1'];
+		for (const ext of fromEnv) {
+			if (!ordered.includes(ext)) {
+				ordered.push(ext);
+			}
+		}
+		ordered.push('');
+		return ordered;
+	})();
+	const suffixes = process.platform === 'win32' ? winSuffixes : [''];
+	const isBareConfigured = Boolean(configured && !path.isAbsolute(configured) && !configured.includes('/') && !configured.includes('\\'));
 	const candidates = configured
-		? [configured]
-		: directories.filter(Boolean).flatMap(directory => (process.platform === 'win32' ? ['.exe', '.cmd', ''] : ['']).map(suffix => path.join(directory, name + suffix)));
+		? (isBareConfigured
+			? directories.flatMap(directory => suffixes.map(suffix => path.join(directory, (/\.[a-z0-9]+$/i.test(configured) && suffix ? configured : configured + suffix))))
+			: [configured])
+		: directories.flatMap(directory => suffixes.map(suffix => path.join(directory, name + suffix)));
 	for (const candidate of candidates) {
 		try {
-			await fs.access(candidate, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+			const stat = await fs.stat(candidate);
+			if (!stat.isFile()) {
+				continue;
+			}
+			if (process.platform !== 'win32') {
+				await fs.access(candidate, fs.constants.X_OK);
+			}
 			return candidate;
 		} catch { /* Try the next executable location. */ }
 	}
@@ -377,8 +421,20 @@ export async function findExecutable(name: string): Promise<string | undefined> 
 
 export function spawnEngine(executable: string, args: readonly string[], cwd?: string, env?: NodeJS.ProcessEnv): cp.ChildProcessWithoutNullStreams {
 	const mergedEnv: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
-	const existingPath = mergedEnv.PATH ?? (process.platform === 'win32' ? mergedEnv.Path : undefined);
-	mergedEnv.PATH = mergeCliPath(existingPath, cliBinDir);
+	let existingPath: string | undefined;
+	for (const key of Object.keys(mergedEnv)) {
+		if (key.toLowerCase() === 'path') {
+			if (existingPath === undefined && typeof mergedEnv[key] === 'string') {
+				existingPath = mergedEnv[key];
+			}
+			delete mergedEnv[key];
+		}
+	}
+	const canonicalPathKey = process.platform === 'win32' ? 'Path' : 'PATH';
+	mergedEnv[canonicalPathKey] = mergeCliPath(existingPath, cliBinDir);
+	if (process.platform !== 'win32') {
+		mergedEnv.PATH = mergedEnv[canonicalPathKey];
+	}
 	applyHttpConfigurationToEnv(mergedEnv, env);
 	const child = cp.spawn(process.execPath, [path.join(__dirname, 'engineProcess.js'), executable, ...args], {
 		cwd: cwd ?? os.homedir(),

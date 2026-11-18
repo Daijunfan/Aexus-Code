@@ -49,6 +49,60 @@ function sendWireRequest(socketPath: string, payload: Record<string, unknown>): 
 	return sendRawLine(socketPath, JSON.stringify(payload) + '\n');
 }
 
+function spawnBundledAdeCli(repoRoot: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<{ status: number | null; stdout: string; stderr: string }> {
+	const binDir = path.join(repoRoot, 'extensions', 'aexus-agents', 'bin');
+	return new Promise((resolve, reject) => {
+		let child;
+		if (isWindows) {
+			const hasNewlineArg = args.some(a => a.includes('\n') || a.includes('\r'));
+			if (hasNewlineArg) {
+				// Windows cmd.exe batch `%*` truncates arguments at literal newlines; pass UTF-16LE `-EncodedCommand`
+				// with single-quoted literals to `aexus-ade.ps1` so newlines and double quotes arrive verbatim.
+				const psExe = path.join(process.env['SystemRoot'] || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+				const psQuote = (s: string) => `'${s.replace(/'/g, '\'\'')}'`;
+				const psScript = `& ${psQuote(path.join(binDir, 'aexus-ade.ps1'))} ${args.map(psQuote).join(' ')}; exit $LASTEXITCODE`;
+				const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+				child = spawn(psExe, ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
+					env,
+					stdio: ['ignore', 'pipe', 'pipe'],
+					windowsHide: true,
+				});
+			} else {
+				const cliBin = path.join(binDir, 'aexus-ade.cmd');
+				const escapeToken = (arg: string, isCmd: boolean) => {
+					if (isCmd) {
+						return `"${arg.replace(/"/g, '')}"`;
+					}
+					let esc = arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1');
+					esc = `"${esc}"`;
+					return esc.replace(/[()%!^"<>&|]/g, '^$&');
+				};
+				const comspec = process.env['ComSpec'] || path.join(process.env['SystemRoot'] || 'C:\\Windows', 'System32', 'cmd.exe');
+				const innerCmd = [escapeToken(cliBin, true), ...args.map(a => escapeToken(a, false))].join(' ');
+				child = spawn(comspec, ['/d', '/s', '/c', `"${innerCmd}"`], {
+					env,
+					stdio: ['ignore', 'pipe', 'pipe'],
+					windowsHide: true,
+					windowsVerbatimArguments: true,
+				});
+			}
+		} else {
+			child = spawn(path.join(binDir, 'aexus-ade'), args, {
+				env,
+				stdio: ['ignore', 'pipe', 'pipe'],
+			});
+		}
+		let stdout = '';
+		let stderr = '';
+		child.stdout.setEncoding('utf8');
+		child.stderr.setEncoding('utf8');
+		child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+		child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+		child.once('error', reject);
+		child.once('close', status => resolve({ status, stdout, stderr }));
+	});
+}
+
 suite('AdeControlServer', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 	let tempDir: string;
@@ -295,7 +349,8 @@ suite('AdeControlServer', () => {
 		});
 	});
 
-	(isWindows ? test.skip : test)('executes the bundled aexus-ade CLI end-to-end over the authenticated socket', async () => {
+	test('executes the bundled aexus-ade CLI end-to-end over the authenticated socket', async function () {
+		this.timeout(30_000);
 		const dispatched: IAdeControlDispatchRequest[] = [];
 		const server = store.add(new AdeControlServer(async req => {
 			dispatched.push(req);
@@ -307,21 +362,9 @@ suite('AdeControlServer', () => {
 		await server.whenReady();
 
 		const repoRoot = path.resolve(FileAccess.asFileUri('').fsPath, '..');
-		const cliBin = path.join(repoRoot, 'extensions', 'aexus-agents', 'bin', 'aexus-ade');
-		const runCli = (args: string[]) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-			const child = spawn(cliBin, args, {
-				env: { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath },
-				stdio: ['ignore', 'pipe', 'pipe'],
-			});
-			let stdout = '';
-			let stderr = '';
-			child.stdout.setEncoding('utf8');
-			child.stderr.setEncoding('utf8');
-			child.stdout.on('data', (chunk: string) => { stdout += chunk; });
-			child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-			child.once('error', reject);
-			child.once('close', status => resolve({ status, stdout, stderr }));
-		});
+		const alphaPath = path.resolve('/projects/Alpha');
+		const betaPath = path.resolve('/projects/Beta');
+		const runCli = (args: string[]) => spawnBundledAdeCli(repoRoot, args, { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath });
 
 		const helpRun = await runCli(['--help']);
 		assert.strictEqual(helpRun.status, 0, helpRun.stderr);
@@ -337,7 +380,7 @@ suite('AdeControlServer', () => {
 		const viewRun = await runCli(['--json', 'view', '--archived']);
 		assert.strictEqual(viewRun.status, 0, viewRun.stderr);
 
-		const createRun = await runCli(['--json', 'session', 'create', '--project', '/projects/Alpha', '--engine', 'codex', '--title', 'Auth Governor', '--role', 'governor', '--side']);
+		const createRun = await runCli(['--json', 'session', 'create', '--project', alphaPath, '--engine', 'codex', '--title', 'Auth Governor', '--role', 'governor', '--side']);
 		assert.strictEqual(createRun.status, 0, createRun.stderr);
 
 		const subsRun = await runCli(['--json', 'session', 'subordinates', 'gov-1', '--recursive']);
@@ -352,7 +395,7 @@ suite('AdeControlServer', () => {
 		const selfTreeRun = await runCli(['--json', 'session', 'tree']);
 		assert.strictEqual(selfTreeRun.status, 0, selfTreeRun.stderr);
 
-		const moveRun = await runCli(['--json', 'session', 'move', 'sub-1', 'gov-2', '--project', '/projects/Beta']);
+		const moveRun = await runCli(['--json', 'session', 'move', 'sub-1', 'gov-2', '--project', betaPath]);
 		assert.strictEqual(moveRun.status, 0, moveRun.stderr);
 
 		const historyRun = await runCli(['--json', 'session', 'history', 'sub-1', '--limit', '5']);
@@ -364,7 +407,7 @@ suite('AdeControlServer', () => {
 		const deleteRun = await runCli(['--json', 'session', 'delete', 'agent-1', '--force']);
 		assert.strictEqual(deleteRun.status, 0, deleteRun.stderr);
 
-		const projectDeleteRun = await runCli(['--json', 'project', 'delete', '/projects/Beta', '--sessions', '--files']);
+		const projectDeleteRun = await runCli(['--json', 'project', 'delete', betaPath, '--sessions', '--files']);
 		assert.strictEqual(projectDeleteRun.status, 0, projectDeleteRun.stderr);
 
 		const secRun = await runCli(['--json', 'secretary', 'send', 'Focus', 'Alpha', '--wait']);
@@ -376,19 +419,19 @@ suite('AdeControlServer', () => {
 		const inspectorRun = await runCli(['--json', 'view', '--inspector', 'changes']);
 		assert.strictEqual(inspectorRun.status, 0, inspectorRun.stderr);
 
-		const selectProjRun = await runCli(['--json', 'project', 'select', '/projects/Alpha']);
+		const selectProjRun = await runCli(['--json', 'project', 'select', alphaPath]);
 		assert.strictEqual(selectProjRun.status, 0, selectProjRun.stderr);
 
-		const changesRun = await runCli(['--json', 'project', 'changes', '/projects/Alpha']);
+		const changesRun = await runCli(['--json', 'project', 'changes', alphaPath]);
 		assert.strictEqual(changesRun.status, 0, changesRun.stderr);
 
-		const filesRun = await runCli(['--json', 'project', 'files', '/projects/Alpha', '--path', 'src', '--depth', '2']);
+		const filesRun = await runCli(['--json', 'project', 'files', alphaPath, '--path', 'src', '--depth', '2']);
 		assert.strictEqual(filesRun.status, 0, filesRun.stderr);
 
-		const engSessRun = await runCli(['--json', 'engine', 'sessions', 'claude', '--project', '/projects/Alpha', '--limit', '10']);
+		const engSessRun = await runCli(['--json', 'engine', 'sessions', 'claude', '--project', alphaPath, '--limit', '10']);
 		assert.strictEqual(engSessRun.status, 0, engSessRun.stderr);
 
-		const attachRun = await runCli(['--json', 'session', 'attach', '--engine', 'claude', '--native-id', 'nat-1', '--project', '/projects/Alpha', '--role', 'manager', '--no-open']);
+		const attachRun = await runCli(['--json', 'session', 'attach', '--engine', 'claude', '--native-id', 'nat-1', '--project', alphaPath, '--role', 'manager', '--no-open']);
 		assert.strictEqual(attachRun.status, 0, attachRun.stderr);
 
 		const secHistRun = await runCli(['--json', 'secretary', 'history', '--limit', '5']);
@@ -402,7 +445,7 @@ suite('AdeControlServer', () => {
 				params: {
 					open: true,
 					side: true,
-					project: '/projects/Alpha',
+					project: alphaPath,
 					engine: 'codex',
 					title: 'Auth Governor',
 					role: 'governor',
@@ -412,24 +455,25 @@ suite('AdeControlServer', () => {
 			{ action: 'session.subordinates', params: {} },
 			{ action: 'session.tree', params: { id: 'gov-1' } },
 			{ action: 'session.tree', params: {} },
-			{ action: 'session.reparent', params: { id: 'sub-1', parentId: 'gov-2', project: '/projects/Beta' } },
+			{ action: 'session.reparent', params: { id: 'sub-1', parentId: 'gov-2', project: betaPath } },
 			{ action: 'session.history', params: { id: 'sub-1', limit: 5 } },
 			{ action: 'session.list', params: { parent: 'gov-1', role: 'worker' } },
 			{ action: 'session.delete', params: { id: 'agent-1' } },
-			{ action: 'project.delete', params: { target: '/projects/Beta', deleteSessions: true, deleteFiles: true } },
+			{ action: 'project.delete', params: { target: betaPath, deleteSessions: true, deleteFiles: true } },
 			{ action: 'secretary.send', params: { prompt: 'Focus Alpha', wait: true } },
 			{ action: 'view.get', params: {} },
 			{ action: 'view.set', params: { inspector: 'changes' } },
-			{ action: 'project.select', params: { target: '/projects/Alpha' } },
-			{ action: 'project.changes', params: { target: '/projects/Alpha' } },
-			{ action: 'project.files', params: { target: '/projects/Alpha', subpath: 'src', depth: 2 } },
-			{ action: 'engine.sessions', params: { engine: 'claude', project: '/projects/Alpha', limit: 10 } },
-			{ action: 'session.attach', params: { engine: 'claude', nativeId: 'nat-1', open: false, project: '/projects/Alpha', role: 'manager' } },
+			{ action: 'project.select', params: { target: alphaPath } },
+			{ action: 'project.changes', params: { target: alphaPath } },
+			{ action: 'project.files', params: { target: alphaPath, subpath: 'src', depth: 2 } },
+			{ action: 'engine.sessions', params: { engine: 'claude', project: alphaPath, limit: 10 } },
+			{ action: 'session.attach', params: { engine: 'claude', nativeId: 'nat-1', open: false, project: alphaPath, role: 'manager' } },
 			{ action: 'secretary.history', params: { limit: 5 } },
 		]);
 	});
 
-	(isWindows ? test.skip : test)('executes aexus-ade engineering and inbox CLI subcommands end-to-end with blueprint file reading and AEXUS_ADE_CALLER forwarding', async () => {
+	test('executes aexus-ade engineering and inbox CLI subcommands end-to-end with blueprint file reading and AEXUS_ADE_CALLER forwarding', async function () {
+		this.timeout(30_000);
 		const dispatched: IAdeControlDispatchRequest[] = [];
 		const server = store.add(new AdeControlServer(async req => {
 			dispatched.push(req);
@@ -441,21 +485,7 @@ suite('AdeControlServer', () => {
 		fs.writeFileSync(sampleBpPath, '# Sample Blueprint\n', 'utf8');
 
 		const repoRoot = path.resolve(FileAccess.asFileUri('').fsPath, '..');
-		const cliBin = path.join(repoRoot, 'extensions', 'aexus-agents', 'bin', 'aexus-ade');
-		const runCli = (args: string[], extraEnv?: Record<string, string>) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-			const child = spawn(cliBin, args, {
-				env: { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath, ...(extraEnv ?? {}) },
-				stdio: ['ignore', 'pipe', 'pipe'],
-			});
-			let stdout = '';
-			let stderr = '';
-			child.stdout.setEncoding('utf8');
-			child.stderr.setEncoding('utf8');
-			child.stdout.on('data', (chunk: string) => { stdout += chunk; });
-			child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-			child.once('error', reject);
-			child.once('close', status => resolve({ status, stdout, stderr }));
-		});
+		const runCli = (args: string[], extraEnv?: Record<string, string>) => spawnBundledAdeCli(repoRoot, args, { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath, ...(extraEnv ?? {}) });
 
 		for (const [args, env] of [
 			[['--json', 'engineering', 'init', '--governor', 'gov-1', '--on-children', 'relocate'], undefined],
@@ -510,7 +540,8 @@ suite('AdeControlServer', () => {
 		});
 	});
 
-	(isWindows ? test.skip : test)('parses free-text prompts, engineering options, and inbox mark-read usage end-to-end', async () => {
+	test('parses free-text prompts, engineering options, and inbox mark-read usage end-to-end', async function () {
+		this.timeout(30_000);
 		const dispatched: IAdeControlDispatchRequest[] = [];
 		const server = store.add(new AdeControlServer(async req => {
 			dispatched.push(req);
@@ -519,22 +550,7 @@ suite('AdeControlServer', () => {
 		await server.whenReady();
 
 		const repoRoot = path.resolve(FileAccess.asFileUri('').fsPath, '..');
-		const cliBin = path.join(repoRoot, 'extensions', 'aexus-agents', 'bin', 'aexus-ade');
-		const runCli = (args: string[], extraEnv?: Record<string, string>) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-			const child = spawn(cliBin, args, {
-				// Clear the caller by default so parent-process state cannot leak into unrelated assertions.
-				env: { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath, AEXUS_ADE_CALLER: '', ...(extraEnv ?? {}) },
-				stdio: ['ignore', 'pipe', 'pipe'],
-			});
-			let stdout = '';
-			let stderr = '';
-			child.stdout.setEncoding('utf8');
-			child.stderr.setEncoding('utf8');
-			child.stdout.on('data', (chunk: string) => { stdout += chunk; });
-			child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-			child.once('error', reject);
-			child.once('close', status => resolve({ status, stdout, stderr }));
-		});
+		const runCli = (args: string[], extraEnv?: Record<string, string>) => spawnBundledAdeCli(repoRoot, args, { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath, AEXUS_ADE_CALLER: '', ...(extraEnv ?? {}) });
 
 		// `--json` after the positional prompt is opaque text, never a global flag.
 		const sendRun = await runCli(['session', 'send', 'sess-1', 'Please', 'explain', '--json', 'output']);

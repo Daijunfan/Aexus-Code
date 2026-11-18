@@ -983,7 +983,9 @@ interface IFakeAdeControlServer {
 async function startFakeAdeControlServer(result: unknown = { ok: true }): Promise<IFakeAdeControlServer> {
 	// Unix socket paths are limited to ~104 bytes on macOS, so keep this outside the longer testRoot path.
 	const socketDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aexus-cli-'));
-	const socketPath = path.join(socketDir, 's.sock');
+	const socketPath = process.platform === 'win32'
+		? `\\\\.\\pipe\\aexus-cli-test-${path.basename(socketDir)}-${process.pid}`
+		: path.join(socketDir, 's.sock');
 	const requests: IAdeControlWireRequest[] = [];
 	const sockets = new Set<net.Socket>();
 	const server = net.createServer(socket => {

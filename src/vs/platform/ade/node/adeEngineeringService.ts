@@ -63,7 +63,8 @@ function sanitizePathSegment(raw: string): string {
 function execGit(cwd: string, args: readonly string[], timeoutMs = 60_000): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise(resolve => {
 		let settled = false;
-		const child = cp.spawn('git', args, {
+		const fullArgs = process.platform === 'win32' ? ['-c', 'core.longpaths=true', ...args] : args;
+		const child = cp.spawn('git', fullArgs, {
 			cwd,
 			windowsHide: true,
 			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
@@ -73,7 +74,11 @@ function execGit(cwd: string, args: readonly string[], timeoutMs = 60_000): Prom
 		const timer = setTimeout(() => {
 			if (!settled) {
 				settled = true;
-				try { child.kill('SIGKILL'); } catch { /* ignore */ }
+				if (process.platform === 'win32' && child.pid) {
+					try { cp.spawn(path.join(process.env['SystemRoot'] || 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch { /* ignore */ }
+				} else {
+					try { child.kill('SIGKILL'); } catch { /* ignore */ }
+				}
 				resolve({ code: 124, stdout, stderr: `${stderr}\nGit command timed out after ${timeoutMs}ms`.trim() });
 			}
 		}, timeoutMs);

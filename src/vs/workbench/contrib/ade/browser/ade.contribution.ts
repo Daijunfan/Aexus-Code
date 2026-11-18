@@ -8,6 +8,7 @@ import { formatAdeAgentSubtreeLines } from './adeControlHandler.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { isMacintosh, isWindows } from '../../../../base/common/platform.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { basename, removeTrailingPathSeparator } from '../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -325,7 +326,7 @@ async function resolveTargetProjectUri(accessor: ServicesAccessor, explicitUri?:
 			})),
 			{
 				label: localize('adeBrowseProjectFolder', "Browse Local Folder..."),
-				description: localize('adeBrowseProjectFolderDesc', "Select another project folder on this Mac"),
+				description: localize('adeBrowseProjectFolderDesc', "Select another local project folder on this machine"),
 				iconClass: ThemeIcon.asClassName(Codicon.folderOpened),
 				browse: 'local',
 			},
@@ -1261,8 +1262,13 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 		} else {
 			lines.push(`- Direct Subordinates: None`);
 		}
+		const cliFallbackHint = isWindows
+			? `%LOCALAPPDATA%\\Programs\\Aexus Code\\bin\\aexus-ade.cmd`
+			: isMacintosh
+				? `/Applications/Aexus Code.app/Contents/Resources/app/bin/aexus-ade`
+				: `/usr/share/aexus-code/bin/aexus-ade`;
 		lines.push(
-			`- Subordinate Control API (\`aexus-ade\`, fallback \`/Applications/Aexus Code.app/Contents/Resources/app/bin/aexus-ade\`):`,
+			`- Subordinate Control API (\`aexus-ade\`, fallback \`${cliFallbackHint}\`):`,
 			`  - List direct subordinates: \`aexus-ade session subordinates ${agent.id} --json\``,
 			`  - View full subtree rooted at you: \`aexus-ade session tree ${agent.id} --json\``,
 			`  - Inspect hierarchy & engines: \`aexus-ade session info ${agent.id} --json\``,

@@ -1293,9 +1293,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (cmd === 'diff' && !argText.trim()) {
 			try {
 				const [statusRes, statRes, diffRes] = await Promise.all([
-					execFileAsync('git', ['status', '--short', '--branch'], { cwd: record.cwd, timeout: 6000 }),
-					execFileAsync('git', ['diff', '--stat'], { cwd: record.cwd, timeout: 6000 }),
-					execFileAsync('git', ['diff', '--no-color'], { cwd: record.cwd, timeout: 6000, maxBuffer: 2 * 1024 * 1024 }),
+					execFileAsync('git', ['status', '--short', '--branch'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
+					execFileAsync('git', ['diff', '--stat'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
+					execFileAsync('git', ['diff', '--no-color'], { cwd: record.cwd, timeout: 6000, maxBuffer: 2 * 1024 * 1024, windowsHide: true }),
 				]);
 				const statusText = statusRes.stdout.trim() || '(clean working tree)';
 				const statText = statRes.stdout.trim();

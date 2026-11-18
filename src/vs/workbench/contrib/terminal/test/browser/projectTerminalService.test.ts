@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { decodeBase64 } from '../../../../../base/common/buffer.js';
 import { Event } from '../../../../../base/common/event.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
@@ -29,7 +30,7 @@ suite('Project terminal targets', () => {
 		services.stub(IProjectNavigationService, ide);
 		const ade = store.add(services.createInstance(AdeProjectsService));
 		services.stub(IAdeProjectsService, ade);
-		return { services, ide, ade, modes: services.get(IWorkbenchModeService), terminals: services.createInstance(ProjectTerminalService) };
+		return { services, ide, ade, modes: services.get(IWorkbenchModeService), terminals: store.add(services.createInstance(ProjectTerminalService)) };
 	}
 
 	test('synchronizes unified workspace project selection across IDE and ADE without retargeting existing launches', () => {
@@ -60,7 +61,7 @@ suite('Project terminal targets', () => {
 		terminals.addSSHProject('cloud-a', '/srv/app', 'API');
 		terminals.addSSHProject('cloud-b', '/srv/app', 'Worker');
 		terminals.addSSHProject('cloud-a', '/srv/app', 'Backend');
-		const restored = services.createInstance(ProjectTerminalService);
+		const restored = store.add(services.createInstance(ProjectTerminalService));
 		const launch = restored.getLaunchConfig(restored.sshProjects[1]);
 		assert.deepStrictEqual({ targets: restored.sshProjects.map(target => ({ name: target.name, host: target.host, path: target.uri.path })), executable: launch.executable, host: launch.hostLabel, title: launch.name, localTransport: URI.isUri(launch.cwd) && launch.cwd.scheme === 'file', remotePty: launch.isRemotePty }, {
 			targets: [{ name: 'Worker', host: 'cloud-b', path: '/srv/app' }, { name: 'Backend', host: 'cloud-a', path: '/srv/app' }], executable: 'ssh', host: 'cloud-a', title: 'Backend · cloud-a', localTransport: true, remotePty: true,
@@ -77,5 +78,21 @@ suite('Project terminal targets', () => {
 		assert.deepStrictEqual({ prefix: Array.isArray(config.args) ? config.args.slice(0, 2) : config.args, host: config.hostLabel, waitOnFailure: config.waitOnExit }, {
 			prefix: ['-F', URI.joinPath(home, '.ssh/clouds').fsPath], host: 'cloud', waitOnFailure: true,
 		});
+	});
+
+	test('encodes Windows SSH project paths via UTF-16LE -EncodedCommand without shell expansion hazards', () => {
+		const { terminals } = setup();
+		const target = terminals.addSSHProject('win-host', '/C:/Users/dev/$FOO %TEMP%/app\'s');
+		const config = terminals.getLaunchConfig(target);
+		const args = Array.isArray(config.args) ? config.args : [];
+		const remoteCmd = args.at(-1) ?? '';
+		assert.ok(remoteCmd.startsWith('powershell -NoLogo -NoExit -EncodedCommand '), `Unexpected remote command: ${remoteCmd}`);
+		const b64 = remoteCmd.slice('powershell -NoLogo -NoExit -EncodedCommand '.length);
+		const decodedBytes = decodeBase64(b64).buffer;
+		let decodedScript = '';
+		for (let i = 0; i < decodedBytes.byteLength; i += 2) {
+			decodedScript += String.fromCharCode(decodedBytes[i] | (decodedBytes[i + 1] << 8));
+		}
+		assert.strictEqual(decodedScript, `Set-Location -LiteralPath 'C:\\Users\\dev\\$FOO %TEMP%\\app''s'`);
 	});
 });

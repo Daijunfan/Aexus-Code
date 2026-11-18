@@ -159,6 +159,7 @@ export function defaultBrowserWindowOptions(accessor: ServicesAccessor, windowSt
 		minHeight: WindowMinimumSize.HEIGHT,
 		title: productService.nameLong,
 		show: isHiddenWindow ? false : (windowState.mode !== WindowMode.Maximized && windowState.mode !== WindowMode.Fullscreen), // reduce flicker by showing later
+		skipTaskbar: isHiddenWindow ? true : undefined,
 		paintWhenInitiallyHidden: isHiddenWindow ? true : undefined,
 		x: windowState.x,
 		y: windowState.y,

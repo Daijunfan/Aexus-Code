@@ -10,13 +10,16 @@ import * as http from 'node:http';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
 	buildAgyRolePromptProtoSuffix,
 	createWsFrameTransformer,
+	escapeWinCmdToken,
 	extractAgyCascadeIdFromProto,
 	injectAgyConnectJsonRolePrompt,
 	injectLlmPayloadSystemPrompt,
 	injectSessionServerSystemField,
+	isPathWithinOrEqual,
 	mergeRolePromptIntoText,
 	observeAgyConnectWsServerMessage,
 	readRoleSyncSnapshotSync,
@@ -88,7 +91,11 @@ function toCwdString(cwd: string | URL | undefined): string | undefined {
 		return undefined;
 	}
 	if (cwd instanceof URL) {
-		return cwd.pathname;
+		try {
+			return fileURLToPath(cwd);
+		} catch {
+			return cwd.pathname;
+		}
 	}
 	return cwd;
 }
@@ -158,8 +165,15 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 	/* eslint-disable local/code-no-sync-fs -- one-time check during extension-host preload initialization */
 	const hasAdeCliBin = fsSync.existsSync(path.join(adeCliBinDir, process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade'));
 	/* eslint-enable local/code-no-sync-fs */
-	if (hasAdeCliBin && process.env.PATH && !process.env.PATH.split(path.delimiter).includes(adeCliBinDir)) {
-		process.env.PATH = `${adeCliBinDir}${path.delimiter}${process.env.PATH}`;
+	if (hasAdeCliBin) {
+		const envPathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH') ?? (process.platform === 'win32' ? 'Path' : 'PATH');
+		const curEnvPath = process.env[envPathKey] ?? '';
+		const alreadyHasDir = curEnvPath
+			.split(path.delimiter)
+			.some(seg => process.platform === 'win32' ? seg.trim().toLowerCase() === adeCliBinDir.toLowerCase() : seg.trim() === adeCliBinDir);
+		if (!alreadyHasDir) {
+			process.env[envPathKey] = curEnvPath ? `${adeCliBinDir}${path.delimiter}${curEnvPath}` : adeCliBinDir;
+		}
 	}
 
 	const cpModule = options?.childProcessModule ?? (require('node:child_process') as typeof cp);
@@ -466,9 +480,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 						return false;
 					}
 					if (cwd && entry.projectPath) {
-						const resolvedCwd = path.resolve(cwd);
-						const resolvedProj = path.resolve(entry.projectPath);
-						return resolvedCwd === resolvedProj || resolvedCwd.startsWith(resolvedProj + path.sep);
+						return isPathWithinOrEqual(cwd, entry.projectPath);
 					}
 					return true;
 				});
@@ -476,9 +488,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			}
 		}
 		if (cwd && candidate.projectPath && snapshot.activeAgentId !== candidate.id && snapshot.selectedAgentId !== candidate.id) {
-			const resolvedCwd = path.resolve(cwd);
-			const resolvedProj = path.resolve(candidate.projectPath);
-			if (resolvedCwd !== resolvedProj && !resolvedCwd.startsWith(resolvedProj + path.sep)) {
+			if (!isPathWithinOrEqual(cwd, candidate.projectPath)) {
 				return undefined;
 			}
 		}
@@ -1528,7 +1538,22 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			}
 		}
 
-		const child = origSpawn.call(cpModule, nextCommand, nextArgs, nextOptions ?? {});
+		let finalSpawnCommand = nextCommand;
+		let finalSpawnArgs = nextArgs;
+		let finalSpawnOptions: cp.SpawnOptions = nextOptions ?? {};
+		if (process.platform === 'win32' && !finalSpawnOptions.shell && /\.(cmd|bat)$/i.test(finalSpawnCommand)) {
+			const comspec = (finalSpawnOptions.env?.ComSpec || process.env.ComSpec || path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'));
+			const innerCmd = [escapeWinCmdToken(finalSpawnCommand, true), ...finalSpawnArgs.map(a => escapeWinCmdToken(a, false))].join(' ');
+			finalSpawnCommand = comspec;
+			finalSpawnArgs = ['/d', '/s', '/c', `"${innerCmd}"`];
+			finalSpawnOptions = {
+				...finalSpawnOptions,
+				windowsHide: finalSpawnOptions.windowsHide ?? true,
+				windowsVerbatimArguments: true,
+			};
+		}
+
+		const child = origSpawn.call(cpModule, finalSpawnCommand, finalSpawnArgs, finalSpawnOptions);
 
 		if (isClaudeStream) {
 			wrapClaudeChild(child, claudeCliSid, claudeInitialPrompt, claudeIsResume, claudeSpawnedAgentId, cwdStr, claudeOverrideEngine);

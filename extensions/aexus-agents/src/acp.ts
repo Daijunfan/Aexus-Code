@@ -1155,13 +1155,18 @@ export class AntigravityRuntime extends AcpRuntime {
 		return Number.isFinite(parsed) && parsed > 946684800000 ? parsed : fallback;
 	}
 
+	private async resolveSqliteExecutable(): Promise<string> {
+		if (process.platform === 'darwin') {
+			return '/usr/bin/sqlite3';
+		}
+		return (await findExecutable('sqlite3')) ?? 'sqlite3';
+	}
+
 	private async listFromSqlite(): Promise<NativeSession[]> {
 		const seen = new Set<string>();
 		const result: NativeSession[] = [];
 		const query = 'SELECT conversation_id, title, preview, last_modified_time, workspace_uris, parent_conversation_id, last_user_input_time FROM conversation_summaries WHERE parent_conversation_id = \'\' AND killed = 0 ORDER BY last_modified_time DESC;';
-		const sqliteBin = process.platform === 'darwin'
-			? '/usr/bin/sqlite3'
-			: (await findExecutable('sqlite3') ?? 'sqlite3');
+		const sqliteBin = await this.resolveSqliteExecutable();
 		for (const home of this.agyHomes()) {
 			const dbPath = path.join(home, 'conversation_summaries.db');
 			try {
@@ -1170,7 +1175,7 @@ export class AntigravityRuntime extends AcpRuntime {
 				continue;
 			}
 			try {
-				const { stdout } = await execFile(sqliteBin, ['-json', dbPath, query]);
+				const { stdout } = await execFile(sqliteBin, ['-json', dbPath, query], { windowsHide: true });
 				if (!stdout.trim()) { continue; }
 				const rows = JSON.parse(stdout) as AgySummaryRow[];
 				for (const row of rows) {
@@ -1180,7 +1185,8 @@ export class AntigravityRuntime extends AcpRuntime {
 					try {
 						const uris = JSON.parse(row.workspace_uris) as string[];
 						if (uris.length > 0) {
-							cwd = vscode.Uri.parse(uris[0]).fsPath || cwd;
+							const rawUri = uris[0];
+							cwd = (/^(?:[a-zA-Z]:[\\/]|\\\\)/.test(rawUri) ? vscode.Uri.file(rawUri) : vscode.Uri.parse(rawUri)).fsPath || cwd;
 						}
 					} catch { /* Keep home directory fallback. */ }
 					const now = Date.now();
@@ -1312,17 +1318,18 @@ export class AntigravityRuntime extends AcpRuntime {
 			await this.resetClient();
 		}
 		this.knownSessions.delete(session.id);
+		const sqliteBin = await this.resolveSqliteExecutable();
 		for (const root of this.agyHomes()) {
 			const convBase = path.join(root, 'conversations', session.id);
 			await Promise.all([
-				fs.rm(`${convBase}.db`, { force: true }),
-				fs.rm(`${convBase}.db-wal`, { force: true }),
-				fs.rm(`${convBase}.db-shm`, { force: true }),
-				fs.rm(path.join(root, 'brain', session.id), { recursive: true, force: true }),
+				fs.rm(`${convBase}.db`, { force: true, maxRetries: 3, retryDelay: 100 }),
+				fs.rm(`${convBase}.db-wal`, { force: true, maxRetries: 3, retryDelay: 100 }),
+				fs.rm(`${convBase}.db-shm`, { force: true, maxRetries: 3, retryDelay: 100 }),
+				fs.rm(path.join(root, 'brain', session.id), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
 			]);
 			const dbPath = path.join(root, 'conversation_summaries.db');
 			if (/^[0-9a-f-]+$/i.test(session.id)) {
-				await execFile('/usr/bin/sqlite3', ['-bail', dbPath, `DELETE FROM conversation_summaries WHERE conversation_id = '${session.id}';`]).catch(() => { });
+				await execFile(sqliteBin, ['-bail', dbPath, `DELETE FROM conversation_summaries WHERE conversation_id = '${session.id}';`], { windowsHide: true }).catch(() => { });
 			}
 			await Promise.all([
 				this.cleanJsonCacheFile(path.join(root, 'cache', 'conversation_metadata.json'), session.id),

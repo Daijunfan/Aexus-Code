@@ -182,6 +182,10 @@ export class DialogMainService implements IDialogMainService {
 	}
 
 	async showSaveDialog(options: electron.SaveDialogOptions, window?: electron.BrowserWindow): Promise<electron.SaveDialogReturnValue> {
+		if (process.env['AEXUS_HIDDEN_WINDOW'] === '1') {
+			this.logService.info('[AEXUS_HIDDEN_WINDOW] Suppressed showSaveDialog');
+			return { canceled: true, filePath: '' };
+		}
 
 		// Prevent duplicates of the same dialog queueing at the same time
 		const fileDialogLock = this.acquireFileDialogLock(options, window);
@@ -224,6 +228,10 @@ export class DialogMainService implements IDialogMainService {
 	}
 
 	async showOpenDialog(options: electron.OpenDialogOptions, window?: electron.BrowserWindow): Promise<electron.OpenDialogReturnValue> {
+		if (process.env['AEXUS_HIDDEN_WINDOW'] === '1') {
+			this.logService.info('[AEXUS_HIDDEN_WINDOW] Suppressed showOpenDialog');
+			return { canceled: true, filePaths: [] };
+		}
 
 		// Ensure the path exists (if provided)
 		if (options.defaultPath) {

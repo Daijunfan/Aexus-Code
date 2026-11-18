@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { encodeBase64, VSBuffer } from '../../../../base/common/buffer.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
@@ -166,26 +167,35 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		return configFile || undefined;
 	}
 
+	private _encodePowerShellUtf16Base64(script: string): string {
+		const bytes = new Uint8Array(script.length * 2);
+		for (let i = 0; i < script.length; i++) {
+			const code = script.charCodeAt(i);
+			bytes[i * 2] = code & 0xff;
+			bytes[i * 2 + 1] = (code >>> 8) & 0xff;
+		}
+		return encodeBase64(VSBuffer.wrap(bytes));
+	}
+
 	private _buildSshLaunchConfig(uri: URI, hostLabel: string, name: string, osKind: AdeCloudHostOs | undefined, configFile: string | undefined): IShellLaunchConfig {
 		let remoteCommand: string;
-		if (osKind === 'windows') {
-			const winPath = toRemoteNativePath(uri.path || '/', 'windows')
-				.replace(/'/g, `''`)
-				.replace(/`/g, '``')
-				.replace(/"/g, '`"')
-				.replace(/\$/g, '`$');
-			remoteCommand = `powershell -NoLogo -NoExit -Command "Set-Location -LiteralPath '${winPath}'"`;
+		const isWindowsTarget = osKind === 'windows' || /^\/[a-zA-Z]:(?:\/|$)/.test(uri.path) || uri.path.startsWith('//');
+		if (isWindowsTarget) {
+			const winPath = toRemoteNativePath(uri.path || '/', 'windows').replace(/'/g, `''`);
+			const encoded = this._encodePowerShellUtf16Base64(`Set-Location -LiteralPath '${winPath}'`);
+			remoteCommand = `powershell -NoLogo -NoExit -EncodedCommand ${encoded}`;
 		} else {
 			// Quote the remote POSIX path without changing its contents or expanding shell expressions.
 			const posixPath = uri.path || '/';
 			const quoted = `'${posixPath.replace(/'/g, `'\\''`)}'`;
 			remoteCommand = `cd -- ${quoted} && exec "\${SHELL:-/bin/sh}" -l`;
 		}
+		const configuredSshExe = this._configuration.getValue<string>('remote.SSH.path')?.trim();
 		return {
 			name,
 			hostLabel,
 			icon: Codicon.remote,
-			executable: 'ssh',
+			executable: configuredSshExe || 'ssh',
 			args: [...(configFile ? ['-F', configFile] : []), '-t', '--', uri.authority, remoteCommand],
 			cwd: this._paths.userHome({ preferLocal: true }),
 			ignoreConfigurationCwd: true,

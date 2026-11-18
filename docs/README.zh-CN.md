@@ -224,25 +224,47 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 
 ### 环境要求
 
-- **操作系统**：macOS（Apple Silicon `arm64` 已完成完整打包、签名与端到端验证）
-- **工具链**：仓库内置 `./scripts/aexus-env.sh` 自动固定兼容的 Node.js（`24.22.1`，与 `.nvmrc` 及 `.build/toolchain` 保持一致）与 `pnpm` 环境，加上 Xcode Command Line Tools、Python 3 与系统 OpenSSH
+- **操作系统**：**全平台跨系统支持** —— **Windows 10/11（`x64` / `arm64`）**、**macOS（`arm64` / `x64`）** 与 **Linux（`x64` / `arm64`）**
+- **工具链**：
+  - **macOS / Linux**：仓库内置 `./scripts/aexus-env.sh` 自动固定兼容的 Node.js（`24.22.1`，与 `.nvmrc` 保持一致）与 `pnpm@12.16.0` 环境，配合 Xcode Command Line Tools / `build-essential`、Python 3、Rust `1.88` 与系统 OpenSSH。
+  - **Windows**：仓库内置 `.\scripts\aexus-env.ps1`（及 `.\scripts\aexus-env.cmd`）固定 Node.js（`24.22.1`）与 `pnpm@12.16.0`，配合 Visual Studio 2022 C++ Build Tools（含 Spectre 库与 Windows 11 SDK）、Python 3（`setuptools`）、Rust `1.88`、Git（`core.longpaths=true`）与系统 OpenSSH。
 
-### 开发运行与独立应用打包
+### 开发运行与独立应用打包（macOS / Linux）
 
 ```bash
 # 1. 安装依赖
 ./scripts/aexus-env.sh pnpm install
 
-# 2. 快速转译构建并启动开发版
+# 2. 快速转译构建并启动开发版（macOS 与 Linux 通用）
 ./scripts/aexus-env.sh pnpm run build-fast
 ./scripts/aexus-env.sh ./scripts/code.sh
 
-# 3. 构建 macOS arm64 独立应用包并安装至 /Applications/Aexus Code.app
+# 3a. 构建 macOS arm64 独立应用包并安装至 /Applications/Aexus Code.app
 ./scripts/aexus-env.sh pnpm run gulp vscode-darwin-arm64
 ./scripts/aexus-install.sh
+
+# 3b. 构建 Linux 独立应用包（输出至 ../VSCode-linux-x64 或 ../VSCode-linux-arm64）
+./scripts/aexus-env.sh pnpm run gulp vscode-linux-x64
 ```
 
-用户配置保存在 `~/Library/Application Support/Aexus Code`，已安装扩展目录为 `~/.aexus-code/extensions`，与原版 VS Code 完全隔离且互不覆盖。
+### 开发运行与独立应用打包（Windows PowerShell）
+
+```powershell
+# 1. 安装依赖并编译原生 Win32 C++ 扩展模块
+.\scripts\aexus-env.ps1 pnpm install
+
+# 2. 快速转译构建并启动开发版
+.\scripts\aexus-env.ps1 pnpm run build-fast
+.\scripts\aexus-env.ps1 .\scripts\code.bat
+
+# 3. 构建 Windows x64 独立应用包并安装至 %LOCALAPPDATA%\Programs\Aexus Code
+.\scripts\aexus-env.ps1 pnpm run gulp vscode-win32-x64
+.\scripts\aexus-install.ps1
+```
+
+`.\scripts\aexus-install.ps1` 支持跨盘符原子暂存同步并后台无弹窗安装至 `%LOCALAPPDATA%\Programs\Aexus Code`，同时自动校验内置全套命令行启动器：`bin\aexus-ade.cmd`、`bin\aexus-ade.ps1`、`bin\aexus-ade`（Git Bash / WSL）与 `bin\aexus-code.cmd`。
+
+**与官方 VS Code 全功能对标**：在 Windows、macOS 与 Linux 三大平台上，Aexus Code 完整保留上游 VS Code 的全部核心能力——Monaco 编辑器内核、IntelliSense / LSP、多根资源管理器、ripgrep 全局搜索、Git 源码管理与并排 Diff、断点调试器、Tasks 任务系统、原生集成终端（Windows ConPTY / macOS & Linux PTY）、Extension Host 与完整扩展 API；用户配置保存在 `~/Library/Application Support/Aexus Code`（macOS）、`%APPDATA%\Aexus Code`（Windows）或 `~/.config/Aexus Code`（Linux），已安装扩展目录为 `~/.aexus-code/extensions`，与原版 VS Code 完全隔离且互不覆盖，仅排除微软限制仅允许在官方闭源构建中运行的专有插件。
 
 ---
 
@@ -257,6 +279,6 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 
 ## 隐私安全与开源许可
 
-- **本地优先与零密钥泄露**：控制面仅监听本地 `0600` Unix Socket；SSH 云主机迁移仅解析别名与公开连接参数，绝不读取、拷贝或存储任何私钥文件内容与口令；本构建已不再打包上游内置 Copilot 扩展、CLI shim、订阅/令牌端点与微软专有 Agent 后台，同时保留通用编辑器、Extension Host、扩展 API 及兼容类型。
+- **本地优先与零密钥泄露**：控制面仅监听本地 `0600` Unix Socket（macOS/Linux）或本机鉴权 Windows Named Pipe（`\\.\pipe\aexus-ade-control-*`）；SSH 云主机迁移仅解析别名与公开连接参数，绝不读取、拷贝或存储任何私钥文件内容与口令；本构建已不再打包上游内置 Copilot 扩展、CLI shim、订阅/令牌端点与微软专有 Agent 后台，同时保留通用编辑器、Extension Host、扩展 API 及兼容类型。
 - **本地 ad-hoc macOS 签名**：构建产物使用本机 ad-hoc 开发签名，适用于开发与自行安装；面向第三方分发 macOS 应用前，仍需另行完成 Apple Developer ID 签名与公证。
 - **开源许可**：本项目基于 Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) 衍生开发，遵循 **[MIT License](../LICENSE.txt)** 开源许可，完整保留上游版权与许可声明。有关品牌图标与公开扩展市场访问的合规说明，详见 [AEXUS.md](../AEXUS.md)。

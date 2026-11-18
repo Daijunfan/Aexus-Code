@@ -602,7 +602,8 @@ async function browseRemoteFolderOnCloudHostWithBack(
 				.sort((a, b) => a.name.localeCompare(b.name));
 
 			const makeDirItem = (sub: IAdeRemoteDirEntry, highlights?: { label?: { start: number; end: number }[] }): BrowseActionItem => {
-				const nextPath = posix.join(parsed.browseDir, sub.name);
+				const joined = posix.join(parsed.browseDir, sub.name);
+				const nextPath = parsed.browseDir.startsWith('//') && !joined.startsWith('//') ? `/${joined}` : joined;
 				const isDriveItem = parsed.isWindowsDriveRoot && /^[A-Za-z]:$/.test(sub.name);
 				return {
 					label: `${sub.name}/`,

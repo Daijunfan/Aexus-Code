@@ -417,9 +417,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				}
 			}
 			if (rawPaths.length === 0) { throw new CliUsageError('Usage: aexus-ade project add <path...> [--name <label>]'); }
-			const paths = rawPaths.map(item => isCloudOrUriSpec(item)
-				? item.trim()
-				: path.resolve(cwd, item.startsWith('~/') ? path.join(os.homedir(), item.slice(2)) : item === '~' ? os.homedir() : item));
+			const paths = rawPaths.map(item => {
+				if (isCloudOrUriSpec(item)) {
+					return item.trim();
+				}
+				const expanded = (item.startsWith('~/') || item.startsWith('~\\'))
+					? path.join(os.homedir(), item.slice(2))
+					: item === '~'
+						? os.homedir()
+						: item;
+				return path.resolve(cwd, expanded);
+			});
 			return { help: false, json, windowId, action: 'project.add', params: customName ? { paths, name: customName } : { paths } };
 		}
 		if (sub === 'select') {

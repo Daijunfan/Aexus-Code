@@ -95,10 +95,32 @@ export function readRoleSyncSnapshotSync(
 }
 /* eslint-enable local/code-no-sync-fs */
 
-function isPathWithinOrEqual(childPath: string, parentPath: string): boolean {
+export function isPathWithinOrEqual(childPath: string, parentPath: string): boolean {
 	const resolvedChild = path.resolve(childPath);
 	const resolvedParent = path.resolve(parentPath);
-	return resolvedChild === resolvedParent || resolvedChild.startsWith(resolvedParent + path.sep);
+	const normChild = process.platform === 'win32' ? resolvedChild.toLowerCase() : resolvedChild;
+	const normParent = process.platform === 'win32' ? resolvedParent.toLowerCase() : resolvedParent;
+	if (normChild === normParent) {
+		return true;
+	}
+	const parentPrefix = normParent.endsWith(path.sep) ? normParent : normParent + path.sep;
+	return normChild.startsWith(parentPrefix);
+}
+
+/**
+ * Escapes a token for Windows `CreateProcess` + `cmd.exe /d /s /c "<innerCmd>"` (`windowsVerbatimArguments: true`).
+ * The executable path (`isCommand = true`) MUST keep plain outer quotes (`"..."`, never `^"`) so `cmd.exe`
+ * treats spaces in install/profile paths (`...\Aexus Code\bin\...`, `C:\Users\First Last\...`) as a single path,
+ * while positional arguments (`isCommand = false`) `^`-escape `cmd.exe` metacharacters (`()%!^"<>&|`).
+ */
+export function escapeWinCmdToken(arg: string, isCommand = false): string {
+	if (isCommand) {
+		return `"${arg.replace(/"/g, '')}"`;
+	}
+	let escaped = arg.replace(/(\\*)"/g, '$1$1\\"');
+	escaped = escaped.replace(/(\\+)$/, '$1$1');
+	escaped = `"${escaped}"`;
+	return escaped.replace(/[()%!^"<>&|]/g, '^$&');
 }
 
 export function resolveActiveEngineAgent(
@@ -501,8 +523,11 @@ function resolveCommandOnPathSync(command: string, envPath: string | undefined):
 	if (!command || path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
 		return command;
 	}
-	const dirs = (envPath ?? '').split(path.delimiter).filter(Boolean);
-	const extensions = process.platform === 'win32' ? ['', '.cmd', '.exe', '.bat'] : [''];
+	const dirs = (envPath ?? '').split(path.delimiter).map(d => d.trim().replace(/^"+|"+$/g, '')).filter(Boolean);
+	const hasExt = /\.(exe|cmd|bat|com|ps1)$/i.test(command);
+	const extensions = process.platform === 'win32'
+		? (hasExt ? [''] : ['.exe', '.cmd', '.bat', '.com', ''])
+		: [''];
 	for (const dir of dirs) {
 		for (const ext of extensions) {
 			const candidate = path.join(dir, command + ext);
@@ -602,6 +627,21 @@ export function resolveDshDirectSpawn(
 			args: ['--require', preloadPath, realCommand, ...args],
 			env: nextEnv,
 		};
+	}
+
+	// Windows npm `.cmd` shim (e.g. `"%dp0%\node_modules\...\cli.js" %*` or `"%~dp0\...\cli.js" %*`)
+	if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(realCommand)) {
+		const cmdJsMatch = head.match(/"%(?:~)?dp0%?\\([^"]+\.(?:c|m)?js)"/i);
+		if (cmdJsMatch) {
+			const jsTarget = path.resolve(path.dirname(realCommand), cmdJsMatch[1].replace(/\\/g, path.sep));
+			if (fs.existsSync(jsTarget)) {
+				return {
+					command: process.execPath,
+					args: ['--require', preloadPath, jsTarget, ...args],
+					env: nextEnv,
+				};
+			}
+		}
 	}
 
 	return undefined;

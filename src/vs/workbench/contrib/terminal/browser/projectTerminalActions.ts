@@ -50,11 +50,18 @@ export function registerProjectTerminalActions(): void {
 			if (!target) {
 				const host = await input.input({ prompt: localize('sshProjectHost', "SSH Host Alias or user@hostname"), validateInput: async value => value.trim() && !/\s/.test(value.trim()) && !value.trim().startsWith('-') ? undefined : localize('sshHostRequired', "Enter an SSH host alias or user@hostname.") });
 				if (!host) { return; }
-				const path = await input.input({ prompt: localize('sshProjectPath', "Absolute Project Folder on the SSH Host"), placeHolder: '/home/user/project', validateInput: async value => value.startsWith('/') ? undefined : localize('sshPathRequired', "Enter an absolute project folder path.") });
+				const path = await input.input({
+					prompt: localize('sshProjectPath', "Absolute Project Folder on the SSH Host"),
+					placeHolder: '/home/user/project or C:\\Users\\user\\project',
+					validateInput: async value => (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\'))
+						? undefined
+						: localize('sshPathRequired', "Enter an absolute project folder path (e.g. /home/user/app or C:\\Users\\user\\app)."),
+				});
 				if (!path) { return; }
-				const name = await input.input({ prompt: localize('sshProjectName', "Project Name"), value: path.split('/').filter(Boolean).at(-1) || host });
+				const normalizedInputPath = /^[a-zA-Z]:[\\/]/.test(path) ? `/${path.replace(/\\/g, '/')}` : path.startsWith('\\\\') ? path.replace(/\\/g, '/') : path;
+				const name = await input.input({ prompt: localize('sshProjectName', "Project Name"), value: normalizedInputPath.split('/').filter(Boolean).at(-1) || host });
 				if (name === undefined) { return; }
-				target = { host: host.trim(), path, name: name.trim() || undefined };
+				target = { host: host.trim(), path: normalizedInputPath, name: name.trim() || undefined };
 			}
 			await launch(service.addSSHProject(target.host, target.path, target.name));
 		}

@@ -224,25 +224,47 @@ aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 
 ### Prerequisites
 
-- **Platform**: macOS (Apple Silicon `arm64` validated end-to-end for standalone packaging, code signing, and runtime verification)
-- **Toolchain**: `./scripts/aexus-env.sh` automatically pins the compatible Node.js (`24.22.1`, matching `.nvmrc` and `.build/toolchain`) and `pnpm` toolchain; requires Xcode Command Line Tools, Python 3, and system OpenSSH
+- **Platforms**: **Cross-Platform** — **Windows 10/11 (`x64` / `arm64`)**, **macOS (`arm64` / `x64`)**, and **Linux (`x64` / `arm64`)**
+- **Toolchain**:
+  - **macOS / Linux**: `./scripts/aexus-env.sh` pins Node.js (`24.22.1`, matching `.nvmrc`) and `pnpm@12.16.0`, plus Xcode Command Line Tools / `build-essential`, Python 3, Rust (`1.88`), and OpenSSH.
+  - **Windows**: `.\scripts\aexus-env.ps1` (or `.\scripts\aexus-env.cmd`) pins Node.js (`24.22.1`) and `pnpm@12.16.0`, plus Visual Studio 2022 C++ Build Tools (Desktop development with C++, Spectre-mitigated libraries, Windows 11 SDK), Python 3 (`setuptools`), Rust (`1.88`), Git (`core.longpaths=true`), and Windows OpenSSH.
 
-### Quick Start
+### Quick Start (macOS / Linux)
 
 ```bash
 # 1. Install dependencies
 ./scripts/aexus-env.sh pnpm install
 
-# 2. Fast transpile build & launch from source
+# 2. Fast transpile build & launch from source (macOS & Linux)
 ./scripts/aexus-env.sh pnpm run build-fast
 ./scripts/aexus-env.sh ./scripts/code.sh
 
-# 3. Package standalone macOS arm64 application & install to /Applications/Aexus Code.app
+# 3a. Package standalone macOS arm64 application & install to /Applications/Aexus Code.app
 ./scripts/aexus-env.sh pnpm run gulp vscode-darwin-arm64
 ./scripts/aexus-install.sh
+
+# 3b. Package standalone Linux application (outputs ../VSCode-linux-x64 or ../VSCode-linux-arm64)
+./scripts/aexus-env.sh pnpm run gulp vscode-linux-x64
 ```
 
-User settings live in `~/Library/Application Support/Aexus Code` and extensions live in `~/.aexus-code/extensions`, cleanly isolated from any existing VS Code installation.
+### Quick Start (Windows PowerShell)
+
+```powershell
+# 1. Install dependencies & compile native Win32 C++ modules
+.\scripts\aexus-env.ps1 pnpm install
+
+# 2. Fast transpile build & launch from source
+.\scripts\aexus-env.ps1 pnpm run build-fast
+.\scripts\aexus-env.ps1 .\scripts\code.bat
+
+# 3. Package standalone Windows x64 application & install to %LOCALAPPDATA%\Programs\Aexus Code
+.\scripts\aexus-env.ps1 pnpm run gulp vscode-win32-x64
+.\scripts\aexus-install.ps1
+```
+
+`.\scripts\aexus-install.ps1` stages and installs the packaged application cleanly to `%LOCALAPPDATA%\Programs\Aexus Code` (including across separate Windows drive volumes) and verifies all bundled CLI launchers: `bin\aexus-ade.cmd`, `bin\aexus-ade.ps1`, `bin\aexus-ade` (Git Bash / WSL), and `bin\aexus-code.cmd`.
+
+**Full VS Code Feature Parity**: Across Windows, macOS, and Linux, Aexus Code retains the complete upstream VS Code feature set — Monaco editor core, IntelliSense/LSP, multi-root Explorer, ripgrep Search, Git Source Control & Diff Editor, Debugger, Tasks, Integrated Terminal (ConPTY on Windows, PTY on macOS/Linux), Extension Host, and Extension API — while cleanly isolating user settings (`~/Library/Application Support/Aexus Code` on macOS, `%APPDATA%\Aexus Code` on Windows, `~/.config/Aexus Code` on Linux) and extensions (`~/.aexus-code/extensions`). Only closed-source Microsoft proprietary plugins that self-restrict to official Microsoft builds are excluded.
 
 ---
 
@@ -257,6 +279,6 @@ User settings live in `~/Library/Application Support/Aexus Code` and extensions 
 
 ## Security, Privacy & License
 
-- **Local-First & Zero Credential Exposure**: Orchestration runs strictly over a `0600` local Unix socket with per-launch token authentication. SSH Cloud Host migration reads only public host aliases and directory metadata — private key contents and passphrases are never copied or stored. Built-in upstream Copilot extensions, CLI shims, token/subscription endpoints, and proprietary agent backends are not bundled in this build; the generic editor, extension host, extension API, and compatible types remain intact.
+- **Local-First & Zero Credential Exposure**: Orchestration runs strictly over a `0600` local Unix socket (macOS/Linux) or authenticated local Windows Named Pipe (`\\.\pipe\aexus-ade-control-*`) with per-launch token authentication. SSH Cloud Host migration reads only public host aliases and directory metadata — private key contents and passphrases are never copied or stored. Built-in upstream Copilot extensions, CLI shims, token/subscription endpoints, and proprietary agent backends are not bundled in this build; the generic editor, extension host, extension API, and compatible types remain intact.
 - **Local Ad-Hoc macOS Signing**: Packaged builds are signed with a local ad-hoc signature for development and self-installation. Apple Developer ID signing and notarization are a separate step and are required before distributing the macOS application to third parties.
 - **License & Attribution**: Derived from Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) and released under the **[MIT License](LICENSE.txt)** with all upstream copyright notices preserved. See [AEXUS.md](AEXUS.md) for icon attribution and Visual Studio Marketplace compliance notes prior to commercial or public binary redistribution.

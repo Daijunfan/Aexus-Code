@@ -29,11 +29,22 @@ for CANDIDATE in \
 	"/Applications/Aexus Code.app/Contents/MacOS/Electron" \
 	"$BIN_DIR/../../../MacOS/Aexus Code" \
 	"$BIN_DIR/../../../MacOS/Electron" \
+	"$BIN_DIR/../../../../../MacOS/Aexus Code" \
+	"$BIN_DIR/../../../../../MacOS/Electron" \
+	"$BIN_DIR/../Aexus Code.exe" \
+	"$BIN_DIR/../../../../../Aexus Code.exe" \
+	"$BIN_DIR/../aexus-code" \
+	"$BIN_DIR/../../../../../aexus-code" \
+	"/usr/share/aexus-code/aexus-code" \
+	"/opt/Aexus Code/aexus-code" \
+	"${LOCALAPPDATA:+$LOCALAPPDATA/Programs/Aexus Code/Aexus Code.exe}" \
 	"$BIN_DIR/../../.build/electron/Aexus Code.app/Contents/MacOS/Aexus Code" \
-	"$BIN_DIR/../../.build/electron/Code - OSS.app/Contents/MacOS/Electron"
+	"$BIN_DIR/../../.build/electron/Code - OSS.app/Contents/MacOS/Electron" \
+	"$BIN_DIR/../../../.build/electron/Aexus Code.exe" \
+	"$BIN_DIR/../../../.build/electron/aexus-code"
 do
-	if [ -x "$CANDIDATE" ]; then
-		ELECTRON_RUN_AS_NODE=1 exec "$CANDIDATE" "$CLI_JS" "$@"
+	if [ -n "$CANDIDATE" ] && [ -x "$CANDIDATE" ]; then
+		VSCODE_DEV= ELECTRON_RUN_AS_NODE=1 exec "$CANDIDATE" "$CLI_JS" "$@"
 	fi
 done
 

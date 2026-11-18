@@ -224,11 +224,14 @@ function toUri(raw: unknown): URI | undefined {
 		}
 		if (/^ssh:\/\/([^/]+)(\/.*)?$/i.test(trimmed)) {
 			const m = /^ssh:\/\/([^/]+)(\/.*)?$/i.exec(trimmed)!;
-			return buildCloudProjectUri(m[1], m[2] || '/');
+			const rawPath = m[2] || '/';
+			return buildCloudProjectUri(m[1], rawPath, /^\/?[a-zA-Z]:[\\/]/.test(rawPath) ? 'windows' : undefined);
 		}
-		if (/^[A-Za-z0-9._@-]{2,}:\/(?!\/)(.*)$/.test(trimmed) && !/^(file|aexus-ssh|vscode-remote|http|https):/i.test(trimmed)) {
+		if (/^[A-Za-z0-9._@-]{2,}:(?:\/(?!\/)|[a-zA-Z]:[\\/])(.*)$/.test(trimmed) && !/^(file|aexus-ssh|vscode-remote|http|https):/i.test(trimmed)) {
 			const colonIdx = trimmed.indexOf(':');
-			return buildCloudProjectUri(trimmed.slice(0, colonIdx), trimmed.slice(colonIdx + 1));
+			const hostPart = trimmed.slice(0, colonIdx);
+			const pathPart = trimmed.slice(colonIdx + 1);
+			return buildCloudProjectUri(hostPart, pathPart, /^\/?[a-zA-Z]:[\\/]/.test(pathPart) ? 'windows' : undefined);
 		}
 		if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed)) {
 			return URI.parse(trimmed);
@@ -923,16 +926,19 @@ export async function executeAdeControlRequest(
 			throw new Error(localize('adeMissingFilePath', "A file path is required."));
 		}
 		const trimmed = rawFile.trim();
-		if (/^[A-Za-z0-9._@-]{2,}:\/(?!\/)(.*)$/.test(trimmed) && !/^(file|aexus-ssh|vscode-remote|http|https):/i.test(trimmed)) {
+		if (/^[A-Za-z0-9._@-]{2,}:(?:\/(?!\/)|[a-zA-Z]:[\\/])(.*)$/.test(trimmed) && !/^(file|aexus-ssh|vscode-remote|http|https):/i.test(trimmed)) {
 			const colonIdx = trimmed.indexOf(':');
-			return buildCloudProjectUri(trimmed.slice(0, colonIdx), trimmed.slice(colonIdx + 1));
+			const hostPart = trimmed.slice(0, colonIdx);
+			const pathPart = trimmed.slice(colonIdx + 1);
+			return buildCloudProjectUri(hostPart, pathPart, /^\/?[a-zA-Z]:[\\/]/.test(pathPart) ? 'windows' : undefined);
 		}
-		if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed)) {
+		if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed) && !/^[a-zA-Z]:[\\/]/.test(trimmed)) {
 			return URI.parse(trimmed);
 		}
-		if (trimmed.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(trimmed)) {
+		if (trimmed.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\')) {
 			if (projectUri.scheme === AEXUS_SSH_SCHEME) {
-				return buildCloudProjectUri(projectUri.authority, trimmed);
+				const inferredOs = (/^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\') || /^\/[a-zA-Z]:\//.test(projectUri.path)) ? 'windows' : undefined;
+				return buildCloudProjectUri(projectUri.authority, trimmed, inferredOs);
 			}
 			return URI.file(trimmed);
 		}
