@@ -183,9 +183,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private activePopoverSegmentId: string | undefined;
 	private activePopoverTab: PopoverTabKind = 'worker';
 	private activeAnchorKind: 'worker' | 'employee' | 'manager' | 'gate' = 'worker';
-	private isPointerInAnchor = false;
-	private isPointerInPopover = false;
-	private popoverCloseTimer: ReturnType<typeof setTimeout> | undefined;
 
 	private nodeDomById = new Map<string, HTMLElement>();
 	private nodeAnchorsById = new Map<string, {
@@ -233,14 +230,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 	}
 
-	override dispose(): void {
-		if (this.popoverCloseTimer !== undefined) {
-			clearTimeout(this.popoverCloseTimer);
-			this.popoverCloseTimer = undefined;
-		}
-		super.dispose();
-	}
-
 	protected createEditor(parent: HTMLElement): void {
 		this.rootEl = append(parent, $('.ade-eng-editor', { tabindex: 0 }));
 		this.toolbarEl = append(this.rootEl, $('.ade-eng-toolbar'));
@@ -272,12 +261,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		// Floating Bottom-Right Canvas Controls HUD
 		this.hudEl = append(this.bodyEl, $('.ade-eng-canvas-hud'));
 
-		// Anchored Floating Option Popover right adjacent to hovered engine / node (NO sidebar drawer!)
+		// Anchored Floating Option Popover right adjacent to right-clicked engine / node (NO sidebar drawer, NO auto-popup on hover!)
 		this.popoverEl = append(this.bodyEl, $('.ade-eng-popover'));
 		this.popoverContentEl = append(this.popoverEl, $('.ade-eng-popover-inner'));
 
 		this.installViewportInteractions();
-		this.installPopoverHoverKeep();
+		this.installPopoverDismissal();
 	}
 
 	private buildSvgMarkers(): void {
@@ -381,46 +370,33 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}, { passive: false }));
 	}
 
-	private installPopoverHoverKeep(): void {
-		this._register(addDisposableListener(this.popoverEl, EventType.MOUSE_ENTER, () => {
-			this.isPointerInPopover = true;
-			this.cancelPopoverClose();
-		}));
-		this._register(addDisposableListener(this.popoverEl, EventType.MOUSE_LEAVE, () => {
-			this.isPointerInPopover = false;
-			this.schedulePopoverCloseIfIdle();
-		}));
-		this._register(addDisposableListener(this.popoverEl, EventType.FOCUS_OUT, () => {
-			setTimeout(() => {
-				if (!this.isPointerInPopover && !this.isPointerInAnchor && !this.isFocusInsidePopover()) {
-					this.schedulePopoverCloseIfIdle();
-				}
-			}, 120);
-		}));
-	}
+	private installPopoverDismissal(): void {
+		this._register(addDisposableListener(this.rootEl, EventType.POINTER_DOWN, (e: PointerEvent) => {
+			if (!this.activePopoverNodeId || e.button !== 0) {
+				return;
+			}
+			const target = e.target as HTMLElement | null;
+			if (target?.closest('.ade-eng-popover')) {
+				return;
+			}
+			this.closePopover();
+		}, true));
 
-	private isFocusInsidePopover(): boolean {
-		const active = getWindow(this.rootEl).document.activeElement;
-		return Boolean(active && this.popoverEl.contains(active) && (
-			active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT'
-		));
-	}
+		this._register(addDisposableListener(this.viewportEl, EventType.CONTEXT_MENU, (e: MouseEvent) => {
+			const target = e.target as HTMLElement | null;
+			if (target?.closest('.ade-eng-node, .ade-eng-segment-header, .ade-eng-popover')) {
+				return;
+			}
+			EventHelper.stop(e, true);
+			this.closePopover();
+		}));
 
-	private cancelPopoverClose(): void {
-		if (this.popoverCloseTimer !== undefined) {
-			clearTimeout(this.popoverCloseTimer);
-			this.popoverCloseTimer = undefined;
-		}
-	}
-
-	private schedulePopoverCloseIfIdle(): void {
-		this.cancelPopoverClose();
-		this.popoverCloseTimer = setTimeout(() => {
-			this.popoverCloseTimer = undefined;
-			if (!this.isPointerInAnchor && !this.isPointerInPopover && !this.isFocusInsidePopover()) {
+		this._register(addDisposableListener(this.rootEl, EventType.KEY_DOWN, (e: KeyboardEvent) => {
+			if (e.key === 'Escape' && this.activePopoverNodeId) {
+				EventHelper.stop(e, true);
 				this.closePopover();
 			}
-		}, 240);
+		}));
 	}
 
 	private openPopoverForTarget(params: {
@@ -429,7 +405,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		readonly tab?: PopoverTabKind;
 		readonly segmentId?: string;
 	}): void {
-		this.cancelPopoverClose();
 		const targetTab: PopoverTabKind = params.tab ?? (params.anchorKind === 'gate' ? 'task' : params.anchorKind);
 		const sameState = this.activePopoverNodeId === params.nodeId
 			&& this.activeAnchorKind === params.anchorKind
@@ -1210,16 +1185,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const header = append(halo, $('button.ade-eng-segment-header', {
 				type: 'button',
 				'data-segment-id': seg.segmentId,
-				title: localize('adeEngManagerHeaderTooltip', "Hover to configure Manager [{0}] · Click to open Manager session", seg.segmentId),
+				title: localize('adeEngManagerHeaderTooltip', "Right-click to configure Manager [{0}] · Click to open Manager session", seg.segmentId),
 			}));
 			this.segmentHeaderDomById.set(seg.segmentId, header);
 			const mgrGlyph = append(header, $('span'));
 			this.applyEngineIconToElement(mgrGlyph, seg.config.engine);
 			append(header, $('span.ade-eng-segment-label', {}, `Mgr [${seg.segmentId}] · ${seg.config.thinking}`));
 
-			this.canvasRenderDisposables.add(addDisposableListener(header, EventType.MOUSE_ENTER, () => {
+			this.canvasRenderDisposables.add(addDisposableListener(header, EventType.CONTEXT_MENU, e => {
+				EventHelper.stop(e, true);
 				if (segNodes[0]) {
-					this.isPointerInAnchor = true;
 					this.openPopoverForTarget({
 						nodeId: segNodes[0].id,
 						anchorKind: 'manager',
@@ -1228,12 +1203,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					});
 				}
 			}));
-			this.canvasRenderDisposables.add(addDisposableListener(header, EventType.MOUSE_LEAVE, () => {
-				this.isPointerInAnchor = false;
-				this.schedulePopoverCloseIfIdle();
-			}));
 			this.canvasRenderDisposables.add(addDisposableListener(header, EventType.CLICK, e => {
 				EventHelper.stop(e, true);
+				this.closePopover();
 				if (this.activeGovernorId && segNodes[0]) {
 					void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, segNodes[0].id, 'manager');
 				}
@@ -1302,26 +1274,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}));
 
 				const innerCore = append(concentric, $('div.ade-eng-inner-core', {
-					title: localize('adeEngWorkerCoreTooltip', "Worker (L4): {0} — Hover for options · Click to open session", node.worker?.engine ?? 'claude-code'),
+					title: localize('adeEngWorkerCoreTooltip', "Worker (L4): {0} — Right-click for options · Click to open session", node.worker?.engine ?? 'claude-code'),
 				}));
 				const workerGlyph = append(innerCore, $('span'));
 				this.applyEngineIconToElement(workerGlyph, node.worker?.engine);
 
 				const empSatellite = append(concentric, $('div.ade-eng-emp-satellite', {
-					title: localize('adeEngEmployeeSatTooltip', "Employee (L3): {0} — Hover for options · Click to open session", node.employee?.engine ?? 'claude-code'),
+					title: localize('adeEngEmployeeSatTooltip', "Employee (L3): {0} — Right-click for options · Click to open session", node.employee?.engine ?? 'claude-code'),
 				}));
 				this.nodeAnchorsById.set(node.id, { worker: concentric, employee: empSatellite });
 				const empGlyph = append(empSatellite, $('span'));
 				this.applyEngineIconToElement(empGlyph, node.employee?.engine);
 
-				// Hovering directly on Employee satellite switches anchored popover to Employee options!
-				this.canvasRenderDisposables.add(addDisposableListener(empSatellite, EventType.MOUSE_ENTER, e => {
-					e.stopPropagation();
-					this.isPointerInAnchor = true;
+				// Right-clicking directly on Employee satellite or Worker core opens the anchored popover at that exact role!
+				this.canvasRenderDisposables.add(addDisposableListener(empSatellite, EventType.CONTEXT_MENU, e => {
+					EventHelper.stop(e, true);
 					this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'employee', tab: 'employee' });
 				}));
-				this.canvasRenderDisposables.add(addDisposableListener(innerCore, EventType.MOUSE_ENTER, () => {
-					this.isPointerInAnchor = true;
+				this.canvasRenderDisposables.add(addDisposableListener(innerCore, EventType.CONTEXT_MENU, e => {
+					EventHelper.stop(e, true);
 					this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'worker', tab: 'worker' });
 				}));
 
@@ -1348,7 +1319,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				append(caption, $('span.ade-eng-node-sub', {}, subMeta));
 			}
 
-			this.installNodeHoverDragAndClick(node, nodeEl);
+			this.installNodeInteractions(node, nodeEl);
 		}
 	}
 
@@ -1457,9 +1428,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}));
 	}
 
-	private installNodeHoverDragAndClick(node: IAdeEngineeringBlueprintNode, nodeEl: HTMLElement): void {
-		this.canvasRenderDisposables.add(addDisposableListener(nodeEl, EventType.MOUSE_ENTER, e => {
-			this.isPointerInAnchor = true;
+	private installNodeInteractions(node: IAdeEngineeringBlueprintNode, nodeEl: HTMLElement): void {
+		this.canvasRenderDisposables.add(addDisposableListener(nodeEl, EventType.CONTEXT_MENU, e => {
+			EventHelper.stop(e, true);
 			const target = e.target as HTMLElement | null;
 			const isEmp = Boolean(target?.closest('.ade-eng-emp-satellite'));
 			if (node.type === 'user_gate') {
@@ -1469,17 +1440,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.openPopoverForTarget({
 					nodeId: node.id,
 					anchorKind: kind,
-					tab: this.activePopoverNodeId === node.id ? this.activePopoverTab : kind,
+					tab: kind,
 				});
 			}
-		}));
-		this.canvasRenderDisposables.add(addDisposableListener(nodeEl, EventType.MOUSE_LEAVE, () => {
-			this.isPointerInAnchor = false;
-			this.schedulePopoverCloseIfIdle();
 		}));
 
 		let dragging = false;
 		let movedBeyondClickThreshold = false;
+		let downClickedEmp = false;
 		let downClientX = 0;
 		let downClientY = 0;
 		let origX = 0;
@@ -1513,6 +1481,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 			dragging = true;
 			movedBeyondClickThreshold = false;
+			downClickedEmp = Boolean(target?.closest('.ade-eng-emp-satellite'));
 			downClientX = e.clientX;
 			downClientY = e.clientY;
 			const liveNode = this.draftBlueprint?.nodes.find(n => n.id === node.id) ?? node;
@@ -1568,13 +1537,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 			const clickedTarget = e.target as HTMLElement | null;
 			if (node.type === 'task' && this.activeGovernorId) {
-				const clickedEmp = Boolean(clickedTarget?.closest('.ade-eng-emp-satellite'));
+				const clickedEmp = downClickedEmp || Boolean(clickedTarget?.closest('.ade-eng-emp-satellite'));
 				void this.engineering.ensureNodeAgentSessionOpen(
 					this.activeGovernorId,
 					node.id,
 					clickedEmp ? 'employee' : 'worker',
 				);
-			} else {
+			} else if (this.snapshot?.state.nodes[node.id]?.phase === 'waiting_user_gate') {
 				this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'gate', tab: 'task' });
 			}
 		};
@@ -1584,7 +1553,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	// =========================================================================
-	// Anchored Floating Engine & Node Option Popover (Adjacent to Hovered Icon)
+	// Anchored Floating Engine & Node Option Popover (Right-Click Adjacent Menu)
 	// =========================================================================
 
 	private renderPopover(): void {
@@ -1659,6 +1628,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		} else {
 			append(header, $('span.ade-eng-lock-pill', {}, localize('adeEngLockedShort', "Locked")));
 		}
+
+		const closeBtn = append(header, $('button.ade-eng-pop-icon-btn.close', {
+			type: 'button',
+			title: localize('adeEngClosePopoverTooltip', "Close"),
+		}));
+		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		this.popoverRenderDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, e => {
+			EventHelper.stop(e, true);
+			this.closePopover();
+		}));
 
 		// 2. User Gate Popover (Compact Gate Options + Direct Approve/Rollback)
 		if (draftNode.type === 'user_gate') {

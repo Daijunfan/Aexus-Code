@@ -31,7 +31,7 @@ import {
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
-import { IConfirmation, IConfirmationResult, IDialogService, IPrompt, IPromptResult } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IConfirmation, IConfirmationResult, IDialogService, IPrompt, IPromptResultWithCancel } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IWorkspaceContextService, IWorkspaceFoldersChangeEvent, toWorkspaceFolder } from '../../../../../platform/workspace/common/workspace.js';
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { EditorInput } from '../../../../common/editor/editorInput.js';
@@ -145,10 +145,10 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		let promptCallCount = 0;
 
 		instantiation.stub(IDialogService, new class extends mock<IDialogService>() {
-			override async prompt<T>(prompt: IPrompt<T>): Promise<IPromptResult<T>> {
+			override async prompt<T>(prompt: IPrompt<T>): Promise<IPromptResultWithCancel<T>> {
 				promptCallCount++;
 				if (nextPromptChoice === undefined) {
-					return { result: undefined };
+					return { result: undefined as unknown as T };
 				}
 				const btn = prompt.buttons?.find(b => {
 					const val = b.run({ checkboxChecked: false });
@@ -208,14 +208,14 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 			loadInbox: async () => [...storedInbox],
 			saveInbox: async items => { storedInbox = [...items]; },
 			captureWorkspaceSnapshot: async (cwd: string): Promise<IAdeWorkspaceSnapshot> => ({
-				workspacePath: cwd,
+				rootPath: cwd,
 				capturedAt: Date.now(),
-				files: {},
+				entries: {},
 			}),
 			computeWorkerTurnChanges: async (): Promise<IAdeWorkerTurnChanges> => ({
+				capturedAt: Date.now(),
 				touchedFiles: [{ relativePath: 'src/auth.ts', kind: 'modified' }],
-				unifiedDiff: simulatedDiffSummary,
-				truncated: false,
+				combinedDiff: simulatedDiffSummary,
 			}),
 			ensureSegmentWorktree: async (govId, projectPath, segmentId) => ({
 				worktree: {
@@ -320,7 +320,7 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 				if (!registered) {
 					throw new Error(`Unregistered command in test: ${id}`);
 				}
-				return instantiation.invokeFunction(registered.handler, ...args) as Promise<T>;
+				return instantiation.invokeFunction(registered.handler, ...args) as unknown as Promise<T>;
 			},
 		};
 		instantiation.stub(ICommandService, baseCommandService);
@@ -755,6 +755,7 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 			title: 'Circuit Broken on N1',
 			message: 'Need human confirmation whether CockroachDB SERIALIZABLE is enabled in prod.',
 		});
+		assert.ok(postRes);
 		assert.strictEqual(postRes.kind, 'governor_message');
 		assert.strictEqual(h.inbox.unreadCount, 1);
 	});
@@ -932,7 +933,7 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.state.nodes.N1.phase, 'employee_review');
 	});
 
-	test('Visual DOM verification: AdeEngineeringEditorPane concentric nodes, pistol cursor, hover drawer, single-click jump, draft lock/confirm & AdeProjectsView Inbox switcher', async () => {
+	test('Visual DOM verification: AdeEngineeringEditorPane concentric nodes, pistol cursor, right-click popover, single-click jump, draft lock/confirm & AdeProjectsView Inbox switcher', async () => {
 		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1100px;height:720px;' }));
 		const sidebarHost = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:300px;height:640px;' }));
 		const inboxStandaloneHost = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:320px;height:520px;' }));
@@ -1022,18 +1023,35 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const portOutRect = n1PortOut.getBoundingClientRect();
 		assert.ok(Math.abs((concRect.top + concRect.height / 2) - (portOutRect.top + portOutRect.height / 2)) <= 1.5, 'Output port Y aligns pixel-perfectly with concentric circle center');
 
-		// 2. Verify Zero-Click Hover automatically opens Anchored Floating Option Popover adjacent to hovered node (NO sidebar drawer!)
+		// 2. Verify right-click (contextmenu) opens the Anchored Floating Option Popover, while hover NEVER auto-opens it (NO sidebar drawer!)
 		const nodeN1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;
 		assert.ok(nodeN1El);
+		const segHeaderEl = host.querySelector('.ade-eng-segment-header') as HTMLElement;
+		assert.ok(segHeaderEl, 'Manager segment header rendered');
 		assert.strictEqual(host.querySelector('.ade-eng-drawer'), null, 'Legacy right-hand sidebar drawer must not exist');
 		const popoverEl = host.querySelector('.ade-eng-popover') as HTMLElement;
 		assert.ok(popoverEl && !popoverEl.classList.contains('open'), 'Floating option popover starts closed');
 
-		nodeN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-		assert.ok(popoverEl.classList.contains('open'), 'Hovering node must open adjacent floating option list with zero clicks');
+		nodeN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+		segHeaderEl.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Hovering a node or Manager segment header must NEVER auto-open the floating option popover');
+
+		nodeN1El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popoverEl.classList.contains('open'), true, 'Right-clicking node must open adjacent floating option list');
 		const popTitleInput = popoverEl.querySelector('input.ade-eng-pop-title-input') as HTMLInputElement;
 		assert.strictEqual(popTitleInput.value, 'Architecture & Core Contracts');
 		assert.strictEqual(popoverEl.querySelectorAll('.ade-eng-engine-opt').length, 8, 'All 8 Coding Agent engine options rendered in adjacent floating menu');
+
+		// 2b. Verify the popover close icon button and Escape both dismiss it
+		const closePopoverBtn = popoverEl.querySelector('.ade-eng-pop-icon-btn.close') as HTMLButtonElement | null;
+		assert.ok(closePopoverBtn, 'Floating option popover exposes a close icon button');
+		closePopoverBtn.click();
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Close icon button must close the floating option popover');
+
+		nodeN1El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popoverEl.classList.contains('open'), true, 'Right-clicking node must re-open the floating option popover');
+		popoverEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Escape key must close the floating option popover');
 
 		// 3. Verify Single Left-Click on Task Node jumps directly to Worker session!
 		h.openedLog.length = 0;
@@ -1068,12 +1086,21 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const runningEdgeEl = host.querySelector('.ade-eng-edge-path.status-running');
 		assert.ok(runningEdgeEl, 'Edge feeding active User Gate U1 renders animated green dashed status-running path');
 
-		// Inspect N1 Popover -> inputs & engine options must be disabled!
-		lockedN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+		// Inspect N1 Popover via right-click -> inputs & engine options must be disabled!
+		lockedN1El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Hovering the completed node must not open the popover');
+		lockedN1El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popoverEl.classList.contains('open'), true, 'Right-clicking the completed node must open its popover');
 		const lockedTitleInput = popoverEl.querySelector('input.ade-eng-input') as HTMLInputElement;
 		assert.strictEqual(lockedTitleInput.disabled, true, 'Completed node configuration inputs must be strictly locked');
 		const lockedEngineBtn = popoverEl.querySelector('button.ade-eng-engine-opt') as HTMLButtonElement;
 		assert.strictEqual(lockedEngineBtn.disabled, true, 'Completed node engine options must be strictly locked');
+
+		// Clicking outside the popover on the canvas viewport must dismiss the open popover cleanly
+		const viewportEl = host.querySelector('.ade-eng-viewport') as HTMLElement;
+		viewportEl.dispatchEvent(new PointerEvent('pointerdown', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
+		viewportEl.dispatchEvent(new PointerEvent('pointerup', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Clicking outside on the canvas must dismiss the open popover');
 
 		// Approve U1 via standalone AdeInboxPanel while holding N2's Worker turn so N2 is actively `worker_running`!
 		const inboxPanel = store.add(new AdeInboxPanel(inboxStandaloneHost, h.inbox, h.engineering, h.instantiation.get(IAdeEditorService)));
@@ -1088,7 +1115,10 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 
 		// Edit running node N2's title in Draft mode and click Confirm -> must trigger IDialogService.confirm!
 		const nodeN2El = host.querySelector('.ade-eng-node[data-node-id="N2"]') as HTMLElement;
-		nodeN2El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+		nodeN2El.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Hovering the running node must not open the popover');
+		nodeN2El.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		assert.strictEqual(popoverEl.classList.contains('open'), true, 'Right-clicking the running node must open its popover');
 		const n2TitleInput = popoverEl.querySelector('input.ade-eng-input') as HTMLInputElement;
 		assert.strictEqual(n2TitleInput.disabled, false);
 		n2TitleInput.value = 'Updated Running Task N2';

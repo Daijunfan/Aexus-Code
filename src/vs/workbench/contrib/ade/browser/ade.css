@@ -1825,7 +1825,7 @@
 	white-space: nowrap;
 }
 
-/* Anchored Floating Option Card right adjacent to hovered engine / node */
+/* Anchored Floating Option Card right adjacent to right-clicked engine / node */
 .monaco-workbench .ade-eng-popover {
 	position: absolute;
 	left: 220px;
@@ -1853,40 +1853,6 @@
 	opacity: 1;
 	transform: translateY(0) scale(1);
 	pointer-events: auto;
-}
-
-/* Invisible hover corridor between node/engine icon and adjacent popover */
-.monaco-workbench .ade-eng-popover.open::before {
-	content: '';
-	position: absolute;
-	top: -8px;
-	bottom: -8px;
-	left: -18px;
-	width: 18px;
-	background: transparent;
-}
-
-.monaco-workbench .ade-eng-popover.open.flipped-left::before {
-	left: auto;
-	right: -18px;
-}
-
-.monaco-workbench .ade-eng-popover.open.placed-below::before {
-	left: 0;
-	right: 0;
-	top: -18px;
-	bottom: auto;
-	width: auto;
-	height: 18px;
-}
-
-.monaco-workbench .ade-eng-popover.open.placed-above::before {
-	left: 0;
-	right: 0;
-	top: auto;
-	bottom: -18px;
-	width: auto;
-	height: 18px;
 }
 
 .monaco-workbench .ade-eng-popover-inner {

@@ -15,6 +15,7 @@ import { Workspace } from '../../../../../platform/workspace/test/common/testWor
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
 import { IProjectNavigationService, ProjectNavigationService } from '../../../files/browser/projectNavigationService.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
+import { AdeProjectsChangeKind } from '../../common/ade.js';
 
 suite('ADE project sessions', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -99,7 +100,7 @@ suite('ADE project sessions', () => {
 		const third = projects.addProject(URI.file('/ade/third'));
 		projects.setDraft(first.id, 'Keep this draft');
 		projects.setDraft(child.id, 'Keep this child draft');
-		const changes: ('order' | void)[] = [];
+		const changes: (AdeProjectsChangeKind | void)[] = [];
 		store.add(projects.onDidChange(change => changes.push(change)));
 		const order = () => projects.agents.filter(agent => !agent.parentId).map(agent => agent.label);
 		const orders: string[][] = [];
