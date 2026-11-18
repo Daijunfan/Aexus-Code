@@ -6,10 +6,12 @@
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { URI } from '../../../../base/common/uri.js';
+import { localize } from '../../../../nls.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { ExtensionIdentifier } from '../../../../platform/extensions/common/extensions.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { Verbosity } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { GroupDirection, IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -23,8 +25,35 @@ import { ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } f
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
 import { AdeCloudHostsEditorInput, AdeCloudHostsEditorPane } from './adeCloudHostsEditorPane.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
-import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
+import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput, AdeSessionWarmupStep, formatAdeAgentLineage } from './adeSessionEditor.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
+
+/**
+ * A {@link ChatEditorInput} for an ADE Agent session that surfaces the session's org-chart
+ * lineage (`Project › Supervisor › Role`) as the editor description and in the tab tooltip.
+ */
+export class AdeLineageChatEditorInput extends ChatEditorInput {
+	private lineageProvider: (() => string | undefined) | undefined;
+
+	setLineageProvider(provider: (() => string | undefined) | undefined): void {
+		this.lineageProvider = provider;
+		this._onDidChangeLabel.fire();
+	}
+
+	refreshLineage(): void {
+		this._onDidChangeLabel.fire();
+	}
+
+	override getDescription(verbosity?: Verbosity): string | undefined {
+		return this.lineageProvider?.() ?? super.getDescription(verbosity);
+	}
+
+	override getTitle(verbosity?: Verbosity): string {
+		const title = super.getTitle(verbosity);
+		const lineage = verbosity === Verbosity.LONG ? this.lineageProvider?.() : undefined;
+		return lineage ? `${title} \u2014 ${lineage}` : title;
+	}
+}
 
 export class AdeEditorService extends Disposable implements IAdeEditorService {
 	declare readonly _serviceBrand: undefined;
@@ -169,6 +198,9 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 					}
 					const agent = this.projects.agents.find(item => item.session?.resource.toString() === sessionKey);
 					editor.setTitleOverride(agent && agent.labelIsCustom !== false ? agent.label : undefined);
+					if (editor instanceof AdeLineageChatEditorInput) {
+						editor.refreshLineage();
+					}
 				}
 			}
 		}
@@ -186,15 +218,78 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		return undefined;
 	}
 
+	private formatLineageForSession(sessionResource: URI): string | undefined {
+		const key = sessionResource.toString();
+		const agent = this.projects.agents.find(item => item.session?.resource.toString() === key);
+		return agent ? formatAdeAgentLineage(this.projects, agent) : undefined;
+	}
+
+	private createAgentChatInput(agent: IAdeAgent & { readonly session: NonNullable<IAdeAgent['session']> }): ChatEditorInput {
+		const resource = agent.session.resource;
+		const input = this.instantiationService.createInstance(AdeLineageChatEditorInput, resource, {
+			title: { preferred: agent.label, override: agent.labelIsCustom !== false ? agent.label : undefined },
+			modelInputState: agent.draft ? { attachments: [], mode: { id: 'agent', kind: ChatModeKind.Agent }, selectedModel: undefined, inputText: agent.draft, selections: [], contrib: {} } : undefined,
+		});
+		input.setLineageProvider(() => this.formatLineageForSession(resource));
+		return input;
+	}
+
+	/**
+	 * Materializes a lazy Agent session while an {@link AdeSessionEditorInput} shows a 3-step
+	 * warm-up stepper. Failures stay visible on that editor with a Retry action instead of being
+	 * swallowed. Returns the warm-up editor's group when it should host the connected chat.
+	 */
+	private async warmUpLazyAgent(agent: IAdeAgent, engineId: string, options?: { side?: boolean }): Promise<{ readonly ok: boolean; readonly group: IEditorGroup }> {
+		const group = this.resolveTargetGroup(options?.side);
+		const warmInput = this.instantiationService.createInstance(AdeSessionEditorInput, agent.id);
+		const engineName = this.sessions.getEngineName?.(engineId) ?? engineId;
+		warmInput.setWarmup({ step: 'spawning', engineName });
+		await this.editorService.openEditor(warmInput, { pinned: true }, group.id);
+		// The editor group may hand back an already-open equivalent input; drive the one that is shown.
+		const shown = group.editors.find((editor): editor is AdeSessionEditorInput => editor instanceof AdeSessionEditorInput && editor.matches(warmInput)) ?? warmInput;
+		if (shown !== warmInput) {
+			shown.setWarmup({ step: 'spawning', engineName });
+			if (!group.editors.includes(warmInput)) {
+				warmInput.dispose();
+			}
+		}
+
+		let step: AdeSessionWarmupStep = 'spawning';
+		try {
+			const targetCwd = agent.workingDirectoryOverride ? URI.file(agent.workingDirectoryOverride) : agent.projectUri;
+			const materialized = await this.sessions.create(engineId, targetCwd);
+			if (!materialized) {
+				throw new Error(localize('adeWarmupNoSession', "{0} did not return a session.", engineName));
+			}
+			step = 'binding';
+			shown.setWarmup({ step, engineName });
+			this.projects.bindSession(agent.id, { engineId: materialized.engineId, resource: materialized.resource });
+			step = 'syncing';
+			shown.setWarmup({ step, engineName });
+			return { ok: true, group };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error ?? '');
+			shown.setWarmup({ step: 'error', failedStep: step, engineName, error: message || undefined }, () => {
+				void this.openAgent(agent.id, options);
+			});
+			return { ok: false, group };
+		}
+	}
+
 	async openAgent(id: string, options?: { side?: boolean }): Promise<void> {
 		let agent = this.projects.getAgent(id);
+		let warmGroup: IEditorGroup | undefined;
 		if (agent && !agent.session && agent.preferredEngineId) {
-			const targetCwd = agent.workingDirectoryOverride ? URI.file(agent.workingDirectoryOverride) : agent.projectUri;
-			const materialized = await this.sessions.create(agent.preferredEngineId, targetCwd).catch(() => undefined);
-			if (materialized) {
-				this.projects.bindSession(agent.id, { engineId: materialized.engineId, resource: materialized.resource });
-				agent = this.projects.getAgent(id);
+			const result = await this.warmUpLazyAgent(agent, agent.preferredEngineId, options);
+			agent = this.projects.getAgent(id);
+			if (!result.ok) {
+				if (agent) {
+					this.projects.selectAgent(id);
+					this.projects.markRead(id);
+				}
+				return;
 			}
+			warmGroup = result.group;
 		}
 		if (agent) {
 			this.projects.selectAgent(id);
@@ -219,11 +314,11 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 			}
 		}
 
-		const targetGroup = this.resolveTargetGroup(options?.side);
-		const input = agent?.session ? this.instantiationService.createInstance(ChatEditorInput, agent.session.resource, {
-			title: { preferred: agent.label, override: agent.labelIsCustom !== false ? agent.label : undefined },
-			modelInputState: agent.draft ? { attachments: [], mode: { id: 'agent', kind: ChatModeKind.Agent }, selectedModel: undefined, inputText: agent.draft, selections: [], contrib: {} } : undefined,
-		}) : this.instantiationService.createInstance(AdeSessionEditorInput, id);
+		const targetGroup = warmGroup ?? this.resolveTargetGroup(options?.side);
+		const session = agent?.session;
+		const input = agent && session
+			? this.createAgentChatInput({ ...agent, session })
+			: this.instantiationService.createInstance(AdeSessionEditorInput, id);
 		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
 		this.updateTitles();
 		if (agent?.session && agent.draft) {
