@@ -287,6 +287,18 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			),
 			mgrShowsSupervisorAndSub: mgrContext?.includes('Supervisor: Platform Lead') && mgrContext?.includes('API Employee'),
 			empShowsSupervisor: empContext?.includes('Role: Employee') && empContext?.includes('Supervisor: Backend Manager'),
+			empHasEmployeeWorkerBoundary: Boolean(
+				empContext?.includes('Employee ≠ Worker')
+				&& empContext?.includes('绝不是 Worker')
+			),
+			empSupervisesWorkerL4: Boolean(
+				empContext?.includes('positioned strictly ABOVE Worker (L4)')
+				&& empContext?.includes('supervise, and review leaf Worker (L4)')
+			),
+			secHasEmployeeWorkerBoundary: Boolean(
+				secContext?.includes('Employee [L3] ≠ Worker [L4]')
+				&& secContext?.includes('`Employee` IS NOT `Worker`')
+			),
 			secHasViewportAndCli: Boolean(
 				secContext?.includes('[Aexus ADE Live Viewport & Macro Control Context]')
 				&& secContext?.includes('Focused Project: Alpha (/projects/Alpha)')
@@ -301,6 +313,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			govHasSubordinateApi: true,
 			mgrShowsSupervisorAndSub: true,
 			empShowsSupervisor: true,
+			empHasEmployeeWorkerBoundary: true,
+			empSupervisesWorkerL4: true,
+			secHasEmployeeWorkerBoundary: true,
 			secHasViewportAndCli: true,
 		});
 	});

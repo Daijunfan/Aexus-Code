@@ -59,6 +59,15 @@ Global Options:
   --json                    Print structured JSON output
   --window <id>             Target a specific workbench window ID
 
+Organizational Ranks (governor [L1] > manager [L2] > employee [L3] > worker [L4] — IMPORTANT: employee != worker):
+  governor  (L1)  Top executive orchestrator; oversees manager/employee/worker and designs Engineering DAG blueprints.
+  manager   (L2)  Module / segment lead overseeing employee & worker; performs segment-level secondary review.
+  employee  (L3)  Orchestrated supervisory & acceptance-review rank ABOVE worker (Employee IS NOT Worker / Employee != Worker):
+                  holds full aexus-ade subordinate control APIs over leaf workers; in Engineering trees, strictly audits
+                  worker diffs & writes incremental node reports (never writes business code itself).
+  worker    (L4)  Lowest pure execution leaf rank BELOW employee: cannot have subordinates and runs with 100% clean
+                  native Coding Agent context (zero ADE role/API prompt injection) to execute actual coding tasks.
+
 Commands:
   status
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
@@ -1628,7 +1637,11 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 	}
 }
 
-if (require.main === module) {
+const isDirectExecution = typeof require !== 'undefined' && typeof module !== 'undefined'
+	? require.main === module
+	: Boolean(process.argv[1] && /(?:^|[\\/])adeCli\.(?:[cm]?ts|[cm]?js)$/.test(process.argv[1]));
+
+if (isDirectExecution) {
 	void runCli(process.argv.slice(2)).then(code => {
 		process.exitCode = code;
 	});

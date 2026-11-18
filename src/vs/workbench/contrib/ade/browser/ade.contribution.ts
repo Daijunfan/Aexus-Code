@@ -466,14 +466,14 @@ function buildAllRolePickItems(): IRolePickItem[] {
 		},
 		{
 			label: localize('rolePickEmployee', "Employee"),
-			description: localize('rolePickEmployeeRankDesc', "L3 Staff Rank · Specialist contributor (manages leaf Worker)"),
+			description: localize('rolePickEmployeeRankDesc', "L3 Supervisory & Review Rank (NOT Worker) · Orchestrates & reviews leaf Worker (L4)"),
 			iconClass: ThemeIcon.asClassName(Codicon.account),
 			role: 'employee',
 			rank: 'employee',
 		},
 		{
 			label: localize('rolePickWorker', "Worker"),
-			description: localize('rolePickWorkerRankDesc', "L4 Lowest Rank · Pure native Coding Agent (100% clean context, no role injection)"),
+			description: localize('rolePickWorkerRankDesc', "L4 Lowest Pure Execution Rank (below Employee) · 100% clean native Coding Agent context, no subordinates"),
 			iconClass: ThemeIcon.asClassName(Codicon.terminal),
 			role: undefined,
 			rank: 'worker',
@@ -1111,7 +1111,7 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 		if (rank === 'worker') {
 			await clipboard.writeText([
 				`[Aexus Session Info]`,
-				`- Role: Worker (Lowest Rank · Clean Native Context)`,
+				`- Role: Worker (L4 Lowest Pure Execution Rank · Below Employee [L3], NOT Employee · 100% Clean Native Context)`,
 				`- Session: ${agent.label} (id: ${agent.id})`,
 				`- Project: ${projects.getProjectName(agent.projectUri)} (${agent.projectUri.fsPath})`,
 			].join('\n'));
@@ -1121,6 +1121,7 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 		const lines = [
 			`[Aexus Orchestrated Role Context]`,
 			`- Role: ${rankLabel}`,
+			`- Rank Rule: Governor (L1) > Manager (L2) > Employee (L3) > Worker (L4) — Employee (L3) IS NOT Worker (L4)! Employee is an orchestrated supervisory/review rank above pure leaf Worker.`,
 			`- Session: ${agent.label} (id: ${agent.id})`,
 			`- Project: ${projects.getProjectName(agent.projectUri)} (${agent.projectUri.fsPath})`,
 		];

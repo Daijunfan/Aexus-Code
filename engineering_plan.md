@@ -34,12 +34,12 @@ AEXUS CODE — ADE ENGINEERING 核心功能开发蓝图（纯文本规范版）
   (a) 本段链路的“收尾节点”或标记为“Critical（关键卡点）”的节点通过 Employee 初审后，唤醒 Manager 执行关键链路二次验收；
   (b) 某节点连续 3 次未通过 Employee 单点验收时，唤醒 Manager 清空重试状态并给出指导意见，赋予下级第 4 次机会；
   (c) Watchdog 监测到下属活跃 Worker 超时无流式输出时，唤醒 Manager 接收异常告警并唤醒/处置 Worker。
-- Employee (L3，单节点验收负责人)：
-  对应 DAG 画布上的每一个任务节点。严禁亲自编写业务代码！在节点启动派发阶段保持休眠（由系统直接把静态提示词与上游汇报推给 Worker，避免无意义的派发 Token 消耗）。仅在所属 Worker 执行回合结束（turn-complete）后被唤醒，执行两项专属职责：
+- Employee (L3，单节点验收负责人 —— 注意：Employee 绝不是 Worker！Employee [L3] ≠ Worker [L4])：
+  对应 DAG 画布上的每一个任务节点，属于 L3 编排管理与验收层，严禁与底层执行者 Worker (L4) 混淆，也严禁亲自编写业务代码！在节点启动派发阶段保持休眠（由系统直接把静态提示词与上游汇报推给 Worker，避免无意义的派发 Token 消耗）。仅在所属 Worker 执行回合结束（turn-complete）后被唤醒，执行两项专属职责：
   (a) 依据节点验收标准与 Git Diff 检查 Worker 实现是否正确；
   (b) 若实现正确，由 Employee 负责总结当前 Worker 的代码改动，撰写本节点的简短工作汇报并提交给系统续接到递增汇报链中（以此保证 Worker 100% 纯净）。
-- Worker (L4，纯净执行主力)：
-  一对一挂载在每个 Employee 节点内部，负责全部真实编码、调试与构建工作，上下文 100% 保持对应 Coding Agent 引擎原生状态。
+- Worker (L4，底层纯净执行主力 —— 位于 Employee [L3] 之下，不等同于 Employee)：
+  一对一挂载在每个 Employee 节点内部（或在自由会话中作为最底层无编排纯执行叶子节点），不注入任何编排提示词或 aexus-ade API，不可向下挂载子会话，负责全部真实编码、调试与构建工作，上下文 100% 保持对应 Coding Agent 引擎原生状态。
 
 2.3 Manager 管辖链路 100% 全自动切分算法
 - 系统根据 DAG 连线拓扑 100% 自动计算并生成 Manager 分段，不允许人工重叠指派。

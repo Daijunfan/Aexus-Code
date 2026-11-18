@@ -96,15 +96,15 @@ function formatRoleTitle(rank: AdeSessionRank): string {
 function formatRoleCharterDescription(rank: AdeSessionRank): string {
 	switch (rank) {
 		case 'governor':
-			return 'L1 Top Rank / 最高管理职级（Governor · 项目总负责人）：You are the project-level executive orchestrator in Aexus Code ADE, overseeing Manager, Employee, and Worker subordinates.';
+			return 'L1 Top Rank / 最高管理职级（Governor · 项目总负责人）：You are the top-level executive orchestrator in Aexus Code ADE, overseeing Manager (L2), Employee (L3), and Worker (L4) subordinates.';
 		case 'manager':
-			return 'L2 Lead Rank / 中层管理职级（Manager · 领域与模块主管）：You are a mid-level team lead in Aexus Code ADE, coordinating Employee and Worker subordinates and reporting to your supervisor (if assigned).';
+			return 'L2 Lead Rank / 中层管理职级（Manager · 链路与模块主管）：You are a mid-level team lead in Aexus Code ADE, coordinating Employee (L3) and Worker (L4) subordinates and reporting to your supervisor (if assigned).';
 		case 'employee':
-			return 'L3 Staff Rank / 骨干员工职级（Employee · 专业研发角色）：You are an orchestrated staff contributor in Aexus Code ADE who executes tasks and may supervise leaf Worker sessions.';
+			return 'L3 Supervisory & Review Rank / 骨干员工职级（Employee · 基层管理与单节点验收负责人 —— 绝不是 Worker！Employee ≠ Worker）：You are an L3 orchestrated supervisor and reviewer positioned strictly ABOVE Worker (L4). You are NOT a Worker: you hold full ADE Subordinate Control API authority to spawn, dispatch, supervise, and review leaf Worker (L4) sessions rather than acting as a rankless pure executor.';
 		case 'subordinate':
-			return 'Orchestrated Member / 编排成员角色（Subordinate）：You are an orchestrated member session in Aexus Code ADE.';
+			return 'Orchestrated Member / 编排成员角色（Subordinate · L3 同级编排角色，非底层 Worker）：You are an orchestrated member session in Aexus Code ADE positioned above leaf Worker (L4).';
 		case 'worker':
-			return 'L4 Lowest Rank (Worker).';
+			return 'L4 Lowest Pure Execution Rank / 底层纯净执行职级（Worker · 纯执行主力，位于 Employee [L3] 之下，不等同于 Employee）。';
 	}
 }
 
@@ -428,6 +428,9 @@ export function buildAdeAgentRoleContext(
 		`- Session: ${agent.label} (id: ${agent.id})`,
 		`- Engine: ${ownEngineName} (${agent.session?.engineId ?? 'draft'})`,
 		`- Project: ${projects.getProjectName(agent.projectUri)} (${agent.projectUri.fsPath})`,
+		'- Four-Tier ADE Rank Hierarchy (CRITICAL RULE — `Employee` IS NOT `Worker` / `Employee [L3] ≠ Worker [L4]`):',
+		'  - `Governor` (L1 · 项目总负责人) > `Manager` (L2 · 链路/模块主管) > `Employee` (L3 · 骨干员工：基层管理与验收负责人) > `Worker` (L4 · 底层纯净执行主力).',
+		'  - **`Employee` 绝不是 `Worker` (`Employee ≠ Worker`)**: `Employee (L3)` belongs to the orchestrated management/review tier (L1–L3), receives `aexus-ade` Subordinate Control APIs, and supervises/reviews leaf `Worker (L4)` sessions; `Worker (L4)` is the lowest un-orchestrated execution leaf (`--role worker`) with zero role/API injection and no subordinates. NEVER conflate `Employee` with `Worker` or refer to an `Employee` session as a `Worker`!',
 	];
 	if (supervisor) {
 		lines.push(`- Supervisor: ${supervisor.label} (id: ${supervisor.id}, role: ${formatRoleTitle(resolveAdeAgentRank(supervisor, true))})`);
@@ -471,7 +474,7 @@ export function buildAdeAgentRoleContext(
 		} else if (effectiveRole === 'employee') {
 			lines.push(
 				`- Engineering Single-Node Reviewer (L3) Charter (Node \`${agent.treeNodeId ?? 'task'}\`):`,
-				'  - **STRICT PROHIBITION**: NEVER write or edit business code yourself! Your Worker (L4) executes all coding with 100% pure native context.',
+				'  - **CRITICAL ROLE BOUNDARY (`Employee ≠ Worker`)**: You are **Employee (L3 · Single-Node Acceptance Reviewer)**, NOT **Worker (L4 · Pure Executor)**! **STRICT PROHIBITION**: NEVER write or edit business code yourself — your subordinate Worker (L4) executes all coding with 100% pure native context.',
 				'  - Woken ONLY after your Worker completes a turn: audit Acceptance Criteria + single-Worker Git Diff, then submit review & concise node report:',
 				`  - Approve & Submit Report: \`aexus-ade engineering review --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'} --role employee --verdict pass --report "<concise summary>"\``,
 				`  - Internal Reject (reuses original Worker, not a formal failure): \`aexus-ade engineering review --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'} --role employee --verdict reject --feedback "<fix instructions>"\``,
@@ -636,6 +639,12 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			inboxBlock,
 			'- Live ADE Session Hierarchy:',
 			hierarchyBlock,
+			'- Four-Tier Organizational Rank System (CRITICAL DISTINCTION: `Employee` IS NOT `Worker` / `Employee [L3] ≠ Worker [L4]`):',
+			'  - Strict Rank Order: `governor` (L1) > `manager` (L2) > `employee` (L3) > `worker` (L4).',
+			'  - `governor` (L1 · 项目总负责人): Top executive orchestrator; oversees `manager`/`employee`/`worker` and owns Engineering `blueprint.md` DAG topology.',
+			'  - `manager` (L2 · 链路/模块主管): Mid-level lead overseeing `employee` & `worker`; owns maximal non-branching DAG segments in Engineering.',
+			'  - `employee` (L3 · 骨干员工/基层管理与单节点验收官 —— **绝不是 `worker`！`employee ≠ worker`**): Orchestrated L3 rank strictly ABOVE `worker (L4)`; holds `aexus-ade` Subordinate Control APIs to spawn/dispatch/supervise `worker` sessions, and in Engineering trees strictly reviews `worker` Git Diffs & writes node reports without writing business code itself.',
+			'  - `worker` (L4 · 底层纯净执行主力 —— **不等同于 `employee`**): Lowest leaf execution rank (`--role worker`); cannot have subordinates, receives ZERO ADE role/API prompt injection (100% pure native Coding Agent context), and performs actual coding/debugging/building.',
 			'- Complete ADE Macro Control CLI (`aexus-ade` is directly on your PATH; pass `--json` for structured output):',
 			'  - Viewport & Inspector: `aexus-ade status --json` | `aexus-ade view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh] --json`',
 			'  - Projects & Git/Files Inspector: `aexus-ade project list` | `aexus-ade project add <path...> [--name <label>]` | `aexus-ade project select <target>` | `aexus-ade project remove <target>` | `aexus-ade project delete <target> [--sessions] [--files] [--permanent]` | `aexus-ade project focus <target>` | `aexus-ade project home` | `aexus-ade project forward` | `aexus-ade project move <source> (--before <target> | --after <target>)` | `aexus-ade project changes [target]` | `aexus-ade project files [target] [--path <subpath>] [--depth <n>]` | `aexus-ade project open-file <file> [--project <target>] [--side]` | `aexus-ade project open-diff <file> [--project <target>]`',

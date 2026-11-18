@@ -12,6 +12,17 @@ ADE uses the standard VS Code chat editor with installed Coding Agent CLIs, reta
 
 ADE distinguishes **Remove from Sidebar** (detaches the sidebar entry without touching engine storage) from **Delete Permanently** (invokes the engine runtime's `delete` implementation to wipe the underlying native session history). Built-in `aexus-ade` CLI (`bin/aexus-ade` -> `dist/adeCli.js`) is automatically prepended to `PATH` for engine subprocesses and integrated terminals.
 
+## Organizational Rank Hierarchy (`Employee [L3] ≠ Worker [L4]`)
+
+ADE enforces a strict four-tier rank hierarchy (`Governor [L1] > Manager [L2] > Employee [L3] > Worker [L4]`):
+
+- **Governor (`L1`)**: Project-level executive orchestrator; oversees `Manager`, `Employee`, and `Worker` subordinates and authors `blueprint.md` Engineering DAG topologies.
+- **Manager (`L2`)**: Module / segment lead overseeing `Employee` and `Worker` subordinates; performs segment-level secondary verification and Watchdog recovery.
+- **Employee (`L3` — NOT `Worker` / `Employee ≠ Worker`)**: Orchestrated supervisory and acceptance-review rank positioned strictly **above** `Worker (L4)`. `Employee` holds full `aexus-ade` Subordinate Control APIs to spawn, dispatch, and review leaf `Worker` sessions (and in ADE Engineering trees strictly audits `Worker` diffs and writes incremental node reports without writing business code itself).
+- **Worker (`L4` — Pure Execution Leaf)**: Lowest leaf rank positioned **below** `Employee (L3)`. Cannot spawn subordinates and receives zero ADE role/API prompt injection, preserving 100% clean native Coding Agent context for actual code implementation, debugging, and builds.
+
+Orchestrated sessions (`Governor`, `Manager`, `Employee`, and global `Secretary`) perform a brief input-locked initialization upon creation to internalize their rank charter and `aexus-ade` API documentation before the user's first message.
+
 Engine-created child conversations appear beneath their actual parent session. Codex and Kilo report new children during a request; startup, completed requests, and the Refresh action also discover persisted children. Removing a child shortcut hides it from subsequent discovery until it is explicitly attached again. Custom ADE names apply to the tree and editor tabs without renaming the engine's native conversation.
 
 Open child views receive updated native history when their parent finishes work or the projects are refreshed. Native message IDs keep these updates stable, and the workbench retains unsent drafts. Permission and question prompts identify their engine and project directory.

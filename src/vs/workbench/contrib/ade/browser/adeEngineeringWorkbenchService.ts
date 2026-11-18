@@ -1686,8 +1686,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 
 		const reviewPrompt = [
 			`# Engineering Single-Node Review — [${node.id}] ${node.title}`,
-			`You are the **Employee (L3 · Single-Node Acceptance Reviewer)** for task node \`${node.id}\` in Engineering tree \`${entry.governorSessionId}\`.`,
-			'**STRICT RULE**: NEVER write or modify business code yourself! Your sole responsibility is to audit your Worker\'s implementation against the Acceptance Criteria and submit your verdict via `aexus-ade`.',
+			`You are the **Employee (L3 · Single-Node Acceptance Reviewer — NOT Worker [L4])** for task node \`${node.id}\` in Engineering tree \`${entry.governorSessionId}\`.`,
+			'**STRICT ROLE BOUNDARY (`Employee ≠ Worker`)**: You are `Employee (L3)`, NOT `Worker (L4)`! NEVER write or modify business code yourself — your subordinate `Worker (L4)` executes all coding, while your sole responsibility is to audit your Worker\'s implementation against the Acceptance Criteria and submit your verdict & node report via `aexus-ade`.',
 			...(entry.blueprint.metadata.workspaceIsolation !== 'worktree'
 				? ['**Shared-Workspace Concurrency Rule**: Parallel DAG nodes may create or modify unrelated files in this shared repository simultaneously. Evaluate ONLY the files and behavior belonging to `' + node.id + '` — NEVER reject or ask your Worker to delete unrelated files created by parallel nodes!']
 				: []),
