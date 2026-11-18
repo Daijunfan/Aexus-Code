@@ -366,6 +366,30 @@ export interface IAdeEngineeringTreeSummary {
 
 export type AdeInboxItemKind = 'governor_message' | 'user_gate';
 
+/**
+ * Triage severity of an ADE Inbox item.
+ * - `critical`: RED Circuit-Breaker trips and other run-halting escalations.
+ * - `gate`: User Acceptance Gates awaiting a human decision.
+ * - `info`: ordinary Governor updates.
+ */
+export type AdeInboxSeverity = 'critical' | 'gate' | 'info';
+
+const ADE_INBOX_CIRCUIT_PATTERN = /circuit/i;
+
+/**
+ * Resolves the effective triage severity of an inbox item. Items persisted before
+ * `severity` existed fall back to a `/circuit/i` title heuristic.
+ */
+export function resolveAdeInboxSeverity(item: Pick<IAdeInboxItem, 'kind' | 'title' | 'severity'>): AdeInboxSeverity {
+	if (item.severity) {
+		return item.severity;
+	}
+	if (item.kind === 'user_gate') {
+		return 'gate';
+	}
+	return ADE_INBOX_CIRCUIT_PATTERN.test(item.title) ? 'critical' : 'info';
+}
+
 export interface IAdeInboxItem {
 	readonly id: string;
 	readonly kind: AdeInboxItemKind;
@@ -385,6 +409,8 @@ export interface IAdeInboxItem {
 	readonly resolution?: string;
 	readonly createdAt: number;
 	readonly resolvedAt?: number;
+	/** Optional triage severity; see {@link resolveAdeInboxSeverity} for the legacy fallback. */
+	readonly severity?: AdeInboxSeverity;
 }
 
 export interface IAdeWorkspaceFileSnapshotEntry {
@@ -556,6 +582,7 @@ export interface IAdeInboxService {
 		readonly message: string;
 		readonly title?: string;
 		readonly nodeId?: string;
+		readonly severity?: AdeInboxSeverity;
 	}): Promise<IAdeInboxItem>;
 	upsertUserGateTodo(params: {
 		readonly governorSessionId: string;
@@ -566,6 +593,11 @@ export interface IAdeInboxService {
 		readonly upstreamSummary: string;
 		readonly rollbackCandidates: readonly { readonly id: string; readonly title: string }[];
 	}): Promise<IAdeInboxItem>;
+	/**
+	 * Records that a RED Circuit-Breaker tripped on `nodeId`, so the Governor's next
+	 * escalation for it is triaged as `critical`.
+	 */
+	noteCircuitBreakerTrip?(governorSessionId: string, nodeId: string): void;
 	markRead(id?: string): Promise<void>;
 	resolveItem(id: string, resolution?: string): Promise<IAdeInboxItem | undefined>;
 	removeItemsForGovernor(governorSessionId: string): Promise<void>;

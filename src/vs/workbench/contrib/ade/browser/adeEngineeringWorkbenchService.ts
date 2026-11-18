@@ -13,6 +13,7 @@ import { localize } from '../../../../nls.js';
 import {
 	ADE_WATCHDOG_TIMEOUT_CONFIG_KEY,
 	AdeEngineeringRunStatus,
+	AdeInboxSeverity,
 	AdeThinkingLevel,
 	AdeWorkTreeType,
 	DEFAULT_WATCHDOG_TIMEOUT_MINUTES,
@@ -47,6 +48,7 @@ import {
 	accumulateTokenUsage,
 	createEmptyNodeRoleTokenBreakdown,
 	createEmptyTreeTokenUsageSummary,
+	resolveAdeInboxSeverity,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
 	AdeBlueprintValidationError,
@@ -213,6 +215,8 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 
 	private readonly _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange = this._onDidChange.event;
+	/** Governor session id -> node id of an un-escalated RED Circuit-Breaker trip. */
+	private readonly circuitBreakerTrips = new Map<string, string>();
 
 	constructor(
 		@IInstantiationService instantiationService: IInstantiationService,
@@ -237,6 +241,10 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 
 	get items(): readonly IAdeInboxItem[] {
 		return this._items;
+	}
+
+	noteCircuitBreakerTrip(governorSessionId: string, nodeId: string): void {
+		this.circuitBreakerTrips.set(governorSessionId, nodeId);
 	}
 
 	get unreadCount(): number {
@@ -264,10 +272,19 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 		readonly message: string;
 		readonly title?: string;
 		readonly nodeId?: string;
+		readonly severity?: AdeInboxSeverity;
 	}): Promise<IAdeInboxItem> {
 		await this._readyPromise;
 		const gov = this.projects.getAgent(params.governorSessionId);
 		const projectUri = gov?.projectUri;
+		const title = params.title?.trim() || localize('adeInboxGovernorMsgDefaultTitle', "Governor Escalation — Human Decision Needed");
+		const trippedNodeId = this.circuitBreakerTrips.get(params.governorSessionId);
+		const escalatesTrip = trippedNodeId !== undefined && (!params.nodeId || params.nodeId === trippedNodeId);
+		if (escalatesTrip) {
+			this.circuitBreakerTrips.delete(params.governorSessionId);
+		}
+		const severity: AdeInboxSeverity = params.severity
+			?? (escalatesTrip ? 'critical' : resolveAdeInboxSeverity({ kind: 'governor_message', title }));
 		const item: IAdeInboxItem = {
 			id: generateUuid(),
 			kind: 'governor_message',
@@ -277,11 +294,12 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 			projectPath: projectUri?.fsPath ?? '',
 			projectName: projectUri ? this.projects.getProjectName(projectUri) : '',
 			...(params.nodeId ? { nodeId: params.nodeId } : {}),
-			title: params.title?.trim() || localize('adeInboxGovernorMsgDefaultTitle', "Governor Escalation — Human Decision Needed"),
+			title,
 			message: params.message.trim(),
 			unread: true,
 			resolved: false,
 			createdAt: Date.now(),
+			severity,
 		};
 		this._items = [item, ...this._items];
 		await this.backend.saveInbox(this._items);
@@ -325,6 +343,7 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 			unread: true,
 			resolved: false,
 			createdAt: Date.now(),
+			severity: 'gate',
 		};
 
 		if (existingIdx >= 0) {
@@ -1780,6 +1799,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 							governorSessionId: entry.governorSessionId,
 							title: localize('adeEngMergeConflictInboxTitle', "Git Worktree Final Merge Conflict"),
 							message: `${mergeRes.conflictedFiles.join(', ')}\n\n${mergeRes.summary}`,
+							severity: 'critical',
 						}).catch(() => undefined);
 						await this.persistEntry(entry);
 						return;
@@ -2611,6 +2631,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				detail: `3rd formal failure (RED): ${mgrFeedback}`,
 			});
 			await this.persistEntry(entry);
+			this.inbox.noteCircuitBreakerTrip?.(entry.governorSessionId, node.id);
 			await this.wakeGovernorOnCircuitBreaker(entry, node, seg, mgrFeedback);
 			return this.buildSnapshot(entry);
 		}

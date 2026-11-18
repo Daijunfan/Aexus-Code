@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { asCSSUrl } from '../../../../base/browser/cssValue.js';
-import { $, addDisposableListener, append, EventHelper, EventType } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, EventHelper, EventType } from '../../../../base/browser/dom.js';
 import { CountBadge } from '../../../../base/browser/ui/countBadge/countBadge.js';
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { RenderIndentGuides } from '../../../../base/browser/ui/tree/abstractTree.js';
@@ -49,10 +49,11 @@ import { createFileIconThemableTreeContainerScope, IResourceLabel, ResourceLabel
 import { API_OPEN_DIFF_EDITOR_COMMAND_ID, API_OPEN_EDITOR_COMMAND_ID } from '../../../browser/parts/editor/editorCommands.js';
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IViewDescriptorService } from '../../../common/views.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ISCMRepository, ISCMResource, ISCMResourceGroup, ISCMService } from '../../scm/common/scm.js';
-import { IAdeEditorService, IAdeProject, IAdeProjectsService } from '../common/ade.js';
+import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_FILES_VIEW_ID, IAdeEditorService, IAdeProject, IAdeProjectsService } from '../common/ade.js';
 import { AdeFileActions } from './adeFileActions.js';
 
 export function findProjectScmRepository(scmService: ISCMService, uriIdentityService: IUriIdentityService, projectUri: URI): ISCMRepository | undefined {
@@ -105,6 +106,64 @@ export async function openScmResourceInAde(adeEditors: IAdeEditorService, resour
 	await adeEditors.openFile(resource.sourceUri, projectUri, options);
 }
 
+/** Git status letter shown as a decoration pill on each changed file. */
+export type AdeChangeLetter = 'A' | 'M' | 'D' | 'R' | 'U' | 'C';
+
+const ADE_CHANGE_LETTER_PATTERNS: readonly [RegExp, AdeChangeLetter][] = [
+	[/conflict/i, 'C'],
+	[/untracked/i, 'U'],
+	[/renamed|copied/i, 'R'],
+	[/deleted/i, 'D'],
+	[/added/i, 'A'],
+	[/modified|changed/i, 'M'],
+];
+
+/** Derives the status letter for a local SCM resource from its decorations (tooltip first, then strike-through). */
+export function resolveAdeChangeLetter(resource: Pick<ISCMResource, 'decorations'>): AdeChangeLetter {
+	const tooltip = resource.decorations.tooltip ?? '';
+	for (const [pattern, letter] of ADE_CHANGE_LETTER_PATTERNS) {
+		if (pattern.test(tooltip)) {
+			return letter;
+		}
+	}
+	return resource.decorations.strikeThrough ? 'D' : 'M';
+}
+
+function normalizeRemoteLetter(status: IAdeRemoteScmStatusEntry['status']): AdeChangeLetter {
+	switch (status) {
+		case 'A':
+		case 'D':
+		case 'R':
+		case 'U':
+			return status;
+		default:
+			return 'M';
+	}
+}
+
+export interface IAdeChangesSummary {
+	readonly total: number;
+	readonly added: number;
+	readonly modified: number;
+	readonly deleted: number;
+}
+
+/** Summarizes change letters into `N files · A · M · D` counts (untracked counts as added, renamed/conflicted as modified). */
+export function summarizeAdeChangeLetters(letters: Iterable<AdeChangeLetter>): IAdeChangesSummary {
+	let total = 0, added = 0, modified = 0, deleted = 0;
+	for (const letter of letters) {
+		total++;
+		if (letter === 'A' || letter === 'U') {
+			added++;
+		} else if (letter === 'D') {
+			deleted++;
+		} else {
+			modified++;
+		}
+	}
+	return { total, added, modified, deleted };
+}
+
 type AdeChangeTreeItem =
 	| { readonly kind: 'group'; readonly group: ISCMResourceGroup; readonly resources: readonly ISCMResource[] }
 	| { readonly kind: 'resource'; readonly resource: ISCMResource; readonly projectUri: URI }
@@ -119,7 +178,9 @@ interface IChangeGroupTemplate {
 interface IChangeResourceTemplate {
 	readonly row: HTMLElement;
 	readonly fileLabel: IResourceLabel;
+	readonly openDiffButton: HTMLElement;
 	readonly openFileButton: HTMLElement;
+	readonly letterPill: HTMLElement;
 	readonly decorationIcon: HTMLElement;
 	readonly elementDisposables: DisposableStore;
 	readonly templateDisposables: DisposableStore;
@@ -162,13 +223,27 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 		private readonly hoverService: IHoverService,
 		private readonly onOpenFile: (resource: ISCMResource, projectUri: URI) => void,
 		private readonly onOpenRemoteEntry: (entry: IAdeRemoteScmStatusEntry, projectUri: URI) => void,
+		private readonly onOpenDiff: (resource: ISCMResource, projectUri: URI) => void,
+		private readonly onOpenRemoteDiff: (entry: IAdeRemoteScmStatusEntry, projectUri: URI) => void,
 	) { }
+
+	private applyLetter(pill: HTMLElement, letter: AdeChangeLetter, tooltip: string): void {
+		pill.textContent = letter;
+		pill.className = `ade-scm-letter letter-${letter}`;
+		pill.setAttribute('aria-label', tooltip || letter);
+	}
 
 	renderTemplate(container: HTMLElement): IChangeResourceTemplate {
 		const templateDisposables = new DisposableStore();
 		const row = append(container, $('.ade-scm-resource-row'));
 		const labelHost = append(row, $('.ade-scm-resource-label'));
 		const fileLabel = templateDisposables.add(this.labels.create(labelHost, { supportHighlights: true, supportDescriptionHighlights: true }));
+		const openDiffButton = append(row, $('button.ade-icon-button.ade-scm-open-diff', {
+			type: 'button',
+			'aria-label': localize('adeOpenChangedDiff', "Open Changes"),
+		}));
+		openDiffButton.classList.add(...ThemeIcon.asClassNameArray(Codicon.diff));
+		templateDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), openDiffButton, localize('adeOpenChangedDiff', "Open Changes")));
 		const openFileButton = append(row, $('button.ade-icon-button.ade-scm-open-file', {
 			type: 'button',
 			'aria-label': localize('adeOpenChangedFile', "Open File"),
@@ -176,10 +251,13 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 		openFileButton.classList.add(...ThemeIcon.asClassNameArray(Codicon.goToFile));
 		templateDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), openFileButton, localize('adeOpenChangedFile', "Open File")));
 		const decorationIcon = append(row, $('span.ade-scm-decoration-icon'));
+		const letterPill = append(row, $('span.ade-scm-letter'));
 		return {
 			row,
 			fileLabel,
+			openDiffButton,
 			openFileButton,
+			letterPill,
 			decorationIcon,
 			elementDisposables: new DisposableStore(),
 			templateDisposables,
@@ -216,6 +294,12 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 				EventHelper.stop(event, true);
 				this.onOpenRemoteEntry(entry, projectUri);
 			}));
+			template.elementDisposables.add(addDisposableListener(template.openDiffButton, EventType.CLICK, event => {
+				EventHelper.stop(event, true);
+				this.onOpenRemoteDiff(entry, projectUri);
+			}));
+			this.applyLetter(template.letterPill, normalizeRemoteLetter(entry.status), statusTooltip);
+			template.elementDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.letterPill, statusTooltip));
 			const statusIcon = entry.status === 'A' || entry.status === 'U'
 				? Codicon.diffAdded
 				: entry.status === 'D'
@@ -256,6 +340,11 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 			EventHelper.stop(event, true);
 			this.onOpenFile(resource, projectUri);
 		}));
+		template.elementDisposables.add(addDisposableListener(template.openDiffButton, EventType.CLICK, event => {
+			EventHelper.stop(event, true);
+			this.onOpenDiff(resource, projectUri);
+		}));
+		this.applyLetter(template.letterPill, resolveAdeChangeLetter(resource), tooltip);
 
 		if (icon) {
 			if (ThemeIcon.isThemeIcon(icon)) {
@@ -291,11 +380,16 @@ export class AdeChangesView extends ViewPane {
 	private tree: WorkbenchAsyncDataTree<AdeChangeTreeItem[], AdeChangeTreeItem, FuzzyScore> | undefined;
 	private treeContainer: HTMLElement | undefined;
 	private emptyContainer: HTMLElement | undefined;
+	private emptyActions: HTMLElement | undefined;
+	private summaryContainer: HTMLElement | undefined;
+	private lastBodyHeight = 0;
+	private lastBodyWidth = 0;
 	private readonly repoDisposables = this._register(new DisposableStore());
 	private readonly triedGitOpen = new Set<string>();
 	private readonly refreshQueue = new Sequencer();
 	private currentRepository: ISCMRepository | undefined;
 	private readonly cloudHosts: IAdeCloudHostBackendService | undefined;
+	private readonly viewsService: IViewsService | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -320,12 +414,12 @@ export class AdeChangesView extends ViewPane {
 		@ILabelService private readonly labelService: ILabelService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
-		this.cloudHosts = instantiationService.invokeFunction(accessor => {
-			try {
-				return accessor.get(IAdeCloudHostBackendService);
-			} catch {
-				return undefined;
-			}
+		[this.cloudHosts, this.viewsService] = instantiationService.invokeFunction(accessor => {
+			let cloud: IAdeCloudHostBackendService | undefined;
+			let views: IViewsService | undefined;
+			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
+			try { views = accessor.get(IViewsService); } catch { views = undefined; }
+			return [cloud, views] as const;
 		});
 		this._register(Event.any(
 			projectNavigation.onDidChangeProject,
@@ -403,7 +497,10 @@ export class AdeChangesView extends ViewPane {
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
 		container.classList.add('ade-inspector-view-body');
-		this.emptyContainer = append(container, $('.ade-inspector-empty'));
+		this.emptyContainer = append(container, $('.ade-inspector-empty.ade-changes-empty'));
+		this.emptyActions = this.renderEmptyActions(container);
+		this.summaryContainer = append(container, $('.ade-changes-summary', { role: 'status' }));
+		this.summaryContainer.hidden = true;
 		const treeContainer = this.treeContainer = append(container, $('.ade-changes-tree.explorer-folders-view'));
 		this._register(createFileIconThemableTreeContainerScope(treeContainer, this.themeService));
 		const labels = this._register(this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this.onDidChangeBodyVisibility }));
@@ -427,6 +524,12 @@ export class AdeChangesView extends ViewPane {
 					},
 					(entry, projectUri) => {
 						void this.openRemoteBackingFile(entry, projectUri);
+					},
+					(resource, projectUri) => {
+						void openScmResourceInAde(this.adeEditors, resource, projectUri);
+					},
+					(entry, projectUri) => {
+						void this.openRemoteScmDiff(entry, projectUri);
 					},
 				),
 			],
@@ -544,6 +647,93 @@ export class AdeChangesView extends ViewPane {
 		void this.refresh();
 	}
 
+	private renderEmptyActions(container: HTMLElement): HTMLElement {
+		const actions = append(container, $('.ade-inspector-empty-actions'));
+		actions.hidden = true;
+		const addAction = (icon: ThemeIcon, label: string, run: () => void) => {
+			const btn = append(actions, $('button.ade-inspector-empty-action', { type: 'button' }));
+			const ico = append(btn, $('span', { 'aria-hidden': 'true' }));
+			ico.classList.add(...ThemeIcon.asClassNameArray(icon));
+			append(btn, $('span', {}, label));
+			this._register(addDisposableListener(btn, EventType.CLICK, run));
+		};
+		addAction(Codicon.files, localize('adeChangesOpenFiles', "Open Files"), () => {
+			if (this.viewsService) {
+				void this.viewsService.openView(ADE_FILES_VIEW_ID, true);
+			} else {
+				void this.commandService.executeCommand(`${ADE_FILES_VIEW_ID}.focus`).catch(() => undefined);
+			}
+		});
+		addAction(Codicon.refresh, localize('adeChangesRefresh', "Refresh"), () => {
+			void this.refresh();
+		});
+		return actions;
+	}
+
+	private showEmpty(message: string, withActions: boolean): void {
+		if (!this.emptyContainer || !this.treeContainer) {
+			return;
+		}
+		this.emptyContainer.textContent = message;
+		this.emptyContainer.hidden = false;
+		this.emptyContainer.classList.toggle('no-project', !withActions);
+		if (this.emptyActions) {
+			this.emptyActions.hidden = !withActions;
+		}
+		this.treeContainer.hidden = true;
+		this.updateSummary(undefined);
+	}
+
+	private showTree(): void {
+		if (!this.emptyContainer || !this.treeContainer) {
+			return;
+		}
+		this.emptyContainer.hidden = true;
+		if (this.emptyActions) {
+			this.emptyActions.hidden = true;
+		}
+		this.treeContainer.hidden = false;
+	}
+
+	private updateSummary(summary: IAdeChangesSummary | undefined): void {
+		const host = this.summaryContainer;
+		const hadSummary = Boolean(host && !host.hidden);
+		this.updateTitleDescription(summary && summary.total > 0 ? String(summary.total) : undefined);
+		if (!host) {
+			return;
+		}
+		clearNode(host);
+		host.hidden = !summary || summary.total === 0;
+		if (summary && summary.total > 0) {
+			append(host, $('span.ade-changes-summary-total', {}, summary.total === 1
+				? localize('adeChangesOneFile', "1 file")
+				: localize('adeChangesFiles', "{0} files", summary.total)));
+			const addCount = (letter: AdeChangeLetter, count: number, label: string) => {
+				if (count <= 0) {
+					return;
+				}
+				append(host, $('span.ade-changes-summary-sep', { 'aria-hidden': 'true' }, '\u00b7'));
+				const part = append(host, $(`span.ade-changes-summary-part.letter-${letter}`, { title: label, 'aria-label': `${label}: ${count}` }));
+				append(part, $(`span.ade-scm-letter.letter-${letter}`, { 'aria-hidden': 'true' }, letter));
+				append(part, $('span.ade-changes-summary-count', {}, String(count)));
+			};
+			addCount('A', summary.added, localize('adeChangesAdded', "Added"));
+			addCount('M', summary.modified, localize('adeChangesModified', "Modified"));
+			addCount('D', summary.deleted, localize('adeChangesDeleted', "Deleted"));
+		}
+		if (hadSummary !== Boolean(!host.hidden)) {
+			this.layoutTree();
+		}
+	}
+
+	private layoutTree(): void {
+		if (this.lastBodyHeight <= 0) {
+			return;
+		}
+		const summaryHeight = this.summaryContainer && !this.summaryContainer.hidden ? this.summaryContainer.offsetHeight : 0;
+		this.tree?.layout(Math.max(0, this.lastBodyHeight - summaryHeight), this.lastBodyWidth);
+	}
+
 	private bindRepositoryListeners(repository: ISCMRepository | undefined): void {
 		if (this.currentRepository === repository) {
 			return;
@@ -576,9 +766,7 @@ export class AdeChangesView extends ViewPane {
 			const project = this.getActiveProject();
 			if (!project) {
 				this.bindRepositoryListeners(undefined);
-				this.emptyContainer.textContent = localize('adeSelectProjectForChanges', "Select a project to view changes");
-				this.emptyContainer.hidden = false;
-				this.treeContainer.hidden = true;
+				this.showEmpty(localize('adeSelectProjectForChanges', "Select a project to view changes"), false);
 				await this.tree.setInput([]);
 				return;
 			}
@@ -592,9 +780,7 @@ export class AdeChangesView extends ViewPane {
 					entries = [];
 				}
 				if (entries.length === 0) {
-					this.emptyContainer.textContent = localize('adeNoChangesInProject', "No changes in {0}", project.name);
-					this.emptyContainer.hidden = false;
-					this.treeContainer.hidden = true;
+					this.showEmpty(localize('adeNoChangesInProject', "No changes in {0}", project.name), true);
 					await this.tree.setInput([]);
 					return;
 				}
@@ -619,8 +805,8 @@ export class AdeChangesView extends ViewPane {
 						projectUri: project.uri,
 					});
 				}
-				this.emptyContainer.hidden = true;
-				this.treeContainer.hidden = false;
+				this.showTree();
+				this.updateSummary(summarizeAdeChangeLetters(entries.map(entry => normalizeRemoteLetter(entry.status))));
 				await this.tree.setInput(remoteGroups);
 				for (const g of remoteGroups) {
 					await this.tree.expand(g);
@@ -647,25 +833,30 @@ export class AdeChangesView extends ViewPane {
 			this.bindRepositoryListeners(repository);
 
 			const groups: AdeChangeTreeItem[] = [];
+			const letters = new Map<string, AdeChangeLetter>();
 			let totalResources = 0;
 			for (const group of repository?.provider.groups ?? []) {
 				const resources = group.resources.filter(item => this.uriIdentityService.extUri.isEqualOrParent(item.sourceUri, project.uri));
 				totalResources += resources.length;
+				for (const resource of resources) {
+					const key = resource.sourceUri.toString();
+					if (!letters.has(key)) {
+						letters.set(key, resolveAdeChangeLetter(resource));
+					}
+				}
 				if (resources.length > 0 || !group.hideWhenEmpty) {
 					groups.push({ kind: 'group', group, resources });
 				}
 			}
 
 			if (totalResources === 0) {
-				this.emptyContainer.textContent = localize('adeNoChangesInProject', "No changes in {0}", project.name);
-				this.emptyContainer.hidden = false;
-				this.treeContainer.hidden = true;
+				this.showEmpty(localize('adeNoChangesInProject', "No changes in {0}", project.name), true);
 				await this.tree.setInput([]);
 				return;
 			}
 
-			this.emptyContainer.hidden = true;
-			this.treeContainer.hidden = false;
+			this.showTree();
+			this.updateSummary(summarizeAdeChangeLetters(letters.values()));
 			await this.tree.setInput(groups);
 			for (const group of groups) {
 				await this.tree.expand(group);
@@ -675,7 +866,9 @@ export class AdeChangesView extends ViewPane {
 
 	protected override layoutBody(height: number, width: number): void {
 		super.layoutBody(height, width);
-		this.tree?.layout(height, width);
+		this.lastBodyHeight = height;
+		this.lastBodyWidth = width;
+		this.layoutTree();
 	}
 
 	override focus(): void {
@@ -720,9 +913,11 @@ export class AdeFilesView extends ViewPane {
 	private tree: WorkbenchAsyncDataTree<URI, IAdeFileTreeItem, FuzzyScore> | undefined;
 	private treeContainer: HTMLElement | undefined;
 	private emptyContainer: HTMLElement | undefined;
+	private emptyActions: HTMLElement | undefined;
 	private readonly watchers = this._register(new DisposableMap<string, DisposableStore>());
 	private readonly refreshQueue = new Sequencer();
 	private readonly fileActions: AdeFileActions;
+	private readonly commandService: ICommandService | undefined;
 	private currentProjectKey: string | undefined;
 
 	constructor(
@@ -744,6 +939,13 @@ export class AdeFilesView extends ViewPane {
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this.fileActions = instantiationService.createInstance(AdeFileActions);
+		this.commandService = instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(ICommandService);
+			} catch {
+				return undefined;
+			}
+		});
 
 		this._register(Event.any(
 			projectNavigation.onDidChangeProject,
@@ -770,7 +972,8 @@ export class AdeFilesView extends ViewPane {
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
 		container.classList.add('ade-inspector-view-body');
-		this.emptyContainer = append(container, $('.ade-inspector-empty'));
+		this.emptyContainer = append(container, $('.ade-inspector-empty.ade-files-empty'));
+		this.emptyActions = this.renderFilesEmptyActions(container);
 		const treeContainer = this.treeContainer = append(container, $('.ade-files-tree.explorer-folders-view'));
 		this._register(createFileIconThemableTreeContainerScope(treeContainer, this.themeService));
 		const labels = this._register(this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: this.onDidChangeBodyVisibility }));
@@ -801,6 +1004,13 @@ export class AdeFilesView extends ViewPane {
 		this._register(UndoCommand.addImplementation(110, 'ade-files', () => tree.isDOMFocused() ? this.fileActions.undo() : false));
 		this._register(RedoCommand.addImplementation(110, 'ade-files', () => tree.isDOMFocused() ? this.fileActions.redo() : false));
 
+		this._register(tree.onDidChangeCollapseState(event => {
+			const element = event.node.element?.element;
+			if (event.node.collapsed && element && !URI.isUri(element) && element.kind === 'folder') {
+				this.pruneWatchers(element.resource);
+			}
+		}));
+
 		this._register(tree.onDidOpen(event => {
 			if (event.element?.kind === 'file') {
 				void this.adeEditors.openFile(event.element.resource, event.element.projectUri, event.editorOptions);
@@ -825,6 +1035,40 @@ export class AdeFilesView extends ViewPane {
 		}));
 
 		void this.refresh();
+	}
+
+	private renderFilesEmptyActions(container: HTMLElement): HTMLElement {
+		const actions = append(container, $('.ade-inspector-empty-actions'));
+		actions.hidden = true;
+		const addAction = (icon: ThemeIcon, label: string, run: () => void) => {
+			const btn = append(actions, $('button.ade-inspector-empty-action', { type: 'button' }));
+			const ico = append(btn, $('span', { 'aria-hidden': 'true' }));
+			ico.classList.add(...ThemeIcon.asClassNameArray(icon));
+			append(btn, $('span', {}, label));
+			this._register(addDisposableListener(btn, EventType.CLICK, run));
+		};
+		addAction(Codicon.folderOpened, localize('adeFilesAddProjectFolder', "Add Project Folder..."), () => {
+			void this.commandService?.executeCommand('workbench.action.ade.addProjectFolder').catch(() => undefined);
+		});
+		addAction(Codicon.remote, localize('adeFilesManageCloudHosts', "Cloud Hosts..."), () => {
+			void this.commandService?.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID).catch(() => undefined);
+		});
+		return actions;
+	}
+
+	/** Disposes the watchers of a collapsed folder and all of its descendants. */
+	private pruneWatchers(folder: URI): void {
+		const prefix = folder.toString();
+		const descendantPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
+		for (const key of [...this.watchers.keys()]) {
+			if (key === prefix || key.startsWith(descendantPrefix)) {
+				this.watchers.deleteAndDispose(key);
+			}
+		}
+	}
+
+	get watchedFolderCount(): number {
+		return [...this.watchers.keys()].length;
 	}
 
 	private async getChildren(element: URI | IAdeFileTreeItem): Promise<IAdeFileTreeItem[]> {
@@ -862,7 +1106,12 @@ export class AdeFilesView extends ViewPane {
 				this.watchers.clearAndDisposeAll();
 				this.emptyContainer.textContent = localize('adeSelectProjectForFiles', "Select a project to view files");
 				this.emptyContainer.hidden = false;
+				this.emptyContainer.classList.add('no-project');
+				if (this.emptyActions) {
+					this.emptyActions.hidden = false;
+				}
 				this.treeContainer.hidden = true;
+				this.updateTitleDescription(undefined);
 				return;
 			}
 
@@ -873,7 +1122,11 @@ export class AdeFilesView extends ViewPane {
 			}
 
 			this.emptyContainer.hidden = true;
+			if (this.emptyActions) {
+				this.emptyActions.hidden = true;
+			}
 			this.treeContainer.hidden = false;
+			this.updateTitleDescription(project.name);
 			if (this.tree.getInput() && this.uriIdentityService.extUri.isEqual(this.tree.getInput(), project.uri)) {
 				await this.tree.updateChildren();
 			} else {

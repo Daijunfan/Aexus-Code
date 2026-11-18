@@ -5,6 +5,11 @@
 
 .monaco-workbench .ade-icon-button[hidden],
 .monaco-workbench .ade-worktree-badge[hidden],
+.monaco-workbench .ade-status-dot[hidden],
+.monaco-workbench .ade-session-warmup-host[hidden],
+.monaco-workbench .ade-agent-status[hidden],
+.monaco-workbench .ade-changes-summary[hidden],
+.monaco-workbench .ade-inspector-empty-actions[hidden],
 .monaco-workbench .ade-inbox-panel[hidden] {
 	display: none !important;
 }
@@ -16,6 +21,10 @@
 	box-sizing: border-box;
 }
 
+/* ============================================================================
+ * ADE Session Editor — 32px Lineage Header & 3-Step Warm-Up Stepper
+ * ============================================================================ */
+
 .monaco-workbench .ade-session-editor {
 	box-sizing: border-box;
 	display: flex;
@@ -25,6 +34,322 @@
 	overflow: auto;
 	color: var(--vscode-editor-foreground);
 	background: var(--vscode-editor-background);
+}
+
+.monaco-workbench .ade-session-editor.has-header {
+	padding: 0;
+	gap: 0;
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-session-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 32px;
+	min-height: 32px;
+	padding: 0 14px;
+	box-sizing: border-box;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-widget-border, transparent));
+	background: color-mix(in srgb, var(--vscode-foreground) 2.5%, var(--vscode-editor-background));
+	flex-shrink: 0;
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-session-breadcrumbs {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	overflow: hidden;
+	font-size: 11.5px;
+	line-height: 20px;
+}
+
+.monaco-workbench .ade-session-crumb {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	max-width: 180px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-session-crumb-icon {
+	font-size: 12px !important;
+	color: var(--vscode-icon-foreground);
+	flex-shrink: 0;
+}
+
+.monaco-workbench button.ade-session-crumb.ancestor {
+	border: none;
+	background: transparent;
+	padding: 1px 4px;
+	border-radius: 4px;
+	font: inherit;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+}
+
+.monaco-workbench button.ade-session-crumb.ancestor:hover {
+	color: var(--vscode-foreground);
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.monaco-workbench button.ade-session-crumb.ancestor:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.monaco-workbench .ade-session-crumb.current {
+	color: var(--vscode-foreground);
+	font-weight: 600;
+}
+
+.monaco-workbench .ade-session-crumb-sep {
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.65;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-session-rank-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	height: 17px;
+	padding: 0 6px;
+	border-radius: 4px;
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 15px;
+	white-space: nowrap;
+	flex-shrink: 0;
+	border: 1px solid transparent;
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-session-rank-pill[data-tier]::before {
+	content: attr(data-tier);
+	font-size: 9px;
+	font-weight: 700;
+	opacity: 0.85;
+}
+
+.monaco-workbench .ade-session-rank-pill.rank-governor {
+	color: var(--vscode-ade-rank-governor, #F2C35B);
+	background: color-mix(in srgb, var(--vscode-ade-rank-governor, #F2C35B) 16%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-governor, #F2C35B) 48%, transparent);
+}
+
+.monaco-workbench .ade-session-rank-pill.rank-manager {
+	color: var(--vscode-ade-rank-manager, #818CF8);
+	background: color-mix(in srgb, var(--vscode-ade-rank-manager, #818CF8) 16%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-manager, #818CF8) 48%, transparent);
+}
+
+.monaco-workbench .ade-session-rank-pill.rank-employee {
+	color: var(--vscode-ade-rank-employee, #A78BFA);
+	background: color-mix(in srgb, var(--vscode-ade-rank-employee, #A78BFA) 8%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-employee, #A78BFA) 55%, transparent);
+	box-shadow: inset 0 2px 0 var(--vscode-ade-rank-employee, #A78BFA);
+}
+
+.monaco-workbench .ade-session-rank-pill.rank-subordinate {
+	color: var(--vscode-ade-rank-member, #9AA4B2);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-member, #9AA4B2) 48%, transparent);
+}
+
+.monaco-workbench .ade-session-rank-pill.rank-worker {
+	color: var(--vscode-ade-rank-worker, #34D399);
+	border: 1px dashed color-mix(in srgb, var(--vscode-ade-rank-worker, #34D399) 52%, transparent);
+	font-weight: 400;
+}
+
+.monaco-workbench .ade-session-header-trailing {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-session-engine-chip,
+.monaco-workbench .ade-session-subordinates-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 19px;
+	padding: 0 7px;
+	border-radius: 999px;
+	font-size: 10.5px;
+	font-weight: 500;
+	color: var(--vscode-descriptionForeground);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-session-engine-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-session-engine-chip.status-working .ade-session-engine-dot {
+	background: var(--vscode-testing-iconPassed, #3FB950);
+}
+
+.monaco-workbench .ade-session-engine-chip.status-pending .ade-session-engine-dot {
+	background: var(--vscode-editorWarning-foreground);
+}
+
+.monaco-workbench .ade-session-body {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--vscode-spacing-size160);
+	padding: var(--vscode-spacing-size320);
+	overflow: auto;
+	box-sizing: border-box;
+}
+
+/* 3-Step Lazy Warm-Up Stepper + Retry Error State */
+.monaco-workbench .ade-session-warmup {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 12px 14px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-focusBorder) 38%, var(--vscode-widget-border, transparent));
+	background: color-mix(in srgb, var(--vscode-editorWidget-background) 85%, var(--vscode-editor-background));
+	overflow: hidden;
+	position: relative;
+}
+
+.monaco-workbench .ade-session-warmup.error {
+	border-color: color-mix(in srgb, var(--vscode-ade-severity-critical, var(--vscode-errorForeground, #F87171)) 55%, transparent);
+	box-shadow: inset 3px 0 0 var(--vscode-ade-severity-critical, var(--vscode-errorForeground, #F87171));
+}
+
+.monaco-workbench .ade-session-warmup-title {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-session-warmup.error .ade-session-warmup-title-icon {
+	color: var(--vscode-ade-severity-critical, var(--vscode-errorForeground, #F87171));
+}
+
+.monaco-workbench .ade-session-warmup-steps {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.monaco-workbench .ade-session-warmup-step {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-session-warmup-step.active {
+	color: var(--vscode-foreground);
+	font-weight: 600;
+}
+
+.monaco-workbench .ade-session-warmup-step.done {
+	color: var(--vscode-testing-iconPassed, #3FB950);
+}
+
+.monaco-workbench .ade-session-warmup-step.failed {
+	color: var(--vscode-ade-severity-critical, var(--vscode-errorForeground, #F87171));
+	font-weight: 600;
+}
+
+.monaco-workbench .ade-session-warmup-step-marker {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 17px;
+	height: 17px;
+	border-radius: 50%;
+	font-size: 10px;
+	font-weight: 700;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 22%, transparent);
+	font-variant-numeric: tabular-nums;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-session-warmup-step.active .ade-session-warmup-step-marker {
+	border-color: var(--vscode-focusBorder);
+	color: var(--vscode-focusBorder);
+	background: color-mix(in srgb, var(--vscode-focusBorder) 14%, transparent);
+}
+
+.monaco-workbench .ade-session-warmup-step.done .ade-session-warmup-step-marker {
+	border-color: var(--vscode-testing-iconPassed, #3FB950);
+	background: color-mix(in srgb, var(--vscode-testing-iconPassed, #3FB950) 16%, transparent);
+}
+
+.monaco-workbench .ade-session-warmup-step.failed .ade-session-warmup-step-marker {
+	border-color: var(--vscode-ade-severity-critical, var(--vscode-errorForeground, #F87171));
+	background: color-mix(in srgb, var(--vscode-ade-severity-critical, var(--vscode-errorForeground, #F87171)) 16%, transparent);
+}
+
+.monaco-workbench .ade-session-warmup-bar {
+	position: relative;
+	height: 2px;
+	border-radius: 2px;
+	background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-session-warmup-bar::after {
+	content: '';
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 40%;
+	height: 100%;
+	background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+	border-radius: 2px;
+}
+
+.monaco-workbench .ade-session-warmup-error {
+	font-size: 11.5px;
+	line-height: 1.45;
+	color: var(--vscode-descriptionForeground);
+	padding: 6px 8px;
+	border-radius: 5px;
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	overflow-wrap: anywhere;
+}
+
+.monaco-workbench .ade-session-warmup-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .ade-session-warmup-actions .monaco-button {
+	width: auto;
 }
 
 .monaco-workbench .ade-session-editor h2 {
@@ -361,25 +686,34 @@
 }
 
 .monaco-workbench .ade-role-badge.role-governor {
-	border-color: var(--vscode-charts-purple, var(--vscode-focusBorder));
+	color: var(--vscode-ade-rank-governor, #F2C35B);
+	background: color-mix(in srgb, var(--vscode-ade-rank-governor, #F2C35B) 16%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-governor, #F2C35B) 48%, transparent);
 }
 
 .monaco-workbench .ade-role-badge.role-manager {
-	border-color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+	color: var(--vscode-ade-rank-manager, #818CF8);
+	background: color-mix(in srgb, var(--vscode-ade-rank-manager, #818CF8) 16%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-manager, #818CF8) 48%, transparent);
 }
 
 .monaco-workbench .ade-role-badge.role-employee {
-	border-color: var(--vscode-charts-green, var(--vscode-badge-background));
+	color: var(--vscode-ade-rank-employee, #A78BFA);
+	background: color-mix(in srgb, var(--vscode-ade-rank-employee, #A78BFA) 7%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-employee, #A78BFA) 55%, transparent);
+	box-shadow: inset 0 2px 0 var(--vscode-ade-rank-employee, #A78BFA);
 }
 
 .monaco-workbench .ade-role-badge.role-subordinate {
-	border-color: var(--vscode-charts-orange, var(--vscode-widget-border, transparent));
+	color: var(--vscode-ade-rank-member, #9AA4B2);
+	background: transparent;
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-member, #9AA4B2) 48%, transparent);
 }
 
 .monaco-workbench .ade-role-badge.role-worker {
 	background: transparent;
-	color: var(--vscode-descriptionForeground);
-	border-color: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	color: var(--vscode-ade-rank-worker, #34D399);
+	border: 1px dashed color-mix(in srgb, var(--vscode-ade-rank-worker, #34D399) 52%, transparent);
 	font-weight: 400;
 }
 
@@ -428,6 +762,120 @@
 	overflow: hidden;
 }
 
+/* Illustrated empty states via ::before mask so textContent stays exact */
+.monaco-workbench .ade-inspector-empty.ade-changes-empty,
+.monaco-workbench .ade-inspector-empty.ade-files-empty {
+	align-items: center;
+	text-align: center;
+	padding: 24px 14px 10px;
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+.monaco-workbench .ade-inspector-empty.ade-changes-empty::before,
+.monaco-workbench .ade-inspector-empty.ade-files-empty::before {
+	content: '';
+	display: block;
+	width: 28px;
+	height: 28px;
+	margin-bottom: 4px;
+	background-color: var(--vscode-descriptionForeground);
+	opacity: 0.65;
+	-webkit-mask-repeat: no-repeat;
+	mask-repeat: no-repeat;
+	-webkit-mask-position: center;
+	mask-position: center;
+	-webkit-mask-size: 26px 26px;
+	mask-size: 26px 26px;
+}
+
+.monaco-workbench .ade-inspector-empty.ade-changes-empty:not(.no-project)::before {
+	background-color: var(--vscode-testing-iconPassed, #3FB950);
+	opacity: 0.85;
+	-webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='black' d='M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm3.35 5.35-4 4a.5.5 0 0 1-.7 0l-2-2a.5.5 0 1 1 .7-.7L7 9.29l3.65-3.64a.5.5 0 0 1 .7.7z'/%3E%3C/svg%3E");
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='black' d='M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm3.35 5.35-4 4a.5.5 0 0 1-.7 0l-2-2a.5.5 0 1 1 .7-.7L7 9.29l3.65-3.64a.5.5 0 0 1 .7.7z'/%3E%3C/svg%3E");
+}
+
+.monaco-workbench .ade-inspector-empty.ade-changes-empty.no-project::before {
+	-webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='black' d='M2 3.5A1.5 1.5 0 0 1 3.5 2h3.09a1.5 1.5 0 0 1 1.06.44l.91.91a.5.5 0 0 0 .35.15H12.5A1.5 1.5 0 0 1 14 5v7.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9zM3.5 3a.5.5 0 0 0-.5.5v9a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5V5a.5.5 0 0 0-.5-.5H8.91a1.5 1.5 0 0 1-1.06-.44l-.91-.91A.5.5 0 0 0 6.59 3H3.5z'/%3E%3C/svg%3E");
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='black' d='M2 3.5A1.5 1.5 0 0 1 3.5 2h3.09a1.5 1.5 0 0 1 1.06.44l.91.91a.5.5 0 0 0 .35.15H12.5A1.5 1.5 0 0 1 14 5v7.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-9zM3.5 3a.5.5 0 0 0-.5.5v9a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5V5a.5.5 0 0 0-.5-.5H8.91a1.5 1.5 0 0 1-1.06-.44l-.91-.91A.5.5 0 0 0 6.59 3H3.5z'/%3E%3C/svg%3E");
+}
+
+.monaco-workbench .ade-inspector-empty.ade-files-empty::before {
+	-webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='black' d='M13.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h12l.5-.5v-10L13.5 3zm-.5 10H2V3h4.29l.85.85.36.15H13v9z'/%3E%3C/svg%3E");
+	mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='black' d='M13.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h12l.5-.5v-10L13.5 3zm-.5 10H2V3h4.29l.85.85.36.15H13v9z'/%3E%3C/svg%3E");
+}
+
+/* Sibling quick actions beneath .ade-inspector-empty */
+.monaco-workbench .ade-inspector-empty-actions {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 0 12px 16px;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .ade-inspector-empty-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 22px;
+	padding: 0 8px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 15%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-inspector-empty-action:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	border-color: var(--vscode-textLink-foreground);
+}
+
+.monaco-workbench .ade-inspector-empty-action:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+/* Changes Summary Strip (`N files · A · M · D`) */
+.monaco-workbench .ade-changes-summary {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 26px;
+	padding: 3px 10px;
+	border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, transparent));
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, var(--vscode-sideBar-background, transparent));
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	flex-shrink: 0;
+	box-sizing: border-box;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .ade-changes-summary-total {
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-changes-summary-sep {
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.65;
+}
+
+.monaco-workbench .ade-changes-summary-part {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+}
+
 .monaco-workbench .ade-changes-tree,
 .monaco-workbench .ade-files-tree {
 	flex: 1;
@@ -456,7 +904,7 @@
 	min-width: 0;
 	padding-right: 8px;
 	box-sizing: border-box;
-	gap: 4px;
+	gap: 3px;
 }
 
 .monaco-workbench .ade-scm-resource-row.faded {
@@ -469,22 +917,73 @@
 	overflow: hidden;
 }
 
+.monaco-workbench .ade-scm-open-diff,
 .monaco-workbench .ade-scm-open-file {
+	width: 18px;
+	height: 18px;
+	font-size: 13px;
 	opacity: 0;
 }
 
+.monaco-workbench .ade-scm-resource-row:hover .ade-scm-open-diff,
 .monaco-workbench .ade-scm-resource-row:hover .ade-scm-open-file,
+.monaco-workbench .ade-scm-open-diff:focus-visible,
 .monaco-workbench .ade-scm-open-file:focus-visible {
 	opacity: 1;
+}
+
+/* GitDecoration letter pills (`A`, `M`, `D`, `R`, `U`, `C`) */
+.monaco-workbench .ade-scm-letter {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 15px;
+	height: 15px;
+	padding: 0 3px;
+	border-radius: 3.5px;
+	font-size: 9.5px;
+	font-weight: 700;
+	line-height: 14px;
+	font-variant-numeric: tabular-nums;
+	flex-shrink: 0;
+	box-sizing: border-box;
+	color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-editorWarning-foreground));
+	background: color-mix(in srgb, currentColor 14%, transparent);
+	border: 1px solid color-mix(in srgb, currentColor 34%, transparent);
+}
+
+.monaco-workbench .ade-scm-letter.letter-A {
+	color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed, #3FB950));
+}
+
+.monaco-workbench .ade-scm-letter.letter-U {
+	color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed, #3FB950)));
+}
+
+.monaco-workbench .ade-scm-letter.letter-M {
+	color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-editorWarning-foreground));
+}
+
+.monaco-workbench .ade-scm-letter.letter-D {
+	color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-testing-iconFailed, var(--vscode-errorForeground)));
+}
+
+.monaco-workbench .ade-scm-letter.letter-R {
+	color: var(--vscode-gitDecoration-renamedResourceForeground, var(--vscode-textLink-foreground));
+}
+
+.monaco-workbench .ade-scm-letter.letter-C {
+	color: var(--vscode-gitDecoration-conflictingResourceForeground, var(--vscode-errorForeground));
 }
 
 .monaco-workbench .ade-scm-decoration-icon {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 16px;
-	height: 16px;
-	background-size: 16px;
+	width: 14px;
+	height: 14px;
+	font-size: 13px;
+	background-size: 14px;
 	background-repeat: no-repeat;
 	background-position: center;
 	flex-shrink: 0;
@@ -501,9 +1000,9 @@
 	border-radius: 999px;
 	font-weight: 600;
 	letter-spacing: 0.01em;
-	color: #58a6ff;
-	background: color-mix(in srgb, #388bfd 16%, transparent);
-	border: 1px solid color-mix(in srgb, #58a6ff 42%, transparent);
+	color: var(--vscode-ade-severity-info, var(--vscode-textLink-foreground, #60A5FA));
+	background: color-mix(in srgb, var(--vscode-ade-severity-info, var(--vscode-textLink-foreground, #60A5FA)) 15%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-ade-severity-info, var(--vscode-textLink-foreground, #60A5FA)) 42%, transparent);
 	white-space: nowrap;
 	flex-shrink: 0;
 	cursor: pointer;
@@ -511,14 +1010,14 @@
 }
 
 .monaco-workbench .ade-worktree-badge:hover {
-	background: color-mix(in srgb, #388bfd 26%, transparent);
-	border-color: #58a6ff;
+	background: color-mix(in srgb, var(--vscode-ade-severity-info, var(--vscode-textLink-foreground, #60A5FA)) 24%, transparent);
+	border-color: var(--vscode-ade-severity-info, var(--vscode-textLink-foreground, #60A5FA));
 }
 
 .monaco-workbench .ade-worktree-badge.type-research {
-	color: #d2a8ff;
-	background: color-mix(in srgb, #a371f7 16%, transparent);
-	border-color: color-mix(in srgb, #d2a8ff 42%, transparent);
+	color: var(--vscode-ade-rank-employee, #A78BFA);
+	background: color-mix(in srgb, var(--vscode-ade-rank-employee, #A78BFA) 15%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-employee, #A78BFA) 42%, transparent);
 }
 
 .monaco-workbench .ade-sidebar-seg-tabs {
@@ -559,7 +1058,7 @@
 .monaco-workbench .ade-sidebar-seg-btn.active {
 	background: var(--vscode-editor-background);
 	color: var(--vscode-foreground);
-	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+	box-shadow: 0 1px 2px color-mix(in srgb, var(--vscode-widget-shadow, #000000) 40%, transparent);
 }
 
 .monaco-workbench .ade-sidebar-seg-btn .ade-sidebar-section-title {
@@ -579,8 +1078,8 @@
 	font-size: 10px;
 	font-weight: 700;
 	line-height: 15px;
-	background: var(--vscode-activityBarBadge-background, #2f81f7);
-	color: var(--vscode-activityBarBadge-foreground, #ffffff);
+	background: var(--vscode-activityBarBadge-background, var(--vscode-badge-background));
+	color: var(--vscode-activityBarBadge-foreground, var(--vscode-badge-foreground));
 }
 
 .monaco-workbench .ade-inbox-count-badge[hidden],
@@ -590,10 +1089,14 @@
 }
 
 /* ============================================================================
- * ADE Inbox Sidebar Panel
+ * ADE Inbox Sidebar Panel — Triage Lanes & 3px Severity Rail
  * ============================================================================ */
 
 .monaco-workbench .ade-inbox-panel {
+	--ade-inbox-critical: var(--vscode-ade-severity-critical, var(--vscode-testing-iconFailed, #F87171));
+	--ade-inbox-gate: var(--vscode-ade-severity-gate, #FF7AB8);
+	--ade-inbox-pass: var(--vscode-testing-iconPassed, #3FB950);
+	--ade-inbox-info: var(--vscode-ade-severity-info, var(--vscode-textLink-foreground, #60A5FA));
 	display: flex;
 	flex-direction: column;
 	flex: 1;
@@ -649,6 +1152,8 @@
 .monaco-workbench .ade-sidebar-seg-btn:focus-visible,
 .monaco-workbench .ade-inbox-filter-btn:focus-visible,
 .monaco-workbench .ade-inbox-link-btn:focus-visible,
+.monaco-workbench .ade-inbox-lane-header.collapsible:focus-visible,
+.monaco-workbench .ade-inbox-lineage:focus-visible,
 .monaco-workbench .ade-inbox-card:focus-visible {
 	outline: 1px solid var(--vscode-focusBorder);
 	outline-offset: -1px;
@@ -658,13 +1163,92 @@
 	flex: 1;
 	min-height: 0;
 	overflow-y: auto;
-	padding: 8px;
+	padding: 6px 8px 10px;
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 7px;
 	box-sizing: border-box;
 }
 
+/* Sticky Triage Lane Headers: Critical / Needs Decision / Updates / Resolved */
+.monaco-workbench .ade-inbox-lane-header {
+	position: sticky;
+	top: -6px;
+	z-index: 2;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 22px;
+	padding: 3px 6px;
+	margin: 2px -2px 0;
+	border-radius: 5px;
+	background: color-mix(in srgb, var(--vscode-sideBar-background, var(--vscode-editor-background)) 92%, transparent);
+	backdrop-filter: blur(6px);
+	font-size: 10.5px;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+	user-select: none;
+}
+
+.monaco-workbench .ade-inbox-lane-header.collapsible {
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-inbox-lane-header.collapsible:hover {
+	color: var(--vscode-foreground);
+	background: var(--vscode-list-hoverBackground);
+}
+
+.monaco-workbench .ade-inbox-lane-chevron {
+	font-size: 11px !important;
+}
+
+.monaco-workbench .ade-inbox-lane-rail {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-inbox-lane-header.lane-critical {
+	color: var(--ade-inbox-critical);
+}
+
+.monaco-workbench .ade-inbox-lane-header.lane-critical .ade-inbox-lane-rail {
+	background: var(--ade-inbox-critical);
+}
+
+.monaco-workbench .ade-inbox-lane-header.lane-gate .ade-inbox-lane-rail {
+	background: var(--ade-inbox-gate);
+}
+
+.monaco-workbench .ade-inbox-lane-header.lane-info .ade-inbox-lane-rail {
+	background: var(--ade-inbox-info);
+}
+
+.monaco-workbench .ade-inbox-lane-header.lane-resolved .ade-inbox-lane-rail {
+	background: var(--ade-inbox-pass);
+}
+
+.monaco-workbench .ade-inbox-lane-count {
+	margin-left: auto;
+	min-width: 16px;
+	height: 15px;
+	padding: 0 5px;
+	border-radius: 999px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+/* Polished Empty State */
 .monaco-workbench .ade-inbox-empty {
 	padding: 28px 14px;
 	text-align: center;
@@ -672,39 +1256,78 @@
 	display: flex;
 	flex-direction: column;
 	align-items: center;
-	gap: 8px;
+	gap: 6px;
 	font-size: 12px;
 }
 
 .monaco-workbench .ade-inbox-empty-icon {
-	font-size: 24px;
-	opacity: 0.65;
+	font-size: 26px !important;
+	color: var(--ade-inbox-pass);
+	opacity: 0.85;
 }
 
+.monaco-workbench .ade-inbox-empty-title {
+	margin: 2px 0 0;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-inbox-empty p {
+	margin: 0;
+	line-height: 1.45;
+}
+
+.monaco-workbench .ade-inbox-empty-link {
+	margin-top: 4px;
+	font-weight: 600;
+}
+
+/* Cards with 3px Severity Rail */
 .monaco-workbench .ade-inbox-card {
+	--ade-card-accent: var(--ade-inbox-info);
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
-	padding: 10px;
-	border-radius: 8px;
-	background: color-mix(in srgb, var(--vscode-editor-background) 82%, var(--vscode-sideBar-background));
+	padding: 9px 10px 9px 12px;
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--vscode-editor-background) 84%, var(--vscode-sideBar-background));
 	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	box-shadow: inset 3px 0 0 color-mix(in srgb, var(--ade-card-accent) 62%, transparent);
 	box-sizing: border-box;
 	transition: border-color 120ms ease, background 120ms ease;
 }
 
-.monaco-workbench .ade-inbox-card.unread {
-	border-color: color-mix(in srgb, var(--vscode-textLink-foreground) 55%, transparent);
-	box-shadow: inset 2px 0 0 var(--vscode-textLink-foreground);
+.monaco-workbench .ade-inbox-card.sev-critical,
+.monaco-workbench .ade-inbox-card.kind-governor_alert {
+	--ade-card-accent: var(--ade-inbox-critical);
+	border-color: color-mix(in srgb, var(--ade-inbox-critical) 46%, transparent);
+	background: color-mix(in srgb, var(--ade-inbox-critical) 6%, var(--vscode-editor-background));
+	box-shadow: inset 3px 0 0 var(--ade-inbox-critical);
 }
 
-.monaco-workbench .ade-inbox-card.kind-user_gate.unread {
-	border-color: color-mix(in srgb, #3fb950 55%, transparent);
-	box-shadow: inset 2px 0 0 #3fb950;
+.monaco-workbench .ade-inbox-card.sev-gate,
+.monaco-workbench .ade-inbox-card.kind-user_gate {
+	--ade-card-accent: var(--ade-inbox-gate);
+}
+
+.monaco-workbench .ade-inbox-card.unread {
+	border-color: color-mix(in srgb, var(--ade-card-accent) 52%, transparent);
+	box-shadow: inset 3px 0 0 var(--ade-card-accent);
 }
 
 .monaco-workbench .ade-inbox-card.resolved {
 	opacity: 0.68;
+	box-shadow: inset 3px 0 0 color-mix(in srgb, var(--ade-inbox-pass) 45%, transparent);
+}
+
+.monaco-workbench .ade-inbox-error-icon {
+	color: var(--ade-inbox-critical);
+	font-size: 13px !important;
+}
+
+.monaco-workbench .ade-inbox-error-dismiss {
+	margin-left: auto;
 }
 
 .monaco-workbench .ade-inbox-card-top {
@@ -725,13 +1348,18 @@
 }
 
 .monaco-workbench .ade-inbox-kind-pill.kind-user_gate {
-	color: #3fb950;
-	background: color-mix(in srgb, #2ea043 18%, transparent);
+	color: var(--ade-inbox-gate);
+	background: color-mix(in srgb, var(--ade-inbox-gate) 16%, transparent);
 }
 
 .monaco-workbench .ade-inbox-kind-pill.kind-governor_message {
-	color: #f5b942;
-	background: color-mix(in srgb, #d97706 20%, transparent);
+	color: var(--vscode-ade-rank-governor, var(--vscode-editorWarning-foreground));
+	background: color-mix(in srgb, var(--vscode-ade-rank-governor, var(--vscode-editorWarning-foreground)) 16%, transparent);
+}
+
+.monaco-workbench .ade-inbox-kind-pill.sev-critical {
+	color: var(--ade-inbox-critical);
+	background: color-mix(in srgb, var(--ade-inbox-critical) 18%, transparent);
 }
 
 .monaco-workbench .ade-inbox-project-pill {
@@ -743,11 +1371,11 @@
 }
 
 .monaco-workbench .ade-inbox-unread-dot {
-	margin-left: auto;
 	width: 7px;
 	height: 7px;
 	border-radius: 50%;
-	background: var(--vscode-textLink-foreground);
+	background: var(--ade-card-accent);
+	flex-shrink: 0;
 }
 
 .monaco-workbench .ade-inbox-card-title {
@@ -757,9 +1385,52 @@
 	line-height: 1.35;
 }
 
+/* Clickable Lineage Jump (`Governor ▸ [N3] Title`) */
 .monaco-workbench .ade-inbox-card-meta {
 	font-size: 10.5px;
 	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench button.ade-inbox-lineage {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	align-self: flex-start;
+	max-width: 100%;
+	padding: 1px 5px;
+	margin: 0 -5px;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	font: inherit;
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	text-align: left;
+}
+
+.monaco-workbench button.ade-inbox-lineage:hover {
+	color: var(--vscode-textLink-foreground);
+	background: color-mix(in srgb, var(--vscode-textLink-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-inbox-lineage-gov {
+	font-weight: 600;
+	color: var(--vscode-ade-rank-governor, var(--vscode-foreground));
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-inbox-lineage-sep {
+	opacity: 0.7;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-inbox-lineage-node {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .monaco-workbench .ade-inbox-card-message {
@@ -768,6 +1439,20 @@
 	color: var(--vscode-foreground);
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
+}
+
+.monaco-workbench .ade-inbox-card-message.clamped {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 3;
+	line-clamp: 3;
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-inbox-more {
+	align-self: flex-start;
+	padding: 0 2px;
+	font-weight: 600;
 }
 
 .monaco-workbench .ade-inbox-upstream-details {
@@ -794,7 +1479,7 @@
 
 .monaco-workbench .ade-inbox-resolved-tag {
 	font-size: 10.5px;
-	color: #3fb950;
+	color: var(--ade-inbox-pass);
 	font-weight: 500;
 }
 
@@ -807,6 +1492,9 @@
 }
 
 .monaco-workbench .ade-inbox-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
 	border-radius: 5px;
 	font-size: 11px;
 	font-weight: 600;
@@ -816,8 +1504,12 @@
 	transition: filter 120ms ease, background 120ms ease;
 }
 
+.monaco-workbench .ade-inbox-btn-icon {
+	font-size: 11px !important;
+}
+
 .monaco-workbench .ade-inbox-btn.primary {
-	background: #2ea043;
+	background: color-mix(in srgb, var(--ade-inbox-pass) 82%, #0d4429);
 	color: #ffffff;
 }
 
@@ -826,14 +1518,14 @@
 }
 
 .monaco-workbench .ade-inbox-btn.danger {
-	background: #da3633;
+	background: color-mix(in srgb, var(--ade-inbox-critical) 84%, #7f1d1d);
 	color: #ffffff;
 }
 
 .monaco-workbench .ade-inbox-btn.danger-outline {
 	background: transparent;
-	color: #f85149;
-	border-color: color-mix(in srgb, #f85149 48%, transparent);
+	color: var(--ade-inbox-critical);
+	border-color: color-mix(in srgb, var(--ade-inbox-critical) 48%, transparent);
 }
 
 .monaco-workbench .ade-inbox-btn.secondary {
@@ -854,8 +1546,110 @@
 	margin-top: 4px;
 	padding: 8px;
 	border-radius: 6px;
-	background: color-mix(in srgb, #f85149 8%, transparent);
-	border: 1px solid color-mix(in srgb, #f85149 28%, transparent);
+	background: color-mix(in srgb, var(--ade-inbox-critical) 8%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-inbox-critical) 28%, transparent);
+}
+
+/* ============================================================================
+ * Light (.vs), High-Contrast (.hc-black / .hc-light) & Reduced-Motion Rules
+ * for Sidebar, Inbox, Session Editor & Inspector
+ * ============================================================================ */
+
+.monaco-workbench.vs .ade-session-rank-pill.rank-governor,
+.monaco-workbench.vs .ade-role-badge.role-governor {
+	color: var(--vscode-ade-rank-governor, #9A6700);
+	background: color-mix(in srgb, var(--vscode-ade-rank-governor, #9A6700) 13%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-governor, #9A6700) 42%, transparent);
+}
+
+.monaco-workbench.vs .ade-session-rank-pill.rank-manager,
+.monaco-workbench.vs .ade-role-badge.role-manager {
+	color: var(--vscode-ade-rank-manager, #4F46E5);
+	background: color-mix(in srgb, var(--vscode-ade-rank-manager, #4F46E5) 12%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-manager, #4F46E5) 40%, transparent);
+}
+
+.monaco-workbench.vs .ade-session-rank-pill.rank-employee,
+.monaco-workbench.vs .ade-role-badge.role-employee {
+	color: var(--vscode-ade-rank-employee, #6D28D9);
+	background: color-mix(in srgb, var(--vscode-ade-rank-employee, #6D28D9) 7%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-employee, #6D28D9) 48%, transparent);
+	box-shadow: inset 0 2px 0 var(--vscode-ade-rank-employee, #6D28D9);
+}
+
+.monaco-workbench.vs .ade-session-rank-pill.rank-worker,
+.monaco-workbench.vs .ade-role-badge.role-worker {
+	color: var(--vscode-ade-rank-worker, #059669);
+	border-color: color-mix(in srgb, var(--vscode-ade-rank-worker, #059669) 48%, transparent);
+}
+
+.monaco-workbench.vs .ade-inbox-panel {
+	--ade-inbox-critical: var(--vscode-ade-severity-critical, #DC2626);
+	--ade-inbox-gate: var(--vscode-ade-severity-gate, #B8237A);
+	--ade-inbox-pass: var(--vscode-testing-iconPassed, #1A7F37);
+	--ade-inbox-info: var(--vscode-ade-severity-info, #2563EB);
+}
+
+.monaco-workbench.vs .ade-inbox-card {
+	background: var(--vscode-editor-background);
+}
+
+.monaco-workbench.hc-black .ade-inbox-card,
+.monaco-workbench.hc-light .ade-inbox-card,
+.monaco-workbench.hc-black .ade-session-warmup,
+.monaco-workbench.hc-light .ade-session-warmup,
+.monaco-workbench.hc-black .ade-session-header,
+.monaco-workbench.hc-light .ade-session-header {
+	background: transparent;
+	border-color: var(--vscode-contrastBorder);
+}
+
+.monaco-workbench.hc-black .ade-session-rank-pill,
+.monaco-workbench.hc-light .ade-session-rank-pill,
+.monaco-workbench.hc-black .ade-scm-letter,
+.monaco-workbench.hc-light .ade-scm-letter,
+.monaco-workbench.hc-black .ade-inbox-kind-pill,
+.monaco-workbench.hc-light .ade-inbox-kind-pill {
+	background: transparent;
+	border: 1px solid var(--vscode-contrastBorder, currentColor);
+}
+
+@keyframes adeSessionWarmupSlide {
+	0% {
+		transform: translateX(-100%);
+	}
+	100% {
+		transform: translateX(260%);
+	}
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	.monaco-workbench:not(.reduce-motion):not(.monaco-reduce-motion) .ade-session-warmup-bar::after {
+		animation: adeSessionWarmupSlide 1.4s ease-in-out infinite;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench .ade-worktree-badge,
+	.monaco-workbench .ade-sidebar-seg-btn,
+	.monaco-workbench .ade-inbox-card,
+	.monaco-workbench .ade-inbox-btn,
+	.monaco-workbench .ade-inspector-empty-action {
+		transition: none !important;
+	}
+}
+
+.monaco-workbench.reduce-motion .ade-worktree-badge,
+.monaco-workbench.monaco-reduce-motion .ade-worktree-badge,
+.monaco-workbench.reduce-motion .ade-sidebar-seg-btn,
+.monaco-workbench.monaco-reduce-motion .ade-sidebar-seg-btn,
+.monaco-workbench.reduce-motion .ade-inbox-card,
+.monaco-workbench.monaco-reduce-motion .ade-inbox-card,
+.monaco-workbench.reduce-motion .ade-inbox-btn,
+.monaco-workbench.monaco-reduce-motion .ade-inbox-btn,
+.monaco-workbench.reduce-motion .ade-inspector-empty-action,
+.monaco-workbench.monaco-reduce-motion .ade-inspector-empty-action {
+	transition: none !important;
 }
 
 /* ============================================================================
@@ -4123,6 +4917,7 @@
 .monaco-workbench .ade-cloud-host-badge {
 	display: inline-flex;
 	align-items: center;
+	gap: 4px;
 	height: 17px;
 	max-width: 112px;
 	padding: 0 6px;
@@ -4130,9 +4925,9 @@
 	font-size: 10px;
 	font-weight: 600;
 	letter-spacing: 0.01em;
-	color: #58a6ff;
-	background: color-mix(in srgb, #388bfd 16%, transparent);
-	border: 1px solid color-mix(in srgb, #58a6ff 34%, transparent);
+	color: var(--vscode-ade-cloud, #38BDF8);
+	background: color-mix(in srgb, var(--vscode-ade-cloud, #38BDF8) 14%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-ade-cloud, #38BDF8) 36%, transparent);
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -4144,9 +4939,9 @@
 }
 
 .monaco-workbench.vs .ade-cloud-host-badge {
-	color: #0969da;
-	background: color-mix(in srgb, #0969da 11%, transparent);
-	border-color: color-mix(in srgb, #0969da 28%, transparent);
+	color: var(--vscode-ade-cloud, #0284C7);
+	background: color-mix(in srgb, var(--vscode-ade-cloud, #0284C7) 11%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-ade-cloud, #0284C7) 28%, transparent);
 }
 
 .monaco-workbench .ade-ch-studio {

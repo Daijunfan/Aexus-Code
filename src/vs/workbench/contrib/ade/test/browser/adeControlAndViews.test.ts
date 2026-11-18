@@ -27,11 +27,13 @@ import {
 	IAdeSessionTreeResult,
 } from '../../../../../platform/ade/common/adeControl.js';
 import { isIMenuItem, MenuId, MenuRegistry } from '../../../../../platform/actions/common/actions.js';
+import { AEXUS_SSH_SCHEME } from '../../../../../platform/ade/common/adeCloudHosts.js';
+import { IAdeEngineeringService, IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IDialogService, IPrompt } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { ExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
-import { IFileService } from '../../../../../platform/files/common/files.js';
+import { IFileService, IFileStatWithMetadata } from '../../../../../platform/files/common/files.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
@@ -39,6 +41,7 @@ import { IWorkspaceContextService, IWorkspaceFoldersChangeEvent, toWorkspaceFold
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { IAgentHostEnablementService } from '../../../../../platform/agentHost/common/agentHostEnablementService.js';
 import { API_OPEN_DIFF_EDITOR_COMMAND_ID } from '../../../../browser/parts/editor/editorCommands.js';
+import { Verbosity } from '../../../../common/editor.js';
 import { EditorInput } from '../../../../common/editor/editorInput.js';
 import { IViewContainerModel, IViewDescriptorService, ViewContainer, ViewContainerLocation } from '../../../../common/views.js';
 import { IEditorGroup, IEditorGroupsService, IEditorPart } from '../../../../services/editor/common/editorGroupsService.js';
@@ -60,15 +63,16 @@ import { IWebviewViewService, WebviewView } from '../../../webviewView/browser/w
 import '../../browser/ade.css';
 import '../../browser/ade.contribution.js';
 import '../../browser/adeControlHandler.js';
-import { AdeEditorService } from '../../browser/adeEditorService.js';
-import { AdeChangesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
+import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
+import { AdeInboxPanel } from '../../browser/adeInboxView.js';
+import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
 import { AdeProjectsDragAndDrop, AdeProjectsView, AdeTreeItem } from '../../browser/adeProjectsView.js';
 import { ChatEditorInput } from '../../../chat/browser/widgetHosts/editor/chatEditorInput.js';
-import { AdeExtensionWebviewEditorInput, AdeExtensionWebviewEditorPane, AdeSessionEditorInput } from '../../browser/adeSessionEditor.js';
+import { AdeExtensionWebviewEditorInput, AdeExtensionWebviewEditorPane, AdeSessionEditor, AdeSessionEditorInput } from '../../browser/adeSessionEditor.js';
 import { IAdeEngineSession, IAdeSessionsService } from '../../browser/adeSessionsService.js';
-import { ADE_CHANGES_VIEW_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
+import { ADE_CHANGES_VIEW_ID, ADE_FILES_VIEW_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
 
 suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -1800,6 +1804,684 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			visibleAfterAlphaTwistieCollapse: ['Alpha', 'Beta'],
 			selectedAfterBetaExpandClick: 'Beta',
 			visibleAfterBetaExpand: ['Alpha', 'Beta', 'Beta Session'],
+		});
+	});
+
+	test('renders 4-tier Org-Chart Deck tree channels, recycled lock hygiene, Cloud Host chip, sticky Focus banner, and Critical Inbox tab badge', async () => {
+		const cloudProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'gpu-a100', path: '/workspace/CloudRepo' });
+		const h = createHarness([alpha, cloudProject]);
+		h.modes.setMode('ade');
+
+		const lockedIds = new Set<string>();
+		const origProjects = h.projects;
+		origProjects.isLockedByWorkTree = (id: string) => lockedIds.has(id);
+
+		const onInboxChanged = store.add(new Emitter<void>());
+		let inboxItems: IAdeInboxItem[] = [];
+		const inboxStub = new class extends mock<IAdeInboxService>() {
+			override get items(): readonly IAdeInboxItem[] { return inboxItems; }
+			override get unreadCount(): number { return inboxItems.filter(i => i.unread && !i.resolved).length; }
+			override readonly onDidChange = onInboxChanged.event;
+			override list(opts?: { includeResolved?: boolean }): readonly IAdeInboxItem[] {
+				return opts?.includeResolved ? inboxItems : inboxItems.filter(i => !i.resolved);
+			}
+		}();
+		h.instantiation.stub(IAdeInboxService, inboxStub);
+		h.instantiation.stub(IAdeEngineeringService, new class extends mock<IAdeEngineeringService>() {
+			override listTrees() { return []; }
+		}());
+
+		const editorState: { current?: EditorInput } = {};
+		const onActiveEditorChange = store.add(new Emitter<void>());
+		h.instantiation.stub(IEditorService, new class extends mock<IEditorService>() {
+			override readonly onDidActiveEditorChange = onActiveEditorChange.event;
+			override get activeEditor(): EditorInput | undefined { return editorState.current; }
+		}());
+
+		const dummySidebar = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.deck'; }();
+		h.instantiation.stub(IViewDescriptorService, {
+			getViewLocationById: () => ViewContainerLocation.Sidebar,
+			onDidChangeLocation: Event.None,
+			getViewDescriptorById: () => null,
+			getViewContainerByViewId: () => dummySidebar,
+			getDefaultContainerById: () => dummySidebar,
+			getViewContainerModel: () => new class extends mock<IViewContainerModel>() {
+				override readonly title = 'Sessions';
+				override readonly onDidChangeContainerInfo = Event.None;
+			}(),
+			onDidChangeContainer: Event.None,
+		});
+
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/deck-gov') }, 'Gov Root', { role: 'governor' });
+		h.projects.setAgentWorkTreeTag?.(gov.id, 'engineering');
+		const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/deck-mgr') }, 'Mgr Lead', { parentId: gov.id, role: 'manager' });
+		const emp = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/deck-emp') }, 'Emp Reviewer', { parentId: mgr.id, role: 'employee' });
+		const wrk = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/deck-wrk') }, 'Wrk Leaf', { parentId: emp.id });
+		h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/deck-free') }, 'Unlocked Worker');
+		lockedIds.add(mgr.id);
+
+		const host = append(document.body, $('.monaco-workbench.ade-deck-view-test-host'));
+		store.add({ dispose: () => host.remove() });
+		host.style.width = '280px';
+		host.style.height = '600px';
+
+		const view = store.add(h.instantiation.createInstance(AdeProjectsView, { id: ADE_PROJECTS_VIEW_ID, title: 'Sessions' }));
+		view.render();
+		host.appendChild(view.element);
+		view.setVisible(true);
+		view.orthogonalSize = 280;
+		view.layout(600);
+		await view.refresh();
+		await view.revealAgent(wrk.id);
+
+		const findRow = (labelText: string) => [...host.querySelectorAll<HTMLElement>('.ade-tree-row')]
+			.find(el => el.querySelector('.label-name')?.textContent === labelText)!;
+
+		const govRow = findRow('Gov Root');
+		const mgrRow = findRow('Mgr Lead');
+		const empRow = findRow('Emp Reviewer');
+		const wrkRow = findRow('Wrk Leaf');
+		const freeRow = findRow('Unlocked Worker');
+		const cloudRow = findRow('CloudRepo');
+
+		const rowSnapshot = {
+			govTier: govRow.querySelector('.ade-role-badge')?.getAttribute('data-tier'),
+			govBadgeText: govRow.querySelector('.ade-role-badge')?.textContent,
+			govBadgeHasOrgIcon: Boolean(govRow.querySelector('.ade-role-badge .codicon-organization')),
+			govWorktreeText: govRow.querySelector('.ade-worktree-badge')?.textContent,
+			govChildRank: govRow.getAttribute('data-child-rank'),
+			mgrLocked: mgrRow.classList.contains('ade-worktree-locked') && !mgrRow.querySelector<HTMLElement>('.ade-lock-glyph')!.hidden,
+			mgrBadgeLocked: Boolean(mgrRow.querySelector('.ade-role-badge.locked')),
+			mgrChildRank: mgrRow.getAttribute('data-child-rank'),
+			empTier: empRow.querySelector('.ade-role-badge')?.getAttribute('data-tier'),
+			empBadgeText: empRow.querySelector('.ade-role-badge')?.textContent,
+			empHasShieldIcon: Boolean(empRow.querySelector('.ade-role-badge .codicon-shield')),
+			empChildRank: empRow.getAttribute('data-child-rank'),
+			empChildLabel: empRow.getAttribute('data-child-label'),
+			wrkTier: wrkRow.querySelector('.ade-role-badge')?.getAttribute('data-tier'),
+			wrkBadgeText: wrkRow.querySelector('.ade-role-badge')?.textContent,
+			wrkDepthClass: wrkRow.classList.contains('depth-4'),
+			freeNotLocked: !freeRow.classList.contains('ade-worktree-locked') && freeRow.querySelector<HTMLElement>('.ade-lock-glyph')!.hidden,
+			cloudChipText: cloudRow.querySelector('.ade-cloud-host-badge')?.textContent,
+			cloudHasDot: Boolean(cloudRow.querySelector('.ade-cloud-host-badge .ade-cloud-host-dot')),
+			hiddenStatusDotDisplay: mainWindow.getComputedStyle(freeRow.querySelector<HTMLElement>('.ade-status-dot')!).display,
+		};
+
+		// Hygiene F1: clear lock on Mgr Lead and refresh -> recycled row MUST shed ade-worktree-locked and hide lock glyph
+		lockedIds.clear();
+		await view.refresh();
+		const mgrUnlockedAfterRecycle = !findRow('Mgr Lead').classList.contains('ade-worktree-locked')
+			&& findRow('Mgr Lead').querySelector<HTMLElement>('.ade-lock-glyph')!.hidden;
+
+		// Secretary active bar + working chip + unread dot
+		const secResource = URI.parse('aexus-secretary:/sec-deck');
+		h.projects.configureSecretary({ engineId: 'aexus-claude', resource: secResource });
+		h.projects.syncSessionItem(secResource, { status: 'working' }, false);
+		h.projects.syncSessionItem(secResource, { status: 'idle' }, false);
+		const secUnreadVisible = !host.querySelector<HTMLElement>('.ade-secretary-bar .ade-status-dot')!.hidden;
+		const secEditor = store.add(h.instantiation.createInstance(AdeSessionEditorInput, ADE_SECRETARY_ID));
+		editorState.current = secEditor;
+		onActiveEditorChange.fire();
+		h.projects.syncSessionItem(secResource, { status: 'working' }, true);
+		const secBar = host.querySelector<HTMLElement>('.ade-secretary-bar')!;
+		const secretaryActiveWorking = secUnreadVisible
+			&& secBar.classList.contains('is-active')
+			&& secBar.classList.contains('is-working')
+			&& !secBar.querySelector<HTMLElement>('.ade-secretary-status-chip')!.hidden
+			&& Boolean(secBar.querySelector('.ade-secretary-icon-wrap svg.ade-secretary-app-icon'));
+
+		// Focus mode sticky banner outside .ade-sidebar-controls + Exit button returns Home
+		const bannerBeforeFocusHidden = host.querySelector<HTMLElement>('.ade-focus-banner')!.hidden;
+		h.navigation.enterProject(cloudProject);
+		await view.refresh();
+		const focusBanner = host.querySelector<HTMLElement>('.ade-focus-banner')!;
+		const bannerInControls = Boolean(host.querySelector('.ade-sidebar-controls .ade-focus-banner'));
+		const focusBannerVisibleWithCloud = !focusBanner.hidden
+			&& focusBanner.querySelector('.ade-focus-banner-name')?.textContent === 'CloudRepo'
+			&& focusBanner.querySelector('.ade-focus-banner-host')?.textContent === 'Cloud: gpu-a100';
+		focusBanner.querySelector<HTMLButtonElement>('.ade-focus-banner-exit')!.click();
+		await view.refresh();
+		const bannerHiddenAfterExit = focusBanner.hidden && !h.navigation.focusedProject;
+
+		// Critical Circuit-Breaker item turns Inbox tab badge critical
+		inboxItems = [{
+			id: 'cb-1',
+			kind: 'governor_message',
+			treeType: 'engineering',
+			governorSessionId: gov.id,
+			governorLabel: gov.label,
+			projectPath: alpha.fsPath,
+			projectName: 'Alpha',
+			nodeId: 'N3',
+			nodeTitle: 'Auth Service',
+			title: 'Circuit Breaker on N3',
+			message: '3 formal failures.',
+			unread: false,
+			resolved: false,
+			createdAt: Date.now(),
+		}];
+		onInboxChanged.fire();
+		const inboxBadge = host.querySelector<HTMLElement>('.ade-inbox-count-badge')!;
+		const criticalBadgeRedEvenWhenRead = !inboxBadge.hidden && inboxBadge.classList.contains('critical') && inboxBadge.textContent === '1';
+
+		assert.deepStrictEqual({
+			...rowSnapshot,
+			mgrUnlockedAfterRecycle,
+			secretaryActiveWorking,
+			bannerBeforeFocusHidden,
+			bannerInControls,
+			focusBannerVisibleWithCloud,
+			bannerHiddenAfterExit,
+			criticalBadgeRedEvenWhenRead,
+		}, {
+			govTier: 'L1',
+			govBadgeText: 'Governor',
+			govBadgeHasOrgIcon: true,
+			govWorktreeText: 'Engineering',
+			govChildRank: 'manager',
+			mgrLocked: true,
+			mgrBadgeLocked: true,
+			mgrChildRank: 'employee',
+			empTier: 'L3',
+			empBadgeText: 'Employee',
+			empHasShieldIcon: true,
+			empChildRank: 'worker',
+			empChildLabel: '→ Worker',
+			wrkTier: 'L4',
+			wrkBadgeText: 'Worker',
+			wrkDepthClass: true,
+			freeNotLocked: true,
+			cloudChipText: 'gpu-a100',
+			cloudHasDot: true,
+			hiddenStatusDotDisplay: 'none',
+			mgrUnlockedAfterRecycle: true,
+			secretaryActiveWorking: true,
+			bannerBeforeFocusHidden: true,
+			bannerInControls: false,
+			focusBannerVisibleWithCloud: true,
+			bannerHiddenAfterExit: true,
+			criticalBadgeRedEvenWhenRead: true,
+		});
+	});
+
+	test('groups ADE Inbox into Critical / Needs Decision / Updates / Resolved lanes with clickable lineage, clamp, and Circuit-Breaker actions', async () => {
+		const h = createHarness([alpha]);
+		const onInboxChanged = store.add(new Emitter<void>());
+		const openedCanvases: string[] = [];
+		const resolvedIds: string[] = [];
+		let gateShouldThrow = true;
+
+		const items: IAdeInboxItem[] = [
+			{
+				id: 'info-1',
+				kind: 'governor_message',
+				treeType: 'engineering',
+				governorSessionId: 'gov-1',
+				governorLabel: 'Alpha Gov',
+				projectPath: alpha.fsPath,
+				projectName: 'Alpha',
+				title: 'Milestone status note',
+				message: 'Line 1\nLine 2\nLine 3\nLine 4 extra details beyond three lines for message clamping.',
+				unread: true,
+				resolved: false,
+				createdAt: Date.now() - 5000,
+			},
+			{
+				id: 'gate-1',
+				kind: 'user_gate',
+				treeType: 'engineering',
+				governorSessionId: 'gov-1',
+				governorLabel: 'Alpha Gov',
+				projectPath: alpha.fsPath,
+				projectName: 'Alpha',
+				nodeId: 'U1',
+				nodeTitle: 'Release Signoff',
+				title: 'User Acceptance Gate: [U1] Release Signoff',
+				message: 'Ready for review.',
+				unread: true,
+				resolved: false,
+				createdAt: Date.now() - 3000,
+			},
+			{
+				id: 'crit-1',
+				kind: 'governor_message',
+				treeType: 'engineering',
+				governorSessionId: 'gov-1',
+				governorLabel: 'Alpha Gov',
+				projectPath: alpha.fsPath,
+				projectName: 'Alpha',
+				nodeId: 'N3',
+				nodeTitle: 'DB Migration',
+				title: 'Escalation after halt',
+				message: 'Circuit breaker tripped on N3.',
+				severity: 'critical',
+				unread: true,
+				resolved: false,
+				createdAt: Date.now() - 1000,
+			},
+			{
+				id: 'done-1',
+				kind: 'governor_message',
+				treeType: 'engineering',
+				governorSessionId: 'gov-1',
+				governorLabel: 'Alpha Gov',
+				projectPath: alpha.fsPath,
+				projectName: 'Alpha',
+				title: 'Earlier note',
+				message: 'Already handled.',
+				unread: false,
+				resolved: true,
+				resolution: 'Acknowledged',
+				createdAt: Date.now() - 20_000,
+			},
+		];
+
+		const inboxStub = new class extends mock<IAdeInboxService>() {
+			override get items(): readonly IAdeInboxItem[] { return items; }
+			override get unreadCount(): number { return items.filter(i => i.unread && !i.resolved).length; }
+			override readonly onDidChange = onInboxChanged.event;
+			override list(opts?: { includeResolved?: boolean }): readonly IAdeInboxItem[] {
+				return opts?.includeResolved ? items : items.filter(i => !i.resolved);
+			}
+			override async markRead(): Promise<void> { }
+			override async resolveItem(id: string): Promise<IAdeInboxItem | undefined> {
+				resolvedIds.push(id);
+				return items.find(i => i.id === id);
+			}
+		}();
+		const engStub = new class extends mock<IAdeEngineeringService>() {
+			override listTrees() {
+				return [{
+					governorSessionId: 'gov-1',
+					governorLabel: 'Alpha Gov',
+					projectPath: alpha.fsPath,
+					projectName: 'Alpha',
+					treeType: 'engineering' as const,
+					runStatus: 'idle' as const,
+					workspaceIsolation: 'shared' as const,
+					managerCount: 1,
+					totalNodes: 2,
+					completedNodes: 1,
+					runningNodes: 0,
+					failedNodes: 0,
+					waitingGates: 1,
+					updatedAt: Date.now(),
+				}];
+			}
+			override async openEngineeringEditor(govId: string): Promise<void> {
+				openedCanvases.push(govId);
+			}
+			override async submitGateVerdict(): Promise<never> {
+				if (gateShouldThrow) {
+					throw new Error('Backend gate timeout');
+				}
+				return undefined as never;
+			}
+		}();
+
+		const host = append(document.body, $('.monaco-workbench.ade-inbox-lanes-test-host'));
+		store.add({ dispose: () => host.remove() });
+		const panel = store.add(new AdeInboxPanel(host, inboxStub, engStub, h.editorsStub));
+
+		const pendingLaneOrder = [...panel.element.querySelectorAll('.ade-inbox-lane-header .ade-inbox-lane-title')].map(el => el.textContent);
+		const cardOrder = [...panel.element.querySelectorAll<HTMLElement>('.ade-inbox-card[data-inbox-id]')].map(el => el.getAttribute('data-inbox-id'));
+		const criticalPrimaryText = panel.element.querySelector('[data-inbox-id="crit-1"] .ade-inbox-btn.danger')?.textContent;
+		const gateApproveIncludesApprove = Boolean(panel.element.querySelector('[data-inbox-id="gate-1"] .ade-inbox-btn.primary')?.textContent?.includes('Approve'));
+
+		// Clickable lineage jumps to canvas
+		panel.element.querySelector<HTMLButtonElement>('[data-inbox-id="crit-1"] button.ade-inbox-lineage')!.click();
+
+		// Message clamp + More toggle
+		const infoMsgClampedInitially = Boolean(panel.element.querySelector('[data-inbox-id="info-1"] .ade-inbox-card-message.clamped'));
+		panel.element.querySelector<HTMLButtonElement>('[data-inbox-id="info-1"] .ade-inbox-more')!.click();
+		const infoMsgExpandedAfterMore = !panel.element.querySelector('[data-inbox-id="info-1"] .ade-inbox-card-message.clamped');
+
+		// Gate error renders styled .ade-inbox-error-banner.sev-critical (Hygiene F3)
+		panel.element.querySelector<HTMLButtonElement>('[data-inbox-id="gate-1"] .ade-inbox-btn.primary')!.click();
+		await timeout(10);
+		const errorBannerVisible = Boolean(panel.element.querySelector('.ade-inbox-error-banner.sev-critical'));
+		gateShouldThrow = false;
+
+		// Switch to "All" filter -> Resolved lane starts collapsed, clicking header expands it
+		const filterBtns = [...panel.element.querySelectorAll<HTMLButtonElement>('.ade-inbox-filter-btn')];
+		filterBtns.find(b => b.textContent === 'All')!.click();
+		const resolvedCollapsedInitially = !panel.element.querySelector('[data-inbox-id="done-1"]');
+		panel.element.querySelector<HTMLElement>('.ade-inbox-lane-header.lane-resolved')!.click();
+		const resolvedVisibleAfterExpand = Boolean(panel.element.querySelector('[data-inbox-id="done-1"]'));
+
+		// Severity fallback heuristic `/circuit/i` when `severity` is omitted
+		const legacyCircuitSeverity = resolveAdeInboxSeverity({ kind: 'governor_message', title: 'CIRCUIT broken on N1' });
+
+		assert.deepStrictEqual({
+			pendingLaneOrder,
+			cardOrder,
+			criticalPrimaryText,
+			gateApproveIncludesApprove,
+			openedCanvases,
+			infoMsgClampedInitially,
+			infoMsgExpandedAfterMore,
+			errorBannerVisible,
+			resolvedCollapsedInitially,
+			resolvedVisibleAfterExpand,
+			legacyCircuitSeverity,
+		}, {
+			pendingLaneOrder: ['Critical', 'Needs Decision', 'Updates'],
+			cardOrder: ['crit-1', 'gate-1', 'info-1'],
+			criticalPrimaryText: 'Open Node ↗',
+			gateApproveIncludesApprove: true,
+			openedCanvases: ['gov-1'],
+			infoMsgClampedInitially: true,
+			infoMsgExpandedAfterMore: true,
+			errorBannerVisible: true,
+			resolvedCollapsedInitially: true,
+			resolvedVisibleAfterExpand: true,
+			legacyCircuitSeverity: 'critical',
+		});
+	});
+
+	test('warms up lazy sessions via AdeSessionEditor 3-step stepper with Retry on failure, and surfaces lineage on connected ChatEditorInput', async () => {
+		const h = createHarness([alpha]);
+		h.modes.setMode('ade');
+
+		const editors: EditorInput[] = [];
+		let activeEditor: EditorInput | undefined;
+		const onActiveChange = store.add(new Emitter<void>());
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+			override get editors(): readonly EditorInput[] { return editors; }
+			override get activeEditor(): EditorInput | null { return activeEditor ?? null; }
+			override focus(): void { }
+		}();
+		const fakePart = {
+			get activeGroup(): IEditorGroup { return fakeGroup; },
+			get groups(): readonly IEditorGroup[] { return [fakeGroup]; },
+			findGroup: () => undefined,
+			addGroup: () => fakeGroup,
+		} as unknown as IEditorPart;
+		h.instantiation.stub(IEditorGroupsService, new class extends mock<IEditorGroupsService>() {
+			override get mainPart(): IEditorPart { return fakePart; }
+		}());
+		h.instantiation.stub(IEditorService, new class extends mock<IEditorService>() {
+			override readonly onDidActiveEditorChange = onActiveChange.event;
+			override get activeEditor(): EditorInput | undefined { return activeEditor; }
+			override openEditor = (async (editor: unknown): Promise<undefined> => {
+				if (editor instanceof EditorInput) {
+					if (!editors.includes(editor)) {
+						editors.push(editor);
+					}
+					activeEditor = editor;
+					onActiveChange.fire();
+				}
+				return undefined;
+			}) as IEditorService['openEditor'];
+			override async closeEditors(toClose: readonly { readonly editor: EditorInput; readonly groupId: number }[]): Promise<void> {
+				for (const item of toClose) {
+					const idx = editors.indexOf(item.editor);
+					if (idx >= 0) {
+						editors.splice(idx, 1);
+					}
+					if (activeEditor === item.editor) {
+						activeEditor = editors.at(-1);
+						onActiveChange.fire();
+					}
+					item.editor.dispose();
+				}
+			}
+		}());
+		h.instantiation.stub(IExtensionService, new class extends mock<IExtensionService>() {
+			override readonly extensions = [] as never;
+			override async activateById(): Promise<void> { }
+			override async activateByEvent(): Promise<void> { }
+		}());
+		h.instantiation.stub(IChatSessionsService, new class extends mock<IChatSessionsService>() {
+			override getAllChatSessionContributions() { return []; }
+		}());
+		h.instantiation.stub(IAgentHostEnablementService, new class extends mock<IAgentHostEnablementService>() { }());
+
+		let shouldFailSpawn = true;
+		h.instantiation.stub(IAdeSessionsService, new class extends mock<IAdeSessionsService>() {
+			override getEngineName(engineId: string): string { return engineId === 'aexus-claude' ? 'Claude Code' : engineId; }
+			override async create(engineId: string): Promise<IAdeEngineSession> {
+				if (shouldFailSpawn) {
+					throw new Error('CLI daemon unreachable');
+				}
+				return {
+					engineId,
+					projectUri: alpha,
+					resource: URI.parse('aexus-claude:/materialized-emp'),
+					label: 'Materialized Emp',
+				};
+			}
+		}());
+
+		const realEditors = store.add(h.instantiation.createInstance(AdeEditorService));
+		h.instantiation.stub(IAdeEditorService, realEditors);
+
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/lin-gov') }, 'Chief Gov', { role: 'governor' });
+		const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/lin-mgr') }, 'Core Mgr', { parentId: gov.id, role: 'manager' });
+		const lazyEmp = h.projects.addAgent(mgr.id, 'Lazy Reviewer', 'employee');
+		h.projects.updateAgentEnginePreferences?.(lazyEmp.id, { preferredEngineId: 'aexus-claude' });
+
+		// 1) First open fails -> stays on AdeSessionEditorInput in error state with Retry (never silently swallowed!)
+		await realEditors.openAgent(lazyEmp.id);
+		const failedInput = activeEditor;
+		assert.ok(failedInput instanceof AdeSessionEditorInput);
+
+		// Mount AdeSessionEditor pane on failedInput to verify 32px lineage header + stepper error + Retry button
+		const paneHost = append(document.body, $('.monaco-workbench.ade-session-pane-test-host'));
+		store.add({ dispose: () => paneHost.remove() });
+		const pane = store.add(h.instantiation.createInstance(AdeSessionEditor, fakeGroup));
+		pane.create(paneHost);
+		await pane.setInput(failedInput, undefined, { newInGroup: true }, CancellationToken.None);
+
+		const headerHeight = paneHost.querySelector<HTMLElement>('.ade-session-header')?.offsetHeight;
+		const crumbTexts = [...paneHost.querySelectorAll('.ade-session-crumb')].map(el => el.textContent);
+		const rankPillTier = paneHost.querySelector('.ade-session-rank-pill')?.getAttribute('data-tier');
+		const stepCount = paneHost.querySelectorAll('.ade-session-warmup-step').length;
+		const errorText = paneHost.querySelector('.ade-session-warmup-error')?.textContent;
+		const retryBtn = [...paneHost.querySelectorAll<HTMLElement>('.ade-session-warmup-actions .monaco-button')].find(b => b.textContent === 'Retry');
+
+		// 2) Flip spawn to succeed and click Retry -> swaps warm-up tab to AdeLineageChatEditorInput with rich lineage!
+		shouldFailSpawn = false;
+		retryBtn!.click();
+		await timeout(30);
+
+		const connectedInput = activeEditor;
+		const isLineageChat = connectedInput instanceof AdeLineageChatEditorInput && connectedInput instanceof ChatEditorInput;
+		const chatDescription = connectedInput?.getDescription();
+		const chatLongTitle = connectedInput?.getTitle(Verbosity.LONG);
+		const warmTabClosed = editors.every(e => !(e instanceof AdeSessionEditorInput));
+		await realEditors.closeAgents([gov, mgr, h.projects.getAgent(lazyEmp.id)!]);
+
+		assert.deepStrictEqual({
+			headerHeight,
+			crumbTexts,
+			rankPillTier,
+			stepCount,
+			errorText,
+			hasRetryBtn: Boolean(retryBtn),
+			isLineageChat,
+			chatDescription,
+			chatLongTitleIncludesLineage: Boolean(chatLongTitle?.includes('Alpha › Core Mgr › Employee')),
+			warmTabClosed,
+		}, {
+			headerHeight: 32,
+			crumbTexts: ['Alpha', 'Chief Gov', 'Core Mgr', 'Lazy Reviewer'],
+			rankPillTier: 'L3',
+			stepCount: 3,
+			errorText: 'CLI daemon unreachable',
+			hasRetryBtn: true,
+			isLineageChat: true,
+			chatDescription: 'Alpha › Core Mgr › Employee',
+			chatLongTitleIncludesLineage: true,
+			warmTabClosed: true,
+		});
+	});
+
+	test('renders AdeChangesView summary strip + gitDecoration letter pills + sibling empty actions, and prunes collapsed folder watchers in AdeFilesView', async () => {
+		const h = createHarness([alpha, beta]);
+		const addedUri = URI.file('/projects/Alpha/src/new.ts');
+		const modifiedUri = URI.file('/projects/Alpha/src/app.ts');
+		const deletedUri = URI.file('/projects/Alpha/src/old.ts');
+
+		const groupHolder: { ref?: ISCMResourceGroup } = {};
+		const mkRes = (uri: URI, tooltip: string, strikeThrough = false): ISCMResource => ({
+			get resourceGroup() { return groupHolder.ref!; },
+			sourceUri: uri,
+			decorations: { tooltip, strikeThrough },
+			contextValue: undefined,
+			command: undefined,
+			multiDiffEditorOriginalUri: undefined,
+			multiDiffEditorModifiedUri: undefined,
+			open: async () => { },
+		});
+		const provider = upcastPartial<ISCMProvider>({
+			id: 'git-alpha',
+			label: 'Git',
+			rootUri: alpha,
+			groups: [],
+			onDidChangeResourceGroups: Event.None,
+			onDidChangeResources: Event.None,
+			getOriginalResource: async () => null,
+		});
+		const groupRef = upcastPartial<ISCMResourceGroup>({
+			id: 'workingTree',
+			label: 'Changes',
+			provider,
+			hideWhenEmpty: false,
+			resources: [
+				mkRes(addedUri, 'Index Added'),
+				mkRes(modifiedUri, 'Modified'),
+				mkRes(deletedUri, 'Deleted', true),
+			],
+			onDidChange: Event.None,
+			onDidChangeResources: Event.None,
+		});
+		groupHolder.ref = groupRef;
+		(provider.groups as ISCMResourceGroup[]).push(groupRef);
+		const repo = upcastPartial<ISCMRepository>({ id: 'repo-alpha', provider });
+		h.instantiation.stub(ISCMService, new class extends mock<ISCMService>() {
+			override readonly repositories = [repo];
+			override readonly onDidAddRepository = Event.None;
+			override readonly onDidRemoveRepository = Event.None;
+		}());
+
+		const dummyInspector = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.inspector2'; }();
+		h.instantiation.stub(IViewDescriptorService, {
+			getViewLocationById: () => ViewContainerLocation.AuxiliaryBar,
+			onDidChangeLocation: Event.None,
+			getViewDescriptorById: () => null,
+			getViewContainerByViewId: () => dummyInspector,
+			getDefaultContainerById: () => dummyInspector,
+			getViewContainerModel: () => new class extends mock<IViewContainerModel>() {
+				override readonly title = 'Project Inspector';
+				override readonly onDidChangeContainerInfo = Event.None;
+			}(),
+			onDidChangeContainer: Event.None,
+		});
+
+		const host = append(document.body, $('.monaco-workbench.ade-inspector-upgrade-host'));
+		store.add({ dispose: () => host.remove() });
+		const changesView = store.add(h.instantiation.createInstance(AdeChangesView, { id: ADE_CHANGES_VIEW_ID, title: 'Changes' }));
+		changesView.render();
+		host.appendChild(changesView.element);
+		changesView.orthogonalSize = 260;
+		changesView.layout(320);
+
+		h.navigation.selectProject(alpha);
+		await changesView.refresh();
+		const summaryText = host.querySelector('.ade-changes-summary')?.textContent;
+		const rowLetters = [...host.querySelectorAll('.ade-scm-resource-row .ade-scm-letter')].map(el => el.textContent).sort();
+		const titleCount = changesView.titleDescription;
+		const emptyActionsHiddenWhenHasChanges = host.querySelector<HTMLElement>('.ade-inspector-empty-actions')?.hidden;
+
+		// Beta has 0 changes -> exact .ade-inspector-empty textContent + visible sibling quick actions
+		h.navigation.selectProject(beta);
+		await changesView.refresh();
+		const betaEmptyExact = host.querySelector('.ade-inspector-empty')?.textContent;
+		const siblingQuickActions = [...host.querySelectorAll('.ade-inspector-empty-actions .ade-inspector-empty-action')].map(el => el.textContent);
+		const titleCountClearedOnEmpty = changesView.titleDescription;
+
+		// AdeFilesView watcher pruning on folder collapse
+		let activeWatchers = 0;
+		const subFolder = URI.file('/projects/Alpha/src');
+		const nestedFolder = URI.file('/projects/Alpha/src/nested');
+		h.instantiation.stub(IFileService, new class extends mock<IFileService>() {
+			override readonly onDidFilesChange = Event.None;
+			override readonly onDidRunOperation = Event.None;
+			override createWatcher() {
+				activeWatchers++;
+				return {
+					onDidChange: Event.None,
+					dispose: () => { activeWatchers--; },
+				};
+			}
+			override async resolve(resource: URI): Promise<IFileStatWithMetadata> {
+				const children = resource.path === alpha.path
+					? [{ resource: subFolder, name: 'src', isDirectory: true, isFile: false, isSymbolicLink: false }]
+					: resource.path === subFolder.path
+						? [{ resource: nestedFolder, name: 'nested', isDirectory: true, isFile: false, isSymbolicLink: false }]
+						: [{ resource: URI.file('/projects/Alpha/src/nested/index.ts'), name: 'index.ts', isDirectory: false, isFile: true, isSymbolicLink: false }];
+				return {
+					resource,
+					name: resource.path.split('/').pop() ?? '',
+					isDirectory: true,
+					isFile: false,
+					isSymbolicLink: false,
+					mtime: 0,
+					ctime: 0,
+					etag: '1',
+					size: 0,
+					locked: false,
+					readonly: false,
+					executable: false,
+					children: children.map(c => ({ ...c, mtime: 0, ctime: 0, etag: '1', size: 0, locked: false, readonly: false, executable: false, children: undefined })),
+				};
+			}
+		}());
+
+		const filesHost = append(document.body, $('.monaco-workbench.ade-files-watcher-host'));
+		store.add({ dispose: () => filesHost.remove() });
+		const filesView = store.add(h.instantiation.createInstance(AdeFilesView, { id: ADE_FILES_VIEW_ID, title: 'Files' }));
+		filesView.render();
+		filesHost.appendChild(filesView.element);
+		filesView.orthogonalSize = 260;
+		filesView.layout(300);
+
+		h.navigation.selectProject(alpha);
+		await filesView.refresh(URI.file('/projects/Alpha/src/nested/index.ts'));
+		const watchersAfterDeepExpand = { mapCount: filesView.watchedFolderCount, activeWatchers };
+
+		// Click `src` folder row to collapse it -> watchers for `src` and `src/nested` MUST be disposed & pruned!
+		const srcRow = [...filesHost.querySelectorAll<HTMLElement>('.monaco-list-row')].find(r => r.textContent?.trim() === 'src')!;
+		srcRow.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+		const treeTwistie = srcRow.querySelector<HTMLElement>('.monaco-tl-twistie')!;
+		treeTwistie.dispatchEvent(new mainWindow.MouseEvent('mousedown', { bubbles: true, button: 0, detail: 1 }));
+		treeTwistie.dispatchEvent(new mainWindow.MouseEvent('mouseup', { bubbles: true, button: 0, detail: 1 }));
+		treeTwistie.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, button: 0, detail: 1 }));
+		await timeout(20);
+		const watchersAfterCollapse = { mapCount: filesView.watchedFolderCount, activeWatchers };
+
+		assert.deepStrictEqual({
+			summaryText,
+			rowLetters,
+			titleCount,
+			emptyActionsHiddenWhenHasChanges,
+			betaEmptyExact,
+			siblingQuickActions,
+			titleCountClearedOnEmpty,
+			watchersAfterDeepExpand,
+			watchersAfterCollapse,
+		}, {
+			summaryText: '3 files·A1·M1·D1',
+			rowLetters: ['A', 'D', 'M'],
+			titleCount: '3',
+			emptyActionsHiddenWhenHasChanges: true,
+			betaEmptyExact: 'No changes in Beta',
+			siblingQuickActions: ['Open Files', 'Refresh'],
+			titleCountClearedOnEmpty: undefined,
+			watchersAfterDeepExpand: { mapCount: 3, activeWatchers: 3 },
+			watchersAfterCollapse: { mapCount: 1, activeWatchers: 1 },
 		});
 	});
 });
