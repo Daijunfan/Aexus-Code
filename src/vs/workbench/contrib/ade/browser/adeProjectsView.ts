@@ -42,9 +42,10 @@ import { createFileIconThemableTreeContainerScope, IResourceLabel, ResourceLabel
 import { InlineEditInputBox } from '../../../browser/parts/views/inlineEditInputBox.js';
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IEditableData, IViewDescriptorService } from '../../../common/views.js';
+import { formatProjectDisplayPath, isCloudProjectUri } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IAdeEngineeringService, IAdeInboxService } from '../../../../platform/ade/common/adeEngineering.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
 import { AdeInboxPanel } from './adeInboxView.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
@@ -205,6 +206,7 @@ interface IAdeTreeTemplate {
 	readonly labelHost: HTMLElement;
 	readonly label: IResourceLabel;
 	readonly editHost: HTMLElement;
+	readonly cloudBadge: HTMLElement;
 	readonly countBadge: HTMLElement;
 	readonly addSessionBtn: HTMLElement;
 	readonly workTreeBadge: HTMLElement;
@@ -240,6 +242,8 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		const editHost = append(row, $('.ade-tree-edit-host'));
 		editHost.hidden = true;
 		const trailing = append(row, $('.ade-tree-trailing'));
+		const cloudBadge = append(trailing, $('span.ade-cloud-host-badge'));
+		cloudBadge.hidden = true;
 		const countBadge = append(trailing, $('span.ade-project-count'));
 		countBadge.hidden = true;
 		const addSessionBtn = append(trailing, $('button.ade-icon-button.ade-project-add-btn', {
@@ -260,6 +264,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			labelHost,
 			label,
 			editHost,
+			cloudBadge,
 			countBadge,
 			addSessionBtn,
 			workTreeBadge,
@@ -326,14 +331,27 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 				template.countBadge.hidden = true;
 			}
 
-			this.applyItemIcon(template.iconNode, Codicon.folder);
+			const isCloud = isCloudProjectUri(item.project.uri);
+			this.applyItemIcon(template.iconNode, isCloud ? Codicon.remote : Codicon.folder);
+			if (isCloud) {
+				template.cloudBadge.textContent = item.project.uri.authority;
+				template.cloudBadge.hidden = false;
+				template.editDisposables.add(this.hoverService.setupManagedHover(
+					getDefaultHoverDelegate('mouse'),
+					template.cloudBadge,
+					localize('adeCloudProjectTooltip', "SSH Cloud Host Project ({0})", formatProjectDisplayPath(item.project.uri)),
+				));
+			} else {
+				template.cloudBadge.textContent = '';
+				template.cloudBadge.hidden = true;
+			}
 			template.label.setResource({
 				resource: item.project.uri,
 				name: item.project.name,
 			}, {
 				hideIcon: true,
 				fileKind: FileKind.FOLDER,
-				title: item.project.uri.fsPath,
+				title: formatProjectDisplayPath(item.project.uri),
 				extraClasses: ['explorer-item', 'ade-project-folder-row'],
 			});
 
@@ -349,6 +367,8 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			return;
 		}
 
+		template.cloudBadge.textContent = '';
+		template.cloudBadge.hidden = true;
 		template.countBadge.hidden = true;
 
 		const agent = item.agent;
@@ -387,7 +407,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		}, {
 			hideIcon: true,
 			fileKind: FileKind.FILE,
-			title: `${engineTitle} (${badgeLabel}${!session && agent.preferredEngineId ? ' · Lazy' : ''}) • ${agent.projectUri.fsPath}`,
+			title: `${engineTitle} (${badgeLabel}${!session && agent.preferredEngineId ? ' · Lazy' : ''}) • ${formatProjectDisplayPath(agent.projectUri)}`,
 			extraClasses: ['explorer-item', 'ade-agent-session-row'],
 		});
 
@@ -1007,6 +1027,13 @@ export class AdeProjectsView extends ViewPane {
 				label: localize('openInTerminal', "Open in Integrated Terminal"),
 				run: () => this.commandService.executeCommand('workbench.action.terminal.new', { cwd: project.uri }),
 			}),
+			...(isCloudProjectUri(project.uri) ? [
+				toAction({
+					id: 'ade.project.configureCloudHost',
+					label: localize('adeConfigureCloudHostMenu', "Configure Cloud Host ({0})...", project.uri.authority),
+					run: () => this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, project.uri.authority),
+				}),
+			] : []),
 			new Separator(),
 			toAction({
 				id: 'ade.project.remove',

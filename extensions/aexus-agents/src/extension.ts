@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as cp from 'node:child_process';
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -57,6 +58,51 @@ interface RecordEntry extends NativeSession {
 	sessionConfig?: SessionConfigState;
 	activeGoal?: string;
 	roleInit?: RoleInitState;
+	cloudProjectUri?: string;
+}
+
+const CLOUD_PROJECT_SCHEME = 'aexus-ssh';
+
+function sanitizeCloudWorkspaceSegment(raw: string): string {
+	const cleaned = raw.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
+	return cleaned || 'root';
+}
+
+function computeCloudBridgeDirectory(projectUri: vscode.Uri): string {
+	const rawPath = projectUri.path || '/';
+	const tailSlug = sanitizeCloudWorkspaceSegment(path.posix.basename(rawPath) || 'root').slice(0, 48);
+	const pathHash = crypto.createHash('sha256').update(rawPath).digest('hex').slice(0, 12);
+	return path.join(
+		os.homedir(),
+		'.aexus-code',
+		'cloud-workspaces',
+		sanitizeCloudWorkspaceSegment(projectUri.authority).slice(0, 64),
+		`${tailSlug}-${pathHash}`,
+	);
+}
+
+async function resolveProjectLocalCwd(projectUri: vscode.Uri): Promise<{ localCwd: string; cloudProjectUri?: string }> {
+	if (projectUri.scheme === CLOUD_PROJECT_SCHEME) {
+		const localCwd = computeCloudBridgeDirectory(projectUri);
+		await fs.mkdir(localCwd, { recursive: true });
+		return {
+			localCwd,
+			cloudProjectUri: projectUri.with({ path: projectUri.path.replace(/\/+$/, '') || '/' }).toString(),
+		};
+	}
+	return { localCwd: projectUri.fsPath };
+}
+
+function recordProjectUri(record: RecordEntry): vscode.Uri {
+	return record.cloudProjectUri ? vscode.Uri.parse(record.cloudProjectUri) : vscode.Uri.file(record.cwd);
+}
+
+function formatRecordProjectLabel(record: RecordEntry): string {
+	if (record.cloudProjectUri) {
+		const parsed = vscode.Uri.parse(record.cloudProjectUri);
+		return `${parsed.authority}:${parsed.path || '/'}`;
+	}
+	return record.cwd;
 }
 
 interface SecretaryState {
@@ -393,7 +439,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		engineId: `aexus-${record.engine}`,
 		resource: resource(record),
 		parentResource: parentResource(record),
-		projectUri: vscode.Uri.file(record.cwd),
+		projectUri: recordProjectUri(record),
 		label: record.label,
 		updated: record.updated,
 		nativeId: record.id,
@@ -476,9 +522,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	const item = (record: RecordEntry): vscode.ChatSessionItem => {
 		const result = controllers.get(record.engine)!.createChatSessionItem(resource(record), record.label);
-		result.description = record.cwd;
+		result.description = formatRecordProjectLabel(record);
 		result.metadata = {
 			workingDirectoryPath: record.cwd,
+			...(record.cloudProjectUri ? { aexusProjectUri: record.cloudProjectUri } : {}),
 			nativeSessionId: record.id,
 			provisional: record.provisional ?? false,
 			aexusParentSessionResource: parentResource(record)?.toString(),
@@ -1497,6 +1544,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			].join('\n');
 		}
 
+		if (record.cloudProjectUri) {
+			const parsedCloud = vscode.Uri.parse(record.cloudProjectUri);
+			const sshInfo = await Promise.resolve(vscode.commands.executeCommand<{ effectiveSshConfigPath?: string; os?: string } | undefined>(
+				'aexus.ade.getCloudHostSshContext',
+				parsedCloud.authority,
+			)).catch(() => undefined);
+			const sshCfgFlag = sshInfo?.effectiveSshConfigPath ? `-F "${sshInfo.effectiveSshConfigPath}" ` : '';
+			const remotePath = parsedCloud.path || '/';
+			const quotedRemotePath = `'${remotePath.replace(/'/g, `'\\''`)}'`;
+			basePrompt = [
+				`[Aexus Cloud Host Project Context]`,
+				`- Active Project is on SSH Cloud Host \`${parsedCloud.authority}\` at remote directory \`${remotePath}\` (URI: \`${record.cloudProjectUri}\`, OS: \`${sshInfo?.os ?? 'linux'}\`).`,
+				`- Local harness staging directory on this Mac: \`${record.cwd}\`.`,
+				`- Execute shell commands, builds, tests, and file edits on the Cloud Host via SSH: \`ssh ${sshCfgFlag}${parsedCloud.authority} "cd -- ${quotedRemotePath} && <command>"\` (or \`scp\`/\`rsync\` when transferring artifacts).`,
+				'',
+				basePrompt,
+			].join('\n');
+		}
+
 		const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
 		const currentRankForContext = isSecretary ? 'secretary' : (snapForContext?.isOrchestrated ? snapForContext.rank : undefined);
 		const alreadyInitializedForRank = Boolean(
@@ -2037,8 +2103,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.create', async (engineId: string, project: vscode.Uri) => {
 			const engine = engineId.slice('aexus-'.length);
-			const native = await runtime(engine).create(project.fsPath);
-			const record: RecordEntry = { ...native, engine, initialTitle: native.label, resourceId: native.id, sessionConfig: {} };
+			const { localCwd, cloudProjectUri } = await resolveProjectLocalCwd(project);
+			const native = await runtime(engine).create(localCwd);
+			const record: RecordEntry = {
+				...native,
+				engine,
+				initialTitle: native.label,
+				resourceId: native.id,
+				sessionConfig: {},
+				...(cloudProjectUri ? { cloudProjectUri } : {}),
+			};
 			records.set(key(engine, native.id), record);
 			await save();
 			refresh(engine);
@@ -2051,19 +2125,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const sessions = await list(engine, token.token);
 				let record = sessions.find(entry => entry.id === nativeId || entry.resourceId === nativeId || entry.id.startsWith(nativeId));
 				if (!record) {
-					if (!project || project.scheme !== 'file') {
+					if (!project || (project.scheme !== 'file' && project.scheme !== CLOUD_PROJECT_SCHEME)) {
 						throw new Error(vscode.l10n.t('Conversation {0} was not found in {1}.', nativeId, engine));
 					}
+					const { localCwd, cloudProjectUri } = await resolveProjectLocalCwd(project);
 					const now = Date.now();
 					record = accept(engine, {
 						id: nativeId,
-						cwd: project.fsPath,
+						cwd: localCwd,
 						label: vscode.l10n.t('{0} Session {1}', engine, nativeId.slice(0, 8)),
 						created: now,
 						updated: now,
 						provisional: false,
 					});
+					if (cloudProjectUri) {
+						record.cloudProjectUri = cloudProjectUri;
+					}
 					record.resourceId ??= record.id;
+					await save();
+					refresh(engine);
+				} else if (project?.scheme === CLOUD_PROJECT_SCHEME && !record.cloudProjectUri) {
+					const { cloudProjectUri } = await resolveProjectLocalCwd(project);
+					record.cloudProjectUri = cloudProjectUri;
 					await save();
 					refresh(engine);
 				}
@@ -2078,11 +2161,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			let sessions: RecordEntry[];
 			try { sessions = await list(engine, token.token); } finally { token.dispose(); }
 			const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
-			const requested = project ? await canonical(project.fsPath) : undefined;
+			const requestedCloud = project?.scheme === CLOUD_PROJECT_SCHEME
+				? project.with({ path: project.path.replace(/\/+$/, '') || '/' }).toString()
+				: undefined;
+			const requestedCwd = project
+				? await canonical(project.scheme === CLOUD_PROJECT_SCHEME ? computeCloudBridgeDirectory(project) : project.fsPath)
+				: undefined;
 			const result = [];
 			for (const record of sessions) {
 				if (record.parentId) { continue; }
-				if (!requested || requested === await canonical(record.cwd)) { result.push(describe(record)); }
+				if (!project) {
+					result.push(describe(record));
+					continue;
+				}
+				if (requestedCloud && record.cloudProjectUri === requestedCloud) {
+					result.push(describe(record));
+					continue;
+				}
+				if (requestedCwd && requestedCwd === await canonical(record.cwd)) {
+					result.push(describe(record));
+				}
 			}
 			return result;
 		}),
@@ -2103,7 +2201,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const record = await getRecord(uri, token.token);
 				await save();
 				return {
-					projectUri: vscode.Uri.file(record.cwd),
+					projectUri: recordProjectUri(record),
 					label: record.label,
 					nativeId: record.id,
 					provisional: Boolean(record.provisional),
@@ -2403,7 +2501,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const token = new vscode.CancellationTokenSource();
 			try {
 				const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
-				const targetCwd = await canonical(project.fsPath);
+				const targetCloud = project.scheme === CLOUD_PROJECT_SCHEME
+					? project.with({ path: project.path.replace(/\/+$/, '') || '/' }).toString()
+					: undefined;
+				const targetCwd = await canonical(project.scheme === CLOUD_PROJECT_SCHEME ? computeCloudBridgeDirectory(project) : project.fsPath);
 				await Promise.allSettled(
 					available
 						.filter(entry => entry.command)
@@ -2415,7 +2516,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const matching: RecordEntry[] = [];
 				for (const candidate of records.values()) {
 					if (key(candidate.engine, candidate.id) === secretaryState?.recordKey) { continue; }
-					if (await canonical(candidate.cwd) === targetCwd) {
+					if ((targetCloud && candidate.cloudProjectUri === targetCloud) || await canonical(candidate.cwd) === targetCwd) {
 						matching.push(candidate);
 					}
 				}

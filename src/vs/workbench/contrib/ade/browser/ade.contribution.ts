@@ -15,11 +15,18 @@ import { URI } from '../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import {
+	AEXUS_SSH_SCHEME,
+	formatProjectDisplayPath,
+	IAdeCloudHostBackendService,
+	isCloudProjectUri,
+} from '../../../../platform/ade/common/adeCloudHosts.js';
+import {
 	ADE_WATCHDOG_TIMEOUT_CONFIG_KEY,
 	DEFAULT_WATCHDOG_TIMEOUT_MINUTES,
 	IAdeEngineeringService,
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
+import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
@@ -50,9 +57,12 @@ import { ChatSessionStatus, IChatSessionsService } from '../../chat/common/chatS
 import { DELETE_ROOT_FOLDER_COMMAND_ID } from '../../files/browser/fileConstants.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import {
+	ADE_ADD_CLOUD_PROJECT_COMMAND_ID,
 	ADE_CHANGES_VIEW_ID,
+	ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID,
 	ADE_DELETE_PROJECT_COMMAND_ID,
 	ADE_FILES_VIEW_ID,
+	ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID,
 	ADE_INSPECTOR_CONTAINER_ID,
 	ADE_OPEN_ENGINEERING_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
@@ -66,6 +76,17 @@ import {
 	IAdeProjectsService,
 	resolveAdeAgentRank,
 } from '../common/ade.js';
+import {
+	AdeCloudHostWorkbenchContribution,
+	browseRemoteFolderOnCloudHost,
+	pickCloudHostProjectFolder,
+	pickProjectFoldersWithCloudOption,
+} from './adeCloudHostFileSystemProvider.js';
+import {
+	AdeCloudHostsEditorInput,
+	AdeCloudHostsEditorPane,
+	AdeCloudHostsEditorSerializer,
+} from './adeCloudHostsEditorPane.js';
 import { AdeEditorService } from './adeEditorService.js';
 import {
 	AdeEngineeringEditorInput,
@@ -161,6 +182,7 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 	}
 }
 
+registerWorkbenchContribution2(AdeCloudHostWorkbenchContribution.ID, AdeCloudHostWorkbenchContribution, WorkbenchPhase.BlockRestore);
 registerWorkbenchContribution2(AdeEditorContribution.ID, AdeEditorContribution, WorkbenchPhase.AfterRestored);
 
 const viewContainersRegistry = Registry.as<IViewContainersRegistry>(Extensions.ViewContainersRegistry);
@@ -233,6 +255,12 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 );
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeEngineeringEditorInput.ID, AdeEngineeringEditorSerializer);
 
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(AdeCloudHostsEditorPane, AdeCloudHostsEditorPane.ID, localize('adeCloudHostsEditorPaneTitle', "Cloud Hosts (SSH)")),
+	[new SyncDescriptor(AdeCloudHostsEditorInput)],
+);
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeCloudHostsEditorInput.ID, AdeCloudHostsEditorSerializer);
+
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'aexusAdeEngineering',
 	title: localize('adeEngineeringConfigurationTitle', "ADE Engineering"),
@@ -271,37 +299,44 @@ async function resolveTargetProjectUri(accessor: ServicesAccessor, explicitUri?:
 	if (URI.isUri(explicitUri)) {
 		return removeTrailingPathSeparator(explicitUri);
 	}
+	const instantiationService = accessor.get(IInstantiationService);
 	const navigation = accessor.get(IProjectNavigationService);
 	const projects = accessor.get(IAdeProjectsService);
 	const quickInput = accessor.get(IQuickInputService);
 	const dialogs = accessor.get(IFileDialogService);
 
-	if (navigation.focusedProject) {
+	if (navigation.focusedProject && (!requireLocalFile || navigation.focusedProject.uri.scheme === Schemas.file)) {
 		return navigation.focusedProject.uri;
 	}
 	const candidates = projects.projects.filter(project => !requireLocalFile || project.uri.scheme === Schemas.file);
-	if (candidates.length >= 1) {
+	if (candidates.length >= 1 || !requireLocalFile) {
 		const active = projects.selectedProject;
 		const sorted = active
 			? [...candidates].sort((a, b) => Number(b.uri.toString() === active.uri.toString()) - Number(a.uri.toString() === active.uri.toString()))
 			: candidates;
-		const items: (IQuickPickItem & { uri?: URI; browse?: boolean })[] = [
+		const items: (IQuickPickItem & { uri?: URI; browse?: 'local' | 'cloud' })[] = [
 			...sorted.map(project => ({
 				label: project.name,
-				description: project.uri.fsPath,
-				iconClass: ThemeIcon.asClassName(Codicon.folder),
+				description: formatProjectDisplayPath(project.uri),
+				iconClass: ThemeIcon.asClassName(isCloudProjectUri(project.uri) ? Codicon.remote : Codicon.folder),
 				uri: project.uri,
 			})),
 			{
-				label: localize('adeBrowseProjectFolder', "Browse Folder..."),
-				description: localize('adeBrowseProjectFolderDesc', "Select another project folder on disk"),
+				label: localize('adeBrowseProjectFolder', "Browse Local Folder..."),
+				description: localize('adeBrowseProjectFolderDesc', "Select another project folder on this Mac"),
 				iconClass: ThemeIcon.asClassName(Codicon.folderOpened),
-				browse: true,
+				browse: 'local',
 			},
+			...(!requireLocalFile ? [{
+				label: localize('adeBrowseCloudProjectFolder', "Cloud Host Folder (SSH)..."),
+				description: localize('adeBrowseCloudProjectFolderDesc', "Select a remote project folder on a saved or VS Code Cloud Host"),
+				iconClass: ThemeIcon.asClassName(Codicon.remote),
+				browse: 'cloud' as const,
+			}] : []),
 		];
 		const chosen = await quickInput.pick(items, {
 			title: localize('adeChooseProjectTitle', "Select Project for Session"),
-			placeHolder: localize('adeChooseProjectForSession', "Select a project folder for this session"),
+			placeHolder: localize('adeChooseProjectForSession', "Select a local or Cloud Host project folder for this session"),
 			matchOnDescription: true,
 		});
 		if (!chosen) {
@@ -309,6 +344,10 @@ async function resolveTargetProjectUri(accessor: ServicesAccessor, explicitUri?:
 		}
 		if (chosen.uri) {
 			return chosen.uri;
+		}
+		if (chosen.browse === 'cloud') {
+			const cloudUri = await instantiationService.invokeFunction(acc => pickCloudHostProjectFolder(acc));
+			return cloudUri ? removeTrailingPathSeparator(cloudUri) : undefined;
 		}
 	}
 	const scheme = requireLocalFile ? Schemas.file : undefined;
@@ -332,6 +371,7 @@ function tryGetOptionalService<T>(accessor: ServicesAccessor, identifier: { (...
 }
 
 function sessionPicker(accessor: ServicesAccessor): (projectUri?: URI, mode?: 'create' | 'existing', customTitle?: string) => Promise<IAdeEngineSession | undefined> {
+	const instantiationService = accessor.get(IInstantiationService);
 	const quickInput = accessor.get(IQuickInputService);
 	const sessions = accessor.get(IAdeSessionsService);
 	const dialogs = accessor.get(IFileDialogService);
@@ -372,27 +412,42 @@ function sessionPicker(accessor: ServicesAccessor): (projectUri?: URI, mode?: 'c
 		}
 
 		if (create) {
-			const scheme = engine.id.startsWith('aexus-') ? Schemas.file : undefined;
-			const folder = projectUri ?? (await dialogs.showOpenDialog({
-				title: localize('selectAgentProject', "Select Agent Project Folder"),
-				canSelectFiles: false,
-				canSelectFolders: true,
-				canSelectMany: false,
-				availableFileSystems: scheme ? [scheme] : undefined,
-				defaultUri: await dialogs.defaultFolderPath(scheme),
-			}))?.[0];
+			let folder = projectUri;
+			if (!folder) {
+				const pickedFolders = await instantiationService.invokeFunction(acc => pickProjectFoldersWithCloudOption(acc, {
+					title: localize('selectAgentProject', "Select Agent Project Folder"),
+				}));
+				folder = pickedFolders?.[0];
+			}
 			if (!folder) {
 				return undefined;
 			}
 			const normalized = removeTrailingPathSeparator(folder);
-			projects.registerProject(normalized, basename(normalized));
+			if (engine.id.startsWith('aexus-') && normalized.scheme !== Schemas.file && normalized.scheme !== AEXUS_SSH_SCHEME) {
+				const fallback = (await dialogs.showOpenDialog({
+					title: localize('selectAgentProject', "Select Agent Project Folder"),
+					canSelectFiles: false,
+					canSelectFolders: true,
+					canSelectMany: false,
+					availableFileSystems: [Schemas.file],
+					defaultUri: await dialogs.defaultFolderPath(Schemas.file),
+				}))?.[0];
+				if (!fallback) {
+					return undefined;
+				}
+				const localNormalized = removeTrailingPathSeparator(fallback);
+				projects.registerProject(localNormalized, basename(localNormalized));
+				await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
+				return sessions.create(engine.id, localNormalized);
+			}
+			projects.registerProject(normalized, basename(normalized) || normalized.authority || 'project');
 			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
 			return sessions.create(engine.id, normalized);
 		}
 
 		const conversations = sessions.list(engine.id, projectUri).then(items => items.map(session => ({
 			label: session.label,
-			description: session.projectUri.fsPath,
+			description: formatProjectDisplayPath(session.projectUri),
 			session,
 		})));
 		const chosen = await quickInput.pick(conversations, {
@@ -402,7 +457,7 @@ function sessionPicker(accessor: ServicesAccessor): (projectUri?: URI, mode?: 'c
 		});
 		if (chosen?.session) {
 			const normalized = removeTrailingPathSeparator(chosen.session.projectUri);
-			projects.registerProject(normalized, basename(normalized));
+			projects.registerProject(normalized, basename(normalized) || normalized.authority || 'project');
 			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
 		}
 		return chosen?.session;
@@ -423,7 +478,7 @@ async function pickAgent(accessor: ServicesAccessor, id?: string): Promise<IAdeA
 	return view?.selectedAgent
 		|| (await quickInput.pick(projects.agents.map(agent => ({
 			label: agent.label,
-			description: agent.projectUri.fsPath,
+			description: formatProjectDisplayPath(agent.projectUri),
 			agent,
 		})), { placeHolder: localize('selectParentAgent', "Select an Agent conversation") }))?.agent;
 }
@@ -523,7 +578,6 @@ registerAction2(class AddAdeProjectFolderAction extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor, uri?: URI | readonly URI[]): Promise<void> {
-		const dialogs = accessor.get(IFileDialogService);
 		const projects = accessor.get(IAdeProjectsService);
 		const modes = accessor.get(IWorkbenchModeService);
 		const uriIdentity = accessor.get(IUriIdentityService);
@@ -536,12 +590,8 @@ registerAction2(class AddAdeProjectFolderAction extends Action2 {
 			? [uri]
 			: Array.isArray(uri) && uri.some(item => URI.isUri(item))
 				? uri.filter((item): item is URI => URI.isUri(item))
-				: (await dialogs.showOpenDialog({
+				: (await pickProjectFoldersWithCloudOption(accessor, {
 					title: localize('adeSelectProjectFolderDialog', "Add Project Folder"),
-					canSelectFiles: false,
-					canSelectFolders: true,
-					canSelectMany: true,
-					defaultUri: await dialogs.defaultFolderPath(),
 				})) ?? [];
 		if (folders.length === 0) {
 			return;
@@ -549,7 +599,7 @@ registerAction2(class AddAdeProjectFolderAction extends Action2 {
 		let lastNormalized: URI | undefined;
 		for (const folder of folders) {
 			const normalized = removeTrailingPathSeparator(folder);
-			projects.registerProject(normalized, basename(normalized));
+			projects.registerProject(normalized, basename(normalized) || normalized.authority || 'project');
 			lastNormalized = normalized;
 		}
 		await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
@@ -1113,7 +1163,7 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 				`[Aexus Session Info]`,
 				`- Role: Worker (L4 Lowest Pure Execution Rank · Below Employee [L3], NOT Employee · 100% Clean Native Context)`,
 				`- Session: ${agent.label} (id: ${agent.id})`,
-				`- Project: ${projects.getProjectName(agent.projectUri)} (${agent.projectUri.fsPath})`,
+				`- Project: ${projects.getProjectName(agent.projectUri)} (${formatProjectDisplayPath(agent.projectUri)})`,
 			].join('\n'));
 			return;
 		}
@@ -1123,7 +1173,7 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 			`- Role: ${rankLabel}`,
 			`- Rank Rule: Governor (L1) > Manager (L2) > Employee (L3) > Worker (L4) — Employee (L3) IS NOT Worker (L4)! Employee is an orchestrated supervisory/review rank above pure leaf Worker.`,
 			`- Session: ${agent.label} (id: ${agent.id})`,
-			`- Project: ${projects.getProjectName(agent.projectUri)} (${agent.projectUri.fsPath})`,
+			`- Project: ${projects.getProjectName(agent.projectUri)} (${formatProjectDisplayPath(agent.projectUri)})`,
 		];
 		if (supervisor) {
 			const supRank = formatRoleLabel(resolveAdeAgentRank(supervisor, true));
@@ -1476,12 +1526,114 @@ registerAction2(class RefreshAgentProjectsAction extends Action2 {
 			id: 'workbench.action.ade.refresh',
 			title: localize2('refreshAgentSessions', "Refresh Sessions"),
 			icon: Codicon.refresh,
-			menu: { ...viewTitleMenu, order: 2 },
+			menu: { ...viewTitleMenu, order: 3 },
 		});
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const view = accessor.get(IViewsService).getActiveViewWithId<AdeProjectsView>(ADE_PROJECTS_VIEW_ID);
 		await view?.refresh();
+	}
+});
+
+CommandsRegistry.registerCommand(
+	'workbench.action.aexusCloudHosts.pickProjectFolders',
+	async (accessor: ServicesAccessor, options?: { readonly title?: string }) => {
+		return pickProjectFoldersWithCloudOption(accessor, options);
+	},
+);
+
+registerAction2(class ManageAdeCloudHostsAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID,
+			title: localize2('adeManageCloudHostsTitle', "Cloud Hosts: Manage Saved Cloud Hosts..."),
+			icon: Codicon.remote,
+			f1: true,
+			menu: [
+				{ ...viewTitleMenu, order: 2 },
+				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', 'workbench.explorer.fileView'), group: 'navigation', order: 50 },
+				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', ADE_PROJECTS_VIEW_ID), group: '2_workspace', order: 0 },
+			],
+		});
+	}
+
+	async run(accessor: ServicesAccessor, focusHostTarget?: string): Promise<void> {
+		const editors = accessor.get(IAdeEditorService);
+		await editors.openCloudHosts?.(typeof focusHostTarget === 'string' ? focusHostTarget : undefined);
+	}
+});
+
+registerAction2(class AddAdeCloudProjectFolderAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_ADD_CLOUD_PROJECT_COMMAND_ID,
+			title: localize2('adeAddCloudProjectFolderTitle', "Cloud Hosts: Add Cloud Host Project Folder..."),
+			icon: Codicon.cloudDownload,
+			f1: true,
+			menu: [
+				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', ADE_PROJECTS_VIEW_ID), group: '2_workspace', order: 0.5 },
+				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', 'workbench.explorer.fileView'), group: '2_workspace', order: 0.5 },
+			],
+		});
+	}
+
+	async run(accessor: ServicesAccessor, hostTarget?: string): Promise<void> {
+		const instantiationService = accessor.get(IInstantiationService);
+		const projects = accessor.get(IAdeProjectsService);
+		const uriIdentity = accessor.get(IUriIdentityService);
+		const backend = tryGetOptionalService<IAdeCloudHostBackendService>(accessor, IAdeCloudHostBackendService);
+		const fileService = tryGetOptionalService<IFileService>(accessor, IFileService);
+		const contextService = tryGetOptionalService<IWorkspaceContextService>(accessor, IWorkspaceContextService);
+		const workspaceEditing = tryGetOptionalService<IWorkspaceEditingService>(accessor, IWorkspaceEditingService);
+		const environmentService = tryGetOptionalService<IWorkbenchEnvironmentService>(accessor, IWorkbenchEnvironmentService);
+
+		let cloudUri: URI | undefined;
+		if (typeof hostTarget === 'string' && hostTarget.trim() && backend) {
+			const matched = await backend.getHost(hostTarget.trim());
+			if (matched) {
+				cloudUri = await instantiationService.invokeFunction(acc => browseRemoteFolderOnCloudHost(acc, matched));
+			}
+		}
+		if (!cloudUri) {
+			cloudUri = await instantiationService.invokeFunction(acc => pickCloudHostProjectFolder(acc));
+		}
+		if (!cloudUri) {
+			return;
+		}
+		const normalized = removeTrailingPathSeparator(cloudUri);
+		projects.registerProject(normalized, basename(normalized) || normalized.authority || 'project');
+		await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
+		projects.selectProject(normalized);
+	}
+});
+
+registerAction2(class ImportVsCodeCloudHostsAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID,
+			title: localize2('adeImportVsCodeCloudHostsTitle', "Cloud Hosts: Migrate / Sync Cloud Hosts from VS Code & SSH Config"),
+			icon: Codicon.sync,
+			f1: true,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const backend = tryGetOptionalService<IAdeCloudHostBackendService>(accessor, IAdeCloudHostBackendService);
+		const notifications = accessor.get(INotificationService);
+		const editors = accessor.get(IAdeEditorService);
+		if (!backend) {
+			notifications.warn(localize('adeCloudHostBackendUnavailable', "Cloud Host backend is unavailable in this environment."));
+			return;
+		}
+		const res = await backend.importFromVsCodeAndSshConfig();
+		notifications.info(localize(
+			'adeImportVsCodeCloudHostsDone',
+			"Migrated & synced {0} Cloud Host(s) ({1} new, {2} recent folders) from VS Code and ~/.ssh/config.",
+			res.totalHosts,
+			res.importedCount,
+			res.importedRecentFolders,
+		));
+		await editors.openCloudHosts?.();
 	}
 });

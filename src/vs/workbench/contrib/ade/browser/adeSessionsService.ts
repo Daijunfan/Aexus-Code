@@ -10,6 +10,7 @@ import { joinPath } from '../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
+import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
@@ -97,14 +98,18 @@ export class AdeSessionsService implements IAdeSessionsService {
 	}
 
 	private binding(engineId: string, item: IChatSessionItem): IAdeEngineSession | undefined {
+		const rawCloudUri = typeof item.metadata?.aexusProjectUri === 'string' ? item.metadata.aexusProjectUri : undefined;
+		if (rawCloudUri) {
+			return { engineId, resource: item.resource, projectUri: URI.parse(rawCloudUri), label: item.label, updated: item.timing.lastRequestEnded ?? item.timing.created };
+		}
 		const cwd = item.metadata?.workingDirectoryPath ?? item.metadata?.repositoryPath;
 		return cwd ? { engineId, resource: item.resource, projectUri: URI.file(cwd), label: item.label, updated: item.timing.lastRequestEnded ?? item.timing.created } : undefined;
 	}
 
 	async create(engineId: string, projectUri: URI): Promise<IAdeEngineSession> {
 		if (engineId.startsWith('aexus-')) {
-			if (projectUri.scheme !== Schemas.file) {
-				throw new Error(localize('nativeEngineNeedsLocalProject', "This engine runs on this computer. Select a local project folder or use a session provider for the remote host."));
+			if (projectUri.scheme !== Schemas.file && projectUri.scheme !== AEXUS_SSH_SCHEME) {
+				throw new Error(localize('nativeEngineNeedsLocalProject', "This engine runs on this computer or an Aexus SSH Cloud Host. Select a local or Cloud Host project folder."));
 			}
 			const created = await this.commands.executeCommand<IAdeEngineSession>('aexus.agentEngines.create', engineId, projectUri);
 			if (!created) {
@@ -174,7 +179,7 @@ export class AdeSessionsService implements IAdeSessionsService {
 	}
 
 	async deleteProjectSessions(projectUri: URI): Promise<number> {
-		if (projectUri.scheme !== Schemas.file) {
+		if (projectUri.scheme !== Schemas.file && projectUri.scheme !== AEXUS_SSH_SCHEME) {
 			return 0;
 		}
 		await this.extensions.whenInstalledExtensionsRegistered();

@@ -70,10 +70,11 @@ function registerOpenTerminalCommand(id: string, explorerKind: 'integrated' | 'e
 						});
 					});
 					for (const cwd of cwds) {
-						if (opened[cwd.path]) {
+						const cwdKey = cwd.toString();
+						if (opened[cwdKey]) {
 							return;
 						}
-						opened[cwd.path] = true;
+						opened[cwdKey] = true;
 						const instance = await integratedTerminalService.createTerminal({ config: { cwd } });
 						if (instance && instance.target !== TerminalLocation.Editor && (resources.length === 1 || !resource || cwd.path === resource.path || cwd.path === dirname(resource.path))) {
 							integratedTerminalService.setActiveInstance(instance);
@@ -118,7 +119,7 @@ export class ExternalTerminalContribution extends Disposable implements IWorkben
 				id: OPEN_IN_INTEGRATED_TERMINAL_COMMAND_ID,
 				title: nls.localize('scopedConsoleAction.Integrated', "Open in Integrated Terminal")
 			},
-			when: ContextKeyExpr.or(shouldShowIntegratedOnLocal, ResourceContextKey.Scheme.isEqualTo(Schemas.vscodeRemote))
+			when: ContextKeyExpr.or(shouldShowIntegratedOnLocal, ResourceContextKey.Scheme.isEqualTo(Schemas.vscodeRemote), ResourceContextKey.Scheme.isEqualTo('aexus-ssh'))
 		};
 
 

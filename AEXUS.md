@@ -57,6 +57,15 @@ Codex、Claude Code、Cline、Kilo Code、DSH、OpenCode 和 Antigravity 的面�
 
 在左栏项目根目录上右键选择 **Focus** 进入项目。顶部左侧显示 **Home** 按钮，点击返回项目主页面；返回后显示前进图标，可重新进入刚才的项目。如果改为 Focus 另一个项目，前进目标会更新为新项目，不会跳回旧项目。工作区原有项目列表与已打开文件保留。IDE 与 ADE 共享同一套项目宇宙、顺序与 `Focus ➔ Home ⇄ Forward` 导航状态。
 
+## SSH 云主机（Cloud Hosts）与远端项目丝滑共存（`aexus-ssh://`）
+
+无需远端预装专有 `vscode-server`，原生基于系统 OpenSSH 多路复用通道与密钥体系实现本地 `file://` 项目与多台 SSH 云主机（`aexus-ssh://<alias>/<remotePath>`）项目在**同一窗口**内丝滑共存：
+
+- **自动搬移原版 VS Code 云主机与历史远端目录**：首次加载及手动同步（`Cloud Hosts: Migrate / Sync Cloud Hosts from VS Code & SSH Config` / `aexus-ade host import-vscode`）时，自动递归解析 `~/.ssh/config` 与全部 `Include` 子配置（遵循 OpenSSH 首匹配优先语义），并从原版 VS Code 的 `settings.json`（`remote.SSH.remotePlatform` / `remote.SSH.configFile`）、`state.vscdb`（`ms-vscode-remote.remote-ssh` 远端目录历史）、`storage.json`、`Project Manager` 及历史 `hosts.json` 完整迁移云主机别名、操作系统类型（`linux` / `macos` / `windows`）、跳板机（`ProxyJump`）、密钥路径及常用远端项目目录（严格不读取或复制任何私钥内容与密码）。
+- **IDE 与 ADE 统一“添加项目文件夹”入口**：点击 ADE 左栏顶部的 `+`（`Add Project Folder...`）或在 IDE 中执行 `Add Projects...` 时，统一弹出 **本地文件夹（`Local Folder...`）**、**SSH 云主机项目文件夹（`Cloud Host Folder (SSH)...`，支持在线逐级浏览远端目录与一键勾选 VS Code 历史远端目录）** 与 **管理云主机（`Manage Cloud Hosts...`）** 选项。
+- **可视化云主机管理面板（`Cloud Host Studio` / `AdeCloudHostsEditorPane`）**：支持新建、保存、编辑修改（显示名、SSH 别名、IP/域名、用户名、端口、操作系统、私钥路径、`ProxyJump` 跳板机、默认工作目录与备注）、一键连通性延迟检测（`Test Connection`）、删除、从 VS Code 同步以及一键打开远端终端或添加远端项目；生成的 `<userDataDir>/ssh/effective_ssh_config` 让 Aexus 托管主机配置优先于 `~/.ssh/config` 生效，同时完整继承原有跳板机与全局密钥配置。
+- **原生远端文件系统、源码变更 Diff 与集成终端直连**：内置 `AexusSshFileSystemProvider`（支持 Linux/macOS POSIX 与 Windows PowerShell 远端读写、目录树、新建、重命名、复制与删除，编辑器 `Cmd+S` 直接保存回云主机磁盘）与 `aexus-ssh-git-head:` 远端 Git 状态及并排 Diff；在云主机项目或其任意子目录上新建集成终端（终端面板 `+`、右键 `Open in Integrated Terminal` 或终端分屏）时，自动通过 `ssh -F <effective_ssh_config> -t` 直连并进入对应的远端项目目录（本地项目仍打开本地 Shell）；同时完整兼容 ADE Coding Agent 会话创建与 `aexus-ade host`（`list` / `info` / `add` / `update` / `remove` / `test` / `browse` / `import-vscode` / `open`）控制面指令。
+
 ## ADE（Agent Development Environment）Phase 1
 
 ADE 与 IDE 呈镜像对称架构（单分支同目录协作，无需 Git Worktree）：

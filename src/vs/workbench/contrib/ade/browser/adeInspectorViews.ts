@@ -21,6 +21,13 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI, UriComponents } from '../../../../base/common/uri.js';
 import { RedoCommand, UndoCommand } from '../../../../editor/browser/editorExtensions.js';
 import { localize } from '../../../../nls.js';
+import {
+	AEXUS_SSH_GIT_HEAD_SCHEME,
+	AEXUS_SSH_SCHEME,
+	formatProjectDisplayPath,
+	IAdeCloudHostBackendService,
+	IAdeRemoteScmStatusEntry,
+} from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -100,7 +107,9 @@ export async function openScmResourceInAde(adeEditors: IAdeEditorService, resour
 
 type AdeChangeTreeItem =
 	| { readonly kind: 'group'; readonly group: ISCMResourceGroup; readonly resources: readonly ISCMResource[] }
-	| { readonly kind: 'resource'; readonly resource: ISCMResource; readonly projectUri: URI };
+	| { readonly kind: 'resource'; readonly resource: ISCMResource; readonly projectUri: URI }
+	| { readonly kind: 'remote-group'; readonly groupId: string; readonly label: string; readonly entries: readonly IAdeRemoteScmStatusEntry[]; readonly projectUri: URI }
+	| { readonly kind: 'remote-resource'; readonly entry: IAdeRemoteScmStatusEntry; readonly projectUri: URI };
 
 interface IChangeGroupTemplate {
 	readonly label: HTMLElement;
@@ -128,11 +137,15 @@ class AdeChangeGroupRenderer implements ITreeRenderer<AdeChangeTreeItem, FuzzySc
 	}
 
 	renderElement(node: ITreeNode<AdeChangeTreeItem, FuzzyScore>, _index: number, template: IChangeGroupTemplate): void {
-		if (node.element.kind !== 'group') {
+		if (node.element.kind === 'group') {
+			template.label.textContent = node.element.group.label;
+			template.badge.setCount(node.element.resources.length);
 			return;
 		}
-		template.label.textContent = node.element.group.label;
-		template.badge.setCount(node.element.resources.length);
+		if (node.element.kind === 'remote-group') {
+			template.label.textContent = node.element.label;
+			template.badge.setCount(node.element.entries.length);
+		}
 	}
 
 	disposeTemplate(template: IChangeGroupTemplate): void {
@@ -148,6 +161,7 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 		private readonly themeService: IThemeService,
 		private readonly hoverService: IHoverService,
 		private readonly onOpenFile: (resource: ISCMResource, projectUri: URI) => void,
+		private readonly onOpenRemoteEntry: (entry: IAdeRemoteScmStatusEntry, projectUri: URI) => void,
 	) { }
 
 	renderTemplate(container: HTMLElement): IChangeResourceTemplate {
@@ -174,6 +188,46 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 
 	renderElement(node: ITreeNode<AdeChangeTreeItem, FuzzyScore>, _index: number, template: IChangeResourceTemplate): void {
 		template.elementDisposables.clear();
+		if (node.element.kind === 'remote-resource') {
+			const { entry, projectUri } = node.element;
+			const uri = joinPath(projectUri, entry.relativePath);
+			const relDir = entry.relativePath.includes('/') ? entry.relativePath.slice(0, entry.relativePath.lastIndexOf('/')) : undefined;
+			const statusTooltip = entry.status === 'A'
+				? localize('adeRemoteAdded', "Added")
+				: entry.status === 'D'
+					? localize('adeRemoteDeleted', "Deleted")
+					: entry.status === 'U'
+						? localize('adeRemoteUntracked', "Untracked")
+						: entry.status === 'R'
+							? localize('adeRemoteRenamed', "Renamed")
+							: localize('adeRemoteModified', "Modified");
+			template.row.classList.toggle('faded', false);
+			template.fileLabel.setResource({
+				resource: uri,
+				name: basename(uri),
+				description: relDir,
+			}, {
+				fileKind: FileKind.FILE,
+				strikethrough: entry.status === 'D',
+				title: `${formatProjectDisplayPath(uri)} • ${statusTooltip}`,
+				fileDecorations: { colors: false, badges: false },
+			});
+			template.elementDisposables.add(addDisposableListener(template.openFileButton, EventType.CLICK, event => {
+				EventHelper.stop(event, true);
+				this.onOpenRemoteEntry(entry, projectUri);
+			}));
+			const statusIcon = entry.status === 'A' || entry.status === 'U'
+				? Codicon.diffAdded
+				: entry.status === 'D'
+					? Codicon.diffRemoved
+					: Codicon.diffModified;
+			template.decorationIcon.className = `ade-scm-decoration-icon ${ThemeIcon.asClassName(statusIcon)}`;
+			template.decorationIcon.style.color = '';
+			template.decorationIcon.style.backgroundImage = '';
+			template.decorationIcon.style.display = '';
+			template.elementDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.decorationIcon, statusTooltip));
+			return;
+		}
 		if (node.element.kind !== 'resource') {
 			return;
 		}
@@ -184,6 +238,7 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 		const theme = this.themeService.getColorTheme();
 		const icon = isDark(theme.type) ? (resource.decorations.iconDark ?? resource.decorations.icon) : resource.decorations.icon;
 		const tooltip = resource.decorations.tooltip ?? '';
+		const displayPath = formatProjectDisplayPath(uri);
 
 		template.row.classList.toggle('faded', Boolean(resource.decorations.faded));
 		template.fileLabel.setResource({
@@ -193,7 +248,7 @@ class AdeChangeResourceRenderer implements ITreeRenderer<AdeChangeTreeItem, Fuzz
 		}, {
 			fileKind: FileKind.FILE,
 			strikethrough: resource.decorations.strikeThrough,
-			title: tooltip ? `${uri.fsPath} • ${tooltip}` : uri.fsPath,
+			title: tooltip ? `${displayPath} • ${tooltip}` : displayPath,
 			fileDecorations: { colors: false, badges: !icon },
 		});
 
@@ -240,6 +295,7 @@ export class AdeChangesView extends ViewPane {
 	private readonly triedGitOpen = new Set<string>();
 	private readonly refreshQueue = new Sequencer();
 	private currentRepository: ISCMRepository | undefined;
+	private readonly cloudHosts: IAdeCloudHostBackendService | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -264,6 +320,13 @@ export class AdeChangesView extends ViewPane {
 		@ILabelService private readonly labelService: ILabelService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
+		this.cloudHosts = instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(IAdeCloudHostBackendService);
+			} catch {
+				return undefined;
+			}
+		});
 		this._register(Event.any(
 			projectNavigation.onDidChangeProject,
 			projectNavigation.onDidChangeSelectedProject,
@@ -273,6 +336,12 @@ export class AdeChangesView extends ViewPane {
 			themeService.onDidColorThemeChange,
 		)(() => {
 			void this.refresh();
+		}));
+		this._register(fileService.onDidFilesChange(e => {
+			const active = this.getActiveProject();
+			if (active && active.uri.scheme === AEXUS_SSH_SCHEME && e.affects(active.uri)) {
+				void this.refresh();
+			}
 		}));
 	}
 
@@ -294,6 +363,43 @@ export class AdeChangesView extends ViewPane {
 		await this.adeEditors.openFile(resource.sourceUri, projectUri);
 	}
 
+	private async openRemoteScmDiff(entry: IAdeRemoteScmStatusEntry, projectUri: URI, options?: IEditorOptions): Promise<void> {
+		const modifiedUri = joinPath(projectUri, entry.relativePath);
+		const headQuery = new URLSearchParams({
+			root: projectUri.path || '/',
+			rel: entry.relativePath,
+		}).toString();
+		const headUri = URI.from({
+			scheme: AEXUS_SSH_GIT_HEAD_SCHEME,
+			authority: projectUri.authority,
+			path: `/${entry.relativePath.replace(/^\/+/, '')}`,
+			query: headQuery,
+		});
+		if (entry.status === 'U' || entry.status === 'A') {
+			await this.adeEditors.openFile(modifiedUri, projectUri, options);
+			return;
+		}
+		if (entry.status === 'D') {
+			await this.adeEditors.openFile(headUri, projectUri, options);
+			return;
+		}
+		await this.adeEditors.openDiff(
+			headUri,
+			modifiedUri,
+			localize('adeWorkingTreeDiff', "{0} (Working Tree)", basename(modifiedUri)),
+			projectUri,
+			options,
+		);
+	}
+
+	private async openRemoteBackingFile(entry: IAdeRemoteScmStatusEntry, projectUri: URI): Promise<void> {
+		if (entry.status === 'D') {
+			await this.openRemoteScmDiff(entry, projectUri);
+			return;
+		}
+		await this.adeEditors.openFile(joinPath(projectUri, entry.relativePath), projectUri);
+	}
+
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
 		container.classList.add('ade-inspector-view-body');
@@ -308,31 +414,51 @@ export class AdeChangesView extends ViewPane {
 			treeContainer,
 			{
 				getHeight: () => 22,
-				getTemplateId: item => item.kind === 'group' ? 'ade-change-group' : 'ade-change-resource',
+				getTemplateId: item => (item.kind === 'group' || item.kind === 'remote-group') ? 'ade-change-group' : 'ade-change-resource',
 			},
 			[
 				new AdeChangeGroupRenderer(),
-				new AdeChangeResourceRenderer(labels, this.themeService, this.hoverService, (resource, projectUri) => {
-					void this.openBackingFile(resource, projectUri);
-				}),
+				new AdeChangeResourceRenderer(
+					labels,
+					this.themeService,
+					this.hoverService,
+					(resource, projectUri) => {
+						void this.openBackingFile(resource, projectUri);
+					},
+					(entry, projectUri) => {
+						void this.openRemoteBackingFile(entry, projectUri);
+					},
+				),
 			],
 			{
-				hasChildren: item => Array.isArray(item) || item.kind === 'group',
+				hasChildren: item => Array.isArray(item) || item.kind === 'group' || item.kind === 'remote-group',
 				getChildren: item => Array.isArray(item)
 					? item
 					: item.kind === 'group'
 						? item.resources.map(resource => ({ kind: 'resource' as const, resource, projectUri: this.getActiveProject()?.uri ?? resource.sourceUri }))
-						: [],
+						: item.kind === 'remote-group'
+							? item.entries.map(entry => ({ kind: 'remote-resource' as const, entry, projectUri: item.projectUri }))
+							: [],
 			},
 			{
 				identityProvider: {
 					getId: item => item.kind === 'group'
 						? `group:${item.group.provider.id}:${item.group.id}`
-						: `resource:${item.resource.resourceGroup.provider.id}:${item.resource.resourceGroup.id}:${item.resource.sourceUri.toString()}`,
+						: item.kind === 'remote-group'
+							? `remote-group:${item.projectUri.toString()}:${item.groupId}`
+							: item.kind === 'remote-resource'
+								? `remote-resource:${item.projectUri.toString()}:${item.entry.staged ? 'staged' : 'wt'}:${item.entry.relativePath}`
+								: `resource:${item.resource.resourceGroup.provider.id}:${item.resource.resourceGroup.id}:${item.resource.sourceUri.toString()}`,
 				},
 				accessibilityProvider: {
 					getWidgetAriaLabel: () => localize('adeChangesAria', "Project Changes"),
-					getAriaLabel: item => item.kind === 'group' ? item.group.label : basename(item.resource.sourceUri),
+					getAriaLabel: item => item.kind === 'group'
+						? item.group.label
+						: item.kind === 'remote-group'
+							? item.label
+							: item.kind === 'remote-resource'
+								? basename(joinPath(item.projectUri, item.entry.relativePath))
+								: basename(item.resource.sourceUri),
 				},
 				renderIndentGuides: RenderIndentGuides.Always,
 				expandOnlyOnTwistieClick: false,
@@ -344,10 +470,44 @@ export class AdeChangesView extends ViewPane {
 		this._register(tree.onDidOpen(event => {
 			if (event.element?.kind === 'resource') {
 				void openScmResourceInAde(this.adeEditors, event.element.resource, event.element.projectUri, event.editorOptions);
+			} else if (event.element?.kind === 'remote-resource') {
+				void this.openRemoteScmDiff(event.element.entry, event.element.projectUri, event.editorOptions);
 			}
 		}));
 
 		this._register(tree.onContextMenu(event => {
+			if (event.element?.kind === 'remote-resource') {
+				const { entry, projectUri } = event.element;
+				const uri = joinPath(projectUri, entry.relativePath);
+				tree.setFocus([event.element]);
+				this.contextMenuService.showContextMenu({
+					getAnchor: () => event.anchor,
+					getActions: () => [
+						toAction({
+							id: 'ade.changes.openRemoteDiff',
+							label: localize('adeOpenChanges', "Open Changes"),
+							run: () => this.openRemoteScmDiff(entry, projectUri),
+						}),
+						toAction({
+							id: 'ade.changes.openRemoteFile',
+							label: localize('adeOpenFile', "Open File"),
+							run: () => this.openRemoteBackingFile(entry, projectUri),
+						}),
+						new Separator(),
+						toAction({
+							id: 'ade.changes.copyRemotePath',
+							label: localize('copyPath', "Copy Path"),
+							run: () => this.clipboardService.writeText(formatProjectDisplayPath(uri)),
+						}),
+						toAction({
+							id: 'ade.changes.copyRemoteRelativePath',
+							label: localize('copyRelativePath', "Copy Relative Path"),
+							run: () => this.clipboardService.writeText(entry.relativePath),
+						}),
+					],
+				});
+				return;
+			}
 			if (event.element?.kind !== 'resource') {
 				return;
 			}
@@ -420,6 +580,51 @@ export class AdeChangesView extends ViewPane {
 				this.emptyContainer.hidden = false;
 				this.treeContainer.hidden = true;
 				await this.tree.setInput([]);
+				return;
+			}
+
+			if (project.uri.scheme === AEXUS_SSH_SCHEME && this.cloudHosts) {
+				this.bindRepositoryListeners(undefined);
+				let entries: readonly IAdeRemoteScmStatusEntry[] = [];
+				try {
+					entries = await this.cloudHosts.remoteGitStatus(project.uri.authority, project.uri.path || '/');
+				} catch {
+					entries = [];
+				}
+				if (entries.length === 0) {
+					this.emptyContainer.textContent = localize('adeNoChangesInProject', "No changes in {0}", project.name);
+					this.emptyContainer.hidden = false;
+					this.treeContainer.hidden = true;
+					await this.tree.setInput([]);
+					return;
+				}
+				const staged = entries.filter(e => e.staged);
+				const working = entries.filter(e => !e.staged);
+				const remoteGroups: AdeChangeTreeItem[] = [];
+				if (staged.length > 0) {
+					remoteGroups.push({
+						kind: 'remote-group',
+						groupId: 'staged',
+						label: localize('adeRemoteStagedChanges', "Staged Changes"),
+						entries: staged,
+						projectUri: project.uri,
+					});
+				}
+				if (working.length > 0) {
+					remoteGroups.push({
+						kind: 'remote-group',
+						groupId: 'changes',
+						label: localize('adeRemoteWorkingChanges', "Changes"),
+						entries: working,
+						projectUri: project.uri,
+					});
+				}
+				this.emptyContainer.hidden = true;
+				this.treeContainer.hidden = false;
+				await this.tree.setInput(remoteGroups);
+				for (const g of remoteGroups) {
+					await this.tree.expand(g);
+				}
 				return;
 			}
 

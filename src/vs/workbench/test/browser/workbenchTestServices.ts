@@ -414,7 +414,7 @@ export function workbenchInstantiationService(
 
 	instantiationService.stub(IProjectNavigationService, disposables.add(instantiationService.createInstance(ProjectNavigationService)));
 	instantiationService.stub(IAdeProjectsService, disposables.add(instantiationService.createInstance(AdeProjectsService)));
-	instantiationService.stub(IProjectTerminalService, instantiationService.createInstance(ProjectTerminalService));
+	instantiationService.stub(IProjectTerminalService, disposables.add(instantiationService.createInstance(ProjectTerminalService)));
 	return instantiationService;
 }
 

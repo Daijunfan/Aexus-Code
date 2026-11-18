@@ -17,7 +17,7 @@ function createLauncher(accessor: ServicesAccessor): (target: IProjectTerminalTa
 	const terminals = accessor.get(ITerminalService);
 	const groups = accessor.get(ITerminalGroupService);
 	return async target => {
-		const config = projects.getLaunchConfig(target);
+		const config = await projects.resolveLaunchConfigForUri(target.uri, target.name);
 		const instance = await terminals.createTerminal({ config, cwd: config.cwd, location: TerminalLocation.Panel, skipContributedProfileCheck: true });
 		terminals.setActiveInstance(instance);
 		await groups.showPanel(true);

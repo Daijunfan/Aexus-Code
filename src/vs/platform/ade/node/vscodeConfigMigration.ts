@@ -87,6 +87,9 @@ const TARGET_STATE_KEYS = [
 	'yesho.pi-coding-agent-vscode',
 	'sst-dev.opencode',
 	'harcochen.dsh-vsc-integration',
+	'ms-vscode-remote.remote-ssh',
+	'ms-vscode.remote-explorer',
+	'alefragnani.project-manager',
 ] as const;
 
 const TARGET_STORAGE_EXTENSION_DIRS = [
@@ -98,6 +101,8 @@ const TARGET_STORAGE_EXTENSION_DIRS = [
 	'openai.chatgpt',
 	'zgy.opencode-vscode-ui',
 	'yesho.pi-coding-agent-vscode',
+	'ms-vscode-remote.remote-ssh',
+	'alefragnani.project-manager',
 ] as const;
 
 const TARGET_CODING_AGENT_EXTENSION_IDS = [
@@ -111,6 +116,10 @@ const TARGET_CODING_AGENT_EXTENSION_IDS = [
 	'fengze233.dsh-vscode-panel',
 	'google.google-antigravity',
 	'yesho.pi-coding-agent-vscode',
+	'ms-vscode-remote.remote-ssh',
+	'ms-vscode-remote.remote-ssh-edit',
+	'ms-vscode.remote-explorer',
+	'alefragnani.project-manager',
 ] as const;
 
 const MAX_STORAGE_FILE_BYTES = 50 * 1024 * 1024;
@@ -435,6 +444,13 @@ async function migrateStateDbKeys(
 			}
 
 			let merged = existingParsed ? mergeMissingJsonObject(existingParsed, vsParsed) : { ...vsParsed };
+			if (row.key === 'ms-vscode-remote.remote-ssh') {
+				for (const subKey of Object.keys(merged)) {
+					if (subKey.startsWith('auth-prompt-')) {
+						delete merged[subKey];
+					}
+				}
+			}
 			if (row.key === 'saoudrizwan.claude-dev' && (existingParsed?.welcomeViewCompleted === true || vsParsed.welcomeViewCompleted === true)) {
 				merged = { ...merged, welcomeViewCompleted: true };
 			}

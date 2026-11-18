@@ -27,6 +27,7 @@ import { IExtensionService } from '../../../services/extensions/common/extension
 import { ExtensionKeyedWebviewOriginStore, IOverlayWebview, IWebviewService, WebviewContentPurpose } from '../../webview/browser/webview.js';
 import { WebviewWindowDragMonitor } from '../../webview/browser/webviewWindowDragMonitor.js';
 import { IWebviewViewService, WebviewView } from '../../webviewView/browser/webviewViewService.js';
+import { formatProjectDisplayPath } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { ADE_SECRETARY_ID, ADE_SESSION_SCHEME, IAdeProjectsService } from '../common/ade.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
@@ -112,7 +113,7 @@ export class AdeSessionEditor extends EditorPane {
 		this.inputDisposables.add(this.projects.onDidChange(() => {
 			heading.textContent = this.projects.getAgent(agent.id)?.label ?? localize('agentSession', "Agent Session");
 		}));
-		append(this.container, $('p.ade-project-path', {}, agent.projectUri.fsPath));
+		append(this.container, $('p.ade-project-path', {}, formatProjectDisplayPath(agent.projectUri)));
 		append(this.container, $('div.ade-agent-status', { role: 'status' }, localize('connectAgentDescription', "Connect this draft to a new or existing Coding Agent conversation. Your draft will be kept.")));
 		append(this.container, $('div.ade-conversation-empty', {}, agent.parentId ? localize('emptyChildConversation', "This subordinate Agent has its own conversation and draft.") : localize('emptyConversation', "This is a project conversation. Subordinate Agent conversations appear nested beneath it.")));
 		const composer = append(this.container, $('div.ade-composer'));

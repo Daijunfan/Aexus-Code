@@ -74,7 +74,7 @@ Commands:
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
 
   project list
-  project add <path...> [--name <label>]
+  project add <path|aexus-ssh://host/path|host:/path...> [--name <label>]
   project select <target>
   project remove <target>
   project delete <target> [--sessions] [--files] [--permanent]
@@ -86,6 +86,16 @@ Commands:
   project files [target] [--path <subpath>] [--depth <n>]
   project open-file <file> [--project <target>] [--side]
   project open-diff <file> [--project <target>]
+
+  host list
+  host info <alias|id>
+  host add --host <addr> [--name <label>] [--alias <alias>] [--user <user>] [--port <n>] [--os <linux|macos|windows>] [--identity <keyPath>] [--jump <proxyJump>] [--default-dir <remotePath>]
+  host update <alias|id> [--host <addr>] [--name <label>] [--alias <alias>] [--user <user>] [--port <n>] [--os <linux|macos|windows>] [--identity <keyPath>] [--jump <proxyJump>] [--default-dir <remotePath>]
+  host remove <alias|id>
+  host test <alias|id>
+  host browse <alias|id> [--path <remotePath>]
+  host import-vscode
+  host open [alias|id]
 
   engine list
   engine sessions <engine> [--project <target>] [--limit <n>]
@@ -165,7 +175,19 @@ function parseBooleanValue(raw: string, flagName: string): boolean {
 	throw new CliUsageError(`Invalid boolean value for ${flagName}: ${raw} (expected true or false).`);
 }
 
+function isCloudOrUriSpec(value: string): boolean {
+	const trimmed = value.trim();
+	if (/^(aexus-ssh|ssh|vscode-remote|file):\/\//i.test(trimmed)) {
+		return true;
+	}
+	if (/^[A-Za-z0-9._@-]{2,}:\/(?!\/)(.*)$/.test(trimmed)) {
+		return true;
+	}
+	return false;
+}
+
 function resolvePathIfRelative(value: string, cwd: string): string {
+	if (isCloudOrUriSpec(value)) { return value.trim(); }
 	if (value === '~') { return os.homedir(); }
 	if (value.startsWith('~/') || value.startsWith('~\\')) { return path.join(os.homedir(), value.slice(2)); }
 	if (value === '.' || value === '..' || value.startsWith('./') || value.startsWith('../') || value.startsWith('.\\') || value.startsWith('..\\')) {
@@ -174,12 +196,15 @@ function resolvePathIfRelative(value: string, cwd: string): string {
 	return value;
 }
 
-async function canonicalizeParamsPaths(params: Record<string, unknown> | undefined): Promise<Record<string, unknown> | undefined> {
+async function canonicalizeParamsPaths(params: Record<string, unknown> | undefined, action?: string): Promise<Record<string, unknown> | undefined> {
 	if (!params) {
 		return params;
 	}
+	if (action?.startsWith('host.')) {
+		return params;
+	}
 	const canonicalizeStr = async (val: string): Promise<string> => {
-		if (!path.isAbsolute(val)) {
+		if (isCloudOrUriSpec(val) || !path.isAbsolute(val)) {
 			return val;
 		}
 		try {
@@ -392,7 +417,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				}
 			}
 			if (rawPaths.length === 0) { throw new CliUsageError('Usage: aexus-ade project add <path...> [--name <label>]'); }
-			const paths = rawPaths.map(item => path.resolve(cwd, item.startsWith('~/') ? path.join(os.homedir(), item.slice(2)) : item === '~' ? os.homedir() : item));
+			const paths = rawPaths.map(item => isCloudOrUriSpec(item)
+				? item.trim()
+				: path.resolve(cwd, item.startsWith('~/') ? path.join(os.homedir(), item.slice(2)) : item === '~' ? os.homedir() : item));
 			return { help: false, json, windowId, action: 'project.add', params: customName ? { paths, name: customName } : { paths } };
 		}
 		if (sub === 'select') {
@@ -1706,6 +1733,129 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		throw new CliUsageError(`Unknown inbox subcommand: ${sub}`);
 	}
 
+	if (group === 'host' || group === 'cloud-host') {
+		const sub = tail[0] ?? 'list';
+		const args = tail.slice(1);
+		const takeVal = (iRef: { i: number }, flagName: string): string => {
+			const cur = args[iRef.i];
+			const eqIdx = cur.indexOf('=');
+			if (eqIdx >= 0) {
+				const val = cur.slice(eqIdx + 1);
+				if (!val) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+				return val;
+			}
+			const next = args[++iRef.i];
+			if (next === undefined) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+			return next;
+		};
+
+		if (sub === 'list') {
+			if (args.length > 0) { throw new CliUsageError(`Unexpected arguments for host list: ${args.join(' ')}`); }
+			return { help: false, json, windowId, action: 'host.list', params: {} };
+		}
+		if (sub === 'info' || sub === 'get') {
+			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade host info <alias|id>'); }
+			return { help: false, json, windowId, action: 'host.get', params: { target: args[0] } };
+		}
+		if (sub === 'remove' || sub === 'delete' || sub === 'rm') {
+			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade host remove <alias|id>'); }
+			return { help: false, json, windowId, action: 'host.delete', params: { target: args[0] } };
+		}
+		if (sub === 'test' || sub === 'ping') {
+			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade host test <alias|id>'); }
+			return { help: false, json, windowId, action: 'host.test', params: { target: args[0] } };
+		}
+		if (sub === 'import-vscode' || sub === 'import' || sub === 'sync') {
+			if (args.length > 0) { throw new CliUsageError('Usage: aexus-ade host import-vscode'); }
+			return { help: false, json, windowId, action: 'host.import', params: {} };
+		}
+		if (sub === 'open') {
+			if (args.length > 1) { throw new CliUsageError('Usage: aexus-ade host open [alias|id]'); }
+			return { help: false, json, windowId, action: 'host.open', params: args[0] ? { target: args[0] } : {} };
+		}
+		if (sub === 'browse' || sub === 'ls') {
+			let target: string | undefined;
+			let remotePath: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--path' || arg.startsWith('--path=')) {
+					remotePath = takeVal(ref, '--path');
+				} else if (!arg.startsWith('-') && !target) {
+					target = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for host browse: ${arg}`);
+				}
+			}
+			if (!target) { throw new CliUsageError('Usage: aexus-ade host browse <alias|id> [--path <remotePath>]'); }
+			return { help: false, json, windowId, action: 'host.browse', params: remotePath ? { target, path: remotePath } : { target } };
+		}
+		if (sub === 'add' || sub === 'upsert' || sub === 'update' || sub === 'edit') {
+			const params: Record<string, unknown> = {};
+			let targetPositional: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--id' || arg.startsWith('--id=')) {
+					params.id = takeVal(ref, '--id');
+				} else if (arg === '--host' || arg === '--hostname' || arg.startsWith('--host=') || arg.startsWith('--hostname=')) {
+					params.hostName = takeVal(ref, '--host');
+				} else if (arg === '--name' || arg.startsWith('--name=')) {
+					params.name = takeVal(ref, '--name');
+				} else if (arg === '--alias' || arg.startsWith('--alias=')) {
+					params.alias = takeVal(ref, '--alias');
+				} else if (arg === '--user' || arg.startsWith('--user=')) {
+					params.user = takeVal(ref, '--user');
+				} else if (arg === '--port' || arg.startsWith('--port=')) {
+					const val = takeVal(ref, '--port');
+					if (!/^\d+$/.test(val) || Number(val) < 1 || Number(val) > 65535) {
+						throw new CliUsageError('Option --port requires an integer between 1 and 65535.');
+					}
+					params.port = Number(val);
+				} else if (arg === '--os' || arg.startsWith('--os=')) {
+					const val = takeVal(ref, '--os').toLowerCase();
+					if (val !== 'linux' && val !== 'macos' && val !== 'windows') {
+						throw new CliUsageError('Option --os must be linux, macos, or windows.');
+					}
+					params.os = val;
+				} else if (arg === '--identity' || arg === '--identity-file' || arg.startsWith('--identity=') || arg.startsWith('--identity-file=')) {
+					params.identityFile = takeVal(ref, '--identity');
+				} else if (arg === '--jump' || arg === '--proxy-jump' || arg.startsWith('--jump=') || arg.startsWith('--proxy-jump=')) {
+					params.proxyJump = takeVal(ref, '--jump');
+				} else if (arg === '--default-dir' || arg.startsWith('--default-dir=')) {
+					params.defaultDirectory = takeVal(ref, '--default-dir');
+				} else if (arg === '--notes' || arg.startsWith('--notes=')) {
+					params.notes = takeVal(ref, '--notes');
+				} else if (!arg.startsWith('-') && !targetPositional) {
+					targetPositional = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for host ${sub}: ${arg}`);
+				}
+			}
+			if ((sub === 'update' || sub === 'edit') && targetPositional && !params.id && !params.alias) {
+				params.alias = targetPositional;
+			} else if ((sub === 'add' || sub === 'upsert') && targetPositional && !params.hostName) {
+				let spec = targetPositional.trim();
+				if (spec.includes('@')) {
+					const idx = spec.lastIndexOf('@');
+					if (!params.user) { params.user = spec.slice(0, idx); }
+					spec = spec.slice(idx + 1);
+				}
+				const pm = /^([^:]+):(\d+)$/.exec(spec);
+				if (pm) {
+					params.hostName = pm[1];
+					if (!params.port) { params.port = Number(pm[2]); }
+				} else {
+					params.hostName = spec;
+				}
+			}
+			if (!params.hostName && (sub === 'add' || sub === 'upsert')) {
+				throw new CliUsageError('Usage: aexus-ade host add (<user@host[:port]> | --host <addr>) [--name <label>] [--alias <alias>] [--os <linux|macos|windows>]');
+			}
+			return { help: false, json, windowId, action: 'host.upsert', params };
+		}
+
+		throw new CliUsageError(`Unknown host subcommand: ${sub}`);
+	}
+
 	throw new CliUsageError(`Unknown command: ${group}`);
 }
 
@@ -1898,7 +2048,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 
 	try {
 		const { socketPath, token } = await resolveConnection(env);
-		const normalizedParams = await canonicalizeParamsPaths(parsed.params);
+		const normalizedParams = await canonicalizeParamsPaths(parsed.params, parsed.action);
 		if (
 			(parsed.action === 'engineering.blueprint.apply' || parsed.action === 'engineering.blueprint.validate')
 			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.text === undefined

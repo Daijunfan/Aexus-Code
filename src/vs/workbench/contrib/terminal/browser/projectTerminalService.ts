@@ -4,12 +4,18 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Codicon } from '../../../../base/common/codicons.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { basename, joinPath } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
+import {
+	AdeCloudHostOs,
+	IAdeCloudHostBackendService,
+	toRemoteNativePath,
+} from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
-import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILabelService } from '../../../../platform/label/common/label.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IShellLaunchConfig } from '../../../../platform/terminal/common/terminal.js';
@@ -42,12 +48,16 @@ export interface IProjectTerminalService {
 	addSSHProject(host: string, path: string, name?: string): IProjectTerminalTarget;
 	findProject(cwd: string | URI | undefined): IProjectTerminalTarget | undefined;
 	getLaunchConfig(target: IProjectTerminalTarget): IShellLaunchConfig;
+	resolveLaunchConfigForUri(uri: URI, explicitName?: string): Promise<IShellLaunchConfig>;
 }
 
 /** Resolves project context at creation time; running terminals retain their own host and cwd. */
-export class ProjectTerminalService implements IProjectTerminalService {
+export class ProjectTerminalService extends Disposable implements IProjectTerminalService {
 	declare readonly _serviceBrand: undefined;
 	private _sshEntries: IStoredSSHProject[];
+	private _cachedEffectiveSshConfigPath: string | undefined;
+	private readonly _hostOsCache = new Map<string, AdeCloudHostOs>();
+	private readonly _cloudHosts: IAdeCloudHostBackendService | undefined;
 
 	constructor(
 		@IWorkbenchModeService private readonly _modes: IWorkbenchModeService,
@@ -58,12 +68,53 @@ export class ProjectTerminalService implements IProjectTerminalService {
 		@IUriIdentityService private readonly _uriIdentity: IUriIdentityService,
 		@IStorageService private readonly _storage: IStorageService,
 		@IConfigurationService private readonly _configuration: IConfigurationService,
+		@IInstantiationService instantiationService: IInstantiationService,
 	) {
+		super();
 		this._sshEntries = _storage.getObject<IStoredSSHProject[]>('aexus.terminal.sshProjects', StorageScope.PROFILE, []);
+		this._cloudHosts = instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(IAdeCloudHostBackendService);
+			} catch {
+				return undefined;
+			}
+		});
+		if (this._cloudHosts) {
+			void this._refreshCloudHostMetadata();
+			this._register(this._cloudHosts.onDidChangeHosts(() => {
+				void this._refreshCloudHostMetadata();
+			}));
+		}
+	}
+
+	private async _refreshCloudHostMetadata(): Promise<void> {
+		if (!this._cloudHosts) {
+			return;
+		}
+		try {
+			const [cfgPath, hosts] = await Promise.all([
+				this._cloudHosts.getEffectiveSshConfigPath().catch(() => undefined),
+				this._cloudHosts.listHosts().catch(() => []),
+			]);
+			if (cfgPath) {
+				this._cachedEffectiveSshConfigPath = cfgPath;
+			}
+			this._hostOsCache.clear();
+			for (const h of hosts) {
+				this._hostOsCache.set(h.alias, h.os);
+			}
+		} catch {
+			// Best effort cache prime
+		}
 	}
 
 	private _workspaceTarget(uri: URI, name: string): IProjectTerminalTarget {
-		return { uri, name, host: uri.scheme === Schemas.file ? localize('localHost', "Local") : this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority };
+		const host = uri.scheme === Schemas.file
+			? localize('localHost', "Local")
+			: uri.scheme === SSH_PROJECT_SCHEME
+				? uri.authority
+				: (this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority);
+		return { uri, name, host };
 	}
 
 	get projects(): readonly IProjectTerminalTarget[] {
@@ -104,27 +155,68 @@ export class ProjectTerminalService implements IProjectTerminalService {
 			.sort((a, b) => b.uri.path.length - a.uri.path.length)[0];
 	}
 
-	getLaunchConfig(target: IProjectTerminalTarget): IShellLaunchConfig {
-		const name = localize('projectTerminalTitle', "{0} · {1}", target.name, target.host);
-		if (target.uri.scheme !== SSH_PROJECT_SCHEME) {
-			return { name, cwd: target.uri };
+	private _resolveSshConfigPathSync(): string | undefined {
+		if (this._cachedEffectiveSshConfigPath) {
+			return this._cachedEffectiveSshConfigPath;
 		}
-		// Quote the remote POSIX path without changing its contents or expanding shell expressions.
-		const path = `'${target.uri.path.replace(/'/g, `'\\''`)}'`;
 		let configFile = this._configuration.getValue<string>('remote.SSH.configFile');
 		if (configFile?.startsWith('~/') || configFile?.startsWith('~\\')) {
 			configFile = joinPath(this._paths.userHome({ preferLocal: true }), configFile.slice(2)).fsPath;
 		}
+		return configFile || undefined;
+	}
+
+	private _buildSshLaunchConfig(uri: URI, hostLabel: string, name: string, osKind: AdeCloudHostOs | undefined, configFile: string | undefined): IShellLaunchConfig {
+		let remoteCommand: string;
+		if (osKind === 'windows') {
+			const winPath = toRemoteNativePath(uri.path || '/', 'windows')
+				.replace(/'/g, `''`)
+				.replace(/`/g, '``')
+				.replace(/"/g, '`"')
+				.replace(/\$/g, '`$');
+			remoteCommand = `powershell -NoLogo -NoExit -Command "Set-Location -LiteralPath '${winPath}'"`;
+		} else {
+			// Quote the remote POSIX path without changing its contents or expanding shell expressions.
+			const posixPath = uri.path || '/';
+			const quoted = `'${posixPath.replace(/'/g, `'\\''`)}'`;
+			remoteCommand = `cd -- ${quoted} && exec "\${SHELL:-/bin/sh}" -l`;
+		}
 		return {
 			name,
-			hostLabel: target.host,
+			hostLabel,
 			icon: Codicon.remote,
 			executable: 'ssh',
-			args: [...(configFile ? ['-F', configFile] : []), '-t', '--', target.host, `cd -- ${path} && exec "\${SHELL:-/bin/sh}" -l`],
+			args: [...(configFile ? ['-F', configFile] : []), '-t', '--', uri.authority, remoteCommand],
 			cwd: this._paths.userHome({ preferLocal: true }),
 			ignoreConfigurationCwd: true,
 			isRemotePty: true,
 			waitOnExit: true,
 		};
+	}
+
+	getLaunchConfig(target: IProjectTerminalTarget): IShellLaunchConfig {
+		const name = localize('projectTerminalTitle', "{0} · {1}", target.name, target.host);
+		if (target.uri.scheme !== SSH_PROJECT_SCHEME) {
+			return { name, cwd: target.uri };
+		}
+		const osKind = this._hostOsCache.get(target.uri.authority);
+		const configFile = this._resolveSshConfigPathSync();
+		return this._buildSshLaunchConfig(target.uri, target.host, name, osKind, configFile);
+	}
+
+	async resolveLaunchConfigForUri(uri: URI, explicitName?: string): Promise<IShellLaunchConfig> {
+		const matchedProject = this.findProject(uri);
+		const hostLabel = matchedProject?.host ?? (uri.scheme === SSH_PROJECT_SCHEME ? uri.authority : (this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority || localize('localHost', "Local")));
+		const folderName = explicitName ?? (uri === matchedProject?.uri ? matchedProject.name : (basename(uri) || matchedProject?.name || hostLabel));
+		const name = localize('projectTerminalTitle', "{0} · {1}", folderName, hostLabel);
+		if (uri.scheme !== SSH_PROJECT_SCHEME) {
+			return { name, cwd: uri };
+		}
+		if (this._cloudHosts && (!this._cachedEffectiveSshConfigPath || !this._hostOsCache.has(uri.authority))) {
+			await this._refreshCloudHostMetadata();
+		}
+		const osKind = this._hostOsCache.get(uri.authority);
+		const configFile = this._resolveSshConfigPathSync();
+		return this._buildSshLaunchConfig(uri, hostLabel, name, osKind, configFile);
 	}
 }

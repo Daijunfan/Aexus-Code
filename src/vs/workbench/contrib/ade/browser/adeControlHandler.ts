@@ -70,6 +70,13 @@ import {
 import { findProjectScmRepository, openScmResourceInAde } from './adeInspectorViews.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
+import {
+	AdeCloudHostOs,
+	AEXUS_SSH_SCHEME,
+	buildCloudProjectUri,
+	formatProjectDisplayPath,
+	IAdeCloudHostBackendService,
+} from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 function tryGetService<T>(accessor: ServicesAccessor, id: ServiceIdentifier<T>): T | undefined {
@@ -215,6 +222,14 @@ function toUri(raw: unknown): URI | undefined {
 		if (!trimmed) {
 			return undefined;
 		}
+		if (/^ssh:\/\/([^/]+)(\/.*)?$/i.test(trimmed)) {
+			const m = /^ssh:\/\/([^/]+)(\/.*)?$/i.exec(trimmed)!;
+			return buildCloudProjectUri(m[1], m[2] || '/');
+		}
+		if (/^[A-Za-z0-9._@-]{2,}:\/(?!\/)(.*)$/.test(trimmed) && !/^(file|aexus-ssh|vscode-remote|http|https):/i.test(trimmed)) {
+			const colonIdx = trimmed.indexOf(':');
+			return buildCloudProjectUri(trimmed.slice(0, colonIdx), trimmed.slice(colonIdx + 1));
+		}
 		if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed)) {
 			return URI.parse(trimmed);
 		}
@@ -235,7 +250,7 @@ function buildProjectSummaries(
 	const activeUri = focusedUri ?? projects.selectedProject?.uri ?? navigation.selectedProject?.uri;
 	return projects.projects.map(project => ({
 		name: project.name,
-		path: project.uri.fsPath,
+		path: formatProjectDisplayPath(project.uri),
 		uri: project.uri.toString(),
 		focused: Boolean(focusedUri && uriIdentity.extUri.isEqual(focusedUri, project.uri)),
 		selected: Boolean(activeUri && uriIdentity.extUri.isEqual(activeUri, project.uri)),
@@ -250,7 +265,7 @@ function toSessionSummary(projects: IAdeProjectsService, sessions: IAdeSessionsS
 	return {
 		id: agent.id,
 		parentId: agent.parentId,
-		projectPath: agent.projectUri.fsPath,
+		projectPath: formatProjectDisplayPath(agent.projectUri),
 		projectName: projects.getProjectName(agent.projectUri),
 		label: agent.label,
 		role: agent.role,
@@ -387,10 +402,10 @@ function buildControlStatus(
 		showArchived: projects.showArchived,
 		navigation: {
 			isFocused: Boolean(focused),
-			focusedProject: focused ? { name: focused.name, path: focused.uri.fsPath, uri: focused.uri.toString() } : undefined,
+			focusedProject: focused ? { name: focused.name, path: formatProjectDisplayPath(focused.uri), uri: focused.uri.toString() } : undefined,
 			canGoForward: navigation.canGoForward,
 		},
-		selectedProject: selected ? { name: selected.name, path: selected.uri.fsPath, uri: selected.uri.toString() } : undefined,
+		selectedProject: selected ? { name: selected.name, path: formatProjectDisplayPath(selected.uri), uri: selected.uri.toString() } : undefined,
 		...(selectedAgent ? { selectedSession: toSessionSummary(projects, sessions, selectedAgent) } : {}),
 		activeEditor,
 		secretary: {
@@ -429,7 +444,7 @@ export function buildAdeAgentRoleContext(
 		`- Role: ${formatRoleTitle(effectiveRole)}`,
 		`- Session: ${agent.label} (id: ${agent.id})`,
 		`- Engine: ${ownEngineName} (${agent.session?.engineId ?? 'draft'})`,
-		`- Project: ${projects.getProjectName(agent.projectUri)} (${agent.projectUri.fsPath})`,
+		`- Project: ${projects.getProjectName(agent.projectUri)} (${formatProjectDisplayPath(agent.projectUri)})`,
 		'- Four-Tier ADE Rank Hierarchy (CRITICAL RULE — `Employee` IS NOT `Worker` / `Employee [L3] ≠ Worker [L4]`):',
 		'  - `Governor` (L1 · 项目总负责人) > `Manager` (L2 · 链路/模块主管) > `Employee` (L3 · 骨干员工：基层管理与验收负责人) > `Worker` (L4 · 底层纯净执行主力).',
 		'  - **`Employee` 绝不是 `Worker` (`Employee ≠ Worker`)**: `Employee (L3)` belongs to the orchestrated management/review tier (L1–L3), receives `aexus-ade` Subordinate Control APIs, and supervises/reviews leaf `Worker (L4)` sessions; `Worker (L4)` is the lowest un-orchestrated execution leaf (`--role worker`) with zero role/API injection and no subordinates. NEVER conflate `Employee` with `Worker` or refer to an `Employee` session as a `Worker`!',
@@ -531,7 +546,7 @@ export function buildAdeRoleSyncSnapshot(
 		return {
 			id: agent.id,
 			label: agent.label,
-			projectPath: agent.projectUri.fsPath,
+			projectPath: formatProjectDisplayPath(agent.projectUri),
 			engineId: agent.session?.engineId ?? agent.preferredEngineId,
 			resource: agent.session?.resource.toString(),
 			rank,
@@ -878,6 +893,7 @@ export async function executeAdeControlRequest(
 	const layoutService = tryGetService(accessor, IWorkbenchLayoutService);
 	const engineeringService = tryGetService(accessor, IAdeEngineeringService);
 	const inboxService = tryGetService(accessor, IAdeInboxService);
+	const cloudHosts = tryGetService(accessor, IAdeCloudHostBackendService);
 
 	const resolveActiveOrTargetProjectUri = (rawTarget: unknown): URI => {
 		if (rawTarget !== undefined && rawTarget !== null && String(rawTarget).trim()) {
@@ -902,10 +918,17 @@ export async function executeAdeControlRequest(
 			throw new Error(localize('adeMissingFilePath', "A file path is required."));
 		}
 		const trimmed = rawFile.trim();
+		if (/^[A-Za-z0-9._@-]{2,}:\/(?!\/)(.*)$/.test(trimmed) && !/^(file|aexus-ssh|vscode-remote|http|https):/i.test(trimmed)) {
+			const colonIdx = trimmed.indexOf(':');
+			return buildCloudProjectUri(trimmed.slice(0, colonIdx), trimmed.slice(colonIdx + 1));
+		}
 		if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed)) {
 			return URI.parse(trimmed);
 		}
 		if (trimmed.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(trimmed)) {
+			if (projectUri.scheme === AEXUS_SSH_SCHEME) {
+				return buildCloudProjectUri(projectUri.authority, trimmed);
+			}
 			return URI.file(trimmed);
 		}
 		return joinPath(projectUri, trimmed);
@@ -995,7 +1018,7 @@ export async function executeAdeControlRequest(
 			const summaries = buildProjectSummaries(projects, navigation, uriIdentity);
 			return summaries.find(item => uriIdentity.extUri.isEqual(URI.parse(item.uri), normalized)) ?? {
 				name: projects.getProjectName(normalized),
-				path: normalized.fsPath,
+				path: formatProjectDisplayPath(normalized),
 				uri: normalized.toString(),
 				focused: Boolean(navigation.focusedProject && uriIdentity.extUri.isEqual(navigation.focusedProject.uri, normalized)),
 				selected: true,
@@ -1016,7 +1039,7 @@ export async function executeAdeControlRequest(
 				: undefined;
 			for (let idx = 0; idx < uris.length; idx++) {
 				const uri = uris[idx];
-				projects.registerProject(uri, idx === 0 && customName ? customName : basename(uri));
+				projects.registerProject(uri, idx === 0 && customName ? customName : (basename(uri) || uri.authority || 'project'));
 			}
 			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
 			const lastUri = uris[uris.length - 1];
@@ -1028,8 +1051,8 @@ export async function executeAdeControlRequest(
 				return summaries.filter(item => uris.some(uri => uriIdentity.extUri.isEqual(URI.parse(item.uri), uri)));
 			}
 			return summaries.find(item => uriIdentity.extUri.isEqual(URI.parse(item.uri), uris[0])) ?? {
-				name: customName || basename(uris[0]),
-				path: uris[0].fsPath,
+				name: customName || basename(uris[0]) || uris[0].authority || 'project',
+				path: formatProjectDisplayPath(uris[0]),
 				uri: uris[0].toString(),
 				focused: false,
 				selected: true,
@@ -1057,7 +1080,7 @@ export async function executeAdeControlRequest(
 			}
 			projects.removeProject(targetUri);
 			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
-			return { removed: targetUri.fsPath, uri: targetUri.toString() };
+			return { removed: formatProjectDisplayPath(targetUri), uri: targetUri.toString() };
 		}
 
 		case 'project.delete': {
@@ -1102,7 +1125,7 @@ export async function executeAdeControlRequest(
 			projects.removeProject(targetUri);
 			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
 			return {
-				deleted: targetUri.fsPath,
+				deleted: formatProjectDisplayPath(targetUri),
 				uri: targetUri.toString(),
 				deletedSessions: deleteSessions,
 				deletedFiles: deleteFiles,
@@ -1168,8 +1191,8 @@ export async function executeAdeControlRequest(
 			const totalChanges = groups.reduce((acc, g) => acc + g.count, 0);
 			return {
 				project: projects.getProjectName(projectUri),
-				projectPath: projectUri.fsPath,
-				repositoryRoot: repository?.provider.rootUri?.fsPath,
+				projectPath: formatProjectDisplayPath(projectUri),
+				repositoryRoot: repository?.provider.rootUri ? formatProjectDisplayPath(repository.provider.rootUri) : undefined,
 				totalChanges,
 				groups,
 			};
@@ -1195,7 +1218,7 @@ export async function executeAdeControlRequest(
 					}
 					entries.push({
 						name: child.name,
-						path: child.resource.fsPath,
+						path: formatProjectDisplayPath(child.resource),
 						relativePath: relativePath(projectUri, child.resource) ?? child.name,
 						kind: child.isDirectory ? 'folder' : 'file',
 					});
@@ -1210,8 +1233,8 @@ export async function executeAdeControlRequest(
 			await walk(rootDirUri, 1);
 			return {
 				project: projects.getProjectName(projectUri),
-				projectPath: projectUri.fsPath,
-				directory: rootDirUri.fsPath,
+				projectPath: formatProjectDisplayPath(projectUri),
+				directory: formatProjectDisplayPath(rootDirUri),
 				count: entries.length,
 				entries,
 			};
@@ -1223,9 +1246,9 @@ export async function executeAdeControlRequest(
 			modes.setMode('ade');
 			await editors.openFile(fileUri, projectUri);
 			return {
-				opened: fileUri.fsPath,
+				opened: formatProjectDisplayPath(fileUri),
 				project: projects.getProjectName(projectUri),
-				projectPath: projectUri.fsPath,
+				projectPath: formatProjectDisplayPath(projectUri),
 			};
 		}
 
@@ -1250,9 +1273,9 @@ export async function executeAdeControlRequest(
 				await editors.openFile(fileUri, projectUri);
 			}
 			return {
-				openedDiff: fileUri.fsPath,
+				openedDiff: formatProjectDisplayPath(fileUri),
 				project: projects.getProjectName(projectUri),
-				projectPath: projectUri.fsPath,
+				projectPath: formatProjectDisplayPath(projectUri),
 			};
 		}
 
@@ -1283,7 +1306,7 @@ export async function executeAdeControlRequest(
 				nativeId: item.resource.path.startsWith('/') ? item.resource.path.slice(1) : item.resource.path,
 				resource: item.resource.toString(),
 				label: item.label,
-				projectPath: item.projectUri.fsPath,
+				projectPath: formatProjectDisplayPath(item.projectUri),
 				updated: item.updated,
 			}));
 		}
@@ -2433,10 +2456,134 @@ export async function executeAdeControlRequest(
 			return { unreadCount: inboxService.unreadCount };
 		}
 
+		case 'host.list': {
+			if (!cloudHosts) {
+				throw new Error('Cloud Host backend service is not available.');
+			}
+			return cloudHosts.listHosts();
+		}
+
+		case 'host.get': {
+			if (!cloudHosts) {
+				throw new Error('Cloud Host backend service is not available.');
+			}
+			const rawTarget = String(params.target ?? params.id ?? params.alias ?? '').trim();
+			if (!rawTarget) {
+				throw new Error('Cloud Host ID or alias is required.');
+			}
+			const found = await cloudHosts.getHost(rawTarget);
+			if (!found) {
+				throw new Error(`Cloud Host not found: ${rawTarget}`);
+			}
+			return found;
+		}
+
+		case 'host.upsert': {
+			if (!cloudHosts) {
+				throw new Error('Cloud Host backend service is not available.');
+			}
+			const lookupKey = String(params.id ?? params.alias ?? params.target ?? '').trim();
+			const existing = lookupKey ? await cloudHosts.getHost(lookupKey) : undefined;
+			const hostName = String(params.hostName ?? params.host ?? existing?.hostName ?? '').trim();
+			if (!hostName) {
+				throw new Error('Cloud Host address (--host) is required.');
+			}
+			const rawOs = typeof params.os === 'string' ? params.os.trim().toLowerCase() : undefined;
+			const osKind: AdeCloudHostOs | undefined = rawOs === 'windows' || rawOs === 'macos' || rawOs === 'linux' ? rawOs : existing?.os;
+			const rawStrict = typeof params.strictHostKeyChecking === 'string' ? params.strictHostKeyChecking.trim() : undefined;
+			const strictCheck = rawStrict === 'yes' || rawStrict === 'accept-new' || rawStrict === 'no' ? rawStrict : existing?.strictHostKeyChecking;
+			return cloudHosts.upsertHost({
+				id: typeof params.id === 'string' && params.id.trim() ? params.id.trim() : existing?.id,
+				name: (typeof params.name === 'string' && params.name.trim() ? params.name.trim() : existing?.name) ?? hostName,
+				alias: typeof params.alias === 'string' && params.alias.trim() ? params.alias.trim() : existing?.alias,
+				hostName,
+				user: typeof params.user === 'string' ? (params.user.trim() || undefined) : existing?.user,
+				port: typeof params.port === 'number' ? params.port : (typeof params.port === 'string' && /^\d+$/.test(params.port) ? Number(params.port) : existing?.port),
+				os: osKind,
+				identityFile: typeof params.identityFile === 'string' ? params.identityFile : existing?.identityFile,
+				proxyJump: typeof params.proxyJump === 'string' ? params.proxyJump : existing?.proxyJump,
+				strictHostKeyChecking: strictCheck,
+				defaultDirectory: typeof params.defaultDirectory === 'string' ? params.defaultDirectory : existing?.defaultDirectory,
+				notes: typeof params.notes === 'string' ? params.notes : existing?.notes,
+			});
+		}
+
+		case 'host.delete': {
+			if (!cloudHosts) {
+				throw new Error('Cloud Host backend service is not available.');
+			}
+			const rawTarget = String(params.target ?? params.id ?? params.alias ?? '').trim();
+			if (!rawTarget) {
+				throw new Error('Cloud Host ID or alias is required.');
+			}
+			const ok = await cloudHosts.deleteHost(rawTarget);
+			if (!ok) {
+				throw new Error(`Cloud Host not found: ${rawTarget}`);
+			}
+			return { deleted: rawTarget };
+		}
+
+		case 'host.test': {
+			if (!cloudHosts) {
+				throw new Error('Cloud Host backend service is not available.');
+			}
+			const rawTarget = String(params.target ?? params.id ?? params.alias ?? '').trim();
+			if (!rawTarget) {
+				throw new Error('Cloud Host ID or alias is required.');
+			}
+			return cloudHosts.testConnection(rawTarget);
+		}
+
+		case 'host.browse': {
+			if (!cloudHosts) {
+				throw new Error('Cloud Host backend service is not available.');
+			}
+			const rawTarget = String(params.target ?? params.host ?? params.alias ?? '').trim();
+			if (!rawTarget) {
+				throw new Error('Cloud Host alias is required.');
+			}
+			const matched = await cloudHosts.getHost(rawTarget);
+			const authority = matched?.alias ?? rawTarget;
+			const remotePath = typeof params.path === 'string' && params.path.trim()
+				? params.path.trim()
+				: (matched?.defaultDirectory || matched?.recentDirectories[0] || '/');
+			const entries = await cloudHosts.remoteReadDir(authority, remotePath);
+			return { host: authority, path: remotePath, entries };
+		}
+
+		case 'host.import': {
+			if (!cloudHosts) {
+				throw new Error('Cloud Host backend service is not available.');
+			}
+			return cloudHosts.importFromVsCodeAndSshConfig();
+		}
+
+		case 'host.open': {
+			const target = typeof params.target === 'string' && params.target.trim() ? params.target.trim() : undefined;
+			await editors.openCloudHosts?.(target);
+			return { opened: true, ...(target ? { target } : {}) };
+		}
+
 		default:
 			throw new Error(localize('adeUnknownControlAction', "Unknown ADE control action: {0}", String(action)));
 	}
 }
+
+CommandsRegistry.registerCommand('aexus.ade.getCloudHostSshContext', async (accessor: ServicesAccessor, rawAlias?: unknown) => {
+	const cloudHosts = tryGetService(accessor, IAdeCloudHostBackendService);
+	if (!cloudHosts) {
+		return undefined;
+	}
+	const alias = typeof rawAlias === 'string' ? rawAlias.trim() : '';
+	const [effectiveSshConfigPath, matched] = await Promise.all([
+		cloudHosts.getEffectiveSshConfigPath().catch(() => undefined),
+		alias ? cloudHosts.getHost(alias).catch(() => undefined) : Promise.resolve(undefined),
+	]);
+	return {
+		effectiveSshConfigPath,
+		os: matched?.os ?? 'linux',
+	};
+});
 
 CommandsRegistry.registerCommand(ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID, (accessor: ServicesAccessor, rawResource: unknown) => {
 	return resolveAdePromptContext(accessor, rawResource);

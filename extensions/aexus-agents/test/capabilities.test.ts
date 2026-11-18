@@ -6,9 +6,11 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseCliCommand, runCli, type IAdeControlWireRequest } from '../src/adeCli.ts';
 import {
 	buildOptionGroupsForSession,
 	discoverEngineModels,
@@ -969,5 +971,195 @@ describe('package.json contributions', () => {
 			participants.map(participant => participant.id).sort(),
 			['aexus-secretary', ...ENGINE_IDS].sort(),
 		);
+	});
+});
+
+interface IFakeAdeControlServer {
+	readonly env: NodeJS.ProcessEnv;
+	readonly requests: IAdeControlWireRequest[];
+	close(): Promise<void>;
+}
+
+async function startFakeAdeControlServer(result: unknown = { ok: true }): Promise<IFakeAdeControlServer> {
+	// Unix socket paths are limited to ~104 bytes on macOS, so keep this outside the longer testRoot path.
+	const socketDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aexus-cli-'));
+	const socketPath = path.join(socketDir, 's.sock');
+	const requests: IAdeControlWireRequest[] = [];
+	const sockets = new Set<net.Socket>();
+	const server = net.createServer(socket => {
+		sockets.add(socket);
+		socket.on('close', () => sockets.delete(socket));
+		socket.setEncoding('utf8');
+		let buffer = '';
+		socket.on('data', (chunk: Buffer) => {
+			buffer += chunk.toString('utf8');
+			let newline = buffer.indexOf('\n');
+			while (newline >= 0) {
+				const line = buffer.slice(0, newline).trim();
+				buffer = buffer.slice(newline + 1);
+				if (line) {
+					requests.push(JSON.parse(line) as IAdeControlWireRequest);
+					socket.write(JSON.stringify({ ok: true, result }) + '\n');
+				}
+				newline = buffer.indexOf('\n');
+			}
+		});
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once('error', reject);
+		server.listen(socketPath, () => {
+			server.removeListener('error', reject);
+			resolve();
+		});
+	});
+	return {
+		env: { AEXUS_ADE_SOCKET: socketPath, AEXUS_ADE_TOKEN: 'test-token' },
+		requests,
+		close: () => new Promise<void>(resolve => {
+			for (const socket of sockets) {
+				socket.destroy();
+			}
+			server.close(() => {
+				fs.rmSync(socketDir, { recursive: true, force: true });
+				resolve();
+			});
+		}),
+	};
+}
+
+async function runCliAgainstFakeServer(argv: readonly string[], result?: unknown): Promise<{ code: number; stdout: string; stderr: string; requests: IAdeControlWireRequest[] }> {
+	const server = await startFakeAdeControlServer(result);
+	const stdout: string[] = [];
+	const stderr: string[] = [];
+	try {
+		const code = await runCli(argv, {
+			stdout: text => stdout.push(text),
+			stderr: text => stderr.push(text),
+			env: server.env,
+			cwd: workspace,
+		});
+		return { code, stdout: stdout.join(''), stderr: stderr.join(''), requests: server.requests };
+	} finally {
+		await server.close();
+	}
+}
+
+const HOST_COMMAND_CASES: { argv: readonly string[]; action: string; params: Record<string, unknown> }[] = [
+	{ argv: ['host', 'list'], action: 'host.list', params: {} },
+	{ argv: ['host', 'info', 'gpu1'], action: 'host.get', params: { target: 'gpu1' } },
+	{
+		argv: ['host', 'add', 'ubuntu@10.0.0.5:2222', '--name', 'MyGPU', '--alias', 'gpu1', '--os', 'linux', '--default-dir', '/workspace'],
+		action: 'host.upsert',
+		params: {
+			name: 'MyGPU',
+			alias: 'gpu1',
+			os: 'linux',
+			defaultDirectory: '/workspace',
+			user: 'ubuntu',
+			hostName: '10.0.0.5',
+			port: 2222,
+		},
+	},
+	{ argv: ['host', 'update', 'gpu1', '--jump', 'bastion'], action: 'host.upsert', params: { proxyJump: 'bastion', alias: 'gpu1' } },
+	{ argv: ['host', 'remove', 'gpu1'], action: 'host.delete', params: { target: 'gpu1' } },
+	{ argv: ['host', 'test', 'gpu1'], action: 'host.test', params: { target: 'gpu1' } },
+	{ argv: ['host', 'browse', 'gpu1', '--path', '/workspace'], action: 'host.browse', params: { target: 'gpu1', path: '/workspace' } },
+	{ argv: ['host', 'import-vscode'], action: 'host.import', params: {} },
+	{ argv: ['host', 'open', 'gpu1'], action: 'host.open', params: { target: 'gpu1' } },
+];
+
+describe('Ade CLI cloud host commands', () => {
+
+	describe('parseCliCommand', () => {
+
+		for (const { argv, action, params } of HOST_COMMAND_CASES) {
+			test(`parses 'aexus-ade ${argv.join(' ')}'`, () => {
+				assert.deepStrictEqual(parseCliCommand([...argv], workspace), {
+					help: false,
+					json: false,
+					windowId: undefined,
+					action,
+					params,
+				});
+			});
+		}
+
+		test('cloud-host is an alias for host', () => {
+			assert.deepStrictEqual(parseCliCommand(['cloud-host', 'list'], workspace), {
+				help: false,
+				json: false,
+				windowId: undefined,
+				action: 'host.list',
+				params: {},
+			});
+		});
+
+		test('host add rejects a missing host spec', () => {
+			assert.throws(() => parseCliCommand(['host', 'add', '--name', 'gpu'], workspace), /Usage: aexus-ade host add/);
+		});
+
+		test('host add rejects an out-of-range port', () => {
+			assert.throws(() => parseCliCommand(['host', 'add', 'gpu1', '--port', '70000'], workspace), /--port requires an integer between 1 and 65535/);
+		});
+
+		test('host add rejects an unsupported os', () => {
+			assert.throws(() => parseCliCommand(['host', 'add', 'gpu1', '--os', 'solaris'], workspace), /--os must be linux, macos, or windows/);
+		});
+
+		test('host browse rejects a missing target', () => {
+			assert.throws(() => parseCliCommand(['host', 'browse', '--path', '/workspace'], workspace), /Usage: aexus-ade host browse/);
+		});
+
+		test('project add preserves aexus-ssh specs', () => {
+			assert.deepStrictEqual(parseCliCommand(['project', 'add', 'aexus-ssh://gpu1/workspace/repo'], workspace), {
+				help: false,
+				json: false,
+				windowId: undefined,
+				action: 'project.add',
+				params: { paths: ['aexus-ssh://gpu1/workspace/repo'] },
+			});
+		});
+
+		test('project add preserves host:path specs', () => {
+			assert.deepStrictEqual(parseCliCommand(['project', 'add', 'gpu1:/workspace/repo'], workspace), {
+				help: false,
+				json: false,
+				windowId: undefined,
+				action: 'project.add',
+				params: { paths: ['gpu1:/workspace/repo'] },
+			});
+		});
+	});
+
+	describe('runCli', () => {
+
+		for (const { argv, action, params } of HOST_COMMAND_CASES) {
+			test(`sends ${action} for 'aexus-ade ${argv.join(' ')}'`, async () => {
+				const result = { id: 'gpu1' };
+				const { code, stdout, stderr, requests } = await runCliAgainstFakeServer([...argv, '--json'], result);
+				assert.deepStrictEqual(
+					{ code, stdout: JSON.parse(stdout), stderr, requests: requests.map(request => ({ action: request.action, params: request.params })) },
+					{ code: 0, stdout: result, stderr: '', requests: [{ action, params }] },
+				);
+			});
+		}
+
+		test('does not resolve aexus-ssh project paths against the local cwd', async () => {
+			const spec = 'aexus-ssh://gpu1/workspace/repo';
+			const { code, requests } = await runCliAgainstFakeServer(['project', 'add', spec, '--json'], { paths: [spec] });
+			assert.deepStrictEqual(
+				{ code, params: requests.map(request => request.params) },
+				{ code: 0, params: [{ paths: [spec] }] },
+			);
+		});
+
+		test('does not resolve host:path project specs against the local cwd', async () => {
+			const spec = 'gpu1:/workspace/repo';
+			const { code, requests } = await runCliAgainstFakeServer(['project', 'add', spec, '--json'], { paths: [spec] });
+			assert.deepStrictEqual(
+				{ code, params: requests.map(request => request.params) },
+				{ code: 0, params: [{ paths: [spec] }] },
+			);
+		});
 	});
 });

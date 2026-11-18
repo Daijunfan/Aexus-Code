@@ -111,6 +111,14 @@ CommandsRegistry.registerCommand({
 });
 
 async function selectWorkspaceFolders(accessor: ServicesAccessor): Promise<URI[] | undefined> {
+	const environmentService = accessor.get(IWorkbenchEnvironmentService);
+	if (!environmentService.remoteAuthority && CommandsRegistry.getCommand('workbench.action.aexusCloudHosts.pickProjectFolders')) {
+		const commandService = accessor.get(ICommandService);
+		return commandService.executeCommand<URI[] | undefined>('workbench.action.aexusCloudHosts.pickProjectFolders', {
+			title: localize('addProjectsTitle', "Add Projects"),
+		});
+	}
+
 	const dialogsService = accessor.get(IFileDialogService);
 	const pathService = accessor.get(IPathService);
 

@@ -21,6 +21,7 @@ import { ChatModeKind } from '../../chat/common/constants.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
+import { AdeCloudHostsEditorInput, AdeCloudHostsEditorPane } from './adeCloudHostsEditorPane.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
@@ -241,6 +242,24 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		}
 		const targetGroup = this.resolveTargetGroup(options?.side);
 		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, governorId);
+		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
+	}
+
+	async openCloudHosts(hostIdOrAlias?: string, options?: { side?: boolean }): Promise<void> {
+		for (const group of this.editorGroupsService.mainPart.groups) {
+			for (const editor of group.editors) {
+				if (editor instanceof AdeCloudHostsEditorInput && !editor.isDisposed()) {
+					editor.setFocusHostTarget(hostIdOrAlias);
+					const pane = await this.editorService.openEditor(editor, { pinned: true }, group.id);
+					if (pane instanceof AdeCloudHostsEditorPane) {
+						await pane.focusHost(hostIdOrAlias);
+					}
+					return;
+				}
+			}
+		}
+		const targetGroup = this.resolveTargetGroup(options?.side);
+		const input = this.instantiationService.createInstance(AdeCloudHostsEditorInput, hostIdOrAlias);
 		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
 	}
 

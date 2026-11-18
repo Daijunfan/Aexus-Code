@@ -12,6 +12,7 @@ import { dirname, joinPath, removeTrailingPathSeparator } from '../../../../base
 import Severity from '../../../../base/common/severity.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
+import { AEXUS_SSH_SCHEME, formatProjectDisplayPath } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
@@ -78,7 +79,7 @@ async function resolveTargetProjectUris(
 
 	const picked = await quickInput.pick(candidates.map(project => ({
 		label: project.name,
-		description: project.uri.fsPath,
+		description: formatProjectDisplayPath(project.uri),
 		uri: project.uri,
 	})), { placeHolder, matchOnDescription: true });
 
@@ -126,14 +127,15 @@ export async function reconcileIdeWorkspaceWithCatalog(options: IReconcileIdeWor
 			}
 			const alreadyInWorkspace = currentFolders.some(folder => uriIdentity.extUri.isEqual(folder.uri, project.uri));
 			if (!alreadyInWorkspace) {
-				if (project.uri.scheme !== Schemas.file) {
-					continue;
-				}
-				if (fileService) {
-					const exists = await fileService.exists(project.uri).catch(() => false);
-					if (!exists) {
-						continue;
+				if (project.uri.scheme === Schemas.file) {
+					if (fileService) {
+						const exists = await fileService.exists(project.uri).catch(() => false);
+						if (!exists) {
+							continue;
+						}
 					}
+				} else if (project.uri.scheme !== AEXUS_SSH_SCHEME && project.uri.scheme !== Schemas.vscodeRemote) {
+					continue;
 				}
 			}
 			const entry = { uri: project.uri, name: project.name };
@@ -302,7 +304,7 @@ async function deleteProjectFolderOnDisk(
 			const fallback = await dialogs.confirm({
 				type: 'warning',
 				message: localize('deleteProjectTrashFailed', "Failed to delete '{0}' using the Trash. Permanently delete instead?", projectName),
-				detail: localize('deleteProjectPermanentIrreversible', "This will permanently delete '{0}' from disk. This action cannot be undone.", targetUri.fsPath),
+				detail: localize('deleteProjectPermanentIrreversible', "This will permanently delete '{0}' from disk. This action cannot be undone.", formatProjectDisplayPath(targetUri)),
 				primaryButton: localize('deleteProjectPermanentlyFallbackBtn', "&&Delete Permanently"),
 			});
 			if (!fallback.confirmed) {
@@ -369,9 +371,10 @@ export async function deleteProjectsWithModePrompt(
 		const sessionLine = projectAgents.length > 0
 			? localize('deleteProjectSessionCountLine', "Tracked ADE sessions in this project: {0}", projectAgents.length)
 			: localize('deleteProjectNoSessionLine', "No tracked ADE sessions; engine history in this project folder will still be checked.");
+		const displayTarget = formatProjectDisplayPath(targetUri);
 		const filesEffect = canUseTrash
-			? localize('deleteFilesTrashDesc', "Moves '{0}' to Trash on disk", targetUri.fsPath)
-			: localize('deleteFilesPermanentDesc', "Permanently deletes '{0}' from disk (cannot be undone)", targetUri.fsPath);
+			? localize('deleteFilesTrashDesc', "Moves '{0}' to Trash on disk", displayTarget)
+			: localize('deleteFilesPermanentDesc', "Permanently deletes '{0}' from disk (cannot be undone)", displayTarget);
 
 		type DeleteChoice = 'sessions' | 'sessionsAndFiles' | 'files' | 'filesAndSessions' | undefined;
 		let choice: DeleteChoice;
@@ -381,7 +384,7 @@ export async function deleteProjectsWithModePrompt(
 				type: Severity.Warning,
 				message: localize('adeDeleteProjectPromptMessage', "How would you like to delete project '{0}'?", projectName),
 				detail: [
-					targetUri.fsPath,
+					displayTarget,
 					sessionLine,
 					'',
 					localize('adeDeleteOptionSessions', "• Delete All Sessions: Deletes all Coding Agent sessions for this project and removes it from ADE and IDE (files on disk are kept)."),
@@ -407,7 +410,7 @@ export async function deleteProjectsWithModePrompt(
 				type: Severity.Warning,
 				message: localize('ideDeleteProjectPromptMessage', "How would you like to delete project '{0}'?", projectName),
 				detail: [
-					targetUri.fsPath,
+					displayTarget,
 					sessionLine,
 					'',
 					localize('ideDeleteOptionFiles', "• Delete All Files: {0} and removes it from IDE and ADE (Coding Agent session histories are kept).", filesEffect),

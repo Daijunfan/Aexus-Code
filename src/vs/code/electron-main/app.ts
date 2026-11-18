@@ -150,8 +150,11 @@ import { IMcpGatewayService, McpGatewayChannelName } from '../../platform/mcp/co
 import { McpGatewayService } from '../../platform/mcp/node/mcpGatewayService.js';
 import { McpGatewayChannel } from '../../platform/mcp/node/mcpGatewayChannel.js';
 import { ADE_CONTROL_CHANNEL_NAME } from '../../platform/ade/common/adeControl.js';
+import { ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/adeCloudHosts.js';
+import { AdeCloudHostBackendChannel } from '../../platform/ade/common/adeCloudHostsIpc.js';
 import { ADE_ENGINEERING_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/adeEngineering.js';
 import { AdeEngineeringBackendChannel } from '../../platform/ade/common/adeEngineeringIpc.js';
+import { AdeCloudHostNodeService } from '../../platform/ade/node/adeCloudHostService.js';
 import { AdeControlServer } from '../../platform/ade/node/adeControlServer.js';
 import { AdeEngineeringNodeService } from '../../platform/ade/node/adeEngineeringService.js';
 import { IWebContentExtractorService } from '../../platform/webContentExtractor/common/webContentExtractor.js';
@@ -1622,6 +1625,15 @@ export class CodeApplication extends Disposable {
 
 		const adeEngineeringNodeService = this._register(new AdeEngineeringNodeService());
 		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, new AdeEngineeringBackendChannel(adeEngineeringNodeService));
+
+		const isCustomTestDataDir = Boolean(this.environmentMainService.args['user-data-dir'] || this.environmentMainService.args.extensionTestsPath);
+		const adeCloudHostNodeService = this._register(new AdeCloudHostNodeService({
+			userDataPath: this.environmentMainService.userDataPath,
+			syncUserSshDir: !isCustomTestDataDir,
+			autoImportOnFirstLoad: !isCustomTestDataDir,
+			logService: this.logService,
+		}));
+		mainProcessElectronServer.registerChannel(ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME, new AdeCloudHostBackendChannel(adeCloudHostNodeService));
 
 		// Logger
 		const loggerChannel = this._register(new LoggerChannel(accessor.get(ILoggerMainService)));

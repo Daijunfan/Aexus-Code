@@ -7,6 +7,8 @@ import { Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IServerChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { ADE_CONTROL_CHANNEL_NAME, ADE_CONTROL_EXECUTE_COMMAND_ID, IAdeControlDispatchRequest } from '../../../../platform/ade/common/adeControl.js';
+import { ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME, IAdeCloudHostBackendService } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { AdeCloudHostBackendChannelClient } from '../../../../platform/ade/common/adeCloudHostsIpc.js';
 import { ADE_ENGINEERING_BACKEND_CHANNEL_NAME, IAdeEngineeringBackendService } from '../../../../platform/ade/common/adeEngineering.js';
 import { AdeEngineeringBackendChannelClient } from '../../../../platform/ade/common/adeEngineeringIpc.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -22,7 +24,14 @@ class NativeAdeEngineeringBackendService extends AdeEngineeringBackendChannelCli
 	}
 }
 
+class NativeAdeCloudHostBackendService extends AdeCloudHostBackendChannelClient {
+	constructor(@IMainProcessService mainProcessService: IMainProcessService) {
+		super(mainProcessService.getChannel(ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME));
+	}
+}
+
 registerSingleton(IAdeEngineeringBackendService, NativeAdeEngineeringBackendService, InstantiationType.Delayed);
+registerSingleton(IAdeCloudHostBackendService, NativeAdeCloudHostBackendService, InstantiationType.Delayed);
 
 const ADE_CONTROL_RENDERER_CONTRIBUTION_ID = 'workbench.contrib.adeControlRenderer';
 

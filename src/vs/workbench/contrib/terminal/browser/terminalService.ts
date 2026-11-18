@@ -31,7 +31,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { VirtualWorkspaceContext } from '../../../common/contextkeys.js';
 import { ICreateTerminalOptions, IDetachedTerminalInstance, IDetachedXTermOptions, IRequestAddInstanceToGroupEvent, ITerminalConfigurationService, ITerminalEditorService, ITerminalGroup, ITerminalGroupService, ITerminalInstance, ITerminalInstanceHost, ITerminalInstanceService, ITerminalLocationOptions, ITerminalService, ITerminalServiceNativeDelegate, TerminalConnectionState, TerminalEditorLocation } from './terminal.js';
 import { getCwdForSplit } from './terminalActions.js';
-import { IProjectTerminalService } from './projectTerminalService.js';
+import { IProjectTerminalService, SSH_PROJECT_SCHEME } from './projectTerminalService.js';
 import { TerminalEditorInput } from './terminalEditorInput.js';
 import { getColorStyleContent, getUriClasses } from './terminalIcon.js';
 import { TerminalProfileQuickpick } from './terminalProfileQuickpick.js';
@@ -990,6 +990,24 @@ export class TerminalService extends Disposable implements ITerminalService {
 			const source = parent.shellLaunchConfig;
 			options.config = { executable: source.executable, args: source.args, cwd: source.cwd, name: source.name, env: source.env, hostLabel: source.hostLabel, icon: source.icon, ignoreConfigurationCwd: true, isRemotePty: true, waitOnExit: source.waitOnExit };
 			options.cwd = source.cwd;
+		}
+		const candidateSshCwd = URI.isUri(options.cwd) && options.cwd.scheme === SSH_PROJECT_SCHEME
+			? options.cwd
+			: typeof options.cwd === 'string' && options.cwd.startsWith(`${SSH_PROJECT_SCHEME}://`)
+				? URI.parse(options.cwd)
+				: URI.isUri(requested?.cwd) && requested.cwd.scheme === SSH_PROJECT_SCHEME
+					? requested.cwd
+					: typeof requested?.cwd === 'string' && requested.cwd.startsWith(`${SSH_PROJECT_SCHEME}://`)
+						? URI.parse(requested.cwd)
+						: undefined;
+		if (candidateSshCwd && (!requested?.executable || requested.executable === 'ssh') && !requested?.customPtyImplementation && !requested?.attachPersistentProcess) {
+			const sshLaunch = await this._projectTerminals.resolveLaunchConfigForUri(candidateSshCwd, requested?.name);
+			options.config = {
+				...sshLaunch,
+				...(requested?.env ? { env: requested.env } : {}),
+			};
+			options.cwd = sshLaunch.cwd;
+			options.skipContributedProfileCheck = true;
 		}
 		// Await the initialization of available profiles as long as this is not a pty terminal or a
 		// local terminal in a remote workspace as profile won't be used in those cases and these
