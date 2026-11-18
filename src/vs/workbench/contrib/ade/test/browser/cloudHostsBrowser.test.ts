@@ -6,6 +6,7 @@
 import assert from 'assert';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
+import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../base/common/network.js';
 import { basename } from '../../../../../base/common/resources.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -20,8 +21,10 @@ import {
 	IAdeRemoteDirEntry,
 	IAdeRemoteFileStat,
 } from '../../../../../platform/ade/common/adeCloudHosts.js';
+import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
+import { IFileDialogService, IOpenDialogOptions } from '../../../../../platform/dialogs/common/dialogs.js';
 import {
 	FileChangeType,
 	FilePermission,
@@ -30,6 +33,18 @@ import {
 	IFileService,
 	IFileSystemProviderError,
 } from '../../../../../platform/files/common/files.js';
+import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
+import {
+	IQuickInputButton,
+	IQuickInputHideEvent,
+	IQuickInputService,
+	IQuickPick,
+	IQuickPickDidAcceptEvent,
+	IQuickPickItem,
+	IQuickPickItemButtonEvent,
+	IQuickPickSeparator,
+	QuickInputHideReason,
+} from '../../../../../platform/quickinput/common/quickInput.js';
 import { IUriIdentityService } from '../../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService, IWorkspaceFoldersChangeEvent, toWorkspaceFolder, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
@@ -39,7 +54,7 @@ import { workbenchInstantiationService } from '../../../../test/browser/workbenc
 import { IProjectNavigationService, ProjectNavigationService } from '../../../files/browser/projectNavigationService.js';
 import { IShellLaunchConfig } from '../../../../../platform/terminal/common/terminal.js';
 import { ProjectTerminalService } from '../../../terminal/browser/projectTerminalService.js';
-import { AexusSshFileSystemProvider } from '../../browser/adeCloudHostFileSystemProvider.js';
+import { AexusSshFileSystemProvider, pickProjectFoldersWithCloudOption } from '../../browser/adeCloudHostFileSystemProvider.js';
 import { executeAdeControlRequest } from '../../browser/adeControlHandler.js';
 import { reconcileIdeWorkspaceWithCatalog } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
@@ -582,5 +597,281 @@ suite('reconcileIdeWorkspaceWithCatalog cloud roots & host.* control actions', (
 		await call('host.delete', { target: 'gpu1' });
 		const remaining = await call('host.list') as IAdeCloudHost[];
 		assert.strictEqual(remaining.length, 0);
+	});
+});
+
+class TestCloudHostQuickPick extends mock<IQuickPick<IQuickPickItem, { useSeparators: true }>>() {
+	private readonly disposables = new DisposableStore();
+	private readonly hideEmitter = this.disposables.add(new Emitter<IQuickInputHideEvent>());
+	private readonly acceptEmitter = this.disposables.add(new Emitter<IQuickPickDidAcceptEvent>());
+
+	override readonly onDidHide: Event<IQuickInputHideEvent> = (listener, thisArgs, disposables) => this.disposables.add(this.hideEmitter.event(listener, thisArgs, disposables));
+	override readonly onDidAccept: Event<IQuickPickDidAcceptEvent> = (listener, thisArgs, disposables) => this.disposables.add(this.acceptEmitter.event(listener, thisArgs, disposables));
+	override readonly onDidTriggerButton: Event<IQuickInputButton> = Event.None;
+	override readonly onDidTriggerItemButton: Event<IQuickPickItemButtonEvent<IQuickPickItem>> = Event.None;
+	override items: readonly (IQuickPickItem | IQuickPickSeparator)[] = [];
+	override selectedItems: readonly IQuickPickItem[] = [];
+	override title: string | undefined = undefined;
+	override placeholder: string | undefined = undefined;
+	override matchOnDescription = false;
+	override buttons: ReadonlyArray<IQuickInputButton> = [];
+
+	private shown = false;
+
+	override show(): void {
+		this.shown = true;
+	}
+
+	override hide(): void {
+		if (!this.shown) {
+			return;
+		}
+		this.shown = false;
+		this.hideEmitter.fire({ reason: QuickInputHideReason.Other });
+	}
+
+	override dispose(): void {
+		this.shown = false;
+		this.disposables.dispose();
+	}
+
+	labels(): string[] {
+		return this.items.map(item => item.label ?? '');
+	}
+
+	acceptItemByLabel(label: string): void {
+		const item = this.items.find((entry): entry is IQuickPickItem => entry.type !== 'separator' && entry.label === label);
+		assert.ok(item, `Missing quick pick item: ${label}`);
+		this.selectedItems = [item];
+		this.acceptEmitter.fire({ inBackground: false });
+	}
+}
+
+function stubQuickInput(instantiation: TestInstantiationService): TestCloudHostQuickPick[] {
+	const quickPicks: TestCloudHostQuickPick[] = [];
+	instantiation.stub(IQuickInputService, {
+		backButton: { iconClass: 'codicon-arrow-left', tooltip: 'Back' },
+	}, 'createQuickPick', <T extends IQuickPickItem>(): IQuickPick<T, { useSeparators: true }> => {
+		const quickPick = new TestCloudHostQuickPick();
+		quickPicks.push(quickPick);
+		return quickPick as unknown as IQuickPick<T, { useSeparators: true }>;
+	});
+	return quickPicks;
+}
+
+async function waitForQuickPick(quickPicks: TestCloudHostQuickPick[], count: number): Promise<TestCloudHostQuickPick> {
+	for (let i = 0; i < 100 && quickPicks.length < count; i++) {
+		await Promise.resolve();
+	}
+	assert.strictEqual(quickPicks.length, count, `Expected ${count} quick pick(s)`);
+	return quickPicks[count - 1];
+}
+
+function snapshotQuickPick(quickPick: TestCloudHostQuickPick) {
+	return { title: quickPick.title, items: quickPick.labels() };
+}
+
+function makeCloudHost(alias: string, os: AdeCloudHostOs): IAdeCloudHost {
+	return {
+		id: alias,
+		name: alias,
+		alias,
+		hostName: alias,
+		port: 22,
+		os,
+		defaultDirectory: '/srv/projects',
+		recentDirectories: [],
+		source: 'user',
+		createdAt: 0,
+		updatedAt: 0,
+	};
+}
+
+suite('pickProjectFoldersWithCloudOption', () => {
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('walks the two-step + flow: immediate host list, remote folder browsing with Switch Host, and local delegation', async () => {
+		const instantiation = workbenchInstantiationService(undefined, store);
+		const quickPicks = stubQuickInput(instantiation);
+
+		const remoteReads: Array<{ authority: string; path: string }> = [];
+		const recordedDirectories: Array<{ id: string; path: string }> = [];
+		instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
+			onDidChangeHosts: Event.None,
+			listHosts: async () => [makeCloudHost('cloud-linux', 'linux'), makeCloudHost('cloud-win', 'windows')],
+			remoteReadDir: async (authority: string, path: string) => {
+				remoteReads.push({ authority, path });
+				return [
+					{ name: 'repo-one', type: 'directory' },
+					{ name: 'notes.txt', type: 'file' },
+				];
+			},
+			recordRecentDirectory: async (id: string, path: string) => { recordedDirectories.push({ id, path }); },
+		}));
+
+		const home = URI.file('/home/me');
+		const localFolder = URI.file('/Users/me/local-project');
+		const dialogOptions: IOpenDialogOptions[] = [];
+		instantiation.stub(IFileDialogService, upcastPartial<IFileDialogService>({
+			defaultFolderPath: async () => home,
+			showOpenDialog: async (options: IOpenDialogOptions) => {
+				dialogOptions.push(options);
+				return [localFolder];
+			},
+		}));
+		instantiation.stub(ICommandService, upcastPartial<ICommandService>({
+			executeCommand: async () => undefined,
+		}));
+
+		const pick = () => instantiation.invokeFunction(accessor => pickProjectFoldersWithCloudOption(accessor));
+
+		const remotePick = pick();
+		const step1 = await waitForQuickPick(quickPicks, 1);
+		const step1Snapshot = snapshotQuickPick(step1);
+		step1.acceptItemByLabel('cloud-linux');
+
+		const step2 = await waitForQuickPick(quickPicks, 2);
+		const step2Snapshot = snapshotQuickPick(step2);
+		step2.acceptItemByLabel('Switch Host...');
+
+		const backToStep1 = await waitForQuickPick(quickPicks, 3);
+		const backToStep1Snapshot = snapshotQuickPick(backToStep1);
+		backToStep1.acceptItemByLabel('cloud-linux');
+
+		const step2Again = await waitForQuickPick(quickPicks, 4);
+		const step2AgainSnapshot = snapshotQuickPick(step2Again);
+		step2Again.acceptItemByLabel('repo-one/');
+
+		const navigatedStep2 = await waitForQuickPick(quickPicks, 5);
+		const navigatedStep2Snapshot = snapshotQuickPick(navigatedStep2);
+		navigatedStep2.acceptItemByLabel('Open This Folder: /srv/projects/repo-one');
+
+		const remoteResult = await remotePick;
+
+		const localPick = pick();
+		const localStep = await waitForQuickPick(quickPicks, 6);
+		const localStepSnapshot = snapshotQuickPick(localStep);
+		localStep.acceptItemByLabel('Local (This Computer)');
+		const localResult = await localPick;
+
+		assert.deepStrictEqual({
+			step1: step1Snapshot,
+			step2: step2Snapshot,
+			backToStep1: backToStep1Snapshot,
+			step2Again: step2AgainSnapshot,
+			navigatedStep2: navigatedStep2Snapshot,
+			remoteResult: remoteResult?.map(uri => uri.toString()),
+			remoteReads,
+			recordedDirectories,
+			localStep: localStepSnapshot,
+			localDialog: {
+				options: dialogOptions.map(options => ({
+					title: options.title,
+					canSelectFiles: options.canSelectFiles,
+					canSelectFolders: options.canSelectFolders,
+					canSelectMany: options.canSelectMany,
+					availableFileSystems: options.availableFileSystems,
+					defaultUri: options.defaultUri?.toString(),
+				})),
+				result: localResult?.map(uri => uri.toString()),
+			},
+		}, {
+			step1: {
+				title: 'Add Project (1/2) — Select Host',
+				items: [
+					'Local Host',
+					'Local (This Computer)',
+					'Cloud Hosts (SSH) · 2',
+					'cloud-linux',
+					'cloud-win',
+					'Cloud Host Management',
+					'Add New Cloud Host...',
+					'Manage Saved Cloud Hosts...',
+					'Sync / Import Cloud Hosts from VS Code & ~/.ssh/config',
+				],
+			},
+			step2: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				items: [
+					'Open This Folder: /srv/projects',
+					'Enter Remote Folder Path Manually...',
+					'New Folder in /srv/projects...',
+					'Switch Host...',
+					'Folders in /srv/projects',
+					'..',
+					'repo-one/',
+				],
+			},
+			backToStep1: {
+				title: 'Add Project (1/2) — Select Host',
+				items: [
+					'Local Host',
+					'Local (This Computer)',
+					'Cloud Hosts (SSH) · 2',
+					'cloud-linux',
+					'cloud-win',
+					'Cloud Host Management',
+					'Add New Cloud Host...',
+					'Manage Saved Cloud Hosts...',
+					'Sync / Import Cloud Hosts from VS Code & ~/.ssh/config',
+				],
+			},
+			step2Again: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				items: [
+					'Open This Folder: /srv/projects',
+					'Enter Remote Folder Path Manually...',
+					'New Folder in /srv/projects...',
+					'Switch Host...',
+					'Folders in /srv/projects',
+					'..',
+					'repo-one/',
+				],
+			},
+			navigatedStep2: {
+				title: 'Add Project (2/2) — Select Folder on cloud-linux',
+				items: [
+					'Open This Folder: /srv/projects/repo-one',
+					'Enter Remote Folder Path Manually...',
+					'New Folder in /srv/projects/repo-one...',
+					'Switch Host...',
+					'Folders in /srv/projects/repo-one',
+					'..',
+					'repo-one/',
+				],
+			},
+			remoteResult: ['aexus-ssh://cloud-linux/srv/projects/repo-one'],
+			remoteReads: [
+				{ authority: 'cloud-linux', path: '/srv/projects' },
+				{ authority: 'cloud-linux', path: '/srv/projects' },
+				{ authority: 'cloud-linux', path: '/srv/projects/repo-one' },
+			],
+			recordedDirectories: [{ id: 'cloud-linux', path: '/srv/projects/repo-one' }],
+			localStep: {
+				title: 'Add Project (1/2) — Select Host',
+				items: [
+					'Local Host',
+					'Local (This Computer)',
+					'Cloud Hosts (SSH) · 2',
+					'cloud-linux',
+					'cloud-win',
+					'Cloud Host Management',
+					'Add New Cloud Host...',
+					'Manage Saved Cloud Hosts...',
+					'Sync / Import Cloud Hosts from VS Code & ~/.ssh/config',
+				],
+			},
+			localDialog: {
+				options: [{
+					title: 'Add Local Project Folder',
+					canSelectFiles: false,
+					canSelectFolders: true,
+					canSelectMany: true,
+					availableFileSystems: [Schemas.file],
+					defaultUri: 'file:///home/me',
+				}],
+				result: ['file:///Users/me/local-project'],
+			},
+		});
 	});
 });

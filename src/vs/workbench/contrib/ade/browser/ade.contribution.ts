@@ -1526,7 +1526,7 @@ registerAction2(class RefreshAgentProjectsAction extends Action2 {
 			id: 'workbench.action.ade.refresh',
 			title: localize2('refreshAgentSessions', "Refresh Sessions"),
 			icon: Codicon.refresh,
-			menu: { ...viewTitleMenu, order: 3 },
+			menu: { ...viewTitleMenu, order: 2 },
 		});
 	}
 
@@ -1551,9 +1551,8 @@ registerAction2(class ManageAdeCloudHostsAction extends Action2 {
 			icon: Codicon.remote,
 			f1: true,
 			menu: [
-				{ ...viewTitleMenu, order: 2 },
-				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', 'workbench.explorer.fileView'), group: 'navigation', order: 50 },
 				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', ADE_PROJECTS_VIEW_ID), group: '2_workspace', order: 0 },
+				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', 'workbench.explorer.fileView'), group: '2_workspace', order: 0 },
 			],
 		});
 	}

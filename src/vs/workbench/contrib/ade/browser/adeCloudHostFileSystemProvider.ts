@@ -428,6 +428,15 @@ export async function browseRemoteFolderOnCloudHost(
 	accessor: ServicesAccessor,
 	host: IAdeCloudHost,
 ): Promise<URI | undefined> {
+	const result = await browseRemoteFolderOnCloudHostWithBack(accessor, host, false);
+	return result === 'switch-host' ? undefined : result;
+}
+
+async function browseRemoteFolderOnCloudHostWithBack(
+	accessor: ServicesAccessor,
+	host: IAdeCloudHost,
+	allowSwitchHost: boolean,
+): Promise<URI | 'switch-host' | undefined> {
 	const quickInput = accessor.get(IQuickInputService);
 	const notifications = tryGetOptional<INotificationService>(accessor, INotificationService);
 	const backend = tryGetOptional<IAdeCloudHostBackendService>(accessor, IAdeCloudHostBackendService);
@@ -441,7 +450,7 @@ export async function browseRemoteFolderOnCloudHost(
 	);
 
 	type BrowseActionItem = IQuickPickItem & {
-		readonly action: 'select-current' | 'select-recent' | 'enter-dir' | 'parent' | 'manual' | 'mkdir';
+		readonly action: 'select-current' | 'select-recent' | 'enter-dir' | 'parent' | 'manual' | 'mkdir' | 'switch-host';
 		readonly targetPath?: string;
 	};
 
@@ -466,7 +475,7 @@ export async function browseRemoteFolderOnCloudHost(
 		if (!browseError) {
 			items.push({
 				label: localize('adeCloudUseCurrentFolder', "Open This Folder: {0}", currentDir),
-				description: `${host.name} (${formatCloudHostTargetLabel(host)})`,
+				description: localize('adeCloudAddAsProjectDesc', "Add {0}:{1} as Project Workspace", host.alias, currentDir),
 				iconClass: ThemeIcon.asClassName(Codicon.check),
 				alwaysShow: true,
 				action: 'select-current',
@@ -489,6 +498,16 @@ export async function browseRemoteFolderOnCloudHost(
 				label: localize('adeCloudCreateFolderHere', "New Folder in {0}...", currentDir),
 				iconClass: ThemeIcon.asClassName(Codicon.newFolder),
 				action: 'mkdir',
+			});
+		}
+
+		if (allowSwitchHost) {
+			items.push({
+				label: localize('adeCloudSwitchHostItem', "Switch Host..."),
+				description: localize('adeCloudSwitchHostItemDesc', "Go back to select Local or another Cloud Host"),
+				iconClass: ThemeIcon.asClassName(Codicon.arrowLeft),
+				alwaysShow: true,
+				action: 'switch-host',
 			});
 		}
 
@@ -530,30 +549,62 @@ export async function browseRemoteFolderOnCloudHost(
 			}
 		}
 
-		const picked = await quickInput.pick(items, {
-			title: localize('adeBrowseCloudHostTitle', "Select Remote Project Folder on {0}", host.name),
-			placeHolder: browseError
+		const picked = await new Promise<{ item?: BrowseActionItem; back?: boolean }>(resolve => {
+			const qp = quickInput.createQuickPick<BrowseActionItem>({ useSeparators: true });
+			qp.title = allowSwitchHost
+				? localize('adeBrowseCloudHostStep2Title', "Add Project (2/2) — Select Folder on {0}", host.name)
+				: localize('adeBrowseCloudHostTitle', "Select Remote Project Folder on {0}", host.name);
+			qp.placeholder = browseError
 				? localize('adeCloudBrowseOfflinePlaceholder', "Choose a recent folder or enter a remote path on {0}", host.name)
-				: localize('adeCloudBrowsePlaceholder', "Navigate folders or select ✓ Open This Folder ({0}:{1})", host.alias, currentDir),
-			matchOnDescription: true,
+				: localize('adeCloudBrowsePlaceholder', "Navigate folders or select Open This Folder ({0}:{1})", host.alias, currentDir);
+			qp.matchOnDescription = true;
+			if (allowSwitchHost) {
+				qp.buttons = [quickInput.backButton];
+			}
+			qp.items = items;
+			let settled = false;
+			qp.onDidTriggerButton(btn => {
+				if (btn === quickInput.backButton) {
+					settled = true;
+					qp.hide();
+					resolve({ back: true });
+				}
+			});
+			qp.onDidAccept(() => {
+				settled = true;
+				const sel = qp.selectedItems[0];
+				qp.hide();
+				resolve({ item: sel });
+			});
+			qp.onDidHide(() => {
+				qp.dispose();
+				if (!settled) {
+					resolve({});
+				}
+			});
+			qp.show();
 		});
 
-		if (!picked) {
+		if (picked.back || picked.item?.action === 'switch-host') {
+			return 'switch-host';
+		}
+
+		if (!picked.item) {
 			return undefined;
 		}
 
-		if (picked.action === 'select-current' || picked.action === 'select-recent') {
-			const finalPath = picked.targetPath ?? currentDir;
+		if (picked.item.action === 'select-current' || picked.item.action === 'select-recent') {
+			const finalPath = picked.item.targetPath ?? currentDir;
 			await backend.recordRecentDirectory(host.id, finalPath);
 			return buildCloudProjectUri(host.alias, finalPath, host.os);
 		}
 
-		if (picked.action === 'parent' || picked.action === 'enter-dir') {
-			currentDir = picked.targetPath ?? currentDir;
+		if (picked.item.action === 'parent' || picked.item.action === 'enter-dir') {
+			currentDir = picked.item.targetPath ?? currentDir;
 			continue;
 		}
 
-		if (picked.action === 'mkdir') {
+		if (picked.item.action === 'mkdir') {
 			const folderName = await quickInput.input({
 				title: localize('adeCloudNewFolderTitle', "Create Remote Folder in {0}", currentDir),
 				prompt: localize('adeCloudNewFolderPrompt', "New folder name"),
@@ -571,7 +622,7 @@ export async function browseRemoteFolderOnCloudHost(
 			continue;
 		}
 
-		if (picked.action === 'manual') {
+		if (picked.item.action === 'manual') {
 			const manualPath = await quickInput.input({
 				title: localize('adeCloudManualPathTitle', "Remote Project Folder on {0}", host.name),
 				prompt: localize('adeCloudManualPathPrompt', "Enter absolute path on {0}", formatCloudHostTargetLabel(host)),
@@ -729,7 +780,11 @@ export async function pickCloudHostProjectFolder(
 
 		if (picked.item.kind === 'host' && picked.item.host) {
 			const chosenHost = picked.item.host;
-			return instantiationService.invokeFunction(acc => browseRemoteFolderOnCloudHost(acc, chosenHost));
+			const res = await instantiationService.invokeFunction(acc => browseRemoteFolderOnCloudHostWithBack(acc, chosenHost, true));
+			if (res === 'switch-host') {
+				continue;
+			}
+			return res;
 		}
 	}
 }
@@ -742,60 +797,184 @@ export async function pickProjectFoldersWithCloudOption(
 	const quickInput = accessor.get(IQuickInputService);
 	const dialogs = accessor.get(IFileDialogService);
 	const commands = accessor.get(ICommandService);
+	const notifications = tryGetOptional<INotificationService>(accessor, INotificationService);
 	const backend = tryGetOptional<IAdeCloudHostBackendService>(accessor, IAdeCloudHostBackendService);
 
-	const hostCount = backend ? (await backend.listHosts().catch(() => [])).length : 0;
+	const editBtn: IQuickInputButton = {
+		iconClass: ThemeIcon.asClassName(Codicon.edit),
+		tooltip: localize('adeEditCloudHostBtnTooltip', "Edit Cloud Host"),
+	};
+	const studioBtn: IQuickInputButton = {
+		iconClass: ThemeIcon.asClassName(Codicon.settingsGear),
+		tooltip: localize('adeOpenHostInStudioBtnTooltip', "Open in Cloud Host Studio"),
+	};
 
-	type SourcePick = IQuickPickItem & { readonly source: 'local' | 'cloud' | 'manage-cloud' };
-	const sourceItems: SourcePick[] = [
-		{
-			label: localize('adeAddLocalProjectOption', "Local Folder..."),
-			description: localize('adeAddLocalProjectOptionDesc', "Select one or more project folders on this Mac"),
-			iconClass: ThemeIcon.asClassName(Codicon.folderOpened),
-			source: 'local',
-		},
-		{
-			label: localize('adeAddCloudProjectOption', "Cloud Host Folder (SSH)..."),
-			description: hostCount > 0
-				? localize('adeAddCloudProjectOptionCountDesc', "Browse & add a remote project from {0} saved / VS Code Cloud Host(s)", hostCount)
-				: localize('adeAddCloudProjectOptionEmptyDesc', "Connect an SSH Cloud Host and add a remote project folder"),
-			iconClass: ThemeIcon.asClassName(Codicon.remote),
-			source: 'cloud',
-		},
-		{
-			label: localize('adeManageCloudHostsFromAddOption', "Manage Cloud Hosts..."),
-			description: localize('adeManageCloudHostsFromAddOptionDesc', "Save, edit, modify, test, delete, or import VS Code Cloud Hosts"),
-			iconClass: ThemeIcon.asClassName(Codicon.serverProcess),
-			source: 'manage-cloud',
-		},
-	];
+	type HostStepItem = IQuickPickItem & {
+		readonly kind: 'local' | 'cloud-host' | 'add-host' | 'open-manager' | 'import-vscode';
+		readonly host?: IAdeCloudHost;
+	};
 
-	const chosen = await quickInput.pick(sourceItems, {
-		title: options.title ?? localize('adeAddProjectSourceTitle', "Add Project Folder"),
-		placeHolder: localize('adeAddProjectSourcePlaceholder', "Choose Local Folder or Cloud Host (SSH) Project"),
-		matchOnDescription: true,
-	});
+	while (true) {
+		const hosts = backend ? await backend.listHosts().catch(() => []) : [];
 
-	if (!chosen) {
-		return undefined;
-	}
+		const items: (HostStepItem | IQuickPickSeparator)[] = [
+			{
+				type: 'separator',
+				label: localize('adeHostStepLocalSep', "Local Host"),
+			},
+			{
+				label: localize('adeHostStepLocalItem', "Local (This Computer)"),
+				description: localize('adeHostStepLocalItemDesc', "Select folder(s) on this computer as project workspace(s)"),
+				iconClass: ThemeIcon.asClassName(Codicon.deviceDesktop),
+				alwaysShow: true,
+				kind: 'local',
+			},
+			{
+				type: 'separator',
+				label: hosts.length > 0
+					? localize('adeHostStepCloudListSepCount', "Cloud Hosts (SSH) · {0}", hosts.length)
+					: localize('adeHostStepCloudListSepEmpty', "Cloud Hosts (SSH)"),
+			},
+		];
 
-	if (chosen.source === 'local') {
-		return dialogs.showOpenDialog({
-			title: options.title ?? localize('adeSelectLocalProjectFolderDialog', "Add Local Project Folder"),
-			canSelectFiles: false,
-			canSelectFolders: true,
-			canSelectMany: true,
-			availableFileSystems: [Schemas.file],
-			defaultUri: await dialogs.defaultFolderPath(Schemas.file),
+		for (const h of hosts) {
+			const jumpTag = h.proxyJump ? ` · via ${h.proxyJump}` : '';
+			const recentHint = h.recentDirectories[0] ? ` · ${h.recentDirectories[0]}` : '';
+			items.push({
+				label: h.name,
+				description: `${formatCloudHostTargetLabel(h)} [${h.os}]${jumpTag}${recentHint}`,
+				iconClass: ThemeIcon.asClassName(Codicon.remote),
+				buttons: [editBtn, studioBtn],
+				kind: 'cloud-host',
+				host: h,
+			});
+		}
+
+		items.push(
+			{
+				type: 'separator',
+				label: localize('adeHostStepManageSep', "Cloud Host Management"),
+			},
+			{
+				label: localize('adeAddNewCloudHostItem', "Add New Cloud Host..."),
+				description: localize('adeHostStepAddNewDesc', "Save a new SSH Cloud Host (IP, User, Port, SSH Key, ProxyJump), then pick a folder"),
+				iconClass: ThemeIcon.asClassName(Codicon.add),
+				alwaysShow: true,
+				kind: 'add-host',
+			},
+			{
+				label: localize('adeOpenCloudHostManagerItem', "Manage Saved Cloud Hosts..."),
+				description: localize('adeHostStepManageDesc', "Open Cloud Host Studio to edit, modify, test, or delete Cloud Hosts"),
+				iconClass: ThemeIcon.asClassName(Codicon.serverProcess),
+				alwaysShow: true,
+				kind: 'open-manager',
+			},
+			{
+				label: localize('adeImportVsCodeHostsItem', "Sync / Import Cloud Hosts from VS Code & ~/.ssh/config"),
+				description: localize('adeImportVsCodeHostsItemDesc', "Migrate SSH hosts, platforms & recent remote project folders from VS Code"),
+				iconClass: ThemeIcon.asClassName(Codicon.sync),
+				kind: 'import-vscode',
+			},
+		);
+
+		const picked = await new Promise<{ item?: HostStepItem; editHost?: IAdeCloudHost; studioHost?: IAdeCloudHost }>(resolve => {
+			const qp = quickInput.createQuickPick<HostStepItem>({ useSeparators: true });
+			qp.title = options.title
+				? localize('adeSelectHostWithPrefixTitle', "{0} (1/2) — Select Host", options.title)
+				: localize('adeSelectHostStep1Title', "Add Project (1/2) — Select Host");
+			qp.placeholder = localize('adeSelectHostStep1Placeholder', "Choose Local (This Computer) or select a Cloud Host to pick a folder on it");
+			qp.matchOnDescription = true;
+			qp.items = items;
+			let settled = false;
+			qp.onDidTriggerItemButton(ev => {
+				if (!ev.item.host) {
+					return;
+				}
+				settled = true;
+				qp.hide();
+				if (ev.button === studioBtn) {
+					resolve({ studioHost: ev.item.host });
+				} else {
+					resolve({ editHost: ev.item.host });
+				}
+			});
+			qp.onDidAccept(() => {
+				settled = true;
+				const sel = qp.selectedItems[0];
+				qp.hide();
+				resolve({ item: sel });
+			});
+			qp.onDidHide(() => {
+				qp.dispose();
+				if (!settled) {
+					resolve({});
+				}
+			});
+			qp.show();
 		});
-	}
 
-	if (chosen.source === 'manage-cloud') {
-		await commands.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID);
-		return undefined;
-	}
+		if (picked.studioHost) {
+			await commands.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, picked.studioHost.alias);
+			return undefined;
+		}
 
-	const cloudUri = await instantiationService.invokeFunction(acc => pickCloudHostProjectFolder(acc));
-	return cloudUri ? [cloudUri] : undefined;
+		if (picked.editHost) {
+			const toEdit = picked.editHost;
+			await instantiationService.invokeFunction(acc => promptQuickUpsertCloudHost(acc, toEdit));
+			continue;
+		}
+
+		if (!picked.item) {
+			return undefined;
+		}
+
+		if (picked.item.kind === 'local') {
+			return dialogs.showOpenDialog({
+				title: options.title ?? localize('adeSelectLocalProjectFolderDialog', "Add Local Project Folder"),
+				canSelectFiles: false,
+				canSelectFolders: true,
+				canSelectMany: true,
+				availableFileSystems: [Schemas.file],
+				defaultUri: await dialogs.defaultFolderPath(Schemas.file),
+			});
+		}
+
+		if (picked.item.kind === 'cloud-host' && picked.item.host) {
+			const chosenHost = picked.item.host;
+			const cloudRes = await instantiationService.invokeFunction(acc => browseRemoteFolderOnCloudHostWithBack(acc, chosenHost, true));
+			if (cloudRes === 'switch-host') {
+				continue;
+			}
+			return cloudRes ? [cloudRes] : undefined;
+		}
+
+		if (picked.item.kind === 'add-host') {
+			const created = await instantiationService.invokeFunction(acc => promptQuickUpsertCloudHost(acc));
+			if (created) {
+				const cloudRes = await instantiationService.invokeFunction(acc => browseRemoteFolderOnCloudHostWithBack(acc, created, true));
+				if (cloudRes === 'switch-host') {
+					continue;
+				}
+				return cloudRes ? [cloudRes] : undefined;
+			}
+			continue;
+		}
+
+		if (picked.item.kind === 'open-manager') {
+			await commands.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID);
+			return undefined;
+		}
+
+		if (picked.item.kind === 'import-vscode' && backend) {
+			const res = await backend.importFromVsCodeAndSshConfig();
+			notifications?.info(localize(
+				'adeImportedVsCodeCloudHostsToast',
+				"Synced {0} Cloud Host(s) ({1} new, {2} recent folders) from VS Code & SSH config.",
+				res.totalHosts,
+				res.importedCount,
+				res.importedRecentFolders,
+			));
+			continue;
+		}
+	}
 }
