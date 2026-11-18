@@ -266,7 +266,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 
 	private loadStoredAgents(preserveStatusFrom?: readonly IAdeAgent[]): IAdeAgent[] {
 		const statusById = preserveStatusFrom ? new Map(preserveStatusFrom.map(agent => [agent.id, agent.status ?? 'idle'])) : undefined;
-		return this.storageService.getObject<IStoredAgent[]>('aexus.ade.agents', StorageScope.PROFILE, []).map(entry => ({
+		const parsed: IAdeAgent[] = this.storageService.getObject<IStoredAgent[]>('aexus.ade.agents', StorageScope.PROFILE, []).map(entry => ({
 			id: entry.id,
 			parentId: entry.parentId,
 			projectUri: removeTrailingPathSeparator(URI.parse(entry.projectUri)),
@@ -287,6 +287,38 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			preferredThinking: entry.preferredThinking,
 			workingDirectoryOverride: entry.workingDirectoryOverride,
 		}));
+		return this.pruneOrphanedAgents(parsed);
+	}
+
+	private pruneOrphanedAgents(agents: readonly IAdeAgent[]): IAdeAgent[] {
+		if (agents.length === 0) {
+			return [];
+		}
+		const byId = new Map(agents.map(agent => [agent.id, agent]));
+		const validIds = new Set<string>();
+		for (const agent of agents) {
+			if (!agent.parentId) {
+				if (!agent.treeGovernorId || agent.treeGovernorId === agent.id || byId.has(agent.treeGovernorId)) {
+					validIds.add(agent.id);
+				}
+				continue;
+			}
+			const visited = new Set<string>([agent.id]);
+			let cursor = byId.get(agent.parentId);
+			let reachesRoot = false;
+			while (cursor && !visited.has(cursor.id)) {
+				visited.add(cursor.id);
+				if (!cursor.parentId) {
+					reachesRoot = !cursor.treeGovernorId || cursor.treeGovernorId === cursor.id || byId.has(cursor.treeGovernorId);
+					break;
+				}
+				cursor = byId.get(cursor.parentId);
+			}
+			if (reachesRoot && (!agent.treeGovernorId || byId.has(agent.treeGovernorId))) {
+				validIds.add(agent.id);
+			}
+		}
+		return agents.filter(agent => validIds.has(agent.id));
 	}
 
 	private mergeIntoCatalog(candidates: readonly { uri: URI; name?: string }[]): boolean {
@@ -674,7 +706,12 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		while (added) {
 			added = false;
 			for (const entry of this.entries) {
-				if (entry.parentId && ids.has(entry.parentId) && !ids.has(entry.id)) {
+				if (ids.has(entry.id)) {
+					continue;
+				}
+				const byParent = Boolean(entry.parentId && ids.has(entry.parentId));
+				const byWorkTreeGov = Boolean(entry.treeGovernorId && entry.treeGovernorId !== entry.id && ids.has(entry.treeGovernorId));
+				if (byParent || byWorkTreeGov) {
 					ids.add(entry.id);
 					added = true;
 				}
@@ -1254,18 +1291,21 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		}
 	}
 
-	removeAgent(id: string): void {
+	removeAgent(id: string): readonly IAdeAgent[] {
 		const subtree = this.getSubtree(id);
 		if (!subtree.length) {
-			return;
+			return [];
 		}
 		const removed = new Set(subtree.map(agent => agent.id));
 		if (this._selectedAgentId && removed.has(this._selectedAgentId)) {
 			this._selectedAgentId = undefined;
+			this.storageService.remove('aexus.ade.selectedProjectId', StorageScope.PROFILE);
 		}
-		this.entries = this.entries.filter(agent => !removed.has(agent.id));
+		this.entries = this.pruneOrphanedAgents(this.entries.filter(agent => !removed.has(agent.id)));
 		this.saveAgents();
+		this.removedAgentsEmitter.fire(subtree);
 		this.changeEmitter.fire();
+		return subtree;
 	}
 
 	setDraft(id: string, draft: string): void {

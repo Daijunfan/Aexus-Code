@@ -102,8 +102,7 @@ Commands:
   session stop <id>
   session archive <id>
   session unarchive <id>
-  session detach <id>
-  session remove <id>
+  session detach|remove <id>
   session delete <id> [--force]
 
   secretary [status]
@@ -1545,12 +1544,23 @@ function sendSocketRequest(socketPath: string, payload: IAdeControlWireRequest):
 	});
 }
 
-function formatHumanOutput(result: unknown): string {
+function formatHumanOutput(action: string | undefined, result: unknown): string {
 	if (result === undefined || result === null) {
 		return 'OK';
 	}
-	if (typeof result === 'string' || typeof result === 'number' || typeof result === 'boolean') {
+	if (typeof result !== 'object') {
 		return String(result);
+	}
+	const record = result as Record<string, unknown>;
+	const id = typeof record.detached === 'string' ? record.detached : typeof record.deleted === 'string' ? record.deleted : undefined;
+	const count = record.count;
+	if (id !== undefined && typeof count === 'number') {
+		const verb = action === 'session.delete' ? 'Deleted' : 'Detached';
+		const subordinates = count - 1;
+		if (subordinates > 0) {
+			return `${verb} session '${id}' and removed ${subordinates} subordinate session${subordinates === 1 ? '' : 's'}.`;
+		}
+		return `${verb} session '${id}'.`;
 	}
 	return JSON.stringify(result, null, 2);
 }
@@ -1605,7 +1615,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		if (parsed.json) {
 			writeOut(JSON.stringify(response.result ?? { ok: true }, null, 2) + '\n');
 		} else {
-			writeOut(formatHumanOutput(response.result) + '\n');
+			writeOut(formatHumanOutput(parsed.action, response.result) + '\n');
 		}
 		return 0;
 	} catch (error) {

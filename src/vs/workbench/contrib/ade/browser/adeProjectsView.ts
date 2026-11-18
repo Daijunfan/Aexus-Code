@@ -663,6 +663,12 @@ export class AdeProjectsView extends ViewPane {
 				event.preventDefault();
 				event.stopPropagation();
 				void this.commandService.executeCommand(ADE_DELETE_PROJECT_COMMAND_ID, focused.project.uri);
+				return;
+			}
+			if (focused.kind === 'agent' && (event.equals(KeyCode.Delete) || (isMacintosh && event.metaKey && event.keyCode === KeyCode.Backspace))) {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.commandService.executeCommand('workbench.action.ade.deleteAgentPermanently', focused.agent.id);
 			}
 		}));
 
@@ -1088,19 +1094,26 @@ export class AdeProjectsView extends ViewPane {
 					: localize('adeArchiveConversation', "Archive Conversation"),
 				run: () => this.commandService.executeCommand(isArchived ? 'workbench.action.ade.restoreAgent' : 'workbench.action.ade.archiveAgent', agentId),
 			})] : []),
-			...(!isLocked || !agent.parentId ? [
-				new Separator(),
-				toAction({
-					id: 'ade.detach',
-					label: localize('adeRemoveFromSidebar', "Remove from Sidebar"),
-					run: () => this.commandService.executeCommand('workbench.action.ade.removeAgent', agentId),
-				}),
-				toAction({
-					id: 'ade.deletePermanently',
-					label: localize('adeDeletePermanently', "Delete Permanently..."),
-					run: () => this.commandService.executeCommand('workbench.action.ade.deleteAgentPermanently', agentId),
-				}),
-			] : []),
+			...(!isLocked || !agent.parentId ? (() => {
+				const descendantCount = Math.max(0, this.projects.getSubtree(agentId).length - 1);
+				return [
+					new Separator(),
+					toAction({
+						id: 'ade.detach',
+						label: descendantCount > 0
+							? localize('adeRemoveWithSubordinatesFromSidebar', "Remove from Sidebar (with {0} Subordinates)", descendantCount)
+							: localize('adeRemoveFromSidebar', "Remove from Sidebar"),
+						run: () => this.commandService.executeCommand('workbench.action.ade.removeAgent', agentId),
+					}),
+					toAction({
+						id: 'ade.deletePermanently',
+						label: descendantCount > 0
+							? localize('adeDeleteWithSubordinatesPermanently', "Delete Permanently (with {0} Subordinates)...", descendantCount)
+							: localize('adeDeletePermanently', "Delete Permanently..."),
+						run: () => this.commandService.executeCommand('workbench.action.ade.deleteAgentPermanently', agentId),
+					}),
+				];
+			})() : []),
 		];
 	}
 

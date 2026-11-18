@@ -435,7 +435,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			this._register(projects.onDidRemoveAgents(removed => {
 				for (const agent of removed) {
 					if (!agent.parentId && this.trees.has(agent.id)) {
-						void this.cleanupDeletedGovernorTree(agent.id, agent.projectUri.fsPath);
+						void this.cleanupDeletedGovernorTree(agent.id, agent.projectUri.fsPath, removed);
 					}
 				}
 			}));
@@ -512,13 +512,39 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		}
 	}
 
-	private async cleanupDeletedGovernorTree(governorSessionId: string, projectPath: string): Promise<void> {
+	private async cleanupDeletedGovernorTree(
+		governorSessionId: string,
+		projectPath: string,
+		removedAgents?: readonly IAdeAgent[],
+	): Promise<void> {
 		const entry = this.trees.get(governorSessionId);
 		if (!entry) {
 			return;
 		}
 		entry.activeWorkerRunTokens.clear();
 		this.trees.delete(governorSessionId);
+
+		// Stop any active sessions belonging to this Governor's Engineering tree
+		const resourcesToKill = new Map<string, URI>();
+		if (removedAgents) {
+			for (const member of removedAgents) {
+				if ((member.id === governorSessionId || member.treeGovernorId === governorSessionId) && member.session) {
+					resourcesToKill.set(member.session.resource.toString(), member.session.resource);
+				}
+			}
+		}
+		for (const agent of this.projects.agents) {
+			if (agent.treeGovernorId === governorSessionId && agent.id !== governorSessionId) {
+				if (agent.session) {
+					resourcesToKill.set(agent.session.resource.toString(), agent.session.resource);
+				}
+				this.projects.removeAgent(agent.id);
+			}
+		}
+		for (const resource of resourcesToKill.values()) {
+			await this.commandService.executeCommand('aexus.agentEngines.killSession', resource).catch(() => undefined);
+		}
+
 		await this.backend.cleanupTreeWorktrees(governorSessionId, projectPath).catch(() => { });
 		await this.backend.deleteTree(governorSessionId, entry.treeType).catch(() => { });
 		await this.inbox.removeItemsForGovernor(governorSessionId).catch(() => { });
@@ -717,6 +743,12 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		});
 
 		const synced = this.projects.syncWorkTreeHierarchy(entry.governorSessionId, entry.treeType, segmentSpecs);
+		for (const removed of synced.removedAgents) {
+			if (removed.session) {
+				void this.sessions.stop?.(removed.session)?.catch(() => undefined);
+				void this.sessions.delete(removed.session).catch(() => undefined);
+			}
+		}
 		const nextNodes: Record<string, IAdeEngineeringNodeRuntimeState> = { ...entry.state.nodes };
 		for (const node of entry.blueprint.nodes) {
 			const seg = entry.blueprint.managers.find(m => m.nodeIds.includes(node.id));

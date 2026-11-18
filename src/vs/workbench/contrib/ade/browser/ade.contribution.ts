@@ -1265,6 +1265,17 @@ registerAction2(class RestoreAgentAction extends Action2 {
 	}
 });
 
+function collectMergedSubtree(projects: IAdeProjectsService, rootId: string, initialSubtree: readonly IAdeAgent[]): IAdeAgent[] {
+	const merged = new Map<string, IAdeAgent>();
+	for (const item of initialSubtree) {
+		merged.set(item.id, item);
+	}
+	for (const item of projects.getSubtree(rootId)) {
+		merged.set(item.id, item);
+	}
+	return [...merged.values()];
+}
+
 registerAction2(class RemoveAgentAction extends Action2 {
 	constructor() {
 		super({
@@ -1278,6 +1289,7 @@ registerAction2(class RemoveAgentAction extends Action2 {
 	async run(accessor: ServicesAccessor, id?: string): Promise<void> {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
+		const sessions = accessor.get(IAdeSessionsService);
 		const engineering = accessor.get(IAdeEngineeringService);
 		const notifications = accessor.get(INotificationService);
 		const agent = await pickAgent(accessor, id);
@@ -1286,11 +1298,23 @@ registerAction2(class RemoveAgentAction extends Action2 {
 				notifications.info(localize('adeLockedByWorkTreeRemoveChild', "'{0}' is managed by an ADE Engineering DAG. Delete or edit its node on the Engineering canvas instead.", agent.label));
 				return;
 			}
-			const subtree = projects.getSubtree(agent.id);
-			if (!agent.parentId && engineering.hasTree(agent.id)) {
+			const initialSubtree = projects.getSubtree(agent.id);
+			await engineering.whenReady().catch(() => undefined);
+			if (!agent.parentId && (engineering.hasTree(agent.id) || Boolean(agent.treeType))) {
 				await engineering.removeTree(agent.id).catch(() => undefined);
 			}
+			const subtree = collectMergedSubtree(projects, agent.id, initialSubtree);
+			for (const member of subtree) {
+				if (member.session) {
+					await sessions.stop?.(member.session).catch(() => undefined);
+				}
+			}
 			projects.removeAgent(agent.id);
+			for (const member of subtree) {
+				if (projects.getAgent(member.id)) {
+					projects.removeAgent(member.id);
+				}
+			}
 			await editors.closeAgents(subtree);
 		}
 	}
@@ -1306,7 +1330,7 @@ registerAction2(class DeleteAgentPermanentlyAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor, id?: string): Promise<void> {
+	async run(accessor: ServicesAccessor, id?: string, options?: { readonly force?: boolean }): Promise<void> {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
 		const sessions = accessor.get(IAdeSessionsService);
@@ -1321,28 +1345,38 @@ registerAction2(class DeleteAgentPermanentlyAction extends Action2 {
 			notifications.info(localize('adeLockedByWorkTreeDeleteChild', "'{0}' is managed by an ADE Engineering DAG. Delete or edit its node on the Engineering canvas instead.", agent.label));
 			return;
 		}
-		const subtree = projects.getSubtree(agent.id);
-		const confirmation = await dialogs.confirm({
-			type: 'warning',
-			message: localize('adeConfirmDeletePermanent', "Permanently delete '{0}' and its conversation history from the Coding Agent engine?", agent.label),
-			detail: subtree.length > 1
-				? localize('adeConfirmDeleteSubtreeDetail', "This will also permanently delete {0} subordinate conversation(s). This action cannot be undone.", subtree.length - 1)
-				: localize('adeConfirmDeleteSingleDetail', "This action cannot be undone."),
-			primaryButton: localize('adeDeletePermanentlyBtn', "&&Delete Permanently"),
-		});
-		if (!confirmation.confirmed) {
-			return;
+		await engineering.whenReady().catch(() => undefined);
+		const initialSubtree = projects.getSubtree(agent.id);
+		if (!options?.force) {
+			const confirmation = await dialogs.confirm({
+				type: 'warning',
+				message: localize('adeConfirmDeletePermanent', "Permanently delete '{0}' and its conversation history from the Coding Agent engine?", agent.label),
+				detail: initialSubtree.length > 1
+					? localize('adeConfirmDeleteSubtreeDetail', "This will also permanently delete {0} subordinate conversation(s). This action cannot be undone.", initialSubtree.length - 1)
+					: localize('adeConfirmDeleteSingleDetail', "This action cannot be undone."),
+				primaryButton: localize('adeDeletePermanentlyBtn', "&&Delete Permanently"),
+			});
+			if (!confirmation.confirmed) {
+				return;
+			}
 		}
-		if (!agent.parentId && engineering.hasTree(agent.id)) {
+		if (!agent.parentId && (engineering.hasTree(agent.id) || Boolean(agent.treeType))) {
 			await engineering.removeTree(agent.id).catch(() => undefined);
 		}
+		const subtree = collectMergedSubtree(projects, agent.id, initialSubtree);
 		for (const member of subtree) {
 			if (member.session) {
-				await sessions.delete(member.session);
+				await sessions.stop?.(member.session).catch(() => undefined);
+				await sessions.delete(member.session).catch(() => undefined);
 			}
 		}
 		await editors.closeAgents(subtree);
 		projects.removeAgent(agent.id);
+		for (const member of subtree) {
+			if (projects.getAgent(member.id)) {
+				projects.removeAgent(member.id);
+			}
+		}
 	}
 });
 

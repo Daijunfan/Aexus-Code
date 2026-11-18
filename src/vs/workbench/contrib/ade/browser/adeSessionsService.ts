@@ -44,6 +44,7 @@ export interface IAdeSessionsService {
 	list(engineId: string, projectUri?: URI): Promise<readonly IAdeEngineSession[]>;
 	rename(session: IAdeSession, label: string): Promise<void>;
 	delete(session: IAdeSession): Promise<void>;
+	stop?(session: IAdeSession): Promise<void>;
 	deleteProjectSessions?(projectUri: URI): Promise<number>;
 	ensureSecretary?(engineId?: string, projectUri?: URI, forceReset?: boolean): Promise<IAdeSession | undefined>;
 	getSessionInfo?(session: IAdeSession): Promise<{ nativeId?: string; provisional?: boolean; unmaterialized?: boolean; engine?: string } | undefined>;
@@ -163,6 +164,12 @@ export class AdeSessionsService implements IAdeSessionsService {
 	async delete(session: IAdeSession): Promise<void> {
 		if (session.engineId.startsWith('aexus-')) {
 			await this.commands.executeCommand('aexus.agentEngines.delete', session.resource);
+		}
+	}
+
+	async stop(session: IAdeSession): Promise<void> {
+		if (session.engineId.startsWith('aexus-')) {
+			await this.commands.executeCommand('aexus.agentEngines.killSession', session.resource).catch(() => undefined);
 		}
 	}
 

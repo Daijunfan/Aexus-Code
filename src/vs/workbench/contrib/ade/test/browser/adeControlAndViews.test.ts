@@ -85,6 +85,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 
 		let sessionCounter = 0;
 		const deletedResources: string[] = [];
+		const deleteAttempts: string[] = [];
+		const deleteFailures = new Set<string>();
+		const stoppedResources: string[] = [];
 		const deletedProjectSessions: string[] = [];
 		const removedWorkspaceFolders: string[] = [];
 		const renamedResources: Array<{ resource: string; label: string }> = [];
@@ -135,8 +138,16 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			rename: async (session: IAdeSession, label: string) => {
 				renamedResources.push({ resource: session.resource.toString(), label });
 			},
+			stop: async (session: IAdeSession) => {
+				stoppedResources.push(session.resource.toString());
+			},
 			delete: async (session: IAdeSession) => {
-				deletedResources.push(session.resource.toString());
+				const resource = session.resource.toString();
+				deleteAttempts.push(resource);
+				if (deleteFailures.has(resource)) {
+					throw new Error('Simulated engine history deletion failure');
+				}
+				deletedResources.push(resource);
 			},
 			deleteProjectSessions: async (projectUri: URI) => {
 				deletedProjectSessions.push(projectUri.toString());
@@ -209,6 +220,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			modes: instantiation.get(IWorkbenchModeService),
 			editorsStub,
 			deletedResources,
+			deleteAttempts,
+			deleteFailures,
+			stoppedResources,
 			deletedProjectSessions,
 			removedWorkspaceFolders,
 			getFolders: () => folders,
@@ -1467,6 +1481,84 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			level1AgentsIconAligned: true,
 			level1AgentsLabelAligned: true,
 			uniformPositiveIndentStep: true,
+		});
+	});
+
+	test('session.remove / session.detach cascade-stop, close tabs, and remove every descendant without deleting engine histories', async () => {
+		const h = createHarness();
+		h.modes.setMode('ade');
+
+		const makeChain = (prefix: string) => {
+			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse(`aexus-claude:/${prefix}-gov`) }, `${prefix} Governor`, { role: 'governor' });
+			const mgr = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse(`aexus-codex:/${prefix}-mgr`) }, `${prefix} Manager`, { parentId: gov.id, role: 'manager' });
+			const emp = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse(`aexus-claude:/${prefix}-emp`) }, `${prefix} Employee`, { parentId: mgr.id, role: 'employee' });
+			const wrk = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse(`aexus-codex:/${prefix}-wrk`) }, `${prefix} Worker`, { parentId: emp.id });
+			return { gov, mgr, emp, wrk };
+		};
+		const resources = (...agents: IAdeAgent[]) => agents.map(agent => agent.session!.resource.toString());
+
+		// Detach a full Governor -> Manager -> Employee -> Worker tree.
+		const detachTree = makeChain('detach');
+		await h.control('session.detach', { id: detachTree.gov.id });
+
+		// Remove only the mid-tree Manager -> Employee -> Worker subtree, leaving its Governor intact.
+		const removeTree = makeChain('remove');
+		await h.control('session.remove', { id: removeTree.mgr.id });
+
+		assert.deepStrictEqual({
+			stopped: h.stoppedResources,
+			closed: h.closedAgentIds,
+			deleted: h.deletedResources,
+			remainingIds: h.projects.agents.map(agent => agent.id),
+			removeGovernorSurvives: Boolean(h.projects.getAgent(removeTree.gov.id)),
+			removeGovernorSubtreeSize: h.projects.getSubtree(removeTree.gov.id).length,
+		}, {
+			stopped: [
+				...resources(detachTree.gov, detachTree.mgr, detachTree.emp, detachTree.wrk),
+				...resources(removeTree.mgr, removeTree.emp, removeTree.wrk),
+			],
+			closed: [
+				detachTree.gov.id, detachTree.mgr.id, detachTree.emp.id, detachTree.wrk.id,
+				removeTree.mgr.id, removeTree.emp.id, removeTree.wrk.id,
+			],
+			deleted: [],
+			remainingIds: [removeTree.gov.id],
+			removeGovernorSurvives: true,
+			removeGovernorSubtreeSize: 1,
+		});
+	});
+
+	test('session.delete tears down the whole multi-level subtree even when one engine history deletion throws', async () => {
+		const h = createHarness();
+		h.modes.setMode('ade');
+
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/del-gov') }, 'Governor', { role: 'governor' });
+		const mgr = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/del-mgr') }, 'Manager', { parentId: gov.id, role: 'manager' });
+		const emp = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/del-emp') }, 'Employee', { parentId: mgr.id, role: 'employee' });
+		const wrk = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/del-wrk') }, 'Worker', { parentId: emp.id });
+		const resources = [gov, mgr, emp, wrk].map(agent => agent.session!.resource.toString());
+
+		// The Employee engine history deletion fails; teardown must still complete for every other member.
+		h.deleteFailures.add(resources[2]);
+
+		const result = await h.control<{ deletedIds: string[]; count: number }>('session.delete', { id: gov.id });
+
+		assert.deepStrictEqual({
+			deletedIds: result.deletedIds,
+			count: result.count,
+			stopCalls: h.stoppedResources,
+			deleteAttempts: h.deleteAttempts,
+			succeededDeletes: h.deletedResources,
+			closedIds: h.closedAgentIds,
+			remainingIds: h.projects.agents.map(agent => agent.id),
+		}, {
+			deletedIds: [gov.id, mgr.id, emp.id, wrk.id],
+			count: 4,
+			stopCalls: resources,
+			deleteAttempts: resources,
+			succeededDeletes: [resources[0], resources[1], resources[3]],
+			closedIds: [gov.id, mgr.id, emp.id, wrk.id],
+			remainingIds: [],
 		});
 	});
 });

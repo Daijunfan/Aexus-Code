@@ -1692,18 +1692,35 @@ export async function executeAdeControlRequest(
 			return toSessionSummary(projects, sessions, projects.getAgent(root.id)!);
 		}
 
+		case 'session.remove':
 		case 'session.detach': {
 			const agent = resolveAgentFromParams(projects, params);
 			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
 				throw new Error(localize('adeLockedByEngineeringDetach', "Subordinate session '{0}' is locked by an Engineering tree. Remove or edit nodes via Engineering blueprint.", agent.label));
 			}
-			const subtree = projects.getSubtree(agent.id);
-			if (!agent.parentId && engineeringService?.hasTree(agent.id)) {
-				await engineeringService.removeTree(agent.id);
+			await engineeringService?.whenReady().catch(() => undefined);
+			const initialSubtree = projects.getSubtree(agent.id);
+			if (!agent.parentId && (engineeringService?.hasTree(agent.id) || Boolean(agent.treeType))) {
+				await engineeringService?.removeTree(agent.id).catch(() => undefined);
+			}
+			const mergedMap = new Map<string, IAdeAgent>(initialSubtree.map(item => [item.id, item]));
+			for (const item of projects.getSubtree(agent.id)) {
+				mergedMap.set(item.id, item);
+			}
+			const subtree = [...mergedMap.values()];
+			for (const member of subtree) {
+				if (member.session) {
+					await sessions.stop?.(member.session).catch(() => undefined);
+				}
 			}
 			projects.removeAgent(agent.id);
+			for (const member of subtree) {
+				if (projects.getAgent(member.id)) {
+					projects.removeAgent(member.id);
+				}
+			}
 			await editors.closeAgents(subtree);
-			return { detached: agent.id, count: subtree.length };
+			return { detached: agent.id, removedIds: subtree.map(item => item.id), count: subtree.length };
 		}
 
 		case 'session.delete': {
@@ -1711,18 +1728,30 @@ export async function executeAdeControlRequest(
 			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
 				throw new Error(localize('adeLockedByEngineeringDelete', "Subordinate session '{0}' is locked by an Engineering tree. Remove or edit nodes via Engineering blueprint.", agent.label));
 			}
-			const subtree = projects.getSubtree(agent.id);
-			if (!agent.parentId && engineeringService?.hasTree(agent.id)) {
-				await engineeringService.removeTree(agent.id);
+			await engineeringService?.whenReady().catch(() => undefined);
+			const initialSubtree = projects.getSubtree(agent.id);
+			if (!agent.parentId && (engineeringService?.hasTree(agent.id) || Boolean(agent.treeType))) {
+				await engineeringService?.removeTree(agent.id).catch(() => undefined);
 			}
+			const mergedMap = new Map<string, IAdeAgent>(initialSubtree.map(item => [item.id, item]));
+			for (const item of projects.getSubtree(agent.id)) {
+				mergedMap.set(item.id, item);
+			}
+			const subtree = [...mergedMap.values()];
 			for (const member of subtree) {
 				if (member.session) {
-					await sessions.delete(member.session);
+					await sessions.stop?.(member.session).catch(() => undefined);
+					await sessions.delete(member.session).catch(() => undefined);
 				}
 			}
 			await editors.closeAgents(subtree);
 			projects.removeAgent(agent.id);
-			return { deleted: agent.id, count: subtree.length };
+			for (const member of subtree) {
+				if (projects.getAgent(member.id)) {
+					projects.removeAgent(member.id);
+				}
+			}
+			return { deleted: agent.id, deletedIds: subtree.map(item => item.id), count: subtree.length };
 		}
 
 		case 'secretary.status':

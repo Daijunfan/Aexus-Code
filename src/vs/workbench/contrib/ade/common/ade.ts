@@ -206,7 +206,7 @@ export interface IAdeProjectsService {
 	setAgentStatus(id: string, status: AdeAgentStatus, unread?: boolean): void;
 	updateSessionLabel(resource: URI, label: string): void;
 	syncSessionItem(resource: URI, update: { readonly label?: string; readonly status?: AdeAgentStatus }, isActiveInEditor?: boolean): void;
-	removeAgent(id: string): void;
+	removeAgent(id: string): readonly IAdeAgent[] | void;
 	setDraft(id: string, draft: string): void;
 
 	configureSecretary(session: IAdeSession): void;

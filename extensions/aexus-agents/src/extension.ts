@@ -842,7 +842,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (candidate.engine === record.engine && (removedIds.has(candidate.id) || (candidate.resourceId && removedIds.has(candidate.resourceId)))) {
 				deletedKeys.add(entryKey);
 				activeTurns.get(identity(candidate))?.cancel();
+				activeTurns.delete(identity(candidate));
+				busy.delete(identity(candidate));
 				opened.get(identity(candidate))?.cancellation.cancel();
+				if (candidate !== record && available.some(entry => entry.id === candidate.engine && entry.command)) {
+					await runtime(candidate.engine).killSession?.(candidate).catch(() => { });
+					await runtime(candidate.engine).delete(candidate, token).catch(() => { });
+				}
 				records.delete(entryKey);
 				controller?.items.delete(resource(candidate));
 				count++;

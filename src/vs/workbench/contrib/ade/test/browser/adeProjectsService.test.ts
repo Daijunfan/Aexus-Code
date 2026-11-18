@@ -391,4 +391,41 @@ suite('ADE project sessions', () => {
 			navOrderB: ['Gamma', 'Beta'],
 		});
 	});
+
+	test('cascade-removes every level of a 4-level supervisor subtree, clears descendant selection, and prunes stored orphans on reload', () => {
+		const instantiationService = workbenchInstantiationService(undefined, store);
+		const projects = store.add(instantiationService.createInstance(AdeProjectsService));
+		const projectUri = URI.file('/ade/cascade');
+		const governor = projects.addSession(projectUri, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/cascade-gov') }, 'Governor', { role: 'governor' });
+		const manager = projects.addSession(projectUri, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/cascade-mgr') }, 'Manager', { parentId: governor.id, role: 'manager' });
+		const employee = projects.addSession(projectUri, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/cascade-emp') }, 'Employee', { parentId: manager.id, role: 'employee' });
+		const worker = projects.addSession(projectUri, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/cascade-wrk') }, 'Worker', { parentId: employee.id });
+		projects.selectAgent(worker.id);
+
+		const removedEvents: string[][] = [];
+		store.add(projects.onDidRemoveAgents(removed => removedEvents.push(removed.map(agent => agent.id))));
+
+		const removed = projects.removeAgent(governor.id);
+
+		// A stored subordinate whose parent no longer exists must not survive a reload.
+		instantiationService.get(IStorageService).store('aexus.ade.agents', JSON.stringify([
+			{ id: 'stored-root', projectUri: projectUri.toString(), label: 'Stored Root', draft: '' },
+			{ id: 'stored-orphan', parentId: 'missing-supervisor', projectUri: projectUri.toString(), label: 'Stored Orphan', draft: '' },
+		]), StorageScope.PROFILE, StorageTarget.MACHINE);
+		const restored = store.add(instantiationService.createInstance(AdeProjectsService));
+
+		assert.deepStrictEqual({
+			removedIds: removed.map(agent => agent.id),
+			remainingIds: projects.agents.map(agent => agent.id),
+			selectedAgentId: projects.selectedAgentId,
+			removedEvents,
+			restoredIds: restored.agents.map(agent => agent.id),
+		}, {
+			removedIds: [governor.id, manager.id, employee.id, worker.id],
+			remainingIds: [],
+			selectedAgentId: undefined,
+			removedEvents: [[governor.id, manager.id, employee.id, worker.id]],
+			restoredIds: ['stored-root'],
+		});
+	});
 });
