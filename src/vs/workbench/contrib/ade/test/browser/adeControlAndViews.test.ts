@@ -1809,7 +1809,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 
 	test('renders 4-tier Org-Chart Deck tree channels, recycled lock hygiene, Cloud Host chip, sticky Focus banner, and Critical Inbox tab badge', async () => {
 		const cloudProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'gpu-a100', path: '/workspace/CloudRepo' });
-		const h = createHarness([alpha, cloudProject]);
+		const ubuntuProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'ubuntu-target1', path: '/home/lab' });
+		const kaliProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'kali-Linux1', path: '/home/kali' });
+		const winProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'BUPT-Windows', path: '/C:/Users/djf' });
+		const h = createHarness([alpha, cloudProject, ubuntuProject, kaliProject, winProject]);
 		h.modes.setMode('ade');
 
 		const lockedIds = new Set<string>();
@@ -1883,6 +1886,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		const wrkRow = findRow('Wrk Leaf');
 		const freeRow = findRow('Unlocked Worker');
 		const cloudRow = findRow('CloudRepo');
+		const alphaRow = findRow('Alpha');
+		const ubuntuRow = findRow('lab');
+		const kaliRow = findRow('kali');
+		const winRow = findRow('djf');
 
 		const rowSnapshot = {
 			govTier: govRow.querySelector('.ade-role-badge')?.getAttribute('data-tier'),
@@ -1904,9 +1911,15 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			freeNotLocked: !freeRow.classList.contains('ade-worktree-locked') && freeRow.querySelector<HTMLElement>('.ade-lock-glyph')!.hidden,
 			cloudChipText: cloudRow.querySelector('.ade-cloud-host-badge')?.textContent,
 			cloudHasDot: Boolean(cloudRow.querySelector('.ade-cloud-host-badge .ade-cloud-host-dot')),
+			localProjectOsHasSvg: Boolean(alphaRow.querySelector('.ade-tree-item-icon-os svg')),
+			ubuntuProjectOs: ubuntuRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
+			kaliProjectOs: kaliRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
+			winProjectOs: winRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
+			genericCloudOs: cloudRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
+			agentHasNoOsSvg: !govRow.querySelector('.ade-tree-item-icon')?.hasAttribute('data-os') && !govRow.querySelector('.ade-tree-item-icon svg'),
 			cloudHiddenRoleBadgeDisplay: mainWindow.getComputedStyle(cloudRow.querySelector<HTMLElement>('.ade-role-badge')!).display,
 			cloudHiddenWorktreeBadgeDisplay: mainWindow.getComputedStyle(cloudRow.querySelector<HTMLElement>('.ade-worktree-badge')!).display,
-			localProjectHiddenRoleBadgeDisplay: mainWindow.getComputedStyle(findRow('Alpha').querySelector<HTMLElement>('.ade-role-badge')!).display,
+			localProjectHiddenRoleBadgeDisplay: mainWindow.getComputedStyle(alphaRow.querySelector<HTMLElement>('.ade-role-badge')!).display,
 			hiddenStatusDotDisplay: mainWindow.getComputedStyle(freeRow.querySelector<HTMLElement>('.ade-status-dot')!).display,
 		};
 
@@ -1996,6 +2009,12 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			freeNotLocked: true,
 			cloudChipText: 'gpu-a100',
 			cloudHasDot: true,
+			localProjectOsHasSvg: true,
+			ubuntuProjectOs: 'ubuntu',
+			kaliProjectOs: 'kali',
+			winProjectOs: 'windows',
+			genericCloudOs: 'linux',
+			agentHasNoOsSvg: true,
 			cloudHiddenRoleBadgeDisplay: 'none',
 			cloudHiddenWorktreeBadgeDisplay: 'none',
 			localProjectHiddenRoleBadgeDisplay: 'none',

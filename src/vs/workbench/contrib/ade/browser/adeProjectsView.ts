@@ -40,13 +40,14 @@ import { defaultButtonStyles } from '../../../../platform/theme/browser/defaultS
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { createFileIconThemableTreeContainerScope, IResourceLabel, ResourceLabels } from '../../../browser/labels.js';
+import { renderAdeOsIcon, resolveLocalOsIconKind } from '../../../browser/adeOsIcon.js';
 import { InlineEditInputBox } from '../../../browser/parts/views/inlineEditInputBox.js';
 import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IEditableData, IViewDescriptorService } from '../../../common/views.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEditorInput.js';
-import { formatProjectDisplayPath, isCloudProjectUri } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { ADE_OS_ICON_LABELS, AdeOsIconKind, formatProjectDisplayPath, IAdeCloudHost, IAdeCloudHostBackendService, isCloudProjectUri, resolveAdeOsIconKind } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IAdeEngineeringService, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_OPEN_RESEARCH_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
@@ -283,6 +284,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		private readonly onSetAgentRole: (agentId: string) => void,
 		private readonly onOpenEngineering: (governorId: string) => void,
 		private readonly getEditableData: (agent: IAdeAgent) => IEditableData | undefined,
+		private readonly getCloudHostMeta: (authority: string) => IAdeCloudHost | undefined,
 	) { }
 
 	renderTemplate(container: HTMLElement): IAdeTreeTemplate {
@@ -332,6 +334,12 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 	}
 
 	private applyItemIcon(iconNode: HTMLElement, icon: ThemeIcon | URI): void {
+		delete iconNode.dataset.os;
+		iconNode.removeAttribute('aria-label');
+		iconNode.title = '';
+		if (iconNode.firstChild) {
+			iconNode.replaceChildren();
+		}
 		if (URI.isUri(icon)) {
 			iconNode.className = 'ade-tree-item-icon ade-tree-item-icon-svg';
 			iconNode.style.backgroundImage = asCSSUrl(icon);
@@ -339,6 +347,29 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			iconNode.className = `ade-tree-item-icon ${ThemeIcon.asClassName(icon)}`;
 			iconNode.style.backgroundImage = '';
 		}
+	}
+
+	private applyProjectOsIcon(iconNode: HTMLElement, project: IAdeProject): void {
+		const isCloud = isCloudProjectUri(project.uri);
+		let osKind: AdeOsIconKind;
+		let tooltip: string;
+		if (isCloud) {
+			const host = this.getCloudHostMeta(project.uri.authority);
+			osKind = resolveAdeOsIconKind({
+				os: host?.os,
+				distribution: host?.lastTestStatus?.remoteUname,
+				hint: `${host?.name ?? ''} ${host?.alias ?? ''} ${host?.user ?? ''} ${project.uri.authority} ${project.name}`,
+			});
+			tooltip = `${ADE_OS_ICON_LABELS[osKind]} · ${project.uri.authority}`;
+		} else {
+			osKind = resolveLocalOsIconKind(project.name);
+			tooltip = ADE_OS_ICON_LABELS[osKind];
+		}
+		renderAdeOsIcon(iconNode, osKind, {
+			baseClass: 'ade-tree-item-icon ade-tree-item-icon-os',
+			prefix: 'ade-os',
+			tooltip,
+		});
 	}
 
 	private applyStatusIndicator(element: HTMLElement, kind: 'working' | 'pending' | 'unread' | 'none', isBubble = false): void {
@@ -397,7 +428,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			}
 
 			const isCloud = isCloudProjectUri(item.project.uri);
-			this.applyItemIcon(template.iconNode, isCloud ? Codicon.remote : Codicon.folder);
+			this.applyProjectOsIcon(template.iconNode, item.project);
 			template.row.setAttribute('data-child-rank', 'governor');
 			template.row.setAttribute('data-child-label', localize('adeDropTopLevelPreview', "→ Top-Level"));
 			if (isCloud) {
@@ -618,6 +649,8 @@ export class AdeProjectsView extends ViewPane {
 	private readonly inboxService: IAdeInboxService | undefined;
 	private readonly notificationService: INotificationService | undefined;
 	private readonly workbenchEditorService: IEditorService | undefined;
+	private readonly cloudHostBackend: IAdeCloudHostBackendService | undefined;
+	private readonly cloudHostMetaByAuthority = new Map<string, IAdeCloudHost>();
 	private emptyStateHost: HTMLElement | undefined;
 	private emptyStateMessage: HTMLElement | undefined;
 	private readonly emptyActionDisposables = this._register(new DisposableStore());
@@ -667,21 +700,30 @@ export class AdeProjectsView extends ViewPane {
 			this.refreshAgentIcons();
 		}));
 
-		const [engSvc, inbSvc, notifSvc, editorSvc] = instantiationService.invokeFunction(accessor => {
+		const [engSvc, inbSvc, notifSvc, editorSvc, cloudSvc] = instantiationService.invokeFunction(accessor => {
 			let eng: IAdeEngineeringService | undefined;
 			let inb: IAdeInboxService | undefined;
 			let notif: INotificationService | undefined;
 			let edit: IEditorService | undefined;
+			let cloud: IAdeCloudHostBackendService | undefined;
 			try { eng = accessor.get(IAdeEngineeringService); } catch { eng = undefined; }
 			try { inb = accessor.get(IAdeInboxService); } catch { inb = undefined; }
 			try { notif = accessor.get(INotificationService); } catch { notif = undefined; }
 			try { edit = accessor.get(IEditorService); } catch { edit = undefined; }
-			return [eng, inb, notif, edit] as const;
+			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
+			return [eng, inb, notif, edit, cloud] as const;
 		});
 		this.engineeringService = engSvc;
 		this.inboxService = inbSvc;
 		this.notificationService = notifSvc;
 		this.workbenchEditorService = editorSvc;
+		this.cloudHostBackend = cloudSvc;
+		if (this.cloudHostBackend) {
+			void this.refreshCloudHostMeta();
+			this._register(this.cloudHostBackend.onDidChangeHosts(() => {
+				void this.refreshCloudHostMeta();
+			}));
+		}
 		if (this.inboxService) {
 			this._register(this.inboxService.onDidChange(() => this.updateHeaderControls()));
 		}
@@ -698,6 +740,23 @@ export class AdeProjectsView extends ViewPane {
 
 	get isEditing(): boolean {
 		return this.editingAgentId !== undefined;
+	}
+
+	private async refreshCloudHostMeta(): Promise<void> {
+		if (!this.cloudHostBackend) {
+			return;
+		}
+		try {
+			const hosts = await this.cloudHostBackend.listHosts();
+			this.cloudHostMetaByAuthority.clear();
+			for (const h of hosts) {
+				this.cloudHostMetaByAuthority.set(h.alias, h);
+				this.cloudHostMetaByAuthority.set(h.alias.toLowerCase(), h);
+			}
+			this.refreshAgentIcons();
+		} catch {
+			// Best-effort OS metadata lookup; fallback uses authority/name hints.
+		}
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -745,6 +804,7 @@ export class AdeProjectsView extends ViewPane {
 					agentId => void this.commandService.executeCommand('workbench.action.ade.setRole', agentId),
 					governorId => void this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, governorId),
 					agent => this.getEditableData(agent),
+					authority => this.cloudHostMetaByAuthority.get(authority) ?? this.cloudHostMetaByAuthority.get(authority.toLowerCase()),
 				),
 			],
 			{

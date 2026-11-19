@@ -34,22 +34,22 @@ export function resolveAdeOsIconKind(input: {
 	readonly hint?: string;
 }): AdeOsIconKind {
 	const source = `${input.distribution ?? ''} ${input.hint ?? ''}`;
-	if (input.os === 'windows' || (!input.os && /\b(win32|win64|windows)\b/i.test(source))) {
+	if (input.os === 'windows' || (!input.os && /(?:windows|win32|win64)/i.test(source))) {
 		return 'windows';
 	}
-	if (input.os === 'macos' || (!input.os && /\b(macos|darwin|osx)\b/i.test(source))) {
+	if (input.os === 'macos' || (!input.os && /(?:macos|darwin|\bosx\b)/i.test(source))) {
 		return 'macos';
 	}
-	if (/\bkali\b/i.test(source)) {
+	if (/kali/i.test(source)) {
 		return 'kali';
 	}
-	if (/\bubuntu\b/i.test(source)) {
+	if (/ubuntu/i.test(source)) {
 		return 'ubuntu';
 	}
-	if (/\bdebian\b/i.test(source)) {
+	if (/debian/i.test(source)) {
 		return 'debian';
 	}
-	if (/\b(centos|rocky|alma|rhel|redhat|fedora)\b/i.test(source)) {
+	if (/(?:centos|rocky|alma|rhel|redhat|fedora)/i.test(source)) {
 		return 'enterprise-linux';
 	}
 	return 'linux';

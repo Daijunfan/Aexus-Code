@@ -568,8 +568,43 @@
 	flex-shrink: 0;
 }
 
-.monaco-workbench .ade-tree-row.ade-cloud-project .ade-tree-item-icon {
+.monaco-workbench .ade-tree-row.ade-cloud-project .ade-tree-item-icon:not(.ade-tree-item-icon-os) {
 	color: var(--ade-deck-cloud);
+}
+
+.monaco-workbench .ade-tree-item-icon.ade-tree-item-icon-os {
+	width: 16px;
+	height: 16px;
+	flex: 0 0 16px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 3px;
+	overflow: hidden;
+	color: var(--vscode-icon-foreground);
+}
+
+.monaco-workbench .ade-tree-item-icon.ade-tree-item-icon-os > svg {
+	width: 14px;
+	height: 14px;
+	display: block;
+}
+
+.monaco-workbench .ade-tree-item-icon.ade-tree-item-icon-os.ade-os-macos > svg {
+	width: 13px;
+	height: 13px;
+}
+
+.monaco-workbench .ade-tree-item-icon.ade-tree-item-icon-os.ade-os-kali {
+	border-radius: 50%;
+	background: linear-gradient(145deg, #0f172a 0%, #1d4ed8 100%);
+	padding: 1.5px;
+	box-sizing: border-box;
+}
+
+.monaco-workbench .ade-tree-item-icon.ade-tree-item-icon-os.ade-os-kali > svg {
+	width: 12px;
+	height: 12px;
 }
 
 /* ============================================================================
