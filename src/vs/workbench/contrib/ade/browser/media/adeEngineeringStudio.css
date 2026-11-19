@@ -99,7 +99,7 @@
 	white-space: nowrap;
 }
 
-@container ade-eng (max-width: 1080px) {
+@container ade-eng (max-width: 1260px) {
 	.monaco-workbench .ade-eng-editor .ade-eng-toolbar.floating {
 		gap: 4px;
 		left: 8px;
@@ -159,7 +159,7 @@
 }
 
 /* Keep "Task" label accessible & visible across container widths (T14) */
-@container ade-eng (max-width: 1020px) {
+@container ade-eng (max-width: 1260px) {
 	.monaco-workbench .ade-eng-editor .ade-eng-tool-btn.primary-spawn .ade-eng-tool-label {
 		display: inline !important;
 	}

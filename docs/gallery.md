@@ -59,45 +59,47 @@ A curated tour of Aexus Code's surfaces across Dark Modern, Light Modern, High C
 
 ---
 
-## DAG Studio, Dual-Shell Pods & Synchronized Blueprints
+## DAG Studio, Dual-Shell Pods, Research Mode & Synchronized Blueprints
 
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Simulated 0-Token Interactive Demo — Armored Nested Dual-Shell Task Pods, 3-Stage Adversarial Rail &amp; Release Gate" />
-      <p align="center"><sub><strong>Armored Nested Dual-Shell Pods (Simulated 0-Token Demo)</strong></sub></p>
+      <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Engineering Mode Parallel DAG — Armored Nested Dual-Shell Task Pods, 3x Worktree Fan-Out &amp; Release Gate U1 (Simulated 0-Token Demo)" />
+      <p align="center"><sub><strong>Engineering Mode Parallel DAG — Nested Dual-Shell Pods (Simulated 0-Token Demo)</strong></sub></p>
     </td>
+    <td width="50%">
+      <img src="assets/19-research-mode-dag.png" width="100%" alt="Research Mode Parallel DAG — Warm Amber/Magenta Canvas with Multi-Track Hypothesis Probing &amp; Methodology Peer Gate U1" />
+      <p align="center"><sub><strong>Research Mode Parallel DAG — Warm Amber/Magenta Hypothesis Canvas &amp; Peer Gate</strong></sub></p>
+    </td>
+  </tr>
+  <tr>
     <td width="50%">
       <img src="assets/13-prompt-to-dag-bar.png" width="100%" alt="Prompt-to-DAG Floating Bar (Cmd/Ctrl+Shift+K or /) — Deterministic Keyword-to-DAG Scaffolding" />
       <p align="center"><sub><strong>Prompt-to-DAG (<code>Cmd/Ctrl+Shift+K</code> or <code>/</code>) — Deterministic Keyword Scaffolding (&lt;50ms)</strong></sub></p>
     </td>
-  </tr>
-  <tr>
     <td width="50%">
       <img src="assets/09-blueprint-recipes-gallery.png" width="100%" alt="DAG Blueprint Recipes Gallery — 6 Curated Engineering &amp; Research Templates with Enforced Budget Caps" />
       <p align="center"><sub><strong>6 Built-In DAG Blueprint Recipes with Live SVG Previews &amp; Budget Caps</strong></sub></p>
     </td>
+  </tr>
+  <tr>
     <td width="50%">
       <img src="assets/03-engineering-node-inspector.png" width="100%" alt="Right-Click Node Card — Acceptance Report, Touched File Diff &amp; Role Token Breakdown" />
       <p align="center"><sub><strong>Node Acceptance Report, Touched Files &amp; Per-Role Telemetry</strong></sub></p>
     </td>
-  </tr>
-  <tr>
     <td width="50%">
       <img src="assets/03b-engineering-role-engines.png" width="100%" alt="8-Engine Role Configurator &amp; Thinking Effort Selector with Public Upstream Models" />
       <p align="center"><sub><strong>Mix All 8 Native Engines, Public Models &amp; Thinking Effort per Role</strong></sub></p>
     </td>
+  </tr>
+  <tr>
     <td width="50%">
       <img src="assets/04-engineering-user-gate.png" width="100%" alt="User Gate Sign-Off Card — Aggregated Upstream Reports &amp; Directed Rollback" />
       <p align="center"><sub><strong>User Gate Sign-Off Card — Upstream Reports &amp; Directed Rollback</strong></sub></p>
     </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <p align="center">
-        <img src="assets/04c-engineering-blueprint-drawer.png" width="75%" alt="Hybrid Mermaid + Markdown Blueprint Sheet &amp; Live Execution Timeline" /><br/>
-        <sub><strong>Hybrid Mermaid + Markdown Blueprint Sheet &amp; Live Execution Timeline</strong></sub>
-      </p>
+    <td width="50%">
+      <img src="assets/04c-engineering-blueprint-drawer.png" width="100%" alt="Hybrid Mermaid + Markdown Blueprint Sheet &amp; Live Execution Timeline" />
+      <p align="center"><sub><strong>Hybrid Mermaid + Markdown Blueprint Sheet &amp; Live Execution Timeline</strong></sub></p>
     </td>
   </tr>
 </table>
@@ -131,24 +133,34 @@ A curated tour of Aexus Code's surfaces across Dark Modern, Light Modern, High C
 
 ---
 
-## Multi-Tier Sessions, Zero-Server SSH Cloud Hosts & IDE Mirror Symmetry
+## Multi-OS Projects, Multi-Host Terminals, VS Code Extensions & Zero-Server Cloud Hosts
 
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="ADE Session Hierarchy, Safe-Mode Orchestrated Chat &amp; Side-by-Side Diff" />
-      <p align="center"><sub><strong>ADE Session Hierarchy, Safe-Mode Orchestrated Chat &amp; Side-by-Side Diff</strong></sub></p>
+      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="Multi-Project Multi-OS ADE Command Center — Apple, Ubuntu, Kali and Windows projects with all 8 native coding agent engine icons &amp; live diff" />
+      <p align="center"><sub><strong>Unified Multi-OS Projects &amp; 8-Engine ADE Command Center (Full Badges + Diff)</strong></sub></p>
     </td>
     <td width="50%">
-      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE Mirror Symmetry Mode — Local + Cloud SSH Explorer, Split Editors &amp; Hybrid Terminals" />
-      <p align="center"><sub><strong>IDE Mirror Symmetry — Local + SSH Explorer &amp; Hybrid Terminals</strong></sub></p>
+      <img src="assets/17-multi-host-terminals.png" width="100%" alt="Simultaneous Local and Multi-Cloud OS Integrated Terminals — Ubuntu GPU and Kali RedTeam shells with macOS, Ubuntu, Kali and Windows OS tab icons" />
+      <p align="center"><sub><strong>Simultaneous Local &amp; Multi-Cloud OS Terminals (macOS · Ubuntu · Kali · Windows)</strong></sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE Mirror Symmetry Mode — Native VS Code Explorer, Split Diff &amp; Simultaneous Multi-OS Terminals" />
+      <p align="center"><sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry — Native Explorer, Split Diff &amp; Multi-OS Terminals</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/18-vscode-extensions-compat.png" width="100%" alt="Native VS Code Extensions Marketplace Compatibility via Open VSX — Python Debugger, Claude Code, Python, Java &amp; Ruby LSP" />
+      <p align="center"><sub><strong>Full VS Code Extensions Ecosystem via Live Open VSX Marketplace</strong></sub></p>
     </td>
   </tr>
   <tr>
     <td colspan="2">
       <p align="center">
-        <img src="assets/05-cloud-host-studio.png" width="75%" alt="Cloud Host Studio — KPI Strip, Multi-OS Host Cards, Latency Test &amp; Non-Destructive VS Code Migration" /><br/>
-        <sub><strong>Cloud Host Studio — KPI Strip, Multi-OS Cards &amp; Non-Destructive SSH Config</strong></sub>
+        <img src="assets/05-cloud-host-studio.png" width="78%" alt="Cloud Host Studio — KPI Strip, Multi-OS Host Cards (Kali w/ ProxyJump, macOS, Ubuntu, Windows), Latency Test &amp; Non-Destructive VS Code Migration" /><br/>
+        <sub><strong>Zero-Server SSH Cloud Host Studio — Multi-OS Cards (Kali · macOS · Ubuntu · Windows) &amp; Non-Destructive SSH Config</strong></sub>
       </p>
     </td>
   </tr>

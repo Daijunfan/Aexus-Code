@@ -42,13 +42,14 @@
 
 Most AI developer setups force you to choose between a closed-source single-agent editor, detached terminal wrappers outside your IDE, or cloud workflow builders disconnected from Git and local CLIs.
 
-**Aexus Code** (`v1.1.0`) is a 100% open-source (**MIT**), local-first desktop workbench built on `Code - OSS` (`1.146.0`) with [Open VSX](https://open-vsx.org/) extensions and zero bundled Copilot telemetry, combining a full-parity **IDE (`IDE`)** and an extensible **Agent Development Environment (`ADE`)**:
+**Aexus Code** (`v1.1.0`) is a 100% open-source (**MIT**), local-first desktop workbench supercharged on `Code - OSS` (`1.146.0`) with [Open VSX](https://open-vsx.org/) VS Code extensions compatibility and zero bundled Copilot telemetry, unifying a full-parity **IDE (`IDE`)** and an extensible **Agent Development Environment (`ADE`)**:
 
-1. **Organization & Roles Studio ("Everything is Extensible")** — Start from **5 presets** (`Enterprise 4-Tier`, `Agile 3-Tier Startup`, `AI Research Lab`, `Security Red/Blue Audit`, `2-Tier Flat Swarm`) or author custom ranks with `{{variables}}` prompt templates, a **4-Slot DAG Binding bar** (`Orchestrator`, `Segment Owner`, `Adversarial Reviewer`, `Pure Executor`), an interactive **Rank × Fixed Kernel API Permission Matrix**, and lineage-enforced HMAC capability tokens across all 8 engines.
-2. **8 Native BYO-CLI Coding Engines (Visible Safe / Autonomous Controls)** — Orchestrate **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** locally with your own CLIs and subscriptions. Interactive sessions start in each engine's safe approval mode; a live **Status Bar pill** (`ADE: Safe Mode` / `ADE: Autonomous`) lets you see and toggle permission posture at a glance, while unattended DAG lanes require explicit per-project confirmation and keep Codex Workers bounded to `workspace-write` in their Git worktree by default.
-3. **Deterministic Engineering & Research DAGs** — Run parallel worktrees or file-scoped lanes with **upfront SHA-256 hash-pinned `verify:` checks** (with one-click revocation UI & CLI), **`files:` scope serialization**, **`max_concurrency` + critical-path scheduling**, **branch-isolated RED circuit breakers**, **Git-native cumulative diffs**, and a **2-stage zero-token-first Watchdog**.
-4. **Dynamic-Tier FinOps, Configurable Pricing & Budget Guardrails** — Track real-time `$USD` spend per active organization tier (preferring engine-reported costs when present), prompt-cache savings, custom rate cards (`aexus.ade.pricing`), and **Subscription (`$0` marginal)** mode — backed by **recipe-enforced `max_budget_usd` ceilings**, **pre-dispatch admission**, and **clean post-turn pauses**.
-5. **Smart Calm Sidebar, Rank-Filtered Inbox & Non-Destructive SSH Cloud Hosts** — Keep large multi-agent trees legible with compact hover-bloom badges, triage alerts with accurate kind badges (`Trust Gate`, `Budget Cap`, `Circuit Breaker`) and schema-driven rank filter pills, and mix local `file://` folders with zero-server `aexus-ssh://` hosts without ever mutating global `~/.ssh/config`.
+1. **One Panel for Multi-Project, Multi-OS Workspaces (`macOS` · `Ubuntu` · `Kali` · `Windows`)** — Manage local `file://` repositories and zero-server `aexus-ssh://` cloud projects side-by-side in a single sidebar, ignoring path and OS differences, with crisp platform badges, Smart Calm hover-bloom pills, a 1-click full-badge toggle, and a pinned viewport-aware **`✦ Secretary`**.
+2. **Simultaneous Local & Multi-Cloud Integrated Terminals** — Control your local macOS/Linux/Windows shell alongside multiple remote Linux, Kali, and Windows SSH cloud host terminals in split panes inside the same window — complete with per-OS terminal tab badges and zero `vscode-server` installation or `~/.ssh/config` mutation.
+3. **8 Native BYO-CLI Coding Engines in One ADE Sidebar** — Orchestrate **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** locally with official brand icons, your own subscriptions, visible **`ADE: Safe Mode`** / **`ADE: Autonomous`** status controls, and a rank-filtered **`ADE Inbox`** (`Trust Gate`, `Budget Cap`, `Circuit Breaker`).
+4. **Extensible Multi-Tier Organizations ("Everything is Extensible")** — Start from **5 presets** (`Enterprise 4-Tier`, `Agile 3-Tier Startup`, `AI Research Lab`, `Security Red/Blue Audit`, `2-Tier Flat Swarm`) or design custom ranks like filling in the blanks: author `{{variables}}` prompt templates, bind the **4 DAG slots**, toggle the **Rank × Fixed Kernel API Permission Matrix**, and enforce server-signed HMAC capability tokens.
+5. **Visual Engineering & Research Parallel DAGs + FinOps Guardrails** — Execute parallel Git worktrees or file-scoped lanes with Nested Dual-Shell Pods, **upfront SHA-256 hash-pinned `verify:` gates**, **`files:` scope serialization**, **`max_concurrency` scheduling**, **branch-isolated RED circuit breakers**, **2-stage zero-token-first Watchdog**, and **dynamic-tier FinOps budget caps**.
+6. **Full-Parity Native VS Code IDE & Open VSX Extension Compatibility** — Press `Alt+Cmd+A` (`Alt+Ctrl+A`) to flip instantly between **`ADE`** and **`IDE`** with 100% native `Code - OSS` editing, Git diffs, debugging, terminals, and live **Open VSX** marketplace compatibility for mainstream VS Code extensions (`Python`, `Python Debugger`, `Java`, `Ruby LSP`, `Claude Code`, and more).
 
 ---
 
@@ -101,7 +102,29 @@ flowchart TB
 
 ## Flagship Capabilities
 
-### 1. Organization & Roles Studio ("Everything is Extensible")
+### 1. Unified Multi-OS Multi-Project ADE Sidebar & Simultaneous Multi-Host Terminals
+
+Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**, **Kali Linux**, and **Windows** in one unified sidebar — and drive multiple local + cloud terminals side-by-side without juggling windows or installing remote daemons:
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/02-ade-hierarchy-and-diff.png" width="100%" alt="Unified Multi-Project Multi-OS ADE Command Center — macOS, Ubuntu, Kali and Windows projects with all 8 native coding agent engine icons, L1 to L4 badges and live Git diff" />
+      <p align="center"><sub><strong>One Panel, Multi-OS Projects &amp; 8-Engine ADE Hierarchy:</strong> Local Apple + cloud Ubuntu, Kali &amp; Windows projects, colorful engine icons, L1–L4 full badges, pinned <code>✦ Secretary</code> &amp; live diff.</sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/17-multi-host-terminals.png" width="100%" alt="Simultaneous Local and Multi-Cloud OS Integrated Terminals — Split Ubuntu GPU and Kali RedTeam shells alongside macOS, Ubuntu, Kali and Windows OS tab icons" />
+      <p align="center"><sub><strong>Simultaneous Local &amp; Multi-Cloud OS Terminals:</strong> Split Ubuntu H100 GPU + Kali RedTeam shells running live alongside Apple, Ubuntu, Kali &amp; Windows terminal tabs.</sub></p>
+    </td>
+  </tr>
+</table>
+
+- **Zero Path & OS Friction**: Mix local `file://` projects and zero-server `aexus-ssh://` hosts in the same tree with automatic platform icons (`macOS`, `Ubuntu`, `Kali`, `Windows`), pinned `✦ Secretary`, Smart Calm hover-bloom mode, and a **1-click full-badge toggle**.
+- **All 8 Native Coding Engines Side-by-Side**: Visual brand icons differentiate **Claude Code**, **Codex**, **Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** instantly across every tier (`L1`–`L4`) and every host.
+
+---
+
+### 2. Organization & Roles Studio ("Everything is Extensible")
 
 Define the exact multi-agent organization your team wants instead of being locked into one fixed hierarchy. Engineering and Research DAGs resolve four **structural work-tree slots** (`orchestrator`, `segment_owner`, `reviewer`, `executor`) directly from your active schema — and now you can view, bind, and validate all 4 slots live in Role Studio:
 
@@ -128,15 +151,22 @@ Define the exact multi-agent organization your team wants instead of being locke
 
 ---
 
-### 2. Deterministic DAG Guardrails, Nested Dual-Shell Pods & 6 Synchronized Blueprint Recipes
+### 3. Deterministic Engineering & Research Parallel DAGs, Nested Dual-Shell Pods & 6 Blueprint Recipes
 
-Right-click any top-level orchestrator (`Governor` / `Tech Lead` / `Coordinator`) on a local Git workspace and choose **`Engineering`** or **`Research`** to launch a visual, Mermaid+Markdown synchronized DAG:
+Right-click any top-level orchestrator (`Governor` / `Tech Lead` / `Coordinator`) on a local Git workspace and choose **`Engineering`** or **`Research`** to launch a visual, Mermaid+Markdown synchronized parallel DAG:
 
-<p align="center">
-  <img src="docs/assets/14-living-pods-interactive-demo.png" width="100%" alt="Armored Nested Dual-Shell Task Pods, 3-Stage Adversarial Rail, Worktree Lanes &amp; Release Gate (Simulated 0-Token Demo)" />
-  <br/>
-  <sub><em>Simulated 0-Token Demo preview:</em> Armored Nested Dual-Shell Task Pods (outer <code>EMPLOYEE · L3</code> review shell wrapping recessed inner <code>WORKER · L4</code> execution core) inside auto-partitioned <code>MGR · L2</code> lanes.</sub>
-</p>
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/14-living-pods-interactive-demo.png" width="100%" alt="Engineering Mode Parallel DAG — Armored Nested Dual-Shell Task Pods, 3x Worktree Fan-Out, Release Gate U1 &amp; Live FinOps Pill (Simulated 0-Token Demo)" />
+      <p align="center"><sub><strong>Engineering Mode DAG (Simulated 0-Token Demo):</strong> Nested Dual-Shell Pods (<code>L3</code> review shell wrapping <code>L4</code> pure core), <code>3×</code> worktree lanes &amp; Gate <code>U1</code>.</sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/19-research-mode-dag.png" width="100%" alt="Research Mode Parallel DAG — Warm Amber/Magenta Canvas with Multi-Track Hypothesis Probing, Quantitative Benchmark Harness and Methodology Peer Gate U1" />
+      <p align="center"><sub><strong>Research Mode Parallel DAG:</strong> Distinct warm amber/magenta canvas for multi-track hypothesis probing, benchmark harnesses &amp; peer methodology gates.</sub></p>
+    </td>
+  </tr>
+</table>
 
 - **Upfront SHA-256 Hash-Pinned `verify:` Checks & Revocation**: Untrusted or agent-modified `verify:` commands are gated **upfront at the start of `runTree` before any Worker runs** — never wasting tokens before human approval. Approved commands execute in a scrubbed environment (`AEXUS_ADE_*` stripped; POSIX detached process group or Windows `cmd.exe /d /s /c`) and can be inspected or revoked anytime via **`Aexus ADE: Manage Trusted Verify Commands...`** or `aexus-ade engineering verify-trust list|revoke`.
 - **`files:` Scope Serialization & `max_concurrency` Critical-Path Scheduling**: Declare per-node file ownership globs (`files: src/services/**`) so overlapping nodes serialize automatically in `shared` workspace mode, while `max_concurrency` caps parallel active pods prioritized by critical-path depth.
@@ -165,7 +195,7 @@ Right-click any top-level orchestrator (`Governor` / `Tech Lead` / `Coordinator`
 
 ---
 
-### 3. Safe Git Worktree Sandbox, Smart Calm Sidebar & Rank-Filtered Inbox
+### 4. Safe Git Worktree Sandbox, Smart Calm Sidebar & Rank-Filtered Inbox
 
 <table>
   <tr>
@@ -186,20 +216,28 @@ Right-click any top-level orchestrator (`Governor` / `Tech Lead` / `Coordinator`
 
 ---
 
-### 4. Zero-Server SSH Cloud Hosts (`aexus-ssh://`) & `ADE ⇄ IDE` Mirror Symmetry
+### 5. Supercharged VS Code IDE (`ADE ⇄ IDE`), Full Extensions Compatibility & Zero-Server SSH Cloud Hosts
+
+Aexus Code keeps 100% of native `Code - OSS` IDE ergonomics intact — Explorer, split editors, side-by-side diffs, multi-OS terminals, and live **[Open VSX](https://open-vsx.org/)** compatibility for mainstream VS Code marketplace extensions — while adding a Zero-Server SSH Cloud Host Studio:
 
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/assets/05-cloud-host-studio.png" width="100%" alt="Zero-Server SSH Cloud Host Studio — KPI Overview, Multi-OS Host Cards, Latency Check and VS Code Config Migration" />
-      <p align="center"><sub><strong>Zero-Server SSH Cloud Host Studio (Linux, macOS &amp; Windows)</strong></sub></p>
+      <img src="docs/assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE Mirror Symmetry — Native VS Code Explorer, Side-by-Side Diff and Simultaneous Local + Multi-Cloud OS Integrated Terminals" />
+      <p align="center"><sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry (<code>Alt+Cmd+A</code>):</strong> Full native VS Code Explorer, split diff &amp; live multi-OS terminals.</sub></p>
     </td>
     <td width="50%">
-      <img src="docs/assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE Mirror Symmetry — Hybrid Local and SSH Explorer, Split Editors and Integrated Terminals" />
-      <p align="center"><sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry &amp; Hybrid Terminals</strong></sub></p>
+      <img src="docs/assets/18-vscode-extensions-compat.png" width="100%" alt="Native VS Code Extensions Marketplace Compatibility via Open VSX — Python Debugger, Claude Code, Python, Red Hat Java, Ruby LSP" />
+      <p align="center"><sub><strong>Full VS Code Extensions Ecosystem (Open VSX):</strong> Install <code>Python Debugger</code>, <code>Claude Code</code>, <code>Python</code>, <code>Java</code>, <code>Ruby LSP</code> &amp; thousands more.</sub></p>
     </td>
   </tr>
 </table>
+
+<p align="center">
+  <img src="docs/assets/05-cloud-host-studio.png" width="88%" alt="Zero-Server SSH Cloud Host Studio — KPI Overview, Multi-OS Host Cards (Kali w/ ProxyJump, macOS, Ubuntu, Windows) and VS Code Config Migration" />
+  <br/>
+  <sub><strong>Zero-Server SSH Cloud Host Studio:</strong> Manage Kali Linux (with ProxyJump), macOS, Ubuntu GPU &amp; Windows SSH hosts in one console without installing <code>vscode-server</code> or mutating <code>~/.ssh/config</code>.</sub>
+</p>
 
 - **Zero Remote Daemon**: Edit remote files, view Git `HEAD` diffs, run interactive ADE agent sessions, and open remote SSH PTY terminals right beside local folders with **no `vscode-server` installed on remote hosts**.
 - **Non-Destructive `~/.ssh/config` Guarantee**: `syncUserSshDir` defaults to **`false`** — Aexus Code passes `-F <userDataDir>/ssh/effective_ssh_config` exclusively to its own SSH sessions/terminals and **never prepends `Include` or modifies your global `~/.ssh/config`**.

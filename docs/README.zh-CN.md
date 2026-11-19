@@ -42,13 +42,14 @@
 
 现有 AI 研发工具通常不得不在「闭源单线程 IDE」、「脱离编辑器的外部 Worktree 终端壳」与「脱离真实代码库与 Git 的云端节点画布」之间妥协。
 
-**Aexus Code**（`v1.1.0`）基于开源 `Code - OSS`（`1.146.0`）打造，采用 **MIT 开源协议**，默认接入开源 **[Open VSX](https://open-vsx.org/)** 扩展市场并彻底移除微软闭源 Copilot 遥测，在一个本地优先的桌面窗口中融合全功能 **IDE** 与可扩展的 **组织化智能体开发环境（ADE）**：
+**Aexus Code**（`v1.1.0`）基于开源 `Code - OSS`（`1.146.0`）深度魔改打造，采用 **MIT 开源协议**，默认接入开源 **[Open VSX](https://open-vsx.org/)** 市场并兼容绝大多数 VS Code 插件，同时彻底移除微软闭源 Copilot 遥测，在一个本地优先的桌面窗口中融合全功能 **IDE** 与可扩展的 **组织化智能体开发环境（ADE）**：
 
-1. **组织与职级工作室（"Everything is Extensible"）**——内置 **5 套组织预设**（`企业四级`、`敏捷三级创业团队`、`AI 科研实验室`、`红蓝安全审计`、`双层扁平蜂群`），支持填空式自定义职级、**四槽位 DAG 绑定栏**（`Orchestrator` / `Segment Owner` / `Adversarial Reviewer` / `Pure Executor`）、`{{variables}}` 提示词模板、**职级 × 固定内核 API 权限矩阵**，以及全 8 大引擎统一的血缘校验 HMAC 能力令牌。
-2. **8 大本机 BYO-CLI 编码引擎（可见的安全 / 全自动开关）**——使用你自己的本机 CLI 与订阅直连 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 与 **Pi**。交互式会话默认运行安全审批模式；底部**状态栏胶囊**（`ADE: Safe Mode` / `ADE: Autonomous`）随时展示并切换权限策略；自动 DAG 流水线需按项目显式确认，且 Codex 执行器默认限定在 Worktree 级 `workspace-write` 沙盒内。
-3. **确定性 Engineering & Research DAG 护栏**——支持 **派发前前置校验的 SHA-256 哈希锁定 `verify:`**（配可视化撤销面板与 CLI）、**`files:` 作用域串行化**、**`max_concurrency` + 关键路径调度**、**支路隔离的红色熔断器**、**Git 原生累计 Diff** 与 **零 Token 优先的两阶段 Watchdog**。
-4. **动态职级 FinOps、可配置定价与预算护栏**——按当前生效的组织职级实时统计 `$USD` 消耗（优先采用引擎上报费用）、缓存节省、自定义费率表（`aexus.ade.pricing`）与 **订阅制（`$0` 边际费用）模式**；内置模板自动应用 `max_budget_usd` 上限，并配合**派发前准入 + 回合后停机暂停**杜绝失控消耗。
-5. **Smart Calm 极简侧栏、精准分类 Inbox 与非破坏性 SSH 云主机**——侧栏采用紧凑悬停绽放徽章，统一 `ADE Inbox` 展示精准告警分类（`Trust Gate`、`Budget Cap`、`Circuit Breaker`）与动态职级筛选胶囊；同一窗口混排本地 `file://` 与免装机 `aexus-ssh://` 云主机，且默认绝不修改用户全局 `~/.ssh/config`。
+1. **一个面板管理多个项目，无视路径与系统差异（`macOS` · `Ubuntu` · `Kali` · `Windows`）**——在同一侧栏无缝混排本地 `file://` 仓库与免装机 `aexus-ssh://` 云端项目，自动呈现多平台图标、Smart Calm 悬停绽放徽章、一键全徽章切换与顶部常驻的视口感知 **`✦ Secretary`**。
+2. **一个面板同时掌控多个本地与云主机集成终端**——在同一个窗口内分屏直控本机 macOS/Linux/Windows 终端与多台 Ubuntu GPU、Kali 渗透、Windows 编译云主机终端，右侧标签自带彩色系统图标，零 `vscode-server` 侵入且绝不修改 `~/.ssh/config`。
+3. **新增 ADE 控制面，8 大本机 BYO-CLI 编码引擎同台协作**——使用你自己的本机 CLI 与订阅直连 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 与 **Pi**，官网辨识度彩色引擎图标一目了然，底部状态栏实时显示 **`ADE: Safe Mode` / `ADE: Autonomous`** 权限策略，并配按职级过滤的 **`ADE Inbox`**。
+4. **多职级角色分工 + 组织与职级工作室（"Everything is Extensible"）**——内置 **5 套组织预设**（`企业四级`、`敏捷三级创业团队`、`AI 科研实验室`、`红蓝安全审计`、`双层扁平蜂群`），支持像做填空题一样自定义职级、编写 `{{variables}}` 提示词、配置**四槽位 DAG 绑定栏**与**职级 × 固定内核 API 权限矩阵**，全链路服务端 HMAC 能力令牌鉴权。
+5. **DAG 可视化并行工作流与确定性护栏**——支持 Engineering / Research 双模式可视化并行 DAG、嵌套双壳舱、**派发前 SHA-256 哈希锁定 `verify:` 门禁**、**`files:` 作用域串行化**、**`max_concurrency` 关键路径调度**、**支路隔离红色熔断器**、**零 Token 优先 Watchdog** 与 **动态职级 FinOps 预算护栏**。
+6. **深度魔改版 VS Code，保留全套原生 IDE 功能并兼容市场插件**——随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**，100% 保留原生资源管理器、分屏 Diff、调试器、多端终端与 **Open VSX** 主流插件生态（`Python`、`Python Debugger`、`Java`、`Ruby LSP`、`Claude Code` 等开箱即装）。
 
 ---
 
@@ -101,7 +102,29 @@ flowchart TB
 
 ## 核心旗舰能力
 
-### 1. 组织与职级工作室（"Everything is Extensible"）
+### 1. 一个面板掌控多端多系统项目、8 大引擎 ADE 会话与多云主机集成终端
+
+在同一左侧栏统一管理 **macOS**、**Ubuntu**、**Kali Linux** 与 **Windows** 上的本地及云端项目，并在同一窗口内分屏直控多台本机 + 云主机集成终端：
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="一个面板管理多端多系统项目与 8 大引擎 ADE 指挥中枢 — macOS、Ubuntu、Kali、Windows 图标与全职级徽章" />
+      <p align="center"><sub><strong>一个面板管理多端项目 &amp; 8 大引擎 ADE 层级树：</strong>本机 Apple + 云端 Ubuntu/Kali/Windows 项目同屏管理、官方彩色引擎图标、L1–L4 全徽章与实时 Diff。</sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/17-multi-host-terminals.png" width="100%" alt="一个面板同时掌控多个本地与云主机终端 — Ubuntu GPU 与 Kali 分屏运行，右侧终端标签自带全平台彩色图标" />
+      <p align="center"><sub><strong>一个面板同控多个本地与云主机终端：</strong>Ubuntu H100 GPU 与 Kali 安全终端分屏齐发，右侧列表自带 Apple / Ubuntu / Kali / Windows 专属系统图标。</sub></p>
+    </td>
+  </tr>
+</table>
+
+- **彻底无视路径与系统差异**：在同一侧栏混排本地 `file://` 与免装机 `aexus-ssh://` 云端项目，自动识别平台图标（Apple / Ubuntu / Kali / Windows），顶部常驻 **`✦ Secretary`**，支持 Smart Calm 极简模式与**一键完整徽章展开**。
+- **8 大本机原生编码引擎同台协作**：**Claude Code**、**Codex**、**Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline**、**Pi** 官方辨识度彩色图标一眼区分，覆盖 L1–L4 全职级与多端主机。
+
+---
+
+### 2. 组织与职级工作室（"Everything is Extensible"）
 
 不再被绑死在单一固定组织结构里。Engineering 与 Research DAG 通过 4 个**结构化工作树槽位**（`orchestrator`、`segment_owner`、`reviewer`、`executor`）动态映射至当前生效的组织配置，并可在工作室内一键绑定与校验：
 
@@ -128,15 +151,22 @@ flowchart TB
 
 ---
 
-### 2. 确定性 DAG 护栏、装甲嵌套双壳舱与 6 套 1:1 同步蓝图模板
+### 3. 确定性 Engineering & Research 并行 DAG、嵌套双壳舱与 6 套蓝图模板
 
-在本地 Git 工作区中右键任意顶层编排者（`Governor` / `Tech Lead` / `Coordinator`）开启 **`Engineering`** 或 **`Research`**，即可启动与 Mermaid + Markdown 双向同步的可视化流水线：
+在本地 Git 工作区中右键任意顶层编排者（`Governor` / `Tech Lead` / `Coordinator`）开启 **`Engineering`** 或 **`Research`**，即可启动与 Mermaid + Markdown 双向同步的可视化并行流水线：
 
-<p align="center">
-  <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="装甲嵌套双壳任务舱、三段式对抗流水线、Worktree 泳道与人工发布门禁（零 Token 模拟演练预览）" />
-  <br/>
-  <sub><em>零 Token 模拟演练预览：</em>外层 <code>EMPLOYEE · L3</code> 验收壳四边包裹内层 <code>WORKER · L4</code> 纯净执行核，整体嵌于自动切分的 <code>MGR · L2</code> 泳道中。</sub>
-</p>
+<table>
+  <tr>
+    <td width="50%">
+      <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Engineering 模式并行 DAG — 装甲嵌套双壳舱、三路并行 Worktree、人工发布门禁 U1 与实时 FinOps 药丸（零 Token 模拟演练）" />
+      <p align="center"><sub><strong>Engineering 模式并行 DAG（零 Token 模拟演练）：</strong>嵌套双壳任务舱（外层 <code>L3</code> 验收包裹内层 <code>L4</code> 纯执行）、三路并行 Worktree 与门禁 <code>U1</code>。</sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/19-research-mode-dag.png" width="100%" alt="Research 模式并行 DAG — 暖琥珀/洋红科研画布、多轨假设探索、定量基准与同行评审门禁 U1" />
+      <p align="center"><sub><strong>Research 模式并行 DAG：</strong>专属暖琥珀/洋红画布，支持多轨假设探索、定量基准验证与同行方法论门禁 <code>U1</code>。</sub></p>
+    </td>
+  </tr>
+</table>
 
 - **派发前前置 SHA-256 哈希锁定 `verify:` 与撤销机制**：`runTree` 启动时在**派发任何 Worker 之前**即前置扫描未信任的 `verify:` 命令，避免在等待人工同意前浪费 Token。通过审核的命令在清洗后的环境（剥离 `AEXUS_ADE_*`；POSIX 独立进程组 / Windows `cmd.exe /d /s /c`）中执行，且随时可通过 **`Aexus ADE: Manage Trusted Verify Commands...`** 或 `aexus-ade engineering verify-trust list|revoke` 查看或撤销信任。
 - **`files:` 作用域串行化与 `max_concurrency` 关键路径调度**：为节点声明文件所有权 glob（如 `files: src/services/**`），`shared` 模式下存在交集的节点自动串行避免写冲突；`max_concurrency` 控制最大并行数并沿关键路径优先调度。
@@ -165,7 +195,7 @@ flowchart TB
 
 ---
 
-### 3. 安全 Git Worktree 沙盒、Smart Calm 侧栏与精准分类 Inbox
+### 4. 安全 Git Worktree 沙盒、Smart Calm 侧栏与精准分类 Inbox
 
 <table>
   <tr>
@@ -186,20 +216,28 @@ flowchart TB
 
 ---
 
-### 4. 免远端装机 SSH 云主机（`aexus-ssh://`）与 `ADE ⇄ IDE` 镜像对称
+### 5. 魔改版全功能 VS Code IDE（`ADE ⇄ IDE`）、主流插件兼容与免装机 SSH 云主机
+
+Aexus Code 完整保留原生 `Code - OSS` IDE 的全部生产力——资源管理器、分屏编辑器、实时 Git Diff、多端集成终端与 **[Open VSX](https://open-vsx.org/)** 主流 VS Code 扩展兼容，同时提供免远端装机的多系统 SSH 云主机工作室：
 
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/05-cloud-host-studio.png" width="100%" alt="免远端装机多系统 SSH 云主机中心 — KPI 指标、多平台卡片与 VS Code 历史配置迁移" />
-      <p align="center"><sub><strong>免装机多系统 SSH 云主机中心（Linux / macOS / Windows）</strong></sub></p>
+      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE 镜像对称模式 — 完整原生 VS Code 资源管理器、左右分屏 Diff 与多系统本地/云主机集成终端" />
+      <p align="center"><sub><strong>瞬切 <code>ADE ⇄ IDE</code> 镜像对称（<code>Alt+Cmd+A</code>）：</strong>完整原生 VS Code 资源管理器、分屏 Diff 与多端云主机终端。</sub></p>
     </td>
     <td width="50%">
-      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="ADE 与 IDE 镜像对称模式 — 本地与 SSH 混合资源管理器与双端集成终端" />
-      <p align="center"><sub><strong>瞬切 <code>ADE ⇄ IDE</code> 镜像对称与本地/远端混合终端</strong></sub></p>
+      <img src="assets/18-vscode-extensions-compat.png" width="100%" alt="兼容 VS Code 市场绝大多数插件（Open VSX 实时浏览）— Python Debugger、Claude Code、Python、Java、Ruby LSP" />
+      <p align="center"><sub><strong>兼容 VS Code 主流市场插件（Open VSX）：</strong>开箱安装 <code>Python Debugger</code>、<code>Claude Code</code>、<code>Python</code>、<code>Java</code>、<code>Ruby LSP</code> 等海量插件。</sub></p>
     </td>
   </tr>
 </table>
+
+<p align="center">
+  <img src="assets/05-cloud-host-studio.png" width="88%" alt="免远端装机多系统 SSH 云主机中心 — Kali（支持 ProxyJump 跳板机）、macOS、Ubuntu GPU、Windows 11 卡片与 VS Code 配置迁移" />
+  <br/>
+  <sub><strong>免远端装机多系统 SSH 云主机中心：</strong>统一管理 Kali（含 ProxyJump 跳板机）、macOS、Ubuntu GPU 与 Windows 云主机，无需安装 <code>vscode-server</code>，绝不改写 <code>~/.ssh/config</code>。</sub>
+</p>
 
 - **零远端后台**：在同一窗口直接编辑远端文件、查看 `HEAD` Diff、运行交互式 ADE 会话并打开远端 SSH 集成终端，**无需在目标服务器安装或升级 `vscode-server`**。
 - **非破坏性 `~/.ssh/config` 保证**：`syncUserSshDir` 默认为 **`false`**——Aexus Code 仅向自身的 SSH 会话与终端传入 `-F <userDataDir>/ssh/effective_ssh_config`，**绝不修改或向用户全局 `~/.ssh/config` 头部插入 `Include`**。
