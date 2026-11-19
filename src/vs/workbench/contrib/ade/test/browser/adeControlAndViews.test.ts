@@ -297,7 +297,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			empShowsSupervisor: empContext?.includes('Role: Employee') && empContext?.includes('Supervisor: Backend Manager'),
 			empHasEmployeeWorkerBoundary: Boolean(
 				empContext?.includes('Employee ≠ Worker')
-				&& empContext?.includes('绝不是 Worker')
+				&& empContext?.includes('Supervisory Reviewer')
 			),
 			empSupervisesWorkerL4: Boolean(
 				empContext?.includes('positioned strictly ABOVE Worker (L4)')

@@ -7,6 +7,23 @@ A curated tour of Aexus Code's surfaces across Dark Modern, Light Modern, DAG or
 
 ---
 
+## Organization & Roles Studio, Permission Matrix & Rank-Filtered Inbox
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="assets/15-org-role-studio-matrix.png" width="100%" alt="Organization & Roles Studio — Rank x Fixed Kernel API Permission Matrix, 5 Starter Presets & Smart Calm Sidebar" />
+      <p align="center"><sub><strong>Organization &amp; Roles Studio — <code>Rank × Fixed Kernel API</code> Permission Matrix &amp; Smart Calm Sidebar</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/16-smart-calm-and-inbox-ranks.png" width="100%" alt="Rank-Filtered ADE Inbox alongside Fill-in-the-Blank Rank Identity and Prompt Template Editor" />
+      <p align="center"><sub><strong>Rank-Filtered <code>ADE Inbox</code> (<code>All | Gov | Mgr | Emp | Wrk</code>) &amp; Rank Prompt Editor</strong></sub></p>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## Motion Clips *(6–10s Auto-Playing GIFs + HD 1440×900 MP4s)*
 
 <table>

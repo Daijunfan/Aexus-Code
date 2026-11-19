@@ -58,6 +58,12 @@ Most AI developer setups force you to choose between a closed-source single-agen
 
 Define the exact multi-agent organization your team wants instead of being locked into one fixed hierarchy. Engineering and Research DAGs resolve four **structural work-tree slots** (`orchestrator`, `segment_owner`, `reviewer`, `executor`) from your active schema — so DAG pipelines run cleanly under 2-tier, 3-tier, 4-tier, or custom ranks:
 
+<p align="center">
+  <img src="docs/assets/15-org-role-studio-matrix.png" width="100%" alt="Organization & Roles Studio — 5 Starter Presets, Rank x Fixed Kernel API Permission Matrix, Pure Worker 0-API Lock & Smart Calm Sidebar" />
+  <br/>
+  <sub><strong>Organization &amp; Roles Studio ("Everything is Extensible"):</strong> 5 starter presets, live <code>Rank × Fixed Kernel API</code> permission matrix with <code>High Privilege</code> badges, permanent <code>Pure · 0</code> leaf Worker isolation, and Smart Calm sidebar hierarchy.</sub>
+</p>
+
 | Starter Preset | Rank Ladder (Top → Leaf Pure Executor) | Work-Tree Slot Mapping (`orch / seg / rev / exec`) |
 | :--- | :--- | :--- |
 | **`default-4tier`** *(Default)* | `Governor (L1)` → `Manager (L2)` → `Employee (L3)` → `Worker (L4 Pure)` | `governor / manager / employee / worker` |
@@ -103,11 +109,18 @@ Right-click any top-level orchestrator (`Governor` / `Tech Lead` / `Coordinator`
 
 ### 3. Safe Git Worktree Sandbox, Smart Calm Sidebar & Rank-Filtered Inbox
 
-<p align="center">
-  <img src="docs/assets/11-worktree-merge-workbench.png" width="100%" alt="Per-Lane Git Worktree Sandbox and Merge / Prune Workbench" />
-  <br/>
-  <sub>Per-segment Git worktrees on <code>aexus-eng/*</code> branches with in-studio merge/cleanup controls, dirty-tree preflight, and preserved user Git identity.</sub>
-</p>
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/16-smart-calm-and-inbox-ranks.png" width="100%" alt="Rank-Filtered ADE Inbox (All / Gov / Mgr / Emp / Wrk) alongside Fill-in-the-Blank Rank Identity and Prompt Template Editor" />
+      <p align="center"><sub><strong>Rank-Filtered <code>ADE Inbox</code> &amp; Fill-in-the-Blank Rank Prompt Editor</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/11-worktree-merge-workbench.png" width="100%" alt="Per-Lane Git Worktree Sandbox and Merge / Prune Workbench" />
+      <p align="center"><sub><strong>Per-Lane <code>aexus-eng/*</code> Git Worktree Sandbox &amp; Merge Workbench</strong></sub></p>
+    </td>
+  </tr>
+</table>
 
 - **Safe Git Worktree Lifecycle**: Blueprint and runtime state live outside your repository under `~/.aexus-code/engineering/` and `~/.aexus-code/research/`. When `worktree` isolation is enabled, parallel lanes execute on dedicated **`aexus-eng/*` Git branches** with dirty-tree preflight before merging, non-destructive branch creation (no forced `-B` reset or `-D` drop by default), your own `git config user.name` / `user.email` preserved (plus a `Co-authored-by` trailer), and explicit pause + Inbox alert if worktree creation fails.
 - **Smart Calm Sidebar**: Session rows default to compact hover-bloom rank/engine indicators to cut visual clutter, paired with a **1-click full-badge toggle** when you want every rank and status pill visible simultaneously, plus the pinned viewport-aware **`✦ Secretary`** at the top.

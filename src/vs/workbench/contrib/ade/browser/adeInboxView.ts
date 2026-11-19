@@ -127,7 +127,10 @@ export function groupAdeInboxItemsByLane(items: readonly IAdeInboxItem[]): Map<'
 		lanes.set(lane, []);
 	}
 	for (const item of items) {
-		const lane: 'critical' | 'gate' | 'info' | 'resolved' = item.resolved ? 'resolved' : resolveAdeInboxSeverity(item);
+		const rawLane = item.resolved ? 'resolved' : resolveAdeInboxSeverity(item);
+		const lane: 'critical' | 'gate' | 'info' | 'resolved' = lanes.has(rawLane as 'critical' | 'gate' | 'info' | 'resolved')
+			? (rawLane as 'critical' | 'gate' | 'info' | 'resolved')
+			: 'info';
 		lanes.get(lane)!.push(item);
 	}
 	return lanes;

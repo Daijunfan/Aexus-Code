@@ -278,13 +278,6 @@
 					},
 					"additionalProperties": false
 				},
-				"aexus.ade.autonomousMode": {
-					"type": "boolean",
-					"default": false,
-					"scope": "application",
-					"restricted": true,
-					"description": "Allow interactive Coding Agent sessions to default to autonomous auto-approve execution modes instead of safe approval modes (acceptEdits, workspace-write + on-request, ask). Automated Engineering DAG runs remain controlled separately."
-				},
 				"aexus.ade.nativeExtensionRoleBridge.enabled": {
 					"type": "boolean",
 					"default": true,

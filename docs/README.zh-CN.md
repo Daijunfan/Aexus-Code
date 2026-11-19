@@ -58,6 +58,12 @@
 
 不再被绑死在单一固定组织结构里。Engineering 与 Research DAG 通过 4 个**结构化工作树槽位**（`orchestrator`、`segment_owner`、`reviewer`、`executor`）动态映射至当前生效的组织配置——无论是 2 级、3 级、4 级还是完全自定义的职级梯队，DAG 流水线均可无障碍运行：
 
+<p align="center">
+  <img src="assets/15-org-role-studio-matrix.png" width="100%" alt="组织与职级工作室 — 5 套内置预设、职级×固定内核 API 权限矩阵、纯净 Worker 零权限锁定与 Smart Calm 侧栏" />
+  <br/>
+  <sub><strong>组织与职级工作室（"Everything is Extensible"）：</strong>5 套内置预设、实时 <code>职级 × 固定内核 API</code> 权限矩阵（含 <code>High Privilege</code> 高危标记）、叶子 Worker 永久 <code>Pure · 0</code> 锁定，以及 Smart Calm 极简侧栏层级树。</sub>
+</p>
+
 | 内置组织预设 | 职级梯队（顶层 → 叶子纯净执行器） | 工作树槽位映射（`orch / seg / rev / exec`） |
 | :--- | :--- | :--- |
 | **`default-4tier`** *（默认）* | `Governor (L1)` → `Manager (L2)` → `Employee (L3)` → `Worker (L4 Pure)` | `governor / manager / employee / worker` |
@@ -103,11 +109,18 @@
 
 ### 3. 安全 Git Worktree 沙盒、Smart Calm 侧栏与按职级过滤 Inbox
 
-<p align="center">
-  <img src="assets/11-worktree-merge-workbench.png" width="100%" alt="按泳道隔离的 Git Worktree 沙盒与合并/清理工作台" />
-  <br/>
-  <sub>并行泳道运行于独立 <code>aexus-eng/*</code> Git 分支，内置脏工作树预检、保留用户 Git 身份及画布内一键合并/清理。</sub>
-</p>
+<table>
+  <tr>
+    <td width="50%">
+      <img src="assets/16-smart-calm-and-inbox-ranks.png" width="100%" alt="按职级过滤的 ADE Inbox（All / Gov / Mgr / Emp / Wrk）与填空式职级提示词编辑器" />
+      <p align="center"><sub><strong>按职级过滤 <code>ADE Inbox</code> &amp; 填空式职级提示词编辑器</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/11-worktree-merge-workbench.png" width="100%" alt="按泳道隔离的 Git Worktree 沙盒与合并/清理工作台" />
+      <p align="center"><sub><strong>独立 <code>aexus-eng/*</code> Git Worktree 沙盒与合并/清理工作台</strong></sub></p>
+    </td>
+  </tr>
+</table>
 
 - **安全的 Git Worktree 生命周期**：DAG 蓝图与运行态保存在仓库外部的 `~/.aexus-code/engineering/` 与 `~/.aexus-code/research/`。开启 `worktree` 模式时，并行泳道使用独立的 **`aexus-eng/*` Git 分支**，合并前执行脏工作树预检、避免破坏性 `-B` 强行重置或默认 `-D` 删分支、保留用户自身的 `git config user.name/email`（附带 `Co-authored-by` 尾注），且 Worktree 创建失败时会显式暂停并发送 Inbox 告警，绝不静默降级并行写入共享根目录。
 - **Smart Calm 极简侧栏**：会话行默认展示紧凑悬停绽放徽章以降低视觉干扰，顶部提供**一键切换完整徽章视图**按钮，并在最上方常驻具备视口感知能力的 **`✦ Secretary`**。

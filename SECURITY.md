@@ -26,6 +26,7 @@ Aexus Code exposes a local control plane (`aexus-ade`) strictly on loopback loca
   - The main-process `AdeControlServer` generates a 32-byte `capabilitySecret` held **only in memory** (never written to disk).
   - When spawning an orchestrated agent session, the runtime requests a server-signed capability token (`aexus-cap.<base64url(payload)>.<hmacSha256Hex>`) bound to the session ID and organizational rank, injects `AEXUS_ADE_SESSION_TOKEN` and `AEXUS_ADE_SOCKET`, and **strips `AEXUS_ADE_CONTROL_FILE` and `AEXUS_ADE_TOKEN`** from the child environment.
   - On every incoming request carrying a capability token, the server verifies the HMAC in constant time and **forges/overwrites `caller` server-side from the signed token** — agents cannot spoof `secretary`, elevate their rank, or bypass permission checks by clearing environment variables.
+  - **Local OS-User Threat Boundary**: Human terminal invocations of `aexus-ade` authenticate with the per-instance `0600` master metadata file under `~/.aexus-code/`. Because local coding agents run under the same OS user account on a single-user workstation, server-signed capability tokens enforce rank least-privilege against prompt injection and CLI misuse, rather than acting as an OS-level container or VM boundary against an adversarial local process with arbitrary filesystem read access.
 - **Pure Worker Isolation**:
   - Sessions assigned to a `pureExecution` rank (such as `Worker [L4]`, `Builder`, or `Agent`) have `AEXUS_ADE_CONTROL_FILE`, `AEXUS_ADE_TOKEN`, `AEXUS_ADE_SOCKET`, and `AEXUS_ADE_CALLER` stripped, the bundled `aexus-ade` binary directory removed from `PATH`, and receive an explicit server-signed deny token (`pure: true`) that `AdeControlServer` rejects immediately.
 - **Least-Privilege API Splits**:
@@ -64,6 +65,7 @@ When you orchestrate third-party coding agent extensions inside Aexus Code's ext
 
 - **Zero Private Key Handling**: Cloud Host management and automatic VS Code SSH migration read only public host aliases, hostnames, usernames, ports, `ProxyJump` entries, and remote directory history from `~/.ssh/config` and VS Code metadata. Private key contents and passphrases are never copied, stored, or logged.
 - **OpenSSH `BatchMode=yes` & Key/Agent Auth**: Non-interactive filesystem and Git transport invokes system OpenSSH with `BatchMode=yes`, which **requires key-based authentication (or a running `ssh-agent`)** — interactive password prompts and non-cached 2FA challenges are not supported on background file transport.
+- **Host Key Verification Policy**: Aexus Code respects any `StrictHostKeyChecking` directive configured in your `~/.ssh/config` via OpenSSH first-match-wins semantics, falling back to `accept-new` only when neither the host entry nor `~/.ssh/config` specifies a policy.
 - **Platform Multiplexing Behavior**:
   - **macOS & Linux**: Uses OpenSSH `ControlMaster` connection multiplexing for low-latency remote file and Git operations.
   - **Windows**: OpenSSH on Windows does not support Unix-socket `ControlMaster`; Aexus Code uses direct OpenSSH connections per command.
