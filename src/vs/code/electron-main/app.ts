@@ -1629,7 +1629,7 @@ export class CodeApplication extends Disposable {
 		const isCustomTestDataDir = Boolean(this.environmentMainService.args['user-data-dir'] || this.environmentMainService.args.extensionTestsPath);
 		const adeCloudHostNodeService = this._register(new AdeCloudHostNodeService({
 			userDataPath: this.environmentMainService.userDataPath,
-			syncUserSshDir: !isCustomTestDataDir,
+			syncUserSshDir: false,
 			autoImportOnFirstLoad: !isCustomTestDataDir,
 			logService: this.logService,
 		}));

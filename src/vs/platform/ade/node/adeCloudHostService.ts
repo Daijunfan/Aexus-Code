@@ -31,6 +31,7 @@ import {
 	sanitizeSshAlias,
 	toRemoteNativePath,
 } from '../common/adeCloudHosts.js';
+import { stripAdeControlEnv } from '../common/adeControl.js';
 import { resolveDefaultVsCodePaths } from './vscodeConfigMigration.js';
 
 export interface IAdeCloudHostNodeServiceOptions {
@@ -441,7 +442,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		this.userDataPath = options.userDataPath ?? defaultAexusUserDataPath(this.homedir);
 		this.vsCodeUserDataDir = options.vsCodeUserDataDir ?? resolveDefaultVsCodePaths(this.homedir).userDataDir;
 		this.defaultSshConfigPath = options.sshConfigPath ?? path.join(this.homedir, '.ssh', 'config');
-		this.syncUserSshDir = options.syncUserSshDir ?? !options.userDataPath;
+		this.syncUserSshDir = options.syncUserSshDir ?? false;
 		this.autoImportOnFirstLoad = options.autoImportOnFirstLoad ?? true;
 		this.sshExecutable = options.sshExecutable ?? resolveDefaultSshExecutable();
 		this.logService = options.logService;
@@ -1197,7 +1198,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				windowsHide: true,
 				stdio: ['pipe', 'pipe', 'pipe'],
 				env: {
-					...process.env,
+					...stripAdeControlEnv(process.env),
 					SSH_ASKPASS_REQUIRE: 'never',
 					DISPLAY: '',
 				},

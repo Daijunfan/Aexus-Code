@@ -18,6 +18,30 @@ export const ADE_CONTROL_META_NAME = 'ade-control.json';
 export const ADE_CAPABILITY_TOKEN_PREFIX = 'aexus-cap.';
 export const ADE_MINT_SESSION_TOKEN_ACTION = 'auth.mintSessionToken';
 
+export const ADE_CONTROL_ENV_KEYS = [
+	'AEXUS_ADE_CONTROL_FILE',
+	'AEXUS_ADE_TOKEN',
+	'AEXUS_ADE_SOCKET',
+	'AEXUS_ADE_SESSION_TOKEN',
+	'AEXUS_ADE_CALLER',
+] as const;
+
+const ADE_CONTROL_ENV_KEY_SET = new Set<string>(ADE_CONTROL_ENV_KEYS);
+
+/**
+ * Returns a shallow copy of `env` with all local ADE control-plane credentials and
+ * routing variables removed (case-insensitively for Windows compatibility).
+ */
+export function stripAdeControlEnv<T extends Record<string, string | undefined>>(env: T): T {
+	const cleaned: Record<string, string | undefined> = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (!ADE_CONTROL_ENV_KEY_SET.has(key.toUpperCase())) {
+			cleaned[key] = value;
+		}
+	}
+	return cleaned as T;
+}
+
 export type AdeBuiltInAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate';
 export type AdeAgentRole = AdeBuiltInAgentRole | (string & {});
 export type AdeSessionRank = AdeAgentRole | 'worker';

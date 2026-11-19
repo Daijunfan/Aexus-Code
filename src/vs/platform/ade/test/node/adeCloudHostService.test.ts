@@ -780,6 +780,44 @@ suite('AdeCloudHosts', () => {
 			assert.ok(managedContent.includes('ProxyJump GPU-server'));
 			assert.ok(managedContent.includes('HostKeyAlias vmlab-gpubupt208-ubuntu-target1'));
 		});
+
+		test('defaults syncUserSshDir to false and never mutates ~/.ssh/config or creates ~/.ssh/aexus-code-hosts.conf', async () => {
+			const homedir = path.join(tmpDir, 'home');
+			const userSshCfg = path.join(homedir, '.ssh', 'config');
+			const originalContent = 'Host personal\n    HostName personal.example.com\n    StrictHostKeyChecking yes\n';
+			await writeText(userSshCfg, originalContent);
+
+			const prevXdg = process.env.XDG_CONFIG_HOME;
+			const prevAppData = process.env.APPDATA;
+			delete process.env.XDG_CONFIG_HOME;
+			delete process.env.APPDATA;
+			try {
+				// Omit BOTH `syncUserSshDir` and `userDataPath` to verify the default never touches ~/.ssh/config.
+				const svc = disposables.add(new AdeCloudHostNodeService({
+					homedir,
+					vsCodeUserDataDir: path.join(tmpDir, 'vscode'),
+					sshConfigPath: userSshCfg,
+					autoImportOnFirstLoad: false,
+				}));
+
+				await svc.upsertHost({
+					name: 'GPU Cluster',
+					alias: 'gpu-cluster',
+					hostName: '10.42.8.100',
+					user: 'ubuntu',
+					strictHostKeyChecking: 'no',
+				});
+
+				assert.strictEqual(await fs.readFile(userSshCfg, 'utf8'), originalContent);
+				assert.strictEqual(await exists(path.join(homedir, '.ssh', 'aexus-code-hosts.conf')), false);
+
+				const effectiveCfg = await fs.readFile(await svc.getEffectiveSshConfigPath(), 'utf8');
+				assert.ok(effectiveCfg.includes(`Include "${userSshCfg}"`));
+			} finally {
+				if (prevXdg === undefined) { delete process.env.XDG_CONFIG_HOME; } else { process.env.XDG_CONFIG_HOME = prevXdg; }
+				if (prevAppData === undefined) { delete process.env.APPDATA; } else { process.env.APPDATA = prevAppData; }
+			}
+		});
 	});
 
 	(isWindows ? suite.skip : suite)('remote transport', () => {
@@ -1012,6 +1050,67 @@ suite('AdeCloudHosts', () => {
 			await svc.testConnection('explicit-policy');
 			const explicitArgs = await fs.readFile(argsLog, 'utf8');
 			assert.strictEqual(explicitArgs.includes('StrictHostKeyChecking=yes'), true, 'CLI should pass explicit per-host StrictHostKeyChecking');
+		});
+
+		test('strips all AEXUS_ADE_* control-plane env vars before spawning ssh', async () => {
+			const envLog = path.join(tmpDir, 'ssh-env.log');
+			const spySsh = path.join(tmpDir, 'spy-env-ssh.sh');
+			await fs.writeFile(spySsh, [
+				'#!/bin/sh',
+				`{`,
+				`  echo "CONTROL_FILE=\${AEXUS_ADE_CONTROL_FILE:-}"`,
+				`  echo "TOKEN=\${AEXUS_ADE_TOKEN:-}"`,
+				`  echo "SOCKET=\${AEXUS_ADE_SOCKET:-}"`,
+				`  echo "SESSION_TOKEN=\${AEXUS_ADE_SESSION_TOKEN:-}"`,
+				`  echo "CALLER=\${AEXUS_ADE_CALLER:-}"`,
+				`  echo "BENIGN=\${AEXUS_BENIGN_SSH_TEST:-}"`,
+				`} > "${envLog}"`,
+				'echo "Linux (ubuntu)|/home/tester"',
+				'',
+			].join('\n'), { encoding: 'utf8', mode: 0o755 });
+			await fs.chmod(spySsh, 0o755);
+
+			const testVars: Record<string, string> = {
+				AEXUS_ADE_CONTROL_FILE: '/tmp/secret-control.json',
+				AEXUS_ADE_TOKEN: 'master-secret-token',
+				AEXUS_ADE_SOCKET: '/tmp/secret-control.sock',
+				AEXUS_ADE_SESSION_TOKEN: 'aexus-cap.secret.sig',
+				AEXUS_ADE_CALLER: 'governor',
+				AEXUS_BENIGN_SSH_TEST: 'preserved',
+			};
+			const prev: Record<string, string | undefined> = {};
+			for (const [k, v] of Object.entries(testVars)) {
+				prev[k] = process.env[k];
+				process.env[k] = v;
+			}
+			try {
+				const homedir = path.join(tmpDir, 'home');
+				const svc = disposables.add(new AdeCloudHostNodeService({
+					userDataPath: path.join(tmpDir, 'aexus'),
+					homedir,
+					vsCodeUserDataDir: path.join(tmpDir, 'vscode'),
+					sshConfigPath: path.join(homedir, '.ssh', 'config'),
+					autoImportOnFirstLoad: false,
+					sshExecutable: spySsh,
+				}));
+				await svc.upsertHost({ name: 'Env Scrub Box', alias: 'env-scrub', hostName: '10.0.0.12' });
+				const res = await svc.testConnection('env-scrub');
+				assert.strictEqual(res.ok, true);
+
+				const captured = await fs.readFile(envLog, 'utf8');
+				assert.deepStrictEqual(captured.trim().split('\n'), [
+					'CONTROL_FILE=',
+					'TOKEN=',
+					'SOCKET=',
+					'SESSION_TOKEN=',
+					'CALLER=',
+					'BENIGN=preserved',
+				]);
+			} finally {
+				for (const [k, v] of Object.entries(prev)) {
+					if (v === undefined) { delete process.env[k]; } else { process.env[k] = v; }
+				}
+			}
 		});
 	});
 });

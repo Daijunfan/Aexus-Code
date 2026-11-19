@@ -15,8 +15,10 @@ import {
 	ADE_PURE_WORKER_FALLBACK_DENY_TOKEN,
 	AgentChildIdentity,
 	buildAgentChildEnv,
+	computeAgentIdentityScopeKey,
 	isPureWorkerDenyToken,
 	isPureWorkerIdentity,
+	SHARED_PURE_SCOPE_KEY,
 	stripDirectoriesFromPath,
 } from './roleBridgeShared';
 
@@ -165,11 +167,10 @@ export function isAutonomousModeEnabled(): boolean {
 	}
 }
 
-export function agentIdentityScopeKey(sessionId: string, identity?: AgentChildIdentity): string {
-	if (isPureWorkerIdentity(identity)) {
-		return 'pure';
-	}
-	return `orch:${sessionId}:${identity!.callerRole!.trim().toLowerCase()}`;
+export { SHARED_PURE_SCOPE_KEY };
+
+export function agentIdentityScopeKey(sessionId: string, identity?: AgentChildIdentity, cwd?: string): string {
+	return computeAgentIdentityScopeKey(sessionId, identity, cwd);
 }
 
 interface MasterControlConnection {

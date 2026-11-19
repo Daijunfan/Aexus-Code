@@ -9,7 +9,7 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
-import { computeDoctorExitCode, parseCliCommand, runCli } from '../src/adeCli.ts';
+import { ADE_CLI_SCHEMA_VERSION, ADE_CLI_VERSION, computeDoctorExitCode, HELP_TEXT, parseCliCommand, runCli } from '../src/adeCli.ts';
 
 const CWD = path.join(os.tmpdir(), 'aexus-ade-cli');
 
@@ -180,11 +180,12 @@ describe('runCli version', () => {
 		];
 		assert.deepStrictEqual({ exitCodes, outputs }, {
 			exitCodes: [0, 0, 0],
-			outputs: Array.from({ length: 3 }, () => 'aexus-ade 1.0.0 (Aexus Code / Code - OSS 1.146.0)\n'),
+			outputs: Array.from({ length: 3 }, () => `aexus-ade ${ADE_CLI_VERSION} (Aexus Code / Code - OSS 1.146.0)\n`),
 		});
+		assert.strictEqual(ADE_CLI_VERSION, '1.1.0');
 	});
 
-	test('prints structured JSON when --json is passed', async () => {
+	test('prints structured JSON with schemaVersion when --json is passed', async () => {
 		let stdout = '';
 		const exitCode = await runCli(['--version', '--json'], {
 			stdout: text => { stdout += text; },
@@ -193,14 +194,14 @@ describe('runCli version', () => {
 		});
 		assert.deepStrictEqual({ exitCode, version: JSON.parse(stdout) }, {
 			exitCode: 0,
-			version: { cli: 'aexus-ade', version: '1.0.0', engineBaseline: '1.146.0' },
+			version: { schemaVersion: ADE_CLI_SCHEMA_VERSION, cli: 'aexus-ade', version: '1.1.0', engineBaseline: '1.146.0' },
 		});
 	});
 });
 
-describe('runCli completion', () => {
-	test('emits a completion script for bash, zsh, and fish covering the top-level groups', async () => {
-		const scripts = await Promise.all((['bash', 'zsh', 'fish'] as const).map(async shell => {
+describe('runCli completion & HELP_TEXT', () => {
+	test('emits completion scripts for bash, zsh, fish, and powershell covering role, generate, demo, and verify-trust', async () => {
+		const scripts = await Promise.all((['bash', 'zsh', 'fish', 'powershell'] as const).map(async shell => {
 			let stdout = '';
 			const exitCode = await runCli(['completion', shell], {
 				stdout: text => { stdout += text; },
@@ -212,13 +213,34 @@ describe('runCli completion', () => {
 		for (const { shell, exitCode, stdout } of scripts) {
 			assert.strictEqual(exitCode, 0, shell);
 			assert.match(stdout, /aexus-ade/, shell);
-			for (const token of ['doctor', 'completion', 'status', 'mode', 'view', 'project', 'host', 'engine', 'session', 'secretary', 'engineering', 'inbox', 'demo', 'watchdog-action']) {
+			for (const token of [
+				'doctor', 'completion', 'status', 'mode', 'view', 'role', 'project', 'host',
+				'engine', 'session', 'secretary', 'engineering', 'inbox',
+				'apply-preset', 'set-tier', 'presets', 'reset',
+				'demo', 'generate', 'verify-trust', 'revoke', 'watchdog-action',
+			]) {
 				assert.ok(stdout.includes(token), `${shell} completion is missing ${token}`);
 			}
 		}
 		assert.match(scripts.find(script => script.shell === 'bash')!.stdout, /complete -F _aexus_ade aexus-ade/);
 		assert.match(scripts.find(script => script.shell === 'zsh')!.stdout, /^#compdef aexus-ade/m);
 		assert.match(scripts.find(script => script.shell === 'fish')!.stdout, /^# fish completion for aexus-ade/m);
+		assert.match(scripts.find(script => script.shell === 'powershell')!.stdout, /Register-ArgumentCompleter -Native -CommandName aexus-ade/);
+
+		// `pwsh` alias resolves to PowerShell completion script.
+		let pwshOut = '';
+		const pwshCode = await runCli(['completion', 'pwsh'], { stdout: t => { pwshOut += t; }, stderr: () => { }, env: {} });
+		assert.strictEqual(pwshCode, 0);
+		assert.strictEqual(pwshOut, scripts.find(script => script.shell === 'powershell')!.stdout);
+	});
+
+	test('HELP_TEXT documents engineering generate, verify-trust, role subcommands, and powershell completions', () => {
+		assert.ok(HELP_TEXT.includes('completion <bash|zsh|fish|powershell>'));
+		assert.ok(HELP_TEXT.includes('engineering generate '));
+		assert.ok(HELP_TEXT.includes('engineering verify-trust list'));
+		assert.ok(HELP_TEXT.includes('engineering verify-trust revoke'));
+		assert.ok(HELP_TEXT.includes('role apply-preset'));
+		assert.ok(HELP_TEXT.includes('role set-tier'));
 	});
 
 	test('rejects an unknown or missing shell', async () => {
@@ -226,15 +248,35 @@ describe('runCli completion', () => {
 		const io = { stdout: (text: string) => { errors.push(text); }, stderr: (text: string) => { errors.push(text); }, env: {} };
 		const exitCodes = [
 			await runCli(['completion'], io),
-			await runCli(['completion', 'powershell'], io),
+			await runCli(['completion', 'tcsh'], io),
 		];
 		assert.deepStrictEqual({ exitCodes, errors }, {
 			exitCodes: [1, 1],
 			errors: [
-				'Error: Usage: aexus-ade completion <bash|zsh|fish>\n',
-				'Error: Usage: aexus-ade completion <bash|zsh|fish>\n',
+				'Error: Usage: aexus-ade completion <bash|zsh|fish|powershell>\n',
+				'Error: Usage: aexus-ade completion <bash|zsh|fish|powershell>\n',
 			],
 		});
+	});
+});
+
+describe('parseCliCommand engineering verify-trust', () => {
+	test('routes verify-trust list and revoke with hash, --all, and --project', () => {
+		assert.deepStrictEqual([
+			parseCliCommand(['engineering', 'verify-trust', 'list'], CWD),
+			parseCliCommand(['engineering', 'verify-trust', 'list', '--project', './repo'], CWD),
+			parseCliCommand(['engineering', 'verify-trust', 'revoke', 'sha256-abc'], CWD),
+			parseCliCommand(['engineering', 'verify-trust', 'revoke', '--all', '--project', './repo'], CWD),
+		], [
+			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.list', params: {} },
+			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.list', params: { project: path.join(CWD, 'repo') } },
+			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.revoke', params: { hash: 'sha256-abc' } },
+			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.revoke', params: { all: true, project: path.join(CWD, 'repo') } },
+		]);
+		assert.throws(
+			() => parseCliCommand(['engineering', 'verify-trust', 'revoke'], CWD),
+			/Usage: aexus-ade engineering verify-trust revoke/,
+		);
 	});
 });
 
@@ -257,6 +299,8 @@ describe('parseCliCommand role customization & custom rank slugs', () => {
 			parseCliCommand(['role', 'apis', '--json']),
 			parseCliCommand(['role', 'presets']),
 			parseCliCommand(['role', 'preset', 'startup-3tier']),
+			parseCliCommand(['role', 'apply-preset', 'startup-3tier']),
+			parseCliCommand(['role', 'set-tier', 's-1', 'tech-lead']),
 			parseCliCommand(['role', 'reset']),
 			parseCliCommand(['role', 'studio', 'qa-auditor']),
 			parseCliCommand(['session', 'create', '--role', 'qa-auditor', '--title', 'Audit Lead', '--no-open']),
@@ -266,6 +310,8 @@ describe('parseCliCommand role customization & custom rank slugs', () => {
 			{ help: false, json: true, windowId: undefined, action: 'role.apis', params: {} },
 			{ help: false, json: false, windowId: undefined, action: 'role.presets', params: {} },
 			{ help: false, json: false, windowId: undefined, action: 'role.schema.set', params: { presetId: 'startup-3tier' } },
+			{ help: false, json: false, windowId: undefined, action: 'role.schema.set', params: { presetId: 'startup-3tier' } },
+			{ help: false, json: false, windowId: undefined, action: 'session.setRole', params: { id: 's-1', role: 'tech-lead' } },
 			{ help: false, json: false, windowId: undefined, action: 'role.schema.reset', params: {} },
 			{ help: false, json: false, windowId: undefined, action: 'role.studio.open', params: { rankId: 'qa-auditor' } },
 			{ help: false, json: false, windowId: undefined, action: 'session.create', params: { open: false, noOpen: true, title: 'Audit Lead', role: 'qa-auditor' } },
@@ -315,6 +361,8 @@ describe('runCli doctor --json', () => {
 		});
 		assert.deepStrictEqual({ exitCode, stderr }, { exitCode: 1, stderr: '' });
 		const report = JSON.parse(stdout) as {
+			readonly schemaVersion: number;
+			readonly aexusVersion: string;
 			readonly platform: string;
 			readonly arch: string;
 			readonly projectPath: string;
@@ -325,6 +373,8 @@ describe('runCli doctor --json', () => {
 			readonly summary: { readonly enginesReady: number; readonly enginesTotal: number };
 		};
 		assert.deepStrictEqual({
+			schemaVersion: report.schemaVersion,
+			aexusVersion: report.aexusVersion,
 			platform: report.platform,
 			arch: report.arch,
 			projectPath: report.projectPath,
@@ -334,6 +384,8 @@ describe('runCli doctor --json', () => {
 			checkStatuses: Object.fromEntries(report.checks.map(check => [check.id, check.status])),
 			summary: report.summary,
 		}, {
+			schemaVersion: 1,
+			aexusVersion: '1.1.0',
 			platform: process.platform,
 			arch: process.arch,
 			projectPath: CWD,
@@ -348,6 +400,69 @@ describe('runCli doctor --json', () => {
 			},
 			summary: { enginesReady: 0, enginesTotal: 8 },
 		});
+	});
+
+	test('emits schemaVersion: 1 on status --json and supports --json uniformly across role list and role presets', async t => {
+		if (process.platform === 'win32') {
+			t.skip('Unix domain socket test');
+			return;
+		}
+		const tmpDir = await fs.mkdtemp(path.join('/tmp', 'ade-json-'));
+		const sockPath = path.join(tmpDir, 'ade.sock');
+		const srv = net.createServer(sock => {
+			let buf = '';
+			sock.setEncoding('utf8');
+			sock.on('data', chunk => {
+				buf += chunk;
+				const idx = buf.indexOf('\n');
+				if (idx >= 0) {
+					const req = JSON.parse(buf.slice(0, idx)) as { action?: string };
+					if (req.action === 'status') {
+						sock.end(JSON.stringify({ ok: true, result: { mode: 'ade', counts: { projects: 1 } } }) + '\n');
+					} else if (req.action === 'role.schema.get') {
+						sock.end(JSON.stringify({ ok: true, result: { ranks: [{ id: 'governor', name: 'Governor', tier: 1, apis: ['session.manage'] }] } }) + '\n');
+					} else if (req.action === 'role.presets') {
+						sock.end(JSON.stringify({ ok: true, result: [{ id: 'default-4tier', name: '4-Tier Org', description: 'Standard hierarchy' }] }) + '\n');
+					} else {
+						sock.end(JSON.stringify({ ok: true, result: {} }) + '\n');
+					}
+				}
+			});
+		});
+		await new Promise<void>(resolve => srv.listen(sockPath, resolve));
+		try {
+			const env: NodeJS.ProcessEnv = { AEXUS_ADE_SOCKET: sockPath, AEXUS_ADE_TOKEN: 'tok' };
+			const invoke = async (argv: string[]) => {
+				let stdout = '';
+				let stderr = '';
+				const code = await runCli(argv, { stdout: s => { stdout += s; }, stderr: s => { stderr += s; }, env, cwd: tmpDir });
+				return { code, stdout, stderr };
+			};
+			const statusRes = await invoke(['status', '--json']);
+			assert.strictEqual(statusRes.code, 0, statusRes.stderr);
+			assert.deepStrictEqual(JSON.parse(statusRes.stdout), { schemaVersion: 1, mode: 'ade', counts: { projects: 1 } });
+
+			const roleListJson = await invoke(['role', 'list', '--json']);
+			assert.strictEqual(roleListJson.code, 0, roleListJson.stderr);
+			assert.deepStrictEqual(JSON.parse(roleListJson.stdout), { ranks: [{ id: 'governor', name: 'Governor', tier: 1, apis: ['session.manage'] }] });
+
+			const roleListHuman = await invoke(['role', 'list']);
+			assert.strictEqual(roleListHuman.code, 0, roleListHuman.stderr);
+			assert.match(roleListHuman.stdout, /Organization Role Schema:/);
+			assert.match(roleListHuman.stdout, /governor \(L1\): Governor/);
+
+			const rolePresetsJson = await invoke(['role', 'presets', '--json']);
+			assert.strictEqual(rolePresetsJson.code, 0, rolePresetsJson.stderr);
+			assert.deepStrictEqual(JSON.parse(rolePresetsJson.stdout), [{ id: 'default-4tier', name: '4-Tier Org', description: 'Standard hierarchy' }]);
+
+			const rolePresetsHuman = await invoke(['role', 'presets']);
+			assert.strictEqual(rolePresetsHuman.code, 0, rolePresetsHuman.stderr);
+			assert.match(rolePresetsHuman.stdout, /Available Organization Presets:/);
+			assert.match(rolePresetsHuman.stdout, /default-4tier: 4-Tier Org/);
+		} finally {
+			await new Promise<void>(resolve => srv.close(() => resolve()));
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 });
 

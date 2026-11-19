@@ -21,6 +21,7 @@ import {
 	IAdeControlConnectionMetadata,
 	IAdeControlDispatchRequest,
 	IAdeControlWireResponse,
+	stripAdeControlEnv,
 } from '../../common/adeControl.js';
 import { AdeControlServer } from '../../node/adeControlServer.js';
 
@@ -386,6 +387,7 @@ suite('AdeControlServer', () => {
 		const statusRun = await runCli(['--json', 'status']);
 		assert.strictEqual(statusRun.status, 0, statusRun.stderr);
 		assert.deepStrictEqual(JSON.parse(statusRun.stdout), {
+			schemaVersion: 1,
 			mode: 'ade',
 			counts: { projects: 2 },
 		});
@@ -568,7 +570,7 @@ suite('AdeControlServer', () => {
 		// `--json` after the positional prompt is opaque text, never a global flag.
 		const sendRun = await runCli(['session', 'send', 'sess-1', 'Please', 'explain', '--json', 'output']);
 		// Bracketed model IDs and `off` thinking levels pass through verbatim.
-		const configureRun = await runCli(['engineering', 'configure', '--governor', 'g1', '--all', '--engine', 'claude-code', '--model', 'deepseek-flash[1m]', '--thinking', 'off']);
+		const configureRun = await runCli(['engineering', 'configure', '--governor', 'g1', '--all', '--engine', 'claude-code', '--model', 'claude-sonnet-4-5[1m]', '--thinking', 'off']);
 		const resetRun = await runCli(['engineering', 'reset', '--governor', 'g1', '--node', 'N2']);
 		const diffRun = await runCli(['engineering', 'diff', '--governor', 'g1', '--node', 'N1']);
 		const reportsRun = await runCli(['engineering', 'reports', '--governor', 'g1']);
@@ -601,7 +603,7 @@ suite('AdeControlServer', () => {
 				bareMarkReadUsage: true,
 				dispatched: [
 					{ action: 'session.send', params: { id: 'sess-1', prompt: 'Please explain --json output' } },
-					{ action: 'engineering.configure', params: { governor: 'g1', all: true, engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' } },
+					{ action: 'engineering.configure', params: { governor: 'g1', all: true, engine: 'claude-code', model: 'claude-sonnet-4-5[1m]', thinking: 'off' } },
 					{ action: 'engineering.reset', params: { governor: 'g1', node: 'N2' } },
 					{ action: 'engineering.diff', params: { governor: 'g1', node: 'N1' } },
 					{ action: 'engineering.reports', params: { governor: 'g1' } },
@@ -722,6 +724,27 @@ suite('AdeControlServer', () => {
 				},
 			},
 		]);
+	});
+
+	test('stripAdeControlEnv removes all ADE control-plane credentials case-insensitively without mutating source env', () => {
+		const original: NodeJS.ProcessEnv = {
+			PATH: '/usr/bin',
+			HOME: '/Users/dev',
+			AEXUS_ADE_CONTROL_FILE: '/tmp/ade-control.json',
+			AEXUS_ADE_TOKEN: 'master-token',
+			AEXUS_ADE_SOCKET: '/tmp/ade.sock',
+			AEXUS_ADE_SESSION_TOKEN: 'aexus-cap.abc.def',
+			AEXUS_ADE_CALLER: 'governor',
+			aexus_ade_token: 'lowercase-win-variant',
+			AEXUS_OTHER: 'keep-me',
+		};
+		const cleaned = stripAdeControlEnv(original);
+		assert.deepStrictEqual(cleaned, {
+			PATH: '/usr/bin',
+			HOME: '/Users/dev',
+			AEXUS_OTHER: 'keep-me',
+		});
+		assert.strictEqual(original.AEXUS_ADE_TOKEN, 'master-token', 'source env must not be mutated');
 	});
 
 	test('routes bundled aexus-ade CLI via AEXUS_ADE_SESSION_TOKEN without reading master control metadata', async function () {

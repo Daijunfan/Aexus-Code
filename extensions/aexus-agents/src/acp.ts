@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
-import { AgentChildIdentity, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
+import { AgentChildIdentity, ROLE_INIT_MARKER, SHARED_PURE_SCOPE_KEY, stripAdeControlEnv, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
 import { agentIdentityScopeKey, capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
@@ -155,7 +155,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
 
 	protected get client(): JsonLineClient | undefined {
-		return this.clientPool.get('pure')?.client;
+		return this.clientPool.get(SHARED_PURE_SCOPE_KEY)?.client;
 	}
 
 	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
@@ -260,7 +260,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		return undefined;
 	}
 
-	protected ensureClientSlot(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<{ readonly slot: AcpClientSlot; readonly client: JsonLineClient }> {
+	protected ensureClientSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string): Promise<{ readonly slot: AcpClientSlot; readonly client: JsonLineClient }> {
 		let slot = this.clientPool.get(scopeKey);
 		if (slot?.client && !slot.client.isClosed && slot.ready) {
 			const existingSlot = slot;
@@ -276,7 +276,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		currentSlot.ready = (async () => {
 			const baseEnv = await this.buildSpawnEnv();
 			const childEnv = await prepareAgentChildEnv(identity ?? { sessionId: `${this.id}-pure`, pureWorker: true }, baseEnv);
-			const client = new JsonLineClient(this.executable, [...this.args], undefined, childEnv);
+			const client = new JsonLineClient(this.executable, [...this.args], cwd, childEnv);
 			currentSlot.client = client;
 			client.onPacket(packet => {
 				if (packet.method === 'session/update') {
@@ -309,8 +309,36 @@ export abstract class AcpRuntime implements EngineRuntime {
 		return currentSlot.ready.then(client => ({ slot: currentSlot, client }));
 	}
 
-	protected ensureClient(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<JsonLineClient> {
-		return this.ensureClientSlot(scopeKey, identity).then(res => res.client);
+	protected ensureClient(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string): Promise<JsonLineClient> {
+		return this.ensureClientSlot(scopeKey, identity, cwd).then(res => res.client);
+	}
+
+	protected resolveLiveScopeKey(sessionId: string): string {
+		const existingKey = this.sessionScopeKeys.get(sessionId);
+		if (existingKey) {
+			const slot = this.clientPool.get(existingKey);
+			if (slot?.client && !slot.client.isClosed && slot.ready) {
+				return existingKey;
+			}
+		}
+		return SHARED_PURE_SCOPE_KEY;
+	}
+
+	protected async retireStaleSessionSlot(sessionId: string, nextScopeKey: string): Promise<void> {
+		const prevScopeKey = this.sessionScopeKeys.get(sessionId);
+		if (!prevScopeKey || prevScopeKey === nextScopeKey) {
+			return;
+		}
+		const prevSlot = this.clientPool.get(prevScopeKey);
+		if (prevSlot) {
+			if (prevSlot.client && !prevSlot.client.isClosed && prevSlot.openSessions.has(sessionId)) {
+				await prevSlot.client.request('session/close', { sessionId }).catch(() => { });
+			}
+			prevSlot.openSessions.delete(sessionId);
+			if (prevScopeKey !== SHARED_PURE_SCOPE_KEY) {
+				await this.resetClient(prevScopeKey);
+			}
+		}
 	}
 
 	protected async closeSession(sessionId: string): Promise<void> {
@@ -325,8 +353,8 @@ export abstract class AcpRuntime implements EngineRuntime {
 			slot.openSessions.delete(sessionId);
 			await slot.client.request('session/close', { sessionId }).catch(() => { });
 		}
-		if (scopeKey && scopeKey !== 'pure') {
-			this.sessionScopeKeys.delete(sessionId);
+		this.sessionScopeKeys.delete(sessionId);
+		if (scopeKey && scopeKey !== SHARED_PURE_SCOPE_KEY) {
 			await this.resetClient(scopeKey);
 		}
 	}
@@ -355,7 +383,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const now = Date.now();
 		try {
 			const { slot, created } = await withTimeout((async () => {
-				const ensured = await this.ensureClientSlot('pure', { sessionId: `${this.id}-pure`, pureWorker: true });
+				const ensured = await this.ensureClientSlot(SHARED_PURE_SCOPE_KEY, { sessionId: `${this.id}-pure`, pureWorker: true });
 				const result = await ensured.client.request<AcpSessionSetupResult>('session/new', { cwd, mcpServers: [] });
 				return { slot: ensured.slot, created: result };
 			})(), 15000);
@@ -369,11 +397,11 @@ export abstract class AcpRuntime implements EngineRuntime {
 				provisional: true,
 			};
 			slot.openSessions.add(session.id);
-			this.sessionScopeKeys.set(session.id, 'pure');
+			this.sessionScopeKeys.set(session.id, SHARED_PURE_SCOPE_KEY);
 			this.knownSessions.set(session.id, session);
 			return session;
 		} catch {
-			void this.resetClient('pure').catch(() => { });
+			void this.resetClient(SHARED_PURE_SCOPE_KEY).catch(() => { });
 			return {
 				id: randomUUID(),
 				cwd,
@@ -387,20 +415,28 @@ export abstract class AcpRuntime implements EngineRuntime {
 	}
 
 	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
-		const scopeKey = options ? agentIdentityScopeKey(session.id, options) : (this.sessionScopeKeys.get(session.id) ?? 'pure');
+		const scopeKey = options
+			? agentIdentityScopeKey(session.id, options, session.cwd)
+			: this.resolveLiveScopeKey(session.id);
 		const identity: AgentChildIdentity = options
 			? { sessionId: session.id, callerRole: options.callerRole, pureWorker: options.pureWorker }
 			: { sessionId: session.id, pureWorker: true };
+		await this.retireStaleSessionSlot(session.id, scopeKey);
 		if (!session.unmaterialized) {
 			return;
 		}
-		const { slot, client } = await this.ensureClientSlot(scopeKey, identity);
+		const { slot, client } = await this.ensureClientSlot(scopeKey, identity, scopeKey === SHARED_PURE_SCOPE_KEY ? undefined : session.cwd);
 		const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
 		this.ingestSessionSetup(created);
 		session.id = created.sessionId;
 		session.unmaterialized = false;
+		const resolvedScopeKey = options ? agentIdentityScopeKey(session.id, options, session.cwd) : scopeKey;
+		if (resolvedScopeKey !== scopeKey && this.clientPool.get(scopeKey) === slot && !this.clientPool.has(resolvedScopeKey)) {
+			this.clientPool.delete(scopeKey);
+			this.clientPool.set(resolvedScopeKey, slot);
+		}
 		slot.openSessions.add(session.id);
-		this.sessionScopeKeys.set(session.id, scopeKey);
+		this.sessionScopeKeys.set(session.id, resolvedScopeKey);
 		this.knownSessions.set(session.id, session);
 	}
 
@@ -437,7 +473,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 
 	protected async loadReplayedHistory(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
 		if (token.isCancellationRequested) { return []; }
-		const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+		const scopeKey = this.resolveLiveScopeKey(session.id);
 		const { slot, client } = await this.ensureClientSlot(scopeKey);
 		if (!this.agentCapabilities?.loadSession) { return []; }
 		const entries: HistoryEntry[] = [];
@@ -604,7 +640,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
 		if (this.cachedModels.length === 0 && this.cachedModes.length === 0 && this.cachedCommands.length === 0 && session && !session.unmaterialized) {
 			try {
-				const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+				const scopeKey = this.resolveLiveScopeKey(session.id);
 				const { slot, client } = await withTimeout(this.ensureClientSlot(scopeKey), 8000);
 				if (!slot.openSessions.has(session.id) && cwd) {
 					await withTimeout(this.ensureSessionOpen(slot, client, session), 8000).catch(() => { });
@@ -657,12 +693,13 @@ export abstract class AcpRuntime implements EngineRuntime {
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
-		const scopeKey = agentIdentityScopeKey(session.id, options);
+		const scopeKey = agentIdentityScopeKey(session.id, options, session.cwd);
+		await this.retireStaleSessionSlot(session.id, scopeKey);
 		const { slot, client } = await this.ensureClientSlot(scopeKey, {
 			sessionId: session.id,
 			callerRole: options?.callerRole,
 			pureWorker: options?.pureWorker,
-		});
+		}, session.cwd);
 		await this.ensureSessionOpen(slot, client, session);
 		this.sessionScopeKeys.set(session.id, scopeKey);
 		if (options?.model && options.model !== 'default') {
@@ -1252,9 +1289,6 @@ export class AntigravityRuntime extends AcpRuntime {
 	}
 
 	private async resolveSqliteExecutable(): Promise<string> {
-		if (process.platform === 'darwin') {
-			return '/usr/bin/sqlite3';
-		}
 		return (await findExecutable('sqlite3')) ?? 'sqlite3';
 	}
 
@@ -1263,6 +1297,7 @@ export class AntigravityRuntime extends AcpRuntime {
 		const result: NativeSession[] = [];
 		const query = 'SELECT conversation_id, title, preview, last_modified_time, workspace_uris, parent_conversation_id, last_user_input_time FROM conversation_summaries WHERE parent_conversation_id = \'\' AND killed = 0 ORDER BY last_modified_time DESC;';
 		const sqliteBin = await this.resolveSqliteExecutable();
+		const sqliteEnv = stripAdeControlEnv(process.env);
 		for (const home of this.agyHomes()) {
 			const dbPath = path.join(home, 'conversation_summaries.db');
 			try {
@@ -1271,7 +1306,7 @@ export class AntigravityRuntime extends AcpRuntime {
 				continue;
 			}
 			try {
-				const { stdout } = await execFile(sqliteBin, ['-json', dbPath, query], { windowsHide: true });
+				const { stdout } = await execFile(sqliteBin, ['-json', dbPath, query], { windowsHide: true, env: sqliteEnv });
 				if (!stdout.trim()) { continue; }
 				const rows = JSON.parse(stdout) as AgySummaryRow[];
 				for (const row of rows) {
@@ -1415,6 +1450,7 @@ export class AntigravityRuntime extends AcpRuntime {
 		}
 		this.knownSessions.delete(session.id);
 		const sqliteBin = await this.resolveSqliteExecutable();
+		const sqliteEnv = stripAdeControlEnv(process.env);
 		for (const root of this.agyHomes()) {
 			const convBase = path.join(root, 'conversations', session.id);
 			await Promise.all([
@@ -1425,7 +1461,7 @@ export class AntigravityRuntime extends AcpRuntime {
 			]);
 			const dbPath = path.join(root, 'conversation_summaries.db');
 			if (/^[0-9a-f-]+$/i.test(session.id)) {
-				await execFile(sqliteBin, ['-bail', dbPath, `DELETE FROM conversation_summaries WHERE conversation_id = '${session.id}';`], { windowsHide: true }).catch(() => { });
+				await execFile(sqliteBin, ['-bail', dbPath, `DELETE FROM conversation_summaries WHERE conversation_id = '${session.id}';`], { windowsHide: true, env: sqliteEnv }).catch(() => { });
 			}
 			await Promise.all([
 				this.cleanJsonCacheFile(path.join(root, 'cache', 'conversation_metadata.json'), session.id),

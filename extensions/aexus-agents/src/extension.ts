@@ -2087,7 +2087,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			title: vscode.l10n.t('Enter Custom Model ID'),
 			prompt: vscode.l10n.t('Enter the exact model identifier supported by the active Coding Agent engine (leave "default" to use engine default)'),
 			value: currentCfg?.model && currentCfg.model !== 'default' ? currentCfg.model : '',
-			placeHolder: vscode.l10n.t('e.g. gpt-6.1-sol, deepseek-v4-pro, group-openai/gpt-6'),
+			placeHolder: vscode.l10n.t('e.g. sonnet, gpt-5, deepseek-reasoner'),
 			ignoreFocusOut: true,
 		});
 		if (entered === undefined) {
@@ -2371,6 +2371,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				thinking?: EngineThinkingLevel;
 				pureWorker?: boolean;
 				callerRole?: string;
+				autonomousApproved?: boolean;
+				sandboxMode?: string;
 			},
 		) => {
 			const lookupToken = new vscode.CancellationTokenSource();
@@ -2511,16 +2513,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const prevId = record.id;
 				let contextCompactedDuringTurn = false;
 				const cfg = record.sessionConfig ?? {};
+				const effectiveAutomatedEngineering = rawOptions?.autonomousApproved !== undefined
+					? (rawOptions.autonomousApproved || isAutonomousModeEnabled())
+					: true;
+				const effectiveSandboxMode = rawOptions?.sandboxMode && rawOptions.sandboxMode !== 'default'
+					? rawOptions.sandboxMode
+					: (cfg.sandboxMode && cfg.sandboxMode !== 'default' ? cfg.sandboxMode : undefined);
 				const headlessSendOptions: EngineSendOptions = {
 					model: rawOptions?.model ?? (cfg.model && cfg.model !== 'default' ? cfg.model : undefined),
 					thinking: rawOptions?.thinking ?? (cfg.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined),
 					mode: cfg.mode && cfg.mode !== 'default' ? cfg.mode : undefined,
 					permissionMode: cfg.permissionMode && cfg.permissionMode !== 'default' ? cfg.permissionMode : undefined,
-					sandboxMode: cfg.sandboxMode && cfg.sandboxMode !== 'default' ? cfg.sandboxMode : undefined,
+					sandboxMode: effectiveSandboxMode,
 					webSearch: cfg.webSearch,
 					pureWorker: isPureWorker,
 					callerRole,
-					automatedEngineering: true,
+					automatedEngineering: effectiveAutomatedEngineering,
 					onInterimUsage: reportInterimUsage,
 					onContextCompacted: () => {
 						contextCompactedDuringTurn = true;

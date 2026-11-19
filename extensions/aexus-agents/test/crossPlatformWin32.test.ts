@@ -131,3 +131,12 @@ describe('escapeWinCmdToken', () => {
 		assert.ok(argToken.includes('^&') && argToken.includes('^|'));
 	});
 });
+
+describe('cross-platform sqlite3 & env hygiene in acp.ts', () => {
+	test('acp.ts resolves sqlite3 cross-platform without hardcoded /usr/bin/sqlite3 and scrubs ADE control env', () => {
+		const acpSource = fs.readFileSync(path.join(EXTENSION_ROOT, 'src', 'acp.ts'), 'utf8');
+		assert.strictEqual(acpSource.includes('/usr/bin/sqlite3'), false, 'acp.ts must not hardcode /usr/bin/sqlite3');
+		assert.ok(acpSource.includes('findExecutable(\'sqlite3\')'), 'acp.ts should resolve sqlite3 via findExecutable');
+		assert.ok(acpSource.includes('stripAdeControlEnv(process.env)'), 'acp.ts should strip AEXUS_ADE_* control vars before spawning sqlite3');
+	});
+});

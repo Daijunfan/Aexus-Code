@@ -1194,6 +1194,88 @@ export const ADE_CAPABILITY_TOKEN_PREFIX = 'aexus-cap.';
 export const ADE_MINT_SESSION_TOKEN_ACTION = 'auth.mintSessionToken';
 export const ADE_PURE_WORKER_FALLBACK_DENY_TOKEN = 'aexus-cap.eyJzaWQiOiJwdXJlLXdvcmtlciIsInJhbmsiOiJ3b3JrZXIiLCJwdXJlIjp0cnVlLCJpYXQiOjB9.0000000000000000000000000000000000000000000000000000000000000000';
 
+export const ADE_CONTROL_ENV_KEYS = [
+	'AEXUS_ADE_CONTROL_FILE',
+	'AEXUS_ADE_TOKEN',
+	'AEXUS_ADE_SOCKET',
+	'AEXUS_ADE_SESSION_TOKEN',
+	'AEXUS_ADE_CALLER',
+] as const;
+
+const ADE_CONTROL_ENV_KEY_SET = new Set<string>(ADE_CONTROL_ENV_KEYS);
+
+/**
+ * Returns a shallow copy of `env` with all local ADE control-plane credentials and
+ * routing variables removed (case-insensitively for Windows compatibility).
+ */
+export function stripAdeControlEnv<T extends Record<string, string | undefined>>(env: T): T {
+	const cleaned: Record<string, string | undefined> = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (!ADE_CONTROL_ENV_KEY_SET.has(key.toUpperCase())) {
+			cleaned[key] = value;
+		}
+	}
+	return cleaned as T;
+}
+
+export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
+/**
+ * Resolves the effective Codex sandbox mode. Both interactive sessions and automated
+ * engineering DAG workers default to `'workspace-write'` (scoped to the session cwd /
+ * isolated Git worktree) unless `autonomousMode` is explicitly enabled or the caller
+ * passes an explicit `sandboxMode`.
+ */
+export function resolveCodexSandboxMode(
+	options?: { readonly automatedEngineering?: boolean; readonly sandboxMode?: string },
+	explicitSandboxMode?: string,
+	autonomousMode = false,
+): CodexSandboxMode {
+	switch ((explicitSandboxMode ?? options?.sandboxMode)?.trim()) {
+		case 'read-only':
+			return 'read-only';
+		case 'workspace-write':
+			return 'workspace-write';
+		case 'danger-full-access':
+			return 'danger-full-access';
+		default:
+			return autonomousMode ? 'danger-full-access' : 'workspace-write';
+	}
+}
+
+export const SHARED_PURE_SCOPE_KEY = 'pure::shared';
+
+export function normalizePoolCwd(cwd: string | undefined, platform: NodeJS.Platform = process.platform): string {
+	const trimmed = cwd?.trim();
+	if (!trimmed) {
+		return '';
+	}
+	return platform === 'win32'
+		? path.win32.normalize(trimmed).replace(/[\\/]+$/, '').toLowerCase()
+		: path.posix.normalize(trimmed).replace(/\/+$/, '');
+}
+
+/**
+ * Computes an isolated engine client-pool key incorporating `(cwd, sessionId, rank, pure)`
+ * so changing a session's rank, purity, or working directory never reuses a stale pool
+ * process carrying older capability credentials.
+ */
+export function computeAgentIdentityScopeKey(
+	sessionId: string,
+	identity?: AgentChildIdentity,
+	cwd?: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const normCwd = normalizePoolCwd(cwd, platform);
+	const sid = sessionId.trim() || 'session';
+	const pure = isPureWorkerIdentity(identity);
+	if (pure) {
+		return `pure:${normCwd}:${sid}`;
+	}
+	const rank = identity!.callerRole!.trim().toLowerCase();
+	return `orch:${normCwd}:${sid}:${rank}`;
+}
+
 export interface AgentChildIdentity {
 	readonly sessionId?: string;
 	readonly callerRole?: string;

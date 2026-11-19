@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
-import { AgentChildIdentity } from './roleBridgeShared';
+import { AgentChildIdentity, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
 import { agentIdentityScopeKey, capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
@@ -217,12 +217,15 @@ function turnUsageFromKiloTokens(tokens: KiloTokens | undefined): EngineTurnToke
 	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
 }
 
+const SHARED_PURE_SERVER_KEY = `${SHARED_PURE_SCOPE_KEY}:ask`;
+
 interface SharedServerSlot {
 	child?: ReturnType<typeof spawnEngine>;
 	endpoint?: Promise<string>;
 	readonly password: string;
 	readonly identity: AgentChildIdentity;
 	readonly autoApprove: boolean;
+	readonly cwd?: string;
 }
 
 abstract class SharedServerRuntime implements EngineRuntime {
@@ -261,30 +264,46 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		return isAutonomousModeEnabled();
 	}
 
-	private resolveServerDescriptor(sessionId?: string, options?: EngineSendOptions): { readonly key: string; readonly identity: AgentChildIdentity; readonly autoApprove: boolean } {
+	private resolveServerDescriptor(sessionId?: string, options?: EngineSendOptions, cwd?: string): { readonly key: string; readonly identity: AgentChildIdentity; readonly autoApprove: boolean; readonly cwd?: string } {
 		const autoApprove = this.shouldAutoApprove(options);
 		if (!sessionId || !options) {
 			return {
-				key: 'pure:ask',
+				key: SHARED_PURE_SERVER_KEY,
 				identity: { sessionId: `${this.id}-pure`, pureWorker: true },
 				autoApprove: false,
 			};
 		}
-		const identityScope = agentIdentityScopeKey(sessionId, options);
-		const identity: AgentChildIdentity = identityScope === 'pure'
-			? { sessionId: `${this.id}-pure`, pureWorker: true }
+		const identityScope = agentIdentityScopeKey(sessionId, options, cwd);
+		const isPure = identityScope.startsWith('pure:');
+		const identity: AgentChildIdentity = isPure
+			? { sessionId, pureWorker: true }
 			: { sessionId, callerRole: options.callerRole, pureWorker: false };
 		return {
 			key: `${identityScope}:${autoApprove ? 'auto' : 'ask'}`,
 			identity,
 			autoApprove,
+			cwd,
 		};
 	}
 
-	private ensureServerSlot(key: string, identity: AgentChildIdentity, autoApprove: boolean): SharedServerSlot {
+	private retireStaleServerSlot(sessionId: string, nextServerKey: string): void {
+		const prevKey = this.sessionServerKeys.get(sessionId);
+		if (!prevKey || prevKey === nextServerKey || prevKey === SHARED_PURE_SERVER_KEY) {
+			return;
+		}
+		const prevSlot = this.servers.get(prevKey);
+		if (prevSlot) {
+			if (prevSlot.child) {
+				stopEngine(prevSlot.child);
+			}
+			this.servers.delete(prevKey);
+		}
+	}
+
+	private ensureServerSlot(key: string, identity: AgentChildIdentity, autoApprove: boolean, cwd?: string): SharedServerSlot {
 		let slot = this.servers.get(key);
 		if (!slot) {
-			slot = { password: randomBytes(24).toString('hex'), identity, autoApprove };
+			slot = { password: randomBytes(24).toString('hex'), identity, autoApprove, cwd };
 			this.servers.set(key, slot);
 		}
 		return slot;
@@ -565,17 +584,18 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
-	private getEndpoint(serverKey = 'pure:ask', identity?: AgentChildIdentity, autoApprove = false): Promise<{ readonly url: string; readonly password: string }> {
+	private getEndpoint(serverKey = SHARED_PURE_SERVER_KEY, identity?: AgentChildIdentity, autoApprove = false, cwd?: string): Promise<{ readonly url: string; readonly password: string }> {
 		const slot = this.ensureServerSlot(
 			serverKey,
 			identity ?? { sessionId: `${this.id}-pure`, pureWorker: true },
 			autoApprove,
+			cwd,
 		);
 		if (!slot.endpoint) {
 			slot.endpoint = (async () => {
 				const childEnv = await prepareAgentChildEnv(slot.identity);
 				return await new Promise<string>((resolve, reject) => {
-					const child = slot.child = spawnEngine(this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], undefined, {
+					const child = slot.child = spawnEngine(this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], slot.cwd, {
 						...childEnv,
 						[`${this.envPrefix}_SERVER_USERNAME`]: 'aexus',
 						[`${this.envPrefix}_SERVER_PASSWORD`]: slot.password,
@@ -601,11 +621,11 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		return slot.endpoint.then(url => ({ url, password: slot.password }));
 	}
 
-	protected async request<T>(route: string, cwd: string, method = 'GET', body?: object, signal?: AbortSignal, serverKey = 'pure:ask', identity?: AgentChildIdentity, autoApprove = false): Promise<T> {
+	protected async request<T>(route: string, cwd: string, method = 'GET', body?: object, signal?: AbortSignal, serverKey = SHARED_PURE_SERVER_KEY, identity?: AgentChildIdentity, autoApprove = false): Promise<T> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				const ep = await this.getEndpoint(serverKey, identity, autoApprove);
+				const ep = await this.getEndpoint(serverKey, identity, autoApprove, serverKey === SHARED_PURE_SERVER_KEY ? undefined : cwd);
 				const url = new URL(route, ep.url);
 				url.searchParams.set('directory', cwd);
 				const response = await fetch(url, {
@@ -679,15 +699,24 @@ abstract class SharedServerRuntime implements EngineRuntime {
 	}
 
 	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
+		const desc = this.resolveServerDescriptor(session.id, options, session.cwd);
+		this.retireStaleServerSlot(session.id, desc.key);
 		if (!session.unmaterialized) {
 			return;
 		}
-		const desc = this.resolveServerDescriptor(session.id, options);
 		const created = this.session(await this.request<KiloSession>('/session', session.cwd, 'POST', {}, undefined, desc.key, desc.identity, desc.autoApprove));
+		const prevId = session.id;
 		session.id = created.id;
 		session.unmaterialized = false;
 		session.provisional = false;
-		this.sessionServerKeys.set(session.id, desc.key);
+		const resolvedDesc = this.resolveServerDescriptor(session.id, options, session.cwd);
+		if (resolvedDesc.key !== desc.key && this.servers.has(desc.key) && !this.servers.has(resolvedDesc.key)) {
+			const moved = this.servers.get(desc.key)!;
+			this.servers.delete(desc.key);
+			this.servers.set(resolvedDesc.key, moved);
+		}
+		this.sessionServerKeys.delete(prevId);
+		this.sessionServerKeys.set(session.id, resolvedDesc.key);
 	}
 
 	async children(session: NativeSession, token: vscode.CancellationToken): Promise<NativeSession[]> {
@@ -745,19 +774,25 @@ abstract class SharedServerRuntime implements EngineRuntime {
 	}
 
 	async killSession(session: NativeSession): Promise<void> {
-		const serverKey = this.sessionServerKeys.get(session.id) ?? 'pure:ask';
+		const serverKey = this.sessionServerKeys.get(session.id) ?? SHARED_PURE_SERVER_KEY;
 		const slot = this.servers.get(serverKey);
 		if (slot?.endpoint) {
 			await this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, serverKey, slot.identity, slot.autoApprove).catch(() => { });
+		}
+		this.sessionServerKeys.delete(session.id);
+		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
+			if (slot.child) { stopEngine(slot.child); }
+			this.servers.delete(serverKey);
 		}
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		this.knownSessions.set(session.id, session);
-		const desc = this.resolveServerDescriptor(session.id, options);
+		const desc = this.resolveServerDescriptor(session.id, options, session.cwd);
+		this.retireStaleServerSlot(session.id, desc.key);
 		this.sessionServerKeys.set(session.id, desc.key);
 		const abort = new AbortController();
-		const ep = await this.getEndpoint(desc.key, desc.identity, desc.autoApprove);
+		const ep = await this.getEndpoint(desc.key, desc.identity, desc.autoApprove, desc.cwd);
 		const url = new URL('/event', ep.url);
 		url.searchParams.set('directory', session.cwd);
 		const response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}` }, signal: abort.signal });
@@ -885,7 +920,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			this.knownSessions.delete(session.id);
 			return;
 		}
-		const serverKey = this.sessionServerKeys.get(session.id) ?? 'pure:ask';
+		const serverKey = this.sessionServerKeys.get(session.id) ?? SHARED_PURE_SERVER_KEY;
 		const slot = this.servers.get(serverKey);
 		try {
 			if (slot?.endpoint) {
@@ -900,7 +935,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			}
 		}
 		this.sessionServerKeys.delete(session.id);
-		if (!serverKey.startsWith('pure:') && slot) {
+		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
 			if (slot.child) { stopEngine(slot.child); }
 			this.servers.delete(serverKey);
 		}

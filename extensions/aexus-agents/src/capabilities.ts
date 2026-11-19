@@ -705,49 +705,45 @@ const ENGINE_INFO: ReadonlyArray<{ id: EngineId; name: string; description: stri
 ];
 
 const CLAUDE_ALIAS_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'deepseek-flash[1m]', name: 'DeepSeek Flash (1M Context)' },
-	{ id: 'deepseek-v4-pro[1m]', name: 'DeepSeek V4 Pro (1M Context)' },
 	{ id: 'sonnet', name: 'Sonnet' },
 	{ id: 'opus', name: 'Opus' },
 	{ id: 'haiku', name: 'Haiku' },
+	{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
+	{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' },
 ];
 
 const CODEX_COMMON_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'gpt-6-luna', name: 'GPT-6 Luna' },
-	{ id: 'gpt-5.4', name: 'GPT-5.4' },
+	{ id: 'gpt-5', name: 'GPT-5' },
+	{ id: 'gpt-5-mini', name: 'GPT-5 Mini' },
 	{ id: 'o3', name: 'o3' },
+	{ id: 'o4-mini', name: 'o4-mini' },
 	{ id: 'codex-mini-latest', name: 'Codex Mini' },
 ];
 
 const PI_FALLBACK_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'gpt-6', name: 'GPT-6' },
-	{ id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
-	{ id: 'gemini-4-hydrogen-high', name: 'Gemini 4 Hydrogen (High)' },
-	{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+	{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
+	{ id: 'gpt-5', name: 'GPT-5' },
+	{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+	{ id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
 ];
 
 const ANTIGRAVITY_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' },
-	{ id: 'gemini-4-argon', name: 'Gemini 4 Argon' },
-	{ id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' },
-	{ id: 'gemini-pro-orchestrator', name: 'Orchestrator (Carbon)' },
-	{ id: 'gemini-pro-orchestrator-argon', name: 'Orchestrator (Argon)' },
-	{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
-	{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
-	{ id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5' },
-	{ id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
+	{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+	{ id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+	{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
 ];
 
 const DSH_KNOWN_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: '["deepseek-official","deepseek-v4-flash"]', name: 'deepseek-v4-flash', description: 'deepseek-official/deepseek-v4-flash' },
-	{ id: '["deepseek-official","deepseek-flash"]', name: 'DeepSeek-V4.1-Flash', description: 'deepseek-official/deepseek-flash' },
-	{ id: '["deepseek-official","deepseek-v4-pro"]', name: 'DeepSeek-V4-Pro', description: 'deepseek-official/deepseek-v4-pro' },
+	{ id: '["deepseek-official","deepseek-reasoner"]', name: 'deepseek-reasoner', description: 'deepseek-official/deepseek-reasoner' },
+	{ id: '["deepseek-official","deepseek-chat"]', name: 'deepseek-chat', description: 'deepseek-official/deepseek-chat' },
 ];
 
 const CLINE_KNOWN_MODELS: readonly DiscoveredOptionItem[] = [
-	{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
-	{ id: 'deepseek-flash', name: 'DeepSeek Flash' },
-	{ id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5' },
+	{ id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+	{ id: 'deepseek-chat', name: 'DeepSeek Chat' },
+	{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
+	{ id: 'gpt-5', name: 'GPT-5' },
+	{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
 ];
 
 function appendOptionItems(target: DiscoveredOptionItem[], seen: Set<string>, items: readonly DiscoveredOptionItem[]): void {

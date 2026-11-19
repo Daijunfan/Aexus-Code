@@ -14,7 +14,8 @@ const execFileAsync = promisify(execFile);
 
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_META_NAME = 'ade-control.json';
-export const ADE_CLI_VERSION = '1.0.0';
+export const ADE_CLI_VERSION = '1.1.0';
+export const ADE_CLI_SCHEMA_VERSION = 1;
 export const ADE_ENGINE_BASELINE = '1.146.0';
 
 export type AdeAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate' | (string & {});
@@ -47,7 +48,7 @@ export interface AdeCliIo {
 	readonly stdoutIsTTY?: boolean;
 }
 
-export type CompletionShell = 'bash' | 'zsh' | 'fish';
+export type CompletionShell = 'bash' | 'zsh' | 'fish' | 'powershell';
 
 export interface ParsedCliInvocation {
 	readonly help: boolean;
@@ -66,7 +67,7 @@ function isValidRoleSlug(val: string | undefined): val is string {
 	return Boolean(val && ROLE_SLUG_RE.test(val.trim()));
 }
 
-const HELP_TEXT = `Usage: aexus-ade [options] <command> [args]
+export const HELP_TEXT = `Usage: aexus-ade [options] <command> [args]
 
 Control the running Aexus Code ADE workbench over its local control socket.
 
@@ -89,14 +90,15 @@ Commands:
   status
   version
   doctor [--project <path>] [--strict]
-  completion <bash|zsh|fish>
+  completion <bash|zsh|fish|powershell>
   mode [get | set <ade|ide>]
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
 
   role list
   role apis
   role presets
-  role preset <presetId>
+  role apply-preset <presetId>    (alias: role preset <presetId>)
+  role set-tier <sessionId> <rankId|worker|none>
   role reset
   role studio [rankId]
 
@@ -163,6 +165,7 @@ Commands:
   secretary mark-read
 
   engineering demo [--governor <id>]
+  engineering generate --governor <id> --prompt "<goal>" [--engine <e>] [--max-budget-usd <usd>] [--force-stop-running]
   engineering init --governor <id> [--tree-type <engineering|research>] [--on-children <relocate|delete> --target <id>] [--open] [--side]
   engineering list [--project <path>] [--tree-type <engineering|research>]
   engineering open --governor <id> [--side]
@@ -180,6 +183,8 @@ Commands:
   engineering template apply --governor <id> --template <id> [--preset <balanced|max-quality|fast-economy>] [--engine <e>] [--secondary-engine <e>] [--isolation <shared|worktree>] [--max-budget-usd <usd>] [--force-stop-running]
   engineering report --governor <id> [--out <file>]
   engineering worktrees (merge | cleanup) --governor <id>
+  engineering verify-trust list [--project <path>]
+  engineering verify-trust revoke (<hash> | --all) [--project <path>]
   engineering diff --governor <id> --node <nodeId>
   engineering reports --governor <id> [--include-stale]
   engineering status --governor <id> [--node <nodeId>]
@@ -375,12 +380,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	}
 
 	if (group === 'completion') {
-		const shell = tail[0];
-		if (shell !== 'bash' && shell !== 'zsh' && shell !== 'fish') {
-			throw new CliUsageError('Usage: aexus-ade completion <bash|zsh|fish>');
-		}
-		if (tail.length > 1) {
-			throw new CliUsageError('Usage: aexus-ade completion <bash|zsh|fish>');
+		const rawShell = tail[0]?.trim().toLowerCase();
+		const shell: CompletionShell | undefined = rawShell === 'pwsh'
+			? 'powershell'
+			: (rawShell === 'bash' || rawShell === 'zsh' || rawShell === 'fish' || rawShell === 'powershell' ? rawShell : undefined);
+		if (!shell || tail.length > 1) {
+			throw new CliUsageError('Usage: aexus-ade completion <bash|zsh|fish|powershell>');
 		}
 		return { help: false, json, completion: shell, windowId };
 	}
@@ -1850,6 +1855,49 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			return { help: false, json, windowId, action: `engineering.worktrees.${wtSub}`, params: { governor } };
 		}
 
+		if (sub === 'verify-trust' || sub === 'verifyTrust') {
+			const vtSub = args[0] ?? 'list';
+			const vtArgs = args.length > 0 ? args.slice(1) : [];
+			if (vtSub === 'list') {
+				let project: string | undefined;
+				for (const ref = { i: 0 }; ref.i < vtArgs.length; ref.i++) {
+					const arg = vtArgs[ref.i];
+					if (arg === '--project' || arg.startsWith('--project=')) {
+						project = resolvePathIfRelative(takeOptionVal(ref, '--project', vtArgs), cwd);
+					} else {
+						throw new CliUsageError(`Unknown option for engineering verify-trust list: ${arg}`);
+					}
+				}
+				return { help: false, json, windowId, action: 'engineering.verifyTrust.list', params: project ? { project } : {} };
+			}
+			if (vtSub === 'revoke') {
+				let hash: string | undefined;
+				let all = false;
+				let project: string | undefined;
+				for (const ref = { i: 0 }; ref.i < vtArgs.length; ref.i++) {
+					const arg = vtArgs[ref.i];
+					if (arg === '--all') {
+						all = true;
+					} else if (arg === '--hash' || arg.startsWith('--hash=')) {
+						hash = takeOptionVal(ref, '--hash', vtArgs);
+					} else if (arg === '--project' || arg.startsWith('--project=')) {
+						project = resolvePathIfRelative(takeOptionVal(ref, '--project', vtArgs), cwd);
+					} else if (!arg.startsWith('-') && !hash) {
+						hash = arg;
+					} else {
+						throw new CliUsageError(`Unknown option for engineering verify-trust revoke: ${arg}`);
+					}
+				}
+				if (!all && !hash) {
+					throw new CliUsageError('Usage: aexus-ade engineering verify-trust revoke (<hash> | --all) [--project <path>]');
+				}
+				const params: Record<string, unknown> = all ? { all: true } : { hash };
+				if (project) { params.project = project; }
+				return { help: false, json, windowId, action: 'engineering.verifyTrust.revoke', params };
+			}
+			throw new CliUsageError('Usage: aexus-ade engineering verify-trust <list | revoke (<hash> | --all)> [--project <path>]');
+		}
+
 		if (sub === 'diff') {
 			let governor: string | undefined;
 			let node: string | undefined;
@@ -2144,9 +2192,20 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		if (sub === 'preset' || sub === 'apply-preset') {
 			const presetId = args[0]?.trim();
 			if (!presetId) {
-				throw new CliUsageError('Usage: aexus-ade role preset <presetId>');
+				throw new CliUsageError('Usage: aexus-ade role apply-preset <presetId>');
 			}
 			return { help: false, json, windowId, action: 'role.schema.set', params: { presetId } };
+		}
+		if (sub === 'set-tier') {
+			if (args.length !== 2) {
+				throw new CliUsageError('Usage: aexus-ade role set-tier <sessionId> <rankId|worker|none>');
+			}
+			const [id, rawRoleArg] = args;
+			const roleArg = rawRoleArg.trim().toLowerCase();
+			if (roleArg !== 'none' && !isValidRoleSlug(roleArg)) {
+				throw new CliUsageError('Role must be a valid rank ID (e.g. governor, manager, employee, worker, custom rank ID, or none).');
+			}
+			return { help: false, json, windowId, action: 'session.setRole', params: { id, role: roleArg === 'none' || roleArg === 'worker' ? null : roleArg } };
 		}
 		if (sub === 'reset') {
 			return { help: false, json, windowId, action: 'role.schema.reset', params: {} };
@@ -2316,6 +2375,28 @@ function formatHumanOutput(action: string | undefined, result: unknown): string 
 		}
 		return `${verb} session '${id}'.`;
 	}
+	if (action === 'role.schema.get' && Array.isArray(record.ranks)) {
+		const lines = ['Organization Role Schema:'];
+		for (const rawRank of record.ranks as Array<Record<string, unknown>>) {
+			const id = String(rawRank.id ?? '');
+			const name = String(rawRank.name ?? id);
+			const tier = rawRank.tier !== undefined ? `L${rawRank.tier}` : '';
+			const pure = rawRank.pureExecution ? ' [pure: 0 APIs]' : '';
+			const apis = Array.isArray(rawRank.apis) ? ` (${rawRank.apis.length} APIs)` : '';
+			lines.push(`  - ${id}${tier ? ` (${tier})` : ''}: ${name}${pure || apis}`);
+		}
+		return lines.join('\n');
+	}
+	if (action === 'role.presets' && Array.isArray(result)) {
+		const lines = ['Available Organization Presets:'];
+		for (const rawPreset of result as Array<Record<string, unknown>>) {
+			const id = String(rawPreset.id ?? '');
+			const name = String(rawPreset.name ?? id);
+			const desc = typeof rawPreset.description === 'string' && rawPreset.description ? ` — ${rawPreset.description}` : '';
+			lines.push(`  - ${id}: ${name}${desc}`);
+		}
+		return lines.join('\n');
+	}
 	const tokenSummary = formatEngineeringTokenSummary(action, result);
 	const json = JSON.stringify(result, null, 2);
 	return tokenSummary ? `${json}\n${tokenSummary}` : json;
@@ -2375,6 +2456,8 @@ interface IDoctorEngineCheck {
 }
 
 export interface IDoctorReport {
+	readonly schemaVersion: number;
+	readonly aexusVersion: string;
 	readonly platform: NodeJS.Platform;
 	readonly arch: string;
 	readonly nodeVersion: string;
@@ -2509,6 +2592,8 @@ async function runDoctorDiagnostics(projectPath: string, env: NodeJS.ProcessEnv)
 		},
 	];
 	return {
+		schemaVersion: ADE_CLI_SCHEMA_VERSION,
+		aexusVersion: ADE_CLI_VERSION,
 		platform: process.platform,
 		arch: process.arch,
 		nodeVersion: process.version,
@@ -2562,6 +2647,7 @@ function formatDoctorHuman(report: IDoctorReport, color: ICliColorizer): string 
 	const lines: string[] = [];
 	lines.push(color.bold(color.cyan('Aexus Code · ADE Environment Doctor')));
 	lines.push(color.dim('==================================='));
+	lines.push(`${color.bold('Aexus Version:')} ${report.aexusVersion} (Code - OSS ${ADE_ENGINE_BASELINE})`);
 	lines.push(`${color.bold('Platform:')}      ${report.platform}/${report.arch} (Node ${report.nodeVersion})`);
 	lines.push(`${color.bold('Project:')}       ${report.projectPath}`);
 	lines.push(`${color.bold('Control Plane:')} ${report.controlPlane.connected ? color.green(`CONNECTED (${report.controlPlane.socketPath})`) : color.red(`OFFLINE (${report.controlPlane.error || 'workbench not running'})`)}`);
@@ -2578,16 +2664,24 @@ function formatDoctorHuman(report: IDoctorReport, color: ICliColorizer): string 
 	return lines.join('\n');
 }
 
-const TOP_LEVEL_COMMANDS = [
-	'doctor', 'completion', 'status', 'mode', 'view', 'project', 'host',
+export const TOP_LEVEL_COMMANDS = [
+	'doctor', 'completion', 'status', 'mode', 'view', 'role', 'project', 'host',
 	'engine', 'session', 'secretary', 'engineering', 'inbox', 'version',
 ] as const;
 
-const ENGINEERING_SUBCOMMANDS = [
-	'demo', 'init', 'list', 'open', 'blueprint', 'run', 'pause', 'resume', 'stop',
-	'remove', 'reset', 'configure', 'template', 'report', 'worktrees', 'diff',
+export const ROLE_SUBCOMMANDS = [
+	'list', 'apis', 'presets', 'preset', 'apply-preset', 'set-tier', 'reset', 'studio',
+] as const;
+
+export const ENGINEERING_SUBCOMMANDS = [
+	'demo', 'generate', 'init', 'list', 'open', 'blueprint', 'run', 'pause', 'resume', 'stop',
+	'remove', 'reset', 'configure', 'template', 'report', 'worktrees', 'verify-trust', 'diff',
 	'reports', 'status', 'review', 'gate', 'watchdog-action',
 ] as const;
+
+export const VERIFY_TRUST_SUBCOMMANDS = ['list', 'revoke'] as const;
+
+const COMPLETION_SHELLS = ['bash', 'zsh', 'fish', 'powershell'] as const;
 
 function buildBashCompletion(): string {
 	return [
@@ -2597,16 +2691,26 @@ function buildBashCompletion(): string {
 		'\tcur="${COMP_WORDS[COMP_CWORD]}"',
 		'',
 		`\tlocal top_level="${TOP_LEVEL_COMMANDS.join(' ')}"`,
+		`\tlocal role_subcommands="${ROLE_SUBCOMMANDS.join(' ')}"`,
 		`\tlocal engineering_subcommands="${ENGINEERING_SUBCOMMANDS.join(' ')}"`,
+		`\tlocal verify_trust_subcommands="${VERIFY_TRUST_SUBCOMMANDS.join(' ')}"`,
 		'',
 		'\tcase "${COMP_WORDS[1]}" in',
 		'\t\tcompletion)',
-		'\t\t\tCOMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )',
+		`\t\t\tCOMPREPLY=( $(compgen -W "${COMPLETION_SHELLS.join(' ')}" -- "$cur") )`,
+		'\t\t\treturn 0',
+		'\t\t\t;;',
+		'\t\trole|roles|org)',
+		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
+		'\t\t\t\tCOMPREPLY=( $(compgen -W "$role_subcommands" -- "$cur") )',
+		'\t\t\tfi',
 		'\t\t\treturn 0',
 		'\t\t\t;;',
 		'\t\tengineering)',
 		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
 		'\t\t\t\tCOMPREPLY=( $(compgen -W "$engineering_subcommands" -- "$cur") )',
+		'\t\t\telif [ "$COMP_CWORD" -eq 3 ] && [ "${COMP_WORDS[2]}" = "verify-trust" ]; then',
+		'\t\t\t\tCOMPREPLY=( $(compgen -W "$verify_trust_subcommands" -- "$cur") )',
 		'\t\t\tfi',
 		'\t\t\treturn 0',
 		'\t\t\t;;',
@@ -2628,13 +2732,14 @@ function buildZshCompletion(): string {
 		'#compdef aexus-ade',
 		'',
 		'_aexus_ade() {',
-		'\tlocal -a top_level engineering_subcommands',
+		'\tlocal -a top_level role_subcommands engineering_subcommands verify_trust_subcommands',
 		'\ttop_level=(',
 		`\t\t'doctor:Diagnose the ADE environment'`,
 		`\t\t'completion:Emit a shell completion script'`,
 		`\t\t'status:Show workbench status'`,
 		`\t\t'mode:Get or set ADE/IDE mode'`,
 		`\t\t'view:Inspect or change the ADE view'`,
+		`\t\t'role:Manage organization roles and presets'`,
 		`\t\t'project:Manage projects'`,
 		`\t\t'host:Manage Cloud Hosts'`,
 		`\t\t'engine:List engines and sessions'`,
@@ -2644,8 +2749,19 @@ function buildZshCompletion(): string {
 		`\t\t'inbox:Manage the governor inbox'`,
 		`\t\t'version:Print the CLI version'`,
 		'\t)',
+		'\trole_subcommands=(',
+		`\t\t'list:Show active organization role schema'`,
+		`\t\t'apis:List available ADE control API primitives'`,
+		`\t\t'presets:List built-in organization presets'`,
+		`\t\t'preset:Apply an organization preset'`,
+		`\t\t'apply-preset:Apply an organization preset'`,
+		`\t\t'set-tier:Assign a session role tier'`,
+		`\t\t'reset:Reset organization roles to default'`,
+		`\t\t'studio:Open Organization and Roles Studio'`,
+		'\t)',
 		'\tengineering_subcommands=(',
 		`\t\t'demo:Create a demo engineering tree'`,
+		`\t\t'generate:Generate an engineering DAG blueprint from a goal prompt'`,
 		`\t\t'init:Initialize an engineering tree'`,
 		`\t\t'list:List engineering trees'`,
 		`\t\t'open:Open an engineering tree'`,
@@ -2660,6 +2776,7 @@ function buildZshCompletion(): string {
 		`\t\t'template:List or apply recipes'`,
 		`\t\t'report:Write a verification report'`,
 		`\t\t'worktrees:Merge or clean up worktrees'`,
+		`\t\t'verify-trust:Inspect or revoke trusted verify command hashes'`,
 		`\t\t'diff:Show a node diff'`,
 		`\t\t'reports:List node reports'`,
 		`\t\t'status:Show node status'`,
@@ -2667,13 +2784,21 @@ function buildZshCompletion(): string {
 		`\t\t'gate:Submit a quality gate verdict'`,
 		`\t\t'watchdog-action:Send a watchdog action'`,
 		'\t)',
+		'\tverify_trust_subcommands=(',
+		`\t\t'list:List trusted verify command hashes'`,
+		`\t\t'revoke:Revoke one or all trusted verify command hashes'`,
+		'\t)',
 		'',
 		'\tif (( CURRENT == 2 )); then',
 		`\t\t_describe -t commands 'aexus-ade command' top_level`,
 		'\telif [[ ${words[2]} == completion ]]; then',
-		`\t\t_values 'shell' bash zsh fish`,
+		`\t\t_values 'shell' ${COMPLETION_SHELLS.join(' ')}`,
+		'\telif [[ ( ${words[2]} == role || ${words[2]} == roles || ${words[2]} == org ) && CURRENT == 3 ]]; then',
+		`\t\t_describe -t commands 'role command' role_subcommands`,
 		'\telif [[ ${words[2]} == engineering && CURRENT == 3 ]]; then',
 		`\t\t_describe -t commands 'engineering command' engineering_subcommands`,
+		'\telif [[ ${words[2]} == engineering && ${words[3]} == verify-trust && CURRENT == 4 ]]; then',
+		`\t\t_describe -t commands 'verify-trust command' verify_trust_subcommands`,
 		'\tfi',
 		'}',
 		'',
@@ -2693,6 +2818,7 @@ function buildFishCompletion(): string {
 		status: 'Show workbench status',
 		mode: 'Get or set ADE/IDE mode',
 		view: 'Inspect or change the ADE view',
+		role: 'Manage organization roles and presets',
 		project: 'Manage projects',
 		host: 'Manage Cloud Hosts',
 		engine: 'List engines and sessions',
@@ -2705,9 +2831,23 @@ function buildFishCompletion(): string {
 	for (const command of TOP_LEVEL_COMMANDS) {
 		lines.push(`complete -c aexus-ade -n '__fish_use_subcommand' -a ${command} -d '${descriptions[command]}'`);
 	}
-	lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'`);
+	lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_SHELLS.join(' ')}'`);
+	const roleDescriptions: Record<(typeof ROLE_SUBCOMMANDS)[number], string> = {
+		list: 'Show active organization role schema',
+		apis: 'List available ADE control API primitives',
+		presets: 'List built-in organization presets',
+		preset: 'Apply an organization preset',
+		'apply-preset': 'Apply an organization preset',
+		'set-tier': 'Assign a session role tier',
+		reset: 'Reset organization roles to default',
+		studio: 'Open Organization and Roles Studio',
+	};
+	for (const command of ROLE_SUBCOMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from role' -a ${command} -d '${roleDescriptions[command]}'`);
+	}
 	const engineeringDescriptions: Record<(typeof ENGINEERING_SUBCOMMANDS)[number], string> = {
 		demo: 'Create a demo engineering tree',
+		generate: 'Generate an engineering DAG blueprint from a goal prompt',
 		init: 'Initialize an engineering tree',
 		list: 'List engineering trees',
 		open: 'Open an engineering tree',
@@ -2722,6 +2862,7 @@ function buildFishCompletion(): string {
 		template: 'List or apply recipes',
 		report: 'Write a verification report',
 		worktrees: 'Merge or clean up worktrees',
+		'verify-trust': 'Inspect or revoke trusted verify command hashes',
 		diff: 'Show a node diff',
 		reports: 'List node reports',
 		status: 'Show node status',
@@ -2730,10 +2871,53 @@ function buildFishCompletion(): string {
 		'watchdog-action': 'Send a watchdog action',
 	};
 	for (const command of ENGINEERING_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from engineering' -a ${command} -d '${engineeringDescriptions[command]}'`);
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from engineering; and not __fish_seen_subcommand_from verify-trust' -a ${command} -d '${engineeringDescriptions[command]}'`);
+	}
+	const verifyTrustDescriptions: Record<(typeof VERIFY_TRUST_SUBCOMMANDS)[number], string> = {
+		list: 'List trusted verify command hashes',
+		revoke: 'Revoke one or all trusted verify command hashes',
+	};
+	for (const command of VERIFY_TRUST_SUBCOMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from engineering; and __fish_seen_subcommand_from verify-trust' -a ${command} -d '${verifyTrustDescriptions[command]}'`);
 	}
 	lines.push('');
 	return lines.join('\n');
+}
+
+function buildPowerShellCompletion(): string {
+	const quoteList = (items: readonly string[]) => items.map(item => `'${item}'`).join(', ');
+	return [
+		'# PowerShell completion for aexus-ade',
+		`Register-ArgumentCompleter -Native -CommandName aexus-ade -ScriptBlock {`,
+		'\tparam($wordToComplete, $commandAst, $cursorPosition)',
+		'\t$tokens = $commandAst.CommandElements | ForEach-Object { $_.Extent.Text }',
+		`\t$topLevel = @(${quoteList(TOP_LEVEL_COMMANDS)})`,
+		`\t$shells = @(${quoteList(COMPLETION_SHELLS)})`,
+		`\t$roleSubcommands = @(${quoteList(ROLE_SUBCOMMANDS)})`,
+		`\t$engineeringSubcommands = @(${quoteList(ENGINEERING_SUBCOMMANDS)})`,
+		`\t$verifyTrustSubcommands = @(${quoteList(VERIFY_TRUST_SUBCOMMANDS)})`,
+		'\t$candidates = @()',
+		'\tif ($tokens.Count -le 2 -and ($tokens.Count -eq 1 -or $wordToComplete)) {',
+		'\t\t$candidates = $topLevel',
+		'\t} elseif ($tokens.Count -ge 2) {',
+		'\t\tswitch ($tokens[1]) {',
+		'\t\t\t\'completion\' { $candidates = $shells }',
+		'\t\t\t{ $_ -in @(\'role\', \'roles\', \'org\') } { $candidates = $roleSubcommands }',
+		'\t\t\t\'engineering\' {',
+		'\t\t\t\tif ($tokens.Count -ge 3 -and $tokens[2] -eq \'verify-trust\') {',
+		'\t\t\t\t\t$candidates = $verifyTrustSubcommands',
+		'\t\t\t\t} else {',
+		'\t\t\t\t\t$candidates = $engineeringSubcommands',
+		'\t\t\t\t}',
+		'\t\t\t}',
+		'\t\t}',
+		'\t}',
+		`\t$candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {`,
+		`\t\t[System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)`,
+		'\t}',
+		'}',
+		'',
+	].join('\n');
 }
 
 export function buildCompletionScript(shell: CompletionShell): string {
@@ -2741,6 +2925,7 @@ export function buildCompletionScript(shell: CompletionShell): string {
 		case 'bash': return buildBashCompletion();
 		case 'zsh': return buildZshCompletion();
 		case 'fish': return buildFishCompletion();
+		case 'powershell': return buildPowerShellCompletion();
 	}
 }
 
@@ -2760,7 +2945,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 
 	if (parsed.version) {
 		if (parsed.json) {
-			writeOut(JSON.stringify({ cli: 'aexus-ade', version: ADE_CLI_VERSION, engineBaseline: ADE_ENGINE_BASELINE }, null, 2) + '\n');
+			writeOut(JSON.stringify({ schemaVersion: ADE_CLI_SCHEMA_VERSION, cli: 'aexus-ade', version: ADE_CLI_VERSION, engineBaseline: ADE_ENGINE_BASELINE }, null, 2) + '\n');
 		} else {
 			writeOut(`aexus-ade ${ADE_CLI_VERSION} (Aexus Code / Code - OSS ${ADE_ENGINE_BASELINE})\n`);
 		}
@@ -2855,12 +3040,15 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			}
 			return 0;
 		}
+		const outputPayload = parsed.action === 'status' && response.result && typeof response.result === 'object' && !Array.isArray(response.result)
+			? { schemaVersion: ADE_CLI_SCHEMA_VERSION, ...(response.result as Record<string, unknown>) }
+			: response.result;
 		if (parsed.json) {
-			writeOut(JSON.stringify(response.result ?? { ok: true }, null, 2) + '\n');
+			writeOut(JSON.stringify(outputPayload ?? { ok: true }, null, 2) + '\n');
 		} else if (parsed.action === 'engineering.blueprint.get' && parsed.params?.raw === true) {
-			writeOut(formatRawBlueprintOutput(response.result));
+			writeOut(formatRawBlueprintOutput(outputPayload));
 		} else {
-			writeOut(formatHumanOutput(parsed.action, response.result) + '\n');
+			writeOut(formatHumanOutput(parsed.action, outputPayload) + '\n');
 		}
 		return 0;
 	} catch (error) {

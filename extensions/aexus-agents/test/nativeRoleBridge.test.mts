@@ -2122,4 +2122,57 @@ describe('ADE Native Extension Role Bridge', () => {
 			await fs.promises.rm(tmpRoot, { recursive: true, force: true });
 		}
 	});
+
+	it('stripAdeControlEnv removes all AEXUS_ADE_* control vars case-insensitively without mutating input', () => {
+		const rawEnv: NodeJS.ProcessEnv = {
+			PATH: '/usr/bin',
+			AEXUS_ADE_CONTROL_FILE: '/tmp/ade-control.json',
+			AEXUS_ADE_TOKEN: 'master-token',
+			AEXUS_ADE_SOCKET: '/tmp/ade.sock',
+			AEXUS_ADE_SESSION_TOKEN: 'aexus-cap.123.456',
+			AEXUS_ADE_CALLER: 'governor',
+			aexus_ade_socket: '/tmp/lower.sock',
+			KEEP_VAR: 'ok',
+		};
+		const cleaned = sharedModule.stripAdeControlEnv(rawEnv);
+		assert.deepStrictEqual(cleaned, { PATH: '/usr/bin', KEEP_VAR: 'ok' });
+		assert.strictEqual(rawEnv.AEXUS_ADE_TOKEN, 'master-token');
+	});
+
+	it('resolveCodexSandboxMode bounds automated engineering workers to workspace-write unless autonomousMode or explicit danger-full-access is set', () => {
+		// Automated DAG worker with autonomousMode=false stays bounded to workspace-write (worktree cwd)
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true }, undefined, false), 'workspace-write');
+		// Interactive session with autonomousMode=false also defaults to workspace-write
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({}, undefined, false), 'workspace-write');
+		// Explicit autonomousMode=true unlocks danger-full-access
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true }, undefined, true), 'danger-full-access');
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({}, undefined, true), 'danger-full-access');
+		// Explicit sandboxMode always wins (both restrictive and permissive)
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true, sandboxMode: 'danger-full-access' }, undefined, false), 'danger-full-access');
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true, sandboxMode: 'read-only' }, undefined, true), 'read-only');
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true }, 'workspace-write', true), 'workspace-write');
+	});
+
+	it('computeAgentIdentityScopeKey isolates engine client pools by (cwd, sessionId, rank, pure) so rank/cwd changes never reuse a stale pool', () => {
+		const govKey = sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'governor', pureWorker: false }, '/repo/main', 'darwin');
+		const empKey = sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'employee', pureWorker: false }, '/repo/main', 'darwin');
+		const pureKey = sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', pureWorker: true }, '/repo/main', 'darwin');
+		const otherCwdKey = sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'governor', pureWorker: false }, '/repo/worktree-n2', 'darwin');
+		const otherSessKey = sharedModule.computeAgentIdentityScopeKey('sess-2', { sessionId: 'sess-2', callerRole: 'governor', pureWorker: false }, '/repo/main', 'darwin');
+
+		const uniqueKeys = new Set([govKey, empKey, pureKey, otherCwdKey, otherSessKey, sharedModule.SHARED_PURE_SCOPE_KEY]);
+		assert.strictEqual(uniqueKeys.size, 6, 'Every distinct (cwd, sessionId, rank, pure) tuple must yield a distinct pool key');
+		assert.ok(pureKey.startsWith('pure:'));
+		assert.ok(govKey.startsWith('orch:'));
+		// Trailing slashes normalize identically
+		assert.strictEqual(
+			sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'Governor' }, '/repo/main/', 'darwin'),
+			govKey,
+		);
+		// Windows paths normalize case-insensitively
+		assert.strictEqual(
+			sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'employee' }, 'C:\\Repo\\Work\\', 'win32'),
+			sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'employee' }, 'c:\\repo\\work', 'win32'),
+		);
+	});
 });

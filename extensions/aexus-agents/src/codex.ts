@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { AgentChildIdentity } from './roleBridgeShared';
+import { AgentChildIdentity, CodexSandboxMode, resolveCodexSandboxMode, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
 import { agentIdentityScopeKey, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, RpcPacket, withTimeout } from './runtime';
 
 interface ThreadItem { type: string; text?: string; command?: string; server?: string; tool?: string; query?: string; content?: { type: string; text?: string }[] }
@@ -24,7 +24,7 @@ interface SkillEntry { name?: string; id?: string; skill?: string; description?:
 interface SessionRuntimeSettings { model?: string; effort?: string; approvalPolicy: string; sandbox?: string; webSearch?: string }
 
 type ApprovalPolicy = 'untrusted' | 'on-request' | 'never';
-type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+type SandboxMode = CodexSandboxMode;
 
 function shorten(value: string, max = 140): string {
 	return value.length > max ? `${value.slice(0, max - 1)}…` : value;
@@ -182,7 +182,7 @@ export class CodexRuntime implements EngineRuntime {
 		slot.loaded.clear();
 	}
 
-	private async ensureSlot(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
+	private async ensureSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
 		const existing = this.clientSlots.get(scopeKey);
 		if (existing && (!existing.client || !existing.client.isClosed)) {
 			const client = await existing.ready;
@@ -199,7 +199,7 @@ export class CodexRuntime implements EngineRuntime {
 		};
 		slot.ready = (async () => {
 			const childEnv = await prepareAgentChildEnv(identity ?? { sessionId: 'codex-pure', pureWorker: true });
-			const client = new JsonLineClient(this.executable, ['app-server'], undefined, childEnv);
+			const client = new JsonLineClient(this.executable, ['app-server'], cwd, childEnv);
 			slot.client = client;
 			slot.sessionListener = client.onPacket(packet => {
 				const params = packet.params as Notification | undefined;
@@ -285,21 +285,36 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
+	private async retireStaleSessionSlot(sessionId: string, nextScopeKey: string): Promise<void> {
+		const prevScopeKey = this.sessionScopeKeys.get(sessionId);
+		if (!prevScopeKey || prevScopeKey === nextScopeKey) {
+			return;
+		}
+		const prevSlot = this.clientSlots.get(prevScopeKey);
+		if (prevSlot) {
+			if (prevSlot.client && !prevSlot.client.isClosed) {
+				await prevSlot.client.request('thread/unsubscribe', { threadId: sessionId }).catch(() => { });
+			}
+			prevSlot.loaded.delete(sessionId);
+			if (prevScopeKey !== SHARED_PURE_SCOPE_KEY) {
+				this.disposeSlot(prevScopeKey);
+			}
+		}
+	}
+
+	private resolveLiveScopeKey(sessionId: string): string {
+		const existingKey = this.sessionScopeKeys.get(sessionId);
+		if (existingKey) {
+			const slot = this.clientSlots.get(existingKey);
+			if (slot && (!slot.client || !slot.client.isClosed)) {
+				return existingKey;
+			}
+		}
+		return SHARED_PURE_SCOPE_KEY;
+	}
+
 	private sandboxMode(options?: EngineSendOptions, explicitSandboxMode?: string): SandboxMode {
-		if (options?.automatedEngineering) {
-			return 'danger-full-access';
-		}
-		switch ((explicitSandboxMode ?? options?.sandboxMode)?.trim()) {
-			case 'read-only':
-				return 'read-only';
-			case 'workspace-write':
-				return 'workspace-write';
-			case 'danger-full-access':
-				return 'danger-full-access';
-			default:
-				// Safe by default for interactive sessions unless autonomousMode is explicitly enabled.
-				return isAutonomousModeEnabled() ? 'danger-full-access' : 'workspace-write';
-		}
+		return resolveCodexSandboxMode(options, explicitSandboxMode, isAutonomousModeEnabled());
 	}
 
 	private threadStartParams(cwd: string, options?: EngineSendOptions): Record<string, unknown> {
@@ -339,8 +354,8 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
-	private async ensureReady(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<JsonLineClient> {
-		const { client } = await this.ensureSlot(scopeKey, identity);
+	private async ensureReady(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string): Promise<JsonLineClient> {
+		const { client } = await this.ensureSlot(scopeKey, identity, cwd);
 		return client;
 	}
 
@@ -413,10 +428,10 @@ export class CodexRuntime implements EngineRuntime {
 		const now = Date.now();
 		try {
 			return await withTimeout((async () => {
-				const { client, loaded } = await this.ensureSlot('pure', { sessionId: 'codex-pure', pureWorker: true });
+				const { client, loaded } = await this.ensureSlot(SHARED_PURE_SCOPE_KEY, { sessionId: 'codex-pure', pureWorker: true });
 				const result = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(cwd, options));
 				loaded.add(result.thread.id);
-				this.sessionScopeKeys.set(result.thread.id, 'pure');
+				this.sessionScopeKeys.set(result.thread.id, SHARED_PURE_SCOPE_KEY);
 				this.recordThreadModelIfUnsupported(result.thread.id, result.model);
 				return { ...this.session(result.thread), provisional: true };
 			})(), 6000);
@@ -434,11 +449,14 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
-		const scopeKey = options ? agentIdentityScopeKey(session.id, options) : (this.sessionScopeKeys.get(session.id) ?? 'pure');
+		const scopeKey = options
+			? agentIdentityScopeKey(session.id, options, session.cwd)
+			: this.resolveLiveScopeKey(session.id);
 		const identity: AgentChildIdentity = options
 			? { sessionId: session.id, callerRole: options.callerRole, pureWorker: options.pureWorker }
 			: { sessionId: session.id, pureWorker: true };
-		const { client, loaded } = await this.ensureSlot(scopeKey, identity);
+		await this.retireStaleSessionSlot(session.id, scopeKey);
+		const { client, loaded } = await this.ensureSlot(scopeKey, identity, scopeKey === SHARED_PURE_SCOPE_KEY ? undefined : session.cwd);
 		this.sessionScopeKeys.set(session.id, scopeKey);
 		if (session.unmaterialized) {
 			const result = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options));
@@ -540,21 +558,23 @@ export class CodexRuntime implements EngineRuntime {
 				await slot.client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
 				slot.loaded.delete(session.id);
 			}
-			if (key !== 'pure' && key.startsWith(`orch:${session.id}:`)) {
+			if (key !== SHARED_PURE_SCOPE_KEY && key.includes(`:${session.id}`)) {
 				this.disposeSlot(key);
 			}
 		}
+		this.sessionScopeKeys.delete(session.id);
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		await this.prepareSession(session, options);
 		this.knownSessions.set(session.id, session);
-		const scopeKey = agentIdentityScopeKey(session.id, options);
+		const scopeKey = agentIdentityScopeKey(session.id, options, session.cwd);
+		await this.retireStaleSessionSlot(session.id, scopeKey);
 		const { client } = await this.ensureSlot(scopeKey, {
 			sessionId: session.id,
 			callerRole: options?.callerRole,
 			pureWorker: options?.pureWorker,
-		});
+		}, session.cwd);
 		this.sessionScopeKeys.set(session.id, scopeKey);
 		let turnId: string | undefined;
 		const mappedEffort = mapReasoningEffort(options?.thinking);
@@ -699,7 +719,7 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	private async materializeForCommand(session: NativeSession): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
-		const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+		const scopeKey = this.resolveLiveScopeKey(session.id);
 		const slot = await this.ensureSlot(scopeKey);
 		if (session.unmaterialized || session.provisional) {
 			await this.prepareSession(session);
@@ -751,7 +771,7 @@ export class CodexRuntime implements EngineRuntime {
 			return true;
 		}
 		try {
-			const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+			const scopeKey = this.resolveLiveScopeKey(session.id);
 			const { client, loaded } = await this.ensureSlot(scopeKey);
 			if (token.isCancellationRequested) {
 				return true;
@@ -825,7 +845,7 @@ export class CodexRuntime implements EngineRuntime {
 		for (const child of await this.children(session, token)) {
 			await this.delete(child, token);
 		}
-		const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+		const scopeKey = this.resolveLiveScopeKey(session.id);
 		const { client, loaded } = await this.ensureSlot(scopeKey);
 		if (session.provisional) {
 			await client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
@@ -843,7 +863,7 @@ export class CodexRuntime implements EngineRuntime {
 		}
 		loaded.delete(session.id);
 		this.sessionScopeKeys.delete(session.id);
-		if (scopeKey !== 'pure') {
+		if (scopeKey !== SHARED_PURE_SCOPE_KEY) {
 			this.disposeSlot(scopeKey);
 		}
 		this.knownSessions.delete(session.id);
