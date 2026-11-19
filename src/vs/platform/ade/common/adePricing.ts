@@ -10,6 +10,9 @@ import {
 } from './adeEngineering.js';
 import { normalizeBlueprintEngine } from './adeEngineeringBlueprint.js';
 
+export const ADE_PRICING_CONFIG_KEY = 'aexus.ade.pricing';
+export const ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY = 'aexus.ade.pricing.subscriptionMode';
+
 export interface IAdeModelPricingRate {
 	readonly label: string;
 	/** USD per 1,000,000 uncached input tokens. */
@@ -22,14 +25,24 @@ export interface IAdeModelPricingRate {
 	readonly cacheWritePerMTok: number;
 }
 
+export type AdeCustomPricingMap = Readonly<Record<string, Partial<IAdeModelPricingRate>>>;
+
+export interface IAdePricingOptions {
+	/** Optional user-configured per-model or per-engine rate overrides from `aexus.ade.pricing`. */
+	readonly customPricing?: AdeCustomPricingMap;
+	/** When true (`aexus.ade.pricing.subscriptionMode`), marginal API spend is reported as $0.00. */
+	readonly subscriptionMode?: boolean;
+}
+
 const MODEL_PRICING_RULES: readonly { readonly match: RegExp; readonly rate: IAdeModelPricingRate }[] = [
 	// Anthropic Claude family
 	{ match: /opus/i, rate: { label: 'Claude Opus', inputPerMTok: 15, outputPerMTok: 75, cacheReadPerMTok: 1.5, cacheWritePerMTok: 18.75 } },
 	{ match: /haiku/i, rate: { label: 'Claude Haiku', inputPerMTok: 0.8, outputPerMTok: 4, cacheReadPerMTok: 0.08, cacheWritePerMTok: 1 } },
 	{ match: /sonnet|claude/i, rate: { label: 'Claude Sonnet', inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheWritePerMTok: 3.75 } },
-	// OpenAI / Codex family
+	// OpenAI / Codex family (match more-specific gpt-5-pro before generic gpt-5!)
 	{ match: /\bo3-mini\b|\bo4-mini\b|\bmini\b/i, rate: { label: 'OpenAI Mini', inputPerMTok: 1.1, outputPerMTok: 4.4, cacheReadPerMTok: 0.275, cacheWritePerMTok: 1.1 } },
 	{ match: /\bo3\b|\bo1\b/i, rate: { label: 'OpenAI Reasoning', inputPerMTok: 10, outputPerMTok: 40, cacheReadPerMTok: 2.5, cacheWritePerMTok: 10 } },
+	{ match: /gpt-5(?:\.\d+)?-pro\b/i, rate: { label: 'OpenAI GPT-5 Pro', inputPerMTok: 15, outputPerMTok: 120, cacheReadPerMTok: 3.75, cacheWritePerMTok: 15 } },
 	{ match: /gpt-5|gpt-4\.1|codex/i, rate: { label: 'OpenAI Codex', inputPerMTok: 2.5, outputPerMTok: 10, cacheReadPerMTok: 0.25, cacheWritePerMTok: 2.5 } },
 	// Google Gemini / Antigravity family
 	{ match: /flash/i, rate: { label: 'Gemini Flash', inputPerMTok: 0.3, outputPerMTok: 2.5, cacheReadPerMTok: 0.075, cacheWritePerMTok: 0.3 } },
@@ -60,31 +73,92 @@ const FALLBACK_PRICING: IAdeModelPricingRate = {
 	cacheWritePerMTok: 2.5,
 };
 
-export function resolveModelPricing(roleConfig?: Pick<IAdeRoleModelConfig, 'engine' | 'model'>): IAdeModelPricingRate {
+function findCustomPricingOverride(
+	customPricing: AdeCustomPricingMap | undefined,
+	roleConfig: Pick<IAdeRoleModelConfig, 'engine' | 'model'> | undefined,
+): Partial<IAdeModelPricingRate> | undefined {
+	if (!customPricing || !roleConfig) {
+		return undefined;
+	}
+	const entries = Object.entries(customPricing).filter(([, v]) => Boolean(v && typeof v === 'object'));
+	if (entries.length === 0) {
+		return undefined;
+	}
+	const model = roleConfig.model?.trim().toLowerCase();
+	if (model) {
+		let bestKeyLen = -1;
+		let bestOverride: Partial<IAdeModelPricingRate> | undefined;
+		for (const [rawKey, override] of entries) {
+			const key = rawKey.trim().toLowerCase();
+			if (!key) {
+				continue;
+			}
+			if (model === key || model.includes(key)) {
+				if (key.length > bestKeyLen) {
+					bestKeyLen = key.length;
+					bestOverride = override;
+				}
+			}
+		}
+		if (bestOverride) {
+			return bestOverride;
+		}
+	}
+	const rawEngine = roleConfig.engine?.trim().toLowerCase();
+	const normEngine = roleConfig.engine ? normalizeBlueprintEngine(roleConfig.engine).toLowerCase() : undefined;
+	for (const [rawKey, override] of entries) {
+		const key = rawKey.trim().toLowerCase();
+		if (key && (key === rawEngine || key === normEngine)) {
+			return override;
+		}
+	}
+	return undefined;
+}
+
+function mergePricingRate(base: IAdeModelPricingRate, override: Partial<IAdeModelPricingRate>): IAdeModelPricingRate {
+	const pickNum = (val: unknown, fallback: number): number => (typeof val === 'number' && Number.isFinite(val) && val >= 0 ? val : fallback);
+	return {
+		label: typeof override.label === 'string' && override.label.trim() ? override.label.trim() : base.label,
+		inputPerMTok: pickNum(override.inputPerMTok, base.inputPerMTok),
+		outputPerMTok: pickNum(override.outputPerMTok, base.outputPerMTok),
+		cacheReadPerMTok: pickNum(override.cacheReadPerMTok, base.cacheReadPerMTok),
+		cacheWritePerMTok: pickNum(override.cacheWritePerMTok, base.cacheWritePerMTok),
+	};
+}
+
+export function resolveModelPricing(
+	roleConfig?: Pick<IAdeRoleModelConfig, 'engine' | 'model'>,
+	options?: IAdePricingOptions,
+): IAdeModelPricingRate {
+	let baseRate: IAdeModelPricingRate | undefined;
 	const model = roleConfig?.model?.trim();
 	if (model) {
 		for (const rule of MODEL_PRICING_RULES) {
 			if (rule.match.test(model)) {
-				return rule.rate;
+				baseRate = rule.rate;
+				break;
 			}
 		}
 	}
-	const engine = roleConfig?.engine ? normalizeBlueprintEngine(roleConfig.engine) : undefined;
-	if (engine && ENGINE_DEFAULT_PRICING[engine]) {
-		return ENGINE_DEFAULT_PRICING[engine];
+	if (!baseRate) {
+		const engine = roleConfig?.engine ? normalizeBlueprintEngine(roleConfig.engine) : undefined;
+		baseRate = (engine && ENGINE_DEFAULT_PRICING[engine]) ? ENGINE_DEFAULT_PRICING[engine] : FALLBACK_PRICING;
 	}
-	return FALLBACK_PRICING;
+	const customOverride = findCustomPricingOverride(options?.customPricing, roleConfig);
+	return customOverride ? mergePricingRate(baseRate, customOverride) : baseRate;
 }
 
 /**
  * Computes the USD cost of a token usage bucket.
- * Honors explicit `usage.costUsd` reported directly by an engine; otherwise estimates from model pricing.
+ * Honors `subscriptionMode` ($0.00 marginal spend), explicit `usage.costUsd` reported directly by an engine,
+ * or otherwise estimates from model pricing (with optional `aexus.ade.pricing` overrides).
  */
 export function estimateTokenUsageCostUsd(
 	usage: IAdeTokenUsage | undefined,
 	roleConfig?: Pick<IAdeRoleModelConfig, 'engine' | 'model'>,
+	options?: IAdePricingOptions,
 ): number {
-	if (!usage) {
+	if (!usage || options?.subscriptionMode === true) {
 		return 0;
 	}
 	if (typeof usage.costUsd === 'number' && Number.isFinite(usage.costUsd) && usage.costUsd > 0) {
@@ -93,7 +167,7 @@ export function estimateTokenUsageCostUsd(
 	if (usage.totalTokens <= 0) {
 		return 0;
 	}
-	const rate = resolveModelPricing(roleConfig);
+	const rate = resolveModelPricing(roleConfig, options);
 	const structuredTotal = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 	let cost: number;
 	if (structuredTotal > 0) {
@@ -116,11 +190,12 @@ export function estimateTokenUsageCostUsd(
 export function estimateCacheSavingsUsd(
 	usage: IAdeTokenUsage | undefined,
 	roleConfig?: Pick<IAdeRoleModelConfig, 'engine' | 'model'>,
+	options?: IAdePricingOptions,
 ): number {
-	if (!usage || usage.cacheReadTokens <= 0) {
+	if (!usage || usage.cacheReadTokens <= 0 || options?.subscriptionMode === true) {
 		return 0;
 	}
-	const rate = resolveModelPricing(roleConfig);
+	const rate = resolveModelPricing(roleConfig, options);
 	const savedPerMTok = Math.max(0, rate.inputPerMTok - rate.cacheReadPerMTok);
 	return Math.round(((usage.cacheReadTokens * savedPerMTok) / 1_000_000) * 1_000_000) / 1_000_000;
 }
@@ -156,12 +231,15 @@ export interface IAdeTreeFinancialSummary {
 	readonly maxBudgetUsd?: number;
 	readonly budgetUtilizationPct?: number;
 	readonly budgetStatus: AdeBudgetStatus;
+	readonly subscriptionMode?: boolean;
 }
 
 export function computeTreeFinancialSummary(
 	snapshot: Pick<IAdeEngineeringTreeSnapshot, 'blueprint' | 'state' | 'tokenUsage'>,
+	options?: IAdePricingOptions,
 ): IAdeTreeFinancialSummary {
 	const bp = snapshot.blueprint;
+	const isSubscription = options?.subscriptionMode === true;
 	const firstWorkerCfg = bp.nodes.find(n => n.worker)?.worker;
 	const firstEmpCfg = bp.nodes.find(n => n.employee)?.employee;
 	const firstMgrCfg = bp.managers[0]?.config;
@@ -185,37 +263,39 @@ export function computeTreeFinancialSummary(
 			costByNode[node.id] = 0;
 			continue;
 		}
-		const wCost = estimateTokenUsageCostUsd(rt.tokenUsage.worker, node.worker);
-		const eCost = estimateTokenUsageCostUsd(rt.tokenUsage.employee, node.employee);
-		const mCost = estimateTokenUsageCostUsd(rt.tokenUsage.manager, segmentByNode.get(node.id) ?? firstMgrCfg);
+		const wCost = estimateTokenUsageCostUsd(rt.tokenUsage.worker, node.worker, options);
+		const eCost = estimateTokenUsageCostUsd(rt.tokenUsage.employee, node.employee, options);
+		const mCost = estimateTokenUsageCostUsd(rt.tokenUsage.manager, segmentByNode.get(node.id) ?? firstMgrCfg, options);
 		const nTotal = Math.round((wCost + eCost + mCost) * 1_000_000) / 1_000_000;
 		costByNode[node.id] = nTotal;
 		workerSumFromNodes += wCost;
 		empSumFromNodes += eCost;
 		mgrSumFromNodes += mCost;
-		savingsFromNodes += estimateCacheSavingsUsd(rt.tokenUsage.worker, node.worker)
-			+ estimateCacheSavingsUsd(rt.tokenUsage.employee, node.employee)
-			+ estimateCacheSavingsUsd(rt.tokenUsage.manager, segmentByNode.get(node.id) ?? firstMgrCfg);
+		savingsFromNodes += estimateCacheSavingsUsd(rt.tokenUsage.worker, node.worker, options)
+			+ estimateCacheSavingsUsd(rt.tokenUsage.employee, node.employee, options)
+			+ estimateCacheSavingsUsd(rt.tokenUsage.manager, segmentByNode.get(node.id) ?? firstMgrCfg, options);
 	}
 
 	const tu = snapshot.tokenUsage;
-	const govCost = estimateTokenUsageCostUsd(tu.governor, firstMgrCfg ?? firstEmpCfg ?? firstWorkerCfg);
-	const mgrCost = mgrSumFromNodes > 0 ? Math.round(mgrSumFromNodes * 1_000_000) / 1_000_000 : estimateTokenUsageCostUsd(tu.manager, firstMgrCfg);
-	const empCost = empSumFromNodes > 0 ? Math.round(empSumFromNodes * 1_000_000) / 1_000_000 : estimateTokenUsageCostUsd(tu.employee, firstEmpCfg);
-	const wrkCost = workerSumFromNodes > 0 ? Math.round(workerSumFromNodes * 1_000_000) / 1_000_000 : estimateTokenUsageCostUsd(tu.worker, firstWorkerCfg);
+	const govCost = estimateTokenUsageCostUsd(tu.governor, firstMgrCfg ?? firstEmpCfg ?? firstWorkerCfg, options);
+	const mgrCost = mgrSumFromNodes > 0 ? Math.round(mgrSumFromNodes * 1_000_000) / 1_000_000 : estimateTokenUsageCostUsd(tu.manager, firstMgrCfg, options);
+	const empCost = empSumFromNodes > 0 ? Math.round(empSumFromNodes * 1_000_000) / 1_000_000 : estimateTokenUsageCostUsd(tu.employee, firstEmpCfg, options);
+	const wrkCost = workerSumFromNodes > 0 ? Math.round(workerSumFromNodes * 1_000_000) / 1_000_000 : estimateTokenUsageCostUsd(tu.worker, firstWorkerCfg, options);
 
 	const tierSum = Math.round((govCost + mgrCost + empCost + wrkCost) * 1_000_000) / 1_000_000;
-	const explicitTotal = typeof tu.total.costUsd === 'number' && tu.total.costUsd > 0 ? tu.total.costUsd : 0;
-	const totalCostUsd = Math.max(tierSum, explicitTotal);
+	const explicitTotal = !isSubscription && typeof tu.total.costUsd === 'number' && tu.total.costUsd > 0 ? tu.total.costUsd : 0;
+	const totalCostUsd = isSubscription ? 0 : Math.max(tierSum, explicitTotal);
 
-	const govSavings = estimateCacheSavingsUsd(tu.governor, firstMgrCfg ?? firstWorkerCfg);
-	const cacheSavingsUsd = Math.round((
-		(savingsFromNodes > 0 ? savingsFromNodes : (
-			estimateCacheSavingsUsd(tu.worker, firstWorkerCfg)
-			+ estimateCacheSavingsUsd(tu.employee, firstEmpCfg)
-			+ estimateCacheSavingsUsd(tu.manager, firstMgrCfg)
-		)) + govSavings
-	) * 1_000_000) / 1_000_000;
+	const govSavings = estimateCacheSavingsUsd(tu.governor, firstMgrCfg ?? firstWorkerCfg, options);
+	const cacheSavingsUsd = isSubscription
+		? 0
+		: Math.round((
+			(savingsFromNodes > 0 ? savingsFromNodes : (
+				estimateCacheSavingsUsd(tu.worker, firstWorkerCfg, options)
+				+ estimateCacheSavingsUsd(tu.employee, firstEmpCfg, options)
+				+ estimateCacheSavingsUsd(tu.manager, firstMgrCfg, options)
+			)) + govSavings
+		) * 1_000_000) / 1_000_000;
 
 	const inputDenominator = tu.total.inputTokens + tu.total.cacheReadTokens;
 	const cacheHitRatePct = inputDenominator > 0 ? Math.round((tu.total.cacheReadTokens / inputDenominator) * 100) : 0;
@@ -258,5 +338,6 @@ export function computeTreeFinancialSummary(
 		costBySegment,
 		...(maxBudgetUsd !== undefined ? { maxBudgetUsd, budgetUtilizationPct } : {}),
 		budgetStatus,
+		...(isSubscription ? { subscriptionMode: true } : {}),
 	};
 }

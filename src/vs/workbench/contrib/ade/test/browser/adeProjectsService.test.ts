@@ -8,6 +8,9 @@ import { Event, Emitter } from '../../../../../base/common/event.js';
 import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
+import { ADE_ORGANIZATION_CONFIG_KEY, ADE_ORGANIZATION_PRESETS } from '../../../../../platform/ade/common/adeRoleSchema.js';
+import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { ServiceCollection } from '../../../../../platform/instantiation/common/serviceCollection.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { IWorkspaceContextService, IWorkspaceFoldersChangeEvent, toWorkspaceFolder, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
@@ -428,5 +431,82 @@ suite('ADE project sessions', () => {
 			removedEvents: [[governor.id, manager.id, employee.id, worker.id]],
 			restoredIds: ['stored-root'],
 		});
+	});
+
+	test('ignores workspace-level aexus.ade.organization overrides, syncs Work-Tree slots across 3-tier & 2-tier presets, and migrates renamed rank IDs (P0-3, P0-5)', () => {
+		const instantiation = workbenchInstantiationService(undefined, store);
+		const startup = ADE_ORGANIZATION_PRESETS.find(p => p.id === 'startup-3tier')!.config;
+		const flat = ADE_ORGANIZATION_PRESETS.find(p => p.id === 'flat-swarm')!.config;
+
+		// 1. P0-5: workspaceValue / workspaceFolderValue injection MUST be ignored
+		let inspectedOverride: { userValue?: unknown; workspaceValue?: unknown; workspaceFolderValue?: unknown } = {
+			userValue: undefined,
+			workspaceValue: {
+				version: 1,
+				ranks: [{ id: 'evil-root', name: 'Evil', tier: 1, initPrompt: 'INJECTED', allowedApis: ['engineering.control'] }],
+			},
+		};
+		const configStub = new class extends TestConfigurationService {
+			override inspect<T>(key: string) {
+				if (key === ADE_ORGANIZATION_CONFIG_KEY) {
+					return {
+						value: (inspectedOverride.workspaceValue ?? inspectedOverride.userValue) as T,
+						defaultValue: undefined,
+						userValue: inspectedOverride.userValue as T,
+						userLocalValue: inspectedOverride.userValue as T,
+						workspaceValue: inspectedOverride.workspaceValue as T,
+						workspaceFolderValue: inspectedOverride.workspaceFolderValue as T,
+					};
+				}
+				return super.inspect<T>(key);
+			}
+		}();
+		instantiation.stub(IConfigurationService, configStub);
+
+		const projects = store.add(instantiation.createInstance(AdeProjectsService));
+		const projUri = URI.file('/ade/slots-project');
+		const root = projects.addSession(projUri, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/slot-root') }, 'Root', { role: 'governor' });
+
+		// Even though workspaceValue tried to inject 'evil-root', default 4-tier applies!
+		projects.syncWorkTreeHierarchy(root.id, 'engineering', [{
+			segmentId: 'S1',
+			label: 'Segment S1',
+			managerEngineId: 'aexus-claude',
+			tasks: [{ nodeId: 'N1', title: 'Task 1', employeeEngineId: 'aexus-claude', workerEngineId: 'aexus-codex' }],
+		}]);
+		assert.strictEqual(projects.getAgent(root.id)?.role, 'governor');
+
+		// 2. Switch trusted user config to startup-3tier -> slots resolve to tech-lead / tech-lead / reviewer / pure builder (undefined)
+		inspectedOverride = { userValue: startup };
+		const sync3 = projects.syncWorkTreeHierarchy(root.id, 'engineering', [{
+			segmentId: 'S1',
+			label: 'Segment S1',
+			managerEngineId: 'aexus-claude',
+			tasks: [{ nodeId: 'N1', title: 'Task 1', employeeEngineId: 'aexus-claude', workerEngineId: 'aexus-codex' }],
+		}]);
+		assert.strictEqual(projects.getAgent(root.id)?.role, 'tech-lead');
+		assert.strictEqual(projects.getAgent(sync3.managerAgentsBySegment.S1)?.role, 'tech-lead');
+		assert.strictEqual(projects.getAgent(sync3.employeeAgentsByNode.N1)?.role, 'reviewer');
+		assert.strictEqual(projects.getAgent(sync3.workerAgentsByNode.N1)?.role, undefined);
+
+		// 3. Switch trusted user config to flat-swarm -> slots resolve to coordinator / coordinator / coordinator / pure agent (undefined)
+		inspectedOverride = { userValue: flat };
+		const sync2 = projects.syncWorkTreeHierarchy(root.id, 'engineering', [{
+			segmentId: 'S1',
+			label: 'Segment S1',
+			managerEngineId: 'aexus-claude',
+			tasks: [{ nodeId: 'N1', title: 'Task 1', employeeEngineId: 'aexus-claude', workerEngineId: 'aexus-codex' }],
+		}]);
+		assert.strictEqual(projects.getAgent(root.id)?.role, 'coordinator');
+		assert.strictEqual(projects.getAgent(sync2.managerAgentsBySegment.S1)?.role, 'coordinator');
+		assert.strictEqual(projects.getAgent(sync2.employeeAgentsByNode.N1)?.role, 'coordinator');
+		assert.strictEqual(projects.getAgent(sync2.workerAgentsByNode.N1)?.role, undefined);
+
+		// 4. Rank ID migration updates live sessions (including worktree-locked sessions) cleanly
+		const migratedCount = projects.migrateRankId('coordinator', 'swarm-lead');
+		assert.strictEqual(migratedCount, 3);
+		assert.strictEqual(projects.getAgent(root.id)?.role, 'swarm-lead');
+		assert.strictEqual(projects.getAgent(sync2.managerAgentsBySegment.S1)?.role, 'swarm-lead');
+		assert.strictEqual(projects.getAgent(sync2.employeeAgentsByNode.N1)?.role, 'swarm-lead');
 	});
 });

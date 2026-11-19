@@ -70,14 +70,28 @@ import {
 	toAdeEngineId,
 } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
 import {
+	ADE_PRICING_CONFIG_KEY,
+	ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY,
+	AdeCustomPricingMap,
+	IAdePricingOptions,
 	computeTreeFinancialSummary,
 	estimateTokenUsageCostUsd,
 	formatUsdCost,
 } from '../../../../platform/ade/common/adePricing.js';
+import {
+	ADE_ORGANIZATION_CONFIG_KEY,
+	IAdeOrganizationConfig,
+	normalizeAdeOrganizationConfig,
+	resolveRankWorkTreeSlots,
+	resolveWorkTreeSlotRank,
+} from '../../../../platform/ade/common/adeRoleSchema.js';
 import { buildBlueprintFromTemplate } from '../../../../platform/ade/common/adeBlueprintTemplates.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkbenchModeService } from '../../../services/workbenchMode/common/workbenchMode.js';
 import { IChatService } from '../../chat/common/chatService/chatService.js';
@@ -89,6 +103,7 @@ import {
 	IAdeProjectsService,
 	IAdeWorkTreeSegmentSpec,
 } from '../common/ade.js';
+import { IAdeRoleSchemaService, readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 export const ADE_WORKER_HEARTBEAT_COMMAND_ID = 'aexus.ade.engineering.workerHeartbeat';
@@ -213,6 +228,108 @@ function resolveOptionalScmService(instantiationService: IInstantiationService):
 	});
 }
 
+function resolveOptionalService<T>(instantiationService: IInstantiationService, id: { (...args: unknown[]): unknown; toString(): string }): T | undefined {
+	return instantiationService.invokeFunction(accessor => {
+		try {
+			return accessor.get(id as never) as T;
+		} catch {
+			return undefined;
+		}
+	});
+}
+
+const ADE_TRUSTED_VERIFY_HASHES_STORAGE_KEY = 'aexus.ade.engineering.trustedVerifyHashes';
+const PERSIST_ERROR_INBOX_THROTTLE_MS = 30_000;
+
+const SHA256_K = new Uint32Array([
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256HexFallback(bytes: Uint8Array): string {
+	let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+	let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+	const bitLen = bytes.length * 8;
+	const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+	const padded = new Uint8Array(paddedLen);
+	padded.set(bytes);
+	padded[bytes.length] = 0x80;
+	const view = new DataView(padded.buffer);
+	view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+	view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+	const w = new Uint32Array(64);
+	for (let offset = 0; offset < paddedLen; offset += 64) {
+		for (let i = 0; i < 16; i++) {
+			w[i] = view.getUint32(offset + i * 4, false);
+		}
+		for (let i = 16; i < 64; i++) {
+			const s0 = ((w[i - 15] >>> 7) | (w[i - 15] << 25)) ^ ((w[i - 15] >>> 18) | (w[i - 15] << 14)) ^ (w[i - 15] >>> 3);
+			const s1 = ((w[i - 2] >>> 17) | (w[i - 2] << 15)) ^ ((w[i - 2] >>> 19) | (w[i - 2] << 13)) ^ (w[i - 2] >>> 10);
+			w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+		}
+		let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+		for (let i = 0; i < 64; i++) {
+			const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+			const ch = (e & f) ^ ((~e) & g);
+			const t1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+			const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+			const maj = (a & b) ^ (a & c) ^ (b & c);
+			const t2 = (S0 + maj) >>> 0;
+			h = g; g = f; f = e; e = (d + t1) >>> 0;
+			d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+		}
+		h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+		h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+	}
+	return [h0, h1, h2, h3, h4, h5, h6, h7].map(n => n.toString(16).padStart(8, '0')).join('');
+}
+
+async function computeVerifyCommandSha256(command: string): Promise<string> {
+	const bytes = new TextEncoder().encode(command.trim());
+	if (typeof globalThis.crypto?.subtle?.digest === 'function') {
+		try {
+			const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+			return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+		} catch {
+			// Fall back to deterministic pure-JS SHA-256
+		}
+	}
+	return sha256HexFallback(bytes);
+}
+
+function collectBlueprintVerifyCommands(blueprint: IAdeEngineeringBlueprint): string[] {
+	const seen = new Set<string>();
+	const cmds: string[] = [];
+	const push = (raw: string | undefined) => {
+		const trimmed = raw?.trim();
+		if (trimmed && !seen.has(trimmed)) {
+			seen.add(trimmed);
+			cmds.push(trimmed);
+		}
+	};
+	push(blueprint.metadata.verify);
+	for (const node of blueprint.nodes) {
+		if (node.type === 'task') {
+			push(node.verify);
+		}
+	}
+	return cmds;
+}
+
+function isInteractiveHumanCaller(caller: string | undefined): boolean {
+	if (caller === undefined) {
+		return true;
+	}
+	const norm = caller.trim().toLowerCase();
+	return !norm || norm === 'user' || norm === 'human';
+}
+
 // ---------------------------------------------------------------------------
 // ADE Inbox Service (Spec 6.5)
 // ---------------------------------------------------------------------------
@@ -284,7 +401,7 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 		readonly title?: string;
 		readonly nodeId?: string;
 		readonly severity?: AdeInboxSeverity;
-		readonly senderRank?: 'governor' | 'manager' | 'employee' | 'worker';
+		readonly senderRank?: string;
 		readonly senderAgentId?: string;
 	}): Promise<IAdeInboxItem> {
 		await this._readyPromise;
@@ -313,7 +430,7 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 			resolved: false,
 			createdAt: Date.now(),
 			severity,
-			senderRank: params.senderRank ?? 'governor',
+			senderRank: params.senderRank ?? gov?.role ?? 'governor',
 			...(params.senderAgentId ? { senderAgentId: params.senderAgentId } : {}),
 		};
 		this._items = [item, ...this._items];
@@ -445,6 +562,10 @@ interface IManagedTreeEntry {
 	nodeInitialSnapshots: Map<string, IAdeWorkspaceSnapshot>;
 	/** Per-segment initial workspace snapshot taken before the segment head's Turn 1 so Manager sees cumulative segment diffs. */
 	segmentInitialSnapshots: Map<string, IAdeWorkspaceSnapshot>;
+	/** SHA-256 hashes of verify commands explicitly declined by the user during this session. */
+	declinedVerifyHashes: Set<string>;
+	/** Timestamp of last persist-failure Inbox notification (rate-limited). */
+	lastPersistErrorAlertAt?: number;
 	persistChain: Promise<void>;
 	removed?: boolean;
 }
@@ -455,6 +576,11 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 	private readonly backend: IAdeEngineeringBackendService;
 	private readonly chatService: IChatService | undefined;
 	private readonly scmService: ISCMService | undefined;
+	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
+	private readonly storageService: IStorageService | undefined;
+	private readonly dialogService: IDialogService | undefined;
+	private readonly notificationService: INotificationService | undefined;
+	private readonly trustedVerifyHashesByProject = new Map<string, Set<string>>();
 	private readonly trees = new Map<string, IManagedTreeEntry>();
 	private readonly demoTimers = new Map<string, number[]>();
 	private readonly demoActive = new Set<string>();
@@ -480,6 +606,11 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		this.backend = resolveOptionalBackend(instantiationService);
 		this.chatService = resolveOptionalChatService(instantiationService);
 		this.scmService = resolveOptionalScmService(instantiationService);
+		this.roleSchemaService = resolveOptionalService<IAdeRoleSchemaService>(instantiationService, IAdeRoleSchemaService);
+		this.storageService = resolveOptionalService<IStorageService>(instantiationService, IStorageService);
+		this.dialogService = resolveOptionalService<IDialogService>(instantiationService, IDialogService);
+		this.notificationService = resolveOptionalService<INotificationService>(instantiationService, INotificationService);
+		this.loadTrustedVerifyHashesFromStorage();
 		this.readyPromise = this.hydrateFromDisk();
 
 		if (projects.onDidRemoveAgents) {
@@ -555,6 +686,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			governorSessionId,
 			blueprintText: serializeEngineeringBlueprint(builtBlueprint),
 			forceStopRunning: true,
+			trustedVerifyCommands: true,
 		});
 
 		const entry = this.trees.get(governorSessionId)!;
@@ -888,6 +1020,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 						recentNodeFileMutations: new Map(),
 						nodeInitialSnapshots: new Map(),
 						segmentInitialSnapshots: new Map(),
+						declinedVerifyHashes: new Set(),
 						persistChain: Promise.resolve(),
 					};
 					this.trees.set(record.governorSessionId, entry);
@@ -1129,6 +1262,171 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		};
 	}
 
+	private getOrganizationConfig(): IAdeOrganizationConfig {
+		if (this.roleSchemaService) {
+			return this.roleSchemaService.getConfig();
+		}
+		const raw = readTrustedApplicationConfigValue<unknown>(this.configurationService, ADE_ORGANIZATION_CONFIG_KEY);
+		return normalizeAdeOrganizationConfig(raw);
+	}
+
+	private getPricingOptions(): IAdePricingOptions | undefined {
+		const rawCustom = readTrustedApplicationConfigValue<unknown>(this.configurationService, ADE_PRICING_CONFIG_KEY);
+		const customPricing = rawCustom && typeof rawCustom === 'object' && !Array.isArray(rawCustom)
+			? rawCustom as AdeCustomPricingMap
+			: undefined;
+		const subscriptionMode = readTrustedApplicationConfigValue<boolean>(this.configurationService, ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY) === true;
+		if (!customPricing && !subscriptionMode) {
+			return undefined;
+		}
+		return {
+			...(customPricing ? { customPricing } : {}),
+			...(subscriptionMode ? { subscriptionMode: true } : {}),
+		};
+	}
+
+	private loadTrustedVerifyHashesFromStorage(): void {
+		if (!this.storageService) {
+			return;
+		}
+		const stored = this.storageService.getObject<Record<string, unknown>>(ADE_TRUSTED_VERIFY_HASHES_STORAGE_KEY, StorageScope.PROFILE, {});
+		if (!stored || typeof stored !== 'object') {
+			return;
+		}
+		for (const [projectKey, rawHashes] of Object.entries(stored)) {
+			if (!Array.isArray(rawHashes)) {
+				continue;
+			}
+			const valid = rawHashes.filter((h): h is string => typeof h === 'string' && h.length === 64);
+			if (valid.length > 0) {
+				this.trustedVerifyHashesByProject.set(projectKey, new Set(valid));
+			}
+		}
+	}
+
+	private saveTrustedVerifyHashesToStorage(): void {
+		if (!this.storageService) {
+			return;
+		}
+		const serialized: Record<string, string[]> = {};
+		for (const [projectKey, hashes] of this.trustedVerifyHashesByProject.entries()) {
+			if (hashes.size > 0) {
+				serialized[projectKey] = [...hashes].sort();
+			}
+		}
+		this.storageService.store(ADE_TRUSTED_VERIFY_HASHES_STORAGE_KEY, JSON.stringify(serialized), StorageScope.PROFILE, StorageTarget.MACHINE);
+	}
+
+	private getProjectTrustKey(projectPath: string): string {
+		return projectPath.trim();
+	}
+
+	private async isVerifyCommandTrusted(projectPath: string, command: string): Promise<{ readonly trusted: boolean; readonly hash: string }> {
+		const hash = await computeVerifyCommandSha256(command);
+		const key = this.getProjectTrustKey(projectPath);
+		const trusted = Boolean(this.trustedVerifyHashesByProject.get(key)?.has(hash));
+		return { trusted, hash };
+	}
+
+	private trustVerifyCommandHashes(projectPath: string, hashes: readonly string[]): void {
+		if (hashes.length === 0) {
+			return;
+		}
+		const key = this.getProjectTrustKey(projectPath);
+		let set = this.trustedVerifyHashesByProject.get(key);
+		if (!set) {
+			set = new Set<string>();
+			this.trustedVerifyHashesByProject.set(key, set);
+		}
+		let changed = false;
+		for (const h of hashes) {
+			if (!set.has(h)) {
+				set.add(h);
+				changed = true;
+			}
+		}
+		if (changed) {
+			this.saveTrustedVerifyHashesToStorage();
+		}
+	}
+
+	private async promptApproveVerifyCommands(
+		projectPath: string,
+		commands: readonly { readonly command: string; readonly hash: string }[],
+	): Promise<boolean> {
+		if (!this.dialogService || commands.length === 0) {
+			return false;
+		}
+		const cmdList = commands.map((c, idx) => `${idx + 1}. ${c.command}`).join('\n');
+		const confirmation = await this.dialogService.confirm({
+			type: 'warning',
+			message: localize(
+				'adeEngVerifyTrustConfirmTitle',
+				"Approve {0} blueprint verification shell command(s) for this project?",
+				commands.length,
+			),
+			detail: localize(
+				'adeEngVerifyTrustConfirmDetail',
+				"Project: {0}\n\nThese shell commands will run automatically after Worker turns (SHA-256 hash-pinned per project):\n\n{1}",
+				projectPath,
+				cmdList,
+			),
+			primaryButton: localize('adeEngVerifyTrustApproveBtn', "&&Trust & Run"),
+		});
+		if (confirmation.confirmed) {
+			this.trustVerifyCommandHashes(projectPath, commands.map(c => c.hash));
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Atomic read-modify-write helper for per-node runtime state: ALWAYS re-reads the latest
+	 * `entry.state.nodes[nodeId]` immediately before applying a patch so concurrent updates
+	 * (e.g. `recordSessionTurnUsage` or stream heartbeats arriving across an `await`) are never clobbered.
+	 */
+	private updateNodeState(
+		entry: IManagedTreeEntry,
+		nodeId: string,
+		updater: (current: IAdeEngineeringNodeRuntimeState) => IAdeEngineeringNodeRuntimeState,
+		extraStatePatch?: Partial<Omit<IAdeEngineeringTreeState, 'nodes'>>,
+	): IAdeEngineeringNodeRuntimeState | undefined {
+		const fresh = entry.state.nodes[nodeId];
+		if (!fresh) {
+			return undefined;
+		}
+		const next = updater(fresh);
+		entry.state = {
+			...entry.state,
+			...(extraStatePatch ?? {}),
+			nodes: {
+				...entry.state.nodes,
+				[nodeId]: next,
+			},
+		};
+		return next;
+	}
+
+	private isBudgetExceeded(entry: IManagedTreeEntry): { readonly exceeded: boolean; readonly totalCostUsd: number; readonly maxBudgetUsd?: number } {
+		const maxBudgetUsd = entry.blueprint.metadata.maxBudgetUsd;
+		if (!(typeof maxBudgetUsd === 'number' && Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0)) {
+			return { exceeded: false, totalCostUsd: 0 };
+		}
+		const fin = computeTreeFinancialSummary(
+			{
+				blueprint: entry.blueprint,
+				state: entry.state,
+				tokenUsage: this.computeResolvedTreeTokenUsage(entry.state),
+			},
+			this.getPricingOptions(),
+		);
+		return {
+			exceeded: fin.totalCostUsd >= maxBudgetUsd,
+			totalCostUsd: fin.totalCostUsd,
+			maxBudgetUsd,
+		};
+	}
+
 	private applyTurnTokenUsage(
 		entry: IManagedTreeEntry,
 		role: 'worker' | 'employee' | 'manager' | 'governor',
@@ -1138,6 +1436,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!rawDelta) {
 			return false;
 		}
+		const pricingOptions = this.getPricingOptions();
 		let enrichedDelta: Partial<IAdeTokenUsage> = rawDelta;
 		if (!(typeof rawDelta.costUsd === 'number' && Number.isFinite(rawDelta.costUsd) && rawDelta.costUsd > 0)) {
 			const node = nodeId ? entry.blueprint.nodes.find(n => n.id === nodeId) : undefined;
@@ -1148,7 +1447,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					? node?.employee
 					: seg?.config;
 			const normalizedForCost = accumulateTokenUsage(undefined, rawDelta, true);
-			const estimatedCost = estimateTokenUsageCostUsd(normalizedForCost, roleCfg);
+			const estimatedCost = estimateTokenUsageCostUsd(normalizedForCost, roleCfg, pricingOptions);
 			if (estimatedCost > 0) {
 				enrichedDelta = { ...rawDelta, costUsd: estimatedCost, estimated: true };
 			}
@@ -1195,21 +1494,16 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 	}
 
 	private enforceBudgetCeilingIfNeeded(entry: IManagedTreeEntry, nodeId?: string): void {
-		const maxBudgetUsd = entry.blueprint.metadata.maxBudgetUsd;
-		if (!(typeof maxBudgetUsd === 'number' && Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0)) {
-			return;
-		}
 		if (entry.state.runStatus !== 'running') {
 			return;
 		}
-		const fin = computeTreeFinancialSummary({
-			blueprint: entry.blueprint,
-			state: entry.state,
-			tokenUsage: this.computeResolvedTreeTokenUsage(entry.state),
-		});
-		if (fin.totalCostUsd < maxBudgetUsd) {
+		const budgetCheck = this.isBudgetExceeded(entry);
+		if (!budgetCheck.exceeded || budgetCheck.maxBudgetUsd === undefined) {
 			return;
 		}
+		// Immediately invalidate in-flight worker run tokens & transition to paused so no concurrent dispatch slips through,
+		// then route through pauseTree() to stop active agent processes and cleanly reset active nodes to 'idle'.
+		entry.activeWorkerRunTokens.clear();
 		entry.state = {
 			...entry.state,
 			runStatus: 'paused',
@@ -1218,17 +1512,18 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		const detail = localize(
 			'adeEngBudgetLimitReachedDetail',
 			"Estimated spend {0} reached budget ceiling {1}. Execution paused automatically to prevent runaway API spend.",
-			formatUsdCost(fin.totalCostUsd),
-			formatUsdCost(maxBudgetUsd),
+			formatUsdCost(budgetCheck.totalCostUsd),
+			formatUsdCost(budgetCheck.maxBudgetUsd),
 		);
 		this.appendEvent(entry, 'warn', 'budget.limit_reached', { nodeId, detail });
 		void this.inbox.postGovernorMessage({
 			governorSessionId: entry.governorSessionId,
 			nodeId,
-			title: localize('adeEngBudgetPausedInboxTitle', "Budget Guardrail Paused DAG ({0} / {1})", formatUsdCost(fin.totalCostUsd), formatUsdCost(maxBudgetUsd)),
+			title: localize('adeEngBudgetPausedInboxTitle', "Budget Guardrail Paused DAG ({0} / {1})", formatUsdCost(budgetCheck.totalCostUsd), formatUsdCost(budgetCheck.maxBudgetUsd)),
 			message: detail,
 			severity: 'critical',
 		}).catch(() => undefined);
+		void this.pauseTree(entry.governorSessionId).catch(() => undefined);
 	}
 
 	private syncSidebarHierarchy(entry: IManagedTreeEntry): void {
@@ -1342,8 +1637,34 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			if (entry.removed || !this.trees.has(entry.governorSessionId)) {
 				return;
 			}
-			await this.backend.saveTree(snapshotRecord);
-		}).catch(() => undefined);
+			try {
+				await this.backend.saveTree(snapshotRecord);
+			} catch (err) {
+				const errMsg = err instanceof Error ? err.message : String(err);
+				this.appendEvent(entry, 'error', 'state.persist_failed', {
+					detail: `Failed to persist Engineering tree state: ${errMsg}`,
+				});
+				const now = Date.now();
+				if (!entry.lastPersistErrorAlertAt || now - entry.lastPersistErrorAlertAt >= PERSIST_ERROR_INBOX_THROTTLE_MS) {
+					entry.lastPersistErrorAlertAt = now;
+					this.notificationService?.error(localize(
+						'adeEngPersistFailedNotification',
+						"Failed to save ADE Engineering state: {0}",
+						errMsg,
+					));
+					void this.inbox.postGovernorMessage({
+						governorSessionId: entry.governorSessionId,
+						title: localize('adeEngPersistFailedInboxTitle', "Failed to Save Engineering State"),
+						message: localize(
+							'adeEngPersistFailedInboxMessage',
+							"Could not write blueprint.md / state.json to disk: {0}. Check available disk space and filesystem permissions.",
+							errMsg,
+						),
+						severity: 'critical',
+					}).catch(() => undefined);
+				}
+			}
+		});
 		entry.persistChain = nextWrite;
 		await nextWrite;
 		if (!entry.removed && this.trees.has(entry.governorSessionId)) {
@@ -1404,9 +1725,10 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			}
 		}
 
-		// Ensure role is governor
-		if (gov.role !== 'governor') {
-			this.projects.setAgentRole(gov.id, 'governor');
+		// Ensure role matches the configured orchestrator Work-Tree slot (e.g. 'governor', 'tech-lead', 'coordinator')
+		const orchestratorRankId = resolveWorkTreeSlotRank(this.getOrganizationConfig(), 'orchestrator').id;
+		if (gov.role !== orchestratorRankId) {
+			this.projects.setAgentRole(gov.id, orchestratorRankId);
 		}
 
 		const defaultEngine = normalizeBlueprintEngine(gov.session?.engineId ?? gov.preferredEngineId ?? 'claude-code');
@@ -1435,6 +1757,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			recentNodeFileMutations: new Map(),
 			nodeInitialSnapshots: new Map(),
 			segmentInitialSnapshots: new Map(),
+			declinedVerifyHashes: new Set(),
 			persistChain: Promise.resolve(),
 		};
 
@@ -1564,6 +1887,43 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			throw new AdeRunningNodesAffectedError(affectedRunningNodes);
 		}
 
+		// P0-6: Hash-pinned verify command trust gate before applying blueprint
+		const blueprintVerifyCmds = collectBlueprintVerifyCommands(nextBlueprint);
+		const untrustedVerifyCmds: Array<{ readonly command: string; readonly hash: string }> = [];
+		for (const cmd of blueprintVerifyCmds) {
+			const status = await this.isVerifyCommandTrusted(entry.state.projectPath, cmd);
+			if (!status.trusted) {
+				untrustedVerifyCmds.push({ command: cmd, hash: status.hash });
+			}
+		}
+		if (untrustedVerifyCmds.length > 0) {
+			if (options.trustedVerifyCommands === true) {
+				this.trustVerifyCommandHashes(entry.state.projectPath, untrustedVerifyCmds.map(c => c.hash));
+				for (const c of untrustedVerifyCmds) {
+					entry.declinedVerifyHashes.delete(c.hash);
+				}
+			} else if (isInteractiveHumanCaller(options.caller) && this.dialogService) {
+				const approved = await this.promptApproveVerifyCommands(entry.state.projectPath, untrustedVerifyCmds);
+				if (approved) {
+					for (const c of untrustedVerifyCmds) {
+						entry.declinedVerifyHashes.delete(c.hash);
+					}
+				} else {
+					for (const c of untrustedVerifyCmds) {
+						entry.declinedVerifyHashes.add(c.hash);
+					}
+					this.appendEvent(entry, 'warn', 'verify.untrusted_declined', {
+						detail: `User declined trusting ${untrustedVerifyCmds.length} verification command(s); execution will refuse to run unapproved verify commands.`,
+					});
+				}
+			} else {
+				// Non-interactive agent caller (e.g. Governor / Secretary CLI apply): NEVER auto-trust shell verify commands!
+				this.appendEvent(entry, 'warn', 'verify.approval_required', {
+					detail: `Blueprint applied by "${options.caller ?? 'agent'}" contains ${untrustedVerifyCmds.length} unapproved verify command(s); human approval required before execution.`,
+				});
+			}
+		}
+
 		// Force-stop affected active nodes if confirmed
 		if (affectedRunningNodes.length > 0) {
 			for (const nodeId of affectedRunningNodes) {
@@ -1617,7 +1977,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		this.appendEvent(entry, 'info', 'blueprint.applied', {
 			detail: `${nextBlueprint.nodes.length} node(s), ${nextBlueprint.managers.length} Manager segment(s)`,
 		});
-		const scopeConflicts = detectSharedWorkspaceScopeConflicts(nextBlueprint);
+		const scopeConflicts = detectSharedWorkspaceScopeConflicts(nextBlueprint, { treatMissingAsWholeRepo: true });
 		for (const c of scopeConflicts) {
 			this.appendEvent(entry, 'warn', 'blueprint.scope_conflict', {
 				nodeId: c.nodeA,
@@ -1819,9 +2179,21 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			}
 		}
 
+		const fullReset = !params.nodeId?.trim() && !params.keepCompleted;
+		if (fullReset) {
+			entry.nodeInitialSnapshots.clear();
+			entry.segmentInitialSnapshots.clear();
+			await this.backend.cleanupTreeWorktrees(entry.governorSessionId, entry.state.projectPath).catch(() => { });
+			await this.inbox.removeItemsForGovernor(entry.governorSessionId).catch(() => { });
+		}
+
+		// Re-read fresh entry.state.nodes & reports AFTER all awaits (eliminates stale RMW window)
 		const nextNodes: Record<string, IAdeEngineeringNodeRuntimeState> = { ...entry.state.nodes };
 		const nextReports: Record<string, IAdeIncrementalReportEntry> = { ...entry.state.reports };
 		for (const nid of resetSet) {
+			if (params.keepCompleted && !params.nodeId?.trim() && nextNodes[nid]?.completed) {
+				continue;
+			}
 			const prev = nextNodes[nid];
 			entry.nodeInitialSnapshots.delete(nid);
 			if (prev?.segmentId) {
@@ -1845,14 +2217,6 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			delete nextReports[nid];
 		}
 
-		const fullReset = !params.nodeId?.trim() && !params.keepCompleted;
-		if (fullReset) {
-			entry.nodeInitialSnapshots.clear();
-			entry.segmentInitialSnapshots.clear();
-			await this.backend.cleanupTreeWorktrees(entry.governorSessionId, entry.state.projectPath).catch(() => { });
-			await this.inbox.removeItemsForGovernor(entry.governorSessionId).catch(() => { });
-		}
-
 		entry.state = {
 			...entry.state,
 			runStatus: params.nodeId?.trim()
@@ -1872,11 +2236,27 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 
 	private assertStartAuthorized(caller: string | undefined): void {
 		const normalized = (caller ?? 'user').trim().toLowerCase();
+		if (!normalized || normalized === 'user' || normalized === 'human' || normalized === 'secretary') {
+			return;
+		}
+		const baseCaller = normalized.includes(':') ? normalized.slice(0, normalized.indexOf(':')) : normalized;
+		const orgConfig = this.getOrganizationConfig();
+		const configuredRank = orgConfig.ranks.find(r => r.id.toLowerCase() === baseCaller);
+		if (configuredRank) {
+			if (!configuredRank.pureExecution && configuredRank.allowedApis.includes('engineering.control')) {
+				return;
+			}
+			throw new Error(localize(
+				'adeEngineeringGovernorStartForbidden',
+				"Permission denied: Orchestrated tree agents ({0}) cannot start Engineering execution directly. Only the User (via Engineering page) or Secretary may start execution.",
+				normalized,
+			));
+		}
 		if (
-			normalized === 'governor' || normalized.startsWith('governor:')
-			|| normalized === 'manager' || normalized.startsWith('manager:')
-			|| normalized === 'employee' || normalized.startsWith('employee:')
-			|| normalized === 'worker' || normalized.startsWith('worker:')
+			baseCaller === 'governor'
+			|| baseCaller === 'manager'
+			|| baseCaller === 'employee'
+			|| baseCaller === 'worker'
 		) {
 			throw new Error(localize(
 				'adeEngineeringGovernorStartForbidden',
@@ -2049,9 +2429,10 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!agent.session) {
 			return { reply: '' };
 		}
+		const orgConfig = this.getOrganizationConfig();
 		const resolvedCallerRole = options.pureWorker
-			? 'worker'
-			: (agent.role ?? 'employee');
+			? resolveWorkTreeSlotRank(orgConfig, 'executor').id
+			: (agent.role ?? resolveWorkTreeSlotRank(orgConfig, 'reviewer').id);
 		const turnStartedAt = Date.now();
 		this.projects.setAgentStatus(agent.id, 'working');
 		try {
@@ -2381,13 +2762,18 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			readyTaskNodes.sort((a, b) => (priorities.get(b.id) ?? 0) - (priorities.get(a.id) ?? 0));
 		}
 
+		if (this.isBudgetExceeded(entry).exceeded) {
+			this.enforceBudgetCeilingIfNeeded(entry);
+			return;
+		}
+
 		let runningSlots = activeTaskNodes.length;
 		for (const node of readyTaskNodes) {
 			if (runningSlots >= maxConcurrency) {
 				break;
 			}
-			if (isSharedWorkspace && node.files && node.files.length > 0) {
-				const conflictsActive = activeTaskNodes.some(active => doFileScopesOverlap(node.files, active.files));
+			if (isSharedWorkspace) {
+				const conflictsActive = activeTaskNodes.some(active => doFileScopesOverlap(node.files, active.files, { treatMissingAsWholeRepo: true }));
 				if (conflictsActive) {
 					continue;
 				}
@@ -2515,6 +2901,11 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (entry.removed || entry.state.runStatus !== 'running') {
 			return;
 		}
+		// Pre-dispatch budget admission guardrail: refuse new turns once ceiling is reached.
+		if (this.isBudgetExceeded(entry).exceeded) {
+			this.enforceBudgetCeilingIfNeeded(entry, node.id);
+			return;
+		}
 		const rState = entry.state.nodes[node.id];
 		if (!rState?.workerAgentId || rState.completed) {
 			return;
@@ -2531,19 +2922,13 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		const runToken = ++this.nextRunToken;
 		entry.activeWorkerRunTokens.set(node.id, runToken);
 		const reservedAt = Date.now();
-		entry.state = {
-			...entry.state,
-			nodes: {
-				...entry.state.nodes,
-				[node.id]: {
-					...rState,
-					phase: 'worker_running',
-					startedAt: rState.startedAt ?? reservedAt,
-					lastStreamActivityAt: reservedAt,
-					lastGateFeedback: undefined,
-				},
-			},
-		};
+		this.updateNodeState(entry, node.id, fresh => ({
+			...fresh,
+			phase: 'worker_running',
+			startedAt: fresh.startedAt ?? reservedAt,
+			lastStreamActivityAt: reservedAt,
+			lastGateFeedback: undefined,
+		}));
 
 		let effectiveCwd = entry.state.projectPath;
 		try {
@@ -2554,21 +2939,14 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			effectiveCwd = ws.cwd;
 			if (ws.mergeConflict) {
 				entry.activeWorkerRunTokens.delete(node.id);
-				const curState = entry.state.nodes[node.id] ?? rState;
+				const updatedConflict = this.updateNodeState(entry, node.id, fresh => ({
+					...fresh,
+					phase: 'manager_escalation',
+				}));
 				// Spec 4.2: Wake segment Manager to resolve Git merge conflict before running Worker!
-				entry.state = {
-					...entry.state,
-					nodes: {
-						...entry.state.nodes,
-						[node.id]: {
-							...curState,
-							phase: 'manager_escalation',
-						},
-					},
-				};
 				this.appendEvent(entry, 'warn', 'worktree.conflict', {
 					nodeId: node.id,
-					segmentId: curState.segmentId,
+					segmentId: updatedConflict?.segmentId ?? rState.segmentId,
 					detail: `Merge conflict on: ${ws.mergeConflict.conflictedFiles.join(', ')}`,
 				});
 				await this.persistEntry(entry);
@@ -2576,10 +2954,27 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				return;
 			}
 		} catch (err) {
-			this.appendEvent(entry, 'warn', 'worktree.fallback', {
+			entry.activeWorkerRunTokens.delete(node.id);
+			const errMsg = err instanceof Error ? err.message : String(err);
+			this.appendEvent(entry, 'error', 'worktree.creation_failed', {
 				nodeId: node.id,
-				detail: err instanceof Error ? err.message : String(err),
+				segmentId: rState.segmentId,
+				detail: `Git worktree isolation failed for [${node.id}]: ${errMsg}. Paused execution instead of silently falling back to shared workspace.`,
 			});
+			void this.inbox.postGovernorMessage({
+				governorSessionId: entry.governorSessionId,
+				nodeId: node.id,
+				title: localize('adeEngWorktreeFailedInboxTitle', "Git Worktree Creation Failed — Execution Paused"),
+				message: localize(
+					'adeEngWorktreeFailedInboxMsg',
+					"Could not prepare isolated Git worktree for node [{0}]: {1}\n\nExecution was paused to prevent unisolated parallel edits in the shared repository root. Fix the Git repository state or switch workspace_isolation to shared explicitly.",
+					node.id,
+					errMsg,
+				),
+				severity: 'critical',
+			}).catch(() => undefined);
+			await this.pauseTree(entry.governorSessionId);
+			return;
 		}
 
 		if (entry.removed || entry.activeWorkerRunTokens.get(node.id) !== runToken || entry.state.runStatus !== 'running') {
@@ -2668,17 +3063,52 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		changes: IAdeWorkerTurnChanges,
 		cumulativeChanges?: IAdeWorkerTurnChanges,
 	): Promise<void> {
-		const latest = entry.state.nodes[node.id];
-		if (!latest || latest.completed) {
+		const initialLatest = entry.state.nodes[node.id];
+		if (!initialLatest || initialLatest.completed) {
 			return;
 		}
 		const effectiveCumulative = cumulativeChanges ?? changes;
-		const nextWorkerTurnCount = (latest.workerTurnCount ?? 0) + 1;
 
-		// Deterministic pre-review verification gate (skip LLM Employee completely on obvious build/lint/test failures)
+		// Deterministic pre-review verification gate (skip LLM Reviewer completely on obvious build/lint/test failures)
 		const verifyCmd = node.verify?.trim() || entry.blueprint.metadata.verify?.trim();
 		let verifyPassLine: string | undefined;
 		if (verifyCmd && this.backend.runNodeVerificationCommand) {
+			const trustCheck = await this.isVerifyCommandTrusted(entry.state.projectPath, verifyCmd);
+			if (entry.removed || entry.state.runStatus !== 'running') {
+				return;
+			}
+			let commandApproved = trustCheck.trusted;
+			if (!commandApproved && !entry.declinedVerifyHashes.has(trustCheck.hash) && this.dialogService) {
+				commandApproved = await this.promptApproveVerifyCommands(entry.state.projectPath, [{ command: verifyCmd, hash: trustCheck.hash }]);
+				if (!commandApproved) {
+					entry.declinedVerifyHashes.add(trustCheck.hash);
+				}
+			}
+			if (entry.removed || entry.state.runStatus !== 'running') {
+				return;
+			}
+			if (!commandApproved) {
+				const blockDetail = localize(
+					'adeEngVerifyBlockedUntrustedDetail',
+					"Refused to execute unapproved verification command `{0}` on node [{1}]. Execution paused until the command is explicitly trusted.",
+					verifyCmd,
+					node.id,
+				);
+				this.appendEvent(entry, 'error', 'verify.blocked_untrusted', {
+					nodeId: node.id,
+					detail: blockDetail,
+				});
+				void this.inbox.postGovernorMessage({
+					governorSessionId: entry.governorSessionId,
+					nodeId: node.id,
+					title: localize('adeEngVerifyBlockedInboxTitle', "Blocked Untrusted Verify Command on [{0}]", node.id),
+					message: blockDetail,
+					severity: 'critical',
+				}).catch(() => undefined);
+				await this.pauseTree(entry.governorSessionId);
+				return;
+			}
+
 			const verifyRes = await this.backend.runNodeVerificationCommand(effectiveCwd, verifyCmd).catch(err => ({
 				passed: false,
 				exitCode: 1,
@@ -2696,30 +3126,35 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					detail: `${verifyCmd} (exit ${verifyRes.exitCode})`,
 				});
 				const seg = entry.blueprint.managers.find(m => m.nodeIds.includes(node.id));
-				const nextRejectCount = (latest.employeeRejectCount ?? 0) + 1;
-				const commonUpdated = {
-					...latest,
-					workerTurnCount: nextWorkerTurnCount,
+				// Re-read fresh node state AFTER verify await via updateNodeState so concurrent tokenUsage/heartbeat updates are never clobbered!
+				const freshAfterVerify = entry.state.nodes[node.id];
+				if (!freshAfterVerify || freshAfterVerify.completed) {
+					return;
+				}
+				const nextRejectCount = (freshAfterVerify.employeeRejectCount ?? 0) + 1;
+				const buildCommonPatch = (fresh: IAdeEngineeringNodeRuntimeState): IAdeEngineeringNodeRuntimeState => ({
+					...fresh,
+					workerTurnCount: (fresh.workerTurnCount ?? 0) + 1,
 					watchdogRemindCount: 0,
 					lastWorkerOutput: workerReply.slice(0, 6000),
 					lastChanges: changes,
 					cumulativeChanges: effectiveCumulative,
 					lastVerifyOutput: trimmedOut,
 					lastEmployeeFeedback: verifyFeedback,
-				};
-				if (latest.fourthChanceGranted && seg) {
-					entry.state = { ...entry.state, nodes: { ...entry.state.nodes, [node.id]: { ...commonUpdated, phase: 'manager_review' } } };
+				});
+				if (freshAfterVerify.fourthChanceGranted && seg) {
+					this.updateNodeState(entry, node.id, fresh => ({ ...buildCommonPatch(fresh), phase: 'manager_review' }));
 					await this.persistEntry(entry);
 					await this.wakeSegmentManagerForSecondaryReview(entry, node, seg);
 					return;
 				}
 				if (nextRejectCount >= 3 && seg) {
-					entry.state = { ...entry.state, nodes: { ...entry.state.nodes, [node.id]: { ...commonUpdated, phase: 'manager_escalation', employeeRejectCount: nextRejectCount } } };
+					this.updateNodeState(entry, node.id, fresh => ({ ...buildCommonPatch(fresh), phase: 'manager_escalation', employeeRejectCount: nextRejectCount }));
 					await this.persistEntry(entry);
 					await this.wakeSegmentManagerForEscalation(entry, node, seg, verifyFeedback);
 					return;
 				}
-				entry.state = { ...entry.state, nodes: { ...entry.state.nodes, [node.id]: { ...commonUpdated, employeeRejectCount: nextRejectCount } } };
+				this.updateNodeState(entry, node.id, fresh => ({ ...buildCommonPatch(fresh), employeeRejectCount: nextRejectCount }));
 				await this.persistEntry(entry);
 				void this.activateTaskNodeWorker(entry, node, { source: 'verify', feedback: verifyFeedback });
 				return;
@@ -2731,26 +3166,24 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			verifyPassLine = `PASSED (\`${verifyCmd}\`, ${verifyRes.durationMs}ms)`;
 		}
 
-		const prevReviewCount = latest.employeeReviewCount ?? 0;
+		// Re-read fresh node state AFTER any verify/trust await before entering review (P1-2)
+		const freshBeforeReview = entry.state.nodes[node.id];
+		if (!freshBeforeReview || freshBeforeReview.completed) {
+			return;
+		}
+		const prevReviewCount = freshBeforeReview.employeeReviewCount ?? 0;
 		const isIncrementalReview = prevReviewCount > 0;
-
-		entry.state = {
-			...entry.state,
-			nodes: {
-				...entry.state.nodes,
-				[node.id]: {
-					...latest,
-					phase: 'employee_review',
-					workerTurnCount: nextWorkerTurnCount,
-					employeeReviewCount: prevReviewCount + 1,
-					watchdogRemindCount: 0,
-					lastWorkerOutput: workerReply.slice(0, 6000),
-					lastChanges: changes,
-					cumulativeChanges: effectiveCumulative,
-					lastVerifyOutput: verifyPassLine,
-				},
-			},
-		};
+		const latest = this.updateNodeState(entry, node.id, fresh => ({
+			...fresh,
+			phase: 'employee_review',
+			workerTurnCount: (fresh.workerTurnCount ?? 0) + 1,
+			employeeReviewCount: (fresh.employeeReviewCount ?? 0) + 1,
+			watchdogRemindCount: 0,
+			lastWorkerOutput: workerReply.slice(0, 6000),
+			lastChanges: changes,
+			cumulativeChanges: effectiveCumulative,
+			lastVerifyOutput: verifyPassLine,
+		}))!;
 		this.appendEvent(entry, 'info', 'employee.review_started', {
 			nodeId: node.id,
 			detail: `${changes.touchedFiles.length} file(s) touched (${effectiveCumulative.touchedFiles.length} cumulative)`,
@@ -3276,6 +3709,13 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		}
 
 		if (params.verdict === 'pass') {
+			if (entry.blueprint.metadata.workspaceIsolation === 'worktree' && seg && isSegmentTail) {
+				const wtPath = entry.state.worktrees?.[seg.segmentId]?.worktreePath;
+				if (wtPath) {
+					await this.backend.commitSegmentWorktree(wtPath, `feat(ade): complete segment ${seg.segmentId}`).catch(() => undefined);
+				}
+			}
+			// Re-read fresh reports & node state AFTER commitSegmentWorktree await (P1-2)
 			const nextReports = { ...entry.state.reports };
 			if (params.report?.trim()) {
 				nextReports[node.id] = {
@@ -3285,28 +3725,20 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					updatedAt: Date.now(),
 				};
 			}
-			if (entry.blueprint.metadata.workspaceIsolation === 'worktree' && seg && isSegmentTail) {
-				const wtPath = entry.state.worktrees?.[seg.segmentId]?.worktreePath;
-				if (wtPath) {
-					await this.backend.commitSegmentWorktree(wtPath, `feat(ade): complete segment ${seg.segmentId}`).catch(() => undefined);
-				}
-			}
-			entry.state = {
-				...entry.state,
-				reports: nextReports,
-				nodes: {
-					...entry.state.nodes,
-					[node.id]: {
-						...prev,
-						phase: 'completed',
-						completed: true,
-						completedAt: Date.now(),
-						employeeRejectCount: 0,
-						fourthChanceGranted: false,
-						lastManagerFeedback: undefined,
-					},
-				},
-			};
+			this.updateNodeState(
+				entry,
+				node.id,
+				fresh => ({
+					...fresh,
+					phase: 'completed',
+					completed: true,
+					completedAt: Date.now(),
+					employeeRejectCount: 0,
+					fourthChanceGranted: false,
+					lastManagerFeedback: undefined,
+				}),
+				{ reports: nextReports },
+			);
 			this.appendEvent(entry, 'info', 'manager.approved', {
 				nodeId: node.id,
 				segmentId: seg?.segmentId,
@@ -3589,7 +4021,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 	}
 
 	async runWatchdogSweep(now = Date.now()): Promise<void> {
-		const configuredMinutes = this.configurationService.getValue<number>(ADE_WATCHDOG_TIMEOUT_CONFIG_KEY);
+		const configuredMinutes = readTrustedApplicationConfigValue<number>(this.configurationService, ADE_WATCHDOG_TIMEOUT_CONFIG_KEY);
 		const alertPromises: Promise<unknown>[] = [];
 		for (const entry of this.trees.values()) {
 			if (entry.state.runStatus !== 'running') {
@@ -3714,36 +4146,24 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				await this.commandService.executeCommand('aexus.agentEngines.killSession', worker.session.resource).catch(() => undefined);
 			}
 			this.appendEvent(entry, 'warn', 'watchdog.kill_restart', { nodeId: node.id, detail: nudgeText });
-			entry.state = {
-				...entry.state,
-				nodes: {
-					...entry.state.nodes,
-					[node.id]: {
-						...rState,
-						lastStreamActivityAt: Date.now(),
-						lastWatchdogAlertAt: undefined,
-						watchdogRemindCount: 0,
-						workerTurnCount: 0,
-					},
-				},
-			};
+			this.updateNodeState(entry, node.id, fresh => ({
+				...fresh,
+				lastStreamActivityAt: Date.now(),
+				lastWatchdogAlertAt: undefined,
+				watchdogRemindCount: 0,
+				workerTurnCount: 0,
+			}));
 			await this.persistEntry(entry);
 			void this.activateTaskNodeWorker(entry, node, { source: 'watchdog', feedback: nudgeText });
 			return this.buildSnapshot(entry);
 		}
 
 		// Default: 'remind'
-		entry.state = {
-			...entry.state,
-			nodes: {
-				...entry.state.nodes,
-				[node.id]: {
-					...rState,
-					lastStreamActivityAt: Date.now(),
-					lastWatchdogAlertAt: undefined,
-				},
-			},
-		};
+		this.updateNodeState(entry, node.id, fresh => ({
+			...fresh,
+			lastStreamActivityAt: Date.now(),
+			lastWatchdogAlertAt: undefined,
+		}));
 		this.appendEvent(entry, 'info', 'watchdog.remind', { nodeId: node.id, detail: nudgeText });
 		await this.persistEntry(entry);
 
@@ -3798,10 +4218,13 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					nodeId ??= targetAgent.treeNodeId ?? nid;
 				}
 			}
-			if (!nodeId && targetAgent.role === 'manager') {
-				role = 'manager';
-			} else if (!nodeId && targetAgent.role === 'employee') {
-				role = 'employee';
+			if (!nodeId && targetAgent.role) {
+				const slots = resolveRankWorkTreeSlots(this.getOrganizationConfig(), targetAgent.role);
+				if (targetAgent.role === 'manager' || slots.includes('segment_owner')) {
+					role = 'manager';
+				} else if (targetAgent.role === 'employee' || slots.includes('reviewer')) {
+					role = 'employee';
+				}
 			}
 		}
 		if (this.applyTurnTokenUsage(entry, role, params.usage, nodeId)) {

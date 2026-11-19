@@ -314,6 +314,43 @@ suite('AdePricing', () => {
 			{ totalCostUsd: 25, tierSum: 16.75, budgetUtilizationPct: 125, budgetStatus: 'exceeded' },
 		);
 	});
+
+	test('matches gpt-5-pro before generic gpt-5, supports customPricing overrides, and supports zero-dollar subscriptionMode (P1-13)', () => {
+		const gpt5Pro = resolveModelPricing({ engine: 'codex', model: 'gpt-5-pro' });
+		const gpt5Std = resolveModelPricing({ engine: 'codex', model: 'gpt-5' });
+		assert.strictEqual(gpt5Pro.label, 'OpenAI GPT-5 Pro');
+		assert.strictEqual(gpt5Pro.inputPerMTok, 15);
+		assert.strictEqual(gpt5Pro.outputPerMTok, 120);
+		assert.strictEqual(gpt5Std.label, 'OpenAI Codex');
+		assert.strictEqual(gpt5Std.inputPerMTok, 2.5);
+
+		// Custom pricing override map merges partial or full overrides cleanly
+		const customOptions = {
+			customPricing: {
+				'claude-opus-4-6': { label: 'Enterprise Opus Discount', inputPerMTok: 10, outputPerMTok: 50 },
+			},
+		};
+		const overridden = resolveModelPricing({ engine: 'claude-code', model: 'claude-opus-4-6' }, customOptions);
+		assert.strictEqual(overridden.label, 'Enterprise Opus Discount');
+		assert.strictEqual(overridden.inputPerMTok, 10);
+		assert.strictEqual(overridden.outputPerMTok, 50);
+		assert.strictEqual(
+			estimateTokenUsageCostUsd(createUsage({ inputTokens: 1_000_000, outputTokens: 1_000_000 }), { engine: 'claude-code', model: 'claude-opus-4-6' }, customOptions),
+			60,
+		);
+
+		// Subscription mode reports $0.00 marginal spend while keeping token usage intact
+		const subSummary = computeTreeFinancialSummary(createFinanceInput(20, 25), { subscriptionMode: true });
+		assert.strictEqual(subSummary.subscriptionMode, true);
+		assert.strictEqual(subSummary.totalCostUsd, 0);
+		assert.strictEqual(subSummary.costByTier.worker, 0);
+		assert.strictEqual(subSummary.costByTier.employee, 0);
+		assert.strictEqual(subSummary.budgetStatus, 'ok');
+		assert.strictEqual(
+			estimateTokenUsageCostUsd(createUsage({ inputTokens: 1_000_000, outputTokens: 500_000, costUsd: 12.5 }), opusConfig, { subscriptionMode: true }),
+			0,
+		);
+	});
 });
 
 suite('AdeBlueprintTemplates', () => {
@@ -367,6 +404,12 @@ suite('AdeBlueprintTemplates', () => {
 				const parsed = parseEngineeringBlueprint(serializeEngineeringBlueprint(built));
 
 				assert.strictEqual(built.nodes.length, summary.nodeCount, `${summary.id}/${preset} node count`);
+				assert.ok(typeof built.metadata.maxConcurrency === 'number' && built.metadata.maxConcurrency >= 1, `${summary.id} declares maxConcurrency`);
+				assert.ok(typeof built.metadata.verify === 'string' && built.metadata.verify.length > 0, `${summary.id} declares metadata verify`);
+				for (const taskNode of built.nodes.filter(n => n.type === 'task')) {
+					assert.ok(Array.isArray(taskNode.files) && taskNode.files.length > 0, `${summary.id}/${taskNode.id} declares concrete files scope`);
+					assert.ok(typeof taskNode.verify === 'string' && taskNode.verify.length > 0, `${summary.id}/${taskNode.id} declares concrete verify command`);
+				}
 				assert.deepStrictEqual(canonicalBlueprint(parsed), canonicalBlueprint(built), `${summary.id}/${preset} round-trip`);
 				assert.strictEqual(hasOverlappingPodPositions(built.nodes), false, `${summary.id}/${preset} built layout overlaps`);
 				assert.strictEqual(hasOverlappingPodPositions(parsed.nodes), false, `${summary.id}/${preset} parsed layout overlaps`);

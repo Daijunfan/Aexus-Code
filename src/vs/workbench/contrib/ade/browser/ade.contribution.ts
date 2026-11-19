@@ -28,6 +28,10 @@ import {
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
+	ADE_PRICING_CONFIG_KEY,
+	ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY,
+} from '../../../../platform/ade/common/adePricing.js';
+import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	ADE_ORGANIZATION_JSON_SCHEMA,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
@@ -36,10 +40,11 @@ import {
 	getTopRankDefinition,
 	IAdeOrganizationConfig,
 	resolveEffectiveRankDefinition,
+	resolveWorkTreeSlotRank,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
-import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
+import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -299,15 +304,48 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			default: DEFAULT_WATCHDOG_TIMEOUT_MINUTES,
 			minimum: 1,
 			maximum: 240,
+			scope: ConfigurationScope.APPLICATION,
+			restricted: true,
 			description: localize('adeWatchdogTimeoutMinutesDesc', "Minutes of Worker execution inactivity before the ADE Engineering Watchdog wakes the Segment Manager to remind or kill-restart the stalled Worker."),
 		},
 		[ADE_ORGANIZATION_CONFIG_KEY]: {
 			...ADE_ORGANIZATION_JSON_SCHEMA,
 			default: DEFAULT_ADE_ORGANIZATION_CONFIG,
+			scope: ConfigurationScope.APPLICATION,
+			restricted: true,
 			markdownDescription: localize(
 				'adeOrganizationConfigDesc',
 				"Customizable ADE multi-agent organization schema: define custom rank names/tiers, author each rank's initialization prompt template, and assign fixed Aexus-Code core primitive API permissions. For a guided fill-in-the-blank editor, open the [Organization & Roles Studio](command:workbench.action.ade.openRoleStudio).",
 			),
+		},
+		[ADE_PRICING_CONFIG_KEY]: {
+			type: 'object',
+			default: {},
+			scope: ConfigurationScope.APPLICATION,
+			additionalProperties: {
+				type: 'object',
+				properties: {
+					label: { type: 'string', description: localize('adePricingLabelDesc', "Optional human-readable display label for this model/engine rate.") },
+					inputPerMTok: { type: 'number', minimum: 0, description: localize('adePricingInputDesc', "USD cost per 1M input tokens.") },
+					outputPerMTok: { type: 'number', minimum: 0, description: localize('adePricingOutputDesc', "USD cost per 1M output tokens.") },
+					cacheReadPerMTok: { type: 'number', minimum: 0, description: localize('adePricingCacheReadDesc', "USD cost per 1M cache read tokens.") },
+					cacheWritePerMTok: { type: 'number', minimum: 0, description: localize('adePricingCacheWriteDesc', "USD cost per 1M cache write tokens.") },
+				},
+			},
+			description: localize('adePricingConfigDesc', "Optional custom USD-per-1M-token pricing override map keyed by model substring or engine ID (e.g. \"claude-opus-4-6\", \"gpt-5-pro\", \"aexus-claude\")."),
+		},
+		[ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY]: {
+			type: 'boolean',
+			default: false,
+			scope: ConfigurationScope.APPLICATION,
+			description: localize('adePricingSubscriptionModeDesc', "When enabled (e.g. Claude Max, ChatGPT Plus/Pro, or flat-rate enterprise subscriptions), estimated marginal token spend is reported as $0.00 while token counts remain tracked."),
+		},
+		'aexus.ade.autonomousMode': {
+			type: 'boolean',
+			default: false,
+			scope: ConfigurationScope.APPLICATION,
+			restricted: true,
+			description: localize('adeAutonomousModeDesc', "Application-scoped toggle controlling whether ADE sessions may run with elevated autonomous execution flags. Restricted to prevent repository settings from enabling autonomous mode."),
 		},
 	},
 });
@@ -872,19 +910,21 @@ async function openOrInitializeWorkTree(
 	const dialogs = accessor.get(IDialogService);
 	const notifications = accessor.get(INotificationService);
 	const modes = accessor.get(IWorkbenchModeService);
+	const roleConfig = getRoleConfig(accessor);
 
 	const target = await pickAgent(accessor, governorId);
 	if (!target) {
 		return;
 	}
+	const orchestratorRank = resolveWorkTreeSlotRank(roleConfig, 'orchestrator');
 	const modeLabel = requestedTreeType === 'research' ? 'Research' : 'Engineering';
 	if (target.parentId) {
-		notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level Governor session can own an ADE {0} workflow tree.", modeLabel));
+		notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level {0} session can own an ADE {1} workflow tree.", orchestratorRank.name, modeLabel));
 		return;
 	}
-	const rank = resolveAdeAgentRank(target, projects.hasSubordinates(target.id));
-	if (rank !== 'governor') {
-		notifications.warn(localize('adeEngMustBeGovernorRank', "Promote '{0}' to Governor first before enabling ADE {1}.", target.label, modeLabel));
+	const rank = resolveAdeAgentRank(target, projects.hasSubordinates(target.id), roleConfig);
+	if (rank !== orchestratorRank.id) {
+		notifications.warn(localize('adeEngMustBeGovernorRank', "Promote '{0}' to {1} first before enabling ADE {2}.", target.label, orchestratorRank.name, modeLabel));
 		return;
 	}
 
@@ -1007,6 +1047,7 @@ registerAction2(class TryInteractiveEngineeringDemoAction extends Action2 {
 		const modes = accessor.get(IWorkbenchModeService);
 		const notifications = accessor.get(INotificationService);
 		const workspace = accessor.get(IWorkspaceContextService);
+		const roleConfig = getRoleConfig(accessor);
 
 		modes.setMode('ade');
 		await engineering.whenReady();
@@ -1016,6 +1057,7 @@ registerAction2(class TryInteractiveEngineeringDemoAction extends Action2 {
 			projectUri = URI.file('/tmp/aexus-interactive-demo');
 			projects.registerProject(projectUri, 'aexus-interactive-demo');
 		}
+		const orchestratorRankId = resolveWorkTreeSlotRank(roleConfig, 'orchestrator').id;
 		const demoLabel = 'Interactive Demo · Feature Ship';
 		let demoGov = projects.agents.find(a => !a.parentId && a.label === demoLabel && a.projectUri.toString() === projectUri!.toString());
 		if (!demoGov) {
@@ -1023,7 +1065,7 @@ registerAction2(class TryInteractiveEngineeringDemoAction extends Action2 {
 				projectUri,
 				{ engineId: 'aexus-claude', resource: URI.parse(`aexus-claude://aexus-demo/${Date.now()}`) },
 				demoLabel,
-				{ role: 'governor' },
+				{ role: orchestratorRankId },
 			);
 		}
 		if (!engineering.hasTree(demoGov.id)) {

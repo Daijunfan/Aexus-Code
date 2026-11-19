@@ -570,4 +570,51 @@ suite('AdeEngineeringBlueprintParser', () => {
 			cjkHigherThanAsciiQuarter: true,
 		});
 	});
+
+	test('treats undeclared files as whole-repo overlapping in shared mode when treatMissingAsWholeRepo is enabled (P1-4)', () => {
+		assert.strictEqual(doFileScopesOverlap(undefined, ['src/a.ts']), false);
+		assert.strictEqual(doFileScopesOverlap(undefined, ['src/a.ts'], { treatMissingAsWholeRepo: true }), true);
+		assert.strictEqual(doFileScopesOverlap(['src/a.ts'], undefined, { treatMissingAsWholeRepo: true }), true);
+		assert.strictEqual(doFileScopesOverlap(undefined, undefined, { treatMissingAsWholeRepo: true }), true);
+		assert.strictEqual(doFileScopesOverlap(['src/a/**'], ['src/b/**'], { treatMissingAsWholeRepo: true }), false);
+
+		const md = [
+			'---',
+			'workspace_isolation: shared',
+			'---',
+			'',
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Root"] --> N2["Branch A"]',
+			'  N1 --> N3["Branch B"]',
+			'  N2 --> N4["Join"]',
+			'  N3 --> N4',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] Root',
+			'- type: task',
+			'- goal: Root setup',
+			'',
+			'### [N2] Branch A',
+			'- type: task',
+			'- goal: Touch unspecified files',
+			'',
+			'### [N3] Branch B',
+			'- type: task',
+			'- files: src/b/**',
+			'- goal: Touch B files',
+			'',
+			'### [N4] Join',
+			'- type: task',
+			'- goal: Join results',
+		].join('\n');
+
+		const parsed = parseEngineeringBlueprint(md);
+		assert.deepStrictEqual(parsed.nodes.find(n => n.id === 'N3')?.files, ['src/b/**']);
+		assert.strictEqual(parsed.nodes.find(n => n.id === 'N2')?.files, undefined);
+		assert.deepStrictEqual(detectSharedWorkspaceScopeConflicts(parsed), []);
+		const strictConflicts = detectSharedWorkspaceScopeConflicts(parsed, { treatMissingAsWholeRepo: true });
+		assert.deepStrictEqual(strictConflicts.map(c => `${c.nodeA}:${c.nodeB}`), ['N2:N3']);
+	});
 });

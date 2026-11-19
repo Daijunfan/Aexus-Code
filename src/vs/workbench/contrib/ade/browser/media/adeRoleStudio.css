@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 /* ============================================================================
- * ADE Organization & Roles Studio — "Everything is Extendible" Visual Editor
+ * ADE Organization & Roles Studio — "Everything is Extensible" Visual Editor
  * ============================================================================ */
 
 .ade-role-studio {
@@ -801,4 +801,274 @@
 		border-right: none;
 		border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
 	}
+}
+
+/* ---- View Mode Toggle & Permission Matrix ---- */
+
+.ade-rs-controls-bar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.ade-rs-view-toggle {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px;
+	border-radius: 7px;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.28));
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	gap: 2px;
+}
+
+.ade-rs-view-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 24px;
+	padding: 0 10px;
+	border: 1px solid transparent;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11.5px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.ade-rs-view-tab:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.ade-rs-view-tab.active {
+	background: var(--vscode-editor-background);
+	color: var(--vscode-foreground);
+	border-color: var(--vscode-focusBorder);
+	font-weight: 600;
+}
+
+.ade-rs-matrix-wrap {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: auto;
+	padding: 18px 24px 36px;
+}
+
+.ade-rs-matrix-scroll {
+	overflow-x: auto;
+	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.24));
+	border-radius: 8px;
+}
+
+.ade-rs-matrix-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+}
+
+.ade-rs-matrix-table th,
+.ade-rs-matrix-table td {
+	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+	padding: 8px 10px;
+	vertical-align: middle;
+}
+
+.ade-rs-matrix-table thead th {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+	text-align: left;
+	font-weight: 600;
+}
+
+.ade-rs-matrix-rank-col {
+	text-align: center !important;
+	min-width: 112px;
+}
+
+.ade-rs-matrix-rank-col.color-amber { --ade-rs-rank-accent: var(--ade-rs-amber); }
+.ade-rs-matrix-rank-col.color-indigo { --ade-rs-rank-accent: var(--ade-rs-indigo); }
+.ade-rs-matrix-rank-col.color-purple { --ade-rs-rank-accent: var(--ade-rs-purple); }
+.ade-rs-matrix-rank-col.color-emerald { --ade-rs-rank-accent: var(--ade-rs-emerald); }
+.ade-rs-matrix-rank-col.color-cyan { --ade-rs-rank-accent: var(--ade-rs-cyan); }
+.ade-rs-matrix-rank-col.color-rose { --ade-rs-rank-accent: var(--ade-rs-rose); }
+.ade-rs-matrix-rank-col.color-slate { --ade-rs-rank-accent: var(--ade-rs-slate); }
+
+.ade-rs-matrix-rank-head {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+}
+
+.ade-rs-matrix-rank-name {
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--vscode-foreground);
+}
+
+.ade-rs-matrix-cat-row td {
+	font-size: 10.5px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--vscode-descriptionForeground);
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, var(--vscode-editor-background));
+	padding: 6px 10px;
+}
+
+.ade-rs-matrix-api-cell {
+	text-align: left;
+	font-weight: 400;
+	min-width: 280px;
+}
+
+.ade-rs-matrix-row.dangerous .ade-rs-matrix-api-cell {
+	border-left: 3px solid var(--ade-rs-rose);
+}
+
+.ade-rs-matrix-cell {
+	text-align: center;
+}
+
+.ade-rs-matrix-cell.granted {
+	background: color-mix(in srgb, var(--ade-rs-emerald) 9%, transparent);
+}
+
+.ade-rs-matrix-cell.pure-locked {
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+}
+
+.ade-rs-matrix-cb {
+	width: 15px;
+	height: 15px;
+	cursor: pointer;
+}
+
+.ade-rs-matrix-cb:disabled {
+	cursor: default;
+	opacity: 0.4;
+}
+
+/* ---- Keyboard Focus-Visible Rings ---- */
+
+.ade-rs-btn:focus-visible,
+.ade-rs-preset-chip:focus-visible,
+.ade-rs-view-tab:focus-visible,
+.ade-rs-rank-card:focus-visible,
+.ade-rs-mini-icon-btn:focus-visible,
+.ade-rs-swatch:focus-visible,
+.ade-rs-icon-choice:focus-visible,
+.ade-rs-var-chip:focus-visible,
+.ade-rs-input:focus-visible,
+.ade-rs-select:focus-visible,
+.ade-rs-textarea:focus-visible,
+.ade-rs-import-textarea:focus-visible,
+.ade-rs-matrix-cb:focus-visible,
+.ade-rs-api-item:has(input:focus-visible) {
+	outline: 2px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+/* ---- Reduced Motion ---- */
+
+@media (prefers-reduced-motion: reduce) {
+	.ade-rs-btn,
+	.ade-rs-preset-chip,
+	.ade-rs-view-tab,
+	.ade-rs-rank-card,
+	.ade-rs-swatch,
+	.ade-rs-api-item {
+		transition: none !important;
+	}
+	.ade-rs-swatch:hover {
+		transform: none !important;
+	}
+}
+
+/* ---- High Contrast Themes (.hc-black & .hc-light) ---- */
+
+.monaco-workbench.hc-black .ade-role-studio,
+.monaco-workbench.hc-light .ade-role-studio {
+	--ade-rs-amber: var(--vscode-foreground);
+	--ade-rs-indigo: var(--vscode-foreground);
+	--ade-rs-purple: var(--vscode-foreground);
+	--ade-rs-emerald: var(--vscode-foreground);
+	--ade-rs-cyan: var(--vscode-foreground);
+	--ade-rs-rose: var(--vscode-errorForeground, var(--vscode-foreground));
+	--ade-rs-slate: var(--vscode-foreground);
+}
+
+.monaco-workbench.hc-black .ade-rs-header,
+.monaco-workbench.hc-light .ade-rs-header {
+	background: var(--vscode-editor-background);
+	border-bottom: 1px solid var(--vscode-contrastBorder);
+}
+
+.monaco-workbench.hc-black .ade-rs-card,
+.monaco-workbench.hc-light .ade-rs-card,
+.monaco-workbench.hc-black .ade-rs-ladder-col,
+.monaco-workbench.hc-light .ade-rs-ladder-col,
+.monaco-workbench.hc-black .ade-rs-import-bar,
+.monaco-workbench.hc-light .ade-rs-import-bar,
+.monaco-workbench.hc-black .ade-rs-preview-pre,
+.monaco-workbench.hc-light .ade-rs-preview-pre,
+.monaco-workbench.hc-black .ade-rs-matrix-scroll,
+.monaco-workbench.hc-light .ade-rs-matrix-scroll {
+	background: var(--vscode-editor-background);
+	border-color: var(--vscode-contrastBorder);
+}
+
+.monaco-workbench.hc-black .ade-rs-btn,
+.monaco-workbench.hc-light .ade-rs-btn,
+.monaco-workbench.hc-black .ade-rs-preset-chip,
+.monaco-workbench.hc-light .ade-rs-preset-chip,
+.monaco-workbench.hc-black .ade-rs-view-toggle,
+.monaco-workbench.hc-light .ade-rs-view-toggle,
+.monaco-workbench.hc-black .ade-rs-rank-card,
+.monaco-workbench.hc-light .ade-rs-rank-card,
+.monaco-workbench.hc-black .ade-rs-api-item,
+.monaco-workbench.hc-light .ade-rs-api-item,
+.monaco-workbench.hc-black .ade-rs-icon-choice,
+.monaco-workbench.hc-light .ade-rs-icon-choice,
+.monaco-workbench.hc-black .ade-rs-var-chip,
+.monaco-workbench.hc-light .ade-rs-var-chip,
+.monaco-workbench.hc-black .ade-rs-philosophy-pill,
+.monaco-workbench.hc-light .ade-rs-philosophy-pill,
+.monaco-workbench.hc-black .ade-rs-dirty-pill,
+.monaco-workbench.hc-light .ade-rs-dirty-pill,
+.monaco-workbench.hc-black .ade-rs-kernel-badge,
+.monaco-workbench.hc-light .ade-rs-kernel-badge,
+.monaco-workbench.hc-black .ade-rs-api-danger,
+.monaco-workbench.hc-light .ade-rs-api-danger,
+.monaco-workbench.hc-black .ade-rs-pure-banner,
+.monaco-workbench.hc-light .ade-rs-pure-banner,
+.monaco-workbench.hc-black .ade-rs-token-pill,
+.monaco-workbench.hc-light .ade-rs-token-pill {
+	border: 1px solid var(--vscode-contrastBorder);
+	background: var(--vscode-editor-background);
+	box-shadow: none;
+}
+
+.monaco-workbench.hc-black .ade-rs-rank-card.selected,
+.monaco-workbench.hc-light .ade-rs-rank-card.selected,
+.monaco-workbench.hc-black .ade-rs-preset-chip.active,
+.monaco-workbench.hc-light .ade-rs-preset-chip.active,
+.monaco-workbench.hc-black .ade-rs-view-tab.active,
+.monaco-workbench.hc-light .ade-rs-view-tab.active,
+.monaco-workbench.hc-black .ade-rs-api-item.checked,
+.monaco-workbench.hc-light .ade-rs-api-item.checked {
+	border: 2px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+	box-shadow: none;
+}
+
+.monaco-workbench.hc-black .ade-rs-api-item.disabled,
+.monaco-workbench.hc-light .ade-rs-api-item.disabled {
+	opacity: 0.72;
+	border-style: dashed;
 }

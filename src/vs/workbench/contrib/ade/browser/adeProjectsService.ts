@@ -13,12 +13,14 @@ import { AdeThinkingLevel, AdeWorkTreeType } from '../../../../platform/ade/comm
 import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	getDefaultPureLeafRank,
 	getNextLowerRankFromConfig,
 	getTopRankDefinition,
 	IAdeOrganizationConfig,
 	isPureExecutionRank,
 	normalizeAdeOrganizationConfig,
 	resolveEffectiveRankDefinition,
+	resolveWorkTreeSlotRank,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -40,6 +42,7 @@ import {
 	IAdeWorkTreeSegmentSpec,
 	IAdeWorkTreeSyncResult,
 } from '../common/ade.js';
+import { readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
 
 interface IStoredProject {
 	uri: string;
@@ -826,7 +829,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	}
 
 	private getRoleSchema(): IAdeOrganizationConfig {
-		const raw = this.configurationService.getValue<unknown>(ADE_ORGANIZATION_CONFIG_KEY);
+		const raw = readTrustedApplicationConfigValue<unknown>(this.configurationService, ADE_ORGANIZATION_CONFIG_KEY);
 		return raw ? normalizeAdeOrganizationConfig(raw) : DEFAULT_ADE_ORGANIZATION_CONFIG;
 	}
 
@@ -881,10 +884,11 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		if (!gov || gov.parentId) {
 			return;
 		}
+		const orchestratorRankId = resolveWorkTreeSlotRank(this.getRoleSchema(), 'orchestrator').id;
 		this.entries = this.entries.map(agent => agent.id === governorId
 			? {
 				...agent,
-				role: treeType ? 'governor' : agent.role,
+				role: treeType ? orchestratorRankId : agent.role,
 				treeType,
 				treeGovernorId: treeType ? governorId : undefined,
 			}
@@ -924,6 +928,16 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			throw new Error(localize('adeWorkTreeGovernorMissing', "Engineering Governor session '{0}' does not exist or is not a top-level session.", governorId));
 		}
 
+		const schema = this.getRoleSchema();
+		const orchestratorRank = resolveWorkTreeSlotRank(schema, 'orchestrator');
+		const segmentOwnerRank = resolveWorkTreeSlotRank(schema, 'segment_owner');
+		const reviewerRank = resolveWorkTreeSlotRank(schema, 'reviewer');
+		const executorRank = resolveWorkTreeSlotRank(schema, 'executor');
+		const defaultLeaf = getDefaultPureLeafRank(schema);
+		const executorRole: AdeAgentRole | undefined = executorRank.pureExecution && executorRank.id === defaultLeaf.id
+			? undefined
+			: executorRank.id;
+
 		const existingSubtree = this.getSubtree(governorId).slice(1);
 		const existingById = new Map(existingSubtree.map(a => [a.id, a]));
 		const existingManagersBySeg = new Map<string, IAdeAgent>();
@@ -931,12 +945,16 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		const existingWorkersByNode = new Map<string, IAdeAgent>();
 
 		for (const item of existingSubtree) {
-			if (item.role === 'manager' && item.treeSegmentId) {
+			if (item.treeSegmentId && !item.treeNodeId) {
 				existingManagersBySeg.set(item.treeSegmentId, item);
-			} else if (item.role === 'employee' && item.treeNodeId) {
-				existingEmployeesByNode.set(item.treeNodeId, item);
-			} else if (!item.role && item.treeNodeId) {
-				existingWorkersByNode.set(item.treeNodeId, item);
+			} else if (item.treeNodeId) {
+				const parent = item.parentId ? existingById.get(item.parentId) : undefined;
+				const isExecutor = !item.role || (parent !== undefined && parent.treeNodeId === item.treeNodeId);
+				if (isExecutor) {
+					existingWorkersByNode.set(item.treeNodeId, item);
+				} else {
+					existingEmployeesByNode.set(item.treeNodeId, item);
+				}
 			}
 		}
 
@@ -960,7 +978,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				projectUri: gov.projectUri,
 				label: seg.label,
 				labelIsCustom: true,
-				role: 'manager',
+				role: segmentOwnerRank.id,
 				archived: undefined,
 				unread: prevMgr?.unread,
 				status: prevMgr?.status ?? 'idle',
@@ -989,7 +1007,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					projectUri: gov.projectUri,
 					label: `[${task.nodeId}] ${task.title}`,
 					labelIsCustom: true,
-					role: 'employee',
+					role: reviewerRank.id,
 					archived: undefined,
 					unread: prevEmp?.unread,
 					status: prevEmp?.status ?? 'idle',
@@ -1016,9 +1034,9 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					id: wrkId,
 					parentId: empId,
 					projectUri: gov.projectUri,
-					label: `${task.title} · Worker`,
+					label: `${task.title} · ${executorRank.name}`,
 					labelIsCustom: true,
-					role: undefined, // Pure Worker L4!
+					role: executorRole,
 					archived: undefined,
 					unread: prevWrk?.unread,
 					status: prevWrk?.status ?? 'idle',
@@ -1044,7 +1062,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			if (entry.id === governorId) {
 				nextEntries.push({
 					...entry,
-					role: 'governor',
+					role: orchestratorRank.id,
 					treeType,
 					treeGovernorId: governorId,
 				});
@@ -1315,6 +1333,31 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, role } : agent);
 		this.saveAgents();
 		this.changeEmitter.fire();
+	}
+
+	/**
+	 * Migrates all live sessions carrying `oldRankId` to `newRankId` (including work-tree sessions)
+	 * when an organizational rank slug ID is renamed in Organization & Roles Studio.
+	 */
+	migrateRankId(oldRankId: string, newRankId: string): number {
+		const prev = oldRankId.trim().toLowerCase();
+		const next = newRankId.trim();
+		if (!prev || !next || prev === next.toLowerCase()) {
+			return 0;
+		}
+		let migrated = 0;
+		this.entries = this.entries.map(agent => {
+			if (agent.role && agent.role.trim().toLowerCase() === prev) {
+				migrated++;
+				return { ...agent, role: next };
+			}
+			return agent;
+		});
+		if (migrated > 0) {
+			this.saveAgents();
+			this.changeEmitter.fire();
+		}
+		return migrated;
 	}
 
 	setArchived(id: string, archived: boolean): void {

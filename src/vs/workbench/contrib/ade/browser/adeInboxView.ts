@@ -42,17 +42,17 @@ const ADE_INBOX_RENDER_LANE_ORDER: readonly AdeInboxLane[] = ['critical', 'gate'
 
 export type AdeInboxRankFilter = 'all' | AdeInboxSenderRank;
 
-export const ADE_INBOX_RANK_FILTERS: readonly AdeInboxRankFilter[] = ['all', 'governor', 'manager', 'employee', 'worker'];
-
-const ADE_INBOX_RANK_PRIORITY: Readonly<Record<AdeInboxSenderRank, number>> = {
-	governor: 0,
-	manager: 1,
-	employee: 2,
-	worker: 3,
-};
+export const ADE_INBOX_RANK_FILTERS: readonly AdeInboxRankFilter[] = [
+	'all',
+	...DEFAULT_ADE_ORGANIZATION_CONFIG.ranks.map(rank => rank.id),
+];
 
 /** Message length beyond which a card is clamped to 3 lines with a "more" toggle. */
 const ADE_INBOX_CLAMP_CHARS = 180;
+
+function lookupInboxRankDefinition(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG) {
+	return findRankDefinition(config, rank) ?? findRankDefinition(DEFAULT_ADE_ORGANIZATION_CONFIG, rank);
+}
 
 export function normalizeAdeInboxRank(
 	rank: AdeSessionRank | undefined,
@@ -61,23 +61,11 @@ export function normalizeAdeInboxRank(
 	if (!rank) {
 		return resolveEffectiveRankDefinition(config, undefined, false).id;
 	}
-	const found = findRankDefinition(config, rank);
+	const found = lookupInboxRankDefinition(rank, config);
 	if (found) {
 		return found.id;
 	}
-	switch (rank) {
-		case 'governor':
-			return 'governor';
-		case 'manager':
-			return 'manager';
-		case 'employee':
-		case 'subordinate':
-			return 'employee';
-		case 'worker':
-			return 'worker';
-		default:
-			return String(rank);
-	}
+	return String(rank);
 }
 
 export function resolveAdeInboxItemRank(
@@ -94,63 +82,27 @@ export function resolveAdeInboxItemRank(
 			return normalizeAdeInboxRank(resolveAdeAgentRank(sender, projects.hasSubordinates(sender.id), config), config);
 		}
 	}
-	return config.ranks[0]?.id ?? 'governor';
+	return config.ranks[0]?.id ?? DEFAULT_ADE_ORGANIZATION_CONFIG.ranks[0].id;
 }
 
 function getRankTierLabel(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
-	const found = findRankDefinition(config, rank);
-	if (found) {
-		return `L${found.tier}`;
-	}
-	switch (rank) {
-		case 'governor': return 'L1';
-		case 'manager': return 'L2';
-		case 'employee': return 'L3';
-		case 'worker': return 'L4';
-		default: return 'L*';
-	}
+	const found = lookupInboxRankDefinition(rank, config);
+	return found ? `L${found.tier}` : 'L*';
 }
 
 function getRankShortLabel(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
-	const found = findRankDefinition(config, rank);
-	if (found) {
-		return found.shortName;
-	}
-	switch (rank) {
-		case 'governor': return localize('adeInboxRankGovShort', "Gov");
-		case 'manager': return localize('adeInboxRankMgrShort', "Mgr");
-		case 'employee': return localize('adeInboxRankEmpShort', "Emp");
-		case 'worker': return localize('adeInboxRankWrkShort', "Wrk");
-		default: return String(rank).slice(0, 4);
-	}
+	const found = lookupInboxRankDefinition(rank, config);
+	return found ? found.shortName : String(rank).slice(0, 4);
 }
 
 function getRankFullLabel(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
-	const found = findRankDefinition(config, rank);
-	if (found) {
-		return found.name;
-	}
-	switch (rank) {
-		case 'governor': return localize('adeInboxRankGovFull', "Governor");
-		case 'manager': return localize('adeInboxRankMgrFull', "Manager");
-		case 'employee': return localize('adeInboxRankEmpFull', "Employee");
-		case 'worker': return localize('adeInboxRankWrkFull', "Worker");
-		default: return String(rank);
-	}
+	const found = lookupInboxRankDefinition(rank, config);
+	return found ? found.name : String(rank);
 }
 
 function getRankIcon(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): ThemeIcon {
-	const found = findRankDefinition(config, rank);
-	if (found) {
-		return resolveAdeRankCodicon(found.icon);
-	}
-	switch (rank) {
-		case 'governor': return Codicon.organization;
-		case 'manager': return Codicon.briefcase;
-		case 'employee': return Codicon.shield;
-		case 'worker': return Codicon.tools;
-		default: return Codicon.account;
-	}
+	const found = lookupInboxRankDefinition(rank, config);
+	return found ? resolveAdeRankCodicon(found.icon) : Codicon.account;
 }
 
 function formatLaneTitle(lane: AdeInboxLane): string {
@@ -306,7 +258,7 @@ export class AdeInboxPanel extends Disposable {
 			const rank = normalizeAdeInboxRank(resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), config), config);
 			entries.push({ agent, rank });
 		}
-		const tierOf = (r: string) => findRankDefinition(config, r)?.tier ?? (ADE_INBOX_RANK_PRIORITY[r] ?? 99);
+		const tierOf = (r: string) => lookupInboxRankDefinition(r, config)?.tier ?? 99;
 		entries.sort((a, b) => tierOf(a.rank) - tierOf(b.rank));
 		return entries;
 	}
@@ -473,7 +425,8 @@ export class AdeInboxPanel extends Disposable {
 		const ico = append(empty, $('span.ade-inbox-empty-icon', { 'aria-hidden': 'true' }));
 		ico.classList.add(...ThemeIcon.asClassNameArray(this.showResolved || hasItemsInOtherRanks ? Codicon.inbox : Codicon.passFilled));
 		if (this.selectedRank !== 'all') {
-			const rankLabel = `${getRankTierLabel(this.selectedRank)} ${getRankFullLabel(this.selectedRank)}`;
+			const roleConfig = this.getRoleConfig();
+			const rankLabel = `${getRankTierLabel(this.selectedRank, roleConfig)} ${getRankFullLabel(this.selectedRank, roleConfig)}`;
 			append(empty, $('h3.ade-inbox-empty-title', {}, localize('adeInboxEmptyRankTitle', "No {0} messages", rankLabel)));
 			append(empty, $('p', {}, hasItemsInOtherRanks
 				? localize('adeInboxEmptyRankOther', "Other ranks have active items in your Inbox.")
@@ -552,10 +505,10 @@ export class AdeInboxPanel extends Disposable {
 			}
 		}));
 
-		const topRow = append(card, $('.ade-inbox-card-top'));
-		const rankPill = append(topRow, $(`span.ade-inbox-rank-pill.rank-${rank}`, { 'data-tier': getRankTierLabel(rank) }));
-		const rankIco = append(rankPill, $('span.ade-inbox-rank-pill-icon', { 'aria-hidden': 'true' }));
 		const roleConfig = this.getRoleConfig();
+		const topRow = append(card, $('.ade-inbox-card-top'));
+		const rankPill = append(topRow, $(`span.ade-inbox-rank-pill.rank-${rank}`, { 'data-tier': getRankTierLabel(rank, roleConfig) }));
+		const rankIco = append(rankPill, $('span.ade-inbox-rank-pill-icon', { 'aria-hidden': 'true' }));
 		rankIco.classList.add(...ThemeIcon.asClassNameArray(getRankIcon(rank, roleConfig)));
 		append(rankPill, $('span', {}, `${getRankTierLabel(rank, roleConfig)} ${getRankFullLabel(rank, roleConfig)}`));
 

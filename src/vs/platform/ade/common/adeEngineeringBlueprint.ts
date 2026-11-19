@@ -1708,12 +1708,24 @@ function scopePrefix(pattern: string): { prefix: string; isGlob: boolean } {
 	return { prefix, isGlob: true };
 }
 
+export interface IAdeFileScopeOverlapOptions {
+	/**
+	 * When true, a task node with no declared `files:` scope is conservatively treated as touching
+	 * the entire repository (overlapping every other node in shared workspace mode).
+	 */
+	readonly treatMissingAsWholeRepo?: boolean;
+}
+
 /**
  * Conservatively checks whether two declared file/directory/glob scope patterns could touch the same file.
  */
-export function doFileScopesOverlap(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+export function doFileScopesOverlap(
+	a: readonly string[] | undefined,
+	b: readonly string[] | undefined,
+	options?: IAdeFileScopeOverlapOptions,
+): boolean {
 	if (!a?.length || !b?.length) {
-		return false;
+		return Boolean(options?.treatMissingAsWholeRepo);
 	}
 	for (const rawA of a) {
 		const pa = scopePrefix(rawA);
@@ -1753,12 +1765,17 @@ export interface IAdeScopeConflictWarning {
 /**
  * Planning-time static check: finds pairs of potentially concurrent task nodes (neither is an ancestor of the other)
  * that declare overlapping `files` scopes in `shared` workspace mode.
+ * When `options.treatMissingAsWholeRepo` is true, undeclared `files` scopes are treated as whole-repo `['**']`.
  */
-export function detectSharedWorkspaceScopeConflicts(blueprint: IAdeEngineeringBlueprint): IAdeScopeConflictWarning[] {
+export function detectSharedWorkspaceScopeConflicts(
+	blueprint: IAdeEngineeringBlueprint,
+	options?: IAdeFileScopeOverlapOptions,
+): IAdeScopeConflictWarning[] {
 	if (blueprint.metadata.workspaceIsolation === 'worktree') {
 		return [];
 	}
-	const taskNodes = blueprint.nodes.filter(n => n.type === 'task' && n.files && n.files.length > 0);
+	const treatMissingAsWholeRepo = Boolean(options?.treatMissingAsWholeRepo);
+	const taskNodes = blueprint.nodes.filter(n => n.type === 'task' && (treatMissingAsWholeRepo || (n.files && n.files.length > 0)));
 	if (taskNodes.length < 2) {
 		return [];
 	}
@@ -1794,8 +1811,13 @@ export function detectSharedWorkspaceScopeConflicts(blueprint: IAdeEngineeringBl
 			if (reach.get(a.id)!.has(b.id) || reach.get(b.id)!.has(a.id)) {
 				continue;
 			}
-			if (doFileScopesOverlap(a.files, b.files)) {
-				warnings.push({ nodeA: a.id, nodeB: b.id, scopesA: a.files!, scopesB: b.files! });
+			if (doFileScopesOverlap(a.files, b.files, { treatMissingAsWholeRepo })) {
+				warnings.push({
+					nodeA: a.id,
+					nodeB: b.id,
+					scopesA: a.files?.length ? a.files : ['** (undeclared whole-repo)'],
+					scopesB: b.files?.length ? b.files : ['** (undeclared whole-repo)'],
+				});
 			}
 		}
 	}

@@ -172,7 +172,157 @@ suite('AdeEngineeringNodeService', () => {
 			assert.ok(segD.mergeConflict);
 			assert.deepStrictEqual(segD.mergeConflict.conflictedFiles, ['shared.txt']);
 
-			await svc.cleanupTreeWorktrees('gov-wt', repoDir);
+			await svc.cleanupTreeWorktrees('gov-wt', repoDir, true);
+		} finally {
+			svc.dispose();
+		}
+	});
+
+	test('uses git-native dirty tracking honoring .gitignore and detects adds, mods, deletes, reverts, and mid-turn commits (P1-5)', async () => {
+		const aexusHome = path.join(tmpDir, '.aexus-code');
+		const repoDir = path.join(tmpDir, 'git-snapshot-repo');
+		await fs.promises.mkdir(path.join(repoDir, 'src'), { recursive: true });
+		runGitSync(repoDir, ['init']);
+		runGitSync(repoDir, ['config', 'user.name', 'Real Dev']);
+		runGitSync(repoDir, ['config', 'user.email', 'dev@example.org']);
+		await fs.promises.writeFile(path.join(repoDir, '.gitignore'), 'ignored-out/\n*.log\n', 'utf8');
+		await fs.promises.writeFile(path.join(repoDir, 'src', 'keep.ts'), 'export const keep = 1;\n', 'utf8');
+		await fs.promises.writeFile(path.join(repoDir, 'src', 'drop.ts'), 'export const drop = 1;\n', 'utf8');
+		await fs.promises.writeFile(path.join(repoDir, 'src', 'committed.ts'), 'export const committed = "v1";\n', 'utf8');
+		runGitSync(repoDir, ['add', '.']);
+		runGitSync(repoDir, ['commit', '-m', 'initial']);
+
+		const svc = new AdeEngineeringNodeService({ baseDir: aexusHome });
+		try {
+			const before = await svc.captureWorkspaceSnapshot(repoDir);
+			assert.strictEqual(before.gitDirtyMode, true, 'Git repo snapshot must use gitDirtyMode instead of full tree walk');
+			assert.ok(before.gitHead, 'Git repo snapshot records HEAD commit SHA');
+			assert.deepStrictEqual(Object.keys(before.entries), [], 'Clean repo starts with 0 dirty entries');
+
+			// Mutate tracked, add untracked, delete tracked, write ignored files
+			await fs.promises.mkdir(path.join(repoDir, 'ignored-out'), { recursive: true });
+			await fs.promises.writeFile(path.join(repoDir, 'ignored-out', 'noise.js'), 'console.log(1);\n', 'utf8');
+			await fs.promises.writeFile(path.join(repoDir, 'debug.log'), 'noisy log\n', 'utf8');
+			await fs.promises.writeFile(path.join(repoDir, 'src', 'keep.ts'), 'export const keep = 2;\n', 'utf8');
+			await fs.promises.writeFile(path.join(repoDir, 'src', 'added.ts'), 'export const added = true;\n', 'utf8');
+			await fs.promises.rm(path.join(repoDir, 'src', 'drop.ts'));
+
+			const changes = await svc.computeWorkerTurnChanges(repoDir, before);
+			assert.deepStrictEqual(
+				changes.touchedFiles.map(f => ({ path: f.relativePath, kind: f.kind })),
+				[
+					{ path: 'src/added.ts', kind: 'added' },
+					{ path: 'src/drop.ts', kind: 'deleted' },
+					{ path: 'src/keep.ts', kind: 'modified' },
+				],
+			);
+			assert.ok(changes.combinedDiff.includes('-export const keep = 1;'));
+			assert.ok(changes.combinedDiff.includes('+export const keep = 2;'));
+			assert.ok(changes.combinedDiff.includes('-export const drop = 1;'));
+			assert.ok(!changes.combinedDiff.includes('noise.js'), '.gitignore entries must be excluded');
+			assert.ok(!changes.combinedDiff.includes('debug.log'), '.gitignore patterns must be excluded');
+
+			// Also verify mid-turn commit detection
+			const beforeCommitTurn = await svc.captureWorkspaceSnapshot(repoDir);
+			await fs.promises.writeFile(path.join(repoDir, 'src', 'committed.ts'), 'export const committed = "v2";\n', 'utf8');
+			runGitSync(repoDir, ['add', 'src/committed.ts']);
+			runGitSync(repoDir, ['commit', '-m', 'worker committed mid-turn']);
+			const commitTurnChanges = await svc.computeWorkerTurnChanges(repoDir, beforeCommitTurn);
+			assert.deepStrictEqual(
+				commitTurnChanges.touchedFiles.map(f => ({ path: f.relativePath, kind: f.kind })),
+				[{ path: 'src/committed.ts', kind: 'modified' }],
+			);
+		} finally {
+			svc.dispose();
+		}
+	});
+
+	test('preserves user Git identity + Co-authored-by trailer, reuses existing branches without -B, refuses dirty merges, and uses safe -d cleanup (P1-3)', async () => {
+		const aexusHome = path.join(tmpDir, '.aexus-code');
+		const repoDir = path.join(tmpDir, 'git-safe-wt');
+		await fs.promises.mkdir(repoDir, { recursive: true });
+		runGitSync(repoDir, ['init']);
+		runGitSync(repoDir, ['config', 'user.name', 'Alice Developer']);
+		runGitSync(repoDir, ['config', 'user.email', 'alice@company.dev']);
+		await fs.promises.writeFile(path.join(repoDir, 'app.txt'), 'v1\n', 'utf8');
+		runGitSync(repoDir, ['add', '.']);
+		runGitSync(repoDir, ['commit', '-m', 'init']);
+
+		const svc = new AdeEngineeringNodeService({ baseDir: aexusHome });
+		try {
+			const segA = await svc.ensureSegmentWorktree('gov-safe', repoDir, 'A', []);
+			await fs.promises.writeFile(path.join(segA.worktree.worktreePath, 'feature.txt'), 'hello\n', 'utf8');
+			const sha1 = await svc.commitSegmentWorktree(segA.worktree.worktreePath, 'feat: add feature');
+			assert.ok(sha1);
+
+			// Verify user identity preserved and Co-authored-by trailer appended
+			const logInfo = cp.execFileSync('git', ['log', '-1', '--format=%an <%ae>%n%B'], { cwd: segA.worktree.worktreePath, encoding: 'utf8' });
+			assert.ok(logInfo.includes('Alice Developer <alice@company.dev>'), 'Must preserve user Git identity');
+			assert.ok(logInfo.includes('Co-authored-by: Aexus Engineering <ade@aexus.local>'), 'Must append Co-authored-by trailer');
+
+			// Remove worktree dir ONLY (leaving branch with unmerged commit), then re-attach -> must reuse existing branch (NOT -B reset!)
+			runGitSync(repoDir, ['worktree', 'remove', '--force', segA.worktree.worktreePath]);
+			const reattached = await svc.ensureSegmentWorktree('gov-safe', repoDir, 'A', []);
+			assert.strictEqual(reattached.worktree.headCommit, sha1, 'Existing unmerged segment branch must be reused without destructive -B reset');
+
+			// Dirty working tree in projectPath MUST refuse mergeSegmentsIntoProject
+			await fs.promises.writeFile(path.join(repoDir, 'app.txt'), 'uncommitted local edit\n', 'utf8');
+			const dirtyMerge = await svc.mergeSegmentsIntoProject(repoDir, [segA.worktree.branchName]);
+			assert.strictEqual(dirtyMerge.ok, false, 'Dirty working tree must block segment merge');
+			assert.ok(dirtyMerge.summary.includes('uncommitted changes'));
+
+			// Safe default cleanup uses `git branch -d` -> unmerged branch MUST survive!
+			await svc.cleanupTreeWorktrees('gov-safe', repoDir);
+			const remainingBranches = cp.execFileSync('git', ['branch', '--list', segA.worktree.branchName], { cwd: repoDir, encoding: 'utf8' }).trim();
+			assert.ok(remainingBranches.includes(segA.worktree.branchName), 'Safe cleanup (-d) must preserve unmerged branch');
+
+			// Explicit force=true cleanup deletes unmerged branch cleanly
+			await svc.cleanupTreeWorktrees('gov-safe', repoDir, true);
+			const afterForce = cp.execFileSync('git', ['branch', '--list', segA.worktree.branchName], { cwd: repoDir, encoding: 'utf8' }).trim();
+			assert.strictEqual(afterForce, '', 'Forced cleanup (-D) deletes unmerged branch');
+		} finally {
+			svc.dispose();
+		}
+	});
+
+	test('runs verify command via POSIX /bin/sh -c and kills entire process group on timeout (P0-6, P2-5)', async () => {
+		if (process.platform === 'win32') {
+			return;
+		}
+		const aexusHome = path.join(tmpDir, '.aexus-code');
+		const workDir = path.join(tmpDir, 'verify-pgkill');
+		await fs.promises.mkdir(workDir, { recursive: true });
+		const pidFile = path.join(workDir, 'grandchild.pid');
+
+		const svc = new AdeEngineeringNodeService({ baseDir: aexusHome });
+		try {
+			const okRes = await svc.runNodeVerificationCommand(workDir, 'printf "verify-ok"', 5000);
+			assert.strictEqual(okRes.passed, true);
+			assert.strictEqual(okRes.output, 'verify-ok');
+
+			// Spawn a background grandchild `sleep 30` and wait on it; timeout must SIGKILL the whole process group!
+			const timeoutRes = await svc.runNodeVerificationCommand(
+				workDir,
+				`sleep 30 & echo $! > "${pidFile}"; wait`,
+				1000,
+			);
+			assert.strictEqual(timeoutRes.passed, false);
+			assert.strictEqual(timeoutRes.exitCode, 124);
+			assert.ok(timeoutRes.output.includes('timed out'));
+
+			const rawPid = (await fs.promises.readFile(pidFile, 'utf8')).trim();
+			const grandchildPid = Number(rawPid);
+			assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, `Expected valid grandchild pid, got ${rawPid}`);
+
+			// Give OS a brief tick to reap SIGKILLed process group member
+			await new Promise(resolve => setTimeout(resolve, 100));
+			let alive = true;
+			try {
+				process.kill(grandchildPid, 0);
+			} catch {
+				alive = false;
+			}
+			assert.strictEqual(alive, false, `Grandchild process ${grandchildPid} must be terminated when verify times out`);
 		} finally {
 			svc.dispose();
 		}

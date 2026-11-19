@@ -35,7 +35,13 @@ import {
 } from '../../../../platform/ade/common/adeEngineering.js';
 import { detectSharedWorkspaceScopeConflicts, normalizeThinkingLevel, parseEngineeringBlueprint, serializeEngineeringBlueprint } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
 import { AdeBlueprintTemplatePreset, buildBlueprintFromTemplate, listBlueprintTemplates } from '../../../../platform/ade/common/adeBlueprintTemplates.js';
-import { computeTreeFinancialSummary } from '../../../../platform/ade/common/adePricing.js';
+import {
+	ADE_PRICING_CONFIG_KEY,
+	ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY,
+	AdeCustomPricingMap,
+	computeTreeFinancialSummary,
+	IAdePricingOptions,
+} from '../../../../platform/ade/common/adePricing.js';
 import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
 import { synthesizeBlueprintFromPrompt } from '../../../../platform/ade/common/adePromptToDag.js';
 import {
@@ -52,6 +58,7 @@ import {
 	isPureExecutionRank,
 	normalizeAdeOrganizationConfig,
 	resolveEffectiveRankDefinition,
+	resolveWorkTreeSlotRank,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -86,7 +93,7 @@ import {
 	IAdeProjectsService,
 	resolveAdeAgentRank,
 } from '../common/ade.js';
-import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
+import { IAdeRoleSchemaService, readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
 import { findProjectScmRepository, openScmResourceInAde } from './adeInspectorViews.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
@@ -105,6 +112,24 @@ function tryGetService<T>(accessor: ServicesAccessor, id: ServiceIdentifier<T>):
 	} catch {
 		return undefined;
 	}
+}
+
+function readAdePricingOptions(configurationService: IConfigurationService | undefined): IAdePricingOptions | undefined {
+	if (!configurationService) {
+		return undefined;
+	}
+	const rawCustom = readTrustedApplicationConfigValue<unknown>(configurationService, ADE_PRICING_CONFIG_KEY);
+	const customPricing = rawCustom && typeof rawCustom === 'object' && !Array.isArray(rawCustom)
+		? rawCustom as AdeCustomPricingMap
+		: undefined;
+	const subscriptionMode = readTrustedApplicationConfigValue<boolean>(configurationService, ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY) === true;
+	if (!customPricing && !subscriptionMode) {
+		return undefined;
+	}
+	return {
+		...(customPricing ? { customPricing } : {}),
+		...(subscriptionMode ? { subscriptionMode: true } : {}),
+	};
 }
 
 function formatRoleTitle(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
@@ -174,6 +199,7 @@ function buildSessionTreeResult(
 	projects: IAdeProjectsService,
 	sessions: IAdeSessionsService | undefined,
 	rootAgent: IAdeAgent,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
 ): IAdeSessionTreeResult {
 	let totalSubordinates = 0;
 	let maxDepth = 0;
@@ -191,7 +217,7 @@ function buildSessionTreeResult(
 			.filter(child => !visited.has(child.id))
 			.map(child => buildNode(child, depth + 1));
 		return {
-			session: toSessionSummary(projects, sessions, agent),
+			session: toSessionSummary(projects, sessions, agent, config),
 			depth,
 			children,
 		};
@@ -303,7 +329,12 @@ function buildProjectSummaries(
 	}));
 }
 
-function toSessionSummary(projects: IAdeProjectsService, sessions: IAdeSessionsService | undefined, agent: IAdeAgent): IAdeSessionSummary {
+function toSessionSummary(
+	projects: IAdeProjectsService,
+	sessions: IAdeSessionsService | undefined,
+	agent: IAdeAgent,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+): IAdeSessionSummary {
 	const hasSubs = projects.hasSubordinates(agent.id);
 	const effectiveEngineId = agent.session?.engineId ?? agent.preferredEngineId;
 	const lockedByWorkTree = Boolean(projects.isLockedByWorkTree?.(agent.id));
@@ -314,7 +345,7 @@ function toSessionSummary(projects: IAdeProjectsService, sessions: IAdeSessionsS
 		projectName: projects.getProjectName(agent.projectUri),
 		label: agent.label,
 		role: agent.role,
-		rank: resolveAdeAgentRank(agent, hasSubs),
+		rank: resolveAdeAgentRank(agent, hasSubs, config),
 		isOrchestrated: projects.isOrchestrated(agent),
 		engineId: effectiveEngineId,
 		engineName: effectiveEngineId ? (sessions?.getEngineName(effectiveEngineId) ?? effectiveEngineId) : undefined,
@@ -338,6 +369,7 @@ function buildControlStatus(
 	navigation: IProjectNavigationService,
 	editors: IAdeEditorService,
 	sessions?: IAdeSessionsService,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
 ): IAdeControlStatus {
 	const focused = navigation.focusedProject;
 	const selected = focused ?? projects.selectedProject ?? navigation.selectedProject;
@@ -361,7 +393,7 @@ function buildControlStatus(
 				agentId: activeInput.agentId,
 				label: agent?.label ?? activeInput.getName(),
 				role: agent?.role,
-				rank: agent ? resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id)) : undefined,
+				rank: agent ? resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), config) : undefined,
 				engineId: agent?.session?.engineId,
 			};
 		}
@@ -373,7 +405,7 @@ function buildControlStatus(
 			label: agent?.label ?? activeInput.getName(),
 			resource: agent?.session?.resource.toString(),
 			role: agent?.role,
-			rank: agent ? resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id)) : undefined,
+			rank: agent ? resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), config) : undefined,
 			engineId: agent?.session?.engineId ?? activeInput.engineId,
 		};
 	} else if (activeInput instanceof ChatEditorInput) {
@@ -394,7 +426,7 @@ function buildControlStatus(
 					label: agent.label,
 					resource: sessionKey,
 					role: agent.role,
-					rank: resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id)),
+					rank: resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), config),
 					engineId: agent.session?.engineId,
 				};
 			} else {
@@ -415,7 +447,7 @@ function buildControlStatus(
 				label: mappedAgent.label,
 				resource: mappedAgent.session?.resource.toString(),
 				role: mappedAgent.role,
-				rank: resolveAdeAgentRank(mappedAgent, projects.hasSubordinates(mappedAgent.id)),
+				rank: resolveAdeAgentRank(mappedAgent, projects.hasSubordinates(mappedAgent.id), config),
 				engineId: mappedAgent.session?.engineId,
 			};
 		} else if (activeInput?.resource?.scheme === ADE_ENGINEERING_SCHEME) {
@@ -451,7 +483,7 @@ function buildControlStatus(
 			canGoForward: navigation.canGoForward,
 		},
 		selectedProject: selected ? { name: selected.name, path: formatProjectDisplayPath(selected.uri), uri: selected.uri.toString() } : undefined,
-		...(selectedAgent ? { selectedSession: toSessionSummary(projects, sessions, selectedAgent) } : {}),
+		...(selectedAgent ? { selectedSession: toSessionSummary(projects, sessions, selectedAgent, config) } : {}),
 		activeEditor,
 		secretary: {
 			configured: Boolean(secretary.session),
@@ -491,6 +523,15 @@ export function buildAdeAgentRoleContext(
 	const supervisorRankName = supervisor
 		? formatRoleTitle(resolveAdeAgentRank(supervisor, true, config), config)
 		: undefined;
+	const workTreeSlot = !isWorkTree
+		? undefined
+		: !agent.parentId
+			? 'orchestrator' as const
+			: agent.treeNodeId
+				? 'reviewer' as const
+				: agent.treeSegmentId
+					? 'segment_owner' as const
+					: 'orchestrator' as const;
 
 	return compileAdeRolePrompt({
 		config,
@@ -513,6 +554,7 @@ export function buildAdeAgentRoleContext(
 				governorId: agent.treeGovernorId ?? agent.id,
 				segmentId: agent.treeSegmentId,
 				nodeId: agent.treeNodeId,
+				slot: workTreeSlot,
 			}
 			: undefined,
 	});
@@ -585,7 +627,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 
 	const secretaryResource = projects.secretary.session?.resource;
 	if (sessionResource && (sessionResource.scheme === 'aexus-secretary' || (secretaryResource && (uriIdentity.extUri.isEqual(sessionResource, secretaryResource) || sessionResource.toString() === secretaryResource.toString())))) {
-		const status = buildControlStatus(modes, projects, navigation, editors, sessions);
+		const status = buildControlStatus(modes, projects, navigation, editors, sessions, roleConfig);
 		const summaries = buildProjectSummaries(projects, navigation, uriIdentity);
 		const focusLine = status.navigation.isFocused && status.navigation.focusedProject
 			? `Focused Project: ${status.navigation.focusedProject.name} (${status.navigation.focusedProject.path})`
@@ -972,7 +1014,7 @@ export async function executeAdeControlRequest(
 
 	switch (action) {
 		case 'status':
-			return buildControlStatus(modes, projects, navigation, editors, sessions);
+			return buildControlStatus(modes, projects, navigation, editors, sessions, roleConfig);
 
 		case 'mode.get':
 			return { mode: modes.mode };
@@ -1386,7 +1428,7 @@ export async function executeAdeControlRequest(
 					if (parentFilter && agent.parentId !== parentFilter.id) {
 						return false;
 					}
-					if (rankFilter && resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id)) !== rankFilter) {
+					if (rankFilter && resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), roleConfig) !== rankFilter) {
 						return false;
 					}
 					if (engineFilter && agent.session?.engineId !== engineFilter) {
@@ -1403,7 +1445,7 @@ export async function executeAdeControlRequest(
 					}
 					return true;
 				})
-				.map(agent => toSessionSummary(projects, sessions, agent));
+				.map(agent => toSessionSummary(projects, sessions, agent, roleConfig));
 		}
 
 		case 'session.info':
@@ -1412,9 +1454,9 @@ export async function executeAdeControlRequest(
 			const supervisor = agent.parentId ? projects.getAgent(agent.parentId) : undefined;
 			const subordinates = projects.getDirectSubordinates(agent.id);
 			return {
-				session: toSessionSummary(projects, sessions, agent),
-				...(supervisor ? { supervisor: toSessionSummary(projects, sessions, supervisor) } : {}),
-				subordinates: subordinates.map(child => toSessionSummary(projects, sessions, child)),
+				session: toSessionSummary(projects, sessions, agent, roleConfig),
+				...(supervisor ? { supervisor: toSessionSummary(projects, sessions, supervisor, roleConfig) } : {}),
+				subordinates: subordinates.map(child => toSessionSummary(projects, sessions, child, roleConfig)),
 			};
 		}
 
@@ -1425,16 +1467,16 @@ export async function executeAdeControlRequest(
 				? projects.getSubtree(agent.id).slice(1)
 				: projects.getDirectSubordinates(agent.id);
 			return {
-				supervisor: toSessionSummary(projects, sessions, agent),
+				supervisor: toSessionSummary(projects, sessions, agent, roleConfig),
 				count: subordinates.length,
-				subordinates: subordinates.map(child => toSessionSummary(projects, sessions, child)),
+				subordinates: subordinates.map(child => toSessionSummary(projects, sessions, child, roleConfig)),
 			};
 		}
 
 		case 'session.tree':
 		case 'session.subtree': {
 			const agent = resolveSupervisorOrSession(projects, editors, params);
-			return buildSessionTreeResult(projects, sessions, agent);
+			return buildSessionTreeResult(projects, sessions, agent, roleConfig);
 		}
 
 		case 'session.create': {
@@ -1527,7 +1569,7 @@ export async function executeAdeControlRequest(
 				modes.setMode('ade');
 				await editors.openAgent(createdAgent.id, { side: Boolean(params.side) });
 			}
-			return toSessionSummary(projects, sessions, projects.getAgent(createdAgent.id)!);
+			return toSessionSummary(projects, sessions, projects.getAgent(createdAgent.id)!, roleConfig);
 		}
 
 		case 'session.attach': {
@@ -1600,7 +1642,7 @@ export async function executeAdeControlRequest(
 				modes.setMode('ade');
 				await editors.openAgent(createdAgent.id, { side: Boolean(params.side) });
 			}
-			return toSessionSummary(projects, sessions, projects.getAgent(createdAgent.id)!);
+			return toSessionSummary(projects, sessions, projects.getAgent(createdAgent.id)!, roleConfig);
 		}
 
 		case 'session.connect': {
@@ -1717,7 +1759,7 @@ export async function executeAdeControlRequest(
 				throw new Error(localize('adeCannotClearRoleWithSubordinates', "Cannot clear role while session has subordinate agents."));
 			}
 			projects.setAgentRole(agent.id, nextRole);
-			return toSessionSummary(projects, sessions, projects.getAgent(agent.id)!);
+			return toSessionSummary(projects, sessions, projects.getAgent(agent.id)!, roleConfig);
 		}
 
 		case 'session.reparent':
@@ -1741,7 +1783,7 @@ export async function executeAdeControlRequest(
 			if (!moved) {
 				throw new Error(localize('adeCannotNestSession', "Cannot move session '{0}' under the requested target.", agent.label));
 			}
-			return toSessionSummary(projects, sessions, projects.getAgent(agent.id)!);
+			return toSessionSummary(projects, sessions, projects.getAgent(agent.id)!, roleConfig);
 		}
 
 		case 'session.send': {
@@ -1750,7 +1792,7 @@ export async function executeAdeControlRequest(
 			if (typeof rawMessage !== 'string' || !rawMessage.trim()) {
 				throw new Error(localize('adeMissingMessage', "Message text is required."));
 			}
-			const rank = resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id));
+			const rank = resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), roleConfig);
 			if (!agent.session) {
 				projects.setDraft(agent.id, rawMessage);
 				return { id: agent.id, label: agent.label, rank, status: 'draft', draft: rawMessage };
@@ -1788,7 +1830,7 @@ export async function executeAdeControlRequest(
 
 		case 'session.history': {
 			const agent = resolveAgentFromParams(projects, params);
-			const rank = resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id));
+			const rank = resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), roleConfig);
 			const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.floor(params.limit) : 20;
 			if (!agent.session) {
 				return { id: agent.id, label: agent.label, rank, status: 'draft', messages: [] };
@@ -2158,6 +2200,7 @@ export async function executeAdeControlRequest(
 				governorSessionId: gov.id,
 				blueprintText,
 				forceStopRunning: params.forceStopRunning === true,
+				caller: typeof params.caller === 'string' ? params.caller : undefined,
 			});
 			return {
 				governorSessionId: snap.governorSessionId,
@@ -2359,7 +2402,7 @@ export async function executeAdeControlRequest(
 				runStatus: snap.state.runStatus,
 				progress: snap.progress,
 				tokenUsage: snap.tokenUsage,
-				financials: computeTreeFinancialSummary(snap),
+				financials: computeTreeFinancialSummary(snap, readAdePricingOptions(configurationService)),
 				managers: snap.blueprint.managers,
 				nodes: snap.nodes,
 				edges: snap.edges,
@@ -2378,13 +2421,30 @@ export async function executeAdeControlRequest(
 			if (!nodeId) {
 				throw new Error('Node ID (--node <nodeId>) is required for engineering review.');
 			}
-			if (params.role !== 'employee' && params.role !== 'manager') {
-				throw new Error(`Invalid review role '${String(params.role)}': expected 'employee' or 'manager'.`);
+			const rawRole = typeof params.role === 'string' ? params.role.trim().toLowerCase() : '';
+			const reviewerSlotId = resolveWorkTreeSlotRank(roleConfig, 'reviewer').id.toLowerCase();
+			const segmentOwnerSlotId = resolveWorkTreeSlotRank(roleConfig, 'segment_owner').id.toLowerCase();
+			let role: 'employee' | 'manager' | undefined;
+			if (rawRole === 'employee') {
+				role = 'employee';
+			} else if (rawRole === 'manager') {
+				role = 'manager';
+			} else if (rawRole && rawRole === reviewerSlotId && rawRole === segmentOwnerSlotId) {
+				// Collapsed 2-tier preset (e.g. flat-swarm coordinator): disambiguate using active node phase.
+				const currentSnap = engineeringService.getTreeSnapshot(gov.id);
+				const currentPhase = currentSnap?.nodes.find(n => n.node.id === nodeId)?.runtime.phase;
+				role = currentPhase === 'manager_review' ? 'manager' : 'employee';
+			} else if (rawRole && rawRole === reviewerSlotId) {
+				role = 'employee';
+			} else if (rawRole && rawRole === segmentOwnerSlotId) {
+				role = 'manager';
+			}
+			if (!role) {
+				throw new Error(`Invalid review role '${String(params.role)}': expected 'employee', 'manager', '${reviewerSlotId}', or '${segmentOwnerSlotId}'.`);
 			}
 			if (params.verdict !== 'pass' && params.verdict !== 'reject' && params.verdict !== 'guidance') {
 				throw new Error(`Invalid review verdict '${String(params.verdict)}': expected 'pass', 'reject', or 'guidance'.`);
 			}
-			const role = params.role;
 			const verdict = params.verdict;
 			const reportText = typeof params.report === 'string'
 				? params.report
@@ -2478,6 +2538,7 @@ export async function executeAdeControlRequest(
 				governorSessionId: gov.id,
 				blueprintText: serializeEngineeringBlueprint(bp),
 				forceStopRunning: params.forceStopRunning === true,
+				caller: typeof params.caller === 'string' ? params.caller : undefined,
 			});
 			return {
 				governorSessionId: snap.governorSessionId,
@@ -2504,7 +2565,7 @@ export async function executeAdeControlRequest(
 			return {
 				governorSessionId: snap.governorSessionId,
 				treeType: snap.treeType,
-				financials: computeTreeFinancialSummary(snap),
+				financials: computeTreeFinancialSummary(snap, readAdePricingOptions(configurationService)),
 				markdown: buildEngineeringRunReportMarkdown(snap),
 				svg: buildEngineeringDagSvg(snap),
 			};
@@ -2529,11 +2590,12 @@ export async function executeAdeControlRequest(
 				const demoLabel = 'Interactive Demo · Feature Ship';
 				let demoGov = projects.agents.find(a => !a.parentId && a.label === demoLabel && a.projectUri.toString() === projectUri.toString());
 				if (!demoGov) {
+					const orchestratorRankId = resolveWorkTreeSlotRank(roleConfig, 'orchestrator').id;
 					demoGov = projects.addSession(
 						projectUri,
 						{ engineId: 'aexus-claude', resource: URI.parse(`aexus-claude://aexus-demo/${Date.now()}`) },
 						demoLabel,
-						{ role: 'governor' },
+						{ role: orchestratorRankId },
 					);
 				}
 				govId = demoGov.id;
@@ -2575,6 +2637,7 @@ export async function executeAdeControlRequest(
 				governorSessionId: gov.id,
 				blueprintText,
 				forceStopRunning: Boolean(params.forceStopRunning),
+				caller: typeof params.caller === 'string' ? params.caller : undefined,
 			});
 			if (params.open !== false) {
 				modes.setMode('ade');
@@ -2633,7 +2696,7 @@ export async function executeAdeControlRequest(
 				throw new Error('Inbox message text is required.');
 			}
 			const rawNode = params.node ?? params.nodeId;
-			const resolvedRank = resolveAdeAgentRank(gov, projects.hasSubordinates(gov.id));
+			const resolvedRank = resolveAdeAgentRank(gov, projects.hasSubordinates(gov.id), roleConfig);
 			const senderRank = resolvedRank === 'subordinate' ? 'employee' : resolvedRank;
 			return inboxService.postGovernorMessage({
 				governorSessionId: gov.id,

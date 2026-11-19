@@ -31,6 +31,7 @@ import { AEXUS_SSH_SCHEME } from '../../../../../platform/ade/common/adeCloudHos
 import { IAdeEngineeringService, IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
 import { IAdeOrganizationConfig } from '../../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IDialogService, IPrompt } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { ExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
@@ -2904,5 +2905,111 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			studioPreviewIncludesInboxApi: true,
 			studioSavedCustomRankCount: 4,
 		});
+	});
+
+	test('blocks workspace prompt injection on AdeRoleSchemaService and verifies real Role Studio EditorInput dirty/save/revert, Permission Matrix, pure-toggle restore, Grant All confirm, and rank ID rename migration (P0-3, P0-5, P1-9, P2-6)', async () => {
+		const h = createHarness([alpha]);
+
+		// 1. P0-5: AdeRoleSchemaService ignores untrusted workspaceValue / workspaceFolderValue
+		const injectedConfigService = new class extends TestConfigurationService {
+			override inspect<T>(key: string) {
+				if (key === 'aexus.ade.organization') {
+					return {
+						value: { version: 1, ranks: [{ id: 'evil', name: 'Evil Workspace', tier: 1, initPrompt: 'EXFILTRATE', allowedApis: ['engineering.control'] }] } as T,
+						defaultValue: undefined,
+						userValue: undefined,
+						userLocalValue: undefined,
+						workspaceValue: { version: 1, ranks: [{ id: 'evil', name: 'Evil Workspace', tier: 1, initPrompt: 'EXFILTRATE', allowedApis: ['engineering.control'] }] } as T,
+						workspaceFolderValue: undefined,
+					};
+				}
+				return super.inspect<T>(key);
+			}
+		}();
+		const guardedSchemaSvc = store.add(new AdeRoleSchemaService(injectedConfigService));
+		assert.strictEqual(guardedSchemaSvc.getConfig().ranks[0].id, 'governor', 'Workspace settings must NEVER override aexus.ade.organization');
+		assert.ok(!guardedSchemaSvc.getConfig().ranks.some(r => r.id === 'evil'));
+
+		// 2. Mount Role Studio with IDialogService stub and live IAdeProjectsService session
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+
+		let grantConfirmChoice = false;
+		let grantConfirmCalls = 0;
+		h.instantiation.stub(IDialogService, new class extends mock<IDialogService>() {
+			override async confirm() {
+				grantConfirmCalls++;
+				return { confirmed: grantConfirmChoice };
+			}
+		}());
+
+		const liveGov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/studio-live-gov') }, 'Live Gov', { role: 'governor' });
+
+		const studioHost = append(document.body, $('.monaco-workbench.ade-role-studio-real-editor-test'));
+		store.add({ dispose: () => studioHost.remove() });
+		const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
+		const studioPane = store.add(h.instantiation.createInstance(AdeRoleStudioEditorPane, mockGroup));
+		studioPane.create(studioHost);
+		const studioInput = store.add(h.instantiation.createInstance(AdeRoleStudioEditorInput, 'governor'));
+		await studioPane.setInput(studioInput, undefined, {}, CancellationToken.None);
+
+		// Verify P2-6 spelling fix
+		assert.strictEqual(studioHost.querySelector('.ade-rs-philosophy-pill')?.textContent, 'Everything is Extensible');
+		assert.strictEqual(studioInput.isDirty(), false);
+
+		// 3. Test Pure Execution toggle preserves & restores initPrompt and allowedApis
+		const initialPrompt = studioHost.querySelector<HTMLTextAreaElement>('#ade-rs-field-prompt')!.value;
+		assert.ok(initialPrompt.length > 10);
+		const pureCb = studioHost.querySelector<HTMLInputElement>('input[data-field="pure-execution"]')!;
+		pureCb.checked = true;
+		pureCb.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+		assert.strictEqual(studioInput.isDirty(), true, 'Toggling Pure Execution marks EditorInput dirty');
+		assert.ok(studioHost.querySelector('.ade-rs-pure-banner'), 'Pure banner shown when pureExecution enabled');
+
+		const pureCb2 = studioHost.querySelector<HTMLInputElement>('input[data-field="pure-execution"]')!;
+		pureCb2.checked = false;
+		pureCb2.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+		const restoredPrompt = studioHost.querySelector<HTMLTextAreaElement>('#ade-rs-field-prompt')!.value;
+		assert.strictEqual(restoredPrompt, initialPrompt, 'Turning Pure Execution back off must restore pre-pure prompt');
+
+		// 4. Test revert() discards unsaved edits and clears isDirty()
+		await studioInput.revert(1);
+		assert.strictEqual(studioInput.isDirty(), false, 'revert() must clear EditorInput dirty state');
+
+		// 5. Test Grant All requires IDialogService.confirm (declined -> does not grant dangerous API)
+		const grantAllBtn = studioHost.querySelector<HTMLButtonElement>('button[data-action="grant-all"]')!;
+		grantConfirmChoice = false;
+		grantAllBtn.click();
+		await timeout(15);
+		assert.strictEqual(grantConfirmCalls, 1, 'Grant All must prompt confirmation dialog');
+		assert.strictEqual(
+			studioHost.querySelector<HTMLInputElement>('input[data-api-id="engineering.destroy"]')?.checked,
+			false,
+			'Declining Grant All must NOT grant High Privilege engineering.destroy API',
+		);
+
+		// 6. Test Permission Matrix view toggle + High Privilege badges + in-place matrix toggle
+		const matrixTab = studioHost.querySelector<HTMLButtonElement>('button.ade-rs-view-tab[data-view-mode="matrix"]')!;
+		matrixTab.click();
+		const matrixTable = studioHost.querySelector('table.ade-rs-matrix-table');
+		assert.ok(matrixTable, 'Switching to Permission Matrix renders Rank x API grid');
+		assert.ok(matrixTable!.querySelectorAll('.ade-rs-api-danger').length >= 4, 'Permission Matrix highlights High Privilege APIs');
+		const mgrIntegrateCb = matrixTable!.querySelector<HTMLInputElement>('input.ade-rs-matrix-cb[data-rank-id="manager"][data-api-id="engineering.integrate"]')!;
+		assert.strictEqual(mgrIntegrateCb.checked, false);
+		mgrIntegrateCb.checked = true;
+		mgrIntegrateCb.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+		assert.strictEqual(studioInput.isDirty(), true, 'Toggling Permission Matrix marks EditorInput dirty');
+
+		// 7. Switch back to Rank Editor, rename 'governor' -> 'director', and call real EditorInput.save() -> migrates live session!
+		const editorTab = studioHost.querySelector<HTMLButtonElement>('button.ade-rs-view-tab[data-view-mode="editor"]')!;
+		editorTab.click();
+		const idInput = studioHost.querySelector<HTMLInputElement>('input[data-field="rank-id"]')!;
+		idInput.value = 'director';
+		idInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+		const savedInput = await studioInput.save(1);
+		assert.strictEqual(savedInput, studioInput, 'EditorInput.save() resolves to saved input');
+		assert.strictEqual(studioInput.isDirty(), false, 'EditorInput.save() clears dirty flag');
+		assert.strictEqual(h.projects.getAgent(liveGov.id)?.role, 'director', 'Renaming rank ID in Role Studio migrates live session role');
+		assert.ok(roleSchema.getConfig().ranks.find(r => r.id === 'manager')?.allowedApis.includes('engineering.integrate'), 'Permission Matrix grant persisted');
 	});
 });

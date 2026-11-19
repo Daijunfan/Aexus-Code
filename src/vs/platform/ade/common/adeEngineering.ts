@@ -484,6 +484,10 @@ export interface IAdeWorkspaceSnapshot {
 	readonly capturedAt: number;
 	readonly entries: Readonly<Record<string, IAdeWorkspaceFileSnapshotEntry>>;
 	readonly truncated?: boolean;
+	/** Present when snapshot was captured using Git-native dirty/untracked tracking instead of full directory scan. */
+	readonly gitDirtyMode?: boolean;
+	/** Repository HEAD SHA at snapshot capture time (empty string for unborn HEAD). */
+	readonly gitHead?: string;
 }
 
 export interface IAdeStoredEngineeringRecord {
@@ -531,7 +535,7 @@ export interface IAdeEngineeringBackendService {
 		projectPath: string,
 		branches: readonly string[],
 	): Promise<{ readonly ok: boolean; readonly conflictedFiles: readonly string[]; readonly summary: string }>;
-	cleanupTreeWorktrees(governorSessionId: string, projectPath: string): Promise<void>;
+	cleanupTreeWorktrees(governorSessionId: string, projectPath: string, force?: boolean): Promise<void>;
 	/** Runs an optional deterministic build/lint/test verification shell command before waking LLM review. */
 	runNodeVerificationCommand?(cwd: string, command: string, timeoutMs?: number): Promise<IAdeVerificationResult>;
 }
@@ -547,6 +551,10 @@ export interface IAdeApplyBlueprintOptions {
 	readonly governorSessionId: string;
 	readonly blueprintText: string;
 	readonly forceStopRunning?: boolean;
+	/** Optional caller identity (e.g. `'user'`, `'secretary'`, or an agent rank ID) used by verify trust gating. */
+	readonly caller?: string;
+	/** Internal flag used only by zero-execution demo simulations or trusted internal re-serializations. */
+	readonly trustedVerifyCommands?: boolean;
 }
 
 export interface IAdeEngineeringReviewParams {

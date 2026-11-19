@@ -29,6 +29,35 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 
 export const IAdeRoleSchemaService = createDecorator<IAdeRoleSchemaService>('adeRoleSchemaService');
 
+/**
+ * Reads an application/user-scoped ADE setting while explicitly ignoring untrusted
+ * `workspaceValue` / `workspaceFolderValue` layers (prevents repo `.vscode/settings.json`
+ * prompt/permission/timeout injection even in untrusted or mixed test environments).
+ */
+export function readTrustedApplicationConfigValue<T>(
+	configurationService: IConfigurationService,
+	key: string,
+): T | undefined {
+	const inspected = typeof configurationService.inspect === 'function'
+		? configurationService.inspect<T>(key)
+		: undefined;
+	if (inspected) {
+		const trusted = inspected.policyValue
+			?? inspected.applicationValue
+			?? inspected.userLocalValue
+			?? inspected.userValue
+			?? inspected.userRemoteValue;
+		if (trusted !== undefined) {
+			return trusted;
+		}
+		if (inspected.workspaceValue !== undefined || inspected.workspaceFolderValue !== undefined) {
+			return inspected.defaultValue;
+		}
+		return inspected.value ?? inspected.defaultValue;
+	}
+	return configurationService.getValue<T>(key);
+}
+
 export interface IAdeRoleSchemaService {
 	readonly _serviceBrand: undefined;
 	readonly onDidChangeSchema: Event<IAdeOrganizationConfig>;
@@ -84,7 +113,7 @@ export class AdeRoleSchemaService extends Disposable implements IAdeRoleSchemaSe
 	}
 
 	private readConfigFromSettings(): IAdeOrganizationConfig {
-		const raw = this.configurationService.getValue<unknown>(ADE_ORGANIZATION_CONFIG_KEY);
+		const raw = readTrustedApplicationConfigValue<unknown>(this.configurationService, ADE_ORGANIZATION_CONFIG_KEY);
 		return normalizeAdeOrganizationConfig(raw);
 	}
 

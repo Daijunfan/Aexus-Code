@@ -19,6 +19,9 @@ import {
 	normalizeAdeOrganizationConfig,
 	previewCompiledRankPrompt,
 	resolveActionPrimitiveApi,
+	resolveRankWorkTreeSlots,
+	resolveWorkTreeSlotRank,
+	resolveWorkTreeSlotRankId,
 } from '../../common/adeRoleSchema.js';
 
 suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
@@ -110,7 +113,19 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'cto', 'session.reparent').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'cto', 'session.detach').allowed, true);
 		assert.strictEqual(resolveActionPrimitiveApi('host.upsert'), 'host.access');
-		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.merge'), 'engineering.design');
+		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.merge'), 'engineering.integrate');
+		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.cleanup'), 'engineering.integrate');
+		assert.strictEqual(resolveActionPrimitiveApi('engineering.remove'), 'engineering.destroy');
+		assert.strictEqual(resolveActionPrimitiveApi('engineering.reset'), 'engineering.destroy');
+
+		// P1-7: Default governor holds engineering.design only — MUST NOT be authorized for dangerous integrate/destroy actions
+		const integrateSpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'engineering.integrate');
+		const destroySpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'engineering.destroy');
+		assert.strictEqual(integrateSpec?.dangerous, true);
+		assert.strictEqual(destroySpec?.dangerous, true);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.worktrees.merge').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.remove').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.reset').allowed, false);
 	});
 
 	test('computes custom hierarchy levels, next-lower ranks, template interpolation, and scoped CLI compilation', () => {
@@ -159,6 +174,89 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		const builderDef = startup.ranks.find(r => r.id === 'builder')!;
 		const purePreview = previewCompiledRankPrompt(startup, builderDef);
 		assert.strictEqual(purePreview.estimatedTokens, 0);
-		assert.ok(ADE_PRIMITIVE_APIS.length >= 10);
+		assert.ok(ADE_PRIMITIVE_APIS.length >= 12);
+	});
+
+	test('resolves structural Work-Tree slots across all 5 presets and custom orgs, and compiles slot-aware English prompts (P0-3, P2-6)', () => {
+		const startup = ADE_ORGANIZATION_PRESETS.find(p => p.id === 'startup-3tier')!.config;
+		const flat = ADE_ORGANIZATION_PRESETS.find(p => p.id === 'flat-swarm')!.config;
+		const research = ADE_ORGANIZATION_PRESETS.find(p => p.id === 'research-lab')!.config;
+		const sec = ADE_ORGANIZATION_PRESETS.find(p => p.id === 'security-audit')!.config;
+
+		assert.deepStrictEqual({
+			default4: ['orchestrator', 'segment_owner', 'reviewer', 'executor'].map(s => resolveWorkTreeSlotRankId(DEFAULT_ADE_ORGANIZATION_CONFIG, s as 'orchestrator')),
+			startup3: ['orchestrator', 'segment_owner', 'reviewer', 'executor'].map(s => resolveWorkTreeSlotRankId(startup, s as 'orchestrator')),
+			flat2: ['orchestrator', 'segment_owner', 'reviewer', 'executor'].map(s => resolveWorkTreeSlotRankId(flat, s as 'orchestrator')),
+			research4: ['orchestrator', 'segment_owner', 'reviewer', 'executor'].map(s => resolveWorkTreeSlotRankId(research, s as 'orchestrator')),
+			sec4: ['orchestrator', 'segment_owner', 'reviewer', 'executor'].map(s => resolveWorkTreeSlotRankId(sec, s as 'orchestrator')),
+		}, {
+			default4: ['governor', 'manager', 'employee', 'worker'],
+			startup3: ['tech-lead', 'tech-lead', 'reviewer', 'builder'],
+			flat2: ['coordinator', 'coordinator', 'coordinator', 'agent'],
+			research4: ['governor', 'manager', 'employee', 'worker'],
+			sec4: ['governor', 'manager', 'employee', 'worker'],
+		});
+
+		assert.deepStrictEqual(resolveRankWorkTreeSlots(startup, 'tech-lead'), ['orchestrator', 'segment_owner']);
+		assert.deepStrictEqual(resolveRankWorkTreeSlots(flat, 'coordinator'), ['orchestrator', 'segment_owner', 'reviewer']);
+
+		// Custom slotless 3-tier org resolves structural slots cleanly via tier heuristic
+		const customSlotless = normalizeAdeOrganizationConfig({
+			version: 1,
+			ranks: [
+				{ id: 'cto', name: 'CTO', tier: 1, allowedApis: ['engineering.design', 'engineering.review'] },
+				{ id: 'qa', name: 'QA Lead', tier: 2, allowedApis: ['engineering.review'] },
+				{ id: 'dev', name: 'Dev Bot', tier: 3, pureExecution: true },
+			],
+		});
+		assert.strictEqual(resolveWorkTreeSlotRank(customSlotless, 'orchestrator').id, 'cto');
+		assert.strictEqual(resolveWorkTreeSlotRank(customSlotless, 'segment_owner').id, 'cto');
+		assert.strictEqual(resolveWorkTreeSlotRank(customSlotless, 'reviewer').id, 'qa');
+		assert.strictEqual(resolveWorkTreeSlotRank(customSlotless, 'executor').id, 'dev');
+
+		// Slot-aware work-tree prompt compilation under startup-3tier & flat-swarm
+		const startupReviewerPrompt = compileAdeRolePrompt({
+			config: startup,
+			rank: resolveWorkTreeSlotRank(startup, 'reviewer'),
+			agentId: 'rev-n1',
+			agentLabel: '[N1] Spec',
+			engineDisplay: 'Claude Code',
+			engineId: 'aexus-claude',
+			projectName: 'Demo',
+			projectPath: '/tmp/demo',
+			workTree: { treeType: 'engineering', governorId: 'lead-1', segmentId: 'S1', nodeId: 'N1', slot: 'reviewer' },
+		})!;
+		assert.ok(startupReviewerPrompt.includes('Reviewer ≠ Builder'), 'Startup 3-tier reviewer prompt uses resolved slot pair');
+		assert.ok(startupReviewerPrompt.includes('--role employee'), 'Review CLI instruction renders cleanly for reviewer slot');
+		assert.ok(!/没有职级/.test(startupReviewerPrompt), 'English prompt must not embed Chinese text (P2-6)');
+
+		const flatReviewerPrompt = compileAdeRolePrompt({
+			config: flat,
+			rank: resolveWorkTreeSlotRank(flat, 'reviewer'),
+			agentId: 'coord-n1',
+			agentLabel: '[N1] Swarm Task',
+			engineDisplay: 'Claude Code',
+			engineId: 'aexus-claude',
+			projectName: 'Demo',
+			projectPath: '/tmp/demo',
+			workTree: { treeType: 'engineering', governorId: 'coord-1', segmentId: 'S1', nodeId: 'N1', slot: 'reviewer' },
+		})!;
+		assert.ok(flatReviewerPrompt.includes('Coordinator ≠ Agent'));
+		assert.ok(!/没有职级/.test(flatReviewerPrompt));
+
+		// Default 4-tier still keeps exact Employee ≠ Worker wording
+		const defaultEmpPrompt = compileAdeRolePrompt({
+			config: DEFAULT_ADE_ORGANIZATION_CONFIG,
+			rank: resolveWorkTreeSlotRank(DEFAULT_ADE_ORGANIZATION_CONFIG, 'reviewer'),
+			agentId: 'emp-n1',
+			agentLabel: '[N1] Core',
+			engineDisplay: 'Claude Code',
+			engineId: 'aexus-claude',
+			projectName: 'Demo',
+			projectPath: '/tmp/demo',
+			workTree: { treeType: 'engineering', governorId: 'gov-1', segmentId: 'S1', nodeId: 'N1', slot: 'reviewer' },
+		})!;
+		assert.ok(defaultEmpPrompt.includes('Employee ≠ Worker'));
+		assert.ok(!/没有职级/.test(defaultEmpPrompt));
 	});
 });

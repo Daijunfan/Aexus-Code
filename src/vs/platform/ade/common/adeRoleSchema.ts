@@ -20,7 +20,16 @@ export type AdePrimitiveApiId =
 	| 'engineering.read'
 	| 'engineering.design'
 	| 'engineering.review'
+	| 'engineering.integrate'
+	| 'engineering.destroy'
 	| 'engineering.control';
+
+/** Structural operational slots used by Engineering & Research DAG work-trees across arbitrary N-tier organizations. */
+export type AdeWorkTreeSlot = 'orchestrator' | 'segment_owner' | 'reviewer' | 'executor';
+
+export const ADE_WORK_TREE_SLOTS: readonly AdeWorkTreeSlot[] = ['orchestrator', 'segment_owner', 'reviewer', 'executor'];
+
+export type IAdeWorkTreeSlotMap = Readonly<Partial<Record<AdeWorkTreeSlot, string>>>;
 
 export type AdePrimitiveApiCategory = 'messaging' | 'hierarchy' | 'workspace' | 'engineering';
 
@@ -64,6 +73,7 @@ export interface IAdePromptApiRenderContext {
 	readonly treeSegmentId?: string;
 	readonly treeNodeId?: string;
 	readonly rankId: string;
+	readonly workTreeSlot?: AdeWorkTreeSlot;
 }
 
 export interface IAdePrimitiveApiSpec {
@@ -247,12 +257,14 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			}
 			const govId = ctx.treeGovernorId ?? ctx.agentId;
 			const nodeArg = ctx.treeNodeId ?? '<nodeId>';
-			if (ctx.rankId === 'employee' || ctx.rankId === 'subordinate') {
+			const isReviewer = ctx.workTreeSlot === 'reviewer' || (!ctx.workTreeSlot && (ctx.rankId === 'employee' || ctx.rankId === 'subordinate'));
+			const isSegmentOwner = ctx.workTreeSlot === 'segment_owner' || (!ctx.workTreeSlot && ctx.rankId === 'manager');
+			if (isReviewer) {
 				return [
 					`  - Inspect: \`aexus-ade engineering diff --governor ${govId} --node ${nodeArg}\` | \`aexus-ade engineering status --governor ${govId} --node ${nodeArg} --json\``,
 				];
 			}
-			if (ctx.rankId === 'manager') {
+			if (isSegmentOwner) {
 				return [
 					`  - Inspect: \`aexus-ade engineering status --governor ${govId} --node <nodeId> --json\` | \`diff --governor ${govId} --node <nodeId>\``,
 				];
@@ -267,7 +279,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 		id: 'engineering.design',
 		category: 'engineering',
 		label: 'Author Blueprint & Configure DAG',
-		description: 'Initialize trees, apply blueprints/templates, configure per-node engines/models, reset nodes, and manage worktrees.',
+		description: 'Initialize trees, apply blueprints/templates, and configure per-node engines, models, and thinking budgets.',
 		actions: [
 			'engineering.init',
 			'engineering.blueprint.apply',
@@ -276,11 +288,6 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'engineering.template.apply',
 			'engineering.templates.apply',
 			'engineering.configure',
-			'engineering.reset',
-			'engineering.remove',
-			'engineering.worktrees',
-			'engineering.worktrees.merge',
-			'engineering.worktrees.cleanup',
 			'engineering.demo',
 		],
 		renderCliLines: ctx => {
@@ -290,7 +297,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			const govId = ctx.treeGovernorId ?? ctx.agentId;
 			return [
 				`  - Blueprint Apply: \`aexus-ade engineering template apply --governor ${govId} --template <id>\` | \`aexus-ade engineering blueprint apply --governor ${govId} --file <path>\``,
-				`  - Configure & Reset: \`aexus-ade engineering configure --governor ${govId} --all [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>]\` | \`reset --governor ${govId} [--node <id>]\``,
+				`  - Configure DAG: \`aexus-ade engineering configure --governor ${govId} --all [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>]\``,
 			];
 		},
 	},
@@ -298,7 +305,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 		id: 'engineering.review',
 		category: 'engineering',
 		label: 'DAG Review Verdict & Watchdog',
-		description: 'Submit formal Employee/Manager pass/reject/guidance review verdicts and execute Watchdog remind/kill-restart actions.',
+		description: 'Submit formal Reviewer/Segment-Owner pass/reject/guidance review verdicts and execute Watchdog remind/kill-restart actions.',
 		actions: [
 			'engineering.review',
 			'engineering.watchdogAction',
@@ -309,7 +316,8 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			}
 			const govId = ctx.treeGovernorId ?? ctx.agentId;
 			const nodeArg = ctx.treeNodeId ?? '<nodeId>';
-			if (ctx.rankId === 'employee' || ctx.rankId === 'subordinate') {
+			const isReviewer = ctx.workTreeSlot === 'reviewer' || (!ctx.workTreeSlot && (ctx.rankId === 'employee' || ctx.rankId === 'subordinate'));
+			if (isReviewer) {
 				return [
 					`  - Pass: \`aexus-ade engineering review --governor ${govId} --node ${nodeArg} --role employee --verdict pass --report "<concise summary>"\``,
 					`  - Reject (reuses Worker): \`aexus-ade engineering review --governor ${govId} --node ${nodeArg} --role employee --verdict reject --feedback "<fix instructions>"\``,
@@ -318,6 +326,47 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			return [
 				`  - Verdict / Guidance: \`aexus-ade engineering review --governor ${govId} --node <nodeId> --role manager --verdict <pass|reject|guidance> [--feedback "<text>"]\``,
 				`  - Watchdog Action: \`aexus-ade engineering watchdog-action --governor ${govId} --node <nodeId> --action <remind|kill-restart> [--message "<text>"]\``,
+			];
+		},
+	},
+	{
+		id: 'engineering.integrate',
+		category: 'engineering',
+		label: 'Merge & Clean Up Git Worktrees',
+		description: 'Inspect, merge isolated segment branches into the project branch, and prune Git worktrees (High Privilege).',
+		actions: [
+			'engineering.worktrees',
+			'engineering.worktrees.merge',
+			'engineering.worktrees.cleanup',
+		],
+		dangerous: true,
+		renderCliLines: ctx => {
+			if (!ctx.isWorkTree) {
+				return [];
+			}
+			const govId = ctx.treeGovernorId ?? ctx.agentId;
+			return [
+				`  - Worktree Integration: \`aexus-ade engineering worktrees merge --governor ${govId}\` | \`worktrees cleanup --governor ${govId}\``,
+			];
+		},
+	},
+	{
+		id: 'engineering.destroy',
+		category: 'engineering',
+		label: 'Reset & Remove DAG Trees',
+		description: 'Reset DAG execution progress or permanently remove an Engineering/Research Work-Tree (High Privilege).',
+		actions: [
+			'engineering.reset',
+			'engineering.remove',
+		],
+		dangerous: true,
+		renderCliLines: ctx => {
+			if (!ctx.isWorkTree) {
+				return [];
+			}
+			const govId = ctx.treeGovernorId ?? ctx.agentId;
+			return [
+				`  - Reset / Remove Tree: \`aexus-ade engineering reset --governor ${govId} [--node <id>]\` | \`remove --governor ${govId}\``,
 			];
 		},
 	},
@@ -399,6 +448,7 @@ export interface IAdeRankDefinition {
 export interface IAdeOrganizationConfig {
 	readonly version: 1;
 	readonly presetId?: string;
+	readonly slots?: IAdeWorkTreeSlotMap;
 	readonly ranks: readonly IAdeRankDefinition[];
 }
 
@@ -426,6 +476,12 @@ export const ADE_PROMPT_TEMPLATE_VARIABLES: readonly { readonly token: string; r
 export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 	version: 1,
 	presetId: 'default-4tier',
+	slots: {
+		orchestrator: 'governor',
+		segment_owner: 'manager',
+		reviewer: 'employee',
+		executor: 'worker',
+	},
 	ranks: [
 		{
 			id: 'governor',
@@ -531,6 +587,12 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 		config: {
 			version: 1,
 			presetId: 'startup-3tier',
+			slots: {
+				orchestrator: 'tech-lead',
+				segment_owner: 'tech-lead',
+				reviewer: 'reviewer',
+				executor: 'builder',
+			},
 			ranks: [
 				{
 					id: 'tech-lead',
@@ -544,7 +606,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'reviewer',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'engineering.read', 'engineering.design'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'engineering.read', 'engineering.design', 'engineering.review'],
 				},
 				{
 					id: 'reviewer',
@@ -583,6 +645,12 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 		config: {
 			version: 1,
 			presetId: 'research-lab',
+			slots: {
+				orchestrator: 'governor',
+				segment_owner: 'manager',
+				reviewer: 'employee',
+				executor: 'worker',
+			},
 			ranks: [
 				{
 					id: 'governor',
@@ -649,6 +717,12 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 		config: {
 			version: 1,
 			presetId: 'security-audit',
+			slots: {
+				orchestrator: 'governor',
+				segment_owner: 'manager',
+				reviewer: 'employee',
+				executor: 'worker',
+			},
 			ranks: [
 				{
 					id: 'governor',
@@ -715,6 +789,12 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 		config: {
 			version: 1,
 			presetId: 'flat-swarm',
+			slots: {
+				orchestrator: 'coordinator',
+				segment_owner: 'coordinator',
+				reviewer: 'coordinator',
+				executor: 'agent',
+			},
 			ranks: [
 				{
 					id: 'coordinator',
@@ -728,7 +808,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'agent',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'engineering.read', 'engineering.design', 'engineering.review'],
 				},
 				{
 					id: 'agent',
@@ -771,6 +851,7 @@ function cloneDefaultOrganizationConfig(): IAdeOrganizationConfig {
 	return {
 		version: 1,
 		presetId: DEFAULT_ADE_ORGANIZATION_CONFIG.presetId,
+		...(DEFAULT_ADE_ORGANIZATION_CONFIG.slots ? { slots: { ...DEFAULT_ADE_ORGANIZATION_CONFIG.slots } } : {}),
 		ranks: DEFAULT_ADE_ORGANIZATION_CONFIG.ranks.map(r => ({ ...r, allowedApis: [...r.allowedApis] })),
 	};
 }
@@ -865,11 +946,83 @@ export function normalizeAdeOrganizationConfig(raw: unknown): IAdeOrganizationCo
 			: r
 	));
 
+	// Sanitize optional structural work-tree slot mapping against valid rank IDs
+	let normalizedSlots: IAdeWorkTreeSlotMap | undefined;
+	if (obj.slots && typeof obj.slots === 'object' && !Array.isArray(obj.slots)) {
+		const rawSlots = obj.slots as Record<string, unknown>;
+		const slotEntries: Partial<Record<AdeWorkTreeSlot, string>> = {};
+		for (const slot of ADE_WORK_TREE_SLOTS) {
+			const candidate = typeof rawSlots[slot] === 'string' ? sanitizeRankId(rawSlots[slot] as string) : '';
+			if (candidate && validIds.has(candidate)) {
+				slotEntries[slot] = candidate;
+			}
+		}
+		if (Object.keys(slotEntries).length > 0) {
+			normalizedSlots = slotEntries;
+		}
+	}
+
 	return {
 		version: 1,
 		presetId: typeof obj.presetId === 'string' && obj.presetId.trim() ? obj.presetId.trim() : undefined,
+		...(normalizedSlots ? { slots: normalizedSlots } : {}),
 		ranks: cleaned,
 	};
+}
+
+/**
+ * Resolves the concrete rank definition fulfilling a structural Work-Tree slot
+ * (`orchestrator`, `segment_owner`, `reviewer`, `executor`) across ANY organization preset
+ * (4-tier Enterprise, 3-tier Startup, 2-tier Flat Swarm, or custom N-tier schemas).
+ */
+export function resolveWorkTreeSlotRank(
+	config: IAdeOrganizationConfig,
+	slot: AdeWorkTreeSlot,
+): IAdeRankDefinition {
+	const explicitId = config.slots?.[slot];
+	if (explicitId) {
+		const explicit = findRankDefinition(config, explicitId);
+		if (explicit) {
+			return explicit;
+		}
+	}
+	const nonPure = config.ranks.filter(r => !r.pureExecution);
+	switch (slot) {
+		case 'orchestrator':
+			return findRankDefinition(config, 'governor')
+				?? nonPure[0]
+				?? getTopRankDefinition(config);
+		case 'executor':
+			return getDefaultPureLeafRank(config);
+		case 'reviewer':
+			return findRankDefinition(config, 'employee')
+				?? nonPure[nonPure.length - 1]
+				?? getTopRankDefinition(config);
+		case 'segment_owner':
+			return findRankDefinition(config, 'manager')
+				?? (nonPure.length >= 3 ? nonPure[1] : nonPure[0])
+				?? getTopRankDefinition(config);
+	}
+}
+
+/** Convenience helper returning the resolved rank slug ID for a structural Work-Tree slot. */
+export function resolveWorkTreeSlotRankId(
+	config: IAdeOrganizationConfig,
+	slot: AdeWorkTreeSlot,
+): string {
+	return resolveWorkTreeSlotRank(config, slot).id;
+}
+
+/** Returns all structural Work-Tree slots fulfilled by `rankId` (in 2-tier/3-tier orgs one rank may fulfill multiple slots). */
+export function resolveRankWorkTreeSlots(
+	config: IAdeOrganizationConfig,
+	rankId: string | undefined,
+): AdeWorkTreeSlot[] {
+	const target = findRankDefinition(config, rankId);
+	if (!target) {
+		return [];
+	}
+	return ADE_WORK_TREE_SLOTS.filter(slot => resolveWorkTreeSlotRank(config, slot).id === target.id);
 }
 
 /** Finds a rank definition by ID (with backward-compatible alias mapping for legacy `'subordinate'` / `'member'`). */
@@ -1111,6 +1264,7 @@ export interface IAdeRolePromptCompileInput {
 		readonly governorId: string;
 		readonly segmentId?: string;
 		readonly nodeId?: string;
+		readonly slot?: AdeWorkTreeSlot;
 	};
 }
 
@@ -1191,9 +1345,17 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 	if (input.workTree) {
 		const govId = input.workTree.governorId;
 		const treeKindTitle = input.workTree.treeType === 'research' ? 'ADE Research Tree' : 'ADE Engineering Tree';
+		const resolvedSlot: AdeWorkTreeSlot | undefined = input.workTree.slot
+			?? (input.workTree.nodeId ? 'reviewer'
+				: input.workTree.segmentId ? 'segment_owner'
+					: resolveRankWorkTreeSlots(config, rank.id)[0]);
+		const reviewerRank = resolveWorkTreeSlotRank(config, 'reviewer');
+		const segmentOwnerRank = resolveWorkTreeSlotRank(config, 'segment_owner');
+		const executorRank = resolveWorkTreeSlotRank(config, 'executor');
+
 		lines.push(
 			`- Work Tree: **${treeKindTitle}** (governor: \`${govId}\`${input.workTree.segmentId ? `, segment: \`${input.workTree.segmentId}\`` : ''}${input.workTree.nodeId ? `, node: \`${input.workTree.nodeId}\`` : ''}) — topology locked by \`blueprint.md\`; inspect live nodes/status via \`aexus-ade engineering status --governor ${govId} --json\`.`,
-			`- Identity Rule: When asked your role/rank, state **${rank.name}**, session \`${input.agentId}\`, project **${input.projectName}**, and work tree \`${govId}\`. NEVER claim that you are "not an employee" or have "no rank / 没有职级".`,
+			`- Identity Rule: When asked your role/rank, state **${rank.name}**, session \`${input.agentId}\`, project **${input.projectName}**, and work tree \`${govId}\`. NEVER claim that you are "not an employee" or have "no rank".`,
 		);
 		if (interpolatedCharter) {
 			lines.push('- Role Initialization Charter:');
@@ -1204,25 +1366,30 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 			}
 		}
 
-		// Preserve strict Work-Tree operational guardrails for structural slots
+		// Preserve strict Work-Tree operational guardrails keyed by structural slot (works across all org presets)
 		const isResearchTree = input.workTree.treeType === 'research';
-		if (rank.id === 'governor') {
+		if (resolvedSlot === 'orchestrator') {
 			lines.push(
-				isResearchTree ? '- Research Governor (L1) Operational Rules:' : '- Engineering Governor (L1) Operational Rules:',
+				isResearchTree
+					? `- Research ${rank.name} (L${rank.tier}) Operational Rules:`
+					: `- Engineering ${rank.name} (L${rank.tier}) Operational Rules:`,
 				isResearchTree
 					? '  - Design multi-track research synthesis & verification DAG topology in `blueprint.md`.'
 					: '  - Design task decomposition & DAG parallel topology in `blueprint.md` (supports optional node `files:` scope and `verify:` check commands, plus `max_concurrency`).',
-				'  - Asleep during normal execution; woken ONLY on 3rd formal Manager failure (RED Circuit Breaker). NEVER call `aexus-ade engineering run` yourself unless explicitly authorized (normally User or Secretary starts execution).',
+				`  - Asleep during normal execution; woken ONLY on 3rd formal ${segmentOwnerRank.name} failure (RED Circuit Breaker). NEVER call \`aexus-ade engineering run\` yourself unless explicitly authorized (normally User or Secretary starts execution).`,
 			);
-		} else if (rank.id === 'manager') {
+		} else if (resolvedSlot === 'segment_owner') {
 			lines.push(
 				`- Segment ${rank.name} (L${rank.tier}) Operational Rules (Segment \`${input.workTree.segmentId ?? 'auto'}\`):`,
-				'  - Woken ONLY on: (a) segment tail / ★Critical secondary review, (b) 3x Employee internal rejections (grant 4th-chance guidance or formal reject), (c) Git worktree merge conflict, or (d) persistent Watchdog stall.',
+				`  - Woken ONLY on: (a) segment tail / ★Critical secondary review, (b) 3x ${reviewerRank.name} internal rejections (grant 4th-chance guidance or formal reject), (c) Git worktree merge conflict, or (d) persistent Watchdog stall.`,
 			);
-		} else if (rank.id === 'employee' || rank.id === 'subordinate') {
+		} else if (resolvedSlot === 'reviewer') {
+			const noCodingPair = rank.id === 'employee' && executorRank.id === 'worker'
+				? 'Employee ≠ Worker'
+				: `${rank.name} ≠ ${executorRank.name}`;
 			lines.push(
 				`- Single-Node Reviewer (L${rank.tier}) Operational Rules (Node \`${input.workTree.nodeId ?? 'task'}\`):`,
-				'  - **STRICT PROHIBITION (`Employee ≠ Worker`)**: NEVER write or edit business code yourself — your Worker executes all coding. Audit Acceptance Criteria + Diff and submit your verdict via `aexus-ade`.',
+				`  - **STRICT PROHIBITION (\`${noCodingPair}\`)**: NEVER write or edit business code yourself — your ${executorRank.name} executes all coding. Audit Acceptance Criteria + Diff and submit your verdict via \`aexus-ade\`.`,
 			);
 		}
 
@@ -1233,6 +1400,7 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 			treeSegmentId: input.workTree.segmentId,
 			treeNodeId: input.workTree.nodeId,
 			rankId: rank.id,
+			workTreeSlot: resolvedSlot,
 		});
 		if (apiLines.length > 0) {
 			lines.push(`- Authorized Aexus-Code Primitive APIs (${rank.allowedApis.join(', ')}):`);
@@ -1251,7 +1419,7 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 	}
 
 	lines.push(
-		`- Identity Rule: When asked your role/rank, state **${rank.name}**, session \`${input.agentId}\`, project **${input.projectName}**, supervisor (${input.supervisor ? `${input.supervisor.label} [${input.supervisor.rankName}]` : 'None'}), and subordinates. NEVER claim that you are "not an employee" or have "no rank / 没有职级".`,
+		`- Identity Rule: When asked your role/rank, state **${rank.name}**, session \`${input.agentId}\`, project **${input.projectName}**, supervisor (${input.supervisor ? `${input.supervisor.label} [${input.supervisor.rankName}]` : 'None'}), and subordinates. NEVER claim that you are "not an employee" or have "no rank".`,
 	);
 
 	if (interpolatedCharter) {
@@ -1324,6 +1492,17 @@ export const ADE_ORGANIZATION_JSON_SCHEMA = {
 		presetId: {
 			type: 'string' as const,
 			description: 'Active preset identifier (e.g. default-4tier, startup-3tier, research-lab, security-audit, flat-swarm, custom).',
+		},
+		slots: {
+			type: 'object' as const,
+			additionalProperties: false,
+			description: 'Structural Work-Tree slot mapping (orchestrator, segment_owner, reviewer, executor) to configured rank IDs.',
+			properties: {
+				orchestrator: { type: 'string' as const, description: 'Rank ID owning DAG topology & escalations (L1).' },
+				segment_owner: { type: 'string' as const, description: 'Rank ID owning segment review, merge conflicts, and escalations.' },
+				reviewer: { type: 'string' as const, description: 'Rank ID auditing single-node diffs & acceptance criteria without coding.' },
+				executor: { type: 'string' as const, description: 'Rank ID executing coding / analysis turns (typically pure execution).' },
+			},
 		},
 		ranks: {
 			type: 'array' as const,
