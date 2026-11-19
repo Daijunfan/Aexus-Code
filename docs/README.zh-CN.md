@@ -31,18 +31,32 @@
 > - **10 秒零 Token 互动演练（零源码改动、无需 API Key）**：按 `Cmd/Ctrl+Shift+P` 执行 **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`**（或 `aexus-ade engineering demo`），即刻体验完整四级协作、人工点击 **`✓ Approve`** 放行门禁，并一键导出**矢量 SVG 架构图**与 **GitHub PR 验收报告**。按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
 
 <p align="center">
-  <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Aexus Code — 活态嵌套双壳任务舱、三段式对抗流水线、实时动态播报、Git Worktree 泳道与人工发布门禁" />
+  <img src="assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code 实录动图 — 四级多智能体 DAG 编排、三路并行 Git Worktree、自愈返工、金色门禁审批与四层 FinOps 成本看板" />
+  <br/>
+  <sub><strong>实机动态演示：</strong>三路并行 Git Worktree ➔ 琥珀返工自愈 ➔ 金色人工门禁 <code>U1</code> 一键放行 ➔ 四层 FinOps（省钱 <code>81%</code>）· <a href="assets/demos/02-live-dag-choreography.mp4">▶ 查看 1440×900 高清 MP4</a></sub>
 </p>
+
+### 实机动态短视频速览 *（6–10 秒自动播放，附高清 MP4 源文件）*
 
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/13-prompt-to-dag-bar.png" width="100%" alt="自然语言一键生成 DAG 浮条（Cmd/Ctrl+K）" />
-      <p align="center"><sub><strong>一句话生成 DAG（<code>Cmd/Ctrl+K</code>）— 50ms 拆解多路并行智能体组织图</strong></sub></p>
+      <img src="assets/demos/01-prompt-to-dag.gif" width="100%" alt="一句话生成 DAG（Cmd/Ctrl+K）与 6 套内置蓝图模板库实录" />
+      <p align="center"><sub><strong>1. 一句话（<code>Cmd/Ctrl+K</code>）➔ 秒生多智能体 DAG &amp; 6 套蓝图模板</strong> · <a href="assets/demos/01-prompt-to-dag.mp4">▶ 高清 MP4</a></sub></p>
     </td>
     <td width="50%">
-      <img src="assets/08-finops-budget-guardrails.png" width="100%" alt="四层 Agent FinOps 美元统计、缓存省钱与硬预算熔断护栏" />
-      <p align="center"><sub><strong>四层 Agent FinOps、缓存省钱统计与硬预算熔断护栏</strong></sub></p>
+      <img src="assets/demos/03-gantt-worktrees-themes.gif" width="100%" alt="悬停微浮条、可视化执行甘特图、Git Worktree 一键合并工作台与深浅主题切换" />
+      <p align="center"><sub><strong>2. 悬停微浮条、执行甘特图、Worktree 合并台 &amp; 深浅色瞬切</strong> · <a href="assets/demos/03-gantt-worktrees-themes.mp4">▶ 高清 MP4</a></sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="assets/demos/04-ade-ide-mirror-symmetry.gif" width="100%" alt="0ms ADE 与 IDE 镜像对称切换、本地与云主机多项目管理及常驻 Secretary" />
+      <p align="center"><sub><strong>3. 0ms <code>ADE ⇄ IDE</code> 镜像切换 · 多项目并行 + <code>✦ Secretary</code></strong> · <a href="assets/demos/04-ade-ide-mirror-symmetry.mp4">▶ 高清 MP4</a></sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/demos/05-cloud-hosts-studio.gif" width="100%" alt="免远端装机多系统 SSH 云主机中心（Linux 与 Windows）" />
+      <p align="center"><sub><strong>4. 免装机原生 SSH 云主机中心（Linux / Windows 同屏管理）</strong> · <a href="assets/demos/05-cloud-hosts-studio.mp4">▶ 高清 MP4</a></sub></p>
     </td>
   </tr>
 </table>
@@ -91,6 +105,16 @@
 通过画布内置的 **DAG Blueprint Recipes** 模板库一键拉起多路并行流水线（或在 [`examples/blueprints/`](../examples/blueprints/README.md) 中直接导入分享 `.md` 蓝图）；实时洞察四级组织架构的美元支出与 Prompt Cache 节省金额，一键设定 `$2 / $5 / $10 / $25` 或自定义硬预算熔断线，并可在深色与浅色主题下享受同等高质感体验：
 
 <table>
+  <tr>
+    <td width="50%">
+      <img src="assets/13-prompt-to-dag-bar.png" width="100%" alt="自然语言一键生成 DAG 浮条（Cmd/Ctrl+K）" />
+      <p align="center"><sub><strong>一句话生成 DAG（<code>Cmd/Ctrl+K</code>）— 50ms 拆解多路并行智能体组织图</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/08-finops-budget-guardrails.png" width="100%" alt="四层 Agent FinOps 美元统计、缓存省钱与硬预算熔断护栏" />
+      <p align="center"><sub><strong>四层 Agent FinOps、缓存省钱统计与硬预算熔断护栏</strong></sub></p>
+    </td>
+  </tr>
   <tr>
     <td width="50%">
       <img src="assets/09-blueprint-recipes-gallery.png" width="100%" alt="DAG Blueprint Recipes 模板库 — 6 套精选 Engineering 与 Research 蓝图与实时 SVG 拓扑预览" />
@@ -152,7 +176,7 @@
 对任意顶层 `Governor` 右键开启 **`Engineering`**，或执行 **`Open ADE Research...`**，即可将口头对话升级为**拓扑锁定的可视化工程/研究流水线**（蓝图与运行态完全独立保存在 `~/.aexus-code/engineering/<governor-id>/` 与 `~/.aexus-code/research/<governor-id>/`，零污染业务 Git 仓库）：
 
 <p align="center">
-  <img src="assets/01-ade-engineering-dag.png" width="100%" alt="Aexus Code — ADE 四级会话树与 Engineering 动态协作 DAG 画布" />
+  <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Aexus Code — 活态嵌套双壳任务舱、三段式对抗流水线、实时动态播报、Git Worktree 泳道与人工发布门禁" />
 </p>
 
 <table>
@@ -176,11 +200,17 @@
       <p align="center"><sub><strong>ADE Inbox 收信箱实时门禁提醒与动态 DAG 同屏联动</strong></sub></p>
     </td>
   </tr>
+  <tr>
+    <td width="50%">
+      <img src="assets/01-ade-engineering-dag.png" width="100%" alt="Aexus Code — ADE 四级会话树与 Engineering 动态协作 DAG 画布" />
+      <p align="center"><sub><strong>四级会话树与自动切分 MNP 泳道实时联动</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/04c-engineering-blueprint-drawer.png" width="100%" alt="ADE Engineering 混合 Mermaid + Markdown 蓝图抽屉与实时执行日志" />
+      <p align="center"><sub><strong>混合 Mermaid + Markdown 蓝图抽屉与实时执行日志</strong></sub></p>
+    </td>
+  </tr>
 </table>
-
-<p align="center">
-  <img src="assets/04c-engineering-blueprint-drawer.png" width="100%" alt="ADE Engineering 混合 Mermaid + Markdown 蓝图抽屉与实时执行日志" />
-</p>
 
 - **极大无分支路径（Maximal Non-Branching Path）自动切分**：只需套用模板、拖拽节点或编辑 Markdown + Mermaid，系统 100% 自动在分叉前、合流后与 `user_gate` 边界切分 `MGR · L2` 管辖段框（Worktree 模式下段顶实时呈现隔离分支徽章），并同步生成锁定的左栏四级会话树。
 - **装甲嵌套双壳「活态」任务舱（`268×172`）**：外层 **`EMPLOYEE · L3`** 验收壳顶脊配备实时 **三段式对抗流水线指示条（`L4 编码 ▸ L3 审计 ▸ L2 签收`）**，四边物理包裹内层凹陷的 **`WORKER · L4`** 执行核——内置 **单行实时动态播报条（Activity Ticker）**、**代码变更规模徽章（`+N -M`）**、节点级 `$USD` 消耗、**Figma 式悬停快捷操作微浮条（`💬 🛡 ⚙ +`）** 与 **双击标题就地重命名**。
@@ -292,7 +322,7 @@ aexus-ade engineering report --governor "$GOV_ID" --out ./pr-verification-report
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
 | `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
-| `engineering` | `list` · `init` · `open` · `demo [--governor <id>]` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
+| `engineering` | `list` · `init` · `open` · `demo [--governor <id>]` · `generate --prompt "<goal>"` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
 
 ---

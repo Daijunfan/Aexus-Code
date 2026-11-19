@@ -31,18 +31,32 @@
 > - **10-Second Interactive Demo (`$0.00` Spend, Zero File Changes)**: Press `Cmd/Ctrl+Shift+P` → **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`** (or `aexus-ade engineering demo`) to watch the entire 4-tier choreography live, approve Gate `U1`, and export a shareable **Vector SVG** + **GitHub PR Audit Report**. Toggle **`ADE ⇄ IDE`** anytime with `Alt+Cmd+A` (`Alt+Ctrl+A`).
 
 <p align="center">
-  <img src="docs/assets/14-living-pods-interactive-demo.png" width="100%" alt="Aexus Code — Living Armored Dual-Shell Pods, 3-Stage Adversarial Rail, Live Activity Tickers, Git Worktree Lanes &amp; Release Readiness Gate" />
+  <img src="docs/assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code Live Demo — 4-Tier DAG Choreography, 3x Parallel Git Worktrees, Self-Healing Rework, Golden Release Gate Approval &amp; 4-Tier FinOps" />
+  <br/>
+  <sub><strong>Live 4-Tier DAG Choreography:</strong> 3× Parallel Git Worktree Fan-Out ➔ Self-Healing Rework ➔ Golden Gate <code>U1</code> Approval ➔ 4-Tier FinOps (<code>81%</code> Cache Saved) · <a href="docs/assets/demos/02-live-dag-choreography.mp4">▶ Watch Full HD MP4 (1440×900)</a></sub>
 </p>
+
+### Live Motion Showcase *(Auto-Playing 6–10s Clips)*
 
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/assets/13-prompt-to-dag-bar.png" width="100%" alt="Prompt-to-DAG Floating Command Bar (Cmd/Ctrl+K) — One Sentence to Parallel Multi-Agent Org Chart" />
-      <p align="center"><sub><strong>Prompt-to-DAG (<code>Cmd/Ctrl+K</code>) — One Sentence ➔ Full Multi-Agent DAG in &lt;50ms</strong></sub></p>
+      <img src="docs/assets/demos/01-prompt-to-dag.gif" width="100%" alt="Prompt-to-DAG (Cmd/Ctrl+K) — One Sentence to Multi-Agent Org Chart and 6 Built-In Blueprint Recipes" />
+      <p align="center"><sub><strong>1. One Sentence (<code>Cmd/Ctrl+K</code>) ➔ Parallel Multi-Agent DAG &amp; 6 Recipes</strong> · <a href="docs/assets/demos/01-prompt-to-dag.mp4">▶ HD MP4</a></sub></p>
     </td>
     <td width="50%">
-      <img src="docs/assets/08-finops-budget-guardrails.png" width="100%" alt="4-Tier FinOps, Prompt-Cache Dollar Savings &amp; Hard Budget Circuit Breaker" />
-      <p align="center"><sub><strong>4-Tier Agent FinOps, Cache Savings &amp; Hard Budget Circuit Breaker</strong></sub></p>
+      <img src="docs/assets/demos/03-gantt-worktrees-themes.gif" width="100%" alt="Hover Quick-Action Micro-Halo, Execution Gantt Timeline, Git Worktree Merge Workbench &amp; Dark/Light Themes" />
+      <p align="center"><sub><strong>2. Hover Micro-Halo, Execution Gantt, Worktree Merge &amp; Dark ⇄ Light</strong> · <a href="docs/assets/demos/03-gantt-worktrees-themes.mp4">▶ HD MP4</a></sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/demos/04-ade-ide-mirror-symmetry.gif" width="100%" alt="Instant ADE to IDE Mirror Symmetry, Multi-Project Local and Cloud SSH Workspace, and Pinned Secretary" />
+      <p align="center"><sub><strong>3. 0ms <code>ADE ⇄ IDE</code> Mirror Symmetry · Multi-Project + <code>✦ Secretary</code></strong> · <a href="docs/assets/demos/04-ade-ide-mirror-symmetry.mp4">▶ HD MP4</a></sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/demos/05-cloud-hosts-studio.gif" width="100%" alt="Zero-Server Multi-OS SSH Cloud Host Studio for Linux and Windows Servers" />
+      <p align="center"><sub><strong>4. Zero-Server Multi-OS SSH Cloud Host Studio (Linux &amp; Windows)</strong> · <a href="docs/assets/demos/05-cloud-hosts-studio.mp4">▶ HD MP4</a></sub></p>
     </td>
   </tr>
 </table>
@@ -91,6 +105,16 @@ Today's AI dev tools force an ugly trade-off:
 Launch multi-agent workflows in seconds from the built-in **DAG Blueprint Recipes** gallery (or share `.aexus-blueprint.md` files from [`examples/blueprints/`](examples/blueprints/README.md)), monitor real-time dollar spend and prompt-cache savings across every tier (`Governor L1`, `Manager L2`, `Employee L3`, `Worker L4`), and lock hard dollar guardrails (`Off / $2 / $5 / $10 / $25` or custom `$`) that pause execution automatically before budgets are exceeded:
 
 <table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/13-prompt-to-dag-bar.png" width="100%" alt="Prompt-to-DAG Floating Command Bar (Cmd/Ctrl+K) — One Sentence to Parallel Multi-Agent Org Chart" />
+      <p align="center"><sub><strong>Prompt-to-DAG (<code>Cmd/Ctrl+K</code>) — One Sentence ➔ Full Multi-Agent DAG in &lt;50ms</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/08-finops-budget-guardrails.png" width="100%" alt="4-Tier FinOps, Prompt-Cache Dollar Savings &amp; Hard Budget Circuit Breaker" />
+      <p align="center"><sub><strong>4-Tier Agent FinOps, Cache Savings &amp; Hard Budget Circuit Breaker</strong></sub></p>
+    </td>
+  </tr>
   <tr>
     <td width="50%">
       <img src="docs/assets/09-blueprint-recipes-gallery.png" width="100%" alt="DAG Blueprint Recipes Gallery — 6 Curated Engineering & Research Templates with Live Mini-SVG Topology Previews" />
@@ -152,7 +176,7 @@ At the top of the ADE `Sessions` dispatch rail sits **`✦ Secretary`**, a viewp
 Right-click any top-level `Governor` and select **`Engineering`** — or invoke **`Open ADE Research...`** — to promote ad-hoc prompting into a **deterministic, topology-locked DAG pipeline** (persisted cleanly under `~/.aexus-code/engineering/<governor-id>/` and `~/.aexus-code/research/<governor-id>/` with zero clutter in your Git repository):
 
 <p align="center">
-  <img src="docs/assets/01-ade-engineering-dag.png" width="100%" alt="Aexus Code — ADE 4-Tier Session Hierarchy & Live Collaborative Engineering DAG" />
+  <img src="docs/assets/14-living-pods-interactive-demo.png" width="100%" alt="Aexus Code — Living Armored Dual-Shell Pods, 3-Stage Adversarial Rail, Live Activity Tickers, Git Worktree Lanes &amp; Release Readiness Gate" />
 </p>
 
 <table>
@@ -176,11 +200,17 @@ Right-click any top-level `Governor` and select **`Engineering`** — or invoke 
       <p align="center"><sub><strong>ADE Inbox Actionable Gate Queue Synchronized with Live DAG</strong></sub></p>
     </td>
   </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/01-ade-engineering-dag.png" width="100%" alt="Aexus Code — ADE 4-Tier Session Hierarchy &amp; Live Collaborative Engineering DAG" />
+      <p align="center"><sub><strong>4-Tier Session Hierarchy Synchronized with Auto-Partitioned MNP Lanes</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/04c-engineering-blueprint-drawer.png" width="100%" alt="ADE Engineering Hybrid Mermaid + Markdown Blueprint Sheet &amp; Live Execution Timeline" />
+      <p align="center"><sub><strong>Hybrid Mermaid + Markdown Blueprint Sheet &amp; Live Execution Timeline</strong></sub></p>
+    </td>
+  </tr>
 </table>
-
-<p align="center">
-  <img src="docs/assets/04c-engineering-blueprint-drawer.png" width="100%" alt="ADE Engineering Hybrid Mermaid + Markdown Blueprint Sheet &amp; Live Execution Timeline" />
-</p>
 
 - **Algorithmic Maximal Non-Branching Path (`MNP`) Partitioning**: Author nodes visually, load a built-in Recipe, or edit Markdown + Mermaid directly; Aexus Code automatically partitions linear segments between forks, joins, and `user_gate` boundaries into dedicated `MGR · L2` segment lanes (with live Git branch badges in worktree mode) and pre-builds the locked 4-tier sidebar hierarchy.
 - **Armored Nested Dual-Shell Task Pods (`268×172`) with Living Agent Telemetry**: Every task node is one cohesive pod — an outer **`EMPLOYEE · L3`** verification shell (with a live **3-stage adversarial rail `L4 Code ▸ L3 Audit ▸ L2 Sign-off`**) physically enclosing a recessed inner **`WORKER · L4`** execution core featuring a **live 1-line activity ticker**, **Git diff magnitude pill (`+N -M`)**, per-pod `$USD` footer, **Figma-style hover quick-action halo (`💬 🛡 ⚙ +`)**, and **double-click inline title rename**.
@@ -292,7 +322,7 @@ aexus-ade engineering report --governor "$GOV_ID" --out ./pr-verification-report
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
 | `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
-| `engineering` | `list` · `init` · `open` · `demo [--governor <id>]` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
+| `engineering` | `list` · `init` · `open` · `demo [--governor <id>]` · `generate --prompt "<goal>"` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
 
 ---
