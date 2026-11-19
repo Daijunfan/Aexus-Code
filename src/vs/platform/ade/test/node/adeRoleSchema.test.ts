@@ -112,11 +112,49 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'qa-auditor', 'project.delete').allowed, false);
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'cto', 'session.reparent').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'cto', 'session.detach').allowed, true);
-		assert.strictEqual(resolveActionPrimitiveApi('host.upsert'), 'host.access');
+		// P1-01: Read-only host.access vs High Privilege host.manage split
+		assert.strictEqual(resolveActionPrimitiveApi('host.list'), 'host.access');
+		assert.strictEqual(resolveActionPrimitiveApi('host.get'), 'host.access');
+		assert.strictEqual(resolveActionPrimitiveApi('host.browse'), 'host.access');
+		assert.strictEqual(resolveActionPrimitiveApi('host.open'), 'host.access');
+		assert.strictEqual(resolveActionPrimitiveApi('host.upsert'), 'host.manage');
+		assert.strictEqual(resolveActionPrimitiveApi('host.delete'), 'host.manage');
+		assert.strictEqual(resolveActionPrimitiveApi('host.test'), 'host.manage');
+		assert.strictEqual(resolveActionPrimitiveApi('host.import'), 'host.manage');
+		const hostAccessSpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'host.access');
+		const hostManageSpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'host.manage');
+		assert.strictEqual(Boolean(hostAccessSpec?.dangerous), false);
+		assert.strictEqual(hostManageSpec?.dangerous, true);
+		const readOnlyHostOrg = normalizeAdeOrganizationConfig({
+			version: 1,
+			ranks: [{ id: 'observer', name: 'Observer', tier: 1, allowedApis: ['host.access'] }],
+		});
+		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.list').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.browse').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.upsert').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.delete').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.test').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.import').allowed, false);
 		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.merge'), 'engineering.integrate');
 		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.cleanup'), 'engineering.integrate');
 		assert.strictEqual(resolveActionPrimitiveApi('engineering.remove'), 'engineering.destroy');
 		assert.strictEqual(resolveActionPrimitiveApi('engineering.reset'), 'engineering.destroy');
+
+		// P1-06: Governor engineering.design compiled prompt includes engineering generate/template & role CLI docs
+		const govPrompt = compileAdeRolePrompt({
+			config: DEFAULT_ADE_ORGANIZATION_CONFIG,
+			rank: DEFAULT_ADE_ORGANIZATION_CONFIG.ranks[0],
+			agentId: 'gov-doc',
+			agentLabel: 'Doc Gov',
+			engineDisplay: 'Claude Code',
+			engineId: 'aexus-claude',
+			projectName: 'Demo',
+			projectPath: '/tmp/demo',
+			workTree: { treeType: 'engineering', governorId: 'gov-doc', slot: 'orchestrator' },
+		})!;
+		assert.ok(govPrompt.includes('engineering generate'));
+		assert.ok(govPrompt.includes('engineering template list'));
+		assert.ok(govPrompt.includes('aexus-ade role list'));
 
 		// P1-7: Default governor holds engineering.design only — MUST NOT be authorized for dangerous integrate/destroy actions
 		const integrateSpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'engineering.integrate');

@@ -442,7 +442,7 @@ suite('AdeBlueprintTemplates', () => {
 				nonCriticalWorker: { engine: 'codex', thinking: 'medium' },
 				employee: { engine: 'claude-code', thinking: 'medium' },
 				manager: { engine: 'claude-code', thinking: 'medium' },
-				maxBudgetUsd: undefined,
+				maxBudgetUsd: 8,
 			},
 			{
 				preset: 'max-quality',
@@ -450,7 +450,7 @@ suite('AdeBlueprintTemplates', () => {
 				nonCriticalWorker: { engine: 'claude-code', thinking: 'high' },
 				employee: { engine: 'claude-code', thinking: 'high' },
 				manager: { engine: 'claude-code', thinking: 'high' },
-				maxBudgetUsd: undefined,
+				maxBudgetUsd: 8,
 			},
 			{
 				preset: 'fast-economy',
@@ -490,6 +490,19 @@ suite('AdeBlueprintTemplates', () => {
 			buildBlueprintFromTemplate('feature-ship', { governorSessionId: 'gov-zero', preset: 'fast-economy', maxBudgetUsd: 0 }).metadata.maxBudgetUsd,
 			undefined,
 		);
+
+		// P2-07: Optional orgPreset metadata round-trips cleanly from template builder through serializer & parser
+		const withOrgPreset = buildBlueprintFromTemplate('feature-ship', {
+			governorSessionId: 'gov-org',
+			orgPreset: 'startup-3tier',
+		});
+		assert.strictEqual(withOrgPreset.metadata.orgPreset, 'startup-3tier');
+		assert.strictEqual(withOrgPreset.metadata.maxBudgetUsd, 8);
+		const serializedOrg = serializeEngineeringBlueprint(withOrgPreset);
+		assert.ok(serializedOrg.includes('- org_preset: startup-3tier'));
+		const reparsedOrg = parseEngineeringBlueprint(serializedOrg);
+		assert.strictEqual(reparsedOrg.metadata.orgPreset, 'startup-3tier');
+		assert.strictEqual(reparsedOrg.metadata.maxBudgetUsd, 8);
 	});
 
 	test('throws on unknown template ids', () => {

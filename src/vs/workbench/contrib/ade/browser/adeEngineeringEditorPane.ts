@@ -51,6 +51,12 @@ import {
 } from '../../../../platform/ade/common/adePricing.js';
 import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
 import { PROMPT_DAG_EXAMPLES, synthesizeBlueprintFromPrompt } from '../../../../platform/ade/common/adePromptToDag.js';
+import {
+	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	IAdeOrganizationConfig,
+	IAdeRankDefinition,
+	resolveWorkTreeSlotRank,
+} from '../../../../platform/ade/common/adeRoleSchema.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
@@ -64,6 +70,7 @@ import { IEditorOpenContext, IEditorSerializer } from '../../../common/editor.js
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { ADE_ENGINEERING_SCHEME, IAdeProjectsService } from '../common/ade.js';
+import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeRunningNodesAffectedError } from './adeEngineeringWorkbenchService.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 import './media/adeEngineeringStudio.css';
@@ -522,6 +529,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private configuredModelsByEngine: Record<string, readonly { readonly id: string; readonly label: string }[]> = {};
 	private nextDatalistId = 1;
 
+	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
+
 	constructor(
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -533,16 +542,61 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		@IDialogService private readonly dialogService: IDialogService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@ICommandService private readonly commandService: ICommandService,
+		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super(AdeEngineeringEditorPane.ID, group, telemetryService, storageService ? themeService : themeService, storageService);
 		this.storage = storageService;
+		this.roleSchemaService = instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(IAdeRoleSchemaService);
+			} catch {
+				return undefined;
+			}
+		});
 		this._register(this.themeService.onDidColorThemeChange(() => {
 			this.renderCanvas();
 			if (this.activePopoverNodeId && !this.isFocusInsideEditableControl(this.popoverEl)) {
 				this.renderPopover();
 			}
 		}));
+		if (this.roleSchemaService) {
+			this._register(this.roleSchemaService.onDidChangeSchema(() => {
+				if (!this.rootEl) {
+					return;
+				}
+				this.renderToolbar();
+				this.renderCanvas();
+				if (this.showTokenAnalytics) {
+					this.renderTokenAnalytics();
+				}
+				if (this.activeSheetTab) {
+					this.renderSheet();
+				}
+				if (this.activePopoverNodeId && !this.isFocusInsideEditableControl(this.popoverEl)) {
+					this.renderPopover();
+				}
+			}));
+		}
 		void this.refreshConfiguredModels();
+	}
+
+	private getOrgRoleContext(): {
+		readonly config: IAdeOrganizationConfig;
+		readonly tierCount: number;
+		readonly orchestrator: IAdeRankDefinition;
+		readonly segmentOwner: IAdeRankDefinition;
+		readonly reviewer: IAdeRankDefinition;
+		readonly executor: IAdeRankDefinition;
+	} {
+		const config = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+		return {
+			config,
+			tierCount: config.ranks.length,
+			orchestrator: resolveWorkTreeSlotRank(config, 'orchestrator'),
+			segmentOwner: resolveWorkTreeSlotRank(config, 'segment_owner'),
+			reviewer: resolveWorkTreeSlotRank(config, 'reviewer'),
+			executor: resolveWorkTreeSlotRank(config, 'executor'),
+		};
 	}
 
 	private async refreshConfiguredModels(): Promise<void> {
@@ -716,6 +770,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			{ keys: ['⌘/Ctrl', 'Z'], label: localize('adeEngKbUndo', "Undo") },
 			{ keys: ['⇧', '⌘/Ctrl', 'Z'], label: localize('adeEngKbRedo', "Redo") },
 			{ keys: ['Del'], label: localize('adeEngKbDelete', "Delete inspected node") },
+			{ keys: ['/'], label: localize('adeEngKbPromptBar', "Toggle Prompt-to-DAG bar (or ⇧⌘K / Ctrl+Shift+K)") },
 			{ keys: ['Esc'], label: localize('adeEngKbClose', "Close surface / cancel wiring") },
 			{ keys: ['?'], label: localize('adeEngKbHelp', "Toggle this card") },
 		];
@@ -1075,12 +1130,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.viewportEl.classList.add('space-pan');
 			}
 
-			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
-				EventHelper.stop(e, true);
-				this.togglePromptBar(!this.showPromptBar);
-				return;
-			}
-
 			if (e.key === 'Escape') {
 				if (this.showPromptBar) {
 					EventHelper.stop(e, true);
@@ -1168,6 +1217,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			if (e.key === '?' && !e.metaKey && !e.ctrlKey) {
 				EventHelper.stop(e, true);
 				this.toggleShortcuts();
+				return;
+			}
+
+			if (plainKey && !onControl && e.key === '/') {
+				EventHelper.stop(e, true);
+				this.togglePromptBar(!this.showPromptBar);
 				return;
 			}
 
@@ -1421,6 +1476,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		clearNode(this.templatesModalEl);
 	}
 
+	togglePromptToDagBar(open?: boolean): void {
+		this.togglePromptBar(open ?? !this.showPromptBar);
+	}
+
 	private togglePromptBar(open: boolean): void {
 		this.showPromptBar = open;
 		if (!open) {
@@ -1480,7 +1539,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const input = append(topRow, $('input.ade-eng-prompt-input', {
 			type: 'text',
-			placeholder: localize('adeEngPromptPlaceholder', "Describe what to build, debug, audit, or research — press Enter to synthesize DAG…"),
+			placeholder: localize('adeEngPromptPlaceholder', "Describe your goal — press Enter to generate DAG…"),
 			value: this.promptDraftText,
 		})) as HTMLInputElement;
 		this.promptBarRenderDisposables.add(addDisposableListener(input, EventType.INPUT, () => {
@@ -1528,8 +1587,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (this.engineering.startDemoSimulation) {
 			const simChip = append(chipsRow, $('button.ade-eng-prompt-chip.demo', {
 				type: 'button',
-				title: localize('adeEngPromptSimTooltip', "Play live animated 6-node walkthrough (0 API tokens)"),
-			}, localize('adeEngPromptSimBtn', "▶ Live Demo (0 tok)")));
+				title: localize('adeEngPromptSimTooltip', "Play animated 6-node walkthrough simulation (0 API tokens, 0 file changes)"),
+			}, localize('adeEngPromptSimBtn', "▶ Simulated Demo (0 tok)")));
 			this.promptBarRenderDisposables.add(addDisposableListener(simChip, EventType.CLICK, async () => {
 				const govId = this.snapshot?.governorSessionId;
 				if (!govId || !this.engineering.startDemoSimulation) {
@@ -1790,9 +1849,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const tu = snap.tokenUsage;
 		const fin = computeTreeFinancialSummary(snap);
 		const total = Math.max(1, tu.total.totalTokens);
+		const orgCtx = this.getOrgRoleContext();
 
 		const head = append(this.tokenAnalyticsEl, $('.ade-eng-ta-head'));
-		append(head, $('span.ade-eng-ta-title', {}, localize('adeEngTokenAnalyticsTitle', "4-Tier FinOps")));
+		append(head, $('span.ade-eng-ta-title', {}, localize('adeEngTokenAnalyticsTitle', "{0}-Tier FinOps", orgCtx.tierCount)));
 		const headActions = append(head, $('.ade-eng-ta-head-actions'));
 		const svgBtn = append(headActions, $('button.ade-eng-ta-svg-btn', {
 			type: 'button',
@@ -1875,12 +1935,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}));
 		}
 
-		// Stacked 4-tier bar: Gov / Mgr / Emp / Wrk
+		// Stacked tier bar dynamically labeled from active IAdeRoleSchemaService
 		const tiers: { readonly label: string; readonly short: string; readonly usage: IAdeTokenUsage; readonly cost: number; readonly cls: string }[] = [
-			{ label: localize('adeEngTierGov', "Governor · L1 (Architect)"), short: localize('adeEngTierGovShort', "Gov"), usage: tu.governor, cost: fin.costByTier.governor, cls: 'gov' },
-			{ label: localize('adeEngTierMgr', "Manager · L2 (Segment)"), short: localize('adeEngTierMgrShort', "Mgr"), usage: tu.manager, cost: fin.costByTier.manager, cls: 'mgr' },
-			{ label: localize('adeEngTierEmp', "Employee · L3 (Reviewer)"), short: localize('adeEngTierEmpShort', "Emp"), usage: tu.employee, cost: fin.costByTier.employee, cls: 'emp' },
-			{ label: localize('adeEngTierWrk', "Worker · L4 (Executor)"), short: localize('adeEngTierWrkShort', "Wrk"), usage: tu.worker, cost: fin.costByTier.worker, cls: 'wrk' },
+			{ label: localize('adeEngTierGov', "{0} · L{1} (Architect)", orgCtx.orchestrator.name, orgCtx.orchestrator.tier), short: orgCtx.orchestrator.shortName, usage: tu.governor, cost: fin.costByTier.governor, cls: 'gov' },
+			{ label: localize('adeEngTierMgr', "{0} · L{1} (Segment)", orgCtx.segmentOwner.name, orgCtx.segmentOwner.tier), short: orgCtx.segmentOwner.shortName, usage: tu.manager, cost: fin.costByTier.manager, cls: 'mgr' },
+			{ label: localize('adeEngTierEmp', "{0} · L{1} (Reviewer)", orgCtx.reviewer.name, orgCtx.reviewer.tier), short: orgCtx.reviewer.shortName, usage: tu.employee, cost: fin.costByTier.employee, cls: 'emp' },
+			{ label: localize('adeEngTierWrk', "{0} · L{1} (Executor)", orgCtx.executor.name, orgCtx.executor.tier), short: orgCtx.executor.shortName, usage: tu.worker, cost: fin.costByTier.worker, cls: 'wrk' },
 		];
 		const stack = append(this.tokenAnalyticsEl, $('.ade-eng-ta-stack', {
 			role: 'img',
@@ -2721,13 +2781,26 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 
+		const orgCtx = this.getOrgRoleContext();
 		// Island 1 (Left): Title + Mode Pill + Status + Rich Progress Bar + Interactive Token Analytics + Quick Node Jump
 		const left = append(this.toolbarEl, $('.ade-eng-toolbar-group.left.island'));
 		const titleIcon = append(left, $('span.ade-eng-title-icon'));
 		titleIcon.classList.add(...ThemeIcon.asClassNameArray(snap.treeType === 'research' ? Codicon.beaker : Codicon.typeHierarchySub));
 		append(left, $('span.ade-eng-toolbar-title', { title: snap.governorLabel }, snap.governorLabel));
 		append(left, $('span.ade-eng-tree-pill', {
-			title: localize('adeEngTierLegendTooltip', "4-Tier Architecture: Governor (L1) → Segment Manager (L2 Lane) → Outer Employee Shell (L3 Reviewer) → Inner Worker Core (L4 Executor)"),
+			title: localize(
+				'adeEngTierLegendTooltip',
+				"{0}-Tier Architecture: {1} (L{2}) → Segment {3} (L{4} Lane) → Outer {5} Shell (L{6} Reviewer) → Inner {7} Core (L{8} Executor)",
+				orgCtx.tierCount,
+				orgCtx.orchestrator.name,
+				orgCtx.orchestrator.tier,
+				orgCtx.segmentOwner.name,
+				orgCtx.segmentOwner.tier,
+				orgCtx.reviewer.name,
+				orgCtx.reviewer.tier,
+				orgCtx.executor.name,
+				orgCtx.executor.tier,
+			),
 		}, snap.treeType === 'research' ? localize('adeEngTreeResearch', "Research") : localize('adeEngTreeEngineering', "Engineering")));
 
 		const statusPill = append(left, $(`span.ade-eng-run-pill.status-${snap.state.runStatus}`));
@@ -2766,10 +2839,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const tokenTooltipLines = [
 			localize(
 				'adeEngTokensTotalTooltip',
-				"Total Token Consumption: {0} tokens ({1} turns) · Est. Spend: {2} — Click for 4-tier FinOps & Budget Guardrail",
+				"Total Token Consumption: {0} tokens ({1} turns) · Est. Spend: {2} — Click for {3}-tier FinOps & Budget Guardrail",
 				treeTokens.totalTokens.toLocaleString(),
 				treeTokens.turns,
 				formatUsdCost(fin.totalCostUsd),
+				orgCtx.tierCount,
 			),
 			localize(
 				'adeEngTokensIoTooltip',
@@ -2782,7 +2856,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			),
 			localize(
 				'adeEngTokensByRoleTooltip',
-				"By Role — Worker (L4): {0} ({4}) · Employee (L3): {1} ({5}) · Manager (L2): {2} ({6}) · Governor (L1): {3} ({7})",
+				"By Role — {8} (L{9}): {0} ({4}) · {10} (L{11}): {1} ({5}) · {12} (L{13}): {2} ({6}) · {14} (L{15}): {3} ({7})",
 				snap.tokenUsage.worker.totalTokens.toLocaleString(),
 				snap.tokenUsage.employee.totalTokens.toLocaleString(),
 				snap.tokenUsage.manager.totalTokens.toLocaleString(),
@@ -2791,6 +2865,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				formatUsdCost(fin.costByTier.employee),
 				formatUsdCost(fin.costByTier.manager),
 				formatUsdCost(fin.costByTier.governor),
+				orgCtx.executor.name,
+				orgCtx.executor.tier,
+				orgCtx.reviewer.name,
+				orgCtx.reviewer.tier,
+				orgCtx.segmentOwner.name,
+				orgCtx.segmentOwner.tier,
+				orgCtx.orchestrator.name,
+				orgCtx.orchestrator.tier,
 			),
 		];
 		const budgetClass = fin.budgetStatus === 'exceeded' ? '.budget-exceeded' : fin.budgetStatus === 'warn' ? '.budget-warn' : '';
@@ -2869,7 +2951,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			() => this.togglePromptBar(!this.showPromptBar),
 			`ade-eng-prompt-bar-btn${this.showPromptBar ? '.active' : ''}`,
 		);
-		promptBtn.title = localize('adeEngPromptBarTooltip', "Describe a goal in plain language to synthesize a tailored multi-agent DAG (Cmd/Ctrl+K)");
+		promptBtn.title = localize('adeEngPromptBarTooltip', "Describe a goal in plain language to synthesize a tailored multi-agent DAG (/ or Cmd/Ctrl+Shift+K)");
 
 		const recipesBtn = makeToolBtnIn(
 			center,
@@ -3709,8 +3791,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				append(this.starterHintEl, $('span.ade-eng-starter-text', {}, localize('adeEngStarterHintText', "✦ Quick Start:")));
 				const promptCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.prompt', {
 					type: 'button',
-					title: localize('adeEngStarterPromptTip', "Type one sentence to generate a full multi-agent DAG (Cmd/Ctrl+K)"),
-				}, localize('adeEngStarterPromptBtn', "✦ Prompt to DAG (⌘K)")));
+					title: localize('adeEngStarterPromptTip', "Type one sentence to generate a full multi-agent DAG (/ or Cmd/Ctrl+Shift+K)"),
+				}, localize('adeEngStarterPromptBtn', "✦ Prompt to DAG (/)")));
 				this.canvasRenderDisposables.add(addDisposableListener(promptCta, EventType.CLICK, () => this.togglePromptBar(true)));
 				const recipesCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.primary', { type: 'button' }, localize('adeEngStarterRecipesBtn', "Blueprint Recipes")));
 				this.canvasRenderDisposables.add(addDisposableListener(recipesCta, EventType.CLICK, () => this.openTemplatesModal()));
@@ -3765,8 +3847,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const nodeById = new Map(bp.nodes.map(n => [n.id, n]));
 		const runtimes = snap.state.nodes;
 		const fin = computeTreeFinancialSummary(snap);
+		const orgCtx = this.getOrgRoleContext();
 
-		// 1. Render Auto-Partitioned Manager (L2) Segment Enclosures
+		// 1. Render Auto-Partitioned Segment Owner Enclosures
 		for (const seg of bp.managers) {
 			const segNodes = seg.nodeIds.map(id => nodeById.get(id)).filter((n): n is IAdeEngineeringBlueprintNode => Boolean(n));
 			if (segNodes.length === 0) {
@@ -3804,11 +3887,17 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const header = append(halo, $(`button.ade-eng-segment-header${isManagerActive ? '.role-active' : ''}`, {
 				type: 'button',
 				'data-segment-id': seg.segmentId,
-				title: localize('adeEngManagerHeaderTooltip', "Manager · L2 [{0}] — Click to open Manager session · Right-click or click ⚙ to configure", seg.segmentId),
+				title: localize(
+					'adeEngManagerHeaderTooltip',
+					"{0} · L{1} [{2}] — Click to open {0} session · Right-click or click ⚙ to configure",
+					orgCtx.segmentOwner.name,
+					orgCtx.segmentOwner.tier,
+					seg.segmentId,
+				),
 			}));
 			this.segmentHeaderDomById.set(seg.segmentId, header);
 
-			append(header, $('span.ade-eng-role-tag.mgr', {}, localize('adeEngMgrTierBadge', "MGR · L2")));
+			append(header, $('span.ade-eng-role-tag.mgr', {}, `${orgCtx.segmentOwner.shortName.toUpperCase()} · L${orgCtx.segmentOwner.tier}`));
 			const segWt = snap.state.worktrees?.[seg.segmentId];
 			if (segWt) {
 				append(header, $('span.ade-eng-segment-label.compact', {}, `[${seg.segmentId}]`));
@@ -3817,7 +3906,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}));
 				const brIco = append(wtBadge, $('span'));
 				brIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.gitBranch));
-				const cleanBranch = segWt.branchName.replace(/^(?:ade-eng|ade)\//, '');
+				const cleanBranch = segWt.branchName.replace(/^(?:aexus-eng|ade-eng|ade)\//, '');
 				const shortBranch = cleanBranch.length > 16 ? `${cleanBranch.slice(0, 15)}…` : cleanBranch;
 				append(wtBadge, $('span', {}, shortBranch));
 			} else {
@@ -4081,12 +4170,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						onClick();
 					}));
 				};
-				addQuickAction(Codicon.commentDiscussion, localize('adeEngQaWorkerTip', "Open Worker · L4 Chat"), 'wrk', () => {
+				addQuickAction(Codicon.commentDiscussion, localize('adeEngQaWorkerTip', "Open {0} · L{1} Chat", orgCtx.executor.name, orgCtx.executor.tier), 'wrk', () => {
 					if (this.activeGovernorId) {
 						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, node.id, 'worker');
 					}
 				});
-				addQuickAction(Codicon.shield, localize('adeEngQaEmpTip', "Open Employee · L3 Reviewer"), 'emp', () => {
+				addQuickAction(Codicon.shield, localize('adeEngQaEmpTip', "Open {0} · L{1} Reviewer", orgCtx.reviewer.name, orgCtx.reviewer.tier), 'emp', () => {
 					if (this.activeGovernorId) {
 						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, node.id, 'employee');
 					}
@@ -4098,15 +4187,17 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					this.addDraftNode('task', node.id);
 				});
 
-				// 1. OUTER SHELL HEADER = Employee (L3 · Acceptance Reviewer) + 3-Stage Pipeline Rail (Code ▸ Audit ▸ Sign-off)
+				// 1. OUTER SHELL HEADER = Reviewer + 3-Stage Pipeline Rail (Code ▸ Audit ▸ Sign-off)
 				const empSatellite = append(concentric, $(`div.ade-eng-emp-satellite${empActive ? '.role-active' : ''}${node.critical ? '.has-critical' : ''}`, {
 					title: localize(
 						'adeEngEmployeeSatTooltip',
-						"Outer Shell — Employee · L3 (Acceptance Reviewer): {0} — Click to open Employee chat · Right-click to configure",
+						"Outer Shell — {1} · L{2} (Acceptance Reviewer): {0} — Click to open {1} chat · Right-click to configure",
 						formatRoleConfigCompact(node.employee, 'medium'),
+						orgCtx.reviewer.name,
+						orgCtx.reviewer.tier,
 					),
 				}));
-				append(empSatellite, $('span.ade-eng-role-tag.emp', {}, localize('adeEngEmpTierBadge', "EMPLOYEE · L3")));
+				append(empSatellite, $('span.ade-eng-role-tag.emp', {}, `${orgCtx.reviewer.name.toUpperCase()} · L${orgCtx.reviewer.tier}`));
 				const empGlyph = append(empSatellite, $('span'));
 				this.applyEngineIconToElement(empGlyph, node.employee?.engine);
 				append(empSatellite, $('span.ade-eng-emp-meta', {}, formatRoleConfigCompact(node.employee, 'medium')));
@@ -4167,18 +4258,20 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					}, '★'));
 				}
 
-				// 2. INNER RECESSED CORE = Worker (L4 · Pure Native Executor) visibly enclosed inside Employee Shell!
+				// 2. INNER RECESSED CORE = Pure Executor visibly enclosed inside Reviewer Shell!
 				const innerCore = append(concentric, $(`div.ade-eng-inner-core${workerActive ? '.role-active' : ''}`, {
 					title: localize(
 						'adeEngWorkerCoreTooltip',
-						"Inner Core — Worker · L4 (Executor): {0} — Click to open Worker chat · Right-click or click ⚙ to configure",
+						"Inner Core — {1} · L{2} (Executor): {0} — Click to open {1} chat · Right-click or click ⚙ to configure",
 						formatRoleConfigCompact(node.worker, 'high'),
+						orgCtx.executor.name,
+						orgCtx.executor.tier,
 					),
 				}));
 				this.nodeAnchorsById.set(node.id, { worker: concentric, employee: empSatellite });
 
 				const wrkTopBar = append(innerCore, $('div.ade-eng-wrk-topbar'));
-				append(wrkTopBar, $('span.ade-eng-role-tag.wrk', {}, localize('adeEngWrkTierBadge', "WORKER · L4")));
+				append(wrkTopBar, $('span.ade-eng-role-tag.wrk', {}, `${orgCtx.executor.name.toUpperCase()} · L${orgCtx.executor.tier}`));
 				append(wrkTopBar, $('span.ade-eng-node-id-chip', {}, node.id));
 				if (empActive) {
 					append(wrkTopBar, $('span.ade-eng-handoff-chip', {}, localize('adeEngHandoffToEmp', "↑ Auditing")));
@@ -5135,7 +5228,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const modelInput = append(body, $('input.ade-eng-pop-model-input', {
 			type: 'text',
 			list: listId,
-			placeholder: localize('adeEngModelCompactPlaceholder', "Default model (or enter e.g. deepseek-flash[1m])"),
+			placeholder: localize('adeEngModelCompactPlaceholder', "Default model (or enter e.g. sonnet, gpt-5, deepseek-reasoner)"),
 			value: params.current.model ?? '',
 			...(params.disabled ? { disabled: 'disabled' } : {}),
 		})) as HTMLInputElement;
@@ -5925,9 +6018,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			append(summaryBanner, $('div.ade-eng-wt-summary-title', {}, snap.blueprint.metadata.workspaceIsolation === 'worktree'
 				? localize('adeEngWtActiveModeTitle', "Git Worktree Sandbox Isolation Enabled")
 				: localize('adeEngWtSharedModeTitle', "Shared Workspace Mode")));
+			const orgCtx = this.getOrgRoleContext();
 			append(summaryBanner, $('div.ade-eng-wt-summary-sub', {}, localize(
 				'adeEngWtSummaryDesc',
-				"Each parallel Manager · L2 segment executes on its own Git worktree branch so concurrent Workers never collide. Review changes and merge cleanly into your main branch.",
+				"Each parallel {0} · L{1} segment executes on its own Git worktree branch so concurrent {2} lanes never collide. Review changes and merge cleanly into your main branch.",
+				orgCtx.segmentOwner.name,
+				orgCtx.segmentOwner.tier,
+				orgCtx.executor.name,
 			)));
 
 			if (wtList.length === 0) {
@@ -6069,12 +6166,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}
 			}
 
+			const orgCtx = this.getOrgRoleContext();
 			const filterBar = append(this.sheetContentEl, $('.ade-eng-event-filters'));
 			const filters: { readonly id: EventFilterKind; readonly label: string }[] = [
 				{ id: 'all', label: localize('adeEngLogFilterAll', "All") },
-				{ id: 'worker', label: localize('adeEngLogFilterWrk', "Worker · L4") },
-				{ id: 'employee', label: localize('adeEngLogFilterEmp', "Employee · L3") },
-				{ id: 'manager', label: localize('adeEngLogFilterMgr', "Manager · L2") },
+				{ id: 'worker', label: localize('adeEngLogFilterWrk', "{0} · L{1}", orgCtx.executor.name, orgCtx.executor.tier) },
+				{ id: 'employee', label: localize('adeEngLogFilterEmp', "{0} · L{1}", orgCtx.reviewer.name, orgCtx.reviewer.tier) },
+				{ id: 'manager', label: localize('adeEngLogFilterMgr', "{0} · L{1}", orgCtx.segmentOwner.name, orgCtx.segmentOwner.tier) },
 				{ id: 'gates', label: localize('adeEngLogFilterGates', "Gates & Alerts") },
 			];
 			for (const f of filters) {

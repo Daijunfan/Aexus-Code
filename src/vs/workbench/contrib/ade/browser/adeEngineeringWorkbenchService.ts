@@ -10,6 +10,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
+import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
 import {
 	ADE_WATCHDOG_TIMEOUT_CONFIG_KEY,
 	AdeEngineeringRunStatus,
@@ -43,6 +44,7 @@ import {
 	IAdeStoredEngineeringRecord,
 	IAdeTokenUsage,
 	IAdeTreeTokenUsageSummary,
+	IAdeTrustedVerifyCommandEntry,
 	IAdeWorkerTurnChanges,
 	IAdeWorkspaceSnapshot,
 	accumulateTokenUsage,
@@ -81,6 +83,7 @@ import {
 import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	IAdeOrganizationConfig,
+	IAdeRankDefinition,
 	normalizeAdeOrganizationConfig,
 	resolveRankWorkTreeSlots,
 	resolveWorkTreeSlotRank,
@@ -239,7 +242,13 @@ function resolveOptionalService<T>(instantiationService: IInstantiationService, 
 }
 
 const ADE_TRUSTED_VERIFY_HASHES_STORAGE_KEY = 'aexus.ade.engineering.trustedVerifyHashes';
+const ADE_AUTONOMOUS_DAG_APPROVED_PROJECTS_STORAGE_KEY = 'aexus.ade.engineering.autonomousApprovedProjects';
 const PERSIST_ERROR_INBOX_THROTTLE_MS = 30_000;
+
+interface IStoredVerifyTrustMeta {
+	readonly commandPreview?: string;
+	readonly approvedAt?: number;
+}
 
 const SHA256_K = new Uint32Array([
 	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -580,7 +589,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 	private readonly storageService: IStorageService | undefined;
 	private readonly dialogService: IDialogService | undefined;
 	private readonly notificationService: INotificationService | undefined;
-	private readonly trustedVerifyHashesByProject = new Map<string, Set<string>>();
+	private readonly trustedVerifyHashesByProject = new Map<string, Map<string, IStoredVerifyTrustMeta>>();
+	private readonly autonomousApprovedProjects = new Set<string>();
 	private readonly trees = new Map<string, IManagedTreeEntry>();
 	private readonly demoTimers = new Map<string, number[]>();
 	private readonly demoActive = new Set<string>();
@@ -611,6 +621,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		this.dialogService = resolveOptionalService<IDialogService>(instantiationService, IDialogService);
 		this.notificationService = resolveOptionalService<INotificationService>(instantiationService, INotificationService);
 		this.loadTrustedVerifyHashesFromStorage();
+		this.loadAutonomousApprovedProjectsFromStorage();
 		this.readyPromise = this.hydrateFromDisk();
 
 		if (projects.onDidRemoveAgents) {
@@ -738,9 +749,9 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			runStatus: 'running',
 			updatedAt: t0,
 			worktrees: {
-				N2: { segmentId: 'N2', branchName: 'ade/demo-N2-backend', worktreePath: `${entry.state.projectPath}/.worktrees/demo-N2`, headCommit: 'a4f82e19' },
-				N3: { segmentId: 'N3', branchName: 'ade/demo-N3-ui', worktreePath: `${entry.state.projectPath}/.worktrees/demo-N3`, headCommit: '9c1d4b72' },
-				N4: { segmentId: 'N4', branchName: 'ade/demo-N4-tests', worktreePath: `${entry.state.projectPath}/.worktrees/demo-N4`, headCommit: '7e23fa10' },
+				N2: { segmentId: 'N2', branchName: 'aexus-eng/demo-N2-backend', worktreePath: '~/.aexus-code/engineering/demo/worktrees/N2', headCommit: 'a4f82e19' },
+				N3: { segmentId: 'N3', branchName: 'aexus-eng/demo-N3-ui', worktreePath: '~/.aexus-code/engineering/demo/worktrees/N3', headCommit: '9c1d4b72' },
+				N4: { segmentId: 'N4', branchName: 'aexus-eng/demo-N4-tests', worktreePath: '~/.aexus-code/engineering/demo/worktrees/N4', headCommit: '7e23fa10' },
 			},
 			tokenUsage: {
 				governor: mkTok(8_000, 1_800, 28_000, 2_000, 1, 0.06),
@@ -842,7 +853,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					N2: {
 						nodeId: 'N2',
 						nodeTitle: 'Core Backend & Services',
-						summary: 'Implemented FinOps budget guardrail and scheduler ring buffer on ade/demo-N2-backend (18/18 unit tests passing).',
+						summary: 'Implemented FinOps budget guardrail and scheduler ring buffer on aexus-eng/demo-N2-backend (18/18 unit tests passing).',
 						updatedAt: now,
 					},
 				},
@@ -1285,6 +1296,21 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		};
 	}
 
+	private getSlotRanks(): {
+		readonly orchestrator: IAdeRankDefinition;
+		readonly segmentOwner: IAdeRankDefinition;
+		readonly reviewer: IAdeRankDefinition;
+		readonly executor: IAdeRankDefinition;
+	} {
+		const orgConfig = this.getOrganizationConfig();
+		return {
+			orchestrator: resolveWorkTreeSlotRank(orgConfig, 'orchestrator'),
+			segmentOwner: resolveWorkTreeSlotRank(orgConfig, 'segment_owner'),
+			reviewer: resolveWorkTreeSlotRank(orgConfig, 'reviewer'),
+			executor: resolveWorkTreeSlotRank(orgConfig, 'executor'),
+		};
+	}
+
 	private loadTrustedVerifyHashesFromStorage(): void {
 		if (!this.storageService) {
 			return;
@@ -1293,13 +1319,36 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!stored || typeof stored !== 'object') {
 			return;
 		}
-		for (const [projectKey, rawHashes] of Object.entries(stored)) {
-			if (!Array.isArray(rawHashes)) {
-				continue;
+		for (const [projectKey, rawEntries] of Object.entries(stored)) {
+			const map = new Map<string, IStoredVerifyTrustMeta>();
+			if (Array.isArray(rawEntries)) {
+				for (const item of rawEntries) {
+					if (typeof item === 'string' && item.length === 64) {
+						map.set(item, {});
+					} else if (item && typeof item === 'object') {
+						const obj = item as { hash?: unknown; commandPreview?: unknown; approvedAt?: unknown };
+						if (typeof obj.hash === 'string' && obj.hash.length === 64) {
+							map.set(obj.hash, {
+								...(typeof obj.commandPreview === 'string' && obj.commandPreview.trim() ? { commandPreview: obj.commandPreview.trim().slice(0, 160) } : {}),
+								...(typeof obj.approvedAt === 'number' && Number.isFinite(obj.approvedAt) ? { approvedAt: obj.approvedAt } : {}),
+							});
+						}
+					}
+				}
+			} else if (rawEntries && typeof rawEntries === 'object') {
+				for (const [hash, meta] of Object.entries(rawEntries as Record<string, unknown>)) {
+					if (hash.length !== 64) {
+						continue;
+					}
+					const obj = (meta && typeof meta === 'object') ? meta as { commandPreview?: unknown; approvedAt?: unknown } : {};
+					map.set(hash, {
+						...(typeof obj.commandPreview === 'string' && obj.commandPreview.trim() ? { commandPreview: obj.commandPreview.trim().slice(0, 160) } : {}),
+						...(typeof obj.approvedAt === 'number' && Number.isFinite(obj.approvedAt) ? { approvedAt: obj.approvedAt } : {}),
+					});
+				}
 			}
-			const valid = rawHashes.filter((h): h is string => typeof h === 'string' && h.length === 64);
-			if (valid.length > 0) {
-				this.trustedVerifyHashesByProject.set(projectKey, new Set(valid));
+			if (map.size > 0) {
+				this.trustedVerifyHashesByProject.set(projectKey, map);
 			}
 		}
 	}
@@ -1308,13 +1357,46 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!this.storageService) {
 			return;
 		}
-		const serialized: Record<string, string[]> = {};
-		for (const [projectKey, hashes] of this.trustedVerifyHashesByProject.entries()) {
-			if (hashes.size > 0) {
-				serialized[projectKey] = [...hashes].sort();
+		const serialized: Record<string, Array<{ hash: string; commandPreview?: string; approvedAt?: number }>> = {};
+		for (const [projectKey, entries] of this.trustedVerifyHashesByProject.entries()) {
+			if (entries.size > 0) {
+				serialized[projectKey] = [...entries.entries()]
+					.sort(([a], [b]) => a.localeCompare(b))
+					.map(([hash, meta]) => ({
+						hash,
+						...(meta.commandPreview ? { commandPreview: meta.commandPreview } : {}),
+						...(meta.approvedAt !== undefined ? { approvedAt: meta.approvedAt } : {}),
+					}));
 			}
 		}
 		this.storageService.store(ADE_TRUSTED_VERIFY_HASHES_STORAGE_KEY, JSON.stringify(serialized), StorageScope.PROFILE, StorageTarget.MACHINE);
+	}
+
+	private loadAutonomousApprovedProjectsFromStorage(): void {
+		if (!this.storageService) {
+			return;
+		}
+		const stored = this.storageService.getObject<string[]>(ADE_AUTONOMOUS_DAG_APPROVED_PROJECTS_STORAGE_KEY, StorageScope.PROFILE, []);
+		if (!Array.isArray(stored)) {
+			return;
+		}
+		for (const entry of stored) {
+			if (typeof entry === 'string' && entry.trim()) {
+				this.autonomousApprovedProjects.add(entry.trim());
+			}
+		}
+	}
+
+	private saveAutonomousApprovedProjectsToStorage(): void {
+		if (!this.storageService) {
+			return;
+		}
+		this.storageService.store(
+			ADE_AUTONOMOUS_DAG_APPROVED_PROJECTS_STORAGE_KEY,
+			JSON.stringify([...this.autonomousApprovedProjects].sort()),
+			StorageScope.PROFILE,
+			StorageTarget.MACHINE,
+		);
 	}
 
 	private getProjectTrustKey(projectPath: string): string {
@@ -1328,26 +1410,199 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		return { trusted, hash };
 	}
 
-	private trustVerifyCommandHashes(projectPath: string, hashes: readonly string[]): void {
-		if (hashes.length === 0) {
+	private trustVerifyCommandHashes(
+		projectPath: string,
+		entries: readonly (string | { readonly hash: string; readonly command?: string })[],
+	): void {
+		if (entries.length === 0) {
 			return;
 		}
 		const key = this.getProjectTrustKey(projectPath);
-		let set = this.trustedVerifyHashesByProject.get(key);
-		if (!set) {
-			set = new Set<string>();
-			this.trustedVerifyHashesByProject.set(key, set);
+		let map = this.trustedVerifyHashesByProject.get(key);
+		if (!map) {
+			map = new Map<string, IStoredVerifyTrustMeta>();
+			this.trustedVerifyHashesByProject.set(key, map);
 		}
+		const now = Date.now();
 		let changed = false;
-		for (const h of hashes) {
-			if (!set.has(h)) {
-				set.add(h);
+		for (const item of entries) {
+			const hash = typeof item === 'string' ? item : item.hash;
+			const preview = typeof item === 'string' ? undefined : item.command?.trim().slice(0, 160);
+			const existing = map.get(hash);
+			if (!existing) {
+				map.set(hash, {
+					...(preview ? { commandPreview: preview } : {}),
+					approvedAt: now,
+				});
+				changed = true;
+			} else if (preview && !existing.commandPreview) {
+				map.set(hash, {
+					...existing,
+					commandPreview: preview,
+				});
 				changed = true;
 			}
 		}
 		if (changed) {
 			this.saveTrustedVerifyHashesToStorage();
 		}
+	}
+
+	listTrustedVerifyCommands(projectPath?: string): readonly IAdeTrustedVerifyCommandEntry[] {
+		const filterKey = projectPath?.trim();
+		const results: IAdeTrustedVerifyCommandEntry[] = [];
+		for (const [projKey, entries] of this.trustedVerifyHashesByProject.entries()) {
+			if (filterKey && projKey !== filterKey) {
+				continue;
+			}
+			for (const [hash, meta] of entries.entries()) {
+				results.push({
+					projectPath: projKey,
+					hash,
+					commandPreview: meta.commandPreview ?? `(sha256:${hash.slice(0, 12)})`,
+					approvedAt: meta.approvedAt ?? 0,
+				});
+			}
+		}
+		return results.sort((a, b) => ((b.approvedAt ?? 0) - (a.approvedAt ?? 0)) || a.projectPath.localeCompare(b.projectPath) || a.hash.localeCompare(b.hash));
+	}
+
+	revokeTrustedVerifyCommand(projectPath: string, hash: string): boolean {
+		const key = this.getProjectTrustKey(projectPath);
+		const map = this.trustedVerifyHashesByProject.get(key);
+		if (!map || !map.delete(hash)) {
+			return false;
+		}
+		if (map.size === 0) {
+			this.trustedVerifyHashesByProject.delete(key);
+		}
+		for (const entry of this.trees.values()) {
+			if (this.getProjectTrustKey(entry.state.projectPath) === key) {
+				entry.declinedVerifyHashes.delete(hash);
+			}
+		}
+		this.saveTrustedVerifyHashesToStorage();
+		return true;
+	}
+
+	revokeAllTrustedVerifyCommands(projectPath?: string): number {
+		const filterKey = projectPath?.trim();
+		let removed = 0;
+		if (filterKey) {
+			const map = this.trustedVerifyHashesByProject.get(filterKey);
+			if (map) {
+				removed = map.size;
+				this.trustedVerifyHashesByProject.delete(filterKey);
+			}
+			for (const entry of this.trees.values()) {
+				if (this.getProjectTrustKey(entry.state.projectPath) === filterKey) {
+					entry.declinedVerifyHashes.clear();
+				}
+			}
+		} else {
+			for (const map of this.trustedVerifyHashesByProject.values()) {
+				removed += map.size;
+			}
+			this.trustedVerifyHashesByProject.clear();
+			for (const entry of this.trees.values()) {
+				entry.declinedVerifyHashes.clear();
+			}
+		}
+		if (removed > 0) {
+			this.saveTrustedVerifyHashesToStorage();
+		}
+		return removed;
+	}
+
+	private async collectUntrustedVerifyCommands(entry: IManagedTreeEntry): Promise<Array<{ readonly command: string; readonly hash: string }>> {
+		const commands = collectBlueprintVerifyCommands(entry.blueprint);
+		const untrusted: Array<{ readonly command: string; readonly hash: string }> = [];
+		for (const command of commands) {
+			const status = await this.isVerifyCommandTrusted(entry.state.projectPath, command);
+			if (!status.trusted) {
+				untrusted.push({ command, hash: status.hash });
+			}
+		}
+		return untrusted;
+	}
+
+	private async ensurePreDispatchVerifyTrust(entry: IManagedTreeEntry, caller: string | undefined): Promise<boolean> {
+		const untrusted = await this.collectUntrustedVerifyCommands(entry);
+		if (untrusted.length === 0) {
+			return true;
+		}
+		const allPreviouslyDeclined = untrusted.every(c => entry.declinedVerifyHashes.has(c.hash));
+		if (!allPreviouslyDeclined && isInteractiveHumanCaller(caller) && this.dialogService) {
+			const approved = await this.promptApproveVerifyCommands(entry.state.projectPath, untrusted);
+			if (approved) {
+				for (const c of untrusted) {
+					entry.declinedVerifyHashes.delete(c.hash);
+				}
+				return true;
+			}
+			for (const c of untrusted) {
+				entry.declinedVerifyHashes.add(c.hash);
+			}
+		}
+		const cmdList = untrusted.map(c => `\`${c.command}\``).join(', ');
+		const blockDetail = localize(
+			'adeEngVerifyPreDispatchBlockedDetail',
+			"Paused before dispatching Workers: {0} unapproved verification command(s) require explicit trust ({1}).",
+			untrusted.length,
+			cmdList,
+		);
+		entry.state = {
+			...entry.state,
+			runStatus: 'paused',
+		};
+		this.appendEvent(entry, 'error', 'verify.blocked_untrusted', {
+			detail: blockDetail,
+		});
+		void this.inbox.postGovernorMessage({
+			governorSessionId: entry.governorSessionId,
+			title: localize('adeEngVerifyPreDispatchInboxTitle', "[Verify Gate] Blocked Untrusted Verify Command ({0})", untrusted.length),
+			message: blockDetail,
+			severity: 'critical',
+		}).catch(() => undefined);
+		await this.persistEntry(entry);
+		return false;
+	}
+
+	private async ensureAutonomousDagApproved(entry: IManagedTreeEntry): Promise<boolean> {
+		const globalAutonomous = readTrustedApplicationConfigValue<boolean>(this.configurationService, 'aexus.ade.autonomousMode') === true;
+		if (globalAutonomous) {
+			return true;
+		}
+		const projectKey = this.getProjectTrustKey(entry.state.projectPath);
+		if (this.autonomousApprovedProjects.has(projectKey)) {
+			return true;
+		}
+		if (!this.dialogService) {
+			return true;
+		}
+		const confirmation = await this.dialogService.confirm({
+			type: 'warning',
+			message: localize(
+				'adeEngAutonomousConfirmTitle',
+				"Allow autonomous Work-Tree DAG execution for this project?",
+			),
+			detail: localize(
+				'adeEngAutonomousConfirmDetail',
+				"Project: {0}\n\nAutomated DAG lanes dispatch coding engines without per-tool prompts (Codex runs scoped to workspace-write inside isolated worktrees). Safe Mode (aexus.ade.autonomousMode = false) requires a one-time confirmation per project before starting automated execution.",
+				entry.state.projectPath,
+			),
+			primaryButton: localize('adeEngAutonomousConfirmBtn', "&&Approve & Run DAG"),
+		});
+		if (confirmation.confirmed) {
+			this.autonomousApprovedProjects.add(projectKey);
+			this.saveAutonomousApprovedProjectsToStorage();
+			return true;
+		}
+		this.appendEvent(entry, 'warn', 'tree.autonomous_approval_declined', {
+			detail: 'Execution not started: user declined autonomous Work-Tree DAG confirmation in Safe Mode.',
+		});
+		await this.persistEntry(entry);
+		return false;
 	}
 
 	private async promptApproveVerifyCommands(
@@ -1374,7 +1629,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			primaryButton: localize('adeEngVerifyTrustApproveBtn', "&&Trust & Run"),
 		});
 		if (confirmation.confirmed) {
-			this.trustVerifyCommandHashes(projectPath, commands.map(c => c.hash));
+			this.trustVerifyCommandHashes(projectPath, commands);
 			return true;
 		}
 		return false;
@@ -1519,7 +1774,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		void this.inbox.postGovernorMessage({
 			governorSessionId: entry.governorSessionId,
 			nodeId,
-			title: localize('adeEngBudgetPausedInboxTitle', "Budget Guardrail Paused DAG ({0} / {1})", formatUsdCost(budgetCheck.totalCostUsd), formatUsdCost(budgetCheck.maxBudgetUsd)),
+			title: localize('adeEngBudgetPausedInboxTitle', "[Budget Guardrail] Paused DAG ({0} / {1})", formatUsdCost(budgetCheck.totalCostUsd), formatUsdCost(budgetCheck.maxBudgetUsd)),
 			message: detail,
 			severity: 'critical',
 		}).catch(() => undefined);
@@ -1654,7 +1909,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					));
 					void this.inbox.postGovernorMessage({
 						governorSessionId: entry.governorSessionId,
-						title: localize('adeEngPersistFailedInboxTitle', "Failed to Save Engineering State"),
+						title: localize('adeEngPersistFailedInboxTitle', "[Persist Error] Failed to Save Engineering State"),
 						message: localize(
 							'adeEngPersistFailedInboxMessage',
 							"Could not write blueprint.md / state.json to disk: {0}. Check available disk space and filesystem permissions.",
@@ -1681,6 +1936,12 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		}
 		if (gov.parentId) {
 			throw new Error(localize('adeEngineeringGovMustBeRoot', "Only a top-level Governor session can own an Engineering tree."));
+		}
+		if (gov.projectUri.scheme === AEXUS_SSH_SCHEME) {
+			throw new Error(localize(
+				'adeEngineeringSshUnsupported',
+				"Engineering/Research DAG worktrees currently require a local Git repository. Interactive ADE sessions, remote editing, Git diffs, and SSH terminals remain available directly on aexus-ssh:// projects.",
+			));
 		}
 
 		// Spec 2.1(a): If already initialized for this treeType, return existing snapshot directly
@@ -1745,6 +2006,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				treeType,
 				governorSessionId: gov.id,
 				projectPath: gov.projectUri.fsPath,
+				projectUri: gov.projectUri.toString(),
 				runStatus: 'idle',
 				createdAt: now,
 				updatedAt: now,
@@ -1898,7 +2160,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		}
 		if (untrustedVerifyCmds.length > 0) {
 			if (options.trustedVerifyCommands === true) {
-				this.trustVerifyCommandHashes(entry.state.projectPath, untrustedVerifyCmds.map(c => c.hash));
+				this.trustVerifyCommandHashes(entry.state.projectPath, untrustedVerifyCmds);
 				for (const c of untrustedVerifyCmds) {
 					entry.declinedVerifyHashes.delete(c.hash);
 				}
@@ -2072,6 +2334,9 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			governorSessionId: entry.blueprint.metadata.governorSessionId,
 			workspaceIsolation: params.workspaceIsolation ?? entry.blueprint.metadata.workspaceIsolation,
 			watchdogTimeoutMinutes: entry.blueprint.metadata.watchdogTimeoutMinutes,
+			...(entry.blueprint.metadata.maxConcurrency !== undefined ? { maxConcurrency: entry.blueprint.metadata.maxConcurrency } : {}),
+			...(entry.blueprint.metadata.verify ? { verify: entry.blueprint.metadata.verify } : {}),
+			...(entry.blueprint.metadata.orgPreset ? { orgPreset: entry.blueprint.metadata.orgPreset } : {}),
 			...(entry.blueprint.metadata.flowDirection ? { flowDirection: entry.blueprint.metadata.flowDirection } : {}),
 			...(nextBudgetUsd !== undefined ? { maxBudgetUsd: nextBudgetUsd } : {}),
 		};
@@ -2109,7 +2374,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!result.ok) {
 			void this.inbox.postGovernorMessage({
 				governorSessionId: entry.governorSessionId,
-				title: localize('adeEngWorktreeMergeConflictTitle', "Worktree Merge Conflict ({0} file(s))", result.conflictedFiles.length),
+				title: localize('adeEngWorktreeMergeConflictTitle', "[Worktree Merge Conflict] ({0} file(s))", result.conflictedFiles.length),
 				message: result.summary,
 				severity: 'critical',
 			}).catch(() => undefined);
@@ -2274,6 +2539,15 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", governorSessionId));
 		}
 
+		// P1-04: Pre-dispatch upfront verify trust gate BEFORE dispatching any Worker!
+		if (!(await this.ensurePreDispatchVerifyTrust(entry, caller))) {
+			return this.buildSnapshot(entry);
+		}
+		// P0-04: One-time per-project autonomous DAG confirmation when Safe Mode is active!
+		if (!(await this.ensureAutonomousDagApproved(entry))) {
+			return this.buildSnapshot(entry);
+		}
+
 		const nextNodes: Record<string, IAdeEngineeringNodeRuntimeState> = { ...entry.state.nodes };
 		for (const [nid, nState] of Object.entries(nextNodes)) {
 			if (!nState.completed && (nState.phase === 'circuit_broken' || nState.formalFailureCount >= 3)) {
@@ -2327,6 +2601,12 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		const entry = this.trees.get(governorSessionId);
 		if (!entry) {
 			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", governorSessionId));
+		}
+		if (!(await this.ensurePreDispatchVerifyTrust(entry, caller))) {
+			return this.buildSnapshot(entry);
+		}
+		if (!(await this.ensureAutonomousDagApproved(entry))) {
+			return this.buildSnapshot(entry);
 		}
 		const nextNodes: Record<string, IAdeEngineeringNodeRuntimeState> = { ...entry.state.nodes };
 		for (const [nid, nState] of Object.entries(nextNodes)) {
@@ -2450,6 +2730,10 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 						pureWorker: options.pureWorker,
 						callerRole: resolvedCallerRole,
 						cwdOverride: options.cwdOverride,
+						autonomousApproved: options.usageContext
+							? (readTrustedApplicationConfigValue<boolean>(this.configurationService, 'aexus.ade.autonomousMode') === true
+								|| this.autonomousApprovedProjects.has(this.getProjectTrustKey(options.usageContext.entry.state.projectPath)))
+							: false,
 					},
 				);
 			} catch (err) {
@@ -2703,7 +2987,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 						});
 						await this.inbox.postGovernorMessage({
 							governorSessionId: entry.governorSessionId,
-							title: localize('adeEngMergeConflictInboxTitle', "Git Worktree Final Merge Conflict"),
+							title: localize('adeEngMergeConflictInboxTitle', "[Worktree Merge Conflict] Final Merge Conflict"),
 							message: `${mergeRes.conflictedFiles.join(', ')}\n\n${mergeRes.summary}`,
 							severity: 'critical',
 						}).catch(() => undefined);
@@ -2964,7 +3248,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			void this.inbox.postGovernorMessage({
 				governorSessionId: entry.governorSessionId,
 				nodeId: node.id,
-				title: localize('adeEngWorktreeFailedInboxTitle', "Git Worktree Creation Failed — Execution Paused"),
+				title: localize('adeEngWorktreeFailedInboxTitle', "[Worktree Error] Git Worktree Creation Failed — Execution Paused"),
 				message: localize(
 					'adeEngWorktreeFailedInboxMsg',
 					"Could not prepare isolated Git worktree for node [{0}]: {1}\n\nExecution was paused to prevent unisolated parallel edits in the shared repository root. Fix the Git repository state or switch workspace_isolation to shared explicitly.",
@@ -3101,7 +3385,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				void this.inbox.postGovernorMessage({
 					governorSessionId: entry.governorSessionId,
 					nodeId: node.id,
-					title: localize('adeEngVerifyBlockedInboxTitle', "Blocked Untrusted Verify Command on [{0}]", node.id),
+					title: localize('adeEngVerifyBlockedInboxTitle', "[Verify Gate] Blocked Untrusted Verify Command on [{0}]", node.id),
 					message: blockDetail,
 					severity: 'critical',
 				}).catch(() => undefined);
@@ -3202,11 +3486,13 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			? effectiveCumulative.touchedFiles.map(f => `- [${f.kind.toUpperCase()}] ${f.relativePath}`).join('\n')
 			: touchedSummary;
 
+		const slots = this.getSlotRanks();
+		const reviewerBadge = `${slots.reviewer.name} (L${slots.reviewer.tier} Reviewer, \`${slots.reviewer.name} ≠ ${slots.executor.name}\`)`;
 		const actionLines = [
 			'## Required Action (Execute ONE command via bash/terminal tool)',
 			`- **If PASS**: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict pass --report "<concise summary for downstream nodes>"\``,
 			latest.fourthChanceGranted
-				? `- **If REJECT** (4th-chance final review — routes to Segment Manager): \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<fix instructions>"\``
+				? `- **If REJECT** (4th-chance final review — routes to ${slots.segmentOwner.name}): \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<fix instructions>"\``
 				: `- **If REJECT** (internal iteration ${(latest.employeeRejectCount ?? 0) + 1}/3): \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<fix instructions>"\``,
 		];
 
@@ -3214,11 +3500,11 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (isIncrementalReview) {
 			reviewPrompt = [
 				`# Re-Review (Attempt #${prevReviewCount + 1}) — [${node.id}] ${node.title}`,
-				`Role: **Employee (L3 Reviewer, \`Employee ≠ Worker\`)** — audit only; NEVER edit business code yourself. Original goal, acceptance criteria & upstream context are in your prior turn.`,
+				`Role: **${reviewerBadge}** — audit only; NEVER edit business code yourself. Original goal, acceptance criteria & upstream context are in your prior turn.`,
 				...(verifyPassLine ? ['', `## Deterministic Verification: ${verifyPassLine}`] : []),
 				'',
-				'## Latest Worker Output',
-				workerReply.trim() ? workerReply.trim().slice(0, 3000) : '(No text summary returned by Worker)',
+				`## Latest ${slots.executor.name} Output`,
+				workerReply.trim() ? workerReply.trim().slice(0, 3000) : `(No text summary returned by ${slots.executor.name})`,
 				'',
 				'## This Turn\'s Incremental Diff',
 				changes.combinedDiff ? `\`\`\`diff\n${changes.combinedDiff}\n\`\`\`` : '(Empty turn diff)',
@@ -3236,9 +3522,9 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			const layeredUpstream = buildLayeredUpstreamReports(node.id, entry.blueprint, entry.state.reports);
 			reviewPrompt = [
 				`# Engineering Single-Node Review — [${node.id}] ${node.title}`,
-				`Role: **Employee (L3 Reviewer, \`Employee ≠ Worker\`)** for node \`${node.id}\` in tree \`${entry.governorSessionId}\`. Audit only — NEVER write or modify business code yourself.`,
+				`Role: **${reviewerBadge}** for node \`${node.id}\` in tree \`${entry.governorSessionId}\`. Audit only — NEVER write or modify business code yourself.`,
 				...(entry.blueprint.metadata.workspaceIsolation !== 'worktree'
-					? ['**Shared-Workspace Rule**: Parallel DAG nodes may touch unrelated files concurrently. Evaluate ONLY files/behavior for `' + node.id + '` — never ask your Worker to delete unrelated parallel files.']
+					? [`**Shared-Workspace Rule**: Parallel DAG nodes may touch unrelated files concurrently. Evaluate ONLY files/behavior for \`${node.id}\` — never ask your ${slots.executor.name} to delete unrelated parallel files.`]
 					: []),
 				...(verifyPassLine ? ['', `## Deterministic Verification: ${verifyPassLine}`] : []),
 				'',
@@ -3251,13 +3537,13 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				'## Upstream Context',
 				this.formatLayeredUpstreamSummaryBlock(layeredUpstream),
 				'',
-				'## Worker Output Summary',
-				workerReply.trim() ? workerReply.trim().slice(0, 4000) : '(No text summary returned by Worker)',
+				`## ${slots.executor.name} Output Summary`,
+				workerReply.trim() ? workerReply.trim().slice(0, 4000) : `(No text summary returned by ${slots.executor.name})`,
 				'',
-				'## Files Touched by Worker',
+				`## Files Touched by ${slots.executor.name}`,
 				touchedSummary,
 				'',
-				'## Unified Diff of Worker Changes',
+				`## Unified Diff of ${slots.executor.name} Changes`,
 				changes.combinedDiff ? `\`\`\`diff\n${changes.combinedDiff}\n\`\`\`` : '(Empty diff — run read-only `git status` / `git diff` or test commands if needed)',
 				'',
 				...actionLines,
@@ -3269,7 +3555,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			thinking: node.employee?.thinking ?? 'medium',
 			cwdOverride: effectiveCwd,
 		}, [
-			`IMPORTANT: Your Employee review turn for node \`${node.id}\` ended without executing \`aexus-ade engineering review\`.`,
+			`IMPORTANT: Your ${slots.reviewer.name} review turn for node \`${node.id}\` ended without executing \`aexus-ade engineering review\`.`,
 			`Execute ONE command immediately via Bash:`,
 			`- Pass: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict pass --report "<concise summary>"\``,
 			`- Reject: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<fix instructions>"\``,
@@ -3364,10 +3650,11 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			? `${segmentDiffText.slice(0, 20_000)}\n... (diff truncated; run \`aexus-ade engineering diff --governor ${entry.governorSessionId} --node ${node.id}\` or \`git diff\`)`
 			: segmentDiffText;
 
+		const slots = this.getSlotRanks();
 		const prompt = [
 			`# Engineering Segment Secondary Review — Segment [${seg.segmentId}] · Node [${node.id}] ${node.title}`,
-			`You are the **Manager (L2 · Critical Segment Lead)** responsible for segment \`${seg.segmentId}\` (\`${seg.nodeIds.join(' -> ')}\`) in Engineering tree \`${entry.governorSessionId}\`.`,
-			`Node \`${node.id}\` (${node.critical ? '★Critical Gate' : 'Segment Tail Node'}) has passed Employee primary review and requires your secondary segment-level verification.`,
+			`You are the **${slots.segmentOwner.name} (L${slots.segmentOwner.tier} · Critical Segment Lead)** responsible for segment \`${seg.segmentId}\` (\`${seg.nodeIds.join(' -> ')}\`) in Engineering tree \`${entry.governorSessionId}\`.`,
+			`Node \`${node.id}\` (${node.critical ? '★Critical Gate' : 'Segment Tail Node'}) has passed ${slots.reviewer.name} primary review and requires your secondary segment-level verification.`,
 			...(entry.blueprint.metadata.workspaceIsolation !== 'worktree'
 				? ['**Shared-Workspace Concurrency Rule**: Parallel DAG segments may create or modify unrelated files in this shared repository simultaneously. Verify ONLY the deliverables of segment `' + seg.segmentId + '` and leave unrelated parallel files intact.']
 				: []),
@@ -3396,7 +3683,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			thinking: seg.config.thinking,
 			cwdOverride: effectiveCwd,
 		}, [
-			`IMPORTANT: Your Manager secondary review turn for node \`${node.id}\` ended without executing \`aexus-ade engineering review\`.`,
+			`IMPORTANT: Your ${slots.segmentOwner.name} secondary review turn for node \`${node.id}\` ended without executing \`aexus-ade engineering review\`.`,
 			`Execute ONE of the following commands immediately via your Bash tool:`,
 			`- Pass: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict pass\``,
 			`- Reject: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict reject --feedback "<reason>"\``,
@@ -3413,13 +3700,14 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!rState?.managerAgentId) {
 			return;
 		}
+		const slots = this.getSlotRanks();
 		const effectiveCwd = entry.state.worktrees?.[seg.segmentId]?.worktreePath ?? entry.state.projectPath;
 		const prompt = [
 			`# Engineering 3x Internal Rejection Escalation — Node [${node.id}] ${node.title}`,
-			`You are the **Manager (L2)** for segment \`${seg.segmentId}\` in Engineering tree \`${entry.governorSessionId}\`.`,
-			`Task node \`${node.id}\` failed Employee single-node review **3 consecutive times**.`,
+			`You are the **${slots.segmentOwner.name} (L${slots.segmentOwner.tier})** for segment \`${seg.segmentId}\` in Engineering tree \`${entry.governorSessionId}\`.`,
+			`Task node \`${node.id}\` failed ${slots.reviewer.name} single-node review **3 consecutive times**.`,
 			'',
-			'## Latest Employee Rejection Feedback',
+			`## Latest ${slots.reviewer.name} Rejection Feedback`,
 			lastEmployeeFeedback || '(No feedback provided)',
 			'',
 			'## Node Goal & Acceptance Criteria',
@@ -3427,9 +3715,9 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			(node.acceptance ?? '').trim(),
 			'',
 			'## Required Action (Spec 3.3c)',
-			'Inspect the workspace state globally, clear the internal retry state, and provide architectural guidance to grant the original Worker & Employee a **4th chance** (or issue a formal Manager rejection if unrecoverable):',
+			`Inspect the workspace state globally, clear the internal retry state, and provide architectural guidance to grant the original ${slots.executor.name} & ${slots.reviewer.name} a **4th chance** (or issue a formal ${slots.segmentOwner.name} rejection if unrecoverable):`,
 			`- **Grant 4th Chance with Guidance**: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict guidance --feedback "<clear architectural guidance for 4th attempt>"\``,
-			`- **Formal Manager Failure**: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict reject --feedback "<reason>"\``,
+			`- **Formal ${slots.segmentOwner.name} Failure**: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict reject --feedback "<reason>"\``,
 		].join('\n');
 
 		void this.dispatchReviewerWithNudge(entry, node.id, 'manager_escalation', rState.managerAgentId, prompt, {
@@ -3437,7 +3725,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			thinking: seg.config.thinking,
 			cwdOverride: effectiveCwd,
 		}, [
-			`IMPORTANT: Your Manager escalation turn for node \`${node.id}\` ended without executing \`aexus-ade engineering review\`.`,
+			`IMPORTANT: Your ${slots.segmentOwner.name} escalation turn for node \`${node.id}\` ended without executing \`aexus-ade engineering review\`.`,
 			`Execute ONE of the following commands immediately via your Bash tool:`,
 			`- Grant 4th chance: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict guidance --feedback "<guidance>"\``,
 			`- Formal reject: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict reject --feedback "<reason>"\``,
@@ -3455,15 +3743,16 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!seg || !rState?.managerAgentId) {
 			return;
 		}
+		const slots = this.getSlotRanks();
 		const prompt = [
 			`# Git Worktree Merge Conflict Before Node [${node.id}] ${node.title}`,
-			`You are the **Manager (L2)** for join segment \`${seg.segmentId}\` in isolated worktree \`${worktreePath}\`.`,
+			`You are the **${slots.segmentOwner.name} (L${slots.segmentOwner.tier})** for join segment \`${seg.segmentId}\` in isolated worktree \`${worktreePath}\`.`,
 			`Merging upstream parallel segment branches produced conflicts in: ${conflict.conflictedFiles.join(', ')}.`,
 			'',
 			'## Conflict Output',
 			conflict.summary,
 			'',
-			'Resolve the merge conflicts cleanly in the worktree, commit the merge (`git add -A && git commit --no-edit`), and then resume the Worker via:',
+			`Resolve the merge conflicts cleanly in the worktree, commit the merge (\`git add -A && git commit --no-edit\`), and then resume the ${slots.executor.name} via:`,
 			`\`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role manager --verdict guidance --feedback "Upstream branches merged cleanly; proceed with task implementation."\``,
 		].join('\n');
 
@@ -3486,20 +3775,21 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!gov) {
 			return;
 		}
+		const slots = this.getSlotRanks();
 		const prompt = [
-			`# CIRCUIT BREAKER ALERT (3rd Manager Formal Failure) — Node [${node.id}] ${node.title}`,
-			`You are the **Governor (L1 · Engineering Tree Owner)** for Engineering tree \`${entry.governorSessionId}\`.`,
-			`Segment \`${seg?.segmentId ?? 'unknown'}\` at node \`${node.id}\` ("${node.title}") has failed **3 formal Manager acceptance reviews** and has entered **RED Circuit-Broken** pause state.`,
+			`# CIRCUIT BREAKER ALERT (3rd ${slots.segmentOwner.name} Formal Failure) — Node [${node.id}] ${node.title}`,
+			`You are the **${slots.orchestrator.name} (L${slots.orchestrator.tier} · Engineering Tree Owner)** for Engineering tree \`${entry.governorSessionId}\`.`,
+			`Segment \`${seg?.segmentId ?? 'unknown'}\` at node \`${node.id}\` ("${node.title}") has failed **3 formal ${slots.segmentOwner.name} acceptance reviews** and has entered **RED Circuit-Broken** pause state.`,
 			'',
-			'## Final Manager Rejection Feedback',
+			`## Final ${slots.segmentOwner.name} Rejection Feedback`,
 			finalManagerFeedback || '(None)',
 			'',
-			'## Available Governor Actions',
+			`## Available ${slots.orchestrator.name} Actions`,
 			`1. Inspect full DAG status: \`aexus-ade engineering status --governor ${entry.governorSessionId} --json\``,
 			`2. Read & revise the blueprint if task decomposition needs adjustment: \`aexus-ade engineering blueprint get --governor ${entry.governorSessionId}\` -> \`aexus-ade engineering blueprint apply --governor ${entry.governorSessionId} --file <path>\``,
 			`3. **If human decision or intervention is required (Spec 2.2 & 3.4)**, post an escalation alert to ADE Inbox:`,
 			`   \`aexus-ade inbox post --from ${entry.governorSessionId} --message "<concise situation report & decision needed from user>"\``,
-			'*(Note: Per Engineering governance rules, Governor cannot call `engineering run` directly; User or Secretary will resume execution once ready.)*',
+			`*(Note: Per Engineering governance rules, ${slots.orchestrator.name} cannot call \`engineering run\` directly; User or Secretary will resume execution once ready.)*`,
 		].join('\n');
 
 		void this.dispatchSessionTurn(gov.id, prompt, {
@@ -3558,8 +3848,11 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					},
 				};
 
-				// Spec 3.3(b): Tail node of Manager segment OR Critical node -> wake Manager for secondary review!
-				if (isSegmentTail || node.critical) {
+				// Spec 3.3(b): Tail node of Segment Owner OR Critical node -> wake Segment Owner for secondary review
+				// UNLESS segment_owner === reviewer (e.g. 2-tier flat-swarm), in which case skip duplicate secondary review!
+				const slots = this.getSlotRanks();
+				const skipDuplicateSecondaryReview = slots.segmentOwner.id === slots.reviewer.id;
+				if ((isSegmentTail || node.critical) && !skipDuplicateSecondaryReview) {
 					entry.state = {
 						...entry.state,
 						reports: nextReports,
@@ -3585,23 +3878,27 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					return this.buildSnapshot(entry);
 				}
 
-				// Spec 3.3(a): Non-tail & non-critical -> directly mark completed (green) and advance downstream!
-				entry.state = {
-					...entry.state,
-					reports: nextReports,
-					nodes: {
-						...entry.state.nodes,
-						[node.id]: {
-							...prev,
-							phase: 'completed',
-							completed: true,
-							completedAt: Date.now(),
-							employeeRejectCount: 0,
-							fourthChanceGranted: false,
-							lastEmployeeFeedback: undefined,
-						},
-					},
-				};
+				// Spec 3.3(a): Non-tail & non-critical (or collapsed segment_owner === reviewer preset) -> complete directly!
+				if (skipDuplicateSecondaryReview && entry.blueprint.metadata.workspaceIsolation === 'worktree' && seg && isSegmentTail) {
+					const wtPath = entry.state.worktrees?.[seg.segmentId]?.worktreePath;
+					if (wtPath) {
+						await this.backend.commitSegmentWorktree(wtPath, `feat(ade): complete segment ${seg.segmentId}`).catch(() => undefined);
+					}
+				}
+				this.updateNodeState(
+					entry,
+					node.id,
+					fresh => ({
+						...fresh,
+						phase: 'completed',
+						completed: true,
+						completedAt: Date.now(),
+						employeeRejectCount: 0,
+						fourthChanceGranted: false,
+						lastEmployeeFeedback: undefined,
+					}),
+					{ reports: nextReports },
+				);
 				this.appendEvent(entry, 'info', 'node.completed', { nodeId: node.id, detail: reportText });
 				await this.persistEntry(entry);
 				if (entry.state.runStatus === 'running') {
@@ -4099,13 +4396,14 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				await this.persistEntry(entry);
 
 				if (seg && rState.managerAgentId) {
+					const slots = this.getSlotRanks();
 					const alertPrompt = [
-						`# Watchdog Timeout Alert — Worker Unresponsive on Node [${node.id}] ${node.title}`,
-						`Active Worker (\`${rState.workerAgentId}\`) on segment \`${seg.segmentId}\` remained unresponsive for **${timeoutMinutes} minutes** even after an automatic Watchdog reminder.`,
+						`# Watchdog Timeout Alert — ${slots.executor.name} Unresponsive on Node [${node.id}] ${node.title}`,
+						`Active ${slots.executor.name} (\`${rState.workerAgentId}\`) on segment \`${seg.segmentId}\` remained unresponsive for **${timeoutMinutes} minutes** even after an automatic Watchdog reminder.`,
 						'',
-						'## Recommended Manager Action (Spec 3.7)',
-						'Inspect status or force kill-restart the deadlocked Worker subprocess:',
-						`- **Force Kill & Restart Worker (Recommended)**: \`aexus-ade engineering watchdog-action --governor ${entry.governorSessionId} --node ${node.id} --action kill-restart --message "Continue task from current workspace state."\``,
+						`## Recommended ${slots.segmentOwner.name} Action (Spec 3.7)`,
+						`Inspect status or force kill-restart the deadlocked ${slots.executor.name} subprocess:`,
+						`- **Force Kill & Restart ${slots.executor.name} (Recommended)**: \`aexus-ade engineering watchdog-action --governor ${entry.governorSessionId} --node ${node.id} --action kill-restart --message "Continue task from current workspace state."\``,
 						`- **Send Another Reminder**: \`aexus-ade engineering watchdog-action --governor ${entry.governorSessionId} --node ${node.id} --action remind --message "Please report progress or complete the current step."\``,
 					].join('\n');
 					alertPromises.push(this.dispatchSessionTurn(rState.managerAgentId, alertPrompt, {

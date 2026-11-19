@@ -16,6 +16,7 @@ export type AdePrimitiveApiId =
 	| 'project.read'
 	| 'project.manage'
 	| 'host.access'
+	| 'host.manage'
 	| 'inbox.post'
 	| 'engineering.read'
 	| 'engineering.design'
@@ -200,24 +201,36 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 	{
 		id: 'host.access',
 		category: 'workspace',
-		label: 'Cloud Host (SSH) Access',
-		description: 'List, test, browse, and manage remote SSH Cloud Host connections and folders.',
+		label: 'Cloud Host (SSH) Read Access',
+		description: 'List, inspect, browse, and open saved remote SSH Cloud Host connections and folders.',
 		actions: [
 			'host.list',
 			'host.info',
 			'host.get',
 			'host.browse',
-			'host.test',
+			'host.open',
+		],
+		renderCliLines: () => [
+			`  - Cloud Hosts (Read): \`aexus-ade host list --json\` | \`host browse <alias> --path <dir> --json\``,
+		],
+	},
+	{
+		id: 'host.manage',
+		category: 'workspace',
+		label: 'Manage & Test Cloud Hosts (SSH)',
+		description: 'Add, update, delete, import, or test outbound SSH connectivity for saved Cloud Host definitions (High Privilege).',
+		actions: [
 			'host.add',
 			'host.update',
 			'host.upsert',
 			'host.remove',
 			'host.delete',
+			'host.test',
 			'host.import',
-			'host.open',
 		],
+		dangerous: true,
 		renderCliLines: () => [
-			`  - Cloud Hosts: \`aexus-ade host list --json\` | \`host browse <alias> --path <dir> --json\` | \`host test <alias> --json\``,
+			`  - Cloud Hosts (Manage): \`aexus-ade host test <alias> --json\` | \`host add <alias> --host <addr>\` | \`host delete <alias>\` | \`host import\``,
 		],
 	},
 	{
@@ -296,8 +309,8 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			}
 			const govId = ctx.treeGovernorId ?? ctx.agentId;
 			return [
-				`  - Blueprint Apply: \`aexus-ade engineering template apply --governor ${govId} --template <id>\` | \`aexus-ade engineering blueprint apply --governor ${govId} --file <path>\``,
-				`  - Configure DAG: \`aexus-ade engineering configure --governor ${govId} --all [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>]\``,
+				`  - Blueprint Generate / Apply: \`aexus-ade engineering generate --governor ${govId} --prompt "<goal>"\` | \`engineering template list --json\` | \`engineering template apply --governor ${govId} --template <id>\` | \`engineering blueprint apply --governor ${govId} --file <path>\``,
+				`  - Configure DAG & Roles: \`aexus-ade engineering configure --governor ${govId} --all [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>]\` | \`aexus-ade role list --json\``,
 			];
 		},
 	},

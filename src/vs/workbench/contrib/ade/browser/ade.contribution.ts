@@ -44,6 +44,7 @@ import {
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
+import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
@@ -63,8 +64,10 @@ import { ActiveEditorContext, FocusedViewContext, WorkspaceFolderCountContext } 
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { EditorExtensions, IEditorFactoryRegistry } from '../../../common/editor.js';
 import { Extensions, IViewContainersRegistry, IViewsRegistry, ViewContainerLocation } from '../../../common/views.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
+import { IStatusbarEntry, IStatusbarEntryAccessor, IStatusbarService, StatusbarAlignment } from '../../../services/statusbar/browser/statusbar.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IWorkbenchModeService, WorkbenchModeContext, WorkbenchModeViewContainers } from '../../../services/workbenchMode/common/workbenchMode.js';
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
@@ -95,7 +98,7 @@ import {
 	IAdeProjectsService,
 	resolveAdeAgentRank,
 } from '../common/ade.js';
-import { AdeRoleSchemaService, IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
+import { AdeRoleSchemaService, IAdeRoleSchemaService, readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
 import {
 	AdeCloudHostWorkbenchContribution,
 	browseRemoteFolderOnCloudHost,
@@ -209,8 +212,58 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 	}
 }
 
+export const ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID = 'workbench.action.ade.toggleAutonomousMode';
+export const ADE_MANAGE_TRUSTED_VERIFY_COMMAND_ID = 'workbench.action.ade.manageTrustedVerifyCommands';
+export const ADE_TOGGLE_PROMPT_TO_DAG_COMMAND_ID = 'workbench.action.ade.togglePromptToDagBar';
+
+export class AdeAutonomousModeStatusContribution extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.adeAutonomousModeStatus';
+	private readonly entryAccessor: IStatusbarEntryAccessor;
+
+	constructor(
+		@IStatusbarService statusbarService: IStatusbarService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
+	) {
+		super();
+		this.entryAccessor = this._register(statusbarService.addEntry(
+			this.buildEntry(),
+			'status.aexus.ade.autonomousMode',
+			StatusbarAlignment.RIGHT,
+			90,
+		));
+		this._register(this.configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('aexus.ade.autonomousMode')) {
+				this.entryAccessor.update(this.buildEntry());
+			}
+		}));
+	}
+
+	private buildEntry(): IStatusbarEntry {
+		const autonomous = readTrustedApplicationConfigValue<boolean>(this.configurationService, 'aexus.ade.autonomousMode') === true;
+		if (autonomous) {
+			return {
+				name: localize('adeStatusModeName', "Aexus ADE Permission Mode"),
+				text: `$(flame) ${localize('adeStatusAutonomousText', "ADE: Autonomous")}`,
+				ariaLabel: localize('adeStatusAutonomousAria', "Aexus ADE Permission Mode: Autonomous. Click to toggle back to Safe Mode."),
+				tooltip: localize('adeStatusAutonomousTooltip', "Aexus ADE is in Autonomous Mode (aexus.ade.autonomousMode = true). Click to switch back to Safe Mode."),
+				command: ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID,
+				kind: 'warning',
+			};
+		}
+		return {
+			name: localize('adeStatusModeName', "Aexus ADE Permission Mode"),
+			text: `$(shield) ${localize('adeStatusSafeText', "ADE: Safe Mode")}`,
+			ariaLabel: localize('adeStatusSafeAria', "Aexus ADE Permission Mode: Safe Mode. Click to toggle Autonomous Mode."),
+			tooltip: localize('adeStatusSafeTooltip', "Aexus ADE is in Safe Mode (aexus.ade.autonomousMode = false). Click to switch to Autonomous Mode."),
+			command: ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID,
+			kind: 'standard',
+		};
+	}
+}
+
 registerWorkbenchContribution2(AdeCloudHostWorkbenchContribution.ID, AdeCloudHostWorkbenchContribution, WorkbenchPhase.BlockRestore);
 registerWorkbenchContribution2(AdeEditorContribution.ID, AdeEditorContribution, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(AdeAutonomousModeStatusContribution.ID, AdeAutonomousModeStatusContribution, WorkbenchPhase.AfterRestored);
 
 const viewContainersRegistry = Registry.as<IViewContainersRegistry>(Extensions.ViewContainersRegistry);
 
@@ -1880,5 +1933,113 @@ registerAction2(class ImportVsCodeCloudHostsAction extends Action2 {
 			res.importedRecentFolders,
 		));
 		await editors.openCloudHosts?.();
+	}
+});
+
+registerAction2(class ToggleAdeAutonomousModeAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID,
+			title: localize2('adeToggleAutonomousModeTitle', "Toggle Safe / Autonomous Permission Mode"),
+			category: localize2('adeCategory', "Aexus ADE"),
+			icon: Codicon.shield,
+			f1: true,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const configurationService = accessor.get(IConfigurationService);
+		const notifications = accessor.get(INotificationService);
+		const current = readTrustedApplicationConfigValue<boolean>(configurationService, 'aexus.ade.autonomousMode') === true;
+		const next = !current;
+		await configurationService.updateValue('aexus.ade.autonomousMode', next, ConfigurationTarget.USER);
+		notifications.info(next
+			? localize('adeAutonomousModeEnabledNotice', "Aexus ADE switched to Autonomous Mode (aexus.ade.autonomousMode = true).")
+			: localize('adeSafeModeEnabledNotice', "Aexus ADE switched to Safe Mode (aexus.ade.autonomousMode = false)."));
+	}
+});
+
+registerAction2(class ManageAdeTrustedVerifyCommandsAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_MANAGE_TRUSTED_VERIFY_COMMAND_ID,
+			title: localize2('adeManageTrustedVerifyTitle', "Manage Trusted Verify Commands..."),
+			category: localize2('adeCategory', "Aexus ADE"),
+			icon: Codicon.shield,
+			f1: true,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const engineering = accessor.get(IAdeEngineeringService);
+		const quickInput = accessor.get(IQuickInputService);
+		const notifications = accessor.get(INotificationService);
+		await engineering.whenReady();
+		const entries = engineering.listTrustedVerifyCommands?.() ?? [];
+		if (entries.length === 0) {
+			notifications.info(localize('adeNoTrustedVerifyCommands', "No trusted blueprint verification commands are currently stored."));
+			return;
+		}
+		const items: Array<IQuickPickItem & { readonly revokeAll?: boolean; readonly entry?: { readonly projectPath: string; readonly hash: string; readonly commandPreview: string } }> = [
+			...entries.map(entry => {
+				const preview = entry.commandPreview || `(sha256:${entry.hash.slice(0, 12)})`;
+				return {
+					label: preview,
+					description: entry.projectPath,
+					detail: localize('adeTrustedVerifyHashDetail', "SHA-256: {0}… — select to revoke trust", entry.hash.slice(0, 16)),
+					iconClass: ThemeIcon.asClassName(Codicon.terminal),
+					entry: { projectPath: entry.projectPath, hash: entry.hash, commandPreview: preview },
+				};
+			}),
+			{
+				label: localize('adeRevokeAllTrustedVerifyLabel', "Revoke All Trusted Verify Commands ({0})", entries.length),
+				description: localize('adeRevokeAllTrustedVerifyDesc', "Clear all SHA-256 hash-pinned verify approvals across projects"),
+				iconClass: ThemeIcon.asClassName(Codicon.trash),
+				revokeAll: true,
+			},
+		];
+		const picked = await quickInput.pick(items, {
+			title: localize('adeManageTrustedVerifyPickerTitle', "Trusted Blueprint Verify Commands"),
+			placeHolder: localize('adeManageTrustedVerifyPickerPlaceholder', "Select a trusted verify command to revoke its SHA-256 approval"),
+			matchOnDescription: true,
+			matchOnDetail: true,
+		});
+		if (!picked) {
+			return;
+		}
+		if (picked.revokeAll) {
+			const count = engineering.revokeAllTrustedVerifyCommands?.() ?? 0;
+			notifications.info(localize('adeRevokedAllTrustedVerifyNotice', "Revoked {0} trusted verification command(s).", count));
+		} else if (picked.entry) {
+			const revoked = engineering.revokeTrustedVerifyCommand?.(picked.entry.projectPath, picked.entry.hash) ?? false;
+			if (revoked) {
+				notifications.info(localize('adeRevokedSingleTrustedVerifyNotice', "Revoked trusted verify command '{0}'.", picked.entry.commandPreview));
+			}
+		}
+	}
+});
+
+registerAction2(class ToggleAdePromptToDagBarAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_TOGGLE_PROMPT_TO_DAG_COMMAND_ID,
+			title: localize2('adeTogglePromptToDagBarTitle', "Toggle Prompt-to-DAG Bar"),
+			category: localize2('adeCategory', "Aexus ADE"),
+			icon: Codicon.wand,
+			f1: true,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyK,
+				weight: KeybindingWeight.WorkbenchContrib,
+				when: ActiveEditorContext.isEqualTo(AdeEngineeringEditorPane.ID),
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorService = accessor.get(IEditorService);
+		const pane = editorService.activeEditorPane;
+		if (pane instanceof AdeEngineeringEditorPane) {
+			pane.togglePromptToDagBar();
+		}
 	}
 });

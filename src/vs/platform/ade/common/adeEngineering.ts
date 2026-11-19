@@ -99,6 +99,8 @@ export interface IAdeEngineeringBlueprintMetadata {
 	readonly maxConcurrency?: number;
 	/** Optional default deterministic verification shell command run after Worker completion before LLM review. */
 	readonly verify?: string;
+	/** Optional recommended Organization Preset ID (e.g. 'default-4tier', 'security-audit', 'research-lab'). */
+	readonly orgPreset?: string;
 }
 
 export interface IAdeEngineeringManagerSegment {
@@ -349,6 +351,8 @@ export interface IAdeEngineeringTreeState {
 	readonly treeType: AdeWorkTreeType;
 	readonly governorSessionId: string;
 	readonly projectPath: string;
+	/** Canonical project URI (e.g. `file:///...`) used to guard non-local schemes such as `aexus-ssh://`. */
+	readonly projectUri?: string;
 	readonly runStatus: AdeEngineeringRunStatus;
 	readonly createdAt: number;
 	readonly updatedAt: number;
@@ -601,6 +605,13 @@ export interface IAdeEngineeringConfigureParams {
 	readonly forceStopRunning?: boolean;
 }
 
+export interface IAdeTrustedVerifyCommandEntry {
+	readonly projectPath: string;
+	readonly hash: string;
+	readonly commandPreview?: string;
+	readonly approvedAt?: number;
+}
+
 export const IAdeEngineeringService = createDecorator<IAdeEngineeringService>('adeEngineeringService');
 
 export interface IAdeEngineeringService {
@@ -640,6 +651,9 @@ export interface IAdeEngineeringService {
 	cleanupTreeWorktrees?(governorSessionId: string): Promise<void>;
 	startDemoSimulation?(governorSessionId: string): Promise<IAdeEngineeringTreeSnapshot>;
 	isDemoSimulation?(governorSessionId: string): boolean;
+	listTrustedVerifyCommands?(projectPath?: string): readonly IAdeTrustedVerifyCommandEntry[];
+	revokeTrustedVerifyCommand?(projectPath: string, hash: string): boolean;
+	revokeAllTrustedVerifyCommands?(projectPath?: string): number;
 }
 
 export const IAdeInboxService = createDecorator<IAdeInboxService>('adeInboxService');

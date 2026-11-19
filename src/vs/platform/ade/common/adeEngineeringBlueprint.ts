@@ -759,6 +759,7 @@ export function parseEngineeringBlueprint(
 	let maxBudgetUsd: number | undefined;
 	let maxConcurrency: number | undefined;
 	let defaultVerify: string | undefined;
+	let orgPreset: string | undefined;
 
 	// Optional YAML frontmatter before the Mermaid block (`---\nkey: val\n---`)
 	const frontmatterMatch = normalizedText.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
@@ -785,6 +786,8 @@ export function parseEngineeringBlueprint(
 				if (Number.isFinite(num) && num >= 1) { maxConcurrency = num; }
 			} else if ((fk === 'verify' || fk === 'check') && fv) {
 				defaultVerify = fv;
+			} else if ((fk === 'org_preset' || fk === 'orgpreset') && fv) {
+				orgPreset = fv;
 			}
 		}
 	}
@@ -890,6 +893,8 @@ export function parseEngineeringBlueprint(
 				}
 			} else if ((key === 'verify' || key === 'check') && val) {
 				defaultVerify = val;
+			} else if ((key === 'org_preset' || key === 'orgpreset') && val) {
+				orgPreset = val;
 			}
 			continue;
 		}
@@ -1137,6 +1142,7 @@ export function parseEngineeringBlueprint(
 		...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
 		...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
 		...(defaultVerify ? { verify: defaultVerify } : {}),
+		...(orgPreset ? { orgPreset } : {}),
 	};
 
 	return {
@@ -1266,6 +1272,9 @@ export function serializeEngineeringBlueprint(blueprint: IAdeEngineeringBlueprin
 			: []),
 		...(blueprint.metadata.verify?.trim()
 			? [`- verify: ${blueprint.metadata.verify.trim()}`]
+			: []),
+		...(blueprint.metadata.orgPreset?.trim()
+			? [`- org_preset: ${blueprint.metadata.orgPreset.trim()}`]
 			: []),
 	];
 

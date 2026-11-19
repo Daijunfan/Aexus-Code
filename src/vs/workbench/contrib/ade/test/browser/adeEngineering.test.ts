@@ -1224,6 +1224,7 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		n2TitleInput.dispatchEvent(new mainWindow.Event('change'));
 
 		h.setNextConfirmChoice(true);
+		const confirmsBeforeDraft = h.confirmCallCount;
 		const confirmDone = h.waitForNextConfirm();
 		const confirmBtn = Array.from(host.querySelectorAll('.ade-eng-action-btn.confirm'))[0] as HTMLButtonElement;
 		assert.ok(confirmBtn);
@@ -1231,7 +1232,7 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 
 		heldN2.reply.complete('stopped');
 		await confirmDone;
-		assert.strictEqual(h.confirmCallCount, 1, 'Confirming draft changes that affect a running node MUST prompt user confirmation');
+		assert.strictEqual(h.confirmCallCount, confirmsBeforeDraft + 1, 'Confirming draft changes that affect a running node MUST prompt user confirmation');
 
 		pane.clearInput();
 
@@ -1346,18 +1347,18 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const configured = await h.engineering.configureTree({
 			governorSessionId: gov.id,
 			engine: 'claude-code',
-			model: 'deepseek-flash[1m]',
+			model: 'deepseek-reasoner',
 			thinking: 'off',
 		});
 		const taskNodes = configured.blueprint.nodes.filter(n => n.type === 'task');
 		assert.strictEqual(taskNodes.length, 3);
 		for (const node of taskNodes) {
-			assert.deepStrictEqual(node.worker, { engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' });
-			assert.deepStrictEqual(node.employee, { engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' });
+			assert.deepStrictEqual(node.worker, { engine: 'claude-code', model: 'deepseek-reasoner', thinking: 'off' });
+			assert.deepStrictEqual(node.employee, { engine: 'claude-code', model: 'deepseek-reasoner', thinking: 'off' });
 		}
 		assert.ok(configured.blueprint.managers.length > 0);
 		for (const manager of configured.blueprint.managers) {
-			assert.deepStrictEqual(manager.config, { engine: 'claude-code', model: 'deepseek-flash[1m]', thinking: 'off' });
+			assert.deepStrictEqual(manager.config, { engine: 'claude-code', model: 'deepseek-reasoner', thinking: 'off' });
 		}
 
 		// 2. Control CLI: blueprint validate / configure / reset work; session.connect & session.archive stay locked on Engineering subordinates.
@@ -2908,23 +2909,16 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 
 		await h.engineering.runTree(coordinator.id, 'user');
 		await waitForNodePhase(h.engineering, coordinator.id, 'N1', 'employee_review');
-		// Collapsed coordinator role auto-disambiguates employee_review -> employee, manager_review -> manager!
+		// P1-03: In collapsed 2-tier flat-swarm (segment_owner === reviewer === coordinator), a single pass completes N1 directly without redundant manager_review!
 		await h.commandService.executeCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, 'engineering.review', {
 			governor: coordinator.id,
 			node: 'N1',
 			role: 'coordinator',
 			verdict: 'pass',
-			report: 'Coordinator step 1 passed',
+			report: 'Coordinator single-pass approval',
 			caller: 'coordinator',
 		});
-		await waitForNodePhase(h.engineering, coordinator.id, 'N1', 'manager_review');
-		await h.commandService.executeCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, 'engineering.review', {
-			governor: coordinator.id,
-			node: 'N1',
-			role: 'coordinator',
-			verdict: 'pass',
-			caller: 'coordinator',
-		});
+		assert.strictEqual(h.engineering.getTreeSnapshot(coordinator.id)?.state.nodes.N1.phase, 'completed');
 		assert.strictEqual(h.engineering.getTreeSnapshot(coordinator.id)?.state.runStatus, 'completed');
 	});
 
@@ -3161,5 +3155,206 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		await waitForDomCondition(() => h.inbox.items.some(i => i.governorSessionId === govPersist.id && i.title.includes('Failed to Save')));
 		assert.ok(h.engineering.getTreeSnapshot(govPersist.id)?.state.events.some(e => e.event === 'state.persist_failed'));
 		h.setSaveTreeError(undefined);
+	});
+
+	test('enforces Safe-Mode autonomous DAG gate, upfront pre-dispatch verify gate + trust revocation, SSH URI rejection, and authentic demo paths (P0-04, P0-06, P0-08, P1-04)', async () => {
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+
+		// 1. P0-06: Reject aexus-ssh:// projects cleanly on initTree
+		const sshUri = URI.parse('aexus-ssh://prod-box/srv/app');
+		h.projects.registerProject(sshUri, 'prod-app');
+		const sshSess = await sessions.create('aexus-claude', sshUri);
+		const sshGov = h.projects.addSession(sshUri, sshSess, 'Remote Gov', { role: 'governor' });
+		await assert.rejects(
+			() => h.engineering.initTree({ governorSessionId: sshGov.id }),
+			/require a local Git repository.*aexus-ssh:\/\//i,
+		);
+
+		// 2. P0-04: Safe-Mode one-time autonomous DAG confirmation gate per project
+		const gov = await createGovernor(h.projects, sessions, 'Safe Gate Gov');
+		const initSnap = await h.engineering.initTree({ governorSessionId: gov.id });
+		assert.strictEqual(initSnap.state.projectUri, projectUri.toString(), 'initTree persists projectUri');
+
+		const simpleBp = [
+			'---',
+			'workspace_isolation: shared',
+			'---',
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Safe Task"]',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] Safe Task',
+			'- type: task',
+			'- files: src/safe.ts',
+			'- goal: Test safe gate',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: simpleBp });
+
+		// Decline autonomous confirmation -> 0 Worker dispatches & stays idle
+		h.setNextConfirmChoice(false);
+		const turnsBeforeDecline = h.dispatchedTurns.length;
+		const confirmsBeforeDecline = h.confirmCallCount;
+		const declinedSnap = await h.engineering.runTree(gov.id, 'user');
+		assert.strictEqual(h.confirmCallCount, confirmsBeforeDecline + 1, 'Safe Mode prompts one-time autonomous DAG confirmation');
+		assert.strictEqual(declinedSnap.state.runStatus, 'idle');
+		assert.strictEqual(h.dispatchedTurns.length, turnsBeforeDecline, 'Declining autonomous gate must dispatch 0 Workers');
+		assert.ok(declinedSnap.state.events.some(e => e.event === 'tree.autonomous_approval_declined'));
+
+		// Approve autonomous confirmation -> caches approval per project; second runTree does NOT re-prompt!
+		h.setNextConfirmChoice(true);
+		const confirmsBeforeApprove = h.confirmCallCount;
+		await h.engineering.runTree(gov.id, 'user');
+		assert.strictEqual(h.confirmCallCount, confirmsBeforeApprove + 1);
+		await waitForNodePhase(h.engineering, gov.id, 'N1', 'employee_review');
+		await h.engineering.stopTree(gov.id);
+
+		const confirmsBeforeSecondRun = h.confirmCallCount;
+		await h.engineering.runTree(gov.id, 'user');
+		assert.strictEqual(h.confirmCallCount, confirmsBeforeSecondRun, 'Cached per-project autonomous approval must not re-prompt');
+		await h.engineering.stopTree(gov.id);
+
+		// 3. P1-04: Upfront pre-dispatch verify gate blocks BEFORE dispatching any Worker + trust revocation APIs
+		const verifyBp = [
+			'---',
+			'workspace_isolation: shared',
+			'---',
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Verified Task"]',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] Verified Task',
+			'- type: task',
+			'- files: src/v.ts',
+			'- verify: npm run test:unit',
+			'- goal: Test upfront verify gate',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: verifyBp, caller: 'governor' });
+		const turnsBeforeUntrustedRun = h.dispatchedTurns.length;
+		// Non-interactive secretary run with untrusted verify MUST pause BEFORE dispatching any Worker!
+		const blockedSnap = await h.engineering.runTree(gov.id, 'secretary');
+		assert.strictEqual(blockedSnap.state.runStatus, 'paused');
+		assert.strictEqual(h.dispatchedTurns.length, turnsBeforeUntrustedRun, 'Upfront pre-dispatch verify gate must spend 0 Worker turns');
+		assert.ok(h.inbox.items.some(i => i.governorSessionId === gov.id && i.title.startsWith('[Verify Gate]')));
+
+		// Approve interactively -> listTrustedVerifyCommands returns command preview -> revoke re-blocks!
+		h.setNextConfirmChoice(true);
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: verifyBp });
+		const trustedList = h.engineering.listTrustedVerifyCommands!(projectUri.fsPath);
+		assert.strictEqual(trustedList.length, 1);
+		assert.strictEqual(trustedList[0].commandPreview, 'npm run test:unit');
+		assert.strictEqual(trustedList[0].projectPath, projectUri.fsPath);
+		assert.strictEqual(h.engineering.revokeTrustedVerifyCommand!(projectUri.fsPath, trustedList[0].hash), true);
+		assert.strictEqual(h.engineering.listTrustedVerifyCommands!(projectUri.fsPath).length, 0);
+
+		const turnsAfterRevoke = h.dispatchedTurns.length;
+		const reBlockedSnap = await h.engineering.runTree(gov.id, 'secretary');
+		assert.strictEqual(reBlockedSnap.state.runStatus, 'paused');
+		assert.strictEqual(h.dispatchedTurns.length, turnsAfterRevoke, 'Revoking trusted hash must re-enable upfront verify gate');
+
+		// 4. P0-08: Demo simulation uses authentic aexus-eng/* branches and ~/.aexus-code/engineering/demo/worktrees/* paths
+		const demoSnap = await h.engineering.startDemoSimulation!(gov.id);
+		assert.strictEqual(demoSnap.state.worktrees?.N2?.branchName, 'aexus-eng/demo-N2-backend');
+		assert.strictEqual(demoSnap.state.worktrees?.N3?.branchName, 'aexus-eng/demo-N3-ui');
+		assert.strictEqual(demoSnap.state.worktrees?.N4?.branchName, 'aexus-eng/demo-N4-tests');
+		assert.strictEqual(demoSnap.state.worktrees?.N2?.worktreePath, '~/.aexus-code/engineering/demo/worktrees/N2');
+		assert.strictEqual(demoSnap.state.worktrees?.N3?.worktreePath, '~/.aexus-code/engineering/demo/worktrees/N3');
+		assert.strictEqual(demoSnap.state.worktrees?.N4?.worktreePath, '~/.aexus-code/engineering/demo/worktrees/N4');
+		await h.engineering.stopTree(gov.id);
+	});
+
+	test('renders preset-dynamic prompts & FinOps/canvas tier labels, stops hijacking Cmd/Ctrl+K, opens Prompt bar via /, and cleans model placeholder & demo label (P0-05, P1-03, P1-08, P1-13)', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:820px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const startupPreset = ADE_ORGANIZATION_PRESETS.find(p => p.id === 'startup-3tier')!.config;
+		await h.roleSchema.updateConfig(startupPreset);
+		await h.configService.setUserConfiguration(ADE_ORGANIZATION_CONFIG_KEY, startupPreset);
+
+		const leadSess = await sessions.create('aexus-claude', projectUri);
+		const lead = h.projects.addSession(projectUri, leadSess, 'Startup Lead', { role: 'tech-lead' });
+		await h.engineering.initTree({ governorSessionId: lead.id });
+		const bp = [
+			'---',
+			'workspace_isolation: shared',
+			'---',
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Build Feature"]',
+			'```',
+			'',
+			'## Nodes',
+			'### [N1] Build Feature',
+			'- type: task',
+			'- files: src/feature.ts',
+			'- goal: Implement feature',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: lead.id, blueprintText: bp });
+
+		// 1. P1-03: Runtime review prompts use dynamic preset rank names (Reviewer / Builder / Tech Lead), not hardcoded Employee/Worker/Manager
+		await h.engineering.runTree(lead.id, 'user');
+		await waitForNodePhase(h.engineering, lead.id, 'N1', 'employee_review');
+		await waitForDomCondition(() => h.dispatchedTurns.some(t => t.prompt.includes('Engineering Single-Node Review')));
+		const reviewerPrompt = h.dispatchedTurns.find(t => t.prompt.includes('Engineering Single-Node Review'))?.prompt ?? '';
+		assert.ok(reviewerPrompt.includes('Reviewer (L2 Reviewer, `Reviewer ≠ Builder`)'), `Expected dynamic Reviewer prompt, got: ${reviewerPrompt.slice(0, 200)}`);
+		assert.ok(!reviewerPrompt.includes('Employee (L3 Reviewer'), 'Must not hardcode Employee (L3) under startup-3tier');
+		await h.engineering.stopTree(lead.id);
+
+		// 2. Mount AdeEngineeringEditorPane under startup-3tier and check dynamic canvas & FinOps labels
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 820, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, lead.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		assert.ok(host.querySelector('.ade-eng-role-tag.emp')?.textContent?.includes('REVIEWER · L2'), 'Outer shell badge uses active reviewer rank');
+		assert.ok(host.querySelector('.ade-eng-role-tag.wrk')?.textContent?.includes('BUILDER · L3'), 'Inner core badge uses active executor rank');
+
+		// Open FinOps card and verify dynamic 3-Tier FinOps heading & tier labels
+		host.querySelector<HTMLElement>('.ade-eng-tokens-pill')?.click();
+		const taText = host.querySelector('.ade-eng-token-analytics-card')?.textContent ?? '';
+		assert.ok(taText.includes('3-Tier FinOps'), `Expected 3-Tier FinOps heading, got: ${taText.slice(0, 120)}`);
+		assert.ok(!taText.includes('4-Tier FinOps'), 'Must not hardcode 4-Tier FinOps under 3-tier preset');
+
+		// 3. P1-08: Raw Cmd/Ctrl+K must NOT be hijacked (defaultPrevented === false, prompt bar stays hidden)
+		const rootEl = host.querySelector<HTMLElement>('.ade-eng-editor')!;
+		const promptBarEl = host.querySelector<HTMLElement>('.ade-eng-prompt-bar')!;
+		assert.strictEqual(promptBarEl.hidden, true);
+		const cmdKEvent = new mainWindow.KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true, cancelable: true });
+		rootEl.dispatchEvent(cmdKEvent);
+		assert.strictEqual(cmdKEvent.defaultPrevented, false, 'Cmd/Ctrl+K must NOT be hijacked on canvas');
+		assert.strictEqual(promptBarEl.hidden, true, 'Cmd/Ctrl+K must NOT toggle Prompt-to-DAG bar');
+
+		// Plain '/' opens Prompt-to-DAG bar & renders P1-13 "▶ Simulated Demo (0 tok)"
+		const slashEvent = new mainWindow.KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true });
+		rootEl.dispatchEvent(slashEvent);
+		assert.strictEqual(slashEvent.defaultPrevented, true, 'Plain / opens Prompt-to-DAG bar on canvas');
+		assert.strictEqual(promptBarEl.hidden, false);
+		const simBtnText = promptBarEl.querySelector('.ade-eng-prompt-chip.demo')?.textContent ?? '';
+		assert.ok(simBtnText.includes('Simulated Demo'), `Expected Simulated Demo chip label, got: ${simBtnText}`);
+		assert.ok(!simBtnText.includes('Live Demo'));
+		pane.togglePromptToDagBar(false);
+		assert.strictEqual(promptBarEl.hidden, true);
+
+		// 4. P0-05: Node popover model input placeholder uses public shipping model names (zero deepseek-flash[1m])
+		const nodeEl = host.querySelector<HTMLElement>('.ade-eng-node[data-node-id="N1"]')!;
+		nodeEl.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }));
+		const modelInput = host.querySelector<HTMLInputElement>('.ade-eng-pop-model-input');
+		assert.ok(modelInput, 'Model input renders in role popover');
+		assert.ok(modelInput!.placeholder.includes('sonnet, gpt-5, deepseek-reasoner'));
+		assert.ok(!modelInput!.placeholder.includes('deepseek-flash'));
+
+		pane.clearInput();
 	});
 });

@@ -60,6 +60,7 @@ interface ITemplateNodeBlueprint {
 interface IBlueprintTemplateDefinition extends IAdeBlueprintTemplateSummary {
 	readonly maxConcurrency?: number;
 	readonly defaultVerify?: string;
+	readonly orgPreset?: string;
 	readonly nodes: readonly ITemplateNodeBlueprint[];
 	readonly edges: readonly IAdeEngineeringBlueprintEdge[];
 }
@@ -641,7 +642,7 @@ const TEMPLATES: readonly IBlueprintTemplateDefinition[] = [
 
 export function listBlueprintTemplates(treeType?: AdeWorkTreeType): readonly IAdeBlueprintTemplateSummary[] {
 	const items = treeType ? TEMPLATES.filter(t => t.treeType === treeType) : TEMPLATES;
-	return items.map(({ nodes: _n, edges: _e, maxConcurrency: _mc, defaultVerify: _dv, ...summary }) => summary);
+	return items.map(({ nodes: _n, edges: _e, maxConcurrency: _mc, defaultVerify: _dv, orgPreset: _op, ...summary }) => summary);
 }
 
 export function getBlueprintTemplate(templateId: string): IAdeBlueprintTemplateSummary | undefined {
@@ -649,7 +650,7 @@ export function getBlueprintTemplate(templateId: string): IAdeBlueprintTemplateS
 	if (!found) {
 		return undefined;
 	}
-	const { nodes: _n, edges: _e, maxConcurrency: _mc, defaultVerify: _dv, ...summary } = found;
+	const { nodes: _n, edges: _e, maxConcurrency: _mc, defaultVerify: _dv, orgPreset: _op, ...summary } = found;
 	return summary;
 }
 
@@ -661,6 +662,7 @@ export interface IBuildBlueprintFromTemplateOptions {
 	readonly preset?: AdeBlueprintTemplatePreset;
 	readonly workspaceIsolation?: AdeWorkspaceIsolationMode;
 	readonly maxBudgetUsd?: number;
+	readonly orgPreset?: string;
 }
 
 export function buildBlueprintFromTemplate(
@@ -728,7 +730,8 @@ export function buildBlueprintFromTemplate(
 	const edges = tpl.edges.map(e => ({ ...e }));
 	const budgetUsd = options.maxBudgetUsd !== undefined
 		? (options.maxBudgetUsd > 0 ? options.maxBudgetUsd : undefined)
-		: (preset === 'fast-economy' ? Math.min(2, tpl.recommendedBudgetUsd) : undefined);
+		: (preset === 'fast-economy' ? Math.min(2, tpl.recommendedBudgetUsd) : tpl.recommendedBudgetUsd);
+	const orgPreset = options.orgPreset?.trim() || tpl.orgPreset?.trim() || undefined;
 
 	const metadata = {
 		treeType,
@@ -739,6 +742,7 @@ export function buildBlueprintFromTemplate(
 		...(tpl.maxConcurrency !== undefined ? { maxConcurrency: tpl.maxConcurrency } : {}),
 		...(tpl.defaultVerify ? { verify: tpl.defaultVerify } : {}),
 		...(budgetUsd !== undefined ? { maxBudgetUsd: budgetUsd } : {}),
+		...(orgPreset ? { orgPreset } : {}),
 	};
 
 	const posMap = computeAutoLayoutPositions({ nodes: rawNodes, edges, metadata });

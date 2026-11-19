@@ -120,6 +120,49 @@ function formatLaneTitle(lane: AdeInboxLane): string {
 	}
 }
 
+/** Formats the category badge label for an Inbox item based on kind, structured title prefix, and severity. */
+export function formatAdeInboxKindLabel(
+	item: Pick<IAdeInboxItem, 'kind' | 'title'>,
+	severity: AdeInboxSeverity,
+): string {
+	if (item.kind === 'user_gate') {
+		return localize('adeInboxKindGate', "User Gate");
+	}
+	const title = (item.title ?? '').trim();
+	if (/^\[Verify Gate\]/i.test(title) || /Untrusted Verify/i.test(title)) {
+		return localize('adeInboxKindTrustGate', "Trust Gate");
+	}
+	if (/^\[Budget Guardrail\]/i.test(title) || /Budget Guardrail/i.test(title)) {
+		return localize('adeInboxKindBudgetCap', "Budget Cap");
+	}
+	if (/^\[Worktree\b/i.test(title) || /Worktree (?:Merge Conflict|Creation Failed)/i.test(title)) {
+		return localize('adeInboxKindWorktreeAlert', "Worktree Alert");
+	}
+	if (/^\[Persist\b/i.test(title) || /Failed to Save Engineering State/i.test(title)) {
+		return localize('adeInboxKindStorageAlert', "Storage Alert");
+	}
+	if (/^\[Circuit Breaker\]/i.test(title) || /Circuit Breaker/i.test(title)) {
+		return localize('adeInboxKindCircuit', "Circuit Breaker");
+	}
+	return severity === 'critical'
+		? localize('adeInboxKindCriticalAlert', "Critical Alert")
+		: localize('adeInboxKindGov', "Governor Alert");
+}
+
+function resolveAdeInboxKindIcon(item: Pick<IAdeInboxItem, 'kind' | 'title'>, severity: AdeInboxSeverity): ThemeIcon {
+	if (item.kind === 'user_gate') {
+		return Codicon.verifiedFilled;
+	}
+	const title = (item.title ?? '').trim();
+	if (/^\[Verify Gate\]/i.test(title) || /Untrusted Verify/i.test(title)) {
+		return Codicon.shield;
+	}
+	if (/^\[Budget Guardrail\]/i.test(title) || /Budget Guardrail/i.test(title)) {
+		return Codicon.warning;
+	}
+	return severity === 'critical' ? Codicon.error : Codicon.warning;
+}
+
 /** Groups formal inbox items into ordered triage lanes (Critical → Needs Decision → Updates → Resolved). */
 export function groupAdeInboxItemsByLane(items: readonly IAdeInboxItem[]): Map<'critical' | 'gate' | 'info' | 'resolved', IAdeInboxItem[]> {
 	const lanes = new Map<'critical' | 'gate' | 'info' | 'resolved', IAdeInboxItem[]>();
@@ -281,7 +324,6 @@ export class AdeInboxPanel extends Disposable {
 		clearNode(this.listEl);
 
 		const roleConfig = this.getRoleConfig();
-		const rankFilters: AdeInboxRankFilter[] = ['all', ...roleConfig.ranks.map(r => r.id)];
 		const allFormalItems = this.inbox.list({ includeResolved: this.showResolved });
 		const allUnreadReplies = this.collectUnreadReplies();
 
@@ -299,6 +341,13 @@ export class AdeInboxPanel extends Disposable {
 		for (const entry of allUnreadReplies) {
 			rankCounts[entry.rank] = (rankCounts[entry.rank] ?? 0) + 1;
 		}
+		// P1-07: Hide pureExecution leaf ranks (e.g. Worker) from filter pills when their count is 0
+		const rankFilters: AdeInboxRankFilter[] = [
+			'all',
+			...roleConfig.ranks
+				.filter(r => !r.pureExecution || (rankCounts[r.id] ?? 0) > 0 || this.selectedRank === r.id)
+				.map(r => r.id),
+		];
 
 		const filteredFormalItems = this.selectedRank === 'all'
 			? allFormalItems
@@ -574,12 +623,7 @@ export class AdeInboxPanel extends Disposable {
 	}
 
 	private formatKindLabel(item: IAdeInboxItem, severity: AdeInboxSeverity): string {
-		if (item.kind === 'user_gate') {
-			return localize('adeInboxKindGate', "User Gate");
-		}
-		return severity === 'critical'
-			? localize('adeInboxKindCircuit', "Circuit Breaker")
-			: localize('adeInboxKindGov', "Governor Alert");
+		return formatAdeInboxKindLabel(item, severity);
 	}
 
 	private renderCard(
@@ -614,7 +658,7 @@ export class AdeInboxPanel extends Disposable {
 		const badge = append(topRow, $(`span.ade-inbox-kind-pill.kind-${item.kind}`));
 		badge.classList.add(`sev-${severity}`);
 		const badgeIco = append(badge, $('span'));
-		badgeIco.classList.add(...ThemeIcon.asClassNameArray(item.kind === 'user_gate' ? Codicon.verifiedFilled : severity === 'critical' ? Codicon.error : Codicon.warning));
+		badgeIco.classList.add(...ThemeIcon.asClassNameArray(resolveAdeInboxKindIcon(item, severity)));
 		append(badge, $('span', {}, this.formatKindLabel(item, severity)));
 
 		append(topRow, $(`span.ade-inbox-rank-pill.compact.rank-${itemRank}`, {

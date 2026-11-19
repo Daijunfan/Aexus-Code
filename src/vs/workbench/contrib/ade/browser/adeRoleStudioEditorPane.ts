@@ -29,6 +29,7 @@ import {
 	IAdeRankDefinition,
 	normalizeAdeOrganizationConfig,
 	previewCompiledRankPrompt,
+	resolveWorkTreeSlotRank,
 	sanitizeRankId,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -770,6 +771,87 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		};
 		addViewTab('editor', localize('adeRoleStudioViewEditor', "Rank Editor"), Codicon.edit);
 		addViewTab('matrix', localize('adeRoleStudioViewMatrix', "Permission Matrix"), Codicon.table);
+
+		// Work-Tree DAG 4-Slot Mapping Bar (P1-02)
+		const normalizedForSlots = draftToConfig(this.draft);
+		const sortedSlotRanks = [...this.draft.ranks].sort((a, b) => a.tier - b.tier);
+		const slotsBar = append(header, $('.ade-rs-slots-bar', {
+			role: 'group',
+			'aria-label': localize('adeRoleStudioSlotsAria', "Work-Tree DAG Slot Mapping"),
+		}));
+		const slotsHead = append(slotsBar, $('.ade-rs-slots-head'));
+		append(slotsHead, $('span.ade-rs-presets-label', {}, localize('adeRoleStudioSlotsLabel', "Work-Tree DAG Slots:")));
+		const slotsGrid = append(slotsBar, $('.ade-rs-slots-grid'));
+		const slotDefs: readonly { readonly slot: AdeWorkTreeSlot; readonly label: string; readonly hint: string }[] = [
+			{ slot: 'orchestrator', label: localize('adeRoleSlotOrchestrator', "Orchestrator"), hint: localize('adeRoleSlotOrchestratorHint', "Owns the DAG tree & blueprint") },
+			{ slot: 'segment_owner', label: localize('adeRoleSlotSegmentOwner', "Segment Owner"), hint: localize('adeRoleSlotSegmentOwnerHint', "Secondary review, merge & escalation") },
+			{ slot: 'reviewer', label: localize('adeRoleSlotReviewer', "Adversarial Reviewer"), hint: localize('adeRoleSlotReviewerHint', "Single-node diff & QA verification") },
+			{ slot: 'executor', label: localize('adeRoleSlotExecutor', "Pure Executor"), hint: localize('adeRoleSlotExecutorHint', "Clean coding leaf worker") },
+		];
+		const resolvedSlotRanks: Record<AdeWorkTreeSlot, IAdeRankDefinition> = {
+			orchestrator: resolveWorkTreeSlotRank(normalizedForSlots, 'orchestrator'),
+			segment_owner: resolveWorkTreeSlotRank(normalizedForSlots, 'segment_owner'),
+			reviewer: resolveWorkTreeSlotRank(normalizedForSlots, 'reviewer'),
+			executor: resolveWorkTreeSlotRank(normalizedForSlots, 'executor'),
+		};
+		for (const def of slotDefs) {
+			const slotItem = append(slotsGrid, $('.ade-rs-slot-item', { 'data-slot': def.slot, title: def.hint }));
+			const selectId = `ade-rs-slot-${def.slot}`;
+			append(slotItem, $('label.ade-rs-slot-label', { for: selectId }, def.label));
+			const selectEl = append(slotItem, $('select.ade-rs-select.ade-rs-slot-select', {
+				id: selectId,
+				'data-slot': def.slot,
+				'aria-label': localize('adeRoleSlotSelectAria', "DAG slot {0}", def.label),
+			})) as HTMLSelectElement;
+			const currentId = this.draft.slots?.[def.slot] ?? resolvedSlotRanks[def.slot].id;
+			for (const r of sortedSlotRanks) {
+				const opt = append(selectEl, $('option', { value: r.id }, `L${r.tier} · ${r.name}`)) as HTMLOptionElement;
+				opt.selected = r.id === currentId;
+			}
+			this.renderDisposables.add(addDisposableListener(selectEl, EventType.CHANGE, () => {
+				if (!this.draft.slots) {
+					this.draft.slots = {
+						orchestrator: resolvedSlotRanks.orchestrator.id,
+						segment_owner: resolvedSlotRanks.segment_owner.id,
+						reviewer: resolvedSlotRanks.reviewer.id,
+						executor: resolvedSlotRanks.executor.id,
+					};
+				}
+				this.draft.slots[def.slot] = selectEl.value;
+				this.markDirty();
+				this.render();
+			}));
+		}
+		const slotWarnings: Array<{ readonly code: string; readonly text: string }> = [];
+		if (resolvedSlotRanks.reviewer.id === resolvedSlotRanks.executor.id) {
+			slotWarnings.push({
+				code: 'reviewer-equals-executor',
+				text: localize(
+					'adeRoleSlotWarnSameReviewerExecutor',
+					"Adversarial Reviewer and Pure Executor share rank '{0}' — self-review disables independent adversarial QA.",
+					resolvedSlotRanks.reviewer.name,
+				),
+			});
+		}
+		if (!resolvedSlotRanks.executor.pureExecution) {
+			slotWarnings.push({
+				code: 'executor-not-pure',
+				text: localize(
+					'adeRoleSlotWarnExecutorNotPure',
+					"Pure Executor slot '{0}' does not have Pure Execution Leaf enabled — DAG workers will receive ADE control prompts/APIs.",
+					resolvedSlotRanks.executor.name,
+				),
+			});
+		}
+		if (slotWarnings.length > 0) {
+			const warnWrap = append(slotsBar, $('.ade-rs-slot-warnings', { role: 'alert' }));
+			for (const w of slotWarnings) {
+				const warnEl = append(warnWrap, $('.ade-rs-slot-warning', { 'data-slot-warning': w.code }));
+				const ico = append(warnEl, $('span.ade-rs-slot-warning-icon', { 'aria-hidden': 'true' }));
+				ico.classList.add(...ThemeIcon.asClassNameArray(Codicon.warning));
+				append(warnEl, $('span', {}, w.text));
+			}
+		}
 
 		// Optional Import JSON Drawer
 		if (this.importBarVisible) {

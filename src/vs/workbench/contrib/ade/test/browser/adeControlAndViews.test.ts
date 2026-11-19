@@ -50,6 +50,7 @@ import { IEditorGroup, IEditorGroupsService, IEditorPart } from '../../../../ser
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IWorkbenchEnvironmentService } from '../../../../services/environment/common/environmentService.js';
 import { IExtensionService } from '../../../../services/extensions/common/extensions.js';
+import { IStatusbarEntry, IStatusbarEntryAccessor, IStatusbarService } from '../../../../services/statusbar/browser/statusbar.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { IWorkbenchModeService } from '../../../../services/workbenchMode/common/workbenchMode.js';
 import { IWorkingCopyFileService } from '../../../../services/workingCopy/common/workingCopyFileService.js';
@@ -63,10 +64,13 @@ import { ISCMProvider, ISCMRepository, ISCMResource, ISCMResourceGroup, ISCMServ
 import { IOverlayWebview, IWebviewService } from '../../../webview/browser/webview.js';
 import { IWebviewViewService, WebviewView } from '../../../webviewView/browser/webviewViewService.js';
 import '../../browser/ade.css';
-import '../../browser/ade.contribution.js';
+import {
+	ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID,
+	AdeAutonomousModeStatusContribution,
+} from '../../browser/ade.contribution.js';
 import '../../browser/adeControlHandler.js';
 import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
-import { AdeInboxPanel } from '../../browser/adeInboxView.js';
+import { AdeInboxPanel, formatAdeInboxKindLabel } from '../../browser/adeInboxView.js';
 import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
@@ -2901,7 +2905,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			qaAllowedReadContext: true,
 			qaDeniedSend: true,
 			qaDeniedProjectDelete: true,
-			inboxRankChipLabels: ['All', 'CTO', 'QA', 'Cod'],
+			inboxRankChipLabels: ['All', 'CTO', 'QA'],
 			studioPreviewIncludesInboxApi: true,
 			studioSavedCustomRankCount: 4,
 		});
@@ -3011,5 +3015,322 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(studioInput.isDirty(), false, 'EditorInput.save() clears dirty flag');
 		assert.strictEqual(h.projects.getAgent(liveGov.id)?.role, 'director', 'Renaming rank ID in Role Studio migrates live session role');
 		assert.ok(roleSchema.getConfig().ranks.find(r => r.id === 'manager')?.allowedApis.includes('engineering.integrate'), 'Permission Matrix grant persisted');
+	});
+
+	test('enforces RBAC lineage, live rank intersection, engineering.destroy on session delete/archive, review slot/session binding, and human-only verifyTrust (P0-01, P0-03, P1-04, P1-06)', async () => {
+		const h = createHarness([alpha, beta]);
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-gov') }, 'Gov Root', { role: 'governor' });
+		const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-mgr') }, 'Mgr Sub', { parentId: gov.id, role: 'manager' });
+		const emp = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-emp') }, 'Emp Sub', { parentId: mgr.id, role: 'employee' });
+		const wrk = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/rbac-wrk') }, 'Wrk Leaf', { parentId: emp.id });
+		const otherGov = h.projects.addSession(beta, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-other-gov') }, 'Other Gov', { role: 'governor' });
+		const otherEmp = h.projects.addSession(beta, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-other-emp') }, 'Other Emp', { parentId: otherGov.id, role: 'employee' });
+
+		// Stub engineering service with a live tree owned by `gov`, bound to `emp` & `mgr` on node N1, plus verify-trust methods
+		let verifyTrustListCalls = 0;
+		let verifyTrustRevokeAllCalls = 0;
+		const reviewCalls: Array<{ nodeId: string; role: string; verdict: string }> = [];
+		const engStub = new class extends mock<IAdeEngineeringService>() {
+			override async whenReady(): Promise<void> { }
+			override hasTree(id: string): boolean { return id === gov.id; }
+			override listTrees() { return []; }
+			override getTreeSnapshot(id: string) {
+				if (id !== gov.id) { return undefined; }
+				return upcastPartial<NonNullable<ReturnType<IAdeEngineeringService['getTreeSnapshot']>>>({
+					governorSessionId: gov.id,
+					state: {
+						treeType: 'engineering',
+						governorSessionId: gov.id,
+						projectPath: alpha.fsPath,
+						runStatus: 'running',
+						createdAt: 0,
+						updatedAt: 0,
+						managerAgentsBySegment: {},
+						nodes: {},
+						reports: {},
+						events: [],
+					},
+					progress: { totalNodes: 1, completedNodes: 0, totalTasks: 1, completedTasks: 0, runningNodes: 1, failedNodes: 0, waitingGates: 0 },
+					nodes: [{
+						node: { id: 'N1', title: 'Core', type: 'task', critical: false },
+						runtime: {
+							nodeId: 'N1',
+							phase: 'employee_review',
+							completed: false,
+							employeeRejectCount: 0,
+							formalFailureCount: 0,
+							employeeAgentId: emp.id,
+							managerAgentId: mgr.id,
+							workerAgentId: wrk.id,
+						},
+						visualStatus: 'running',
+						isSegmentTail: true,
+						upstreamReports: [],
+					}],
+				});
+			}
+			override async submitReview(params: { nodeId: string; role: 'employee' | 'manager'; verdict: 'pass' | 'reject' | 'guidance' }) {
+				reviewCalls.push({ nodeId: params.nodeId, role: params.role, verdict: params.verdict });
+				return this.getTreeSnapshot(gov.id)!;
+			}
+			override listTrustedVerifyCommands() {
+				verifyTrustListCalls++;
+				return [{ projectPath: alpha.fsPath, hash: 'a'.repeat(64), commandPreview: 'npm test', approvedAt: 1000 }];
+			}
+			override revokeAllTrustedVerifyCommands() {
+				verifyTrustRevokeAllCalls++;
+				return 1;
+			}
+		}();
+		h.instantiation.stub(IAdeEngineeringService, engStub);
+
+		const exec = <T = unknown>(action: string, params: Record<string, unknown> = {}) =>
+			h.control<T>(action, params);
+
+		// 1. P1-06: Secretary compiled prompt exposes engineering generate, template, and role CLI docs
+		h.projects.configureSecretary({ engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-sec') });
+		const secPreamble = h.resolvePrompt({ resource: URI.parse('aexus-claude:/rbac-sec'), agentId: ADE_SECRETARY_ID });
+		assert.ok(secPreamble?.includes('engineering generate'));
+		assert.ok(secPreamble?.includes('engineering template'));
+		assert.ok(secPreamble?.includes('role apply-preset'));
+
+		// 2. Archived / missing caller session rejected when _verifiedCaller is true
+		await assert.rejects(
+			() => exec('session.list', { caller: 'manager', _verifiedCaller: true, _callerSessionId: 'non-existent-session' }),
+			/caller session no longer active/i,
+		);
+
+		// 3. session.create blocks omitting --parent (root spawn), peer/superior rank spawn, and cross-subtree spawn
+		await assert.rejects(
+			() => exec('session.create', { engine: 'claude', project: alpha.fsPath, caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/must specify '--parent'/i,
+		);
+		await assert.rejects(
+			() => exec('session.create', { engine: 'claude', parent: mgr.id, role: 'manager', caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/cannot create rank/i,
+		);
+		await assert.rejects(
+			() => exec('session.create', { engine: 'claude', parent: otherGov.id, role: 'employee', caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/outside your subordinate subtree/i,
+		);
+		const createdUnderMgr = await exec<IAdeSessionSummary>('session.create', {
+			engine: 'claude',
+			parent: mgr.id,
+			role: 'employee',
+			open: false,
+			caller: 'manager',
+			_verifiedCaller: true,
+			_callerSessionId: mgr.id,
+		});
+		assert.strictEqual(createdUnderMgr?.parentId, mgr.id);
+
+		// 4. session.role blocks self-promotion and promotion to peer/superior rank
+		await assert.rejects(
+			() => exec('session.role', { id: mgr.id, role: 'governor', caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/cannot change role of itself/i,
+		);
+		await assert.rejects(
+			() => exec('session.role', { id: emp.id, role: 'manager', caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/cannot assign role rank/i,
+		);
+
+		// 5. session.move blocks detach-to-root and cross-subtree moves
+		await assert.rejects(
+			() => exec('session.move', { id: emp.id, parent: 'none', caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/top-level root/i,
+		);
+		await assert.rejects(
+			() => exec('session.move', { id: otherEmp.id, parent: mgr.id, caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/outside your subordinate subtree/i,
+		);
+
+		// 6. session.send allows descendants + direct parent, blocks grandparent/unrelated roots/self
+		await assert.rejects(
+			() => exec('session.send', { id: gov.id, prompt: 'upward jump', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
+			/cannot send messages to rank/i,
+		);
+		await assert.rejects(
+			() => exec('session.send', { id: otherGov.id, prompt: 'lateral jump', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
+			/cannot send messages to rank|outside your subordinate subtree/i,
+		);
+		await assert.rejects(
+			() => exec('session.send', { id: emp.id, prompt: 'self msg', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
+			/cannot send messages to itself/i,
+		);
+		// Direct parent send succeeds
+		await exec('session.send', { id: mgr.id, prompt: 'status report', open: false, caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id });
+		// Descendant send succeeds
+		await exec('session.send', { id: wrk.id, prompt: 'fix unit test', open: false, caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id });
+
+		// 7. session.stop / session.archive / session.delete block targeting superior/unrelated and require engineering.destroy on tree roots
+		await assert.rejects(
+			() => exec('session.stop', { id: gov.id, caller: 'manager', _verifiedCaller: true, _callerSessionId: mgr.id }),
+			/cannot stop rank/i,
+		);
+		// Even a custom top-tier rank WITHOUT engineering.destroy cannot wipe a Governor's tree via session.delete --force
+		await assert.rejects(
+			() => exec('session.delete', { id: gov.id, force: true, caller: 'governor' }),
+			/Permission denied/i,
+		);
+		await assert.rejects(
+			() => exec('session.archive', { id: gov.id, caller: 'governor' }),
+			/Permission denied/i,
+		);
+
+		// 8. Live rank intersection: demoting mgr to pure worker invalidates its stale 'manager' capability token immediately!
+		h.projects.setAgentRole(mgr.id, undefined);
+		const demotedSub = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/rbac-demoted') }, 'Demoted Leaf', { parentId: gov.id });
+		await assert.rejects(
+			() => exec('session.create', { engine: 'claude', parent: demotedSub.id, caller: 'manager', _verifiedCaller: true, _callerSessionId: demotedSub.id }),
+			/Pure Execution/i,
+		);
+		// Restore mgr role for review checks
+		h.projects.setAgentRole(mgr.id, 'manager');
+
+		// 9. engineering.review: Employee cannot spoof --role manager; unrelated tree or unbound reviewer rejected; bound reviewer succeeds
+		await assert.rejects(
+			() => exec('engineering.review', { governor: gov.id, node: 'N1', role: 'manager', verdict: 'pass', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
+			/cannot submit a manager-tier review verdict/i,
+		);
+		await assert.rejects(
+			() => exec('engineering.review', { governor: gov.id, node: 'N1', role: 'employee', verdict: 'pass', caller: 'employee', _verifiedCaller: true, _callerSessionId: otherEmp.id }),
+			/does not belong to Engineering tree/i,
+		);
+		await assert.rejects(
+			() => exec('engineering.review', { governor: gov.id, node: 'N1', role: 'employee', verdict: 'pass', caller: 'employee', _verifiedCaller: true, _callerSessionId: createdUnderMgr!.id }),
+			/does not match bound reviewer session/i,
+		);
+		await exec('engineering.review', { governor: gov.id, node: 'N1', role: 'employee', verdict: 'pass', report: 'LGTM', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id });
+		assert.strictEqual(reviewCalls.length, 1);
+		assert.strictEqual(reviewCalls[0].role, 'employee');
+
+		// 10. engineering.verifyTrust.list / revoke are strictly direct-human-only (denied even for Secretary & Governor)
+		await assert.rejects(() => exec('engineering.verifyTrust.list', { caller: 'secretary' }), /direct human/i);
+		await assert.rejects(() => exec('engineering.verifyTrust.revoke', { all: true, caller: 'secretary' }), /direct human/i);
+		await assert.rejects(() => exec('engineering.verifyTrust.list', { caller: 'governor' }), /Permission denied/i);
+		const listedTrust = await exec<{ entries: readonly unknown[] }>('engineering.verifyTrust.list', {});
+		assert.strictEqual(listedTrust?.entries.length, 1);
+		assert.strictEqual(verifyTrustListCalls, 1);
+		const revokedTrust = await exec<{ revokedCount: number }>('engineering.verifyTrust.revoke', { all: true });
+		assert.strictEqual(revokedTrust?.revokedCount, 1);
+		assert.strictEqual(verifyTrustRevokeAllCalls, 1);
+	});
+
+	test('renders Role Studio 4-slot Work-Tree DAG mapping bar with dirty/save/revert and inline warnings (P1-02)', async () => {
+		const h = createHarness([alpha]);
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+
+		const studioHost = append(document.body, $('.monaco-workbench.ade-role-studio-slots-test'));
+		store.add({ dispose: () => studioHost.remove() });
+		const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
+		const studioPane = store.add(h.instantiation.createInstance(AdeRoleStudioEditorPane, mockGroup));
+		studioPane.create(studioHost);
+		const studioInput = store.add(h.instantiation.createInstance(AdeRoleStudioEditorInput, 'governor'));
+		await studioPane.setInput(studioInput, undefined, {}, CancellationToken.None);
+
+		const getSelect = (slot: string) => studioHost.querySelector<HTMLSelectElement>(`select.ade-rs-slot-select[data-slot="${slot}"]`)!;
+		assert.strictEqual(getSelect('orchestrator').value, 'governor');
+		assert.strictEqual(getSelect('segment_owner').value, 'manager');
+		assert.strictEqual(getSelect('reviewer').value, 'employee');
+		assert.strictEqual(getSelect('executor').value, 'worker');
+		assert.strictEqual(studioHost.querySelectorAll('.ade-rs-slot-warning').length, 0, 'Default 4-tier slots must have 0 warnings');
+
+		// Set reviewer === executor -> marks dirty & shows self-review warning
+		getSelect('reviewer').value = 'worker';
+		getSelect('reviewer').dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+		assert.strictEqual(studioInput.isDirty(), true);
+		assert.ok(studioHost.querySelector('[data-slot-warning="reviewer-equals-executor"]'), 'Must warn when reviewer === executor');
+
+		// Set executor to non-pure rank -> shows executor-not-pure warning
+		getSelect('executor').value = 'employee';
+		getSelect('executor').dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+		assert.ok(studioHost.querySelector('[data-slot-warning="executor-not-pure"]'), 'Must warn when executor is not pureExecution');
+
+		// Revert discards slot changes cleanly
+		await studioInput.revert(1);
+		assert.strictEqual(studioInput.isDirty(), false);
+		assert.strictEqual(getSelect('reviewer').value, 'employee');
+		assert.strictEqual(getSelect('executor').value, 'worker');
+		assert.strictEqual(studioHost.querySelectorAll('.ade-rs-slot-warning').length, 0);
+
+		// Save persists updated slot mapping
+		getSelect('segment_owner').value = 'governor';
+		getSelect('segment_owner').dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+		await studioInput.save(1);
+		assert.strictEqual(studioInput.isDirty(), false);
+		assert.strictEqual(roleSchema.getConfig().slots?.segment_owner, 'governor');
+	});
+
+	test('maps Inbox alert kind badges accurately, hides 0-count pureExecution chips, and updates Safe/Autonomous status bar pill (P1-07, P1-09)', async () => {
+		// 1. P1-07: formatAdeInboxKindLabel accuracy
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'user_gate', title: 'Gate U1' }, 'gate'), 'User Gate');
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'governor_message', title: '[Verify Gate] Blocked Untrusted Verify Command' }, 'critical'), 'Trust Gate');
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'governor_message', title: '[Budget Guardrail] Paused DAG ($2 / $2)' }, 'critical'), 'Budget Cap');
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'governor_message', title: '[Worktree Error] Creation failed' }, 'critical'), 'Worktree Alert');
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'governor_message', title: '[Persist Error] Disk full' }, 'critical'), 'Storage Alert');
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'governor_message', title: '[Circuit Breaker] Node N2 failed 3x' }, 'critical'), 'Circuit Breaker');
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'governor_message', title: 'Unexpected failure' }, 'critical'), 'Critical Alert');
+		assert.strictEqual(formatAdeInboxKindLabel({ kind: 'governor_message', title: 'FYI update' }, 'info'), 'Governor Alert');
+
+		// 2. P1-07: Hide 0-count pureExecution rank chip (Wrk) until a pure-rank item/reply exists
+		const h = createHarness([alpha]);
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+		const inboxStub = new class extends mock<IAdeInboxService>() {
+			override readonly onDidChange = Event.None;
+			override list() { return []; }
+		}();
+		const engStub = new class extends mock<IAdeEngineeringService>() {
+			override listTrees() { return []; }
+		}();
+		const host = append(document.body, $('.ade-inbox-pure-filter-test'));
+		store.add({ dispose: () => host.remove() });
+		const panel = store.add(new AdeInboxPanel(host, inboxStub, engStub, h.editorsStub, undefined, h.projects, h.instantiation.get(IAdeSessionsService), roleSchema));
+		panel.setVisible(true);
+		assert.deepStrictEqual(
+			[...host.querySelectorAll('.ade-inbox-rank-chip-label')].map(el => el.textContent),
+			['All', 'Gov', 'Mgr', 'Emp'],
+			'0-count pureExecution Wrk chip must stay hidden',
+		);
+
+		// When a pure Worker session has an unread reply, Wrk chip dynamically appears
+		const wrkSess = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/unread-wrk') }, 'Pure Worker');
+		h.projects.syncSessionItem(wrkSess.session!.resource, { status: 'idle' }, false);
+		h.projects.syncSessionItem(wrkSess.session!.resource, { status: 'working' }, false);
+		h.projects.syncSessionItem(wrkSess.session!.resource, { status: 'idle' }, false);
+		panel.render();
+		assert.deepStrictEqual(
+			[...host.querySelectorAll('.ade-inbox-rank-chip-label')].map(el => el.textContent),
+			['All', 'Gov', 'Mgr', 'Emp', 'Wrk'],
+			'Pure Wrk chip must surface when count > 0',
+		);
+
+		// 3. P1-09: Safe vs Autonomous Status Bar pill reacts to aexus.ade.autonomousMode
+		let latestEntry: IStatusbarEntry | undefined;
+		const statusbarStub = new class extends mock<IStatusbarService>() {
+			override addEntry(entry: IStatusbarEntry): IStatusbarEntryAccessor {
+				latestEntry = entry;
+				return {
+					update: (next: IStatusbarEntry) => { latestEntry = next; },
+					dispose: () => { },
+				};
+			}
+		}();
+		const configService = new TestConfigurationService({ 'aexus.ade.autonomousMode': false });
+		store.add(new AdeAutonomousModeStatusContribution(statusbarStub, configService));
+		assert.strictEqual(latestEntry?.text, '$(shield) ADE: Safe Mode');
+		assert.strictEqual(latestEntry?.kind, 'standard');
+		assert.strictEqual(latestEntry?.command, ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID);
+
+		await configService.setUserConfiguration('aexus.ade.autonomousMode', true);
+		configService.onDidChangeConfigurationEmitter.fire({
+			affectsConfiguration: (k: string) => k === 'aexus.ade.autonomousMode',
+		} as never);
+		assert.strictEqual(latestEntry?.text, '$(flame) ADE: Autonomous');
+		assert.strictEqual(latestEntry?.kind, 'warning');
 	});
 });

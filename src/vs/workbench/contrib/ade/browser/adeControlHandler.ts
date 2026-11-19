@@ -47,6 +47,7 @@ import { synthesizeBlueprintFromPrompt } from '../../../../platform/ade/common/a
 import {
 	ADE_ORGANIZATION_PRESETS,
 	ADE_PRIMITIVE_APIS,
+	canRankSupervise,
 	checkAdeApiPermission,
 	compileAdeRolePrompt,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
@@ -735,11 +736,11 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			...rankLines,
 			'- Complete ADE Macro Control CLI (`aexus-ade` is directly on your PATH; pass `--json` for structured output):',
 			'  - Viewport & Inspector: `aexus-ade status --json` | `aexus-ade view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh] --json`',
-			'  - Organization, Custom Ranks & Primitive APIs: `aexus-ade role list --json` | `aexus-ade role apis --json` | `aexus-ade role presets --json` | `aexus-ade role studio`',
+			'  - Organization, Custom Ranks & Primitive APIs: `aexus-ade role list --json` | `aexus-ade role apis --json` | `aexus-ade role presets --json` | `aexus-ade role apply-preset <presetId>` | `aexus-ade role set-tier <rankId> ...` | `aexus-ade role reset` | `aexus-ade role studio`',
 			'  - Projects & Git/Files Inspector: `aexus-ade project list` | `aexus-ade project add <path...> [--name <label>]` | `aexus-ade project select <target>` | `aexus-ade project remove <target>` | `aexus-ade project delete <target> [--sessions] [--files] [--permanent]` | `aexus-ade project focus <target>` | `aexus-ade project home` | `aexus-ade project forward` | `aexus-ade project move <source> (--before <target> | --after <target>)` | `aexus-ade project changes [target]` | `aexus-ade project files [target] [--path <subpath>] [--depth <n>]` | `aexus-ade project open-file <file> [--project <target>] [--side]` | `aexus-ade project open-diff <file> [--project <target>]`',
 			'  - Coding Agent Engines (claude, codex, kilo, opencode, dsh, agy, cline, pi): `aexus-ade engine list` | `aexus-ade engine sessions <engine> [--project <target>] [--limit <n>]`',
 			'  - Sessions & Ranks: `aexus-ade session list [--project <p>] [--parent <id|root>] [--role <r>] [--engine <e>] [--status <s>] [--unread] [--archived] [--all]` | `aexus-ade session info <id>` | `aexus-ade session subordinates [id] [--recursive]` | `aexus-ade session tree [id]` | `aexus-ade session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <r>] [--draft [text]] [--side] [--no-open]` | `aexus-ade session attach --engine <e> --native-id <nid> [--project <p>] [--title <t>] [--parent <id>] [--role <r>] [--side] [--no-open]` | `aexus-ade session connect <id> --engine <e> [--native-id <nid>] [--side] [--no-open]` | `aexus-ade session open <id> [--side]` | `aexus-ade session select <id>` | `aexus-ade session close <id>` | `aexus-ade session mark-read <id|--all>` | `aexus-ade session draft <id> [text|--clear]` | `aexus-ade session rename <id> <title>` | `aexus-ade session role <id> <rankId|worker|none>` | `aexus-ade session move <id> <parentId|none> [--project <p>]` | `aexus-ade session reorder <id> (--before <targetId> | --after <targetId>)` | `aexus-ade session send <id> <prompt> [--wait]` | `aexus-ade session history <id> [--limit <n>]` | `aexus-ade session stop <id>` | `aexus-ade session archive <id>` | `aexus-ade session unarchive <id>` | `aexus-ade session detach <id>` | `aexus-ade session delete <id> [--force]`',
-			'  - Engineering DAG Orchestration: `aexus-ade engineering init --governor <id> [--on-children <relocate|delete> --target <id>] [--open]` | `aexus-ade engineering list [--project <path>]` | `aexus-ade engineering open --governor <id> [--side]` | `aexus-ade engineering blueprint get --governor <id> [--raw]` | `aexus-ade engineering blueprint validate (--file <path> | --text <md>)` | `aexus-ade engineering blueprint apply --governor <id> --file <path> [--force-stop-running]` | `aexus-ade engineering configure --governor <id> [--node <nodeId>|--all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>]` | `aexus-ade engineering run --governor <id>` | `aexus-ade engineering pause --governor <id>` | `aexus-ade engineering resume --governor <id>` | `aexus-ade engineering stop --governor <id>` | `aexus-ade engineering reset --governor <id> [--node <nodeId>] [--keep-completed]` | `aexus-ade engineering remove --governor <id>` | `aexus-ade engineering status --governor <id> [--node <nodeId>]` | `aexus-ade engineering diff --governor <id> --node <nodeId>` | `aexus-ade engineering reports --governor <id>` | `aexus-ade engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]` | `aexus-ade engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]` | `aexus-ade engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]`',
+			'  - Engineering DAG Orchestration: `aexus-ade engineering init --governor <id> [--on-children <relocate|delete> --target <id>] [--open]` | `aexus-ade engineering list [--project <path>]` | `aexus-ade engineering open --governor <id> [--side]` | `aexus-ade engineering generate --governor <id> --prompt "<goal>" [--engine <e>] [--budget <usd>]` | `aexus-ade engineering template list [--type <engineering|research>]` | `aexus-ade engineering template apply --governor <id> --template <id> [--preset <balanced|max-quality|fast-economy>]` | `aexus-ade engineering blueprint get --governor <id> [--raw]` | `aexus-ade engineering blueprint validate (--file <path> | --text <md>)` | `aexus-ade engineering blueprint apply --governor <id> --file <path> [--force-stop-running]` | `aexus-ade engineering configure --governor <id> [--node <nodeId>|--all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>]` | `aexus-ade engineering run --governor <id>` | `aexus-ade engineering pause --governor <id>` | `aexus-ade engineering resume --governor <id>` | `aexus-ade engineering stop --governor <id>` | `aexus-ade engineering reset --governor <id> [--node <nodeId>] [--keep-completed]` | `aexus-ade engineering remove --governor <id>` | `aexus-ade engineering status --governor <id> [--node <nodeId>]` | `aexus-ade engineering diff --governor <id> --node <nodeId>` | `aexus-ade engineering reports --governor <id>` | `aexus-ade engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]` | `aexus-ade engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]` | `aexus-ade engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]`',
 			'  - ADE Inbox: `aexus-ade inbox list [--unread-only] [--governor <id>]` | `aexus-ade inbox post --from <governorId> --message <text>` | `aexus-ade inbox mark-read (<id>|--all)` | `aexus-ade inbox resolve --id <msgId>`',
 			'  - Secretary Self-Management: `aexus-ade secretary [status | open [--side] | engine <e> | reset [--engine <e>] | send <prompt> [--wait] | history [--limit <n>] | stop | draft [text|--clear] | mark-read]`',
 		].join('\n');
@@ -929,6 +930,25 @@ async function sendMessageToSessionResource(chatService: IChatService | undefine
 	}
 }
 
+function isStrictDescendantOf(projects: IAdeProjectsService, candidateId: string, ancestorId: string): boolean {
+	if (!candidateId || !ancestorId || candidateId === ancestorId) {
+		return false;
+	}
+	const visited = new Set<string>([candidateId]);
+	let current = projects.getAgent(candidateId)?.parentId;
+	while (current) {
+		if (current === ancestorId) {
+			return true;
+		}
+		if (visited.has(current)) {
+			break;
+		}
+		visited.add(current);
+		current = projects.getAgent(current)?.parentId;
+	}
+	return false;
+}
+
 export async function executeAdeControlRequest(
 	accessor: ServicesAccessor,
 	arg1: IAdeControlDispatchRequest | string,
@@ -969,6 +989,123 @@ export async function executeAdeControlRequest(
 	if (!permission.allowed) {
 		throw new Error(permission.reason ?? localize('adeApiPermissionDenied', "Permission denied for action '{0}'.", String(action)));
 	}
+
+	const rawCallerStr = typeof params.caller === 'string' ? params.caller.trim().toLowerCase() : '';
+	const isHumanOrSecretary = params.caller === undefined || params.caller === null
+		|| (typeof params.caller === 'string' && (!rawCallerStr || rawCallerStr === 'user' || rawCallerStr === 'human' || rawCallerStr === 'secretary'));
+	const rawCallerSessionId = typeof params._callerSessionId === 'string' && params._callerSessionId.trim()
+		? params._callerSessionId.trim()
+		: undefined;
+	const isVerifiedSessionCaller = params._verifiedCaller === true;
+
+	let callerAgent: IAdeAgent | undefined;
+	let callerHasSubs = false;
+	let effectiveCallerRank = permission.rankId ?? rawCallerStr;
+	if (!isHumanOrSecretary && (isVerifiedSessionCaller || rawCallerSessionId)) {
+		if (!rawCallerSessionId) {
+			throw new Error(localize('adeCallerSessionInactive', "Permission denied: caller session no longer active."));
+		}
+		const foundCaller = projects.getAgent(rawCallerSessionId);
+		if (!foundCaller || projects.isArchived(foundCaller.id)) {
+			throw new Error(localize('adeCallerSessionInactive', "Permission denied: caller session no longer active."));
+		}
+		callerAgent = foundCaller;
+		callerHasSubs = projects.hasSubordinates(foundCaller.id);
+		const liveRank = resolveAdeAgentRank(foundCaller, callerHasSubs, roleConfig);
+		const liveRankDef = resolveEffectiveRankDefinition(roleConfig, foundCaller.role, callerHasSubs);
+		if (liveRankDef.pureExecution || isPureExecutionRank(roleConfig, liveRank)) {
+			throw new Error(localize('adeCallerDemotedToPure', "Permission denied: caller session rank '{0}' is pure execution and cannot invoke ADE control APIs.", liveRankDef.name));
+		}
+		if (liveRank.toLowerCase() !== rawCallerStr) {
+			const livePerm = checkAdeApiPermission(roleConfig, liveRank, action);
+			if (!livePerm.allowed) {
+				throw new Error(livePerm.reason ?? localize('adeApiPermissionDeniedLive', "Permission denied: live rank '{0}' is not authorized for action '{1}'.", liveRankDef.name, String(action)));
+			}
+		}
+		const tokenRankDef = resolveEffectiveRankDefinition(roleConfig, permission.rankId ?? rawCallerStr, false);
+		effectiveCallerRank = liveRankDef.tier >= tokenRankDef.tier ? liveRankDef.id : tokenRankDef.id;
+	}
+
+	const topRankDef = getTopRankDefinition(roleConfig);
+	const effectiveCallerDef = !isHumanOrSecretary
+		? resolveEffectiveRankDefinition(roleConfig, effectiveCallerRank, callerHasSubs)
+		: undefined;
+
+	const assertCanSuperviseRank = (targetRankId: string, targetHasSubs: boolean, actionLabel: string): void => {
+		if (isHumanOrSecretary) {
+			return;
+		}
+		if (!canRankSupervise(roleConfig, effectiveCallerRank, callerHasSubs, targetRankId, targetHasSubs)) {
+			const targetDef = resolveEffectiveRankDefinition(roleConfig, targetRankId, targetHasSubs);
+			throw new Error(localize(
+				'adeRankSuperviseDenied',
+				"Permission denied: rank '{0}' (L{1}) cannot {2} rank '{3}' (L{4}).",
+				effectiveCallerDef!.name,
+				effectiveCallerDef!.tier,
+				actionLabel,
+				targetDef.name,
+				targetDef.tier,
+			));
+		}
+	};
+
+	const assertTargetInCallerSubtree = (target: IAdeAgent, actionLabel: string, allowSelf = false): void => {
+		if (isHumanOrSecretary || !callerAgent) {
+			return;
+		}
+		const inScope = allowSelf
+			? (target.id === callerAgent.id || isStrictDescendantOf(projects, target.id, callerAgent.id))
+			: isStrictDescendantOf(projects, target.id, callerAgent.id);
+		if (!inScope) {
+			throw new Error(localize(
+				'adeSubtreeScopeDenied',
+				"Permission denied: session '{0}' is outside your subordinate subtree and cannot be targeted by {1}.",
+				target.label,
+				actionLabel,
+			));
+		}
+	};
+
+	const assertCanManageTarget = (target: IAdeAgent, actionLabel: string): void => {
+		if (isHumanOrSecretary) {
+			return;
+		}
+		if (callerAgent && target.id === callerAgent.id) {
+			throw new Error(localize('adeCannotSelfTarget', "Permission denied: a session cannot {0} itself.", actionLabel));
+		}
+		const targetHasSubs = projects.hasSubordinates(target.id);
+		const targetRank = resolveAdeAgentRank(target, targetHasSubs, roleConfig);
+		assertCanSuperviseRank(targetRank, targetHasSubs, actionLabel);
+		assertTargetInCallerSubtree(target, actionLabel, false);
+	};
+
+	const assertCanDestroyTreeIfPresent = (target: IAdeAgent): void => {
+		if (isHumanOrSecretary) {
+			return;
+		}
+		const hasTree = Boolean(
+			engineeringService?.hasTree(target.id)
+			|| engineeringService?.getTreeSnapshot(target.id)
+			|| target.treeType,
+		);
+		if (!hasTree) {
+			return;
+		}
+		const destroyTokenPerm = checkAdeApiPermission(roleConfig, params.caller, 'engineering.remove');
+		if (!destroyTokenPerm.allowed) {
+			throw new Error(destroyTokenPerm.reason ?? localize('adeEngineeringDestroyDenied', "Permission denied: destroying or archiving an Engineering/Research tree requires 'engineering.destroy'."));
+		}
+		const destroyLivePerm = checkAdeApiPermission(roleConfig, effectiveCallerRank, 'engineering.remove');
+		if (!destroyLivePerm.allowed) {
+			throw new Error(destroyLivePerm.reason ?? localize('adeEngineeringDestroyDenied', "Permission denied: destroying or archiving an Engineering/Research tree requires 'engineering.destroy'."));
+		}
+	};
+
+	const assertDirectHumanOnly = (): void => {
+		if (params.caller !== undefined && params.caller !== null && rawCallerStr !== '' && rawCallerStr !== 'human' && rawCallerStr !== 'user') {
+			throw new Error(localize('adeHumanOnlyActionDenied', "Permission denied: action '{0}' is restricted to direct human invocations.", String(action)));
+		}
+	};
 
 	const resolveActiveOrTargetProjectUri = (rawTarget: unknown): URI => {
 		if (rawTarget !== undefined && rawTarget !== null && String(rawTarget).trim()) {
@@ -1484,6 +1621,23 @@ export async function executeAdeControlRequest(
 			const parent = typeof rawParentId === 'string' && rawParentId.trim()
 				? resolveAgentFromParams(projects, { id: rawParentId })
 				: undefined;
+			if (!isHumanOrSecretary) {
+				if (!parent) {
+					if (callerAgent || effectiveCallerDef!.tier > topRankDef.tier) {
+						throw new Error(localize('adeSessionCreateRequiresParent', "Permission denied: orchestrated sessions must specify '--parent' within their own subordinate subtree."));
+					}
+				} else {
+					assertTargetInCallerSubtree(parent, 'session.create', true);
+					if (callerAgent && parent.id !== callerAgent.id) {
+						assertCanManageTarget(parent, 'spawn a subordinate under');
+					} else if (!callerAgent) {
+						const parentRankDef = resolveEffectiveRankDefinition(roleConfig, parent.role, projects.hasSubordinates(parent.id));
+						if (parentRankDef.tier < effectiveCallerDef!.tier) {
+							throw new Error(localize('adeSessionCreateParentHigherRank', "Permission denied: cannot spawn a session under a higher-tier supervisor ('{0}').", parentRankDef.name));
+						}
+					}
+				}
+			}
 			if (parent && projects.isLockedByWorkTree?.(parent.id)) {
 				throw new Error(localize('adeLockedByEngineeringCreate', "Session '{0}' is locked by an Engineering tree. Modify topology via the Engineering canvas or 'aexus-ade engineering blueprint apply'.", parent.label));
 			}
@@ -1499,12 +1653,9 @@ export async function executeAdeControlRequest(
 				throw new Error(localize('adeSessionCreateNeedsProject', "No project available. Add or specify a project folder first."));
 			}
 
-			const projectUri = removeTrailingPathSeparator(resolvedProjectUri);
-			projects.registerProject(projectUri, basename(projectUri));
-			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
-
 			let role: AdeAgentRole | undefined;
-			const topRankId = getTopRankDefinition(roleConfig).id;
+			const topRankId = topRankDef.id;
+			let promoteUnrankedRootParent = false;
 			if (parent) {
 				const parentHasSubs = projects.hasSubordinates(parent.id);
 				const parentRankDef = resolveEffectiveRankDefinition(roleConfig, parent.role, parentHasSubs);
@@ -1514,16 +1665,40 @@ export async function executeAdeControlRequest(
 				if (params.role !== undefined) {
 					role = parseRole(params.role, roleConfig);
 					if (!parent.parentId && !parent.role) {
-						projects.setAgentRole(parent.id, topRankId);
+						promoteUnrankedRootParent = true;
 					}
 				} else if (!parent.parentId && !parent.role && !parentHasSubs) {
-					projects.setAgentRole(parent.id, topRankId);
+					promoteUnrankedRootParent = true;
 					role = getNextLowerAdeRole(topRankId, true, roleConfig).childRole;
 				} else {
 					role = getNextLowerAdeRole(parent.role, parentHasSubs, roleConfig).childRole;
 				}
 			} else {
 				role = parseRole(params.role, roleConfig);
+			}
+
+			if (!isHumanOrSecretary) {
+				const createdRankDef = resolveEffectiveRankDefinition(roleConfig, role, false);
+				assertCanSuperviseRank(createdRankDef.id, false, 'create');
+				if (parent) {
+					const parentHasSubs = projects.hasSubordinates(parent.id);
+					const effectiveParentRole = promoteUnrankedRootParent ? topRankId : parent.role;
+					if (!canRankSupervise(roleConfig, effectiveParentRole, parentHasSubs || promoteUnrankedRootParent, createdRankDef.id, false)) {
+						throw new Error(localize(
+							'adeParentCannotSuperviseChild',
+							"Permission denied: parent '{0}' cannot supervise a new '{1}' session.",
+							parent.label,
+							createdRankDef.name,
+						));
+					}
+				}
+			}
+
+			const projectUri = removeTrailingPathSeparator(resolvedProjectUri);
+			projects.registerProject(projectUri, basename(projectUri));
+			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
+			if (parent && promoteUnrankedRootParent) {
+				projects.setAgentRole(parent.id, topRankId);
 			}
 
 			const rawLabel = params.label ?? params.title ?? params.name;
@@ -1587,6 +1762,18 @@ export async function executeAdeControlRequest(
 			const parent = typeof rawParentId === 'string' && rawParentId.trim()
 				? resolveAgentFromParams(projects, { id: rawParentId })
 				: undefined;
+			if (!isHumanOrSecretary) {
+				if (!parent) {
+					if (callerAgent || effectiveCallerDef!.tier > topRankDef.tier) {
+						throw new Error(localize('adeSessionAttachRequiresParent', "Permission denied: orchestrated sessions must specify '--parent' within their own subordinate subtree when attaching."));
+					}
+				} else {
+					assertTargetInCallerSubtree(parent, 'session.attach', true);
+					if (callerAgent && parent.id !== callerAgent.id) {
+						assertCanManageTarget(parent, 'attach a subordinate under');
+					}
+				}
+			}
 			if (parent && projects.isLockedByWorkTree?.(parent.id)) {
 				throw new Error(localize('adeLockedByEngineeringCreate', "Session '{0}' is locked by an Engineering tree. Modify topology via the Engineering canvas or 'aexus-ade engineering blueprint apply'.", parent.label));
 			}
@@ -1604,12 +1791,10 @@ export async function executeAdeControlRequest(
 			if (!attached) {
 				throw new Error(localize('adeAttachNotFound', "Could not find native conversation '{0}' in engine '{1}'.", nativeId, engineId));
 			}
-			const projectUri = removeTrailingPathSeparator(parent?.projectUri ?? attached.projectUri);
-			projects.registerProject(projectUri, basename(projectUri));
-			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
 
 			let role: AdeAgentRole | undefined;
-			const topRankId = getTopRankDefinition(roleConfig).id;
+			const topRankId = topRankDef.id;
+			let promoteUnrankedRootParent = false;
 			if (parent) {
 				const parentHasSubs = projects.hasSubordinates(parent.id);
 				const parentRankDef = resolveEffectiveRankDefinition(roleConfig, parent.role, parentHasSubs);
@@ -1619,16 +1804,37 @@ export async function executeAdeControlRequest(
 				if (params.role !== undefined) {
 					role = parseRole(params.role, roleConfig);
 					if (!parent.parentId && !parent.role) {
-						projects.setAgentRole(parent.id, topRankId);
+						promoteUnrankedRootParent = true;
 					}
 				} else if (!parent.parentId && !parent.role && !parentHasSubs) {
-					projects.setAgentRole(parent.id, topRankId);
+					promoteUnrankedRootParent = true;
 					role = getNextLowerAdeRole(topRankId, true, roleConfig).childRole;
 				} else {
 					role = getNextLowerAdeRole(parent.role, parentHasSubs, roleConfig).childRole;
 				}
 			} else {
 				role = parseRole(params.role, roleConfig);
+			}
+			if (!isHumanOrSecretary) {
+				const createdRankDef = resolveEffectiveRankDefinition(roleConfig, role, false);
+				assertCanSuperviseRank(createdRankDef.id, false, 'attach');
+				if (parent) {
+					const parentEffective = resolveEffectiveRankDefinition(roleConfig, promoteUnrankedRootParent ? topRankId : parent.role, true);
+					if (!canRankSupervise(roleConfig, parentEffective.id, true, createdRankDef.id, false)) {
+						throw new Error(localize(
+							'adeParentCannotSuperviseAttached',
+							"Permission denied: parent rank '{0}' cannot supervise attached child rank '{1}'.",
+							parentEffective.name,
+							createdRankDef.name,
+						));
+					}
+				}
+			}
+			const projectUri = removeTrailingPathSeparator(parent?.projectUri ?? attached.projectUri);
+			projects.registerProject(projectUri, basename(projectUri));
+			await reconcileIdeWorkspaceWithCatalog({ projects, contextService, workspaceEditing, environmentService, fileService, uriIdentity });
+			if (parent && promoteUnrankedRootParent) {
+				projects.setAgentRole(parent.id, topRankId);
 			}
 
 			const rawLabel = params.label ?? params.title ?? params.name;
@@ -1750,12 +1956,18 @@ export async function executeAdeControlRequest(
 		case 'session.setRole':
 		case 'session.role': {
 			const agent = resolveAgentFromParams(projects, params);
+			assertCanManageTarget(agent, 'change role of');
 			if (projects.isLockedByWorkTree?.(agent.id)) {
 				throw new Error(localize('adeLockedByEngineeringRole', "Session '{0}' is locked by an Engineering tree and its role cannot be changed manually.", agent.label));
 			}
 			const nextRole = parseRole(params.role, roleConfig);
+			const agentHasSubs = projects.hasSubordinates(agent.id);
+			if (!isHumanOrSecretary) {
+				const nextRankDef = resolveEffectiveRankDefinition(roleConfig, nextRole, agentHasSubs);
+				assertCanSuperviseRank(nextRankDef.id, agentHasSubs, 'assign role');
+			}
 			const nextIsPure = !nextRole || isPureExecutionRank(roleConfig, nextRole);
-			if (nextIsPure && projects.hasSubordinates(agent.id)) {
+			if (nextIsPure && agentHasSubs) {
 				throw new Error(localize('adeCannotClearRoleWithSubordinates', "Cannot clear role while session has subordinate agents."));
 			}
 			projects.setAgentRole(agent.id, nextRole);
@@ -1766,12 +1978,37 @@ export async function executeAdeControlRequest(
 		case 'session.nest':
 		case 'session.move': {
 			const agent = resolveAgentFromParams(projects, params);
+			assertCanManageTarget(agent, 'move');
 			if (projects.isLockedByWorkTree?.(agent.id)) {
 				throw new Error(localize('adeLockedByEngineeringMove', "Session '{0}' belongs to a locked Engineering tree and cannot be reparented manually.", agent.label));
 			}
 			const rawParent = params.parentId ?? params.parent;
 			const clearParent = rawParent === undefined || rawParent === null || rawParent === '' || rawParent === 'none' || rawParent === 'root';
 			const parentAgent = clearParent ? undefined : resolveAgentFromParams(projects, { id: rawParent });
+			if (!isHumanOrSecretary) {
+				if (!parentAgent) {
+					throw new Error(localize('adeCannotDetachToRoot', "Permission denied: orchestrated sessions cannot move a subordinate to top-level root."));
+				}
+				assertTargetInCallerSubtree(parentAgent, 'session.move target supervisor', true);
+				if (callerAgent && parentAgent.id !== callerAgent.id) {
+					assertCanManageTarget(parentAgent, 'assign as supervisor');
+				} else if (!callerAgent) {
+					const parentRankDef = resolveEffectiveRankDefinition(roleConfig, parentAgent.role, projects.hasSubordinates(parentAgent.id));
+					if (parentRankDef.tier < effectiveCallerDef!.tier) {
+						throw new Error(localize('adeMoveTargetHigherRank', "Permission denied: cannot move a session under higher-tier supervisor '{0}'.", parentRankDef.name));
+					}
+				}
+				const targetRankDef = resolveEffectiveRankDefinition(roleConfig, agent.role, projects.hasSubordinates(agent.id));
+				const parentRankDef = resolveEffectiveRankDefinition(roleConfig, parentAgent.role, true);
+				if (!canRankSupervise(roleConfig, parentRankDef.id, true, targetRankDef.id, projects.hasSubordinates(agent.id))) {
+					throw new Error(localize(
+						'adeMoveParentCannotSupervise',
+						"Permission denied: target supervisor '{0}' cannot supervise rank '{1}'.",
+						parentRankDef.name,
+						targetRankDef.name,
+					));
+				}
+			}
 			if (parentAgent && projects.isLockedByWorkTree?.(parentAgent.id)) {
 				throw new Error(localize('adeLockedByEngineeringTarget', "Target supervisor '{0}' belongs to a locked Engineering tree.", parentAgent.label));
 			}
@@ -1788,6 +2025,15 @@ export async function executeAdeControlRequest(
 
 		case 'session.send': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (!isHumanOrSecretary) {
+				if (callerAgent && agent.id === callerAgent.id) {
+					throw new Error(localize('adeCannotSendToSelf', "Permission denied: a session cannot send messages to itself."));
+				}
+				const isDirectSupervisor = Boolean(callerAgent && callerAgent.parentId && agent.id === callerAgent.parentId);
+				if (!isDirectSupervisor) {
+					assertCanManageTarget(agent, 'send messages to');
+				}
+			}
 			const rawMessage = params.message ?? params.prompt ?? params.text;
 			if (typeof rawMessage !== 'string' || !rawMessage.trim()) {
 				throw new Error(localize('adeMissingMessage', "Message text is required."));
@@ -1855,6 +2101,7 @@ export async function executeAdeControlRequest(
 
 		case 'session.stop': {
 			const agent = resolveAgentFromParams(projects, params);
+			assertCanManageTarget(agent, 'stop');
 			const stopRes = agent.session?.engineId.startsWith('aexus-')
 				? await commandService.executeCommand<{ stopped?: boolean }>('aexus.agentEngines.stop', agent.session.resource).catch(() => undefined)
 				: undefined;
@@ -1867,10 +2114,19 @@ export async function executeAdeControlRequest(
 
 		case 'session.archive': {
 			const agent = resolveAgentFromParams(projects, params);
+			const root = projects.getRootAgent(agent.id) ?? agent;
+			assertCanManageTarget(agent, 'archive');
+			if (root.id !== agent.id) {
+				assertCanManageTarget(root, 'archive');
+			}
+			await engineeringService?.whenReady().catch(() => undefined);
+			assertCanDestroyTreeIfPresent(agent);
+			if (root.id !== agent.id) {
+				assertCanDestroyTreeIfPresent(root);
+			}
 			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
 				throw new Error(localize('adeLockedByEngineeringArchive', "Subordinate session '{0}' is locked by an Engineering tree and cannot archive the tree on its own.", agent.label));
 			}
-			const root = projects.getRootAgent(agent.id) ?? agent;
 			const targetArchived = params.restore === true ? false : (typeof params.archived === 'boolean' ? params.archived : true);
 			const subtree = projects.getSubtree(root.id);
 			projects.setArchived(root.id, targetArchived);
@@ -1883,10 +2139,12 @@ export async function executeAdeControlRequest(
 		case 'session.remove':
 		case 'session.detach': {
 			const agent = resolveAgentFromParams(projects, params);
+			assertCanManageTarget(agent, 'detach');
 			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
 				throw new Error(localize('adeLockedByEngineeringDetach', "Subordinate session '{0}' is locked by an Engineering tree. Remove or edit nodes via Engineering blueprint.", agent.label));
 			}
 			await engineeringService?.whenReady().catch(() => undefined);
+			assertCanDestroyTreeIfPresent(agent);
 			const initialSubtree = projects.getSubtree(agent.id);
 			if (!agent.parentId && (engineeringService?.hasTree(agent.id) || Boolean(agent.treeType))) {
 				await engineeringService?.removeTree(agent.id).catch(() => undefined);
@@ -1913,10 +2171,12 @@ export async function executeAdeControlRequest(
 
 		case 'session.delete': {
 			const agent = resolveAgentFromParams(projects, params);
+			assertCanManageTarget(agent, 'delete');
 			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
 				throw new Error(localize('adeLockedByEngineeringDelete', "Subordinate session '{0}' is locked by an Engineering tree. Remove or edit nodes via Engineering blueprint.", agent.label));
 			}
 			await engineeringService?.whenReady().catch(() => undefined);
+			assertCanDestroyTreeIfPresent(agent);
 			const initialSubtree = projects.getSubtree(agent.id);
 			if (!agent.parentId && (engineeringService?.hasTree(agent.id) || Boolean(agent.treeType))) {
 				await engineeringService?.removeTree(agent.id).catch(() => undefined);
@@ -2442,6 +2702,64 @@ export async function executeAdeControlRequest(
 			if (!role) {
 				throw new Error(`Invalid review role '${String(params.role)}': expected 'employee', 'manager', '${reviewerSlotId}', or '${segmentOwnerSlotId}'.`);
 			}
+			if (!isHumanOrSecretary) {
+				const reviewerSlotRank = resolveWorkTreeSlotRank(roleConfig, 'reviewer');
+				const segmentOwnerSlotRank = resolveWorkTreeSlotRank(roleConfig, 'segment_owner');
+				if (role === 'manager') {
+					const holdsOrSupervisesSegmentOwner = effectiveCallerDef!.id === segmentOwnerSlotRank.id
+						|| canRankSupervise(roleConfig, effectiveCallerRank, callerHasSubs, segmentOwnerSlotRank.id, true);
+					if (!holdsOrSupervisesSegmentOwner) {
+						throw new Error(localize(
+							'adeEngineeringReviewManagerRoleDenied',
+							"Permission denied: rank '{0}' cannot submit a manager-tier review verdict (requires '{1}' or a supervising rank).",
+							effectiveCallerDef!.name,
+							segmentOwnerSlotRank.name,
+						));
+					}
+				} else {
+					const holdsOrSupervisesReviewer = effectiveCallerDef!.id === reviewerSlotRank.id
+						|| canRankSupervise(roleConfig, effectiveCallerRank, callerHasSubs, reviewerSlotRank.id, true);
+					if (!holdsOrSupervisesReviewer) {
+						throw new Error(localize(
+							'adeEngineeringReviewEmployeeRoleDenied',
+							"Permission denied: rank '{0}' cannot submit an employee-tier review verdict (requires '{1}' or a supervising rank).",
+							effectiveCallerDef!.name,
+							reviewerSlotRank.name,
+						));
+					}
+				}
+				if (callerAgent) {
+					const callerBelongsToTree = callerAgent.id === gov.id
+						|| callerAgent.treeGovernorId === gov.id
+						|| isStrictDescendantOf(projects, callerAgent.id, gov.id);
+					if (!callerBelongsToTree) {
+						throw new Error(localize(
+							'adeEngineeringReviewWrongTree',
+							"Permission denied: caller session '{0}' does not belong to Engineering tree '{1}'.",
+							callerAgent.id,
+							gov.id,
+						));
+					}
+					const currentSnap = engineeringService.getTreeSnapshot(gov.id);
+					const nodeRuntime = currentSnap?.nodes.find(n => n.node.id === nodeId)?.runtime;
+					if (role === 'employee' && nodeRuntime?.employeeAgentId && callerAgent.id !== nodeRuntime.employeeAgentId) {
+						throw new Error(localize(
+							'adeEngineeringReviewSessionMismatchEmp',
+							"Permission denied: caller session '{0}' does not match bound reviewer session for node '{1}'.",
+							callerAgent.id,
+							nodeId,
+						));
+					}
+					if (role === 'manager' && nodeRuntime?.managerAgentId && callerAgent.id !== nodeRuntime.managerAgentId) {
+						throw new Error(localize(
+							'adeEngineeringReviewSessionMismatchMgr',
+							"Permission denied: caller session '{0}' does not match bound segment manager session for node '{1}'.",
+							callerAgent.id,
+							nodeId,
+						));
+					}
+				}
+			}
 			if (params.verdict !== 'pass' && params.verdict !== 'reject' && params.verdict !== 'guidance') {
 				throw new Error(`Invalid review verdict '${String(params.verdict)}': expected 'pass', 'reject', or 'guidance'.`);
 			}
@@ -2669,6 +2987,43 @@ export async function executeAdeControlRequest(
 			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
 			await engineeringService.cleanupTreeWorktrees(gov.id);
 			return { ok: true, governorSessionId: gov.id };
+		}
+
+		case 'engineering.verifyTrust.list':
+		case 'engineering.verify-trust.list': {
+			assertDirectHumanOnly();
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			await engineeringService.whenReady();
+			const rawProject = params.project ?? params.projectPath ?? params.path;
+			const matchedProject = rawProject ? findMatchingProject(projects, uriIdentity, rawProject) : undefined;
+			const projectPath = matchedProject?.uri.fsPath ?? (typeof rawProject === 'string' && rawProject.trim() ? rawProject.trim() : undefined);
+			return {
+				entries: engineeringService.listTrustedVerifyCommands?.(projectPath) ?? [],
+			};
+		}
+
+		case 'engineering.verifyTrust.revoke':
+		case 'engineering.verify-trust.revoke': {
+			assertDirectHumanOnly();
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			await engineeringService.whenReady();
+			const rawProject = params.project ?? params.projectPath ?? params.path;
+			const matchedProject = rawProject ? findMatchingProject(projects, uriIdentity, rawProject) : undefined;
+			const projectPath = matchedProject?.uri.fsPath ?? (typeof rawProject === 'string' && rawProject.trim() ? rawProject.trim() : undefined);
+			if (params.all === true) {
+				const revokedCount = engineeringService.revokeAllTrustedVerifyCommands?.(projectPath) ?? 0;
+				return { revokedCount, ...(projectPath ? { projectPath } : {}) };
+			}
+			const hash = typeof params.hash === 'string' ? params.hash.trim() : '';
+			if (!projectPath || !hash) {
+				throw new Error('Specify --project <path> and --hash <sha256> (or pass --all) to revoke trusted verify commands.');
+			}
+			const revoked = engineeringService.revokeTrustedVerifyCommand?.(projectPath, hash) ?? false;
+			return { revoked, projectPath, hash };
 		}
 
 		case 'inbox.list': {

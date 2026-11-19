@@ -54,6 +54,65 @@ const MAX_DIFF_FILES = 40;
 const MAX_TOTAL_DIFF_CHARS = 32_000;
 const GIT_DELETED_SENTINEL = '__ade_git_deleted__';
 const AEXUS_CO_AUTHOR_TRAILER = 'Co-authored-by: Aexus Engineering <ade@aexus.local>';
+const NO_HOOKS_GIT_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null'];
+
+export const ADE_SCRUBBED_CONTROL_ENV_KEYS: readonly string[] = [
+	'AEXUS_ADE_CONTROL_FILE',
+	'AEXUS_ADE_TOKEN',
+	'AEXUS_ADE_SOCKET',
+	'AEXUS_ADE_SESSION_TOKEN',
+	'AEXUS_ADE_CALLER',
+	'AEXUS_ADE_WINDOW_KEY',
+	'AEXUS_ADE_ROLE_STATE_FILE',
+];
+
+const ADE_SCRUBBED_CONTROL_ENV_SET = new Set(ADE_SCRUBBED_CONTROL_ENV_KEYS);
+
+/**
+ * Strips Aexus ADE control-plane credentials and identity variables before spawning untrusted
+ * repository hooks, Git subprocesses, or `verify:` verification shell commands inside Worker worktrees.
+ */
+export function scrubAdeControlEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	const sanitized: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (value === undefined || ADE_SCRUBBED_CONTROL_ENV_SET.has(key.toUpperCase())) {
+			continue;
+		}
+		sanitized[key] = value;
+	}
+	return sanitized;
+}
+
+export function buildVerificationSpawnSpec(
+	command: string,
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
+): {
+	readonly bin: string;
+	readonly args: readonly string[];
+	readonly windowsVerbatimArguments?: boolean;
+	readonly env: NodeJS.ProcessEnv;
+} {
+	const trimmed = command.trim();
+	const sanitizedEnv: NodeJS.ProcessEnv = {
+		...scrubAdeControlEnv(env),
+		CI: '1',
+		GIT_TERMINAL_PROMPT: '0',
+	};
+	if (platform === 'win32') {
+		return {
+			bin: env.ComSpec || env.COMSPEC || 'cmd.exe',
+			args: ['/d', '/s', '/c', trimmed],
+			windowsVerbatimArguments: true,
+			env: sanitizedEnv,
+		};
+	}
+	return {
+		bin: '/bin/sh',
+		args: ['-c', trimmed],
+		env: sanitizedEnv,
+	};
+}
 
 function sanitizePathSegment(raw: string): string {
 	const cleaned = raw.trim().replace(/[^A-Za-z0-9_.-]/g, '_');
@@ -75,7 +134,7 @@ function execGitRaw(
 		const child = cp.spawn('git', fullArgs, {
 			cwd,
 			windowsHide: true,
-			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+			env: { ...scrubAdeControlEnv(process.env), GIT_TERMINAL_PROMPT: '0' },
 		});
 		const stdoutChunks: Buffer[] = [];
 		let stdoutBytes = 0;
@@ -774,13 +833,13 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			if (branchRefRes.code === 0) {
 				// Reuse existing segment branch safely without destructive `-B` reset.
 				reusedExistingBranch = true;
-				const attachRes = await execGit(projectPath, ['worktree', 'add', worktreePath, branchName]);
+				const attachRes = await execGit(projectPath, [...NO_HOOKS_GIT_ARGS, 'worktree', 'add', worktreePath, branchName]);
 				if (attachRes.code !== 0) {
 					throw new Error(`Failed to attach existing Git worktree branch ${branchName} for segment ${segmentId}: ${attachRes.stderr || attachRes.stdout}`);
 				}
 			} else {
 				const baseRef = upstreamBranches[0] || 'HEAD';
-				const addRes = await execGit(projectPath, ['worktree', 'add', '-b', branchName, worktreePath, baseRef]);
+				const addRes = await execGit(projectPath, [...NO_HOOKS_GIT_ARGS, 'worktree', 'add', '-b', branchName, worktreePath, baseRef]);
 				if (addRes.code !== 0) {
 					throw new Error(`Failed to create Git worktree for segment ${segmentId}: ${addRes.stderr || addRes.stdout}`);
 				}
@@ -794,7 +853,7 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			if (!upstreamBranch || upstreamBranch === branchName) {
 				continue;
 			}
-			const mergeRes = await execGit(worktreePath, [...identityArgs, 'merge', '--no-edit', upstreamBranch]);
+			const mergeRes = await execGit(worktreePath, [...NO_HOOKS_GIT_ARGS, ...identityArgs, 'merge', '--no-edit', upstreamBranch]);
 			if (mergeRes.code !== 0) {
 				const unmerged = await execGit(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
 				const conflictedFiles = unmerged.stdout.split('\n').map(s => s.trim()).filter(Boolean);
@@ -826,7 +885,7 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 				? message
 				: `${message.trim()}\n\n${AEXUS_CO_AUTHOR_TRAILER}`;
 			await execGit(worktreePath, ['add', '-A']);
-			await execGit(worktreePath, [...identityArgs, 'commit', '-m', fullMessage]);
+			await execGit(worktreePath, [...NO_HOOKS_GIT_ARGS, ...identityArgs, 'commit', '-m', fullMessage]);
 		}
 		const head = await execGit(worktreePath, ['rev-parse', 'HEAD']);
 		return head.code === 0 ? head.stdout.trim() : undefined;
@@ -855,7 +914,7 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 			if (!branch) {
 				continue;
 			}
-			const mergeRes = await execGit(projectPath, [...identityArgs, 'merge', '--no-edit', branch]);
+			const mergeRes = await execGit(projectPath, [...NO_HOOKS_GIT_ARGS, ...identityArgs, 'merge', '--no-edit', branch]);
 			if (mergeRes.code !== 0) {
 				const unmerged = await execGit(projectPath, ['diff', '--name-only', '--diff-filter=U']);
 				const conflictedFiles = unmerged.stdout.split('\n').map(s => s.trim()).filter(Boolean);
@@ -907,13 +966,13 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 		}
 		return new Promise(resolve => {
 			let settled = false;
-			const shellBin = isWindows ? (process.env['ComSpec'] || 'cmd.exe') : '/bin/sh';
-			const shellArgs = isWindows ? ['/d', '/s', '/c', trimmed] : ['-c', trimmed];
-			const child = cp.spawn(shellBin, shellArgs, {
+			const spawnSpec = buildVerificationSpawnSpec(trimmed, process.platform, process.env);
+			const child = cp.spawn(spawnSpec.bin, spawnSpec.args, {
 				cwd,
 				windowsHide: true,
 				detached: !isWindows,
-				env: { ...process.env, CI: '1', GIT_TERMINAL_PROMPT: '0' },
+				...(spawnSpec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+				env: spawnSpec.env,
 			});
 			const maxBytes = 16_000;
 			let combined = '';

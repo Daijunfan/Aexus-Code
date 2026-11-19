@@ -9,7 +9,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from '../../../../base/common/path.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { AdeEngineeringNodeService } from '../../node/adeEngineeringService.js';
+import {
+	ADE_SCRUBBED_CONTROL_ENV_KEYS,
+	AdeEngineeringNodeService,
+	buildVerificationSpawnSpec,
+	scrubAdeControlEnv,
+} from '../../node/adeEngineeringService.js';
 
 function runGitSync(cwd: string, args: string[]): void {
 	cp.execFileSync('git', args, { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
@@ -325,6 +330,97 @@ suite('AdeEngineeringNodeService', () => {
 			assert.strictEqual(alive, false, `Grandchild process ${grandchildPid} must be terminated when verify times out`);
 		} finally {
 			svc.dispose();
+		}
+	});
+
+	test('scrubs ADE control-plane credentials from verify & git child environments, disables repo git hooks, and uses Windows /d /s /c spawn spec (P0-02, P1-14)', async () => {
+		// 1. Direct unit check of scrubAdeControlEnv (case-insensitive)
+		const scrubbed = scrubAdeControlEnv({
+			PATH: '/usr/bin',
+			SAFE_VAR: 'keep-me',
+			AEXUS_ADE_CONTROL_FILE: '/tmp/secret-ctrl.json',
+			AEXUS_ADE_TOKEN: 'secret-token',
+			AEXUS_ADE_SOCKET: '/tmp/ade.sock',
+			AEXUS_ADE_SESSION_TOKEN: 'session-secret',
+			aexus_ade_caller: 'governor',
+			AEXUS_ADE_WINDOW_KEY: 'win-1',
+			AEXUS_ADE_ROLE_STATE_FILE: '/tmp/role.json',
+		});
+		assert.strictEqual(scrubbed.SAFE_VAR, 'keep-me');
+		assert.strictEqual(scrubbed.PATH, '/usr/bin');
+		for (const key of ADE_SCRUBBED_CONTROL_ENV_KEYS) {
+			assert.strictEqual(scrubbed[key], undefined, `${key} must be stripped`);
+		}
+		assert.strictEqual(scrubbed.aexus_ade_caller, undefined, 'Case-insensitive ADE env key must be stripped');
+
+		// 2. Windows cmd.exe spawn spec must pass ['/d', '/s', '/c', command] + windowsVerbatimArguments: true
+		const winSpec = buildVerificationSpawnSpec('npm test -- --run "a b"', 'win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' });
+		assert.strictEqual(winSpec.bin, 'C:\\Windows\\System32\\cmd.exe');
+		assert.deepStrictEqual(winSpec.args, ['/d', '/s', '/c', 'npm test -- --run "a b"']);
+		assert.strictEqual(winSpec.windowsVerbatimArguments, true);
+		const posixSpec = buildVerificationSpawnSpec('echo hi', 'darwin', {});
+		assert.strictEqual(posixSpec.bin, '/bin/sh');
+		assert.deepStrictEqual(posixSpec.args, ['-c', 'echo hi']);
+		assert.strictEqual(Boolean(posixSpec.windowsVerbatimArguments), false);
+
+		if (process.platform === 'win32') {
+			return;
+		}
+
+		// 3. Real verify child process must NOT observe ADE control env vars inherited from parent process
+		const savedEnv: Record<string, string | undefined> = {};
+		for (const key of ADE_SCRUBBED_CONTROL_ENV_KEYS) {
+			savedEnv[key] = process.env[key];
+			process.env[key] = `leaked-${key}`;
+		}
+		const aexusHome = path.join(tmpDir, '.aexus-code');
+		const repoDir = path.join(tmpDir, 'git-hooks-safety');
+		await fs.promises.mkdir(repoDir, { recursive: true });
+		const svc = new AdeEngineeringNodeService({ baseDir: aexusHome });
+		try {
+			const envRes = await svc.runNodeVerificationCommand(
+				repoDir,
+				'printf "%s|%s|%s|%s|%s" "${AEXUS_ADE_CONTROL_FILE:-}" "${AEXUS_ADE_TOKEN:-}" "${AEXUS_ADE_SOCKET:-}" "${AEXUS_ADE_SESSION_TOKEN:-}" "${AEXUS_ADE_CALLER:-}"',
+				5000,
+			);
+			assert.strictEqual(envRes.passed, true);
+			assert.strictEqual(envRes.output, '||||', 'Verify child process must not receive any ADE control env vars');
+
+			// 4. Malicious git hooks in repository MUST NOT execute during automated worktree add / commit / merge (-c core.hooksPath=/dev/null)
+			runGitSync(repoDir, ['init']);
+			runGitSync(repoDir, ['config', 'user.name', 'Test']);
+			runGitSync(repoDir, ['config', 'user.email', 'test@example.com']);
+			await fs.promises.writeFile(path.join(repoDir, 'base.txt'), 'v1\n', 'utf8');
+			runGitSync(repoDir, ['add', '.']);
+			runGitSync(repoDir, ['commit', '-m', 'init']);
+
+			const markerFile = path.join(tmpDir, 'hook-pwned.txt');
+			const hooksDir = path.join(repoDir, '.git', 'hooks');
+			await fs.promises.mkdir(hooksDir, { recursive: true });
+			const hookScript = `#!/bin/sh\necho "pwned:$AEXUS_ADE_TOKEN" >> "${markerFile}"\n`;
+			for (const hookName of ['pre-commit', 'post-checkout', 'post-merge', 'post-commit']) {
+				const hookPath = path.join(hooksDir, hookName);
+				await fs.promises.writeFile(hookPath, hookScript, { encoding: 'utf8', mode: 0o755 });
+			}
+
+			const seg = await svc.ensureSegmentWorktree('gov-hooks', repoDir, 'S1', []);
+			await fs.promises.writeFile(path.join(seg.worktree.worktreePath, 'work.txt'), 'safe\n', 'utf8');
+			const sha = await svc.commitSegmentWorktree(seg.worktree.worktreePath, 'feat: safe commit');
+			assert.ok(sha);
+			const mergeRes = await svc.mergeSegmentsIntoProject(repoDir, [seg.worktree.branchName]);
+			assert.strictEqual(mergeRes.ok, true);
+			assert.strictEqual(fs.existsSync(markerFile), false, 'Automated worktree git ops must disable repo hooks via core.hooksPath=/dev/null');
+
+			await svc.cleanupTreeWorktrees('gov-hooks', repoDir, true);
+		} finally {
+			svc.dispose();
+			for (const key of ADE_SCRUBBED_CONTROL_ENV_KEYS) {
+				if (savedEnv[key] === undefined) {
+					delete process.env[key];
+				} else {
+					process.env[key] = savedEnv[key];
+				}
+			}
 		}
 	});
 });

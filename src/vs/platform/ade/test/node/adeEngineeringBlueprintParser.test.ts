@@ -617,4 +617,27 @@ suite('AdeEngineeringBlueprintParser', () => {
 		const strictConflicts = detectSharedWorkspaceScopeConflicts(parsed, { treatMissingAsWholeRepo: true });
 		assert.deepStrictEqual(strictConflicts.map(c => `${c.nodeA}:${c.nodeB}`), ['N2:N3']);
 	});
+
+	test('parses and serializes optional org_preset in YAML frontmatter and Tree Metadata (P2-07)', () => {
+		const frontmatterMd = [
+			'---',
+			'workspace_isolation: worktree',
+			'max_budget_usd: 12',
+			'org_preset: startup-3tier',
+			'---',
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Design"] --> N2["Build"]',
+			'```',
+		].join('\n');
+		const parsed = parseEngineeringBlueprint(frontmatterMd);
+		assert.strictEqual(parsed.metadata.orgPreset, 'startup-3tier');
+		assert.strictEqual(parsed.metadata.maxBudgetUsd, 12);
+
+		const serialized = serializeEngineeringBlueprint(parsed);
+		assert.ok(serialized.includes('- org_preset: startup-3tier'));
+		const reparsed = parseEngineeringBlueprint(serialized);
+		assert.strictEqual(reparsed.metadata.orgPreset, 'startup-3tier');
+		assert.strictEqual(reparsed.metadata.maxBudgetUsd, 12);
+	});
 });

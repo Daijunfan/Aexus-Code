@@ -419,6 +419,7 @@
 	font-weight: 600;
 	font-variant-numeric: tabular-nums;
 	box-sizing: border-box;
+	flex-shrink: 0;
 	transition: filter 120ms ease, border-color 120ms ease, background 120ms ease;
 }
 
@@ -541,6 +542,7 @@
 	font-size: 9px;
 	line-height: 13px;
 	box-sizing: border-box;
+	flex-shrink: 0;
 	color: var(--ade-deck-severity-info);
 	background: color-mix(in srgb, var(--ade-deck-severity-info) 14%, transparent);
 	border-color: color-mix(in srgb, var(--ade-deck-severity-info) 42%, transparent);
@@ -818,9 +820,39 @@
 .monaco-workbench.hc-black .ade-worktree-badge,
 .monaco-workbench.hc-light .ade-worktree-badge,
 .monaco-workbench.hc-black .ade-cloud-host-badge,
-.monaco-workbench.hc-light .ade-cloud-host-badge {
+.monaco-workbench.hc-light .ade-cloud-host-badge,
+.monaco-workbench.hc-black .ade-inbox-card,
+.monaco-workbench.hc-light .ade-inbox-card,
+.monaco-workbench.hc-black .ade-inbox-rank-chip,
+.monaco-workbench.hc-light .ade-inbox-rank-chip,
+.monaco-workbench.hc-black .ade-inbox-kind-pill,
+.monaco-workbench.hc-light .ade-inbox-kind-pill {
 	background: transparent;
 	border-color: var(--vscode-contrastBorder, currentColor);
+}
+
+.monaco-workbench.hc-black .ade-inbox-rank-chip.active,
+.monaco-workbench.hc-light .ade-inbox-rank-chip.active,
+.monaco-workbench.hc-black .ade-inbox-filter-btn.active,
+.monaco-workbench.hc-light .ade-inbox-filter-btn.active {
+	outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-contrastBorder, currentColor));
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench .ade-secretary-bar,
+	.monaco-workbench .ade-secretary-bar::before,
+	.monaco-workbench .ade-secretary-icon-wrap::after,
+	.monaco-workbench .ade-focus-banner-exit,
+	.monaco-workbench .ade-role-badge,
+	.monaco-workbench .ade-worktree-badge,
+	.monaco-workbench .ade-cloud-host-badge,
+	.monaco-workbench .ade-role-badge .ade-role-badge-icon,
+	.monaco-workbench .ade-role-badge .ade-badge-label,
+	.monaco-workbench .ade-worktree-badge .ade-badge-label,
+	.monaco-workbench .ade-cloud-host-badge .ade-badge-label {
+		animation: none !important;
+		transition: none !important;
+	}
 }
 
 @keyframes adeSecretaryHairlineFlow {
