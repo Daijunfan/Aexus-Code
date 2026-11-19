@@ -1,7 +1,12 @@
-<!-- Thank you for submitting a Pull Request. Please:
-* Read our Pull Request guidelines:
-  https://github.com/microsoft/vscode/wiki/How-to-Contribute#pull-requests
-* Associate an issue with the Pull Request.
-* Ensure that the code is up-to-date with the `main` branch.
-* Include a description of the proposed changes and how to test them.
--->
+## Summary
+Briefly explain the change and why it improves Aexus Code.
+
+## Key Changes
+- ...
+
+## Verification Checklist
+- [ ] `pnpm run typecheck-client` passes with 0 errors
+- [ ] `eslint --max-warnings=0` passes on all modified files
+- [ ] Relevant unit tests added / updated and passing
+- [ ] Verified Dark Modern & Light Modern themes (if UI changed)
+- [ ] Preserves `Employee (L3) ≠ Worker (L4)` and ADE ⇄ IDE Mirror Symmetry invariants

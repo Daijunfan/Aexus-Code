@@ -277,13 +277,6 @@
 						"pi": { "type": "string" }
 					},
 					"additionalProperties": false
-				},
-				"aexus.ade.engineering.watchdogTimeoutMinutes": {
-					"type": "number",
-					"default": 10,
-					"minimum": 0.1,
-					"scope": "window",
-					"description": "%watchdogTimeoutMinutesDescription%"
 				}
 			}
 		}

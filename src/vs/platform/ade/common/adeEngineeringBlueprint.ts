@@ -754,6 +754,7 @@ export function parseEngineeringBlueprint(
 	let governorSessionId = defaults?.governorSessionId ?? '';
 	let workspaceIsolation: AdeWorkspaceIsolationMode = 'shared';
 	let watchdogTimeoutMinutes = DEFAULT_WATCHDOG_TIMEOUT_MINUTES;
+	let maxBudgetUsd: number | undefined;
 
 	// Optional YAML frontmatter before the Mermaid block (`---\nkey: val\n---`)
 	const frontmatterMatch = normalizedText.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
@@ -772,6 +773,9 @@ export function parseEngineeringBlueprint(
 			} else if (fk === 'watchdog_timeout_minutes' || fk === 'watchdogtimeoutminutes') {
 				const num = Number(fv);
 				if (Number.isFinite(num) && num > 0) { watchdogTimeoutMinutes = num; }
+			} else if (fk === 'max_budget_usd' || fk === 'maxbudgetusd') {
+				const num = Number(fv.replace(/^\$/, ''));
+				if (Number.isFinite(num) && num > 0) { maxBudgetUsd = Math.round(num * 100) / 100; }
 			}
 		}
 	}
@@ -864,6 +868,11 @@ export function parseEngineeringBlueprint(
 				const num = Number(val);
 				if (Number.isFinite(num) && num > 0) {
 					watchdogTimeoutMinutes = num;
+				}
+			} else if (key === 'max_budget_usd' || key === 'maxbudgetusd') {
+				const num = Number(val.replace(/^\$/, ''));
+				if (Number.isFinite(num) && num > 0) {
+					maxBudgetUsd = Math.round(num * 100) / 100;
 				}
 			}
 			continue;
@@ -1096,6 +1105,7 @@ export function parseEngineeringBlueprint(
 		workspaceIsolation,
 		watchdogTimeoutMinutes,
 		flowDirection,
+		...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
 	};
 
 	return {
@@ -1217,6 +1227,9 @@ export function serializeEngineeringBlueprint(blueprint: IAdeEngineeringBlueprin
 		`- governor_session_id: ${blueprint.metadata.governorSessionId || '<session-uuid>'}`,
 		`- workspace_isolation: ${blueprint.metadata.workspaceIsolation}`,
 		`- watchdog_timeout_minutes: ${blueprint.metadata.watchdogTimeoutMinutes}`,
+		...(typeof blueprint.metadata.maxBudgetUsd === 'number' && Number.isFinite(blueprint.metadata.maxBudgetUsd) && blueprint.metadata.maxBudgetUsd > 0
+			? [`- max_budget_usd: ${Math.round(blueprint.metadata.maxBudgetUsd * 100) / 100}`]
+			: []),
 	];
 
 	const managerLines: string[] = ['## Auto-Partitioned Managers'];
@@ -1568,6 +1581,29 @@ export function computeAutoLayoutPositions(
 		}
 	}
 	return result;
+}
+
+/**
+ * Returns true if any two positioned nodes overlap or violate minimum rectangular pod + segment header clearance
+ * (e.g., legacy blueprints saved when task nodes were 88×88 circles instead of 268×172 armored dual-shell pods).
+ */
+export function hasOverlappingPodPositions(nodes: readonly IAdeEngineeringBlueprintNode[]): boolean {
+	const positioned = nodes.filter((n): n is IAdeEngineeringBlueprintNode & { readonly position: IAdeNodeCanvasPosition } => Boolean(n.position));
+	if (positioned.length < 2) {
+		return false;
+	}
+	const minDx = 296;
+	const minDy = 216;
+	for (let i = 0; i < positioned.length; i++) {
+		const a = positioned[i].position;
+		for (let j = i + 1; j < positioned.length; j++) {
+			const b = positioned[j].position;
+			if (Math.abs(a.x - b.x) < minDx && Math.abs(a.y - b.y) < minDy) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /**

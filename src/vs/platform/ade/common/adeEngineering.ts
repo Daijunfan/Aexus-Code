@@ -93,6 +93,8 @@ export interface IAdeEngineeringBlueprintMetadata {
 	readonly workspaceIsolation: AdeWorkspaceIsolationMode;
 	readonly watchdogTimeoutMinutes: number;
 	readonly flowDirection?: 'LR' | 'TD';
+	/** Optional hard spend ceiling in USD; reaching it automatically pauses the DAG and posts an ADE Inbox alert. */
+	readonly maxBudgetUsd?: number;
 }
 
 export interface IAdeEngineeringManagerSegment {
@@ -528,6 +530,8 @@ export interface IAdeEngineeringConfigureParams {
 	readonly clearModel?: boolean;
 	readonly thinking?: AdeThinkingLevel;
 	readonly workspaceIsolation?: AdeWorkspaceIsolationMode;
+	readonly maxBudgetUsd?: number;
+	readonly clearBudget?: boolean;
 	readonly forceStopRunning?: boolean;
 }
 
@@ -566,6 +570,8 @@ export interface IAdeEngineeringService {
 	recordSessionTurnUsage(params: { readonly sessionResource?: string; readonly agentId?: string; readonly usage: Partial<IAdeTokenUsage> }): void;
 	openEngineeringEditor(governorSessionId: string, options?: { side?: boolean }): Promise<void>;
 	ensureNodeAgentSessionOpen(governorSessionId: string, nodeId: string, role?: 'worker' | 'employee' | 'manager', options?: { side?: boolean }): Promise<string | undefined>;
+	mergeTreeWorktrees?(governorSessionId: string): Promise<{ readonly ok: boolean; readonly conflictedFiles: readonly string[]; readonly summary: string }>;
+	cleanupTreeWorktrees?(governorSessionId: string): Promise<void>;
 }
 
 export const IAdeInboxService = createDecorator<IAdeInboxService>('adeInboxService');

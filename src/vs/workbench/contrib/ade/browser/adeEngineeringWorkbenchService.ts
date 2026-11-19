@@ -64,6 +64,11 @@ import {
 	serializeEngineeringBlueprint,
 	toAdeEngineId,
 } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
+import {
+	computeTreeFinancialSummary,
+	estimateTokenUsageCostUsd,
+	formatUsdCost,
+} from '../../../../platform/ade/common/adePricing.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -780,12 +785,27 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!rawDelta) {
 			return false;
 		}
+		let enrichedDelta: Partial<IAdeTokenUsage> = rawDelta;
+		if (!(typeof rawDelta.costUsd === 'number' && Number.isFinite(rawDelta.costUsd) && rawDelta.costUsd > 0)) {
+			const node = nodeId ? entry.blueprint.nodes.find(n => n.id === nodeId) : undefined;
+			const seg = nodeId ? entry.blueprint.managers.find(m => m.nodeIds.includes(nodeId)) : entry.blueprint.managers[0];
+			const roleCfg = role === 'worker'
+				? node?.worker
+				: role === 'employee'
+					? node?.employee
+					: seg?.config;
+			const normalizedForCost = accumulateTokenUsage(undefined, rawDelta, true);
+			const estimatedCost = estimateTokenUsageCostUsd(normalizedForCost, roleCfg);
+			if (estimatedCost > 0) {
+				enrichedDelta = { ...rawDelta, costUsd: estimatedCost, estimated: true };
+			}
+		}
 		const prevTreeUsage = this.computeResolvedTreeTokenUsage(entry.state);
-		const updatedRoleBucket = accumulateTokenUsage(prevTreeUsage[role], rawDelta, true);
+		const updatedRoleBucket = accumulateTokenUsage(prevTreeUsage[role], enrichedDelta, true);
 		if (updatedRoleBucket === prevTreeUsage[role]) {
 			return false;
 		}
-		const updatedTreeTotal = accumulateTokenUsage(prevTreeUsage.total, rawDelta, true);
+		const updatedTreeTotal = accumulateTokenUsage(prevTreeUsage.total, enrichedDelta, true);
 		const nextTreeUsage: IAdeTreeTokenUsageSummary = {
 			...prevTreeUsage,
 			[role]: updatedRoleBucket,
@@ -796,8 +816,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (nodeId && role !== 'governor' && entry.state.nodes[nodeId]) {
 			const prevNodeState = entry.state.nodes[nodeId];
 			const prevNodeUsage: IAdeNodeRoleTokenBreakdown = prevNodeState.tokenUsage ?? createEmptyNodeRoleTokenBreakdown();
-			const nextNodeRole = accumulateTokenUsage(prevNodeUsage[role], rawDelta, true);
-			const nextNodeTotal = accumulateTokenUsage(prevNodeUsage.total, rawDelta, true);
+			const nextNodeRole = accumulateTokenUsage(prevNodeUsage[role], enrichedDelta, true);
+			const nextNodeTotal = accumulateTokenUsage(prevNodeUsage.total, enrichedDelta, true);
 			nextNodes = {
 				...entry.state.nodes,
 				[nodeId]: {
@@ -817,7 +837,45 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			tokenUsage: nextTreeUsage,
 			updatedAt: Date.now(),
 		};
+		this.enforceBudgetCeilingIfNeeded(entry, nodeId);
 		return true;
+	}
+
+	private enforceBudgetCeilingIfNeeded(entry: IManagedTreeEntry, nodeId?: string): void {
+		const maxBudgetUsd = entry.blueprint.metadata.maxBudgetUsd;
+		if (!(typeof maxBudgetUsd === 'number' && Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0)) {
+			return;
+		}
+		if (entry.state.runStatus !== 'running') {
+			return;
+		}
+		const fin = computeTreeFinancialSummary({
+			blueprint: entry.blueprint,
+			state: entry.state,
+			tokenUsage: this.computeResolvedTreeTokenUsage(entry.state),
+		});
+		if (fin.totalCostUsd < maxBudgetUsd) {
+			return;
+		}
+		entry.state = {
+			...entry.state,
+			runStatus: 'paused',
+			updatedAt: Date.now(),
+		};
+		const detail = localize(
+			'adeEngBudgetLimitReachedDetail',
+			"Estimated spend {0} reached budget ceiling {1}. Execution paused automatically to prevent runaway API spend.",
+			formatUsdCost(fin.totalCostUsd),
+			formatUsdCost(maxBudgetUsd),
+		);
+		this.appendEvent(entry, 'warn', 'budget.limit_reached', { nodeId, detail });
+		void this.inbox.postGovernorMessage({
+			governorSessionId: entry.governorSessionId,
+			nodeId,
+			title: localize('adeEngBudgetPausedInboxTitle', "Budget Guardrail Paused DAG ({0} / {1})", formatUsdCost(fin.totalCostUsd), formatUsdCost(maxBudgetUsd)),
+			message: detail,
+			severity: 'critical',
+		}).catch(() => undefined);
 	}
 
 	private syncSidebarHierarchy(entry: IManagedTreeEntry): void {
@@ -1281,12 +1339,22 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			return { ...mgr, config: patchRoleCfg(mgr.config) };
 		});
 
+		const nextBudgetUsd = params.clearBudget
+			? undefined
+			: (typeof params.maxBudgetUsd === 'number' && Number.isFinite(params.maxBudgetUsd)
+				? (params.maxBudgetUsd > 0 ? Math.round(params.maxBudgetUsd * 100) / 100 : undefined)
+				: entry.blueprint.metadata.maxBudgetUsd);
+		const nextMetadata = {
+			treeType: entry.blueprint.metadata.treeType,
+			governorSessionId: entry.blueprint.metadata.governorSessionId,
+			workspaceIsolation: params.workspaceIsolation ?? entry.blueprint.metadata.workspaceIsolation,
+			watchdogTimeoutMinutes: entry.blueprint.metadata.watchdogTimeoutMinutes,
+			...(entry.blueprint.metadata.flowDirection ? { flowDirection: entry.blueprint.metadata.flowDirection } : {}),
+			...(nextBudgetUsd !== undefined ? { maxBudgetUsd: nextBudgetUsd } : {}),
+		};
 		const nextBp: IAdeEngineeringBlueprint = {
 			...entry.blueprint,
-			metadata: {
-				...entry.blueprint.metadata,
-				...(params.workspaceIsolation ? { workspaceIsolation: params.workspaceIsolation } : {}),
-			},
+			metadata: nextMetadata,
 			managers: nextManagers,
 			nodes: nextNodes,
 		};
@@ -1295,6 +1363,54 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			blueprintText: serializeEngineeringBlueprint(nextBp),
 			forceStopRunning: params.forceStopRunning ?? false,
 		});
+	}
+
+	async mergeTreeWorktrees(governorSessionId: string): Promise<{ readonly ok: boolean; readonly conflictedFiles: readonly string[]; readonly summary: string }> {
+		await this.readyPromise;
+		const entry = this.trees.get(governorSessionId);
+		if (!entry) {
+			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", governorSessionId));
+		}
+		const worktrees = Object.values(entry.state.worktrees ?? {});
+		if (worktrees.length === 0) {
+			return { ok: true, conflictedFiles: [], summary: 'No isolated segment worktrees are active for this DAG.' };
+		}
+		for (const wt of worktrees) {
+			await this.backend.commitSegmentWorktree(wt.worktreePath, `chore(ade): checkpoint segment ${wt.segmentId} before merge`).catch(() => undefined);
+		}
+		const branches = worktrees.map(wt => wt.branchName);
+		const result = await this.backend.mergeSegmentsIntoProject(entry.state.projectPath, branches);
+		this.appendEvent(entry, result.ok ? 'info' : 'warn', result.ok ? 'worktree.merged' : 'worktree.merge_conflict', {
+			detail: result.summary,
+		});
+		if (!result.ok) {
+			void this.inbox.postGovernorMessage({
+				governorSessionId: entry.governorSessionId,
+				title: localize('adeEngWorktreeMergeConflictTitle', "Worktree Merge Conflict ({0} file(s))", result.conflictedFiles.length),
+				message: result.summary,
+				severity: 'critical',
+			}).catch(() => undefined);
+		}
+		await this.persistEntry(entry);
+		return result;
+	}
+
+	async cleanupTreeWorktrees(governorSessionId: string): Promise<void> {
+		await this.readyPromise;
+		const entry = this.trees.get(governorSessionId);
+		if (!entry) {
+			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", governorSessionId));
+		}
+		await this.backend.cleanupTreeWorktrees(governorSessionId, entry.state.projectPath);
+		entry.state = {
+			...entry.state,
+			worktrees: {},
+			updatedAt: Date.now(),
+		};
+		this.appendEvent(entry, 'info', 'worktree.cleaned', {
+			detail: 'Pruned isolated Git worktrees for this DAG.',
+		});
+		await this.persistEntry(entry);
 	}
 
 	async resetTree(params: IAdeEngineeringResetParams): Promise<IAdeEngineeringTreeSnapshot> {

@@ -33,7 +33,10 @@ import {
 	IAdeEngineeringService,
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
-import { normalizeThinkingLevel, parseEngineeringBlueprint } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
+import { normalizeThinkingLevel, parseEngineeringBlueprint, serializeEngineeringBlueprint } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
+import { AdeBlueprintTemplatePreset, buildBlueprintFromTemplate, listBlueprintTemplates } from '../../../../platform/ade/common/adeBlueprintTemplates.js';
+import { computeTreeFinancialSummary } from '../../../../platform/ade/common/adePricing.js';
+import { buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
@@ -2194,6 +2197,8 @@ export async function executeAdeControlRequest(
 			const rawModel = typeof params.model === 'string' ? params.model.trim() : undefined;
 			const clearModel = params.clearModel === true || rawModel === 'default' || rawModel === 'none';
 			const rawNode = params.all === true ? undefined : (typeof params.node === 'string' ? params.node.trim() : (typeof params.nodeId === 'string' ? params.nodeId.trim() : undefined));
+			const rawBudget = params.maxBudgetUsd !== undefined ? Number(params.maxBudgetUsd) : undefined;
+			const clearBudget = params.clearBudget === true || rawBudget === 0;
 			const snap = await engineeringService.configureTree({
 				governorSessionId: gov.id,
 				nodeId: rawNode || undefined,
@@ -2203,12 +2208,15 @@ export async function executeAdeControlRequest(
 				clearModel,
 				thinking: rawThinking,
 				workspaceIsolation,
+				maxBudgetUsd: (!clearBudget && typeof rawBudget === 'number' && Number.isFinite(rawBudget) && rawBudget > 0) ? rawBudget : undefined,
+				clearBudget,
 				forceStopRunning: params.forceStopRunning === true,
 			});
 			return {
 				governorSessionId: snap.governorSessionId,
 				runStatus: snap.state.runStatus,
 				workspaceIsolation: snap.blueprint.metadata.workspaceIsolation,
+				maxBudgetUsd: snap.blueprint.metadata.maxBudgetUsd,
 				managers: snap.blueprint.managers,
 				nodes: snap.blueprint.nodes.map(n => ({ id: n.id, title: n.title, type: n.type, worker: n.worker, employee: n.employee })),
 			};
@@ -2322,6 +2330,7 @@ export async function executeAdeControlRequest(
 				runStatus: snap.state.runStatus,
 				progress: snap.progress,
 				tokenUsage: snap.tokenUsage,
+				financials: computeTreeFinancialSummary(snap),
 				managers: snap.blueprint.managers,
 				nodes: snap.nodes,
 				edges: snap.edges,
@@ -2404,6 +2413,88 @@ export async function executeAdeControlRequest(
 				message: typeof params.message === 'string' ? params.message : undefined,
 			});
 			return snap;
+		}
+
+		case 'engineering.templates.list': {
+			const rawType = typeof params.treeType === 'string' ? params.treeType.trim().toLowerCase() : undefined;
+			const treeType: AdeWorkTreeType | undefined = rawType === 'research' ? 'research' : (rawType === 'engineering' ? 'engineering' : undefined);
+			return listBlueprintTemplates(treeType);
+		}
+
+		case 'engineering.templates.apply': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const templateId = typeof params.template === 'string' ? params.template.trim() : (typeof params.templateId === 'string' ? params.templateId.trim() : '');
+			if (!templateId) {
+				throw new Error('Specify --template <templateId> to apply a blueprint template.');
+			}
+			const rawPreset = typeof params.preset === 'string' ? params.preset.trim().toLowerCase() : 'balanced';
+			const preset: AdeBlueprintTemplatePreset = rawPreset === 'max-quality' || rawPreset === 'fast-economy' ? rawPreset : 'balanced';
+			const rawIso = typeof params.isolation === 'string' ? params.isolation : (typeof params.workspaceIsolation === 'string' ? params.workspaceIsolation : undefined);
+			const workspaceIsolation: AdeWorkspaceIsolationMode | undefined = rawIso === 'worktree' ? 'worktree' : (rawIso === 'shared' ? 'shared' : undefined);
+			const rawBudget = params.maxBudgetUsd !== undefined ? Number(params.maxBudgetUsd) : undefined;
+			const existing = engineeringService.getTreeSnapshot(gov.id);
+			const bp = buildBlueprintFromTemplate(templateId, {
+				governorSessionId: gov.id,
+				defaultEngine: typeof params.engine === 'string' && params.engine.trim() ? params.engine.trim() : (gov.preferredEngineId ?? gov.session?.engineId),
+				secondaryEngine: typeof params.secondaryEngine === 'string' && params.secondaryEngine.trim() ? params.secondaryEngine.trim() : undefined,
+				treeType: existing?.treeType,
+				preset,
+				workspaceIsolation,
+				maxBudgetUsd: typeof rawBudget === 'number' && Number.isFinite(rawBudget) && rawBudget > 0 ? rawBudget : undefined,
+			});
+			const snap = await engineeringService.applyBlueprint({
+				governorSessionId: gov.id,
+				blueprintText: serializeEngineeringBlueprint(bp),
+				forceStopRunning: params.forceStopRunning === true,
+			});
+			return {
+				governorSessionId: snap.governorSessionId,
+				templateId,
+				preset,
+				treeType: snap.treeType,
+				workspaceIsolation: snap.blueprint.metadata.workspaceIsolation,
+				maxBudgetUsd: snap.blueprint.metadata.maxBudgetUsd,
+				nodeCount: snap.blueprint.nodes.length,
+				managerCount: snap.blueprint.managers.length,
+			};
+		}
+
+		case 'engineering.report': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			await engineeringService.whenReady();
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			const snap = engineeringService.getTreeSnapshot(gov.id);
+			if (!snap) {
+				throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", gov.id));
+			}
+			return {
+				governorSessionId: snap.governorSessionId,
+				treeType: snap.treeType,
+				financials: computeTreeFinancialSummary(snap),
+				markdown: buildEngineeringRunReportMarkdown(snap),
+			};
+		}
+
+		case 'engineering.worktrees.merge': {
+			if (!engineeringService?.mergeTreeWorktrees) {
+				throw new Error('ADE Engineering worktree merge is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			return engineeringService.mergeTreeWorktrees(gov.id);
+		}
+
+		case 'engineering.worktrees.cleanup': {
+			if (!engineeringService?.cleanupTreeWorktrees) {
+				throw new Error('ADE Engineering worktree cleanup is not available.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			await engineeringService.cleanupTreeWorktrees(gov.id);
+			return { ok: true, governorSessionId: gov.id };
 		}
 
 		case 'inbox.list': {

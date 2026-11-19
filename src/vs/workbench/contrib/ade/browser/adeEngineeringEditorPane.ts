@@ -30,6 +30,7 @@ import {
 	computeAutoLayoutPositions,
 	computeEdgeVisualStatus,
 	computeNodeVisualStatus,
+	hasOverlappingPodPositions,
 	listUpstreamTaskAncestors,
 	normalizeBlueprintEngine,
 	normalizeThinkingLevel,
@@ -39,6 +40,16 @@ import {
 	toAdeEngineId,
 	topologicalSortNodes,
 } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
+import {
+	AdeBlueprintTemplatePreset,
+	buildBlueprintFromTemplate,
+	listBlueprintTemplates,
+} from '../../../../platform/ade/common/adeBlueprintTemplates.js';
+import {
+	computeTreeFinancialSummary,
+	formatUsdCost,
+} from '../../../../platform/ade/common/adePricing.js';
+import { buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
@@ -100,9 +111,10 @@ export const ADE_ENG_PARTICLES_PER_EDGE = 3;
 export const ADE_ENG_PHASE_SOFT_SLA_MS = 10 * 60 * 1000;
 
 type PopoverTabKind = 'worker' | 'employee' | 'manager' | 'task' | 'report';
-type SheetTabKind = 'blueprint' | 'events';
+type SheetTabKind = 'blueprint' | 'events' | 'worktrees';
 type SheetModeKind = 'overlay' | 'split';
 type EventFilterKind = 'all' | 'worker' | 'employee' | 'manager' | 'gates';
+type CanvasSpotlightFilter = 'all' | 'active' | 'gates' | 'issues';
 type PhaseRoleKind = 'wrk' | 'emp' | 'mgr';
 type EventRoleKind = 'wrk' | 'emp' | 'mgr' | 'gate' | 'sys';
 
@@ -394,6 +406,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private popoverCaretEl!: HTMLElement;
 	private minimapLegendEl!: HTMLElement;
 	private shortcutsCardEl!: HTMLElement;
+	private templatesModalEl!: HTMLElement;
 	private spawnGhostEl!: HTMLElement;
 	private ghostGroupEl!: SVGGElement;
 	private spawnGhostEdgeEl!: SVGPathElement;
@@ -407,6 +420,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private readonly sheetRenderDisposables = this._register(new DisposableStore());
 	private readonly sheetTimelineDisposables = this._register(new DisposableStore());
 	private readonly tokenAnalyticsDisposables = this._register(new DisposableStore());
+	private readonly templatesRenderDisposables = this._register(new DisposableStore());
 	private readonly bannerDisposables = this._register(new DisposableStore());
 
 	private activeGovernorId: string | undefined;
@@ -423,6 +437,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private spacePressed = false;
 	private showMinimap = true;
 	private showTokenAnalytics = false;
+	private showTemplatesModal = false;
+	private templateFilterMode: 'all' | 'engineering' | 'research' = 'all';
+	private templatePreset: AdeBlueprintTemplatePreset = 'balanced';
+	private templateUseWorktree: boolean | undefined;
+	private templateBudgetCap = '';
+	private canvasFilter: CanvasSpotlightFilter = 'all';
+	private worktreeActionBusy = false;
 	private activeEventFilter: EventFilterKind = 'all';
 	private pendingInitialFit = false;
 	private liveTickTimer: number | undefined;
@@ -620,6 +641,19 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.sheetEl = append(this.bodyEl, $('.ade-eng-sheet.mode-overlay', { 'aria-hidden': 'true', role: 'dialog' }));
 		this.sheetEl.inert = true;
 		this.sheetContentEl = append(this.sheetEl, $('.ade-eng-sheet-inner'));
+
+		// Curated Blueprint Recipe Gallery Modal
+		this.templatesModalEl = append(this.bodyEl, $('.ade-eng-templates-backdrop', {
+			role: 'dialog',
+			'aria-modal': 'true',
+			'aria-label': localize('adeEngTemplatesModalAria', "Blueprint Recipe Gallery"),
+		}));
+		this.templatesModalEl.hidden = true;
+		this._register(addDisposableListener(this.templatesModalEl, EventType.CLICK, (e: MouseEvent) => {
+			if (e.target === this.templatesModalEl) {
+				this.closeTemplatesModal();
+			}
+		}));
 
 		this.installViewportInteractions();
 		this.installMinimapInteractions();
@@ -1012,6 +1046,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 
 			if (e.key === 'Escape') {
+				if (this.showTemplatesModal) {
+					EventHelper.stop(e, true);
+					this.closeTemplatesModal();
+					return;
+				}
 				if (this.showShortcuts) {
 					EventHelper.stop(e, true);
 					this.toggleShortcuts(false);
@@ -1320,6 +1359,205 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.syncTokensPillState();
 	}
 
+	private openTemplatesModal(): void {
+		this.closePopover();
+		this.closeTokenAnalytics();
+		this.toggleShortcuts(false);
+		this.showTemplatesModal = true;
+		this.templateFilterMode = this.snapshot?.treeType === 'research' ? 'research' : 'engineering';
+		this.templateUseWorktree = undefined;
+		this.renderTemplatesModal();
+		this.templatesModalEl.hidden = false;
+	}
+
+	private closeTemplatesModal(): void {
+		if (!this.showTemplatesModal) {
+			return;
+		}
+		this.showTemplatesModal = false;
+		this.templatesModalEl.hidden = true;
+		this.templatesRenderDisposables.clear();
+		clearNode(this.templatesModalEl);
+	}
+
+	private renderTemplatesModal(): void {
+		this.templatesRenderDisposables.clear();
+		clearNode(this.templatesModalEl);
+		const snap = this.snapshot;
+		if (!snap) {
+			return;
+		}
+		const card = append(this.templatesModalEl, $('.ade-eng-templates-card'));
+		const head = append(card, $('.ade-eng-templates-head'));
+		const titleWrap = append(head, $('.ade-eng-templates-title-wrap'));
+		const ico = append(titleWrap, $('span.ade-eng-templates-ico'));
+		ico.classList.add(...ThemeIcon.asClassNameArray(Codicon.sparkle));
+		const titleStack = append(titleWrap, $('.ade-eng-templates-title-stack'));
+		append(titleStack, $('div.ade-eng-templates-title', {}, localize('adeEngRecipesTitle', "DAG Blueprint Recipes")));
+		append(titleStack, $('div.ade-eng-templates-sub', {}, localize('adeEngRecipesSubtitle', "Battle-tested 4-tier workflows with automatic MNP segment lanes, adversarial L3 review, and human sign-off gates.")));
+		const closeBtn = append(head, $('button.ade-eng-pop-icon-btn.close', {
+			type: 'button',
+			title: localize('adeEngCloseRecipesTooltip', "Close (Esc)"),
+		}));
+		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		this.templatesRenderDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.closeTemplatesModal()));
+
+		// Controls Strip: Mode filter + Engine preset + Worktree toggle + Budget Cap
+		const controls = append(card, $('.ade-eng-templates-controls'));
+		const modeGroup = append(controls, $('.ade-eng-templates-seg-group'));
+		const modeTabs: { readonly id: 'all' | 'engineering' | 'research'; readonly label: string }[] = [
+			{ id: 'all', label: localize('adeEngRecipeFilterAll', "All (6)") },
+			{ id: 'engineering', label: localize('adeEngRecipeFilterEng', "Engineering") },
+			{ id: 'research', label: localize('adeEngRecipeFilterRes', "Research") },
+		];
+		for (const mt of modeTabs) {
+			const b = append(modeGroup, $(`button.ade-eng-templates-pill${this.templateFilterMode === mt.id ? '.active' : ''}`, { type: 'button' }, mt.label));
+			this.templatesRenderDisposables.add(addDisposableListener(b, EventType.CLICK, () => {
+				this.templateFilterMode = mt.id;
+				this.renderTemplatesModal();
+			}));
+		}
+
+		const presetGroup = append(controls, $('.ade-eng-templates-seg-group'));
+		const presets: { readonly id: AdeBlueprintTemplatePreset; readonly label: string; readonly tip: string }[] = [
+			{ id: 'balanced', label: localize('adeEngPresetBalanced', "Balanced"), tip: localize('adeEngPresetBalancedTip', "High thinking on critical Workers, Medium on Reviewers & Managers") },
+			{ id: 'max-quality', label: localize('adeEngPresetMaxQuality', "Max Quality"), tip: localize('adeEngPresetMaxQualityTip', "Max thinking on critical paths, High everywhere else") },
+			{ id: 'fast-economy', label: localize('adeEngPresetFastEco', "Fast · $2 Cap"), tip: localize('adeEngPresetFastEcoTip', "Low/Medium thinking with automatic $2.00 budget guardrail") },
+		];
+		for (const pr of presets) {
+			const b = append(presetGroup, $(`button.ade-eng-templates-pill${this.templatePreset === pr.id ? '.active' : ''}`, { type: 'button', title: pr.tip }, pr.label));
+			this.templatesRenderDisposables.add(addDisposableListener(b, EventType.CLICK, () => {
+				this.templatePreset = pr.id;
+				this.renderTemplatesModal();
+			}));
+		}
+
+		const budgetWrap = append(controls, $('.ade-eng-templates-budget-wrap'));
+		append(budgetWrap, $('span.ade-eng-templates-budget-lbl', {}, localize('adeEngRecipeBudgetLbl', "Cap $")));
+		const budgetInput = append(budgetWrap, $('input.ade-eng-templates-budget-input', {
+			type: 'number',
+			min: '0',
+			step: '0.5',
+			placeholder: localize('adeEngRecipeBudgetPh', "Auto"),
+			value: this.templateBudgetCap,
+			'aria-label': localize('adeEngRecipeBudgetAria', "Optional maximum budget in USD"),
+		})) as HTMLInputElement;
+		this.templatesRenderDisposables.add(addDisposableListener(budgetInput, EventType.INPUT, () => {
+			this.templateBudgetCap = budgetInput.value;
+		}));
+
+		// Recipe Cards Grid
+		const grid = append(card, $('.ade-eng-templates-grid'));
+		const templates = listBlueprintTemplates(this.templateFilterMode === 'all' ? undefined : this.templateFilterMode);
+		const govAgent = this.activeGovernorId ? this.projects.getAgent(this.activeGovernorId) : undefined;
+		const defaultEngine = govAgent?.preferredEngineId ?? govAgent?.session?.engineId ?? 'claude-code';
+
+		for (const tpl of templates) {
+			const item = append(grid, $(`div.ade-eng-recipe-card.mode-${tpl.treeType}`, { 'data-template-id': tpl.id }));
+			const itemTop = append(item, $('.ade-eng-recipe-top'));
+			append(itemTop, $(`span.ade-eng-recipe-cat.mode-${tpl.treeType}`, {}, tpl.category));
+			append(itemTop, $('span.ade-eng-recipe-meta', {}, localize(
+				'adeEngRecipeMeta',
+				"{0} nodes · {1}× parallel · {2}",
+				tpl.nodeCount,
+				tpl.parallelBranches,
+				tpl.recommendedIsolation === 'worktree' ? 'Worktree' : 'Shared',
+			)));
+
+			// Mini SVG Topology Preview
+			const previewWrap = append(item, $('.ade-eng-recipe-preview', { 'aria-hidden': 'true' }));
+			const svg = previewWrap.appendChild($.SVG<SVGSVGElement>('svg', {
+				viewBox: '0 0 100 52',
+				class: 'ade-eng-recipe-svg',
+			}));
+			const pMap = new Map(tpl.previewNodes.map(n => [n.id, { x: n.x, y: 6 + (n.y / 100) * 40, type: n.type }]));
+			for (const e of tpl.previewEdges) {
+				const a = pMap.get(e.from);
+				const b = pMap.get(e.to);
+				if (!a || !b) {
+					continue;
+				}
+				const mx = (a.x + b.x) / 2;
+				svg.appendChild($.SVG<SVGPathElement>('path', {
+					class: 'ade-eng-recipe-edge',
+					d: `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`,
+				}));
+			}
+			for (const pn of tpl.previewNodes) {
+				const pt = pMap.get(pn.id)!;
+				if (pn.type === 'user_gate') {
+					svg.appendChild($.SVG<SVGPolygonElement>('polygon', {
+						class: 'ade-eng-recipe-gate',
+						points: `${pt.x},${pt.y - 4.5} ${pt.x + 5},${pt.y} ${pt.x},${pt.y + 4.5} ${pt.x - 5},${pt.y}`,
+					}));
+				} else {
+					svg.appendChild($.SVG<SVGRectElement>('rect', {
+						class: 'ade-eng-recipe-node',
+						x: String(pt.x - 6),
+						y: String(pt.y - 3.6),
+						width: '12',
+						height: '7.2',
+						rx: '2',
+					}));
+				}
+			}
+
+			append(item, $('div.ade-eng-recipe-name', {}, tpl.name));
+			append(item, $('div.ade-eng-recipe-desc', {}, tpl.tagline));
+			const hlWrap = append(item, $('.ade-eng-recipe-highlights'));
+			for (const hl of tpl.highlights) {
+				append(hlWrap, $('span.ade-eng-recipe-hl', {}, hl));
+			}
+
+			const foot = append(item, $('.ade-eng-recipe-foot'));
+			append(foot, $('span.ade-eng-recipe-budget-hint', {}, localize('adeEngRecipeRecBudget', "Est. cap ~{0}", formatUsdCost(tpl.recommendedBudgetUsd))));
+			const applyBtn = append(foot, $('button.ade-eng-action-btn.confirm.ade-eng-recipe-apply-btn', {
+				type: 'button',
+				'data-template-id': tpl.id,
+			}, localize('adeEngRecipeApplyBtn', "Apply Recipe")));
+			this.templatesRenderDisposables.add(addDisposableListener(applyBtn, EventType.CLICK, async () => {
+				if (!this.activeGovernorId) {
+					return;
+				}
+				const parsedBudget = this.templateBudgetCap.trim() ? Number(this.templateBudgetCap.trim()) : undefined;
+				const nextBp = buildBlueprintFromTemplate(tpl.id, {
+					governorSessionId: this.activeGovernorId,
+					defaultEngine,
+					treeType: snap.treeType,
+					preset: this.templatePreset,
+					workspaceIsolation: this.templateUseWorktree !== undefined
+						? (this.templateUseWorktree ? 'worktree' : 'shared')
+						: tpl.recommendedIsolation,
+					...(parsedBudget !== undefined && Number.isFinite(parsedBudget) && parsedBudget > 0 ? { maxBudgetUsd: parsedBudget } : {}),
+				});
+				const ok = await this.applyRawBlueprintWithSafety(serializeEngineeringBlueprint(nextBp));
+				if (ok) {
+					this.closeTemplatesModal();
+					this.fitViewportToGraph(true);
+				}
+			}));
+		}
+	}
+
+	private copyRunReportToClipboard(triggerBtn?: HTMLElement): void {
+		const snap = this.snapshot;
+		if (!snap) {
+			return;
+		}
+		const markdown = buildEngineeringRunReportMarkdown(snap);
+		void getWindow(this.rootEl).navigator.clipboard?.writeText(markdown);
+		if (triggerBtn) {
+			const prev = triggerBtn.textContent;
+			triggerBtn.textContent = localize('adeEngCopiedPrReportBtn', "✓ Copied PR Report");
+			getWindow(this.rootEl).setTimeout(() => {
+				if (triggerBtn.isConnected && prev) {
+					triggerBtn.textContent = prev;
+				}
+			}, 1800);
+		}
+		this.notificationService.info(localize('adeEngCopiedPrReportNotice', "Copied PR-ready Verification Report ({0} chars) to clipboard.", markdown.length));
+	}
+
 	private renderTokenAnalytics(): void {
 		this.tokenAnalyticsDisposables.clear();
 		clearNode(this.tokenAnalyticsEl);
@@ -1328,26 +1566,39 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 		const tu = snap.tokenUsage;
+		const fin = computeTreeFinancialSummary(snap);
 		const total = Math.max(1, tu.total.totalTokens);
 
 		const head = append(this.tokenAnalyticsEl, $('.ade-eng-ta-head'));
-		append(head, $('span.ade-eng-ta-title', {}, localize('adeEngTokenAnalyticsTitle', "4-Tier Token & Telemetry Breakdown")));
-		const closeBtn = append(head, $('button.ade-eng-pop-icon-btn.close', { type: 'button', title: localize('adeEngClosePopoverTooltip', "Close (Esc)") }));
+		append(head, $('span.ade-eng-ta-title', {}, localize('adeEngTokenAnalyticsTitle', "4-Tier FinOps & Telemetry")));
+		const headActions = append(head, $('.ade-eng-ta-head-actions'));
+		const prBtn = append(headActions, $('button.ade-eng-ta-pr-btn', {
+			type: 'button',
+			title: localize('adeEngCopyPrReportTooltip', "Copy GitHub PR-ready Verification & FinOps Markdown Report"),
+		}, localize('adeEngCopyPrReportShort', "Copy PR Report")));
+		this.tokenAnalyticsDisposables.add(addDisposableListener(prBtn, EventType.CLICK, () => this.copyRunReportToClipboard(prBtn)));
+		const closeBtn = append(headActions, $('button.ade-eng-pop-icon-btn.close', { type: 'button', title: localize('adeEngClosePopoverTooltip', "Close (Esc)") }));
 		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
 		this.tokenAnalyticsDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.closeTokenAnalytics()));
 
 		const kpiGrid = append(this.tokenAnalyticsEl, $('.ade-eng-ta-kpis'));
-		const addKpi = (label: string, val: string) => {
-			const cell = append(kpiGrid, $('.ade-eng-ta-kpi'));
+		const addKpi = (label: string, val: string, extraCls = '', title?: string) => {
+			const cell = append(kpiGrid, $(`.ade-eng-ta-kpi${extraCls ? `.${extraCls}` : ''}`, title ? { title } : {}));
 			append(cell, $('span.ade-eng-ta-kpi-label', {}, label));
 			append(cell, $('span.ade-eng-ta-kpi-val', {}, val));
 		};
+		addKpi(localize('adeEngTaEstSpend', "Est. Spend"), formatUsdCost(fin.totalCostUsd), `spend budget-${fin.budgetStatus}`, localize('adeEngTaEstSpendTip', "Estimated API cost across all 4 tiers"));
+		addKpi(
+			localize('adeEngTaCacheSaved', "Cache Saved"),
+			fin.cacheSavingsUsd > 0 ? `${formatUsdCost(fin.cacheSavingsUsd)} (${fin.cacheHitRatePct}%)` : `${fin.cacheHitRatePct}% hit`,
+			fin.cacheSavingsUsd > 0 ? 'savings' : '',
+			localize('adeEngTaCacheSavedTip', "Prompt-cache savings vs full uncached input rates"),
+		);
 		addKpi(localize('adeEngTaTotal', "Total"), `${tu.total.totalTokens.toLocaleString()} tok`);
 		addKpi(localize('adeEngTaTurns', "Turns"), String(tu.total.turns));
 		addKpi(localize('adeEngTaInput', "Input"), formatCompactTokenCount(tu.total.inputTokens));
 		addKpi(localize('adeEngTaOutput', "Output"), formatCompactTokenCount(tu.total.outputTokens));
 		addKpi(localize('adeEngTaCacheRead', "Cache Read"), formatCompactTokenCount(tu.total.cacheReadTokens));
-		addKpi(localize('adeEngTaCacheWrite', "Cache Write"), formatCompactTokenCount(tu.total.cacheWriteTokens));
 		const ratePerMin = computeTokenRatePerMinute(this.tokenSamples);
 		const isLive = snap.state.runStatus === 'running';
 		const rateCell = append(kpiGrid, $(`.ade-eng-ta-kpi.rate${isLive && ratePerMin > 0 ? '.live' : ''}`, {
@@ -1356,12 +1607,53 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		append(rateCell, $('span.ade-eng-ta-kpi-label', {}, localize('adeEngTaRate', "Rate")));
 		append(rateCell, $('span.ade-eng-ta-kpi-val.ade-eng-ta-rate', {}, localize('adeEngTaRateValue', "{0} tok/min", formatCompactTokenCount(ratePerMin))));
 
+		// Hard Budget Guardrail Strip
+		const budgetBox = append(this.tokenAnalyticsEl, $(`.ade-eng-ta-budget.status-${fin.budgetStatus}`));
+		const budgetTop = append(budgetBox, $('.ade-eng-ta-budget-top'));
+		append(budgetTop, $('span.ade-eng-ta-budget-title', {}, localize('adeEngBudgetGuardTitle', "Budget Guardrail")));
+		append(budgetTop, $('span.ade-eng-ta-budget-readout', {}, fin.maxBudgetUsd !== undefined
+			? `${formatUsdCost(fin.totalCostUsd)} / ${formatUsdCost(fin.maxBudgetUsd)} (${fin.budgetUtilizationPct ?? 0}%)`
+			: localize('adeEngBudgetUncapped', "Uncapped")));
+		if (fin.maxBudgetUsd !== undefined) {
+			const bTrack = append(budgetBox, $('.ade-eng-ta-bar-track.budget'));
+			const bFill = append(bTrack, $(`div.ade-eng-ta-bar-fill.budget-${fin.budgetStatus}`));
+			bFill.style.width = `${Math.min(100, Math.max(fin.totalCostUsd > 0 ? 4 : 0, fin.budgetUtilizationPct ?? 0))}%`;
+		}
+		const budgetBtns = append(budgetBox, $('.ade-eng-ta-budget-presets'));
+		const presetCaps: { readonly label: string; readonly val: number | undefined }[] = [
+			{ label: localize('adeEngBudgetOff', "Off"), val: undefined },
+			{ label: '$2', val: 2 },
+			{ label: '$5', val: 5 },
+			{ label: '$10', val: 10 },
+			{ label: '$25', val: 25 },
+		];
+		for (const pc of presetCaps) {
+			const isActiveCap = pc.val === undefined ? fin.maxBudgetUsd === undefined : fin.maxBudgetUsd === pc.val;
+			const capBtn = append(budgetBtns, $(`button.ade-eng-ta-cap-btn${isActiveCap ? '.active' : ''}`, {
+				type: 'button',
+				'data-budget-cap': pc.val === undefined ? 'off' : String(pc.val),
+			}, pc.label));
+			this.tokenAnalyticsDisposables.add(addDisposableListener(capBtn, EventType.CLICK, async () => {
+				if (!this.activeGovernorId) {
+					return;
+				}
+				try {
+					await this.engineering.configureTree({
+						governorSessionId: this.activeGovernorId,
+						...(pc.val === undefined ? { clearBudget: true } : { maxBudgetUsd: pc.val }),
+					});
+				} catch (err) {
+					this.notificationService.error(err instanceof Error ? err.message : String(err));
+				}
+			}));
+		}
+
 		// Stacked 4-tier bar: Gov / Mgr / Emp / Wrk
-		const tiers: { readonly label: string; readonly short: string; readonly usage: IAdeTokenUsage; readonly cls: string }[] = [
-			{ label: localize('adeEngTierGov', "Governor · L1 (Architect)"), short: localize('adeEngTierGovShort', "Gov"), usage: tu.governor, cls: 'gov' },
-			{ label: localize('adeEngTierMgr', "Manager · L2 (Segment)"), short: localize('adeEngTierMgrShort', "Mgr"), usage: tu.manager, cls: 'mgr' },
-			{ label: localize('adeEngTierEmp', "Employee · L3 (Reviewer)"), short: localize('adeEngTierEmpShort', "Emp"), usage: tu.employee, cls: 'emp' },
-			{ label: localize('adeEngTierWrk', "Worker · L4 (Executor)"), short: localize('adeEngTierWrkShort', "Wrk"), usage: tu.worker, cls: 'wrk' },
+		const tiers: { readonly label: string; readonly short: string; readonly usage: IAdeTokenUsage; readonly cost: number; readonly cls: string }[] = [
+			{ label: localize('adeEngTierGov', "Governor · L1 (Architect)"), short: localize('adeEngTierGovShort', "Gov"), usage: tu.governor, cost: fin.costByTier.governor, cls: 'gov' },
+			{ label: localize('adeEngTierMgr', "Manager · L2 (Segment)"), short: localize('adeEngTierMgrShort', "Mgr"), usage: tu.manager, cost: fin.costByTier.manager, cls: 'mgr' },
+			{ label: localize('adeEngTierEmp', "Employee · L3 (Reviewer)"), short: localize('adeEngTierEmpShort', "Emp"), usage: tu.employee, cost: fin.costByTier.employee, cls: 'emp' },
+			{ label: localize('adeEngTierWrk', "Worker · L4 (Executor)"), short: localize('adeEngTierWrkShort', "Wrk"), usage: tu.worker, cost: fin.costByTier.worker, cls: 'wrk' },
 		];
 		const stack = append(this.tokenAnalyticsEl, $('.ade-eng-ta-stack', {
 			role: 'img',
@@ -1370,7 +1662,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		for (const tier of tiers) {
 			const pct = tu.total.totalTokens > 0 ? (tier.usage.totalTokens / total) * 100 : 0;
 			const seg = append(stack, $(`span.ade-eng-ta-stack-seg.${tier.cls}`, {
-				title: `${tier.label}: ${tier.usage.totalTokens.toLocaleString()} (${Math.round(pct)}%)`,
+				title: `${tier.label}: ${tier.usage.totalTokens.toLocaleString()} (${Math.round(pct)}%) · ${formatUsdCost(tier.cost)}`,
 			}));
 			seg.style.flexGrow = String(Math.max(tu.total.totalTokens > 0 ? 0 : 1, pct));
 		}
@@ -1387,7 +1679,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const row = append(rolesWrap, $('.ade-eng-ta-role-row'));
 			const top = append(row, $('.ade-eng-ta-role-top'));
 			append(top, $(`span.ade-eng-ta-role-name.${tier.cls}`, {}, tier.label));
-			append(top, $('span.ade-eng-ta-role-val', {}, `${tier.usage.totalTokens.toLocaleString()} (${pct}%)`));
+			append(top, $('span.ade-eng-ta-role-val', {}, `${tier.usage.totalTokens.toLocaleString()} (${pct}%) · ${formatUsdCost(tier.cost)}`));
 			const track = append(row, $('.ade-eng-ta-bar-track'));
 			const fill = append(track, $(`div.ade-eng-ta-bar-fill.${tier.cls}`));
 			fill.style.width = `${Math.max(tier.usage.totalTokens > 0 ? 4 : 0, pct)}%`;
@@ -1408,7 +1700,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						done++;
 					}
 				}
-				return { seg: m, tokens, done };
+				return { seg: m, tokens, cost: fin.costBySegment[m.segmentId] ?? 0, done };
 			});
 			const maxSegTokens = Math.max(1, ...segRows.map(r => r.tokens));
 			for (const r of segRows) {
@@ -1419,7 +1711,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}));
 				append(row, $('span.ade-eng-ta-seg-name', {}, r.seg.segmentId));
 				append(row, $('span.ade-eng-ta-seg-done', {}, `${r.done}/${r.seg.nodeIds.length}`));
-				append(row, $('span.ade-eng-ta-seg-tok', {}, formatCompactTokenCount(r.tokens)));
+				append(row, $('span.ade-eng-ta-seg-tok', {}, r.cost > 0 ? `${formatCompactTokenCount(r.tokens)} · ${formatUsdCost(r.cost)}` : formatCompactTokenCount(r.tokens)));
 				const bar = append(row, $('span.ade-eng-ta-seg-bar'));
 				const barFill = append(bar, $('span.ade-eng-ta-seg-bar-fill'));
 				barFill.style.width = `${Math.round((r.tokens / maxSegTokens) * 100)}%`;
@@ -1428,12 +1720,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 
 		// Top-5 most expensive nodes (click = focus node)
-		append(this.tokenAnalyticsEl, $('div.ade-eng-ta-section-label', {}, localize('adeEngTaTopLabel', "Top Nodes by Tokens")));
+		append(this.tokenAnalyticsEl, $('div.ade-eng-ta-section-label', {}, localize('adeEngTaTopLabel', "Top Nodes by Spend")));
 		const topWrap = append(this.tokenAnalyticsEl, $('.ade-eng-ta-top'));
 		const topNodes = (bp?.nodes ?? [])
-			.map(n => ({ node: n, tokens: snap.state.nodes[n.id]?.tokenUsage?.total.totalTokens ?? 0 }))
+			.map(n => ({ node: n, tokens: snap.state.nodes[n.id]?.tokenUsage?.total.totalTokens ?? 0, cost: fin.costByNode[n.id] ?? 0 }))
 			.filter(r => r.tokens > 0)
-			.sort((a, b) => b.tokens - a.tokens)
+			.sort((a, b) => (b.cost - a.cost) || (b.tokens - a.tokens))
 			.slice(0, 5);
 		if (topNodes.length === 0) {
 			append(topWrap, $('div.ade-eng-empty-hint', {}, localize('adeEngTaTopEmpty', "No node has consumed tokens yet.")));
@@ -1448,7 +1740,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			append(row, $('span.ade-eng-ta-top-rank', {}, String(idx + 1)));
 			append(row, $('span.ade-eng-node-id-chip', {}, r.node.id));
 			append(row, $('span.ade-eng-ta-top-title', {}, r.node.title));
-			append(row, $('span.ade-eng-ta-top-tok', {}, formatCompactTokenCount(r.tokens)));
+			append(row, $('span.ade-eng-ta-top-tok', {}, r.cost > 0 ? `${formatCompactTokenCount(r.tokens)} · ${formatUsdCost(r.cost)}` : formatCompactTokenCount(r.tokens)));
 			const bar = append(row, $('span.ade-eng-ta-top-bar'));
 			bar.style.setProperty('--pct', `${Math.round((r.tokens / maxNodeTokens) * 100)}%`);
 			this.tokenAnalyticsDisposables.add(addDisposableListener(row, EventType.CLICK, () => this.focusNodeOnCanvas(r.node.id, false)));
@@ -1776,8 +2068,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.hideBanner();
 		this.closePopover();
 		this.closeTokenAnalytics();
+		this.closeTemplatesModal();
 		this.closeSheet();
 		this.toggleShortcuts(false);
+		this.canvasFilter = 'all';
 		this.syncRootModeClass();
 		if (switchingGovernor) {
 			this.pendingInitialFit = true;
@@ -1834,8 +2128,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.hideBanner();
 		this.closePopover();
 		this.closeTokenAnalytics();
+		this.closeTemplatesModal();
 		this.closeSheet();
 		this.toggleShortcuts(false);
+		this.canvasFilter = 'all';
 		super.clearInput();
 	}
 
@@ -1878,9 +2174,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (snap && (resetDraft || !this.isDraftDirty || !this.draftBlueprint)) {
 			const cloned = cloneBlueprint(snap.blueprint);
 			const autoPos = this.autoLayoutPositions(cloned);
+			const needsDeOverlap = hasOverlappingPodPositions(cloned.nodes);
 			this.draftBlueprint = {
 				...cloned,
-				nodes: cloned.nodes.map(n => n.position ? n : { ...n, position: autoPos.get(n.id) ?? { x: 204, y: 260 } }),
+				nodes: cloned.nodes.map(n => (!needsDeOverlap && n.position) ? n : { ...n, position: autoPos.get(n.id) ?? { x: 204, y: 260 } }),
 			};
 			if (resetDraft) {
 				this.isDraftDirty = false;
@@ -2238,31 +2535,39 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		append(progressPill, $('span', {}, `${snap.progress.completedNodes}/${snap.progress.totalNodes} · ${bp.managers.length} Mgr`));
 
 		const treeTokens = snap.tokenUsage.total;
+		const fin = computeTreeFinancialSummary(snap);
 		const tokenTooltipLines = [
 			localize(
 				'adeEngTokensTotalTooltip',
-				"Total Token Consumption: {0} tokens ({1} turns) — Click for 4-tier chart",
+				"Total Token Consumption: {0} tokens ({1} turns) · Est. Spend: {2} — Click for 4-tier FinOps & Budget Guardrail",
 				treeTokens.totalTokens.toLocaleString(),
 				treeTokens.turns,
+				formatUsdCost(fin.totalCostUsd),
 			),
 			localize(
 				'adeEngTokensIoTooltip',
-				"Input: {0} · Output: {1} · Cache Read: {2} · Cache Write: {3}",
+				"Input: {0} · Output: {1} · Cache Read: {2} (Saved {3}) · Cache Write: {4}",
 				treeTokens.inputTokens.toLocaleString(),
 				treeTokens.outputTokens.toLocaleString(),
 				treeTokens.cacheReadTokens.toLocaleString(),
+				formatUsdCost(fin.cacheSavingsUsd),
 				treeTokens.cacheWriteTokens.toLocaleString(),
 			),
 			localize(
 				'adeEngTokensByRoleTooltip',
-				"By Role — Worker (L4): {0} · Employee (L3): {1} · Manager (L2): {2} · Governor (L1): {3}",
+				"By Role — Worker (L4): {0} ({4}) · Employee (L3): {1} ({5}) · Manager (L2): {2} ({6}) · Governor (L1): {3} ({7})",
 				snap.tokenUsage.worker.totalTokens.toLocaleString(),
 				snap.tokenUsage.employee.totalTokens.toLocaleString(),
 				snap.tokenUsage.manager.totalTokens.toLocaleString(),
 				snap.tokenUsage.governor.totalTokens.toLocaleString(),
+				formatUsdCost(fin.costByTier.worker),
+				formatUsdCost(fin.costByTier.employee),
+				formatUsdCost(fin.costByTier.manager),
+				formatUsdCost(fin.costByTier.governor),
 			),
 		];
-		const tokensPill = append(left, $(`span.ade-eng-tokens-pill${treeTokens.totalTokens > 0 ? '.has-usage' : ''}${this.showTokenAnalytics ? '.active' : ''}`, {
+		const budgetClass = fin.budgetStatus === 'exceeded' ? '.budget-exceeded' : fin.budgetStatus === 'warn' ? '.budget-warn' : '';
+		const tokensPill = append(left, $(`span.ade-eng-tokens-pill${treeTokens.totalTokens > 0 ? '.has-usage' : ''}${this.showTokenAnalytics ? '.active' : ''}${budgetClass}`, {
 			title: tokenTooltipLines.join('\n'),
 			role: 'button',
 			tabindex: '0',
@@ -2270,7 +2575,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.tokensPillEl = tokensPill;
 		const tokIco = append(tokensPill, $('span.ade-eng-tokens-ico'));
 		tokIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.pulse));
-		append(tokensPill, $('span', {}, `${formatCompactTokenCount(treeTokens.totalTokens)} tok`));
+		const pillLabel = fin.maxBudgetUsd !== undefined
+			? `${formatCompactTokenCount(treeTokens.totalTokens)} · ${formatUsdCost(fin.totalCostUsd)}/${formatUsdCost(fin.maxBudgetUsd)}`
+			: (fin.totalCostUsd > 0 ? `${formatCompactTokenCount(treeTokens.totalTokens)} · ${formatUsdCost(fin.totalCostUsd)}` : `${formatCompactTokenCount(treeTokens.totalTokens)} tok`);
+		append(tokensPill, $('span', {}, pillLabel));
 		this.toolbarRenderDisposables.add(addDisposableListener(tokensPill, EventType.CLICK, () => {
 			this.toggleTokenAnalytics();
 		}));
@@ -2327,6 +2635,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		);
 		connectBtn.title = localize('adeEngConnectTooltip', "Toggle Edge Wiring Mode (or drag directly from any node's right port)");
 
+		const recipesBtn = makeToolBtnIn(
+			center,
+			Codicon.sparkle,
+			localize('adeEngRecipesBtn', "Recipes"),
+			() => this.openTemplatesModal(),
+			`ade-eng-recipes-btn${this.showTemplatesModal ? '.active' : ''}`,
+		);
+		recipesBtn.title = localize('adeEngRecipesTooltip', "Open Curated Blueprint Recipe Gallery (6 Engineering & Research Workflows)");
+
 		append(center, $('span.ade-eng-toolbar-sep'));
 
 		const undoBtn = append(center, $('button.ade-eng-icon-btn.ade-eng-undo-btn', {
@@ -2380,8 +2697,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			() => this.toggleSheet('events'),
 			`ade-eng-sheet-toggle${this.activeSheetTab === 'events' ? '.active' : ''}`,
 		);
-		logsBtn.title = localize('adeEngEventsSheetTooltip', "Inspect live Engineering timeline & execution logs ({0})", snap.state.events.length);
+		logsBtn.title = localize('adeEngEventsSheetTooltip', "Inspect live Engineering timeline, Gantt & execution logs ({0})", snap.state.events.length);
 		this.eventsSheetBtnEl = logsBtn;
+
+		const activeWorktrees = Object.keys(snap.state.worktrees ?? {}).length;
+		if (bp.metadata.workspaceIsolation === 'worktree' || activeWorktrees > 0) {
+			const wtBtn = makeToolBtn(
+				Codicon.gitMerge,
+				activeWorktrees > 0
+					? localize('adeEngWorktreesCountBtn', "Worktrees ({0})", activeWorktrees)
+					: localize('adeEngWorktreesBtn', "Worktrees"),
+				() => this.toggleSheet('worktrees'),
+				`ade-eng-sheet-toggle.ade-eng-worktrees-btn${this.activeSheetTab === 'worktrees' ? '.active' : ''}`,
+			);
+			wtBtn.title = localize('adeEngWorktreesSheetTooltip', "Inspect isolated Git worktree branches, merge into project, or clean up");
+		}
 
 		append(right, $('span.ade-eng-toolbar-sep'));
 
@@ -2509,6 +2839,34 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private renderHud(): void {
 		this.hudRenderDisposables.clear();
 		clearNode(this.hudEl);
+
+		const snap = this.snapshot;
+		const bp = this.draftBlueprint;
+		if (snap && bp && bp.nodes.length >= 2) {
+			const filterWrap = append(this.hudEl, $('.ade-eng-hud-filters', {
+				role: 'group',
+				'aria-label': localize('adeEngSpotlightFilterAria', "Spotlight DAG nodes by status"),
+			}));
+			const filterDefs: { readonly id: CanvasSpotlightFilter; readonly label: string; readonly count?: number }[] = [
+				{ id: 'all', label: localize('adeEngSpotAll', "All") },
+				{ id: 'active', label: localize('adeEngSpotActive', "Active"), count: snap.progress.runningNodes },
+				{ id: 'gates', label: localize('adeEngSpotGates', "Gates"), count: snap.progress.waitingGates },
+				{ id: 'issues', label: localize('adeEngSpotIssues', "Issues"), count: snap.progress.failedNodes },
+			];
+			for (const fd of filterDefs) {
+				const txt = fd.count && fd.count > 0 ? `${fd.label} ${fd.count}` : fd.label;
+				const fBtn = append(filterWrap, $(`button.ade-eng-hud-filter-btn${this.canvasFilter === fd.id ? '.active' : ''}${fd.id === 'issues' && (fd.count ?? 0) > 0 ? '.has-issues' : ''}`, {
+					type: 'button',
+					'data-canvas-filter': fd.id,
+				}, txt));
+				this.hudRenderDisposables.add(addDisposableListener(fBtn, EventType.CLICK, () => {
+					this.canvasFilter = fd.id;
+					this.renderHud();
+					this.renderCanvas();
+				}));
+			}
+			append(this.hudEl, $('span.ade-eng-hud-sep'));
+		}
 
 		const mapToggleBtn = append(this.hudEl, $(`button.ade-eng-hud-icon-btn.ade-eng-minimap-toggle${this.showMinimap ? '.active' : ''}`, {
 			type: 'button',
@@ -3096,13 +3454,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.connectHintEl.hidden = true;
 		}
 
-		// Empty Blueprint Onboarding CTA
+		// Empty Blueprint Onboarding CTA + Curated Recipe Quick-Launch
 		if (bp.nodes.length === 0) {
 			clearNode(this.emptyStateEl);
 			append(this.emptyStateEl, $('div.ade-eng-empty-title', {}, localize('adeEngEmptyCanvasTitle', "Design Your Engineering DAG")));
 			append(this.emptyStateEl, $('div.ade-eng-empty-desc', {}, localize('adeEngEmptyCanvasDesc', "Each Task Node wraps an inner Worker (L4 Executor) inside an outer Employee (L3 Reviewer) shell, supervised by Segment Managers (L2).")));
-			const ctaBtn = append(this.emptyStateEl, $('button.ade-eng-action-btn.run', { type: 'button' }, localize('adeEngEmptyCreateFirstBtn', "+ Create First Task Node")));
+			const ctaRow = append(this.emptyStateEl, $('.ade-eng-empty-cta-row'));
+			const ctaBtn = append(ctaRow, $('button.ade-eng-action-btn.run', { type: 'button' }, localize('adeEngEmptyCreateFirstBtn', "+ Create First Task Node")));
 			this.canvasRenderDisposables.add(addDisposableListener(ctaBtn, EventType.CLICK, () => this.addDraftNode('task')));
+			const browseBtn = append(ctaRow, $('button.ade-eng-action-btn.secondary', { type: 'button' }, localize('adeEngEmptyBrowseRecipesBtn', "Browse Blueprint Recipes")));
+			this.canvasRenderDisposables.add(addDisposableListener(browseBtn, EventType.CLICK, () => this.openTemplatesModal()));
 			this.emptyStateEl.hidden = false;
 			this.minimapEl.hidden = true;
 			return;
@@ -3111,6 +3472,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const nodeById = new Map(bp.nodes.map(n => [n.id, n]));
 		const runtimes = snap.state.nodes;
+		const fin = computeTreeFinancialSummary(snap);
 
 		// 1. Render Auto-Partitioned Manager (L2) Segment Enclosures
 		for (const seg of bp.managers) {
@@ -3159,8 +3521,19 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.applyEngineIconToElement(mgrGlyph, seg.config.engine);
 			append(header, $('span.ade-eng-segment-label', {}, `[${seg.segmentId}] ${formatRoleConfigCompact(seg.config, 'medium')}`));
 			append(header, $('span.ade-eng-segment-stat', {}, `${segDoneCount}/${segNodes.length}`));
+			const segWt = snap.state.worktrees?.[seg.segmentId];
+			if (segWt) {
+				const wtBadge = append(header, $('span.ade-eng-segment-branch', {
+					title: localize('adeEngSegmentBranchTooltip', "Isolated Git Worktree: {0} ({1})", segWt.branchName, segWt.worktreePath),
+				}));
+				const brIco = append(wtBadge, $('span'));
+				brIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.gitBranch));
+				const shortBranch = segWt.branchName.length > 18 ? `${segWt.branchName.slice(0, 17)}…` : segWt.branchName;
+				append(wtBadge, $('span', {}, shortBranch));
+			}
 			if (segTokens > 0) {
-				append(header, $('span.ade-eng-segment-tok', {}, formatCompactTokenCount(segTokens)));
+				const segCost = fin.costBySegment[seg.segmentId] ?? 0;
+				append(header, $('span.ade-eng-segment-tok', {}, segCost > 0 ? `${formatCompactTokenCount(segTokens)} · ${formatUsdCost(segCost)}` : formatCompactTokenCount(segTokens)));
 			}
 			const segGear = append(header, $('span.ade-eng-seg-cfg-ico', {
 				title: localize('adeEngConfigureMgrBtnTooltip', "Configure Segment Manager [{0}]", seg.segmentId),
@@ -3214,9 +3587,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				? localize('adeEngGateAriaLabel', "User Gate {0}: {1}, status {2}", node.id, node.title, visualStatus)
 				: localize('adeEngTaskAriaLabel', "Task {0}: {1}, phase {2}, failure {3} of 3", node.id, node.title, phaseName, failCount);
 
+			const matchesSpotlight = this.canvasFilter === 'all'
+				|| (this.canvasFilter === 'active' && visualStatus === 'running')
+				|| (this.canvasFilter === 'gates' && node.type === 'user_gate')
+				|| (this.canvasFilter === 'issues' && (visualStatus === 'failure_1' || visualStatus === 'failure_2' || visualStatus === 'failure_3'));
+
 			const nodeEl = append(
 				this.nodesLayerEl,
-				$(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${isAwaitingGate ? '.awaiting-gate' : ''}${workerActive ? '.phase-worker' : ''}${empActive ? '.phase-employee' : ''}${mgrActive ? '.phase-manager' : ''}${this.activePopoverNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}${this.xrefNodeId === node.id ? '.xref' : ''}`, {
+				$(`div.ade-eng-node.type-${node.type}.status-${visualStatus}${isLocked ? '.locked' : ''}${isAwaitingGate ? '.awaiting-gate' : ''}${workerActive ? '.phase-worker' : ''}${empActive ? '.phase-employee' : ''}${mgrActive ? '.phase-manager' : ''}${this.activePopoverNodeId === node.id ? '.inspected' : ''}${this.connectSourceNodeId === node.id ? '.connect-source' : ''}${this.xrefNodeId === node.id ? '.xref' : ''}${!matchesSpotlight ? '.spotlight-dim' : ''}`, {
 					'data-node-id': node.id,
 					'data-visual-status': visualStatus,
 					'data-phase': phaseName,
@@ -3555,12 +3933,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					const wTok = runtime?.tokenUsage?.worker.totalTokens ?? 0;
 					const eTok = runtime?.tokenUsage?.employee.totalTokens ?? 0;
 					const mTok = runtime?.tokenUsage?.manager.totalTokens ?? 0;
+					const nCost = fin.costByNode[node.id] ?? 0;
 					const sumRole = Math.max(1, wTok + eTok + mTok);
 					const wPct = Math.round((wTok / sumRole) * 100);
 					const ePct = Math.round(((wTok + eTok) / sumRole) * 100);
 					const nodeBreakdownTitle = localize(
 						'adeEngNodeTokensTooltip',
-						"Node [{0}] Tokens: {1} total (In {2} · Out {3} · Cache {4})\nWorker (L4): {5} · Employee (L3): {6} · Manager (L2): {7}",
+						"Node [{0}] Tokens: {1} total · Est. {8} (In {2} · Out {3} · Cache {4})\nWorker (L4): {5} · Employee (L3): {6} · Manager (L2): {7}",
 						node.id,
 						nodeTok.totalTokens.toLocaleString(),
 						nodeTok.inputTokens.toLocaleString(),
@@ -3569,10 +3948,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						wTok.toLocaleString(),
 						eTok.toLocaleString(),
 						mTok.toLocaleString(),
+						formatUsdCost(nCost),
 					);
+					const tokLabel = nCost > 0
+						? `${formatCompactTokenCount(nodeTok.totalTokens)} · ${formatUsdCost(nCost)}`
+						: `${formatCompactTokenCount(nodeTok.totalTokens)} tok`;
 					const tokEl = append(footRight, $('span.ade-eng-node-tokens', {
 						title: nodeBreakdownTitle,
-					}, `${formatCompactTokenCount(nodeTok.totalTokens)} tok`));
+					}, tokLabel));
 					tokEl.style.setProperty('--wrk-pct', `${wPct}%`);
 					tokEl.style.setProperty('--emp-pct', `${ePct}%`);
 				}
@@ -4913,10 +5296,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const tabsWrap = append(head, $('.ade-eng-sheet-tabs'));
 		const bpTabBtn = append(tabsWrap, $(`button.ade-eng-sheet-tab${this.activeSheetTab === 'blueprint' ? '.active' : ''}`, {
 			type: 'button',
-		}, localize('adeEngSheetBlueprintTab', "Blueprint Markdown")));
+		}, localize('adeEngSheetBlueprintTab', "Blueprint")));
 		const evTabBtn = append(tabsWrap, $(`button.ade-eng-sheet-tab${this.activeSheetTab === 'events' ? '.active' : ''}`, {
 			type: 'button',
-		}, localize('adeEngSheetEventsTab', "Execution Logs ({0})", snap.state.events.length)));
+		}, localize('adeEngSheetEventsTab', "Logs ({0})", snap.state.events.length)));
+		const wtEntries = Object.values(snap.state.worktrees ?? {});
+		const showWorktreesTab = snap.blueprint.metadata.workspaceIsolation === 'worktree' || wtEntries.length > 0 || this.activeSheetTab === 'worktrees';
+		if (showWorktreesTab) {
+			const wtTabBtn = append(tabsWrap, $(`button.ade-eng-sheet-tab${this.activeSheetTab === 'worktrees' ? '.active' : ''}`, {
+				type: 'button',
+			}, localize('adeEngSheetWorktreesTab', "Worktrees ({0})", wtEntries.length)));
+			this.sheetRenderDisposables.add(addDisposableListener(wtTabBtn, EventType.CLICK, () => {
+				this.activeSheetTab = 'worktrees';
+				this.setXrefNode(undefined);
+				this.renderToolbar();
+				this.renderSheet();
+			}));
+		}
 
 		this.sheetRenderDisposables.add(addDisposableListener(bpTabBtn, EventType.CLICK, () => {
 			this.activeSheetTab = 'blueprint';
@@ -5038,6 +5434,32 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				statusMsg.className = 'ade-eng-sheet-status ok';
 			}));
 
+			const exportBtn = append(actions, $('button.ade-eng-action-btn.secondary', {
+				type: 'button',
+				title: localize('adeEngExportBlueprintTooltip', "Download shareable .aexus-blueprint.md file"),
+			}, localize('adeEngExportBlueprintBtn', "Export .md")));
+			this.sheetRenderDisposables.add(addDisposableListener(exportBtn, EventType.CLICK, () => {
+				const win = getWindow(this.rootEl);
+				const blob = new Blob([editor.value], { type: 'text/markdown;charset=utf-8' });
+				const url = win.URL.createObjectURL(blob);
+				const link = win.document.createElement('a');
+				const safeName = (snap.governorLabel || snap.governorSessionId).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'aexus-dag';
+				link.href = url;
+				link.download = `${safeName}.aexus-blueprint.md`;
+				link.click();
+				win.setTimeout(() => win.URL.revokeObjectURL(url), 1000);
+				statusMsg.textContent = localize('adeEngExportedBlueprintMsg', "Exported {0}.aexus-blueprint.md.", safeName);
+				statusMsg.className = 'ade-eng-sheet-status ok';
+			}));
+
+			const prReportBtn = append(actions, $('button.ade-eng-action-btn.secondary', {
+				type: 'button',
+				title: localize('adeEngSheetCopyPrTooltip', "Copy GitHub PR-ready Verification & FinOps Report"),
+			}, localize('adeEngSheetCopyPrBtn', "PR Report")));
+			this.sheetRenderDisposables.add(addDisposableListener(prReportBtn, EventType.CLICK, () => {
+				this.copyRunReportToClipboard(prReportBtn);
+			}));
+
 			const applyBtn = append(actions, $('button.ade-eng-action-btn.confirm', {
 				type: 'button',
 			}, localize('adeEngApplyRawBlueprintBtn', "Validate & Apply")));
@@ -5062,7 +5484,146 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					void doApplyRaw();
 				}
 			}));
+		} else if (this.activeSheetTab === 'worktrees') {
+			const body = append(this.sheetContentEl, $('.ade-eng-sheet-body.worktrees'));
+			const wtList = Object.values(snap.state.worktrees ?? {});
+			const summaryBanner = append(body, $('.ade-eng-wt-summary'));
+			append(summaryBanner, $('div.ade-eng-wt-summary-title', {}, snap.blueprint.metadata.workspaceIsolation === 'worktree'
+				? localize('adeEngWtActiveModeTitle', "Git Worktree Sandbox Isolation Enabled")
+				: localize('adeEngWtSharedModeTitle', "Shared Workspace Mode")));
+			append(summaryBanner, $('div.ade-eng-wt-summary-sub', {}, localize(
+				'adeEngWtSummaryDesc',
+				"Each parallel Manager · L2 segment executes on its own Git worktree branch so concurrent Workers never collide. Review changes and merge cleanly into your main branch.",
+			)));
+
+			if (wtList.length === 0) {
+				append(body, $('div.ade-eng-empty-hint', {}, localize('adeEngWtNoneYet', "No isolated worktrees have been provisioned yet. Run the DAG in Worktree mode to spin up per-segment branches automatically.")));
+			} else {
+				const listWrap = append(body, $('.ade-eng-wt-list'));
+				for (const wt of wtList) {
+					const seg = snap.blueprint.managers.find(m => m.segmentId === wt.segmentId);
+					const segTouched = new Set<string>();
+					for (const nid of seg?.nodeIds ?? []) {
+						for (const f of snap.state.nodes[nid]?.lastChanges?.touchedFiles ?? []) {
+							segTouched.add(f.relativePath);
+						}
+					}
+					const card = append(listWrap, $('.ade-eng-wt-card', { 'data-segment-id': wt.segmentId }));
+					const top = append(card, $('.ade-eng-wt-card-top'));
+					append(top, $('span.ade-eng-role-tag.mgr', {}, `MGR · ${wt.segmentId}`));
+					const br = append(top, $('span.ade-eng-wt-branch-chip', {}));
+					const brIco = append(br, $('span'));
+					brIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.gitBranch));
+					append(br, $('span', {}, wt.branchName));
+					if (wt.headCommit) {
+						append(top, $('span.ade-eng-wt-sha', {}, wt.headCommit.slice(0, 7)));
+					}
+					append(card, $('div.ade-eng-wt-path', { title: wt.worktreePath }, wt.worktreePath));
+					const foot = append(card, $('.ade-eng-wt-card-foot'));
+					append(foot, $('span.ade-eng-wt-files', {}, localize('adeEngWtFilesCount', "{0} touched file(s)", segTouched.size)));
+					const focusBtn = append(foot, $('button.ade-eng-wt-focus-btn', { type: 'button' }, localize('adeEngWtFocusLaneBtn', "Focus Lane")));
+					this.sheetRenderDisposables.add(addDisposableListener(focusBtn, EventType.CLICK, () => this.focusSegmentOnCanvas(wt.segmentId)));
+				}
+			}
+
+			const wtStatusEl = append(body, $('div.ade-eng-sheet-status'));
+			const actions = append(body, $('.ade-eng-sheet-actions'));
+			const mergeBtn = append(actions, $('button.ade-eng-action-btn.confirm.ade-eng-wt-merge-btn', {
+				type: 'button',
+				...(wtList.length === 0 || this.worktreeActionBusy ? { disabled: 'disabled' } : {}),
+			}, localize('adeEngWtMergeAllBtn', "Merge All into Project"))) as HTMLButtonElement;
+			const cleanBtn = append(actions, $('button.ade-eng-action-btn.secondary.ade-eng-wt-cleanup-btn', {
+				type: 'button',
+				...(wtList.length === 0 || this.worktreeActionBusy ? { disabled: 'disabled' } : {}),
+			}, localize('adeEngWtCleanupBtn', "Clean Up Worktrees"))) as HTMLButtonElement;
+
+			this.sheetRenderDisposables.add(addDisposableListener(mergeBtn, EventType.CLICK, async () => {
+				if (!this.activeGovernorId || !this.engineering.mergeTreeWorktrees || this.worktreeActionBusy) {
+					return;
+				}
+				this.worktreeActionBusy = true;
+				mergeBtn.disabled = true;
+				cleanBtn.disabled = true;
+				try {
+					const res = await this.engineering.mergeTreeWorktrees(this.activeGovernorId);
+					wtStatusEl.textContent = res.ok ? `✓ ${res.summary}` : `⚠ ${res.summary}`;
+					wtStatusEl.className = `ade-eng-sheet-status ${res.ok ? 'ok' : 'err'}`;
+				} catch (err) {
+					wtStatusEl.textContent = `⚠ ${err instanceof Error ? err.message : String(err)}`;
+					wtStatusEl.className = 'ade-eng-sheet-status err';
+				} finally {
+					this.worktreeActionBusy = false;
+					if (this.activeSheetTab === 'worktrees') {
+						this.renderSheet();
+					}
+				}
+			}));
+
+			this.sheetRenderDisposables.add(addDisposableListener(cleanBtn, EventType.CLICK, async () => {
+				if (!this.activeGovernorId || !this.engineering.cleanupTreeWorktrees || this.worktreeActionBusy) {
+					return;
+				}
+				this.worktreeActionBusy = true;
+				mergeBtn.disabled = true;
+				cleanBtn.disabled = true;
+				try {
+					await this.engineering.cleanupTreeWorktrees(this.activeGovernorId);
+					wtStatusEl.textContent = localize('adeEngWtCleanedMsg', "✓ Pruned all isolated worktrees cleanly.");
+					wtStatusEl.className = 'ade-eng-sheet-status ok';
+				} catch (err) {
+					wtStatusEl.textContent = `⚠ ${err instanceof Error ? err.message : String(err)}`;
+					wtStatusEl.className = 'ade-eng-sheet-status err';
+				} finally {
+					this.worktreeActionBusy = false;
+					if (this.activeSheetTab === 'worktrees') {
+						this.renderSheet();
+					}
+				}
+			}));
 		} else {
+			// Visual Execution Gantt Strip (when at least 1 node has started)
+			const fin = computeTreeFinancialSummary(snap);
+			const ganttItems = snap.nodes
+				.filter(n => typeof n.runtime.startedAt === 'number' && n.runtime.startedAt > 0)
+				.map(n => ({
+					node: n.node,
+					visualStatus: n.visualStatus,
+					start: n.runtime.startedAt!,
+					end: n.runtime.completedAt || Math.max(n.runtime.startedAt! + 1000, snap.state.updatedAt),
+					cost: fin.costByNode[n.node.id] ?? 0,
+				}));
+			if (ganttItems.length > 0) {
+				const minT = Math.min(...ganttItems.map(g => g.start));
+				const maxT = Math.max(minT + 1000, ...ganttItems.map(g => g.end));
+				const span = maxT - minT;
+				const ganttWrap = append(this.sheetContentEl, $('.ade-eng-gantt'));
+				const ganttHead = append(ganttWrap, $('.ade-eng-gantt-head'));
+				append(ganttHead, $('span.ade-eng-gantt-title', {}, localize('adeEngGanttTitle', "Execution Gantt · {0} ({1})", formatElapsedCompact(minT, maxT), formatUsdCost(fin.totalCostUsd))));
+				const ganttPrBtn = append(ganttHead, $('button.ade-eng-ta-pr-btn', {
+					type: 'button',
+					title: localize('adeEngGanttCopyPrTip', "Copy PR Verification Report Markdown"),
+				}, localize('adeEngGanttCopyPrLabel', "Copy PR Report")));
+				this.sheetRenderDisposables.add(addDisposableListener(ganttPrBtn, EventType.CLICK, () => this.copyRunReportToClipboard(ganttPrBtn)));
+				for (const item of ganttItems.slice(0, 8)) {
+					const row = append(ganttWrap, $('button.ade-eng-gantt-row', {
+						type: 'button',
+						'data-node-id': item.node.id,
+						title: `[${item.node.id}] ${item.node.title} · ${formatElapsedCompact(item.start, item.end)} · ${formatUsdCost(item.cost)}`,
+					}));
+					append(row, $('span.ade-eng-node-id-chip', {}, item.node.id));
+					const track = append(row, $('span.ade-eng-gantt-track'));
+					const leftPct = Math.max(0, Math.min(96, ((item.start - minT) / span) * 100));
+					const widthPct = Math.max(4, Math.min(100 - leftPct, ((item.end - item.start) / span) * 100));
+					const bar = append(track, $(`span.ade-eng-gantt-bar.status-${item.visualStatus}`));
+					bar.style.left = `${leftPct.toFixed(1)}%`;
+					bar.style.width = `${widthPct.toFixed(1)}%`;
+					append(row, $('span.ade-eng-gantt-meta', {}, item.cost > 0
+						? `${formatElapsedCompact(item.start, item.end)} · ${formatUsdCost(item.cost)}`
+						: formatElapsedCompact(item.start, item.end)));
+					this.sheetRenderDisposables.add(addDisposableListener(row, EventType.CLICK, () => this.focusNodeOnCanvas(item.node.id, false)));
+				}
+			}
+
 			const filterBar = append(this.sheetContentEl, $('.ade-eng-event-filters'));
 			const filters: { readonly id: EventFilterKind; readonly label: string }[] = [
 				{ id: 'all', label: localize('adeEngLogFilterAll', "All") },

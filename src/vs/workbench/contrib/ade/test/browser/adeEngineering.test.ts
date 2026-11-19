@@ -2231,4 +2231,224 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 
 		pane.clearInput();
 	});
+
+	test('Budget Guardrail circuit breaker: a running tree pauses at the configured ceiling, logs budget.limit_reached and posts a critical Inbox item', async () => {
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Budget Guard Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		await h.engineering.configureTree({ governorSessionId: gov.id, maxBudgetUsd: 0.01 });
+		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.blueprint.metadata.maxBudgetUsd, 0.01, 'Configured budget cap persists on the blueprint');
+
+		await h.engineering.runTree(gov.id, 'user');
+		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.state.runStatus, 'running', 'Tree starts running before spend is recorded');
+
+		// 21k tokens on the governor safely exceeds $0.01 at any engine pricing tier.
+		h.engineering.recordSessionTurnUsage({
+			agentId: gov.id,
+			usage: { inputTokens: 20_000, outputTokens: 1_000, totalTokens: 21_000 },
+		});
+		await waitForDomCondition(() => h.inbox.items.some(item => item.governorSessionId === gov.id && item.severity === 'critical'));
+
+		const snap = h.engineering.getTreeSnapshot(gov.id)!;
+		assert.strictEqual(snap.state.runStatus, 'paused', 'Spend at the ceiling automatically pauses the DAG');
+		assert.ok(
+			snap.state.events.some(event => event.event === 'budget.limit_reached' && event.level === 'warn'),
+			'Budget circuit breaker appends a warn budget.limit_reached event',
+		);
+		const criticalItem = h.inbox.items.find(item => item.governorSessionId === gov.id && item.severity === 'critical');
+		assert.ok(criticalItem?.message.includes('budget ceiling'), 'Inbox receives a critical budget ceiling message');
+	});
+
+	test('Blueprint Recipe Gallery: clicking Recipes opens recipe cards and applying feature-ship rebuilds the canvas with 6 nodes and no legacy drawer', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:800px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Recipe Gallery Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 800, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		const recipesBtn = host.querySelector('.ade-eng-recipes-btn') as HTMLButtonElement;
+		assert.ok(recipesBtn, 'Toolbar renders the Recipes gallery button');
+		recipesBtn.click();
+
+		const templatesCard = host.querySelector('.ade-eng-templates-card') as HTMLElement;
+		assert.ok(templatesCard, 'Clicking Recipes opens the Blueprint Recipe Gallery modal');
+		assert.strictEqual((templatesCard.closest('.ade-eng-templates-backdrop') as HTMLElement).hidden, false, 'Recipe gallery backdrop is visible');
+		assert.ok(templatesCard.querySelectorAll('.ade-eng-recipe-card').length >= 4, 'Gallery renders the engineering recipe cards');
+
+		const applyBtn = templatesCard.querySelector('.ade-eng-recipe-apply-btn[data-template-id="feature-ship"]') as HTMLButtonElement;
+		assert.ok(applyBtn, 'feature-ship recipe exposes its Apply Recipe button');
+		applyBtn.click();
+
+		await waitForDomCondition(() => host.querySelectorAll('.ade-eng-node').length === 6, 5000);
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, 6, 'feature-ship applies all 6 nodes cleanly');
+		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.blueprint.nodes.length, 6, 'Service blueprint matches the 6-node recipe');
+		assert.strictEqual(host.querySelector('.ade-eng-drawer'), null, 'Recipe apply never reintroduces the legacy right-hand drawer');
+
+		pane.clearInput();
+	});
+
+	test('FinOps USD analytics: the token pill opens budget telemetry and a $5 cap preset updates the blueprint budget', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:800px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'FinOps Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 800, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		const tokensPill = host.querySelector('.ade-eng-tokens-pill') as HTMLButtonElement;
+		assert.ok(tokensPill, 'Toolbar renders the tokens pill');
+		tokensPill.click();
+
+		const analyticsCard = host.querySelector('.ade-eng-token-analytics-card') as HTMLElement;
+		assert.strictEqual(analyticsCard.hidden, false, 'Token pill opens the FinOps analytics card');
+		assert.ok(analyticsCard.querySelector('.ade-eng-ta-kpi.spend'), 'Estimated spend KPI renders');
+		assert.ok(analyticsCard.querySelector('.ade-eng-ta-budget'), 'Budget guardrail strip renders');
+		assert.ok(analyticsCard.querySelector('.ade-eng-ta-pr-btn'), 'Copy PR report action renders');
+
+		const capBtn = analyticsCard.querySelector('.ade-eng-ta-cap-btn[data-budget-cap="5"]') as HTMLButtonElement;
+		assert.ok(capBtn, 'Budget cap preset $5 renders');
+		capBtn.click();
+
+		await waitForDomCondition(() => h.engineering.getTreeSnapshot(gov.id)?.blueprint.metadata.maxBudgetUsd === 5);
+		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.blueprint.metadata.maxBudgetUsd, 5, 'Clicking the $5 cap updates the blueprint budget');
+
+		pane.clearInput();
+	});
+
+	test('Canvas spotlight, Worktrees sheet and Gantt strip: gates filter dims non-gates, worktree merge/cleanup run, and started nodes render the Gantt', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:800px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Spotlight Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const worktreeBlueprint = [
+			'---',
+			'version: 1',
+			'treeType: engineering',
+			'workspaceIsolation: worktree',
+			'---',
+			'',
+			'```mermaid',
+			'graph LR',
+			'  N1["Core"] --> U1{{"Gate"}}',
+			'  U1 --> N2["Polish"]',
+			'```',
+			'',
+			'## Node: N1',
+			'- Title: Core',
+			'- Type: task',
+			'- Critical: true',
+			'- Employee: engine=claude-code, thinking=high',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Build core.',
+			'### Acceptance Criteria',
+			'Core compiles.',
+			'',
+			'## Node: U1',
+			'- Title: Gate',
+			'- Type: user_gate',
+			'### Description',
+			'Review core.',
+			'',
+			'## Node: N2',
+			'- Title: Polish',
+			'- Type: task',
+			'- Critical: false',
+			'- Employee: engine=claude-code, thinking=medium',
+			'- Worker: engine=codex, thinking=high',
+			'### Goal',
+			'Polish UI.',
+			'### Acceptance Criteria',
+			'UI renders.',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: worktreeBlueprint });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 800, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		// 1. Spotlight filter dims non-gate nodes without ever removing them from the canvas.
+		const nodesBeforeFilter = host.querySelectorAll('.ade-eng-node').length;
+		assert.strictEqual(nodesBeforeFilter, 3, 'Canvas renders N1, U1 and N2');
+		const gatesFilterBtn = host.querySelector('button[data-canvas-filter="gates"]') as HTMLButtonElement;
+		assert.ok(gatesFilterBtn, 'HUD exposes the Gates spotlight filter');
+		gatesFilterBtn.click();
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node').length, nodesBeforeFilter, 'Spotlight filtering keeps every node mounted');
+		assert.strictEqual(host.querySelectorAll('.ade-eng-node.spotlight-dim').length, 2, 'Both non-gate task nodes receive spotlight-dim');
+		assert.strictEqual(host.querySelector('.ade-eng-node[data-node-id="U1"]')?.classList.contains('spotlight-dim'), false, 'The user gate stays spotlit');
+
+		// 2. Running the tree provisions the segment worktree so the Worktrees sheet renders branch cards.
+		const heldN1 = h.holdNextWorkerTurn();
+		await h.engineering.runTree(gov.id, 'user');
+		await heldN1.started.p;
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-worktrees-btn')?.textContent?.includes('(1)')));
+		assert.strictEqual(Object.keys(h.engineering.getTreeSnapshot(gov.id)?.state.worktrees ?? {}).length, 1, 'Worktree isolation provisioned one segment branch');
+
+		(host.querySelector('.ade-eng-worktrees-btn') as HTMLButtonElement).click();
+		assert.ok((host.querySelector('.ade-eng-sheet') as HTMLElement).classList.contains('open'), 'Worktrees toolbar button opens the sheet');
+		assert.ok((host.querySelector('.ade-eng-sheet-tab.active') as HTMLElement | null)?.textContent?.includes('Worktrees'), 'Worktrees tab becomes the active sheet tab');
+		const worktreeCard = host.querySelector('.ade-eng-wt-card') as HTMLElement;
+		assert.ok(worktreeCard, 'Worktrees sheet renders a branch card');
+		assert.ok(worktreeCard.querySelector('.ade-eng-wt-branch-chip')?.textContent?.includes('ade-eng/'), 'Branch card shows the isolated git branch name');
+
+		(host.querySelector('.ade-eng-wt-merge-btn') as HTMLButtonElement).click();
+		await waitForDomCondition(() => Boolean(h.engineering.getTreeSnapshot(gov.id)?.state.events.some(event => event.event === 'worktree.merged')), 5000);
+		await waitForDomCondition(() => {
+			const cleanupBtn = host.querySelector('.ade-eng-wt-cleanup-btn') as HTMLButtonElement | null;
+			return Boolean(cleanupBtn && !cleanupBtn.disabled);
+		}, 5000);
+		(host.querySelector('.ade-eng-wt-cleanup-btn') as HTMLButtonElement).click();
+		await waitForDomCondition(() => Object.keys(h.engineering.getTreeSnapshot(gov.id)?.state.worktrees ?? {}).length === 0, 5000);
+		assert.ok(
+			h.engineering.getTreeSnapshot(gov.id)?.state.events.some(event => event.event === 'worktree.cleaned'),
+			'Clean Up Worktrees invokes cleanupTreeWorktrees and logs the prune event',
+		);
+
+		// 3. Logs tab renders the execution Gantt as soon as nodes have a startedAt timestamp.
+		const logsTabBtn = Array.from(host.querySelectorAll<HTMLButtonElement>('.ade-eng-sheet-tab')).find(tab => tab.textContent?.includes('Logs'));
+		assert.ok(logsTabBtn, 'Sheet exposes the Logs tab');
+		logsTabBtn.click();
+		assert.ok(host.querySelector('.ade-eng-gantt'), 'Logs tab renders the execution Gantt strip');
+		assert.ok(host.querySelector('.ade-eng-gantt-row[data-node-id="N1"]'), 'Gantt renders a row for the started N1 node');
+
+		await h.engineering.stopTree(gov.id);
+		heldN1.reply.complete('done');
+		pane.clearInput();
+	});
 });

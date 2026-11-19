@@ -1,14 +1,20 @@
 ---
-name: Feature request
-about: Suggest an idea for this project
-title: ''
-labels: ''
-assignees: ''
-
+name: Feature Request
+about: Propose a new capability, Blueprint Recipe, or Coding Agent engine integration
+title: "[Feature]: "
+labels: enhancement
 ---
 
-<!-- ⚠️⚠️ Do Not Delete This! feature_request_template ⚠️⚠️ -->
-<!-- Please read our Rules of Conduct: https://opensource.microsoft.com/codeofconduct/ -->
-<!-- Please search existing issues to avoid creating duplicates. -->
+## Problem & Motivation
+Describe the developer workflow bottleneck this feature solves.
 
-<!-- Describe the feature you'd like. -->
+## Proposed Solution
+Describe the desired UX, CLI interface (`aexus-ade ...`), or DAG orchestration behavior.
+
+## Category
+- [ ] ADE Engineering / Research DAG Studio
+- [ ] Blueprint Recipes / FinOps / Guardrails
+- [ ] Native Coding Agent Engine Bridge
+- [ ] SSH Cloud Host Studio (`aexus-ssh://`)
+- [ ] IDE Mirror Symmetry / Chat UX
+- [ ] Cross-Platform (Windows / macOS / Linux)

@@ -78,9 +78,10 @@
 
 .monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.island {
 	pointer-events: auto;
-	height: 38px;
-	padding: 0 9px;
-	border-radius: 12px;
+	height: 36px;
+	padding: 0 7px;
+	gap: 4px;
+	border-radius: 11px;
 	background: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 78%, transparent);
 	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
 	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -89,7 +90,23 @@
 
 .monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.left.island {
 	flex: 0 1 auto;
-	max-width: min(560px, 46%);
+	max-width: min(600px, 52%);
+	min-width: 0;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.left.island .ade-eng-tokens-pill {
+	flex-shrink: 0;
+	white-space: nowrap;
+}
+
+@container ade-eng (max-width: 1020px) {
+	.monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.island {
+		padding: 0 6px;
+		gap: 3px;
+	}
+	.monaco-workbench .ade-eng-editor .ade-eng-progress-track {
+		display: none;
+	}
 }
 
 .monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.center.island {
@@ -220,8 +237,12 @@
 .monaco-workbench .ade-eng-editor .ade-eng-segment-header {
 	top: -26px;
 	left: -1.5px;
+	max-width: calc(100% + 3px);
 	height: 26px;
-	padding: 0 10px 0 8px;
+	padding: 0 9px 0 8px;
+	gap: 5px;
+	overflow: hidden;
+	white-space: nowrap;
 	border-radius: 9px 9px 0 0;
 	border: 1.5px solid color-mix(in srgb, var(--ade-rank-mgr) 52%, transparent);
 	border-bottom-color: color-mix(in srgb, var(--vscode-editor-background) 85%, #1e1b4b);
@@ -231,6 +252,12 @@
 		color-mix(in srgb, var(--ade-rank-mgr) 9%, var(--vscode-editor-background)) 100%
 	);
 	box-shadow: 0 -3px 10px rgba(0, 0, 0, 0.2);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-segment-tok,
+.monaco-workbench .ade-eng-editor .ade-eng-segment-stat {
+	white-space: nowrap;
+	flex-shrink: 0;
 }
 
 .monaco-workbench .ade-eng-editor .ade-eng-segment-header::after {
@@ -846,6 +873,7 @@
  * ============================================================================ */
 
 .monaco-workbench .ade-eng-editor .ade-eng-minimap {
+	bottom: 62px;
 	height: 142px;
 }
 
@@ -1813,6 +1841,720 @@
 .monaco-workbench.vs .ade-eng-editor .ade-eng-bp-editor-wrap {
 	background: #f8fafc;
 	border-color: rgba(15, 23, 42, 0.15);
+}
+
+/* ============================================================================
+ * Wave 4 · FinOps USD Guardrails, Blueprint Recipe Gallery, Worktree Merge & Gantt
+ * ============================================================================ */
+
+.monaco-workbench .ade-eng-editor .ade-eng-tokens-pill.budget-warn {
+	border-color: color-mix(in srgb, var(--ade-eng-amber-light) 65%, transparent);
+	color: var(--ade-eng-amber-light);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-tokens-pill.budget-exceeded {
+	border-color: color-mix(in srgb, var(--ade-eng-red) 75%, transparent);
+	background: rgba(239, 68, 68, 0.16);
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipes-btn {
+	color: var(--ade-rank-gov, #f2c35b);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipes-btn.active {
+	background: color-mix(in srgb, var(--ade-rank-gov, #f2c35b) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-rank-gov, #f2c35b) 52%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-empty-cta-row {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+/* Segment Worktree Branch Pill */
+.monaco-workbench .ade-eng-editor .ade-eng-segment-branch {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	font-size: 9.5px;
+	font-weight: 650;
+	font-family: var(--vscode-editor-font-family, monospace);
+	padding: 1px 6px;
+	border-radius: 999px;
+	color: #38bdf8;
+	background: rgba(56, 189, 248, 0.14);
+	border: 1px solid rgba(56, 189, 248, 0.34);
+	flex: 0 1 74px;
+	min-width: 0;
+	max-width: 74px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Spotlight Status Filter Pills in Canvas HUD */
+.monaco-workbench .ade-eng-editor .ade-eng-hud-filters {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-hud-filter-btn {
+	height: 22px;
+	padding: 0 7px;
+	border-radius: 6px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+	transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-hud-filter-btn:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-hud-filter-btn.active {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--ade-mode-accent) 22%, var(--vscode-editor-background));
+	border-color: color-mix(in srgb, var(--ade-mode-accent) 52%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-hud-filter-btn.has-issues:not(.active) {
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-node.spotlight-dim {
+	opacity: 0.24;
+	filter: saturate(0.45);
+	transition: opacity 160ms ease, filter 160ms ease;
+}
+
+/* 4-Tier FinOps Analytics: PR Report Button, Spend/Savings KPIs & Budget Guardrail */
+.monaco-workbench .ade-eng-editor .ade-eng-ta-head-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-pr-btn {
+	height: 22px;
+	padding: 0 8px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--ade-mode-accent) 42%, transparent);
+	background: color-mix(in srgb, var(--ade-mode-accent) 14%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 10.5px;
+	font-weight: 650;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-pr-btn:hover {
+	background: color-mix(in srgb, var(--ade-mode-accent) 26%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mode-accent) 68%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-kpi.spend .ade-eng-ta-kpi-val {
+	color: #f8fafc;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-kpi.spend.budget-warn .ade-eng-ta-kpi-val {
+	color: var(--ade-eng-amber-light);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-kpi.spend.budget-exceeded .ade-eng-ta-kpi-val {
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-kpi.savings {
+	border-color: color-mix(in srgb, var(--ade-rank-wrk) 35%, transparent);
+	background: color-mix(in srgb, var(--ade-rank-wrk) 9%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-kpi.savings .ade-eng-ta-kpi-val {
+	color: var(--ade-rank-wrk);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-budget {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 8px 10px;
+	border-radius: 10px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3.5%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-budget.status-warn {
+	border-color: color-mix(in srgb, var(--ade-eng-amber-light) 48%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-budget.status-exceeded {
+	border-color: color-mix(in srgb, var(--ade-eng-red) 62%, transparent);
+	background: rgba(239, 68, 68, 0.09);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-budget-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-budget-title {
+	font-size: 10.5px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-budget-readout {
+	font-size: 11px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-bar-fill.budget-ok {
+	background: linear-gradient(90deg, #10b981, #34d399);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-bar-fill.budget-warn {
+	background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-bar-fill.budget-exceeded {
+	background: linear-gradient(90deg, #ef4444, #f87171);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-budget-presets {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-cap-btn {
+	height: 20px;
+	padding: 0 7px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	font-weight: 650;
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+	transition: background-color 110ms ease, color 110ms ease, border-color 110ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-cap-btn:hover {
+	color: var(--vscode-foreground);
+	border-color: color-mix(in srgb, var(--vscode-foreground) 30%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-cap-btn.active {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--ade-mode-accent) 22%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mode-accent) 60%, transparent);
+}
+
+/* Blueprint Recipe Gallery Modal */
+.monaco-workbench .ade-eng-editor .ade-eng-templates-backdrop {
+	position: absolute;
+	inset: 0;
+	z-index: 65;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 20px;
+	background: rgba(5, 8, 15, 0.62);
+	backdrop-filter: blur(8px);
+	box-sizing: border-box;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-backdrop[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-card {
+	width: min(860px, 96%);
+	max-height: min(740px, 92%);
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 16px 18px;
+	border-radius: 16px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #161822) 96%, #0b0d14);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	box-shadow: 0 24px 64px rgba(0, 0, 0, 0.56), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+	overflow: hidden;
+	box-sizing: border-box;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-title-wrap {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-ico {
+	width: 32px;
+	height: 32px;
+	border-radius: 10px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 16px;
+	color: var(--ade-rank-gov, #f2c35b);
+	background: color-mix(in srgb, var(--ade-rank-gov, #f2c35b) 16%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-rank-gov, #f2c35b) 36%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-title {
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-sub {
+	font-size: 11.5px;
+	color: var(--vscode-descriptionForeground);
+	margin-top: 2px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-controls {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+	padding-bottom: 4px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-seg-group {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border-radius: 9px;
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-pill {
+	height: 24px;
+	padding: 0 9px;
+	border-radius: 7px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-pill:hover {
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-pill.active {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--ade-mode-accent) 22%, var(--vscode-editor-background));
+	border-color: color-mix(in srgb, var(--ade-mode-accent) 48%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-budget-wrap {
+	margin-left: auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-budget-input {
+	width: 64px;
+	height: 24px;
+	padding: 0 7px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	box-sizing: border-box;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px;
+	overflow-y: auto;
+	padding: 0 2px 14px 0;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-card {
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	padding: 12px;
+	border-radius: 12px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 11%, transparent);
+	background: color-mix(in srgb, var(--vscode-editor-background) 88%, transparent);
+	transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-card:hover {
+	border-color: color-mix(in srgb, var(--ade-mode-accent) 52%, transparent);
+	box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-cat {
+	font-size: 9.5px;
+	font-weight: 750;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	padding: 2px 7px;
+	border-radius: 999px;
+	color: #38bdf8;
+	background: rgba(56, 189, 248, 0.14);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-cat.mode-research {
+	color: #f59e0b;
+	background: rgba(245, 158, 11, 0.15);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-meta {
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-preview {
+	height: 58px;
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, rgba(0, 0, 0, 0.22));
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 3px 6px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-svg {
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-edge {
+	fill: none;
+	stroke: color-mix(in srgb, var(--ade-rank-wrk) 65%, transparent);
+	stroke-width: 1.3;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-node {
+	fill: color-mix(in srgb, var(--ade-rank-emp) 34%, #0d111a);
+	stroke: var(--ade-rank-wrk);
+	stroke-width: 1.1;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-gate {
+	fill: rgba(245, 185, 66, 0.26);
+	stroke: #f5b942;
+	stroke-width: 1.2;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-name {
+	font-size: 12.5px;
+	font-weight: 700;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-desc {
+	font-size: 11px;
+	line-height: 1.42;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-highlights {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-hl {
+	font-size: 9.5px;
+	padding: 2px 6px;
+	border-radius: 6px;
+	color: var(--vscode-descriptionForeground);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-foot {
+	margin-top: auto;
+	padding-top: 6px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-recipe-budget-hint {
+	font-size: 10.5px;
+	font-variant-numeric: tabular-nums;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* Worktrees Merge Sheet Tab */
+.monaco-workbench .ade-eng-editor .ade-eng-sheet-body.worktrees {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 12px 14px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-summary {
+	padding: 10px 12px;
+	border-radius: 10px;
+	background: color-mix(in srgb, #38bdf8 9%, transparent);
+	border: 1px solid color-mix(in srgb, #38bdf8 26%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-summary-title {
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-summary-sub {
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--vscode-descriptionForeground);
+	margin-top: 3px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-card {
+	padding: 10px 12px;
+	border-radius: 10px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-card-top,
+.monaco-workbench .ade-eng-editor .ade-eng-wt-card-foot {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-card-foot {
+	justify-content: space-between;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-branch-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 10.5px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	color: #38bdf8;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: rgba(56, 189, 248, 0.12);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-sha {
+	font-size: 10px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	color: var(--vscode-descriptionForeground);
+	margin-left: auto;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-path {
+	font-size: 10.5px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	color: var(--vscode-descriptionForeground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-files {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wt-focus-btn {
+	height: 22px;
+	padding: 0 8px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: transparent;
+	color: var(--vscode-foreground);
+	font-size: 10.5px;
+	cursor: pointer;
+}
+
+/* Visual Execution Gantt Strip inside Logs Sheet */
+.monaco-workbench .ade-eng-editor .ade-eng-gantt {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 9px 12px 10px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 2.5%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 2px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-title {
+	font-size: 10.5px;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	color: var(--vscode-descriptionForeground);
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-row {
+	display: grid;
+	grid-template-columns: 36px 1fr auto;
+	align-items: center;
+	gap: 7px;
+	padding: 2px 4px;
+	border-radius: 6px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	text-align: left;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-row:hover {
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-track {
+	position: relative;
+	height: 7px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-bar {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	border-radius: 999px;
+	background: var(--ade-rank-wrk);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-bar.status-running {
+	background: linear-gradient(90deg, #38bdf8, #34d399);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-bar.status-failure_1,
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-bar.status-failure_2 {
+	background: #f59e0b;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-bar.status-failure_3 {
+	background: #ef4444;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-meta {
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+	color: var(--vscode-descriptionForeground);
+	white-space: nowrap;
+}
+
+/* Light Modern overrides for Wave 4 surfaces */
+.monaco-workbench.vs .ade-eng-editor .ade-eng-templates-backdrop {
+	background: rgba(15, 23, 42, 0.34);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-templates-card {
+	background: #ffffff;
+	border-color: rgba(15, 23, 42, 0.14);
+	box-shadow: 0 22px 54px rgba(15, 23, 42, 0.18);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-recipe-card {
+	background: #f8fafc;
+	border-color: rgba(15, 23, 42, 0.12);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-recipe-preview {
+	background: #f1f5f9;
+	border-color: rgba(15, 23, 42, 0.08);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-ta-kpi.spend .ade-eng-ta-kpi-val {
+	color: #0f172a;
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-tokens-pill.budget-exceeded {
+	color: #b91c1c;
+}
+
+.monaco-workbench.hc-black .ade-eng-editor .ade-eng-templates-card,
+.monaco-workbench.hc-light .ade-eng-editor .ade-eng-templates-card,
+.monaco-workbench.hc-black .ade-eng-editor .ade-eng-recipe-card,
+.monaco-workbench.hc-light .ade-eng-editor .ade-eng-recipe-card {
+	border: 2px solid var(--vscode-contrastBorder, currentColor);
+	box-shadow: none !important;
+	backdrop-filter: none;
 }
 
 /* ============================================================================

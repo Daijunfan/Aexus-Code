@@ -3,10 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_META_NAME = 'ade-control.json';
@@ -70,6 +74,7 @@ Organizational Ranks (governor [L1] > manager [L2] > employee [L3] > worker [L4]
 
 Commands:
   status
+  doctor [--project <path>]
   mode [get | set <ade|ide>]
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
 
@@ -147,7 +152,11 @@ Commands:
   engineering stop --governor <id>
   engineering remove --governor <id>
   engineering reset --governor <id> [--node <nodeId>] [--keep-completed]
-  engineering configure --governor <id> [--node <nodeId> | --all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>]
+  engineering configure --governor <id> [--node <nodeId> | --all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>] [--max-budget-usd <usd> | --clear-budget]
+  engineering template list [--tree-type <engineering|research>]
+  engineering template apply --governor <id> --template <id> [--preset <balanced|max-quality|fast-economy>] [--engine <e>] [--secondary-engine <e>] [--isolation <shared|worktree>] [--max-budget-usd <usd>] [--force-stop-running]
+  engineering report --governor <id> [--out <file>]
+  engineering worktrees (merge | cleanup) --governor <id>
   engineering diff --governor <id> --node <nodeId>
   engineering reports --governor <id> [--include-stale]
   engineering status --governor <id> [--node <nodeId>]
@@ -333,6 +342,27 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	if (group === 'status') {
 		if (tail.length > 0) { throw new CliUsageError(`Unexpected arguments for status: ${tail.join(' ')}`); }
 		return { help: false, json, windowId, action: 'status', params: {} };
+	}
+
+	if (group === 'doctor') {
+		let projectPath = cwd;
+		for (let i = 0; i < tail.length; i++) {
+			const arg = tail[i];
+			if (arg === '--project') {
+				const next = tail[++i];
+				if (!next) { throw new CliUsageError('Option --project requires a path.'); }
+				projectPath = resolvePathIfRelative(next, cwd);
+			} else if (arg.startsWith('--project=')) {
+				const next = arg.slice('--project='.length);
+				if (!next) { throw new CliUsageError('Option --project requires a path.'); }
+				projectPath = resolvePathIfRelative(next, cwd);
+			} else if (!arg.startsWith('-')) {
+				projectPath = resolvePathIfRelative(arg, cwd);
+			} else {
+				throw new CliUsageError(`Unknown option for doctor: ${arg}`);
+			}
+		}
+		return { help: false, json, windowId, action: 'doctor', params: { projectPath } };
 	}
 
 	if (group === 'mode') {
@@ -1540,6 +1570,8 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			let model: string | undefined;
 			let thinking: string | undefined;
 			let isolation: string | undefined;
+			let maxBudgetUsd: number | undefined;
+			let clearBudget = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=')) {
@@ -1567,12 +1599,25 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					if (isolation !== 'shared' && isolation !== 'worktree') {
 						throw new CliUsageError('Option --isolation must be shared or worktree.');
 					}
+				} else if (arg === '--max-budget-usd' || arg.startsWith('--max-budget-usd=')) {
+					const raw = takeOptionVal(ref, '--max-budget-usd', args).replace(/^\$/, '');
+					const num = Number(raw);
+					if (!Number.isFinite(num) || num < 0) {
+						throw new CliUsageError('Option --max-budget-usd requires a non-negative number.');
+					}
+					if (num === 0) {
+						clearBudget = true;
+					} else {
+						maxBudgetUsd = Math.round(num * 100) / 100;
+					}
+				} else if (arg === '--clear-budget') {
+					clearBudget = true;
 				} else {
 					throw new CliUsageError(`Unknown option for engineering configure: ${arg}`);
 				}
 			}
 			if (!governor) {
-				throw new CliUsageError('Usage: aexus-ade engineering configure --governor <id> [--node <nodeId> | --all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>]');
+				throw new CliUsageError('Usage: aexus-ade engineering configure --governor <id> [--node <nodeId> | --all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>] [--max-budget-usd <usd> | --clear-budget]');
 			}
 			const params: Record<string, unknown> = { governor };
 			if (node) { params.node = node; }
@@ -1582,7 +1627,129 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (model) { params.model = model; }
 			if (thinking) { params.thinking = thinking; }
 			if (isolation) { params.isolation = isolation; }
+			if (maxBudgetUsd !== undefined) { params.maxBudgetUsd = maxBudgetUsd; }
+			if (clearBudget) { params.clearBudget = true; }
 			return { help: false, json, windowId, action: 'engineering.configure', params };
+		}
+
+		if (sub === 'template' || sub === 'templates') {
+			const tplSub = args[0] ?? 'list';
+			const tplArgs = args.slice(1);
+			if (tplSub === 'list') {
+				let treeType: string | undefined;
+				for (const ref = { i: 0 }; ref.i < tplArgs.length; ref.i++) {
+					const arg = tplArgs[ref.i];
+					if (arg === '--tree-type' || arg.startsWith('--tree-type=')) {
+						treeType = takeOptionVal(ref, '--tree-type', tplArgs).toLowerCase();
+						if (treeType !== 'engineering' && treeType !== 'research') {
+							throw new CliUsageError('Option --tree-type must be engineering or research.');
+						}
+					} else {
+						throw new CliUsageError(`Unknown option for engineering template list: ${arg}`);
+					}
+				}
+				return { help: false, json, windowId, action: 'engineering.templates.list', params: treeType ? { treeType } : {} };
+			}
+			if (tplSub === 'apply') {
+				let governor: string | undefined;
+				let template: string | undefined;
+				let preset: string | undefined;
+				let engine: string | undefined;
+				let secondaryEngine: string | undefined;
+				let isolation: string | undefined;
+				let maxBudgetUsd: number | undefined;
+				let forceStopRunning = false;
+				for (const ref = { i: 0 }; ref.i < tplArgs.length; ref.i++) {
+					const arg = tplArgs[ref.i];
+					if (arg === '--governor' || arg.startsWith('--governor=')) {
+						governor = takeOptionVal(ref, '--governor', tplArgs);
+					} else if (arg === '--template' || arg.startsWith('--template=')) {
+						template = takeOptionVal(ref, '--template', tplArgs);
+					} else if (arg === '--preset' || arg.startsWith('--preset=')) {
+						preset = takeOptionVal(ref, '--preset', tplArgs).toLowerCase();
+						if (preset !== 'balanced' && preset !== 'max-quality' && preset !== 'fast-economy') {
+							throw new CliUsageError('Option --preset must be balanced, max-quality, or fast-economy.');
+						}
+					} else if (arg === '--engine' || arg.startsWith('--engine=')) {
+						engine = takeOptionVal(ref, '--engine', tplArgs);
+					} else if (arg === '--secondary-engine' || arg.startsWith('--secondary-engine=')) {
+						secondaryEngine = takeOptionVal(ref, '--secondary-engine', tplArgs);
+					} else if (arg === '--isolation' || arg.startsWith('--isolation=')) {
+						isolation = takeOptionVal(ref, '--isolation', tplArgs).toLowerCase();
+						if (isolation !== 'shared' && isolation !== 'worktree') {
+							throw new CliUsageError('Option --isolation must be shared or worktree.');
+						}
+					} else if (arg === '--worktree') {
+						isolation = 'worktree';
+					} else if (arg === '--max-budget-usd' || arg.startsWith('--max-budget-usd=')) {
+						const num = Number(takeOptionVal(ref, '--max-budget-usd', tplArgs).replace(/^\$/, ''));
+						if (!Number.isFinite(num) || num <= 0) {
+							throw new CliUsageError('Option --max-budget-usd requires a positive number.');
+						}
+						maxBudgetUsd = Math.round(num * 100) / 100;
+					} else if (arg === '--force-stop-running') {
+						forceStopRunning = true;
+					} else if (!arg.startsWith('-') && !template) {
+						template = arg;
+					} else {
+						throw new CliUsageError(`Unknown option for engineering template apply: ${arg}`);
+					}
+				}
+				if (!governor || !template) {
+					throw new CliUsageError('Usage: aexus-ade engineering template apply --governor <id> --template <id> [--preset <balanced|max-quality|fast-economy>] [--engine <e>] [--secondary-engine <e>] [--isolation <shared|worktree>] [--max-budget-usd <usd>] [--force-stop-running]');
+				}
+				const params: Record<string, unknown> = { governor, template };
+				if (preset) { params.preset = preset; }
+				if (engine) { params.engine = engine; }
+				if (secondaryEngine) { params.secondaryEngine = secondaryEngine; }
+				if (isolation) { params.isolation = isolation; }
+				if (maxBudgetUsd !== undefined) { params.maxBudgetUsd = maxBudgetUsd; }
+				if (forceStopRunning) { params.forceStopRunning = true; }
+				return { help: false, json, windowId, action: 'engineering.templates.apply', params };
+			}
+			throw new CliUsageError('Usage: aexus-ade engineering template <list|apply> ...');
+		}
+
+		if (sub === 'report') {
+			let governor: string | undefined;
+			let outFile: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--out' || arg.startsWith('--out=')) {
+					outFile = resolvePathIfRelative(takeOptionVal(ref, '--out', args), cwd);
+				} else {
+					throw new CliUsageError(`Unknown option for engineering report: ${arg}`);
+				}
+			}
+			if (!governor) {
+				throw new CliUsageError('Usage: aexus-ade engineering report --governor <id> [--out <file>]');
+			}
+			const params: Record<string, unknown> = { governor };
+			if (outFile) { params.outFile = outFile; }
+			return { help: false, json, windowId, action: 'engineering.report', params };
+		}
+
+		if (sub === 'worktrees' || sub === 'worktree') {
+			const wtSub = args[0];
+			const wtArgs = args.slice(1);
+			if (wtSub !== 'merge' && wtSub !== 'cleanup') {
+				throw new CliUsageError('Usage: aexus-ade engineering worktrees <merge|cleanup> --governor <id>');
+			}
+			let governor: string | undefined;
+			for (const ref = { i: 0 }; ref.i < wtArgs.length; ref.i++) {
+				const arg = wtArgs[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', wtArgs);
+				} else {
+					throw new CliUsageError(`Unknown option for engineering worktrees ${wtSub}: ${arg}`);
+				}
+			}
+			if (!governor) {
+				throw new CliUsageError(`Usage: aexus-ade engineering worktrees ${wtSub} --governor <id>`);
+			}
+			return { help: false, json, windowId, action: `engineering.worktrees.${wtSub}`, params: { governor } };
 		}
 
 		if (sub === 'diff') {
@@ -1970,6 +2137,9 @@ function formatHumanOutput(action: string | undefined, result: unknown): string 
 		return String(result);
 	}
 	const record = result as Record<string, unknown>;
+	if (action === 'engineering.report' && typeof record.markdown === 'string') {
+		return record.markdown.trimEnd();
+	}
 	const diffPayload = typeof record.combinedDiff === 'string' ? record.combinedDiff : record.diff;
 	if (action === 'engineering.diff' && typeof diffPayload === 'string') {
 		return diffPayload || '(No textual diff)';
@@ -2035,6 +2205,144 @@ function formatEngineeringTokenSummary(action: string | undefined, result: unkno
 	return total === undefined ? undefined : `Token usage: ${total} token${total === 1 ? '' : 's'}.`;
 }
 
+interface IDoctorEngineCheck {
+	readonly id: string;
+	readonly label: string;
+	readonly binary: string;
+	readonly installed: boolean;
+	readonly path?: string;
+	readonly installHint: string;
+}
+
+interface IDoctorReport {
+	readonly platform: NodeJS.Platform;
+	readonly arch: string;
+	readonly nodeVersion: string;
+	readonly projectPath: string;
+	readonly controlPlane: { readonly connected: boolean; readonly socketPath?: string; readonly error?: string };
+	readonly tooling: {
+		readonly git: { readonly installed: boolean; readonly version?: string; readonly worktreeReady: boolean };
+		readonly ssh: { readonly installed: boolean; readonly version?: string };
+	};
+	readonly projectRules: readonly string[];
+	readonly engines: readonly IDoctorEngineCheck[];
+	readonly summary: { readonly enginesReady: number; readonly enginesTotal: number };
+}
+
+const DOCTOR_ENGINES: readonly { readonly id: string; readonly label: string; readonly binary: string; readonly installHint: string }[] = [
+	{ id: 'claude-code', label: 'Claude Code', binary: 'claude', installHint: 'npm i -g @anthropic-ai/claude-code' },
+	{ id: 'codex', label: 'Codex', binary: 'codex', installHint: 'npm i -g @openai/codex' },
+	{ id: 'antigravity', label: 'Google Antigravity', binary: 'agy', installHint: 'Install Antigravity CLI (agy)' },
+	{ id: 'opencode', label: 'OpenCode', binary: 'opencode', installHint: 'npm i -g opencode-ai' },
+	{ id: 'kilo', label: 'Kilo Code', binary: 'kilo', installHint: 'npm i -g @kilocode/cli' },
+	{ id: 'dsh', label: 'DeepSeek Harness', binary: 'dsh', installHint: 'Install DeepSeek Harness (dsh)' },
+	{ id: 'cline', label: 'Cline', binary: 'cline', installHint: 'npm i -g cline' },
+	{ id: 'pi', label: 'Pi', binary: 'pi', installHint: 'npm i -g @mariozechner/pi-coding-agent' },
+];
+
+const PROJECT_RULE_CANDIDATES: readonly string[] = [
+	'AGENTS.md',
+	'CLAUDE.md',
+	'.cursorrules',
+	'.cursor/rules',
+	'.github/copilot-instructions.md',
+	'.agents/skills',
+	'AEXUS.md',
+];
+
+async function locateExecutable(binary: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
+	const locator = process.platform === 'win32' ? 'where' : 'which';
+	try {
+		const { stdout } = await execFileAsync(locator, [binary], { env, timeout: 3000 });
+		const firstLine = stdout.split(/\r?\n/).map(s => s.trim()).find(Boolean);
+		return firstLine || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function probeCommandVersion(binary: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<string | undefined> {
+	try {
+		const { stdout, stderr } = await execFileAsync(binary, [...args], { env, timeout: 3000 });
+		const line = (stdout || stderr).split(/\r?\n/).map(s => s.trim()).find(Boolean);
+		return line || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function runDoctorDiagnostics(projectPath: string, env: NodeJS.ProcessEnv): Promise<IDoctorReport> {
+	const [engines, gitVersion, sshVersion, controlPlane, detectedRules] = await Promise.all([
+		Promise.all(DOCTOR_ENGINES.map(async e => {
+			const resolved = await locateExecutable(e.binary, env);
+			return {
+				id: e.id,
+				label: e.label,
+				binary: e.binary,
+				installed: Boolean(resolved),
+				...(resolved ? { path: resolved } : {}),
+				installHint: e.installHint,
+			};
+		})),
+		probeCommandVersion('git', ['--version'], env),
+		probeCommandVersion('ssh', ['-V'], env),
+		(async () => {
+			try {
+				const conn = await resolveConnection(env);
+				const res = await sendSocketRequest(conn.socketPath, { token: conn.token, action: 'status', params: {} });
+				return { connected: Boolean(res.ok), socketPath: conn.socketPath, ...(res.ok ? {} : { error: res.error }) };
+			} catch (err) {
+				return { connected: false, error: (err as Error).message };
+			}
+		})(),
+		Promise.all(PROJECT_RULE_CANDIDATES.map(async rel => {
+			try {
+				await fs.access(path.join(projectPath, rel));
+				return rel;
+			} catch {
+				return undefined;
+			}
+		})),
+	]);
+
+	const projectRules = detectedRules.filter((r): r is string => Boolean(r));
+	const enginesReady = engines.filter(e => e.installed).length;
+	return {
+		platform: process.platform,
+		arch: process.arch,
+		nodeVersion: process.version,
+		projectPath,
+		controlPlane,
+		tooling: {
+			git: { installed: Boolean(gitVersion), ...(gitVersion ? { version: gitVersion } : {}), worktreeReady: Boolean(gitVersion) },
+			ssh: { installed: Boolean(sshVersion), ...(sshVersion ? { version: sshVersion } : {}) },
+		},
+		projectRules,
+		engines,
+		summary: { enginesReady, enginesTotal: engines.length },
+	};
+}
+
+function formatDoctorHuman(report: IDoctorReport): string {
+	const lines: string[] = [];
+	lines.push('Aexus Code · ADE Environment Doctor');
+	lines.push('===================================');
+	lines.push(`Platform:      ${report.platform}/${report.arch} (Node ${report.nodeVersion})`);
+	lines.push(`Project:       ${report.projectPath}`);
+	lines.push(`Control Plane: ${report.controlPlane.connected ? `CONNECTED (${report.controlPlane.socketPath})` : `OFFLINE (${report.controlPlane.error || 'workbench not running'})`}`);
+	lines.push(`Git Worktree:  ${report.tooling.git.installed ? `READY (${report.tooling.git.version})` : 'MISSING (install git for worktree isolation)'}`);
+	lines.push(`OpenSSH:       ${report.tooling.ssh.installed ? `READY (${report.tooling.ssh.version})` : 'MISSING (install OpenSSH for aexus-ssh:// Cloud Hosts)'}`);
+	lines.push(`Project Rules: ${report.projectRules.length > 0 ? report.projectRules.join(', ') : '(none detected — supports AGENTS.md, CLAUDE.md, .cursorrules)'}`);
+	lines.push('');
+	lines.push(`Native Coding Engines (${report.summary.enginesReady}/${report.summary.enginesTotal} installed):`);
+	for (const e of report.engines) {
+		const mark = e.installed ? '[OK]  ' : '[--]  ';
+		const detail = e.installed ? (e.path ?? e.binary) : `not found (${e.installHint})`;
+		lines.push(`  ${mark} ${e.label.padEnd(20)} ${e.binary.padEnd(10)} ${detail}`);
+	}
+	return lines.join('\n');
+}
+
 export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promise<number> {
 	const writeOut = io.stdout ?? (text => process.stdout.write(text));
 	const writeErr = io.stderr ?? (text => process.stderr.write(text));
@@ -2051,6 +2359,17 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 
 	if (parsed.help) {
 		writeOut(HELP_TEXT);
+		return 0;
+	}
+
+	if (parsed.action === 'doctor') {
+		const projectPath = typeof parsed.params?.projectPath === 'string' ? parsed.params.projectPath : cwd;
+		const report = await runDoctorDiagnostics(projectPath, env);
+		if (parsed.json) {
+			writeOut(JSON.stringify(report, null, 2) + '\n');
+		} else {
+			writeOut(formatDoctorHuman(report) + '\n');
+		}
 		return 0;
 	}
 
@@ -2085,6 +2404,22 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 				writeErr(`Error: ${response.error || 'ADE control command failed.'}\n`);
 			}
 			return 1;
+		}
+		if (
+			parsed.action === 'engineering.report'
+			&& typeof parsed.params?.outFile === 'string'
+			&& response.result && typeof response.result === 'object'
+			&& typeof (response.result as Record<string, unknown>).markdown === 'string'
+		) {
+			const outPath = parsed.params.outFile;
+			await fs.mkdir(path.dirname(outPath), { recursive: true });
+			await fs.writeFile(outPath, (response.result as Record<string, unknown>).markdown as string, 'utf8');
+			if (parsed.json) {
+				writeOut(JSON.stringify({ ok: true, outFile: outPath, ...(response.result as Record<string, unknown>) }, null, 2) + '\n');
+			} else {
+				writeOut(`Wrote verification report to ${outPath}\n`);
+			}
+			return 0;
 		}
 		if (parsed.json) {
 			writeOut(JSON.stringify(response.result ?? { ok: true }, null, 2) + '\n');
