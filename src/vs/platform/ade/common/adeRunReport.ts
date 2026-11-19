@@ -8,6 +8,7 @@ import {
 	IAdeEngineeringResolvedNodeStatus,
 	IAdeEngineeringTreeSnapshot,
 } from './adeEngineering.js';
+import { buildOrthogonalRoundedEdgePath, IAdeOrthogonalEdgeObstacle } from './adeEngineeringBlueprint.js';
 import { computeTreeFinancialSummary, formatUsdCost } from './adePricing.js';
 
 function formatDurationMs(ms: number | undefined): string {
@@ -274,9 +275,9 @@ export function buildEngineeringDagSvg(snapshot: IAdeEngineeringTreeSnapshot): s
 	const parts: string[] = [];
 	parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif">`);
 	parts.push(`<defs>`);
-	parts.push(`  <pattern id="aexusGrid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M 24 0 L 0 0 0 24" fill="none" stroke="rgba(148,163,184,0.08)" stroke-width="1"/></pattern>`);
-	parts.push(`  <marker id="arrowIdle" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b"/></marker>`);
-	parts.push(`  <marker id="arrowDone" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399"/></marker>`);
+	parts.push(`  <pattern id="aexusGrid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="12" cy="12" r="0.9" fill="rgba(148,163,184,0.16)"/></pattern>`);
+	parts.push(`  <marker id="arrowIdle" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M 0 1.8 L 8.6 5 L 0 8.2 L 1.8 5 z" fill="#64748b"/></marker>`);
+	parts.push(`  <marker id="arrowDone" viewBox="0 0 10 10" refX="8.2" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse"><path d="M 0 1.8 L 8.6 5 L 0 8.2 L 1.8 5 z" fill="#34d399"/></marker>`);
 	parts.push(`</defs>`);
 	parts.push(`<rect width="${width}" height="${height}" rx="14" fill="#0d1117"/>`);
 	parts.push(`<rect x="0" y="${HEADER_H}" width="${width}" height="${contentH}" fill="url(#aexusGrid)"/>`);
@@ -323,11 +324,11 @@ export function buildEngineeringDagSvg(snapshot: IAdeEngineeringTreeSnapshot): s
 		const segLabel = wt
 			? `MGR · L2 [${seg.segmentId}] · ${truncateSvgText(wt.branchName, 20)}`
 			: `MGR · L2 [${seg.segmentId}] · ${seg.config.engine}`;
-		parts.push(`<rect x="${lx}" y="${ly}" width="${lw}" height="${lh}" rx="14" fill="rgba(99,102,241,0.06)" stroke="rgba(129,140,248,0.42)" stroke-width="1.25" stroke-dasharray="5 4"/>`);
-		parts.push(`<text x="${lx + 12}" y="${ly + 18}" font-size="10" font-weight="700" fill="#a5b4fc">${escapeXml(segLabel)}</text>`);
+		parts.push(`<rect x="${lx}" y="${ly}" width="${lw}" height="${lh}" rx="14" fill="rgba(148,163,184,0.035)" stroke="rgba(129,140,248,0.28)" stroke-width="1"/>`);
+		parts.push(`<text x="${lx + 12}" y="${ly + 18}" font-size="10" font-weight="650" fill="#a5b4fc">${escapeXml(segLabel)}</text>`);
 	}
 
-	// Edges
+	// Strictly Orthogonal Edges with Draw.io Smooth Rounded Corners
 	for (const e of snapshot.edges) {
 		const from = nodePos.get(e.edge.from);
 		const to = nodePos.get(e.edge.to);
@@ -338,12 +339,29 @@ export function buildEngineeringDagSvg(snapshot: IAdeEngineeringTreeSnapshot): s
 		const y1 = from.cy;
 		const x2 = to.cx - to.hw;
 		const y2 = to.cy;
-		const dx = Math.max(36, Math.abs(x2 - x1) * 0.45);
+		const obstacles: IAdeOrthogonalEdgeObstacle[] = [];
+		for (const [nid, np] of nodePos) {
+			if (nid === e.edge.from || nid === e.edge.to) {
+				continue;
+			}
+			obstacles.push({
+				minX: np.cx - np.hw - 12,
+				minY: np.cy - np.hh - 12,
+				maxX: np.cx + np.hw + 12,
+				maxY: np.cy + np.hh + 12,
+			});
+		}
+		const d = buildOrthogonalRoundedEdgePath(x1, y1, x2, y2, {
+			cornerRadius: 14,
+			minStub: 24,
+			wrapClearanceY: 112,
+			obstacles,
+		});
 		const isDone = from.entry.visualStatus === 'completed';
 		const stroke = isDone ? '#34d399' : '#64748b';
 		const marker = isDone ? 'url(#arrowDone)' : 'url(#arrowIdle)';
 		const dash = isDone ? '' : ' stroke-dasharray="4 4"';
-		parts.push(`<path d="M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}" fill="none" stroke="${stroke}" stroke-width="${isDone ? 2 : 1.5}"${dash} marker-end="${marker}"/>`);
+		parts.push(`<path d="${d}" fill="none" stroke="${stroke}" stroke-width="${isDone ? 1.8 : 1.5}" stroke-linecap="round" stroke-linejoin="round"${dash} marker-end="${marker}"/>`);
 	}
 
 	// Nodes (Armored Nested Dual-Shell Pods & User Gates)

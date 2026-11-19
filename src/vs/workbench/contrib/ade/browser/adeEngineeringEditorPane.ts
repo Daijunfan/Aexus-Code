@@ -26,10 +26,14 @@ import {
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
 	AdeBlueprintValidationError,
+	IAdeOrthogonalEdgeObstacle,
+	IAdeOrthogonalEdgeRoute,
+	buildOrthogonalRoundedEdgePath,
 	buildUpstreamReportChain,
 	computeAutoLayoutPositions,
 	computeEdgeVisualStatus,
 	computeNodeVisualStatus,
+	computeOrthogonalRoundedEdgeRoute,
 	hasOverlappingPodPositions,
 	listUpstreamTaskAncestors,
 	normalizeBlueprintEngine,
@@ -96,7 +100,7 @@ const THINKING_OPTIONS: readonly { readonly value: AdeThinkingLevel; readonly la
 
 const TASK_POD_WIDTH = 268;
 const TASK_POD_HEIGHT = 172;
-const TASK_POD_RADIUS = 18;
+const TASK_POD_RADIUS = 14;
 const GATE_NODE_WIDTH = 220;
 const GATE_NODE_HEIGHT = 96;
 const POPOVER_WIDTH = 304;
@@ -844,21 +848,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const marker = $.SVG<SVGMarkerElement>('marker', {
 				id: this.markerId(status),
 				viewBox: '0 0 10 10',
-				refX: '8.5',
+				refX: '8.2',
 				refY: '5',
-				markerWidth: '6.5',
-				markerHeight: '6.5',
+				markerWidth: '5.5',
+				markerHeight: '5.5',
 				orient: 'auto-start-reverse',
 			});
 			marker.appendChild($.SVG<SVGPathElement>('path', {
-				d: 'M 0 1.5 L 9 5 L 0 8.5 z',
+				d: 'M 0 1.8 L 8.6 5 L 0 8.2 L 1.8 5 z',
 				fill: colorVar,
 			}));
 			this.edgesDefsEl.appendChild(marker);
 		};
 		createArrow('pending', 'var(--ade-eng-edge-pending, #6e7681)');
 		createArrow('running', 'var(--ade-eng-green, #3fb950)');
-		createArrow('completed', 'var(--ade-eng-green, #2ea043)');
+		createArrow('completed', 'var(--ade-eng-green-solid, #10b981)');
 		createArrow('blocked', 'var(--ade-eng-edge-blocked, #6e7681)');
 	}
 
@@ -1721,10 +1725,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				if (!a || !b) {
 					continue;
 				}
-				const mx = (a.x + b.x) / 2;
+				const aOutX = a.type === 'user_gate' ? a.x + 5 : a.x + 6;
+				const bInX = b.type === 'user_gate' ? b.x - 5 : b.x - 6;
 				svg.appendChild($.SVG<SVGPathElement>('path', {
 					class: 'ade-eng-recipe-edge',
-					d: `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`,
+					d: buildOrthogonalRoundedEdgePath(aOutX, a.y, bInX, b.y, { cornerRadius: 4, minStub: 4, wrapClearanceY: 12 }),
 				}));
 			}
 			for (const pn of tpl.previewNodes) {
@@ -3523,12 +3528,43 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		};
 	}
 
-	private buildBezierPath(x1: number, y1: number, x2: number, y2: number): string {
-		const dx = Math.abs(x2 - x1);
-		const controlOffset = Math.max(60, Math.min(190, dx * 0.5));
-		const c1x = x1 + controlOffset;
-		const c2x = x2 - controlOffset;
-		return `M ${Math.round(x1)} ${Math.round(y1)} C ${Math.round(c1x)} ${Math.round(y1)}, ${Math.round(c2x)} ${Math.round(y2)}, ${Math.round(x2)} ${Math.round(y2)}`;
+	private collectEdgeObstacles(excludeFromId?: string, excludeToId?: string): IAdeOrthogonalEdgeObstacle[] {
+		const bp = this.draftBlueprint;
+		if (!bp) {
+			return [];
+		}
+		const obstacles: IAdeOrthogonalEdgeObstacle[] = [];
+		for (const n of bp.nodes) {
+			if (n.id === excludeFromId || n.id === excludeToId) {
+				continue;
+			}
+			const cx = n.position?.x ?? 196;
+			const cy = n.position?.y ?? 256;
+			const hw = (n.type === 'user_gate' ? GATE_NODE_WIDTH : TASK_POD_WIDTH) / 2 + 12;
+			const hh = (n.type === 'user_gate' ? GATE_NODE_HEIGHT : TASK_POD_HEIGHT) / 2 + 12;
+			obstacles.push({ minX: cx - hw, minY: cy - hh, maxX: cx + hw, maxY: cy + hh });
+		}
+		return obstacles;
+	}
+
+	private buildOrthogonalEdgeRoute(
+		x1: number,
+		y1: number,
+		x2: number,
+		y2: number,
+		excludeFromId?: string,
+		excludeToId?: string,
+	): IAdeOrthogonalEdgeRoute {
+		return computeOrthogonalRoundedEdgeRoute(x1, y1, x2, y2, {
+			cornerRadius: 14,
+			minStub: 24,
+			wrapClearanceY: 116,
+			obstacles: this.collectEdgeObstacles(excludeFromId, excludeToId),
+		});
+	}
+
+	private buildOrthogonalEdgePath(x1: number, y1: number, x2: number, y2: number, excludeFromId?: string, excludeToId?: string): string {
+		return this.buildOrthogonalEdgeRoute(x1, y1, x2, y2, excludeFromId, excludeToId).path;
 	}
 
 	private computeSegmentBounds(segNodes: readonly IAdeEngineeringBlueprintNode[]): { minX: number; minY: number; maxX: number; maxY: number } {
@@ -3539,11 +3575,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		for (const n of segNodes) {
 			const cx = n.position?.x ?? 204;
 			const cy = n.position?.y ?? 260;
-			const padX = n.type === 'user_gate' ? 132 : 154;
+			const padX = n.type === 'user_gate' ? 128 : 148;
 			minX = Math.min(minX, cx - padX);
-			minY = Math.min(minY, cy - 114);
-			maxX = Math.max(maxX, cx + padX + 8);
-			maxY = Math.max(maxY, cy + 108);
+			minY = Math.min(minY, cy - 100);
+			maxX = Math.max(maxX, cx + padX);
+			maxY = Math.max(maxY, cy + 98);
 		}
 		return { minX, minY, maxX, maxY };
 	}
@@ -3573,7 +3609,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const p1 = this.getNodePorts(srcNode);
 		const ghostInX = ghostPos.x - (isGate ? GATE_NODE_WIDTH : TASK_POD_WIDTH) / 2 - 4;
-		this.spawnGhostEdgeEl.setAttribute('d', this.buildBezierPath(p1.outX, p1.outY, ghostInX, ghostPos.y));
+		this.spawnGhostEdgeEl.setAttribute('d', this.buildOrthogonalEdgePath(p1.outX, p1.outY, ghostInX, ghostPos.y, srcNode.id));
 		this.spawnGhostEdgeEl.style.display = '';
 	}
 
@@ -3665,12 +3701,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			if (!src || !dst) {
 				continue;
 			}
-			this.minimapSvgEl.appendChild($.SVG<SVGLineElement>('line', {
+			const p1 = this.getNodePorts(src);
+			const p2 = this.getNodePorts(dst);
+			this.minimapSvgEl.appendChild($.SVG<SVGPathElement>('path', {
 				class: 'ade-eng-minimap-edge',
-				x1: String(sx(src.position?.x ?? 196).toFixed(1)),
-				y1: String(sy(src.position?.y ?? 256).toFixed(1)),
-				x2: String(sx(dst.position?.x ?? 196).toFixed(1)),
-				y2: String(sy(dst.position?.y ?? 256).toFixed(1)),
+				d: buildOrthogonalRoundedEdgePath(sx(p1.outX), sy(p1.outY), sx(p2.inX), sy(p2.inY), {
+					cornerRadius: 3,
+					minStub: 4,
+					wrapClearanceY: 10,
+				}),
 			}));
 		}
 
@@ -3900,7 +3939,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			append(header, $('span.ade-eng-role-tag.mgr', {}, `${orgCtx.segmentOwner.shortName.toUpperCase()} · L${orgCtx.segmentOwner.tier}`));
 			const segWt = snap.state.worktrees?.[seg.segmentId];
 			if (segWt) {
-				append(header, $('span.ade-eng-segment-label.compact', {}, `[${seg.segmentId}]`));
+				append(header, $('span.ade-eng-segment-label.compact', {}, seg.segmentId));
 				const wtBadge = append(header, $('span.ade-eng-segment-branch', {
 					title: localize('adeEngSegmentBranchTooltip', "Isolated Git Worktree: {0} ({1})", segWt.branchName, segWt.worktreePath),
 				}));
@@ -3912,10 +3951,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			} else {
 				const mgrGlyph = append(header, $('span'));
 				this.applyEngineIconToElement(mgrGlyph, seg.config.engine);
-				append(header, $('span.ade-eng-segment-label', {}, `[${seg.segmentId}] ${formatRoleConfigCompact(seg.config, 'medium')}`));
-				append(header, $('span.ade-eng-segment-stat', {}, `${segDoneCount}/${segNodes.length}`));
+				const segModelText = segNodes.length > 1
+					? `${seg.segmentId} · ${formatRoleConfigCompact(seg.config, 'medium')}`
+					: `${seg.segmentId} · ${compactModelShort(seg.config.model) || compactEngineTag(seg.config.engine)}`;
+				append(header, $('span.ade-eng-segment-label', {}, segModelText));
+				if (segNodes.length > 1) {
+					append(header, $('span.ade-eng-segment-stat', {}, `${segDoneCount}/${segNodes.length}`));
+				}
 			}
-			if (segTokens > 0) {
+			if (segTokens > 0 && segNodes.length > 1) {
 				const segCost = fin.costBySegment[seg.segmentId] ?? 0;
 				const compactMetric = segWt && segCost > 0
 					? formatUsdCost(segCost)
@@ -4200,7 +4244,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				append(empSatellite, $('span.ade-eng-role-tag.emp', {}, `${orgCtx.reviewer.name.toUpperCase()} · L${orgCtx.reviewer.tier}`));
 				const empGlyph = append(empSatellite, $('span'));
 				this.applyEngineIconToElement(empGlyph, node.employee?.engine);
-				append(empSatellite, $('span.ade-eng-emp-meta', {}, formatRoleConfigCompact(node.employee, 'medium')));
+				const empCompactLabel = compactModelShort(node.employee?.model) || compactEngineTag(node.employee?.engine);
+				append(empSatellite, $('span.ade-eng-emp-meta', {}, empCompactLabel));
 
 				// Visual 3-stage Adversarial Pipeline Rail: L4 Code -> L3 Audit -> L2 Sign-off
 				const stageRail = append(empSatellite, $('span.ade-eng-stage-rail', {
@@ -4506,7 +4551,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 			const p1 = this.getNodePorts(src);
 			const p2 = this.getNodePorts(dst);
-			const d = this.buildBezierPath(p1.outX, p1.outY, p2.inX, p2.inY);
+			const route = this.buildOrthogonalEdgeRoute(p1.outX, p1.outY, p2.inX, p2.inY, edge.from, edge.to);
+			const d = route.path;
 			const edgeStatus: AdeEngineeringEdgeVisualStatus = computeEdgeVisualStatus(edge, runtimes);
 			const canDelete = !this.isNodeCompletedLocked(edge.to);
 			const edgeUid = `${this.instanceUid}-${edgeIdx}-${sanitizeSvgId(edge.from)}-${sanitizeSvgId(edge.to)}`;
@@ -4600,8 +4646,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					this.removeDraftEdge(edge.from, edge.to);
 				}));
 
-				const midX = Math.round((p1.outX + p2.inX) / 2);
-				const midY = Math.round((p1.outY + p2.inY) / 2);
+				const midX = Math.round(route.midX);
+				const midY = Math.round(route.midY);
 				const delGroup = g.appendChild($.SVG<SVGGElement>('g', {
 					class: 'ade-eng-edge-del-btn',
 					transform: `translate(${midX}, ${midY})`,
@@ -4639,7 +4685,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.worldEl.classList.add('wiring-active');
 			const startPorts = this.getNodePorts(node);
 			this.rubberBandPathEl.style.display = '';
-			this.rubberBandPathEl.setAttribute('d', this.buildBezierPath(startPorts.outX, startPorts.outY, startPorts.outX + 12, startPorts.outY));
+			this.rubberBandPathEl.setAttribute('d', this.buildOrthogonalEdgePath(startPorts.outX, startPorts.outY, startPorts.outX + 24, startPorts.outY, node.id));
 
 			const win = getWindow(this.rootEl);
 			const moveListener = addDisposableListener(win, EventType.POINTER_MOVE, (me: PointerEvent) => {
@@ -4650,7 +4696,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				const wx = (me.clientX - rect.left - this.panX) / this.zoom;
 				const wy = (me.clientY - rect.top - this.panY) / this.zoom;
 				const curPorts = this.getNodePorts(node);
-				this.rubberBandPathEl.setAttribute('d', this.buildBezierPath(curPorts.outX, curPorts.outY, wx, wy));
+				this.rubberBandPathEl.setAttribute('d', this.buildOrthogonalEdgePath(curPorts.outX, curPorts.outY, wx, wy, node.id));
 			});
 
 			const upListener = addDisposableListener(win, EventType.POINTER_UP, (ue: PointerEvent) => {

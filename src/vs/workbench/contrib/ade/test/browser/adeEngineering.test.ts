@@ -1800,6 +1800,11 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const edgesSvg = host.querySelector('svg.ade-eng-edges-svg') as SVGSVGElement;
 		assert.ok(parseInt(worldEl.style.width, 10) > 4800 && parseInt(worldEl.style.height, 10) > 3600, 'World div expands beyond 4800×3600 for large graphs');
 		assert.strictEqual(edgesSvg.getAttribute('width'), String(parseInt(worldEl.style.width, 10)), 'Edges SVG width matches expanded world');
+		const renderedEdgePaths = Array.from(edgesSvg.querySelectorAll('.ade-eng-edge-item .ade-eng-edge-path')).map(el => el.getAttribute('d') ?? '');
+		assert.ok(renderedEdgePaths.length >= 2, 'Live DAG renders edge paths');
+		for (const d of renderedEdgePaths) {
+			assert.ok(d.startsWith('M ') && d.includes(' L ') && !d.includes(' C '), `Live DAG edge path must use strictly orthogonal rounded routing (no cubic C): ${d}`);
+		}
 
 		// 2. Symmetric 268×172 armored dual-shell pod + 4 L-clamps + ±0.5px port-out center alignment + segment progress strip
 		const n1El = host.querySelector('.ade-eng-node[data-node-id="N1"]') as HTMLElement;

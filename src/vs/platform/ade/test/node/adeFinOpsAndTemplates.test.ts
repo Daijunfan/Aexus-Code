@@ -34,7 +34,9 @@ import {
 import { synthesizeBlueprintFromPrompt } from '../../common/adePromptToDag.js';
 import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../common/adeRunReport.js';
 import {
+	buildOrthogonalRoundedEdgePath,
 	computeAutoLayoutPositions,
+	computeOrthogonalRoundedEdgeRoute,
 	hasOverlappingPodPositions,
 	parseEngineeringBlueprint,
 	serializeEngineeringBlueprint,
@@ -798,6 +800,104 @@ suite('AdeDagSvgExport', () => {
 			escapedGovernor: true,
 			noRawMarkup: true,
 		});
+
+		const edgePathMatches = [...svg.matchAll(/<path d="([^"]+)" fill="none" stroke="[^"]+" stroke-width=/g)].map(m => m[1]);
+		assert.ok(edgePathMatches.length >= 2, 'Exported SVG contains directed edge paths');
+		for (const d of edgePathMatches) {
+			assertOrthogonalRoundedSvgPath(d);
+		}
+	});
+});
+
+function assertOrthogonalRoundedSvgPath(d: string, expectedCorners?: number): number {
+	assert.ok(d.startsWith('M '), `Path must start with absolute M: ${d}`);
+	assert.strictEqual(/[CcSsAa]/.test(d), false, `Path must not contain cubic/arc curves: ${d}`);
+	const commands = (d.match(/[A-Za-z][^A-Za-z]*/g) ?? []).map(raw => ({
+		op: raw[0],
+		args: (raw.slice(1).match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number),
+	}));
+	assert.ok(commands.length >= 2 && commands[0].op === 'M' && commands[commands.length - 1].op === 'L', `Invalid path commands: ${d}`);
+	assert.match(commands.map(c => c.op).join(''), /^M(LQ)*L$/, `Unexpected orthogonal command sequence: ${d}`);
+	let cx = commands[0].args[0];
+	let cy = commands[0].args[1];
+	let corners = 0;
+	for (const cmd of commands.slice(1)) {
+		if (cmd.op === 'L') {
+			const [nx, ny] = cmd.args;
+			assert.ok(Math.abs(nx - cx) < 0.05 || Math.abs(ny - cy) < 0.05, `L segment must be strictly horizontal or vertical: ${d}`);
+			cx = nx;
+			cy = ny;
+		} else {
+			assert.strictEqual(cmd.op, 'Q');
+			const [qx, qy, bx, by] = cmd.args;
+			const inX = qx - cx;
+			const inY = qy - cy;
+			const outX = bx - qx;
+			const outY = by - qy;
+			assert.ok(Math.abs(inX * outX + inY * outY) < 0.05, `Q corner must join perpendicular H/V segments: ${d}`);
+			assert.ok(Math.abs(Math.hypot(inX, inY) - Math.hypot(outX, outY)) < 0.15, `Q fillet arms must be symmetric: ${d}`);
+			cx = bx;
+			cy = by;
+			corners++;
+		}
+	}
+	if (expectedCorners !== undefined) {
+		assert.strictEqual(corners, expectedCorners, `Expected ${expectedCorners} rounded corners in ${d}`);
+	}
+	return corners;
+}
+
+suite('AdeOrthogonalRoundedEdgeRouting', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	function assertStrictlyOrthogonal(points: readonly { readonly x: number; readonly y: number }[], label: string): void {
+		assert.ok(points.length >= 2, `${label}: expected at least 2 waypoints`);
+		for (let i = 1; i < points.length; i++) {
+			const dx = Math.abs(points[i].x - points[i - 1].x);
+			const dy = Math.abs(points[i].y - points[i - 1].y);
+			assert.ok(dx < 0.05 || dy < 0.05, `${label}: segment ${i - 1}->${i} must be strictly horizontal or vertical (dx=${dx}, dy=${dy})`);
+		}
+	}
+
+	test('routes straight horizontal edges without curves or slant', () => {
+		const route = computeOrthogonalRoundedEdgeRoute(338, 260, 462, 260);
+		assertStrictlyOrthogonal(route.points, 'straight');
+		assert.strictEqual(route.path, 'M 338 260 L 462 260');
+		assertOrthogonalRoundedSvgPath(route.path, 0);
+		assert.strictEqual(route.midX, 400);
+		assert.strictEqual(route.midY, 260);
+	});
+
+	test('routes forward fan-out edges with strictly H/V segments, smooth draw.io Q corners and aligned trunk', () => {
+		const top = computeOrthogonalRoundedEdgeRoute(338, 260, 462, 140, { cornerRadius: 14 });
+		const bot = computeOrthogonalRoundedEdgeRoute(338, 260, 462, 380, { cornerRadius: 14 });
+		assertStrictlyOrthogonal(top.points, 'fan-out-top');
+		assertStrictlyOrthogonal(bot.points, 'fan-out-bot');
+		assert.strictEqual(top.path, 'M 338 260 L 386 260 Q 400 260 400 246 L 400 154 Q 400 140 414 140 L 462 140');
+		assert.strictEqual(bot.path, 'M 338 260 L 386 260 Q 400 260 400 274 L 400 366 Q 400 380 414 380 L 462 380');
+		assertOrthogonalRoundedSvgPath(top.path, 2);
+		assertOrthogonalRoundedSvgPath(bot.path, 2);
+		assert.strictEqual(top.midX, bot.midX, 'Sibling fan-out edges share a clean vertical trunk');
+	});
+
+	test('routes obstacle detours and backward U-routes strictly orthogonally with 4 rounded corners', () => {
+		const detour = computeOrthogonalRoundedEdgeRoute(200, 260, 800, 260, {
+			cornerRadius: 14,
+			obstacles: [{ minX: 420, minY: 160, maxX: 580, maxY: 360 }],
+		});
+		assertStrictlyOrthogonal(detour.points, 'obstacle-detour');
+		assertOrthogonalRoundedSvgPath(detour.path, 4);
+
+		const shiftedTrunk = computeOrthogonalRoundedEdgeRoute(200, 200, 800, 420, {
+			cornerRadius: 14,
+			obstacles: [{ minX: 460, minY: 180, maxX: 540, maxY: 440 }],
+		});
+		assertStrictlyOrthogonal(shiftedTrunk.points, 'shifted-trunk');
+		assertOrthogonalRoundedSvgPath(shiftedTrunk.path, 2);
+		assert.ok(shiftedTrunk.midX < 460 || shiftedTrunk.midX > 540, `Trunk ${shiftedTrunk.midX} avoids intermediate pod obstacle [460..540]`);
+
+		const backPath = buildOrthogonalRoundedEdgePath(600, 260, 200, 260, { cornerRadius: 12 });
+		assertOrthogonalRoundedSvgPath(backPath, 4);
 	});
 });
 

@@ -2657,8 +2657,10 @@
 }
 
 .monaco-workbench .ade-eng-minimap-edge {
+	fill: none;
 	stroke: color-mix(in srgb, var(--vscode-foreground) 28%, transparent);
 	stroke-width: 1px;
+	stroke-linejoin: round;
 }
 
 .monaco-workbench .ade-eng-minimap-node {
@@ -2873,47 +2875,49 @@
 
 .monaco-workbench .ade-eng-edge-path {
 	fill: none;
-	stroke-width: 2.2px;
+	stroke-width: 1.6px;
 	stroke-linecap: round;
-	transition: stroke 180ms ease;
+	stroke-linejoin: round;
+	transition: stroke 180ms ease, stroke-width 140ms ease;
 }
 
 .monaco-workbench .ade-eng-edge-path.status-pending,
 .monaco-workbench .ade-eng-edge-path.status-blocked {
 	stroke: var(--ade-eng-edge-pending);
-	opacity: 0.68;
+	opacity: 0.62;
 }
 
 .monaco-workbench .ade-eng-edge-path.status-running {
 	stroke: var(--ade-eng-green);
-	stroke-width: 2.7px;
-	stroke-dasharray: 10 7;
-	animation: adeEngEdgeFlow 0.78s linear infinite;
+	stroke-width: 2.1px;
+	stroke-dasharray: 8 6;
+	animation: adeEngEdgeFlow 0.85s linear infinite;
 }
 
 .monaco-workbench .ade-eng-edge-glow {
 	fill: none;
 	stroke: var(--ade-eng-green);
-	stroke-width: 8px;
-	opacity: 0.18;
+	stroke-width: 5px;
+	opacity: 0.1;
 	stroke-linecap: round;
+	stroke-linejoin: round;
 }
 
 .monaco-workbench .ade-eng-edge-glow.status-completed {
-	opacity: 0.08;
-	stroke-width: 6px;
+	opacity: 0;
+	stroke-width: 0;
 }
 
 .monaco-workbench .ade-eng-edge-path.status-completed {
 	stroke: var(--ade-eng-green-solid);
-	stroke-width: 2.5px;
-	opacity: 0.95;
+	stroke-width: 1.8px;
+	opacity: 0.9;
 }
 
 .monaco-workbench .ade-eng-edge-path.rubber-band {
 	stroke: #58a6ff;
-	stroke-width: 2.4px;
-	stroke-dasharray: 6 5;
+	stroke-width: 1.8px;
+	stroke-dasharray: 5 4;
 	animation: adeEngEdgeFlow 0.7s linear infinite;
 }
 
@@ -3024,25 +3028,21 @@
 
 .monaco-workbench .ade-eng-ring-track {
 	fill: none;
-	stroke: color-mix(in srgb, #a78bfa 26%, color-mix(in srgb, var(--vscode-foreground) 14%, transparent));
-	stroke-width: 1.8px;
+	stroke: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	stroke-width: 1px;
 }
 
 .monaco-workbench .ade-eng-ring-indicator {
 	fill: none;
-	stroke-width: 2.4px;
+	stroke-width: 1.45px;
 	stroke-linecap: round;
 	transition: stroke 180ms ease;
 }
 
 /* 6-State Node Perimeter Color Matrix */
 .monaco-workbench .ade-eng-node.status-pending .ade-eng-ring-indicator {
-	stroke: color-mix(in srgb, var(--ade-eng-gray) 55%, transparent);
-	opacity: 0.72;
-}
-
-.monaco-workbench .ade-eng-node.status-running .ade-eng-concentric {
-	filter: drop-shadow(0 0 12px rgba(63, 185, 80, 0.32));
+	stroke: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	opacity: 0.9;
 }
 
 .monaco-workbench .ade-eng-node.status-running .ade-eng-ring-track {
@@ -3051,53 +3051,31 @@
 
 .monaco-workbench .ade-eng-node.status-running .ade-eng-ring-indicator {
 	stroke: var(--ade-eng-green);
+	stroke-width: 1.8px;
 	stroke-dasharray: 28 72;
 	animation: adeEngPerimeterFlow 1.65s linear infinite;
 }
 
-/* Distinct Violet-Cyan Perimeter Scan when Outer Employee (L3) is Auditing! */
-.monaco-workbench .ade-eng-node.status-running.phase-employee .ade-eng-concentric {
-	filter: drop-shadow(0 0 14px rgba(139, 92, 246, 0.45));
-}
-
+/* Distinct Violet Perimeter Scan when Outer Employee (L3) is Auditing */
 .monaco-workbench .ade-eng-node.status-running.phase-employee .ade-eng-ring-indicator {
 	stroke: #a78bfa;
+	stroke-width: 1.8px;
 	stroke-dasharray: 32 68;
 	animation: adeEngPerimeterFlow 1.25s linear infinite;
 }
 
-.monaco-workbench .ade-eng-node.status-completed .ade-eng-concentric {
-	background: linear-gradient(
-		180deg,
-		rgba(46, 160, 67, 0.16) 0%,
-		rgba(20, 28, 25, 0.96) 42%,
-		rgba(17, 23, 22, 0.98) 100%
-	);
-	filter: drop-shadow(0 3px 10px rgba(46, 160, 67, 0.22));
-}
-
-.monaco-workbench.vs .ade-eng-node.status-completed .ade-eng-concentric {
-	background: linear-gradient(180deg, #ecfdf5 0%, #f8fafc 45%, #f0fdf4 100%);
-}
-
 .monaco-workbench .ade-eng-node.status-completed .ade-eng-ring-indicator {
-	stroke: var(--ade-eng-green-solid);
-}
-
-.monaco-workbench .ade-eng-node.status-failure_1 .ade-eng-concentric {
-	filter: drop-shadow(0 0 10px rgba(245, 185, 66, 0.36));
+	stroke: color-mix(in srgb, var(--ade-eng-green-solid) 68%, transparent);
 }
 
 .monaco-workbench .ade-eng-node.status-failure_1 .ade-eng-ring-indicator {
 	stroke: var(--ade-eng-amber-light);
-}
-
-.monaco-workbench .ade-eng-node.status-failure_2 .ade-eng-concentric {
-	filter: drop-shadow(0 0 12px rgba(217, 119, 6, 0.46));
+	stroke-width: 1.7px;
 }
 
 .monaco-workbench .ade-eng-node.status-failure_2 .ade-eng-ring-indicator {
 	stroke: var(--ade-eng-amber-deep);
+	stroke-width: 1.7px;
 }
 
 .monaco-workbench .ade-eng-node.status-failure_3 .ade-eng-concentric {
@@ -3106,6 +3084,7 @@
 
 .monaco-workbench .ade-eng-node.status-failure_3 .ade-eng-ring-indicator {
 	stroke: var(--ade-eng-red);
+	stroke-width: 1.8px;
 }
 
 /* 1. Outer Shell Top Header = Employee (L3 · Acceptance Reviewer) */
@@ -3682,15 +3661,15 @@
 .monaco-workbench .ade-eng-port {
 	position: absolute;
 	top: 0;
-	width: 12px;
-	height: 12px;
+	width: 9px;
+	height: 9px;
 	transform: translate(-50%, -50%);
 	border-radius: 50%;
 	background: var(--vscode-editor-background);
-	border: 2px solid color-mix(in srgb, var(--vscode-foreground) 38%, transparent);
+	border: 1.5px solid color-mix(in srgb, var(--vscode-foreground) 34%, transparent);
 	z-index: 8;
 	cursor: crosshair;
-	opacity: 0.65;
+	opacity: 0.55;
 	box-sizing: border-box;
 	transition: opacity 120ms ease, transform 120ms ease, border-color 120ms ease, background 120ms ease;
 }

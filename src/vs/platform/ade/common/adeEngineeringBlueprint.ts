@@ -1608,10 +1608,10 @@ export function computeAutoLayoutPositions(
 	}
 
 	const isVertical = blueprint.metadata.flowDirection === 'TD';
-	const hGap = options?.horizontalGap ?? (isVertical ? 320 : 332);
-	const vGap = options?.verticalGap ?? (isVertical ? 232 : 228);
+	const hGap = options?.horizontalGap ?? (isVertical ? 344 : 368);
+	const vGap = options?.verticalGap ?? (isVertical ? 248 : 246);
 	const originX = options?.originX ?? 192;
-	const originY = options?.originY ?? 250;
+	const originY = options?.originY ?? 260;
 
 	const result = new Map<string, IAdeNodeCanvasPosition>();
 	for (let l = 0; l < layers.length; l++) {
@@ -1922,4 +1922,242 @@ export function buildLayeredUpstreamReports(
 		}
 	}
 	return { direct, distant };
+}
+
+export interface IAdeOrthogonalEdgeObstacle {
+	readonly minX: number;
+	readonly minY: number;
+	readonly maxX: number;
+	readonly maxY: number;
+}
+
+export interface IAdeOrthogonalEdgeOptions {
+	/** Corner fillet radius in px for draw.io-style smooth rounded 90° elbows. Default: 14. */
+	readonly cornerRadius?: number;
+	/** Minimum horizontal exit/entry stub before turning vertically. Default: 22. */
+	readonly minStub?: number;
+	/** Vertical clearance when routing backward/same-row wrap-around edges. Default: 114. */
+	readonly wrapClearanceY?: number;
+	/** Optional intermediate node rectangles so edges route around pods cleanly. */
+	readonly obstacles?: readonly IAdeOrthogonalEdgeObstacle[];
+}
+
+export interface IAdeOrthogonalEdgeRoute {
+	/** SVG path string built strictly from horizontal/vertical segments (`L`) and smooth rounded 90° corners (`Q`). */
+	readonly path: string;
+	/** Midpoint coordinates suitable for hover delete buttons (`×`) or labels. */
+	readonly midX: number;
+	readonly midY: number;
+	/** Underlying strictly orthogonal polyline vertices before corner rounding. */
+	readonly points: readonly { readonly x: number; readonly y: number }[];
+}
+
+function roundSvgCoord(value: number): number {
+	return Math.round(value * 10) / 10;
+}
+
+function verticalSegmentHitsObstacles(
+	x: number,
+	yA: number,
+	yB: number,
+	obstacles: readonly IAdeOrthogonalEdgeObstacle[],
+): boolean {
+	const top = Math.min(yA, yB);
+	const bottom = Math.max(yA, yB);
+	for (const obs of obstacles) {
+		if (x >= obs.minX && x <= obs.maxX && bottom >= obs.minY && top <= obs.maxY) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function roundedOrthogonalPolylineToSvgPath(
+	rawPoints: readonly { readonly x: number; readonly y: number }[],
+	cornerRadius: number,
+): string {
+	// Collapse duplicates and collinear vertices while preserving strict orthogonality
+	const pts: { x: number; y: number }[] = [];
+	for (const p of rawPoints) {
+		const prev = pts[pts.length - 1];
+		if (prev && Math.abs(prev.x - p.x) < 0.05 && Math.abs(prev.y - p.y) < 0.05) {
+			continue;
+		}
+		if (pts.length >= 2) {
+			const a = pts[pts.length - 2];
+			const b = pts[pts.length - 1];
+			const sameX = Math.abs(a.x - b.x) < 0.05 && Math.abs(b.x - p.x) < 0.05;
+			const sameY = Math.abs(a.y - b.y) < 0.05 && Math.abs(b.y - p.y) < 0.05;
+			if (sameX || sameY) {
+				pts[pts.length - 1] = { x: p.x, y: p.y };
+				continue;
+			}
+		}
+		pts.push({ x: p.x, y: p.y });
+	}
+	if (pts.length === 0) {
+		return '';
+	}
+	if (pts.length === 1) {
+		return `M ${roundSvgCoord(pts[0].x)} ${roundSvgCoord(pts[0].y)}`;
+	}
+	const parts: string[] = [`M ${roundSvgCoord(pts[0].x)} ${roundSvgCoord(pts[0].y)}`];
+	if (pts.length === 2) {
+		parts.push(`L ${roundSvgCoord(pts[1].x)} ${roundSvgCoord(pts[1].y)}`);
+		return parts.join(' ');
+	}
+	for (let i = 1; i < pts.length - 1; i++) {
+		const prev = pts[i - 1];
+		const curr = pts[i];
+		const next = pts[i + 1];
+		const vx1 = curr.x - prev.x;
+		const vy1 = curr.y - prev.y;
+		const vx2 = next.x - curr.x;
+		const vy2 = next.y - curr.y;
+		const len1 = Math.hypot(vx1, vy1);
+		const len2 = Math.hypot(vx2, vy2);
+		if (len1 < 0.05 || len2 < 0.05) {
+			continue;
+		}
+		const avail1 = i === 1 ? len1 : len1 / 2;
+		const avail2 = i === pts.length - 2 ? len2 : len2 / 2;
+		const r = Math.min(cornerRadius, avail1, avail2);
+		if (r < 0.5) {
+			parts.push(`L ${roundSvgCoord(curr.x)} ${roundSvgCoord(curr.y)}`);
+		} else {
+			const ux1 = vx1 / len1;
+			const uy1 = vy1 / len1;
+			const ux2 = vx2 / len2;
+			const uy2 = vy2 / len2;
+			const ax = curr.x - ux1 * r;
+			const ay = curr.y - uy1 * r;
+			const bx = curr.x + ux2 * r;
+			const by = curr.y + uy2 * r;
+			parts.push(`L ${roundSvgCoord(ax)} ${roundSvgCoord(ay)} Q ${roundSvgCoord(curr.x)} ${roundSvgCoord(curr.y)} ${roundSvgCoord(bx)} ${roundSvgCoord(by)}`);
+		}
+	}
+	const last = pts[pts.length - 1];
+	parts.push(`L ${roundSvgCoord(last.x)} ${roundSvgCoord(last.y)}`);
+	return parts.join(' ');
+}
+
+/**
+ * Computes a draw.io-style strictly horizontal/vertical orthogonal route with smooth
+ * rounded quadratic-Bezier corners (`Q`) between `(x1, y1)` and `(x2, y2)`.
+ */
+export function computeOrthogonalRoundedEdgeRoute(
+	x1: number,
+	y1: number,
+	x2: number,
+	y2: number,
+	options?: IAdeOrthogonalEdgeOptions,
+): IAdeOrthogonalEdgeRoute {
+	const cornerRadius = Math.max(0, options?.cornerRadius ?? 14);
+	const minStub = Math.max(4, options?.minStub ?? 22);
+	const wrapClearanceY = Math.max(24, options?.wrapClearanceY ?? 114);
+	const obstacles = options?.obstacles ?? [];
+	const dx = x2 - x1;
+	const dy = y2 - y1;
+
+	// Case 1: Strictly horizontal straight line (detour orthogonally only if an obstacle blocks the span)
+	if (Math.abs(dy) < 1.5 && dx >= 0) {
+		const blocking = obstacles.filter(o => o.minX < x2 - 4 && o.maxX > x1 + 4 && y1 >= o.minY && y1 <= o.maxY);
+		if (blocking.length === 0) {
+			const y = roundSvgCoord((y1 + y2) / 2);
+			const points = [{ x: x1, y }, { x: x2, y }];
+			return {
+				path: roundedOrthogonalPolylineToSvgPath(points, cornerRadius),
+				midX: roundSvgCoord((x1 + x2) / 2),
+				midY: y,
+				points,
+			};
+		}
+		const minTop = Math.min(...blocking.map(o => o.minY)) - 18;
+		const maxBot = Math.max(...blocking.map(o => o.maxY)) + 18;
+		const detourY = Math.abs(y1 - minTop) <= Math.abs(maxBot - y1) ? minTop : maxBot;
+		const stub = Math.min(minStub, Math.max(8, dx * 0.25));
+		const lx = x1 + stub;
+		const rx = x2 - stub;
+		const points = [
+			{ x: x1, y: y1 },
+			{ x: lx, y: y1 },
+			{ x: lx, y: detourY },
+			{ x: rx, y: detourY },
+			{ x: rx, y: y2 },
+			{ x: x2, y: y2 },
+		];
+		return {
+			path: roundedOrthogonalPolylineToSvgPath(points, cornerRadius),
+			midX: roundSvgCoord((lx + rx) / 2),
+			midY: roundSvgCoord(detourY),
+			points,
+		};
+	}
+
+	// Case 2: Standard forward 3-segment orthogonal route (H -> V -> H) with smooth rounded elbows
+	if (dx >= Math.min(minStub * 1.4, 20)) {
+		let trunkX = (x1 + x2) / 2;
+		const minTrunk = x1 + Math.min(minStub, dx / 2);
+		const maxTrunk = x2 - Math.min(minStub, dx / 2);
+		if (obstacles.length > 0 && verticalSegmentHitsObstacles(trunkX, y1, y2, obstacles)) {
+			const gutterOffset = Math.min(minStub + 14, dx * 0.28);
+			const candidates = [
+				Math.max(minTrunk, Math.min(maxTrunk, x2 - gutterOffset)),
+				Math.max(minTrunk, Math.min(maxTrunk, x1 + gutterOffset)),
+			];
+			for (const c of candidates) {
+				if (!verticalSegmentHitsObstacles(c, y1, y2, obstacles)) {
+					trunkX = c;
+					break;
+				}
+			}
+		}
+		trunkX = Math.max(minTrunk, Math.min(maxTrunk, trunkX));
+		const points = [
+			{ x: x1, y: y1 },
+			{ x: trunkX, y: y1 },
+			{ x: trunkX, y: y2 },
+			{ x: x2, y: y2 },
+		];
+		return {
+			path: roundedOrthogonalPolylineToSvgPath(points, cornerRadius),
+			midX: roundSvgCoord(trunkX),
+			midY: roundSvgCoord((y1 + y2) / 2),
+			points,
+		};
+	}
+
+	// Case 3: Tight horizontal gap or backward edge — clean 5-segment orthogonal U-route
+	const rightX = x1 + minStub;
+	const leftX = x2 - minStub;
+	const bridgeY = Math.abs(dy) >= 48
+		? (y1 + y2) / 2
+		: Math.min(y1, y2) - wrapClearanceY;
+	const points = [
+		{ x: x1, y: y1 },
+		{ x: rightX, y: y1 },
+		{ x: rightX, y: bridgeY },
+		{ x: leftX, y: bridgeY },
+		{ x: leftX, y: y2 },
+		{ x: x2, y: y2 },
+	];
+	return {
+		path: roundedOrthogonalPolylineToSvgPath(points, cornerRadius),
+		midX: roundSvgCoord((rightX + leftX) / 2),
+		midY: roundSvgCoord(bridgeY),
+		points,
+	};
+}
+
+/**
+ * Convenience wrapper returning only the draw.io-style rounded orthogonal SVG path string.
+ */
+export function buildOrthogonalRoundedEdgePath(
+	x1: number,
+	y1: number,
+	x2: number,
+	y2: number,
+	options?: IAdeOrthogonalEdgeOptions,
+): string {
+	return computeOrthogonalRoundedEdgeRoute(x1, y1, x2, y2, options).path;
 }
