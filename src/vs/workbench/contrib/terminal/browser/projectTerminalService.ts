@@ -111,11 +111,15 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		}
 	}
 
+	private _getCachedCloudHost(authority: string): IAdeCloudHost | undefined {
+		return this._hostMetaCache.get(authority) ?? this._hostMetaCache.get(authority.toLowerCase());
+	}
+
 	private _workspaceTarget(uri: URI, name: string): IProjectTerminalTarget {
 		const host = uri.scheme === Schemas.file
 			? localize('localHost', "Local")
 			: uri.scheme === SSH_PROJECT_SCHEME
-				? uri.authority
+				? (this._getCachedCloudHost(uri.authority)?.alias ?? uri.authority)
 				: (this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority);
 		return { uri, name, host };
 	}
@@ -198,14 +202,17 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 			remoteCommand = `cd -- ${quoted} && exec "\${SHELL:-/bin/sh}" -l`;
 		}
 		const configuredSshExe = this._configuration.getValue<string>('remote.SSH.path')?.trim();
+		// OpenSSH Host matching is case-sensitive whereas persisted aexus-ssh:// URI authorities are lowercased.
+		// Prefer the canonical Cloud Host alias whenever available so mixed-case hosts (e.g. kali-Linux1) match.
+		const sshTarget = hostMeta?.alias || uri.authority;
 		return {
 			name,
-			hostLabel,
+			hostLabel: hostMeta?.alias || hostLabel,
 			hostOs: resolvedHostOs,
 			hostDistribution,
 			icon: Codicon.remote,
 			executable: configuredSshExe || 'ssh',
-			args: [...(configFile ? ['-F', configFile] : []), '-t', '--', uri.authority, remoteCommand],
+			args: [...(configFile ? ['-F', configFile] : []), '-t', '--', sshTarget, remoteCommand],
 			cwd: this._paths.userHome({ preferLocal: true }),
 			ignoreConfigurationCwd: true,
 			isRemotePty: true,
@@ -214,27 +221,32 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 	}
 
 	getLaunchConfig(target: IProjectTerminalTarget): IShellLaunchConfig {
-		const name = localize('projectTerminalTitle', "{0} · {1}", target.name, target.host);
 		if (target.uri.scheme !== SSH_PROJECT_SCHEME) {
+			const name = localize('projectTerminalTitle', "{0} · {1}", target.name, target.host);
 			return { name, cwd: target.uri };
 		}
-		const hostMeta = this._hostMetaCache.get(target.uri.authority) ?? this._hostMetaCache.get(target.uri.authority.toLowerCase());
+		const hostMeta = this._getCachedCloudHost(target.uri.authority);
+		const displayHost = hostMeta?.alias || target.host;
+		const name = localize('projectTerminalTitle', "{0} · {1}", target.name, displayHost);
 		const configFile = this._resolveSshConfigPathSync();
-		return this._buildSshLaunchConfig(target.uri, target.host, name, hostMeta, configFile);
+		return this._buildSshLaunchConfig(target.uri, displayHost, name, hostMeta, configFile);
 	}
 
 	async resolveLaunchConfigForUri(uri: URI, explicitName?: string): Promise<IShellLaunchConfig> {
 		const matchedProject = this.findProject(uri);
-		const hostLabel = matchedProject?.host ?? (uri.scheme === SSH_PROJECT_SCHEME ? uri.authority : (this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority || localize('localHost', "Local")));
-		const folderName = explicitName ?? (uri === matchedProject?.uri ? matchedProject.name : (basename(uri) || matchedProject?.name || hostLabel));
-		const name = localize('projectTerminalTitle', "{0} · {1}", folderName, hostLabel);
 		if (uri.scheme !== SSH_PROJECT_SCHEME) {
+			const hostLabel = matchedProject?.host ?? (this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority || localize('localHost', "Local"));
+			const folderName = explicitName ?? (uri === matchedProject?.uri ? matchedProject.name : (basename(uri) || matchedProject?.name || hostLabel));
+			const name = localize('projectTerminalTitle', "{0} · {1}", folderName, hostLabel);
 			return { name, cwd: uri };
 		}
-		if (this._cloudHosts && (!this._cachedEffectiveSshConfigPath || !this._hostMetaCache.has(uri.authority))) {
+		if (this._cloudHosts && (!this._cachedEffectiveSshConfigPath || !this._getCachedCloudHost(uri.authority))) {
 			await this._refreshCloudHostMetadata();
 		}
-		const hostMeta = this._hostMetaCache.get(uri.authority) ?? this._hostMetaCache.get(uri.authority.toLowerCase());
+		const hostMeta = this._getCachedCloudHost(uri.authority);
+		const hostLabel = hostMeta?.alias || matchedProject?.host || uri.authority;
+		const folderName = explicitName ?? (uri === matchedProject?.uri ? matchedProject.name : (basename(uri) || matchedProject?.name || hostLabel));
+		const name = localize('projectTerminalTitle', "{0} · {1}", folderName, hostLabel);
 		const configFile = this._resolveSshConfigPathSync();
 		return this._buildSshLaunchConfig(uri, hostLabel, name, hostMeta, configFile);
 	}

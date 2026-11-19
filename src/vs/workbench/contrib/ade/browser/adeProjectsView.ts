@@ -383,12 +383,13 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		let tooltip: string;
 		if (isCloud) {
 			const host = this.getCloudHostMeta(project.uri.authority);
+			const hostLabel = host?.alias ?? project.uri.authority;
 			osKind = resolveAdeOsIconKind({
 				os: host?.os,
 				distribution: host?.lastTestStatus?.remoteUname,
 				hint: `${host?.name ?? ''} ${host?.alias ?? ''} ${host?.user ?? ''} ${project.uri.authority} ${project.name}`,
 			});
-			tooltip = `${ADE_OS_ICON_LABELS[osKind]} · ${project.uri.authority}`;
+			tooltip = `${ADE_OS_ICON_LABELS[osKind]} · ${hostLabel}`;
 		} else {
 			osKind = resolveLocalOsIconKind(project.name);
 			tooltip = ADE_OS_ICON_LABELS[osKind];
@@ -460,14 +461,15 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.row.setAttribute('data-child-rank', 'governor');
 			template.row.setAttribute('data-child-label', localize('adeDropTopLevelPreview', "→ Top-Level"));
 			if (isCloud) {
+				const cloudHostLabel = this.getCloudHostMeta(item.project.uri.authority)?.alias ?? item.project.uri.authority;
 				template.row.classList.add('ade-cloud-project');
 				template.cloudBadge.className = 'ade-cloud-host-badge';
-				if (item.project.name.trim().toLowerCase() === item.project.uri.authority.trim().toLowerCase()) {
+				if (item.project.name.trim().toLowerCase() === cloudHostLabel.trim().toLowerCase()) {
 					template.cloudBadge.classList.add('is-same-as-name');
 				}
 				template.cloudBadge.replaceChildren(
 					$('span.ade-cloud-host-dot', { 'aria-hidden': 'true' }),
-					$('span.ade-badge-label', {}, item.project.uri.authority),
+					$('span.ade-badge-label', {}, cloudHostLabel),
 				);
 				template.cloudBadge.hidden = false;
 				template.editDisposables.add(this.hoverService.setupManagedHover(

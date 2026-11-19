@@ -550,8 +550,12 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	private formatManagedHostBlock(host: IAdeCloudHost): string {
 		const safeAlias = sanitizeSshAlias(this.sanitizeSshDirectiveValue(host.alias));
+		const lowerAlias = safeAlias.toLowerCase();
+		// URI.toString() lowercases aexus-ssh:// authorities per RFC 3986, while OpenSSH `Host` matching is
+		// case-sensitive. Emit both the canonical alias and its lowercase form so mixed-case aliases always match.
+		const hostPattern = lowerAlias !== safeAlias ? `${safeAlias} ${lowerAlias}` : safeAlias;
 		const safeHostName = this.sanitizeSshDirectiveValue(host.hostName);
-		const lines: string[] = [`Host ${safeAlias}`];
+		const lines: string[] = [`Host ${hostPattern}`];
 		lines.push(`    HostName ${safeHostName.includes(' ') ? `"${safeHostName}"` : safeHostName}`);
 		if (host.user) {
 			const safeUser = this.sanitizeSshDirectiveValue(host.user);

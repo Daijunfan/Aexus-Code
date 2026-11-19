@@ -720,7 +720,7 @@ suite('AdeCloudHosts', () => {
 			assert.deepStrictEqual(managedContent, [
 				'# Managed by Aexus Code Cloud Hosts. Private keys and credentials are never stored in this file.',
 				'',
-				'Host My-Staging-Box',
+				'Host My-Staging-Box my-staging-box',
 				'    HostName staging.example.com',
 				'    User deploy',
 				'    Port 2222',

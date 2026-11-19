@@ -1605,18 +1605,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 		if (record.cloudProjectUri) {
 			const parsedCloud = vscode.Uri.parse(record.cloudProjectUri);
-			const sshInfo = await Promise.resolve(vscode.commands.executeCommand<{ effectiveSshConfigPath?: string; os?: string } | undefined>(
+			const sshInfo = await Promise.resolve(vscode.commands.executeCommand<{ effectiveSshConfigPath?: string; alias?: string; os?: string } | undefined>(
 				'aexus.ade.getCloudHostSshContext',
 				parsedCloud.authority,
 			)).catch(() => undefined);
+			const sshTarget = sshInfo?.alias || parsedCloud.authority;
 			const sshCfgFlag = sshInfo?.effectiveSshConfigPath ? `-F "${sshInfo.effectiveSshConfigPath}" ` : '';
 			const remotePath = parsedCloud.path || '/';
 			const quotedRemotePath = `'${remotePath.replace(/'/g, `'\\''`)}'`;
 			preambleSections.push([
 				`[Aexus Cloud Host Project Context]`,
-				`- Active Project is on SSH Cloud Host \`${parsedCloud.authority}\` at remote directory \`${remotePath}\` (URI: \`${record.cloudProjectUri}\`, OS: \`${sshInfo?.os ?? 'linux'}\`).`,
+				`- Active Project is on SSH Cloud Host \`${sshTarget}\` at remote directory \`${remotePath}\` (URI: \`${record.cloudProjectUri}\`, OS: \`${sshInfo?.os ?? 'linux'}\`).`,
 				`- Local harness staging directory on this Mac: \`${record.cwd}\`.`,
-				`- Execute shell commands, builds, tests, and file edits on the Cloud Host via SSH: \`ssh ${sshCfgFlag}${parsedCloud.authority} "cd -- ${quotedRemotePath} && <command>"\` (or \`scp\`/\`rsync\` when transferring artifacts).`,
+				`- Execute shell commands, builds, tests, and file edits on the Cloud Host via SSH: \`ssh ${sshCfgFlag}${sshTarget} "cd -- ${quotedRemotePath} && <command>"\` (or \`scp\`/\`rsync\` when transferring artifacts).`,
 			].join('\n'));
 		}
 

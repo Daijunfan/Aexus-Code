@@ -368,7 +368,12 @@ suite('ProjectTerminalService cloud host launches', () => {
 		const backend = upcastPartial<IAdeCloudHostBackendService>({
 			onDidChangeHosts: Event.None,
 			getEffectiveSshConfigPath: async () => effectiveSshConfigPath,
-			listHosts: async () => [makeHost('cloud-linux', 'linux'), makeHost('cloud-win', 'windows')],
+			listHosts: async () => [
+				makeHost('cloud-linux', 'linux'),
+				makeHost('cloud-win', 'windows'),
+				makeHost('kali-Linux1', 'linux'),
+				makeHost('BUPT-Windows', 'windows'),
+			],
 		});
 		services.stub(IAdeCloudHostBackendService, backend);
 		const terminals = store.add(services.createInstance(ProjectTerminalService));
@@ -437,6 +442,39 @@ suite('ProjectTerminalService cloud host launches', () => {
 				configArgs: [['-F', effectiveSshConfigPath], ['-F', effectiveSshConfigPath]],
 				targets: ['cloud-linux', 'cloud-win'],
 			},
+		});
+	});
+
+	test('preserves canonical mixed-case SSH host aliases after URI.toString() lowercases authority', async () => {
+		const { terminals } = setup();
+		// URI.toString() lowercases authority per RFC 3986 (e.g. kali-Linux1 -> kali-linux1, BUPT-Windows -> bupt-windows).
+		const persistedKaliUri = URI.parse(cloudUri('kali-Linux1', '/home/kali/Kali 团队').toString());
+		const persistedWinUri = URI.parse(cloudUri('BUPT-Windows', '/C:/Users/djf').toString());
+		assert.strictEqual(persistedKaliUri.authority, 'kali-linux1');
+		assert.strictEqual(persistedWinUri.authority, 'bupt-windows');
+
+		const kaliLaunch = await terminals.resolveLaunchConfigForUri(persistedKaliUri, 'Kali 团队');
+		const winLaunch = await terminals.resolveLaunchConfigForUri(persistedWinUri, 'djf');
+		const syncKaliLaunch = terminals.getLaunchConfig({ uri: persistedKaliUri, name: 'Kali 团队', host: 'kali-linux1' });
+
+		assert.deepStrictEqual({
+			kaliTarget: launchArgs(kaliLaunch)[4],
+			kaliHostLabel: kaliLaunch.hostLabel,
+			kaliName: kaliLaunch.name,
+			kaliCmd: launchArgs(kaliLaunch)[5],
+			syncKaliTarget: launchArgs(syncKaliLaunch)[4],
+			winTarget: launchArgs(winLaunch)[4],
+			winHostLabel: winLaunch.hostLabel,
+			winOs: winLaunch.hostOs,
+		}, {
+			kaliTarget: 'kali-Linux1',
+			kaliHostLabel: 'kali-Linux1',
+			kaliName: 'Kali 团队 · kali-Linux1',
+			kaliCmd: 'cd -- \'/home/kali/Kali 团队\' && exec "${SHELL:-/bin/sh}" -l',
+			syncKaliTarget: 'kali-Linux1',
+			winTarget: 'BUPT-Windows',
+			winHostLabel: 'BUPT-Windows',
+			winOs: 'windows',
 		});
 	});
 });

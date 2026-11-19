@@ -3264,6 +3264,7 @@ CommandsRegistry.registerCommand('aexus.ade.getCloudHostSshContext', async (acce
 	]);
 	return {
 		effectiveSshConfigPath,
+		alias: matched?.alias || alias || undefined,
 		os: matched?.os ?? 'linux',
 	};
 });
