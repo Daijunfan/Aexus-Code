@@ -2407,7 +2407,6 @@ function createColorizer(enabled: boolean): ICliColorizer {
 }
 
 function formatDoctorHuman(report: IDoctorReport, color: ICliColorizer): string {
-	const status = (ok: boolean, text: string): string => ok ? color.green(text) : color.red(text);
 	const lines: string[] = [];
 	lines.push(color.bold(color.cyan('Aexus Code · ADE Environment Doctor')));
 	lines.push(color.dim('==================================='));
