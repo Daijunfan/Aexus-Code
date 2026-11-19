@@ -1,4 +1,83 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-<rect x="64" y="64" width="896" height="896" rx="200" fill="#000"/>
-<path transform="translate(212 212) scale(6)" fill="#fff" fill-rule="evenodd" d="M70.9119 99.5723C72.4869 100.189 74.2828 100.15 75.8725 99.3807L96.4604 89.4231C98.624 88.3771 100 86.1762 100 83.7616V16.2392C100 13.8247 98.624 11.6238 96.4604 10.5774L75.8725 0.619067C73.7862 -0.389991 71.3446 -0.142885 69.5135 1.19527C69.252 1.38636 69.0028 1.59985 68.769 1.83502L29.3551 37.9795L12.1872 24.88C10.5891 23.6607 8.35365 23.7606 6.86938 25.1178L1.36302 30.1525C-0.452603 31.8127 -0.454583 34.6837 1.35854 36.3466L16.2471 50.0001L1.35854 63.6536C-0.454583 65.3164 -0.452603 68.1876 1.36302 69.8477L6.86938 74.8824C8.35365 76.2395 10.5891 76.34 12.1872 75.1201L29.3551 62.0207L68.769 98.1651C69.3925 98.7923 70.1246 99.2645 70.9119 99.5723ZM75.0152 27.1813L45.1092 50.0001L75.0152 72.8189V27.1813Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Aexus Code">
+  <defs>
+    <linearGradient id="bgGrad" x1="48" y1="32" x2="464" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#111A2E" />
+      <stop offset="52%" stop-color="#0B1120" />
+      <stop offset="100%" stop-color="#070B14" />
+    </linearGradient>
+
+    <radialGradient id="ambientGlow" cx="256" cy="172" r="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.22" />
+      <stop offset="55%" stop-color="#6366F1" stop-opacity="0.09" />
+      <stop offset="100%" stop-color="#0B1120" stop-opacity="0" />
+    </radialGradient>
+
+    <linearGradient id="borderGrad" x1="36" y1="36" x2="476" y2="476" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7DD3FC" stop-opacity="0.55" />
+      <stop offset="50%" stop-color="#475569" stop-opacity="0.32" />
+      <stop offset="100%" stop-color="#A78BFA" stop-opacity="0.52" />
+    </linearGradient>
+
+    <linearGradient id="leftLegGrad" x1="256" y1="112" x2="132" y2="384" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7DD3FC" />
+      <stop offset="48%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+
+    <linearGradient id="rightLegGrad" x1="256" y1="112" x2="380" y2="384" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0F2FE" />
+      <stop offset="45%" stop-color="#60A5FA" />
+      <stop offset="100%" stop-color="#A855F7" />
+    </linearGradient>
+
+    <linearGradient id="bridgeGrad" x1="176" y1="292" x2="336" y2="292" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22D3EE" />
+      <stop offset="50%" stop-color="#F8FAFC" />
+      <stop offset="100%" stop-color="#C084FC" />
+    </linearGradient>
+
+    <linearGradient id="prismFacet" x1="256" y1="126" x2="256" y2="366" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#6366F1" stop-opacity="0.03" />
+    </linearGradient>
+
+    <linearGradient id="spineGrad" x1="256" y1="138" x2="256" y2="292" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0F2FE" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0.35" />
+    </linearGradient>
+  </defs>
+
+  <!-- Obsidian Rounded-Square Badge -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#bgGrad)" />
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#ambientGlow)" />
+  <rect x="27" y="27" width="458" height="458" rx="109" fill="none" stroke="url(#borderGrad)" stroke-width="6" />
+
+  <!-- Subtle Geometric Prism Inner Facet -->
+  <polygon points="256,122 378,374 256,314 134,374" fill="url(#prismFacet)" />
+
+  <!-- Precision Orchestration Spine (Governor -> Review Nexus) -->
+  <line x1="256" y1="132" x2="256" y2="292" stroke="url(#spineGrad)" stroke-width="10" stroke-linecap="round" />
+
+  <!-- Geometric A-Prism Structural DAG Edges -->
+  <line x1="256" y1="120" x2="136" y2="372" stroke="url(#leftLegGrad)" stroke-width="34" stroke-linecap="round" />
+  <line x1="256" y1="120" x2="376" y2="372" stroke="url(#rightLegGrad)" stroke-width="34" stroke-linecap="round" />
+
+  <!-- Crossbar Bridge (Adversarial Review / Synchronization Layer) -->
+  <line x1="184" y1="292" x2="328" y2="292" stroke="url(#bridgeGrad)" stroke-width="24" stroke-linecap="round" />
+
+  <!-- Central Review Diamond Node -->
+  <polygon points="256,266 282,292 256,318 230,292" fill="#0B1120" stroke="#7DD3FC" stroke-width="9" stroke-linejoin="round" />
+  <circle cx="256" cy="292" r="8" fill="#F8FAFC" />
+
+  <!-- Apex Governor Node (L1) -->
+  <circle cx="256" cy="120" r="34" fill="#0B1120" stroke="#38BDF8" stroke-width="12" />
+  <circle cx="256" cy="120" r="14" fill="#F8FAFC" />
+
+  <!-- Left Parallel Execution Node (L4) -->
+  <circle cx="136" cy="372" r="28" fill="#0B1120" stroke="#6366F1" stroke-width="11" />
+  <circle cx="136" cy="372" r="11" fill="#E0F2FE" />
+
+  <!-- Right Parallel Execution Node (L4) -->
+  <circle cx="376" cy="372" r="28" fill="#0B1120" stroke="#A855F7" stroke-width="11" />
+  <circle cx="376" cy="372" r="11" fill="#F3E8FF" />
 </svg>
