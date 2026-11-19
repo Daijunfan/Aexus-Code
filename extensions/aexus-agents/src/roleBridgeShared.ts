@@ -23,6 +23,7 @@ export interface RoleSyncAgentEntry {
 	readonly nativeSessionId?: string;
 	readonly rank: AdeSessionRank;
 	readonly isOrchestrated: boolean;
+	readonly isWorkTree?: boolean;
 	readonly rolePrompt?: string;
 	readonly preferredModel?: string;
 	readonly preferredThinking?: string;

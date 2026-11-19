@@ -322,6 +322,48 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			secHasEmployeeWorkerBoundary: true,
 			secHasViewportAndCli: true,
 		});
+
+		// Audit #1/#10/#11/#12/#16/#18: prompt must stay byte-identical across volatile subordinate status transitions,
+		// avoid duplicating Direct Subordinates + Subtree, keep Work-Tree prompts lean & template-aware, and collapse work-tree sub-nodes in Secretary!
+		const govPromptBeforeStatusFlip = h.resolvePrompt(governor.session!.resource)!;
+		h.projects.setAgentStatus(manager.id, 'working');
+		const govPromptAfterStatusFlip = h.resolvePrompt(governor.session!.resource)!;
+		const backendMgrOccurrences = govPromptBeforeStatusFlip.split(manager.id).length - 1;
+
+		const wtGov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/wt-gov') }, 'WT Governor', { role: 'governor' });
+		h.projects.setAgentWorkTreeTag?.(wtGov.id, 'engineering');
+		h.projects.syncWorkTreeHierarchy?.(wtGov.id, 'engineering', [{
+			segmentId: 'N1',
+			label: 'Segment N1',
+			managerEngineId: 'aexus-claude',
+			tasks: [{ nodeId: 'N1', title: 'Task N1', employeeEngineId: 'aexus-claude', workerEngineId: 'aexus-codex' }],
+		}]);
+		const wtMgr = h.projects.getDirectSubordinates(wtGov.id)[0];
+		const wtEmp = h.projects.getDirectSubordinates(wtMgr.id)[0];
+		const wtGovPrompt = h.resolvePrompt({ agentId: wtGov.id })!;
+		const wtEmpPrompt = h.resolvePrompt({ agentId: wtEmp.id })!;
+		const wtEmpDelta = h.resolvePrompt({ agentId: wtEmp.id, mode: 'delta' });
+		const secWithWt = h.resolvePrompt(URI.parse('aexus-claude:/sec-live'))!;
+
+		assert.deepStrictEqual({
+			cacheStableAcrossStatusChange: govPromptBeforeStatusFlip === govPromptAfterStatusFlip,
+			noDuplicateDirectSubordinates: backendMgrOccurrences === 1,
+			wtGovHasTemplateEntry: wtGovPrompt.includes('engineering template list'),
+			wtGovOmitsSubtreeDump: !wtGovPrompt.includes(wtEmp.id),
+			wtEmpOmitsSubordinateSessionApi: !wtEmpPrompt.includes('aexus-ade session subordinates'),
+			wtEmpKeepsNoCodeRule: wtEmpPrompt.includes('Employee ≠ Worker') && wtEmpPrompt.includes('NEVER write or edit business code'),
+			wtDeltaIsUndefined: wtEmpDelta === undefined,
+			secCollapsesManagedTreeNodes: secWithWt.includes('managed tree node(s)') && !secWithWt.includes(wtEmp.id),
+		}, {
+			cacheStableAcrossStatusChange: true,
+			noDuplicateDirectSubordinates: true,
+			wtGovHasTemplateEntry: true,
+			wtGovOmitsSubtreeDump: true,
+			wtEmpOmitsSubordinateSessionApi: true,
+			wtEmpKeepsNoCodeRule: true,
+			wtDeltaIsUndefined: true,
+			secCollapsesManagedTreeNodes: true,
+		});
 	});
 
 	test('compacts prompt context in delta mode for orchestrated agents and Secretary', () => {

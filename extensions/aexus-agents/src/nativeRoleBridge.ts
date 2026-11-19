@@ -944,8 +944,24 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 							bindNativeSession('claude', liveAgent.id, sid);
 						}
 						if (liveAgent?.isOrchestrated && liveAgent.rolePrompt) {
+							const msg = pkt.message as Record<string, unknown>;
+							const firstText = typeof msg.content === 'string'
+								? msg.content
+								: Array.isArray(msg.content)
+									? String((msg.content.find(part => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') as { text?: string } | undefined)?.text ?? '')
+									: '';
+							const isCompactCmd = /^\s*\/(?:compact|smol)\b/i.test(firstText);
+							const alreadyHasRoleHeader = firstText.trimStart().startsWith('[Aexus Orchestrated Role Context');
+							if (isCompactCmd) {
+								// Let compaction run cleanly, then re-establish role context on the following turn.
+								lastInjectedPrompt = undefined;
+								return line;
+							}
+							if (alreadyHasRoleHeader) {
+								lastInjectedPrompt = liveAgent.rolePrompt;
+								return line;
+							}
 							if (lastInjectedPrompt !== liveAgent.rolePrompt) {
-								const msg = pkt.message as Record<string, unknown>;
 								const prefix = `[Aexus Orchestrated Role Context Updated]\n${liveAgent.rolePrompt}\n\n`;
 								if (typeof msg.content === 'string') {
 									msg.content = `${prefix}${msg.content}`;
@@ -1204,6 +1220,13 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 					if ((pkt.method === 'turn/start' || pkt.method === 'turn/addUserMessage' || pkt.method === 'turn/steer') && typeof params?.threadId === 'string') {
 						const tid = params.threadId;
 						if (!ephemeralThreadIds.has(tid)) {
+							const inputItems = Array.isArray(params.input) ? params.input : [];
+							const firstInputText = String((inputItems.find(it => it && typeof it === 'object' && typeof (it as { text?: unknown }).text === 'string') as { text?: string } | undefined)?.text ?? '');
+							if (/^\s*\/(?:compact|smol)\b/i.test(firstInputText)) {
+								injectedPromptByThread.delete(tid);
+								immediateOut += clean + '\n';
+								continue;
+							}
 							const cwd = typeof params.cwd === 'string' ? params.cwd : undefined;
 							const agent = resolveAgentForEngine('codex', tid, cwd);
 							if (agent) {
@@ -1342,7 +1365,17 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 						if (liveAgent && currentPiSessionId) {
 							bindNativeSession('pi', liveAgent.id, currentPiSessionId);
 						}
+						if (/^\s*\/(?:compact|smol)\b/i.test(pkt.message)) {
+							lastInjectedPrompt = undefined;
+							out += clean + '\n';
+							continue;
+						}
 						if (liveAgent?.isOrchestrated && liveAgent.rolePrompt) {
+							if (pkt.message.trimStart().startsWith('[Aexus Orchestrated Role Context')) {
+								lastInjectedPrompt = liveAgent.rolePrompt;
+								out += clean + '\n';
+								continue;
+							}
 							if (lastInjectedPrompt !== liveAgent.rolePrompt) {
 								pkt.message = `[Aexus Orchestrated Role Context Updated]\n${liveAgent.rolePrompt}\n\n${pkt.message}`;
 								lastInjectedPrompt = liveAgent.rolePrompt;

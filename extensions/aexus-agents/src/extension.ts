@@ -30,7 +30,6 @@ import { PiRuntime } from './pi';
 import {
 	AEXUS_PREAMBLE_END_MARKER,
 	filterAndCleanHistoryTurns,
-	ROLE_INIT_MARKER,
 	RoleSyncSnapshot,
 } from './roleBridgeShared';
 import {
@@ -64,6 +63,7 @@ interface RecordEntry extends NativeSession {
 	sessionConfig?: SessionConfigState;
 	activeGoal?: string;
 	roleInit?: RoleInitState;
+	lastDeltaContext?: string;
 	cloudProjectUri?: string;
 }
 
@@ -130,7 +130,6 @@ interface EngineDefinition {
 const SECRETARY_TYPE = 'aexus-secretary';
 const SECRETARY_URI = vscode.Uri.from({ scheme: SECRETARY_TYPE, path: '/main' });
 const GOAL_COMPLETE_MARKER = '<!-- GOAL_COMPLETE -->';
-const ROLE_INIT_ACK = 'ADE_ROLE_READY';
 const MAX_GOAL_ROUNDS = 6;
 
 const ENGINE_ALIASES: Record<string, string> = {
@@ -262,13 +261,32 @@ function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?
 	};
 }
 
+function estimateTextTokens(text: string): number {
+	if (!text) {
+		return 0;
+	}
+	let cjkChars = 0;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (
+			(code >= 0x3000 && code <= 0x9FFF)
+			|| (code >= 0xAC00 && code <= 0xD7AF)
+			|| (code >= 0xF900 && code <= 0xFAFF)
+			|| (code >= 0xFF00 && code <= 0xFFEF)
+		) {
+			cjkChars++;
+		}
+	}
+	return Math.max(1, Math.ceil(cjkChars * 1.15 + (text.length - cjkChars) / 4));
+}
+
 function resolveCompletedTurnUsage(engine: EngineRuntime, sessionId: string, promptText: string, replyText: string, startedAt: number): EngineTurnTokenUsage {
 	const reported = engine.consumeLastTurnUsage?.(sessionId);
 	if (reported && reported.totalTokens > 0) {
 		return reported;
 	}
-	const inputTokens = Math.ceil(promptText.length / 4);
-	const outputTokens = Math.ceil(replyText.length / 4);
+	const inputTokens = estimateTextTokens(promptText);
+	const outputTokens = estimateTextTokens(replyText);
 	return {
 		inputTokens,
 		outputTokens,
@@ -546,12 +564,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const setGoalBannerInUi = (sessionUri: vscode.Uri, goalText: string | undefined) => {
 		void Promise.resolve(vscode.commands.executeCommand('aexus.ade.setSessionGoalBanner', sessionUri, goalText)).catch(() => undefined);
 	};
-
-	const setSessionInitializingInUi = (sessionUri: vscode.Uri, message: string | undefined) => {
-		void Promise.resolve(vscode.commands.executeCommand('aexus.ade.setSessionInitializing', sessionUri, message)).catch(() => undefined);
-	};
-
-	const inFlightRoleInits = new Map<string, Promise<void>>();
 
 	// eslint-disable-next-line prefer-const
 	let secretaryController: vscode.ChatSessionItemController | undefined;
@@ -913,9 +925,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						})).catch(() => undefined);
 					}
 					customizationChangedEmitter.fire();
-					if (opened.has(SECRETARY_TYPE)) {
-						void ensureRoleInitialized(record, SECRETARY_URI, true);
-					}
 				}
 				continue;
 			}
@@ -1025,128 +1034,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const history = (turns: HistoryEntry[], participant: string): readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn2)[] => filterAndCleanHistoryTurns(turns).map(turn => turn.role === 'user'
 		? new vscode.ChatRequestTurn2(turn.text, undefined, [], participant, [], undefined, turn.id, undefined, undefined, turn.isSystemInitiated)
 		: new vscode.ChatResponseTurn2([new vscode.ChatResponseMarkdownPart(turn.text)], {}, participant));
-
-	const ensureRoleInitialized = async (record: RecordEntry, sessionUri: vscode.Uri, isSecretary: boolean): Promise<void> => {
-		if (record.readOnly) {
-			return;
-		}
-		const snapEntry = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
-		if (!isSecretary && !snapEntry?.isOrchestrated) {
-			return;
-		}
-		const targetRank = isSecretary ? 'secretary' : (snapEntry?.rank ?? 'governor');
-		if (record.roleInit && record.roleInit.engine === record.engine && record.roleInit.rank === targetRank) {
-			return;
-		}
-		const recordKey = identity(record);
-		const existingInit = inFlightRoleInits.get(recordKey);
-		if (existingInit) {
-			return existingInit;
-		}
-		if (busy.has(recordKey)) {
-			return;
-		}
-		if (!await ensureEngineCommand(record.engine)) {
-			return;
-		}
-
-		const roleDisplay = isSecretary ? 'Secretary' : targetRank.charAt(0).toUpperCase() + targetRank.slice(1);
-		const bannerMessage = vscode.l10n.t('Initializing {0} role & ADE control-plane context…', roleDisplay);
-
-		const runInit = (async () => {
-			const initCts = new vscode.CancellationTokenSource();
-			busy.add(recordKey);
-			activeTurns.set(recordKey, initCts);
-			controllers.get(record.engine)?.items.add(item(record));
-			if (isSecretary) {
-				refreshSecretaryItem();
-			}
-			setSessionInitializingInUi(sessionUri, bannerMessage);
-			// Re-apply shortly after in case the editor tab widget is still mounting
-			const remountTimer = setTimeout(() => {
-				if (inFlightRoleInits.has(recordKey)) {
-					setSessionInitializingInUi(sessionUri, bannerMessage);
-				}
-			}, 180);
-
-			try {
-				const roleDocs = await Promise.resolve(vscode.commands.executeCommand<string | undefined>('aexus.ade.resolvePromptContext', sessionUri)).catch(() => undefined);
-				if (!roleDocs?.trim()) {
-					return;
-				}
-				const engine = runtime(record.engine);
-				const prevId = record.id;
-				if (engine.prepareSession) {
-					await engine.prepareSession(record);
-					if (record.id !== prevId) {
-						records.delete(key(record.engine, prevId));
-						records.set(key(record.engine, record.id), record);
-					}
-					await save();
-				}
-
-				const initPrompt = [
-					ROLE_INIT_MARKER,
-					`You are initializing as **${roleDisplay}** in **Aexus Code ADE**.`,
-					`Read and internalize your organizational rank, identity override rules, responsibilities, and the \`aexus-ade\` CLI API documentation below so you are immediately ready when the user sends their first message.`,
-					`STRICT INITIALIZATION RULE: Do NOT execute any shell commands, file operations, or tools during this initialization step. Simply internalize the specifications below and reply with the exact single token: ${ROLE_INIT_ACK}`,
-					'',
-					roleDocs.trim(),
-				].join('\n');
-
-				const silentTarget: vscode.ChatResponseStream = Object.create(null);
-				const silentStream: vscode.ChatResponseStream = new Proxy(silentTarget, {
-					get() { return () => { }; },
-				});
-				const cfg = getSessionConfig(record, isSecretary);
-				const effectiveInitModel = (cfg.model && cfg.model !== 'default') ? cfg.model : snapEntry?.preferredModel;
-				const effectiveInitThinking: EngineThinkingLevel = (cfg.thinking === 'off' || snapEntry?.preferredThinking === 'off') ? 'off' : 'low';
-				const initStartedAt = Date.now();
-				await engine.send(record, initPrompt, silentStream, initCts.token, toSendOptions(
-					{ ...cfg, ...(effectiveInitModel ? { model: effectiveInitModel } : {}), thinking: effectiveInitThinking },
-					{ pureWorker: false, callerRole: targetRank, automatedEngineering: true },
-				));
-				if (!isSecretary) {
-					const initUsage = resolveCompletedTurnUsage(engine, record.id, initPrompt, ROLE_INIT_ACK, initStartedAt);
-					if (initUsage.totalTokens > 0) {
-						void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
-							sessionResource: sessionUri.toString(),
-							usage: initUsage,
-						})).catch(() => undefined);
-					}
-				}
-
-				if (!initCts.token.isCancellationRequested) {
-					record.roleInit = {
-						rank: targetRank,
-						engine: record.engine,
-						initializedAt: Date.now(),
-					};
-					record.updated = Date.now();
-					await save();
-				}
-			} catch {
-				// Non-fatal: if initialization fails (e.g. offline), the first user turn falls back to full context injection.
-			} finally {
-				clearTimeout(remountTimer);
-				initCts.dispose();
-				inFlightRoleInits.delete(recordKey);
-				activeTurns.delete(recordKey);
-				busy.delete(recordKey);
-				setSessionInitializingInUi(sessionUri, undefined);
-				if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
-					controllers.get(record.engine)?.items.add(item(record));
-				}
-				if (isSecretary) {
-					refreshSecretaryItem();
-				}
-				await publishHistory(record).catch(() => undefined);
-			}
-		})();
-
-		inFlightRoleInits.set(recordKey, runInit);
-		return runInit;
-	};
 
 	const publishHistory = async (record: RecordEntry): Promise<void> => {
 		const entry = opened.get(identity(record));
@@ -1269,7 +1156,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					params: { engine: `aexus-${rotated.engine}`, resource: SECRETARY_URI.toString(), open: false },
 				})).catch(() => undefined);
 				stream.markdown(`Secretary conversation context has been reset (**${engineName}**).`);
-				void ensureRoleInitialized(rotated, SECRETARY_URI, true);
 			} else {
 				const preservedConfig = record.sessionConfig;
 				const fresh = await runtime(record.engine).create(record.cwd);
@@ -1280,12 +1166,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					sessionConfig: preservedConfig,
 					activeGoal: undefined,
 					roleInit: undefined,
+					lastDeltaContext: undefined,
 				});
 				await save();
 				const openEntry = opened.get(identity(record));
 				openEntry?.changed.fire([]);
 				stream.markdown(`Conversation context cleared (**${engineName}**).`);
-				void ensureRoleInitialized(record, sessionUri, false);
 			}
 			return true;
 		}
@@ -1508,6 +1394,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const normalizedRuntimeCmd = cmd === 'smol' ? 'compact' : cmd;
 			const handledByRuntime = await eng.executeCommand(record, normalizedRuntimeCmd, argText, stream, token, toSendOptions(cfg, {}));
 			if (handledByRuntime) {
+				if (normalizedRuntimeCmd === 'compact') {
+					// Compaction may drop Turn-1 role context from conversation history; re-establish on the next turn.
+					record.roleInit = undefined;
+					record.lastDeltaContext = undefined;
+				}
 				await save();
 				return true;
 			}
@@ -1525,12 +1416,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		token: vscode.CancellationToken,
 	): Promise<vscode.ChatResult> => {
 		if (record.readOnly) { throw new Error(vscode.l10n.t('Continue this subagent from its parent conversation.')); }
-		const initialRecordKey = identity(record);
-		const pendingInit = inFlightRoleInits.get(initialRecordKey);
-		if (pendingInit) {
-			stream.progress(vscode.l10n.t('Waiting for role & API initialization to finish…'));
-			await pendingInit;
-		}
 		const recordKey = identity(record);
 		if (busy.has(recordKey)) { throw new Error(vscode.l10n.t('This conversation is already working. Stop or wait for its current response.')); }
 
@@ -1626,8 +1511,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				'aexus.ade.resolvePromptContext',
 				alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
 			)).catch(() => undefined);
-		if (injected?.trim()) {
-			preambleSections.push(injected.trim());
+		const trimmedInjected = injected?.trim();
+		if (trimmedInjected) {
+			if (!alreadyInitializedForRank || trimmedInjected !== record.lastDeltaContext) {
+				preambleSections.push(trimmedInjected);
+				if (alreadyInitializedForRank) {
+					record.lastDeltaContext = trimmedInjected;
+				}
+			}
 		}
 
 		if (record.cloudProjectUri) {
@@ -1837,12 +1728,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					lastTurnReplies.set(SECRETARY_TYPE, streamedMarkdown.trim());
 				}
 			}
-			if (!alreadyInitializedForRank && currentRankForContext) {
+			if (parsedCmd === 'compact' || parsedCmd === 'smol') {
+				// Prompt-expanded compaction may drop the Turn-1 role charter; re-inject cleanly on the next turn.
+				record.roleInit = undefined;
+				record.lastDeltaContext = undefined;
+			} else if (!alreadyInitializedForRank && currentRankForContext) {
 				record.roleInit = {
 					rank: currentRankForContext,
 					engine: record.engine,
 					initializedAt: Date.now(),
 				};
+				record.lastDeltaContext = undefined;
 			}
 			record.updated = Date.now();
 			if (!isSecretary && !record.customLabel && record.initialTitle && record.label === record.initialTitle) {
@@ -1989,11 +1885,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(SECRETARY_TYPE, entry);
-				if ((secRecord.provisional || secRecord.unmaterialized) && turns.length === 0 && !secRecord.roleInit) {
-					void ensureRoleInitialized(secRecord, SECRETARY_URI, true);
-				} else if (inFlightRoleInits.has(identity(secRecord))) {
-					setSessionInitializingInUi(SECRETARY_URI, vscode.l10n.t('Initializing {0} role & ADE control-plane context…', 'Secretary'));
-				}
 				return {
 					title: 'Secretary',
 					options: toSessionOptionsRecord(groups),
@@ -2073,13 +1964,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 				const entry = { changed: new vscode.EventEmitter<vscode.ChatSession['history']>(), cancellation: new vscode.CancellationTokenSource() };
 				opened.set(identity(record), entry);
-				const snapOnOpen = roleBridge.getSnapshot().agents.find(a => a.resource === uri.toString());
-				if (snapOnOpen?.isOrchestrated && (record.provisional || record.unmaterialized) && turns.length === 0 && !record.roleInit) {
-					void ensureRoleInitialized(record, uri, false);
-				} else if (inFlightRoleInits.has(identity(record))) {
-					const roleTitle = (snapOnOpen?.rank ?? 'governor').charAt(0).toUpperCase() + (snapOnOpen?.rank ?? 'governor').slice(1);
-					setSessionInitializingInUi(uri, vscode.l10n.t('Initializing {0} role & ADE control-plane context…', roleTitle));
-				}
 				return {
 					title: record.label,
 					options: toSessionOptionsRecord(groups),
@@ -2406,11 +2290,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				lookupToken.dispose();
 			}
 
-			const initialEngRecordKey = identity(record);
-			const pendingEngInit = inFlightRoleInits.get(initialEngRecordKey);
-			if (pendingEngInit) {
-				await pendingEngInit;
-			}
 			const recordKey = identity(record);
 			if (busy.has(recordKey)) {
 				activeTurns.get(recordKey)?.cancel();
@@ -2800,20 +2679,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 			const enriched = await enrichRoleSnapshot(rawSnapshot);
 			await roleBridge.updateSnapshot(enriched);
-			if (enriched.mode === 'ade') {
-				for (const agentEntry of enriched.agents) {
-					if (!agentEntry.isOrchestrated || !agentEntry.resource || !agentEntry.engineId?.startsWith('aexus-')) {
-						continue;
-					}
-					try {
-						const agentUri = vscode.Uri.parse(agentEntry.resource);
-						const rec = findCachedRecord(agentUri);
-						if (rec && (rec.provisional || rec.unmaterialized) && !rec.roleInit) {
-							void ensureRoleInitialized(rec, agentUri, false);
-						}
-					} catch { /* Ignore malformed URI. */ }
-				}
-			}
 		}),
 	);
 

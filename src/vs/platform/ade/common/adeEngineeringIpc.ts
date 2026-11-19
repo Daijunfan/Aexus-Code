@@ -11,6 +11,7 @@ import {
 	IAdeInboxItem,
 	IAdeSegmentWorktreeInfo,
 	IAdeStoredEngineeringRecord,
+	IAdeVerificationResult,
 	IAdeWorkerTurnChanges,
 	IAdeWorkspaceSnapshot,
 } from './adeEngineering.js';
@@ -62,6 +63,17 @@ export class AdeEngineeringBackendChannel implements IServerChannel<string> {
 			case 'cleanupTreeWorktrees':
 				await this.service.cleanupTreeWorktrees(args[0] as string, args[1] as string);
 				return undefined as unknown as T;
+			case 'runNodeVerificationCommand': {
+				if (!this.service.runNodeVerificationCommand) {
+					const fallback: IAdeVerificationResult = { passed: true, exitCode: 0, output: '', durationMs: 0 };
+					return fallback as unknown as T;
+				}
+				return await this.service.runNodeVerificationCommand(
+					args[0] as string,
+					args[1] as string,
+					args[2] as number | undefined,
+				) as unknown as T;
+			}
 			default:
 				throw new Error(`Unsupported AdeEngineeringBackendChannel command: ${command}`);
 		}
@@ -134,5 +146,9 @@ export class AdeEngineeringBackendChannelClient implements IAdeEngineeringBacken
 
 	cleanupTreeWorktrees(governorSessionId: string, projectPath: string): Promise<void> {
 		return this.channel.call('cleanupTreeWorktrees', [governorSessionId, projectPath]);
+	}
+
+	runNodeVerificationCommand(cwd: string, command: string, timeoutMs?: number): Promise<IAdeVerificationResult> {
+		return this.channel.call('runNodeVerificationCommand', [cwd, command, timeoutMs]);
 	}
 }

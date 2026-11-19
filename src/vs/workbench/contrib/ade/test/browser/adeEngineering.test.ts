@@ -211,6 +211,9 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const storedRecords = new Map<string, IAdeStoredEngineeringRecord>();
 		let storedInbox: IAdeInboxItem[] = [];
 		const simulatedDiffSummary = '+++ src/auth.ts (+42 -3)';
+		let verifyHandler: ((cwd: string, command: string) => Promise<{ passed: boolean; exitCode: number; output: string; durationMs: number }>) | undefined;
+		let computeChangesHandler: ((cwd: string, before: IAdeWorkspaceSnapshot) => Promise<IAdeWorkerTurnChanges>) | undefined;
+		let snapshotSeq = 0;
 
 		const backendStub: IAdeEngineeringBackendService = {
 			_serviceBrand: undefined,
@@ -225,14 +228,19 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 			saveInbox: async items => { storedInbox = [...items]; },
 			captureWorkspaceSnapshot: async (cwd: string): Promise<IAdeWorkspaceSnapshot> => ({
 				rootPath: cwd,
-				capturedAt: Date.now(),
+				capturedAt: ++snapshotSeq,
 				entries: {},
 			}),
-			computeWorkerTurnChanges: async (): Promise<IAdeWorkerTurnChanges> => ({
-				capturedAt: Date.now(),
-				touchedFiles: [{ relativePath: 'src/auth.ts', kind: 'modified' }],
-				combinedDiff: simulatedDiffSummary,
-			}),
+			computeWorkerTurnChanges: async (cwd: string, before: IAdeWorkspaceSnapshot): Promise<IAdeWorkerTurnChanges> => {
+				if (computeChangesHandler) {
+					return computeChangesHandler(cwd, before);
+				}
+				return {
+					capturedAt: Date.now(),
+					touchedFiles: [{ relativePath: 'src/auth.ts', kind: 'modified' }],
+					combinedDiff: simulatedDiffSummary,
+				};
+			},
 			ensureSegmentWorktree: async (govId, projectPath, segmentId) => ({
 				worktree: {
 					segmentId,
@@ -244,6 +252,12 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 			commitSegmentWorktree: async () => 'abc1234',
 			mergeSegmentsIntoProject: async () => ({ ok: true, conflictedFiles: [], summary: 'Merged cleanly' }),
 			cleanupTreeWorktrees: async () => { },
+			runNodeVerificationCommand: async (cwd: string, command: string) => {
+				if (verifyHandler) {
+					return verifyHandler(cwd, command);
+				}
+				return { passed: true, exitCode: 0, output: 'ok', durationMs: 5 };
+			},
 		};
 		instantiation.stub(IAdeEngineeringBackendService, backendStub);
 
@@ -319,7 +333,8 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 						return { reply: replyText } as T;
 					}
 					return {
-						reply: opts.pureWorker ? nextWorkerTurnReply : 'Acknowledged.',
+						reply: opts.pureWorker ? nextWorkerTurnReply : 'OK',
+						skipReviewerNudge: !opts.pureWorker,
 					} as T;
 				}
 				if (id === 'aexus.agentEngines.killSession') {
@@ -366,6 +381,8 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 			setNextPromptChoice: (choice: unknown) => { nextPromptChoice = choice; },
 			setNextConfirmChoice: (confirmed: boolean) => { nextConfirmChoice = confirmed; },
 			setNextWorkerReply: (reply: string) => { nextWorkerTurnReply = reply; },
+			setVerifyHandler: (fn: typeof verifyHandler) => { verifyHandler = fn; },
+			setComputeChangesHandler: (fn: typeof computeChangesHandler) => { computeChangesHandler = fn; },
 			holdNextWorkerTurn: () => {
 				const holder = {
 					started: new DeferredPromise<void>(),
@@ -930,9 +947,22 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const snapAfterHb = h.engineering.getTreeSnapshot(gov.id)!;
 		assert.strictEqual(snapAfterHb.state.nodes.N1.lastStreamActivityAt, hbTs);
 
-		// Simulate 15 minutes of inactivity -> Watchdog sweep wakes Segment Manager!
-		await h.engineering.runWatchdogSweep(hbTs + 15 * 60_000);
-		assert.ok(h.dispatchedTurns.some(t => t.callerRole === 'manager' && t.prompt.includes('Watchdog Timeout Alert')), 'Watchdog timeout must wake Segment Manager');
+		// Stage 1: Simulate 15 minutes of inactivity -> Watchdog sends zero-token automatic Worker reminder WITHOUT waking LLM Manager!
+		const firstSweepTs = hbTs + 15 * 60_000;
+		await h.engineering.runWatchdogSweep(firstSweepTs);
+		assert.strictEqual(
+			h.dispatchedTurns.some(t => t.callerRole === 'manager' && t.prompt.includes('Watchdog Timeout Alert')),
+			false,
+			'Stage 1 watchdog timeout must auto-remind deterministically without burning a Manager LLM turn',
+		);
+		assert.ok(
+			h.engineering.getTreeSnapshot(gov.id)?.state.events.some(e => e.event === 'watchdog.auto_reminded'),
+			'Stage 1 watchdog must record watchdog.auto_reminded event',
+		);
+
+		// Stage 2: Another 15 minutes of silence after auto-remind -> NOW wake Segment Manager for kill-restart escalation!
+		await h.engineering.runWatchdogSweep(firstSweepTs + 15 * 60_000);
+		assert.ok(h.dispatchedTurns.some(t => t.callerRole === 'manager' && t.prompt.includes('Watchdog Timeout Alert')), 'Stage 2 persistent timeout must wake Segment Manager');
 
 		// Manager executes `watchdog-action --action kill-restart` on stalled N1
 		await h.commandService.executeCommand(
@@ -2578,5 +2608,198 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		assert.strictEqual(host.querySelector('.ade-eng-inline-rename'), null, 'Committing the rename closes the inline input');
 
 		pane.clearInput();
+	});
+
+	test('DAG Audit Upgrades: branch-isolated Circuit Breaker, concurrency & scope serialization, deterministic verify gate, incremental rework & cumulative diffs', async () => {
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Audit Upgrade Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		// 1. Deterministic verify gate (#22) + Incremental rework (#23) + Cumulative node & segment diffs (#24/#25)
+		let verifyAttempts = 0;
+		h.setVerifyHandler(async (_cwd, cmd) => {
+			verifyAttempts++;
+			if (verifyAttempts === 1) {
+				return { passed: false, exitCode: 1, output: `TS2322 syntax error running ${cmd}`, durationMs: 12 };
+			}
+			return { passed: true, exitCode: 0, output: 'All tests passed', durationMs: 18 };
+		});
+		h.setComputeChangesHandler(async (_cwd, before) => {
+			// Baseline snapshot has capturedAt === 1 -> returns FULL cumulative diff; later per-turn snapshots return small incremental diff!
+			if (before.capturedAt === 1) {
+				return {
+					capturedAt: Date.now(),
+					touchedFiles: [
+						{ relativePath: 'src/core.ts', kind: 'added' },
+						{ relativePath: 'src/fix.ts', kind: 'modified' },
+					],
+					combinedDiff: '+++ FULL_CUMULATIVE_DIFF_N1_AND_FIX',
+				};
+			}
+			return {
+				capturedAt: Date.now(),
+				touchedFiles: [{ relativePath: 'src/fix.ts', kind: 'modified' }],
+				combinedDiff: '+++ SMALL_TURN_DIFF_ONLY',
+			};
+		});
+
+		const verifyBp = [
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Build Feature ★Critical"]',
+			'```',
+			'',
+			'## Tree Metadata',
+			'- tree_type: engineering',
+			'- workspace_isolation: shared',
+			'',
+			'## Nodes',
+			'### [N1] Build Feature',
+			'- type: task',
+			'- critical: true',
+			'- verify: npm test',
+			'- goal: Implement full feature module',
+			'- acceptance: Must compile and pass npm test',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov.id, blueprintText: verifyBp });
+		await h.engineering.runTree(gov.id, 'user');
+		await waitForNodePhase(h.engineering, gov.id, 'N1', 'employee_review');
+		await waitForDomCondition(() => h.dispatchedTurns.filter(t => t.callerRole === 'employee').length >= 1);
+
+		const verifyAttemptsBeforeFirstEmpReview = verifyAttempts;
+		const workerTurnsN1 = h.dispatchedTurns.filter(t => t.callerRole === 'worker');
+		const empTurnsBeforeReject = h.dispatchedTurns.filter(t => t.callerRole === 'employee');
+
+		// Employee rejects once -> Worker Turn 3 runs incremental rework -> verify runs 3rd time -> Employee Turn 2 sees cumulative diff!
+		await h.engineering.submitReview({ governorSessionId: gov.id, nodeId: 'N1', role: 'employee', verdict: 'reject', feedback: 'Add null guard' });
+		await waitForDomCondition(() => h.dispatchedTurns.filter(t => t.callerRole === 'employee').length >= 2);
+		const empTurnsAfterReReview = h.dispatchedTurns.filter(t => t.callerRole === 'employee');
+
+		// Employee passes -> Manager wakes and sees cumulative segment diff!
+		await h.engineering.submitReview({ governorSessionId: gov.id, nodeId: 'N1', role: 'employee', verdict: 'pass', report: 'Feature verified.' });
+		await waitForNodePhase(h.engineering, gov.id, 'N1', 'manager_review');
+		await waitForDomCondition(() => h.dispatchedTurns.some(t => t.callerRole === 'manager'));
+		const mgrTurn = h.dispatchedTurns.find(t => t.callerRole === 'manager')!;
+
+		assert.deepStrictEqual({
+			verifyRanTwiceBeforeFirstEmpReview: verifyAttemptsBeforeFirstEmpReview === 2 && verifyAttempts === 3 && empTurnsBeforeReject.length === 1,
+			workerRanInitialPlusVerifyRework: workerTurnsN1.length === 2,
+			workerTurn2IsIncremental: workerTurnsN1[1].prompt.includes('TS2322 syntax error') && !workerTurnsN1[1].prompt.includes('## Acceptance Requirements'),
+			empTurn1ShowsVerifyPassed: empTurnsBeforeReject[0].prompt.includes('Deterministic Verification: PASSED'),
+			empTurn2IsIncrementalWithCumulativeDiff: empTurnsAfterReReview.length === 2
+				&& empTurnsAfterReReview[1].prompt.includes('# Re-Review')
+				&& empTurnsAfterReReview[1].prompt.includes('FULL_CUMULATIVE_DIFF_N1_AND_FIX')
+				&& empTurnsAfterReReview[1].prompt.includes('SMALL_TURN_DIFF_ONLY'),
+			mgrSeesCumulativeSegmentDiff: mgrTurn.prompt.includes('FULL_CUMULATIVE_DIFF_N1_AND_FIX'),
+		}, {
+			verifyRanTwiceBeforeFirstEmpReview: true,
+			workerRanInitialPlusVerifyRework: true,
+			workerTurn2IsIncremental: true,
+			empTurn1ShowsVerifyPassed: true,
+			empTurn2IsIncrementalWithCumulativeDiff: true,
+			mgrSeesCumulativeSegmentDiff: true,
+		});
+
+		// 2. Branch-isolated Circuit Breaker (#19) + Concurrency cap & Scope conflict serialization (#20/#21)
+		h.setVerifyHandler(undefined);
+		h.setComputeChangesHandler(undefined);
+		const gov2 = await createGovernor(h.projects, sessions, 'Parallel CB Gov');
+		await h.engineering.initTree({ governorSessionId: gov2.id });
+		const parallelBp = [
+			'```mermaid',
+			'flowchart LR',
+			'  A["Branch A ★Critical"]',
+			'  B["Branch B Independent"] --> B2["Branch B Tail"]',
+			'  C["Overlap With A"]',
+			'```',
+			'',
+			'## Tree Metadata',
+			'- tree_type: engineering',
+			'- workspace_isolation: shared',
+			'- max_concurrency: 2',
+			'',
+			'## Nodes',
+			'### [A] Branch A',
+			'- type: task',
+			'- critical: true',
+			'- files: src/auth/**',
+			'- goal: Auth change',
+			'',
+			'### [B] Branch B Independent',
+			'- type: task',
+			'- files: src/ui/**',
+			'- goal: UI change',
+			'',
+			'### [B2] Branch B Tail',
+			'- type: task',
+			'- files: src/ui/**',
+			'- goal: UI polish',
+			'',
+			'### [C] Overlap With A',
+			'- type: task',
+			'- files: src/auth/login.ts',
+			'- goal: Login tweak',
+		].join('\n');
+		await h.engineering.applyBlueprint({ governorSessionId: gov2.id, blueprintText: parallelBp });
+
+		// Hold first worker turn (B has highest critical-path priority: B->B2 length 2 vs A length 1)
+		const heldB = h.holdNextWorkerTurn();
+		await h.engineering.runTree(gov2.id, 'user');
+		await heldB.started.p;
+		await waitForNodePhase(h.engineering, gov2.id, 'A', 'employee_review');
+
+		// C must NOT be running while A is active (both max_concurrency=2 AND overlapping files src/auth/**)
+		const snapDuringAB = h.engineering.getTreeSnapshot(gov2.id)!;
+		const cIdleWhileAActive = snapDuringAB.state.nodes.C.phase === 'idle';
+		const scopeEventLogged = snapDuringAB.state.events.some(e => e.event === 'blueprint.scope_conflict');
+
+		// Drive A through 3 formal Manager rejections -> A trips RED Circuit Breaker while B is still running!
+		for (let i = 1; i <= 3; i++) {
+			await h.engineering.submitReview({ governorSessionId: gov2.id, nodeId: 'A', role: 'employee', verdict: 'pass', report: `A attempt ${i}` });
+			await waitForNodePhase(h.engineering, gov2.id, 'A', 'manager_review');
+			await h.engineering.submitReview({ governorSessionId: gov2.id, nodeId: 'A', role: 'manager', verdict: 'reject', feedback: `Fail ${i}` });
+			if (i < 3) {
+				await waitForNodePhase(h.engineering, gov2.id, 'A', 'employee_review');
+			}
+		}
+
+		// Tree runStatus MUST stay 'running' so independent branch B is NOT killed/discarded!
+		const snapAfterACB = h.engineering.getTreeSnapshot(gov2.id)!;
+		const aCircuitBrokenWhileTreeStaysRunning = snapAfterACB.state.nodes.A.phase === 'circuit_broken'
+			&& snapAfterACB.state.runStatus === 'running';
+
+		// Finish independent branch B -> B2 and C cleanly, then verify tree finalizes to 'circuit_broken' once nothing runnable remains!
+		heldB.reply.complete('B done');
+		await waitForNodePhase(h.engineering, gov2.id, 'B', 'employee_review');
+		await h.engineering.submitReview({ governorSessionId: gov2.id, nodeId: 'B', role: 'employee', verdict: 'pass', report: 'B ok' });
+		await waitForNodePhase(h.engineering, gov2.id, 'B2', 'employee_review');
+		await h.engineering.submitReview({ governorSessionId: gov2.id, nodeId: 'B2', role: 'employee', verdict: 'pass', report: 'B2 ok' });
+		await waitForNodePhase(h.engineering, gov2.id, 'B2', 'manager_review');
+		await h.engineering.submitReview({ governorSessionId: gov2.id, nodeId: 'B2', role: 'manager', verdict: 'pass' });
+
+		// C was unblocked once A stopped being active; finish C too
+		await waitForNodePhase(h.engineering, gov2.id, 'C', 'employee_review');
+		await h.engineering.submitReview({ governorSessionId: gov2.id, nodeId: 'C', role: 'employee', verdict: 'pass', report: 'C ok' });
+		await waitForNodePhase(h.engineering, gov2.id, 'C', 'manager_review');
+		await h.engineering.submitReview({ governorSessionId: gov2.id, nodeId: 'C', role: 'manager', verdict: 'pass' });
+
+		const finalSnap = h.engineering.getTreeSnapshot(gov2.id)!;
+		assert.deepStrictEqual({
+			cIdleWhileAActive,
+			scopeEventLogged,
+			aCircuitBrokenWhileTreeStaysRunning,
+			branchBCompletedDespiteACB: finalSnap.state.nodes.B.completed && finalSnap.state.nodes.B2.completed,
+			branchCCompletedDespiteACB: finalSnap.state.nodes.C.completed,
+			finalRunStatusCircuitBroken: finalSnap.state.runStatus === 'circuit_broken',
+		}, {
+			cIdleWhileAActive: true,
+			scopeEventLogged: true,
+			aCircuitBrokenWhileTreeStaysRunning: true,
+			branchBCompletedDespiteACB: true,
+			branchCCompletedDespiteACB: true,
+			finalRunStatusCircuitBroken: true,
+		});
 	});
 });

@@ -1873,4 +1873,72 @@ describe('ADE Native Extension Role Bridge', () => {
 		assert.strictEqual(workerOut[0].payload.toString('utf8'), workerJson);
 		assert.strictEqual(workerOut[0].payload.toString('utf8').includes('aexus_ade_role_context'), false);
 	});
+
+	it('re-injects role context on the turn after /compact without double-prefixing pre-injected turns', async () => {
+		const tmpRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'aexus-compact-bridge-'));
+		const distDir = path.join(tmpRoot, 'dist');
+		const bridgeDir = path.join(tmpRoot, 'bridge');
+		await fs.promises.mkdir(distDir, { recursive: true });
+		await fs.promises.mkdir(bridgeDir, { recursive: true });
+
+		const spawnedChildren: ReturnType<typeof createMockChild>[] = [];
+		const fakeCp = {
+			spawn: (() => {
+				const child = createMockChild();
+				spawnedChildren.push(child);
+				return child;
+			}) as unknown as typeof cp.spawn,
+		};
+
+		const bridge = bridgeModule.createNativeRoleBridgeController({
+			distDir,
+			bridgeDir,
+			scopeId: 'compact-test',
+			childProcessModule: fakeCp,
+			fetchHost: { fetch: (async () => new Response('{}', { status: 200 })) as typeof globalThis.fetch },
+		});
+
+		try {
+			await bridge.updateSnapshot({
+				mode: 'ade',
+				activeAgentId: 'gov-compact',
+				selectedAgentId: 'gov-compact',
+				agents: [{
+					id: 'gov-compact',
+					label: 'Compact Governor',
+					projectPath: '/projects/Alpha',
+					engineId: 'aexus-claude',
+					resource: 'aexus-claude:/compact-gov',
+					rank: 'governor',
+					isOrchestrated: true,
+					rolePrompt: '[Aexus Orchestrated Role Context]\n- Role: Governor (Compact Test)',
+				}],
+			});
+
+			const child = fakeCp.spawn('claude', ['--input-format', 'stream-json', '--output-format', 'stream-json', '--session-id', 'ses-compact'], { cwd: '/projects/Alpha' });
+			const mockChild = spawnedChildren[0];
+			const written: string[] = [];
+			mockChild.stdin.on('data', (chunk: Buffer | string) => written.push(chunk.toString('utf8')));
+			// 1. Normal turn while already injected via --append-system-prompt -> no duplicate user prefix
+			child.stdin!.write(JSON.stringify({ type: 'user', session_id: 'ses-compact', message: { role: 'user', content: 'hello' } }) + '\n');
+			// 2. /compact command -> passes through untouched AND resets lastInjectedPrompt
+			child.stdin!.write(JSON.stringify({ type: 'user', session_id: 'ses-compact', message: { role: 'user', content: '/compact' } }) + '\n');
+			// 3. Turn after /compact -> MUST re-inject role context!
+			child.stdin!.write(JSON.stringify({ type: 'user', session_id: 'ses-compact', message: { role: 'user', content: 'what is my role?' } }) + '\n');
+			// 4. Pre-prefixed turn after another /compact -> must NOT double-prefix!
+			child.stdin!.write(JSON.stringify({ type: 'user', session_id: 'ses-compact', message: { role: 'user', content: '/compact' } }) + '\n');
+			child.stdin!.write(JSON.stringify({ type: 'user', session_id: 'ses-compact', message: { role: 'user', content: '[Aexus Orchestrated Role Context]\nAlready present\n\nhi' } }) + '\n');
+
+			const lines = written.join('').trim().split('\n').map(l => JSON.parse(l) as { message: { content: string } });
+			assert.strictEqual(lines.length, 5);
+			assert.strictEqual(lines[0].message.content, 'hello');
+			assert.strictEqual(lines[1].message.content, '/compact');
+			assert.ok(lines[2].message.content.includes('[Aexus Orchestrated Role Context Updated]') && lines[2].message.content.includes('Role: Governor (Compact Test)'));
+			assert.strictEqual(lines[3].message.content, '/compact');
+			assert.strictEqual(lines[4].message.content.split('[Aexus Orchestrated Role Context').length - 1, 1);
+		} finally {
+			bridge.dispose();
+			await fs.promises.rm(tmpRoot, { recursive: true, force: true });
+		}
+	});
 });

@@ -415,6 +415,8 @@ interface IMutableNodeDraft {
 	goal?: string;
 	acceptance?: string;
 	description?: string;
+	files?: string[];
+	verify?: string;
 	position?: IAdeNodeCanvasPosition;
 }
 
@@ -755,6 +757,8 @@ export function parseEngineeringBlueprint(
 	let workspaceIsolation: AdeWorkspaceIsolationMode = 'shared';
 	let watchdogTimeoutMinutes = DEFAULT_WATCHDOG_TIMEOUT_MINUTES;
 	let maxBudgetUsd: number | undefined;
+	let maxConcurrency: number | undefined;
+	let defaultVerify: string | undefined;
 
 	// Optional YAML frontmatter before the Mermaid block (`---\nkey: val\n---`)
 	const frontmatterMatch = normalizedText.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
@@ -776,6 +780,11 @@ export function parseEngineeringBlueprint(
 			} else if (fk === 'max_budget_usd' || fk === 'maxbudgetusd') {
 				const num = Number(fv.replace(/^\$/, ''));
 				if (Number.isFinite(num) && num > 0) { maxBudgetUsd = Math.round(num * 100) / 100; }
+			} else if (fk === 'max_concurrency' || fk === 'maxconcurrency') {
+				const num = Math.floor(Number(fv));
+				if (Number.isFinite(num) && num >= 1) { maxConcurrency = num; }
+			} else if ((fk === 'verify' || fk === 'check') && fv) {
+				defaultVerify = fv;
 			}
 		}
 	}
@@ -874,6 +883,13 @@ export function parseEngineeringBlueprint(
 				if (Number.isFinite(num) && num > 0) {
 					maxBudgetUsd = Math.round(num * 100) / 100;
 				}
+			} else if (key === 'max_concurrency' || key === 'maxconcurrency') {
+				const num = Math.floor(Number(val));
+				if (Number.isFinite(num) && num >= 1) {
+					maxConcurrency = num;
+				}
+			} else if ((key === 'verify' || key === 'check') && val) {
+				defaultVerify = val;
 			}
 			continue;
 		}
@@ -1030,6 +1046,17 @@ export function parseEngineeringBlueprint(
 				currentNodeDraft.acceptance = readScalarValue(val);
 			} else if (key === 'description') {
 				currentNodeDraft.description = readScalarValue(val);
+			} else if (key === 'files' || key === 'scope') {
+				const rawFiles = readScalarValue(val);
+				const parsedFiles = rawFiles.split(/[,\n]+/).map(s => s.replace(/^[-*]\s*/, '').replace(/^`|`$/g, '').trim()).filter(Boolean);
+				if (parsedFiles.length > 0) {
+					currentNodeDraft.files = parsedFiles;
+				}
+			} else if (key === 'verify' || key === 'check') {
+				const v = readScalarValue(val).trim();
+				if (v) {
+					currentNodeDraft.verify = v;
+				}
 			} else if (key === 'position') {
 				const coords = val.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
 				if (coords) {
@@ -1080,6 +1107,8 @@ export function parseEngineeringBlueprint(
 				goal: draft.goal ?? '',
 				acceptance: draft.acceptance ?? '',
 				...(draft.description ? { description: draft.description } : {}),
+				...(draft.files && draft.files.length > 0 ? { files: draft.files } : {}),
+				...(draft.verify ? { verify: draft.verify } : {}),
 				...(pos ? { position: pos } : {}),
 			});
 		}
@@ -1106,6 +1135,8 @@ export function parseEngineeringBlueprint(
 		watchdogTimeoutMinutes,
 		flowDirection,
 		...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
+		...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
+		...(defaultVerify ? { verify: defaultVerify } : {}),
 	};
 
 	return {
@@ -1230,6 +1261,12 @@ export function serializeEngineeringBlueprint(blueprint: IAdeEngineeringBlueprin
 		...(typeof blueprint.metadata.maxBudgetUsd === 'number' && Number.isFinite(blueprint.metadata.maxBudgetUsd) && blueprint.metadata.maxBudgetUsd > 0
 			? [`- max_budget_usd: ${Math.round(blueprint.metadata.maxBudgetUsd * 100) / 100}`]
 			: []),
+		...(typeof blueprint.metadata.maxConcurrency === 'number' && Number.isFinite(blueprint.metadata.maxConcurrency) && blueprint.metadata.maxConcurrency >= 1
+			? [`- max_concurrency: ${Math.floor(blueprint.metadata.maxConcurrency)}`]
+			: []),
+		...(blueprint.metadata.verify?.trim()
+			? [`- verify: ${blueprint.metadata.verify.trim()}`]
+			: []),
 	];
 
 	const managerLines: string[] = ['## Auto-Partitioned Managers'];
@@ -1258,6 +1295,12 @@ export function serializeEngineeringBlueprint(blueprint: IAdeEngineeringBlueprin
 			const wrk = node.worker ?? { engine: 'codex', thinking: 'high' };
 			nodeLines.push(`- employee: ${formatRoleConfigLine(emp)}`);
 			nodeLines.push(`- worker: ${formatRoleConfigLine(wrk)}`);
+			if (node.files && node.files.length > 0) {
+				nodeLines.push(`- files: ${node.files.join(', ')}`);
+			}
+			if (node.verify?.trim()) {
+				nodeLines.push(`- verify: ${node.verify.trim()}`);
+			}
 			nodeLines.push(...formatBlockScalar('goal', node.goal));
 			nodeLines.push(...formatBlockScalar('acceptance', node.acceptance));
 		}
@@ -1649,4 +1692,203 @@ export function createStarterBlueprint(
 		nodes,
 		edges,
 	};
+}
+
+function normalizeScopePattern(raw: string): string {
+	return raw.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+}
+
+function scopePrefix(pattern: string): { prefix: string; isGlob: boolean } {
+	const norm = normalizeScopePattern(pattern);
+	const starIdx = norm.search(/[*?[{]/);
+	if (starIdx < 0) {
+		return { prefix: norm, isGlob: false };
+	}
+	const prefix = norm.slice(0, starIdx).replace(/\/+$/, '');
+	return { prefix, isGlob: true };
+}
+
+/**
+ * Conservatively checks whether two declared file/directory/glob scope patterns could touch the same file.
+ */
+export function doFileScopesOverlap(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+	if (!a?.length || !b?.length) {
+		return false;
+	}
+	for (const rawA of a) {
+		const pa = scopePrefix(rawA);
+		if (!pa.prefix) {
+			return true;
+		}
+		for (const rawB of b) {
+			const pb = scopePrefix(rawB);
+			if (!pb.prefix) {
+				return true;
+			}
+			if (pa.prefix === pb.prefix) {
+				return true;
+			}
+			if (pa.isGlob && (pb.prefix.startsWith(`${pa.prefix}/`) || pb.prefix === pa.prefix)) {
+				return true;
+			}
+			if (pb.isGlob && (pa.prefix.startsWith(`${pb.prefix}/`) || pa.prefix === pb.prefix)) {
+				return true;
+			}
+			// Exact directory prefix match (e.g. `src/auth` vs `src/auth/login.ts`)
+			if (pb.prefix.startsWith(`${pa.prefix}/`) || pa.prefix.startsWith(`${pb.prefix}/`)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+export interface IAdeScopeConflictWarning {
+	readonly nodeA: string;
+	readonly nodeB: string;
+	readonly scopesA: readonly string[];
+	readonly scopesB: readonly string[];
+}
+
+/**
+ * Planning-time static check: finds pairs of potentially concurrent task nodes (neither is an ancestor of the other)
+ * that declare overlapping `files` scopes in `shared` workspace mode.
+ */
+export function detectSharedWorkspaceScopeConflicts(blueprint: IAdeEngineeringBlueprint): IAdeScopeConflictWarning[] {
+	if (blueprint.metadata.workspaceIsolation === 'worktree') {
+		return [];
+	}
+	const taskNodes = blueprint.nodes.filter(n => n.type === 'task' && n.files && n.files.length > 0);
+	if (taskNodes.length < 2) {
+		return [];
+	}
+	const outgoing = new Map<string, string[]>();
+	for (const n of blueprint.nodes) {
+		outgoing.set(n.id, []);
+	}
+	for (const e of blueprint.edges) {
+		outgoing.get(e.from)?.push(e.to);
+	}
+	const reachableFrom = (startId: string): Set<string> => {
+		const seen = new Set<string>();
+		const queue = [...(outgoing.get(startId) ?? [])];
+		while (queue.length > 0) {
+			const cur = queue.shift()!;
+			if (seen.has(cur)) { continue; }
+			seen.add(cur);
+			for (const nxt of outgoing.get(cur) ?? []) {
+				if (!seen.has(nxt)) { queue.push(nxt); }
+			}
+		}
+		return seen;
+	};
+	const reach = new Map<string, Set<string>>();
+	for (const n of taskNodes) {
+		reach.set(n.id, reachableFrom(n.id));
+	}
+	const warnings: IAdeScopeConflictWarning[] = [];
+	for (let i = 0; i < taskNodes.length; i++) {
+		const a = taskNodes[i];
+		for (let j = i + 1; j < taskNodes.length; j++) {
+			const b = taskNodes[j];
+			if (reach.get(a.id)!.has(b.id) || reach.get(b.id)!.has(a.id)) {
+				continue;
+			}
+			if (doFileScopesOverlap(a.files, b.files)) {
+				warnings.push({ nodeA: a.id, nodeB: b.id, scopesA: a.files!, scopesB: b.files! });
+			}
+		}
+	}
+	return warnings;
+}
+
+/**
+ * Computes critical-path scheduling priority for every node (longest downstream remaining path length
+ * in hops, plus a tie-breaker boost for ★Critical nodes) so bottleneck tracks always dispatch first.
+ */
+export function computeCriticalPathPriorities(blueprint: IAdeEngineeringBlueprint): Map<string, number> {
+	const topoOrder = topologicalSortNodes(blueprint.nodes, blueprint.edges);
+	const nodeById = new Map(blueprint.nodes.map(n => [n.id, n]));
+	const outgoing = new Map<string, string[]>();
+	for (const n of blueprint.nodes) {
+		outgoing.set(n.id, []);
+	}
+	for (const e of blueprint.edges) {
+		outgoing.get(e.from)?.push(e.to);
+	}
+	const height = new Map<string, number>();
+	for (let i = topoOrder.length - 1; i >= 0; i--) {
+		const id = topoOrder[i];
+		let maxChild = 0;
+		for (const next of outgoing.get(id) ?? []) {
+			const h = height.get(next) ?? 0;
+			if (h > maxChild) {
+				maxChild = h;
+			}
+		}
+		const node = nodeById.get(id);
+		const weight = node?.type === 'task' ? 1 : 0.25;
+		height.set(id, weight + maxChild);
+	}
+	const priorities = new Map<string, number>();
+	for (const n of blueprint.nodes) {
+		const base = (height.get(n.id) ?? 1) * 10;
+		priorities.set(n.id, base + (n.critical ? 2 : 0));
+	}
+	return priorities;
+}
+
+/**
+ * Classifies non-stale upstream task reports into:
+ * - `direct`: immediate upstream task parents (passing through `user_gate` nodes), shown in full.
+ * - `distant`: older transitive ancestors (distance >= 2), condensed to 1-line headlines in prompts so deep DAGs stay O(1) bounded.
+ */
+export function buildLayeredUpstreamReports(
+	targetNodeId: string,
+	blueprint: IAdeEngineeringBlueprint,
+	reports: Readonly<Record<string, IAdeIncrementalReportEntry>>,
+): { readonly direct: readonly IAdeIncrementalReportEntry[]; readonly distant: readonly IAdeIncrementalReportEntry[] } {
+	const fullChain = buildUpstreamReportChain(targetNodeId, blueprint, reports);
+	if (fullChain.length === 0) {
+		return { direct: [], distant: [] };
+	}
+	const nodeById = new Map(blueprint.nodes.map(n => [n.id, n]));
+	const incoming = new Map<string, string[]>();
+	for (const n of blueprint.nodes) {
+		incoming.set(n.id, []);
+	}
+	for (const e of blueprint.edges) {
+		incoming.get(e.to)?.push(e.from);
+	}
+	// Collect direct task parents (passing transparently through user_gate nodes)
+	const directIds = new Set<string>();
+	const seenGate = new Set<string>();
+	const queue = [...(incoming.get(targetNodeId) ?? [])];
+	while (queue.length > 0) {
+		const predId = queue.shift()!;
+		const predNode = nodeById.get(predId);
+		if (!predNode) {
+			continue;
+		}
+		if (predNode.type === 'user_gate') {
+			if (!seenGate.has(predId)) {
+				seenGate.add(predId);
+				for (const gPred of incoming.get(predId) ?? []) {
+					queue.push(gPred);
+				}
+			}
+		} else {
+			directIds.add(predId);
+		}
+	}
+	const direct: IAdeIncrementalReportEntry[] = [];
+	const distant: IAdeIncrementalReportEntry[] = [];
+	for (const report of fullChain) {
+		if (directIds.has(report.nodeId)) {
+			direct.push(report);
+		} else {
+			distant.push(report);
+		}
+	}
+	return { direct, distant };
 }

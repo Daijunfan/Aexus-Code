@@ -33,7 +33,7 @@ import {
 	IAdeEngineeringService,
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
-import { normalizeThinkingLevel, parseEngineeringBlueprint, serializeEngineeringBlueprint } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
+import { detectSharedWorkspaceScopeConflicts, normalizeThinkingLevel, parseEngineeringBlueprint, serializeEngineeringBlueprint } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
 import { AdeBlueprintTemplatePreset, buildBlueprintFromTemplate, listBlueprintTemplates } from '../../../../platform/ade/common/adeBlueprintTemplates.js';
 import { computeTreeFinancialSummary } from '../../../../platform/ade/common/adePricing.js';
 import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
@@ -98,9 +98,8 @@ function formatRoleTitle(rank: AdeSessionRank): string {
 		case 'manager':
 			return 'Manager';
 		case 'employee':
-			return 'Employee';
 		case 'subordinate':
-			return 'Subordinate';
+			return 'Employee';
 		case 'worker':
 			return 'Worker';
 	}
@@ -109,41 +108,55 @@ function formatRoleTitle(rank: AdeSessionRank): string {
 function formatRoleCharterDescription(rank: AdeSessionRank): string {
 	switch (rank) {
 		case 'governor':
-			return 'L1 Top Rank / 最高管理职级（Governor · 项目总负责人）：You are the top-level executive orchestrator in Aexus Code ADE, overseeing Manager (L2), Employee (L3), and Worker (L4) subordinates.';
+			return 'L1 Governor (项目总负责人): Top-level orchestrator in Aexus Code ADE overseeing Manager (L2), Employee (L3), and Worker (L4) subordinates.';
 		case 'manager':
-			return 'L2 Lead Rank / 中层管理职级（Manager · 链路与模块主管）：You are a mid-level team lead in Aexus Code ADE, coordinating Employee (L3) and Worker (L4) subordinates and reporting to your supervisor (if assigned).';
+			return 'L2 Manager (模块主管): Mid-level lead coordinating Employee (L3) and Worker (L4) subordinates and reporting to your supervisor (if assigned).';
 		case 'employee':
-			return 'L3 Supervisory & Review Rank / 骨干员工职级（Employee · 基层管理与单节点验收负责人 —— 绝不是 Worker！Employee ≠ Worker）：You are an L3 orchestrated supervisor and reviewer positioned strictly ABOVE Worker (L4). You are NOT a Worker: you hold full ADE Subordinate Control API authority to spawn, dispatch, supervise, and review leaf Worker (L4) sessions rather than acting as a rankless pure executor.';
 		case 'subordinate':
-			return 'Orchestrated Member / 编排成员角色（Subordinate · L3 同级编排角色，非底层 Worker）：You are an orchestrated member session in Aexus Code ADE positioned above leaf Worker (L4).';
+			return 'L3 Employee (骨干员工 · 基层管理与单节点验收负责人，绝不是 Worker / Employee ≠ Worker): Orchestrated supervisor & reviewer positioned strictly ABOVE Worker (L4). You hold `aexus-ade` authority to spawn, dispatch, supervise, and review leaf Worker (L4) sessions rather than acting as a rankless pure executor.';
 		case 'worker':
-			return 'L4 Lowest Pure Execution Rank / 底层纯净执行职级（Worker · 纯执行主力，位于 Employee [L3] 之下，不等同于 Employee）。';
+			return 'L4 Worker (底层纯执行主力): Lowest pure-execution rank positioned below Employee (L3) with no subordinates.';
 	}
 }
+
+const MAX_PROMPT_SUBTREE_LINES = 24;
+const MAX_SECRETARY_SESSION_LINES = 40;
 
 export function formatAdeAgentSubtreeLines(
 	projects: IAdeProjectsService,
 	sessions: IAdeSessionsService | undefined,
 	rootAgentId: string,
+	maxLines = MAX_PROMPT_SUBTREE_LINES,
 ): string[] {
 	const tree = projects.getAgentTree(rootAgentId);
 	if (!tree) {
 		return [];
 	}
 	const lines: string[] = [];
+	let omitted = 0;
 	const visit = (node: IAdeAgentTreeNode, depth: number) => {
+		if (lines.length >= maxLines) {
+			omitted++;
+			for (const child of node.children) {
+				visit(child, depth + 1);
+			}
+			return;
+		}
 		const hasSubs = node.children.length > 0;
 		const rankTitle = formatRoleTitle(resolveAdeAgentRank(node.agent, hasSubs));
 		const engineName = node.agent.session ? (sessions?.getEngineName(node.agent.session.engineId) ?? node.agent.session.engineId) : 'Draft';
-		const status = !node.agent.session ? 'draft' : (node.agent.status ?? 'idle');
 		const indent = '  '.repeat(depth + 1);
-		lines.push(`${indent}- [${rankTitle}] ${node.agent.label} (id: ${node.agent.id}, engine: ${engineName} [${node.agent.session?.engineId ?? 'draft'}], status: ${status})`);
+		// Keep role prompt cache-stable: omit volatile live status (idle/working); query live state via CLI when needed.
+		lines.push(`${indent}- [${rankTitle}] ${node.agent.label} (id: ${node.agent.id}, engine: ${engineName} [${node.agent.session?.engineId ?? 'draft'}])`);
 		for (const child of node.children) {
 			visit(child, depth + 1);
 		}
 	};
 	for (const child of tree.children) {
 		visit(child, 0);
+	}
+	if (omitted > 0) {
+		lines.push(`  - ... (+${omitted} more subordinates; run \`aexus-ade session tree ${rootAgentId} --json\` for full live tree)`);
 	}
 	return lines;
 }
@@ -444,99 +457,75 @@ export function buildAdeAgentRoleContext(
 	const effectiveRole = resolveAdeAgentRank(agent, subordinates.length > 0);
 	const supervisor = agent.parentId ? projects.getAgent(agent.parentId) : undefined;
 	const ownEngineName = agent.session ? (sessions?.getEngineName(agent.session.engineId) ?? agent.session.engineId) : 'Draft';
+	const isWorkTree = agent.treeType === 'engineering' || agent.treeType === 'research';
 	const lines = [
 		'[Aexus Orchestrated Role Context]',
-		'You ARE an official orchestrated organizational agent session in **Aexus Code ADE**.',
-		`- Rank / Position: ${formatRoleCharterDescription(effectiveRole)}`,
+		`You are an orchestrated agent in **Aexus Code ADE**.`,
+		`- Rank: ${formatRoleCharterDescription(effectiveRole)}`,
 		`- Role: ${formatRoleTitle(effectiveRole)}`,
-		`- Session: ${agent.label} (id: ${agent.id})`,
-		`- Engine: ${ownEngineName} (${agent.session?.engineId ?? 'draft'})`,
+		`- Session: ${agent.label} (id: ${agent.id}, engine: ${ownEngineName} [${agent.session?.engineId ?? 'draft'}])`,
 		`- Project: ${projects.getProjectName(agent.projectUri)} (${formatProjectDisplayPath(agent.projectUri)})`,
-		'- Four-Tier ADE Rank Hierarchy (CRITICAL RULE — `Employee` IS NOT `Worker` / `Employee [L3] ≠ Worker [L4]`):',
-		'  - `Governor` (L1 · 项目总负责人) > `Manager` (L2 · 链路/模块主管) > `Employee` (L3 · 骨干员工：基层管理与验收负责人) > `Worker` (L4 · 底层纯净执行主力).',
-		'  - **`Employee` 绝不是 `Worker` (`Employee ≠ Worker`)**: `Employee (L3)` belongs to the orchestrated management/review tier (L1–L3), receives `aexus-ade` Subordinate Control APIs, and supervises/reviews leaf `Worker (L4)` sessions; `Worker (L4)` is the lowest un-orchestrated execution leaf (`--role worker`) with zero role/API injection and no subordinates. NEVER conflate `Employee` with `Worker` or refer to an `Employee` session as a `Worker`!',
+		'- Hierarchy: `Governor` (L1) > `Manager` (L2) > `Employee` (L3 · supervisor/reviewer, `Employee ≠ Worker`) > `Worker` (L4 · pure executor, no subordinates).',
 	];
 	if (supervisor) {
 		lines.push(`- Supervisor: ${supervisor.label} (id: ${supervisor.id}, role: ${formatRoleTitle(resolveAdeAgentRank(supervisor, true))})`);
 	}
-	if (subordinates.length > 0) {
-		lines.push('- Direct Subordinates:');
-		for (const child of subordinates) {
-			const childRank = resolveAdeAgentRank(child, projects.hasSubordinates(child.id));
-			const childEngineName = child.session ? (sessions?.getEngineName(child.session.engineId) ?? child.session.engineId) : 'Draft';
-			lines.push(`  - ${child.label} (id: ${child.id}, role: ${formatRoleTitle(childRank)}, engine: ${childEngineName} [${child.session?.engineId ?? 'draft'}], status: ${child.status ?? 'idle'})`);
+	if (isWorkTree) {
+		const govId = agent.treeGovernorId ?? agent.id;
+		const treeKindTitle = agent.treeType === 'research' ? 'ADE Research Tree' : 'ADE Engineering Tree';
+		lines.push(
+			`- Work Tree: **${treeKindTitle}** (governor: \`${govId}\`${agent.treeSegmentId ? `, segment: \`${agent.treeSegmentId}\`` : ''}${agent.treeNodeId ? `, node: \`${agent.treeNodeId}\`` : ''}) — topology locked by \`blueprint.md\`; inspect live nodes/status via \`aexus-ade engineering status --governor ${govId} --json\`.`,
+			`- Identity Rule: When asked your role/rank, state **${formatRoleTitle(effectiveRole)}**, session \`${agent.id}\`, project **${projects.getProjectName(agent.projectUri)}**, and work tree \`${govId}\`. NEVER claim that you are "not an employee" or have "no rank / 没有职级".`,
+		);
+		const isResearchTree = agent.treeType === 'research';
+		if (effectiveRole === 'governor') {
+			lines.push(
+				isResearchTree ? '- Research Governor (L1) Charter:' : '- Engineering Governor (L1) Charter:',
+				isResearchTree
+					? '  - Design multi-track research synthesis & verification DAG topology in `blueprint.md`.'
+					: '  - Design task decomposition & DAG parallel topology in `blueprint.md` (supports optional node `files:` scope and `verify:` check commands, plus `max_concurrency`).',
+				'  - Asleep during normal execution; woken ONLY on 3rd formal Manager failure (RED Circuit Breaker). NEVER call `aexus-ade engineering run` yourself (only User or Secretary starts execution).',
+				`  - Starter templates & schema: \`aexus-ade engineering template list --json\` | \`aexus-ade engineering template apply --governor ${govId} --template <id>\``,
+				`  - Blueprint: \`aexus-ade engineering blueprint get --governor ${govId} --raw\` | \`validate --file <path>\` | \`apply --governor ${govId} --file <path>\``,
+				`  - Configure: \`aexus-ade engineering configure --governor ${govId} --all [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>]\``,
+				`  - Inspect & Recover: \`aexus-ade engineering status --governor ${govId} [--node <id>] --json\` | \`diff --governor ${govId} --node <id>\` | \`reports --governor ${govId} --json\` | \`reset --governor ${govId} [--node <id>]\``,
+				`  - Subordinate History / Human Inbox: \`aexus-ade session history <subordinate-id> --limit 10 --json\` | \`aexus-ade inbox post --from ${govId} --message "<decision needed>"\``,
+			);
+		} else if (effectiveRole === 'manager') {
+			lines.push(
+				`- Segment Manager (L2) Charter (Segment \`${agent.treeSegmentId ?? 'auto'}\`):`,
+				'  - Woken ONLY on: (a) segment tail / ★Critical secondary review, (b) 3x Employee internal rejections (grant 4th-chance guidance or formal reject), (c) Git worktree merge conflict, or (d) persistent Watchdog stall.',
+				`  - Inspect: \`aexus-ade engineering status --governor ${govId} --node <nodeId> --json\` | \`diff --governor ${govId} --node <nodeId>\` | \`aexus-ade session history <subordinate-id> --limit 10 --json\``,
+				`  - Verdict / Guidance: \`aexus-ade engineering review --governor ${govId} --node <nodeId> --role manager --verdict <pass|reject|guidance> [--feedback "<text>"]\``,
+				`  - Watchdog Action: \`aexus-ade engineering watchdog-action --governor ${govId} --node <nodeId> --action <remind|kill-restart> [--message "<text>"]\``,
+			);
+		} else if (effectiveRole === 'employee' || effectiveRole === 'subordinate') {
+			const nodeArg = agent.treeNodeId ?? '<nodeId>';
+			lines.push(
+				`- Single-Node Reviewer (L3) Charter (Node \`${agent.treeNodeId ?? 'task'}\`):`,
+				'  - **STRICT PROHIBITION (`Employee ≠ Worker`)**: NEVER write or edit business code yourself — your Worker (L4) executes all coding. Audit Acceptance Criteria + Diff and submit your verdict via `aexus-ade`:',
+				`  - Inspect: \`aexus-ade engineering diff --governor ${govId} --node ${nodeArg}\` | \`aexus-ade engineering status --governor ${govId} --node ${nodeArg} --json\``,
+				`  - Pass: \`aexus-ade engineering review --governor ${govId} --node ${nodeArg} --role employee --verdict pass --report "<concise summary>"\``,
+				`  - Reject (reuses Worker): \`aexus-ade engineering review --governor ${govId} --node ${nodeArg} --role employee --verdict reject --feedback "<fix instructions>"\``,
+			);
 		}
+		return lines.join('\n');
+	}
+
+	if (subordinates.length > 0) {
 		lines.push('- Subtree Rooted at You:');
 		lines.push(...formatAdeAgentSubtreeLines(projects, sessions, agent.id));
 	} else {
 		lines.push('- Direct Subordinates: None');
 	}
-	if (agent.treeType === 'engineering' || agent.treeType === 'research') {
-		const govId = agent.treeGovernorId ?? agent.id;
-		const treeKindTitle = agent.treeType === 'research' ? 'ADE Research Tree' : 'ADE Engineering Tree';
-		lines.push(
-			`- Work Tree Binding: **${treeKindTitle}** (governor: \`${govId}\`${agent.treeSegmentId ? `, segment: \`${agent.treeSegmentId}\`` : ''}${agent.treeNodeId ? `, node: \`${agent.treeNodeId}\`` : ''}) — sidebar topology is locked by \`blueprint.md\`.`,
-			`- Identity & Rank Rule (MANDATORY OVERRIDE): When asked about your identity, role, or rank (e.g., "你的职级是什么？", "你的身份?", "你是什么角色？职级", "What is your role/rank?"), ALWAYS explicitly state your Aexus Code ADE organizational rank (**${formatRoleTitle(effectiveRole)}**), session title and ID (\`${agent.id}\`), project (**${projects.getProjectName(agent.projectUri)}**), and work tree (\`${govId}\`). NEVER claim that you are "not an employee", have "no company rank" ("没有公司里的正式职级"), or "have no management authority".`,
-		);
-		const isResearchTree = agent.treeType === 'research';
-		if (effectiveRole === 'governor') {
-			lines.push(
-				isResearchTree
-					? '- Research Governor (L1) Charter:'
-					: '- Engineering Governor (L1) Charter:',
-				isResearchTree
-					? '  - Design multi-track research synthesis & verification DAG topology in `blueprint.md` (`aexus-ade engineering blueprint get/validate/apply`).'
-					: '  - Design task decomposition & DAG parallel topology in `blueprint.md` (`aexus-ade engineering blueprint get/validate/apply`).',
-				'  - Default asleep during normal execution; woken ONLY when a node hits 3 formal Manager failures (RED Circuit Breaker).',
-				'  - NEVER call `aexus-ade engineering run` yourself (only User or Secretary may start execution).',
-				`  - Read blueprint: \`aexus-ade engineering blueprint get --governor ${govId} --raw\``,
-				`  - Validate blueprint: \`aexus-ade engineering blueprint validate --file <path>\``,
-				`  - Apply blueprint: \`aexus-ade engineering blueprint apply --governor ${govId} --file <path>\``,
-				`  - Batch configure engine/model/thinking: \`aexus-ade engineering configure --governor ${govId} --all [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>]\``,
-				`  - Inspect live DAG status / node diff / reports: \`aexus-ade engineering status --governor ${govId} [--node <nodeId>] --json\` | \`aexus-ade engineering diff --governor ${govId} --node <nodeId>\` | \`aexus-ade engineering reports --governor ${govId} --json\``,
-				`  - Reset failed node or tree: \`aexus-ade engineering reset --governor ${govId} [--node <nodeId>]\``,
-				`  - Escalate to human via ADE Inbox: \`aexus-ade inbox post --from ${govId} --message "<situation & decision needed>"\``,
-			);
-		} else if (effectiveRole === 'manager') {
-			lines.push(
-				`- Engineering Segment Manager (L2) Charter (Segment \`${agent.treeSegmentId ?? 'auto'}\`):`,
-				'  - Default asleep; woken ONLY on: (a) segment tail / ★Critical secondary review, (b) 3x consecutive Employee internal rejections (grant 4th chance guidance), (c) Git worktree merge conflict, or (d) Watchdog Worker stream timeout.',
-				`  - Inspect Node Status & Worker Diff: \`aexus-ade engineering status --governor ${govId} --node <nodeId> --json\` | \`aexus-ade engineering diff --governor ${govId} --node <nodeId>\``,
-				`  - Secondary Review / 4th Chance Guidance: \`aexus-ade engineering review --governor ${govId} --node <nodeId> --role manager --verdict <pass|reject|guidance> [--feedback "<text>"]\``,
-				`  - Watchdog Action (prefer remind first): \`aexus-ade engineering watchdog-action --governor ${govId} --node <nodeId> --action <remind|kill-restart> [--message "<text>"]\``,
-			);
-		} else if (effectiveRole === 'employee') {
-			lines.push(
-				`- Engineering Single-Node Reviewer (L3) Charter (Node \`${agent.treeNodeId ?? 'task'}\`):`,
-				'  - **CRITICAL ROLE BOUNDARY (`Employee ≠ Worker`)**: You are **Employee (L3 · Single-Node Acceptance Reviewer)**, NOT **Worker (L4 · Pure Executor)**! **STRICT PROHIBITION**: NEVER write or edit business code yourself — your subordinate Worker (L4) executes all coding with 100% pure native context.',
-				'  - Woken ONLY after your Worker completes a turn: audit Acceptance Criteria + single-Worker Git Diff, then submit review & concise node report:',
-				`  - Inspect Worker Diff & Node Status: \`aexus-ade engineering diff --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'}\` | \`aexus-ade engineering status --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'} --json\``,
-				`  - Approve & Submit Report: \`aexus-ade engineering review --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'} --role employee --verdict pass --report "<concise summary>"\``,
-				`  - Internal Reject (reuses original Worker, not a formal failure): \`aexus-ade engineering review --governor ${govId} --node ${agent.treeNodeId ?? '<nodeId>'} --role employee --verdict reject --feedback "<fix instructions>"\``,
-			);
-		}
-		lines.push(
-			'- Read-Only Subordinate Inspection API (`aexus-ade` is on your PATH; topology mutations are locked by `blueprint.md`):',
-			`  - List direct subordinates: \`aexus-ade session subordinates ${agent.id} --json\``,
-			`  - View your subtree: \`aexus-ade session tree ${agent.id} --json\``,
-			`  - Inspect session info: \`aexus-ade session info ${agent.id} --json\``,
-			'  - Read subordinate conversation history: `aexus-ade session history <subordinate-id> --limit 10 --json`',
-		);
-		return lines.join('\n');
-	}
 
 	lines.push(
-		`- Identity & Rank Rule (MANDATORY OVERRIDE): When asked about your identity, role, or rank (e.g., "你的职级是什么？", "你的身份?", "你是什么角色？职级", "What is your role/rank?"), ALWAYS explicitly state your Aexus Code ADE organizational rank (**${formatRoleTitle(effectiveRole)}**), session title and ID (\`${agent.id}\`), project (**${projects.getProjectName(agent.projectUri)}**), supervisor (${supervisor ? `${supervisor.label} [${formatRoleTitle(resolveAdeAgentRank(supervisor, true))}]` : 'None'}), and your current subordinates. NEVER claim that you are "not an employee", have "no company rank" ("没有公司里的正式职级"), or "have no management authority".`,
-		`- Dynamic Hot-Swap Rule: Supervisors and subordinates can be reassigned (hot-swapped) dynamically at any time. Before answering questions about your live subordinates or delegating tasks, run \`aexus-ade session info ${agent.id} --json\` and \`aexus-ade session tree ${agent.id} --json\` to get live hierarchy state.`,
-		'- Subordinate Control API (`aexus-ade` is on your PATH):',
-		`  - List your direct subordinates: \`aexus-ade session subordinates ${agent.id} --json\``,
-		`  - View your full subtree: \`aexus-ade session tree ${agent.id} --json\``,
-		`  - Inspect session & hierarchy: \`aexus-ade session info ${agent.id} --json\``,
-		'  - Send task to a subordinate & wait for reply: `aexus-ade session send <subordinate-id> "<message>" --wait --json`',
-		'  - Read subordinate conversation history: `aexus-ade session history <subordinate-id> --limit 10 --json`',
-		`  - Spawn a lower-rank subordinate: \`aexus-ade session create --parent ${agent.id} --engine <claude|codex|kilo|opencode|dsh|agy|cline|pi> --title "<title>" --no-open --json\``,
-		'  - Reassign / hot-swap a subordinate to another supervisor: `aexus-ade session move <subordinate-id> <new-parent-id|none> --json`',
-		'  - Stop an active subordinate turn: `aexus-ade session stop <subordinate-id>`',
+		`- Identity Rule: When asked your role/rank, state **${formatRoleTitle(effectiveRole)}**, session \`${agent.id}\`, project **${projects.getProjectName(agent.projectUri)}**, supervisor (${supervisor ? `${supervisor.label} [${formatRoleTitle(resolveAdeAgentRank(supervisor, true))}]` : 'None'}), and subordinates. NEVER claim that you are "not an employee" or have "no rank / 没有职级".`,
+		`- Live State: Hierarchy can hot-swap dynamically; run \`aexus-ade session info ${agent.id} --json\` or \`aexus-ade session tree ${agent.id} --json\` for live status before delegating.`,
+		'- Subordinate Control API (`aexus-ade` is on PATH):',
+		`  - Inspect: \`aexus-ade session subordinates ${agent.id} --json\` | \`session tree ${agent.id} --json\` | \`session info ${agent.id} --json\` | \`session history <sub-id> --limit 10 --json\``,
+		`  - Dispatch / Stop: \`aexus-ade session send <sub-id> "<message>" --wait --json\` | \`aexus-ade session stop <sub-id>\``,
+		`  - Spawn / Move: \`aexus-ade session create --parent ${agent.id} --engine <claude|codex|kilo|opencode|dsh|agy|cline|pi> --title "<title>" --no-open --json\` | \`aexus-ade session move <sub-id> <new-parent-id|none> --json\``,
 	);
 	return lines.join('\n');
 }
@@ -563,6 +552,7 @@ export function buildAdeRoleSyncSnapshot(
 			resource: agent.session?.resource.toString(),
 			rank,
 			isOrchestrated,
+			isWorkTree: Boolean(agent.treeType),
 			rolePrompt: isOrchestrated ? buildAdeAgentRoleContext(projects, sessions, agent) : undefined,
 			preferredModel: agent.preferredModel,
 			preferredThinking: agent.preferredThinking,
@@ -629,20 +619,38 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 
 		const activeRoots = projects.agents.filter(agent => !agent.parentId && !projects.isArchived(agent.id));
 		const sessionLines: string[] = [];
+		let omittedSessions = 0;
 		const renderSessionLine = (agent: IAdeAgent, depth: number) => {
+			if (sessionLines.length >= MAX_SECRETARY_SESSION_LINES) {
+				omittedSessions++;
+				for (const child of projects.getDirectSubordinates(agent.id)) {
+					renderSessionLine(child, depth + 1);
+				}
+				return;
+			}
 			const hasSubs = projects.hasSubordinates(agent.id);
 			const rankTitle = formatRoleTitle(resolveAdeAgentRank(agent, hasSubs));
 			const engId = agent.session?.engineId ?? agent.preferredEngineId;
 			const eng = engId ? (sessions?.getEngineName(engId) ?? engId) : 'Draft';
 			const st = !agent.session ? 'lazy' : (agent.status ?? 'idle');
-			const treeBadge = !agent.parentId && agent.treeType ? ` [${agent.treeType.toUpperCase()}]` : '';
-			sessionLines.push(`${'  '.repeat(depth + 1)}- [${rankTitle}]${treeBadge} "${agent.label}" (id: ${agent.id}, project: ${projects.getProjectName(agent.projectUri)}, engine: ${eng} [${engId ?? 'draft'}], status: ${st}${agent.unread ? ', UNREAD' : ''})`);
+			const isWorkTreeRoot = !agent.parentId && Boolean(agent.treeType);
+			const treeBadge = isWorkTreeRoot ? ` [${agent.treeType!.toUpperCase()}]` : '';
+			if (isWorkTreeRoot) {
+				const managedCount = Math.max(0, projects.getSubtree(agent.id).length - 1);
+				const managedSuffix = managedCount > 0 ? `, +${managedCount} managed tree node(s) — see ADE Engineering Trees above` : '';
+				sessionLines.push(`${'  '.repeat(depth + 1)}- [${rankTitle}]${treeBadge} "${agent.label}" (id: ${agent.id}, project: ${projects.getProjectName(agent.projectUri)}, engine: ${eng} [${engId ?? 'draft'}], status: ${st}${agent.unread ? ', UNREAD' : ''}${managedSuffix})`);
+				return;
+			}
+			sessionLines.push(`${'  '.repeat(depth + 1)}- [${rankTitle}] "${agent.label}" (id: ${agent.id}, project: ${projects.getProjectName(agent.projectUri)}, engine: ${eng} [${engId ?? 'draft'}], status: ${st}${agent.unread ? ', UNREAD' : ''})`);
 			for (const child of projects.getDirectSubordinates(agent.id)) {
 				renderSessionLine(child, depth + 1);
 			}
 		};
 		for (const root of activeRoots) {
 			renderSessionLine(root, 0);
+		}
+		if (omittedSessions > 0) {
+			sessionLines.push(`  - ... (+${omittedSessions} more sessions; run \`aexus-ade session list --json\`)`);
 		}
 		const hierarchyBlock = sessionLines.length ? sessionLines.join('\n') : '  (No active ADE sessions)';
 
@@ -708,6 +716,10 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 	}
 
 	if (compactDeltaMode) {
+		// Work-tree topology is locked by blueprint.md, so subsequent turns need zero delta hierarchy overhead.
+		if (agent.treeType === 'engineering' || agent.treeType === 'research') {
+			return undefined;
+		}
 		const subordinates = projects.getDirectSubordinates(agent.id);
 		if (!agent.role && subordinates.length === 0) {
 			return undefined;
@@ -2093,10 +2105,12 @@ export async function executeAdeControlRequest(
 				throw new Error('Blueprint markdown content (--file or --text) is required.');
 			}
 			const parsed = parseEngineeringBlueprint(blueprintText);
+			const scopeConflictWarnings = detectSharedWorkspaceScopeConflicts(parsed);
 			return {
 				valid: true,
 				treeType: parsed.metadata.treeType,
 				workspaceIsolation: parsed.metadata.workspaceIsolation,
+				...(scopeConflictWarnings.length > 0 ? { scopeConflictWarnings } : {}),
 				nodeCount: parsed.nodes.length,
 				edgeCount: parsed.edges.length,
 				managers: parsed.managers,

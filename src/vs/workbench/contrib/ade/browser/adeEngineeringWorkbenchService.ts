@@ -48,16 +48,21 @@ import {
 	accumulateTokenUsage,
 	createEmptyNodeRoleTokenBreakdown,
 	createEmptyTreeTokenUsageSummary,
+	estimateTextTokens,
 	resolveAdeInboxSeverity,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
 	AdeBlueprintValidationError,
+	buildLayeredUpstreamReports,
 	buildUpstreamReportChain,
 	computeAutoLayoutPositions,
+	computeCriticalPathPriorities,
 	computeEdgeVisualStatus,
 	computeGateRollbackNodes,
 	computeNodeVisualStatus,
 	createStarterBlueprint,
+	detectSharedWorkspaceScopeConflicts,
+	doFileScopesOverlap,
 	listUpstreamTaskAncestors,
 	normalizeBlueprintEngine,
 	parseEngineeringBlueprint,
@@ -436,6 +441,10 @@ interface IManagedTreeEntry {
 	state: IAdeEngineeringTreeState;
 	activeWorkerRunTokens: Map<string, number>;
 	recentNodeFileMutations: Map<string, ISiblingFileMutation>;
+	/** Per-node initial workspace snapshot taken before Turn 1 so rework re-reviews see cumulative node diffs. */
+	nodeInitialSnapshots: Map<string, IAdeWorkspaceSnapshot>;
+	/** Per-segment initial workspace snapshot taken before the segment head's Turn 1 so Manager sees cumulative segment diffs. */
+	segmentInitialSnapshots: Map<string, IAdeWorkspaceSnapshot>;
 	persistChain: Promise<void>;
 	removed?: boolean;
 }
@@ -877,6 +886,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 						},
 						activeWorkerRunTokens: new Map(),
 						recentNodeFileMutations: new Map(),
+						nodeInitialSnapshots: new Map(),
+						segmentInitialSnapshots: new Map(),
 						persistChain: Promise.resolve(),
 					};
 					this.trees.set(record.governorSessionId, entry);
@@ -1422,6 +1433,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			},
 			activeWorkerRunTokens: new Map(),
 			recentNodeFileMutations: new Map(),
+			nodeInitialSnapshots: new Map(),
+			segmentInitialSnapshots: new Map(),
 			persistChain: Promise.resolve(),
 		};
 
@@ -1604,6 +1617,13 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		this.appendEvent(entry, 'info', 'blueprint.applied', {
 			detail: `${nextBlueprint.nodes.length} node(s), ${nextBlueprint.managers.length} Manager segment(s)`,
 		});
+		const scopeConflicts = detectSharedWorkspaceScopeConflicts(nextBlueprint);
+		for (const c of scopeConflicts) {
+			this.appendEvent(entry, 'warn', 'blueprint.scope_conflict', {
+				nodeId: c.nodeA,
+				detail: `Parallel nodes [${c.nodeA}] & [${c.nodeB}] have overlapping file scopes in shared workspace; scheduler will serialize them automatically (or switch to workspace_isolation: worktree).`,
+			});
+		}
 		await this.persistEntry(entry);
 
 		if (entry.state.runStatus === 'running') {
@@ -1803,6 +1823,10 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		const nextReports: Record<string, IAdeIncrementalReportEntry> = { ...entry.state.reports };
 		for (const nid of resetSet) {
 			const prev = nextNodes[nid];
+			entry.nodeInitialSnapshots.delete(nid);
+			if (prev?.segmentId) {
+				entry.segmentInitialSnapshots.delete(prev.segmentId);
+			}
 			nextNodes[nid] = {
 				nodeId: nid,
 				phase: 'idle',
@@ -1810,6 +1834,9 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				employeeRejectCount: 0,
 				formalFailureCount: 0,
 				fourthChanceGranted: false,
+				workerTurnCount: 0,
+				employeeReviewCount: 0,
+				watchdogRemindCount: 0,
 				segmentId: prev?.segmentId,
 				managerAgentId: prev?.managerAgentId,
 				employeeAgentId: prev?.employeeAgentId,
@@ -1820,6 +1847,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 
 		const fullReset = !params.nodeId?.trim() && !params.keepCompleted;
 		if (fullReset) {
+			entry.nodeInitialSnapshots.clear();
+			entry.segmentInitialSnapshots.clear();
 			await this.backend.cleanupTreeWorktrees(entry.governorSessionId, entry.state.projectPath).catch(() => { });
 			await this.inbox.removeItemsForGovernor(entry.governorSessionId).catch(() => { });
 		}
@@ -2015,7 +2044,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				readonly nodeId?: string;
 			};
 		},
-	): Promise<{ reply: string; stopped?: boolean }> {
+	): Promise<{ reply: string; stopped?: boolean; skipReviewerNudge?: boolean }> {
 		const agent = await this.ensureAgentMaterialized(agentId, options.cwdOverride);
 		if (!agent.session) {
 			return { reply: '' };
@@ -2026,10 +2055,10 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		const turnStartedAt = Date.now();
 		this.projects.setAgentStatus(agent.id, 'working');
 		try {
-			let extResult: { reply?: string; stopped?: boolean; usage?: Partial<IAdeTokenUsage> } | undefined;
+			let extResult: { reply?: string; stopped?: boolean; skipReviewerNudge?: boolean; usage?: Partial<IAdeTokenUsage> } | undefined;
 			let commandMissing = false;
 			try {
-				extResult = await this.commandService.executeCommand<{ reply?: string; stopped?: boolean; usage?: Partial<IAdeTokenUsage> }>(
+				extResult = await this.commandService.executeCommand<{ reply?: string; stopped?: boolean; skipReviewerNudge?: boolean; usage?: Partial<IAdeTokenUsage> }>(
 					'aexus.agentEngines.dispatchEngineeringTurn',
 					agent.session.resource,
 					prompt,
@@ -2055,8 +2084,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				const replyText = extResult.reply ?? '';
 				if (options.usageContext) {
 					const fallbackUsage: Partial<IAdeTokenUsage> = extResult.usage ?? {
-						inputTokens: Math.ceil(prompt.length / 4),
-						outputTokens: Math.ceil(replyText.length / 4),
+						inputTokens: estimateTextTokens(prompt),
+						outputTokens: estimateTextTokens(replyText),
 						durationMs: Math.max(0, Date.now() - turnStartedAt),
 						estimated: true,
 					};
@@ -2067,6 +2096,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				return {
 					reply: replyText,
 					stopped: extResult.stopped,
+					skipReviewerNudge: extResult.skipReviewerNudge,
 				};
 			}
 
@@ -2088,7 +2118,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				}
 				if (options.usageContext) {
 					const fallbackSimUsage: Partial<IAdeTokenUsage> = {
-						inputTokens: Math.max(1, Math.ceil(prompt.length / 4)),
+						inputTokens: Math.max(1, estimateTextTokens(prompt)),
 						outputTokens: 16,
 						durationMs: Math.max(0, Date.now() - turnStartedAt),
 						estimated: true,
@@ -2104,27 +2134,61 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		}
 	}
 
+	private formatLayeredUpstreamSummaryBlock(layered: {
+		readonly direct: readonly IAdeIncrementalReportEntry[];
+		readonly distant: readonly IAdeIncrementalReportEntry[];
+	}): string {
+		if (layered.direct.length === 0 && layered.distant.length === 0) {
+			return '(None — root task)';
+		}
+		const lines: string[] = [];
+		const recentDistant = layered.distant.slice(-6);
+		if (layered.distant.length > recentDistant.length) {
+			lines.push(`- ... (${layered.distant.length - recentDistant.length} earlier ancestor report(s) omitted)`);
+		}
+		for (const r of recentDistant) {
+			const headline = r.summary.replace(/\s+/g, ' ').trim();
+			const clipped = headline.length > 140 ? `${headline.slice(0, 137)}...` : headline;
+			lines.push(`- [${r.nodeId}] ${r.nodeTitle} *(ancestor)*: ${clipped}`);
+		}
+		for (const r of layered.direct) {
+			lines.push(`- **[${r.nodeId}] ${r.nodeTitle}**: ${r.summary}`);
+		}
+		return lines.join('\n');
+	}
+
 	private buildPureWorkerPrompt(
 		node: IAdeEngineeringBlueprintNode,
-		upstreamReports: readonly IAdeIncrementalReportEntry[],
-		reworkInstruction?: { readonly source: 'employee' | 'manager' | 'user_gate' | 'watchdog'; readonly feedback: string },
+		layeredUpstream: { readonly direct: readonly IAdeIncrementalReportEntry[]; readonly distant: readonly IAdeIncrementalReportEntry[] },
+		reworkInstruction?: { readonly source: 'employee' | 'manager' | 'user_gate' | 'watchdog' | 'verify'; readonly feedback: string },
 		sharedWorkspace = false,
+		isIncrementalRework = false,
 	): string {
 		// STRICT COMPLIANCE (Spec 1.2 & 3.2):
 		// Worker L4 context MUST remain 100% pure business code instructions.
 		// Zero ADE role names, zero hierarchy info, zero `aexus-ade` commands, zero report requests!
+		if (isIncrementalRework && reworkInstruction?.feedback?.trim()) {
+			return [
+				`## Required Revisions — ${node.title}`,
+				'Modify the existing workspace code incrementally to address the feedback below while satisfying the original task & acceptance criteria already in your conversation history:',
+				reworkInstruction.feedback.trim(),
+				...(sharedWorkspace ? ['', 'Touch only files required for this task; leave unrelated workspace files untouched.'] : []),
+			].join('\n\n');
+		}
+
 		const sections: string[] = [];
 
-		if (upstreamReports.length > 0) {
+		if (layeredUpstream.direct.length > 0 || layeredUpstream.distant.length > 0) {
 			sections.push([
 				'## Completed Upstream Context',
-				...upstreamReports.map(r => `- **${r.nodeTitle}** (\`${r.nodeId}\`): ${r.summary}`),
+				this.formatLayeredUpstreamSummaryBlock(layeredUpstream),
 			].join('\n'));
 		}
 
 		sections.push([
 			`## Task: ${node.title}`,
 			(node.goal ?? '').trim() || `Implement ${node.title}.`,
+			...(node.files && node.files.length > 0 ? ['', `Target file scope: ${node.files.join(', ')}`] : []),
 			...(sharedWorkspace ? ['', 'Touch only files required for this task; leave any other files in the workspace untouched.'] : []),
 		].join('\n'));
 
@@ -2290,22 +2354,63 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			return preds.every(predId => Boolean(entry.state.nodes[predId]?.completed));
 		});
 
+		// Activate ready user gates immediately (0 Worker concurrency slots)
 		for (const node of readyNodes) {
 			if (node.type === 'user_gate') {
 				await this.activateUserGateNode(entry, node);
-			} else {
-				void this.activateTaskNodeWorker(entry, node);
 			}
 		}
 
-		// Transition runStatus to 'waiting_gate' if at least one gate is waiting and zero other nodes are actively running
+		// Schedule ready task nodes by critical-path priority within maxConcurrency & shared-workspace scope isolation
+		const isSharedWorkspace = entry.blueprint.metadata.workspaceIsolation !== 'worktree';
+		const maxConcurrency = entry.blueprint.metadata.maxConcurrency ?? (isSharedWorkspace ? 4 : 6);
+		const nodeById = new Map(entry.blueprint.nodes.map(n => [n.id, n]));
+		const activeTaskNodes: IAdeEngineeringBlueprintNode[] = [];
+		for (const [nid, s] of Object.entries(entry.state.nodes)) {
+			if (!s.completed && s.phase !== 'idle' && s.phase !== 'waiting_user_gate' && s.phase !== 'circuit_broken') {
+				const n = nodeById.get(nid);
+				if (n && n.type === 'task') {
+					activeTaskNodes.push(n);
+				}
+			}
+		}
+
+		const readyTaskNodes = readyNodes.filter(n => n.type === 'task');
+		if (readyTaskNodes.length > 1) {
+			const priorities = computeCriticalPathPriorities(entry.blueprint);
+			readyTaskNodes.sort((a, b) => (priorities.get(b.id) ?? 0) - (priorities.get(a.id) ?? 0));
+		}
+
+		let runningSlots = activeTaskNodes.length;
+		for (const node of readyTaskNodes) {
+			if (runningSlots >= maxConcurrency) {
+				break;
+			}
+			if (isSharedWorkspace && node.files && node.files.length > 0) {
+				const conflictsActive = activeTaskNodes.some(active => doFileScopesOverlap(node.files, active.files));
+				if (conflictsActive) {
+					continue;
+				}
+			}
+			activeTaskNodes.push(node);
+			runningSlots++;
+			void this.activateTaskNodeWorker(entry, node);
+		}
+
+		// Finalize runStatus if zero active tasks remain (waiting on a User Gate or blocked by a circuit-broken branch)
 		const hasWaitingGate = Object.values(entry.state.nodes).some(s => !s.completed && s.phase === 'waiting_user_gate');
 		const hasActiveWork = Object.values(entry.state.nodes).some(
 			s => !s.completed && s.phase !== 'idle' && s.phase !== 'waiting_user_gate' && s.phase !== 'circuit_broken',
 		);
-		if (hasWaitingGate && !hasActiveWork && entry.state.runStatus === 'running') {
-			entry.state = { ...entry.state, runStatus: 'waiting_gate' };
-			await this.persistEntry(entry);
+		const hasCircuitBroken = Object.values(entry.state.nodes).some(s => !s.completed && s.phase === 'circuit_broken');
+		if (!hasActiveWork && entry.state.runStatus === 'running') {
+			if (hasWaitingGate) {
+				entry.state = { ...entry.state, runStatus: 'waiting_gate' };
+				await this.persistEntry(entry);
+			} else if (hasCircuitBroken) {
+				entry.state = { ...entry.state, runStatus: 'circuit_broken' };
+				await this.persistEntry(entry);
+			}
 		}
 	}
 
@@ -2405,7 +2510,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 	private async activateTaskNodeWorker(
 		entry: IManagedTreeEntry,
 		node: IAdeEngineeringBlueprintNode,
-		reworkInstruction?: { readonly source: 'employee' | 'manager' | 'user_gate' | 'watchdog'; readonly feedback: string },
+		reworkInstruction?: { readonly source: 'employee' | 'manager' | 'user_gate' | 'watchdog' | 'verify'; readonly feedback: string },
 	): Promise<void> {
 		if (entry.removed || entry.state.runStatus !== 'running') {
 			return;
@@ -2492,9 +2597,31 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (entry.removed || entry.activeWorkerRunTokens.get(node.id) !== runToken || entry.state.runStatus !== 'running') {
 			return;
 		}
-		const upstreamReports = buildUpstreamReportChain(node.id, entry.blueprint, entry.state.reports);
+		if (!entry.nodeInitialSnapshots.has(node.id)) {
+			entry.nodeInitialSnapshots.set(node.id, beforeSnapshot);
+		}
+		const owningSeg = entry.blueprint.managers.find(m => m.nodeIds.includes(node.id));
+		if (owningSeg && !entry.segmentInitialSnapshots.has(owningSeg.segmentId)) {
+			entry.segmentInitialSnapshots.set(owningSeg.segmentId, beforeSnapshot);
+		}
+		const layeredUpstream = buildLayeredUpstreamReports(node.id, entry.blueprint, entry.state.reports);
 		const isSharedWorkspace = entry.blueprint.metadata.workspaceIsolation !== 'worktree';
-		const purePrompt = this.buildPureWorkerPrompt(node, upstreamReports, effectiveRework, isSharedWorkspace);
+		const prevTurnCount = entry.state.nodes[node.id]?.workerTurnCount ?? 0;
+		const isIncrementalRework = Boolean(effectiveRework && prevTurnCount > 0);
+		const purePrompt = this.buildPureWorkerPrompt(node, layeredUpstream, effectiveRework, isSharedWorkspace, isIncrementalRework);
+
+		const computeTurnAndCumulative = async (): Promise<{ turnChanges: IAdeWorkerTurnChanges; cumulativeChanges: IAdeWorkerTurnChanges }> => {
+			const siblingFilter = this.buildSiblingSha1Filter(entry, node.id, beforeSnapshot.capturedAt);
+			const turnChanges = await this.backend.computeWorkerTurnChanges(effectiveCwd, beforeSnapshot, siblingFilter);
+			const nodeBaseline = entry.nodeInitialSnapshots.get(node.id);
+			if (!nodeBaseline || nodeBaseline === beforeSnapshot) {
+				return { turnChanges, cumulativeChanges: turnChanges };
+			}
+			const cumulativeSiblingFilter = this.buildSiblingSha1Filter(entry, node.id, nodeBaseline.capturedAt);
+			const cumulativeChanges = await this.backend.computeWorkerTurnChanges(effectiveCwd, nodeBaseline, cumulativeSiblingFilter)
+				.catch(() => turnChanges);
+			return { turnChanges, cumulativeChanges };
+		};
 
 		try {
 			const turnRes = await this.dispatchSessionTurn(rState.workerAgentId, purePrompt, {
@@ -2511,11 +2638,10 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			}
 			entry.activeWorkerRunTokens.delete(node.id);
 
-			const siblingFilter = this.buildSiblingSha1Filter(entry, node.id, beforeSnapshot.capturedAt);
-			const changes = await this.backend.computeWorkerTurnChanges(effectiveCwd, beforeSnapshot, siblingFilter);
-			this.recordNodeFileMutations(entry, node.id, changes);
+			const { turnChanges, cumulativeChanges } = await computeTurnAndCumulative();
+			this.recordNodeFileMutations(entry, node.id, turnChanges);
 			void this.refreshProjectScmSilently(entry.state.projectPath);
-			await this.handleWorkerTurnCompleted(entry, node, effectiveCwd, turnRes.reply, changes);
+			await this.handleWorkerTurnCompleted(entry, node, effectiveCwd, turnRes.reply, turnChanges, cumulativeChanges);
 		} catch (err) {
 			if (entry.removed || entry.activeWorkerRunTokens.get(node.id) !== runToken || entry.state.runStatus !== 'running') {
 				return;
@@ -2523,15 +2649,14 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			entry.activeWorkerRunTokens.delete(node.id);
 			const errMsg = err instanceof Error ? err.message : String(err);
 			this.appendEvent(entry, 'error', 'worker.error', { nodeId: node.id, detail: errMsg });
-			const siblingFilter = this.buildSiblingSha1Filter(entry, node.id, beforeSnapshot.capturedAt);
-			const changes = await this.backend.computeWorkerTurnChanges(effectiveCwd, beforeSnapshot, siblingFilter).catch(() => ({
-				capturedAt: Date.now(),
-				touchedFiles: [],
-				combinedDiff: '',
+			const fallbackEmpty: IAdeWorkerTurnChanges = { capturedAt: Date.now(), touchedFiles: [], combinedDiff: '' };
+			const { turnChanges, cumulativeChanges } = await computeTurnAndCumulative().catch(() => ({
+				turnChanges: fallbackEmpty,
+				cumulativeChanges: fallbackEmpty,
 			}));
-			this.recordNodeFileMutations(entry, node.id, changes);
+			this.recordNodeFileMutations(entry, node.id, turnChanges);
 			void this.refreshProjectScmSilently(entry.state.projectPath);
-			await this.handleWorkerTurnCompleted(entry, node, effectiveCwd, `[Worker execution error]: ${errMsg}`, changes);
+			await this.handleWorkerTurnCompleted(entry, node, effectiveCwd, `[Worker execution error]: ${errMsg}`, turnChanges, cumulativeChanges);
 		}
 	}
 
@@ -2541,11 +2666,74 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		effectiveCwd: string,
 		workerReply: string,
 		changes: IAdeWorkerTurnChanges,
+		cumulativeChanges?: IAdeWorkerTurnChanges,
 	): Promise<void> {
 		const latest = entry.state.nodes[node.id];
 		if (!latest || latest.completed) {
 			return;
 		}
+		const effectiveCumulative = cumulativeChanges ?? changes;
+		const nextWorkerTurnCount = (latest.workerTurnCount ?? 0) + 1;
+
+		// Deterministic pre-review verification gate (skip LLM Employee completely on obvious build/lint/test failures)
+		const verifyCmd = node.verify?.trim() || entry.blueprint.metadata.verify?.trim();
+		let verifyPassLine: string | undefined;
+		if (verifyCmd && this.backend.runNodeVerificationCommand) {
+			const verifyRes = await this.backend.runNodeVerificationCommand(effectiveCwd, verifyCmd).catch(err => ({
+				passed: false,
+				exitCode: 1,
+				output: err instanceof Error ? err.message : String(err),
+				durationMs: 0,
+			}));
+			if (entry.removed || entry.state.runStatus !== 'running') {
+				return;
+			}
+			const trimmedOut = verifyRes.output.trim().slice(0, 4000);
+			if (!verifyRes.passed) {
+				const verifyFeedback = `Deterministic verification command \`${verifyCmd}\` failed (exit ${verifyRes.exitCode}):\n\`\`\`\n${trimmedOut || '(no output)'}\n\`\`\``;
+				this.appendEvent(entry, 'warn', 'verify.failed', {
+					nodeId: node.id,
+					detail: `${verifyCmd} (exit ${verifyRes.exitCode})`,
+				});
+				const seg = entry.blueprint.managers.find(m => m.nodeIds.includes(node.id));
+				const nextRejectCount = (latest.employeeRejectCount ?? 0) + 1;
+				const commonUpdated = {
+					...latest,
+					workerTurnCount: nextWorkerTurnCount,
+					watchdogRemindCount: 0,
+					lastWorkerOutput: workerReply.slice(0, 6000),
+					lastChanges: changes,
+					cumulativeChanges: effectiveCumulative,
+					lastVerifyOutput: trimmedOut,
+					lastEmployeeFeedback: verifyFeedback,
+				};
+				if (latest.fourthChanceGranted && seg) {
+					entry.state = { ...entry.state, nodes: { ...entry.state.nodes, [node.id]: { ...commonUpdated, phase: 'manager_review' } } };
+					await this.persistEntry(entry);
+					await this.wakeSegmentManagerForSecondaryReview(entry, node, seg);
+					return;
+				}
+				if (nextRejectCount >= 3 && seg) {
+					entry.state = { ...entry.state, nodes: { ...entry.state.nodes, [node.id]: { ...commonUpdated, phase: 'manager_escalation', employeeRejectCount: nextRejectCount } } };
+					await this.persistEntry(entry);
+					await this.wakeSegmentManagerForEscalation(entry, node, seg, verifyFeedback);
+					return;
+				}
+				entry.state = { ...entry.state, nodes: { ...entry.state.nodes, [node.id]: { ...commonUpdated, employeeRejectCount: nextRejectCount } } };
+				await this.persistEntry(entry);
+				void this.activateTaskNodeWorker(entry, node, { source: 'verify', feedback: verifyFeedback });
+				return;
+			}
+			this.appendEvent(entry, 'info', 'verify.passed', {
+				nodeId: node.id,
+				detail: `${verifyCmd} (${verifyRes.durationMs}ms)`,
+			});
+			verifyPassLine = `PASSED (\`${verifyCmd}\`, ${verifyRes.durationMs}ms)`;
+		}
+
+		const prevReviewCount = latest.employeeReviewCount ?? 0;
+		const isIncrementalReview = prevReviewCount > 0;
+
 		entry.state = {
 			...entry.state,
 			nodes: {
@@ -2553,14 +2741,19 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				[node.id]: {
 					...latest,
 					phase: 'employee_review',
+					workerTurnCount: nextWorkerTurnCount,
+					employeeReviewCount: prevReviewCount + 1,
+					watchdogRemindCount: 0,
 					lastWorkerOutput: workerReply.slice(0, 6000),
 					lastChanges: changes,
+					cumulativeChanges: effectiveCumulative,
+					lastVerifyOutput: verifyPassLine,
 				},
 			},
 		};
 		this.appendEvent(entry, 'info', 'employee.review_started', {
 			nodeId: node.id,
-			detail: `${changes.touchedFiles.length} file(s) touched`,
+			detail: `${changes.touchedFiles.length} file(s) touched (${effectiveCumulative.touchedFiles.length} cumulative)`,
 		});
 		await this.persistEntry(entry);
 
@@ -2568,53 +2761,83 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!latest.employeeAgentId) {
 			return;
 		}
-		const upstreamReports = buildUpstreamReportChain(node.id, entry.blueprint, entry.state.reports);
 		const touchedSummary = changes.touchedFiles.length > 0
 			? changes.touchedFiles.map(f => `- [${f.kind.toUpperCase()}] ${f.relativePath}`).join('\n')
 			: '(No workspace file mutations detected in snapshot)';
+		const hasDistinctCumulative = effectiveCumulative !== changes && effectiveCumulative.combinedDiff !== changes.combinedDiff;
+		const cumulativeTouchedSummary = effectiveCumulative.touchedFiles.length > 0
+			? effectiveCumulative.touchedFiles.map(f => `- [${f.kind.toUpperCase()}] ${f.relativePath}`).join('\n')
+			: touchedSummary;
 
-		const reviewPrompt = [
-			`# Engineering Single-Node Review — [${node.id}] ${node.title}`,
-			`You are the **Employee (L3 · Single-Node Acceptance Reviewer — NOT Worker [L4])** for task node \`${node.id}\` in Engineering tree \`${entry.governorSessionId}\`.`,
-			'**STRICT ROLE BOUNDARY (`Employee ≠ Worker`)**: You are `Employee (L3)`, NOT `Worker (L4)`! NEVER write or modify business code yourself — your subordinate `Worker (L4)` executes all coding, while your sole responsibility is to audit your Worker\'s implementation against the Acceptance Criteria and submit your verdict & node report via `aexus-ade`.',
-			...(entry.blueprint.metadata.workspaceIsolation !== 'worktree'
-				? ['**Shared-Workspace Concurrency Rule**: Parallel DAG nodes may create or modify unrelated files in this shared repository simultaneously. Evaluate ONLY the files and behavior belonging to `' + node.id + '` — NEVER reject or ask your Worker to delete unrelated files created by parallel nodes!']
-				: []),
-			'',
-			'## Node Goal',
-			(node.goal ?? '').trim() || '(See node title)',
-			'',
-			'## Acceptance Criteria',
-			(node.acceptance ?? '').trim() || 'Implementation is complete, clean, and free of build/test errors.',
-			'',
-			'## Upstream Incremental Reports',
-			this.formatUpstreamSummaryBlock(upstreamReports),
-			'',
-			'## Worker Output Summary',
-			workerReply.trim() ? workerReply.trim().slice(0, 4000) : '(No text summary returned by Worker)',
-			'',
-			'## Files Touched by Worker This Turn',
-			touchedSummary,
-			'',
-			'## Unified Diff of Worker Changes',
-			changes.combinedDiff ? `\`\`\`diff\n${changes.combinedDiff}\n\`\`\`` : '(Empty diff — you may run read-only `git status` / `git diff` or test commands if needed)',
-			'',
+		const actionLines = [
 			'## Required Action (Execute ONE command via bash/terminal tool)',
-			`- **If PASS**: Write a concise summary of what this node accomplished and run:`,
-			`  \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict pass --report "<concise summary for downstream nodes>"\``,
+			`- **If PASS**: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict pass --report "<concise summary for downstream nodes>"\``,
 			latest.fourthChanceGranted
-				? `- **If REJECT** (4th-chance final review — rejection routes directly to Segment Manager formal judgment): Provide specific actionable fix instructions and run:`
-				: `- **If REJECT** (internal iteration ${(latest.employeeRejectCount ?? 0) + 1}/3): Provide specific actionable fix instructions for the original Worker and run:`,
-			`  \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<specific issues & fix instructions>"\``,
-		].join('\n');
+				? `- **If REJECT** (4th-chance final review — routes to Segment Manager): \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<fix instructions>"\``
+				: `- **If REJECT** (internal iteration ${(latest.employeeRejectCount ?? 0) + 1}/3): \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<fix instructions>"\``,
+		];
+
+		let reviewPrompt: string;
+		if (isIncrementalReview) {
+			reviewPrompt = [
+				`# Re-Review (Attempt #${prevReviewCount + 1}) — [${node.id}] ${node.title}`,
+				`Role: **Employee (L3 Reviewer, \`Employee ≠ Worker\`)** — audit only; NEVER edit business code yourself. Original goal, acceptance criteria & upstream context are in your prior turn.`,
+				...(verifyPassLine ? ['', `## Deterministic Verification: ${verifyPassLine}`] : []),
+				'',
+				'## Latest Worker Output',
+				workerReply.trim() ? workerReply.trim().slice(0, 3000) : '(No text summary returned by Worker)',
+				'',
+				'## This Turn\'s Incremental Diff',
+				changes.combinedDiff ? `\`\`\`diff\n${changes.combinedDiff}\n\`\`\`` : '(Empty turn diff)',
+				...(hasDistinctCumulative ? [
+					'',
+					'## Cumulative Node Changes (All Touched Files Since Node Start)',
+					cumulativeTouchedSummary,
+					'',
+					effectiveCumulative.combinedDiff ? `\`\`\`diff\n${effectiveCumulative.combinedDiff.slice(0, 16_000)}\n\`\`\`` : '(Same as turn diff)',
+				] : []),
+				'',
+				...actionLines,
+			].join('\n');
+		} else {
+			const layeredUpstream = buildLayeredUpstreamReports(node.id, entry.blueprint, entry.state.reports);
+			reviewPrompt = [
+				`# Engineering Single-Node Review — [${node.id}] ${node.title}`,
+				`Role: **Employee (L3 Reviewer, \`Employee ≠ Worker\`)** for node \`${node.id}\` in tree \`${entry.governorSessionId}\`. Audit only — NEVER write or modify business code yourself.`,
+				...(entry.blueprint.metadata.workspaceIsolation !== 'worktree'
+					? ['**Shared-Workspace Rule**: Parallel DAG nodes may touch unrelated files concurrently. Evaluate ONLY files/behavior for `' + node.id + '` — never ask your Worker to delete unrelated parallel files.']
+					: []),
+				...(verifyPassLine ? ['', `## Deterministic Verification: ${verifyPassLine}`] : []),
+				'',
+				'## Node Goal',
+				(node.goal ?? '').trim() || '(See node title)',
+				'',
+				'## Acceptance Criteria',
+				(node.acceptance ?? '').trim() || 'Implementation is complete, clean, and free of build/test errors.',
+				'',
+				'## Upstream Context',
+				this.formatLayeredUpstreamSummaryBlock(layeredUpstream),
+				'',
+				'## Worker Output Summary',
+				workerReply.trim() ? workerReply.trim().slice(0, 4000) : '(No text summary returned by Worker)',
+				'',
+				'## Files Touched by Worker',
+				touchedSummary,
+				'',
+				'## Unified Diff of Worker Changes',
+				changes.combinedDiff ? `\`\`\`diff\n${changes.combinedDiff}\n\`\`\`` : '(Empty diff — run read-only `git status` / `git diff` or test commands if needed)',
+				'',
+				...actionLines,
+			].join('\n');
+		}
 
 		void this.dispatchReviewerWithNudge(entry, node.id, 'employee_review', latest.employeeAgentId, reviewPrompt, {
 			model: node.employee?.model,
 			thinking: node.employee?.thinking ?? 'medium',
 			cwdOverride: effectiveCwd,
 		}, [
-			`IMPORTANT: Your Employee review turn for node \`${node.id}\` ended without executing the required \`aexus-ade engineering review\` command via Bash.`,
-			`Execute ONE of the following commands immediately via your Bash tool so the Engineering DAG state machine records your verdict:`,
+			`IMPORTANT: Your Employee review turn for node \`${node.id}\` ended without executing \`aexus-ade engineering review\`.`,
+			`Execute ONE command immediately via Bash:`,
 			`- Pass: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict pass --report "<concise summary>"\``,
 			`- Reject: \`aexus-ade engineering review --governor ${entry.governorSessionId} --node ${node.id} --role employee --verdict reject --feedback "<fix instructions>"\``,
 		].join('\n'));
@@ -2641,7 +2864,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			if (
 				!entry.removed
 				&& !res.stopped
-				&& res.reply.trim() !== 'Acknowledged.'
+				&& !res.skipReviewerNudge
 				&& entry.state.runStatus === 'running'
 				&& entry.state.nodes[nodeId]?.phase === expectedPhase
 			) {
@@ -2677,6 +2900,37 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			.map(r => `- [${r.nodeId}] ${r.nodeTitle}: ${r.summary}`)
 			.join('\n');
 
+		// Compute cumulative diff across the entire segment (not just the last node's last turn)
+		let segmentDiffText = '';
+		let segmentTouchedLines = '';
+		const segBaseline = entry.segmentInitialSnapshots.get(seg.segmentId);
+		if (segBaseline) {
+			const segChanges = await this.backend.computeWorkerTurnChanges(effectiveCwd, segBaseline).catch(() => undefined);
+			if (segChanges && (segChanges.touchedFiles.length > 0 || segChanges.combinedDiff)) {
+				segmentTouchedLines = segChanges.touchedFiles.map(f => `- [${f.kind.toUpperCase()}] ${f.relativePath}`).join('\n');
+				segmentDiffText = segChanges.combinedDiff;
+			}
+		}
+		if (!segmentDiffText) {
+			const touchedMap = new Map<string, string>();
+			const diffParts: string[] = [];
+			for (const nid of seg.nodeIds) {
+				const ch = entry.state.nodes[nid]?.cumulativeChanges ?? entry.state.nodes[nid]?.lastChanges;
+				if (!ch) { continue; }
+				for (const f of ch.touchedFiles) {
+					touchedMap.set(f.relativePath, f.kind);
+				}
+				if (ch.combinedDiff) {
+					diffParts.push(`# [${nid}]\n${ch.combinedDiff}`);
+				}
+			}
+			segmentTouchedLines = [...touchedMap.entries()].map(([p, k]) => `- [${k.toUpperCase()}] ${p}`).join('\n');
+			segmentDiffText = diffParts.join('\n\n');
+		}
+		const cappedSegDiff = segmentDiffText.length > 20_000
+			? `${segmentDiffText.slice(0, 20_000)}\n... (diff truncated; run \`aexus-ade engineering diff --governor ${entry.governorSessionId} --node ${node.id}\` or \`git diff\`)`
+			: segmentDiffText;
+
 		const prompt = [
 			`# Engineering Segment Secondary Review — Segment [${seg.segmentId}] · Node [${node.id}] ${node.title}`,
 			`You are the **Manager (L2 · Critical Segment Lead)** responsible for segment \`${seg.segmentId}\` (\`${seg.nodeIds.join(' -> ')}\`) in Engineering tree \`${entry.governorSessionId}\`.`,
@@ -2692,9 +2946,10 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 			'',
 			'## Segment Incremental Reports',
 			segReports || '(None)',
+			...(segmentTouchedLines ? ['', '## Cumulative Segment Touched Files', segmentTouchedLines] : []),
 			'',
-			'## Latest Worker Diff',
-			rState.lastChanges?.combinedDiff ? `\`\`\`diff\n${rState.lastChanges.combinedDiff}\n\`\`\`` : '(Inspect workspace via read-only git/test commands if needed)',
+			'## Cumulative Segment Diff',
+			cappedSegDiff ? `\`\`\`diff\n${cappedSegDiff}\n\`\`\`` : '(Inspect workspace via read-only git/test commands if needed)',
 			'',
 			`Current Formal Failure Count on \`${node.id}\`: ${rState.formalFailureCount}/3.`,
 			'',
@@ -3069,31 +3324,48 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		const nextFailureCount = prev.formalFailureCount + 1;
 
 		if (nextFailureCount >= 3) {
-			// Spec 3.4: 3rd Manager Formal Failure -> RED Circuit Breaker + Wake Governor!
+			// Branch-isolated RED Circuit Breaker: block this node & its dependents while allowing independent parallel branches to finish
+			const updatedNodes: Record<string, IAdeEngineeringNodeRuntimeState> = {
+				...entry.state.nodes,
+				[node.id]: {
+					...prev,
+					phase: 'circuit_broken',
+					completed: false,
+					employeeRejectCount: 0,
+					formalFailureCount: nextFailureCount,
+					fourthChanceGranted: false,
+					lastManagerFeedback: mgrFeedback,
+				},
+			};
+			const hasOtherActiveWork = Object.entries(updatedNodes).some(
+				([nid, s]) => nid !== node.id && !s.completed && s.phase !== 'idle' && s.phase !== 'waiting_user_gate' && s.phase !== 'circuit_broken',
+			);
+			const incomingByNode = new Map<string, string[]>();
+			for (const bn of entry.blueprint.nodes) { incomingByNode.set(bn.id, []); }
+			for (const e of entry.blueprint.edges) { incomingByNode.get(e.to)?.push(e.from); }
+			const hasOtherRunnableReady = entry.blueprint.nodes.some(bn => {
+				if (bn.id === node.id) { return false; }
+				const s = updatedNodes[bn.id];
+				if (!s || s.completed || s.phase !== 'idle') { return false; }
+				return (incomingByNode.get(bn.id) ?? []).every(predId => Boolean(updatedNodes[predId]?.completed));
+			});
+			const keepIndependentBranchesRunning = entry.state.runStatus === 'running' && (hasOtherActiveWork || hasOtherRunnableReady);
 			entry.state = {
 				...entry.state,
-				runStatus: 'circuit_broken',
-				nodes: {
-					...entry.state.nodes,
-					[node.id]: {
-						...prev,
-						phase: 'circuit_broken',
-						completed: false,
-						employeeRejectCount: 0,
-						formalFailureCount: nextFailureCount,
-						fourthChanceGranted: false,
-						lastManagerFeedback: mgrFeedback,
-					},
-				},
+				runStatus: keepIndependentBranchesRunning ? 'running' : 'circuit_broken',
+				nodes: updatedNodes,
 			};
 			this.appendEvent(entry, 'error', 'manager.circuit_breaker_tripped', {
 				nodeId: node.id,
 				segmentId: seg?.segmentId,
-				detail: `3rd formal failure (RED): ${mgrFeedback}`,
+				detail: `3rd formal failure (RED${keepIndependentBranchesRunning ? '; independent branches continue' : ''}): ${mgrFeedback}`,
 			});
 			await this.persistEntry(entry);
 			this.inbox.noteCircuitBreakerTrip?.(entry.governorSessionId, node.id);
 			await this.wakeGovernorOnCircuitBreaker(entry, node, seg, mgrFeedback);
+			if (keepIndependentBranchesRunning) {
+				await this.scheduleReadyNodes(entry);
+			}
 			return this.buildSnapshot(entry);
 		}
 
@@ -3306,6 +3578,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 							[nid]: {
 								...rState,
 								lastStreamActivityAt: timestamp,
+								watchdogRemindCount: 0,
 							},
 						},
 					};
@@ -3340,6 +3613,41 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 					continue;
 				}
 
+				const seg = entry.blueprint.managers.find(m => m.nodeIds.includes(node.id));
+				const prevRemindCount = rState.watchdogRemindCount ?? 0;
+
+				// Stage 1 (Zero LLM tokens): automatically nudge the stalled Worker deterministically first!
+				if (prevRemindCount === 0 && rState.workerAgentId) {
+					const autoNudge = `No progress output detected for ${timeoutMinutes} minutes. Please report your current step or complete the remaining acceptance requirements.`;
+					entry.state = {
+						...entry.state,
+						nodes: {
+							...entry.state.nodes,
+							[node.id]: {
+								...rState,
+								lastWatchdogAlertAt: now,
+								watchdogRemindCount: 1,
+							},
+						},
+					};
+					this.appendEvent(entry, 'warn', 'watchdog.auto_reminded', {
+						nodeId: node.id,
+						segmentId: seg?.segmentId,
+						detail: `No stream output for ${timeoutMinutes} min — sent zero-token automatic Worker reminder`,
+					});
+					await this.persistEntry(entry);
+					const worker = this.projects.getAgent(rState.workerAgentId);
+					if (entry.activeWorkerRunTokens.has(node.id) && worker?.session) {
+						alertPromises.push(
+							this.commandService.executeCommand('aexus.agentEngines.nudgeSession', worker.session.resource, autoNudge).catch(() => undefined),
+						);
+					} else {
+						void this.activateTaskNodeWorker(entry, node, { source: 'watchdog', feedback: autoNudge });
+					}
+					continue;
+				}
+
+				// Stage 2: Worker stayed unresponsive even after automatic reminder -> wake LLM Segment Manager for kill-restart / escalation!
 				entry.state = {
 					...entry.state,
 					nodes: {
@@ -3347,26 +3655,26 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 						[node.id]: {
 							...rState,
 							lastWatchdogAlertAt: now,
+							watchdogRemindCount: prevRemindCount + 1,
 						},
 					},
 				};
-				const seg = entry.blueprint.managers.find(m => m.nodeIds.includes(node.id));
 				this.appendEvent(entry, 'warn', 'watchdog.timeout_alert', {
 					nodeId: node.id,
 					segmentId: seg?.segmentId,
-					detail: `No stream output for ${timeoutMinutes} min`,
+					detail: `Still silent after automatic reminder (${timeoutMinutes} min) — escalating to Manager`,
 				});
 				await this.persistEntry(entry);
 
 				if (seg && rState.managerAgentId) {
 					const alertPrompt = [
 						`# Watchdog Timeout Alert — Worker Unresponsive on Node [${node.id}] ${node.title}`,
-						`Active Worker (\`${rState.workerAgentId}\`) on segment \`${seg.segmentId}\` has produced **zero streaming output for ${timeoutMinutes} minutes**.`,
+						`Active Worker (\`${rState.workerAgentId}\`) on segment \`${seg.segmentId}\` remained unresponsive for **${timeoutMinutes} minutes** even after an automatic Watchdog reminder.`,
 						'',
 						'## Recommended Manager Action (Spec 3.7)',
-						'Prefer sending a reminder nudge first; only kill-restart if the Worker remains completely deadlocked:',
-						`- **Remind Worker (Default)**: \`aexus-ade engineering watchdog-action --governor ${entry.governorSessionId} --node ${node.id} --action remind --message "Please report progress or complete the current step."\``,
-						`- **Force Kill & Restart Worker**: \`aexus-ade engineering watchdog-action --governor ${entry.governorSessionId} --node ${node.id} --action kill-restart --message "Continue task from current workspace state."\``,
+						'Inspect status or force kill-restart the deadlocked Worker subprocess:',
+						`- **Force Kill & Restart Worker (Recommended)**: \`aexus-ade engineering watchdog-action --governor ${entry.governorSessionId} --node ${node.id} --action kill-restart --message "Continue task from current workspace state."\``,
+						`- **Send Another Reminder**: \`aexus-ade engineering watchdog-action --governor ${entry.governorSessionId} --node ${node.id} --action remind --message "Please report progress or complete the current step."\``,
 					].join('\n');
 					alertPromises.push(this.dispatchSessionTurn(rState.managerAgentId, alertPrompt, {
 						model: seg.config.model,
@@ -3414,6 +3722,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 						...rState,
 						lastStreamActivityAt: Date.now(),
 						lastWatchdogAlertAt: undefined,
+						watchdogRemindCount: 0,
+						workerTurnCount: 0,
 					},
 				},
 			};

@@ -61,6 +61,8 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 	private readonly agentIdToEditor = new Map<string, EditorInput>();
 	private readonly activeSingletonAgentByView = new Map<string, string>();
 	private isSelectingFromEditor = false;
+	private roleSyncTimer: ReturnType<typeof setTimeout> | undefined;
+	private lastSyncedSnapshotKey: string | undefined;
 
 	constructor(
 		@IWorkbenchModeService private readonly modeService: IWorkbenchModeService,
@@ -75,18 +77,28 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		@IPathService private readonly pathService: IPathService,
 	) {
 		super();
-		this._register(projects.onDidChange(() => {
-			this.updateTitles();
-			void this.syncRoleContextToExtHost();
+		this._register({
+			dispose: () => {
+				if (this.roleSyncTimer !== undefined) {
+					clearTimeout(this.roleSyncTimer);
+					this.roleSyncTimer = undefined;
+				}
+			},
+		});
+		this._register(projects.onDidChange(change => {
+			if (change !== 'selection') {
+				this.updateTitles();
+			}
+			this.scheduleRoleContextSync();
 		}));
 		this._register(modeService.onDidChangeMode(mode => {
 			if (mode === 'ade') {
 				this.updateTitles();
 			}
-			void this.syncRoleContextToExtHost();
+			this.scheduleRoleContextSync();
 		}));
 		this._register(this.editorService.onDidActiveEditorChange(() => this.handleActiveEditorChanged()));
-		void this.syncRoleContextToExtHost();
+		this.scheduleRoleContextSync();
 	}
 
 	get activeEditor(): EditorInput | undefined {
@@ -146,11 +158,30 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		void this.syncRoleContextToExtHost();
 	}
 
+	private scheduleRoleContextSync(): void {
+		if (this.roleSyncTimer !== undefined) {
+			clearTimeout(this.roleSyncTimer);
+		}
+		this.roleSyncTimer = setTimeout(() => {
+			this.roleSyncTimer = undefined;
+			void this.syncRoleContextToExtHost();
+		}, 120);
+	}
+
 	private async syncRoleContextToExtHost(explicitActiveAgentId?: string): Promise<void> {
+		if (this.roleSyncTimer !== undefined) {
+			clearTimeout(this.roleSyncTimer);
+			this.roleSyncTimer = undefined;
+		}
 		try {
+			const snapshot = buildAdeRoleSyncSnapshot(this.modeService, this.projects, this, this.sessions, explicitActiveAgentId);
+			const snapshotKey = JSON.stringify(snapshot);
+			if (!explicitActiveAgentId && snapshotKey === this.lastSyncedSnapshotKey) {
+				return;
+			}
+			this.lastSyncedSnapshotKey = snapshotKey;
 			const extId = new ExtensionIdentifier('vscode.aexus-agents');
 			await this.extensionService.activateById(extId, { startup: false, extensionId: extId, activationEvent: 'api' }).catch(() => undefined);
-			const snapshot = buildAdeRoleSyncSnapshot(this.modeService, this.projects, this, this.sessions, explicitActiveAgentId);
 			await this.commandService.executeCommand('aexus.agentEngines.syncRoleContext', snapshot);
 		} catch {
 			// Ignore synchronization failures when Extension Host is unavailable (e.g. unit tests).

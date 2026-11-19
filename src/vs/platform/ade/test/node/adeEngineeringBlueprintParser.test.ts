@@ -5,7 +5,13 @@
 
 import * as assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { IAdeEngineeringBlueprint, IAdeEngineeringNodeRuntimeState, IAdeIncrementalReportEntry } from '../../common/adeEngineering.js';
+import { estimateTextTokens, IAdeEngineeringBlueprint, IAdeEngineeringNodeRuntimeState, IAdeIncrementalReportEntry } from '../../common/adeEngineering.js';
+import {
+	buildLayeredUpstreamReports,
+	computeCriticalPathPriorities,
+	detectSharedWorkspaceScopeConflicts,
+	doFileScopesOverlap,
+} from '../../common/adeEngineeringBlueprint.js';
 import {
 	AdeBlueprintValidationError,
 	buildUpstreamReportChain,
@@ -477,5 +483,91 @@ suite('AdeEngineeringBlueprintParser', () => {
 			],
 			['pending', 'pending', 'pending', 'running', 'pending', 'completed'],
 		);
+	});
+
+	test('round-trips max_concurrency, files, and verify; detects shared scope conflicts, critical-path priority, layered upstream reports, and CJK tokens', () => {
+		const md = [
+			'```mermaid',
+			'flowchart LR',
+			'  N1["Foundation"] --> N2["Auth API"] --> N3["Auth Tests"]',
+			'  N1 --> N4["Overlap Auth"] ',
+			'  N3 --> U1{{"Mid Gate"}} --> N5["Release"]',
+			'```',
+			'',
+			'## Tree Metadata',
+			'- tree_type: engineering',
+			'- workspace_isolation: shared',
+			'- max_concurrency: 2',
+			'- verify: npm run lint',
+			'',
+			'## Nodes',
+			'### [N1] Foundation',
+			'- type: task',
+			'- files: src/core/**',
+			'- goal: Core types',
+			'',
+			'### [N2] Auth API',
+			'- type: task',
+			'- critical: true',
+			'- files: src/auth/**, src/types/user.ts',
+			'- verify: npm test -- auth',
+			'- goal: Build auth API',
+			'',
+			'### [N3] Auth Tests',
+			'- type: task',
+			'- files: test/auth/**',
+			'- goal: Test auth API',
+			'',
+			'### [N4] Overlap Auth',
+			'- type: task',
+			'- files: src/auth/login.ts',
+			'- goal: Parallel login tweak',
+			'',
+			'### [U1] Mid Gate',
+			'- type: user_gate',
+			'- description: Approve before release',
+			'',
+			'### [N5] Release',
+			'- type: task',
+			'- goal: Finalize release',
+		].join('\n');
+
+		const parsed = parseEngineeringBlueprint(md);
+		const roundTripped = parseEngineeringBlueprint(serializeEngineeringBlueprint(parsed));
+		const n2 = roundTripped.nodes.find(n => n.id === 'N2')!;
+		const conflicts = detectSharedWorkspaceScopeConflicts(roundTripped);
+		const priorities = computeCriticalPathPriorities(roundTripped);
+		const reports: Record<string, IAdeIncrementalReportEntry> = {
+			N1: { nodeId: 'N1', nodeTitle: 'Foundation', summary: 'Base types created.', updatedAt: 1 },
+			N2: { nodeId: 'N2', nodeTitle: 'Auth API', summary: 'Auth API implemented.', updatedAt: 2 },
+			N3: { nodeId: 'N3', nodeTitle: 'Auth Tests', summary: 'Auth tests passed.', updatedAt: 3 },
+		};
+		const layeredN5 = buildLayeredUpstreamReports('N5', roundTripped, reports);
+
+		assert.deepStrictEqual({
+			maxConcurrency: roundTripped.metadata.maxConcurrency,
+			defaultVerify: roundTripped.metadata.verify,
+			n2Files: n2.files,
+			n2Verify: n2.verify,
+			overlapTrue: doFileScopesOverlap(['src/auth/**'], ['src/auth/login.ts']),
+			overlapFalse: doFileScopesOverlap(['src/auth/**'], ['test/auth/**']),
+			conflictPairs: conflicts.map(c => `${c.nodeA}:${c.nodeB}`),
+			n2HigherThanN4: (priorities.get('N2') ?? 0) > (priorities.get('N4') ?? 0),
+			n5DirectIds: layeredN5.direct.map(r => r.nodeId),
+			n5DistantIds: layeredN5.distant.map(r => r.nodeId),
+			cjkHigherThanAsciiQuarter: estimateTextTokens('请帮我重构这个工程树的调度与缓存机制') > Math.ceil('请帮我重构这个工程树的调度与缓存机制'.length / 4) * 3,
+		}, {
+			maxConcurrency: 2,
+			defaultVerify: 'npm run lint',
+			n2Files: ['src/auth/**', 'src/types/user.ts'],
+			n2Verify: 'npm test -- auth',
+			overlapTrue: true,
+			overlapFalse: false,
+			conflictPairs: ['N2:N4'],
+			n2HigherThanN4: true,
+			n5DirectIds: ['N3'],
+			n5DistantIds: ['N1', 'N2'],
+			cjkHigherThanAsciiQuarter: true,
+		});
 	});
 });

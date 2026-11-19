@@ -95,6 +95,10 @@ export interface IAdeEngineeringBlueprintMetadata {
 	readonly flowDirection?: 'LR' | 'TD';
 	/** Optional hard spend ceiling in USD; reaching it automatically pauses the DAG and posts an ADE Inbox alert. */
 	readonly maxBudgetUsd?: number;
+	/** Optional maximum number of concurrently executing task nodes (defaults to 4 in shared / 6 in worktree). */
+	readonly maxConcurrency?: number;
+	/** Optional default deterministic verification shell command run after Worker completion before LLM review. */
+	readonly verify?: string;
 }
 
 export interface IAdeEngineeringManagerSegment {
@@ -113,7 +117,18 @@ export interface IAdeEngineeringBlueprintNode {
 	readonly goal?: string;
 	readonly acceptance?: string;
 	readonly description?: string;
+	/** Optional declared file/glob scope patterns for planning-time & runtime shared-workspace conflict avoidance. */
+	readonly files?: readonly string[];
+	/** Optional deterministic build/lint/test shell command run before waking Employee LLM review. */
+	readonly verify?: string;
 	readonly position?: IAdeNodeCanvasPosition;
+}
+
+export interface IAdeVerificationResult {
+	readonly passed: boolean;
+	readonly exitCode: number;
+	readonly output: string;
+	readonly durationMs: number;
 }
 
 export interface IAdeEngineeringBlueprintEdge {
@@ -255,6 +270,31 @@ export function formatCompactTokenCount(tokens: number): string {
 	return String(n);
 }
 
+/**
+ * CJK-aware fallback token estimator used only when an engine omits native usage telemetry.
+ * CJK ideographs/kana/hangul/fullwidth symbols encode at ~1.0–1.5 tokens/char while ASCII/Latin
+ * averages ~0.25 tokens/char; plain `length / 4` undercounts Chinese prompts by 3–4x.
+ */
+export function estimateTextTokens(text: string): number {
+	if (!text) {
+		return 0;
+	}
+	let cjkChars = 0;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (
+			(code >= 0x3000 && code <= 0x9FFF)
+			|| (code >= 0xAC00 && code <= 0xD7AF)
+			|| (code >= 0xF900 && code <= 0xFAFF)
+			|| (code >= 0xFF00 && code <= 0xFFEF)
+		) {
+			cjkChars++;
+		}
+	}
+	const nonCjkChars = text.length - cjkChars;
+	return Math.max(1, Math.ceil(cjkChars * 1.15 + nonCjkChars / 4));
+}
+
 export interface IAdeEngineeringNodeRuntimeState {
 	readonly nodeId: string;
 	readonly phase: AdeEngineeringNodePhase;
@@ -275,6 +315,16 @@ export interface IAdeEngineeringNodeRuntimeState {
 	readonly startedAt?: number;
 	readonly completedAt?: number;
 	readonly lastChanges?: IAdeWorkerTurnChanges;
+	/** Cumulative diff from the node's initial baseline snapshot across all rework turns. */
+	readonly cumulativeChanges?: IAdeWorkerTurnChanges;
+	/** Number of Worker execution turns completed on the active session (0 on fresh or kill-restarted session). */
+	readonly workerTurnCount?: number;
+	/** Number of Employee review turns already dispatched on this node. */
+	readonly employeeReviewCount?: number;
+	/** Number of zero-token automatic Watchdog Worker nudges sent before escalating to LLM Manager. */
+	readonly watchdogRemindCount?: number;
+	/** Latest deterministic `verify` command summary (pass/fail output). */
+	readonly lastVerifyOutput?: string;
 	readonly tokenUsage?: IAdeNodeRoleTokenBreakdown;
 }
 
@@ -482,6 +532,8 @@ export interface IAdeEngineeringBackendService {
 		branches: readonly string[],
 	): Promise<{ readonly ok: boolean; readonly conflictedFiles: readonly string[]; readonly summary: string }>;
 	cleanupTreeWorktrees(governorSessionId: string, projectPath: string): Promise<void>;
+	/** Runs an optional deterministic build/lint/test verification shell command before waking LLM review. */
+	runNodeVerificationCommand?(cwd: string, command: string, timeoutMs?: number): Promise<IAdeVerificationResult>;
 }
 
 export interface IAdeInitEngineeringOptions {

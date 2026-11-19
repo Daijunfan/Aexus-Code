@@ -22,6 +22,7 @@ import {
 	IAdeSegmentWorktreeInfo,
 	IAdeStoredEngineeringRecord,
 	IAdeTouchedFileChange,
+	IAdeVerificationResult,
 	IAdeWorkerTurnChanges,
 	IAdeWorkspaceFileSnapshotEntry,
 	IAdeWorkspaceSnapshot,
@@ -590,5 +591,73 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 				await execGit(projectPath, ['branch', '-D', b]).catch(() => { });
 			}
 		}
+	}
+
+	async runNodeVerificationCommand(cwd: string, command: string, timeoutMs = 120_000): Promise<IAdeVerificationResult> {
+		const trimmed = command.trim();
+		const startedAt = Date.now();
+		if (!trimmed) {
+			return { passed: true, exitCode: 0, output: '', durationMs: 0 };
+		}
+		return new Promise(resolve => {
+			let settled = false;
+			const shellBin = isWindows ? (process.env['ComSpec'] || 'cmd.exe') : (process.env['SHELL'] || '/bin/sh');
+			const shellArgs = isWindows ? ['/d', '/s', '/c', trimmed] : ['-lc', trimmed];
+			const child = cp.spawn(shellBin, shellArgs, {
+				cwd,
+				windowsHide: true,
+				env: { ...process.env, CI: '1', GIT_TERMINAL_PROMPT: '0' },
+			});
+			const maxBytes = 16_000;
+			let combined = '';
+			const appendChunk = (chunk: unknown) => {
+				if (combined.length < maxBytes) {
+					combined += String(chunk).slice(0, maxBytes - combined.length);
+				}
+			};
+			const timer = setTimeout(() => {
+				if (!settled) {
+					settled = true;
+					if (isWindows && child.pid) {
+						try { cp.spawn(path.join(process.env['SystemRoot'] || 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch { /* ignore */ }
+					} else {
+						try { child.kill('SIGKILL'); } catch { /* ignore */ }
+					}
+					resolve({
+						passed: false,
+						exitCode: 124,
+						output: `${combined}\n[Verification command timed out after ${timeoutMs}ms]`.trim(),
+						durationMs: Math.max(0, Date.now() - startedAt),
+					});
+				}
+			}, Math.max(1000, timeoutMs));
+			child.stdout.on('data', appendChunk);
+			child.stderr.on('data', appendChunk);
+			child.on('error', err => {
+				if (!settled) {
+					settled = true;
+					clearTimeout(timer);
+					resolve({
+						passed: false,
+						exitCode: 1,
+						output: err.message,
+						durationMs: Math.max(0, Date.now() - startedAt),
+					});
+				}
+			});
+			child.on('close', code => {
+				if (!settled) {
+					settled = true;
+					clearTimeout(timer);
+					const exitCode = code ?? 1;
+					resolve({
+						passed: exitCode === 0,
+						exitCode,
+						output: combined.trim(),
+						durationMs: Math.max(0, Date.now() - startedAt),
+					});
+				}
+			});
+		});
 	}
 }
