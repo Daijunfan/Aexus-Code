@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/aexus-logo.png" width="88" alt="Aexus Code Original Geometric DAG Logo" />
+  <img src="docs/assets/aexus-logo.png" width="88" alt="Aexus Code Monochrome Logo" />
 </p>
 
 <h1 align="center">Aexus Code</h1>
@@ -424,4 +424,4 @@ We prefer telling engineers the exact rough edges upfront:
 
 - **Architecture & Contributing**: Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) *(canonical architecture guide replacing legacy `AEXUS.md`)*, [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`CHANGELOG.md`](CHANGELOG.md).
 - **Security Policy & Threat Model**: Read [`SECURITY.md`](SECURITY.md) for full details on Safe vs Autonomous mode, lineage-scoped HMAC capability tokens, scrubbed `verify:`/`git` subprocess execution, upfront SHA-256 `verify:` pinning & revocation, non-destructive SSH config (`syncUserSshDir: false`), and opting out of third-party extension role bridging.
-- **License & Attribution**: Derived from Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) under the **[MIT License](LICENSE.txt)** with all upstream copyright notices preserved. Aexus Code uses an original geometric mark (`docs/assets/aexus-logo.svg`) and the open-source [Open VSX Registry](https://open-vsx.org/). Microsoft and Visual Studio Code are trademarks of Microsoft Corporation.
+- **License & Attribution**: Derived from Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) under the **[MIT License](LICENSE.txt)** with all upstream copyright notices preserved, using the open-source [Open VSX Registry](https://open-vsx.org/). Microsoft and Visual Studio Code are trademarks of Microsoft Corporation.

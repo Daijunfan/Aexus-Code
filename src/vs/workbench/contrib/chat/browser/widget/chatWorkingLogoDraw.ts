@@ -19,7 +19,7 @@ export const CHAT_WORKING_LOGO_VIEW_BOX = '-36 -36 168 168';
 export const CHAT_WORKING_LOGO_MASK_RECT = { x: -36, y: -36, width: 168, height: 168 } as const;
 
 /** The rounded black tile behind the mark (22.3% corner radius, matching the product icon). */
-export const CHAT_WORKING_LOGO_TILE = { x: -12, y: -12, size: 120, radius: 26.8, fill: '#0b0d12' } as const;
+export const CHAT_WORKING_LOGO_TILE = { x: -12, y: -12, size: 120, radius: 26.8, fill: '#000000' } as const;
 
 /** The orbital arc around the tile, drawn only when the emblem is at least 18px. */
 export const CHAT_WORKING_LOGO_ORBIT = { cx: 48, cy: 48, r: 78, strokeWidth: 3, dash: '12 88' } as const;

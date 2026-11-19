@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/aexus-logo.png" width="88" alt="Aexus Code 原创几何 DAG 标志" />
+  <img src="assets/aexus-logo.png" width="88" alt="Aexus Code 黑白标志" />
 </p>
 
 <h1 align="center">Aexus Code</h1>
@@ -424,4 +424,4 @@ ARCH=$(uname -m | sed 's/x86_64/x64/')
 
 - **架构与贡献**：请参阅英文架构文档 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)*（已整合替代旧版 `AEXUS.md`）*、[`CONTRIBUTING.md`](../CONTRIBUTING.md) 与 [`CHANGELOG.md`](../CHANGELOG.md)。
 - **安全模型与威胁边界**：请参阅 [`SECURITY.md`](../SECURITY.md)，完整了解安全/全自动模式、血缘校验 HMAC 能力令牌、子进程环境清洗、`verify:` 前置锁定与撤销、非破坏性 SSH 配置（`syncUserSshDir: false`）及第三方扩展角色桥接的关闭方式。
-- **开源许可与合规声明**：基于 Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) 衍生开发并遵循 **[MIT License](../LICENSE.txt)**，完整保留上游版权声明。Aexus Code 使用原创几何标识（`docs/assets/aexus-logo.svg`）并接入开源 [Open VSX Registry](https://open-vsx.org/)。Microsoft 与 Visual Studio Code 为 Microsoft Corporation 的注册商标。
+- **开源许可与合规声明**：基于 Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) 衍生开发并遵循 **[MIT License](../LICENSE.txt)**，完整保留上游版权声明，并接入开源 [Open VSX Registry](https://open-vsx.org/)。Microsoft 与 Visual Studio Code 为 Microsoft Corporation 的注册商标。

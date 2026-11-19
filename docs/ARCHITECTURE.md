@@ -1,6 +1,6 @@
 # Aexus Code Architecture
 
-Aexus Code (`v1.1.0`) is an open-source, MIT-licensed desktop workbench built on `Code - OSS` (`1.146.0`) that unites a full-parity **IDE (`IDE`)** and a multi-agent **Agent Development Environment (`ADE`)** inside one cross-platform Electron application (`macOS`, `Windows`, `Linux`), using an original geometric A-prism / 3-node DAG identity and the open-source [Open VSX Registry](https://open-vsx.org/).
+Aexus Code (`v1.1.0`) is an open-source, MIT-licensed desktop workbench built on `Code - OSS` (`1.146.0`) that unites a full-parity **IDE (`IDE`)** and a multi-agent **Agent Development Environment (`ADE`)** inside one cross-platform Electron application (`macOS`, `Windows`, `Linux`), using the open-source [Open VSX Registry](https://open-vsx.org/).
 
 > [!NOTE]
 > `docs/ARCHITECTURE.md` is the canonical architecture reference for Aexus Code (consolidating and superseding the retired legacy `AEXUS.md` notes, with Open VSX compliance and original Aexus branding).
