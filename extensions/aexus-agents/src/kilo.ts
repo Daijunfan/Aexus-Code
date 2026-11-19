@@ -7,7 +7,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
-import { capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, NativeSession, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { AgentChildIdentity } from './roleBridgeShared';
+import { agentIdentityScopeKey, capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
@@ -216,14 +217,21 @@ function turnUsageFromKiloTokens(tokens: KiloTokens | undefined): EngineTurnToke
 	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
 }
 
+interface SharedServerSlot {
+	child?: ReturnType<typeof spawnEngine>;
+	endpoint?: Promise<string>;
+	readonly password: string;
+	readonly identity: AgentChildIdentity;
+	readonly autoApprove: boolean;
+}
+
 abstract class SharedServerRuntime implements EngineRuntime {
 	abstract readonly id: string;
 	abstract readonly name: string;
 	protected abstract readonly envPrefix: string;
 
-	protected child: ReturnType<typeof spawnEngine> | undefined;
-	protected endpoint: Promise<string> | undefined;
-	private readonly password = randomBytes(24).toString('hex');
+	protected readonly servers = new Map<string, SharedServerSlot>();
+	protected readonly sessionServerKeys = new Map<string, string>();
 	private readonly changed = new vscode.EventEmitter<readonly NativeSession[]>();
 	readonly onDidChangeSessions = this.changed.event;
 	protected readonly knownSessions = new Map<string, NativeSession>();
@@ -238,6 +246,49 @@ abstract class SharedServerRuntime implements EngineRuntime {
 	}
 
 	constructor(protected readonly executable: string) { }
+
+	private shouldAutoApprove(options?: EngineSendOptions): boolean {
+		if (options?.automatedEngineering) {
+			return true;
+		}
+		const perm = options?.permissionMode?.trim();
+		if (perm === 'ask' || perm === 'manual') {
+			return false;
+		}
+		if (perm === 'bypassPermissions' || perm === 'auto' || perm === 'never' || perm === 'danger-full-access') {
+			return true;
+		}
+		return isAutonomousModeEnabled();
+	}
+
+	private resolveServerDescriptor(sessionId?: string, options?: EngineSendOptions): { readonly key: string; readonly identity: AgentChildIdentity; readonly autoApprove: boolean } {
+		const autoApprove = this.shouldAutoApprove(options);
+		if (!sessionId || !options) {
+			return {
+				key: 'pure:ask',
+				identity: { sessionId: `${this.id}-pure`, pureWorker: true },
+				autoApprove: false,
+			};
+		}
+		const identityScope = agentIdentityScopeKey(sessionId, options);
+		const identity: AgentChildIdentity = identityScope === 'pure'
+			? { sessionId: `${this.id}-pure`, pureWorker: true }
+			: { sessionId, callerRole: options.callerRole, pureWorker: false };
+		return {
+			key: `${identityScope}:${autoApprove ? 'auto' : 'ask'}`,
+			identity,
+			autoApprove,
+		};
+	}
+
+	private ensureServerSlot(key: string, identity: AgentChildIdentity, autoApprove: boolean): SharedServerSlot {
+		let slot = this.servers.get(key);
+		if (!slot) {
+			slot = { password: randomBytes(24).toString('hex'), identity, autoApprove };
+			this.servers.set(key, slot);
+		}
+		return slot;
+	}
 
 	private async tryRequest<T>(route: string, cwd: string, timeoutMs = 4000): Promise<T | undefined> {
 		const controller = new AbortController();
@@ -514,43 +565,52 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
-	private getEndpoint(): Promise<string> {
-		if (!this.endpoint) {
-			this.endpoint = new Promise<string>((resolve, reject) => {
-				const child = this.child = spawnEngine(this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], undefined, {
-					...process.env,
-					[`${this.envPrefix}_SERVER_USERNAME`]: 'aexus',
-					[`${this.envPrefix}_SERVER_PASSWORD`]: this.password,
-					[`${this.envPrefix}_PERMISSION`]: '{"*":"allow"}',
+	private getEndpoint(serverKey = 'pure:ask', identity?: AgentChildIdentity, autoApprove = false): Promise<{ readonly url: string; readonly password: string }> {
+		const slot = this.ensureServerSlot(
+			serverKey,
+			identity ?? { sessionId: `${this.id}-pure`, pureWorker: true },
+			autoApprove,
+		);
+		if (!slot.endpoint) {
+			slot.endpoint = (async () => {
+				const childEnv = await prepareAgentChildEnv(slot.identity);
+				return await new Promise<string>((resolve, reject) => {
+					const child = slot.child = spawnEngine(this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], undefined, {
+						...childEnv,
+						[`${this.envPrefix}_SERVER_USERNAME`]: 'aexus',
+						[`${this.envPrefix}_SERVER_PASSWORD`]: slot.password,
+						[`${this.envPrefix}_PERMISSION`]: slot.autoApprove ? '{"*":"allow"}' : '{"*":"ask"}',
+					});
+					let output = '';
+					const inspect = (data: Buffer) => {
+						output = (output + String(data)).slice(-8000);
+						const address = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+						if (address) { resolve(address); }
+					};
+					child.stdout.on('data', inspect);
+					child.stderr.on('data', inspect);
+					child.on('error', reject);
+					child.on('exit', code => {
+						slot.endpoint = undefined;
+						slot.child = undefined;
+						reject(new Error(vscode.l10n.t('{0} ended before its local connection was ready ({1}).', this.name, String(code))));
+					});
 				});
-				let output = '';
-				const inspect = (data: Buffer) => {
-					output = (output + String(data)).slice(-8000);
-					const address = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-					if (address) { resolve(address); }
-				};
-				child.stdout.on('data', inspect);
-				child.stderr.on('data', inspect);
-				child.on('error', reject);
-				child.on('exit', code => {
-					this.endpoint = undefined;
-					this.child = undefined;
-					reject(new Error(vscode.l10n.t('{0} ended before its local connection was ready ({1}).', this.name, String(code))));
-				});
-			});
+			})();
 		}
-		return this.endpoint;
+		return slot.endpoint.then(url => ({ url, password: slot.password }));
 	}
 
-	protected async request<T>(route: string, cwd: string, method = 'GET', body?: object, signal?: AbortSignal): Promise<T> {
+	protected async request<T>(route: string, cwd: string, method = 'GET', body?: object, signal?: AbortSignal, serverKey = 'pure:ask', identity?: AgentChildIdentity, autoApprove = false): Promise<T> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				const url = new URL(route, await this.getEndpoint());
+				const ep = await this.getEndpoint(serverKey, identity, autoApprove);
+				const url = new URL(route, ep.url);
 				url.searchParams.set('directory', cwd);
 				const response = await fetch(url, {
 					method,
-					headers: { Authorization: `Basic ${Buffer.from(`aexus:${this.password}`).toString('base64')}`, 'Content-Type': 'application/json' },
+					headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}`, 'Content-Type': 'application/json' },
 					body: body ? JSON.stringify(body) : undefined,
 					signal,
 				});
@@ -560,12 +620,13 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				return response.status === 204 ? undefined as T : await response.json() as T;
 			} catch (error) {
 				lastError = error;
-				if (attempt === 0 && !signal?.aborted) {
-					if (this.child) {
-						stopEngine(this.child);
-						this.child = undefined;
+				const slot = this.servers.get(serverKey);
+				if (attempt === 0 && !signal?.aborted && slot) {
+					if (slot.child) {
+						stopEngine(slot.child);
+						slot.child = undefined;
 					}
-					this.endpoint = undefined;
+					slot.endpoint = undefined;
 					continue;
 				}
 				throw error;
@@ -617,14 +678,16 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
-	async prepareSession(session: NativeSession): Promise<void> {
+	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
 		if (!session.unmaterialized) {
 			return;
 		}
-		const created = this.session(await this.request<KiloSession>('/session', session.cwd, 'POST', {}));
+		const desc = this.resolveServerDescriptor(session.id, options);
+		const created = this.session(await this.request<KiloSession>('/session', session.cwd, 'POST', {}, undefined, desc.key, desc.identity, desc.autoApprove));
 		session.id = created.id;
 		session.unmaterialized = false;
 		session.provisional = false;
+		this.sessionServerKeys.set(session.id, desc.key);
 	}
 
 	async children(session: NativeSession, token: vscode.CancellationToken): Promise<NativeSession[]> {
@@ -640,13 +703,13 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			: []);
 	}
 
-	private async answer(event: KiloEvent, data: KiloEventData, session: NativeSession, token: vscode.CancellationToken, autoApprove: boolean): Promise<void> {
+	private async answer(event: KiloEvent, data: KiloEventData, session: NativeSession, token: vscode.CancellationToken, autoApprove: boolean, serverKey: string, identity: AgentChildIdentity): Promise<void> {
 		if (event.type === 'permission.asked') {
 			if (autoApprove) {
 				try {
-					await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: 'always' });
+					await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: 'always' }, undefined, serverKey, identity, autoApprove);
 				} catch {
-					await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: 'once' });
+					await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: 'once' }, undefined, serverKey, identity, autoApprove);
 				}
 				return;
 			}
@@ -656,7 +719,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				placeHolder: `${session.cwd}: ${data.permission}: ${(data.patterns ?? []).join(', ')}`,
 				ignoreFocusOut: true,
 			}, token);
-			await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: picked === allow ? 'once' : 'reject' });
+			await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: picked === allow ? 'once' : 'reject' }, undefined, serverKey, identity, autoApprove);
 		}
 		if (event.type === 'question.asked') {
 			const answers: string[][] = [];
@@ -677,22 +740,27 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					answers.push(answer ? [answer.label] : []);
 				}
 			}
-			await this.request(`/question/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { answers });
+			await this.request(`/question/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { answers }, undefined, serverKey, identity, autoApprove);
 		}
 	}
 
 	async killSession(session: NativeSession): Promise<void> {
-		if (this.endpoint) {
-			await this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST').catch(() => { });
+		const serverKey = this.sessionServerKeys.get(session.id) ?? 'pure:ask';
+		const slot = this.servers.get(serverKey);
+		if (slot?.endpoint) {
+			await this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, serverKey, slot.identity, slot.autoApprove).catch(() => { });
 		}
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		this.knownSessions.set(session.id, session);
+		const desc = this.resolveServerDescriptor(session.id, options);
+		this.sessionServerKeys.set(session.id, desc.key);
 		const abort = new AbortController();
-		const url = new URL('/event', await this.getEndpoint());
+		const ep = await this.getEndpoint(desc.key, desc.identity, desc.autoApprove);
+		const url = new URL('/event', ep.url);
 		url.searchParams.set('directory', session.cwd);
-		const response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`aexus:${this.password}`).toString('base64')}` }, signal: abort.signal });
+		const response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}` }, signal: abort.signal });
 		if (!response.ok || !response.body) { throw new Error(vscode.l10n.t('{0} could not open its response stream.', this.name)); }
 		let streamed = false;
 		const parts = new Map<string, string>();
@@ -746,9 +814,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 						}
 					}
 					if (data && sessionId && (event.type === 'permission.asked' || event.type === 'question.asked') && this.belongsTo(sessionId, session.id)) {
-						const autoApprove = Boolean(options?.automatedEngineering) || options?.permissionMode !== 'ask';
 						const targetSession = this.knownSessions.get(sessionId) ?? session;
-						void this.answer(event, data, targetSession, token, autoApprove).catch(() => { });
+						void this.answer(event, data, targetSession, token, desc.autoApprove, desc.key, desc.identity).catch(() => { });
 					}
 					if (!data || sessionId !== session.id) { continue; }
 					if (event.type === 'message.updated' && data.info?.role) { roles.set(data.info.id, data.info.role); }
@@ -774,7 +841,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		})();
 		void events.catch(() => { });
 		const cancellation = token.onCancellationRequested(() => {
-			void this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST').catch(() => { });
+			void this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, desc.key, desc.identity, desc.autoApprove).catch(() => { });
 			abort.abort();
 		});
 		try {
@@ -795,14 +862,14 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			}
 			let result: KiloMessage;
 			try {
-				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal);
+				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal, desc.key, desc.identity, desc.autoApprove);
 			} catch (err) {
 				const hasOptionalFields = payloadBase.model !== undefined || payloadBase.agent !== undefined || payloadBase.variant !== undefined;
 				if (!hasOptionalFields || abort.signal.aborted) {
 					throw err;
 				}
 				// Retry once without optional routing fields (older servers reject unknown fields), keeping the prompt and attachments.
-				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: messageParts }, abort.signal);
+				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: messageParts }, abort.signal, desc.key, desc.identity, desc.autoApprove);
 			}
 			if (result.info.error) { throw new Error(result.info.error.data?.message || vscode.l10n.t('{0} could not complete this request.', this.name)); }
 			if (!streamed) { for (const part of result.parts) { if (part.type === 'text' && part.text) { stream.markdown(part.text); } } }
@@ -818,9 +885,11 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			this.knownSessions.delete(session.id);
 			return;
 		}
+		const serverKey = this.sessionServerKeys.get(session.id) ?? 'pure:ask';
+		const slot = this.servers.get(serverKey);
 		try {
-			if (this.endpoint) {
-				await this.request(`/session/${encodeURIComponent(session.id)}`, session.cwd, 'DELETE');
+			if (slot?.endpoint) {
+				await this.request(`/session/${encodeURIComponent(session.id)}`, session.cwd, 'DELETE', undefined, undefined, serverKey, slot.identity, slot.autoApprove);
 			} else {
 				await capture(this.executable, ['session', 'delete', session.id], token);
 			}
@@ -830,6 +899,11 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				throw error;
 			}
 		}
+		this.sessionServerKeys.delete(session.id);
+		if (!serverKey.startsWith('pure:') && slot) {
+			if (slot.child) { stopEngine(slot.child); }
+			this.servers.delete(serverKey);
+		}
 		this.knownSessions.delete(session.id);
 		for (const [id, entry] of [...this.knownSessions.entries()]) {
 			if (entry.parentId === session.id) {
@@ -838,7 +912,14 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
-	dispose(): void { this.changed.dispose(); if (this.child) { stopEngine(this.child); } }
+	dispose(): void {
+		this.changed.dispose();
+		for (const slot of this.servers.values()) {
+			if (slot.child) { stopEngine(slot.child); }
+		}
+		this.servers.clear();
+		this.sessionServerKeys.clear();
+	}
 }
 
 export class KiloRuntime extends SharedServerRuntime {

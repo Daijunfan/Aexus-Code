@@ -11,8 +11,8 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
-import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, JsonLineClient, NativeSession, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { AgentChildIdentity, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
+import { agentIdentityScopeKey, capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 
@@ -129,15 +129,20 @@ function extractAcpText(update: AcpSessionUpdate): string {
 	return '';
 }
 
+interface AcpClientSlot {
+	client?: JsonLineClient;
+	ready?: Promise<JsonLineClient>;
+	readonly openSessions: Set<string>;
+	readonly loadingSessions: Set<string>;
+}
+
 export abstract class AcpRuntime implements EngineRuntime {
 	abstract readonly id: string;
 	abstract readonly name: string;
 
-	protected client: JsonLineClient | undefined;
-	private ready: Promise<JsonLineClient> | undefined;
+	protected readonly clientPool = new Map<string, AcpClientSlot>();
+	protected readonly sessionScopeKeys = new Map<string, string>();
 	protected agentCapabilities: AcpCapabilities | undefined;
-	protected readonly openSessions = new Set<string>();
-	protected readonly loadingSessions = new Set<string>();
 	protected readonly knownSessions = new Map<string, NativeSession>();
 	protected readonly changed = new vscode.EventEmitter<readonly NativeSession[]>();
 	readonly onDidChangeSessions = this.changed.event;
@@ -148,6 +153,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 	protected cachedConfigOptionIds = new Set<string>();
 	protected cachedModelConfigValues = new Set<string>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
+
+	protected get client(): JsonLineClient | undefined {
+		return this.clientPool.get('pure')?.client;
+	}
 
 	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
 		const usage = this.lastTurnUsageBySession.get(sessionId);
@@ -251,18 +260,24 @@ export abstract class AcpRuntime implements EngineRuntime {
 		return undefined;
 	}
 
-	protected ensureClient(): Promise<JsonLineClient> {
-		if (this.client && !this.client.isClosed && this.ready) {
-			return this.ready;
+	protected ensureClientSlot(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<{ readonly slot: AcpClientSlot; readonly client: JsonLineClient }> {
+		let slot = this.clientPool.get(scopeKey);
+		if (slot?.client && !slot.client.isClosed && slot.ready) {
+			const existingSlot = slot;
+			return slot.ready.then(client => ({ slot: existingSlot, client }));
 		}
-		this.client?.dispose();
-		this.client = undefined;
-		this.openSessions.clear();
-		this.loadingSessions.clear();
-		this.ready = (async () => {
-			const env = await this.buildSpawnEnv();
-			const client = new JsonLineClient(this.executable, [...this.args], undefined, env);
-			this.client = client;
+		slot?.client?.dispose();
+		slot = {
+			openSessions: new Set<string>(),
+			loadingSessions: new Set<string>(),
+		};
+		this.clientPool.set(scopeKey, slot);
+		const currentSlot = slot;
+		currentSlot.ready = (async () => {
+			const baseEnv = await this.buildSpawnEnv();
+			const childEnv = await prepareAgentChildEnv(identity ?? { sessionId: `${this.id}-pure`, pureWorker: true }, baseEnv);
+			const client = new JsonLineClient(this.executable, [...this.args], undefined, childEnv);
+			currentSlot.client = client;
 			client.onPacket(packet => {
 				if (packet.method === 'session/update') {
 					const params = packet.params ?? {};
@@ -284,39 +299,65 @@ export abstract class AcpRuntime implements EngineRuntime {
 			this.agentCapabilities = result?.agentCapabilities;
 			return client;
 		})();
-		void this.ready.catch(() => {
-			this.ready = undefined;
+		void currentSlot.ready.catch(() => {
+			if (this.clientPool.get(scopeKey) === currentSlot) {
+				currentSlot.ready = undefined;
+				currentSlot.client?.dispose();
+				currentSlot.client = undefined;
+			}
 		});
-		return this.ready;
+		return currentSlot.ready.then(client => ({ slot: currentSlot, client }));
+	}
+
+	protected ensureClient(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<JsonLineClient> {
+		return this.ensureClientSlot(scopeKey, identity).then(res => res.client);
 	}
 
 	protected async closeSession(sessionId: string): Promise<void> {
-		if (!this.client || this.client.isClosed || !this.openSessions.has(sessionId)) {
-			this.openSessions.delete(sessionId);
-			return;
+		const scopeKey = this.sessionScopeKeys.get(sessionId);
+		const keys = scopeKey ? [scopeKey] : [...this.clientPool.keys()];
+		for (const key of keys) {
+			const slot = this.clientPool.get(key);
+			if (!slot || !slot.client || slot.client.isClosed || !slot.openSessions.has(sessionId)) {
+				slot?.openSessions.delete(sessionId);
+				continue;
+			}
+			slot.openSessions.delete(sessionId);
+			await slot.client.request('session/close', { sessionId }).catch(() => { });
 		}
-		this.openSessions.delete(sessionId);
-		await this.client.request('session/close', { sessionId }).catch(() => { });
+		if (scopeKey && scopeKey !== 'pure') {
+			this.sessionScopeKeys.delete(sessionId);
+			await this.resetClient(scopeKey);
+		}
 	}
 
-	protected async resetClient(): Promise<void> {
-		const current = this.client;
-		this.client = undefined;
-		this.ready = undefined;
-		this.openSessions.clear();
-		this.loadingSessions.clear();
-		if (current) {
-			current.dispose();
-			await current.waitForClose();
+	protected async resetClient(scopeKey?: string): Promise<void> {
+		const keys = scopeKey ? [scopeKey] : [...this.clientPool.keys()];
+		for (const key of keys) {
+			const slot = this.clientPool.get(key);
+			this.clientPool.delete(key);
+			if (!slot) {
+				continue;
+			}
+			const current = slot.client;
+			slot.client = undefined;
+			slot.ready = undefined;
+			slot.openSessions.clear();
+			slot.loadingSessions.clear();
+			if (current) {
+				current.dispose();
+				await current.waitForClose();
+			}
 		}
 	}
 
 	async create(cwd: string): Promise<NativeSession> {
 		const now = Date.now();
 		try {
-			const created = await withTimeout((async () => {
-				const client = await this.ensureClient();
-				return client.request<AcpSessionSetupResult>('session/new', { cwd, mcpServers: [] });
+			const { slot, created } = await withTimeout((async () => {
+				const ensured = await this.ensureClientSlot('pure', { sessionId: `${this.id}-pure`, pureWorker: true });
+				const result = await ensured.client.request<AcpSessionSetupResult>('session/new', { cwd, mcpServers: [] });
+				return { slot: ensured.slot, created: result };
 			})(), 15000);
 			this.ingestSessionSetup(created);
 			const session: NativeSession = {
@@ -327,11 +368,12 @@ export abstract class AcpRuntime implements EngineRuntime {
 				updated: now,
 				provisional: true,
 			};
-			this.openSessions.add(session.id);
+			slot.openSessions.add(session.id);
+			this.sessionScopeKeys.set(session.id, 'pure');
 			this.knownSessions.set(session.id, session);
 			return session;
 		} catch {
-			void this.resetClient().catch(() => { });
+			void this.resetClient('pure').catch(() => { });
 			return {
 				id: randomUUID(),
 				cwd,
@@ -344,39 +386,59 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 	}
 
-	async prepareSession(session: NativeSession): Promise<void> {
+	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
+		const scopeKey = options ? agentIdentityScopeKey(session.id, options) : (this.sessionScopeKeys.get(session.id) ?? 'pure');
+		const identity: AgentChildIdentity = options
+			? { sessionId: session.id, callerRole: options.callerRole, pureWorker: options.pureWorker }
+			: { sessionId: session.id, pureWorker: true };
 		if (!session.unmaterialized) {
 			return;
 		}
-		const client = await this.ensureClient();
+		const { slot, client } = await this.ensureClientSlot(scopeKey, identity);
 		const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
 		this.ingestSessionSetup(created);
 		session.id = created.sessionId;
 		session.unmaterialized = false;
-		this.openSessions.add(session.id);
+		slot.openSessions.add(session.id);
+		this.sessionScopeKeys.set(session.id, scopeKey);
 		this.knownSessions.set(session.id, session);
 	}
 
-	protected async ensureSessionOpen(client: JsonLineClient, session: NativeSession): Promise<void> {
-		if (this.openSessions.has(session.id)) {
+	protected async ensureSessionOpen(slot: AcpClientSlot, client: JsonLineClient, session: NativeSession): Promise<void> {
+		if (slot.openSessions.has(session.id)) {
 			return;
 		}
-		if (this.agentCapabilities?.sessionCapabilities?.resume) {
-			await client.request('session/resume', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
-		} else if (this.agentCapabilities?.loadSession) {
-			this.loadingSessions.add(session.id);
-			try {
-				await client.request('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
-			} finally {
-				this.loadingSessions.delete(session.id);
+		try {
+			if (this.agentCapabilities?.sessionCapabilities?.resume) {
+				await client.request('session/resume', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+			} else if (this.agentCapabilities?.loadSession) {
+				slot.loadingSessions.add(session.id);
+				try {
+					await client.request('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+				} finally {
+					slot.loadingSessions.delete(session.id);
+				}
+			} else if (session.provisional) {
+				const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
+				this.ingestSessionSetup(created);
+				session.id = created.sessionId;
 			}
+			slot.openSessions.add(session.id);
+		} catch (error) {
+			if (!session.provisional) {
+				throw error;
+			}
+			const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
+			this.ingestSessionSetup(created);
+			session.id = created.sessionId;
+			slot.openSessions.add(session.id);
 		}
-		this.openSessions.add(session.id);
 	}
 
 	protected async loadReplayedHistory(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
 		if (token.isCancellationRequested) { return []; }
-		const client = await this.ensureClient();
+		const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+		const { slot, client } = await this.ensureClientSlot(scopeKey);
 		if (!this.agentCapabilities?.loadSession) { return []; }
 		const entries: HistoryEntry[] = [];
 		const appendChunk = (role: 'user' | 'assistant', text: string) => {
@@ -388,7 +450,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				entries.push({ id: `replay-${entries.length}`, role, text });
 			}
 		};
-		this.loadingSessions.add(session.id);
+		slot.loadingSessions.add(session.id);
 		const listener = client.onPacket(packet => {
 			if (packet.method !== 'session/update') { return; }
 			const params = packet.params ?? {};
@@ -403,10 +465,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 		});
 		try {
 			await client.request('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
-			this.openSessions.add(session.id);
+			slot.openSessions.add(session.id);
 		} finally {
 			listener.dispose();
-			this.loadingSessions.delete(session.id);
+			slot.loadingSessions.delete(session.id);
 		}
 		return entries;
 	}
@@ -526,20 +588,26 @@ export abstract class AcpRuntime implements EngineRuntime {
 	}
 
 	async killSession(session: NativeSession): Promise<void> {
-		if (this.client && !this.client.isClosed) {
-			try {
-				this.client.write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } });
-			} catch { /* ignore */ }
-			await this.closeSession(session.id);
+		const scopeKey = this.sessionScopeKeys.get(session.id);
+		const keys = scopeKey ? [scopeKey] : [...this.clientPool.keys()];
+		for (const key of keys) {
+			const slot = this.clientPool.get(key);
+			if (slot?.client && !slot.client.isClosed) {
+				try {
+					slot.client.write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } });
+				} catch { /* ignore */ }
+			}
 		}
+		await this.closeSession(session.id);
 	}
 
 	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
 		if (this.cachedModels.length === 0 && this.cachedModes.length === 0 && this.cachedCommands.length === 0 && session && !session.unmaterialized) {
 			try {
-				const client = await withTimeout(this.ensureClient(), 8000);
-				if (!this.openSessions.has(session.id) && cwd) {
-					await withTimeout(this.ensureSessionOpen(client, session), 8000).catch(() => { });
+				const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+				const { slot, client } = await withTimeout(this.ensureClientSlot(scopeKey), 8000);
+				if (!slot.openSessions.has(session.id) && cwd) {
+					await withTimeout(this.ensureSessionOpen(slot, client, session), 8000).catch(() => { });
 				}
 			} catch { /* Non-fatal capability probe. */ }
 		}
@@ -582,15 +650,21 @@ export abstract class AcpRuntime implements EngineRuntime {
 			const lines = recent.length > 0
 				? recent.map(item => `- **${item.label}** (\`${item.id.slice(0, 8)}\` · \`${item.cwd}\`)`).join('\n')
 				: '- *(No recorded Cline tasks yet)*';
-			stream.markdown(`### Cline Recent Tasks\n\n${lines}\n\n- **Active Mode**: \`${options?.mode || 'yolo'}\`\n- **Active Model**: \`${options?.model || 'default'}\`\n`);
+			stream.markdown(`### Cline Recent Tasks\n\n${lines}\n\n- **Active Mode**: \`${options?.mode || (isAutonomousModeEnabled() ? 'yolo' : 'ask')}\`\n- **Active Model**: \`${options?.model || 'default'}\`\n`);
 			return true;
 		}
 		return false;
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
-		const client = await this.ensureClient();
-		await this.ensureSessionOpen(client, session);
+		const scopeKey = agentIdentityScopeKey(session.id, options);
+		const { slot, client } = await this.ensureClientSlot(scopeKey, {
+			sessionId: session.id,
+			callerRole: options?.callerRole,
+			pureWorker: options?.pureWorker,
+		});
+		await this.ensureSessionOpen(slot, client, session);
+		this.sessionScopeKeys.set(session.id, scopeKey);
 		if (options?.model && options.model !== 'default') {
 			let normalizedModel = options.model.trim();
 			if (this.id === 'dsh' && !normalizedModel.startsWith('[')) {
@@ -637,9 +711,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 				}
 			}
 		}
+		const autonomous = Boolean(options?.automatedEngineering) || isAutonomousModeEnabled();
 		const effectiveMode = options?.mode && options.mode !== 'default'
 			? options.mode
-			: (this.id === 'cline' ? 'yolo' : this.id === 'antigravity' ? 'auto' : undefined);
+			: (this.id === 'cline' ? (autonomous ? 'yolo' : 'ask') : this.id === 'antigravity' ? (autonomous ? 'auto' : 'ask') : undefined);
 		if (effectiveMode) {
 			if (this.id === 'cline') {
 				const clineSessionMode = effectiveMode === 'plan' ? 'plan' : 'act';
@@ -648,7 +723,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 					await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: clineSessionMode }).catch(() => { });
 				}
 				if (this.cachedConfigOptionIds.has('auto_approve')) {
-					await client.request('session/set_config_option', { sessionId: session.id, configId: 'auto_approve', value: effectiveMode === 'yolo' }).catch(() => { });
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'auto_approve', value: effectiveMode === 'yolo' || Boolean(options?.automatedEngineering) }).catch(() => { });
 				}
 			} else {
 				await client.request('session/set_mode', { sessionId: session.id, modeId: effectiveMode }).catch(() => { });
@@ -667,8 +742,17 @@ export abstract class AcpRuntime implements EngineRuntime {
 				await client.request('session/set_config_option', { sessionId: session.id, configId: 'reasoning_effort', value: normalizedThinking }).catch(() => { });
 			}
 		}
+		const requestedPerm = options?.permissionMode?.trim();
+		const requestedMode = options?.mode?.trim();
+		const explicitAskOrPlan = requestedPerm === 'ask' || requestedPerm === 'manual' || requestedMode === 'ask' || requestedMode === 'plan';
+		const explicitBypass = requestedPerm === 'bypassPermissions'
+			|| requestedPerm === 'auto'
+			|| requestedPerm === 'never'
+			|| requestedPerm === 'danger-full-access'
+			|| requestedMode === 'yolo'
+			|| (this.id === 'antigravity' && requestedMode === 'auto');
 		const autoApprove = Boolean(options?.automatedEngineering)
-			|| (options?.permissionMode !== 'ask' && options?.mode !== 'ask' && options?.mode !== 'plan');
+			|| (!explicitAskOrPlan && (explicitBypass || isAutonomousModeEnabled()));
 		this.knownSessions.set(session.id, session);
 		const listener = client.onPacket(packet => {
 			const params = packet.params ?? {};
@@ -687,7 +771,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				}
 				return;
 			}
-			if (packet.method !== 'session/update' || params.sessionId !== session.id || this.loadingSessions.has(session.id)) {
+			if (packet.method !== 'session/update' || params.sessionId !== session.id || slot.loadingSessions.has(session.id)) {
 				return;
 			}
 			const update = (params.update ?? params) as AcpSessionUpdate;
@@ -696,6 +780,11 @@ export abstract class AcpRuntime implements EngineRuntime {
 				this.lastTurnUsageBySession.set(session.id, updateUsage);
 			}
 			const kind = update.sessionUpdate ?? update.type;
+			if (kind === 'compact_boundary' || kind === 'context_compacted') {
+				try {
+					options?.onContextCompacted?.();
+				} catch { /* Compaction callback must never break the turn. */ }
+			}
 			if (!token.isCancellationRequested && kind === 'agent_message_chunk') {
 				const chunk = extractAcpText(update);
 				if (chunk) { stream.markdown(chunk); }
@@ -752,8 +841,15 @@ export abstract class AcpRuntime implements EngineRuntime {
 
 	dispose(): void {
 		this.changed.dispose();
-		this.client?.dispose();
-		this.client = undefined;
+		for (const slot of this.clientPool.values()) {
+			slot.client?.dispose();
+			slot.client = undefined;
+			slot.ready = undefined;
+			slot.openSessions.clear();
+			slot.loadingSessions.clear();
+		}
+		this.clientPool.clear();
+		this.sessionScopeKeys.clear();
 	}
 }
 
@@ -1314,7 +1410,7 @@ export class AntigravityRuntime extends AcpRuntime {
 			return;
 		}
 		await this.closeSession(session.id);
-		if (this.client && !this.client.isClosed) {
+		if ([...this.clientPool.values()].some(slot => slot.client && !slot.client.isClosed)) {
 			await this.resetClient();
 		}
 		this.knownSessions.delete(session.id);

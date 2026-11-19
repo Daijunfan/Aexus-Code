@@ -19,7 +19,9 @@ import {
 	injectAgyConnectJsonRolePrompt,
 	injectLlmPayloadSystemPrompt,
 	injectSessionServerSystemField,
+	isNativeRoleBridgeDisabledByEnv,
 	isPathWithinOrEqual,
+	isPureWorkerDenyToken,
 	mergeRolePromptIntoText,
 	observeAgyConnectWsServerMessage,
 	readRoleSyncSnapshotSync,
@@ -28,6 +30,7 @@ import {
 	ROLE_STATE_ENV_KEY,
 	RoleSyncAgentEntry,
 	RoleSyncSnapshot,
+	stripDirectoriesFromPath,
 	transformAgyConnectWsClientMessage,
 } from './roleBridgeShared';
 
@@ -37,6 +40,8 @@ export interface NativeRoleBridgeOptions {
 	readonly pid?: number;
 	readonly scopeId?: string;
 	readonly follower?: boolean;
+	readonly enabled?: boolean;
+	readonly env?: NodeJS.ProcessEnv;
 	readonly onNativeSessionBound?: (shortEngine: string, agentId: string, nativeSessionId: string) => void;
 	readonly childProcessModule?: { spawn: typeof cp.spawn };
 	readonly fetchHost?: { fetch: typeof globalThis.fetch };
@@ -55,6 +60,8 @@ export interface NativeRoleBridgeController {
 	readonly externalBindingsFilePath: string;
 	updateSnapshot(snapshot: RoleSyncSnapshot): Promise<void>;
 	getSnapshot(): RoleSyncSnapshot;
+	isEnabled(): boolean;
+	setEnabled(enabled: boolean): void;
 	setOnNativeSessionBound(cb: ((shortEngine: string, agentId: string, nativeSessionId: string) => void) | undefined): void;
 	promoteToPrimary(options?: { onNativeSessionBound?: (shortEngine: string, agentId: string, nativeSessionId: string) => void }): void;
 	readAgyBindings(): Promise<Record<string, string>>;
@@ -150,9 +157,13 @@ async function readFetchBodyText(input: Parameters<typeof fetch>[0], init?: Requ
 }
 
 export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptions): NativeRoleBridgeController {
+	const envSource = options?.env ?? process.env;
+	const disabledByEnv = isNativeRoleBridgeDisabledByEnv(envSource);
+	let bridgeEnabled = !disabledByEnv && options?.enabled !== false;
+
 	const distDir = options?.distDir ?? __dirname;
 	const bridgeDir = options?.bridgeDir ?? path.join(os.homedir(), '.aexus-code', 'role-bridge');
-	const envWindowKey = process.env.AEXUS_ADE_WINDOW_KEY?.trim();
+	const envWindowKey = envSource.AEXUS_ADE_WINDOW_KEY?.trim();
 	const scopeId = options?.scopeId?.trim() || (options?.pid !== undefined ? String(options.pid) : (envWindowKey || String(process.pid)));
 	const stateFilePath = path.join(bridgeDir, `role-state-${scopeId}.json`);
 	const agyBindingsFilePath = path.join(bridgeDir, `agy-bindings-${scopeId}.json`);
@@ -165,7 +176,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 	/* eslint-disable local/code-no-sync-fs -- one-time check during extension-host preload initialization */
 	const hasAdeCliBin = fsSync.existsSync(path.join(adeCliBinDir, process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade'));
 	/* eslint-enable local/code-no-sync-fs */
-	if (hasAdeCliBin) {
+	if (bridgeEnabled && hasAdeCliBin) {
 		const envPathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH') ?? (process.platform === 'win32' ? 'Path' : 'PATH');
 		const curEnvPath = process.env[envPathKey] ?? '';
 		const alreadyHasDir = curEnvPath
@@ -200,7 +211,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 	let followerTimer: ReturnType<typeof setInterval> | undefined;
 
 	const probeEphemeralPort = (): void => {
-		if (disposed || freePortPool.length >= 2) {
+		if (disposed || !bridgeEnabled || freePortPool.length >= 2) {
 			return;
 		}
 		const srv = net.createServer();
@@ -212,16 +223,18 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			const addr = srv.address();
 			const port = typeof addr === 'object' && addr ? addr.port : 0;
 			srv.close(() => {
-				if (!disposed && port > 0 && !freePortPool.includes(port)) {
+				if (!disposed && bridgeEnabled && port > 0 && !freePortPool.includes(port)) {
 					freePortPool.push(port);
 				}
-				if (!disposed && freePortPool.length < 2) {
+				if (!disposed && bridgeEnabled && freePortPool.length < 2) {
 					probeEphemeralPort();
 				}
 			});
 		});
 	};
-	probeEphemeralPort();
+	if (bridgeEnabled) {
+		probeEphemeralPort();
+	}
 
 	const allocateUpstreamPortSync = (avoidPort: number): number => {
 		while (freePortPool.length > 0) {
@@ -402,28 +415,34 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		return stateRefreshPromise;
 	};
 
-	if (isFollower) {
+	const startFollowerTimer = (): void => {
+		if (disposed || !bridgeEnabled || !isFollower || followerTimer) {
+			return;
+		}
 		followerTimer = setInterval(() => {
 			void refreshFromStateFile();
 		}, 250);
 		followerTimer.unref?.();
-	}
+	};
+	startFollowerTimer();
 
-	const initPromise = Promise.all([
-		fs.access(dshPreloadPath).then(() => { hasDshPreload = true; }, () => { }),
-		ensureAgyHooksWorkspace(),
-		fs.readFile(agyBindingsFilePath, 'utf8').then(raw => {
-			const parsed = JSON.parse(raw) as unknown;
-			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-				for (const [convId, agentId] of Object.entries(parsed as Record<string, unknown>)) {
-					if (typeof agentId === 'string' && agentId && !agyBindingsMap[convId]) {
-						agyBindingsMap[convId] = agentId;
+	const initPromise = bridgeEnabled
+		? Promise.all([
+			fs.access(dshPreloadPath).then(() => { hasDshPreload = true; }, () => { }),
+			ensureAgyHooksWorkspace(),
+			fs.readFile(agyBindingsFilePath, 'utf8').then(raw => {
+				const parsed = JSON.parse(raw) as unknown;
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					for (const [convId, agentId] of Object.entries(parsed as Record<string, unknown>)) {
+						if (typeof agentId === 'string' && agentId && !agyBindingsMap[convId]) {
+							agyBindingsMap[convId] = agentId;
+						}
 					}
 				}
-			}
-		}, () => { }),
-		isFollower ? refreshFromStateFile() : persistState(),
-	]);
+			}, () => { }),
+			isFollower ? refreshFromStateFile() : persistState(),
+		])
+		: Promise.resolve();
 
 	const bindNativeSession = (shortEngine: string, agentId: string, nativeSessionId: string) => {
 		if (!agentId || !nativeSessionId) {
@@ -1560,7 +1579,16 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		if (hasAdeCliBin && nextOptions?.env) {
 			const pathKey = Object.keys(nextOptions.env).find(k => k.toUpperCase() === 'PATH') ?? 'PATH';
 			const rawPath = nextOptions.env[pathKey] ?? '';
-			if (!rawPath.split(path.delimiter).includes(adeCliBinDir)) {
+			if (isPureWorkerDenyToken(nextOptions.env.AEXUS_ADE_SESSION_TOKEN)) {
+				// Never re-inject the bundled ADE CLI bin dir into a pure Worker child's PATH.
+				nextOptions = {
+					...nextOptions,
+					env: {
+						...nextOptions.env,
+						[pathKey]: stripDirectoriesFromPath(rawPath, [adeCliBinDir]),
+					},
+				};
+			} else if (!rawPath.split(path.delimiter).includes(adeCliBinDir)) {
 				nextOptions = {
 					...nextOptions,
 					env: {
@@ -1600,9 +1628,9 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 
 		return child;
 	};
-	cpModule.spawn = wrappedSpawn as typeof cpModule.spawn;
 
-	const origFetch = fetchHost.fetch.bind(fetchHost);
+	const origFetchRef = fetchHost.fetch;
+	const origFetch = origFetchRef.bind(fetchHost);
 	const wrappedFetch = async function (input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
 		const urlStr = typeof input === 'string'
 			? input
@@ -1725,15 +1753,72 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 
 		return origFetch(input, init);
 	};
-	fetchHost.fetch = wrappedFetch;
+
+	const applyHooksState = (): void => {
+		if (disposed) {
+			return;
+		}
+		if (bridgeEnabled) {
+			if (cpModule.spawn !== wrappedSpawn) {
+				cpModule.spawn = wrappedSpawn as typeof cpModule.spawn;
+			}
+			if (fetchHost.fetch !== wrappedFetch) {
+				fetchHost.fetch = wrappedFetch;
+			}
+			probeEphemeralPort();
+			startFollowerTimer();
+		} else {
+			if (cpModule.spawn === wrappedSpawn) {
+				cpModule.spawn = origSpawn;
+			}
+			if (fetchHost.fetch === wrappedFetch) {
+				fetchHost.fetch = origFetchRef;
+			}
+			if (followerTimer) {
+				clearInterval(followerTimer);
+				followerTimer = undefined;
+			}
+			for (const cleanup of [...activeDisposables]) {
+				cleanup();
+			}
+			activeDisposables.clear();
+		}
+	};
+
+	if (bridgeEnabled) {
+		applyHooksState();
+	}
 
 	return {
 		stateFilePath,
 		agyHooksWorkspaceDir,
 		agyBindingsFilePath,
 		externalBindingsFilePath,
-		updateSnapshot,
+		updateSnapshot: async next => {
+			if (!bridgeEnabled) {
+				if (!disposed) {
+					applySnapshotToMemory(next);
+				}
+				return;
+			}
+			await updateSnapshot(next);
+		},
 		getSnapshot: () => snapshot,
+		isEnabled: () => bridgeEnabled && !disposed,
+		setEnabled: enabled => {
+			if (disposed) {
+				return;
+			}
+			const nextEnabled = !disabledByEnv && Boolean(enabled);
+			if (nextEnabled === bridgeEnabled) {
+				return;
+			}
+			bridgeEnabled = nextEnabled;
+			applyHooksState();
+			if (bridgeEnabled && !isFollower) {
+				void persistState();
+			}
+		},
 		setOnNativeSessionBound: cb => { onNativeSessionBound = cb; },
 		promoteToPrimary: promoteOpts => {
 			isFollower = false;
@@ -1799,7 +1884,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				cpModule.spawn = origSpawn;
 			}
 			if (fetchHost.fetch === wrappedFetch) {
-				fetchHost.fetch = origFetch;
+				fetchHost.fetch = origFetchRef;
 			}
 			if (!isFollower) {
 				for (const file of [stateFilePath, agyBindingsFilePath, agyInjectedFilePath, externalBindingsFilePath]) {

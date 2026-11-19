@@ -4,10 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, test } from 'node:test';
-import { parseCliCommand, runCli } from '../src/adeCli.ts';
+import { computeDoctorExitCode, parseCliCommand, runCli } from '../src/adeCli.ts';
 
 const CWD = path.join(os.tmpdir(), 'aexus-ade-cli');
 
@@ -25,6 +27,16 @@ describe('parseCliCommand doctor', () => {
 	test('doctor resolves an explicit relative project path', () => {
 		assert.deepStrictEqual(parseCliCommand(['doctor', '--project', './repo'], CWD).params, {
 			projectPath: path.join(CWD, 'repo'),
+		});
+	});
+
+	test('doctor parses --strict flag without altering default params when omitted', () => {
+		assert.deepStrictEqual(parseCliCommand(['doctor', '--strict', '--json'], CWD), {
+			help: false,
+			json: true,
+			windowId: undefined,
+			action: 'doctor',
+			params: { projectPath: CWD, strict: true },
 		});
 	});
 });
@@ -278,7 +290,7 @@ describe('runCli doctor color output', () => {
 
 	test('NO_COLOR disables ANSI even when stdout is a TTY', async () => {
 		const { exitCode, stderr, stdout } = await runDoctor({ NO_COLOR: '1' }, true);
-		assert.deepStrictEqual({ exitCode, stderr, hasAnsi: stdout.includes('\u001b[') }, { exitCode: 0, stderr: '', hasAnsi: false });
+		assert.deepStrictEqual({ exitCode, stderr, hasAnsi: stdout.includes('\u001b[') }, { exitCode: 1, stderr: '', hasAnsi: false });
 	});
 
 	test('FORCE_COLOR enables ANSI even when stdout is not a TTY', async () => {
@@ -288,7 +300,7 @@ describe('runCli doctor color output', () => {
 });
 
 describe('runCli doctor --json', () => {
-	test('emits a structured environment report without requiring a running workbench', async () => {
+	test('emits a structured environment report and exits 1 when control plane is offline and no engines are installed', async () => {
 		let stdout = '';
 		let stderr = '';
 		const exitCode = await runCli(['doctor', '--json', '--project', CWD], {
@@ -301,7 +313,7 @@ describe('runCli doctor --json', () => {
 			},
 			cwd: CWD,
 		});
-		assert.deepStrictEqual({ exitCode, stderr }, { exitCode: 0, stderr: '' });
+		assert.deepStrictEqual({ exitCode, stderr }, { exitCode: 1, stderr: '' });
 		const report = JSON.parse(stdout) as {
 			readonly platform: string;
 			readonly arch: string;
@@ -309,6 +321,7 @@ describe('runCli doctor --json', () => {
 			readonly controlPlane: { readonly connected: boolean };
 			readonly projectRules: readonly string[];
 			readonly engines: readonly { readonly id: string }[];
+			readonly checks: readonly { readonly id: string; readonly status: string }[];
 			readonly summary: { readonly enginesReady: number; readonly enginesTotal: number };
 		};
 		assert.deepStrictEqual({
@@ -318,6 +331,7 @@ describe('runCli doctor --json', () => {
 			controlPlaneConnected: report.controlPlane.connected,
 			projectRules: report.projectRules,
 			engineIds: report.engines.map(engine => engine.id),
+			checkStatuses: Object.fromEntries(report.checks.map(check => [check.id, check.status])),
 			summary: report.summary,
 		}, {
 			platform: process.platform,
@@ -326,7 +340,149 @@ describe('runCli doctor --json', () => {
 			controlPlaneConnected: false,
 			projectRules: [],
 			engineIds: ['claude-code', 'codex', 'antigravity', 'opencode', 'kilo', 'dsh', 'cline', 'pi'],
+			checkStatuses: {
+				'control-plane': 'fail',
+				engines: 'fail',
+				git: 'warn',
+				ssh: 'warn',
+			},
 			summary: { enginesReady: 0, enginesTotal: 8 },
 		});
+	});
+});
+
+describe('computeDoctorExitCode & runCli doctor --strict exit codes', () => {
+	test('returns 1 on fail/error, 2 on warn with --strict, and 0 otherwise', () => {
+		assert.strictEqual(computeDoctorExitCode({ checks: [{ id: 'a', label: 'A', status: 'ok', detail: '' }] }, false), 0);
+		assert.strictEqual(computeDoctorExitCode({ checks: [{ id: 'a', label: 'A', status: 'ok', detail: '' }] }, true), 0);
+		assert.strictEqual(computeDoctorExitCode({ checks: [{ id: 'a', label: 'A', status: 'warn', detail: '' }] }, false), 0);
+		assert.strictEqual(computeDoctorExitCode({ checks: [{ id: 'a', label: 'A', status: 'warn', detail: '' }] }, true), 2);
+		assert.strictEqual(computeDoctorExitCode({ checks: [{ id: 'a', label: 'A', status: 'fail', detail: '' }, { id: 'b', label: 'B', status: 'warn', detail: '' }] }, true), 1);
+		assert.strictEqual(computeDoctorExitCode({ checks: [{ id: 'a', label: 'A', status: 'error', detail: '' }] }, false), 1);
+	});
+
+	test('exits 0 on warnings without --strict, 2 with --strict, and 0 with --strict when all checks are healthy', async t => {
+		if (process.platform === 'win32') {
+			t.skip('Unix domain socket + POSIX sh stub test');
+			return;
+		}
+		const tmpDir = await fs.mkdtemp(path.join('/tmp', 'ade-doc-'));
+		const binDir = path.join(tmpDir, 'bin');
+		await fs.mkdir(binDir, { recursive: true });
+		const makeStub = async (name: string, output: string) => {
+			const file = path.join(binDir, name);
+			await fs.writeFile(file, `#!/bin/sh\necho "${output}"\n`, { mode: 0o755 });
+		};
+		// Provide claude engine + git, intentionally omitting ssh to trigger a warn check.
+		await makeStub('claude', 'claude 1.0.0');
+		await makeStub('git', 'git version 2.45.0');
+		// Include /usr/bin so `which` is available, wait: /usr/bin has ssh on macOS!
+		// Provide a minimal stub `which` in binDir so PATH contains ONLY binDir!
+		await fs.writeFile(path.join(binDir, 'which'), `#!/bin/sh\nif [ -x "${binDir}/$1" ]; then echo "${binDir}/$1"; exit 0; fi\nexit 1\n`, { mode: 0o755 });
+
+		const sockPath = path.join(tmpDir, 'ade.sock');
+		const srv = net.createServer(sock => {
+			let buf = '';
+			sock.setEncoding('utf8');
+			sock.on('data', chunk => {
+				buf += chunk;
+				if (buf.includes('\n')) {
+					sock.end(JSON.stringify({ ok: true, result: { mode: 'ade' } }) + '\n');
+				}
+			});
+		});
+		await new Promise<void>(resolve => srv.listen(sockPath, resolve));
+		try {
+			const env: NodeJS.ProcessEnv = {
+				PATH: binDir,
+				AEXUS_ADE_SOCKET: sockPath,
+				AEXUS_ADE_TOKEN: 'test-token',
+			};
+			let out1 = '';
+			const codeWarnDefault = await runCli(['doctor', '--json', '--project', tmpDir], {
+				stdout: s => { out1 += s; },
+				stderr: () => { },
+				env,
+				cwd: tmpDir,
+			});
+			assert.strictEqual(codeWarnDefault, 0, out1);
+
+			let out2 = '';
+			const codeWarnStrict = await runCli(['doctor', '--strict', '--json', '--project', tmpDir], {
+				stdout: s => { out2 += s; },
+				stderr: () => { },
+				env,
+				cwd: tmpDir,
+			});
+			assert.strictEqual(codeWarnStrict, 2, out2);
+
+			// Add ssh stub so all checks pass with status === 'ok'.
+			await makeStub('ssh', 'OpenSSH_9.7p1');
+			let out3 = '';
+			const codeAllOkStrict = await runCli(['doctor', '--strict', '--json', '--project', tmpDir], {
+				stdout: s => { out3 += s; },
+				stderr: () => { },
+				env,
+				cwd: tmpDir,
+			});
+			assert.strictEqual(codeAllOkStrict, 0, out3);
+		} finally {
+			await new Promise<void>(resolve => srv.close(() => resolve()));
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
+	test('uses AEXUS_ADE_SESSION_TOKEN + AEXUS_ADE_SOCKET without reading master control file and strips caller spoofing', async t => {
+		if (process.platform === 'win32') {
+			t.skip('Unix domain socket test');
+			return;
+		}
+		const tmpDir = await fs.mkdtemp(path.join('/tmp', 'ade-cap-'));
+		const sockPath = path.join(tmpDir, 'ade.sock');
+		const received: Array<{ token?: string; action?: string; params?: Record<string, unknown> }> = [];
+		const srv = net.createServer(sock => {
+			let buf = '';
+			sock.setEncoding('utf8');
+			sock.on('data', chunk => {
+				buf += chunk;
+				const idx = buf.indexOf('\n');
+				if (idx >= 0) {
+					received.push(JSON.parse(buf.slice(0, idx)) as { token?: string; action?: string; params?: Record<string, unknown> });
+					sock.end(JSON.stringify({ ok: true, result: { status: 'ok' } }) + '\n');
+				}
+			});
+		});
+		await new Promise<void>(resolve => srv.listen(sockPath, resolve));
+		try {
+			const capToken = 'aexus-cap.eyJzaWQiOiJzLTEiLCJyYW5rIjoiZW1wbG95ZWUiLCJpYXQiOjF9.deadbeef';
+			let stdout = '';
+			let stderr = '';
+			const code = await runCli(['--json', 'engineering', 'run', '--governor', 'gov-1'], {
+				stdout: s => { stdout += s; },
+				stderr: s => { stderr += s; },
+				env: {
+					AEXUS_ADE_HOME: path.join(tmpDir, 'does-not-exist'),
+					AEXUS_ADE_CONTROL_FILE: path.join(tmpDir, 'does-not-exist', 'ade-control.json'),
+					AEXUS_ADE_TOKEN: 'master-token-must-be-ignored',
+					AEXUS_ADE_SOCKET: sockPath,
+					AEXUS_ADE_SESSION_TOKEN: capToken,
+					AEXUS_ADE_CALLER: 'secretary',
+				},
+				cwd: tmpDir,
+			});
+			assert.strictEqual(code, 0, stderr || stdout);
+			assert.deepStrictEqual(received, [
+				{
+					token: capToken,
+					action: 'engineering.run',
+					params: { governor: 'gov-1' },
+				},
+			]);
+		} finally {
+			await new Promise<void>(resolve => srv.close(() => resolve()));
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 });

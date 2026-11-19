@@ -1941,4 +1941,185 @@ describe('ADE Native Extension Role Bridge', () => {
 			await fs.promises.rm(tmpRoot, { recursive: true, force: true });
 		}
 	});
+
+	it('honors AEXUS_ADE_DISABLE_NATIVE_ROLE_BRIDGE=1 and setEnabled(false) to opt out of fetch/spawn hooking cleanly', async () => {
+		const tmpRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'aexus-bridge-optout-'));
+		const distDir = path.join(tmpRoot, 'dist');
+		const bridgeDir = path.join(tmpRoot, 'bridge');
+		await fs.promises.mkdir(distDir, { recursive: true });
+		await fs.promises.mkdir(bridgeDir, { recursive: true });
+
+		const origSpawn = (() => createMockChild()) as unknown as typeof cp.spawn;
+		const origFetch = (async () => new Response('{}', { status: 200 })) as typeof globalThis.fetch;
+		const fakeCpEnv = { spawn: origSpawn };
+		const fakeFetchEnv = { fetch: origFetch };
+
+		// 1. Env opt-out: spawn and fetch must never be patched, while snapshot state still works in-memory.
+		const envDisabled = bridgeModule.createNativeRoleBridgeController({
+			distDir,
+			bridgeDir,
+			scopeId: 'env-optout',
+			env: { AEXUS_ADE_DISABLE_NATIVE_ROLE_BRIDGE: '1' },
+			childProcessModule: fakeCpEnv,
+			fetchHost: fakeFetchEnv,
+		});
+		try {
+			assert.strictEqual(envDisabled.isEnabled(), false);
+			assert.strictEqual(fakeCpEnv.spawn, origSpawn);
+			assert.strictEqual(fakeFetchEnv.fetch, origFetch);
+			// Calling setEnabled(true) cannot override the explicit env opt-out.
+			envDisabled.setEnabled(true);
+			assert.strictEqual(envDisabled.isEnabled(), false);
+			assert.strictEqual(fakeCpEnv.spawn, origSpawn);
+			assert.strictEqual(fakeFetchEnv.fetch, origFetch);
+
+			await envDisabled.updateSnapshot({
+				mode: 'ade',
+				activeAgentId: 'gov-1',
+				agents: [{
+					id: 'gov-1',
+					label: 'Gov',
+					projectPath: '/tmp/p',
+					engineId: 'aexus-claude',
+					rank: 'governor',
+					isOrchestrated: true,
+					rolePrompt: '[Aexus Orchestrated Role Context]',
+				}],
+			});
+			assert.strictEqual(envDisabled.getSnapshot().activeAgentId, 'gov-1');
+		} finally {
+			envDisabled.dispose();
+		}
+
+		// 2. Runtime setting opt-out via setEnabled(false) cleanly restores original spawn/fetch references.
+		const fakeCpToggle = { spawn: origSpawn };
+		const fakeFetchToggle = { fetch: origFetch };
+		const toggleable = bridgeModule.createNativeRoleBridgeController({
+			distDir,
+			bridgeDir,
+			scopeId: 'setting-optout',
+			env: {},
+			childProcessModule: fakeCpToggle,
+			fetchHost: fakeFetchToggle,
+		});
+		try {
+			assert.strictEqual(toggleable.isEnabled(), true);
+			assert.notStrictEqual(fakeCpToggle.spawn, origSpawn);
+			assert.notStrictEqual(fakeFetchToggle.fetch, origFetch);
+
+			toggleable.setEnabled(false);
+			assert.strictEqual(toggleable.isEnabled(), false);
+			assert.strictEqual(fakeCpToggle.spawn, origSpawn);
+			assert.strictEqual(fakeFetchToggle.fetch, origFetch);
+
+			toggleable.setEnabled(true);
+			assert.strictEqual(toggleable.isEnabled(), true);
+			assert.notStrictEqual(fakeCpToggle.spawn, origSpawn);
+			assert.notStrictEqual(fakeFetchToggle.fetch, origFetch);
+		} finally {
+			toggleable.dispose();
+			await fs.promises.rm(tmpRoot, { recursive: true, force: true });
+		}
+	});
+
+	it('isolates pure Worker vs orchestrated child env across all 8 engines and prevents nativeRoleBridge from re-adding CLI bin to pure Worker PATH', async () => {
+		const adeBinDir = '/opt/aexus/extensions/aexus-agents/bin';
+		const appBinDir = '/Applications/Aexus Code.app/Contents/Resources/app/bin';
+		const baseEnv: NodeJS.ProcessEnv = {
+			PATH: `${adeBinDir}:/usr/local/bin:${appBinDir}:/usr/bin`,
+			AEXUS_ADE_CONTROL_FILE: '/Users/dev/.aexus-code/ade-control.1234.json',
+			AEXUS_ADE_TOKEN: 'master-secret-token',
+			AEXUS_ADE_SOCKET: '/Users/dev/.aexus-code/ade-control.sock',
+			AEXUS_ADE_CALLER: 'secretary',
+		};
+		const engines = ['claude', 'codex', 'pi', 'kilo', 'opencode', 'dsh', 'antigravity', 'cline'] as const;
+		const signedPureToken = `aexus-cap.${Buffer.from(JSON.stringify({ sid: 'wrk-1', rank: 'worker', pure: true, iat: 1 }), 'utf8').toString('base64url')}.${'a'.repeat(64)}`;
+		const signedMgrToken = `aexus-cap.${Buffer.from(JSON.stringify({ sid: 'mgr-1', rank: 'manager', iat: 1 }), 'utf8').toString('base64url')}.${'b'.repeat(64)}`;
+
+		for (const engine of engines) {
+			// Orchestrated session: capability token + socket + caller set; master control file & master token deleted.
+			const orchEnv = sharedModule.buildAgentChildEnv({
+				sessionId: `${engine}-mgr`,
+				callerRole: 'manager',
+				pureWorker: false,
+				baseEnv,
+				cliBinDirs: [adeBinDir, appBinDir],
+				socketPath: '/Users/dev/.aexus-code/ade-control.555.sock',
+				sessionToken: signedMgrToken,
+				platform: 'darwin',
+			});
+			assert.strictEqual(orchEnv.AEXUS_ADE_CONTROL_FILE, undefined, `${engine}: control file must be deleted`);
+			assert.strictEqual(orchEnv.AEXUS_ADE_TOKEN, undefined, `${engine}: master token must be deleted`);
+			assert.strictEqual(orchEnv.AEXUS_ADE_SOCKET, '/Users/dev/.aexus-code/ade-control.555.sock', `${engine}: socket set`);
+			assert.strictEqual(orchEnv.AEXUS_ADE_SESSION_TOKEN, signedMgrToken, `${engine}: session token set`);
+			assert.strictEqual(orchEnv.AEXUS_ADE_CALLER, 'manager', `${engine}: caller set`);
+			assert.ok((orchEnv.PATH ?? '').split(':').includes(adeBinDir), `${engine}: orchestrated keeps CLI bin`);
+
+			// Pure Worker session (both pureWorker: true and callerRole: 'worker'):
+			// all control vars deleted, CLI bin stripped from PATH, and pure deny token injected.
+			for (const pureCase of [
+				{ sessionId: `${engine}-wrk-flag`, pureWorker: true, callerRole: 'governor' },
+				{ sessionId: `${engine}-wrk-role`, pureWorker: false, callerRole: 'worker' },
+			]) {
+				const pureEnv = sharedModule.buildAgentChildEnv({
+					...pureCase,
+					baseEnv,
+					cliBinDirs: [adeBinDir, appBinDir],
+					socketPath: '/Users/dev/.aexus-code/ade-control.555.sock',
+					sessionToken: signedPureToken,
+					platform: 'darwin',
+				});
+				assert.strictEqual(pureEnv.AEXUS_ADE_CONTROL_FILE, undefined, `${engine}: pure control file deleted`);
+				assert.strictEqual(pureEnv.AEXUS_ADE_TOKEN, undefined, `${engine}: pure master token deleted`);
+				assert.strictEqual(pureEnv.AEXUS_ADE_SOCKET, undefined, `${engine}: pure socket deleted`);
+				assert.strictEqual(pureEnv.AEXUS_ADE_CALLER, undefined, `${engine}: pure caller deleted`);
+				assert.strictEqual(pureEnv.AEXUS_ADE_SESSION_TOKEN, signedPureToken, `${engine}: pure deny token injected`);
+				assert.strictEqual(sharedModule.isPureWorkerDenyToken(pureEnv.AEXUS_ADE_SESSION_TOKEN), true);
+				const pathParts = (pureEnv.PATH ?? '').split(':');
+				assert.strictEqual(pathParts.includes(adeBinDir), false, `${engine}: pure PATH must not contain adeBinDir`);
+				assert.strictEqual(pathParts.includes(appBinDir), false, `${engine}: pure PATH must not contain appBinDir`);
+				assert.deepStrictEqual(pathParts, ['/usr/local/bin', '/usr/bin']);
+			}
+		}
+
+		// Verify nativeRoleBridge.wrappedSpawn does NOT re-inject adeCliBinDir for a pure Worker child.
+		const tmpRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'aexus-pure-spawn-'));
+		const fakeDistDir = path.join(tmpRoot, 'dist');
+		const fakeBinDir = path.join(tmpRoot, 'bin');
+		const bridgeDir = path.join(tmpRoot, 'bridge');
+		await fs.promises.mkdir(fakeDistDir, { recursive: true });
+		await fs.promises.mkdir(fakeBinDir, { recursive: true });
+		await fs.promises.mkdir(bridgeDir, { recursive: true });
+		await fs.promises.writeFile(path.join(fakeBinDir, process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade'), '#!/bin/sh\n', { mode: 0o755 });
+
+		let observedPureSpawnEnv: NodeJS.ProcessEnv | undefined;
+		const fakeCp = {
+			spawn: ((_cmd: string, _args: readonly string[], opts?: cp.SpawnOptions) => {
+				observedPureSpawnEnv = opts?.env;
+				return createMockChild();
+			}) as unknown as typeof cp.spawn,
+		};
+		const bridge = bridgeModule.createNativeRoleBridgeController({
+			distDir: fakeDistDir,
+			bridgeDir,
+			scopeId: 'pure-path-guard',
+			env: {},
+			childProcessModule: fakeCp,
+			fetchHost: { fetch: (async () => new Response('{}', { status: 200 })) as typeof globalThis.fetch },
+		});
+		try {
+			fakeCp.spawn('claude', ['--version'], {
+				env: {
+					PATH: `/usr/local/bin${path.delimiter}${fakeBinDir}`,
+					AEXUS_ADE_SESSION_TOKEN: signedPureToken,
+				},
+			});
+			const finalPathKey = Object.keys(observedPureSpawnEnv ?? {}).find(k => k.toUpperCase() === 'PATH') ?? 'PATH';
+			const finalSegments = (observedPureSpawnEnv?.[finalPathKey] ?? '').split(path.delimiter);
+			assert.strictEqual(finalSegments.includes(fakeBinDir), false, 'nativeRoleBridge must strip adeCliBinDir for pure Workers');
+		} finally {
+			bridge.dispose();
+			await fs.promises.rm(tmpRoot, { recursive: true, force: true });
+		}
+	});
 });

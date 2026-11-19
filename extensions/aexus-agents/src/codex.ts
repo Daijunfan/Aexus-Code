@@ -10,7 +10,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, JsonLineClient, NativeSession, RpcPacket, withTimeout } from './runtime';
+import { AgentChildIdentity } from './roleBridgeShared';
+import { agentIdentityScopeKey, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, RpcPacket, withTimeout } from './runtime';
 
 interface ThreadItem { type: string; text?: string; command?: string; server?: string; tool?: string; query?: string; content?: { type: string; text?: string }[] }
 interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[]; usage?: unknown }
@@ -145,16 +146,21 @@ function mapReasoningEffort(thinking?: EngineThinkingLevel): string | undefined 
 	}
 }
 
+interface CodexClientSlot {
+	client?: JsonLineClient;
+	ready: Promise<JsonLineClient>;
+	readonly loaded: Set<string>;
+	sessionListener?: vscode.Disposable;
+}
+
 export class CodexRuntime implements EngineRuntime {
 	readonly id = 'codex';
 	readonly name = 'Codex';
-	private client!: JsonLineClient;
-	private ready!: Promise<void>;
-	private readonly loaded = new Set<string>();
+	private readonly clientSlots = new Map<string, CodexClientSlot>();
+	private readonly sessionScopeKeys = new Map<string, string>();
 	private codexHome!: string;
 	private readonly changed = new vscode.EventEmitter<readonly NativeSession[]>();
 	readonly onDidChangeSessions = this.changed.event;
-	private sessionListener: vscode.Disposable | undefined;
 	private readonly knownSessions = new Map<string, NativeSession>();
 	private readonly supportedModels = new Set<string>();
 	private readonly threadModelOverrides = new Map<string, string>();
@@ -163,48 +169,82 @@ export class CodexRuntime implements EngineRuntime {
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
 	private defaultModel: string | undefined;
 
-	constructor(private readonly executable: string) { this.connect(); }
+	constructor(private readonly executable: string) { }
 
-	private connect(): void {
-		this.loaded.clear();
-		this.supportedModels.clear();
-		this.capabilitiesCache.clear();
-		this.defaultModel = undefined;
-		const client = this.client = new JsonLineClient(this.executable, ['app-server']);
-		this.sessionListener?.dispose();
-		this.sessionListener = client.onPacket(packet => {
-			const params = packet.params as Notification | undefined;
-			if ((packet.method === 'thread/tokenUsage/updated' || packet.method === 'turn/completed') && params?.threadId) {
-				const usage = extractTurnTokenUsage(params.tokenUsage ?? params.usage ?? params.turn?.usage);
-				if (usage) {
-					this.lastTurnUsageBySession.set(params.threadId, usage);
-				}
+	private disposeSlot(scopeKey: string): void {
+		const slot = this.clientSlots.get(scopeKey);
+		if (!slot) {
+			return;
+		}
+		this.clientSlots.delete(scopeKey);
+		slot.sessionListener?.dispose();
+		slot.client?.dispose();
+		slot.loaded.clear();
+	}
+
+	private async ensureSlot(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
+		const existing = this.clientSlots.get(scopeKey);
+		if (existing && (!existing.client || !existing.client.isClosed)) {
+			const client = await existing.ready;
+			if (!client.isClosed) {
+				return { client, loaded: existing.loaded };
 			}
-			if (packet.method === 'thread/started') {
-				const thread = (packet.params as { thread: Thread }).thread;
-				this.loaded.add(thread.id);
-				if (thread.parentThreadId) { this.changed.fire([this.session(thread)]); }
-			}
-		});
-		this.ready = client.request<{ codexHome: string }>('initialize', { clientInfo: { name: 'aexus-code', title: 'Aexus Code', version: '0.1.0' }, capabilities: { experimentalApi: true } }).then(async info => {
-			this.codexHome = info.codexHome;
-			client.write({ jsonrpc: '2.0', method: 'initialized' });
-			try {
-				const modelsResp = await withTimeout(client.request<{ data?: { id?: string; model?: string; isDefault?: boolean }[] }>('model/list', {}), 4000);
-				for (const item of modelsResp?.data ?? []) {
-					const name = item.model || item.id;
-					if (name) {
-						this.supportedModels.add(name);
-						if (item.isDefault || !this.defaultModel) {
-							this.defaultModel = name;
-						}
+		}
+		this.disposeSlot(scopeKey);
+
+		const loaded = new Set<string>();
+		const slot: CodexClientSlot = {
+			loaded,
+			ready: Promise.resolve(undefined as unknown as JsonLineClient),
+		};
+		slot.ready = (async () => {
+			const childEnv = await prepareAgentChildEnv(identity ?? { sessionId: 'codex-pure', pureWorker: true });
+			const client = new JsonLineClient(this.executable, ['app-server'], undefined, childEnv);
+			slot.client = client;
+			slot.sessionListener = client.onPacket(packet => {
+				const params = packet.params as Notification | undefined;
+				if ((packet.method === 'thread/tokenUsage/updated' || packet.method === 'turn/completed') && params?.threadId) {
+					const usage = extractTurnTokenUsage(params.tokenUsage ?? params.usage ?? params.turn?.usage);
+					if (usage) {
+						this.lastTurnUsageBySession.set(params.threadId, usage);
 					}
 				}
-			} catch { /* Keep CLI default model when model/list is unavailable. */ }
+				if (packet.method === 'thread/started') {
+					const thread = (packet.params as { thread: Thread }).thread;
+					loaded.add(thread.id);
+					if (thread.parentThreadId) { this.changed.fire([this.session(thread)]); }
+				}
+			});
+			const info = await client.request<{ codexHome: string }>('initialize', {
+				clientInfo: { name: 'aexus-code', title: 'Aexus Code', version: '0.1.0' },
+				capabilities: { experimentalApi: true },
+			});
+			this.codexHome = info.codexHome;
+			client.write({ jsonrpc: '2.0', method: 'initialized' });
+			if (this.supportedModels.size === 0) {
+				try {
+					const modelsResp = await withTimeout(client.request<{ data?: { id?: string; model?: string; isDefault?: boolean }[] }>('model/list', {}), 4000);
+					for (const item of modelsResp?.data ?? []) {
+						const name = item.model || item.id;
+						if (name) {
+							this.supportedModels.add(name);
+							if (item.isDefault || !this.defaultModel) {
+								this.defaultModel = name;
+							}
+						}
+					}
+				} catch { /* Keep CLI default model when model/list is unavailable. */ }
+			}
+			return client;
+		})();
+		this.clientSlots.set(scopeKey, slot);
+		void slot.ready.catch(() => {
+			if (this.clientSlots.get(scopeKey) === slot) {
+				this.disposeSlot(scopeKey);
+			}
 		});
-		void this.ready.catch(() => {
-			client.dispose();
-		});
+		const client = await slot.ready;
+		return { client, loaded };
 	}
 
 	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
@@ -227,27 +267,38 @@ export class CodexRuntime implements EngineRuntime {
 		return model;
 	}
 
-	private approvalPolicy(permissionMode?: string): ApprovalPolicy {
-		switch (permissionMode?.trim()) {
+	private approvalPolicy(options?: EngineSendOptions, explicitPermissionMode?: string): ApprovalPolicy {
+		if (options?.automatedEngineering) {
+			return 'never';
+		}
+		switch ((explicitPermissionMode ?? options?.permissionMode)?.trim()) {
 			case 'untrusted':
 				return 'untrusted';
 			case 'on-request':
 				return 'on-request';
-			default:
-				// Never prompt in non-interactive app-server turns; that would hang the stream.
+			case 'never':
+			case 'bypassPermissions':
 				return 'never';
+			default:
+				// Safe by default for interactive sessions unless autonomousMode is explicitly enabled.
+				return isAutonomousModeEnabled() ? 'never' : 'on-request';
 		}
 	}
 
-	private sandboxMode(sandboxMode?: string): SandboxMode {
-		switch (sandboxMode?.trim()) {
+	private sandboxMode(options?: EngineSendOptions, explicitSandboxMode?: string): SandboxMode {
+		if (options?.automatedEngineering) {
+			return 'danger-full-access';
+		}
+		switch ((explicitSandboxMode ?? options?.sandboxMode)?.trim()) {
 			case 'read-only':
 				return 'read-only';
 			case 'workspace-write':
 				return 'workspace-write';
-			default:
-				// Highest full-access sandbox by default unless the user explicitly restricted it.
+			case 'danger-full-access':
 				return 'danger-full-access';
+			default:
+				// Safe by default for interactive sessions unless autonomousMode is explicitly enabled.
+				return isAutonomousModeEnabled() ? 'danger-full-access' : 'workspace-write';
 		}
 	}
 
@@ -255,13 +306,13 @@ export class CodexRuntime implements EngineRuntime {
 		const params: Record<string, unknown> = {
 			cwd,
 			ephemeral: false,
-			approvalPolicy: this.approvalPolicy(options?.permissionMode),
+			approvalPolicy: this.approvalPolicy(options),
 		};
 		const model = this.requestedModel(options);
 		if (model) {
 			params.model = model;
 		}
-		const sandbox = this.sandboxMode(options?.sandboxMode);
+		const sandbox = this.sandboxMode(options);
 		if (sandbox) {
 			params.sandbox = sandbox;
 		}
@@ -288,9 +339,9 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
-	private ensureReady(): Promise<void> {
-		if (this.client.isClosed) { this.client.dispose(); this.connect(); }
-		return this.ready;
+	private async ensureReady(scopeKey = 'pure', identity?: AgentChildIdentity): Promise<JsonLineClient> {
+		const { client } = await this.ensureSlot(scopeKey, identity);
+		return client;
 	}
 
 	private session(thread: Thread): NativeSession {
@@ -362,9 +413,10 @@ export class CodexRuntime implements EngineRuntime {
 		const now = Date.now();
 		try {
 			return await withTimeout((async () => {
-				await this.ensureReady();
-				const result = await this.client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(cwd, options));
-				this.loaded.add(result.thread.id);
+				const { client, loaded } = await this.ensureSlot('pure', { sessionId: 'codex-pure', pureWorker: true });
+				const result = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(cwd, options));
+				loaded.add(result.thread.id);
+				this.sessionScopeKeys.set(result.thread.id, 'pure');
 				this.recordThreadModelIfUnsupported(result.thread.id, result.model);
 				return { ...this.session(result.thread), provisional: true };
 			})(), 6000);
@@ -382,29 +434,39 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
-		await this.ensureReady();
+		const scopeKey = options ? agentIdentityScopeKey(session.id, options) : (this.sessionScopeKeys.get(session.id) ?? 'pure');
+		const identity: AgentChildIdentity = options
+			? { sessionId: session.id, callerRole: options.callerRole, pureWorker: options.pureWorker }
+			: { sessionId: session.id, pureWorker: true };
+		const { client, loaded } = await this.ensureSlot(scopeKey, identity);
+		this.sessionScopeKeys.set(session.id, scopeKey);
 		if (session.unmaterialized) {
-			const result = await this.client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options));
-			this.loaded.add(result.thread.id);
+			const result = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options));
+			loaded.add(result.thread.id);
+			this.sessionScopeKeys.set(result.thread.id, scopeKey);
 			this.recordThreadModelIfUnsupported(result.thread.id, result.model);
 			Object.assign(session, this.session(result.thread), { provisional: true, unmaterialized: false });
 			return;
 		}
-		if (session.parentId && !this.loaded.has(session.parentId)) {
-			const parent = await this.client.request<{ thread: Thread }>('thread/read', { threadId: session.parentId, includeTurns: false });
-			await this.prepareSession(this.session(parent.thread));
+		if (session.parentId && !loaded.has(session.parentId)) {
+			const parent = await client.request<{ thread: Thread }>('thread/read', { threadId: session.parentId, includeTurns: false });
+			await this.prepareSession(this.session(parent.thread), options);
 		}
-		if (this.loaded.has(session.id)) { return; }
+		if (loaded.has(session.id)) { return; }
 		try {
-			const result = await this.client.request<{ thread: Thread; model?: string }>('thread/resume', { threadId: session.id, cwd: session.cwd, excludeTurns: true });
-			this.loaded.add(session.id);
+			const result = await client.request<{ thread: Thread; model?: string }>('thread/resume', { threadId: session.id, cwd: session.cwd, excludeTurns: true });
+			loaded.add(session.id);
 			this.recordThreadModelIfUnsupported(session.id, result.model);
 			session.file = result.thread.path;
 			session.provisional = false;
 		} catch (error) {
 			// Empty native threads have no rollout until their first user message.
 			if (!session.provisional || !(error instanceof Error) || !error.message.includes('no rollout found')) { throw error; }
-			Object.assign(session, await this.create(session.cwd, options));
+			const started = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options));
+			loaded.add(started.thread.id);
+			this.sessionScopeKeys.set(started.thread.id, scopeKey);
+			this.recordThreadModelIfUnsupported(started.thread.id, started.model);
+			Object.assign(session, this.session(started.thread), { provisional: true, unmaterialized: false });
 		}
 	}
 
@@ -470,20 +532,34 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	async killSession(session: NativeSession): Promise<void> {
-		if (!this.client.isClosed) {
-			await this.client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
-			this.loaded.delete(session.id);
+		const scopeKey = this.sessionScopeKeys.get(session.id);
+		const keys = scopeKey ? [scopeKey] : [...this.clientSlots.keys()];
+		for (const key of keys) {
+			const slot = this.clientSlots.get(key);
+			if (slot?.client && !slot.client.isClosed) {
+				await slot.client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
+				slot.loaded.delete(session.id);
+			}
+			if (key !== 'pure' && key.startsWith(`orch:${session.id}:`)) {
+				this.disposeSlot(key);
+			}
 		}
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
 		await this.prepareSession(session, options);
 		this.knownSessions.set(session.id, session);
-		const client = this.client;
+		const scopeKey = agentIdentityScopeKey(session.id, options);
+		const { client } = await this.ensureSlot(scopeKey, {
+			sessionId: session.id,
+			callerRole: options?.callerRole,
+			pureWorker: options?.pureWorker,
+		});
+		this.sessionScopeKeys.set(session.id, scopeKey);
 		let turnId: string | undefined;
 		const mappedEffort = mapReasoningEffort(options?.thinking);
-		const approvalPolicy = this.approvalPolicy(options?.permissionMode);
-		const sandboxMode = this.sandboxMode(options?.sandboxMode);
+		const approvalPolicy = this.approvalPolicy(options);
+		const sandboxMode = this.sandboxMode(options);
 		this.sessionSettings.set(session.id, { model: this.requestedModel(options), effort: mappedEffort, approvalPolicy, sandbox: sandboxMode, webSearch: options?.webSearch });
 		const input: Array<Record<string, unknown>> = [{ type: 'text', text, text_elements: [] }];
 		for (const attachment of options?.attachments ?? []) {
@@ -498,13 +574,29 @@ export class CodexRuntime implements EngineRuntime {
 			void completed.catch(() => { });
 			const listener = client.onPacket(packet => {
 				if (packet.method === 'aexus/connectionClosed') { fail(new Error(String(packet.params?.message))); return; }
-				const params = packet.params as Notification | undefined;
+				const params = packet.params as (Notification & { type?: string }) | undefined;
 				if (packet.id !== undefined && params?.threadId && this.belongsTo(params.threadId, session.id)) {
 					const targetSession = this.knownSessions.get(params.threadId) ?? session;
 					void this.handleRequest(client, packet, targetSession, token, approvalPolicy).catch(fail);
 					return;
 				}
 				if (params?.threadId !== session.id) { return; }
+				const isCompactionEvent = packet.method === 'thread/compacted'
+					|| packet.method === 'context/compacted'
+					|| packet.method === 'context_compacted'
+					|| packet.method === 'turn/compacted'
+					|| params.type === 'context_compacted'
+					|| params.type === 'compact_boundary'
+					|| ((packet.method === 'item/started' || packet.method === 'item/completed') && (
+						params.item?.type === 'contextCompaction'
+						|| params.item?.type === 'context_compacted'
+						|| params.item?.type === 'compaction'
+					));
+				if (isCompactionEvent) {
+					try {
+						options?.onContextCompacted?.();
+					} catch { /* Compaction callback must never break the turn. */ }
+				}
 				if (!token.isCancellationRequested && packet.method === 'item/agentMessage/delta' && params.delta) { stream.markdown(params.delta); }
 				if (!token.isCancellationRequested && (packet.method === 'item/reasoning/summaryTextDelta' || packet.method === 'item/reasoning/textDelta')) {
 					emitThinkingProgress(stream, String(packet.params?.delta ?? ''), 'codex-thinking');
@@ -556,10 +648,10 @@ export class CodexRuntime implements EngineRuntime {
 		if (cached && cached.expiresAt > Date.now()) {
 			return cached.value;
 		}
-		await this.ensureReady();
+		const client = await this.ensureReady();
 		const models: Array<{ id: string; name: string; description?: string }> = [];
 		try {
-			const response = await withTimeout(this.client.request<{ data?: Array<{ id?: string; model?: string; displayName?: string; description?: string }> }>('model/list', {}), 4000);
+			const response = await withTimeout(client.request<{ data?: Array<{ id?: string; model?: string; displayName?: string; description?: string }> }>('model/list', {}), 4000);
 			for (const item of response?.data ?? []) {
 				const id = item.model || item.id;
 				if (!id) {
@@ -572,7 +664,7 @@ export class CodexRuntime implements EngineRuntime {
 		const commands: Array<{ name: string; description?: string }> = [];
 		const seen = new Set<string>();
 		try {
-			const response = await withTimeout(this.client.request<unknown>('skills/list', { cwds: [cwd] }), 4000);
+			const response = await withTimeout(client.request<unknown>('skills/list', { cwds: [cwd] }), 4000);
 			for (const entry of extractSkillEntries(response)) {
 				const raw = entry.name ?? entry.skill ?? entry.id ?? (entry.path ? path.basename(entry.path).replace(/\.(md|json)$/i, '') : '');
 				const name = raw.replace(/^\/+/, '').trim();
@@ -606,20 +698,22 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
-	private async materializeForCommand(session: NativeSession): Promise<void> {
-		await this.ensureReady();
+	private async materializeForCommand(session: NativeSession): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
+		const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+		const slot = await this.ensureSlot(scopeKey);
 		if (session.unmaterialized || session.provisional) {
 			await this.prepareSession(session);
 		}
+		return slot;
 	}
 
 	private async executeCompact(session: NativeSession, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<boolean> {
 		try {
-			await this.materializeForCommand(session);
+			const { client } = await this.materializeForCommand(session);
 			if (token.isCancellationRequested) {
 				return true;
 			}
-			await this.client.request('thread/compact/start', { threadId: session.id });
+			await client.request('thread/compact/start', { threadId: session.id });
 			stream.markdown(`**${vscode.l10n.t('Compaction started')}**\n\n${vscode.l10n.t('Codex will summarize the conversation history for thread `{0}`.', session.id)}`);
 			return true;
 		} catch (error) {
@@ -631,11 +725,11 @@ export class CodexRuntime implements EngineRuntime {
 	private async executeReview(session: NativeSession, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken): Promise<boolean> {
 		const instructions = argsText.trim();
 		try {
-			await this.materializeForCommand(session);
+			const { client } = await this.materializeForCommand(session);
 			if (token.isCancellationRequested) {
 				return true;
 			}
-			const result = await this.client.request<Record<string, unknown>>('review/start', {
+			const result = await client.request<Record<string, unknown>>('review/start', {
 				threadId: session.id,
 				target: instructions ? { type: 'custom', instructions } : { type: 'uncommittedChanges' },
 			});
@@ -657,14 +751,16 @@ export class CodexRuntime implements EngineRuntime {
 			return true;
 		}
 		try {
-			await this.ensureReady();
+			const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+			const { client, loaded } = await this.ensureSlot(scopeKey);
 			if (token.isCancellationRequested) {
 				return true;
 			}
-			const result = await this.client.request<{ thread?: Thread; threadId?: string }>('thread/fork', { threadId: session.id, cwd: session.cwd });
+			const result = await client.request<{ thread?: Thread; threadId?: string }>('thread/fork', { threadId: session.id, cwd: session.cwd });
 			const forkedId = result.thread?.id ?? result.threadId;
 			if (forkedId) {
-				this.loaded.add(forkedId);
+				loaded.add(forkedId);
+				this.sessionScopeKeys.set(forkedId, scopeKey);
 				if (result.thread) {
 					this.changed.fire([this.session(result.thread)]);
 				}
@@ -683,8 +779,8 @@ export class CodexRuntime implements EngineRuntime {
 		const settings = this.sessionSettings.get(session.id);
 		const model = this.requestedModel(options) ?? settings?.model ?? this.defaultModel ?? vscode.l10n.t('Unknown');
 		const effort = options?.thinking ?? settings?.effort ?? vscode.l10n.t('Default');
-		const approval = this.approvalPolicy(options?.permissionMode ?? settings?.approvalPolicy);
-		const sandbox = this.sandboxMode(options?.sandboxMode) ?? settings?.sandbox ?? vscode.l10n.t('Codex default');
+		const approval = this.approvalPolicy(options, options?.permissionMode ?? settings?.approvalPolicy);
+		const sandbox = this.sandboxMode(options, options?.sandboxMode ?? settings?.sandbox);
 		const webSearch = options?.webSearch ?? settings?.webSearch ?? 'enabled';
 		const mcpServers = await this.readMcpServerNames();
 		const rows: Array<[string, string]> = [
@@ -729,27 +825,38 @@ export class CodexRuntime implements EngineRuntime {
 		for (const child of await this.children(session, token)) {
 			await this.delete(child, token);
 		}
-		await this.ensureReady();
+		const scopeKey = this.sessionScopeKeys.get(session.id) ?? 'pure';
+		const { client, loaded } = await this.ensureSlot(scopeKey);
 		if (session.provisional) {
-			await this.client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
+			await client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
 		} else {
 			try {
-				await this.client.request('thread/delete', { threadId: session.id });
+				await client.request('thread/delete', { threadId: session.id });
 			} catch (error) {
 				const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
 				if (message.includes('no rollout found') || message.includes('not found')) {
-					await this.client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
+					await client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
 				} else {
 					throw error;
 				}
 			}
 		}
-		this.loaded.delete(session.id);
+		loaded.delete(session.id);
+		this.sessionScopeKeys.delete(session.id);
+		if (scopeKey !== 'pure') {
+			this.disposeSlot(scopeKey);
+		}
 		this.knownSessions.delete(session.id);
 		if (session.file) {
 			await fs.rm(session.file, { force: true });
 		}
 	}
 
-	dispose(): void { this.sessionListener?.dispose(); this.changed.dispose(); this.client.dispose(); }
+	dispose(): void {
+		for (const key of [...this.clientSlots.keys()]) {
+			this.disposeSlot(key);
+		}
+		this.sessionScopeKeys.clear();
+		this.changed.dispose();
+	}
 }

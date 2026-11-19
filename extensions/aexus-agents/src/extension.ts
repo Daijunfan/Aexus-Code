@@ -30,6 +30,7 @@ import { PiRuntime } from './pi';
 import {
 	AEXUS_PREAMBLE_END_MARKER,
 	filterAndCleanHistoryTurns,
+	isNativeRoleBridgeDisabledByEnv,
 	RoleSyncSnapshot,
 } from './roleBridgeShared';
 import {
@@ -42,6 +43,7 @@ import {
 	EngineTurnTokenUsage,
 	findExecutable,
 	HistoryEntry,
+	isAutonomousModeEnabled,
 	NativeSession,
 	setCliBinDirectory,
 } from './runtime';
@@ -52,7 +54,72 @@ const roleBridge = installNativeRoleBridge({ distDir: __dirname });
 interface RoleInitState {
 	rank: string;
 	engine: string;
+	promptHash?: string;
 	initializedAt: number;
+}
+
+function hashRolePrompt(prompt: string | undefined): string {
+	return crypto.createHash('sha256').update((prompt ?? '').trim(), 'utf8').digest('hex');
+}
+
+function resolveDefaultModeForEngine(engineType: EngineId, autonomous: boolean): string | undefined {
+	if (engineType === 'aexus-cline') {
+		return autonomous ? 'yolo' : 'ask';
+	}
+	if (engineType === 'aexus-antigravity') {
+		return autonomous ? 'auto' : 'ask';
+	}
+	if (engineType === 'aexus-pi') {
+		return 'full';
+	}
+	return undefined;
+}
+
+function resolveDefaultPermissionsForEngine(engineType: EngineId, autonomous: boolean): string {
+	if (engineType === 'aexus-codex') {
+		return autonomous ? 'never' : 'on-request';
+	}
+	if (engineType === 'aexus-claude') {
+		return autonomous ? 'bypassPermissions' : 'acceptEdits';
+	}
+	if (engineType === 'aexus-dsh') {
+		return autonomous ? 'danger-full-access' : 'ask';
+	}
+	return autonomous ? 'bypassPermissions' : 'ask';
+}
+
+function resolveDefaultSandboxForEngine(autonomous: boolean): string {
+	return autonomous ? 'danger-full-access' : 'workspace-write';
+}
+
+function withSafeDefaultConfig(engineType: EngineId, cfg: SessionConfigState): SessionConfigState {
+	const autonomous = isAutonomousModeEnabled();
+	if (autonomous) {
+		return cfg;
+	}
+	const defaultMode = resolveDefaultModeForEngine(engineType, false);
+	const defaultPerm = resolveDefaultPermissionsForEngine(engineType, false);
+	const defaultSandbox = resolveDefaultSandboxForEngine(false);
+	return {
+		...cfg,
+		...(defaultMode && (!cfg.mode || cfg.mode === 'default') ? { mode: defaultMode } : {}),
+		...((!cfg.permissionMode || cfg.permissionMode === 'default') ? { permissionMode: defaultPerm } : {}),
+		...(engineType === 'aexus-codex' && (!cfg.sandboxMode || cfg.sandboxMode === 'default') ? { sandboxMode: defaultSandbox } : {}),
+	};
+}
+
+function readNativeRoleBridgeEnabled(): boolean {
+	if (isNativeRoleBridgeDisabledByEnv()) {
+		return false;
+	}
+	try {
+		const cfg = vscode.workspace.getConfiguration('aexus.ade', null);
+		const inspected = cfg.inspect<boolean>('nativeExtensionRoleBridge.enabled');
+		const effective = inspected?.globalValue ?? inspected?.defaultValue ?? cfg.get<boolean>('nativeExtensionRoleBridge.enabled', true);
+		return effective !== false;
+	} catch {
+		return true;
+	}
 }
 
 interface RecordEntry extends NativeSession {
@@ -246,7 +313,7 @@ function toSessionOptionsRecord(groups: readonly vscode.ChatSessionProviderOptio
 	return out;
 }
 
-function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?: boolean; callerRole?: string; automatedEngineering?: boolean; attachments?: readonly EngineAttachment[] }): EngineSendOptions {
+function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?: boolean; callerRole?: string; automatedEngineering?: boolean; attachments?: readonly EngineAttachment[]; onContextCompacted?: () => void }): EngineSendOptions {
 	return {
 		model: cfg?.model && cfg.model !== 'default' ? cfg.model : undefined,
 		thinking: cfg?.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined,
@@ -258,6 +325,7 @@ function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?
 		pureWorker: extra.pureWorker,
 		callerRole: extra.callerRole,
 		automatedEngineering: extra.automatedEngineering,
+		onContextCompacted: extra.onContextCompacted,
 	};
 }
 
@@ -419,6 +487,7 @@ function expandBuiltInWorkflowPrompt(cmd: string, argsText: string, engineId: En
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+	roleBridge.setEnabled(readNativeRoleBridgeEnabled());
 	const cliBinDir = await resolveCliBinDir(context.extensionPath);
 	setCliBinDirectory(cliBinDir);
 	const currentEnvPath = process.env.PATH ?? '';
@@ -486,6 +555,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
 		if (event.affectsConfiguration('aexus.ade.cliPaths')) {
 			void refreshAvailableEngines();
+		}
+		if (event.affectsConfiguration('aexus.ade.nativeExtensionRoleBridge.enabled')) {
+			roleBridge.setEnabled(readNativeRoleBridgeEnabled());
+		}
+		if (event.affectsConfiguration('aexus.ade.autonomousMode')) {
+			for (const emitter of providerOptionsChangeEmitters.values()) {
+				emitter.fire();
+			}
 		}
 	}));
 
@@ -833,7 +910,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				models: collectCustomModelsForEngine(shortEng, rawCaps?.models),
 			};
 			const cfg = secRecord ? getSessionConfig(secRecord, true) : { secretaryEngineId: toEngineType(shortEng) };
-			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', cfg, cwd, caps), SECRETARY_TYPE);
+			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', withSafeDefaultConfig(toEngineType(shortEng), cfg), cwd, caps), SECRETARY_TYPE);
 		}
 		const engineType = toEngineType(sessionType);
 		const shortEng = engineType.slice('aexus-'.length);
@@ -845,7 +922,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			models: collectCustomModelsForEngine(shortEng, rawCaps?.models),
 		};
 		const cfg = rec ? getSessionConfig(rec, false) : {};
-		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, cfg, cwd, caps), engineType);
+		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, withSafeDefaultConfig(engineType, cfg), cwd, caps), engineType);
 	};
 
 	const trackInputState = (sessionType: string, controller: vscode.ChatSessionItemController, groups: vscode.ChatSessionProviderOptionGroup[]): vscode.ChatSessionInputState => {
@@ -936,14 +1013,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				: (record.sessionConfig ??= {});
 
 			const engineType = toEngineType(record.engine);
-			const defaultModeForEngine = engineType === 'aexus-cline' ? 'yolo'
-				: engineType === 'aexus-antigravity' ? 'auto'
-					: engineType === 'aexus-pi' ? 'full'
-						: undefined;
-			const defaultPermissionsForEngine = engineType === 'aexus-codex' ? 'never'
-				: engineType === 'aexus-dsh' ? 'danger-full-access'
-					: 'bypassPermissions';
-			const defaultSandboxForEngine = 'danger-full-access';
+			const autonomous = isAutonomousModeEnabled();
+			const defaultModeForEngine = resolveDefaultModeForEngine(engineType, autonomous);
+			const defaultPermissionsForEngine = resolveDefaultPermissionsForEngine(engineType, autonomous);
+			const defaultSandboxForEngine = resolveDefaultSandboxForEngine(autonomous);
 
 			switch (optionId) {
 				case 'model': {
@@ -1499,11 +1572,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const preambleSections: string[] = [];
 		const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
 		const currentRankForContext = isSecretary ? 'secretary' : (snapForContext?.isOrchestrated ? snapForContext.rank : undefined);
+		const expectedPromptHash = !isSecretary && snapForContext?.rolePrompt?.trim()
+			? hashRolePrompt(snapForContext.rolePrompt)
+			: undefined;
 		const alreadyInitializedForRank = Boolean(
 			currentRankForContext
 			&& record.roleInit
 			&& record.roleInit.engine === record.engine
-			&& record.roleInit.rank === currentRankForContext,
+			&& record.roleInit.rank === currentRankForContext
+			&& (
+				expectedPromptHash
+					? record.roleInit.promptHash === expectedPromptHash
+					: Boolean(record.roleInit.promptHash)
+			),
 		);
 		const injected = !currentRankForContext
 			? undefined
@@ -1512,11 +1593,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
 			)).catch(() => undefined);
 		const trimmedInjected = injected?.trim();
+		let pendingDeltaContext: string | undefined;
 		if (trimmedInjected) {
 			if (!alreadyInitializedForRank || trimmedInjected !== record.lastDeltaContext) {
 				preambleSections.push(trimmedInjected);
 				if (alreadyInitializedForRank) {
-					record.lastDeltaContext = trimmedInjected;
+					pendingDeltaContext = trimmedInjected;
 				}
 			}
 		}
@@ -1557,10 +1639,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				promptConfigureCliPaths(formatMissingEngineMessage(record.engine));
 				return {};
 			}
+			const snapEntry = roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+			const callerRole = isSecretary
+				? 'secretary'
+				: (!snapEntry?.isOrchestrated ? undefined : snapEntry.rank);
+			let contextCompactedDuringTurn = false;
+			const sendOptions = toSendOptions(cfg, {
+				attachments,
+				pureWorker: !isSecretary && !snapEntry?.isOrchestrated,
+				callerRole,
+				onContextCompacted: () => {
+					contextCompactedDuringTurn = true;
+					record.roleInit = undefined;
+					record.lastDeltaContext = undefined;
+				},
+			});
 			const engine = runtime(record.engine);
 			const prevId = record.id;
 			if (engine.prepareSession) {
-				await engine.prepareSession(record);
+				await engine.prepareSession(record, sendOptions);
 				if (record.id !== prevId) {
 					records.delete(key(record.engine, prevId));
 					records.set(key(record.engine, record.id), record);
@@ -1669,15 +1766,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (isSecretary) {
 				lastTurnErrors.delete(SECRETARY_TYPE);
 			}
-			const snapEntry = roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
-			const callerRole = isSecretary
-				? 'secretary'
-				: (!snapEntry?.isOrchestrated ? undefined : snapEntry.rank);
-			const sendOptions = toSendOptions(cfg, {
-				attachments,
-				pureWorker: !isSecretary && !snapEntry?.isOrchestrated,
-				callerRole,
-			});
 
 			const turnStartedAt = Date.now();
 			await engine.send(record, initialFullPrompt, wrappedStream, turnCancellation.token, sendOptions);
@@ -1728,17 +1816,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					lastTurnReplies.set(SECRETARY_TYPE, streamedMarkdown.trim());
 				}
 			}
-			if (parsedCmd === 'compact' || parsedCmd === 'smol') {
-				// Prompt-expanded compaction may drop the Turn-1 role charter; re-inject cleanly on the next turn.
+			if (parsedCmd === 'compact' || parsedCmd === 'smol' || contextCompactedDuringTurn) {
+				// Prompt-expanded or engine auto-compaction may drop the Turn-1 role charter; re-inject cleanly on the next turn.
 				record.roleInit = undefined;
 				record.lastDeltaContext = undefined;
-			} else if (!alreadyInitializedForRank && currentRankForContext) {
+			} else if (!alreadyInitializedForRank && currentRankForContext && !turnCancellation.token.isCancellationRequested) {
 				record.roleInit = {
 					rank: currentRankForContext,
 					engine: record.engine,
+					promptHash: expectedPromptHash ?? hashRolePrompt(trimmedInjected),
 					initializedAt: Date.now(),
 				};
 				record.lastDeltaContext = undefined;
+			} else if (pendingDeltaContext !== undefined && !turnCancellation.token.isCancellationRequested) {
+				record.lastDeltaContext = pendingDeltaContext;
 			}
 			record.updated = Date.now();
 			if (!isSecretary && !record.customLabel && record.initialTitle && record.label === record.initialTitle) {
@@ -2304,14 +2395,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const isPureWorker = Boolean(rawOptions?.pureWorker);
 			let finalPrompt = rawPrompt;
 			let callerRole: string | undefined;
+			let alreadyInit = false;
+			let headlessPromptHash: string | undefined;
+			let headlessTrimmedInjected: string | undefined;
+			let headlessPendingDelta: string | undefined;
 			if (!isPureWorker) {
 				const snapEntry = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
 				callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
-				const alreadyInit = Boolean(
+				headlessPromptHash = snapEntry?.rolePrompt?.trim() ? hashRolePrompt(snapEntry.rolePrompt) : undefined;
+				alreadyInit = Boolean(
 					callerRole
 					&& record.roleInit
 					&& record.roleInit.engine === record.engine
-					&& record.roleInit.rank === callerRole,
+					&& record.roleInit.rank === callerRole
+					&& (
+						headlessPromptHash
+							? record.roleInit.promptHash === headlessPromptHash
+							: Boolean(record.roleInit.promptHash)
+					),
 				);
 				const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
 					'aexus.ade.resolvePromptContext',
@@ -2319,11 +2420,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						? { ...(rawOptions?.agentId ? { agentId: rawOptions.agentId } : {}), resource: uri, mode: 'delta' }
 						: (rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri),
 				)).catch(() => undefined);
-				if (injected?.trim()) {
-					finalPrompt = `${injected.trim()}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${rawPrompt}`;
-				}
-				if (!alreadyInit && callerRole) {
-					record.roleInit = { rank: callerRole, engine: record.engine, initializedAt: Date.now() };
+				headlessTrimmedInjected = injected?.trim();
+				if (headlessTrimmedInjected) {
+					if (!alreadyInit || headlessTrimmedInjected !== record.lastDeltaContext) {
+						finalPrompt = `${headlessTrimmedInjected}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${rawPrompt}`;
+						if (alreadyInit) {
+							headlessPendingDelta = headlessTrimmedInjected;
+						}
+					}
 				}
 			}
 
@@ -2405,17 +2509,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			try {
 				const engine = runtime(record.engine);
 				const prevId = record.id;
-				if (engine.prepareSession) {
-					await engine.prepareSession(record);
-					if (record.id !== prevId) {
-						records.delete(key(record.engine, prevId));
-						records.set(key(record.engine, record.id), record);
-					}
-					await save();
-				}
-				lastTurnErrors.delete(recordKey);
+				let contextCompactedDuringTurn = false;
 				const cfg = record.sessionConfig ?? {};
-				await engine.send(record, finalPrompt, headlessStream, turnCancellation.token, {
+				const headlessSendOptions: EngineSendOptions = {
 					model: rawOptions?.model ?? (cfg.model && cfg.model !== 'default' ? cfg.model : undefined),
 					thinking: rawOptions?.thinking ?? (cfg.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined),
 					mode: cfg.mode && cfg.mode !== 'default' ? cfg.mode : undefined,
@@ -2426,7 +2522,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					callerRole,
 					automatedEngineering: true,
 					onInterimUsage: reportInterimUsage,
-				});
+					onContextCompacted: () => {
+						contextCompactedDuringTurn = true;
+						record.roleInit = undefined;
+						record.lastDeltaContext = undefined;
+					},
+				};
+				if (engine.prepareSession) {
+					await engine.prepareSession(record, headlessSendOptions);
+					if (record.id !== prevId) {
+						records.delete(key(record.engine, prevId));
+						records.set(key(record.engine, record.id), record);
+					}
+					await save();
+				}
+				lastTurnErrors.delete(recordKey);
+				await engine.send(record, finalPrompt, headlessStream, turnCancellation.token, headlessSendOptions);
+				// Commit roleInit ONLY after engine.send succeeds (and unless auto-compaction reset it during the turn).
+				if (contextCompactedDuringTurn) {
+					record.roleInit = undefined;
+					record.lastDeltaContext = undefined;
+				} else if (!isPureWorker && !alreadyInit && callerRole && !turnCancellation.token.isCancellationRequested) {
+					record.roleInit = {
+						rank: callerRole,
+						engine: record.engine,
+						promptHash: headlessPromptHash ?? hashRolePrompt(headlessTrimmedInjected),
+						initializedAt: Date.now(),
+					};
+					record.lastDeltaContext = undefined;
+				} else if (!isPureWorker && headlessPendingDelta !== undefined && !turnCancellation.token.isCancellationRequested) {
+					record.lastDeltaContext = headlessPendingDelta;
+				}
 				if (streamedMarkdown.trim()) {
 					lastTurnReplies.set(identity(record), streamedMarkdown.trim());
 				}

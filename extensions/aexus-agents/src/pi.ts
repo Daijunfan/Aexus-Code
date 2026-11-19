@@ -9,7 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, NativeSession, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface PiContentPart {
 	type?: string;
@@ -445,7 +445,8 @@ export class PiRuntime implements EngineRuntime {
 		if (token?.isCancellationRequested) {
 			return results;
 		}
-		const child = spawnEngine(this.executable, ['--mode', 'rpc', ...extraArgs], cwd);
+		const rpcEnv = await prepareAgentChildEnv({ sessionId: 'pi-rpc', pureWorker: true });
+		const child = spawnEngine(this.executable, ['--mode', 'rpc', ...extraArgs], cwd, rpcEnv);
 		const pending = new Map<string, (data: Record<string, unknown> | undefined) => void>();
 		let buffer = '';
 		child.stdout.setEncoding('utf8');
@@ -730,12 +731,11 @@ export class PiRuntime implements EngineRuntime {
 			...(toolMode === 'readonly' ? ['--tools', 'read,grep,find,ls'] : toolMode === 'chat' ? ['--no-tools'] : []),
 			...this.sessionArgs(session),
 		];
-		const customEnv: NodeJS.ProcessEnv = { ...process.env };
-		if (options?.pureWorker) {
-			delete customEnv.AEXUS_ADE_CALLER;
-		} else if (options?.callerRole) {
-			customEnv.AEXUS_ADE_CALLER = options.callerRole;
-		}
+		const customEnv = await prepareAgentChildEnv({
+			sessionId: session.id,
+			callerRole: options?.callerRole,
+			pureWorker: options?.pureWorker,
+		});
 		const child = spawnEngine(this.executable, args, session.cwd, customEnv);
 		let sessionProcs = this.running.get(session.id);
 		if (!sessionProcs) {
@@ -814,8 +814,15 @@ export class PiRuntime implements EngineRuntime {
 					stream.progress(this.describeToolCall(packet));
 				} else if (packet.type === 'session_info_changed' && typeof packet.name === 'string' && packet.name.trim()) {
 					session.label = packet.name.trim();
+				} else if (packet.type === 'auto_compaction_start' || packet.type === 'auto_compaction_end' || packet.type === 'compaction' || packet.type === 'compact_boundary' || packet.type === 'context_compacted') {
+					try {
+						options?.onContextCompacted?.();
+					} catch { /* Compaction callback must never break the turn. */ }
 				} else if (packet.type === 'extension_ui_request') {
-					const autoApprove = Boolean(options?.automatedEngineering) || options?.permissionMode !== 'ask';
+					const requestedPerm = options?.permissionMode?.trim();
+					const explicitBypass = requestedPerm === 'bypassPermissions' || requestedPerm === 'auto' || requestedPerm === 'never';
+					const autoApprove = Boolean(options?.automatedEngineering)
+						|| (requestedPerm !== 'ask' && requestedPerm !== 'manual' && (explicitBypass || isAutonomousModeEnabled()));
 					void this.handleUiRequest(child, packet, session, token, autoApprove).catch(() => { });
 				} else if (packet.type === 'agent_end' && Array.isArray(packet.messages)) {
 					const lastMsg = packet.messages.at(-1);

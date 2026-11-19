@@ -15,10 +15,19 @@ export const ADE_SET_SESSION_INITIALIZING_COMMAND_ID = 'aexus.ade.setSessionInit
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_SOCKET_NAME = 'ade-control.sock';
 export const ADE_CONTROL_META_NAME = 'ade-control.json';
+export const ADE_CAPABILITY_TOKEN_PREFIX = 'aexus-cap.';
+export const ADE_MINT_SESSION_TOKEN_ACTION = 'auth.mintSessionToken';
 
 export type AdeBuiltInAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate';
 export type AdeAgentRole = AdeBuiltInAgentRole | (string & {});
 export type AdeSessionRank = AdeAgentRole | 'worker';
+
+export interface IAdeCapabilityTokenPayload {
+	readonly sid: string;
+	readonly rank: string;
+	readonly pure?: boolean;
+	readonly iat: number;
+}
 
 export interface IAdeControlConnectionMetadata {
 	readonly socketPath: string;

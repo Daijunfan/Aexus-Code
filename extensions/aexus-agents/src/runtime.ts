@@ -5,10 +5,20 @@
 
 import * as cp from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import * as vscode from 'vscode';
+import {
+	ADE_MINT_SESSION_TOKEN_ACTION,
+	ADE_PURE_WORKER_FALLBACK_DENY_TOKEN,
+	AgentChildIdentity,
+	buildAgentChildEnv,
+	isPureWorkerDenyToken,
+	isPureWorkerIdentity,
+	stripDirectoriesFromPath,
+} from './roleBridgeShared';
 
 export interface NativeSession {
 	id: string;
@@ -45,6 +55,8 @@ export interface EngineSendOptions {
 	readonly automatedEngineering?: boolean;
 	/** Reports live (cumulative for the turn) token usage while the engine is still streaming. */
 	readonly onInterimUsage?: (cumulativeTurnUsage: EngineTurnTokenUsage) => void;
+	/** Called when the engine auto-compacts conversation context during a turn. */
+	readonly onContextCompacted?: () => void;
 }
 
 export interface EngineRuntimeCapabilities {
@@ -75,7 +87,7 @@ export interface EngineRuntime extends vscode.Disposable {
 	list(token: vscode.CancellationToken): Promise<NativeSession[]>;
 	children?(session: NativeSession, token: vscode.CancellationToken): Promise<NativeSession[]>;
 	create(cwd: string): Promise<NativeSession>;
-	prepareSession?(session: NativeSession): Promise<void>;
+	prepareSession?(session: NativeSession, options?: EngineSendOptions): Promise<void>;
 	history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]>;
 	send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void>;
 	getRuntimeCapabilities?(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities>;
@@ -113,6 +125,197 @@ let cliBinDir: string | undefined;
 
 export function setCliBinDirectory(dir: string): void {
 	cliBinDir = dir;
+}
+
+export function getBundledCliBinDirs(): string[] {
+	const candidates = [
+		cliBinDir,
+		path.resolve(__dirname, '..', 'bin'),
+		(() => {
+			try {
+				return vscode.env?.appRoot ? path.join(vscode.env.appRoot, 'bin') : undefined;
+			} catch {
+				return undefined;
+			}
+		})(),
+	];
+	const seen = new Set<string>();
+	const dirs: string[] = [];
+	for (const candidate of candidates) {
+		if (!candidate) {
+			continue;
+		}
+		const normalized = process.platform === 'win32' ? candidate.toLowerCase() : candidate;
+		if (!seen.has(normalized)) {
+			seen.add(normalized);
+			dirs.push(candidate);
+		}
+	}
+	return dirs;
+}
+
+export function isAutonomousModeEnabled(): boolean {
+	try {
+		const cfg = vscode.workspace.getConfiguration('aexus.ade', null);
+		const inspected = cfg.inspect<boolean>('autonomousMode');
+		const effective = inspected?.globalValue ?? inspected?.defaultValue ?? cfg.get<boolean>('autonomousMode', false);
+		return effective === true;
+	} catch {
+		return false;
+	}
+}
+
+export function agentIdentityScopeKey(sessionId: string, identity?: AgentChildIdentity): string {
+	if (isPureWorkerIdentity(identity)) {
+		return 'pure';
+	}
+	return `orch:${sessionId}:${identity!.callerRole!.trim().toLowerCase()}`;
+}
+
+interface MasterControlConnection {
+	readonly socketPath: string;
+	readonly token: string;
+}
+
+const mintedCapabilityTokenCache = new Map<string, { readonly token: string; readonly socketPath: string }>();
+
+async function resolveMasterControlConnection(env: NodeJS.ProcessEnv = process.env): Promise<MasterControlConnection | undefined> {
+	const socketOverride = env.AEXUS_ADE_SOCKET?.trim();
+	const tokenOverride = env.AEXUS_ADE_TOKEN?.trim();
+	if (socketOverride && tokenOverride) {
+		return { socketPath: socketOverride, token: tokenOverride };
+	}
+	const adeHome = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), '.aexus-code');
+	const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(adeHome, 'ade-control.json');
+	try {
+		const raw = await fs.readFile(controlFile, 'utf8');
+		const parsed = JSON.parse(raw) as { socketPath?: unknown; token?: unknown };
+		const metaSocketPath = typeof parsed.socketPath === 'string' ? parsed.socketPath.trim() : '';
+		const socketPath = metaSocketPath || socketOverride || '';
+		const token = tokenOverride || (typeof parsed.token === 'string' ? parsed.token.trim() : '');
+		if (socketPath && token) {
+			return { socketPath, token };
+		}
+	} catch {
+		// Control plane metadata may not exist in unit tests or standalone mode.
+	}
+	return undefined;
+}
+
+function requestControlSocket<T>(socketPath: string, payload: Record<string, unknown>, timeoutMs = 3000): Promise<{ readonly ok: boolean; readonly result?: T; readonly error?: string }> {
+	return new Promise((resolve, reject) => {
+		const socket = net.createConnection(socketPath);
+		let buffer = '';
+		let settled = false;
+		const finish = (cb: () => void) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			socket.destroy();
+			cb();
+		};
+		const timer = setTimeout(() => {
+			finish(() => reject(new Error('ADE control socket request timed out')));
+		}, timeoutMs);
+		socket.setEncoding('utf8');
+		socket.on('connect', () => {
+			socket.write(JSON.stringify(payload) + '\n');
+		});
+		socket.on('data', (chunk: string) => {
+			buffer += chunk;
+			const newline = buffer.indexOf('\n');
+			if (newline >= 0) {
+				const line = buffer.slice(0, newline).trim();
+				finish(() => {
+					try {
+						resolve(JSON.parse(line) as { readonly ok: boolean; readonly result?: T; readonly error?: string });
+					} catch (err) {
+						reject(err);
+					}
+				});
+			}
+		});
+		socket.on('end', () => {
+			if (!settled) {
+				finish(() => {
+					try {
+						resolve(JSON.parse(buffer.trim()) as { readonly ok: boolean; readonly result?: T; readonly error?: string });
+					} catch (err) {
+						reject(err);
+					}
+				});
+			}
+		});
+		socket.on('error', err => {
+			finish(() => reject(err));
+		});
+	});
+}
+
+export async function mintSessionCapabilityToken(
+	sessionId: string,
+	rank: string,
+	pure = false,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<{ readonly token: string; readonly socketPath: string } | undefined> {
+	const conn = await resolveMasterControlConnection(env);
+	if (!conn) {
+		return undefined;
+	}
+	const normalizedSid = sessionId.trim() || 'session';
+	const normalizedRank = pure ? 'worker' : (rank.trim().toLowerCase() || 'worker');
+	const cacheKey = `${conn.socketPath}|${normalizedSid}|${normalizedRank}|${pure ? '1' : '0'}`;
+	const cached = mintedCapabilityTokenCache.get(cacheKey);
+	if (cached) {
+		return cached;
+	}
+	try {
+		const response = await requestControlSocket<{ readonly token?: string }>(conn.socketPath, {
+			token: conn.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: {
+				sessionId: normalizedSid,
+				rank: normalizedRank,
+				pure,
+			},
+		});
+		const mintedToken = response.ok && typeof response.result?.token === 'string' && response.result.token.trim()
+			? response.result.token.trim()
+			: undefined;
+		if (mintedToken) {
+			const entry = { token: mintedToken, socketPath: conn.socketPath };
+			if (mintedCapabilityTokenCache.size > 512) {
+				mintedCapabilityTokenCache.clear();
+			}
+			mintedCapabilityTokenCache.set(cacheKey, entry);
+			return entry;
+		}
+	} catch {
+		// Fall back cleanly if the control socket is temporarily unavailable.
+	}
+	return undefined;
+}
+
+export async function prepareAgentChildEnv(
+	identity?: AgentChildIdentity,
+	baseEnv?: NodeJS.ProcessEnv,
+): Promise<NodeJS.ProcessEnv> {
+	const pure = isPureWorkerIdentity(identity);
+	const sessionId = identity?.sessionId?.trim() || 'session';
+	const rank = pure ? 'worker' : identity!.callerRole!.trim().toLowerCase();
+	const minted = await mintSessionCapabilityToken(sessionId, rank, pure, process.env);
+	const cliBinDirs = getBundledCliBinDirs();
+	return buildAgentChildEnv({
+		sessionId,
+		callerRole: pure ? undefined : rank,
+		pureWorker: pure,
+		baseEnv: baseEnv ?? process.env,
+		cliBinDirs,
+		socketPath: pure ? undefined : (minted?.socketPath ?? process.env.AEXUS_ADE_SOCKET),
+		sessionToken: minted?.token ?? (pure ? ADE_PURE_WORKER_FALLBACK_DENY_TOKEN : undefined),
+	});
 }
 
 function getStandardCliDirectories(): string[] {
@@ -420,7 +623,15 @@ export async function findExecutable(name: string): Promise<string | undefined> 
 }
 
 export function spawnEngine(executable: string, args: readonly string[], cwd?: string, env?: NodeJS.ProcessEnv): cp.ChildProcessWithoutNullStreams {
-	const mergedEnv: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+	const mergedEnv: NodeJS.ProcessEnv = env ? { ...env } : { ...process.env };
+	const isPureEnv = isPureWorkerDenyToken(mergedEnv.AEXUS_ADE_SESSION_TOKEN);
+	// Defense-in-depth: never leak master ADE credentials to spawned engine processes.
+	delete mergedEnv.AEXUS_ADE_CONTROL_FILE;
+	delete mergedEnv.AEXUS_ADE_TOKEN;
+	if (isPureEnv || !env) {
+		delete mergedEnv.AEXUS_ADE_SOCKET;
+		delete mergedEnv.AEXUS_ADE_CALLER;
+	}
 	let existingPath: string | undefined;
 	for (const key of Object.keys(mergedEnv)) {
 		if (key.toLowerCase() === 'path') {
@@ -431,7 +642,12 @@ export function spawnEngine(executable: string, args: readonly string[], cwd?: s
 		}
 	}
 	const canonicalPathKey = process.platform === 'win32' ? 'Path' : 'PATH';
-	mergedEnv[canonicalPathKey] = mergeCliPath(existingPath, cliBinDir);
+	if (isPureEnv) {
+		const mergedStandard = mergeCliPath(existingPath, undefined);
+		mergedEnv[canonicalPathKey] = stripDirectoriesFromPath(mergedStandard, getBundledCliBinDirs());
+	} else {
+		mergedEnv[canonicalPathKey] = mergeCliPath(existingPath, cliBinDir);
+	}
 	if (process.platform !== 'win32') {
 		mergedEnv.PATH = mergedEnv[canonicalPathKey];
 	}

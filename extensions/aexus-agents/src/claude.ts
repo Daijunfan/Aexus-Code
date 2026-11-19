@@ -11,7 +11,7 @@ import * as readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isPathWithinOrEqual, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, NativeSession, spawnEngine, stopEngine } from './runtime';
+import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, spawnEngine, stopEngine } from './runtime';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
 interface ContentBlock { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }
@@ -454,9 +454,11 @@ export class ClaudeRuntime implements EngineRuntime {
 				return 'acceptEdits';
 			case 'auto':
 				return 'auto';
-			default:
-				// Highest permissions by default across all Aexus sessions unless the user explicitly selected Ask/Plan/Auto-Edit/Auto.
+			case 'bypassPermissions':
 				return 'bypassPermissions';
+			default:
+				// Safe by default for interactive sessions unless autonomousMode is explicitly enabled.
+				return isAutonomousModeEnabled() ? 'bypassPermissions' : 'acceptEdits';
 		}
 	}
 
@@ -615,17 +617,16 @@ export class ClaudeRuntime implements EngineRuntime {
 				session.id,
 			];
 			const thinkingTokens = this.mapClaudeThinkingTokens(options?.thinking);
-			const customEnv: NodeJS.ProcessEnv = { ...process.env };
+			const customEnv = await prepareAgentChildEnv({
+				sessionId: session.id,
+				callerRole: options?.callerRole,
+				pureWorker: options?.pureWorker,
+			});
 			if (thinkingTokens !== undefined) {
 				customEnv.MAX_THINKING_TOKENS = thinkingTokens;
 			}
 			if (options?.thinking === 'off' || options?.thinking === 'none') {
 				customEnv.CLAUDE_CODE_DISABLE_THINKING = '1';
-			}
-			if (options?.pureWorker) {
-				delete customEnv.AEXUS_ADE_CALLER;
-			} else if (options?.callerRole) {
-				customEnv.AEXUS_ADE_CALLER = options.callerRole;
 			}
 
 			const child = spawnEngine(this.executable, args, session.cwd, customEnv);
@@ -655,6 +656,15 @@ export class ClaudeRuntime implements EngineRuntime {
 				if (!fromChild && event.type === 'system' && event.subtype === 'init') {
 					session.provisional = false;
 					this.recordInit(session.id, event);
+				}
+				if (!fromChild && (
+					(event.type === 'system' && (event.subtype === 'compact_boundary' || event.subtype === 'context_compacted'))
+					|| event.type === 'compact_boundary'
+					|| event.type === 'context_compacted'
+				)) {
+					try {
+						options?.onContextCompacted?.();
+					} catch { /* Compaction callback must never break the turn. */ }
 				}
 				if (!fromChild && !token.isCancellationRequested && event.type === 'stream_event') {
 					const delta = event.event?.delta;
@@ -849,7 +859,7 @@ export class ClaudeRuntime implements EngineRuntime {
 		const rows: Array<[string, string]> = [];
 		rows.push([vscode.l10n.t('Model'), model ?? vscode.l10n.t('Not reported yet')]);
 		rows.push([vscode.l10n.t('Effort'), options?.thinking ?? vscode.l10n.t('Default')]);
-		rows.push([vscode.l10n.t('Permission mode'), options?.permissionMode ?? init?.permissionMode ?? 'bypassPermissions']);
+		rows.push([vscode.l10n.t('Permission mode'), options?.permissionMode ?? init?.permissionMode ?? (isAutonomousModeEnabled() ? 'bypassPermissions' : 'acceptEdits')]);
 		rows.push([vscode.l10n.t('Session'), session.id]);
 		rows.push([vscode.l10n.t('Turns'), usage?.numTurns !== undefined ? String(usage.numTurns) : vscode.l10n.t('Not reported yet')]);
 		rows.push([vscode.l10n.t('Duration'), usage?.durationMs !== undefined ? `${(usage.durationMs / 1000).toFixed(1)}s` : vscode.l10n.t('Not reported yet')]);

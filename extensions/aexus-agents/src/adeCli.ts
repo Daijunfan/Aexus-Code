@@ -88,7 +88,7 @@ Organizational Ranks (governor [L1] > manager [L2] > employee [L3] > worker [L4]
 Commands:
   status
   version
-  doctor [--project <path>]
+  doctor [--project <path>] [--strict]
   completion <bash|zsh|fish>
   mode [get | set <ade|ide>]
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
@@ -392,6 +392,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 
 	if (group === 'doctor') {
 		let projectPath = cwd;
+		let strict = false;
 		for (let i = 0; i < tail.length; i++) {
 			const arg = tail[i];
 			if (arg === '--project') {
@@ -402,13 +403,15 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const next = arg.slice('--project='.length);
 				if (!next) { throw new CliUsageError('Option --project requires a path.'); }
 				projectPath = resolvePathIfRelative(next, cwd);
+			} else if (arg === '--strict') {
+				strict = true;
 			} else if (!arg.startsWith('-')) {
 				projectPath = resolvePathIfRelative(arg, cwd);
 			} else {
 				throw new CliUsageError(`Unknown option for doctor: ${arg}`);
 			}
 		}
-		return { help: false, json, windowId, action: 'doctor', params: { projectPath } };
+		return { help: false, json, windowId, action: 'doctor', params: strict ? { projectPath, strict: true } : { projectPath } };
 	}
 
 	if (group === 'mode') {
@@ -1501,11 +1504,6 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				throw new CliUsageError(`Usage: aexus-ade engineering ${sub} --governor <id>`);
 			}
 			const params: Record<string, unknown> = { governor };
-			const envCaller = process.env.AEXUS_ADE_CALLER?.trim();
-			if ((sub === 'run' || sub === 'resume') && envCaller) {
-				// Orchestrated agents identify themselves explicitly so they cannot spoof Secretary.
-				params.caller = envCaller;
-			}
 			return { help: false, json, windowId, action: `engineering.${sub}`, params };
 		}
 
@@ -2163,11 +2161,35 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	throw new CliUsageError(`Unknown command: ${group}`);
 }
 
-async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: string; token: string }> {
+async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: string; token: string; usingSessionToken: boolean }> {
 	const socketOverride = env.AEXUS_ADE_SOCKET?.trim();
+	const sessionToken = env.AEXUS_ADE_SESSION_TOKEN?.trim();
+	if (sessionToken) {
+		if (socketOverride) {
+			// Per-session capability token + explicit socket: never read the master token metadata file.
+			return { socketPath: socketOverride, token: sessionToken, usingSessionToken: true };
+		}
+		const adeHomeDir = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
+		const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(adeHomeDir, ADE_CONTROL_META_NAME);
+		let meta: Partial<IAdeControlConnectionMetadata> | undefined;
+		try {
+			meta = JSON.parse(await fs.readFile(controlFile, 'utf8')) as Partial<IAdeControlConnectionMetadata>;
+		} catch (error) {
+			const detail = (error as NodeJS.ErrnoException).code === 'ENOENT'
+				? `Control metadata file not found at ${controlFile}. Is Aexus Code running?`
+				: `Could not read ${controlFile}: ${(error as Error).message}`;
+			throw new Error(detail);
+		}
+		const socketPath = meta?.socketPath;
+		if (!socketPath) {
+			throw new Error(`No socketPath found in ${controlFile}.`);
+		}
+		// Never substitute meta.token when AEXUS_ADE_SESSION_TOKEN is present.
+		return { socketPath, token: sessionToken, usingSessionToken: true };
+	}
 	const tokenOverride = env.AEXUS_ADE_TOKEN?.trim();
 	if (socketOverride && tokenOverride !== undefined) {
-		return { socketPath: socketOverride, token: tokenOverride };
+		return { socketPath: socketOverride, token: tokenOverride, usingSessionToken: false };
 	}
 	const adeHomeDir = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
 	const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(adeHomeDir, ADE_CONTROL_META_NAME);
@@ -2187,7 +2209,7 @@ async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: 
 	if (!socketPath) {
 		throw new Error(`No socketPath found in ${controlFile}.`);
 	}
-	return { socketPath, token };
+	return { socketPath, token, usingSessionToken: false };
 }
 
 function sendSocketRequest(socketPath: string, payload: IAdeControlWireRequest): Promise<IAdeControlWireResponse> {
@@ -2334,6 +2356,15 @@ function formatEngineeringTokenSummary(action: string | undefined, result: unkno
 	return total === undefined ? undefined : `Token usage: ${total} token${total === 1 ? '' : 's'}.`;
 }
 
+export type DoctorCheckStatus = 'ok' | 'warn' | 'fail' | 'error';
+
+export interface IDoctorCheck {
+	readonly id: string;
+	readonly label: string;
+	readonly status: DoctorCheckStatus;
+	readonly detail: string;
+}
+
 interface IDoctorEngineCheck {
 	readonly id: string;
 	readonly label: string;
@@ -2343,7 +2374,7 @@ interface IDoctorEngineCheck {
 	readonly installHint: string;
 }
 
-interface IDoctorReport {
+export interface IDoctorReport {
 	readonly platform: NodeJS.Platform;
 	readonly arch: string;
 	readonly nodeVersion: string;
@@ -2355,7 +2386,20 @@ interface IDoctorReport {
 	};
 	readonly projectRules: readonly string[];
 	readonly engines: readonly IDoctorEngineCheck[];
+	readonly checks: readonly IDoctorCheck[];
 	readonly summary: { readonly enginesReady: number; readonly enginesTotal: number };
+}
+
+export function computeDoctorExitCode(report: Pick<IDoctorReport, 'checks'>, strict: boolean): number {
+	const hasFailure = report.checks.some(check => check.status === 'fail' || check.status === 'error');
+	if (hasFailure) {
+		return 1;
+	}
+	const hasWarning = report.checks.some(check => check.status === 'warn');
+	if (strict && hasWarning) {
+		return 2;
+	}
+	return 0;
 }
 
 const DOCTOR_ENGINES: readonly { readonly id: string; readonly label: string; readonly binary: string; readonly installHint: string }[] = [
@@ -2415,7 +2459,7 @@ async function runDoctorDiagnostics(projectPath: string, env: NodeJS.ProcessEnv)
 		})),
 		probeCommandVersion('git', ['--version'], env),
 		probeCommandVersion('ssh', ['-V'], env),
-		(async () => {
+		(async (): Promise<{ readonly connected: boolean; readonly socketPath?: string; readonly error?: string }> => {
 			try {
 				const conn = await resolveConnection(env);
 				const res = await sendSocketRequest(conn.socketPath, { token: conn.token, action: 'status', params: {} });
@@ -2436,6 +2480,34 @@ async function runDoctorDiagnostics(projectPath: string, env: NodeJS.ProcessEnv)
 
 	const projectRules = detectedRules.filter((r): r is string => Boolean(r));
 	const enginesReady = engines.filter(e => e.installed).length;
+	const checks: IDoctorCheck[] = [
+		{
+			id: 'control-plane',
+			label: 'ADE Control Plane',
+			status: controlPlane.connected ? 'ok' : 'fail',
+			detail: controlPlane.connected
+				? (controlPlane.socketPath ?? 'connected')
+				: (controlPlane.error || 'workbench not running'),
+		},
+		{
+			id: 'engines',
+			label: 'Coding Agent Engines',
+			status: enginesReady > 0 ? 'ok' : 'fail',
+			detail: `${enginesReady}/${engines.length} engines installed`,
+		},
+		{
+			id: 'git',
+			label: 'Git Worktree Tooling',
+			status: gitVersion ? 'ok' : 'warn',
+			detail: gitVersion ?? 'git not found (install git for worktree isolation)',
+		},
+		{
+			id: 'ssh',
+			label: 'OpenSSH Client',
+			status: sshVersion ? 'ok' : 'warn',
+			detail: sshVersion ?? 'ssh not found (install OpenSSH for aexus-ssh:// Cloud Hosts)',
+		},
+	];
 	return {
 		platform: process.platform,
 		arch: process.arch,
@@ -2448,6 +2520,7 @@ async function runDoctorDiagnostics(projectPath: string, env: NodeJS.ProcessEnv)
 		},
 		projectRules,
 		engines,
+		checks,
 		summary: { enginesReady, enginesTotal: engines.length },
 	};
 }
@@ -2706,6 +2779,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 
 	if (parsed.action === 'doctor') {
 		const projectPath = typeof parsed.params?.projectPath === 'string' ? parsed.params.projectPath : cwd;
+		const strict = parsed.params?.strict === true;
 		const report = await runDoctorDiagnostics(projectPath, env);
 		if (parsed.json) {
 			writeOut(JSON.stringify(report, null, 2) + '\n');
@@ -2713,11 +2787,11 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			const isTTY = io.stdoutIsTTY ?? Boolean(process.stdout.isTTY);
 			writeOut(formatDoctorHuman(report, createColorizer(shouldUseColor(env, isTTY))) + '\n');
 		}
-		return 0;
+		return computeDoctorExitCode(report, strict);
 	}
 
 	try {
-		const { socketPath, token } = await resolveConnection(env);
+		const { socketPath, token, usingSessionToken } = await resolveConnection(env);
 		const normalizedParams = await canonicalizeParamsPaths(parsed.params, parsed.action);
 		if (
 			(parsed.action === 'engineering.blueprint.apply' || parsed.action === 'engineering.blueprint.validate')
@@ -2725,11 +2799,28 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		) {
 			normalizedParams.text = await fs.readFile(normalizedParams.file, 'utf8');
 		}
-		const caller = env.AEXUS_ADE_CALLER?.trim();
-		const explicitCaller = typeof normalizedParams?.caller === 'string' ? normalizedParams.caller : undefined;
-		const effectiveParams = caller || explicitCaller
-			? { ...(normalizedParams ?? {}), caller: caller || explicitCaller }
-			: normalizedParams;
+		let effectiveParams: Record<string, unknown> | undefined = normalizedParams;
+		if (usingSessionToken) {
+			// When authenticating with a server-signed capability token, never let CLI flags or env spoof caller.
+			if (effectiveParams) {
+				const sanitized: Record<string, unknown> = { ...effectiveParams };
+				delete sanitized.caller;
+				delete sanitized._verifiedCaller;
+				delete sanitized._callerSessionId;
+				effectiveParams = sanitized;
+			}
+		} else {
+			const caller = env.AEXUS_ADE_CALLER?.trim();
+			if (effectiveParams && (Object.prototype.hasOwnProperty.call(effectiveParams, '_verifiedCaller') || Object.prototype.hasOwnProperty.call(effectiveParams, '_callerSessionId'))) {
+				const sanitized: Record<string, unknown> = { ...effectiveParams };
+				delete sanitized._verifiedCaller;
+				delete sanitized._callerSessionId;
+				effectiveParams = sanitized;
+			}
+			if (caller) {
+				effectiveParams = { ...(effectiveParams ?? {}), caller };
+			}
+		}
 		const makeRequest = (action: string): IAdeControlWireRequest => ({
 			token,
 			action,

@@ -1617,7 +1617,7 @@ export class CodeApplication extends Disposable {
 			const channel = mainProcessElectronServer.getChannel(ADE_CONTROL_CHANNEL_NAME, router);
 			return await channel.call('execute', request);
 		}, { logService: this.logService }));
-		process.env.AEXUS_ADE_CONTROL_FILE = adeControlServer.metaPath;
+		process.env.AEXUS_ADE_CONTROL_FILE = adeControlServer.instanceMetaPath;
 		adeControlServer.whenReady().then(() => {
 			process.env.AEXUS_ADE_SOCKET = adeControlServer.socketPath;
 		}, () => { /* logged in AdeControlServer */ });

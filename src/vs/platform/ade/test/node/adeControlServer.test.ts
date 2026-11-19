@@ -14,8 +14,10 @@ import * as path from '../../../../base/common/path.js';
 import { isWindows } from '../../../../base/common/platform.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import {
+	ADE_CAPABILITY_TOKEN_PREFIX,
 	ADE_CONTROL_META_NAME,
 	ADE_CONTROL_SOCKET_NAME,
+	ADE_MINT_SESSION_TOKEN_ACTION,
 	IAdeControlConnectionMetadata,
 	IAdeControlDispatchRequest,
 	IAdeControlWireResponse,
@@ -253,6 +255,15 @@ suite('AdeControlServer', () => {
 			await secondary.whenReady();
 
 			const expectedFallbackPath = path.join(tempDir, `ade-control.${process.pid}.sock`);
+			const expectedInstanceMetaPath = path.join(tempDir, `ade-control.${process.pid}.json`);
+			assert.strictEqual(secondary.instanceMetaPath, expectedInstanceMetaPath);
+			const secondaryInstanceMeta = JSON.parse(fs.readFileSync(secondary.instanceMetaPath, 'utf8')) as IAdeControlConnectionMetadata;
+			assert.deepStrictEqual(secondaryInstanceMeta, {
+				socketPath: expectedFallbackPath,
+				token: secondary.token,
+				pid: process.pid,
+			});
+			assert.strictEqual(fs.statSync(secondary.instanceMetaPath).mode & 0o777, 0o600);
 			const secondaryRes = await sendWireRequest(secondary.socketPath, {
 				token: secondary.token,
 				action: 'ping',
@@ -266,11 +277,13 @@ suite('AdeControlServer', () => {
 				secondaryRes,
 				preservedMeta,
 				primarySocketStillExists: fs.existsSync(primarySocketPath),
+				instanceMetaCleanedUp: !fs.existsSync(expectedInstanceMetaPath),
 			}, {
 				fallbackSocketPath: expectedFallbackPath,
 				secondaryRes: { ok: true, result: { via: 'secondary', action: 'ping' } },
 				preservedMeta: primaryMetadata,
 				primarySocketStillExists: true,
+				instanceMetaCleanedUp: true,
 			});
 		} finally {
 			await new Promise<void>(resolve => livePrimary.close(() => resolve()));
@@ -599,5 +612,169 @@ suite('AdeControlServer', () => {
 				],
 			},
 		);
+	});
+
+	test('enforces server-signed per-session capability tokens, blocks spoofing/tampering, and denies pure Workers', async () => {
+		const dispatched: IAdeControlDispatchRequest[] = [];
+		const server = store.add(new AdeControlServer(async req => {
+			dispatched.push(req);
+			return { action: req.action, params: req.params };
+		}, { controlDir: tempDir }));
+		await server.whenReady();
+
+		// 1. Per-instance metadata file is always created alongside global meta with 0600 permissions.
+		const expectedInstanceMetaPath = path.join(tempDir, `ade-control.${process.pid}.json`);
+		assert.strictEqual(server.instanceMetaPath, expectedInstanceMetaPath);
+		assert.deepStrictEqual(
+			JSON.parse(fs.readFileSync(server.instanceMetaPath, 'utf8')) as IAdeControlConnectionMetadata,
+			{ socketPath: server.socketPath, token: server.token, pid: process.pid },
+		);
+		if (!isWindows) {
+			assert.strictEqual(fs.statSync(server.instanceMetaPath).mode & 0o777, 0o600);
+		}
+
+		// 2. auth.mintSessionToken succeeds with master token and is intercepted before workbench dispatcher.
+		const mintEmployeeRes = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'emp-42', rank: 'employee', pure: false },
+		});
+		assert.strictEqual(mintEmployeeRes.ok, true);
+		const employeeToken = (mintEmployeeRes.result as { token?: string })?.token ?? '';
+		assert.ok(employeeToken.startsWith(ADE_CAPABILITY_TOKEN_PREFIX));
+		assert.strictEqual(dispatched.length, 0, 'auth.mintSessionToken must be handled inside AdeControlServer');
+
+		const mintPureRes = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'wrk-99', rank: 'worker', pure: true },
+		});
+		assert.strictEqual(mintPureRes.ok, true);
+		const pureWorkerToken = (mintPureRes.result as { token?: string })?.token ?? '';
+		assert.ok(pureWorkerToken.startsWith(ADE_CAPABILITY_TOKEN_PREFIX));
+
+		// 3. Capability tokens CANNOT mint new session tokens.
+		const mintWithCapRes = await sendWireRequest(server.socketPath, {
+			token: employeeToken,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'spoof-1', rank: 'secretary', pure: false },
+		});
+		assert.strictEqual(mintWithCapRes.ok, false);
+		assert.match(mintWithCapRes.error ?? '', /master control token/i);
+
+		// 4. Tampered payload or tampered HMAC signature is rejected without invoking dispatcher.
+		const [, body] = employeeToken.split(ADE_CAPABILITY_TOKEN_PREFIX);
+		const [encodedPayload, sigHex] = body.split('.');
+		const forgedPayload = Buffer.from(JSON.stringify({ sid: 'emp-42', rank: 'secretary', iat: Date.now() }), 'utf8').toString('base64url');
+		const tamperedPayloadToken = `${ADE_CAPABILITY_TOKEN_PREFIX}${forgedPayload}.${sigHex}`;
+		const tamperedSigToken = `${ADE_CAPABILITY_TOKEN_PREFIX}${encodedPayload}.${(sigHex.startsWith('0') ? '1' : '0') + sigHex.slice(1)}`;
+		const [tamperedPayloadRes, tamperedSigRes, forgedTokenRes] = await Promise.all([
+			sendWireRequest(server.socketPath, { token: tamperedPayloadToken, action: 'session.delete', params: { id: 'gov-1' } }),
+			sendWireRequest(server.socketPath, { token: tamperedSigToken, action: 'session.delete', params: { id: 'gov-1' } }),
+			sendWireRequest(server.socketPath, { token: `${ADE_CAPABILITY_TOKEN_PREFIX}bad`, action: 'status' }),
+		]);
+		assert.strictEqual(tamperedPayloadRes.ok, false);
+		assert.strictEqual(tamperedSigRes.ok, false);
+		assert.strictEqual(forgedTokenRes.ok, false);
+		assert.strictEqual(dispatched.length, 0);
+
+		// 5. Pure execution Worker token is immediately denied before reaching dispatcher.
+		const pureRes = await sendWireRequest(server.socketPath, {
+			token: pureWorkerToken,
+			action: 'session.delete',
+			params: { id: 'gov-1', caller: 'secretary' },
+		});
+		assert.deepStrictEqual(pureRes, {
+			ok: false,
+			error: 'Permission denied: pure execution Worker sessions have no ADE control plane access.',
+		});
+		assert.strictEqual(dispatched.length, 0);
+
+		// 6. Valid capability token forcibly overwrites spoofed/absent caller with verified rank + sessionId.
+		const spoofAttemptRes = await sendWireRequest(server.socketPath, {
+			token: employeeToken,
+			action: 'engineering.review',
+			params: { governor: 'gov-1', node: 'N1', caller: 'secretary', _verifiedCaller: false, _callerSessionId: 'fake' },
+		});
+		assert.strictEqual(spoofAttemptRes.ok, true);
+		const omittedCallerRes = await sendWireRequest(server.socketPath, {
+			token: employeeToken,
+			action: 'status',
+		});
+		assert.strictEqual(omittedCallerRes.ok, true);
+		assert.deepStrictEqual(dispatched, [
+			{
+				action: 'engineering.review',
+				params: {
+					governor: 'gov-1',
+					node: 'N1',
+					caller: 'employee',
+					_verifiedCaller: true,
+					_callerSessionId: 'emp-42',
+				},
+			},
+			{
+				action: 'status',
+				params: {
+					caller: 'employee',
+					_verifiedCaller: true,
+					_callerSessionId: 'emp-42',
+				},
+			},
+		]);
+	});
+
+	test('routes bundled aexus-ade CLI via AEXUS_ADE_SESSION_TOKEN without reading master control metadata', async function () {
+		this.timeout(30_000);
+		const dispatched: IAdeControlDispatchRequest[] = [];
+		const server = store.add(new AdeControlServer(async req => {
+			dispatched.push(req);
+			return { action: req.action, params: req.params };
+		}, { controlDir: tempDir }));
+		await server.whenReady();
+
+		const managerToken = server.mintSessionCapabilityToken('mgr-7', 'manager', false);
+		const pureToken = server.mintSessionCapabilityToken('wrk-7', 'worker', true);
+		const repoRoot = path.resolve(FileAccess.asFileUri('').fsPath, '..');
+		const nonexistentHome = path.join(tempDir, 'no-such-ade-home');
+
+		// Even with AEXUS_ADE_CALLER=secretary and no control file, server enforces manager from the signed token.
+		const mgrRun = await spawnBundledAdeCli(repoRoot, ['--json', 'engineering', 'watchdog-action', '--governor', 'gov-1', '--node', 'N1', '--action', 'remind'], {
+			...process.env,
+			AEXUS_ADE_HOME: nonexistentHome,
+			AEXUS_ADE_CONTROL_FILE: path.join(nonexistentHome, 'missing.json'),
+			AEXUS_ADE_TOKEN: '',
+			AEXUS_ADE_SOCKET: server.socketPath,
+			AEXUS_ADE_SESSION_TOKEN: managerToken,
+			AEXUS_ADE_CALLER: 'secretary',
+		});
+		assert.strictEqual(mgrRun.status, 0, mgrRun.stderr);
+
+		// Pure Worker capability token fails with exit code 1 and permission-denied error.
+		const workerRun = await spawnBundledAdeCli(repoRoot, ['--json', 'session', 'delete', 'gov-1', '--force'], {
+			...process.env,
+			AEXUS_ADE_HOME: nonexistentHome,
+			AEXUS_ADE_CONTROL_FILE: path.join(nonexistentHome, 'missing.json'),
+			AEXUS_ADE_TOKEN: '',
+			AEXUS_ADE_SOCKET: server.socketPath,
+			AEXUS_ADE_SESSION_TOKEN: pureToken,
+			AEXUS_ADE_CALLER: 'secretary',
+		});
+		assert.strictEqual(workerRun.status, 1);
+		assert.match(workerRun.stdout + workerRun.stderr, /pure execution Worker sessions have no ADE control plane access/i);
+
+		assert.deepStrictEqual(dispatched, [
+			{
+				action: 'engineering.watchdogAction',
+				params: {
+					governor: 'gov-1',
+					node: 'N1',
+					watchdogAction: 'remind',
+					caller: 'manager',
+					_verifiedCaller: true,
+					_callerSessionId: 'mgr-7',
+				},
+			},
+		]);
 	});
 });

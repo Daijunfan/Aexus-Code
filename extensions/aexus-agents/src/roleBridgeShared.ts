@@ -1189,3 +1189,169 @@ export function observeAgyConnectWsServerMessage(
 		// Ignore malformed frames.
 	}
 }
+
+export const ADE_CAPABILITY_TOKEN_PREFIX = 'aexus-cap.';
+export const ADE_MINT_SESSION_TOKEN_ACTION = 'auth.mintSessionToken';
+export const ADE_PURE_WORKER_FALLBACK_DENY_TOKEN = 'aexus-cap.eyJzaWQiOiJwdXJlLXdvcmtlciIsInJhbmsiOiJ3b3JrZXIiLCJwdXJlIjp0cnVlLCJpYXQiOjB9.0000000000000000000000000000000000000000000000000000000000000000';
+
+export interface AgentChildIdentity {
+	readonly sessionId?: string;
+	readonly callerRole?: string;
+	readonly pureWorker?: boolean;
+}
+
+export interface AgentChildEnvOptions extends AgentChildIdentity {
+	readonly baseEnv?: NodeJS.ProcessEnv;
+	readonly cliBinDirs?: readonly string[];
+	readonly socketPath?: string;
+	readonly sessionToken?: string;
+	readonly platform?: NodeJS.Platform;
+}
+
+export function isPureWorkerIdentity(identity?: AgentChildIdentity): boolean {
+	if (identity?.pureWorker === true) {
+		return true;
+	}
+	const role = identity?.callerRole?.trim().toLowerCase();
+	if (!role || role === 'worker' || role === 'pure-worker' || role === 'none') {
+		return true;
+	}
+	return false;
+}
+
+export function isPureWorkerDenyToken(token: string | undefined): boolean {
+	if (!token || !token.startsWith(ADE_CAPABILITY_TOKEN_PREFIX)) {
+		return false;
+	}
+	const body = token.slice(ADE_CAPABILITY_TOKEN_PREFIX.length);
+	const dotIdx = body.indexOf('.');
+	if (dotIdx <= 0) {
+		return false;
+	}
+	try {
+		const decoded = Buffer.from(body.slice(0, dotIdx), 'base64url').toString('utf8');
+		const parsed = JSON.parse(decoded) as { pure?: unknown };
+		return parsed?.pure === true;
+	} catch {
+		return false;
+	}
+}
+
+export function stripDirectoriesFromPath(
+	rawPath: string | undefined,
+	dirsToRemove: readonly string[],
+	platform: NodeJS.Platform = process.platform,
+): string {
+	if (!rawPath) {
+		return '';
+	}
+	const delimiter = platform === 'win32' ? ';' : ':';
+	const normalizeDir = (value: string): string => {
+		const trimmed = value.trim().replace(/^"+|"+$/g, '');
+		if (!trimmed) {
+			return '';
+		}
+		const resolved = platform === 'win32'
+			? path.win32.normalize(trimmed).replace(/[\\/]+$/, '').toLowerCase()
+			: path.posix.normalize(trimmed).replace(/\/+$/, '');
+		return resolved;
+	};
+	const blocked = new Set(dirsToRemove.map(normalizeDir).filter(Boolean));
+	if (blocked.size === 0) {
+		return rawPath;
+	}
+	const kept: string[] = [];
+	for (const segment of rawPath.split(delimiter)) {
+		const trimmed = segment.trim().replace(/^"+|"+$/g, '');
+		if (!trimmed) {
+			continue;
+		}
+		const normalized = normalizeDir(trimmed);
+		if (blocked.has(normalized)) {
+			continue;
+		}
+		kept.push(trimmed);
+	}
+	return kept.join(delimiter);
+}
+
+/**
+ * Central child-process environment sanitizer shared by all 8 Coding Agent engines.
+ *
+ * - Never leaks master `AEXUS_ADE_CONTROL_FILE` or `AEXUS_ADE_TOKEN` to any child agent.
+ * - Orchestrated sessions receive `AEXUS_ADE_SOCKET`, server-signed `AEXUS_ADE_SESSION_TOKEN`,
+ *   and `AEXUS_ADE_CALLER` (informational; authoritative rank is enforced server-side from the token).
+ * - Pure Worker sessions have all ADE control-plane vars stripped, bundled `aexus-ade` CLI bin
+ *   directories removed from `PATH`, and a `pure: true` deny capability token injected into
+ *   `AEXUS_ADE_SESSION_TOKEN`.
+ */
+export function buildAgentChildEnv(options: AgentChildEnvOptions): NodeJS.ProcessEnv {
+	const platform = options.platform ?? process.platform;
+	const delimiter = platform === 'win32' ? ';' : ':';
+	const env: NodeJS.ProcessEnv = { ...(options.baseEnv ?? process.env) };
+
+	// Never expose the master control metadata path or master socket token to spawned agents.
+	delete env.AEXUS_ADE_CONTROL_FILE;
+	delete env.AEXUS_ADE_TOKEN;
+
+	// Normalize case-variant PATH entries into a single canonical key.
+	let existingPath: string | undefined;
+	for (const key of Object.keys(env)) {
+		if (key.toLowerCase() === 'path') {
+			if (existingPath === undefined && typeof env[key] === 'string') {
+				existingPath = env[key];
+			}
+			delete env[key];
+		}
+	}
+	const canonicalPathKey = platform === 'win32' ? 'Path' : 'PATH';
+	const cliBinDirs = (options.cliBinDirs ?? []).filter(Boolean);
+	const pure = isPureWorkerIdentity(options);
+
+	if (pure) {
+		delete env.AEXUS_ADE_SOCKET;
+		delete env.AEXUS_ADE_CALLER;
+		env.AEXUS_ADE_SESSION_TOKEN = options.sessionToken?.trim() || ADE_PURE_WORKER_FALLBACK_DENY_TOKEN;
+		const strippedPath = stripDirectoriesFromPath(existingPath, cliBinDirs, platform);
+		env[canonicalPathKey] = strippedPath;
+		if (platform !== 'win32') {
+			env.PATH = strippedPath;
+		}
+		return env;
+	}
+
+	const normalizedRank = options.callerRole!.trim().toLowerCase();
+	env.AEXUS_ADE_CALLER = normalizedRank;
+	if (options.socketPath?.trim()) {
+		env.AEXUS_ADE_SOCKET = options.socketPath.trim();
+	}
+	if (options.sessionToken?.trim()) {
+		env.AEXUS_ADE_SESSION_TOKEN = options.sessionToken.trim();
+	} else {
+		delete env.AEXUS_ADE_SESSION_TOKEN;
+	}
+
+	const primaryBinDir = cliBinDirs[0];
+	let nextPath = existingPath ?? '';
+	if (primaryBinDir) {
+		const normalizeSeg = (seg: string) => {
+			const clean = seg.trim().replace(/^"+|"+$/g, '');
+			return platform === 'win32' ? clean.toLowerCase() : clean;
+		};
+		const segments = nextPath ? nextPath.split(delimiter).filter(Boolean) : [];
+		const targetNorm = normalizeSeg(primaryBinDir);
+		if (!segments.some(seg => normalizeSeg(seg) === targetNorm)) {
+			nextPath = nextPath ? `${primaryBinDir}${delimiter}${nextPath}` : primaryBinDir;
+		}
+	}
+	env[canonicalPathKey] = nextPath;
+	if (platform !== 'win32') {
+		env.PATH = nextPath;
+	}
+	return env;
+}
+
+export function isNativeRoleBridgeDisabledByEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+	const raw = env.AEXUS_ADE_DISABLE_NATIVE_ROLE_BRIDGE?.trim().toLowerCase();
+	return raw === '1' || raw === 'true' || raw === 'yes';
+}

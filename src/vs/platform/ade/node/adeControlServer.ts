@@ -13,9 +13,12 @@ import * as path from '../../../base/common/path.js';
 import { isWindows } from '../../../base/common/platform.js';
 import { ILogService } from '../../log/common/log.js';
 import {
+	ADE_CAPABILITY_TOKEN_PREFIX,
 	ADE_CONTROL_DIR_NAME,
 	ADE_CONTROL_META_NAME,
 	ADE_CONTROL_SOCKET_NAME,
+	ADE_MINT_SESSION_TOKEN_ACTION,
+	IAdeCapabilityTokenPayload,
 	IAdeControlConnectionMetadata,
 	IAdeControlDispatchRequest,
 	IAdeControlWireRequest,
@@ -25,6 +28,7 @@ import {
 const DEFAULT_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const DEFAULT_SOCKET_TIMEOUT_MS = 120_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
+const PURE_WORKER_DENIED_ERROR = 'Permission denied: pure execution Worker sessions have no ADE control plane access.';
 
 export type AdeControlDispatcher = (request: IAdeControlDispatchRequest, windowId?: number) => Promise<unknown>;
 
@@ -49,7 +53,9 @@ export class AdeControlServer extends Disposable {
 	private readonly _requestedSocketPath: string;
 	private _activeSocketPath: string;
 	private readonly _metaPath: string;
+	private readonly _instanceMetaPath: string;
 	private readonly _token: string;
+	private readonly _capabilitySecret: Buffer;
 	private readonly _logService: ILogService | undefined;
 	private readonly _maxPayloadBytes: number;
 	private readonly _socketTimeoutMs: number;
@@ -76,7 +82,10 @@ export class AdeControlServer extends Disposable {
 		this._metaPath = options?.metaPath
 			|| process.env.AEXUS_ADE_CONTROL_FILE
 			|| path.join(this._controlDir, ADE_CONTROL_META_NAME);
+		this._instanceMetaPath = path.join(path.dirname(this._metaPath), `ade-control.${process.pid}.json`);
 		this._token = crypto.randomBytes(32).toString('hex');
+		// Kept strictly in main-process memory and never persisted to disk.
+		this._capabilitySecret = crypto.randomBytes(32);
 		this._logService = options?.logService;
 		this._maxPayloadBytes = options?.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
 		this._socketTimeoutMs = options?.socketTimeoutMs ?? DEFAULT_SOCKET_TIMEOUT_MS;
@@ -92,8 +101,26 @@ export class AdeControlServer extends Disposable {
 		return this._metaPath;
 	}
 
+	get instanceMetaPath(): string {
+		return this._instanceMetaPath;
+	}
+
 	get token(): string {
 		return this._token;
+	}
+
+	mintSessionCapabilityToken(sessionId: string, rank: string, pure = false): string {
+		const normalizedSid = sessionId.trim() || 'session';
+		const normalizedRank = pure ? 'worker' : (rank.trim().toLowerCase() || 'worker');
+		const payload: IAdeCapabilityTokenPayload = {
+			sid: normalizedSid,
+			rank: normalizedRank,
+			...(pure ? { pure: true } : {}),
+			iat: Date.now(),
+		};
+		const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+		const signatureHex = crypto.createHmac('sha256', this._capabilitySecret).update(encodedPayload, 'utf8').digest('hex');
+		return `${ADE_CAPABILITY_TOKEN_PREFIX}${encodedPayload}.${signatureHex}`;
 	}
 
 	async whenReady(): Promise<void> {
@@ -189,23 +216,31 @@ export class AdeControlServer extends Disposable {
 			await fs.promises.chmod(listenPath, 0o600);
 		}
 
-		if (writeGlobalMeta && !this._disposed) {
-			const tmpMetaPath = `${this._metaPath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+		if (!this._disposed) {
 			const metadata: IAdeControlConnectionMetadata = {
 				socketPath: listenPath,
 				token: this._token,
 				pid: process.pid,
 			};
-			await fs.promises.writeFile(tmpMetaPath, JSON.stringify(metadata, null, '\t') + '\n', { encoding: 'utf8', mode: 0o600 });
-			if (!isWindows) {
-				await fs.promises.chmod(tmpMetaPath, 0o600);
+			// Always persist a per-instance 0600 metadata file so secondary Aexus Code instances route to their own socket.
+			await this._writeMetadataFile(this._instanceMetaPath, metadata);
+			if (writeGlobalMeta && !this._disposed && this._metaPath !== this._instanceMetaPath) {
+				await this._writeMetadataFile(this._metaPath, metadata);
 			}
-			if (this._disposed) {
-				await this._unlinkQuietly(tmpMetaPath);
-				return;
-			}
-			await fs.promises.rename(tmpMetaPath, this._metaPath);
 		}
+	}
+
+	private async _writeMetadataFile(targetPath: string, metadata: IAdeControlConnectionMetadata): Promise<void> {
+		const tmpMetaPath = `${targetPath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+		await fs.promises.writeFile(tmpMetaPath, JSON.stringify(metadata, null, '\t') + '\n', { encoding: 'utf8', mode: 0o600 });
+		if (!isWindows) {
+			await fs.promises.chmod(tmpMetaPath, 0o600);
+		}
+		if (this._disposed) {
+			await this._unlinkQuietly(tmpMetaPath);
+			return;
+		}
+		await fs.promises.rename(tmpMetaPath, targetPath);
 	}
 
 	private async _pathExists(targetPath: string): Promise<boolean> {
@@ -338,7 +373,22 @@ export class AdeControlServer extends Disposable {
 		}
 
 		const req = parsed as Partial<IAdeControlWireRequest>;
-		if (typeof req.token !== 'string' || !this._isValidToken(req.token)) {
+		if (typeof req.token !== 'string' || req.token.length === 0) {
+			this._writeResponse(socket, { ok: false, error: 'Unauthorized: invalid control token' });
+			return;
+		}
+
+		let isMasterToken = false;
+		let capabilityPayload: IAdeCapabilityTokenPayload | undefined;
+		if (req.token.startsWith(ADE_CAPABILITY_TOKEN_PREFIX)) {
+			capabilityPayload = this._verifyCapabilityToken(req.token);
+			if (!capabilityPayload) {
+				this._writeResponse(socket, { ok: false, error: 'Unauthorized: invalid or tampered capability token' });
+				return;
+			}
+		} else if (this._isValidToken(req.token)) {
+			isMasterToken = true;
+		} else {
 			this._writeResponse(socket, { ok: false, error: 'Unauthorized: invalid control token' });
 			return;
 		}
@@ -358,12 +408,93 @@ export class AdeControlServer extends Disposable {
 			return;
 		}
 
+		if (req.action === ADE_MINT_SESSION_TOKEN_ACTION) {
+			if (!isMasterToken) {
+				this._writeResponse(socket, { ok: false, error: 'Forbidden: auth.mintSessionToken requires master control token authentication' });
+				return;
+			}
+			const rawSessionId = typeof req.params?.sessionId === 'string' ? req.params.sessionId.trim() : '';
+			const pure = req.params?.pure === true;
+			const rawRank = typeof req.params?.rank === 'string' ? req.params.rank.trim() : '';
+			if (!rawSessionId || (!pure && !rawRank)) {
+				this._writeResponse(socket, { ok: false, error: 'Invalid request: auth.mintSessionToken requires sessionId and rank' });
+				return;
+			}
+			const token = this.mintSessionCapabilityToken(rawSessionId, rawRank || 'worker', pure);
+			this._writeResponse(socket, { ok: true, result: { token } });
+			return;
+		}
+
+		let effectiveParams = req.params;
+		if (capabilityPayload) {
+			if (capabilityPayload.pure === true) {
+				this._writeResponse(socket, { ok: false, error: PURE_WORKER_DENIED_ERROR });
+				return;
+			}
+			effectiveParams = {
+				...(req.params ?? {}),
+				caller: capabilityPayload.rank,
+				_verifiedCaller: true,
+				_callerSessionId: capabilityPayload.sid,
+			};
+		} else if (req.params && (Object.prototype.hasOwnProperty.call(req.params, '_verifiedCaller') || Object.prototype.hasOwnProperty.call(req.params, '_callerSessionId'))) {
+			const sanitized: Record<string, unknown> = { ...req.params };
+			delete sanitized._verifiedCaller;
+			delete sanitized._callerSessionId;
+			effectiveParams = sanitized;
+		}
+
 		try {
-			const result = await this._dispatcher({ action: req.action, params: req.params }, req.windowId);
+			const result = await this._dispatcher({ action: req.action, params: effectiveParams }, req.windowId);
 			this._writeResponse(socket, { ok: true, result });
 		} catch (err) {
 			const message = err instanceof Error && err.message ? err.message : toErrorMessage(err, false);
 			this._writeResponse(socket, { ok: false, error: message });
+		}
+	}
+
+	private _verifyCapabilityToken(candidate: string): IAdeCapabilityTokenPayload | undefined {
+		if (!candidate.startsWith(ADE_CAPABILITY_TOKEN_PREFIX)) {
+			return undefined;
+		}
+		const body = candidate.slice(ADE_CAPABILITY_TOKEN_PREFIX.length);
+		const dotIdx = body.indexOf('.');
+		if (dotIdx <= 0 || dotIdx !== body.lastIndexOf('.') || dotIdx === body.length - 1) {
+			return undefined;
+		}
+		const encodedPayload = body.slice(0, dotIdx);
+		const providedSigHex = body.slice(dotIdx + 1);
+		if (!/^[0-9a-f]{64}$/i.test(providedSigHex)) {
+			return undefined;
+		}
+		const expectedSig = crypto.createHmac('sha256', this._capabilitySecret).update(encodedPayload, 'utf8').digest();
+		const providedSig = Buffer.from(providedSigHex, 'hex');
+		if (expectedSig.byteLength !== providedSig.byteLength || !crypto.timingSafeEqual(expectedSig, providedSig)) {
+			return undefined;
+		}
+		try {
+			const decoded = Buffer.from(encodedPayload, 'base64url').toString('utf8');
+			const parsed = JSON.parse(decoded) as Partial<IAdeCapabilityTokenPayload>;
+			if (
+				!parsed
+				|| typeof parsed !== 'object'
+				|| Array.isArray(parsed)
+				|| typeof parsed.sid !== 'string'
+				|| parsed.sid.trim().length === 0
+				|| typeof parsed.rank !== 'string'
+				|| parsed.rank.trim().length === 0
+				|| (parsed.pure !== undefined && typeof parsed.pure !== 'boolean')
+			) {
+				return undefined;
+			}
+			return {
+				sid: parsed.sid.trim(),
+				rank: parsed.rank.trim().toLowerCase(),
+				...(parsed.pure === true ? { pure: true } : {}),
+				iat: typeof parsed.iat === 'number' && Number.isFinite(parsed.iat) ? parsed.iat : 0,
+			};
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -420,16 +551,21 @@ export class AdeControlServer extends Disposable {
 				}
 			}
 
-			try {
-				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must verify PID ownership before removing metadata on shutdown.
-				const raw = fs.readFileSync(this._metaPath, 'utf8');
-				const parsed = JSON.parse(raw) as Partial<IAdeControlConnectionMetadata>;
-				if (parsed && parsed.pid === process.pid && (parsed.socketPath === undefined || parsed.socketPath === this._activeSocketPath)) {
-					// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must remove owned metadata file before process exit.
-					fs.unlinkSync(this._metaPath);
+			const metaPathsToClean = this._instanceMetaPath === this._metaPath
+				? [this._metaPath]
+				: [this._instanceMetaPath, this._metaPath];
+			for (const candidateMetaPath of metaPathsToClean) {
+				try {
+					// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must verify PID ownership before removing metadata on shutdown.
+					const raw = fs.readFileSync(candidateMetaPath, 'utf8');
+					const parsed = JSON.parse(raw) as Partial<IAdeControlConnectionMetadata>;
+					if (parsed && parsed.pid === process.pid && (parsed.socketPath === undefined || parsed.socketPath === this._activeSocketPath)) {
+						// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must remove owned metadata file before process exit.
+						fs.unlinkSync(candidateMetaPath);
+					}
+				} catch {
+					// ignore ENOENT or malformed metadata
 				}
-			} catch {
-				// ignore ENOENT or malformed metadata
 			}
 		}
 
