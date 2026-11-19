@@ -57,5 +57,8 @@ dist
 
 # Throwaway Code OSS dev profiles created by the launch skill
 .v[0-9]*/
-# Local agent validation evidence
+# Local agent validation evidence & workspace-only notes
 .agent-validation/
+AGENTS.md
+audit*.md
+promo-gallery/
