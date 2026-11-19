@@ -59,7 +59,13 @@ export function buildAdeOsIconSvg(doc: Document, kind: AdeOsIconKind): SVGElemen
 	}
 	if (kind === 'kali') {
 		const svg = createSvgElement(doc, 'svg', { viewBox: '0 0 135.47 135.47', 'aria-hidden': 'true' });
-		svg.appendChild(createSvgElement(doc, 'path', { d: KALI_PATH_D, fill: '#fff' }));
+		svg.appendChild(createSvgElement(doc, 'path', {
+			d: KALI_PATH_D,
+			fill: '#ffffff',
+			stroke: '#ffffff',
+			'stroke-width': '2.4',
+			'stroke-linejoin': 'round',
+		}));
 		return svg;
 	}
 	if (kind === 'debian') {
@@ -102,9 +108,9 @@ export function buildAdeOsIconSvg(doc: Document, kind: AdeOsIconKind): SVGElemen
 		width: '27',
 		height: '27',
 		rx: '6',
-		fill: '#1e293b',
-		stroke: '#334155',
-		'stroke-width': '1.25',
+		fill: '#26354d',
+		stroke: '#64748b',
+		'stroke-width': '1.35',
 	}));
 	svg.appendChild(createSvgElement(doc, 'path', {
 		d: 'M10.5 12.5 15.5 17l-5 4.5',

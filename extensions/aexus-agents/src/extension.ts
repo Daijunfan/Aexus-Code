@@ -160,8 +160,8 @@ const ENGINE_ALIASES: Record<string, string> = {
 };
 
 const definitions: readonly EngineDefinition[] = [
-	{ id: 'claude', executable: 'claude', name: 'Claude Code', type: 'aexus-claude', themeIcon: 'claude', create: command => new ClaudeRuntime(command) },
-	{ id: 'codex', executable: 'codex', name: 'Codex', type: 'aexus-codex', themeIcon: 'openai', create: command => new CodexRuntime(command) },
+	{ id: 'claude', executable: 'claude', name: 'Claude Code', type: 'aexus-claude', themeIcon: 'claude', svgIcon: 'claude', create: command => new ClaudeRuntime(command) },
+	{ id: 'codex', executable: 'codex', name: 'Codex', type: 'aexus-codex', themeIcon: 'openai', svgIcon: 'codex', create: command => new CodexRuntime(command) },
 	{ id: 'kilo', executable: 'kilo', name: 'Kilo Code', type: 'aexus-kilo', svgIcon: 'kilo', create: command => new KiloRuntime(command) },
 	{ id: 'opencode', executable: 'opencode', name: 'OpenCode', type: 'aexus-opencode', svgIcon: 'opencode', create: command => new OpenCodeRuntime(command) },
 	{ id: 'dsh', executable: 'dsh', name: 'DeepSeek Harness', type: 'aexus-dsh', svgIcon: 'dsh', create: command => new DshRuntime(command) },
