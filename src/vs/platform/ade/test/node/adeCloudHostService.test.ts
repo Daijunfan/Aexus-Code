@@ -841,8 +841,12 @@ suite('AdeCloudHosts', () => {
 			const check = await svc.testConnection('mock-host');
 			const expectedOs = os.type() === 'Darwin' ? 'macos' : 'linux';
 			assert.deepStrictEqual(
-				{ ok: check.ok, os: check.os, remoteUname: check.remoteUname, remoteHome: check.remoteHome },
-				{ ok: true, os: expectedOs, remoteUname: os.type(), remoteHome: os.homedir() },
+				{ ok: check.ok, os: check.os, remoteHome: check.remoteHome },
+				{ ok: true, os: expectedOs, remoteHome: os.homedir() },
+			);
+			assert.ok(
+				check.remoteUname === os.type() || Boolean(check.remoteUname?.startsWith(`${os.type()} (`)),
+				`Expected remoteUname to match "${os.type()}" or "${os.type()} (<distro>)", got ${JSON.stringify(check.remoteUname)}`,
 			);
 			assert.strictEqual(typeof check.latencyMs, 'number');
 			const stored = await svc.getHost('mock-host');
