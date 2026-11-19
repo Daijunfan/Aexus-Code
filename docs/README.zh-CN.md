@@ -109,12 +109,20 @@ flowchart TB
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="一个面板管理多端多系统项目与 8 大引擎 ADE 指挥中枢 — macOS、Ubuntu、Kali、Windows 图标与全职级徽章" />
-      <p align="center"><sub><strong>一个面板管理多端项目 &amp; 8 大引擎 ADE 层级树：</strong>本机 Apple + 云端 Ubuntu/Kali/Windows 项目同屏管理、官方彩色引擎图标、L1–L4 全徽章与实时 Diff。</sub></p>
+      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="一个面板管理多端多系统项目与 8 大引擎 ADE 指挥中枢 — macOS、Ubuntu、Kali、Windows 图标、L1–L4 全徽章与实时 Agent 会话" />
+      <p align="center"><sub><strong>一个面板管理多端项目 &amp; 8 大引擎 ADE 指挥中枢：</strong>本机 Apple + 云端 Ubuntu/Kali/Windows 项目同屏管理、官方彩色引擎图标、L1–L4 全徽章与实时 Governor 会话。</sub></p>
     </td>
     <td width="50%">
-      <img src="assets/17-multi-host-terminals.png" width="100%" alt="一个面板同时掌控多个本地与云主机终端 — Ubuntu GPU 与 Kali 分屏运行，右侧终端标签自带全平台彩色图标" />
-      <p align="center"><sub><strong>一个面板同控多个本地与云主机终端：</strong>Ubuntu H100 GPU 与 Kali 安全终端分屏齐发，右侧列表自带 Apple / Ubuntu / Kali / Windows 专属系统图标。</sub></p>
+      <img src="assets/20-ade-agent-chat-and-diff.png" width="100%" alt="ADE 实时 Agent 协同对话与分屏 Git Diff 同屏联动" />
+      <p align="center"><sub><strong>ADE 实时 Agent 会话 + 分屏 Git Diff 联动：</strong>多职级编排对话与代码改动左右同屏对照，搭配 Smart Calm 极简侧栏。</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2">
+      <p align="center">
+        <img src="assets/17-multi-host-terminals.png" width="88%" alt="一个面板同时掌控多个本地与云主机终端 — Ubuntu H100 GPU 与 Kali 分屏运行，右侧终端标签自带全平台彩色图标" /><br/>
+        <sub><strong>一个面板同控多个本地与云主机终端：</strong>Ubuntu H100 GPU 与 Kali 安全终端分屏齐发，右侧列表自带 Apple / Ubuntu / Kali / Windows 专属彩色系统图标。</sub>
+      </p>
     </td>
   </tr>
 </table>

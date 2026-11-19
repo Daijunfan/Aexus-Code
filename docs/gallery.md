@@ -133,35 +133,37 @@ A curated tour of Aexus Code's surfaces across Dark Modern, Light Modern, High C
 
 ---
 
-## Multi-OS Projects, Multi-Host Terminals, VS Code Extensions & Zero-Server Cloud Hosts
+## Multi-OS Projects, Live Agent Chat, Multi-Host Terminals, VS Code Extensions & Cloud Hosts
 
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="Multi-Project Multi-OS ADE Command Center — Apple, Ubuntu, Kali and Windows projects with all 8 native coding agent engine icons &amp; live diff" />
-      <p align="center"><sub><strong>Unified Multi-OS Projects &amp; 8-Engine ADE Command Center (Full Badges + Diff)</strong></sub></p>
+      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="Multi-Project Multi-OS ADE Command Center — Apple, Ubuntu, Kali and Windows projects with all 8 native coding agent engine icons, full badges &amp; live Governor chat" />
+      <p align="center"><sub><strong>Unified Multi-OS Projects &amp; 8-Engine ADE Command Center (Full Badges + Governor Chat)</strong></sub></p>
     </td>
+    <td width="50%">
+      <img src="assets/20-ade-agent-chat-and-diff.png" width="100%" alt="Live ADE Agent Chat Session Side-by-Side with Git Working Tree Diff and Smart Calm Sidebar" />
+      <p align="center"><sub><strong>Live ADE Agent Chat Session + Side-by-Side Git Working Tree Diff</strong></sub></p>
+    </td>
+  </tr>
+  <tr>
     <td width="50%">
       <img src="assets/17-multi-host-terminals.png" width="100%" alt="Simultaneous Local and Multi-Cloud OS Integrated Terminals — Ubuntu GPU and Kali RedTeam shells with macOS, Ubuntu, Kali and Windows OS tab icons" />
       <p align="center"><sub><strong>Simultaneous Local &amp; Multi-Cloud OS Terminals (macOS · Ubuntu · Kali · Windows)</strong></sub></p>
     </td>
+    <td width="50%">
+      <img src="assets/05-cloud-host-studio.png" width="100%" alt="Cloud Host Studio — KPI Strip, Bright Colorful Multi-OS Host Cards (Kali Dragon, macOS Apple, Ubuntu Orange, Windows Blue) &amp; Non-Destructive VS Code Migration" />
+      <p align="center"><sub><strong>Zero-Server SSH Cloud Host Studio — Colorful Multi-OS Cards (Kali · macOS · Ubuntu · Windows)</strong></sub></p>
+    </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE Mirror Symmetry Mode — Native VS Code Explorer, Split Diff &amp; Simultaneous Multi-OS Terminals" />
-      <p align="center"><sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry — Native Explorer, Split Diff &amp; Multi-OS Terminals</strong></sub></p>
+      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE Mirror Symmetry Mode — All 5 Mirrored Local + Cloud SSH Projects, Split Diff &amp; Simultaneous Multi-OS Terminals" />
+      <p align="center"><sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry — All 5 Mirrored Projects, Split Diff &amp; Multi-OS Terminals</strong></sub></p>
     </td>
     <td width="50%">
       <img src="assets/18-vscode-extensions-compat.png" width="100%" alt="Native VS Code Extensions Marketplace Compatibility via Open VSX — Python Debugger, Claude Code, Python, Java &amp; Ruby LSP" />
       <p align="center"><sub><strong>Full VS Code Extensions Ecosystem via Live Open VSX Marketplace</strong></sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <p align="center">
-        <img src="assets/05-cloud-host-studio.png" width="78%" alt="Cloud Host Studio — KPI Strip, Multi-OS Host Cards (Kali w/ ProxyJump, macOS, Ubuntu, Windows), Latency Test &amp; Non-Destructive VS Code Migration" /><br/>
-        <sub><strong>Zero-Server SSH Cloud Host Studio — Multi-OS Cards (Kali · macOS · Ubuntu · Windows) &amp; Non-Destructive SSH Config</strong></sub>
-      </p>
     </td>
   </tr>
 </table>

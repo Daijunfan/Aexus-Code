@@ -109,12 +109,20 @@ Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/assets/02-ade-hierarchy-and-diff.png" width="100%" alt="Unified Multi-Project Multi-OS ADE Command Center — macOS, Ubuntu, Kali and Windows projects with all 8 native coding agent engine icons, L1 to L4 badges and live Git diff" />
-      <p align="center"><sub><strong>One Panel, Multi-OS Projects &amp; 8-Engine ADE Hierarchy:</strong> Local Apple + cloud Ubuntu, Kali &amp; Windows projects, colorful engine icons, L1–L4 full badges, pinned <code>✦ Secretary</code> &amp; live diff.</sub></p>
+      <img src="docs/assets/02-ade-hierarchy-and-diff.png" width="100%" alt="Unified Multi-Project Multi-OS ADE Command Center — macOS, Ubuntu, Kali and Windows projects with all 8 native coding agent engine icons, full L1 to L4 badges, live Governor chat and Project Inspector" />
+      <p align="center"><sub><strong>One Panel, Multi-OS Projects &amp; 8-Engine ADE Command Center:</strong> Apple + Ubuntu + Kali + Windows projects, all 8 colorful engine icons, L1–L4 full badges, live Governor session &amp; Project Inspector.</sub></p>
     </td>
     <td width="50%">
-      <img src="docs/assets/17-multi-host-terminals.png" width="100%" alt="Simultaneous Local and Multi-Cloud OS Integrated Terminals — Split Ubuntu GPU and Kali RedTeam shells alongside macOS, Ubuntu, Kali and Windows OS tab icons" />
-      <p align="center"><sub><strong>Simultaneous Local &amp; Multi-Cloud OS Terminals:</strong> Split Ubuntu H100 GPU + Kali RedTeam shells running live alongside Apple, Ubuntu, Kali &amp; Windows terminal tabs.</sub></p>
+      <img src="docs/assets/20-ade-agent-chat-and-diff.png" width="100%" alt="Live ADE Agent Chat Session Side-by-Side with Git Working Tree Diff and Smart Calm Multi-OS Sidebar" />
+      <p align="center"><sub><strong>Live ADE Agent Chat + Side-by-Side Git Diff:</strong> Multi-tier orchestration conversation right beside live code diffs and Smart Calm sidebar.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2">
+      <p align="center">
+        <img src="docs/assets/17-multi-host-terminals.png" width="88%" alt="Simultaneous Local and Multi-Cloud OS Integrated Terminals — Split Ubuntu H100 GPU and Kali RedTeam shells alongside macOS, Ubuntu, Kali and Windows OS tab icons" /><br/>
+        <sub><strong>Simultaneous Local &amp; Multi-Cloud OS Terminals in One Window:</strong> Split Ubuntu H100 GPU + Kali RedTeam shells running live alongside Apple, Ubuntu, Kali &amp; Windows terminal tabs.</sub>
+      </p>
     </td>
   </tr>
 </table>

@@ -24,9 +24,11 @@ import {
 	buildCloudProjectUri,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
+	resolveAdeOsIconKind,
 	resolveInitialCloudHostDirectory,
 	sanitizeSshAlias,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
+import { renderAdeOsIcon } from '../../../browser/adeOsIcon.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
@@ -822,13 +824,15 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 
 		// Head: OS badge · titles · latency · menu
 		const head = append(card, $('header.ade-ch-card-head'));
-		const osBadge = append(head, $(`span.ade-ch-os-badge.os-${host.os}`, {
-			title: host.os === 'windows' ? localize('adeChOsWindows', "Windows") : host.os === 'macos' ? localize('adeChOsMac', "macOS") : localize('adeChOsLinux', "Linux"),
-		}));
+		const osKind = resolveAdeOsIconKind({
+			os: host.os,
+			distribution: host.distribution,
+			hint: `${host.name} ${host.alias} ${host.hostName} ${host.notes ?? ''}`,
+		});
+		const osBadge = append(head, $(`span.ade-ch-os-badge.os-${host.os}.os-kind-${osKind}`));
 		const glyph = append(osBadge, $('span.ade-ch-os-glyph', { 'aria-hidden': 'true' }));
-		if (host.os === 'linux') {
-			glyph.classList.add(...ThemeIcon.asClassNameArray(Codicon.terminalLinux));
-		}
+		renderAdeOsIcon(glyph, osKind, { baseClass: 'ade-ch-os-glyph', prefix: 'ade-os' });
+		osBadge.title = glyph.title;
 		const titles = append(head, $('.ade-ch-card-titles'));
 		append(titles, $('span.ade-ch-card-name', { title: host.name }, host.name));
 		const subRow = append(titles, $('.ade-ch-card-subrow'));
