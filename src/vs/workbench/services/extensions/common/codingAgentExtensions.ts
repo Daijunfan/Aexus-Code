@@ -7,7 +7,10 @@ import { ExtensionIdentifier, ExtensionIdentifierSet, IExtensionContributions, I
 
 /** The built-in ADE bridge owns explicit project sessions, independent of IDE workspaces. */
 export function isWorkspaceIndependentExtension(extension: IExtensionDescription): boolean {
-	return extension.isBuiltin && ExtensionIdentifier.equals(extension.identifier, 'vscode.aexus-agents');
+	return extension.isBuiltin && (
+		ExtensionIdentifier.equals(extension.identifier, 'aexus.aexus-agents') ||
+		ExtensionIdentifier.equals(extension.identifier, 'vscode.aexus-agents')
+	);
 }
 
 export function getWorkspaceIndependentSessionTypes(extensions: readonly IExtensionDescription[]): ReadonlySet<string> {

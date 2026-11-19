@@ -196,7 +196,7 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 				return;
 			}
 			this.lastSyncedSnapshotKey = snapshotKey;
-			const extId = new ExtensionIdentifier('vscode.aexus-agents');
+			const extId = new ExtensionIdentifier('aexus.aexus-agents');
 			await this.extensionService.activateById(extId, { startup: false, extensionId: extId, activationEvent: 'api' }).catch(() => undefined);
 			await this.commandService.executeCommand('aexus.agentEngines.syncRoleContext', snapshot);
 		} catch {
