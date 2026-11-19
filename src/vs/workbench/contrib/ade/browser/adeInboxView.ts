@@ -19,12 +19,20 @@ import {
 	resolveAdeInboxSeverity,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
+	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	findRankDefinition,
+	IAdeOrganizationConfig,
+	resolveEffectiveRankDefinition,
+} from '../../../../platform/ade/common/adeRoleSchema.js';
+import {
 	AdeSessionRank,
 	IAdeAgent,
 	IAdeEditorService,
 	IAdeProjectsService,
 	resolveAdeAgentRank,
 } from '../common/ade.js';
+import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
+import { resolveAdeRankCodicon } from './adeRoleStudioEditorPane.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 type AdeInboxLane = 'critical' | 'gate' | 'replies' | 'info' | 'resolved';
@@ -46,7 +54,17 @@ const ADE_INBOX_RANK_PRIORITY: Readonly<Record<AdeInboxSenderRank, number>> = {
 /** Message length beyond which a card is clamped to 3 lines with a "more" toggle. */
 const ADE_INBOX_CLAMP_CHARS = 180;
 
-export function normalizeAdeInboxRank(rank: AdeSessionRank | undefined): AdeInboxSenderRank {
+export function normalizeAdeInboxRank(
+	rank: AdeSessionRank | undefined,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+): AdeInboxSenderRank {
+	if (!rank) {
+		return resolveEffectiveRankDefinition(config, undefined, false).id;
+	}
+	const found = findRankDefinition(config, rank);
+	if (found) {
+		return found.id;
+	}
 	switch (rank) {
 		case 'governor':
 			return 'governor';
@@ -56,57 +74,82 @@ export function normalizeAdeInboxRank(rank: AdeSessionRank | undefined): AdeInbo
 		case 'subordinate':
 			return 'employee';
 		case 'worker':
-		default:
 			return 'worker';
+		default:
+			return String(rank);
 	}
 }
 
-export function resolveAdeInboxItemRank(item: IAdeInboxItem, projects?: IAdeProjectsService): AdeInboxSenderRank {
+export function resolveAdeInboxItemRank(
+	item: IAdeInboxItem,
+	projects?: IAdeProjectsService,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+): AdeInboxSenderRank {
 	if (item.senderRank) {
-		return item.senderRank;
+		return normalizeAdeInboxRank(item.senderRank, config);
 	}
 	if (item.senderAgentId && projects) {
 		const sender = projects.getAgent(item.senderAgentId);
 		if (sender) {
-			return normalizeAdeInboxRank(resolveAdeAgentRank(sender, projects.hasSubordinates(sender.id)));
+			return normalizeAdeInboxRank(resolveAdeAgentRank(sender, projects.hasSubordinates(sender.id), config), config);
 		}
 	}
-	return 'governor';
+	return config.ranks[0]?.id ?? 'governor';
 }
 
-function getRankTierLabel(rank: AdeInboxSenderRank): string {
+function getRankTierLabel(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	const found = findRankDefinition(config, rank);
+	if (found) {
+		return `L${found.tier}`;
+	}
 	switch (rank) {
 		case 'governor': return 'L1';
 		case 'manager': return 'L2';
 		case 'employee': return 'L3';
 		case 'worker': return 'L4';
+		default: return 'L*';
 	}
 }
 
-function getRankShortLabel(rank: AdeInboxSenderRank): string {
+function getRankShortLabel(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	const found = findRankDefinition(config, rank);
+	if (found) {
+		return found.shortName;
+	}
 	switch (rank) {
 		case 'governor': return localize('adeInboxRankGovShort', "Gov");
 		case 'manager': return localize('adeInboxRankMgrShort', "Mgr");
 		case 'employee': return localize('adeInboxRankEmpShort', "Emp");
 		case 'worker': return localize('adeInboxRankWrkShort', "Wrk");
+		default: return String(rank).slice(0, 4);
 	}
 }
 
-function getRankFullLabel(rank: AdeInboxSenderRank): string {
+function getRankFullLabel(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	const found = findRankDefinition(config, rank);
+	if (found) {
+		return found.name;
+	}
 	switch (rank) {
 		case 'governor': return localize('adeInboxRankGovFull', "Governor");
 		case 'manager': return localize('adeInboxRankMgrFull', "Manager");
 		case 'employee': return localize('adeInboxRankEmpFull', "Employee");
 		case 'worker': return localize('adeInboxRankWrkFull', "Worker");
+		default: return String(rank);
 	}
 }
 
-function getRankIcon(rank: AdeInboxSenderRank): ThemeIcon {
+function getRankIcon(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): ThemeIcon {
+	const found = findRankDefinition(config, rank);
+	if (found) {
+		return resolveAdeRankCodicon(found.icon);
+	}
 	switch (rank) {
 		case 'governor': return Codicon.organization;
 		case 'manager': return Codicon.briefcase;
 		case 'employee': return Codicon.shield;
 		case 'worker': return Codicon.tools;
+		default: return Codicon.account;
 	}
 }
 
@@ -181,6 +224,7 @@ export class AdeInboxPanel extends Disposable {
 		private readonly onError?: (message: string) => void,
 		private readonly projects?: IAdeProjectsService,
 		private readonly sessions?: IAdeSessionsService,
+		private readonly roleSchema?: IAdeRoleSchemaService,
 	) {
 		super();
 		this.element = append(container, $('.ade-inbox-panel'));
@@ -210,7 +254,22 @@ export class AdeInboxPanel extends Disposable {
 				}
 			}));
 		}
+		if (this.roleSchema) {
+			this._register(this.roleSchema.onDidChangeSchema(() => {
+				const cfg = this.roleSchema!.getConfig();
+				if (this.selectedRank !== 'all' && !cfg.ranks.some(r => r.id === this.selectedRank)) {
+					this.selectedRank = 'all';
+				}
+				if (!this.element.hidden) {
+					this.render();
+				}
+			}));
+		}
 		this.render();
+	}
+
+	private getRoleConfig(): IAdeOrganizationConfig {
+		return this.roleSchema?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
 	}
 
 	setVisible(visible: boolean): void {
@@ -238,15 +297,17 @@ export class AdeInboxPanel extends Disposable {
 			return [];
 		}
 		const projects = this.projects;
+		const config = this.getRoleConfig();
 		const entries: IUnreadReplyEntry[] = [];
 		for (const agent of projects.agents) {
 			if (projects.isArchived(agent.id) || !agent.unread) {
 				continue;
 			}
-			const rank = normalizeAdeInboxRank(resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id)));
+			const rank = normalizeAdeInboxRank(resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id), config), config);
 			entries.push({ agent, rank });
 		}
-		entries.sort((a, b) => ADE_INBOX_RANK_PRIORITY[a.rank] - ADE_INBOX_RANK_PRIORITY[b.rank]);
+		const tierOf = (r: string) => findRankDefinition(config, r)?.tier ?? (ADE_INBOX_RANK_PRIORITY[r] ?? 99);
+		entries.sort((a, b) => tierOf(a.rank) - tierOf(b.rank));
 		return entries;
 	}
 
@@ -264,27 +325,29 @@ export class AdeInboxPanel extends Disposable {
 		clearNode(this.rankBarEl);
 		clearNode(this.listEl);
 
+		const roleConfig = this.getRoleConfig();
+		const rankFilters: AdeInboxRankFilter[] = ['all', ...roleConfig.ranks.map(r => r.id)];
 		const allFormalItems = this.inbox.list({ includeResolved: this.showResolved });
 		const allUnreadReplies = this.collectUnreadReplies();
 
 		// Compute per-rank counts across visible formal items + unread session replies
-		const rankCounts: Record<AdeInboxRankFilter, number> = {
+		const rankCounts: Record<string, number> = {
 			all: allFormalItems.length + allUnreadReplies.length,
-			governor: 0,
-			manager: 0,
-			employee: 0,
-			worker: 0,
 		};
+		for (const r of roleConfig.ranks) {
+			rankCounts[r.id] = 0;
+		}
 		for (const item of allFormalItems) {
-			rankCounts[resolveAdeInboxItemRank(item, this.projects)]++;
+			const r = resolveAdeInboxItemRank(item, this.projects, roleConfig);
+			rankCounts[r] = (rankCounts[r] ?? 0) + 1;
 		}
 		for (const entry of allUnreadReplies) {
-			rankCounts[entry.rank]++;
+			rankCounts[entry.rank] = (rankCounts[entry.rank] ?? 0) + 1;
 		}
 
 		const filteredFormalItems = this.selectedRank === 'all'
 			? allFormalItems
-			: allFormalItems.filter(item => resolveAdeInboxItemRank(item, this.projects) === this.selectedRank);
+			: allFormalItems.filter(item => resolveAdeInboxItemRank(item, this.projects, roleConfig) === this.selectedRank);
 		const filteredUnreadReplies = this.selectedRank === 'all'
 			? allUnreadReplies
 			: allUnreadReplies.filter(entry => entry.rank === this.selectedRank);
@@ -346,13 +409,13 @@ export class AdeInboxPanel extends Disposable {
 			}));
 		}
 
-		// Row 2: Rank filter bar (All / Gov / Mgr / Emp / Wrk — fits on 1 crisp row)
-		for (const rank of ADE_INBOX_RANK_FILTERS) {
+		// Row 2: Rank filter bar (dynamic from configured org schema — default All / Gov / Mgr / Emp / Wrk)
+		for (const rank of rankFilters) {
 			const isActive = this.selectedRank === rank;
-			const count = rankCounts[rank];
+			const count = rankCounts[rank] ?? 0;
 			const chipTooltip = rank === 'all'
 				? localize('adeInboxRankAllTooltip', "Show messages from all agent ranks")
-				: localize('adeInboxRankSingleTooltip', "Show only {0} {1} messages", getRankTierLabel(rank), getRankFullLabel(rank));
+				: localize('adeInboxRankSingleTooltip', "Show only {0} {1} messages", getRankTierLabel(rank, roleConfig), getRankFullLabel(rank, roleConfig));
 			const chip = append(this.rankBarEl, $(`button.ade-inbox-rank-chip.rank-${rank}${isActive ? '.active' : ''}${count > 0 ? '.has-items' : ''}`, {
 				type: 'button',
 				'data-rank': rank,
@@ -362,7 +425,7 @@ export class AdeInboxPanel extends Disposable {
 			if (rank === 'all') {
 				append(chip, $('span.ade-inbox-rank-chip-label', {}, localize('adeInboxRankAllLabel', "All")));
 			} else {
-				append(chip, $('span.ade-inbox-rank-chip-label', {}, getRankShortLabel(rank)));
+				append(chip, $('span.ade-inbox-rank-chip-label', {}, getRankShortLabel(rank, roleConfig)));
 			}
 			if (count > 0) {
 				append(chip, $('span.ade-inbox-rank-count', {}, String(count)));
@@ -492,8 +555,9 @@ export class AdeInboxPanel extends Disposable {
 		const topRow = append(card, $('.ade-inbox-card-top'));
 		const rankPill = append(topRow, $(`span.ade-inbox-rank-pill.rank-${rank}`, { 'data-tier': getRankTierLabel(rank) }));
 		const rankIco = append(rankPill, $('span.ade-inbox-rank-pill-icon', { 'aria-hidden': 'true' }));
-		rankIco.classList.add(...ThemeIcon.asClassNameArray(getRankIcon(rank)));
-		append(rankPill, $('span', {}, `${getRankTierLabel(rank)} ${getRankFullLabel(rank)}`));
+		const roleConfig = this.getRoleConfig();
+		rankIco.classList.add(...ThemeIcon.asClassNameArray(getRankIcon(rank, roleConfig)));
+		append(rankPill, $('span', {}, `${getRankTierLabel(rank, roleConfig)} ${getRankFullLabel(rank, roleConfig)}`));
 
 		const projectName = this.projects?.getProjectName(agent.projectUri) ?? '';
 		if (projectName) {
@@ -568,8 +632,9 @@ export class AdeInboxPanel extends Disposable {
 		restoreSelectionStart?: number | null,
 		restoreSelectionEnd?: number | null,
 	): void {
+		const roleConfig = this.getRoleConfig();
 		const severity = resolveAdeInboxSeverity(item);
-		const itemRank = resolveAdeInboxItemRank(item, this.projects);
+		const itemRank = resolveAdeInboxItemRank(item, this.projects, roleConfig);
 		const card = append(this.listEl, $(`div.ade-inbox-card.kind-${item.kind}.sev-${severity}.rank-${itemRank}${item.unread ? '.unread' : ''}${item.resolved ? '.resolved' : ''}`, {
 			'data-inbox-id': item.id,
 			'data-severity': severity,
@@ -597,8 +662,8 @@ export class AdeInboxPanel extends Disposable {
 		append(badge, $('span', {}, this.formatKindLabel(item, severity)));
 
 		append(topRow, $(`span.ade-inbox-rank-pill.compact.rank-${itemRank}`, {
-			title: `${getRankTierLabel(itemRank)} ${getRankFullLabel(itemRank)}`,
-		}, getRankTierLabel(itemRank)));
+			title: `${getRankTierLabel(itemRank, roleConfig)} ${getRankFullLabel(itemRank, roleConfig)}`,
+		}, getRankTierLabel(itemRank, roleConfig)));
 
 		if (item.projectName) {
 			append(topRow, $('span.ade-inbox-project-pill', { title: item.projectPath }, item.projectName));

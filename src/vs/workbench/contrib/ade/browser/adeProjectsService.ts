@@ -10,6 +10,17 @@ import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
 import { AdeThinkingLevel, AdeWorkTreeType } from '../../../../platform/ade/common/adeEngineering.js';
+import {
+	ADE_ORGANIZATION_CONFIG_KEY,
+	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	getNextLowerRankFromConfig,
+	getTopRankDefinition,
+	IAdeOrganizationConfig,
+	isPureExecutionRank,
+	normalizeAdeOrganizationConfig,
+	resolveEffectiveRankDefinition,
+} from '../../../../platform/ade/common/adeRoleSchema.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -87,8 +98,14 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
 		@IProjectNavigationService private readonly projectNavigation: IProjectNavigationService,
 		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super();
+		this._register(this.configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration(ADE_ORGANIZATION_CONFIG_KEY)) {
+				this.changeEmitter.fire();
+			}
+		}));
 
 		const catalogInitialized = storageService.getBoolean('aexus.ade.catalogInitialized', StorageScope.PROFILE, false);
 		const hasStoredProjectsKey = storageService.get('aexus.ade.projects', StorageScope.PROFILE) !== undefined;
@@ -808,9 +825,23 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		return this.entries.some(agent => agent.parentId === id);
 	}
 
+	private getRoleSchema(): IAdeOrganizationConfig {
+		const raw = this.configurationService.getValue<unknown>(ADE_ORGANIZATION_CONFIG_KEY);
+		return raw ? normalizeAdeOrganizationConfig(raw) : DEFAULT_ADE_ORGANIZATION_CONFIG;
+	}
+
 	isOrchestrated(agentOrId: IAdeAgent | string): boolean {
 		const agent = typeof agentOrId === 'string' ? this.getAgent(agentOrId) : agentOrId;
-		return Boolean(agent && (agent.role || this.hasSubordinates(agent.id)));
+		if (!agent) {
+			return false;
+		}
+		if (this.hasSubordinates(agent.id)) {
+			return true;
+		}
+		if (!agent.role) {
+			return false;
+		}
+		return !isPureExecutionRank(this.getRoleSchema(), agent.role);
 	}
 
 	isArchived(id: string): boolean {
@@ -1178,7 +1209,12 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		if (this.getSubtree(id).some(member => member.id === newParentId)) {
 			return false;
 		}
-		const parentRank = getAdeRoleRankLevel(newParent.role, this.hasSubordinates(newParent.id));
+		const schema = this.getRoleSchema();
+		const parentDef = resolveEffectiveRankDefinition(schema, newParent.role, this.hasSubordinates(newParent.id));
+		if (parentDef.pureExecution || !parentDef.canHaveSubordinates) {
+			return false;
+		}
+		const parentRank = getAdeRoleRankLevel(newParent.role, this.hasSubordinates(newParent.id), schema);
 		if (parentRank === 0) {
 			return false;
 		}
@@ -1189,6 +1225,8 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		if (!this.canReparentAgent(id, newParentId, targetProjectUri)) {
 			return false;
 		}
+		const schema = this.getRoleSchema();
+		const topRankId = getTopRankDefinition(schema).id;
 		const agent = this.getAgent(id)!;
 		const subtree = this.getSubtree(id);
 		const subtreeIds = new Set(subtree.map(member => member.id));
@@ -1196,7 +1234,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			const newParent = this.getAgent(newParentId)!;
 			const roleUpdates = new Map<string, AdeAgentRole | undefined>();
 			if (!newParent.parentId && !newParent.role) {
-				roleUpdates.set(newParent.id, 'governor');
+				roleUpdates.set(newParent.id, topRankId);
 			}
 			const queue: string[] = [id];
 			const seen = new Set<string>();
@@ -1212,16 +1250,17 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				}
 				const effParent = currId === id ? newParent : this.getAgent(curr.parentId!);
 				const pRole = effParent && roleUpdates.has(effParent.id) ? roleUpdates.get(effParent.id) : effParent?.role;
-				const pLevel = effParent ? getAdeRoleRankLevel(pRole, true) : 3;
+				const pLevel = effParent ? getAdeRoleRankLevel(pRole, true, schema) : getAdeRoleRankLevel(topRankId, true, schema);
 				const currHasSubs = this.hasSubordinates(curr.id);
 				if (!curr.role && !currHasSubs) {
 					roleUpdates.set(curr.id, undefined);
 				} else {
-					const currLevel = getAdeRoleRankLevel(curr.role, currHasSubs);
+					const currLevel = getAdeRoleRankLevel(curr.role, currHasSubs, schema);
 					if (currLevel >= pLevel) {
-						roleUpdates.set(curr.id, pLevel >= 3 ? 'manager' : 'employee');
+						const nextLower = getNextLowerRankFromConfig(schema, pRole, true);
+						roleUpdates.set(curr.id, nextLower.childRole);
 					} else {
-						roleUpdates.set(curr.id, curr.role ?? 'governor');
+						roleUpdates.set(curr.id, curr.role ?? topRankId);
 					}
 				}
 				for (const child of this.getDirectSubordinates(curr.id)) {

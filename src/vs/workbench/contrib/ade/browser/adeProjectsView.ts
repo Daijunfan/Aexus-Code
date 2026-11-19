@@ -49,9 +49,12 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { ADE_OS_ICON_LABELS, AdeOsIconKind, formatProjectDisplayPath, IAdeCloudHost, IAdeCloudHostBackendService, isCloudProjectUri, resolveAdeOsIconKind } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IAdeEngineeringService, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
+import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_OPEN_RESEARCH_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_OPEN_RESEARCH_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeInboxPanel } from './adeInboxView.js';
+import { resolveAdeRankCodicon } from './adeRoleStudioEditorPane.js';
 import { AdeSessionEditorInput } from './adeSessionEditor.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 import './media/adeSidebarDeck.css';
@@ -62,7 +65,11 @@ export type AdeTreeItem =
 
 const ADE_SIDEBAR_BADGES_EXPANDED_KEY = 'aexus.ade.sidebarBadgesExpanded';
 
-function formatRoleBadgeLabel(rank: AdeSessionRank): string {
+function formatRoleBadgeLabel(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	const def = findRankDefinition(config, rank);
+	if (def) {
+		return def.name;
+	}
 	switch (rank) {
 		case 'governor':
 			return localize('adeRoleGovernor', "Governor");
@@ -74,10 +81,16 @@ function formatRoleBadgeLabel(rank: AdeSessionRank): string {
 			return localize('adeRoleMember', "Member");
 		case 'worker':
 			return localize('adeRoleWorker', "Worker");
+		default:
+			return String(rank);
 	}
 }
 
-function formatNewSubSessionLabel(childRank: AdeSessionRank): string {
+function formatNewSubSessionLabel(childRank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	const def = findRankDefinition(config, childRank);
+	if (def) {
+		return localize('adeNewRankSubSession', "New {0} Sub-Session...", def.name);
+	}
 	switch (childRank) {
 		case 'manager':
 			return localize('adeNewManagerSubSession', "New Manager Sub-Session...");
@@ -90,8 +103,12 @@ function formatNewSubSessionLabel(childRank: AdeSessionRank): string {
 	}
 }
 
-/** Org-chart tier monogram for a rank (L1 Governor … L4 Worker). */
-export function getAdeRankTier(rank: AdeSessionRank): 'L1' | 'L2' | 'L3' | 'L4' {
+/** Org-chart tier monogram for a rank (L1 Governor … LN Leaf). */
+export function getAdeRankTier(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	const def = findRankDefinition(config, rank);
+	if (def) {
+		return `L${def.tier}`;
+	}
 	switch (rank) {
 		case 'governor':
 			return 'L1';
@@ -102,10 +119,16 @@ export function getAdeRankTier(rank: AdeSessionRank): 'L1' | 'L2' | 'L3' | 'L4' 
 			return 'L3';
 		case 'worker':
 			return 'L4';
+		default:
+			return 'L*';
 	}
 }
 
-function getAdeRankIcon(rank: AdeSessionRank): ThemeIcon {
+function getAdeRankIcon(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): ThemeIcon {
+	const def = findRankDefinition(config, rank);
+	if (def) {
+		return resolveAdeRankCodicon(def.icon);
+	}
 	switch (rank) {
 		case 'governor':
 			return Codicon.organization;
@@ -117,11 +140,13 @@ function getAdeRankIcon(rank: AdeSessionRank): ThemeIcon {
 			return Codicon.person;
 		case 'worker':
 			return Codicon.tools;
+		default:
+			return Codicon.account;
 	}
 }
 
-function formatChildRankPreview(childRank: AdeSessionRank): string {
-	return localize('adeDropChildRankPreview', "→ {0}", formatRoleBadgeLabel(childRank));
+function formatChildRankPreview(childRank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	return localize('adeDropChildRankPreview', "→ {0}", formatRoleBadgeLabel(childRank, config));
 }
 
 /** Removes every `rank-*` / `depth-*` modifier so recycled rows never leak state between elements. */
@@ -287,6 +312,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		private readonly onOpenEngineering: (governorId: string) => void,
 		private readonly getEditableData: (agent: IAdeAgent) => IEditableData | undefined,
 		private readonly getCloudHostMeta: (authority: string) => IAdeCloudHost | undefined,
+		private readonly getRoleSchema: () => IAdeOrganizationConfig,
 	) { }
 
 	renderTemplate(container: HTMLElement): IAdeTreeTemplate {
@@ -481,12 +507,14 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		template.countBadge.hidden = true;
 
 		const agent = item.agent;
+		const roleSchema = this.getRoleSchema();
 		const isLocked = Boolean(this.projects.isLockedByWorkTree?.(agent.id));
 		const hasSubs = this.projects.hasSubordinates(agent.id);
-		const rank = resolveAdeAgentRank(agent, hasSubs);
-		const nextLower = getNextLowerAdeRole(agent.role, hasSubs);
+		const rank = resolveAdeAgentRank(agent, hasSubs, roleSchema);
+		const rankDef = resolveEffectiveRankDefinition(roleSchema, agent.role, hasSubs);
+		const nextLower = getNextLowerAdeRole(agent.role, hasSubs, roleSchema);
 		if (nextLower.canSpawnSubSession && !isLocked) {
-			const subLabel = formatNewSubSessionLabel(nextLower.childRank);
+			const subLabel = formatNewSubSessionLabel(nextLower.childRank, roleSchema);
 			template.addSessionBtn.hidden = false;
 			template.addSessionBtn.setAttribute('aria-label', subLabel);
 			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.addSessionBtn, subLabel));
@@ -508,12 +536,12 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		}
 		if (nextLower.canSpawnSubSession) {
 			template.row.setAttribute('data-child-rank', nextLower.childRank);
-			template.row.setAttribute('data-child-label', formatChildRankPreview(nextLower.childRank));
+			template.row.setAttribute('data-child-label', formatChildRankPreview(nextLower.childRank, roleSchema));
 		}
 
 		const icon = effectiveEngineId ? (this.sessions.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
 		const engineTitle = effectiveEngineId ? this.sessions.getEngineName(effectiveEngineId) : localize('adeDraftSession', "Draft");
-		const badgeLabel = formatRoleBadgeLabel(rank);
+		const badgeLabel = formatRoleBadgeLabel(rank, roleSchema);
 
 		this.applyItemIcon(template.iconNode, icon);
 		template.label.setResource({
@@ -552,16 +580,16 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.workTreeBadge.hidden = true;
 		}
 
-		template.roleBadge.className = `ade-role-badge role-${rank}${isLocked ? ' locked' : ''}`;
-		template.roleBadge.setAttribute('data-tier', getAdeRankTier(rank));
+		template.roleBadge.className = `ade-role-badge role-${rank} role-color-${rankDef.color}${rankDef.pureExecution ? ' pure-leaf' : ''}${isLocked ? ' locked' : ''}`;
+		template.roleBadge.setAttribute('data-tier', getAdeRankTier(rank, roleSchema));
 		const rankIcon = $('span.ade-role-badge-icon', { 'aria-hidden': 'true' });
-		rankIcon.classList.add(...ThemeIcon.asClassNameArray(getAdeRankIcon(rank)));
+		rankIcon.classList.add(...ThemeIcon.asClassNameArray(getAdeRankIcon(rank, roleSchema)));
 		template.roleBadge.replaceChildren(rankIcon, $('span.ade-badge-label', {}, badgeLabel));
 		template.roleBadge.hidden = false;
 		const roleTooltip = isLocked
 			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel)
-			: rank === 'worker'
-				? localize('adeWorkerBadgeTooltip', "Role: Worker (Clean Native Context) — Click to change role")
+			: rankDef.pureExecution
+				? localize('adeWorkerBadgeTooltip', "Role: {0} (Clean Native Context) — Click to change role", badgeLabel)
 				: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
 		template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.roleBadge, roleTooltip));
 		if (!isLocked) {
@@ -659,6 +687,7 @@ export class AdeProjectsView extends ViewPane {
 	private readonly notificationService: INotificationService | undefined;
 	private readonly workbenchEditorService: IEditorService | undefined;
 	private readonly cloudHostBackend: IAdeCloudHostBackendService | undefined;
+	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
 	private readonly cloudHostMetaByAuthority = new Map<string, IAdeCloudHost>();
 	private emptyStateHost: HTMLElement | undefined;
 	private emptyStateMessage: HTMLElement | undefined;
@@ -710,24 +739,30 @@ export class AdeProjectsView extends ViewPane {
 			this.refreshAgentIcons();
 		}));
 
-		const [engSvc, inbSvc, notifSvc, editorSvc, cloudSvc] = instantiationService.invokeFunction(accessor => {
+		const [engSvc, inbSvc, notifSvc, editorSvc, cloudSvc, roleSchemaSvc] = instantiationService.invokeFunction(accessor => {
 			let eng: IAdeEngineeringService | undefined;
 			let inb: IAdeInboxService | undefined;
 			let notif: INotificationService | undefined;
 			let edit: IEditorService | undefined;
 			let cloud: IAdeCloudHostBackendService | undefined;
+			let roleSchema: IAdeRoleSchemaService | undefined;
 			try { eng = accessor.get(IAdeEngineeringService); } catch { eng = undefined; }
 			try { inb = accessor.get(IAdeInboxService); } catch { inb = undefined; }
 			try { notif = accessor.get(INotificationService); } catch { notif = undefined; }
 			try { edit = accessor.get(IEditorService); } catch { edit = undefined; }
 			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
-			return [eng, inb, notif, edit, cloud] as const;
+			try { roleSchema = accessor.get(IAdeRoleSchemaService); } catch { roleSchema = undefined; }
+			return [eng, inb, notif, edit, cloud, roleSchema] as const;
 		});
 		this.engineeringService = engSvc;
 		this.inboxService = inbSvc;
 		this.notificationService = notifSvc;
 		this.workbenchEditorService = editorSvc;
 		this.cloudHostBackend = cloudSvc;
+		this.roleSchemaService = roleSchemaSvc;
+		if (this.roleSchemaService) {
+			this._register(this.roleSchemaService.onDidChangeSchema(() => void this.refresh()));
+		}
 		if (this.cloudHostBackend) {
 			void this.refreshCloudHostMeta();
 			this._register(this.cloudHostBackend.onDidChangeHosts(() => {
@@ -789,6 +824,7 @@ export class AdeProjectsView extends ViewPane {
 				msg => this.notificationService?.error(msg),
 				this.projects,
 				this.sessions,
+				this.roleSchemaService,
 			));
 			this.inboxPanel.setVisible(false);
 		}
@@ -819,6 +855,7 @@ export class AdeProjectsView extends ViewPane {
 					governorId => void this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, governorId),
 					agent => this.getEditableData(agent),
 					authority => this.cloudHostMetaByAuthority.get(authority) ?? this.cloudHostMetaByAuthority.get(authority.toLowerCase()),
+					() => this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
 				),
 			],
 			{
@@ -1179,6 +1216,16 @@ export class AdeProjectsView extends ViewPane {
 
 		const actions = append(controls, $('.ade-sidebar-actions'));
 
+		const roleStudioBtn = append(actions, $('button.ade-icon-button.ade-role-studio-btn', {
+			type: 'button',
+			'aria-label': localize('adeOpenRoleStudioBtn', "Customize Organization, Ranks & API Permissions..."),
+		}));
+		roleStudioBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.organization));
+		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), roleStudioBtn, localize('adeOpenRoleStudioTooltip', "Organization & Roles Studio — Customize Ranks, Prompts & APIs")));
+		this._register(addDisposableListener(roleStudioBtn, EventType.CLICK, () => {
+			void this.commandService.executeCommand(ADE_OPEN_ROLE_STUDIO_COMMAND_ID);
+		}));
+
 		const badgesBtn = this.badgesToggleButton = append(actions, $('button.ade-icon-button.ade-badges-toggle-btn', {
 			type: 'button',
 			'aria-label': localize('adeToggleFullBadges', "Toggle Compact vs. Full Badges"),
@@ -1374,15 +1421,16 @@ export class AdeProjectsView extends ViewPane {
 
 	getAgentContextActions(agent: IAdeAgent): IAction[] {
 		const agentId = agent.id;
+		const roleSchema = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
 		const isArchived = this.projects.isArchived(agentId);
 		const hasSubs = this.projects.hasSubordinates(agentId);
-		const rank = resolveAdeAgentRank(agent, hasSubs);
+		const effectiveRank = resolveAdeAgentRank(agent, hasSubs, roleSchema);
 		const isLocked = Boolean(this.projects.isLockedByWorkTree?.(agentId));
 		const workTreeGov = this.projects.getWorkTreeGovernor?.(agentId);
-		const nextLower = getNextLowerAdeRole(agent.role, hasSubs);
+		const nextLower = getNextLowerAdeRole(agent.role, hasSubs, roleSchema);
 		const orchestrated = this.projects.isOrchestrated(agent);
 
-		const isTopGovernor = !agent.parentId && rank === 'governor';
+		const isTopGovernor = !agent.parentId && (effectiveRank === 'governor' || effectiveRank === roleSchema.ranks[0]?.id);
 
 		return [
 			...(isTopGovernor ? [
@@ -1417,7 +1465,7 @@ export class AdeProjectsView extends ViewPane {
 			] : []),
 			...(nextLower.canSpawnSubSession && !isLocked ? [toAction({
 				id: 'ade.newSubSession',
-				label: formatNewSubSessionLabel(nextLower.childRank),
+				label: formatNewSubSessionLabel(nextLower.childRank, roleSchema),
 				run: () => this.commandService.executeCommand('workbench.action.ade.newSubSession', agentId),
 			})] : []),
 			toAction({
@@ -1449,7 +1497,7 @@ export class AdeProjectsView extends ViewPane {
 			})] : []),
 			...(!isLocked ? [
 				new Separator(),
-				...(getAdeRoleRankLevel(agent.role, hasSubs) >= 2 ? [toAction({
+				...(getAdeRoleRankLevel(agent.role, hasSubs, roleSchema) >= 1 ? [toAction({
 					id: 'ade.recruitSubordinate',
 					label: localize('adeRecruitSubordinate', "Recruit Subordinate Agent..."),
 					run: () => this.commandService.executeCommand('workbench.action.ade.addAgent', agentId),
@@ -1463,6 +1511,11 @@ export class AdeProjectsView extends ViewPane {
 					id: 'ade.reparentAgent',
 					label: localize('adeChangeSupervisor', "Change Supervisor..."),
 					run: () => this.commandService.executeCommand('workbench.action.ade.reparentAgent', agentId),
+				}),
+				toAction({
+					id: 'ade.openRoleStudio',
+					label: localize('adeCustomizeRolesAndApis', "Customize Roles, Prompts & APIs..."),
+					run: () => this.commandService.executeCommand(ADE_OPEN_ROLE_STUDIO_COMMAND_ID, effectiveRank),
 				}),
 			] : []),
 			...(orchestrated ? [toAction({

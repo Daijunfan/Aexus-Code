@@ -238,6 +238,30 @@ describe('parseCliCommand engineering demo', () => {
 	});
 });
 
+describe('parseCliCommand role customization & custom rank slugs', () => {
+	test('routes role subcommands and accepts custom rank IDs on session create/role/list', () => {
+		assert.deepStrictEqual([
+			parseCliCommand(['role', 'list', '--json']),
+			parseCliCommand(['role', 'apis', '--json']),
+			parseCliCommand(['role', 'presets']),
+			parseCliCommand(['role', 'preset', 'startup-3tier']),
+			parseCliCommand(['role', 'reset']),
+			parseCliCommand(['role', 'studio', 'qa-auditor']),
+			parseCliCommand(['session', 'create', '--role', 'qa-auditor', '--title', 'Audit Lead', '--no-open']),
+			parseCliCommand(['session', 'role', 's-1', 'tech-lead']),
+		], [
+			{ help: false, json: true, windowId: undefined, action: 'role.schema.get', params: {} },
+			{ help: false, json: true, windowId: undefined, action: 'role.apis', params: {} },
+			{ help: false, json: false, windowId: undefined, action: 'role.presets', params: {} },
+			{ help: false, json: false, windowId: undefined, action: 'role.schema.set', params: { presetId: 'startup-3tier' } },
+			{ help: false, json: false, windowId: undefined, action: 'role.schema.reset', params: {} },
+			{ help: false, json: false, windowId: undefined, action: 'role.studio.open', params: { rankId: 'qa-auditor' } },
+			{ help: false, json: false, windowId: undefined, action: 'session.create', params: { open: false, noOpen: true, title: 'Audit Lead', role: 'qa-auditor' } },
+			{ help: false, json: false, windowId: undefined, action: 'session.setRole', params: { id: 's-1', role: 'tech-lead' } },
+		]);
+	});
+});
+
 describe('runCli doctor color output', () => {
 	const runDoctor = async (env: NodeJS.ProcessEnv, stdoutIsTTY: boolean) => {
 		let stdout = '';

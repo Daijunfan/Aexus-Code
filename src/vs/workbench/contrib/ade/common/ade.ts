@@ -7,6 +7,13 @@ import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { AdeAgentRole, AdeSessionRank } from '../../../../platform/ade/common/adeControl.js';
 import { AdeThinkingLevel, AdeWorkTreeType } from '../../../../platform/ade/common/adeEngineering.js';
+import {
+	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	getNextLowerRankFromConfig,
+	getRankLevelFromConfig,
+	IAdeOrganizationConfig,
+	resolveEffectiveRankDefinition,
+} from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
@@ -15,45 +22,43 @@ import { WorkbenchModeViewContainers } from '../../../services/workbenchMode/com
 export type { AdeAgentRole, AdeSessionRank };
 export type AdeAgentStatus = 'idle' | 'working' | 'pending';
 
-/** Maps an ADE agent role to its hierarchy rank level (3 = Governor, 2 = Manager, 1 = Employee, 0 = Worker). */
-export function getAdeRoleRankLevel(role: AdeAgentRole | undefined, hasSubordinates = false): number {
-	if (role === 'governor' || (!role && hasSubordinates)) {
-		return 3;
-	}
-	if (role === 'manager') {
-		return 2;
-	}
-	if (role === 'employee' || role === 'subordinate') {
-		return 1;
-	}
-	return 0;
+/** Maps an ADE agent role to its numeric hierarchy level (higher = more authority; default 4-tier: Governor=3, Manager=2, Employee=1, Worker=0). */
+export function getAdeRoleRankLevel(
+	role: AdeAgentRole | undefined,
+	hasSubordinates = false,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+): number {
+	return getRankLevelFromConfig(config, role, hasSubordinates);
 }
 
-/** Resolves the effective display rank of an ADE agent session. */
-export function resolveAdeAgentRank(agent: Pick<IAdeAgent, 'role'>, hasSubordinates = false): AdeSessionRank {
+/** Resolves the effective display rank ID of an ADE agent session. */
+export function resolveAdeAgentRank(
+	agent: Pick<IAdeAgent, 'role'>,
+	hasSubordinates = false,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+): AdeSessionRank {
 	if (agent.role) {
 		return agent.role;
 	}
-	return hasSubordinates ? 'governor' : 'worker';
+	return resolveEffectiveRankDefinition(config, undefined, hasSubordinates).id;
 }
 
 /** Computes the automatic one-rank-lower child role when creating a sub-session under a parent session. */
-export function getNextLowerAdeRole(parentRole: AdeAgentRole | undefined, parentHasSubordinates = false): {
+export function getNextLowerAdeRole(
+	parentRole: AdeAgentRole | undefined,
+	parentHasSubordinates = false,
+	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+): {
 	readonly canSpawnSubSession: boolean;
 	readonly childRole: AdeAgentRole | undefined;
 	readonly childRank: AdeSessionRank;
 } {
-	const level = getAdeRoleRankLevel(parentRole, parentHasSubordinates);
-	if (level >= 3) {
-		return { canSpawnSubSession: true, childRole: 'manager', childRank: 'manager' };
-	}
-	if (level === 2) {
-		return { canSpawnSubSession: true, childRole: 'employee', childRank: 'employee' };
-	}
-	if (level === 1) {
-		return { canSpawnSubSession: true, childRole: undefined, childRank: 'worker' };
-	}
-	return { canSpawnSubSession: false, childRole: undefined, childRank: 'worker' };
+	const next = getNextLowerRankFromConfig(config, parentRole, parentHasSubordinates);
+	return {
+		canSpawnSubSession: next.canSpawnSubSession,
+		childRole: next.childRole,
+		childRank: next.childRank,
+	};
 }
 
 export const ADE_PROJECTS_VIEW_ID = 'workbench.ade.projects';
@@ -63,6 +68,7 @@ export const ADE_FILES_VIEW_ID = 'workbench.ade.files';
 export const ADE_SESSION_SCHEME = 'aexus-agent';
 export const ADE_ENGINEERING_SCHEME = 'aexus-engineering';
 export const ADE_CLOUD_HOSTS_SCHEME = 'aexus-cloud-hosts';
+export const ADE_ROLE_STUDIO_SCHEME = 'aexus-roles';
 export const ADE_SECRETARY_ID = '__secretary__';
 export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProjectFolder';
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
@@ -72,6 +78,7 @@ export const ADE_OPEN_RESEARCH_COMMAND_ID = 'workbench.action.ade.openResearch';
 export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHosts.manage';
 export const ADE_ADD_CLOUD_PROJECT_COMMAND_ID = 'workbench.action.aexusCloudHosts.addProject';
 export const ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID = 'workbench.action.aexusCloudHosts.importFromVSCode';
+export const ADE_OPEN_ROLE_STUDIO_COMMAND_ID = 'workbench.action.ade.openRoleStudio';
 
 export interface IAdeProject {
 	readonly uri: URI;
@@ -236,6 +243,7 @@ export interface IAdeEditorService {
 	openAgent(id: string, options?: { side?: boolean }): Promise<void>;
 	openEngineering?(governorId: string, options?: { side?: boolean }): Promise<void>;
 	openCloudHosts?(hostIdOrAlias?: string, options?: { side?: boolean }): Promise<void>;
+	openRoleStudio?(focusRankId?: string, options?: { side?: boolean }): Promise<void>;
 	openSecretary(options?: { side?: boolean }): Promise<void>;
 	closeAgents(agents: readonly IAdeAgent[]): Promise<void>;
 	openFile(resource: URI, projectUriOrAgentId?: URI | string, options?: IEditorOptions): Promise<void>;

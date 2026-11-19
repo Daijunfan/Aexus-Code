@@ -16,7 +16,8 @@ export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_SOCKET_NAME = 'ade-control.sock';
 export const ADE_CONTROL_META_NAME = 'ade-control.json';
 
-export type AdeAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate';
+export type AdeBuiltInAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate';
+export type AdeAgentRole = AdeBuiltInAgentRole | (string & {});
 export type AdeSessionRank = AdeAgentRole | 'worker';
 
 export interface IAdeControlConnectionMetadata {

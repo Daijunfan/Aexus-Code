@@ -468,11 +468,49 @@
 }
 
 /* L4 Worker: Execution Emerald GHOST DASHED leaf pill, regular weight */
-.monaco-workbench .ade-role-badge.role-worker {
+.monaco-workbench .ade-role-badge.role-worker,
+.monaco-workbench .ade-role-badge.pure-leaf {
 	color: var(--ade-deck-rank-worker);
 	background: transparent;
 	border: 1px dashed color-mix(in srgb, var(--ade-deck-rank-worker) 52%, transparent);
 	font-weight: 400;
+}
+
+/* Custom rank palette tokens (for user-defined ranks in Organization & Roles Studio) */
+.monaco-workbench .ade-role-badge.role-color-amber:not(.pure-leaf) {
+	color: var(--ade-deck-rank-governor);
+	background: color-mix(in srgb, var(--ade-deck-rank-governor) 16%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-rank-governor) 48%, transparent);
+}
+.monaco-workbench .ade-role-badge.role-color-indigo:not(.pure-leaf) {
+	color: var(--ade-deck-rank-manager);
+	background: color-mix(in srgb, var(--ade-deck-rank-manager) 16%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-rank-manager) 48%, transparent);
+}
+.monaco-workbench .ade-role-badge.role-color-purple:not(.pure-leaf) {
+	color: var(--ade-deck-rank-employee);
+	background: color-mix(in srgb, var(--ade-deck-rank-employee) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-rank-employee) 52%, transparent);
+}
+.monaco-workbench .ade-role-badge.role-color-emerald:not(.pure-leaf) {
+	color: var(--ade-deck-rank-worker);
+	background: color-mix(in srgb, var(--ade-deck-rank-worker) 14%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-rank-worker) 48%, transparent);
+}
+.monaco-workbench .ade-role-badge.role-color-cyan:not(.pure-leaf) {
+	color: var(--ade-deck-cloud);
+	background: color-mix(in srgb, var(--ade-deck-cloud) 15%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-cloud) 48%, transparent);
+}
+.monaco-workbench .ade-role-badge.role-color-rose:not(.pure-leaf) {
+	color: var(--ade-deck-severity-critical);
+	background: color-mix(in srgb, var(--ade-deck-severity-critical) 15%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-severity-critical) 48%, transparent);
+}
+.monaco-workbench .ade-role-badge.role-color-slate:not(.pure-leaf) {
+	color: var(--ade-deck-rank-member);
+	background: color-mix(in srgb, var(--ade-deck-rank-member) 14%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-rank-member) 48%, transparent);
 }
 
 /* Blueprint-locked rows: lock glyph + dotted non-interactive role pill */

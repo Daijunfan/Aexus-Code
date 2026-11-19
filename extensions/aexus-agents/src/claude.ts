@@ -255,7 +255,8 @@ function isSafeAdeOrchestratorToolCall(
 	toolName: string | undefined,
 	rawInput: object | undefined,
 ): boolean {
-	if (callerRole !== 'secretary' && callerRole !== 'governor' && callerRole !== 'manager' && callerRole !== 'employee') {
+	const normalized = callerRole?.trim().toLowerCase();
+	if (!normalized || normalized === 'worker' || normalized === 'pure-worker') {
 		return false;
 	}
 	if (toolName === 'Read' || toolName === 'Glob' || toolName === 'Grep' || toolName === 'LS') {

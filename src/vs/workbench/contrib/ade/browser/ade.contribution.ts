@@ -5,11 +5,10 @@
 
 import './ade.css';
 import './adeColors.js';
-import { formatAdeAgentSubtreeLines } from './adeControlHandler.js';
+import { buildAdeAgentRoleContext } from './adeControlHandler.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { isMacintosh, isWindows } from '../../../../base/common/platform.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { basename, removeTrailingPathSeparator } from '../../../../base/common/resources.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -28,6 +27,16 @@ import {
 	IAdeEngineeringService,
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
+import {
+	ADE_ORGANIZATION_CONFIG_KEY,
+	ADE_ORGANIZATION_JSON_SCHEMA,
+	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	findRankDefinition,
+	getDefaultPureLeafRank,
+	getTopRankDefinition,
+	IAdeOrganizationConfig,
+	resolveEffectiveRankDefinition,
+} from '../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
@@ -68,6 +77,7 @@ import {
 	ADE_INSPECTOR_CONTAINER_ID,
 	ADE_OPEN_ENGINEERING_COMMAND_ID,
 	ADE_OPEN_RESEARCH_COMMAND_ID,
+	ADE_OPEN_ROLE_STUDIO_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
 	ADE_REMOVE_PROJECT_COMMAND_ID,
 	ADE_RENAME_PROJECT_COMMAND_ID,
@@ -80,6 +90,7 @@ import {
 	IAdeProjectsService,
 	resolveAdeAgentRank,
 } from '../common/ade.js';
+import { AdeRoleSchemaService, IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import {
 	AdeCloudHostWorkbenchContribution,
 	browseRemoteFolderOnCloudHost,
@@ -103,6 +114,12 @@ import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeP
 import { AdeProjectsService } from './adeProjectsService.js';
 import { AdeProjectsView } from './adeProjectsView.js';
 import {
+	AdeRoleStudioEditorInput,
+	AdeRoleStudioEditorPane,
+	AdeRoleStudioEditorSerializer,
+	resolveAdeRankCodicon,
+} from './adeRoleStudioEditorPane.js';
+import {
 	AdeExtensionWebviewEditorInput,
 	AdeExtensionWebviewEditorPane,
 	AdeExtensionWebviewEditorSerializer,
@@ -112,6 +129,7 @@ import {
 } from './adeSessionEditor.js';
 import { AdeSessionsService, IAdeEngine, IAdeEngineSession, IAdeSessionsService } from './adeSessionsService.js';
 
+registerSingleton(IAdeRoleSchemaService, AdeRoleSchemaService, InstantiationType.Delayed);
 registerSingleton(IAdeProjectsService, AdeProjectsService, InstantiationType.Delayed);
 registerSingleton(IAdeEditorService, AdeEditorService, InstantiationType.Delayed);
 registerSingleton(IAdeSessionsService, AdeSessionsService, InstantiationType.Delayed);
@@ -265,9 +283,15 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 );
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeCloudHostsEditorInput.ID, AdeCloudHostsEditorSerializer);
 
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(AdeRoleStudioEditorPane, AdeRoleStudioEditorPane.ID, localize('adeRoleStudioEditorPaneTitle', "Organization & Roles Studio")),
+	[new SyncDescriptor(AdeRoleStudioEditorInput)],
+);
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeRoleStudioEditorInput.ID, AdeRoleStudioEditorSerializer);
+
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'aexusAdeEngineering',
-	title: localize('adeEngineeringConfigurationTitle', "ADE Engineering"),
+	title: localize('adeEngineeringConfigurationTitle', "ADE Engineering & Organization"),
 	type: 'object',
 	properties: {
 		[ADE_WATCHDOG_TIMEOUT_CONFIG_KEY]: {
@@ -276,6 +300,14 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			minimum: 1,
 			maximum: 240,
 			description: localize('adeWatchdogTimeoutMinutesDesc', "Minutes of Worker execution inactivity before the ADE Engineering Watchdog wakes the Segment Manager to remind or kill-restart the stalled Worker."),
+		},
+		[ADE_ORGANIZATION_CONFIG_KEY]: {
+			...ADE_ORGANIZATION_JSON_SCHEMA,
+			default: DEFAULT_ADE_ORGANIZATION_CONFIG,
+			markdownDescription: localize(
+				'adeOrganizationConfigDesc',
+				"Customizable ADE multi-agent organization schema: define custom rank names/tiers, author each rank's initialization prompt template, and assign fixed Aexus-Code core primitive API permissions. For a guided fill-in-the-blank editor, open the [Organization & Roles Studio](command:workbench.action.ade.openRoleStudio).",
+			),
 		},
 	},
 });
@@ -497,7 +529,15 @@ interface IRolePickItem extends IQuickPickItem {
 	readonly rank: AdeSessionRank;
 }
 
-function formatRoleLabel(rank: AdeSessionRank): string {
+function getRoleConfig(accessor: ServicesAccessor): IAdeOrganizationConfig {
+	return tryGetOptionalService<IAdeRoleSchemaService>(accessor, IAdeRoleSchemaService)?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+}
+
+function formatRoleLabel(rank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
+	const def = findRankDefinition(config, rank);
+	if (def) {
+		return def.name;
+	}
 	switch (rank) {
 		case 'governor':
 			return localize('roleLabelGovernor', "Governor");
@@ -509,40 +549,26 @@ function formatRoleLabel(rank: AdeSessionRank): string {
 			return localize('roleLabelSubordinate', "Member");
 		case 'worker':
 			return localize('roleLabelWorker', "Worker");
+		default:
+			return String(rank);
 	}
 }
 
-function buildAllRolePickItems(): IRolePickItem[] {
-	return [
-		{
-			label: localize('rolePickGovernor', "Governor"),
-			description: localize('rolePickGovernorRankDesc', "L1 Top Rank · Team orchestrator (manages Manager / Employee / Worker)"),
-			iconClass: ThemeIcon.asClassName(Codicon.organization),
-			role: 'governor',
-			rank: 'governor',
-		},
-		{
-			label: localize('rolePickManager', "Manager"),
-			description: localize('rolePickManagerRankDesc', "L2 Lead Rank · Module / domain lead (manages Employee / Worker)"),
-			iconClass: ThemeIcon.asClassName(Codicon.briefcase),
-			role: 'manager',
-			rank: 'manager',
-		},
-		{
-			label: localize('rolePickEmployee', "Employee"),
-			description: localize('rolePickEmployeeRankDesc', "L3 Supervisory & Review Rank (NOT Worker) · Orchestrates & reviews leaf Worker (L4)"),
-			iconClass: ThemeIcon.asClassName(Codicon.account),
-			role: 'employee',
-			rank: 'employee',
-		},
-		{
-			label: localize('rolePickWorker', "Worker"),
-			description: localize('rolePickWorkerRankDesc', "L4 Lowest Pure Execution Rank (below Employee) · 100% clean native Coding Agent context, no subordinates"),
-			iconClass: ThemeIcon.asClassName(Codicon.terminal),
-			role: undefined,
-			rank: 'worker',
-		},
-	];
+function buildAllRolePickItems(config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): IRolePickItem[] {
+	const defaultLeaf = getDefaultPureLeafRank(config);
+	return config.ranks.map(rankDef => {
+		const isDefaultPure = Boolean(rankDef.pureExecution && rankDef.id === defaultLeaf.id);
+		const apiTag = rankDef.pureExecution
+			? localize('adeRolePickPureTag', "Pure Leaf · 0 ADE APIs")
+			: localize('adeRolePickApiCountTag', "{0} APIs", rankDef.allowedApis.length);
+		return {
+			label: rankDef.name,
+			description: `L${rankDef.tier} · ${apiTag} · ${rankDef.summary}`,
+			iconClass: ThemeIcon.asClassName(resolveAdeRankCodicon(rankDef.icon)),
+			role: isDefaultPure ? undefined : rankDef.id,
+			rank: rankDef.id,
+		};
+	});
 }
 
 async function pickSessionRole(
@@ -553,14 +579,17 @@ async function pickSessionRole(
 		readonly prioritizeWorker?: boolean;
 		readonly allowedRanks?: ReadonlySet<AdeSessionRank>;
 		readonly currentRank?: AdeSessionRank;
+		readonly config?: IAdeOrganizationConfig;
 	},
 ): Promise<IRolePickItem | undefined> {
-	let items = buildAllRolePickItems();
+	const config = options.config ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+	const defaultLeafId = getDefaultPureLeafRank(config).id;
+	let items = buildAllRolePickItems(config);
 	if (options.allowedRanks) {
 		items = items.filter(item => options.allowedRanks!.has(item.rank));
 	}
 	if (options.prioritizeWorker) {
-		items = [...items].sort((a, b) => Number(b.rank === 'worker') - Number(a.rank === 'worker'));
+		items = [...items].sort((a, b) => Number(b.rank === defaultLeafId) - Number(a.rank === defaultLeafId));
 	}
 	if (options.currentRank) {
 		items = items.map(item => item.rank === options.currentRank
@@ -725,6 +754,7 @@ registerAction2(class NewAdeSessionAction extends Action2 {
 		const modes = accessor.get(IWorkbenchModeService);
 		const views = accessor.get(IViewsService);
 		const quickInput = accessor.get(IQuickInputService);
+		const roleConfig = getRoleConfig(accessor);
 		const chooseSession = sessionPicker(accessor);
 		const resolvedFolder = await resolveTargetProjectUri(accessor, projectUri);
 		if (!resolvedFolder) {
@@ -732,6 +762,7 @@ registerAction2(class NewAdeSessionAction extends Action2 {
 		}
 		const pickedRole = await pickSessionRole(quickInput, {
 			title: localize('adeNewSessionRoleTitle', "New Session in '{0}' — Select Agent Role", basename(resolvedFolder)),
+			config: roleConfig,
 		});
 		if (!pickedRole) {
 			return;
@@ -771,6 +802,7 @@ registerAction2(class OpenExistingAdeSessionAction extends Action2 {
 		const views = accessor.get(IViewsService);
 		const navigation = accessor.get(IProjectNavigationService);
 		const quickInput = accessor.get(IQuickInputService);
+		const roleConfig = getRoleConfig(accessor);
 		const scopedUri = URI.isUri(projectUri) ? projectUri : navigation.focusedProject?.uri;
 		const session = await sessionPicker(accessor)(scopedUri, 'existing');
 		if (!session) {
@@ -779,6 +811,7 @@ registerAction2(class OpenExistingAdeSessionAction extends Action2 {
 		const pickedRole = await pickSessionRole(quickInput, {
 			title: localize('adeAttachSessionRoleTitle', "Attach '{0}' — Select Agent Role", session.label),
 			prioritizeWorker: true,
+			config: roleConfig,
 		});
 		if (!pickedRole) {
 			return;
@@ -808,11 +841,13 @@ registerAction2(class AddProjectAgentAction extends Action2 {
 		const modes = accessor.get(IWorkbenchModeService);
 		const views = accessor.get(IViewsService);
 		const quickInput = accessor.get(IQuickInputService);
+		const roleConfig = getRoleConfig(accessor);
 		const session = await sessionPicker(accessor)(URI.isUri(projectUri) ? projectUri : undefined);
 		if (session) {
 			const pickedRole = await pickSessionRole(quickInput, {
 				title: localize('adeAttachSessionRoleTitle', "Attach '{0}' — Select Agent Role", session.label),
 				prioritizeWorker: true,
+				config: roleConfig,
 			});
 			if (!pickedRole) {
 				return;
@@ -1071,6 +1106,7 @@ registerAction2(class NewSubSessionAction extends Action2 {
 		const views = accessor.get(IViewsService);
 		const quickInput = accessor.get(IQuickInputService);
 		const notifications = accessor.get(INotificationService);
+		const roleConfig = getRoleConfig(accessor);
 		const chooseSession = sessionPicker(accessor);
 
 		const parent = await pickAgent(accessor, parentId);
@@ -1082,22 +1118,26 @@ registerAction2(class NewSubSessionAction extends Action2 {
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
-		let nextLower = getNextLowerAdeRole(parent.role, hasSubs);
+		let nextLower = getNextLowerAdeRole(parent.role, hasSubs, roleConfig);
 		if (!nextLower.canSpawnSubSession) {
+			const supervisoryRanks = new Set<AdeSessionRank>(
+				roleConfig.ranks.filter(r => !r.pureExecution && r.canHaveSubordinates).map(r => r.id),
+			);
 			const promoted = await pickSessionRole(quickInput, {
-				title: localize('adePromoteWorkerBeforeSubTitle', "'{0}' is a lowest-rank Worker — Promote Parent Role First", parent.label),
-				placeHolder: localize('adePromoteWorkerPlaceholder', "Promote this Worker to Governor, Manager, or Employee to manage sub-sessions"),
-				allowedRanks: new Set<AdeSessionRank>(['governor', 'manager', 'employee']),
+				title: localize('adePromoteWorkerBeforeSubTitle', "'{0}' is a leaf rank — Promote Parent Role First", parent.label),
+				placeHolder: localize('adePromoteWorkerPlaceholder', "Promote this session to a supervisory rank to manage sub-sessions"),
+				allowedRanks: supervisoryRanks,
+				config: roleConfig,
 			});
 			if (!promoted) {
 				return;
 			}
 			projects.setAgentRole(parent.id, promoted.role);
-			nextLower = getNextLowerAdeRole(promoted.role, false);
+			nextLower = getNextLowerAdeRole(promoted.role, false, roleConfig);
 		} else if (!parent.role && hasSubs) {
-			projects.setAgentRole(parent.id, 'governor');
+			projects.setAgentRole(parent.id, getTopRankDefinition(roleConfig).id);
 		}
-		const childRankTitle = formatRoleLabel(nextLower.childRank);
+		const childRankTitle = formatRoleLabel(nextLower.childRank, roleConfig);
 		const session = await chooseSession(
 			parent.projectUri,
 			'create',
@@ -1133,6 +1173,7 @@ registerAction2(class RecruitSubordinateAgentAction extends Action2 {
 		const quickInput = accessor.get(IQuickInputService);
 		const views = accessor.get(IViewsService);
 		const notifications = accessor.get(INotificationService);
+		const roleConfig = getRoleConfig(accessor);
 		const chooseSession = sessionPicker(accessor);
 
 		const parent = await pickAgent(accessor, parentId);
@@ -1144,30 +1185,35 @@ registerAction2(class RecruitSubordinateAgentAction extends Action2 {
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
-		let parentRankLevel = getAdeRoleRankLevel(parent.role, hasSubs);
+		let parentRankLevel = getAdeRoleRankLevel(parent.role, hasSubs, roleConfig);
 		if (parentRankLevel === 0) {
+			const supervisoryRanks = new Set<AdeSessionRank>(
+				roleConfig.ranks.filter(r => !r.pureExecution && r.canHaveSubordinates).map(r => r.id),
+			);
 			const promoted = await pickSessionRole(quickInput, {
-				title: localize('adePromoteWorkerBeforeSubTitle', "'{0}' is a lowest-rank Worker — Promote Parent Role First", parent.label),
-				placeHolder: localize('adePromoteWorkerPlaceholder', "Promote this Worker to Governor, Manager, or Employee to manage sub-sessions"),
-				allowedRanks: new Set<AdeSessionRank>(['governor', 'manager', 'employee']),
+				title: localize('adePromoteWorkerBeforeSubTitle', "'{0}' is a leaf rank — Promote Parent Role First", parent.label),
+				placeHolder: localize('adePromoteWorkerPlaceholder', "Promote this session to a supervisory rank to manage sub-sessions"),
+				allowedRanks: supervisoryRanks,
+				config: roleConfig,
 			});
 			if (!promoted) {
 				return;
 			}
 			projects.setAgentRole(parent.id, promoted.role);
-			parentRankLevel = getAdeRoleRankLevel(promoted.role, false);
+			parentRankLevel = getAdeRoleRankLevel(promoted.role, false, roleConfig);
 		} else if (!parent.role && hasSubs) {
-			projects.setAgentRole(parent.id, 'governor');
+			projects.setAgentRole(parent.id, getTopRankDefinition(roleConfig).id);
 		}
 		const allowedRanks = new Set<AdeSessionRank>(
-			(['governor', 'manager', 'employee', 'worker'] as const).filter(rank =>
-				getAdeRoleRankLevel(rank === 'worker' ? undefined : rank) < parentRankLevel,
-			),
+			roleConfig.ranks
+				.filter(r => getAdeRoleRankLevel(r.id, false, roleConfig) < parentRankLevel)
+				.map(r => r.id),
 		);
 		const rolePick = await pickSessionRole(quickInput, {
 			title: localize('adeChooseSubordinateRoleTitle', "Recruit Subordinate Agent (under '{0}')", parent.label),
 			placeHolder: localize('adeChooseSubordinateRolePlaceholder', "Choose a lower organizational rank for this subordinate Agent"),
 			allowedRanks,
+			config: roleConfig,
 		});
 		if (!rolePick) {
 			return;
@@ -1203,6 +1249,7 @@ registerAction2(class SetAgentRoleAction extends Action2 {
 		const projects = accessor.get(IAdeProjectsService);
 		const quickInput = accessor.get(IQuickInputService);
 		const notifications = accessor.get(INotificationService);
+		const roleConfig = getRoleConfig(accessor);
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
 			return;
@@ -1214,23 +1261,30 @@ registerAction2(class SetAgentRoleAction extends Action2 {
 		const subs = projects.getDirectSubordinates(agent.id);
 		const hasSubs = subs.length > 0;
 		const minRankLevel = hasSubs
-			? Math.max(1, ...subs.map(child => getAdeRoleRankLevel(child.role, projects.hasSubordinates(child.id)) + 1))
+			? Math.max(1, ...subs.map(child => getAdeRoleRankLevel(child.role, projects.hasSubordinates(child.id), roleConfig) + 1))
 			: 0;
 		const parent = agent.parentId ? projects.getAgent(agent.parentId) : undefined;
+		const topLevel = getAdeRoleRankLevel(getTopRankDefinition(roleConfig).id, true, roleConfig);
 		const maxRankLevel = parent
-			? getAdeRoleRankLevel(parent.role, true) - 1
-			: 3;
+			? getAdeRoleRankLevel(parent.role, true, roleConfig) - 1
+			: topLevel;
 		const allowedRanks = new Set<AdeSessionRank>(
-			(['governor', 'manager', 'employee', 'worker'] as const).filter(rank => {
-				const level = getAdeRoleRankLevel(rank === 'worker' ? undefined : rank);
-				return level >= minRankLevel && level <= maxRankLevel;
-			}),
+			roleConfig.ranks
+				.filter(rankDef => {
+					const level = getAdeRoleRankLevel(rankDef.id, false, roleConfig);
+					if (hasSubs && (rankDef.pureExecution || !rankDef.canHaveSubordinates)) {
+						return false;
+					}
+					return level >= minRankLevel && level <= maxRankLevel;
+				})
+				.map(r => r.id),
 		);
 		const picked = await pickSessionRole(quickInput, {
 			title: localize('adeSetRolePickerTitle', "Set Role for '{0}'", agent.label),
 			placeHolder: localize('adeSetRolePickerPlaceholder', "Select an organizational role (rank)"),
 			allowedRanks,
-			currentRank: resolveAdeAgentRank(agent, hasSubs),
+			currentRank: resolveAdeAgentRank(agent, hasSubs, roleConfig),
+			config: roleConfig,
 		});
 		if (!picked) {
 			return;
@@ -1254,6 +1308,7 @@ registerAction2(class ReparentAgentAction extends Action2 {
 		const views = accessor.get(IViewsService);
 		const quickInput = accessor.get(IQuickInputService);
 		const notifications = accessor.get(INotificationService);
+		const roleConfig = getRoleConfig(accessor);
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
 			return;
@@ -1280,7 +1335,7 @@ registerAction2(class ReparentAgentAction extends Action2 {
 			if (!projects.canReparentAgent(agent.id, candidate.id)) {
 				continue;
 			}
-			const candidateRank = formatRoleLabel(resolveAdeAgentRank(candidate, projects.hasSubordinates(candidate.id)));
+			const candidateRank = formatRoleLabel(resolveAdeAgentRank(candidate, projects.hasSubordinates(candidate.id), roleConfig), roleConfig);
 			items.push({
 				label: candidate.label,
 				description: `${candidateRank} • ${projects.getProjectName(candidate.projectUri)}`,
@@ -1316,63 +1371,42 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 		const projects = accessor.get(IAdeProjectsService);
 		const sessions = accessor.get(IAdeSessionsService);
 		const clipboard = accessor.get(IClipboardService);
+		const roleConfig = getRoleConfig(accessor);
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
 			return;
 		}
-		const subs = projects.getDirectSubordinates(agent.id);
-		const rank = resolveAdeAgentRank(agent, subs.length > 0);
-		const rankLabel = formatRoleLabel(rank);
-		if (rank === 'worker') {
+		const compiled = buildAdeAgentRoleContext(projects, sessions, agent, roleConfig);
+		if (!compiled) {
+			const rankDef = resolveEffectiveRankDefinition(roleConfig, agent.role, projects.hasSubordinates(agent.id));
 			await clipboard.writeText([
 				`[Aexus Session Info]`,
-				`- Role: Worker (L4 Lowest Pure Execution Rank · Below Employee [L3], NOT Employee · 100% Clean Native Context)`,
+				`- Role: ${rankDef.name} (L${rankDef.tier} Pure Execution Leaf · 100% Clean Native Context)`,
 				`- Session: ${agent.label} (id: ${agent.id})`,
 				`- Project: ${projects.getProjectName(agent.projectUri)} (${formatProjectDisplayPath(agent.projectUri)})`,
 			].join('\n'));
 			return;
 		}
-		const supervisor = agent.parentId ? projects.getAgent(agent.parentId) : undefined;
-		const lines = [
-			`[Aexus Orchestrated Role Context]`,
-			`- Role: ${rankLabel}`,
-			`- Rank Rule: Governor (L1) > Manager (L2) > Employee (L3) > Worker (L4) — Employee (L3) IS NOT Worker (L4)! Employee is an orchestrated supervisory/review rank above pure leaf Worker.`,
-			`- Session: ${agent.label} (id: ${agent.id})`,
-			`- Project: ${projects.getProjectName(agent.projectUri)} (${formatProjectDisplayPath(agent.projectUri)})`,
-		];
-		if (supervisor) {
-			const supRank = formatRoleLabel(resolveAdeAgentRank(supervisor, true));
-			lines.push(`- Supervisor: ${supervisor.label} (id: ${supervisor.id}, role: ${supRank})`);
-		}
-		if (subs.length > 0) {
-			lines.push(`- Direct Subordinates:`);
-			for (const child of subs) {
-				const childRank = formatRoleLabel(resolveAdeAgentRank(child, projects.hasSubordinates(child.id)));
-				const childEngineName = child.session ? sessions.getEngineName(child.session.engineId) : 'Draft';
-				lines.push(`  - ${child.label} (id: ${child.id}, role: ${childRank}, engine: ${childEngineName} [${child.session?.engineId ?? 'draft'}], status: ${child.status ?? 'idle'})`);
-			}
-			lines.push(`- Subtree Rooted at You:`);
-			lines.push(...formatAdeAgentSubtreeLines(projects, sessions, agent.id));
-		} else {
-			lines.push(`- Direct Subordinates: None`);
-		}
-		const cliFallbackHint = isWindows
-			? `%LOCALAPPDATA%\\Programs\\Aexus Code\\bin\\aexus-ade.cmd`
-			: isMacintosh
-				? `/Applications/Aexus Code.app/Contents/Resources/app/bin/aexus-ade`
-				: `/usr/share/aexus-code/bin/aexus-ade`;
-		lines.push(
-			`- Subordinate Control API (\`aexus-ade\`, fallback \`${cliFallbackHint}\`):`,
-			`  - List direct subordinates: \`aexus-ade session subordinates ${agent.id} --json\``,
-			`  - View full subtree rooted at you: \`aexus-ade session tree ${agent.id} --json\``,
-			`  - Inspect hierarchy & engines: \`aexus-ade session info ${agent.id} --json\``,
-			`  - Send task & wait for reply: \`aexus-ade session send <subordinate-id> "<task>" --wait --json\``,
-			`  - Read subordinate history: \`aexus-ade session history <subordinate-id> --limit 10 --json\``,
-			`  - Spawn lower-rank sub-session: \`aexus-ade session create --parent ${agent.id} --engine <claude|codex|kilo|opencode|dsh|agy|cline|pi> --title "<title>" --no-open --json\``,
-			`  - Move subordinate to another supervisor: \`aexus-ade session move <subordinate-id> <new-parent-id|none> --json\``,
-			`  - Stop active subordinate turn: \`aexus-ade session stop <subordinate-id>\``,
-		);
-		await clipboard.writeText(lines.join('\n'));
+		await clipboard.writeText(compiled);
+	}
+});
+
+registerAction2(class OpenAdeRoleStudioAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_OPEN_ROLE_STUDIO_COMMAND_ID,
+			title: localize2('adeOpenRoleStudioTitle', "ADE: Customize Organization, Ranks & API Permissions..."),
+			icon: Codicon.organization,
+			f1: true,
+			menu: [
+				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', ADE_PROJECTS_VIEW_ID), group: '2_workspace', order: 1 },
+			],
+		});
+	}
+
+	async run(accessor: ServicesAccessor, focusRankId?: string): Promise<void> {
+		const editors = accessor.get(IAdeEditorService);
+		await editors.openRoleStudio?.(typeof focusRankId === 'string' ? focusRankId : undefined);
 	}
 });
 

@@ -7,7 +7,7 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 
-export type AdeSessionRank = 'governor' | 'manager' | 'employee' | 'subordinate' | 'worker';
+export type AdeSessionRank = 'governor' | 'manager' | 'employee' | 'subordinate' | 'worker' | (string & {});
 
 export const ROLE_CONTEXT_HEADER = '[Aexus Orchestrated Role Context]';
 export const ROLE_INIT_MARKER = '[AEXUS_ADE_ROLE_INITIALIZATION]';

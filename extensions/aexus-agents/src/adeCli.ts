@@ -17,7 +17,7 @@ export const ADE_CONTROL_META_NAME = 'ade-control.json';
 export const ADE_CLI_VERSION = '1.0.0';
 export const ADE_ENGINE_BASELINE = '1.146.0';
 
-export type AdeAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate';
+export type AdeAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate' | (string & {});
 
 export interface IAdeControlConnectionMetadata {
 	readonly socketPath: string;
@@ -60,7 +60,11 @@ export interface ParsedCliInvocation {
 	readonly params?: Record<string, unknown>;
 }
 
-const VALID_ROLES = new Set<string>(['governor', 'manager', 'employee', 'subordinate', 'worker']);
+const ROLE_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
+
+function isValidRoleSlug(val: string | undefined): val is string {
+	return Boolean(val && ROLE_SLUG_RE.test(val.trim()));
+}
 
 const HELP_TEXT = `Usage: aexus-ade [options] <command> [args]
 
@@ -88,6 +92,13 @@ Commands:
   completion <bash|zsh|fish>
   mode [get | set <ade|ide>]
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
+
+  role list
+  role apis
+  role presets
+  role preset <presetId>
+  role reset
+  role studio [rankId]
 
   project list
   project add <path|aexus-ssh://host/path|host:/path...> [--name <label>]
@@ -728,16 +739,16 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					parent = arg.slice('--parent='.length);
 				} else if (arg === '--role') {
 					const val = args[++i];
-					if (!val || !VALID_ROLES.has(val)) {
-						throw new CliUsageError('Option --role must be one of: governor, manager, employee, subordinate, worker.');
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID (e.g. governor, manager, employee, worker, or custom rank ID).');
 					}
-					role = val;
+					role = val.trim().toLowerCase();
 				} else if (arg.startsWith('--role=')) {
 					const val = arg.slice('--role='.length);
-					if (!VALID_ROLES.has(val)) {
-						throw new CliUsageError('Option --role must be one of: governor, manager, employee, subordinate, worker.');
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID (e.g. governor, manager, employee, worker, or custom rank ID).');
 					}
-					role = val;
+					role = val.trim().toLowerCase();
 				} else if (arg === '--engine') {
 					engine = args[++i];
 					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
@@ -833,16 +844,16 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					parent = arg.slice('--parent='.length);
 				} else if (arg === '--role') {
 					const val = args[++i];
-					if (!val || !VALID_ROLES.has(val)) {
-						throw new CliUsageError('Option --role must be one of: governor, manager, employee, subordinate, worker.');
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID (e.g. governor, manager, employee, worker, or custom rank ID).');
 					}
-					role = val;
+					role = val.trim().toLowerCase();
 				} else if (arg.startsWith('--role=')) {
 					const val = arg.slice('--role='.length);
-					if (!VALID_ROLES.has(val)) {
-						throw new CliUsageError('Option --role must be one of: governor, manager, employee, subordinate, worker.');
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID (e.g. governor, manager, employee, worker, or custom rank ID).');
 					}
-					role = val;
+					role = val.trim().toLowerCase();
 				} else if (arg === '--draft') {
 					const next = args[i + 1];
 					if (next !== undefined && !next.startsWith('--')) {
@@ -910,16 +921,16 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					parent = arg.slice('--parent='.length);
 				} else if (arg === '--role') {
 					const val = args[++i];
-					if (!val || !VALID_ROLES.has(val)) {
-						throw new CliUsageError('Option --role must be one of: governor, manager, employee, subordinate, worker.');
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID (e.g. governor, manager, employee, worker, or custom rank ID).');
 					}
-					role = val;
+					role = val.trim().toLowerCase();
 				} else if (arg.startsWith('--role=')) {
 					const val = arg.slice('--role='.length);
-					if (!VALID_ROLES.has(val)) {
-						throw new CliUsageError('Option --role must be one of: governor, manager, employee, subordinate, worker.');
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID (e.g. governor, manager, employee, worker, or custom rank ID).');
 					}
-					role = val;
+					role = val.trim().toLowerCase();
 				} else if (arg === '--no-open') {
 					noOpen = true;
 				} else if (arg === '--side') {
@@ -1064,10 +1075,11 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			return { help: false, json, windowId, action: 'session.rename', params: { id, title } };
 		}
 		if (sub === 'role') {
-			if (args.length !== 2) { throw new CliUsageError('Usage: aexus-ade session role <id> <governor|manager|employee|worker|none>'); }
-			const [id, roleArg] = args;
-			if (roleArg !== 'none' && !VALID_ROLES.has(roleArg)) {
-				throw new CliUsageError('Role must be one of: governor, manager, employee, subordinate, worker, none.');
+			if (args.length !== 2) { throw new CliUsageError('Usage: aexus-ade session role <id> <rankId|worker|none>'); }
+			const [id, rawRoleArg] = args;
+			const roleArg = rawRoleArg.trim().toLowerCase();
+			if (roleArg !== 'none' && !isValidRoleSlug(roleArg)) {
+				throw new CliUsageError('Role must be a valid rank ID (e.g. governor, manager, employee, worker, custom rank ID, or none).');
 			}
 			return { help: false, json, windowId, action: 'session.setRole', params: { id, role: roleArg === 'none' || roleArg === 'worker' ? null : roleArg } };
 		}
@@ -2119,6 +2131,35 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		throw new CliUsageError(`Unknown host subcommand: ${sub}`);
 	}
 
+	if (group === 'role' || group === 'roles' || group === 'org') {
+		const sub = tail[0] ?? 'list';
+		const args = tail.slice(1);
+		if (sub === 'list' || sub === 'schema' || sub === 'get') {
+			return { help: false, json, windowId, action: 'role.schema.get', params: {} };
+		}
+		if (sub === 'apis' || sub === 'primitives') {
+			return { help: false, json, windowId, action: 'role.apis', params: {} };
+		}
+		if (sub === 'presets') {
+			return { help: false, json, windowId, action: 'role.presets', params: {} };
+		}
+		if (sub === 'preset' || sub === 'apply-preset') {
+			const presetId = args[0]?.trim();
+			if (!presetId) {
+				throw new CliUsageError('Usage: aexus-ade role preset <presetId>');
+			}
+			return { help: false, json, windowId, action: 'role.schema.set', params: { presetId } };
+		}
+		if (sub === 'reset') {
+			return { help: false, json, windowId, action: 'role.schema.reset', params: {} };
+		}
+		if (sub === 'studio' || sub === 'open') {
+			const rankId = args[0]?.trim();
+			return { help: false, json, windowId, action: 'role.studio.open', params: rankId ? { rankId } : {} };
+		}
+		throw new CliUsageError(`Unknown role subcommand: ${sub}`);
+	}
+
 	throw new CliUsageError(`Unknown command: ${group}`);
 }
 
@@ -2687,7 +2728,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		const caller = env.AEXUS_ADE_CALLER?.trim();
 		const explicitCaller = typeof normalizedParams?.caller === 'string' ? normalizedParams.caller : undefined;
 		const effectiveParams = caller || explicitCaller
-			? { ...(normalizedParams ?? {}), caller: explicitCaller ?? caller }
+			? { ...(normalizedParams ?? {}), caller: caller || explicitCaller }
 			: normalizedParams;
 		const makeRequest = (action: string): IAdeControlWireRequest => ({
 			token,

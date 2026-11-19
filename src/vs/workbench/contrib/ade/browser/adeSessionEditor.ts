@@ -58,6 +58,8 @@ export function formatAdeRankLabel(rank: AdeSessionRank): string {
 			return localize('adeSessionRankMember', "Member");
 		case 'worker':
 			return localize('adeSessionRankWorker', "Worker");
+		default:
+			return String(rank);
 	}
 }
 
@@ -72,6 +74,8 @@ function formatAdeRankTier(rank: AdeSessionRank): string {
 			return 'L3';
 		case 'worker':
 			return 'L4';
+		default:
+			return 'L*';
 	}
 }
 

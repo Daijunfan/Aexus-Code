@@ -22,9 +22,11 @@ import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEdito
 import { ChatModeKind } from '../../chat/common/constants.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
+import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
 import { AdeCloudHostsEditorInput, AdeCloudHostsEditorPane } from './adeCloudHostsEditorPane.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
+import { AdeRoleStudioEditorInput, AdeRoleStudioEditorPane } from './adeRoleStudioEditorPane.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput, AdeSessionWarmupStep, formatAdeAgentLineage } from './adeSessionEditor.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
@@ -63,6 +65,7 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 	private isSelectingFromEditor = false;
 	private roleSyncTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastSyncedSnapshotKey: string | undefined;
+	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
 
 	constructor(
 		@IWorkbenchModeService private readonly modeService: IWorkbenchModeService,
@@ -77,6 +80,13 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		@IPathService private readonly pathService: IPathService,
 	) {
 		super();
+		this.roleSchemaService = instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(IAdeRoleSchemaService);
+			} catch {
+				return undefined;
+			}
+		});
 		this._register({
 			dispose: () => {
 				if (this.roleSyncTimer !== undefined) {
@@ -85,6 +95,12 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 				}
 			},
 		});
+		if (this.roleSchemaService) {
+			this._register(this.roleSchemaService.onDidChangeSchema(() => {
+				this.updateTitles();
+				this.scheduleRoleContextSync();
+			}));
+		}
 		this._register(projects.onDidChange(change => {
 			if (change !== 'selection') {
 				this.updateTitles();
@@ -174,7 +190,7 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 			this.roleSyncTimer = undefined;
 		}
 		try {
-			const snapshot = buildAdeRoleSyncSnapshot(this.modeService, this.projects, this, this.sessions, explicitActiveAgentId);
+			const snapshot = buildAdeRoleSyncSnapshot(this.modeService, this.projects, this, this.sessions, explicitActiveAgentId, this.roleSchemaService?.getConfig());
 			const snapshotKey = JSON.stringify(snapshot);
 			if (!explicitActiveAgentId && snapshotKey === this.lastSyncedSnapshotKey) {
 				return;
@@ -386,6 +402,26 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		}
 		const targetGroup = this.resolveTargetGroup(options?.side);
 		const input = this.instantiationService.createInstance(AdeCloudHostsEditorInput, hostIdOrAlias);
+		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
+	}
+
+	async openRoleStudio(focusRankId?: string, options?: { side?: boolean }): Promise<void> {
+		for (const group of this.editorGroupsService.mainPart.groups) {
+			for (const editor of group.editors) {
+				if (editor instanceof AdeRoleStudioEditorInput) {
+					if (focusRankId !== undefined) {
+						editor.setFocusRankId(focusRankId);
+					}
+					const pane = await this.editorService.openEditor(editor, { pinned: true }, group.id);
+					if (pane instanceof AdeRoleStudioEditorPane) {
+						pane.focusRank(focusRankId);
+					}
+					return;
+				}
+			}
+		}
+		const targetGroup = this.resolveTargetGroup(options?.side);
+		const input = this.instantiationService.createInstance(AdeRoleStudioEditorInput, focusRankId);
 		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
 	}
 

@@ -418,7 +418,7 @@ export interface IAdeEngineeringTreeSummary {
 
 export type AdeInboxItemKind = 'governor_message' | 'user_gate';
 
-export type AdeInboxSenderRank = 'governor' | 'manager' | 'employee' | 'worker';
+export type AdeInboxSenderRank = 'governor' | 'manager' | 'employee' | 'worker' | (string & {});
 
 /**
  * Triage severity of an ADE Inbox item.

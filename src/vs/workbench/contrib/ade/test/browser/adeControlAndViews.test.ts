@@ -29,6 +29,7 @@ import {
 import { isIMenuItem, MenuId, MenuRegistry } from '../../../../../platform/actions/common/actions.js';
 import { AEXUS_SSH_SCHEME } from '../../../../../platform/ade/common/adeCloudHosts.js';
 import { IAdeEngineeringService, IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
+import { IAdeOrganizationConfig } from '../../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IDialogService, IPrompt } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
@@ -69,10 +70,12 @@ import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResource
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
 import { AdeProjectsDragAndDrop, AdeProjectsView, AdeTreeItem } from '../../browser/adeProjectsView.js';
+import { AdeRoleStudioEditorInput, AdeRoleStudioEditorPane } from '../../browser/adeRoleStudioEditorPane.js';
 import { ChatEditorInput } from '../../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { AdeExtensionWebviewEditorInput, AdeExtensionWebviewEditorPane, AdeSessionEditor, AdeSessionEditorInput } from '../../browser/adeSessionEditor.js';
 import { IAdeEngineSession, IAdeSessionsService } from '../../browser/adeSessionsService.js';
 import { ADE_CHANGES_VIEW_ID, ADE_FILES_VIEW_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
+import { AdeRoleSchemaService, IAdeRoleSchemaService } from '../../common/adeRoleSchemaService.js';
 
 suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -2754,6 +2757,152 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			titleCountClearedOnEmpty: undefined,
 			watchersAfterDeepExpand: { mapCount: 3, activeWatchers: 3 },
 			watchersAfterCollapse: { mapCount: 1, activeWatchers: 1 },
+		});
+	});
+
+	test('supports extensible custom organization ranks, user-authored prompts, kernel-enforced primitive APIs, dynamic Sidebar/Inbox badges, and visual Fill-in-the-Blank Role Studio', async () => {
+		const h = createHarness();
+		h.modes.setMode('ade');
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+
+		// 1. Inspect fixed primitive APIs & presets, then apply a custom 3-tier org via control API
+		const fixedApis = await h.control<Array<{ id: string }>>('role.apis');
+		const presets = await h.control<Array<{ id: string }>>('role.presets');
+		const customConfig: IAdeOrganizationConfig = {
+			version: 1,
+			presetId: 'custom',
+			ranks: [
+				{
+					id: 'cto',
+					name: 'CTO',
+					shortName: 'CTO',
+					tier: 1,
+					color: 'amber',
+					icon: 'rocket',
+					summary: 'L1 CTO: Strategic technical lead.',
+					initPrompt: 'You are {{rank.tier}} {{rank.name}} owning {{project.name}}.',
+					pureExecution: false,
+					canHaveSubordinates: true,
+					defaultChildRankId: 'qa-auditor',
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post'],
+				},
+				{
+					id: 'qa-auditor',
+					name: 'QA Auditor',
+					shortName: 'QA',
+					tier: 2,
+					color: 'cyan',
+					icon: 'eye',
+					summary: 'L2 QA Auditor: Read-only audit lead.',
+					initPrompt: 'Audit diffs for {{project.name}} under {{supervisor.label}} ({{supervisor.rank}}). Never code directly.',
+					pureExecution: false,
+					canHaveSubordinates: true,
+					defaultChildRankId: 'coder',
+					allowedApis: ['session.read_context', 'project.read', 'inbox.post'],
+				},
+				{
+					id: 'coder',
+					name: 'Coder',
+					shortName: 'Cod',
+					tier: 3,
+					color: 'emerald',
+					icon: 'tools',
+					summary: 'L3 Pure Coder: 100% clean native context.',
+					initPrompt: '',
+					pureExecution: true,
+					canHaveSubordinates: false,
+					allowedApis: [],
+				},
+			],
+		};
+		await h.control('role.schema.set', { config: customConfig });
+
+		// 2. Create sessions with custom ranks & verify compiled prompt + scoped CLI + pure leaf isolation
+		const cto = await h.control<IAdeSessionSummary>('session.create', { project: alpha.fsPath, engine: 'claude', title: 'Chief Tech Officer', role: 'cto', open: false });
+		const qa = await h.control<IAdeSessionSummary>('session.create', { parent: cto.id, engine: 'claude', title: 'Strict QA', role: 'qa-auditor', open: false });
+		const coder = await h.control<IAdeSessionSummary>('session.create', { parent: qa.id, engine: 'codex', title: 'Leaf Coder', role: 'coder', open: false });
+
+		const ctoPrompt = h.resolvePrompt({ agentId: cto.id })!;
+		const qaPrompt = h.resolvePrompt({ agentId: qa.id })!;
+		const coderPrompt = h.resolvePrompt({ agentId: coder.id });
+
+		// 3. Kernel-enforced primitive API authorization check!
+		const qaCanRead = await h.control<{ readonly session: IAdeSessionSummary }>('session.info', { id: cto.id, caller: 'qa-auditor' });
+		let qaDeniedSend = false;
+		try {
+			await h.control('session.send', { id: coder.id, prompt: 'Run', caller: 'qa-auditor' });
+		} catch (err) {
+			qaDeniedSend = /QA Auditor/.test(String(err)) && /session\.message/.test(String(err));
+		}
+		let qaDeniedProjectDelete = false;
+		try {
+			await h.control('project.delete', { target: alpha.fsPath, caller: 'qa-auditor' });
+		} catch (err) {
+			qaDeniedProjectDelete = /project\.manage/.test(String(err));
+		}
+
+		// 4. Verify dynamic Inbox rank filter bar reflects custom ranks (All | CTO | QA | Cod)
+		const inboxStub = upcastPartial<IAdeInboxService>({
+			onDidChange: Event.None,
+			items: [],
+			unreadCount: 0,
+			list: () => [],
+			markRead: async () => { },
+		});
+		const engStub = upcastPartial<IAdeEngineeringService>({
+			onDidChangeTree: Event.None,
+			listTrees: () => [],
+		});
+		const inboxHost = append(document.body, $('.monaco-workbench.ade-custom-inbox-host'));
+		store.add({ dispose: () => inboxHost.remove() });
+		const inboxPanel = store.add(new AdeInboxPanel(inboxHost, inboxStub, engStub, h.editorsStub, undefined, h.projects, h.instantiation.get(IAdeSessionsService), roleSchema));
+		inboxPanel.setVisible(true);
+		const inboxRankChipLabels = [...inboxHost.querySelectorAll('.ade-inbox-rank-chip-label')].map(el => el.textContent);
+
+		// 5. Verify Fill-in-the-Blank Visual Role Studio mounts, adds custom rank, toggles API, previews, and saves!
+		const studioHost = append(document.body, $('.monaco-workbench.ade-role-studio-test-host'));
+		store.add({ dispose: () => studioHost.remove() });
+		const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
+		const studioPane = store.add(h.instantiation.createInstance(AdeRoleStudioEditorPane, mockGroup));
+		studioPane.create(studioHost);
+		const studioInput = store.add(h.instantiation.createInstance(AdeRoleStudioEditorInput, 'qa-auditor'));
+		await studioPane.setInput(studioInput, undefined, {}, CancellationToken.None);
+
+		const addRankBtn = studioHost.querySelector<HTMLButtonElement>('.ade-rs-add-btn')!;
+		addRankBtn.click();
+		const msgCheckbox = studioHost.querySelector<HTMLInputElement>('input[type="checkbox"][data-api-id="inbox.post"]')!;
+		msgCheckbox.checked = true;
+		msgCheckbox.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+		const previewBeforeSave = studioHost.querySelector('.ade-rs-preview-pre')?.textContent ?? '';
+		const saveBtn = studioHost.querySelector<HTMLButtonElement>('.ade-rs-toolbar .ade-rs-btn.primary')!;
+		saveBtn.click();
+		await timeout(15);
+
+		assert.deepStrictEqual({
+			hasFixedPrimitivesAndPresets: fixedApis.length >= 10 && presets.length >= 5,
+			ctoCompiledCustomPrompt: ctoPrompt.includes('You are L1 CTO owning Alpha.') && ctoPrompt.includes('aexus-ade session send'),
+			qaCompiledReadOnlyPrompt: qaPrompt.includes('Audit diffs for Alpha under Chief Tech Officer (CTO).')
+				&& qaPrompt.includes('aexus-ade project list --json')
+				&& !qaPrompt.includes('aexus-ade session send'),
+			coderPureLeafClean: coderPrompt === undefined,
+			qaAllowedReadContext: qaCanRead.session.id === cto.id,
+			qaDeniedSend,
+			qaDeniedProjectDelete,
+			inboxRankChipLabels,
+			studioPreviewIncludesInboxApi: previewBeforeSave.includes('aexus-ade inbox post'),
+			studioSavedCustomRankCount: roleSchema.getConfig().ranks.length,
+		}, {
+			hasFixedPrimitivesAndPresets: true,
+			ctoCompiledCustomPrompt: true,
+			qaCompiledReadOnlyPrompt: true,
+			coderPureLeafClean: true,
+			qaAllowedReadContext: true,
+			qaDeniedSend: true,
+			qaDeniedProjectDelete: true,
+			inboxRankChipLabels: ['All', 'CTO', 'QA', 'Cod'],
+			studioPreviewIncludesInboxApi: true,
+			studioSavedCustomRankCount: 4,
 		});
 	});
 });
