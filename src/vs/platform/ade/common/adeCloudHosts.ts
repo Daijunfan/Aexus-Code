@@ -16,6 +16,44 @@ export const ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME = 'adeCloudHostBackend';
 
 export type AdeCloudHostOs = 'linux' | 'macos' | 'windows';
 export type AdeCloudHostSource = 'user' | 'vscode' | 'ssh-config' | 'aexus-legacy';
+export type AdeOsIconKind = 'windows' | 'macos' | 'kali' | 'ubuntu' | 'debian' | 'enterprise-linux' | 'linux';
+
+export const ADE_OS_ICON_LABELS: Readonly<Record<AdeOsIconKind, string>> = {
+	windows: 'Windows',
+	macos: 'macOS',
+	kali: 'Kali',
+	ubuntu: 'Ubuntu',
+	debian: 'Debian',
+	'enterprise-linux': 'Enterprise Linux',
+	linux: 'Linux',
+};
+
+export function resolveAdeOsIconKind(input: {
+	readonly os?: AdeCloudHostOs;
+	readonly distribution?: string;
+	readonly hint?: string;
+}): AdeOsIconKind {
+	const source = `${input.distribution ?? ''} ${input.hint ?? ''}`;
+	if (input.os === 'windows' || (!input.os && /\b(win32|win64|windows)\b/i.test(source))) {
+		return 'windows';
+	}
+	if (input.os === 'macos' || (!input.os && /\b(macos|darwin|osx)\b/i.test(source))) {
+		return 'macos';
+	}
+	if (/\bkali\b/i.test(source)) {
+		return 'kali';
+	}
+	if (/\bubuntu\b/i.test(source)) {
+		return 'ubuntu';
+	}
+	if (/\bdebian\b/i.test(source)) {
+		return 'debian';
+	}
+	if (/\b(centos|rocky|alma|rhel|redhat|fedora)\b/i.test(source)) {
+		return 'enterprise-linux';
+	}
+	return 'linux';
+}
 
 export interface IAdeCloudHostConnectionCheck {
 	readonly ok: boolean;
@@ -37,6 +75,7 @@ export interface IAdeCloudHost {
 	readonly os: AdeCloudHostOs;
 	readonly identityFile?: string;
 	readonly proxyJump?: string;
+	readonly hostKeyAlias?: string;
 	readonly knownHostsFile?: string;
 	readonly strictHostKeyChecking?: 'yes' | 'accept-new' | 'no';
 	readonly defaultDirectory?: string;
@@ -58,6 +97,7 @@ export interface IAdeCloudHostUpsertInput {
 	readonly os?: AdeCloudHostOs;
 	readonly identityFile?: string;
 	readonly proxyJump?: string;
+	readonly hostKeyAlias?: string;
 	readonly knownHostsFile?: string;
 	readonly strictHostKeyChecking?: 'yes' | 'accept-new' | 'no';
 	readonly defaultDirectory?: string;
@@ -155,23 +195,70 @@ export interface IParsedLiveRemotePathInput {
 	readonly omitLeadingSlashOnWindows: boolean;
 }
 
-export function resolveInitialCloudHostDirectory(host: Pick<IAdeCloudHost, 'os' | 'user' | 'defaultDirectory' | 'recentDirectories' | 'lastTestStatus'>): string {
-	const explicit = host.defaultDirectory?.trim()
-		|| host.recentDirectories[0]?.trim()
-		|| host.lastTestStatus?.remoteHome?.trim();
-	if (explicit) {
-		return normalizeRemoteProjectPath(explicit, host.os);
+export function isShallowRemoteRootPath(rawPath: string | undefined, os: AdeCloudHostOs = 'linux'): boolean {
+	if (!rawPath?.trim()) {
+		return true;
 	}
-	if (host.os === 'windows') {
-		return host.user ? normalizeRemoteProjectPath(`/C:/Users/${host.user}`, 'windows') : '/C:';
+	const norm = normalizeRemoteProjectPath(rawPath, os);
+	return norm === '/' || (os === 'windows' && /^\/[A-Za-z]:$/.test(norm));
+}
+
+export function guessRemoteUserHomeDirectory(os: AdeCloudHostOs, rawUser?: string): string | undefined {
+	const trimmed = rawUser?.trim();
+	if (!trimmed) {
+		return undefined;
 	}
-	if (host.os === 'macos') {
-		return host.user ? normalizeRemoteProjectPath(`/Users/${host.user}`, 'macos') : '/Users';
+	// Strip AD/Windows domain qualifiers such as "administrator@ad.vmlab.test" or "DOMAIN\\user"
+	const withoutDomainPrefix = trimmed.includes('\\')
+		? trimmed.slice(trimmed.lastIndexOf('\\') + 1).trim()
+		: trimmed;
+	const baseUser = withoutDomainPrefix.includes('@')
+		? withoutDomainPrefix.split('@')[0].trim()
+		: withoutDomainPrefix;
+	if (!baseUser) {
+		return undefined;
 	}
-	if (host.user === 'root') {
+	if (os === 'windows') {
+		return normalizeRemoteProjectPath(`/C:/Users/${baseUser}`, 'windows');
+	}
+	if (os === 'macos') {
+		return normalizeRemoteProjectPath(`/Users/${baseUser}`, 'macos');
+	}
+	if (baseUser === 'root') {
 		return '/root';
 	}
-	return host.user ? normalizeRemoteProjectPath(`/home/${host.user}`, 'linux') : '/';
+	return normalizeRemoteProjectPath(`/home/${baseUser}`, 'linux');
+}
+
+export function resolveInitialCloudHostDirectory(host: Pick<IAdeCloudHost, 'os' | 'user' | 'defaultDirectory' | 'recentDirectories' | 'lastTestStatus'>): string {
+	// Prefer a non-root saved default, non-root recent folder, or probed remote home before falling back to guessed user home.
+	const explicitDefault = host.defaultDirectory?.trim();
+	if (explicitDefault && !isShallowRemoteRootPath(explicitDefault, host.os)) {
+		return normalizeRemoteProjectPath(explicitDefault, host.os);
+	}
+	const nonRootRecent = host.recentDirectories.find(dir => dir.trim() && !isShallowRemoteRootPath(dir, host.os));
+	if (nonRootRecent) {
+		return normalizeRemoteProjectPath(nonRootRecent, host.os);
+	}
+	const discoveredHome = host.lastTestStatus?.remoteHome?.trim();
+	if (discoveredHome && !isShallowRemoteRootPath(discoveredHome, host.os)) {
+		return normalizeRemoteProjectPath(discoveredHome, host.os);
+	}
+	const guessedHome = guessRemoteUserHomeDirectory(host.os, host.user);
+	if (guessedHome) {
+		return guessedHome;
+	}
+	const fallbackExplicit = explicitDefault || host.recentDirectories[0]?.trim() || discoveredHome;
+	if (fallbackExplicit) {
+		return normalizeRemoteProjectPath(fallbackExplicit, host.os);
+	}
+	if (host.os === 'windows') {
+		return '/C:';
+	}
+	if (host.os === 'macos') {
+		return '/Users';
+	}
+	return '/';
 }
 
 export function formatLiveRemoteDirInput(

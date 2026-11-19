@@ -27,9 +27,11 @@ import {
 	buildCloudProjectUri,
 	formatCloudHostTargetLabel,
 	formatLiveRemoteDirInput,
+	guessRemoteUserHomeDirectory,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
 	IAdeRemoteDirEntry,
+	isShallowRemoteRootPath,
 	normalizeRemoteProjectPath,
 	parseLiveRemotePathInput,
 	resolveInitialCloudHostDirectory,
@@ -458,12 +460,12 @@ async function browseRemoteFolderOnCloudHostWithBack(
 	}
 
 	type BrowseActionItem = IQuickPickItem & {
-		readonly action: 'select-current' | 'select-path' | 'select-recent' | 'enter-dir' | 'parent' | 'mkdir-and-enter' | 'mkdir-and-select' | 'switch-host';
+		readonly action: 'select-current' | 'select-path' | 'select-recent' | 'enter-dir' | 'parent' | 'mkdir-and-enter' | 'mkdir-and-select' | 'switch-host' | 'show-dot-folders' | 'loading';
 		readonly targetPath?: string;
 	};
 
 	let hostOs: AdeCloudHostOs = host.os;
-	let discoveredHome: string | undefined = host.lastTestStatus?.remoteHome;
+	let discoveredHome: string | undefined = host.lastTestStatus?.remoteHome ?? guessRemoteUserHomeDirectory(hostOs, host.user);
 	let showDotFolders = false;
 
 	const dirCache = new Map<string, readonly IAdeRemoteDirEntry[]>();
@@ -490,7 +492,9 @@ async function browseRemoteFolderOnCloudHostWithBack(
 
 	const initialDir = resolveInitialCloudHostDirectory(host);
 	const hadExplicitInitialDir = Boolean(
-		host.defaultDirectory?.trim() || host.recentDirectories[0]?.trim() || host.lastTestStatus?.remoteHome?.trim(),
+		(host.defaultDirectory?.trim() && !isShallowRemoteRootPath(host.defaultDirectory, hostOs))
+		|| host.recentDirectories.some(d => d.trim() && !isShallowRemoteRootPath(d, hostOs))
+		|| (host.lastTestStatus?.remoteHome?.trim() && !isShallowRemoteRootPath(host.lastTestStatus.remoteHome, hostOs)),
 	);
 
 	return new Promise<URI | 'switch-host' | undefined>(resolve => {
@@ -597,9 +601,14 @@ async function browseRemoteFolderOnCloudHostWithBack(
 			const sepDirLabel = shortSepPath(parsed.browseDir);
 
 			const includeDots = showDotFolders || parsed.filterPrefix.startsWith('.');
+			const isDirLoaded = dirCache.has(parsed.browseDir);
+			const isDirLoading = !isDirLoaded && !browseError;
 			const allDirs = dirEntries
 				.filter(e => e.type === 'directory' && (includeDots || !e.name.startsWith('.')))
 				.sort((a, b) => a.name.localeCompare(b.name));
+			const hiddenDirCount = !includeDots
+				? dirEntries.filter(e => e.type === 'directory' && e.name.startsWith('.')).length
+				: 0;
 
 			const makeDirItem = (sub: IAdeRemoteDirEntry, highlights?: { label?: { start: number; end: number }[] }): BrowseActionItem => {
 				const joined = posix.join(parsed.browseDir, sub.name);
@@ -748,8 +757,25 @@ async function browseRemoteFolderOnCloudHostWithBack(
 					});
 				}
 
-				for (const sub of allDirs) {
-					items.push(makeDirItem(sub));
+				if (isDirLoading) {
+					items.push({
+						label: localize('adeCloudLoadingSubfolders', "Loading folders in {0}...", sepDirLabel),
+						description: localize('adeCloudLoadingSubfoldersDesc', "Connecting to {0} via SSH", host.alias),
+						iconClass: ThemeIcon.asClassName(ThemeIcon.modify(Codicon.loading, 'spin')),
+						action: 'loading',
+					});
+				} else {
+					for (const sub of allDirs) {
+						items.push(makeDirItem(sub));
+					}
+					if (!browseError && allDirs.length === 0 && hiddenDirCount > 0 && !showDotFolders) {
+						items.push({
+							label: localize('adeCloudShowHiddenSubfolders', "Show {0} hidden (.dot) folder(s)...", hiddenDirCount),
+							description: localize('adeCloudShowHiddenSubfoldersDesc', "Only hidden folders exist inside {0}", sepDirLabel),
+							iconClass: ThemeIcon.asClassName(Codicon.eye),
+							action: 'show-dot-folders',
+						});
+					}
 				}
 
 				if (host.recentDirectories.length > 0) {
@@ -819,8 +845,9 @@ async function browseRemoteFolderOnCloudHostWithBack(
 				}
 				const cleanErr = err instanceof Error ? err.message.replace(/^\[[A-Z]+\]\s*/, '') : String(err);
 
-				// On initial open before user edits, auto-discover real remote home / OS or walk up to existing parent folder!
-				if (allowInitialFallback && !userHasEditedValue) {
+				// On initial open before user edits, auto-discover real remote home / OS or walk up ONLY when the folder itself is missing ([ENOENT]/[ENOTDIR]) — never wipe the path down to '/' on SSH transport errors!
+				const isMissingPathError = /\[(ENOENT|ENOTDIR)\]/i.test(cleanErr) || /no such file or directory|not a directory/i.test(cleanErr);
+				if (allowInitialFallback && !userHasEditedValue && isMissingPathError) {
 					if (!hadExplicitInitialDir) {
 						try {
 							const check = await backend.testConnection(host.id);
@@ -979,6 +1006,17 @@ async function browseRemoteFolderOnCloudHostWithBack(
 				return;
 			}
 
+			if (sel.action === 'loading') {
+				return;
+			}
+
+			if (sel.action === 'show-dot-folders') {
+				showDotFolders = true;
+				updateHeaderButtons();
+				renderItemsForState(qp.value);
+				return;
+			}
+
 			if (sel.action === 'switch-host') {
 				finish('switch-host');
 				return;
@@ -1031,6 +1069,7 @@ async function browseRemoteFolderOnCloudHostWithBack(
 		if (!hadExplicitInitialDir) {
 			// Probe remote home & OS first on hosts without an explicit saved folder so we jump directly into actual $HOME / %USERPROFILE%!
 			qp.busy = true;
+			renderItemsForState(initialDisplay);
 			void backend.testConnection(host.id).then(
 				check => {
 					if (settled) {

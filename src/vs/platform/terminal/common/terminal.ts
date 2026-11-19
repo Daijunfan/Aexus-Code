@@ -523,6 +523,16 @@ export interface IShellLaunchConfig {
 	hostLabel?: string;
 
 	/**
+	 * The operating system of the host the terminal runs on (e.g. for Cloud SSH terminals).
+	 */
+	hostOs?: 'linux' | 'macos' | 'windows';
+
+	/**
+	 * Optional OS distribution / uname hint for selecting distro-specific icons (e.g. Ubuntu, Kali, Debian).
+	 */
+	hostDistribution?: string;
+
+	/**
 	 * The shell executable (bash, cmd, etc.).
 	 */
 	executable?: string;

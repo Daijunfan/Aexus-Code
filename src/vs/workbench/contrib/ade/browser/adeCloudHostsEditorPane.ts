@@ -24,6 +24,7 @@ import {
 	buildCloudProjectUri,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
+	resolveInitialCloudHostDirectory,
 	sanitizeSshAlias,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -1244,7 +1245,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 	}
 
 	private async openTerminalOnHost(host: IAdeCloudHost, remotePath?: string): Promise<void> {
-		const targetDir = remotePath || host.defaultDirectory || host.recentDirectories[0] || (host.os === 'windows' ? '/C:/' : (host.user ? `/home/${host.user}` : '/'));
+		const targetDir = remotePath || resolveInitialCloudHostDirectory(host);
 		const targetUri = buildCloudProjectUri(host.alias, targetDir, host.os);
 		await this.commandService.executeCommand('workbench.action.terminal.new', { cwd: targetUri });
 	}

@@ -32,6 +32,7 @@ import { disposableTimeout } from '../../../../base/common/async.js';
 import { ElementsDragAndDropData, ListViewTargetSector, NativeDragAndDropData } from '../../../../base/browser/ui/list/listView.js';
 import { URI } from '../../../../base/common/uri.js';
 import { getColorClass, getIconId, getUriClasses } from './terminalIcon.js';
+import { getTerminalOsTooltip, renderTerminalOsIcon, resolveTerminalOsIconKind, shouldShowTerminalOsIcon } from './terminalOsIcon.js';
 import { IEditableData } from '../../../common/views.js';
 import { InlineEditInputBox } from '../../../browser/parts/views/inlineEditInputBox.js';
 import { CodeDataTransfers, containsDragType, getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
@@ -290,6 +291,10 @@ class TerminalTabsRenderer implements IListRenderer<ITerminalInstance, ITerminal
 
 	renderTemplate(container: HTMLElement): ITerminalTabEntryTemplate {
 		const element = DOM.append(container, $('.terminal-tabs-entry'));
+		const splitPrefix = DOM.append(element, $('span.terminal-tab-split-prefix'));
+		splitPrefix.hidden = true;
+		const osIcon = DOM.append(element, $('span.terminal-os-icon'));
+		osIcon.hidden = true;
 		const context: { hoverActions?: IHoverAction[] } = {};
 		const templateDisposables = new DisposableStore();
 
@@ -329,6 +334,8 @@ class TerminalTabsRenderer implements IListRenderer<ITerminalInstance, ITerminal
 
 		return {
 			element,
+			splitPrefix,
+			osIcon,
 			label,
 			actionBar,
 			context,
@@ -368,22 +375,45 @@ class TerminalTabsRenderer implements IListRenderer<ITerminalInstance, ITerminal
 		const editableData = this._terminalEditingService.getEditableData(instance);
 
 		const iconId = this._instantiationService.invokeFunction(getIconId, instance);
+		const primaryStatus = instance.statusList.primary;
+		const showStatusInsteadOfOsInNarrow = !hasText && Boolean(primaryStatus && primaryStatus.severity > Severity.Ignore);
+		const useOsIcon = shouldShowTerminalOsIcon(instance) && !showStatusInsteadOfOsInNarrow;
+		template.element.classList.toggle('has-os-icon', useOsIcon);
+
 		let label: string = '';
-		if (!hasText) {
-			const primaryStatus = instance.statusList.primary;
-			// Don't show ignore severity
-			if (primaryStatus && primaryStatus.severity > Severity.Ignore) {
-				label = `${prefix}$(${primaryStatus.icon?.id || iconId})`;
+		if (useOsIcon) {
+			const osKind = resolveTerminalOsIconKind(instance);
+			renderTerminalOsIcon(template.osIcon, osKind, getTerminalOsTooltip(instance, osKind));
+			template.osIcon.hidden = false;
+			if (prefix) {
+				template.splitPrefix.textContent = prefix.trim();
+				template.splitPrefix.hidden = false;
 			} else {
-				label = `${prefix}$(${iconId})`;
+				template.splitPrefix.textContent = '';
+				template.splitPrefix.hidden = true;
+			}
+			if (hasText) {
+				this.fillActionBar(instance, template);
+				label = editableData ? '' : (instance.title || '');
 			}
 		} else {
-			this.fillActionBar(instance, template);
-			label = prefix;
-			// Only add the title if the icon is set, this prevents the title jumping around for
-			// example when launching with a ShellLaunchConfig.name and no icon
-			if (instance.icon) {
-				label += editableData ? `$(${iconId})` : `$(${iconId}) ${instance.title}`;
+			template.osIcon.hidden = true;
+			template.splitPrefix.hidden = true;
+			if (!hasText) {
+				// Don't show ignore severity
+				if (primaryStatus && primaryStatus.severity > Severity.Ignore) {
+					label = `${prefix}$(${primaryStatus.icon?.id || iconId})`;
+				} else {
+					label = `${prefix}$(${iconId})`;
+				}
+			} else {
+				this.fillActionBar(instance, template);
+				label = prefix;
+				// Only add the title if the icon is set, this prevents the title jumping around for
+				// example when launching with a ShellLaunchConfig.name and no icon
+				if (instance.icon) {
+					label += editableData ? `$(${iconId})` : `$(${iconId}) ${instance.title}`;
+				}
 			}
 		}
 
@@ -504,6 +534,8 @@ interface ITerminalTabsRendererOptions {
 
 interface ITerminalTabEntryTemplate {
 	readonly element: HTMLElement;
+	readonly splitPrefix: HTMLElement;
+	readonly osIcon: HTMLElement;
 	readonly label: IResourceLabel;
 	readonly actionBar: ActionBar;
 	context: {

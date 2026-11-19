@@ -8,6 +8,7 @@ import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/c
 import {
 	formatLiveRemoteDirInput,
 	parseLiveRemotePathInput,
+	resolveAdeOsIconKind,
 	resolveInitialCloudHostDirectory,
 } from '../../common/adeCloudHosts.js';
 
@@ -287,6 +288,48 @@ suite('resolveInitialCloudHostDirectory', () => {
 			linuxWithoutUser: '/',
 			macosUser: '/Users/me',
 			macosWithoutUser: '/Users',
+		});
+	});
+
+	test('skips shallow root paths when a user home or deeper folder is known and strips domain qualifiers', () => {
+		assert.deepStrictEqual({
+			linuxRootRecentWithUser: resolveInitialCloudHostDirectory({ os: 'linux', user: 'lab', recentDirectories: ['/'] }),
+			linuxRootDefaultWithHome: resolveInitialCloudHostDirectory({ os: 'linux', user: 'lab', defaultDirectory: '/', recentDirectories: ['/', '/home/lab'] }),
+			winDriveRootWithUser: resolveInitialCloudHostDirectory({ os: 'windows', user: 'lab', defaultDirectory: '/C:', recentDirectories: ['/C:'] }),
+			winAdDomainUser: resolveInitialCloudHostDirectory({ os: 'windows', user: 'administrator@ad.vmlab.test', defaultDirectory: '/C:', recentDirectories: [] }),
+			winBackslashDomainUser: resolveInitialCloudHostDirectory({ os: 'windows', user: 'CORP\\alice', defaultDirectory: '/C:', recentDirectories: [] }),
+		}, {
+			linuxRootRecentWithUser: '/home/lab',
+			linuxRootDefaultWithHome: '/home/lab',
+			winDriveRootWithUser: '/C:/Users/lab',
+			winAdDomainUser: '/C:/Users/administrator',
+			winBackslashDomainUser: '/C:/Users/alice',
+		});
+	});
+});
+
+suite('resolveAdeOsIconKind', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('classifies Windows, macOS, Kali, Ubuntu, Debian, Enterprise Linux, and generic Linux consistently', () => {
+		assert.deepStrictEqual({
+			win: resolveAdeOsIconKind({ os: 'windows', hint: 'BUPT-Windows' }),
+			mac: resolveAdeOsIconKind({ os: 'macos', hint: 'Mac-Studio' }),
+			kali: resolveAdeOsIconKind({ os: 'linux', hint: 'kali-Linux1' }),
+			ubuntuByAlias: resolveAdeOsIconKind({ os: 'linux', hint: 'ubuntu-target1' }),
+			ubuntuByDistro: resolveAdeOsIconKind({ os: 'linux', distribution: 'Linux (ubuntu)', hint: 'GPU-server' }),
+			debian: resolveAdeOsIconKind({ os: 'linux', distribution: 'Linux (debian)' }),
+			rhel: resolveAdeOsIconKind({ os: 'linux', distribution: 'Linux (rocky)' }),
+			generic: resolveAdeOsIconKind({ os: 'linux', hint: 'bupt208' }),
+		}, {
+			win: 'windows',
+			mac: 'macos',
+			kali: 'kali',
+			ubuntuByAlias: 'ubuntu',
+			ubuntuByDistro: 'ubuntu',
+			debian: 'debian',
+			rhel: 'enterprise-linux',
+			generic: 'linux',
 		});
 	});
 });

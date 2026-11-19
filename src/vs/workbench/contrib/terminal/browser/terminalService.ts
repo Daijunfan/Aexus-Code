@@ -988,7 +988,7 @@ export class TerminalService extends Disposable implements ITerminalService {
 		}
 		if (parent?.shellLaunchConfig.executable === 'ssh' && parent.shellLaunchConfig.hostLabel && !options.config) {
 			const source = parent.shellLaunchConfig;
-			options.config = { executable: source.executable, args: source.args, cwd: source.cwd, name: source.name, env: source.env, hostLabel: source.hostLabel, icon: source.icon, ignoreConfigurationCwd: true, isRemotePty: true, waitOnExit: source.waitOnExit };
+			options.config = { executable: source.executable, args: source.args, cwd: source.cwd, name: source.name, env: source.env, hostLabel: source.hostLabel, hostOs: source.hostOs, hostDistribution: source.hostDistribution, icon: source.icon, ignoreConfigurationCwd: true, isRemotePty: true, waitOnExit: source.waitOnExit };
 			options.cwd = source.cwd;
 		}
 		const candidateSshCwd = URI.isUri(options.cwd) && options.cwd.scheme === SSH_PROJECT_SCHEME

@@ -415,13 +415,84 @@
 }
 
 .monaco-workbench .pane-body.integrated-terminal .tabs-list .terminal-tabs-entry {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	height: 100%;
+	box-sizing: border-box;
 	text-align: center;
 }
 
 .monaco-workbench .pane-body.integrated-terminal .tabs-container.has-text .tabs-list .terminal-tabs-entry {
+	justify-content: flex-start;
 	padding-left: 10px;
 	padding-right: 10px;
 	text-align: left;
+}
+
+.monaco-workbench .pane-body.integrated-terminal .tabs-container.has-text .tabs-list .terminal-tabs-entry .monaco-icon-label {
+	flex: 1;
+	min-width: 0;
+}
+
+.monaco-workbench .pane-body.integrated-terminal .tabs-container:not(.has-text) .tabs-list .terminal-tabs-entry.has-os-icon .monaco-icon-label {
+	display: none;
+}
+
+.monaco-workbench .terminal-os-icon[hidden],
+.monaco-workbench .terminal-tab-split-prefix[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .terminal-tab-split-prefix {
+	flex-shrink: 0;
+	font-size: 11px;
+	line-height: 1;
+	opacity: 0.72;
+	margin-right: -2px;
+}
+
+.monaco-workbench .terminal-os-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 15px;
+	height: 15px;
+	flex: 0 0 15px;
+	border-radius: 3px;
+	overflow: hidden;
+	color: var(--vscode-icon-foreground);
+}
+
+.monaco-workbench .terminal-os-icon > svg {
+	width: 14px;
+	height: 14px;
+	display: block;
+}
+
+.monaco-workbench .terminal-os-icon.terminal-os-kali {
+	border-radius: 50%;
+	background: linear-gradient(145deg, #0f172a 0%, #1d4ed8 100%);
+	padding: 1.5px;
+	box-sizing: border-box;
+}
+
+.monaco-workbench .terminal-os-icon.terminal-os-kali > svg {
+	width: 12px;
+	height: 12px;
+}
+
+.monaco-workbench .terminal-os-icon.terminal-os-macos > svg {
+	width: 13px;
+	height: 13px;
+}
+
+.monaco-action-bar .action-item .single-terminal-tab .terminal-os-icon {
+	width: 14px;
+	height: 14px;
+	flex: 0 0 14px;
+	margin-right: 5px;
 }
 
 .monaco-workbench .pane-body.integrated-terminal .tabs-container.has-text .tabs-list .terminal-tabs-entry .monaco-icon-label::after {

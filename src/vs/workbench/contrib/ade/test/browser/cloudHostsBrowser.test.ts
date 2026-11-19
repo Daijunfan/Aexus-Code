@@ -1180,6 +1180,50 @@ suite('pickProjectFoldersWithCloudOption', () => {
 			},
 		});
 	});
+
+	test('keeps initial user directory intact on SSH transport failure and offers revealing hidden dot folders when only hidden folders exist', async () => {
+		const failHarness = createHarness(async () => {
+			throw new Error('SSH command failed on cloud-linux (/srv/projects): Connection closed');
+		});
+		const failPick = failHarness.pick();
+		const step1Fail = await waitForQuickPick(failHarness.quickPicks, 1);
+		step1Fail.acceptItemByLabel('cloud-linux');
+		const step2Fail = await waitForQuickPick(failHarness.quickPicks, 2);
+		await waitForLabels(step2Fail, ['Open This Folder: /srv/projects']);
+		const failValue = step2Fail.value;
+		step2Fail.hide();
+		await failPick;
+
+		const dotHarness = createHarness(async (_authority, dirPath) => {
+			if (dirPath === '/srv/projects') {
+				return directories('.claude', '.config');
+			}
+			return [];
+		});
+		const dotPick = dotHarness.pick();
+		const step1Dot = await waitForQuickPick(dotHarness.quickPicks, 1);
+		step1Dot.acceptItemByLabel('cloud-linux');
+		const step2Dot = await waitForQuickPick(dotHarness.quickPicks, 2);
+		await waitForLabels(step2Dot, ['Show 2 hidden (.dot) folder(s)...']);
+		step2Dot.acceptItemByLabel('Show 2 hidden (.dot) folder(s)...');
+		await waitForLabels(step2Dot, ['.claude/', '.config/']);
+		const revealedItems = snapshotQuickPick(step2Dot).items;
+		step2Dot.hide();
+		await dotPick;
+
+		assert.deepStrictEqual({ failValue, revealedItems }, {
+			failValue: '/srv/projects/',
+			revealedItems: [
+				'Open This Folder: /srv/projects',
+				'Folders in /srv/projects',
+				'..',
+				'.claude/',
+				'.config/',
+				'Host',
+				'Switch Host...',
+			],
+		});
+	});
 });
 
 suite('Cloud Host Studio view-model helpers', () => {

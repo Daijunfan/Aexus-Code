@@ -369,7 +369,12 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		if (item.kind === 'project') {
 			template.row.classList.add('ade-project-row', 'depth-0');
 			template.workTreeBadge.hidden = true;
+			template.workTreeBadge.textContent = '';
+			template.workTreeBadge.className = 'ade-worktree-badge';
 			template.roleBadge.hidden = true;
+			template.roleBadge.textContent = '';
+			template.roleBadge.className = 'ade-role-badge';
+			template.roleBadge.removeAttribute('data-tier');
 			const addProjectLabel = localize('adeNewProjectSessionBtn', "New Session in Project...");
 			template.addSessionBtn.hidden = false;
 			template.addSessionBtn.setAttribute('aria-label', addProjectLabel);

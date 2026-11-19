@@ -1904,6 +1904,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			freeNotLocked: !freeRow.classList.contains('ade-worktree-locked') && freeRow.querySelector<HTMLElement>('.ade-lock-glyph')!.hidden,
 			cloudChipText: cloudRow.querySelector('.ade-cloud-host-badge')?.textContent,
 			cloudHasDot: Boolean(cloudRow.querySelector('.ade-cloud-host-badge .ade-cloud-host-dot')),
+			cloudHiddenRoleBadgeDisplay: mainWindow.getComputedStyle(cloudRow.querySelector<HTMLElement>('.ade-role-badge')!).display,
+			cloudHiddenWorktreeBadgeDisplay: mainWindow.getComputedStyle(cloudRow.querySelector<HTMLElement>('.ade-worktree-badge')!).display,
+			localProjectHiddenRoleBadgeDisplay: mainWindow.getComputedStyle(findRow('Alpha').querySelector<HTMLElement>('.ade-role-badge')!).display,
 			hiddenStatusDotDisplay: mainWindow.getComputedStyle(freeRow.querySelector<HTMLElement>('.ade-status-dot')!).display,
 		};
 
@@ -1993,6 +1996,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			freeNotLocked: true,
 			cloudChipText: 'gpu-a100',
 			cloudHasDot: true,
+			cloudHiddenRoleBadgeDisplay: 'none',
+			cloudHiddenWorktreeBadgeDisplay: 'none',
+			localProjectHiddenRoleBadgeDisplay: 'none',
 			hiddenStatusDotDisplay: 'none',
 			mgrUnlockedAfterRecycle: true,
 			secretaryActiveWorking: true,

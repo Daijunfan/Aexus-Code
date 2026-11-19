@@ -60,8 +60,15 @@
 .monaco-workbench .ade-secretary-status-chip[hidden],
 .monaco-workbench .ade-focus-banner[hidden],
 .monaco-workbench .ade-focus-banner-host[hidden],
+.monaco-workbench .ade-role-badge[hidden],
+.monaco-workbench .ade-worktree-badge[hidden],
+.monaco-workbench .ade-cloud-host-badge[hidden],
+.monaco-workbench .ade-project-count[hidden],
+.monaco-workbench .ade-icon-button[hidden],
 .monaco-workbench .ade-lock-glyph[hidden],
-.monaco-workbench .ade-status-dot[hidden] {
+.monaco-workbench .ade-status-dot[hidden],
+.monaco-workbench .ade-tree-label-host[hidden],
+.monaco-workbench .ade-tree-edit-host[hidden] {
 	display: none !important;
 }
 

@@ -741,6 +741,39 @@ suite('AdeCloudHosts', () => {
 				'',
 			].join('\n'));
 		});
+
+		test('routes effective SSH config to a space-free directory and preserves HostKeyAlias when userDataPath contains spaces', async () => {
+			const homedir = path.join(tmpDir, 'home');
+			const spacedUserData = path.join(tmpDir, 'Application Support', 'Aexus Code');
+			const userSshCfg = path.join(homedir, '.ssh', 'config');
+			await writeText(userSshCfg, [
+				'Host ubuntu-target1',
+				'    HostName 127.0.0.1',
+				'    Port 12237',
+				'    User "lab"',
+				'    ProxyJump GPU-server',
+				'    HostKeyAlias vmlab-gpubupt208-ubuntu-target1',
+				'',
+			].join('\n'));
+
+			const svc = disposables.add(new AdeCloudHostNodeService({
+				homedir,
+				userDataPath: spacedUserData,
+				vsCodeUserDataDir: path.join(tmpDir, 'vscode'),
+				sshConfigPath: userSshCfg,
+				syncUserSshDir: false,
+				autoImportOnFirstLoad: true,
+			}));
+
+			const effectivePath = await svc.getEffectiveSshConfigPath();
+			assert.strictEqual(/\s/.test(effectivePath), false, `Expected space-free SSH config path, got: ${effectivePath}`);
+			assert.strictEqual(effectivePath, path.join(homedir, '.aexus-code', 'ssh', 'effective_ssh_config'));
+
+			const managedPath = path.join(homedir, '.aexus-code', 'ssh', 'aexus-managed-hosts.conf');
+			const managedContent = await fs.readFile(managedPath, 'utf8');
+			assert.ok(managedContent.includes('ProxyJump GPU-server'));
+			assert.ok(managedContent.includes('HostKeyAlias vmlab-gpubupt208-ubuntu-target1'));
+		});
 	});
 
 	(isWindows ? suite.skip : suite)('remote transport', () => {

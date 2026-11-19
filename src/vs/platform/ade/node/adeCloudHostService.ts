@@ -26,6 +26,7 @@ import {
 	IAdeRemoteDirEntry,
 	IAdeRemoteFileStat,
 	IAdeRemoteScmStatusEntry,
+	isShallowRemoteRootPath,
 	normalizeRemoteProjectPath,
 	sanitizeSshAlias,
 	toRemoteNativePath,
@@ -50,6 +51,7 @@ interface IParsedSshHostRecord {
 	port?: number;
 	identityFile?: string;
 	proxyJump?: string;
+	hostKeyAlias?: string;
 	knownHostsFile?: string;
 	strictHostKeyChecking?: 'yes' | 'accept-new' | 'no';
 }
@@ -260,6 +262,11 @@ export async function parseOpenSshConfigFiles(
 							target.proxyJump = val;
 						}
 						break;
+					case 'hostkeyalias':
+						if (target.hostKeyAlias === undefined && val.toLowerCase() !== 'none') {
+							target.hostKeyAlias = val;
+						}
+						break;
 					case 'userknownhostsfile':
 						if (target.knownHostsFile === undefined) {
 							target.knownHostsFile = expandTildePath(val, homedir);
@@ -440,8 +447,27 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		this.logService = options.logService;
 
 		this.storageFilePath = path.join(this.userDataPath, 'cloud-hosts.json');
-		this.managedSshConfPath = path.join(this.userDataPath, 'ssh', 'aexus-managed-hosts.conf');
-		this.effectiveSshConfPath = path.join(this.userDataPath, 'ssh', 'effective_ssh_config');
+		const sshConfigDir = this.resolveSafeSshConfigDir();
+		this.managedSshConfPath = path.join(sshConfigDir, 'aexus-managed-hosts.conf');
+		this.effectiveSshConfPath = path.join(sshConfigDir, 'effective_ssh_config');
+	}
+
+	private resolveSafeSshConfigDir(): string {
+		const candidate = path.join(this.userDataPath, 'ssh');
+		// OpenSSH ProxyJump internally invokes `ssh -F <config> -W ...` via shell without quoting whitespace.
+		// Keep a space-free directory so ProxyJump hosts never fail with "Can't open user config file .../Application".
+		if (!/\s/.test(candidate)) {
+			return candidate;
+		}
+		const homeCandidate = path.join(this.homedir, '.aexus-code', 'ssh');
+		if (!/\s/.test(homeCandidate)) {
+			return homeCandidate;
+		}
+		if (process.platform !== 'win32') {
+			const myUid = typeof process.getuid === 'function' ? process.getuid() : 'u';
+			return path.join('/tmp', `aexus-ssh-${myUid}`);
+		}
+		return candidate;
 	}
 
 	private ensureInitialized(): Promise<void> {
@@ -548,6 +574,12 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			const safeJump = this.sanitizeSshDirectiveValue(host.proxyJump);
 			if (safeJump) {
 				lines.push(`    ProxyJump ${safeJump.includes(' ') ? `"${safeJump}"` : safeJump}`);
+			}
+		}
+		if (host.hostKeyAlias) {
+			const safeKeyAlias = this.sanitizeSshDirectiveValue(host.hostKeyAlias);
+			if (safeKeyAlias) {
+				lines.push(`    HostKeyAlias ${safeKeyAlias.includes(' ') ? `"${safeKeyAlias}"` : safeKeyAlias}`);
 			}
 		}
 		if (host.knownHostsFile) {
@@ -700,6 +732,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				? (this.sanitizeSshDirectiveValue(input.identityFile) ? expandTildePath(this.sanitizeSshDirectiveValue(input.identityFile), this.homedir) : undefined)
 				: prev?.identityFile,
 			proxyJump: input.proxyJump !== undefined ? (this.sanitizeSshDirectiveValue(input.proxyJump) || undefined) : prev?.proxyJump,
+			hostKeyAlias: input.hostKeyAlias !== undefined ? (this.sanitizeSshDirectiveValue(input.hostKeyAlias) || undefined) : prev?.hostKeyAlias,
 			knownHostsFile: input.knownHostsFile !== undefined
 				? (this.sanitizeSshDirectiveValue(input.knownHostsFile) ? expandTildePath(this.sanitizeSshDirectiveValue(input.knownHostsFile), this.homedir) : undefined)
 				: prev?.knownHostsFile,
@@ -1050,6 +1083,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 					os: prev.source === 'user' ? prev.os : osKind,
 					identityFile: prev.identityFile ?? sshRec?.identityFile ?? legacyRec?.identityFile,
 					proxyJump: prev.proxyJump ?? sshRec?.proxyJump,
+					hostKeyAlias: prev.hostKeyAlias ?? sshRec?.hostKeyAlias,
 					knownHostsFile: prev.knownHostsFile ?? sshRec?.knownHostsFile ?? legacyRec?.knownHostsFile,
 					strictHostKeyChecking: prev.strictHostKeyChecking ?? sshRec?.strictHostKeyChecking,
 					defaultDirectory: prev.defaultDirectory ?? (legacyRec?.defaultDirectory ? normalizeRemoteProjectPath(legacyRec.defaultDirectory, osKind) : normRecents[0]),
@@ -1075,6 +1109,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 					os: osKind,
 					identityFile: sshRec?.identityFile ?? legacyRec?.identityFile,
 					proxyJump: sshRec?.proxyJump,
+					hostKeyAlias: sshRec?.hostKeyAlias,
 					knownHostsFile: sshRec?.knownHostsFile ?? legacyRec?.knownHostsFile,
 					strictHostKeyChecking: sshRec?.strictHostKeyChecking,
 					defaultDirectory: legacyRec?.defaultDirectory
@@ -1215,7 +1250,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const startedAt = Date.now();
 		const { target, os: declaredOs, host } = await this.resolveHostTarget(idOrAlias);
 		const winProbeCmd = `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(`$ErrorActionPreference='Stop'; Write-Output ('WINDOWS|' + $env:USERPROFILE)`)}`;
-		const posixProbeCmd = `sh -c 'printf "%s|%s\\n" "$(uname -s 2>/dev/null || echo Linux)" "$HOME"'`;
+		const posixProbeCmd = `sh -c 'u=$(uname -s 2>/dev/null || echo Linux); d=""; if [ -r /etc/os-release ]; then d=$(. /etc/os-release 2>/dev/null && printf "%s" "\${ID:-}"); fi; if [ -n "$d" ]; then printf "%s (%s)|%s\\n" "$u" "$d" "$HOME"; else printf "%s|%s\\n" "$u" "$HOME"; fi'`;
 		try {
 			const primaryCmd = declaredOs === 'windows' ? winProbeCmd : posixProbeCmd;
 			let res = await this.runSshRaw(target, primaryCmd, { timeoutMs: 12_000, host });
@@ -1280,7 +1315,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				|| (nextOs !== 'windows' && /^\/[A-Za-z]:/.test(cur.defaultDirectory))
 			),
 		);
-		const nextDefaultDir = (!cur.defaultDirectory || existingDefaultIncompatible)
+		const nextDefaultDir = (!cur.defaultDirectory || existingDefaultIncompatible || isShallowRemoteRootPath(cur.defaultDirectory, nextOs))
 			? (discoveredHome ? normalizeRemoteProjectPath(discoveredHome, nextOs) : cur.defaultDirectory)
 			: cur.defaultDirectory;
 		this.hosts[idx] = {

@@ -12,6 +12,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import {
 	AdeCloudHostOs,
+	IAdeCloudHost,
 	IAdeCloudHostBackendService,
 	toRemoteNativePath,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
@@ -57,7 +58,7 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 	declare readonly _serviceBrand: undefined;
 	private _sshEntries: IStoredSSHProject[];
 	private _cachedEffectiveSshConfigPath: string | undefined;
-	private readonly _hostOsCache = new Map<string, AdeCloudHostOs>();
+	private readonly _hostMetaCache = new Map<string, IAdeCloudHost>();
 	private readonly _cloudHosts: IAdeCloudHostBackendService | undefined;
 
 	constructor(
@@ -100,9 +101,10 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 			if (cfgPath) {
 				this._cachedEffectiveSshConfigPath = cfgPath;
 			}
-			this._hostOsCache.clear();
+			this._hostMetaCache.clear();
 			for (const h of hosts) {
-				this._hostOsCache.set(h.alias, h.os);
+				this._hostMetaCache.set(h.alias, h);
+				this._hostMetaCache.set(h.alias.toLowerCase(), h);
 			}
 		} catch {
 			// Best effort cache prime
@@ -177,9 +179,14 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		return encodeBase64(VSBuffer.wrap(bytes));
 	}
 
-	private _buildSshLaunchConfig(uri: URI, hostLabel: string, name: string, osKind: AdeCloudHostOs | undefined, configFile: string | undefined): IShellLaunchConfig {
+	private _buildSshLaunchConfig(uri: URI, hostLabel: string, name: string, hostMeta: IAdeCloudHost | undefined, configFile: string | undefined): IShellLaunchConfig {
 		let remoteCommand: string;
+		const osKind: AdeCloudHostOs | undefined = hostMeta?.os;
 		const isWindowsTarget = osKind === 'windows' || /^\/[a-zA-Z]:(?:\/|$)/.test(uri.path) || uri.path.startsWith('//');
+		const resolvedHostOs: AdeCloudHostOs = osKind ?? (isWindowsTarget ? 'windows' : 'linux');
+		const hostDistribution = [hostMeta?.lastTestStatus?.remoteUname, hostMeta?.name, hostMeta?.alias, hostMeta?.user, hostLabel]
+			.filter((part): part is string => Boolean(part && part.trim()))
+			.join(' ');
 		if (isWindowsTarget) {
 			const winPath = toRemoteNativePath(uri.path || '/', 'windows').replace(/'/g, `''`);
 			const encoded = this._encodePowerShellUtf16Base64(`Set-Location -LiteralPath '${winPath}'`);
@@ -194,6 +201,8 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		return {
 			name,
 			hostLabel,
+			hostOs: resolvedHostOs,
+			hostDistribution,
 			icon: Codicon.remote,
 			executable: configuredSshExe || 'ssh',
 			args: [...(configFile ? ['-F', configFile] : []), '-t', '--', uri.authority, remoteCommand],
@@ -209,9 +218,9 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		if (target.uri.scheme !== SSH_PROJECT_SCHEME) {
 			return { name, cwd: target.uri };
 		}
-		const osKind = this._hostOsCache.get(target.uri.authority);
+		const hostMeta = this._hostMetaCache.get(target.uri.authority) ?? this._hostMetaCache.get(target.uri.authority.toLowerCase());
 		const configFile = this._resolveSshConfigPathSync();
-		return this._buildSshLaunchConfig(target.uri, target.host, name, osKind, configFile);
+		return this._buildSshLaunchConfig(target.uri, target.host, name, hostMeta, configFile);
 	}
 
 	async resolveLaunchConfigForUri(uri: URI, explicitName?: string): Promise<IShellLaunchConfig> {
@@ -222,11 +231,11 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		if (uri.scheme !== SSH_PROJECT_SCHEME) {
 			return { name, cwd: uri };
 		}
-		if (this._cloudHosts && (!this._cachedEffectiveSshConfigPath || !this._hostOsCache.has(uri.authority))) {
+		if (this._cloudHosts && (!this._cachedEffectiveSshConfigPath || !this._hostMetaCache.has(uri.authority))) {
 			await this._refreshCloudHostMetadata();
 		}
-		const osKind = this._hostOsCache.get(uri.authority);
+		const hostMeta = this._hostMetaCache.get(uri.authority) ?? this._hostMetaCache.get(uri.authority.toLowerCase());
 		const configFile = this._resolveSshConfigPathSync();
-		return this._buildSshLaunchConfig(uri, hostLabel, name, osKind, configFile);
+		return this._buildSshLaunchConfig(uri, hostLabel, name, hostMeta, configFile);
 	}
 }

@@ -38,6 +38,7 @@ import { DisposableMap, DisposableStore, dispose, IDisposable, MutableDisposable
 import { URI } from '../../../../base/common/uri.js';
 import { isDark } from '../../../../platform/theme/common/theme.js';
 import { getColorClass, getUriClasses } from './terminalIcon.js';
+import { getTerminalOsTooltip, renderTerminalOsIcon, resolveTerminalOsIconKind, shouldShowTerminalOsIcon } from './terminalOsIcon.js';
 import { getTerminalActionBarArgs } from './terminalMenus.js';
 import { TerminalContextKeys } from '../common/terminalContextKey.js';
 import { getInstanceHoverInfo } from './terminalTooltip.js';
@@ -516,7 +517,17 @@ class SingleTerminalTabActionViewItem extends MenuEntryActionViewItem {
 			}
 			label.style.color = colorStyle;
 			const primaryActionIcon = this._menuItemAction.item.icon;
-			dom.reset(label, ...renderLabelWithIcons(this._instantiationService.invokeFunction(getSingleTabLabel, instance, this._terminaConfigurationService.config.tabs.separator, ThemeIcon.isThemeIcon(primaryActionIcon) ? primaryActionIcon : undefined)));
+			const useOsIcon = !primaryActionIcon && Boolean(instance.title) && shouldShowTerminalOsIcon(instance);
+			if (useOsIcon) {
+				const osKind = resolveTerminalOsIconKind(instance);
+				const osIconEl = dom.$('span.terminal-os-icon');
+				renderTerminalOsIcon(osIconEl, osKind, getTerminalOsTooltip(instance, osKind));
+				const titleText = getSingleTabTitle(instance, this._terminaConfigurationService.config.tabs.separator);
+				const suffix = primaryStatus?.icon ? ` $(${primaryStatus.icon.id})` : '';
+				dom.reset(label, osIconEl, ...renderLabelWithIcons(`${titleText}${suffix}`));
+			} else {
+				dom.reset(label, ...renderLabelWithIcons(this._instantiationService.invokeFunction(getSingleTabLabel, instance, this._terminaConfigurationService.config.tabs.separator, ThemeIcon.isThemeIcon(primaryActionIcon) ? primaryActionIcon : undefined)));
+			}
 
 			if (this._altCommand) {
 				label.classList.remove(this._altCommand);
