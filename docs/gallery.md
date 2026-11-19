@@ -68,38 +68,28 @@ A curated tour of Aexus Code's surfaces across Dark Modern, Light Modern, High C
       <p align="center"><sub><strong>Armored Nested Dual-Shell Pods (Simulated 0-Token Demo)</strong></sub></p>
     </td>
     <td width="50%">
-      <img src="assets/01-ade-engineering-dag.png" width="100%" alt="ADE Session Hierarchy Synchronized with Auto-Partitioned MNP Lanes" />
-      <p align="center"><sub><strong>Multi-Tier Session Hierarchy &amp; Auto-Partitioned MNP Lanes</strong></sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
       <img src="assets/13-prompt-to-dag-bar.png" width="100%" alt="Prompt-to-DAG Floating Bar (Cmd/Ctrl+Shift+K or /) — Deterministic Keyword-to-DAG Scaffolding" />
       <p align="center"><sub><strong>Prompt-to-DAG (<code>Cmd/Ctrl+Shift+K</code> or <code>/</code>) — Deterministic Keyword Scaffolding (&lt;50ms)</strong></sub></p>
     </td>
+  </tr>
+  <tr>
     <td width="50%">
       <img src="assets/09-blueprint-recipes-gallery.png" width="100%" alt="DAG Blueprint Recipes Gallery — 6 Curated Engineering &amp; Research Templates with Enforced Budget Caps" />
       <p align="center"><sub><strong>6 Built-In DAG Blueprint Recipes with Live SVG Previews &amp; Budget Caps</strong></sub></p>
     </td>
-  </tr>
-  <tr>
     <td width="50%">
       <img src="assets/03-engineering-node-inspector.png" width="100%" alt="Right-Click Node Card — Acceptance Report, Touched File Diff &amp; Role Token Breakdown" />
       <p align="center"><sub><strong>Node Acceptance Report, Touched Files &amp; Per-Role Telemetry</strong></sub></p>
     </td>
+  </tr>
+  <tr>
     <td width="50%">
       <img src="assets/03b-engineering-role-engines.png" width="100%" alt="8-Engine Role Configurator &amp; Thinking Effort Selector with Public Upstream Models" />
       <p align="center"><sub><strong>Mix All 8 Native Engines, Public Models &amp; Thinking Effort per Role</strong></sub></p>
     </td>
-  </tr>
-  <tr>
     <td width="50%">
       <img src="assets/04-engineering-user-gate.png" width="100%" alt="User Gate Sign-Off Card — Aggregated Upstream Reports &amp; Directed Rollback" />
       <p align="center"><sub><strong>User Gate Sign-Off Card — Upstream Reports &amp; Directed Rollback</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/04b-engineering-inbox-and-gate.png" width="100%" alt="ADE Inbox Gate Queue Synchronized with Live DAG Canvas" />
-      <p align="center"><sub><strong>ADE Inbox Actionable Queue Synchronized with Live DAG</strong></sub></p>
     </td>
   </tr>
   <tr>
@@ -155,13 +145,11 @@ A curated tour of Aexus Code's surfaces across Dark Modern, Light Modern, High C
     </td>
   </tr>
   <tr>
-    <td width="50%">
-      <img src="assets/05-cloud-host-studio.png" width="100%" alt="Cloud Host Studio — KPI Strip, Multi-OS Host Cards, Latency Test &amp; Non-Destructive VS Code Migration" />
-      <p align="center"><sub><strong>Cloud Host Studio — KPI Strip, Multi-OS Cards &amp; Non-Destructive SSH Config</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/06-cloud-live-path-and-terminals.png" width="100%" alt="Two-Step Host Picker, Live Remote Path Browser &amp; Hybrid SSH Terminals" />
-      <p align="center"><sub><strong>Two-Step Host Picker, Live Remote Path Browser &amp; SSH Terminals</strong></sub></p>
+    <td colspan="2">
+      <p align="center">
+        <img src="assets/05-cloud-host-studio.png" width="75%" alt="Cloud Host Studio — KPI Strip, Multi-OS Host Cards, Latency Test &amp; Non-Destructive VS Code Migration" /><br/>
+        <sub><strong>Cloud Host Studio — KPI Strip, Multi-OS Cards &amp; Non-Destructive SSH Config</strong></sub>
+      </p>
     </td>
   </tr>
 </table>
