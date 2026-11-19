@@ -19,9 +19,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  core-typecheck-and-ade-tests:
+    name: Core Typecheck, ESLint & ADE Node Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Aexus Code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.0
+
+      - name: Setup Node.js (.nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies (no native C++ rebuilds needed for typecheck/Node tests)
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm -C extensions install --frozen-lockfile --ignore-scripts
+
+      - name: Download Electron type definitions (.build/typings/electron.d.ts)
+        run: node build/npm/electronTypes.ts
+
+      - name: Fast transpile client sources (src -> out)
+        run: pnpm run transpile-client
+
+      - name: Build aexus-agents extension & bundled aexus-ade CLI
+        run: node extensions/aexus-agents/esbuild.mts
+
+      - name: Typecheck client (src/tsconfig.json)
+        run: pnpm run typecheck-client
+
+      - name: Typecheck aexus-agents extension
+        run: pnpm exec tsc -p extensions/aexus-agents/tsconfig.json --noEmit
+
+      - name: Lint ADE platform & workbench sources
+        run: pnpm exec eslint --max-warnings=0 "src/vs/platform/ade/**/*.ts" "src/vs/workbench/contrib/ade/**/*.ts"
+
+      - name: Run ADE platform Node unit tests
+        run: node test/unit/node/index.js --runGlob "vs/platform/ade/test/node/*.test.js"
+
   agents-cli-and-cross-platform:
     name: Agents & CLI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -30,41 +76,87 @@ jobs:
       - name: Checkout Aexus Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 24
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.0
+
+      - name: Setup Node.js (.nvmrc)
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: extensions/pnpm-lock.yaml
+
+      - name: Install extension build dependencies (esbuild & TypeScript)
+        run: pnpm -C extensions install --frozen-lockfile --ignore-scripts
+
+      - name: Build aexus-agents bundle (dist/adeCli.js & preloads)
+        run: node extensions/aexus-agents/esbuild.mts
 
       - name: Run aexus-agents & CLI unit tests
         run: node --test --experimental-strip-types extensions/aexus-agents/test/*.test.*
 
-      - name: Smoke-check standalone aexus-ade CLI (doctor, version, completion)
+      - name: Smoke-check standalone aexus-ade CLI (version, doctor JSON, completion)
         run: |
           node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts --version
-          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts doctor --project . --json
           node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts completion zsh > /dev/null
+          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts completion bash > /dev/null
+          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts completion fish > /dev/null
+          # doctor may exit non-zero on headless CI runners without local coding CLIs; assert valid JSON report
+          set +e
+          DOCTOR_JSON="$(node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts doctor --project . --json)"
+          DOCTOR_EXIT=$?
+          set -e
+          if [ "$DOCTOR_EXIT" -ne 0 ] && [ "$DOCTOR_EXIT" -ne 1 ] && [ "$DOCTOR_EXIT" -ne 2 ]; then
+            echo "Unexpected doctor exit code: $DOCTOR_EXIT" >&2
+            exit 1
+          fi
+          node -e '
+            const report = JSON.parse(process.argv[1]);
+            if (!report.platform || !Array.isArray(report.engines) || report.engines.length < 8) {
+              console.error("Invalid doctor JSON report:", report);
+              process.exit(1);
+            }
+            console.log(`Doctor JSON OK (${report.platform}/${report.arch}, ${report.engines.length} engines checked, exit=${process.argv[2]})`);
+          ' "$DOCTOR_JSON" "$DOCTOR_EXIT"
         shell: bash
 
   docs-and-blueprints-integrity:
-    name: Docs, Blueprints & Community Hygiene
+    name: Docs, Blueprints, Open VSX & Shell Hygiene
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout Aexus Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 24
+      - name: Setup Node.js (.nvmrc)
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
 
-      - name: Verify relative markdown links, screenshots & blueprint schemas
+      - name: Verify shell scripts syntax
+        run: |
+          bash -n scripts/aexus-install.sh
+          bash -n scripts/aexus-env.sh
+
+      - name: Verify product.json, relative markdown links, assets & all 6 blueprint recipes
         run: |
           node -e '
             const fs = require("fs");
             const path = require("path");
+
+            const product = JSON.parse(fs.readFileSync("product.json", "utf8"));
+            if (!product.extensionsGallery?.serviceUrl?.includes("open-vsx.org")) {
+              console.error("product.json extensionsGallery must target Open VSX");
+              process.exit(1);
+            }
+
             const docs = [
               "README.md",
               "docs/README.zh-CN.md",
+              "docs/ARCHITECTURE.md",
+              "docs/gallery.md",
               "CONTRIBUTING.md",
               "SECURITY.md",
               "CODE_OF_CONDUCT.md",
@@ -88,16 +180,32 @@ jobs:
                 if (!fs.existsSync(target)) missing.push(`${doc} -> ${raw}`);
               }
             }
-            const blueprints = fs.readdirSync("examples/blueprints").filter(f => f.endsWith(".md") && f !== "README.md");
-            for (const bp of blueprints) {
-              const content = fs.readFileSync(path.join("examples/blueprints", bp), "utf8");
-              if (!content.includes("```mermaid") || !content.includes("## Tree Metadata") || !content.includes("## Auto-Partitioned Managers")) {
-                missing.push(`invalid blueprint structure: examples/blueprints/${bp}`);
+
+            const requiredBlueprints = [
+              "feature-ship.md",
+              "bug-hunt-fix.md",
+              "security-audit-swarm.md",
+              "safe-migration.md",
+              "deep-research-lab.md",
+              "arch-teardown.md"
+            ];
+            for (const bp of requiredBlueprints) {
+              const full = path.join("examples/blueprints", bp);
+              if (!fs.existsSync(full)) {
+                missing.push(`missing blueprint: ${full}`);
+                continue;
+              }
+              const content = fs.readFileSync(full, "utf8");
+              for (const token of ["```mermaid", "## Tree Metadata", "## Auto-Partitioned Managers", "max_concurrency:", "- files:", "- verify:"]) {
+                if (!content.includes(token)) {
+                  missing.push(`blueprint ${full} missing required field/section: ${token}`);
+                }
               }
             }
+
             if (missing.length) {
               console.error("Integrity failures:\n" + missing.join("\n"));
               process.exit(1);
             }
-            console.log(`Verified ${checked} doc links/assets and ${blueprints.length} example blueprints.`);
+            console.log(`Verified product.json (Open VSX), ${checked} doc links/assets, and ${requiredBlueprints.length} example blueprints.`);
           '

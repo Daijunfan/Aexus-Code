@@ -19,6 +19,7 @@ flowchart LR
 - tree_type: research
 - governor_session_id: <governor-session-id>
 - workspace_isolation: shared
+- max_concurrency: 3
 - watchdog_timeout_minutes: 10
 - max_budget_usd: 6
 
@@ -49,6 +50,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
+- files: research/01-framing/**
+- verify: test -s research/01-framing/hypotheses.md
 - goal: |
     Survey primary sources, prior benchmarks, and open failure modes; establish explicit hypotheses and evaluation metrics.
 - acceptance: |
@@ -60,6 +63,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=antigravity, thinking=high
+- files: research/02-track-a/**
+- verify: test -s research/02-track-a/findings.md
 - goal: |
     Investigate primary hypothesis A via controlled prototype or analytical proof and record quantitative observations.
 - acceptance: |
@@ -71,6 +76,8 @@ flowchart LR
 - critical: false
 - employee: engine=claude-code, thinking=medium
 - worker: engine=antigravity, thinking=medium
+- files: research/03-track-b/**
+- verify: test -s research/03-track-b/counter-baseline.md
 - goal: |
     Evaluate competing approach B under identical constraints to prevent confirmation bias.
 - acceptance: |
@@ -82,6 +89,8 @@ flowchart LR
 - critical: false
 - employee: engine=claude-code, thinking=medium
 - worker: engine=antigravity, thinking=medium
+- files: research/04-benchmarks/**
+- verify: test -s research/04-benchmarks/results.json
 - goal: |
     Build and run a repeatable benchmark measuring latency, throughput, accuracy, and token/resource cost.
 - acceptance: |
@@ -98,6 +107,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
+- files: research/05-synthesis/**
+- verify: test -s research/05-synthesis/decision-brief.md
 - goal: |
     Synthesize verified findings into an actionable technical report with recommendation matrix, charts/tables, and next steps.
 - acceptance: |

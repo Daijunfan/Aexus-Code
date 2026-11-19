@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Aexus Code">
+  <defs>
+    <linearGradient id="bgGrad" x1="48" y1="32" x2="464" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#111A2E" />
+      <stop offset="52%" stop-color="#0B1120" />
+      <stop offset="100%" stop-color="#070B14" />
+    </linearGradient>
+
+    <radialGradient id="ambientGlow" cx="256" cy="172" r="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.22" />
+      <stop offset="55%" stop-color="#6366F1" stop-opacity="0.09" />
+      <stop offset="100%" stop-color="#0B1120" stop-opacity="0" />
+    </radialGradient>
+
+    <linearGradient id="borderGrad" x1="36" y1="36" x2="476" y2="476" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7DD3FC" stop-opacity="0.55" />
+      <stop offset="50%" stop-color="#475569" stop-opacity="0.32" />
+      <stop offset="100%" stop-color="#A78BFA" stop-opacity="0.52" />
+    </linearGradient>
+
+    <linearGradient id="leftLegGrad" x1="256" y1="112" x2="132" y2="384" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7DD3FC" />
+      <stop offset="48%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+
+    <linearGradient id="rightLegGrad" x1="256" y1="112" x2="380" y2="384" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0F2FE" />
+      <stop offset="45%" stop-color="#60A5FA" />
+      <stop offset="100%" stop-color="#A855F7" />
+    </linearGradient>
+
+    <linearGradient id="bridgeGrad" x1="176" y1="292" x2="336" y2="292" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22D3EE" />
+      <stop offset="50%" stop-color="#F8FAFC" />
+      <stop offset="100%" stop-color="#C084FC" />
+    </linearGradient>
+
+    <linearGradient id="prismFacet" x1="256" y1="126" x2="256" y2="366" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#6366F1" stop-opacity="0.03" />
+    </linearGradient>
+
+    <linearGradient id="spineGrad" x1="256" y1="138" x2="256" y2="292" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E0F2FE" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0.35" />
+    </linearGradient>
+  </defs>
+
+  <!-- Obsidian Rounded-Square Badge -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#bgGrad)" />
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#ambientGlow)" />
+  <rect x="27" y="27" width="458" height="458" rx="109" fill="none" stroke="url(#borderGrad)" stroke-width="6" />
+
+  <!-- Subtle Geometric Prism Inner Facet -->
+  <polygon points="256,122 378,374 256,314 134,374" fill="url(#prismFacet)" />
+
+  <!-- Precision Orchestration Spine (Governor -> Review Nexus) -->
+  <line x1="256" y1="132" x2="256" y2="292" stroke="url(#spineGrad)" stroke-width="10" stroke-linecap="round" />
+
+  <!-- Geometric A-Prism Structural DAG Edges -->
+  <line x1="256" y1="120" x2="136" y2="372" stroke="url(#leftLegGrad)" stroke-width="34" stroke-linecap="round" />
+  <line x1="256" y1="120" x2="376" y2="372" stroke="url(#rightLegGrad)" stroke-width="34" stroke-linecap="round" />
+
+  <!-- Crossbar Bridge (Adversarial Review / Synchronization Layer) -->
+  <line x1="184" y1="292" x2="328" y2="292" stroke="url(#bridgeGrad)" stroke-width="24" stroke-linecap="round" />
+
+  <!-- Central Review Diamond Node -->
+  <polygon points="256,266 282,292 256,318 230,292" fill="#0B1120" stroke="#7DD3FC" stroke-width="9" stroke-linejoin="round" />
+  <circle cx="256" cy="292" r="8" fill="#F8FAFC" />
+
+  <!-- Apex Governor Node (L1) -->
+  <circle cx="256" cy="120" r="34" fill="#0B1120" stroke="#38BDF8" stroke-width="12" />
+  <circle cx="256" cy="120" r="14" fill="#F8FAFC" />
+
+  <!-- Left Parallel Execution Node (L4) -->
+  <circle cx="136" cy="372" r="28" fill="#0B1120" stroke="#6366F1" stroke-width="11" />
+  <circle cx="136" cy="372" r="11" fill="#E0F2FE" />
+
+  <!-- Right Parallel Execution Node (L4) -->
+  <circle cx="376" cy="372" r="28" fill="#0B1120" stroke="#A855F7" stroke-width="11" />
+  <circle cx="376" cy="372" r="11" fill="#F3E8FF" />
+</svg>

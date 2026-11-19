@@ -1,312 +1,186 @@
 <p align="center">
-  <img src="assets/aexus-logo.png" width="88" alt="Aexus Code Logo" />
+  <img src="assets/aexus-logo.png" width="88" alt="Aexus Code 原创几何 DAG 标志" />
 </p>
 
 <h1 align="center">Aexus Code</h1>
 
 <p align="center">
   <strong>开源组织化智能体开发环境（ADE）与可视化多智能体控制面 IDE</strong><br/>
-  8 大本机原生 Coding Agent 引擎 · 四级对抗式质量验收 · Engineering &amp; Research 可视化 DAG · 四层 FinOps 成本与预算熔断 · Git Worktree 沙盒工作台 · 免装机原生 SSH 云主机
+  可扩展多级组织架构 · 8 大本机 BYO-CLI 编码引擎 · 确定性 Engineering &amp; Research DAG · 服务端签名能力令牌 · Git Worktree 沙盒 · 免装机原生 SSH 云主机
 </p>
 
 <p align="center">
-  <a href="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml"><img src="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml/badge.svg" alt="Aexus Code CI" /></a>
-  <a href="https://github.com/Daijunfan/Aexus-Code/blob/main/LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-0f172a?style=flat-square" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/Platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-0284c7?style=flat-square" alt="跨平台支持 macOS Windows Linux" />
+  <a href="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml"><img src="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml/badge.svg" alt="Aexus Code CI（类型检查、ESLint、ADE 与 CLI 测试）" /></a>
+  <a href="https://github.com/Daijunfan/Aexus-Code/releases"><img src="https://img.shields.io/badge/Releases-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-0284c7?style=flat-square" alt="预编译发行版 macOS Linux Windows" /></a>
+  <a href="../LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-0f172a?style=flat-square" alt="MIT License" /></a>
+  <a href="https://open-vsx.org/"><img src="https://img.shields.io/badge/Extensions-Open%20VSX-6366f1?style=flat-square" alt="Open VSX 开源扩展市场" /></a>
   <img src="https://img.shields.io/badge/Modes-ADE%20%E2%87%84%20IDE%20Symmetry-2563eb?style=flat-square" alt="ADE IDE 镜像对称" />
-  <img src="https://img.shields.io/badge/Native%20Engines-8%20Coding%20Agents-059669?style=flat-square" alt="8 大原生 Coding Agent" />
-  <img src="https://img.shields.io/badge/FinOps-4--Tier%20USD%20%2B%20Budget%20Breaker-d97706?style=flat-square" alt="四层 FinOps 美元统计与硬预算熔断" />
-  <img src="https://img.shields.io/badge/Remote-Zero--Server%20SSH-7c3aed?style=flat-square" alt="免远端装机原生 SSH 云主机" />
+  <img src="https://img.shields.io/badge/Native%20Engines-8%20BYO--CLI%20Agents-059669?style=flat-square" alt="8 大本机原生编码引擎" />
 </p>
 
 <p align="center">
-  <a href="../README.md">English</a> · <strong>简体中文</strong> · <a href="../examples/blueprints/README.md">蓝图模板库</a> · <a href="../AEXUS.md">架构文档 (AEXUS.md)</a> · <a href="../CHANGELOG.md">更新日志</a> · <a href="../CONTRIBUTING.md">贡献指南</a> · <a href="../CODE_OF_CONDUCT.md">行为准则</a>
+  <a href="../README.md">English</a> · <strong>简体中文</strong> · <a href="ARCHITECTURE.md">架构总览</a> · <a href="gallery.md">完整图库与视频</a> · <a href="../examples/blueprints/README.md">蓝图模板库</a> · <a href="../SECURITY.md">安全模型</a> · <a href="../CHANGELOG.md">更新日志</a> · <a href="../CONTRIBUTING.md">贡献指南</a> · <a href="../CODE_OF_CONDUCT.md">行为准则</a>
 </p>
 
 ---
 
 > [!TIP]
-> **一句话秒级生成多智能体组织图（`Cmd/Ctrl+K`），或 10 秒零成本互动体验（`$0.00` 消耗）：**
-> - **自然语言一键生成 DAG（`Cmd/Ctrl+K`）**：在画布按 `Cmd/Ctrl+K` 输入一句话（如*"构建 OAuth2 登录、迁移用户表并补齐 E2E 测试"*），`<50ms` 内自动拆解并行 Git Worktree 泳道、四级验收任务舱与人工门禁，也支持一键点击内置示例胶囊直接体验！
-> - **10 秒零 Token 互动演练（零源码改动、无需 API Key）**：按 `Cmd/Ctrl+Shift+P` 执行 **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`**（或 `aexus-ade engineering demo`），即刻体验完整四级协作、人工点击 **`✓ Approve`** 放行门禁，并一键导出**矢量 SVG 架构图**与 **GitHub PR 验收报告**。按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
+> **10 秒零花费预览（`$0.00` 模拟演练），或 `<50ms` 生成可编辑 DAG 脚手架：**
+> - **零 Token 模拟互动演练（`$0.00` 花费、零源码改动）**：按 `Cmd/Ctrl+Shift+P` 执行 **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`**（或运行 `aexus-ade engineering demo`），预览完整多级编排、点击放行门禁 `U1`，并导出**矢量 SVG** 与 **GitHub PR 验收报告**。
+> - **Prompt-to-DAG（`Cmd/Ctrl+K`）**：在画布按 `Cmd/Ctrl+K` 输入一句话，基于**确定性关键词到 DAG 脚手架合成（`<50ms`）**即时生成并行泳道与门禁草图，可直接可视化编辑或交由 `Governor` LLM 进一步深化。
+> - **瞬切 `ADE ⇄ IDE`**：随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）在组织化智能体视图与全功能 `Code - OSS` IDE 之间切换，不重启语言服务与终端。
 
 <p align="center">
-  <img src="assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code 实录动图 — 四级多智能体 DAG 编排、三路并行 Git Worktree、自愈返工、金色门禁审批与四层 FinOps 成本看板" />
+  <img src="assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code 零 Token 模拟互动演示 — 四级 DAG 编排、三路并行 Worktree、返工自愈、门禁审批与 FinOps 看板" />
   <br/>
-  <sub><strong>实机动态演示：</strong>三路并行 Git Worktree ➔ 琥珀返工自愈 ➔ 金色人工门禁 <code>U1</code> 一键放行 ➔ 四层 FinOps（省钱 <code>81%</code>）· <a href="assets/demos/02-live-dag-choreography.mp4">▶ 查看 1440×900 高清 MP4</a></sub>
+  <sub><strong>零 Token 模拟互动演示（<code>$0.00</code> 真实花费，确定性编排预览）：</strong>三路并行 Worktree ➔ 返工自愈 ➔ 门禁 <code>U1</code> 审批 ➔ 四层 FinOps · <a href="assets/demos/02-live-dag-choreography.mp4">▶ 观看高清 MP4</a> · <a href="gallery.md">浏览完整图库与 5 段视频 →</a></sub>
 </p>
 
-### 实机动态短视频速览 *（6–10 秒自动播放，附高清 MP4 源文件）*
-
-<table>
-  <tr>
-    <td width="50%">
-      <img src="assets/demos/01-prompt-to-dag.gif" width="100%" alt="一句话生成 DAG（Cmd/Ctrl+K）与 6 套内置蓝图模板库实录" />
-      <p align="center"><sub><strong>1. 一句话（<code>Cmd/Ctrl+K</code>）➔ 秒生多智能体 DAG &amp; 6 套蓝图模板</strong> · <a href="assets/demos/01-prompt-to-dag.mp4">▶ 高清 MP4</a></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/demos/03-gantt-worktrees-themes.gif" width="100%" alt="悬停微浮条、可视化执行甘特图、Git Worktree 一键合并工作台与深浅主题切换" />
-      <p align="center"><sub><strong>2. 悬停微浮条、执行甘特图、Worktree 合并台 &amp; 深浅色瞬切</strong> · <a href="assets/demos/03-gantt-worktrees-themes.mp4">▶ 高清 MP4</a></sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="assets/demos/04-ade-ide-mirror-symmetry.gif" width="100%" alt="0ms ADE 与 IDE 镜像对称切换、本地与云主机多项目管理及常驻 Secretary" />
-      <p align="center"><sub><strong>3. 0ms <code>ADE ⇄ IDE</code> 镜像切换 · 多项目并行 + <code>✦ Secretary</code></strong> · <a href="assets/demos/04-ade-ide-mirror-symmetry.mp4">▶ 高清 MP4</a></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/demos/05-cloud-hosts-studio.gif" width="100%" alt="免远端装机多系统 SSH 云主机中心（Linux 与 Windows）" />
-      <p align="center"><sub><strong>4. 免装机原生 SSH 云主机中心（Linux / Windows 同屏管理）</strong> · <a href="assets/demos/05-cloud-hosts-studio.mp4">▶ 高清 MP4</a></sub></p>
-    </td>
-  </tr>
-</table>
+---
 
 ## 为什么构建 Aexus Code？
 
-市面上的 AI 研发工具往往陷入三类割裂：
-- **闭源 AI IDE**（Cursor、Windsurf）把单线程对话侧栏套在闭源编辑器上——不仅厂商强绑定、费用黑盒，一旦研发任务扩展到多模块并行协作，就缺乏真正的组织化验收与治理机制。
-- **外部多 Worktree 启动器**（Vibe Kanban、Conductor、Superset）在编辑器之外开一堆终端窗口——丢失了完整的 LSP/AST 跳转、并排 Git Diff、断点调试与结构化对抗审查。
-- **独立图编排平台**（LangGraph Studio、Dify、n8n）与真实代码库、Git Worktree 以及本机 Coding Agent CLI 完全脱节。
+现有 AI 研发工具通常不得不在「闭源单线程 IDE」、「脱离编辑器的外部 Worktree 终端壳」与「脱离真实代码库与 Git 的云端节点画布」之间妥协。
 
-**Aexus Code** 基于开源 `Code - OSS` 从底层重构，开辟了一个全新品类——**在同一个 MIT 开源原生桌面窗口内，将全功能对标 VS Code 的 `IDE` 与组织化多智能体研发环境 `ADE` 融为一体**：
+**Aexus Code** 基于开源 `Code - OSS`（`1.146.0`）打造，采用 **MIT 开源协议**，默认接入开源 **[Open VSX](https://open-vsx.org/)** 扩展市场并彻底移除微软闭源 Copilot 遥测，在一个本地优先的桌面窗口中融合全功能 **IDE** 与可扩展的 **组织化智能体开发环境（ADE）**：
 
-1. **8 大本机 Coding Agent 原生直连（自带 CLI，零厂商绑定）**——原生聚合 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 与 **Pi**，无需强制登录云端订阅，彻底剔除微软闭源 Copilot 遥测与捆绑组件。
-2. **严格的四级组织化梯队与对抗式验收（`Employee [L3] ≠ Worker [L4]`）**——将顶层编排与代码审查（**`Governor L1 ➔ Manager L2 ➔ Employee L3`**）与 **100% 纯净无污染的 `Worker L4`** 编码上下文物理隔离，确保每一颗模型 Token 都聚焦于高质量代码交付。
-3. **装甲嵌套双壳任务舱 + 6 套内置蓝图模板（Blueprint Recipes）**——一键套用经过实战检验的 Engineering & Research 多路并行流水线（`Full-Stack Feature Ship`、`Surgical Bug Hunt`、`Multi-Engine Security Audit Swarm`、`Zero-Downtime Refactor`、`Deep Research Lab`、`Architecture Teardown`），支持 `.aexus-blueprint.md` 导出分享，并内置可视化 **Execution Gantt 甘特图** 与 **DAG MAP 小地图**。
-4. **四层 Agent FinOps、缓存省钱统计与硬预算熔断护栏**——跨全部 8 大引擎实时核算 **`$USD` 预估花费**、**Prompt Cache 节省金额（`Cache Saved $`）** 以及四级 / 段 / 节点维度的成本分布；支持设置 **`max_budget_usd` 硬预算上限**，一旦触发自动暂停 DAG 并在 `ADE Inbox` 发出严重告警，彻底杜绝失控烧钱。
-5. **Git Worktree 沙盒一键合并工作台 + 一键生成 GitHub PR 验收报告**——并行 `MGR · L2` 泳道自动运行在独立 Git Worktree 分支上，直接在画布侧栏一键 **`Merge All into Project`** 或 **`Clean Up Worktrees`**；一键复制或 CLI 导出包含实时状态 Mermaid DAG、四层成本表与交付清单的 **GitHub PR 验收报告**（`Copy PR Report` / `aexus-ade engineering report`）。
-6. **免远端装机 SSH 云主机（`aexus-ssh://`）与全量控制面 CLI（含 `aexus-ade doctor`）**——本地项目与多台 Linux / macOS / Windows 云主机在**同一窗口**无缝共存，无需远端安装 `vscode-server`；一条 `aexus-ade doctor` 即可体检 8 大引擎、Git Worktree、OpenSSH 与仓库规则文件。
+1. **组织与职级工作室（"Everything is Extensible"）**——内置 **5 套组织预设**（`企业四级`、`敏捷三级创业团队`、`AI 科研实验室`、`红蓝安全审计`、`双层扁平蜂群`），支持填空式自定义职级、`{{variables}}` 提示词模板、**职级 × 固定内核 API 权限矩阵**，以及全 8 大引擎统一的服务端 HMAC 签名能力令牌（`AEXUS_ADE_SESSION_TOKEN`）。
+2. **8 大本机 BYO-CLI 编码引擎（默认安全模式）**——使用你自己的本机 CLI 与订阅直连 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 与 **Pi**。交互式会话默认运行在各引擎的安全审批模式，全自动模式需显式开启（`aexus.ade.autonomousMode`）。
+3. **确定性 Engineering & Research DAG 护栏**——支持 **SHA-256 哈希锁定的 `verify:` 预审查命令**、**`files:` 作用域串行化**、**`max_concurrency` + 关键路径调度**、**支路隔离的红色熔断器**、**Git 原生累计 Diff** 与 **零 Token 优先的两阶段 Watchdog**。
+4. **四层 FinOps、可配置定价与预算护栏**——优先采用引擎上报费用，缺失时基于可自定义费率表（`aexus.ade.pricing`）实时估算 `$USD` 与缓存节省，并支持 **订阅制（`$0` 边际费用）模式**；配合**派发前预算准入 + 回合后超限自动停机暂停**，杜绝僵尸节点与失控消耗。
+5. **Smart Calm 极简侧栏、按职级过滤的 Inbox 与免装机 SSH 云主机**——侧栏默认采用紧凑悬停绽放徽章（支持一键切换完整徽章视图），统一 `ADE Inbox` 内置动态职级筛选胶囊，并支持在同一窗口混排本地 `file://` 与免远端 `vscode-server` 的 `aexus-ssh://` 云主机项目。
 
 ---
 
-## 核心生态位与主流竞品全景对比
+## 核心旗舰能力
 
-| 核心能力维度 | **Aexus Code** | Cursor / Windsurf | Vibe Kanban / Paradev / Conductor | Cline / Roo Code | LangGraph Studio / Dify |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **100% MIT 开源 & 零云端厂商绑定** | **支持** | 闭源商业软件 | 部分开源 / 外壳包装 | 开源插件 | 部分开源 |
-| **与 VS Code 全功能对标的原生 IDE（LSP / Diff / 调试 / 终端）** | **完整原生（`ADE ⇄ IDE` 镜像）** | 支持 | 无（外部启动器） | 依赖宿主 IDE | 无 |
-| **8 大本机 BYO-CLI 编码引擎同屏混搭编排** | **支持（8 大原生引擎）** | 仅自有运行时 | 仅终端窗格包装 | 单一插件循环 | 仅 API 节点 |
-| **严格四级对抗式验收（`Employee L3 ≠ Worker L4` 纯净编码）** | **支持（Worker 零污染）** | 单代理 / 子代理 | 依赖人工手审 | 同上下文切模式 | 需全手工编排 |
-| **可视化嵌套双壳 DAG + 自动 MNP 切分 + 有向精准打回门禁** | **支持（Eng + Research）** | 无 | 仅看板列表 | 无 | 通用节点图 |
-| **内置可分享蓝图模板库（Markdown + Mermaid 双向同步）** | **支持（6 套模板 + 模板库）** | 仅规则文本 | 无 | 模式 JSON | 私有 JSON/YAML |
-| **四层美元 FinOps + 缓存省钱核算 + 硬预算自动熔断** | **支持（自动暂停 + Inbox）** | 订阅额度 | 无 | 仅单聊估算 | 商业云附加功能 |
-| **IDE 内置 Git Worktree 并行隔离 + 一键合并/清理工作台** | **支持（按 MGR 泳道隔离）** | 基础后台代理 | 支持（脱离 IDE） | 无 | 无 |
-| **可视化执行甘特图 + 一键导出 GitHub PR 验收审计报告** | **支持（界面 + CLI）** | 无 | 无 | 无 | 仅 Trace 日志 |
-| **免远端装机 SSH 云主机（`aexus-ssh://`）与实时路径弹窗** | **支持（零远端守护进程）** | 需装远端服务 | 仅本机 | 依赖宿主插件 | 无 |
-| **100% 等价本地控制面 CLI + 独立 `doctor` 环境体检** | **支持（`aexus-ade`）** | 无 | 有限接口 | 无 | 服务端 API |
-| **跨平台原生桌面端（`macOS · Windows · Linux`）** | **全平台支持** | 支持 | 偏 macOS / Web | 依赖宿主 IDE | Web / Docker |
+### 1. 组织与职级工作室（"Everything is Extensible"）
+
+不再被绑死在单一固定组织结构里。Engineering 与 Research DAG 通过 4 个**结构化工作树槽位**（`orchestrator`、`segment_owner`、`reviewer`、`executor`）动态映射至当前生效的组织配置——无论是 2 级、3 级、4 级还是完全自定义的职级梯队，DAG 流水线均可无障碍运行：
+
+| 内置组织预设 | 职级梯队（顶层 → 叶子纯净执行器） | 工作树槽位映射（`orch / seg / rev / exec`） |
+| :--- | :--- | :--- |
+| **`default-4tier`** *（默认）* | `Governor (L1)` → `Manager (L2)` → `Employee (L3)` → `Worker (L4 Pure)` | `governor / manager / employee / worker` |
+| **`startup-3tier`** | `Tech Lead (L1)` → `Reviewer (L2)` → `Builder (L3 Pure)` | `tech-lead / tech-lead / reviewer / builder` |
+| **`research-lab`** | `Principal Investigator (L1)` → `Research Lead (L2)` → `Peer Critic (L3)` → `Experimenter (L4 Pure)` | `governor / manager / employee / worker` |
+| **`security-audit`** | `Audit Director (L1)` → `Lead Auditor (L2)` → `Verifier (L3)` → `Scanner (L4 Pure)` | `governor / manager / employee / worker` |
+| **`flat-swarm`** | `Coordinator (L1)` → `Agent (L2 Pure)` | `coordinator / coordinator / coordinator / agent` |
+
+- **填空式自定义职级与 `{{variables}}` 模板**：在具备原生脏状态追踪（`isDirty` / `Cmd/Ctrl+S` 保存与回滚、职级 ID 重命名自动迁移活跃会话）的编辑器中自由定制名称、颜色、图标与提示词变量（`{{rank.name}}`、`{{rank.tier}}`、`{{project.name}}`、`{{supervisor.label}}`、`{{hierarchy.ladder}}` 等）。
+- **职级 × 固定内核 API 权限矩阵**：可视化配置每个职级可调用的内核原语（`session.*`、`project.*`、`host.access`、`inbox.post`、`engineering.read/design/review/control`，以及独立拆分的高危权限 `engineering.integrate` 与 `engineering.destroy`）。
+- **服务端签名能力令牌与纯净 Worker 隔离**：每个编排会话均持有主进程内存签发的 HMAC-SHA256 `AEXUS_ADE_SESSION_TOKEN`；服务端严格从令牌推导调用方职级（杜绝伪造 `secretary` 或清空环境变量越权）。纯净执行职级（`Worker` / `Builder` / `Agent`）不仅剥离控制面元数据与 `PATH` 中的 `aexus-ade`，还会注入显式服务端拒绝令牌。
+- **零预热首轮内联注入 + 提示词哈希缓存失效 + 自动压缩恢复**：彻底告别「锁输入框单独预热」——职级契约在首轮对话内联注入，仅在发送成功后提交状态；工作室修改提示词或权限导致 SHA-256 哈希变化时下一轮自动重注；检测到引擎上下文压缩（`compact_boundary` / `context_compacted`）时自动恢复契约上下文。
+- **防恶意仓库提示词注入**：`aexus.ade.organization` 为 `application` 级受限配置（`restricted: true`），自动忽略克隆仓库中 `.vscode/settings.json` 的工作区覆盖。
 
 ---
 
-## 商业级旗舰特性亮点
+### 2. 确定性 DAG 护栏、装甲嵌套双壳舱与 6 套蓝图模板
 
-### 1. 四层 FinOps 成本护栏、6 套内置蓝图模板、执行甘特图与 Worktree 合并工作台
+右键任意顶层编排者（`Governor` / `Tech Lead` / `Coordinator`）开启 **`Engineering`** 或 **`Research`**，即可启动与 Mermaid + Markdown 双向同步的可视化流水线：
 
-通过画布内置的 **DAG Blueprint Recipes** 模板库一键拉起多路并行流水线（或在 [`examples/blueprints/`](../examples/blueprints/README.md) 中直接导入分享 `.md` 蓝图）；实时洞察四级组织架构的美元支出与 Prompt Cache 节省金额，一键设定 `$2 / $5 / $10 / $25` 或自定义硬预算熔断线，并可在深色与浅色主题下享受同等高质感体验：
+<p align="center">
+  <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="装甲嵌套双壳任务舱、三段式对抗流水线、Worktree 泳道与人工发布门禁（零 Token 模拟演练预览）" />
+  <br/>
+  <sub><em>零 Token 模拟演练预览：</em>外层 <code>EMPLOYEE · L3</code> 验收壳四边包裹内层 <code>WORKER · L4</code> 纯净执行核，整体嵌于自动切分的 <code>MGR · L2</code> 泳道中。</sub>
+</p>
+
+- **SHA-256 哈希锁定的 `verify:` 预审查命令**：Worker 完成编码后、唤醒审查者前，先在独立进程组（POSIX `/bin/sh -c`，超时整组清理不留孤儿进程）执行构建/测试校验。所有 `verify:` 命令均按项目以 SHA-256 哈希锁定，首次引入或被智能体修改时必须经人工显式确认才会运行。
+- **`files:` 作用域串行化与 `max_concurrency` 关键路径调度**：为节点声明文件所有权 glob（如 `files: src/server/**`），`shared` 模式下存在交集的节点自动串行避免写冲突；`max_concurrency` 控制最大并行数并沿关键路径优先调度。
+- **支路隔离红色熔断器 & 零 Token 优先的两阶段 Watchdog**：连续正式失败演进为浅琥珀（`failure_1`）→ 深琥珀（`failure_2`）→ 红色熔断（`failure_3`），**仅暂停故障支路**并唤醒顶层编排者与 `ADE Inbox`，健康兄弟支路继续推进。节点卡顿时 Watchdog 第一阶段在**零 Token 消耗**下本地巡检进程与 Git 活跃度，必要时再进入第二阶段升级处理。
+- **Git 原生累计节点与段级 Diff**：Git 仓库内直接基于 `git status --porcelain=v2 -z` 与 `git diff` 追踪改动（遵循 `.gitignore`，无 12,000 文件截断盲区），在节点审查卡与有向局部打回 `User Gate` 中呈现清晰累计 Diff。
+- **四层 FinOps 与预算护栏**：支持**派发前准入检查 + 回合后超限自动停机暂停**（通过 `pauseTree` 停止活跃引擎并干净复位运行中节点至 `idle`），支持自定义 `aexus.ade.pricing` 费率与 **订阅制 `$0` 模式**。
+
+| 内置蓝图模板（6 套全部齐备） | 模式 | 并行泳道 | 默认隔离 | 内置护栏字段 | 适用场景 |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **[`feature-ship`](../examples/blueprints/feature-ship.md)** | Engineering | `3×` 并行 | `worktree` | `max_concurrency` / `files:` / `verify:` | 契约先行的全栈功能交付：后端/前端/测试并行 + 发布门禁 |
+| **[`bug-hunt-fix`](../examples/blueprints/bug-hunt-fix.md)** | Engineering | `2×` 并行 | `shared` | `max_concurrency` / `files:` / `verify:` | 最小复现驱动的精准排障 + 分作用域修复与回归测试 |
+| **[`security-audit-swarm`](../examples/blueprints/security-audit-swarm.md)** | Engineering | `3×` 并行 | `worktree` | `max_concurrency` / `files:` / `verify:` | 鉴权、IPC 与供应链三轨并行安全审计与补丁收敛 |
+| **[`safe-migration`](../examples/blueprints/safe-migration.md)** | Engineering | `2×` 并行 | `worktree` | `max_concurrency` / `files:` / `verify:` | 行为基线锁定、并行重构、回滚门禁与旧代码清理 |
+| **[`deep-research-lab`](../examples/blueprints/deep-research-lab.md)** | Research | `3×` 并行 | `shared` | `max_concurrency` / `files:` / `verify:` | 多轨假设探索、反证基线、定量基准与同行评审报告 |
+| **[`arch-teardown`](../examples/blueprints/arch-teardown.md)** | Research | `2×` 并行 | `shared` | `max_concurrency` / `files:` / `verify:` | 系统并发与开发体验双轨架构拆解，产出可执行 RFC |
+
+---
+
+### 3. 安全 Git Worktree 沙盒、Smart Calm 侧栏与按职级过滤 Inbox
+
+<p align="center">
+  <img src="assets/11-worktree-merge-workbench.png" width="100%" alt="按泳道隔离的 Git Worktree 沙盒与合并/清理工作台" />
+  <br/>
+  <sub>并行泳道运行于独立 <code>aexus-eng/*</code> Git 分支，内置脏工作树预检、保留用户 Git 身份及画布内一键合并/清理。</sub>
+</p>
+
+- **安全的 Git Worktree 生命周期**：DAG 蓝图与运行态保存在仓库外部的 `~/.aexus-code/engineering/` 与 `~/.aexus-code/research/`。开启 `worktree` 模式时，并行泳道使用独立的 **`aexus-eng/*` Git 分支**，合并前执行脏工作树预检、避免破坏性 `-B` 强行重置或默认 `-D` 删分支、保留用户自身的 `git config user.name/email`（附带 `Co-authored-by` 尾注），且 Worktree 创建失败时会显式暂停并发送 Inbox 告警，绝不静默降级并行写入共享根目录。
+- **Smart Calm 极简侧栏**：会话行默认展示紧凑悬停绽放徽章以降低视觉干扰，顶部提供**一键切换完整徽章视图**按钮，并在最上方常驻具备视口感知能力的 **`✦ Secretary`**。
+- **按职级过滤的 `ADE Inbox`**：统一收信箱自动根据当前组织预设动态渲染职级过滤胶囊（如 `All | Governor | Manager | Employee` 或 `All | Tech Lead | Reviewer`），并与画布门禁实时同步。
+
+---
+
+### 4. 免远端装机 SSH 云主机（`aexus-ssh://`）与 `ADE ⇄ IDE` 镜像对称
 
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/13-prompt-to-dag-bar.png" width="100%" alt="自然语言一键生成 DAG 浮条（Cmd/Ctrl+K）" />
-      <p align="center"><sub><strong>一句话生成 DAG（<code>Cmd/Ctrl+K</code>）— 50ms 拆解多路并行智能体组织图</strong></sub></p>
+      <img src="assets/05-cloud-host-studio.png" width="100%" alt="免远端装机多系统 SSH 云主机中心与 VS Code 历史配置迁移" />
+      <p align="center"><sub><strong>免装机多系统 SSH 云主机中心（Linux / macOS / Windows）</strong></sub></p>
     </td>
     <td width="50%">
-      <img src="assets/08-finops-budget-guardrails.png" width="100%" alt="四层 Agent FinOps 美元统计、缓存省钱与硬预算熔断护栏" />
-      <p align="center"><sub><strong>四层 Agent FinOps、缓存省钱统计与硬预算熔断护栏</strong></sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="assets/09-blueprint-recipes-gallery.png" width="100%" alt="DAG Blueprint Recipes 模板库 — 6 套精选 Engineering 与 Research 蓝图与实时 SVG 拓扑预览" />
-      <p align="center"><sub><strong>6 套内置 DAG 蓝图模板库 · 实时 SVG 拓扑预览与引擎预设</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/12-light-theme-finops.png" width="100%" alt="Aexus Code Light Modern 浅色主题 — 嵌套双壳任务舱与四层 FinOps 成本护栏" />
-      <p align="center"><sub><strong>Dark Modern / Light Modern / High Contrast 三主题同等商业级打磨</strong></sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="assets/10-gantt-execution-timeline.png" width="100%" alt="可视化执行甘特图、三轨角色日志流与一键导出 PR 验收报告" />
-      <p align="center"><sub><strong>可视化执行甘特图、按角色过滤日志与一键复制 PR 验收报告</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/11-worktree-merge-workbench.png" width="100%" alt="Git Worktree 并行沙盒与一键合并/清理工作台" />
-      <p align="center"><sub><strong>按 MGR · L2 泳道自动隔离 Git Worktree · 一键合并与清理</strong></sub></p>
+      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="ADE 与 IDE 镜像对称模式 — 本地与 SSH 混合资源管理器与双端集成终端" />
+      <p align="center"><sub><strong>瞬切 <code>ADE ⇄ IDE</code> 镜像对称与本地/远端混合终端</strong></sub></p>
     </td>
   </tr>
 </table>
 
-| 内置蓝图模板 | 模式 | 并行泳道 | 默认隔离模式 | 适用场景 |
-| :--- | :---: | :---: | :---: | :--- |
-| **[`feature-ship`](../examples/blueprints/feature-ship.md)** | Engineering | `3×` 并行 | `worktree` | 契约先行的全栈功能交付：后端/前端/测试三路独立 Worktree 并行 + 人工发布门禁 |
-| **`bug-hunt-fix`** | Engineering | `2×` 并行 | `shared` | 最小复现驱动的精准排障 + 并行修复与回归测试护栏 |
-| **[`security-audit-swarm`](../examples/blueprints/security-audit-swarm.md)** | Engineering | `3×` 并行 | `worktree` | 多引擎交叉安全审计军团（鉴权/注入/依赖三轨并行）收敛至加固补丁 |
-| **[`safe-migration`](../examples/blueprints/safe-migration.md)** | Engineering | `2×` 并行 | `worktree` | 先固化行为基线测试、再并行重构核心与调用点的零停机架构迁移 |
-| **[`deep-research-lab`](../examples/blueprints/deep-research-lab.md)** | Research | `3×` 并行 | `shared` | 多轨文献综述、基线复现验证与同行评审综合报告 |
-| **`arch-teardown`** | Research | `2×` 并行 | `shared` | 竞品与大型代码库深度架构拆解并沉淀可执行 RFC |
+- **零远端后台**：在同一窗口直接编辑远端文件、查看 `HEAD` Diff 并打开远端 SSH 集成终端，**无需在目标服务器安装或升级 `vscode-server`**。
+- **透明的 SSH 传输说明**：在 **macOS / Linux 上使用 OpenSSH `ControlMaster` 连接复用**，在 **Windows 上使用直连 OpenSSH**（Windows OpenSSH 不支持 Unix Socket 复用）。后台文件与 Git 传输使用 **`BatchMode=yes`**，要求已配置密钥或 `ssh-agent` 免交互鉴权（Aexus Code 从不读取或复制私钥内容）。
+- **无损迁移 VS Code 配置**：通过 `aexus-ade host import-vscode` 递归解析 `~/.ssh/config`（含 `Include`）及 VS Code 远端目录历史。
+- **更多界面截图与高清短视频**：请前往 [`docs/gallery.md`](gallery.md) 查看执行甘特图、浅色主题、节点审查卡、Prompt-to-DAG 浮条及全部 5 段 HD MP4 演示。
 
 ---
 
-### 2. 四级智能体组织架构与多模态协同（`Employee [L3] ≠ Worker [L4]`）
+## 8 大本机原生 Coding Agent 引擎
 
-在 ADE 左栏（`Sessions` 调度中心）顶部常驻具备全视口与全会话树感知能力的 **`✦ Secretary`**，下方按项目清晰展开多层级智能体会话树；中间工作区支持智能体会话流与项目实时源码并排 Diff 同屏审阅，右栏 `Project Inspector` 实时同步工作区 `Changes` 与 `Files`：
+所有引擎均在本机运行（`requiresCopilotSignIn: false`），共用统一的隔离环境构造器（`runtime.ts`）与首轮内联角色同步机制（`extension.ts`）：
 
-<p align="center">
-  <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="ADE 四级会话层级、编排对话与实时并排代码 Diff" />
-</p>
-
-> [!IMPORTANT]
-> **核心架构原则：`Employee（L3）` 绝不等于 `Worker（L4）`**
-> - **`Governor [L1]` / `Manager [L2]` / `Employee [L3]`** 属于正式编排与质量门禁职级：创建时即自动锁定输入框完成短暂的组织架构与 `aexus-ade` 控制面预热阅读，后续对话无需重复拼接说明文档。在 Engineering 模式中，`Employee` 专职单节点代码审查、测试核验与递增式交付汇报撰写，**绝不亲自下场改业务代码**。
-> - **`Worker [L4]`** 位于最底层，是唯一**不注入任何编排提示词、不挂载下属 API、不可继续向下派发子会话**的 **100% 原生纯净编码执行器**，确保每一颗模型 Token 都聚焦于代码实现本身。
-
-| 职级 | 层级 | 核心职责 | 控制面权限 | 上下文纯净度 |
-| :--- | :---: | :--- | :--- | :--- |
-| **`✦ Secretary`** | 全局顶置 | 感知活跃项目/视口/全树状态，代用户完成全局调度 | 全量 ADE 操作权限（严禁切入 IDE） | 视口感知 + 控制面 |
-| **`Governor`** | `L1` | 顶层架构拆解、跨模块 `Manager` 统筹、熔断升级决策 | 创建/管理下级树、写入 `ADE Inbox` | 顶层编排预热 |
-| **`Manager`** | `L2` | 管辖单条无分支任务链，处理 `Employee` 升级与关键二次验收 | 调度段内节点、提交段级正式裁决 | 段级编排预热 |
-| **`Employee`** | `L3` | 派发并审查直属 `Worker` 产出、核对快照 Diff、撰写递增汇报 | 调度直属 `Worker`、提交节点验收结果 | 审查门禁预热 |
-| **`Worker`** | `L4` | 纯粹编码、测试与单点问题攻坚 | **无任何编排 API（叶子节点）** | **100% 原生纯净** |
-
----
-
-### 3. 嵌套双壳任务舱、双层对抗验收与精准局部打回门禁
-
-对任意顶层 `Governor` 右键开启 **`Engineering`**，或执行 **`Open ADE Research...`**，即可将口头对话升级为**拓扑锁定的可视化工程/研究流水线**（蓝图与运行态完全独立保存在 `~/.aexus-code/engineering/<governor-id>/` 与 `~/.aexus-code/research/<governor-id>/`，零污染业务 Git 仓库）：
-
-<p align="center">
-  <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Aexus Code — 活态嵌套双壳任务舱、三段式对抗流水线、实时动态播报、Git Worktree 泳道与人工发布门禁" />
-</p>
-
-<table>
-  <tr>
-    <td width="50%">
-      <img src="assets/03-engineering-node-inspector.png" width="100%" alt="右键任务节点：递增验收汇报、关联文件 Diff 与角色 Token 明细" />
-      <p align="center"><sub><strong>节点验收汇报与改动文件级 Diff + 分角色 Token 消耗明细</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/03b-engineering-role-engines.png" width="100%" alt="右键任务节点：8 大原生 Coding Agent 引擎与思考强度自由混搭" />
-      <p align="center"><sub><strong>单角色自由混搭 8 大原生引擎、模型与五档思考强度</strong></sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="assets/04-engineering-user-gate.png" width="100%" alt="User Gate 琥珀门禁卡片：聚合上游汇报与有向精准局部打回" />
-      <p align="center"><sub><strong>User Gate 门禁审批：聚合上游递增汇报与精准局部打回</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/04b-engineering-inbox-and-gate.png" width="100%" alt="ADE Inbox 收信箱与动态协作 DAG 同屏联动" />
-      <p align="center"><sub><strong>ADE Inbox 收信箱实时门禁提醒与动态 DAG 同屏联动</strong></sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="assets/01-ade-engineering-dag.png" width="100%" alt="Aexus Code — ADE 四级会话树与 Engineering 动态协作 DAG 画布" />
-      <p align="center"><sub><strong>四级会话树与自动切分 MNP 泳道实时联动</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/04c-engineering-blueprint-drawer.png" width="100%" alt="ADE Engineering 混合 Mermaid + Markdown 蓝图抽屉与实时执行日志" />
-      <p align="center"><sub><strong>混合 Mermaid + Markdown 蓝图抽屉与实时执行日志</strong></sub></p>
-    </td>
-  </tr>
-</table>
-
-- **极大无分支路径（Maximal Non-Branching Path）自动切分**：只需套用模板、拖拽节点或编辑 Markdown + Mermaid，系统 100% 自动在分叉前、合流后与 `user_gate` 边界切分 `MGR · L2` 管辖段框（Worktree 模式下段顶实时呈现隔离分支徽章），并同步生成锁定的左栏四级会话树。
-- **装甲嵌套双壳「活态」任务舱（`268×172`）**：外层 **`EMPLOYEE · L3`** 验收壳顶脊配备实时 **三段式对抗流水线指示条（`L4 编码 ▸ L3 审计 ▸ L2 签收`）**，四边物理包裹内层凹陷的 **`WORKER · L4`** 执行核——内置 **单行实时动态播报条（Activity Ticker）**、**代码变更规模徽章（`+N -M`）**、节点级 `$USD` 消耗、**Figma 式悬停快捷操作微浮条（`💬 🛡 ⚙ +`）** 与 **双击标题就地重命名**。
-- **画布聚光灯过滤、小地图、吸附对齐与完整撤销/重做**：底部 HUD 支持一键按状态聚光聚焦（`All | Active | Gates | Issues`），悬浮 **DAG MAP** 支持点击/拖拽飞镜，悬停输出端口 `+` 键 1 键派生下游任务（`Alt+单击` 派生 `User Gate`），全部操作支持 `Cmd/Ctrl+Z` 撤销重做。
-- **双层验收闭环与三级失败熔断（Circuit Breaker）**：
-  - `Employee` 内部打回 1–2 次在原会话增量返工；第 3 次自动唤醒段 `Manager` 评估并授予第 4 次指导机会；
-  - 段尾节点或 `★Critical` 关键节点通过 `Employee` 初审后，自动触发 `Manager` 二次正式验收；
-  - `Manager` 正式判定失败呈现三级色阶演进：**浅琥珀（`failure_1`）➔ 深琥珀（`failure_2`）➔ 深红熔断（`failure_3`）**，暂停支路、唤醒 `Governor` 并投递 **`ADE Inbox`** 决策告警。
-- **独立 `User Gate` 验收盾牌与精准局部打回**：等待验收时门禁卡片内联呈现 **`✓ Approve`** 与 **`Rollback…`**，可按有向路径交集精准打回指定上游节点（绝不误伤无关并行支路）。
-
-```mermaid
-flowchart LR
-    W["Worker (L4)\n100% 纯净编码执行"] -->|"快照提取文件 Diff"| E["Employee (L3)\n单节点审查 & 递增汇报"]
-    E -->|"内部返工 (1~2 次)"| W
-    E -->|"第 3 次未过 · 升级请求指导"| M["Manager (L2)\n极大无分支路径段长"]
-    E -->|"初审通过 (段尾 / ★Critical)"| M
-    M -->|"段级通过"| G{{"User Gate / 下游节点"}}
-    M -->|"正式失败 1 → 2 → 3 次"| CB["三级熔断 (Amber → Crimson)\n唤醒 Governor + 投递 Inbox"]
-```
-
----
-
-### 4. 免远端装机的原生 SSH 云主机与实时路径弹窗（`aexus-ssh://`）
-
-无需在云端服务器预装或升级专有远端后台，直接复用本机 OpenSSH 多路复用通道、跳板机（`ProxyJump`）与密钥体系，让多台 Linux / macOS / Windows 云主机项目与本地项目在同一窗口内丝滑并存：
-
-<p align="center">
-  <img src="assets/05-cloud-host-studio.png" width="100%" alt="Cloud Host Studio — 多系统 SSH 云主机可视化管理、连通性测速与 VS Code 历史目录迁移" />
-</p>
-
-<p align="center">
-  <img src="assets/06-cloud-live-path-and-terminals.png" width="100%" alt="统一 + 号两步选主机、实时路径输入联动父子文件夹弹窗与混合 SSH 集成终端" />
-</p>
-
-- **一键无损搬移原版 VS Code 云主机**：自动递归解析 `~/.ssh/config` 及全部 `Include` 子配置，并从 VS Code 的 `settings.json`、`state.vscdb`、`storage.json` 与 `Project Manager` 完整迁移云主机、平台类型与历史远端文件夹（严禁读取或复制私钥内容）。
-- **统一 `+` 两步式体验（选主机 ➔ 实时路径联动弹窗）**：自动弹出当前远端路径下全部子文件夹，支持 `Backspace` 跨 `/` 0ms 退回上级目录（Windows 主机退至 `/` 可直接选择 `C:/`、`D:/` 等全部盘符）。
-- **原生远端编辑、Git Diff 与专属 SSH 集成终端**：Monaco 编辑器 `Cmd/Ctrl+S` 直接写回远端磁盘，云主机项目终端与本地 Shell 标签页并排运行。
-
----
-
-### 5. IDE 镜像对称模式：全功能 VS Code 对标、顶栏纯净插件栏与项目 `Focus`
-
-点击顶栏模式开关切回 **`IDE`**，立即获得清爽、纯粹的高性能代码编辑环境：
-
-<p align="center">
-  <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE 镜像对称模式 — 本地与 SSH 云主机混合多根文件树、分屏代码编辑与双端集成终端" />
-</p>
-
-- **本地 + 云主机混合多根 Explorer & 拖拽自由排序**：同一文件树内直接展开编辑本地 `file://` 与远端 `aexus-ssh://` 项目，自由调整同级文件、文件夹与项目根目录顺序（不移动磁盘文件）。
-- **项目级 `Focus ➔ Home ⇄ Forward` 沉浸聚焦**：IDE 与 ADE 实时共享项目聚焦与前进/返回状态。
-- **纯净单图标顶栏与精准项目绑定**：右上角仅展示已安装的用户级插件与 8 大 Coding Agent（严格不重复），右侧栏标题区清晰展示并切换绑定的目标项目。
-
----
-
-## 8 大原生 Coding Agent 引擎矩阵
-
-所有引擎均声明 `requiresCopilotSignIn: false`，通过本地 CLI / RPC 协议直连，并由 `extensions/aexus-agents` 统一提供会话发现、历史挂载、流式对话、中断、物理删除、实时 Token/USD 遥测及动态职级提示词同步：
-
-| 引擎名称 | 会话标识 | 默认 CLI 命令 | 职级与控制面注入机制 |
+| 引擎名称 | 会话标识 | 默认 CLI | 协议与默认安全模式 |
 | :--- | :--- | :--- | :--- |
-| **Claude Code** | `aexus-claude` | `claude` | 双向 `stream-json` 协议 + 动态职级上下文 + 实时流式 Token 捕获 |
-| **Codex** | `aexus-codex` | `codex` | `app-server` JSON-RPC `thread/inject_items` 实时注入 |
-| **Google Antigravity** | `aexus-antigravity` | `agy` | 本地 `--hub` ConnectRPC 代理拦截 `StartCascade` / `SendUserCascadeMessage` |
-| **Kilo Code** | `aexus-kilo` | `kilo` | ACP 协议适配 + 请求体职级同步 |
-| **OpenCode** | `aexus-opencode` | `opencode` | 原生侧栏与 ACP 双通道协同 |
-| **DeepSeek Harness** | `aexus-dsh` | `dsh` | `dshRolePreload` 扩展宿主零延迟角色同步 |
-| **Cline** | `aexus-cline` | `cline` | `--acp` 协议直连与权限流协同 |
-| **Pi** | `aexus-pi` | `pi` | `--mode rpc` 结构化交互与思考进度流 |
+| **Claude Code** | `aexus-claude` | `claude` | 双向 `stream-json` · 默认 `acceptEdits` · 实时 Token 捕获与压缩重置 |
+| **Codex** | `aexus-codex` | `codex` | `app-server` JSON-RPC（`thread/inject_items`）· 默认 `workspace-write` + `on-request` |
+| **Google Antigravity** | `aexus-antigravity` | `agy` | 本机 `--hub` ConnectRPC 桥接 · 默认 `ask` |
+| **Kilo Code** | `aexus-kilo` | `kilo` | ACP 运行时桥接 · 默认 `ask` |
+| **OpenCode** | `aexus-opencode` | `opencode` | 原生面板 + ACP 生命周期 · 默认 `ask` |
+| **DeepSeek Harness** | `aexus-dsh` | `dsh` | 原生适配器 + 可关闭角色桥接 · 默认 `ask` |
+| **Cline** | `aexus-cline` | `cline` | `--acp` 流式协议 · 默认 `ask` |
+| **Pi** | `aexus-pi` | `pi` | `--mode rpc` 结构化事件流与思考进度 · 默认安全模式 |
+
+> [!NOTE]
+> 针对第三方扩展的角色同步桥接（`nativeRoleBridge`）已在 [`SECURITY.md`](../SECURITY.md) 中完整披露，可随时通过设置 `aexus.ade.nativeExtensionRoleBridge.enabled: false` 或环境变量 `AEXUS_ADE_DISABLE_NATIVE_ROLE_BRIDGE=1` 关闭。
 
 ---
 
-## `aexus-ade` 全量控制面 CLI 与 `doctor` 体检工具
+## `aexus-ade` 本地控制面 CLI
 
-Aexus Code 启动后自动监听本地鉴权 Socket（macOS/Linux: `~/.aexus-code/ade-control.sock`，权限 `0600`）或本机鉴权 Windows Named Pipe（`\\.\pipe\aexus-ade-control-*`），并将 `aexus-ade` 自动注入集成终端与编排智能体 `PATH`：
+Aexus Code 仅监听按实例隔离的本地 `0600` Unix Socket（macOS/Linux：`~/.aexus-code/ade-control.<pid>.sock`）或本机 Windows Named Pipe（`\\.\pipe\aexus-ade-control-*`），由**单实例 32 字节令牌**（人类 CLI）与**服务端签名会话级 HMAC 能力令牌**（`AEXUS_ADE_SESSION_TOKEN`，编排智能体专用）双重鉴权：
 
 ```bash
-# 0. 一键体检 8 大引擎、开启 Shell 自动补全或拉起零 Token 互动演示
+# 0. 一键体检 8 大引擎、Git Worktree 与 OpenSSH（失败退出码 1，--strict 警告退出码 2）
 aexus-ade --version
 aexus-ade doctor --project .
-eval "$(aexus-ade completion zsh)"   # 同样支持 bash | fish
+eval "$(aexus-ade completion zsh)"   # 同时支持 bash | fish
+
+# 1. 查看/切换组织预设或打开「组织与职级工作室」
+aexus-ade role list
+aexus-ade role presets
+aexus-ade role preset startup-3tier
+aexus-ade role studio
+
+# 2. 启动 0 Token 模拟演示，或发起真实 Worktree 并行 DAG + $5 预算上限
 aexus-ade engineering demo
-
-# 1. 模式切换、工作区状态与云主机迁移
-aexus-ade status --json
-aexus-ade mode set ade
-aexus-ade host import-vscode
-aexus-ade project add gpu-h100-cluster:/workspace/tensor-serving
-
-# 2. 创建 Governor、套用内置蓝图模板并设置 $5 硬预算上限
-GOV_ID=$(aexus-ade session create --project nexus-kv-engine --engine claude --role governor --title "Storage Lead" --no-open --json | jq -r .id)
+GOV_ID=$(aexus-ade session create --project my-app --engine claude --role governor --title "Release Lead" --no-open --json | jq -r .id)
 aexus-ade engineering init --governor "$GOV_ID" --open
-aexus-ade engineering template list
 aexus-ade engineering template apply --governor "$GOV_ID" --template feature-ship --preset balanced --isolation worktree --max-budget-usd 5
 aexus-ade engineering run --governor "$GOV_ID"
 
-# 3. 审批 User Gate、合并隔离 Worktree 分支并导出 GitHub PR 验收审计报告
+# 3. 审批人工门禁、合并隔离 Worktree 分支并导出 GitHub PR 验收报告
 aexus-ade inbox list --unread-only
 aexus-ade engineering gate --governor "$GOV_ID" --node U1 --verdict pass
 aexus-ade engineering worktrees merge --governor "$GOV_ID"
@@ -315,81 +189,110 @@ aexus-ade engineering report --governor "$GOV_ID" --out ./pr-verification-report
 
 | 命令组 | 核心子命令 |
 | :--- | :--- |
-| `doctor` / `completion` | `doctor [--project <path>] [--json]` · `completion <bash\|zsh\|fish>` · `--version` *（均支持无需启动界面独立运行）* |
+| `doctor` / `completion` | `doctor [--project <path>] [--strict] [--json]` · `completion <bash\|zsh\|fish>` · `--version` *（无需启动窗口即可独立运行）* |
+| `role` *（别名 `roles`、`org`）* | `list` / `schema` · `apis` / `primitives` · `presets` · `preset <id>` · `reset` · `studio [rankId]` |
 | `status` / `mode` / `view` | `status` · `mode [get \| set <ade\|ide>]` · `view [--archived] [--inspector <changes\|files\|hide>] [--refresh]` |
 | `project` | `list` · `add <path\|host:/path>` · `select` · `remove` · `delete` · `focus` · `home` · `forward` · `move` · `changes` · `files` · `open-file` · `open-diff` |
-| `host` | `list` · `info` · `add` · `update` · `remove` · `test` · `browse` · `import-vscode` · `open` |
+| `host` *（别名 `cloud-host`）* | `list` · `info` · `add` · `update` · `remove` · `test` · `browse` · `import-vscode` · `open` |
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
 | `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
-| `engineering` | `list` · `init` · `open` · `demo [--governor <id>]` · `generate --prompt "<goal>"` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
+| `engineering` | `list` · `init` · `open` · `demo` · `generate --prompt "<goal>"` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
 
 ---
 
-## 从源码构建与运行
+## 生态定位与架构取舍对比
 
-### 环境要求
+不同工具针对不同工作流做了取舍，以下聚焦于公开可验证的架构设计差异：
 
-- **操作系统**：**全平台跨系统支持** —— **macOS（`arm64` / `x64`）**、**Windows 10/11（`x64` / `arm64`）** 与 **Linux（`x64` / `arm64`）**
-- **工具链**：
-  - **macOS / Linux**：仓库内置 `./scripts/aexus-env.sh` 自动固定兼容的 Node.js（`24.22.1`，与 `.nvmrc` 保持一致）与 `pnpm@12.16.0` 环境，配合 Xcode Command Line Tools / `build-essential`、Python 3、Rust `1.88` 与系统 OpenSSH。
-  - **Windows**：仓库内置 `.\scripts\aexus-env.ps1`（及 `.\scripts\aexus-env.cmd`）固定 Node.js（`24.22.1`）与 `pnpm@12.16.0`，配合 Visual Studio 2022 C++ Build Tools（含 Spectre 库与 Windows 11 SDK）、Python 3（`setuptools`）、Rust `1.88`、Git（`core.longpaths=true`）与系统 OpenSSH。
+| 架构维度 | **Aexus Code** | 闭源商业 AI IDE *（如 Cursor、Windsurf）* | 外部 Worktree / 看板启动器 *（如 Vibe Kanban、Conductor）* | IDE 内部智能体插件 *（如 Cline、Roo Code）* | 独立图编排工作室 *（如 LangGraph Studio、Dify）* |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **开源协议与扩展源** | MIT · [Open VSX](https://open-vsx.org/) | 闭源商业 | 混合开源 / 商业 | 开源插件 | 混合开源 / 托管服务 |
+| **原生桌面 IDE 内核** | 完整 `Code - OSS`（`ADE ⇄ IDE`） | 闭源 VS Code 分叉 | 编辑器/终端外部启动壳 | 依赖宿主 IDE | 独立 Web / 服务端界面 |
+| **多引擎 BYO-CLI 编排** | 8 大本机原生 CLI 同屏混搭 | 以自有运行时为主 | 外部 CLI 窗格启动 | 单一插件运行时（多模型 API） | API / SDK 图节点 |
+| **可扩展组织架构与内核权限** | 自定义职级 + 服务端签名能力令牌 | 固定代理 / 子代理模式 | 人工任务分配 | 自定义模式提示词 | 代码编写图角色 |
+| **可视化 DAG + `verify:` + Worktree** | 内置双壳 DAG、`files:`、`verify:` 与 Worktree | 后台代理（无可视化 DAG） | 看板 + Worktree（脱离原生 LSP/Diff） | 顺序 / 模式循环 | 通用图（脱离 Git Worktree） |
+| **免装机多根 SSH（`aexus-ssh://`）** | 原生 OpenSSH（零远端守护进程） | 需远端服务插件 | 偏本机 | 依赖宿主 IDE | 服务端托管 |
 
-### 开发运行与独立应用打包（macOS / Linux）
+---
+
+## 下载发行版或从源码构建
+
+### 方式一：直接下载预编译发行版 *（最快体验）*
+
+前往 **[GitHub Releases](https://github.com/Daijunfan/Aexus-Code/releases)** 下载由 [`.github/workflows/release.yml`](../.github/workflows/release.yml) 在版本标签上自动构建的产物与 `SHA256SUMS.txt`：
+- **macOS（`arm64` Apple Silicon / `x64` Intel）**：`.dmg` 与 `.zip` *（说明：未配置 Apple Developer ID 密钥的构建采用 ad-hoc 签名，首次启动请执行 `xattr -dr com.apple.quarantine "/Applications/Aexus Code.app"` 或通过访达右键 → 打开。）*
+- **Linux（`x64`）**：`.tar.gz`
+- **Windows（`x64`）**：`.zip`
+
+> **扩展市场说明**：Aexus Code 默认接入开源 **[Open VSX Registry](https://open-vsx.org/)**（`open-vsx.org/vscode/gallery`，遵循与 VSCodium 一致的开源合规策略），同时支持本地 `.vsix` 安装；微软限制仅限官方闭源构建运行的专有扩展不包含在内。
+
+### 方式二：从源码构建
+
+#### 前置要求
+- **Node.js `24.22.1`**（与 [`.nvmrc`](../.nvmrc) 保持一致）及 **`pnpm@12.16.0`**（可通过 `nvm`/`fnm`/`mise` + `corepack enable && corepack prepare pnpm@12.16.0 --activate` 准备）。
+  - `./scripts/aexus-env.sh`（macOS/Linux）与 `.\scripts\aexus-env.ps1`（Windows）会自动检测可选的 `.build/toolchain` 目录、对照 `.nvmrc` 校验当前 Node 版本并清理代理/Electron 环境变量——但**不会**自动为你下载 Node。
+- **本机编译工具链**：Xcode Command Line Tools（macOS）、`build-essential` 与 X11/libsecret 头文件（Linux）或 Visual Studio 2022 C++ Build Tools + Windows 11 SDK（Windows），以及 Python 3、Git、OpenSSH。
+
+#### 快速开始（macOS / Linux）
 
 ```bash
-# 1. 安装依赖并体检本机多引擎环境
+# 1. 安装依赖并快速转译核心与 extensions/aexus-agents
 ./scripts/aexus-env.sh pnpm install
+./scripts/aexus-env.sh pnpm run build-fast
+
+# 2. 体检本机 8 大编码 CLI、Git Worktree 与 OpenSSH
+#    （提示：在 build-fast 之前也可直接运行：node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts doctor）
 ./extensions/aexus-agents/bin/aexus-ade doctor
 
-# 2. 快速转译构建并启动开发版（macOS 与 Linux 通用）
-./scripts/aexus-env.sh pnpm run build-fast
+# 3. 从源码启动开发版
 ./scripts/aexus-env.sh ./scripts/code.sh
 
-# 3a. 构建 macOS arm64 独立应用包并覆盖安装至 /Applications/Aexus Code.app
-./scripts/aexus-env.sh pnpm run gulp vscode-darwin-arm64
-./scripts/aexus-install.sh
+# 4a. macOS 打包并安装至 /Applications/Aexus Code.app（自动识别 arm64/x64，可用 AEXUS_ARCH=x64 覆盖）
+ARCH=$(uname -m | sed 's/x86_64/x64/')
+./scripts/aexus-env.sh pnpm run gulp "vscode-darwin-${ARCH}"
+./scripts/aexus-install.sh   # 本地签名与钥匙串助手均为可选，缺失时自动降级 ad-hoc 签名
 
-# 3b. 构建 Linux 独立应用包（输出至 ../VSCode-linux-x64 或 ../VSCode-linux-arm64）
+# 4b. Linux 打包（输出至 ../VSCode-linux-x64）
 ./scripts/aexus-env.sh pnpm run gulp vscode-linux-x64
 ```
 
-### 开发运行与独立应用打包（Windows PowerShell）
+#### 快速开始（Windows PowerShell）
 
 ```powershell
-# 1. 安装依赖并编译原生 Win32 C++ 扩展模块
+# 1. 安装依赖并快速转译
 .\scripts\aexus-env.ps1 pnpm install
+.\scripts\aexus-env.ps1 pnpm run build-fast
+
+# 2. 体检本机编码 CLI、Git 与 OpenSSH
 .\extensions\aexus-agents\bin\aexus-ade.ps1 doctor
 
-# 2. 快速转译构建并启动开发版
-.\scripts\aexus-env.ps1 pnpm run build-fast
+# 3. 从源码启动开发版
 .\scripts\aexus-env.ps1 .\scripts\code.bat
 
-# 3. 构建 Windows x64 独立应用包并安装至 %LOCALAPPDATA%\Programs\Aexus Code
+# 4. 打包并安装至 %LOCALAPPDATA%\Programs\Aexus Code
 .\scripts\aexus-env.ps1 pnpm run gulp vscode-win32-x64
 .\scripts\aexus-install.ps1
 ```
 
-`.\scripts\aexus-install.ps1` 支持跨盘符原子暂存同步并后台无弹窗安装至 `%LOCALAPPDATA%\Programs\Aexus Code`，同时自动校验内置全套命令行启动器：`bin\aexus-ade.cmd`、`bin\aexus-ade.ps1`、`bin\aexus-ade`（Git Bash / WSL）与 `bin\aexus-code.cmd`。
+---
 
-**与官方 VS Code 全功能对标**：在 Windows、macOS 与 Linux 三大平台上，Aexus Code 完整保留上游 VS Code 的全部核心能力——Monaco 编辑器内核、IntelliSense / LSP、多根资源管理器、ripgrep 全局搜索、Git 源码管理与并排 Diff、断点调试器、Tasks 任务系统、原生集成终端（Windows ConPTY / macOS & Linux PTY）、Extension Host 与完整扩展 API；用户配置保存在 `~/Library/Application Support/Aexus Code`（macOS）、`%APPDATA%\Aexus Code`（Windows）或 `~/.config/Aexus Code`（Linux），已安装扩展目录为 `~/.aexus-code/extensions`，与原版 VS Code 完全隔离且互不覆盖，仅排除微软限制仅允许在官方闭源构建中运行的专有插件。
+## 坦诚的局限性与非目标（Honest Limitations & Non-Goals）
+
+我们希望在第一屏就把真实边界说清楚：
+
+- **从源码构建体量较大**：作为完整的 `Code - OSS` Electron 桌面端，源码依赖与构建产物约占用 8–12 GB 磁盘空间，首次安装需要数分钟。只想快速试用请优先下载 GitHub Releases 预编译包。
+- **macOS 发行版签名**：在尚未接入 Apple Developer ID 签名与公证前，macOS 构建包使用 ad-hoc 签名，首次打开需手动放行 Gatekeeper 隔离属性。
+- **Prompt-to-DAG 是确定性脚手架，不是黑盒魔法**：`Cmd/Ctrl+K` 通过关键词规则在 `<50ms` 内零 Token 搭好并行泳道与门禁框架，更深度的任务拆解仍建议可视化调整或交由 `Governor` LLM 细化。
+- **SSH 要求密钥鉴权且 Windows 无多路复用**：`aexus-ssh://` 后台文件与 Git 传输使用 `BatchMode=yes`（不支持交互输入密码或非缓存 2FA），且 Windows 客户端无法使用 Unix Socket `ControlMaster`，远端文件操作延迟高于 macOS/Linux。
+- **FinOps 费用在引擎未上报时为估算值**：CLI 未返回 `total_cost_usd` 时，系统依据 Token 数与 `aexus.ade.pricing` 费率表估算并标注 `estimated`（包月订阅用户可开启 `aexus.ade.pricing.subscriptionMode` 切换为 `$0` 边际模式）。预算护栏在派发新回合前准入拦截，并在回合结束超限时立即停机暂停，因此已在运行中的单回合仍可能轻微超出阈值。
+- **非目标**：不提供托管云端 SaaS IDE、不中转或加价转售模型 API Token，也不捆绑微软闭源 Copilot 或 Visual Studio Marketplace。
 
 ---
 
-## 源码架构导览
+## 社区、安全与开源许可
 
-- [`src/vs/platform/ade/`](../src/vs/platform/ade/)：跨进程核心协议与 Node 服务（`adeControlServer` 本地鉴权控制面、`adeEngineeringService` 与蓝图解析器、`adePricing` 四层 FinOps 计费引擎、`adeBlueprintTemplates` 蓝图模板库、`adeRunReport` PR 验收报告生成器、`adeCloudHostService` 多路复用 SSH 传输层与 `vscodeConfigMigration`）。
-- [`src/vs/workbench/contrib/ade/`](../src/vs/workbench/contrib/ade/)：ADE 工作台核心视图与编辑器（`adeProjectsView` 四级会话树与 `Inbox`、`adeEngineeringEditorPane` 嵌套双壳 DAG 画布与 FinOps / 模板库 / 执行甘特图 / Worktree 合并台 / 聚光灯 HUD、`adeCloudHostsEditorPane`、`adeCloudHostFileSystemProvider` 与 `adeInspectorViews`）。
-- [`src/vs/workbench/contrib/terminal/`](../src/vs/workbench/contrib/terminal/)：按项目自动路由本地 Shell 与远端 SSH PTY 的 `ProjectTerminalService`。
-- [`extensions/aexus-agents/`](../extensions/aexus-agents/)：8 大原生 Coding Agent 运行时适配器、动态角色桥接与 `bin/aexus-ade` CLI（含独立 `doctor` 体检工具）。
-- [`examples/blueprints/`](../examples/blueprints/)：开箱即用、经由解析器往返校验的 Engineering 与 Research 蓝图示例。
-
----
-
-## 社区贡献、安全隐私与开源许可
-
-- **社区贡献与更新日志**：请参阅 [`CONTRIBUTING.md`](../CONTRIBUTING.md)（含核心架构不变量与开发测试流程）与 [`CHANGELOG.md`](../CHANGELOG.md)。
-- **本地优先与安全策略**：请参阅 [`SECURITY.md`](../SECURITY.md)。控制面仅监听本地 `0600` Unix Socket（macOS/Linux）或本机鉴权 Windows Named Pipe（`\\.\pipe\aexus-ade-control-*`）；SSH 云主机迁移仅解析别名与公开连接参数，绝不读取、拷贝或存储任何私钥文件内容与口令；本构建已剔除上游内置 Copilot 扩展、CLI shim、订阅/令牌端点与微软专有 Agent 后台。
-- **本地 ad-hoc macOS 签名**：构建产物使用本机 ad-hoc 开发签名，适用于开发与自行安装；面向第三方分发 macOS 应用前，仍需另行完成 Apple Developer ID 签名与公证。
-- **开源许可**：本项目基于 Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) 衍生开发，遵循 **[MIT License](../LICENSE.txt)** 开源许可，完整保留上游版权与许可声明。有关品牌图标与公开扩展市场访问的合规说明，详见 [AEXUS.md](../AEXUS.md)。
+- **架构与贡献**：请参阅英文架构文档 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)、[`CONTRIBUTING.md`](../CONTRIBUTING.md) 与 [`CHANGELOG.md`](../CHANGELOG.md)。
+- **安全模型与威胁边界**：请参阅 [`SECURITY.md`](../SECURITY.md)，完整了解默认安全模式、服务端能力令牌、防仓库提示词注入、SHA-256 `verify:` 锁定、SSH 边界及第三方扩展角色桥接的关闭方式。
+- **开源许可与合规声明**：基于 Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) 衍生开发并遵循 **[MIT License](../LICENSE.txt)**，完整保留上游版权声明。Aexus Code 使用原创几何标识（`docs/assets/aexus-logo.svg`）并接入开源 [Open VSX Registry](https://open-vsx.org/)。

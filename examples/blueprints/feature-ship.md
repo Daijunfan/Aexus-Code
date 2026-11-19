@@ -19,6 +19,7 @@ flowchart LR
 - tree_type: engineering
 - governor_session_id: <governor-session-id>
 - workspace_isolation: worktree
+- max_concurrency: 3
 - watchdog_timeout_minutes: 10
 - max_budget_usd: 8
 
@@ -49,6 +50,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
+- files: src/contracts/**, src/types/**, docs/contracts/**
+- verify: npm run typecheck
 - goal: |
     Define shared TypeScript/API schemas, interface contracts, and file-ownership boundaries so parallel tracks execute with zero merge conflicts.
 - acceptance: |
@@ -60,6 +63,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=high
+- files: src/server/**, src/services/**
+- verify: npm run typecheck && npm test -- --grep backend
 - goal: |
     Implement business logic, persistence, and error handling strictly adhering to the N1 contract.
 - acceptance: |
@@ -71,6 +76,8 @@ flowchart LR
 - critical: false
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=medium
+- files: src/ui/**, src/components/**, src/styles/**
+- verify: npm run typecheck && npm run lint
 - goal: |
     Build responsive dark/light/high-contrast UI components wired to the N1 interface contract with keyboard accessibility.
 - acceptance: |
@@ -82,6 +89,8 @@ flowchart LR
 - critical: false
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=medium
+- files: test/**, tests/**
+- verify: npm test
 - goal: |
     Author comprehensive unit and integration tests covering happy paths, concurrency, and failure recovery.
 - acceptance: |
@@ -98,6 +107,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=high
+- files: src/**, test/**, docs/**
+- verify: npm run typecheck && npm run lint && npm test
 - goal: |
     Verify cross-track integration after merge, run full typecheck, lint, and smoke tests, and summarize release readiness.
 - acceptance: |
