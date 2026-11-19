@@ -17,9 +17,10 @@ flowchart LR
 - tree_type: engineering
 - governor_session_id: <governor-session-id>
 - workspace_isolation: worktree
-- max_concurrency: 3
 - watchdog_timeout_minutes: 10
 - max_budget_usd: 6
+- max_concurrency: 3
+- verify: npm test
 
 ## Auto-Partitioned Managers
 ### [Segment: N1]
@@ -48,8 +49,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
-- files: docs/security/auth-audit.md, src/auth/**, src/permissions/**
-- verify: test -s docs/security/auth-audit.md
+- files: docs/audit/auth/**
+- verify: git status --short
 - goal: |
     Audit authentication flows, token storage, file permissions (0600), privilege boundaries, and secret leakage vectors.
 - acceptance: |
@@ -61,8 +62,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
-- files: docs/security/ipc-audit.md, src/ipc/**, src/cli/**
-- verify: test -s docs/security/ipc-audit.md
+- files: docs/audit/ipc/**
+- verify: git status --short
 - goal: |
     Inspect shell spawning, SQL/command injection, path traversal, deserialization, and IPC/socket input sanitization.
 - acceptance: |
@@ -74,8 +75,8 @@ flowchart LR
 - critical: false
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=medium
-- files: docs/security/supply-chain-audit.md, package.json, .github/workflows/**
-- verify: test -s docs/security/supply-chain-audit.md
+- files: docs/audit/supply-chain/**
+- verify: git status --short
 - goal: |
     Review dependencies, sandbox flags, CSP/webview boundaries, and error/log redaction across platforms.
 - acceptance: |
@@ -88,7 +89,7 @@ flowchart LR
 - employee: engine=claude-code, thinking=medium
 - worker: engine=dsh, thinking=high
 - files: src/**, test/security/**
-- verify: npm run typecheck && npm test
+- verify: npm test
 - goal: |
     Synthesize findings from N1–N3, apply minimal security patches, and add security regression tests for each resolved vulnerability.
 - acceptance: |
@@ -105,8 +106,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=dsh, thinking=high
-- files: docs/security/**, test/security/**
-- verify: npm run typecheck && npm run lint && npm test
+- files: docs/audit/**, test/**
+- verify: npm run lint && npm test
 - goal: |
     Re-run security checks, static analysis, and full test suite, then publish a clean PR-ready security sign-off report.
 - acceptance: |

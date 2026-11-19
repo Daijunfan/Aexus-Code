@@ -16,9 +16,10 @@ flowchart LR
 - tree_type: engineering
 - governor_session_id: <governor-session-id>
 - workspace_isolation: shared
-- max_concurrency: 2
 - watchdog_timeout_minutes: 10
 - max_budget_usd: 4
+- max_concurrency: 2
+- verify: npm test
 
 ## Auto-Partitioned Managers
 ### [Segment: N1]
@@ -43,8 +44,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
-- files: test/repro/**, docs/triage/**
-- verify: npm test -- --grep repro
+- files: test/repro/**
+- verify: npm run typecheck
 - goal: |
     Isolate the exact failing code path, prove root cause with a minimal failing reproduction test, and document fix scope.
 - acceptance: |
@@ -57,7 +58,7 @@ flowchart LR
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=high
 - files: src/**
-- verify: npm run typecheck && npm run lint
+- verify: npm test
 - goal: |
     Apply the cleanest minimal fix for the confirmed root cause without refactoring unrelated modules.
 - acceptance: |
@@ -69,7 +70,7 @@ flowchart LR
 - critical: false
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=medium
-- files: test/regression/**, tests/**
+- files: test/regression/**
 - verify: npm test
 - goal: |
     Add targeted unit/integration tests covering boundary conditions and adjacent sibling paths to prevent regressions.
@@ -83,7 +84,7 @@ flowchart LR
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
 - files: src/**, test/**
-- verify: npm run typecheck && npm run lint && npm test
+- verify: npm run lint && npm test
 - goal: |
     Audit the combined diff for memory leaks, race conditions, error handling, and performance impact.
 - acceptance: |

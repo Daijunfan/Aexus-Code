@@ -99,7 +99,10 @@ jobs:
           RELEASE_LABEL: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || 'dev' }}
         run: |
           mkdir -p release-artifacts
-          tar -czf "release-artifacts/Aexus-Code-${RELEASE_LABEL}-${TARGET}.tar.gz" -C ".." "${OUT_DIR}"
+          STAGING_DIR="Aexus-Code-${TARGET}"
+          rm -rf "../${STAGING_DIR}"
+          mv "../${OUT_DIR}" "../${STAGING_DIR}"
+          tar -czf "release-artifacts/Aexus-Code-${RELEASE_LABEL}-${TARGET}.tar.gz" -C ".." "${STAGING_DIR}"
 
       - name: Package Windows release archive
         if: runner.os == 'Windows'

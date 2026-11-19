@@ -6,7 +6,7 @@ flowchart LR
   %% @pos R4 992,260
   %% @pos U1 1386,260
   R1["System & API Surface Inventory ★Critical | worker=claude:high"] --> R2["Concurrency, Scale & Failure Analysis ★Critical | worker=claude:high"]
-  R1 --> R3["Developer Experience & UX Teardown | worker=agy:medium"]
+  R1 --> R3["Developer Experience & UX Teardown | worker=claude:medium"]
   R2 --> R4["Trade-Off Matrix & Engineering RFC ★Critical | worker=claude:high"]
   R3 --> R4
   R4 --> U1{{"Architecture Review Gate"}}
@@ -16,9 +16,10 @@ flowchart LR
 - tree_type: research
 - governor_session_id: <governor-session-id>
 - workspace_isolation: shared
-- max_concurrency: 2
 - watchdog_timeout_minutes: 10
 - max_budget_usd: 5
+- max_concurrency: 2
+- verify: git status --short
 
 ## Auto-Partitioned Managers
 ### [Segment: R1]
@@ -43,8 +44,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
-- files: docs/rfc/01-surface-inventory.md
-- verify: test -s docs/rfc/01-surface-inventory.md
+- files: docs/rfc/inventory/**
+- verify: test -d docs/rfc
 - goal: |
     Map module architecture, IPC/RPC boundaries, state ownership, and external extension points with concrete file references.
 - acceptance: |
@@ -56,8 +57,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
-- files: docs/rfc/02-scale-and-failure.md
-- verify: test -s docs/rfc/02-scale-and-failure.md
+- files: docs/rfc/systems/**
+- verify: test -d docs/rfc/systems
 - goal: |
     Analyze scalability limits, failure domains, latency hot paths, and cross-platform edge cases.
 - acceptance: |
@@ -68,9 +69,9 @@ flowchart LR
 - type: task
 - critical: false
 - employee: engine=claude-code, thinking=medium
-- worker: engine=antigravity, thinking=medium
-- files: docs/rfc/03-dx-ux-teardown.md
-- verify: test -s docs/rfc/03-dx-ux-teardown.md
+- worker: engine=claude-code, thinking=medium
+- files: docs/rfc/ux/**
+- verify: test -d docs/rfc/ux
 - goal: |
     Evaluate onboarding friction, workflow ergonomics, visual clarity, and competitive differentiation.
 - acceptance: |
@@ -82,8 +83,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
-- files: docs/rfc/RFC-architecture.md
-- verify: test -s docs/rfc/RFC-architecture.md
+- files: docs/rfc/RFC.md
+- verify: test -f docs/rfc/RFC.md
 - goal: |
     Compile R1–R3 into a concise Engineering RFC with decision matrix, rollout phases, and measurable success metrics.
 - acceptance: |

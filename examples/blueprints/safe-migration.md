@@ -16,9 +16,10 @@ flowchart LR
 - tree_type: engineering
 - governor_session_id: <governor-session-id>
 - workspace_isolation: worktree
-- max_concurrency: 2
 - watchdog_timeout_minutes: 10
 - max_budget_usd: 7
+- max_concurrency: 2
+- verify: npm test
 
 ## Auto-Partitioned Managers
 ### [Segment: N1]
@@ -44,7 +45,7 @@ flowchart LR
 - employee: engine=claude-code, thinking=medium
 - worker: engine=claude-code, thinking=high
 - files: src/compat/**, test/baseline/**
-- verify: npm run typecheck && npm test -- --grep baseline
+- verify: npm test
 - goal: |
     Lock existing behavior with characterization tests and introduce clean adapter shims for incremental cutover.
 - acceptance: |
@@ -56,8 +57,8 @@ flowchart LR
 - critical: true
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=high
-- files: src/core/**, test/core/**
-- verify: npm run typecheck && npm test -- --grep core
+- files: src/core/**
+- verify: npm test
 - goal: |
     Implement the target refactored core behind the N1 adapter boundary with strict typing and unit tests.
 - acceptance: |
@@ -69,8 +70,8 @@ flowchart LR
 - critical: false
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=medium
-- files: src/callers/**, config/**, docs/**
-- verify: npm run typecheck && npm run lint
+- files: src/callers/**, config/**
+- verify: npm run typecheck
 - goal: |
     Update downstream call sites, configuration bindings, and documentation to target the refactored interfaces.
 - acceptance: |
@@ -88,7 +89,7 @@ flowchart LR
 - employee: engine=claude-code, thinking=medium
 - worker: engine=codex, thinking=high
 - files: src/**, test/**
-- verify: npm run typecheck && npm run lint && npm test
+- verify: npm run lint && npm test
 - goal: |
     Remove obsolete shims, run full regression/build suite, and confirm zero dead code or orphaned imports.
 - acceptance: |

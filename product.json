@@ -1,6 +1,7 @@
 {
 	"nameShort": "Aexus Code",
 	"nameLong": "Aexus Code",
+	"aexusVersion": "1.1.0",
 	"openToWelcomeMainPage": false,
 	"applicationName": "aexus-code",
 	"dataFolderName": ".aexus-code",

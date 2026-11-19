@@ -20,9 +20,9 @@ concurrency:
 
 jobs:
   core-typecheck-and-ade-tests:
-    name: Core Typecheck, ESLint & ADE Node Tests
+    name: Core Typecheck, ESLint, ADE Node & Browser Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Checkout Aexus Code
         uses: actions/checkout@v4
@@ -58,11 +58,27 @@ jobs:
       - name: Typecheck aexus-agents extension
         run: pnpm exec tsc -p extensions/aexus-agents/tsconfig.json --noEmit
 
-      - name: Lint ADE platform & workbench sources
-        run: pnpm exec eslint --max-warnings=0 "src/vs/platform/ade/**/*.ts" "src/vs/workbench/contrib/ade/**/*.ts"
+      - name: Lint ADE platform, workbench & aexus-agents sources
+        run: pnpm exec eslint --max-warnings=0 "src/vs/platform/ade/**/*.ts" "src/vs/workbench/contrib/ade/**/*.ts" "extensions/aexus-agents/src/**/*.ts"
 
       - name: Run ADE platform Node unit tests
         run: node test/unit/node/index.js --runGlob "vs/platform/ade/test/node/*.test.js"
+
+      - name: Prepare Electron test runtime for headless Linux
+        run: |
+          pnpm run electron
+          if [ -f .build/electron/chrome-sandbox ]; then
+            sudo chown root .build/electron/chrome-sandbox
+            sudo chmod 4755 .build/electron/chrome-sandbox
+          fi
+
+      - name: Run ADE browser workbench unit tests
+        run: >
+          xvfb-run -a ./scripts/test.sh
+          --run src/vs/workbench/contrib/ade/test/browser/adeControlAndViews.test.ts
+          --run src/vs/workbench/contrib/ade/test/browser/adeEngineering.test.ts
+          --run src/vs/workbench/contrib/ade/test/browser/adeProjectsService.test.ts
+          --run src/vs/workbench/contrib/ade/test/browser/cloudHostsBrowser.test.ts
 
   agents-cli-and-cross-platform:
     name: Agents & CLI (${{ matrix.os }})
@@ -140,7 +156,33 @@ jobs:
           bash -n scripts/aexus-install.sh
           bash -n scripts/aexus-env.sh
 
-      - name: Verify product.json, relative markdown links, assets & all 6 blueprint recipes
+      - name: Verify version parity (product.json, aexus-agents, aexus-ade CLI)
+        run: |
+          node -e '
+            const fs = require("fs");
+            const product = JSON.parse(fs.readFileSync("product.json", "utf8"));
+            const extPkg = JSON.parse(fs.readFileSync("extensions/aexus-agents/package.json", "utf8"));
+            const cliSrc = fs.readFileSync("extensions/aexus-agents/src/adeCli.ts", "utf8");
+            const cliMatch = cliSrc.match(/export\s+const\s+ADE_CLI_VERSION\s*=\s*[\x27"]([^\x27"]+)[\x27"]/);
+            const productVer = product.aexusVersion;
+            const extVer = extPkg.version;
+            const cliVer = cliMatch?.[1];
+            if (!productVer || !extVer || !cliVer) {
+              console.error("Missing version field:", { productVer, extVer, cliVer });
+              process.exit(1);
+            }
+            if (productVer !== extVer || productVer !== cliVer) {
+              console.error("Version parity mismatch:", {
+                "product.json#aexusVersion": productVer,
+                "extensions/aexus-agents/package.json#version": extVer,
+                "extensions/aexus-agents/src/adeCli.ts#ADE_CLI_VERSION": cliVer
+              });
+              process.exit(1);
+            }
+            console.log(`Version parity OK: ${productVer} (product.json == aexus-agents == aexus-ade CLI)`);
+          '
+
+      - name: Verify product.json, desktop entry, relative markdown links, assets & all 6 blueprint recipes
         run: |
           node -e '
             const fs = require("fs");
@@ -149,6 +191,16 @@ jobs:
             const product = JSON.parse(fs.readFileSync("product.json", "utf8"));
             if (!product.extensionsGallery?.serviceUrl?.includes("open-vsx.org")) {
               console.error("product.json extensionsGallery must target Open VSX");
+              process.exit(1);
+            }
+            if (!product.aexusVersion) {
+              console.error("product.json must define aexusVersion");
+              process.exit(1);
+            }
+
+            const desktopEntry = fs.readFileSync("resources/linux/code.desktop", "utf8");
+            if (desktopEntry.includes("Code Editing. Redefined.") || /Keywords=vscode;/i.test(desktopEntry)) {
+              console.error("resources/linux/code.desktop still contains upstream VS Code branding");
               process.exit(1);
             }
 
@@ -168,7 +220,10 @@ jobs:
             for (const doc of docs) {
               if (!fs.existsSync(doc)) { missing.push(doc); continue; }
               const text = fs.readFileSync(doc, "utf8");
-              const re = /(?:src|href)="([^"]+)"|\]\(([^)]+)\)/g;
+              if (/(?:href|src|srcset)="[^"]*AEXUS\.md|\]\([^)]*AEXUS\.md/i.test(text)) {
+                missing.push(`${doc} links to retired AEXUS.md`);
+              }
+              const re = /(?:src|srcset|href)="([^"]+)"|\]\(([^)]+)\)/g;
               let m;
               while ((m = re.exec(text))) {
                 const raw = (m[1] || m[2] || "").trim();
@@ -196,7 +251,7 @@ jobs:
                 continue;
               }
               const content = fs.readFileSync(full, "utf8");
-              for (const token of ["```mermaid", "## Tree Metadata", "## Auto-Partitioned Managers", "max_concurrency:", "- files:", "- verify:"]) {
+              for (const token of ["```mermaid", "## Tree Metadata", "## Auto-Partitioned Managers", "max_budget_usd:", "max_concurrency:", "- files:", "- verify:"]) {
                 if (!content.includes(token)) {
                   missing.push(`blueprint ${full} missing required field/section: ${token}`);
                 }
@@ -207,5 +262,5 @@ jobs:
               console.error("Integrity failures:\n" + missing.join("\n"));
               process.exit(1);
             }
-            console.log(`Verified product.json (Open VSX), ${checked} doc links/assets, and ${requiredBlueprints.length} example blueprints.`);
+            console.log(`Verified product.json (v${product.aexusVersion}, Open VSX), Linux desktop entry, ${checked} doc links/assets, and ${requiredBlueprints.length} example blueprints.`);
           '
