@@ -60,6 +60,8 @@ export type AdeTreeItem =
 	| { readonly kind: 'project'; readonly project: IAdeProject }
 	| { readonly kind: 'agent'; readonly agent: IAdeAgent };
 
+const ADE_SIDEBAR_BADGES_EXPANDED_KEY = 'aexus.ade.sidebarBadgesExpanded';
+
 function formatRoleBadgeLabel(rank: AdeSessionRank): string {
 	switch (rank) {
 		case 'governor':
@@ -433,8 +435,14 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.row.setAttribute('data-child-label', localize('adeDropTopLevelPreview', "→ Top-Level"));
 			if (isCloud) {
 				template.row.classList.add('ade-cloud-project');
-				template.cloudBadge.textContent = item.project.uri.authority;
-				template.cloudBadge.prepend($('span.ade-cloud-host-dot', { 'aria-hidden': 'true' }));
+				template.cloudBadge.className = 'ade-cloud-host-badge';
+				if (item.project.name.trim().toLowerCase() === item.project.uri.authority.trim().toLowerCase()) {
+					template.cloudBadge.classList.add('is-same-as-name');
+				}
+				template.cloudBadge.replaceChildren(
+					$('span.ade-cloud-host-dot', { 'aria-hidden': 'true' }),
+					$('span.ade-badge-label', {}, item.project.uri.authority),
+				);
 				template.cloudBadge.hidden = false;
 				template.editDisposables.add(this.hoverService.setupManagedHover(
 					getDefaultHoverDelegate('mouse'),
@@ -442,7 +450,8 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 					localize('adeCloudProjectTooltip', "SSH Cloud Host Project ({0})", formatProjectDisplayPath(item.project.uri)),
 				));
 			} else {
-				template.cloudBadge.textContent = '';
+				template.cloudBadge.className = 'ade-cloud-host-badge';
+				template.cloudBadge.replaceChildren();
 				template.cloudBadge.hidden = true;
 			}
 			template.label.setResource({
@@ -467,6 +476,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			return;
 		}
 
+		template.cloudBadge.className = 'ade-cloud-host-badge';
 		template.cloudBadge.textContent = '';
 		template.cloudBadge.hidden = true;
 		template.countBadge.hidden = true;
@@ -519,15 +529,15 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 
 		if (!agent.parentId && agent.treeType) {
 			const isRes = agent.treeType === 'research';
-			template.workTreeBadge.textContent = isRes ? localize('adeBadgeResearch', "Research") : localize('adeBadgeEngineering', "Engineering");
+			const treeLabel = isRes ? localize('adeBadgeResearch', "Research") : localize('adeBadgeEngineering', "Engineering");
 			template.workTreeBadge.className = `ade-worktree-badge type-${agent.treeType}`;
 			const treeIcon = $('span.ade-worktree-badge-icon', { 'aria-hidden': 'true' });
 			treeIcon.classList.add(...ThemeIcon.asClassNameArray(isRes ? Codicon.beaker : Codicon.typeHierarchy));
-			template.workTreeBadge.prepend(treeIcon);
+			template.workTreeBadge.replaceChildren(treeIcon, $('span.ade-badge-label', {}, treeLabel));
 			template.workTreeBadge.setAttribute('role', 'button');
 			template.workTreeBadge.setAttribute('tabindex', '0');
 			template.workTreeBadge.hidden = false;
-			const treeTooltip = localize('adeOpenEngineeringBadgeTooltip', "Open {0} DAG Canvas", template.workTreeBadge.textContent);
+			const treeTooltip = localize('adeOpenEngineeringBadgeTooltip', "Open {0} DAG Canvas", treeLabel);
 			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.workTreeBadge, treeTooltip));
 			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.CLICK, event => {
 				EventHelper.stop(event, true);
@@ -543,12 +553,11 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.workTreeBadge.hidden = true;
 		}
 
-		template.roleBadge.textContent = badgeLabel;
 		template.roleBadge.className = `ade-role-badge role-${rank}${isLocked ? ' locked' : ''}`;
 		template.roleBadge.setAttribute('data-tier', getAdeRankTier(rank));
 		const rankIcon = $('span.ade-role-badge-icon', { 'aria-hidden': 'true' });
 		rankIcon.classList.add(...ThemeIcon.asClassNameArray(getAdeRankIcon(rank)));
-		template.roleBadge.prepend(rankIcon);
+		template.roleBadge.replaceChildren(rankIcon, $('span.ade-badge-label', {}, badgeLabel));
 		template.roleBadge.hidden = false;
 		const roleTooltip = isLocked
 			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel)
@@ -642,6 +651,9 @@ export class AdeProjectsView extends ViewPane {
 	private inboxTabBtn: HTMLElement | undefined;
 	private inboxBadgeEl: HTMLElement | undefined;
 	private archivedToggleButton: HTMLElement | undefined;
+	private badgesToggleButton: HTMLButtonElement | undefined;
+	private viewBodyContainer: HTMLElement | undefined;
+	private badgesExpanded = false;
 	private treeHost: HTMLElement | undefined;
 	private inboxPanel: AdeInboxPanel | undefined;
 	private sidebarMode: 'projects' | 'inbox' = 'projects';
@@ -682,6 +694,7 @@ export class AdeProjectsView extends ViewPane {
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
+		this.badgesExpanded = this.storageService.getBoolean(ADE_SIDEBAR_BADGES_EXPANDED_KEY, StorageScope.PROFILE, false);
 
 		this._register(projects.onDidChange(change => {
 			this.updateHeaderControls();
@@ -761,7 +774,9 @@ export class AdeProjectsView extends ViewPane {
 
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
+		this.viewBodyContainer = container;
 		container.classList.add('ade-projects-view-body');
+		container.classList.toggle('ade-badges-expanded', this.badgesExpanded);
 
 		this.renderSecretaryBanner(container);
 		this.renderControlsToolbar(container);
@@ -1165,6 +1180,20 @@ export class AdeProjectsView extends ViewPane {
 
 		const actions = append(controls, $('.ade-sidebar-actions'));
 
+		const badgesBtn = this.badgesToggleButton = append(actions, $('button.ade-icon-button.ade-badges-toggle-btn', {
+			type: 'button',
+			'aria-label': localize('adeToggleFullBadges', "Toggle Compact vs. Full Badges"),
+			'aria-pressed': String(this.badgesExpanded),
+		}));
+		badgesBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.tag));
+		badgesBtn.classList.toggle('active', this.badgesExpanded);
+		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), badgesBtn, () => this.badgesExpanded
+			? localize('adeBadgesExpandedTooltip', "Badges: Always Expanded — Click for Compact (Expand on Hover)")
+			: localize('adeBadgesCompactTooltip', "Badges: Compact (Expand on Hover) — Click to Always Show Full Badges")));
+		this._register(addDisposableListener(badgesBtn, EventType.CLICK, () => {
+			this.setBadgesExpanded(!this.badgesExpanded);
+		}));
+
 		const archivedBtn = this.archivedToggleButton = append(actions, $('button.ade-icon-button', {
 			type: 'button',
 			'aria-label': localize('adeToggleArchived', "Toggle Archived Sessions"),
@@ -1180,12 +1209,25 @@ export class AdeProjectsView extends ViewPane {
 		}));
 	}
 
+	setBadgesExpanded(expanded: boolean): void {
+		this.badgesExpanded = expanded;
+		this.storageService.store(ADE_SIDEBAR_BADGES_EXPANDED_KEY, expanded, StorageScope.PROFILE, StorageTarget.USER);
+		this.viewBodyContainer?.classList.toggle('ade-badges-expanded', expanded);
+		if (this.badgesToggleButton) {
+			this.badgesToggleButton.classList.toggle('active', expanded);
+			this.badgesToggleButton.setAttribute('aria-pressed', String(expanded));
+		}
+	}
+
 	setSidebarMode(mode: 'projects' | 'inbox'): void {
 		this.sidebarMode = mode;
 		this.projectsTabBtn?.classList.toggle('active', mode === 'projects');
 		this.projectsTabBtn?.setAttribute('aria-selected', String(mode === 'projects'));
 		this.inboxTabBtn?.classList.toggle('active', mode === 'inbox');
 		this.inboxTabBtn?.setAttribute('aria-selected', String(mode === 'inbox'));
+		if (this.badgesToggleButton) {
+			this.badgesToggleButton.hidden = mode === 'inbox';
+		}
 		if (this.archivedToggleButton) {
 			this.archivedToggleButton.hidden = mode === 'inbox';
 		}

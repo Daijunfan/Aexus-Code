@@ -510,6 +510,10 @@
 	font-size: 14px;
 }
 
+.monaco-workbench .ade-icon-button[hidden] {
+	display: none !important;
+}
+
 .monaco-workbench .ade-icon-button:hover {
 	background: var(--vscode-toolbar-hoverBackground);
 }

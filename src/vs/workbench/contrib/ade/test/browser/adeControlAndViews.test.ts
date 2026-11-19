@@ -1810,9 +1810,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 	test('renders 4-tier Org-Chart Deck tree channels, recycled lock hygiene, Cloud Host chip, sticky Focus banner, and Critical Inbox tab badge', async () => {
 		const cloudProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'gpu-a100', path: '/workspace/CloudRepo' });
 		const ubuntuProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'ubuntu-target1', path: '/home/lab' });
+		const ubuntuSameName = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'ubuntu-target1', path: '/home/ubuntu-target1' });
 		const kaliProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'kali-Linux1', path: '/home/kali' });
 		const winProject = URI.from({ scheme: AEXUS_SSH_SCHEME, authority: 'BUPT-Windows', path: '/C:/Users/djf' });
-		const h = createHarness([alpha, cloudProject, ubuntuProject, kaliProject, winProject]);
+		const h = createHarness([alpha, cloudProject, ubuntuProject, ubuntuSameName, kaliProject, winProject]);
 		h.modes.setMode('ade');
 
 		const lockedIds = new Set<string>();
@@ -1888,8 +1889,20 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		const cloudRow = findRow('CloudRepo');
 		const alphaRow = findRow('Alpha');
 		const ubuntuRow = findRow('lab');
+		const ubuntuSameRow = findRow('ubuntu-target1');
 		const kaliRow = findRow('kali');
 		const winRow = findRow('djf');
+
+		const viewBody = host.querySelector<HTMLElement>('.ade-projects-view-body')!;
+		const badgesToggleBtn = host.querySelector<HTMLButtonElement>('.ade-badges-toggle-btn')!;
+		const smartCalmDefaultCompact = !viewBody.classList.contains('ade-badges-expanded')
+			&& badgesToggleBtn.getAttribute('aria-pressed') === 'false';
+		badgesToggleBtn.click();
+		const smartCalmExpandedOnClick = viewBody.classList.contains('ade-badges-expanded')
+			&& badgesToggleBtn.getAttribute('aria-pressed') === 'true';
+		badgesToggleBtn.click();
+		const smartCalmCompactAfterSecondClick = !viewBody.classList.contains('ade-badges-expanded')
+			&& badgesToggleBtn.getAttribute('aria-pressed') === 'false';
 
 		const rowSnapshot = {
 			govTier: govRow.querySelector('.ade-role-badge')?.getAttribute('data-tier'),
@@ -1911,6 +1924,11 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			freeNotLocked: !freeRow.classList.contains('ade-worktree-locked') && freeRow.querySelector<HTMLElement>('.ade-lock-glyph')!.hidden,
 			cloudChipText: cloudRow.querySelector('.ade-cloud-host-badge')?.textContent,
 			cloudHasDot: Boolean(cloudRow.querySelector('.ade-cloud-host-badge .ade-cloud-host-dot')),
+			cloudDistinctNotSame: !cloudRow.querySelector('.ade-cloud-host-badge')?.classList.contains('is-same-as-name'),
+			cloudSameNameFlagged: Boolean(ubuntuSameRow.querySelector('.ade-cloud-host-badge')?.classList.contains('is-same-as-name')),
+			smartCalmDefaultCompact,
+			smartCalmExpandedOnClick,
+			smartCalmCompactAfterSecondClick,
 			localProjectOsHasSvg: Boolean(alphaRow.querySelector('.ade-tree-item-icon-os svg')),
 			ubuntuProjectOs: ubuntuRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
 			kaliProjectOs: kaliRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
@@ -2009,6 +2027,11 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			freeNotLocked: true,
 			cloudChipText: 'gpu-a100',
 			cloudHasDot: true,
+			cloudDistinctNotSame: true,
+			cloudSameNameFlagged: true,
+			smartCalmDefaultCompact: true,
+			smartCalmExpandedOnClick: true,
+			smartCalmCompactAfterSecondClick: true,
 			localProjectOsHasSvg: true,
 			ubuntuProjectOs: 'ubuntu',
 			kaliProjectOs: 'kali',

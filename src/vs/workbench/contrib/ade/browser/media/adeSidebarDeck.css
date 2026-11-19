@@ -622,6 +622,102 @@
 }
 
 /* ============================================================================
+ * 4b. Smart Calm Badges — Uniform Micro-Rail at Rest, Full Pill Bloom on Hover/Select
+ *     (Click the Tag button in the sidebar toolbar to pin Full Badges on all rows)
+ * ============================================================================ */
+
+.monaco-workbench .ade-badge-label {
+	display: inline-block;
+	overflow: hidden;
+	min-width: 0;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	vertical-align: bottom;
+}
+
+.monaco-workbench .ade-role-badge,
+.monaco-workbench .ade-worktree-badge,
+.monaco-workbench .ade-cloud-host-badge {
+	transition: padding 150ms cubic-bezier(0.2, 0.8, 0.2, 1), gap 150ms cubic-bezier(0.2, 0.8, 0.2, 1), background 150ms ease, border-color 150ms ease, color 150ms ease, opacity 150ms ease, filter 120ms ease;
+}
+
+.monaco-workbench .ade-role-badge .ade-role-badge-icon,
+.monaco-workbench .ade-role-badge .ade-badge-label,
+.monaco-workbench .ade-worktree-badge .ade-badge-label,
+.monaco-workbench .ade-cloud-host-badge .ade-badge-label {
+	max-width: 120px;
+	min-width: 0;
+	overflow: hidden;
+	opacity: 1;
+	transition: max-width 160ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 130ms ease;
+}
+
+/* Compact (default) rest state: calm aligned L1..L4 monograms + whisper-quiet host labels */
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-role-badge {
+	gap: 0;
+	padding: 0 4px;
+	min-width: 22px;
+	justify-content: center;
+	opacity: 0.92;
+}
+
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-role-badge .ade-role-badge-icon,
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-role-badge .ade-badge-label,
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-worktree-badge .ade-badge-label {
+	max-width: 0;
+	opacity: 0;
+	margin: 0;
+	pointer-events: none;
+}
+
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-worktree-badge {
+	gap: 0;
+	padding: 0 3px;
+	min-width: 17px;
+	justify-content: center;
+	opacity: 0.88;
+}
+
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-lock-glyph {
+	opacity: 0.58;
+}
+
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-cloud-host-badge {
+	background: transparent;
+	border-color: transparent;
+	padding: 0 2px;
+	gap: 4px;
+	color: color-mix(in srgb, var(--ade-deck-cloud) 52%, var(--vscode-descriptionForeground));
+	font-weight: 500;
+	opacity: 0.74;
+}
+
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-cloud-host-badge.is-same-as-name {
+	gap: 0;
+}
+
+.monaco-workbench .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-cloud-host-badge.is-same-as-name .ade-badge-label {
+	max-width: 0;
+	opacity: 0;
+}
+
+.monaco-workbench.hc-black .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-role-badge,
+.monaco-workbench.hc-light .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-role-badge,
+.monaco-workbench.hc-black .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-worktree-badge,
+.monaco-workbench.hc-light .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-worktree-badge,
+.monaco-workbench.hc-black .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-lock-glyph,
+.monaco-workbench.hc-light .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-lock-glyph {
+	opacity: 1;
+}
+
+.monaco-workbench.hc-black .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-cloud-host-badge,
+.monaco-workbench.hc-light .ade-projects-view-body:not(.ade-badges-expanded) .monaco-list-row:not(:hover):not(.selected):not(:focus-within) .ade-cloud-host-badge {
+	border-color: var(--vscode-contrastBorder);
+	color: var(--vscode-foreground);
+	opacity: 1;
+}
+
+/* ============================================================================
  * 5. Drag-and-Drop Rank-Coloured Inset Outline + "→ Employee" Preview Chip
  * ============================================================================ */
 
