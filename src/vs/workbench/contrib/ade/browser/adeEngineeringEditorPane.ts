@@ -50,6 +50,7 @@ import {
 	formatUsdCost,
 } from '../../../../platform/ade/common/adePricing.js';
 import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
+import { PROMPT_DAG_EXAMPLES, synthesizeBlueprintFromPrompt } from '../../../../platform/ade/common/adePromptToDag.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
@@ -117,6 +118,22 @@ type EventFilterKind = 'all' | 'worker' | 'employee' | 'manager' | 'gates';
 type CanvasSpotlightFilter = 'all' | 'active' | 'gates' | 'issues';
 type PhaseRoleKind = 'wrk' | 'emp' | 'mgr';
 type EventRoleKind = 'wrk' | 'emp' | 'mgr' | 'gate' | 'sys';
+
+export function computeDiffLineStats(combinedDiff: string | undefined): { readonly added: number; readonly removed: number } {
+	if (!combinedDiff) {
+		return { added: 0, removed: 0 };
+	}
+	let added = 0;
+	let removed = 0;
+	for (const line of combinedDiff.split('\n')) {
+		if (line.startsWith('+') && !line.startsWith('+++')) {
+			added++;
+		} else if (line.startsWith('-') && !line.startsWith('---')) {
+			removed++;
+		}
+	}
+	return { added, removed };
+}
 
 /**
  * World (canvas) size grows beyond the 4800×3600 baseline so large graphs never clip their edges SVG.
@@ -395,7 +412,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private emptyStateEl!: HTMLElement;
 	private connectHintEl!: HTMLElement;
 	private starterHintEl!: HTMLElement;
+	private promptBarEl!: HTMLElement;
 	private starterHintDismissed = false;
+	private showPromptBar = false;
+	private promptDraftText = '';
 	private minimapEl!: HTMLElement;
 	private minimapSvgEl!: SVGSVGElement;
 	private minimapLensEl!: HTMLElement;
@@ -423,6 +443,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private readonly sheetTimelineDisposables = this._register(new DisposableStore());
 	private readonly tokenAnalyticsDisposables = this._register(new DisposableStore());
 	private readonly templatesRenderDisposables = this._register(new DisposableStore());
+	private readonly promptBarRenderDisposables = this._register(new DisposableStore());
 	private readonly bannerDisposables = this._register(new DisposableStore());
 
 	private activeGovernorId: string | undefined;
@@ -593,6 +614,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.connectHintEl.hidden = true;
 		this.starterHintEl = append(this.bodyEl, $('.ade-eng-starter-banner'));
 		this.starterHintEl.hidden = true;
+		this.promptBarEl = append(this.bodyEl, $('.ade-eng-prompt-bar', {
+			role: 'dialog',
+			'aria-label': localize('adeEngPromptBarAria', "Generate DAG from Natural Language Prompt"),
+		}));
+		this.promptBarEl.hidden = true;
 
 		// Interactive Bottom-Left Live Minimap
 		this.minimapEl = append(this.bodyEl, $('.ade-eng-minimap', {
@@ -1049,7 +1075,18 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.viewportEl.classList.add('space-pan');
 			}
 
+			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+				EventHelper.stop(e, true);
+				this.togglePromptBar(!this.showPromptBar);
+				return;
+			}
+
 			if (e.key === 'Escape') {
+				if (this.showPromptBar) {
+					EventHelper.stop(e, true);
+					this.togglePromptBar(false);
+					return;
+				}
 				if (this.showTemplatesModal) {
 					EventHelper.stop(e, true);
 					this.closeTemplatesModal();
@@ -1382,6 +1419,134 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.templatesModalEl.hidden = true;
 		this.templatesRenderDisposables.clear();
 		clearNode(this.templatesModalEl);
+	}
+
+	private togglePromptBar(open: boolean): void {
+		this.showPromptBar = open;
+		if (!open) {
+			this.promptBarEl.hidden = true;
+			this.promptBarRenderDisposables.clear();
+			clearNode(this.promptBarEl);
+			this.renderToolbar();
+			return;
+		}
+		this.closePopover();
+		this.closeTemplatesModal();
+		this.closeTokenAnalytics();
+		this.renderPromptBar();
+		this.promptBarEl.hidden = false;
+		this.renderToolbar();
+	}
+
+	private async applySynthesizedPrompt(promptText: string): Promise<void> {
+		const snap = this.snapshot;
+		if (!snap) {
+			return;
+		}
+		const trimmed = promptText.trim();
+		if (!trimmed) {
+			return;
+		}
+		const gov = this.projects.getAgent(snap.governorSessionId);
+		const defaultEngine = gov?.preferredEngineId ?? gov?.session?.engineId ?? 'claude-code';
+		const synth = synthesizeBlueprintFromPrompt(trimmed, {
+			governorSessionId: snap.governorSessionId,
+			defaultEngine,
+		});
+		const blueprintText = serializeEngineeringBlueprint(synth.blueprint);
+		const ok = await this.applyRawBlueprintWithSafety(blueprintText);
+		if (ok) {
+			this.promptDraftText = '';
+			this.togglePromptBar(false);
+			this.fitViewportToGraph(true);
+			this.notificationService.info(localize(
+				'adeEngPromptDagGenerated',
+				"Generated {0}-node {1} DAG ({2} parallel lanes · ${3} cap) from prompt.",
+				synth.blueprint.nodes.length,
+				synth.treeType === 'research' ? 'Research' : 'Engineering',
+				synth.tracks.length,
+				synth.blueprint.metadata.maxBudgetUsd ?? 6,
+			));
+		}
+	}
+
+	private renderPromptBar(): void {
+		this.promptBarRenderDisposables.clear();
+		clearNode(this.promptBarEl);
+
+		const topRow = append(this.promptBarEl, $('.ade-eng-prompt-input-row'));
+		const ico = append(topRow, $('span.ade-eng-prompt-ico', { 'aria-hidden': 'true' }));
+		ico.classList.add(...ThemeIcon.asClassNameArray(Codicon.sparkle));
+
+		const input = append(topRow, $('input.ade-eng-prompt-input', {
+			type: 'text',
+			placeholder: localize('adeEngPromptPlaceholder', "Describe what to build, debug, audit, or research — press Enter to synthesize DAG…"),
+			value: this.promptDraftText,
+		})) as HTMLInputElement;
+		this.promptBarRenderDisposables.add(addDisposableListener(input, EventType.INPUT, () => {
+			this.promptDraftText = input.value;
+		}));
+		this.promptBarRenderDisposables.add(addDisposableListener(input, EventType.KEY_DOWN, (e: KeyboardEvent) => {
+			if (e.key === 'Enter' && !e.shiftKey) {
+				EventHelper.stop(e, true);
+				void this.applySynthesizedPrompt(input.value);
+			} else if (e.key === 'Escape') {
+				EventHelper.stop(e, true);
+				this.togglePromptBar(false);
+			}
+		}));
+
+		const genBtn = append(topRow, $('button.ade-eng-prompt-submit-btn', {
+			type: 'button',
+			title: localize('adeEngPromptSubmitTooltip', "Synthesize tailored multi-agent DAG immediately (0 tokens)"),
+		}, localize('adeEngPromptSubmitBtn', "Generate DAG ↵")));
+		this.promptBarRenderDisposables.add(addDisposableListener(genBtn, EventType.CLICK, () => {
+			void this.applySynthesizedPrompt(input.value);
+		}));
+
+		const closeBtn = append(topRow, $('button.ade-eng-pop-icon-btn.close', {
+			type: 'button',
+			title: localize('adeEngPromptCloseTooltip', "Close (Esc)"),
+		}));
+		closeBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
+		this.promptBarRenderDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.togglePromptBar(false)));
+
+		const chipsRow = append(this.promptBarEl, $('.ade-eng-prompt-chips'));
+		append(chipsRow, $('span.ade-eng-prompt-chips-label', {}, localize('adeEngPromptTryLabel', "Try:")));
+		for (const ex of PROMPT_DAG_EXAMPLES) {
+			const chip = append(chipsRow, $('button.ade-eng-prompt-chip', {
+				type: 'button',
+				'data-example-id': ex.id,
+				title: ex.prompt,
+			}, ex.label));
+			this.promptBarRenderDisposables.add(addDisposableListener(chip, EventType.CLICK, () => {
+				input.value = ex.prompt;
+				this.promptDraftText = ex.prompt;
+				void this.applySynthesizedPrompt(ex.prompt);
+			}));
+		}
+		if (this.engineering.startDemoSimulation) {
+			const simChip = append(chipsRow, $('button.ade-eng-prompt-chip.demo', {
+				type: 'button',
+				title: localize('adeEngPromptSimTooltip', "Play live animated 6-node walkthrough (0 API tokens)"),
+			}, localize('adeEngPromptSimBtn', "▶ Live Demo (0 tok)")));
+			this.promptBarRenderDisposables.add(addDisposableListener(simChip, EventType.CLICK, async () => {
+				const govId = this.snapshot?.governorSessionId;
+				if (!govId || !this.engineering.startDemoSimulation) {
+					return;
+				}
+				this.togglePromptBar(false);
+				await this.engineering.startDemoSimulation(govId);
+				this.fitViewportToGraph(true);
+			}));
+		}
+
+		getWindow(this.rootEl).requestAnimationFrame(() => {
+			if (input.isConnected) {
+				input.focus();
+				input.setSelectionRange(input.value.length, input.value.length);
+			}
+		});
 	}
 
 	private renderTemplatesModal(): void {
@@ -2454,23 +2619,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		let maxX = -Infinity;
 		let maxY = -Infinity;
 		for (const n of this.draftBlueprint.nodes) {
-			const x = n.position?.x ?? 204;
-			const y = n.position?.y ?? 260;
-			minX = Math.min(minX, x - 168);
-			minY = Math.min(minY, y - 134);
-			maxX = Math.max(maxX, x + 180);
-			maxY = Math.max(maxY, y + 128);
+			const x = n.position?.x ?? 192;
+			const y = n.position?.y ?? 250;
+			minX = Math.min(minX, x - 152);
+			minY = Math.min(minY, y - 118);
+			maxX = Math.max(maxX, x + 156);
+			maxY = Math.max(maxY, y + 108);
 		}
 		const vw = this.viewportWidth();
 		const vh = this.viewportHeight();
-		const availW = Math.max(320, vw - 76);
-		const availH = Math.max(220, vh - TOOLBAR_SAFE_INSET - 68);
+		const availW = Math.max(320, vw - 48);
+		const availH = Math.max(220, vh - TOOLBAR_SAFE_INSET - 54);
 		const graphW = Math.max(260, maxX - minX);
 		const graphH = Math.max(196, maxY - minY);
-		const scale = Math.min(1.08, Math.max(0.38, Math.min(availW / graphW, availH / graphH)));
+		const scale = Math.min(1.08, Math.max(0.42, Math.min(availW / graphW, availH / graphH)));
 		const targetZoom = Math.round(scale * 100) / 100;
-		const targetPanX = Math.round((availW - graphW * targetZoom) / 2 - minX * targetZoom + 38);
-		const targetPanY = Math.round(TOOLBAR_SAFE_INSET + (availH - graphH * targetZoom) / 2 - minY * targetZoom + 12);
+		const targetPanX = Math.round((availW - graphW * targetZoom) / 2 - minX * targetZoom + 24);
+		const targetPanY = Math.round(TOOLBAR_SAFE_INSET + (availH - graphH * targetZoom) / 2 - minY * targetZoom + 14);
 		this.animateViewportTo(targetPanX, targetPanY, targetZoom, animate);
 	}
 
@@ -2696,6 +2861,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.connectMode ? 'active' : '',
 		);
 		connectBtn.title = localize('adeEngConnectTooltip', "Toggle Edge Wiring Mode (or drag directly from any node's right port)");
+
+		const promptBtn = makeToolBtnIn(
+			center,
+			Codicon.wand,
+			localize('adeEngPromptBtn', "Prompt"),
+			() => this.togglePromptBar(!this.showPromptBar),
+			`ade-eng-prompt-bar-btn${this.showPromptBar ? '.active' : ''}`,
+		);
+		promptBtn.title = localize('adeEngPromptBarTooltip', "Describe a goal in plain language to synthesize a tailored multi-agent DAG (Cmd/Ctrl+K)");
 
 		const recipesBtn = makeToolBtnIn(
 			center,
@@ -3533,7 +3707,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				clearNode(this.starterHintEl);
 				this.starterHintEl.className = 'ade-eng-starter-banner';
 				append(this.starterHintEl, $('span.ade-eng-starter-text', {}, localize('adeEngStarterHintText', "✦ Quick Start:")));
-				const recipesCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.primary', { type: 'button' }, localize('adeEngStarterRecipesBtn', "Browse 6 Blueprint Recipes")));
+				const promptCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.prompt', {
+					type: 'button',
+					title: localize('adeEngStarterPromptTip', "Type one sentence to generate a full multi-agent DAG (Cmd/Ctrl+K)"),
+				}, localize('adeEngStarterPromptBtn', "✦ Prompt to DAG (⌘K)")));
+				this.canvasRenderDisposables.add(addDisposableListener(promptCta, EventType.CLICK, () => this.togglePromptBar(true)));
+				const recipesCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.primary', { type: 'button' }, localize('adeEngStarterRecipesBtn', "Blueprint Recipes")));
 				this.canvasRenderDisposables.add(addDisposableListener(recipesCta, EventType.CLICK, () => this.openTemplatesModal()));
 				if (this.engineering.startDemoSimulation) {
 					const demoCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.demo', { type: 'button' }, localize('adeEngStarterDemoBtn', "▶ Interactive Demo (0 tok)")));
@@ -3630,23 +3809,31 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.segmentHeaderDomById.set(seg.segmentId, header);
 
 			append(header, $('span.ade-eng-role-tag.mgr', {}, localize('adeEngMgrTierBadge', "MGR · L2")));
-			const mgrGlyph = append(header, $('span'));
-			this.applyEngineIconToElement(mgrGlyph, seg.config.engine);
-			append(header, $('span.ade-eng-segment-label', {}, `[${seg.segmentId}] ${formatRoleConfigCompact(seg.config, 'medium')}`));
-			append(header, $('span.ade-eng-segment-stat', {}, `${segDoneCount}/${segNodes.length}`));
 			const segWt = snap.state.worktrees?.[seg.segmentId];
 			if (segWt) {
+				append(header, $('span.ade-eng-segment-label.compact', {}, `[${seg.segmentId}]`));
 				const wtBadge = append(header, $('span.ade-eng-segment-branch', {
 					title: localize('adeEngSegmentBranchTooltip', "Isolated Git Worktree: {0} ({1})", segWt.branchName, segWt.worktreePath),
 				}));
 				const brIco = append(wtBadge, $('span'));
 				brIco.classList.add(...ThemeIcon.asClassNameArray(Codicon.gitBranch));
-				const shortBranch = segWt.branchName.length > 18 ? `${segWt.branchName.slice(0, 17)}…` : segWt.branchName;
+				const cleanBranch = segWt.branchName.replace(/^(?:ade-eng|ade)\//, '');
+				const shortBranch = cleanBranch.length > 16 ? `${cleanBranch.slice(0, 15)}…` : cleanBranch;
 				append(wtBadge, $('span', {}, shortBranch));
+			} else {
+				const mgrGlyph = append(header, $('span'));
+				this.applyEngineIconToElement(mgrGlyph, seg.config.engine);
+				append(header, $('span.ade-eng-segment-label', {}, `[${seg.segmentId}] ${formatRoleConfigCompact(seg.config, 'medium')}`));
+				append(header, $('span.ade-eng-segment-stat', {}, `${segDoneCount}/${segNodes.length}`));
 			}
 			if (segTokens > 0) {
 				const segCost = fin.costBySegment[seg.segmentId] ?? 0;
-				append(header, $('span.ade-eng-segment-tok', {}, segCost > 0 ? `${formatCompactTokenCount(segTokens)} · ${formatUsdCost(segCost)}` : formatCompactTokenCount(segTokens)));
+				const compactMetric = segWt && segCost > 0
+					? formatUsdCost(segCost)
+					: (segCost > 0 ? `${formatCompactTokenCount(segTokens)} · ${formatUsdCost(segCost)}` : formatCompactTokenCount(segTokens));
+				append(header, $('span.ade-eng-segment-tok', {
+					title: `${formatCompactTokenCount(segTokens)} tokens · Est. ${formatUsdCost(segCost)}`,
+				}, compactMetric));
 			}
 			const segGear = append(header, $('span.ade-eng-seg-cfg-ico', {
 				title: localize('adeEngConfigureMgrBtnTooltip', "Configure Segment Manager [{0}]", seg.segmentId),
@@ -3877,7 +4064,41 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						: localize('adeEngMgrReviewRibbon', "MGR REVIEW")));
 				}
 
-				// 1. OUTER SHELL HEADER = Employee (L3 · Acceptance Reviewer)
+				// Hover Quick-Action Micro-Halo (Figma-style direct manipulation without opening heavy popover on hover!)
+				const quickBar = append(concentric, $('div.ade-eng-pod-quickbar', {
+					role: 'toolbar',
+					'aria-label': localize('adeEngPodQuickActionsAria', "Quick Actions for {0}", node.id),
+				}));
+				const addQuickAction = (icon: ThemeIcon, tip: string, extraCls: string, onClick: () => void) => {
+					const btn = append(quickBar, $(`button.ade-eng-pod-qa-btn${extraCls ? `.${extraCls}` : ''}`, {
+						type: 'button',
+						title: tip,
+					}));
+					btn.classList.add(...ThemeIcon.asClassNameArray(icon));
+					this.canvasRenderDisposables.add(addDisposableListener(btn, EventType.POINTER_DOWN, e => EventHelper.stop(e, true)));
+					this.canvasRenderDisposables.add(addDisposableListener(btn, EventType.CLICK, e => {
+						EventHelper.stop(e, true);
+						onClick();
+					}));
+				};
+				addQuickAction(Codicon.commentDiscussion, localize('adeEngQaWorkerTip', "Open Worker · L4 Chat"), 'wrk', () => {
+					if (this.activeGovernorId) {
+						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, node.id, 'worker');
+					}
+				});
+				addQuickAction(Codicon.shield, localize('adeEngQaEmpTip', "Open Employee · L3 Reviewer"), 'emp', () => {
+					if (this.activeGovernorId) {
+						void this.engineering.ensureNodeAgentSessionOpen(this.activeGovernorId, node.id, 'employee');
+					}
+				});
+				addQuickAction(Codicon.settings, localize('adeEngQaCfgTip', "Configure Roles, Spec & Reports"), 'cfg', () => {
+					this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'worker', tab: 'worker' });
+				});
+				addQuickAction(Codicon.add, localize('adeEngQaSpawnTip', "Spawn Downstream Task"), 'spawn', () => {
+					this.addDraftNode('task', node.id);
+				});
+
+				// 1. OUTER SHELL HEADER = Employee (L3 · Acceptance Reviewer) + 3-Stage Pipeline Rail (Code ▸ Audit ▸ Sign-off)
 				const empSatellite = append(concentric, $(`div.ade-eng-emp-satellite${empActive ? '.role-active' : ''}${node.critical ? '.has-critical' : ''}`, {
 					title: localize(
 						'adeEngEmployeeSatTooltip',
@@ -3889,6 +4110,17 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				const empGlyph = append(empSatellite, $('span'));
 				this.applyEngineIconToElement(empGlyph, node.employee?.engine);
 				append(empSatellite, $('span.ade-eng-emp-meta', {}, formatRoleConfigCompact(node.employee, 'medium')));
+
+				// Visual 3-stage Adversarial Pipeline Rail: L4 Code -> L3 Audit -> L2 Sign-off
+				const stageRail = append(empSatellite, $('span.ade-eng-stage-rail', {
+					title: localize('adeEngStageRailTip', "3-Stage Adversarial Pipeline: L4 Code → L3 Employee Audit → L2 Manager Sign-off"),
+				}));
+				const stCode = isLocked || empActive || mgrActive ? 'done' : (workerActive ? 'active' : 'idle');
+				const stAudit = isLocked || mgrActive ? 'done' : (empActive ? 'active' : (failCount > 0 || (runtime?.employeeRejectCount ?? 0) > 0 ? 'warn' : 'idle'));
+				const stMgr = isLocked ? 'done' : (mgrActive ? 'active' : (failCount > 0 ? 'warn' : 'idle'));
+				append(stageRail, $(`i.ade-eng-stage-seg.s-code.st-${stCode}`));
+				append(stageRail, $(`i.ade-eng-stage-seg.s-audit.st-${stAudit}`));
+				append(stageRail, $(`i.ade-eng-stage-seg.s-mgr.st-${stMgr}`));
 
 				if (isLocked) {
 					const doneBadge = append(empSatellite, $('span.ade-eng-corner-status.done', {
@@ -3972,12 +4204,85 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 				const wrkTextCol = append(wrkMainRow, $('div.ade-eng-wrk-text'));
 				const nodeTitleEl = append(wrkTextCol, $('span.ade-eng-node-title', {
-					title: `[${node.id}] ${node.title}`,
+					title: localize('adeEngNodeTitleDblClickTip', "[{0}] {1} — Double-click to rename inline", node.id, node.title),
 				}, node.title));
 				this.nodeTitleDomById.set(node.id, nodeTitleEl);
+				// Figma-style direct manipulation: Double-click pod title to rename inline on canvas!
+				this.canvasRenderDisposables.add(addDisposableListener(nodeTitleEl, EventType.DBLCLICK, e => {
+					EventHelper.stop(e, true);
+					if (isLocked || !this.draftBlueprint) {
+						return;
+					}
+					const editInput = $('input.ade-eng-inline-rename', { type: 'text', value: node.title }) as HTMLInputElement;
+					nodeTitleEl.replaceWith(editInput);
+					let finished = false;
+					const finishRename = (commit: boolean) => {
+						if (finished) {
+							return;
+						}
+						finished = true;
+						const nextTitle = editInput.value.trim();
+						if (commit && nextTitle && nextTitle !== node.title && this.draftBlueprint) {
+							this.markDraftModified({
+								...this.draftBlueprint,
+								nodes: this.draftBlueprint.nodes.map(n => n.id === node.id ? { ...n, title: nextTitle } : n),
+							}, { coalesceKey: `rename:${node.id}` });
+						} else {
+							this.renderCanvas();
+						}
+					};
+					this.canvasRenderDisposables.add(addDisposableListener(editInput, EventType.POINTER_DOWN, pe => EventHelper.stop(pe, true)));
+					this.canvasRenderDisposables.add(addDisposableListener(editInput, EventType.CLICK, ce => EventHelper.stop(ce, true)));
+					this.canvasRenderDisposables.add(addDisposableListener(editInput, EventType.KEY_DOWN, (ke: KeyboardEvent) => {
+						if (ke.key === 'Enter') {
+							EventHelper.stop(ke, true);
+							finishRename(true);
+						} else if (ke.key === 'Escape') {
+							EventHelper.stop(ke, true);
+							finishRename(false);
+						}
+					}));
+					this.canvasRenderDisposables.add(addDisposableListener(editInput, EventType.BLUR, () => finishRename(true)));
+					editInput.focus();
+					editInput.select();
+				}));
 				append(wrkTextCol, $('span.ade-eng-node-sub', {
 					title: `Worker: ${node.worker?.engine ?? 'claude-code'}${node.worker?.model ? ` (${node.worker.model})` : ''} · thinking=${node.worker?.thinking ?? 'high'}`,
 				}, formatRoleConfigCompact(node.worker, 'high')));
+
+				// Live 1-line Activity Ticker inside recessed Worker L4 core
+				const latestFile = runtime?.lastChanges?.touchedFiles?.[0]?.relativePath;
+				const reportEntry = snap.state.reports?.[node.id];
+				let tickerKind: 'coding' | 'audit' | 'warn' | 'done' | 'idle' = 'idle';
+				let tickerText = (node.goal?.trim() || node.acceptance?.trim() || localize('adeEngTickerReady', "Ready for dispatch")).replace(/\s+/g, ' ');
+				if (visualStatus === 'failure_1' || visualStatus === 'failure_2' || visualStatus === 'failure_3') {
+					tickerKind = 'warn';
+					tickerText = `⚠ ${(runtime?.lastManagerFeedback || runtime?.lastEmployeeFeedback || localize('adeEngTickerRework', "Adversarial rework in progress")).replace(/\s+/g, ' ')}`;
+				} else if (empActive) {
+					tickerKind = 'audit';
+					const cnt = runtime?.lastChanges?.touchedFiles.length ?? 0;
+					tickerText = cnt > 0
+						? localize('adeEngTickerAuditingFiles', "▸ L3 auditing {0} touched file(s)…", cnt)
+						: localize('adeEngTickerAuditing', "▸ L3 verifying diff & acceptance criteria…");
+				} else if (mgrActive) {
+					tickerKind = 'audit';
+					tickerText = localize('adeEngTickerMgrReview', "▸ L2 Manager segment sign-off…");
+				} else if (workerActive) {
+					tickerKind = 'coding';
+					tickerText = latestFile
+						? localize('adeEngTickerCodingFile', "▸ Coding · {0}", latestFile)
+						: localize('adeEngTickerCodingGoal', "▸ Coding · {0}", tickerText);
+				} else if (isLocked) {
+					tickerKind = 'done';
+					tickerText = reportEntry?.summary
+						? `✓ ${reportEntry.summary.replace(/\s+/g, ' ')}`
+						: localize('adeEngTickerVerified', "✓ Verified & locked");
+				} else {
+					tickerText = `· ${tickerText}`;
+				}
+				append(innerCore, $(`div.ade-eng-wrk-ticker.kind-${tickerKind}`, {
+					title: tickerText,
+				}, tickerText));
 
 				// Right-clicking directly on Outer Employee Shell Header vs Inner Worker Core targets that exact role tab!
 				this.canvasRenderDisposables.add(addDisposableListener(empSatellite, EventType.CONTEXT_MENU, e => {
@@ -4022,18 +4327,26 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						this.openPopoverForTarget({ nodeId: node.id, anchorKind: 'worker', tab: 'report' });
 					}));
 				} else {
-					const snippet = (node.goal?.trim() || node.acceptance?.trim() || '').replace(/\s+/g, ' ');
 					append(footLeft, $('span.ade-eng-pod-goal-hint', {
-						title: snippet || node.title,
-					}, snippet || localize('adeEngReadyHint', "Ready")));
+						title: localize('adeEngPipelineReadyTooltip', "Ready — Worker (L4) → Employee Audit (L3) → Manager Sign-off (L2)"),
+					}, localize('adeEngReadyPipelineHint', "Ready · L4→L3→L2")));
 				}
 
 				const touchedCount = runtime?.lastChanges?.touchedFiles.length ?? 0;
 				if (touchedCount > 0) {
+					const diffStats = computeDiffLineStats(runtime?.lastChanges?.combinedDiff);
 					const filesChip = append(footRight, $('button.ade-eng-pod-files-pill', {
 						type: 'button',
-						title: localize('adeEngTouchedFilesBadgeTooltip', "{0} touched file(s) — Click to view diff", touchedCount),
-					}, `${touchedCount}f`));
+						title: localize('adeEngTouchedFilesBadgeTooltip', "{0} touched file(s) (+{1} -{2}) — Click to view diff", touchedCount, diffStats.added, diffStats.removed),
+					}));
+					if (diffStats.added > 0 || diffStats.removed > 0) {
+						append(filesChip, $('span.ade-eng-diff-add', {}, `+${diffStats.added}`));
+						if (diffStats.removed > 0) {
+							append(filesChip, $('span.ade-eng-diff-del', {}, `-${diffStats.removed}`));
+						}
+					} else {
+						append(filesChip, $('span', {}, `${touchedCount}f`));
+					}
 					this.canvasRenderDisposables.add(addDisposableListener(filesChip, EventType.POINTER_DOWN, e => EventHelper.stop(e, true)));
 					this.canvasRenderDisposables.add(addDisposableListener(filesChip, EventType.CLICK, e => {
 						EventHelper.stop(e, true);
@@ -4304,7 +4617,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				return;
 			}
 			const target = e.target as HTMLElement | null;
-			if (target?.closest('.ade-eng-port, .ade-eng-quick-spawn-btn, .ade-eng-node-cfg-btn, .ade-eng-pod-report-btn, .ade-eng-pod-files-pill, .ade-eng-gate-inline-actions')) {
+			if (target?.closest('.ade-eng-port, .ade-eng-quick-spawn-btn, .ade-eng-node-cfg-btn, .ade-eng-pod-report-btn, .ade-eng-pod-files-pill, .ade-eng-gate-inline-actions, .ade-eng-pod-quickbar, .ade-eng-inline-rename')) {
 				return;
 			}
 			EventHelper.stop(e, false);

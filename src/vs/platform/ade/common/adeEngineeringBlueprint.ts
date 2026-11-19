@@ -1556,10 +1556,10 @@ export function computeAutoLayoutPositions(
 	}
 
 	const isVertical = blueprint.metadata.flowDirection === 'TD';
-	const hGap = options?.horizontalGap ?? (isVertical ? 336 : 394);
-	const vGap = options?.verticalGap ?? (isVertical ? 252 : 256);
-	const originX = options?.originX ?? 204;
-	const originY = options?.originY ?? 260;
+	const hGap = options?.horizontalGap ?? (isVertical ? 320 : 332);
+	const vGap = options?.verticalGap ?? (isVertical ? 232 : 228);
+	const originX = options?.originX ?? 192;
+	const originY = options?.originY ?? 250;
 
 	const result = new Map<string, IAdeNodeCanvasPosition>();
 	for (let l = 0; l < layers.length; l++) {

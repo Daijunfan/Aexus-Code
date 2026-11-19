@@ -1278,6 +1278,44 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			return { help: false, json, windowId, action: 'engineering.demo', params: governor ? { governor } : {} };
 		}
 
+		if (sub === 'generate' || sub === 'gen') {
+			let governor: string | undefined;
+			let prompt: string | undefined;
+			let engine: string | undefined;
+			let maxBudgetUsd: number | undefined;
+			let forceStopRunning = false;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (arg === '--prompt' || arg.startsWith('--prompt=')) {
+					prompt = takeOptionVal(ref, '--prompt', args);
+				} else if (arg === '--engine' || arg.startsWith('--engine=')) {
+					engine = takeOptionVal(ref, '--engine', args);
+				} else if (arg === '--max-budget-usd' || arg.startsWith('--max-budget-usd=')) {
+					const raw = takeOptionVal(ref, '--max-budget-usd', args).replace(/^\$/, '');
+					const num = Number(raw);
+					if (!Number.isFinite(num) || num <= 0) {
+						throw new CliUsageError('--max-budget-usd must be a positive number.');
+					}
+					maxBudgetUsd = Math.round(num * 100) / 100;
+				} else if (arg === '--force-stop-running') {
+					forceStopRunning = true;
+				} else if (!arg.startsWith('-') && !prompt) {
+					prompt = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for engineering generate: ${arg}`);
+				}
+			}
+			if (!governor || !prompt) {
+				throw new CliUsageError('Usage: aexus-ade engineering generate --governor <id> --prompt "<goal>" [--engine <eng>] [--max-budget-usd <n>]');
+			}
+			const params: Record<string, unknown> = { governor, prompt, forceStopRunning };
+			if (engine) { params.engine = engine; }
+			if (maxBudgetUsd !== undefined) { params.maxBudgetUsd = maxBudgetUsd; }
+			return { help: false, json, windowId, action: 'engineering.generate', params };
+		}
+
 		if (sub === 'init') {
 			let governor: string | undefined;
 			let onChildren: string | undefined;

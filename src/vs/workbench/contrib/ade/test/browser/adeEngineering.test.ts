@@ -2505,4 +2505,78 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 
 		pane.clearInput();
 	});
+
+	test('Wave 6: prompt bar chip synthesizes a 6-node DAG whose pods render rails, tickers, quick actions and inline rename without a drawer', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:800px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Prompt DAG Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 800, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		// 1. The toolbar prompt button opens the prompt bar; the OAuth example chip applies its tailored 6-node DAG.
+		const promptBarBtn = host.querySelector('.ade-eng-prompt-bar-btn') as HTMLButtonElement;
+		assert.ok(promptBarBtn, 'Toolbar renders the prompt bar button');
+		assert.strictEqual((host.querySelector('.ade-eng-prompt-bar') as HTMLElement).hidden, true, 'Prompt bar starts hidden');
+		promptBarBtn.click();
+		assert.strictEqual((host.querySelector('.ade-eng-prompt-bar') as HTMLElement).hidden, false, 'Clicking the toolbar button opens the prompt bar');
+
+		const oauthChip = host.querySelector('.ade-eng-prompt-chip[data-example-id="oauth-ship"]') as HTMLButtonElement;
+		assert.ok(oauthChip, 'Prompt bar renders the oauth-ship example chip');
+		oauthChip.click();
+
+		await waitForDomCondition(() => host.querySelectorAll('.ade-eng-node').length === 6, 5000);
+		assert.deepStrictEqual(
+			{
+				nodes: h.engineering.getTreeSnapshot(gov.id)?.blueprint.nodes.length,
+				drawer: host.querySelector('.ade-eng-drawer'),
+			},
+			{ nodes: 6, drawer: null },
+		);
+
+		// 2. Every task pod keeps its 268x172 geometry and renders the 3-stage rail, ticker and 4-button quick bar.
+		const taskPods = Array.from(host.querySelectorAll<HTMLElement>('.ade-eng-node.type-task'));
+		assert.strictEqual(taskPods.length, 5, 'The 6-node DAG renders 5 task pods plus 1 user gate');
+		const popoverEl = host.querySelector('.ade-eng-popover') as HTMLElement;
+		for (const pod of taskPods) {
+			const concentric = pod.querySelector('.ade-eng-concentric') as HTMLElement;
+			const style = mainWindow.getComputedStyle(concentric);
+			assert.deepStrictEqual(
+				{
+					width: style.width,
+					height: style.height,
+					stages: pod.querySelectorAll('.ade-eng-stage-rail .ade-eng-stage-seg').length,
+					ticker: Boolean(pod.querySelector('.ade-eng-wrk-ticker')),
+					quickActions: pod.querySelectorAll('.ade-eng-pod-quickbar .ade-eng-pod-qa-btn').length,
+				},
+				{ width: '268px', height: '172px', stages: 3, ticker: true, quickActions: 4 },
+			);
+		}
+		taskPods[0].dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+		assert.strictEqual(popoverEl.classList.contains('open'), false, 'Hovering a pod never opens the floating popover');
+
+		// 3. Double-clicking an unlocked pod title renames it inline on Enter.
+		const titleEl = host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-node-title') as HTMLElement;
+		titleEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+		const renameInput = host.querySelector('.ade-eng-inline-rename') as HTMLInputElement;
+		assert.ok(renameInput, 'Double-clicking the pod title opens the inline rename input');
+		renameInput.value = 'Renamed Interface Contract';
+		renameInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+
+		await waitForDomCondition(() => host.querySelector('.ade-eng-node[data-node-id="N1"] .ade-eng-node-title')?.textContent === 'Renamed Interface Contract');
+		assert.strictEqual(host.querySelector('.ade-eng-inline-rename'), null, 'Committing the rename closes the inline input');
+
+		pane.clearInput();
+	});
 });

@@ -37,6 +37,7 @@ import { normalizeThinkingLevel, parseEngineeringBlueprint, serializeEngineering
 import { AdeBlueprintTemplatePreset, buildBlueprintFromTemplate, listBlueprintTemplates } from '../../../../platform/ade/common/adeBlueprintTemplates.js';
 import { computeTreeFinancialSummary } from '../../../../platform/ade/common/adePricing.js';
 import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
+import { synthesizeBlueprintFromPrompt } from '../../../../platform/ade/common/adePromptToDag.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
@@ -2519,6 +2520,46 @@ export async function executeAdeControlRequest(
 				demo: true,
 				nodeCount: snap.blueprint.nodes.length,
 				managerCount: snap.blueprint.managers.length,
+			};
+		}
+
+		case 'engineering.generate': {
+			if (!engineeringService) {
+				throw new Error('ADE Engineering service is not available.');
+			}
+			await engineeringService.whenReady();
+			const promptText = typeof params.prompt === 'string' ? params.prompt.trim() : '';
+			if (!promptText) {
+				throw new Error('Provide a non-empty prompt to synthesize a DAG blueprint.');
+			}
+			const gov = resolveAgentFromParams(projects, { id: params.governor ?? params.governorSessionId ?? params.id });
+			if (!engineeringService.hasTree(gov.id)) {
+				await engineeringService.initTree({ governorSessionId: gov.id, treeType: 'engineering' });
+			}
+			const synth = synthesizeBlueprintFromPrompt(promptText, {
+				governorSessionId: gov.id,
+				defaultEngine: typeof params.engine === 'string' ? params.engine : (gov.preferredEngineId ?? gov.session?.engineId ?? 'claude-code'),
+				secondaryEngine: typeof params.secondaryEngine === 'string' ? params.secondaryEngine : undefined,
+				maxBudgetUsd: typeof params.maxBudgetUsd === 'number' ? params.maxBudgetUsd : undefined,
+			});
+			const blueprintText = serializeEngineeringBlueprint(synth.blueprint);
+			const snap = await engineeringService.applyBlueprint({
+				governorSessionId: gov.id,
+				blueprintText,
+				forceStopRunning: Boolean(params.forceStopRunning),
+			});
+			if (params.open !== false) {
+				modes.setMode('ade');
+				await engineeringService.openEngineeringEditor(gov.id);
+			}
+			return {
+				governorSessionId: gov.id,
+				archetype: synth.archetype,
+				treeType: synth.treeType,
+				tracks: synth.tracks,
+				nodeCount: snap.blueprint.nodes.length,
+				managerCount: snap.blueprint.managers.length,
+				maxBudgetUsd: snap.blueprint.metadata.maxBudgetUsd,
 			};
 		}
 

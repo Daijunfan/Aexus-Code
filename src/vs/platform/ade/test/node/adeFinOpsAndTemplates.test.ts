@@ -31,6 +31,7 @@ import {
 	formatUsdCost,
 	resolveModelPricing,
 } from '../../common/adePricing.js';
+import { synthesizeBlueprintFromPrompt } from '../../common/adePromptToDag.js';
 import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../common/adeRunReport.js';
 import {
 	computeAutoLayoutPositions,
@@ -863,6 +864,88 @@ suite('AdeEngineeringBlueprintBudgetAndLayout', () => {
 				autoLayout: hasOverlappingPodPositions(autoLaidOut),
 			},
 			{ legacy: true, crampedPair: true, single: false, autoLayout: false },
+		);
+	});
+});
+
+suite('AdePromptToDag', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('synthesizes a 6-node worktree engineering DAG with 3 parallel tracks that round-trips through serialize/parse', () => {
+		const result = synthesizeBlueprintFromPrompt(
+			'Build OAuth2 GitHub and Google login, migrate user schema, add E2E tests',
+			{ governorSessionId: 'gov-prompt-feature' },
+		);
+		const { blueprint } = result;
+
+		assert.deepStrictEqual(
+			{
+				archetype: result.archetype,
+				treeType: result.treeType,
+				isolation: blueprint.metadata.workspaceIsolation,
+				tracks: result.tracks,
+				nodeIds: blueprint.nodes.map(n => n.id),
+				overlapping: hasOverlappingPodPositions(blueprint.nodes),
+			},
+			{
+				archetype: 'migration',
+				treeType: 'engineering',
+				isolation: 'worktree',
+				tracks: ['OAuth2 GitHub', 'Google login', 'User schema'],
+				nodeIds: ['N1', 'N2', 'N3', 'N4', 'U1', 'N5'],
+				overlapping: false,
+			},
+		);
+
+		const parsed = parseEngineeringBlueprint(serializeEngineeringBlueprint(blueprint));
+		assert.deepStrictEqual(
+			{
+				metadata: parsed.metadata,
+				nodeIds: parsed.nodes.map(n => n.id),
+				titles: parsed.nodes.map(n => n.title),
+				edges: parsed.edges,
+			},
+			{
+				metadata: blueprint.metadata,
+				nodeIds: blueprint.nodes.map(n => n.id),
+				titles: blueprint.nodes.map(n => n.title),
+				edges: blueprint.edges,
+			},
+		);
+	});
+
+	test('detects research prompts as shared-isolation research trees', () => {
+		const result = synthesizeBlueprintFromPrompt(
+			'Benchmark Redis vs Dragonfly vs Garnet latency and write RFC',
+			{ governorSessionId: 'gov-prompt-research' },
+		);
+
+		assert.deepStrictEqual(
+			{
+				archetype: result.archetype,
+				treeType: result.treeType,
+				isolation: result.blueprint.metadata.workspaceIsolation,
+			},
+			{ archetype: 'research', treeType: 'research', isolation: 'shared' },
+		);
+	});
+
+	test('detects Chinese bugfix prompts while keeping the engineering tree type', () => {
+		const result = synthesizeBlueprintFromPrompt(
+			'修复 WebSocket 断线重连内存泄漏并补齐回归测试',
+			{ governorSessionId: 'gov-prompt-bugfix' },
+		);
+
+		assert.deepStrictEqual(
+			{ archetype: result.archetype, treeType: result.treeType },
+			{ archetype: 'bugfix', treeType: 'engineering' },
+		);
+	});
+
+	test('rejects an empty prompt', () => {
+		assert.throws(
+			() => synthesizeBlueprintFromPrompt('   ', { governorSessionId: 'gov-prompt-empty' }),
+			/Describe what you want/,
 		);
 	});
 });

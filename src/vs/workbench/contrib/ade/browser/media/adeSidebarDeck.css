@@ -501,24 +501,26 @@
 	border-color: color-mix(in srgb, var(--ade-deck-severity-info) 42%, transparent);
 }
 
-/* Preserve readable Governor session title & unclipped rank pill when paired with worktree badge */
+/* Preserve readable Governor session title & unclipped Engineering/Research + rank pills */
 .monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-tree-label-host {
-	min-width: 48px;
+	min-width: 44px;
 }
 
 .monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-tree-trailing {
 	gap: 3px;
-	flex: 0 1 auto;
+	flex: 0 0 auto;
 	min-width: 0;
-	overflow: hidden;
+	overflow: visible;
 }
 
 .monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-worktree-badge {
-	max-width: 72px;
-	min-width: 20px;
-	flex: 0 1 auto;
-	overflow: hidden;
-	text-overflow: ellipsis;
+	max-width: none;
+	flex: 0 0 auto;
+	white-space: nowrap;
+	font-size: 8.5px;
+	padding: 0 4px;
+	gap: 2px;
+	overflow: visible;
 }
 
 .monaco-workbench .ade-tree-row:has(.ade-worktree-badge:not([hidden])) .ade-role-badge {

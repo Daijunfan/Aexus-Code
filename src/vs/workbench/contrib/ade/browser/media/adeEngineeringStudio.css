@@ -99,7 +99,7 @@
 	white-space: nowrap;
 }
 
-@container ade-eng (max-width: 1040px) {
+@container ade-eng (max-width: 1080px) {
 	.monaco-workbench .ade-eng-editor .ade-eng-toolbar.floating {
 		gap: 4px;
 		left: 8px;
@@ -107,7 +107,7 @@
 	}
 	.monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.island {
 		padding: 0 5px;
-		gap: 3px;
+		gap: 2px;
 	}
 	.monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.left.island {
 		max-width: none;
@@ -119,24 +119,24 @@
 		display: none;
 	}
 	.monaco-workbench .ade-eng-editor .ade-eng-status-pill {
-		padding: 0 6px;
-		font-size: 10.5px;
+		padding: 0 5px;
+		font-size: 10px;
 	}
 	.monaco-workbench .ade-eng-editor .ade-eng-progress-pill {
 		padding: 0 4px;
 		font-size: 10px;
 	}
 	.monaco-workbench .ade-eng-editor .ade-eng-tokens-pill {
-		padding: 0 6px;
+		padding: 0 5px;
 		font-size: 10px;
 	}
 	.monaco-workbench .ade-eng-editor .ade-eng-tool-btn {
-		padding: 0 5px;
-		font-size: 11px;
+		padding: 0 4px;
+		font-size: 10.5px;
 	}
 	.monaco-workbench .ade-eng-editor .ade-eng-action-btn {
-		padding: 0 8px;
-		font-size: 11px;
+		padding: 0 7px;
+		font-size: 10.5px;
 	}
 }
 
@@ -283,6 +283,12 @@
 		color-mix(in srgb, var(--ade-rank-mgr) 9%, var(--vscode-editor-background)) 100%
 	);
 	box-shadow: 0 -3px 10px rgba(0, 0, 0, 0.2);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-segment-label.compact {
+	flex: 0 0 auto;
+	overflow: visible;
+	white-space: nowrap;
 }
 
 .monaco-workbench .ade-eng-editor .ade-eng-segment-tok,
@@ -1920,9 +1926,9 @@
 	color: #38bdf8;
 	background: rgba(56, 189, 248, 0.14);
 	border: 1px solid rgba(56, 189, 248, 0.34);
-	flex: 0 1 74px;
+	flex: 0 1 128px;
 	min-width: 0;
-	max-width: 74px;
+	max-width: 128px;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -2762,6 +2768,373 @@
 	background: rgba(5, 150, 105, 0.12);
 	border-color: rgba(5, 150, 105, 0.45);
 	color: #047857;
+}
+
+/* ============================================================================
+ * Wave 6 · Prompt-to-DAG Bar, Living Pod Ticker, 3-Stage Rail & Quick-Action Halo
+ * ============================================================================ */
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-btn.prompt {
+	background: linear-gradient(135deg, rgba(99, 102, 241, 0.24), rgba(56, 189, 248, 0.22));
+	border-color: rgba(129, 140, 248, 0.56);
+	color: #c7d2fe;
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-starter-btn.prompt {
+	background: linear-gradient(135deg, rgba(99, 102, 241, 0.14), rgba(37, 99, 235, 0.12));
+	border-color: rgba(99, 102, 241, 0.45);
+	color: #4338ca;
+}
+
+/* Floating Prompt-to-DAG Command Bar (Cmd/Ctrl+K) */
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-bar {
+	position: absolute;
+	top: 56px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 36;
+	width: min(680px, calc(100% - 32px));
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 10px 12px;
+	border-radius: 14px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #141824) 94%, #0b0e17);
+	border: 1px solid rgba(129, 140, 248, 0.52);
+	box-shadow: 0 18px 46px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(56, 189, 248, 0.16);
+	backdrop-filter: blur(18px) saturate(1.4);
+	box-sizing: border-box;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-bar[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-input-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-ico {
+	color: #a5b4fc;
+	font-size: 15px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	height: 32px;
+	padding: 0 10px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: color-mix(in srgb, var(--vscode-input-background, #0d111a) 90%, transparent);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 12.5px;
+	outline: none;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-input:focus {
+	border-color: #818cf8;
+	box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.22);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-submit-btn {
+	height: 32px;
+	padding: 0 13px;
+	border-radius: 8px;
+	border: 1px solid rgba(129, 140, 248, 0.65);
+	background: linear-gradient(135deg, #4f46e5, #2563eb);
+	color: #ffffff;
+	font-size: 11.5px;
+	font-weight: 700;
+	cursor: pointer;
+	white-space: nowrap;
+	flex-shrink: 0;
+	transition: filter 120ms ease, transform 120ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-submit-btn:hover {
+	filter: brightness(1.12);
+	transform: translateY(-0.5px);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-chips {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-chips-label {
+	font-size: 10.5px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-chip {
+	height: 22px;
+	padding: 0 9px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 10.5px;
+	font-weight: 600;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-chip:hover {
+	border-color: #818cf8;
+	background: rgba(129, 140, 248, 0.16);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-prompt-chip.demo {
+	margin-left: auto;
+	border-color: rgba(52, 211, 153, 0.5);
+	background: rgba(16, 185, 129, 0.14);
+	color: #34d399;
+}
+
+/* 3-Stage Adversarial Micro-Pipeline Rail (L4 Code -> L3 Audit -> L2 Sign-off) */
+.monaco-workbench .ade-eng-editor .ade-eng-stage-rail {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	margin-left: auto;
+	padding: 2px 5px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg {
+	display: inline-block;
+	width: 10px;
+	height: 3.5px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	transition: background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg.s-code.st-active,
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg.s-code.st-done {
+	background: #34d399;
+	box-shadow: 0 0 6px rgba(52, 211, 153, 0.55);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg.s-audit.st-active,
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg.s-audit.st-done {
+	background: #a78bfa;
+	box-shadow: 0 0 6px rgba(167, 139, 250, 0.55);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg.s-mgr.st-active {
+	background: #818cf8;
+	box-shadow: 0 0 6px rgba(129, 140, 248, 0.55);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg.s-mgr.st-done {
+	background: #34d399;
+	box-shadow: 0 0 6px rgba(52, 211, 153, 0.55);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-stage-seg.st-warn {
+	background: #f59e0b;
+	box-shadow: 0 0 6px rgba(245, 158, 11, 0.6);
+}
+
+/* Live 1-Line Activity Ticker inside Recessed Worker L4 Core */
+.monaco-workbench .ade-eng-editor .ade-eng-inner-core {
+	padding: 5px 9px 5px;
+	gap: 3px;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wrk-ticker {
+	margin-top: 1px;
+	padding: 2px 6px;
+	border-radius: 5px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 9.5px;
+	line-height: 14px;
+	color: var(--vscode-descriptionForeground);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wrk-ticker.kind-coding {
+	color: #6ee7b7;
+	background: rgba(16, 185, 129, 0.11);
+	border-color: rgba(52, 211, 153, 0.26);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wrk-ticker.kind-audit {
+	color: #c4b5fd;
+	background: rgba(139, 92, 246, 0.12);
+	border-color: rgba(167, 139, 250, 0.28);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wrk-ticker.kind-done {
+	color: #a7f3d0;
+	background: rgba(16, 185, 129, 0.08);
+	border-color: rgba(52, 211, 153, 0.2);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-wrk-ticker.kind-warn {
+	color: #fcd34d;
+	background: rgba(245, 158, 11, 0.14);
+	border-color: rgba(245, 158, 11, 0.34);
+}
+
+/* Git Diff Magnitude Pill (+add -del) */
+.monaco-workbench .ade-eng-editor .ade-eng-pod-files-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-diff-add {
+	color: #34d399;
+	font-weight: 700;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-diff-del {
+	color: #f87171;
+	font-weight: 700;
+}
+
+/* Hover Quick-Action Micro-Halo (floating cleanly above top-right of hovered pod) */
+.monaco-workbench .ade-eng-editor .ade-eng-pod-quickbar {
+	position: absolute;
+	top: -26px;
+	right: 8px;
+	z-index: 12;
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px 4px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #141824) 94%, #0b0e17);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);
+	opacity: 0;
+	pointer-events: none;
+	transform: translateY(4px) scale(0.96);
+	transition: opacity 130ms ease, transform 130ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-concentric:hover .ade-eng-pod-quickbar,
+.monaco-workbench .ade-eng-editor .ade-eng-concentric:focus-within .ade-eng-pod-quickbar {
+	opacity: 1;
+	pointer-events: auto;
+	transform: translateY(0) scale(1);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-pod-qa-btn {
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: none;
+	border-radius: 999px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: background-color 110ms ease, color 110ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-pod-qa-btn:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-pod-qa-btn.wrk:hover {
+	color: #34d399;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-pod-qa-btn.emp:hover {
+	color: #c4b5fd;
+}
+
+/* Inline Double-Click Title Rename Input */
+.monaco-workbench .ade-eng-editor .ade-eng-inline-rename {
+	width: 100%;
+	height: 20px;
+	padding: 0 5px;
+	border-radius: 4px;
+	border: 1px solid #818cf8;
+	background: var(--vscode-input-background, #0d111a);
+	color: var(--vscode-input-foreground, #f8fafc);
+	font-size: 12px;
+	font-weight: 700;
+	outline: none;
+	box-sizing: border-box;
+}
+
+/* Light Modern overrides for Wave 6 */
+.monaco-workbench.vs .ade-eng-editor .ade-eng-prompt-bar {
+	background: rgba(255, 255, 255, 0.96);
+	border-color: rgba(79, 70, 229, 0.34);
+	box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-prompt-ico {
+	color: #4f46e5;
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-prompt-chip.demo {
+	color: #047857;
+	border-color: rgba(5, 150, 105, 0.4);
+	background: rgba(5, 150, 105, 0.1);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-wrk-ticker {
+	background: rgba(15, 23, 42, 0.04);
+	border-color: rgba(15, 23, 42, 0.08);
+	color: #475569;
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-wrk-ticker.kind-coding,
+.monaco-workbench.vs .ade-eng-editor .ade-eng-wrk-ticker.kind-done {
+	color: #047857;
+	background: rgba(16, 185, 129, 0.1);
+	border-color: rgba(5, 150, 105, 0.22);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-wrk-ticker.kind-audit {
+	color: #6d28d9;
+	background: rgba(139, 92, 246, 0.1);
+	border-color: rgba(109, 40, 217, 0.22);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-wrk-ticker.kind-warn {
+	color: #b45309;
+	background: rgba(245, 158, 11, 0.12);
+	border-color: rgba(217, 119, 6, 0.28);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-pod-quickbar {
+	background: rgba(255, 255, 255, 0.96);
+	border-color: rgba(15, 23, 42, 0.14);
+	box-shadow: 0 6px 18px rgba(15, 23, 42, 0.14);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-diff-add {
+	color: #059669;
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-diff-del {
+	color: #dc2626;
 }
 
 /* ============================================================================

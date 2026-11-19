@@ -26,12 +26,26 @@
 ---
 
 > [!TIP]
-> **10 秒零成本互动体验（`$0.00` 消耗、零源码改动、无需 API Key）：**
-> 启动 Aexus Code 后按 `Cmd/Ctrl+Shift+P` 执行 **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`**（或在终端执行 `aexus-ade engineering demo`），即刻观看「契约节点 ➔ 三路 Git Worktree 并行扩散 ➔ Employee L3 对抗质检拦截与自愈 ➔ 实时四层 FinOps 与甘特图 ➔ 人工可点击 **`✓ Approve`** 验收门禁 ➔ 一键导出**矢量 SVG 架构图**与 **GitHub PR 验收报告**」全流程！随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`** 模式。
+> **一句话秒级生成多智能体组织图（`Cmd/Ctrl+K`），或 10 秒零成本互动体验（`$0.00` 消耗）：**
+> - **自然语言一键生成 DAG（`Cmd/Ctrl+K`）**：在画布按 `Cmd/Ctrl+K` 输入一句话（如*"构建 OAuth2 登录、迁移用户表并补齐 E2E 测试"*），`<50ms` 内自动拆解并行 Git Worktree 泳道、四级验收任务舱与人工门禁，也支持一键点击内置示例胶囊直接体验！
+> - **10 秒零 Token 互动演练（零源码改动、无需 API Key）**：按 `Cmd/Ctrl+Shift+P` 执行 **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`**（或 `aexus-ade engineering demo`），即刻体验完整四级协作、人工点击 **`✓ Approve`** 放行门禁，并一键导出**矢量 SVG 架构图**与 **GitHub PR 验收报告**。按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
 
 <p align="center">
-  <img src="assets/08-finops-budget-guardrails.png" width="100%" alt="Aexus Code — 嵌套双壳任务舱 DAG、Git Worktree 分支段框、四层 FinOps 成本分析与硬预算熔断护栏" />
+  <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Aexus Code — 活态嵌套双壳任务舱、三段式对抗流水线、实时动态播报、Git Worktree 泳道与人工发布门禁" />
 </p>
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="assets/13-prompt-to-dag-bar.png" width="100%" alt="自然语言一键生成 DAG 浮条（Cmd/Ctrl+K）" />
+      <p align="center"><sub><strong>一句话生成 DAG（<code>Cmd/Ctrl+K</code>）— 50ms 拆解多路并行智能体组织图</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="assets/08-finops-budget-guardrails.png" width="100%" alt="四层 Agent FinOps 美元统计、缓存省钱与硬预算熔断护栏" />
+      <p align="center"><sub><strong>四层 Agent FinOps、缓存省钱统计与硬预算熔断护栏</strong></sub></p>
+    </td>
+  </tr>
+</table>
 
 ## 为什么构建 Aexus Code？
 
@@ -169,7 +183,7 @@
 </p>
 
 - **极大无分支路径（Maximal Non-Branching Path）自动切分**：只需套用模板、拖拽节点或编辑 Markdown + Mermaid，系统 100% 自动在分叉前、合流后与 `user_gate` 边界切分 `MGR · L2` 管辖段框（Worktree 模式下段顶实时呈现隔离分支徽章），并同步生成锁定的左栏四级会话树。
-- **装甲嵌套双壳任务舱（`268×172`）**：每个任务节点都是一枚完整实体舱——外层 **`EMPLOYEE · L3`** 验收壳在四边物理包裹内层凹陷的 **`WORKER · L4`** 执行核，实时呈现阶段计时徽章（`Worker · Ns` / `Emp Audit · Ns` / `Mgr Review · Ns`）、改动文件计数与节点级 Token + `$USD` 消耗。
+- **装甲嵌套双壳「活态」任务舱（`268×172`）**：外层 **`EMPLOYEE · L3`** 验收壳顶脊配备实时 **三段式对抗流水线指示条（`L4 编码 ▸ L3 审计 ▸ L2 签收`）**，四边物理包裹内层凹陷的 **`WORKER · L4`** 执行核——内置 **单行实时动态播报条（Activity Ticker）**、**代码变更规模徽章（`+N -M`）**、节点级 `$USD` 消耗、**Figma 式悬停快捷操作微浮条（`💬 🛡 ⚙ +`）** 与 **双击标题就地重命名**。
 - **画布聚光灯过滤、小地图、吸附对齐与完整撤销/重做**：底部 HUD 支持一键按状态聚光聚焦（`All | Active | Gates | Issues`），悬浮 **DAG MAP** 支持点击/拖拽飞镜，悬停输出端口 `+` 键 1 键派生下游任务（`Alt+单击` 派生 `User Gate`），全部操作支持 `Cmd/Ctrl+Z` 撤销重做。
 - **双层验收闭环与三级失败熔断（Circuit Breaker）**：
   - `Employee` 内部打回 1–2 次在原会话增量返工；第 3 次自动唤醒段 `Manager` 评估并授予第 4 次指导机会；

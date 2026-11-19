@@ -26,12 +26,26 @@
 ---
 
 > [!TIP]
-> **Try the Full 4-Tier DAG Studio in 10 Seconds (`$0.00` API Spend, Zero File Changes):**
-> Launch Aexus Code and press `Cmd/Ctrl+Shift+P` → **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`** (or run `aexus-ade engineering demo`) — watch Contract → 3-way parallel Git Worktree fan-out → adversarial L3 QA catch & recovery → live 4-tier FinOps & Execution Gantt → clickable golden **`Release Readiness Gate`** → 1-click **Vector SVG** & **GitHub PR Audit Report** export with zero API keys required! Toggle **`ADE ⇄ IDE`** anytime with `Alt+Cmd+A` (`Alt+Ctrl+A`).
+> **From One Sentence to a Full Multi-Agent Org Chart in 1 Second (`Cmd/Ctrl+K`) — or Try the 0-Token Live Demo:**
+> - **Prompt-to-DAG (`Cmd/Ctrl+K`)**: Press `Cmd/Ctrl+K` on any Engineering or Research canvas, type a single sentence (e.g. *"Build OAuth2 GitHub and Google login, migrate user schema, add E2E tests"*), and watch Aexus Code synthesize parallel Git Worktree lanes, adversarial L3 review pods, and a Release Gate in `<50ms` — or click one of the 3 built-in prompt chips!
+> - **10-Second Interactive Demo (`$0.00` Spend, Zero File Changes)**: Press `Cmd/Ctrl+Shift+P` → **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`** (or `aexus-ade engineering demo`) to watch the entire 4-tier choreography live, approve Gate `U1`, and export a shareable **Vector SVG** + **GitHub PR Audit Report**. Toggle **`ADE ⇄ IDE`** anytime with `Alt+Cmd+A` (`Alt+Ctrl+A`).
 
 <p align="center">
-  <img src="docs/assets/08-finops-budget-guardrails.png" width="100%" alt="Aexus Code — Armored Nested Dual-Shell DAG, Git Worktree Segment Lanes, 4-Tier FinOps & Hard Budget Guardrail" />
+  <img src="docs/assets/14-living-pods-interactive-demo.png" width="100%" alt="Aexus Code — Living Armored Dual-Shell Pods, 3-Stage Adversarial Rail, Live Activity Tickers, Git Worktree Lanes &amp; Release Readiness Gate" />
 </p>
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/13-prompt-to-dag-bar.png" width="100%" alt="Prompt-to-DAG Floating Command Bar (Cmd/Ctrl+K) — One Sentence to Parallel Multi-Agent Org Chart" />
+      <p align="center"><sub><strong>Prompt-to-DAG (<code>Cmd/Ctrl+K</code>) — One Sentence ➔ Full Multi-Agent DAG in &lt;50ms</strong></sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/08-finops-budget-guardrails.png" width="100%" alt="4-Tier FinOps, Prompt-Cache Dollar Savings &amp; Hard Budget Circuit Breaker" />
+      <p align="center"><sub><strong>4-Tier Agent FinOps, Cache Savings &amp; Hard Budget Circuit Breaker</strong></sub></p>
+    </td>
+  </tr>
+</table>
 
 ## Why Aexus Code?
 
@@ -169,7 +183,7 @@ Right-click any top-level `Governor` and select **`Engineering`** — or invoke 
 </p>
 
 - **Algorithmic Maximal Non-Branching Path (`MNP`) Partitioning**: Author nodes visually, load a built-in Recipe, or edit Markdown + Mermaid directly; Aexus Code automatically partitions linear segments between forks, joins, and `user_gate` boundaries into dedicated `MGR · L2` segment lanes (with live Git branch badges in worktree mode) and pre-builds the locked 4-tier sidebar hierarchy.
-- **Armored Nested Dual-Shell Task Pods (`268×172`)**: Every task node is one cohesive pod — an outer **`EMPLOYEE · L3`** verification shell physically enclosing on all four sides a recessed inner **`WORKER · L4`** execution core, complete with verdict chips, live phase timers (`Worker · Ns` / `Emp Audit · Ns` / `Mgr Review · Ns`), touched-file badges, and per-pod token + `$USD` footer.
+- **Armored Nested Dual-Shell Task Pods (`268×172`) with Living Agent Telemetry**: Every task node is one cohesive pod — an outer **`EMPLOYEE · L3`** verification shell (with a live **3-stage adversarial rail `L4 Code ▸ L3 Audit ▸ L2 Sign-off`**) physically enclosing a recessed inner **`WORKER · L4`** execution core featuring a **live 1-line activity ticker**, **Git diff magnitude pill (`+N -M`)**, per-pod `$USD` footer, **Figma-style hover quick-action halo (`💬 🛡 ⚙ +`)**, and **double-click inline title rename**.
 - **Canvas Spotlight Filters, Minimap, Snap Guides & Undo/Redo**: Focus large graphs in one click (`All | Active | Gates | Issues`) without unmounting pods, fly the camera via the floating **`DAG MAP`**, quick-spawn connected nodes via hover `+` (`Alt+Click` for a `User Gate`), and undo/redo every edit with `Cmd/Ctrl+Z`.
 - **Dual-Layer Review Loop & 3-Stage Circuit Breaker**:
   - `Employee` internal rejections (attempts 1–2) iterate in-place on the existing `Worker` session; a 3rd rejection escalates to the segment `Manager`, who resets retry counters and grants a guided 4th attempt.
