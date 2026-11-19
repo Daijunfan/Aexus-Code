@@ -9,36 +9,6 @@ name: Code OSS (workspace images)
 # The daily and manual runs also prepare the WSL distribution of the Windows smoke tests (the
 # wsl-distro job), and cache the apt packages of the Linux test jobs (the linux-packages job).
 on:
-  # Every day, so that there is always a recent image of main: the images are kept for 2 days
-  schedule:
-    - cron: '0 5 * * *'
-  # On pushes, only when an input of the images changes: the source code doesn't need to be current,
-  # as the checkout of a job fetches and writes only what changed since the commit of its image
-  push:
-    branches:
-      - main
-    # The inputs of the install (the pnpm-lock.yaml, pnpm settings and pnpmfile of the install roots,
-    # and the install scripts in build/npm), of the native builds (see NATIVE_BUILD_INPUTS in
-    # workspace_image/image.ts) and of the prepared Electron (see the stamp in
-    # .github/actions/setup-electron/action.yml)
-    paths:
-      - '**/pnpm-lock.yaml'
-      - '**/pnpm-workspace.yaml'
-      - '**/.pnpmfile.mjs'
-      - package.json
-      - remote/package.json
-      - .nvmrc
-      - extensions/copilot/.nvmrc
-      - build/npm/**
-      - build/checksums/electron.txt
-      - build/lib/electron.ts
-      - build/lib/electronVersion.ts
-      - product.json
-      - resources/darwin/*.icns
-      - resources/win32/code.ico
-      - build/.cachesalt
-      - .github/workflows/pr-workspace-images.yml
-      - .github/workflows/workspace_image/**
   workflow_dispatch:
   # Lets a temporary workflow on a branch build the images of the branch, to test the steps of a job
   # that uses them (image.ts restore --branch)

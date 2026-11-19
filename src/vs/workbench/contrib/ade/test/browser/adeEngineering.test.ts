@@ -2451,4 +2451,58 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		heldN1.reply.complete('done');
 		pane.clearInput();
 	});
+
+	test('Wave 5: Starter Onboarding Banner launches the zero-spawn interactive demo, exposes the FinOps SVG export, and stops cleanly', async () => {
+		const host = append(mainWindow.document.body, $('div.monaco-workbench', { style: 'position:fixed;left:0;top:0;width:1200px;height:800px;' }));
+		store.add({ dispose: () => host.remove() });
+
+		const h = createEngineeringHarness();
+		await h.engineering.whenReady();
+		const sessions = h.instantiation.get(IAdeSessionsService);
+		const gov = await createGovernor(h.projects, sessions, 'Starter Banner Gov');
+		await h.engineering.initTree({ governorSessionId: gov.id });
+
+		const fakeGroup = new class extends mock<IEditorGroup>() {
+			override readonly id = 1;
+		}();
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, fakeGroup));
+		pane.create(host);
+		pane.layout({ width: 1200, height: 800, top: 0, left: 0 } as never);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		// 1. A pristine single-node idle tree renders the onboarding banner with both CTAs.
+		const banner = host.querySelector('.ade-eng-starter-banner') as HTMLElement;
+		assert.ok(banner && !banner.hidden, 'Fresh single-node idle tree renders the starter onboarding banner');
+		assert.strictEqual(banner.classList.contains('demo-active'), false);
+		const recipesBtn = banner.querySelector('.ade-eng-starter-btn.primary') as HTMLButtonElement;
+		const demoBtn = banner.querySelector('.ade-eng-starter-btn.demo') as HTMLButtonElement;
+		assert.ok(recipesBtn && recipesBtn.textContent?.includes('Blueprint Recipes'), 'Banner renders the Browse Recipes button');
+		assert.ok(demoBtn && demoBtn.textContent?.includes('Interactive Demo'), 'Banner renders the Interactive Demo button');
+
+		// 2. Clicking Demo simulates the 6-node recipe with zero real CLI spawns and no legacy drawer.
+		const spawnsBeforeDemo = h.createdSessions.length;
+		demoBtn.click();
+		await waitForDomCondition(() => Boolean(host.querySelector('.ade-eng-starter-banner.demo-active')), 5000);
+		assert.strictEqual(h.engineering.isDemoSimulation?.(gov.id), true, 'Demo mode becomes active');
+		assert.strictEqual(h.engineering.getTreeSnapshot(gov.id)?.blueprint.nodes.length, 6, 'Demo applies the 6-node feature-ship blueprint');
+		await waitForDomCondition(() => host.querySelectorAll('.ade-eng-node').length === 6, 5000);
+		assert.strictEqual(h.createdSessions.length, spawnsBeforeDemo, 'Demo simulation MUST NOT spawn any real CLI sessions');
+		assert.strictEqual(host.querySelector('.ade-eng-drawer'), null, 'Demo simulation never reintroduces the legacy right-hand drawer');
+
+		// 3. The FinOps analytics card exposes the SVG export action.
+		(host.querySelector('.ade-eng-tokens-pill') as HTMLElement).click();
+		const analyticsCard = host.querySelector('.ade-eng-token-analytics-card') as HTMLElement;
+		assert.strictEqual(analyticsCard.hidden, false, 'Token pill opens the FinOps analytics card');
+		assert.ok(analyticsCard.querySelector('.ade-eng-ta-svg-btn'), 'FinOps analytics card renders the SVG export button');
+
+		// 4. Stop Demo exits demo mode cleanly.
+		const stopDemoBtn = Array.from(host.querySelectorAll<HTMLButtonElement>('.ade-eng-starter-btn')).find(btn => btn.textContent === 'Stop Demo');
+		assert.ok(stopDemoBtn, 'Demo-active banner renders the Stop Demo button');
+		stopDemoBtn.click();
+		await waitForDomCondition(() => h.engineering.isDemoSimulation?.(gov.id) === false, 5000);
+		assert.strictEqual(h.engineering.isDemoSimulation?.(gov.id), false, 'stopTree cleanly exits demo simulation mode');
+
+		pane.clearInput();
+	});
 });

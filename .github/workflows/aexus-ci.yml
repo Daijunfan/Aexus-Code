@@ -1,0 +1,103 @@
+name: Aexus Code CI
+
+on:
+  push:
+    branches:
+      - main
+      - aexus/main
+  pull_request:
+    branches:
+      - main
+      - aexus/main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aexus-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agents-cli-and-cross-platform:
+    name: Agents & CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout Aexus Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run aexus-agents & CLI unit tests
+        run: node --test --experimental-strip-types extensions/aexus-agents/test/*.test.*
+
+      - name: Smoke-check standalone aexus-ade CLI (doctor, version, completion)
+        run: |
+          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts --version
+          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts doctor --project . --json
+          node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts completion zsh > /dev/null
+        shell: bash
+
+  docs-and-blueprints-integrity:
+    name: Docs, Blueprints & Community Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Aexus Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Verify relative markdown links, screenshots & blueprint schemas
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const docs = [
+              "README.md",
+              "docs/README.zh-CN.md",
+              "CONTRIBUTING.md",
+              "SECURITY.md",
+              "CODE_OF_CONDUCT.md",
+              "CHANGELOG.md",
+              "examples/blueprints/README.md"
+            ];
+            let checked = 0;
+            const missing = [];
+            for (const doc of docs) {
+              if (!fs.existsSync(doc)) { missing.push(doc); continue; }
+              const text = fs.readFileSync(doc, "utf8");
+              const re = /(?:src|href)="([^"]+)"|\]\(([^)]+)\)/g;
+              let m;
+              while ((m = re.exec(text))) {
+                const raw = (m[1] || m[2] || "").trim();
+                if (!raw || /^(https?:|mailto:|#)/i.test(raw)) continue;
+                const clean = raw.split("#")[0].split("?")[0];
+                if (!clean) continue;
+                const target = path.resolve(path.dirname(doc), clean);
+                checked++;
+                if (!fs.existsSync(target)) missing.push(`${doc} -> ${raw}`);
+              }
+            }
+            const blueprints = fs.readdirSync("examples/blueprints").filter(f => f.endsWith(".md") && f !== "README.md");
+            for (const bp of blueprints) {
+              const content = fs.readFileSync(path.join("examples/blueprints", bp), "utf8");
+              if (!content.includes("```mermaid") || !content.includes("## Tree Metadata") || !content.includes("## Auto-Partitioned Managers")) {
+                missing.push(`invalid blueprint structure: examples/blueprints/${bp}`);
+              }
+            }
+            if (missing.length) {
+              console.error("Integrity failures:\n" + missing.join("\n"));
+              process.exit(1);
+            }
+            console.log(`Verified ${checked} doc links/assets and ${blueprints.length} example blueprints.`);
+          '

@@ -69,6 +69,7 @@ import {
 	estimateTokenUsageCostUsd,
 	formatUsdCost,
 } from '../../../../platform/ade/common/adePricing.js';
+import { buildBlueprintFromTemplate } from '../../../../platform/ade/common/adeBlueprintTemplates.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -442,6 +443,8 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 	private readonly chatService: IChatService | undefined;
 	private readonly scmService: ISCMService | undefined;
 	private readonly trees = new Map<string, IManagedTreeEntry>();
+	private readonly demoTimers = new Map<string, number[]>();
+	private readonly demoActive = new Set<string>();
 	private readonly readyPromise: Promise<void>;
 	private nextRunToken = 1;
 	private watchdogTimer: number | undefined;
@@ -482,11 +485,346 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 	}
 
 	override dispose(): void {
+		for (const govId of [...this.demoTimers.keys()]) {
+			this.clearDemoSimulation(govId);
+		}
 		if (this.watchdogTimer !== undefined) {
 			mainWindow.clearInterval(this.watchdogTimer);
 			this.watchdogTimer = undefined;
 		}
 		super.dispose();
+	}
+
+	private clearDemoSimulation(governorSessionId: string): void {
+		const handles = this.demoTimers.get(governorSessionId);
+		if (handles) {
+			for (const h of handles) {
+				mainWindow.clearTimeout(h);
+			}
+			this.demoTimers.delete(governorSessionId);
+		}
+		this.demoActive.delete(governorSessionId);
+	}
+
+	private scheduleDemoStep(governorSessionId: string, delayMs: number, fn: () => void): void {
+		const handle = mainWindow.setTimeout(() => {
+			if (!this.demoActive.has(governorSessionId)) {
+				return;
+			}
+			fn();
+		}, delayMs);
+		const arr = this.demoTimers.get(governorSessionId) ?? [];
+		arr.push(handle);
+		this.demoTimers.set(governorSessionId, arr);
+	}
+
+	isDemoSimulation(governorSessionId: string): boolean {
+		return this.demoActive.has(governorSessionId);
+	}
+
+	async startDemoSimulation(governorSessionId: string): Promise<IAdeEngineeringTreeSnapshot> {
+		await this.readyPromise;
+		const existing = this.trees.get(governorSessionId);
+		if (!existing) {
+			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", governorSessionId));
+		}
+
+		// Apply the canonical Full-Stack Feature Ship recipe cleanly first (resets old demo timers too).
+		const builtBlueprint = buildBlueprintFromTemplate('feature-ship', {
+			governorSessionId,
+			preset: 'balanced',
+			defaultEngine: 'claude-code',
+			secondaryEngine: 'codex',
+			workspaceIsolation: 'worktree',
+			maxBudgetUsd: 5,
+		});
+		await this.applyBlueprint({
+			governorSessionId,
+			blueprintText: serializeEngineeringBlueprint(builtBlueprint),
+			forceStopRunning: true,
+		});
+
+		const entry = this.trees.get(governorSessionId)!;
+		this.demoActive.add(governorSessionId);
+		const t0 = Date.now();
+		const mkTok = (inp: number, out: number, cr: number, cw: number, turns: number, costUsd: number): IAdeTokenUsage => ({
+			inputTokens: inp,
+			outputTokens: out,
+			cacheReadTokens: cr,
+			cacheWriteTokens: cw,
+			totalTokens: inp + out + cr + cw,
+			turns,
+			durationMs: turns * 14_000,
+			costUsd,
+		});
+
+		const demoDiffN1 = [
+			'diff --git a/src/engine/contracts.ts b/src/engine/contracts.ts',
+			'--- a/src/engine/contracts.ts',
+			'+++ b/src/engine/contracts.ts',
+			'@@ -1,4 +1,11 @@',
+			'+export interface IBudgetGuardrail {',
+			'+  readonly maxBudgetUsd: number;',
+			'+  readonly onExceeded: "pause_and_alert";',
+			'+}',
+			'+',
+			' export interface ISchedulerTask {',
+			'   readonly id: string;',
+			'+  readonly laneBranch?: string;',
+			' }',
+		].join('\n');
+
+		const demoDiffN2 = [
+			'diff --git a/src/engine/finops.ts b/src/engine/finops.ts',
+			'--- /dev/null',
+			'+++ b/src/engine/finops.ts',
+			'@@ -0,0 +1,9 @@',
+			'+export function checkBudgetCeiling(spendUsd: number, capUsd?: number): boolean {',
+			'+  if (!capUsd || capUsd <= 0) {',
+			'+    return false;',
+			'+  }',
+			'+  return spendUsd >= capUsd;',
+			'+}',
+		].join('\n');
+
+		// Initial running state — zero real CLI spawns, zero real git commands!
+		entry.state = {
+			...entry.state,
+			runStatus: 'running',
+			updatedAt: t0,
+			worktrees: {
+				N2: { segmentId: 'N2', branchName: 'ade/demo-N2-backend', worktreePath: `${entry.state.projectPath}/.worktrees/demo-N2`, headCommit: 'a4f82e19' },
+				N3: { segmentId: 'N3', branchName: 'ade/demo-N3-ui', worktreePath: `${entry.state.projectPath}/.worktrees/demo-N3`, headCommit: '9c1d4b72' },
+				N4: { segmentId: 'N4', branchName: 'ade/demo-N4-tests', worktreePath: `${entry.state.projectPath}/.worktrees/demo-N4`, headCommit: '7e23fa10' },
+			},
+			tokenUsage: {
+				governor: mkTok(8_000, 1_800, 28_000, 2_000, 1, 0.06),
+				manager: createEmptyTreeTokenUsageSummary().manager,
+				employee: createEmptyTreeTokenUsageSummary().employee,
+				worker: createEmptyTreeTokenUsageSummary().worker,
+				total: mkTok(8_000, 1_800, 28_000, 2_000, 1, 0.06),
+			},
+			nodes: {
+				...entry.state.nodes,
+				N1: { ...entry.state.nodes.N1, phase: 'worker_running', completed: false, startedAt: t0 },
+			},
+			events: [],
+		};
+		this.appendEvent(entry, 'info', 'demo.started', { nodeId: 'N1', detail: 'Interactive Demo (0 API tokens spent) — N1 Worker L4 coding contracts' });
+		this._onDidChangeTree.fire(governorSessionId);
+
+		// Beat 1 (1.1s): N1 enters Employee L3 adversarial audit
+		this.scheduleDemoStep(governorSessionId, 1100, () => {
+			const now = Date.now();
+			entry.state = {
+				...entry.state,
+				updatedAt: now,
+				tokenUsage: {
+					governor: mkTok(10_000, 2_400, 36_000, 3_000, 2, 0.09),
+					manager: mkTok(6_000, 1_500, 22_000, 1_500, 1, 0.05),
+					employee: mkTok(12_000, 3_100, 52_000, 2_500, 2, 0.11),
+					worker: mkTok(32_000, 9_800, 140_000, 6_000, 5, 0.34),
+					total: mkTok(60_000, 16_800, 250_000, 13_000, 10, 0.59),
+				},
+				nodes: {
+					...entry.state.nodes,
+					N1: {
+						...entry.state.nodes.N1,
+						phase: 'employee_review',
+						tokenUsage: {
+							worker: mkTok(32_000, 9_800, 140_000, 6_000, 5, 0.34),
+							employee: mkTok(12_000, 3_100, 52_000, 2_500, 2, 0.11),
+							manager: mkTok(6_000, 1_500, 22_000, 1_500, 1, 0.05),
+							total: mkTok(50_000, 14_400, 214_000, 10_000, 8, 0.50),
+						},
+						lastChanges: {
+							capturedAt: now,
+							touchedFiles: [
+								{ relativePath: 'src/engine/contracts.ts', kind: 'added' },
+								{ relativePath: 'src/engine/scheduler.ts', kind: 'modified' },
+							],
+							combinedDiff: demoDiffN1,
+						},
+					},
+				},
+			};
+			this.appendEvent(entry, 'info', 'employee.review_started', { nodeId: 'N1', detail: 'Employee · L3 auditing N1 contract schemas & diff' });
+			this._onDidChangeTree.fire(governorSessionId);
+		});
+
+		// Beat 2 (2.2s): N1 approved -> 3-way parallel Git Worktree fan-out (N2, N3, N4)!
+		this.scheduleDemoStep(governorSessionId, 2200, () => {
+			const now = Date.now();
+			entry.state = {
+				...entry.state,
+				updatedAt: now,
+				reports: {
+					...entry.state.reports,
+					N1: {
+						nodeId: 'N1',
+						nodeTitle: 'Interface & Data Contract',
+						summary: 'Frozen TypeScript contracts in src/engine/contracts.ts with zero circular dependencies and strict typecheck pass.',
+						updatedAt: now,
+					},
+				},
+				nodes: {
+					...entry.state.nodes,
+					N1: { ...entry.state.nodes.N1, phase: 'completed', completed: true, completedAt: now },
+					N2: { ...entry.state.nodes.N2, phase: 'worker_running', completed: false, startedAt: now },
+					N3: { ...entry.state.nodes.N3, phase: 'worker_running', completed: false, startedAt: now },
+					N4: { ...entry.state.nodes.N4, phase: 'worker_running', completed: false, startedAt: now },
+				},
+			};
+			this.appendEvent(entry, 'info', 'employee.passed', { nodeId: 'N1', detail: 'N1 approved — fanning out 3 parallel Git Worktree lanes (N2, N3, N4)' });
+			this._onDidChangeTree.fire(governorSessionId);
+		});
+
+		// Beat 3 (3.7s): N2 completes Manager sign-off; N3 auditing; N4 catches realistic adversarial failure_1 rework!
+		this.scheduleDemoStep(governorSessionId, 3700, () => {
+			const now = Date.now();
+			entry.state = {
+				...entry.state,
+				updatedAt: now,
+				tokenUsage: {
+					governor: mkTok(14_000, 3_200, 48_000, 4_000, 3, 0.12),
+					manager: mkTok(18_000, 4_400, 78_000, 5_000, 4, 0.17),
+					employee: mkTok(34_000, 9_600, 160_000, 9_000, 7, 0.34),
+					worker: mkTok(96_000, 31_200, 420_000, 20_000, 15, 1.12),
+					total: mkTok(162_000, 48_400, 706_000, 38_000, 29, 1.75),
+				},
+				reports: {
+					...entry.state.reports,
+					N2: {
+						nodeId: 'N2',
+						nodeTitle: 'Core Backend & Services',
+						summary: 'Implemented FinOps budget guardrail and scheduler ring buffer on ade/demo-N2-backend (18/18 unit tests passing).',
+						updatedAt: now,
+					},
+				},
+				nodes: {
+					...entry.state.nodes,
+					N2: {
+						...entry.state.nodes.N2,
+						phase: 'completed',
+						completed: true,
+						completedAt: now,
+						tokenUsage: {
+							worker: mkTok(42_000, 13_400, 190_000, 8_000, 6, 0.49),
+							employee: mkTok(16_000, 4_800, 78_000, 4_000, 3, 0.16),
+							manager: mkTok(7_000, 1_900, 34_000, 2_000, 2, 0.07),
+							total: mkTok(65_000, 20_100, 302_000, 14_000, 11, 0.72),
+						},
+						lastChanges: {
+							capturedAt: now,
+							touchedFiles: [
+								{ relativePath: 'src/engine/finops.ts', kind: 'added' },
+								{ relativePath: 'src/engine/ringBuffer.ts', kind: 'modified' },
+							],
+							combinedDiff: demoDiffN2,
+						},
+					},
+					N3: {
+						...entry.state.nodes.N3,
+						phase: 'employee_review',
+						tokenUsage: {
+							worker: mkTok(26_000, 9_600, 110_000, 6_000, 4, 0.33),
+							employee: mkTok(15_000, 4_600, 70_000, 5_000, 3, 0.15),
+							manager: mkTok(5_000, 1_000, 22_000, 1_500, 1, 0.05),
+							total: mkTok(46_000, 15_200, 202_000, 12_500, 8, 0.53),
+						},
+						lastChanges: {
+							capturedAt: now,
+							touchedFiles: [
+								{ relativePath: 'src/ui/recipeGallery.ts', kind: 'added' },
+								{ relativePath: 'src/ui/finopsCard.css', kind: 'modified' },
+							],
+							combinedDiff: demoDiffN1,
+						},
+					},
+					N4: {
+						...entry.state.nodes.N4,
+						phase: 'worker_running',
+						employeeRejectCount: 1,
+						formalFailureCount: 1,
+						lastEmployeeFeedback: 'Missing concurrent budget-cap race test — Worker L4 adding deterministic stress assertion.',
+						tokenUsage: {
+							worker: mkTok(18_000, 5_800, 80_000, 4_000, 3, 0.22),
+							employee: mkTok(6_000, 1_800, 28_000, 1_500, 1, 0.06),
+							manager: createEmptyNodeRoleTokenBreakdown().manager,
+							total: mkTok(24_000, 7_600, 108_000, 5_500, 4, 0.28),
+						},
+					},
+				},
+			};
+			this.appendEvent(entry, 'info', 'manager.approved', { nodeId: 'N2', detail: 'Manager · L2 signed off segment N2 (18/18 tests green)' });
+			this.appendEvent(entry, 'warn', 'employee.rejected', { nodeId: 'N4', detail: 'Adversarial QA caught missing race test — Worker L4 auto-reworking in-place' });
+			this._onDidChangeTree.fire(governorSessionId);
+		});
+
+		// Beat 4 (5.2s): N3 & N4 pass -> Release Readiness Gate U1 glows amber + posts to ADE Inbox!
+		this.scheduleDemoStep(governorSessionId, 5200, () => {
+			const now = Date.now();
+			entry.state = {
+				...entry.state,
+				updatedAt: now,
+				tokenUsage: {
+					governor: mkTok(14_000, 3_200, 48_000, 4_000, 3, 0.12),
+					manager: mkTok(22_000, 5_400, 96_000, 6_000, 5, 0.21),
+					employee: mkTok(45_000, 12_800, 210_000, 12_000, 9, 0.44),
+					worker: mkTok(118_000, 38_600, 520_000, 24_000, 18, 1.38),
+					total: mkTok(199_000, 60_000, 874_000, 46_000, 35, 2.15),
+				},
+				reports: {
+					...entry.state.reports,
+					N3: {
+						nodeId: 'N3',
+						nodeTitle: 'UI & Interactive Surface',
+						summary: 'Verified Dark/Light theme parity, keyboard focus rings, and zero pod overlaps.',
+						updatedAt: now,
+					},
+					N4: {
+						nodeId: 'N4',
+						nodeTitle: 'Automated Test & Regression Suite',
+						summary: 'Resolved concurrency race assertion on attempt 2; 25/25 unit & regression tests passing.',
+						updatedAt: now,
+					},
+				},
+				nodes: {
+					...entry.state.nodes,
+					N3: { ...entry.state.nodes.N3, phase: 'completed', completed: true, completedAt: now },
+					N4: {
+						...entry.state.nodes.N4,
+						phase: 'completed',
+						completed: true,
+						completedAt: now,
+						formalFailureCount: 0,
+						lastChanges: {
+							capturedAt: now,
+							touchedFiles: [{ relativePath: 'test/finops.test.ts', kind: 'added' }],
+							combinedDiff: demoDiffN2,
+						},
+					},
+					U1: { ...entry.state.nodes.U1, phase: 'waiting_user_gate', completed: false, startedAt: now },
+				},
+			};
+			this.appendEvent(entry, 'info', 'gate.waiting', { nodeId: 'U1', detail: 'Release Readiness Gate awaiting your ✓ Approve (or Rollback…) — $0.00 real spend!' });
+			void this.inbox.upsertUserGateTodo({
+				governorSessionId,
+				treeType: entry.treeType,
+				nodeId: 'U1',
+				nodeTitle: 'Release Readiness Gate (Demo)',
+				description: 'Interactive Demo paused at Human Acceptance Gate U1. Click Approve to finish N5 & generate a PR Verification Report.',
+				upstreamSummary: 'N1 Contract · N2 Backend (18/18 tests) · N3 UI (Dark+Light) · N4 Regression (25/25 tests) all verified.',
+				rollbackCandidates: [
+					{ id: 'N2', title: 'Core Backend & Services' },
+					{ id: 'N3', title: 'UI & Interactive Surface' },
+					{ id: 'N4', title: 'Automated Test & Regression Suite' },
+				],
+			});
+			this._onDidChangeTree.fire(governorSessionId);
+		});
+
+		return this.buildSnapshot(entry);
 	}
 
 	whenReady(): Promise<void> {
@@ -1096,6 +1434,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!entry) {
 			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", options.governorSessionId));
 		}
+		this.clearDemoSimulation(options.governorSessionId);
 		const gov = this.projects.getAgent(entry.governorSessionId);
 		const defaultEngine = normalizeBlueprintEngine(gov?.session?.engineId ?? gov?.preferredEngineId ?? 'claude-code');
 
@@ -1419,6 +1758,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!entry) {
 			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", params.governorSessionId));
 		}
+		this.clearDemoSimulation(params.governorSessionId);
 
 		const resetSet = new Set<string>();
 		if (params.nodeId?.trim()) {
@@ -1600,6 +1940,7 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		if (!entry) {
 			throw new Error(localize('adeEngineeringNotInitialized', "Governor '{0}' has not initialized an Engineering tree yet.", governorSessionId));
 		}
+		this.clearDemoSimulation(governorSessionId);
 		for (const node of entry.blueprint.nodes) {
 			const rState = entry.state.nodes[node.id];
 			if (rState && !rState.completed && rState.phase !== 'idle') {
@@ -2818,6 +3159,46 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 				},
 			};
 			this.appendEvent(entry, 'info', 'gate.approved', { nodeId: gateNode.id, detail: gateNode.title });
+			if (this.demoActive.has(entry.governorSessionId)) {
+				const now = Date.now();
+				const n5 = entry.state.nodes.N5;
+				if (n5) {
+					entry.state = {
+						...entry.state,
+						updatedAt: now,
+						nodes: {
+							...entry.state.nodes,
+							N5: { ...n5, phase: 'worker_running', completed: false, startedAt: now },
+						},
+					};
+					this._onDidChangeTree.fire(entry.governorSessionId);
+					this.scheduleDemoStep(entry.governorSessionId, 950, () => {
+						const doneAt = Date.now();
+						entry.state = {
+							...entry.state,
+							runStatus: 'completed',
+							updatedAt: doneAt,
+							reports: {
+								...entry.state.reports,
+								N5: {
+									nodeId: 'N5',
+									nodeTitle: 'Integration & Smoke Verification',
+									summary: 'Merged 3 isolated worktree lanes cleanly; smoke build & regression suite 100% green ($0.00 real spend).',
+									updatedAt: doneAt,
+								},
+							},
+							nodes: {
+								...entry.state.nodes,
+								N5: { ...entry.state.nodes.N5, phase: 'completed', completed: true, completedAt: doneAt },
+							},
+						};
+						this.appendEvent(entry, 'info', 'demo.completed', { nodeId: 'N5', detail: 'Interactive Demo complete (6/6 verified, $0.00 real spend) — Try Copy PR Report or Export SVG!' });
+						this.clearDemoSimulation(entry.governorSessionId);
+						this._onDidChangeTree.fire(entry.governorSessionId);
+					});
+				}
+				return this.buildSnapshot(entry);
+			}
 			await this.persistEntry(entry);
 			await this.scheduleReadyNodes(entry);
 			return this.buildSnapshot(entry);
@@ -2870,6 +3251,33 @@ export class AdeEngineeringWorkbenchService extends Disposable implements IAdeEn
 		await this.persistEntry(entry);
 
 		const targetNode = entry.blueprint.nodes.find(n => n.id === targetNodeId);
+		if (this.demoActive.has(entry.governorSessionId)) {
+			if (targetNode) {
+				entry.state = {
+					...entry.state,
+					nodes: {
+						...entry.state.nodes,
+						[targetNode.id]: { ...entry.state.nodes[targetNode.id], phase: 'worker_running', startedAt: Date.now() },
+					},
+				};
+				this._onDidChangeTree.fire(entry.governorSessionId);
+				this.scheduleDemoStep(entry.governorSessionId, 1100, () => {
+					const doneAt = Date.now();
+					entry.state = {
+						...entry.state,
+						updatedAt: doneAt,
+						nodes: {
+							...entry.state.nodes,
+							[targetNode.id]: { ...entry.state.nodes[targetNode.id], phase: 'completed', completed: true, completedAt: doneAt },
+							[gateNode.id]: { ...entry.state.nodes[gateNode.id], phase: 'waiting_user_gate', completed: false, startedAt: doneAt },
+						},
+					};
+					this.appendEvent(entry, 'info', 'gate.waiting', { nodeId: gateNode.id, detail: `Rolled-back ${targetNode.id} re-verified — Gate ${gateNode.id} ready again` });
+					this._onDidChangeTree.fire(entry.governorSessionId);
+				});
+			}
+			return this.buildSnapshot(entry);
+		}
 		if (targetNode && targetNode.type === 'task') {
 			void this.activateTaskNodeWorker(entry, targetNode, { source: 'user_gate', feedback });
 		}

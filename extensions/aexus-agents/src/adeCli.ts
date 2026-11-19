@@ -14,6 +14,8 @@ const execFileAsync = promisify(execFile);
 
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_META_NAME = 'ade-control.json';
+export const ADE_CLI_VERSION = '1.0.0';
+export const ADE_ENGINE_BASELINE = '1.146.0';
 
 export type AdeAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate';
 
@@ -41,11 +43,17 @@ export interface AdeCliIo {
 	readonly stderr?: (text: string) => void;
 	readonly env?: NodeJS.ProcessEnv;
 	readonly cwd?: string;
+	/** Overrides the TTY detection used for color output (defaults to `process.stdout.isTTY`). */
+	readonly stdoutIsTTY?: boolean;
 }
+
+export type CompletionShell = 'bash' | 'zsh' | 'fish';
 
 export interface ParsedCliInvocation {
 	readonly help: boolean;
 	readonly json: boolean;
+	readonly version?: boolean;
+	readonly completion?: CompletionShell;
 	readonly windowId?: number;
 	readonly action?: string;
 	readonly fallbackAction?: string;
@@ -60,6 +68,7 @@ Control the running Aexus Code ADE workbench over its local control socket.
 
 Global Options:
   -h, --help                Show this help message and exit
+  -v, --version             Print the CLI and engine baseline version
   --json                    Print structured JSON output
   --window <id>             Target a specific workbench window ID
 
@@ -74,7 +83,9 @@ Organizational Ranks (governor [L1] > manager [L2] > employee [L3] > worker [L4]
 
 Commands:
   status
+  version
   doctor [--project <path>]
+  completion <bash|zsh|fish>
   mode [get | set <ade|ide>]
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
 
@@ -140,6 +151,7 @@ Commands:
   secretary draft [<text> | --clear]
   secretary mark-read
 
+  engineering demo [--governor <id>]
   engineering init --governor <id> [--tree-type <engineering|research>] [--on-children <relocate|delete> --target <id>] [--open] [--side]
   engineering list [--project <path>] [--tree-type <engineering|research>]
   engineering open --governor <id> [--side]
@@ -240,6 +252,7 @@ const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedba
 export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): ParsedCliInvocation {
 	let help = false;
 	let json = false;
+	let version = false;
 	let windowId: number | undefined;
 	const rest: string[] = [];
 	let activeGroup: string | undefined;
@@ -247,11 +260,13 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	let positionalCount = 0;
 
 	const isGlobalFlag = (arg: string): boolean =>
-		arg === '-h' || arg === '--help' || arg === '--json' || arg === '--window' || arg.startsWith('--window=');
+		arg === '-h' || arg === '--help' || arg === '-v' || arg === '--version' || arg === '--json' || arg === '--window' || arg.startsWith('--window=');
 
 	const consumeGlobalFlag = (arg: string, index: number): number => {
 		if (arg === '-h' || arg === '--help') {
 			help = true;
+		} else if (arg === '-v' || arg === '--version') {
+			version = true;
 		} else if (arg === '--json') {
 			json = true;
 		} else if (arg === '--window') {
@@ -333,11 +348,31 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		rest.push(arg);
 	}
 
+	if (version) {
+		return { help: false, json, version: true, windowId };
+	}
+
 	if (help || rest.length === 0 || rest[0] === 'help') {
 		return { help: true, json, windowId };
 	}
 
 	const [group, ...tail] = rest;
+
+	if (group === 'version') {
+		if (tail.length > 0) { throw new CliUsageError(`Unexpected arguments for version: ${tail.join(' ')}`); }
+		return { help: false, json, version: true, windowId };
+	}
+
+	if (group === 'completion') {
+		const shell = tail[0];
+		if (shell !== 'bash' && shell !== 'zsh' && shell !== 'fish') {
+			throw new CliUsageError('Usage: aexus-ade completion <bash|zsh|fish>');
+		}
+		if (tail.length > 1) {
+			throw new CliUsageError('Usage: aexus-ade completion <bash|zsh|fish>');
+		}
+		return { help: false, json, completion: shell, windowId };
+	}
 
 	if (group === 'status') {
 		if (tail.length > 0) { throw new CliUsageError(`Unexpected arguments for status: ${tail.join(' ')}`); }
@@ -1227,6 +1262,21 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (next === undefined) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
 			return next;
 		};
+
+		if (sub === 'demo') {
+			let governor: string | undefined;
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=')) {
+					governor = takeOptionVal(ref, '--governor', args);
+				} else if (!arg.startsWith('-') && !governor) {
+					governor = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for engineering demo: ${arg}`);
+				}
+			}
+			return { help: false, json, windowId, action: 'engineering.demo', params: governor ? { governor } : {} };
+		}
 
 		if (sub === 'init') {
 			let governor: string | undefined;
@@ -2323,24 +2373,224 @@ async function runDoctorDiagnostics(projectPath: string, env: NodeJS.ProcessEnv)
 	};
 }
 
-function formatDoctorHuman(report: IDoctorReport): string {
+interface ICliColorizer {
+	readonly bold: (text: string) => string;
+	readonly dim: (text: string) => string;
+	readonly red: (text: string) => string;
+	readonly green: (text: string) => string;
+	readonly yellow: (text: string) => string;
+	readonly cyan: (text: string) => string;
+}
+
+function shouldUseColor(env: NodeJS.ProcessEnv, isTTY: boolean): boolean {
+	const noColor = env.NO_COLOR;
+	if (noColor !== undefined && noColor !== '') {
+		return false;
+	}
+	const forceColor = env.FORCE_COLOR;
+	if (forceColor !== undefined) {
+		return forceColor !== '0' && forceColor.toLowerCase() !== 'false';
+	}
+	return isTTY;
+}
+
+function createColorizer(enabled: boolean): ICliColorizer {
+	const paint = (code: number, text: string): string => enabled ? `\u001b[${code}m${text}\u001b[0m` : text;
+	return {
+		bold: text => paint(1, text),
+		dim: text => paint(2, text),
+		red: text => paint(31, text),
+		green: text => paint(32, text),
+		yellow: text => paint(33, text),
+		cyan: text => paint(36, text),
+	};
+}
+
+function formatDoctorHuman(report: IDoctorReport, color: ICliColorizer): string {
+	const status = (ok: boolean, text: string): string => ok ? color.green(text) : color.red(text);
 	const lines: string[] = [];
-	lines.push('Aexus Code · ADE Environment Doctor');
-	lines.push('===================================');
-	lines.push(`Platform:      ${report.platform}/${report.arch} (Node ${report.nodeVersion})`);
-	lines.push(`Project:       ${report.projectPath}`);
-	lines.push(`Control Plane: ${report.controlPlane.connected ? `CONNECTED (${report.controlPlane.socketPath})` : `OFFLINE (${report.controlPlane.error || 'workbench not running'})`}`);
-	lines.push(`Git Worktree:  ${report.tooling.git.installed ? `READY (${report.tooling.git.version})` : 'MISSING (install git for worktree isolation)'}`);
-	lines.push(`OpenSSH:       ${report.tooling.ssh.installed ? `READY (${report.tooling.ssh.version})` : 'MISSING (install OpenSSH for aexus-ssh:// Cloud Hosts)'}`);
-	lines.push(`Project Rules: ${report.projectRules.length > 0 ? report.projectRules.join(', ') : '(none detected — supports AGENTS.md, CLAUDE.md, .cursorrules)'}`);
+	lines.push(color.bold(color.cyan('Aexus Code · ADE Environment Doctor')));
+	lines.push(color.dim('==================================='));
+	lines.push(`${color.bold('Platform:')}      ${report.platform}/${report.arch} (Node ${report.nodeVersion})`);
+	lines.push(`${color.bold('Project:')}       ${report.projectPath}`);
+	lines.push(`${color.bold('Control Plane:')} ${report.controlPlane.connected ? color.green(`CONNECTED (${report.controlPlane.socketPath})`) : color.red(`OFFLINE (${report.controlPlane.error || 'workbench not running'})`)}`);
+	lines.push(`${color.bold('Git Worktree:')}  ${report.tooling.git.installed ? color.green(`READY (${report.tooling.git.version})`) : color.yellow('MISSING (install git for worktree isolation)')}`);
+	lines.push(`${color.bold('OpenSSH:')}       ${report.tooling.ssh.installed ? color.green(`READY (${report.tooling.ssh.version})`) : color.yellow('MISSING (install OpenSSH for aexus-ssh:// Cloud Hosts)')}`);
+	lines.push(`${color.bold('Project Rules:')} ${report.projectRules.length > 0 ? report.projectRules.join(', ') : color.dim('(none detected — supports AGENTS.md, CLAUDE.md, .cursorrules)')}`);
 	lines.push('');
-	lines.push(`Native Coding Engines (${report.summary.enginesReady}/${report.summary.enginesTotal} installed):`);
+	lines.push(color.bold(`Native Coding Engines (${report.summary.enginesReady}/${report.summary.enginesTotal} installed):`));
 	for (const e of report.engines) {
-		const mark = e.installed ? '[OK]  ' : '[--]  ';
-		const detail = e.installed ? (e.path ?? e.binary) : `not found (${e.installHint})`;
+		const mark = e.installed ? color.green('[OK]  ') : color.dim('[--]  ');
+		const detail = e.installed ? (e.path ?? e.binary) : color.yellow(`not found (${e.installHint})`);
 		lines.push(`  ${mark} ${e.label.padEnd(20)} ${e.binary.padEnd(10)} ${detail}`);
 	}
 	return lines.join('\n');
+}
+
+const TOP_LEVEL_COMMANDS = [
+	'doctor', 'completion', 'status', 'mode', 'view', 'project', 'host',
+	'engine', 'session', 'secretary', 'engineering', 'inbox', 'version',
+] as const;
+
+const ENGINEERING_SUBCOMMANDS = [
+	'demo', 'init', 'list', 'open', 'blueprint', 'run', 'pause', 'resume', 'stop',
+	'remove', 'reset', 'configure', 'template', 'report', 'worktrees', 'diff',
+	'reports', 'status', 'review', 'gate', 'watchdog-action',
+] as const;
+
+function buildBashCompletion(): string {
+	return [
+		'# bash completion for aexus-ade',
+		'_aexus_ade() {',
+		'\tlocal cur',
+		'\tcur="${COMP_WORDS[COMP_CWORD]}"',
+		'',
+		`\tlocal top_level="${TOP_LEVEL_COMMANDS.join(' ')}"`,
+		`\tlocal engineering_subcommands="${ENGINEERING_SUBCOMMANDS.join(' ')}"`,
+		'',
+		'\tcase "${COMP_WORDS[1]}" in',
+		'\t\tcompletion)',
+		'\t\t\tCOMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )',
+		'\t\t\treturn 0',
+		'\t\t\t;;',
+		'\t\tengineering)',
+		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
+		'\t\t\t\tCOMPREPLY=( $(compgen -W "$engineering_subcommands" -- "$cur") )',
+		'\t\t\tfi',
+		'\t\t\treturn 0',
+		'\t\t\t;;',
+		'\tesac',
+		'',
+		'\tif [ "$COMP_CWORD" -eq 1 ]; then',
+		'\t\tCOMPREPLY=( $(compgen -W "$top_level" -- "$cur") )',
+		'\tfi',
+		'\treturn 0',
+		'}',
+		'',
+		'complete -F _aexus_ade aexus-ade',
+		'',
+	].join('\n');
+}
+
+function buildZshCompletion(): string {
+	return [
+		'#compdef aexus-ade',
+		'',
+		'_aexus_ade() {',
+		'\tlocal -a top_level engineering_subcommands',
+		'\ttop_level=(',
+		`\t\t'doctor:Diagnose the ADE environment'`,
+		`\t\t'completion:Emit a shell completion script'`,
+		`\t\t'status:Show workbench status'`,
+		`\t\t'mode:Get or set ADE/IDE mode'`,
+		`\t\t'view:Inspect or change the ADE view'`,
+		`\t\t'project:Manage projects'`,
+		`\t\t'host:Manage Cloud Hosts'`,
+		`\t\t'engine:List engines and sessions'`,
+		`\t\t'session:Manage sessions'`,
+		`\t\t'secretary:Control the secretary session'`,
+		`\t\t'engineering:Manage engineering trees'`,
+		`\t\t'inbox:Manage the governor inbox'`,
+		`\t\t'version:Print the CLI version'`,
+		'\t)',
+		'\tengineering_subcommands=(',
+		`\t\t'demo:Create a demo engineering tree'`,
+		`\t\t'init:Initialize an engineering tree'`,
+		`\t\t'list:List engineering trees'`,
+		`\t\t'open:Open an engineering tree'`,
+		`\t\t'blueprint:Get, apply, or validate a blueprint'`,
+		`\t\t'run:Start execution'`,
+		`\t\t'pause:Pause execution'`,
+		`\t\t'resume:Resume execution'`,
+		`\t\t'stop:Stop execution'`,
+		`\t\t'remove:Remove an engineering tree'`,
+		`\t\t'reset:Reset node state'`,
+		`\t\t'configure:Configure engines and budgets'`,
+		`\t\t'template:List or apply recipes'`,
+		`\t\t'report:Write a verification report'`,
+		`\t\t'worktrees:Merge or clean up worktrees'`,
+		`\t\t'diff:Show a node diff'`,
+		`\t\t'reports:List node reports'`,
+		`\t\t'status:Show node status'`,
+		`\t\t'review:Submit an acceptance review'`,
+		`\t\t'gate:Submit a quality gate verdict'`,
+		`\t\t'watchdog-action:Send a watchdog action'`,
+		'\t)',
+		'',
+		'\tif (( CURRENT == 2 )); then',
+		`\t\t_describe -t commands 'aexus-ade command' top_level`,
+		'\telif [[ ${words[2]} == completion ]]; then',
+		`\t\t_values 'shell' bash zsh fish`,
+		'\telif [[ ${words[2]} == engineering && CURRENT == 3 ]]; then',
+		`\t\t_describe -t commands 'engineering command' engineering_subcommands`,
+		'\tfi',
+		'}',
+		'',
+		`_aexus_ade "$@"`,
+		'',
+	].join('\n');
+}
+
+function buildFishCompletion(): string {
+	const lines = [
+		'# fish completion for aexus-ade',
+		'complete -c aexus-ade -f',
+	];
+	const descriptions: Record<(typeof TOP_LEVEL_COMMANDS)[number], string> = {
+		doctor: 'Diagnose the ADE environment',
+		completion: 'Emit a shell completion script',
+		status: 'Show workbench status',
+		mode: 'Get or set ADE/IDE mode',
+		view: 'Inspect or change the ADE view',
+		project: 'Manage projects',
+		host: 'Manage Cloud Hosts',
+		engine: 'List engines and sessions',
+		session: 'Manage sessions',
+		secretary: 'Control the secretary session',
+		engineering: 'Manage engineering trees',
+		inbox: 'Manage the governor inbox',
+		version: 'Print the CLI version',
+	};
+	for (const command of TOP_LEVEL_COMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_use_subcommand' -a ${command} -d '${descriptions[command]}'`);
+	}
+	lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'`);
+	const engineeringDescriptions: Record<(typeof ENGINEERING_SUBCOMMANDS)[number], string> = {
+		demo: 'Create a demo engineering tree',
+		init: 'Initialize an engineering tree',
+		list: 'List engineering trees',
+		open: 'Open an engineering tree',
+		blueprint: 'Get, apply, or validate a blueprint',
+		run: 'Start execution',
+		pause: 'Pause execution',
+		resume: 'Resume execution',
+		stop: 'Stop execution',
+		remove: 'Remove an engineering tree',
+		reset: 'Reset node state',
+		configure: 'Configure engines and budgets',
+		template: 'List or apply recipes',
+		report: 'Write a verification report',
+		worktrees: 'Merge or clean up worktrees',
+		diff: 'Show a node diff',
+		reports: 'List node reports',
+		status: 'Show node status',
+		review: 'Submit an acceptance review',
+		gate: 'Submit a quality gate verdict',
+		'watchdog-action': 'Send a watchdog action',
+	};
+	for (const command of ENGINEERING_SUBCOMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from engineering' -a ${command} -d '${engineeringDescriptions[command]}'`);
+	}
+	lines.push('');
+	return lines.join('\n');
+}
+
+export function buildCompletionScript(shell: CompletionShell): string {
+	switch (shell) {
+		case 'bash': return buildBashCompletion();
+		case 'zsh': return buildZshCompletion();
+		case 'fish': return buildFishCompletion();
+	}
 }
 
 export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promise<number> {
@@ -2357,8 +2607,22 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		return 1;
 	}
 
+	if (parsed.version) {
+		if (parsed.json) {
+			writeOut(JSON.stringify({ cli: 'aexus-ade', version: ADE_CLI_VERSION, engineBaseline: ADE_ENGINE_BASELINE }, null, 2) + '\n');
+		} else {
+			writeOut(`aexus-ade ${ADE_CLI_VERSION} (Aexus Code / Code - OSS ${ADE_ENGINE_BASELINE})\n`);
+		}
+		return 0;
+	}
+
 	if (parsed.help) {
 		writeOut(HELP_TEXT);
+		return 0;
+	}
+
+	if (parsed.completion) {
+		writeOut(buildCompletionScript(parsed.completion));
 		return 0;
 	}
 
@@ -2368,7 +2632,8 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		if (parsed.json) {
 			writeOut(JSON.stringify(report, null, 2) + '\n');
 		} else {
-			writeOut(formatDoctorHuman(report) + '\n');
+			const isTTY = io.stdoutIsTTY ?? Boolean(process.stdout.isTTY);
+			writeOut(formatDoctorHuman(report, createColorizer(shouldUseColor(env, isTTY))) + '\n');
 		}
 		return 0;
 	}

@@ -16,6 +16,11 @@ if [ ! -f "$CLI_JS" ] && [ -f "$BIN_DIR/../extensions/aexus-agents/dist/adeCli.j
 	CLI_JS="$BIN_DIR/../extensions/aexus-agents/dist/adeCli.js"
 fi
 
+if [ ! -f "$CLI_JS" ]; then
+	echo "aexus-ade: unable to locate dist/adeCli.js. Run the aexus-agents build first." >&2
+	exit 1
+fi
+
 if command -v node >/dev/null 2>&1; then
 	exec node "$CLI_JS" "$@"
 fi

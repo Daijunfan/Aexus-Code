@@ -31,7 +31,7 @@ import {
 	formatUsdCost,
 	resolveModelPricing,
 } from '../../common/adePricing.js';
-import { buildEngineeringRunReportMarkdown } from '../../common/adeRunReport.js';
+import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../common/adeRunReport.js';
 import {
 	computeAutoLayoutPositions,
 	hasOverlappingPodPositions,
@@ -700,6 +700,47 @@ suite('AdeEngineeringRunReport', () => {
 			],
 			[true, true],
 		);
+	});
+});
+
+suite('AdeDagSvgExport', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('renders a valid dual-shell DAG SVG with tier labels, the MGR worktree lane, User Gate and FinOps header, escaping XML safely', () => {
+		const snapshot = createReportSnapshot();
+		const svg = buildEngineeringDagSvg({
+			...snapshot,
+			governorLabel: 'Gov <Prime> & Co',
+			state: {
+				...snapshot.state,
+				worktrees: { 'N1->N2': snapshot.state.worktrees!['seg-1'] },
+			},
+			nodes: snapshot.nodes.map(entry => entry.node.id === 'N1'
+				? { ...entry, node: { ...entry.node, title: 'Build <Core> & Ship' } }
+				: entry),
+		});
+
+		assert.deepStrictEqual({
+			validRoot: svg.startsWith('<svg ') && svg.endsWith('</svg>'),
+			outerEmployee: svg.includes('EMPLOYEE · L3'),
+			innerWorker: svg.includes('WORKER · L4'),
+			managerLane: svg.includes('MGR · L2 [N1-&gt;N2] · ade/N1-N2'),
+			userGate: svg.includes('AWAITING APPROVAL') && svg.includes('Human Gate'),
+			finOpsHeader: svg.includes('Cache Saved $1.13 (20%)') && svg.includes('$12.50 / $25.00'),
+			escapedTitle: svg.includes('Build &lt;Core&gt; &amp; Ship'),
+			escapedGovernor: svg.includes('Gov &lt;Prime&gt; &amp; Co'),
+			noRawMarkup: !svg.includes('<Core>') && !svg.includes('<Prime>'),
+		}, {
+			validRoot: true,
+			outerEmployee: true,
+			innerWorker: true,
+			managerLane: true,
+			userGate: true,
+			finOpsHeader: true,
+			escapedTitle: true,
+			escapedGovernor: true,
+			noRawMarkup: true,
+		});
 	});
 });
 

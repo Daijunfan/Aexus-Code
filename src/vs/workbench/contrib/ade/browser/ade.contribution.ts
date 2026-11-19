@@ -7,7 +7,7 @@ import './ade.css';
 import './adeColors.js';
 import { formatAdeAgentSubtreeLines } from './adeControlHandler.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { KeyCode } from '../../../../base/common/keyCodes.js';
+import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { isMacintosh, isWindows } from '../../../../base/common/platform.js';
 import { Schemas } from '../../../../base/common/network.js';
@@ -908,6 +908,100 @@ async function openOrInitializeWorkTree(
 	}
 }
 
+registerAction2(class ToggleAdeIdeModeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'aexus.toggleWorkbenchMode',
+			title: localize2('aexusToggleModeTitle', "Aexus: Toggle ADE ⇄ IDE Mode"),
+			icon: Codicon.arrowSwap,
+			f1: true,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyA,
+				weight: KeybindingWeight.WorkbenchContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const modes = accessor.get(IWorkbenchModeService);
+		modes.setMode(modes.mode === 'ade' ? 'ide' : 'ade');
+	}
+});
+
+registerAction2(class SwitchToAdeModeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'aexus.switchToAdeMode',
+			title: localize2('aexusSwitchToAdeModeTitle', "Aexus: Switch to ADE Mode (Agent Development Environment)"),
+			f1: true,
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		accessor.get(IWorkbenchModeService).setMode('ade');
+	}
+});
+
+registerAction2(class SwitchToIdeModeAction extends Action2 {
+	constructor() {
+		super({
+			id: 'aexus.switchToIdeMode',
+			title: localize2('aexusSwitchToIdeModeTitle', "Aexus: Switch to IDE Mode"),
+			f1: true,
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		accessor.get(IWorkbenchModeService).setMode('ide');
+	}
+});
+
+registerAction2(class TryInteractiveEngineeringDemoAction extends Action2 {
+	constructor() {
+		super({
+			id: 'aexus.ade.tryInteractiveDemo',
+			title: localize2('aexusTryInteractiveDemoTitle', "Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)"),
+			icon: Codicon.playCircle,
+			f1: true,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const projects = accessor.get(IAdeProjectsService);
+		const engineering = accessor.get(IAdeEngineeringService);
+		const modes = accessor.get(IWorkbenchModeService);
+		const notifications = accessor.get(INotificationService);
+		const workspace = accessor.get(IWorkspaceContextService);
+
+		modes.setMode('ade');
+		await engineering.whenReady();
+
+		let projectUri = projects.selectedProject?.uri ?? projects.projects[0]?.uri ?? workspace.getWorkspace().folders[0]?.uri;
+		if (!projectUri) {
+			projectUri = URI.file('/tmp/aexus-interactive-demo');
+			projects.registerProject(projectUri, 'aexus-interactive-demo');
+		}
+		const demoLabel = 'Interactive Demo · Feature Ship';
+		let demoGov = projects.agents.find(a => !a.parentId && a.label === demoLabel && a.projectUri.toString() === projectUri!.toString());
+		if (!demoGov) {
+			demoGov = projects.addSession(
+				projectUri,
+				{ engineId: 'aexus-claude', resource: URI.parse(`aexus-claude://aexus-demo/${Date.now()}`) },
+				demoLabel,
+				{ role: 'governor' },
+			);
+		}
+		if (!engineering.hasTree(demoGov.id)) {
+			await engineering.initTree({ governorSessionId: demoGov.id, treeType: 'engineering' });
+		}
+		await engineering.openEngineeringEditor(demoGov.id);
+		if (engineering.startDemoSimulation) {
+			await engineering.startDemoSimulation(demoGov.id);
+			notifications.info(localize('aexusInteractiveDemoStarted', "Interactive Engineering DAG Demo running (0 API tokens spent). Click ✓ Approve on Gate U1 or right-click any pod to explore."));
+		}
+	}
+});
+
 registerAction2(class OpenAdeEngineeringAction extends Action2 {
 	constructor() {
 		super({
@@ -915,11 +1009,11 @@ registerAction2(class OpenAdeEngineeringAction extends Action2 {
 			title: localize2('adeOpenEngineeringActionTitle', "Open ADE Engineering..."),
 			icon: Codicon.typeHierarchySub,
 			f1: true,
-			precondition: WorkbenchModeContext.isEqualTo('ade'),
 		});
 	}
 
 	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+		accessor.get(IWorkbenchModeService).setMode('ade');
 		await openOrInitializeWorkTree(accessor, 'engineering', governorId);
 	}
 });
@@ -931,11 +1025,11 @@ registerAction2(class OpenAdeResearchAction extends Action2 {
 			title: localize2('adeOpenResearchActionTitle', "Open ADE Research..."),
 			icon: Codicon.beaker,
 			f1: true,
-			precondition: WorkbenchModeContext.isEqualTo('ade'),
 		});
 	}
 
 	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+		accessor.get(IWorkbenchModeService).setMode('ade');
 		await openOrInitializeWorkTree(accessor, 'research', governorId);
 	}
 });
@@ -947,7 +1041,6 @@ registerAction2(class OpenAdeInboxAction extends Action2 {
 			title: localize2('adeOpenInboxActionTitle', "Open ADE Inbox"),
 			icon: Codicon.inbox,
 			f1: true,
-			precondition: WorkbenchModeContext.isEqualTo('ade'),
 		});
 	}
 

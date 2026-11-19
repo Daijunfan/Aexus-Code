@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml"><img src="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml/badge.svg" alt="Aexus Code CI" /></a>
   <a href="https://github.com/Daijunfan/Aexus-Code/blob/main/LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-0f172a?style=flat-square" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/Platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-0284c7?style=flat-square" alt="跨平台支持 macOS Windows Linux" />
   <img src="https://img.shields.io/badge/Modes-ADE%20%E2%87%84%20IDE%20Symmetry-2563eb?style=flat-square" alt="ADE IDE 镜像对称" />
@@ -19,10 +20,14 @@
 </p>
 
 <p align="center">
-  <a href="../README.md">English</a> · <strong>简体中文</strong> · <a href="../examples/blueprints/README.md">蓝图模板库</a> · <a href="../AEXUS.md">架构文档 (AEXUS.md)</a> · <a href="../CHANGELOG.md">更新日志</a> · <a href="../CONTRIBUTING.md">贡献指南</a>
+  <a href="../README.md">English</a> · <strong>简体中文</strong> · <a href="../examples/blueprints/README.md">蓝图模板库</a> · <a href="../AEXUS.md">架构文档 (AEXUS.md)</a> · <a href="../CHANGELOG.md">更新日志</a> · <a href="../CONTRIBUTING.md">贡献指南</a> · <a href="../CODE_OF_CONDUCT.md">行为准则</a>
 </p>
 
 ---
+
+> [!TIP]
+> **10 秒零成本互动体验（`$0.00` 消耗、零源码改动、无需 API Key）：**
+> 启动 Aexus Code 后按 `Cmd/Ctrl+Shift+P` 执行 **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`**（或在终端执行 `aexus-ade engineering demo`），即刻观看「契约节点 ➔ 三路 Git Worktree 并行扩散 ➔ Employee L3 对抗质检拦截与自愈 ➔ 实时四层 FinOps 与甘特图 ➔ 人工可点击 **`✓ Approve`** 验收门禁 ➔ 一键导出**矢量 SVG 架构图**与 **GitHub PR 验收报告**」全流程！随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`** 模式。
 
 <p align="center">
   <img src="assets/08-finops-budget-guardrails.png" width="100%" alt="Aexus Code — 嵌套双壳任务舱 DAG、Git Worktree 分支段框、四层 FinOps 成本分析与硬预算熔断护栏" />
@@ -238,8 +243,11 @@ flowchart LR
 Aexus Code 启动后自动监听本地鉴权 Socket（macOS/Linux: `~/.aexus-code/ade-control.sock`，权限 `0600`）或本机鉴权 Windows Named Pipe（`\\.\pipe\aexus-ade-control-*`），并将 `aexus-ade` 自动注入集成终端与编排智能体 `PATH`：
 
 ```bash
-# 0. 一键体检 8 大本机 Coding CLI、Git Worktree 就绪度、OpenSSH、控制面与仓库规则文件
+# 0. 一键体检 8 大引擎、开启 Shell 自动补全或拉起零 Token 互动演示
+aexus-ade --version
 aexus-ade doctor --project .
+eval "$(aexus-ade completion zsh)"   # 同样支持 bash | fish
+aexus-ade engineering demo
 
 # 1. 模式切换、工作区状态与云主机迁移
 aexus-ade status --json
@@ -263,14 +271,14 @@ aexus-ade engineering report --governor "$GOV_ID" --out ./pr-verification-report
 
 | 命令组 | 核心子命令 |
 | :--- | :--- |
-| `doctor` | `doctor [--project <path>] [--json]` *（无需启动界面即可独立体检）* |
+| `doctor` / `completion` | `doctor [--project <path>] [--json]` · `completion <bash\|zsh\|fish>` · `--version` *（均支持无需启动界面独立运行）* |
 | `status` / `mode` / `view` | `status` · `mode [get \| set <ade\|ide>]` · `view [--archived] [--inspector <changes\|files\|hide>] [--refresh]` |
 | `project` | `list` · `add <path\|host:/path>` · `select` · `remove` · `delete` · `focus` · `home` · `forward` · `move` · `changes` · `files` · `open-file` · `open-diff` |
 | `host` | `list` · `info` · `add` · `update` · `remove` · `test` · `browse` · `import-vscode` · `open` |
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
 | `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
-| `engineering` | `list` · `init` · `open` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
+| `engineering` | `list` · `init` · `open` · `demo [--governor <id>]` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
 
 ---

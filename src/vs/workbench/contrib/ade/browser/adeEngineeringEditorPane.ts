@@ -49,7 +49,7 @@ import {
 	computeTreeFinancialSummary,
 	formatUsdCost,
 } from '../../../../platform/ade/common/adePricing.js';
-import { buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
+import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
@@ -394,6 +394,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private nodesLayerEl!: HTMLElement;
 	private emptyStateEl!: HTMLElement;
 	private connectHintEl!: HTMLElement;
+	private starterHintEl!: HTMLElement;
+	private starterHintDismissed = false;
 	private minimapEl!: HTMLElement;
 	private minimapSvgEl!: SVGSVGElement;
 	private minimapLensEl!: HTMLElement;
@@ -589,6 +591,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.emptyStateEl.hidden = true;
 		this.connectHintEl = append(this.bodyEl, $('.ade-eng-connect-banner'));
 		this.connectHintEl.hidden = true;
+		this.starterHintEl = append(this.bodyEl, $('.ade-eng-starter-banner'));
+		this.starterHintEl.hidden = true;
 
 		// Interactive Bottom-Left Live Minimap
 		this.minimapEl = append(this.bodyEl, $('.ade-eng-minimap', {
@@ -1395,7 +1399,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const titleStack = append(titleWrap, $('.ade-eng-templates-title-stack'));
 		append(titleStack, $('div.ade-eng-templates-title', {}, localize('adeEngRecipesTitle', "DAG Blueprint Recipes")));
 		append(titleStack, $('div.ade-eng-templates-sub', {}, localize('adeEngRecipesSubtitle', "Battle-tested 4-tier workflows with automatic MNP segment lanes, adversarial L3 review, and human sign-off gates.")));
-		const closeBtn = append(head, $('button.ade-eng-pop-icon-btn.close', {
+		const headRight = append(head, $('.ade-eng-templates-head-actions'));
+		if (this.engineering.startDemoSimulation) {
+			const demoBtn = append(headRight, $('button.ade-eng-demo-btn', {
+				type: 'button',
+				title: localize('adeEngTryDemoTooltip', "Play a live animated 6-node DAG simulation with 0 API tokens spent and 0 file changes"),
+			}, localize('adeEngTryDemoBtn', "▶ Interactive Demo (0 tok)")));
+			this.templatesRenderDisposables.add(addDisposableListener(demoBtn, EventType.CLICK, async () => {
+				const govId = this.snapshot?.governorSessionId;
+				if (!govId || !this.engineering.startDemoSimulation) {
+					return;
+				}
+				this.closeTemplatesModal();
+				await this.engineering.startDemoSimulation(govId);
+				this.fitViewportToGraph(true);
+			}));
+		}
+		const closeBtn = append(headRight, $('button.ade-eng-pop-icon-btn.close', {
 			type: 'button',
 			title: localize('adeEngCloseRecipesTooltip', "Close (Esc)"),
 		}));
@@ -1539,6 +1559,43 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 	}
 
+	private downloadArtifactFile(filename: string, content: string, mimeType: string): void {
+		const win = getWindow(this.rootEl);
+		const blob = new Blob([content], { type: mimeType });
+		const url = win.URL.createObjectURL(blob);
+		const link = win.document.createElement('a');
+		link.href = url;
+		link.download = filename;
+		link.click();
+		win.setTimeout(() => win.URL.revokeObjectURL(url), 1000);
+	}
+
+	private safeArtifactSlug(snap: IAdeEngineeringTreeSnapshot): string {
+		return (snap.governorLabel || snap.governorSessionId).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-|-$/g, '') || 'aexus-dag';
+	}
+
+	private exportDagSvg(): void {
+		const snap = this.snapshot;
+		if (!snap) {
+			return;
+		}
+		const svg = buildEngineeringDagSvg(snap);
+		const filename = `${this.safeArtifactSlug(snap)}-dag.svg`;
+		this.downloadArtifactFile(filename, svg, 'image/svg+xml;charset=utf-8');
+		this.notificationService.info(localize('adeEngExportedSvgNotice', "Exported shareable vector DAG snapshot to {0}.", filename));
+	}
+
+	private downloadRunReportMarkdown(): void {
+		const snap = this.snapshot;
+		if (!snap) {
+			return;
+		}
+		const markdown = buildEngineeringRunReportMarkdown(snap);
+		const filename = `${this.safeArtifactSlug(snap)}-pr-report.md`;
+		this.downloadArtifactFile(filename, markdown, 'text/markdown;charset=utf-8');
+		this.notificationService.info(localize('adeEngDownloadedPrReportNotice', "Downloaded PR Verification Report to {0}.", filename));
+	}
+
 	private copyRunReportToClipboard(triggerBtn?: HTMLElement): void {
 		const snap = this.snapshot;
 		if (!snap) {
@@ -1570,8 +1627,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const total = Math.max(1, tu.total.totalTokens);
 
 		const head = append(this.tokenAnalyticsEl, $('.ade-eng-ta-head'));
-		append(head, $('span.ade-eng-ta-title', {}, localize('adeEngTokenAnalyticsTitle', "4-Tier FinOps & Telemetry")));
+		append(head, $('span.ade-eng-ta-title', {}, localize('adeEngTokenAnalyticsTitle', "4-Tier FinOps")));
 		const headActions = append(head, $('.ade-eng-ta-head-actions'));
+		const svgBtn = append(headActions, $('button.ade-eng-ta-svg-btn', {
+			type: 'button',
+			title: localize('adeEngExportSvgTooltip', "Export shareable vector SVG snapshot of this DAG"),
+		}, localize('adeEngExportSvgShort', "SVG")));
+		this.tokenAnalyticsDisposables.add(addDisposableListener(svgBtn, EventType.CLICK, () => this.exportDagSvg()));
 		const prBtn = append(headActions, $('button.ade-eng-ta-pr-btn', {
 			type: 'button',
 			title: localize('adeEngCopyPrReportTooltip', "Copy GitHub PR-ready Verification & FinOps Markdown Report"),
@@ -3436,6 +3498,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!bp || !snap) {
 			this.emptyStateEl.hidden = true;
 			this.connectHintEl.hidden = true;
+			this.starterHintEl.hidden = true;
 			this.minimapEl.hidden = true;
 			return;
 		}
@@ -3450,8 +3513,49 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					: localize('adeEngConnectPickSource', "Connect Mode: Click source node → then click downstream target node (Esc to exit)")),
 			);
 			this.connectHintEl.hidden = false;
+			this.starterHintEl.hidden = true;
 		} else {
 			this.connectHintEl.hidden = true;
+			const govId = snap.governorSessionId;
+			const isDemo = Boolean(this.engineering.isDemoSimulation?.(govId));
+			const isPristineTree = snap.state.events.every(event => event.event === 'tree.initialized');
+			const isFreshStarter = bp.nodes.length === 1 && snap.state.runStatus === 'idle' && isPristineTree && !this.starterHintDismissed;
+			if (isDemo) {
+				clearNode(this.starterHintEl);
+				this.starterHintEl.className = 'ade-eng-starter-banner demo-active';
+				append(this.starterHintEl, $('span.ade-eng-starter-text', {}, localize('adeEngDemoBannerText', "✦ Interactive Demo ($0.00 real spend) · Click ✓ Approve on Gate U1 or right-click any pod to inspect diffs")));
+				const stopDemoBtn = append(this.starterHintEl, $('button.ade-eng-starter-btn', { type: 'button' }, localize('adeEngStopDemoBtn', "Stop Demo")));
+				this.canvasRenderDisposables.add(addDisposableListener(stopDemoBtn, EventType.CLICK, () => {
+					void this.engineering.stopTree(govId);
+				}));
+				this.starterHintEl.hidden = false;
+			} else if (isFreshStarter) {
+				clearNode(this.starterHintEl);
+				this.starterHintEl.className = 'ade-eng-starter-banner';
+				append(this.starterHintEl, $('span.ade-eng-starter-text', {}, localize('adeEngStarterHintText', "✦ Quick Start:")));
+				const recipesCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.primary', { type: 'button' }, localize('adeEngStarterRecipesBtn', "Browse 6 Blueprint Recipes")));
+				this.canvasRenderDisposables.add(addDisposableListener(recipesCta, EventType.CLICK, () => this.openTemplatesModal()));
+				if (this.engineering.startDemoSimulation) {
+					const demoCta = append(this.starterHintEl, $('button.ade-eng-starter-btn.demo', { type: 'button' }, localize('adeEngStarterDemoBtn', "▶ Interactive Demo (0 tok)")));
+					this.canvasRenderDisposables.add(addDisposableListener(demoCta, EventType.CLICK, async () => {
+						if (this.engineering.startDemoSimulation) {
+							await this.engineering.startDemoSimulation(govId);
+							this.fitViewportToGraph(true);
+						}
+					}));
+				}
+				const dismissBtn = append(this.starterHintEl, $('button.ade-eng-starter-dismiss', {
+					type: 'button',
+					title: localize('adeEngStarterDismiss', "Dismiss Quick Start"),
+				}, '×'));
+				this.canvasRenderDisposables.add(addDisposableListener(dismissBtn, EventType.CLICK, () => {
+					this.starterHintDismissed = true;
+					this.starterHintEl.hidden = true;
+				}));
+				this.starterHintEl.hidden = false;
+			} else {
+				this.starterHintEl.hidden = true;
+			}
 		}
 
 		// Empty Blueprint Onboarding CTA + Curated Recipe Quick-Launch
@@ -3464,6 +3568,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.canvasRenderDisposables.add(addDisposableListener(ctaBtn, EventType.CLICK, () => this.addDraftNode('task')));
 			const browseBtn = append(ctaRow, $('button.ade-eng-action-btn.secondary', { type: 'button' }, localize('adeEngEmptyBrowseRecipesBtn', "Browse Blueprint Recipes")));
 			this.canvasRenderDisposables.add(addDisposableListener(browseBtn, EventType.CLICK, () => this.openTemplatesModal()));
+			if (this.engineering.startDemoSimulation) {
+				const demoBtn = append(ctaRow, $('button.ade-eng-demo-btn', { type: 'button' }, localize('adeEngEmptyDemoBtn', "▶ Interactive Demo (0 tok)")));
+				this.canvasRenderDisposables.add(addDisposableListener(demoBtn, EventType.CLICK, async () => {
+					if (this.engineering.startDemoSimulation) {
+						await this.engineering.startDemoSimulation(snap.governorSessionId);
+						this.fitViewportToGraph(true);
+					}
+				}));
+			}
 			this.emptyStateEl.hidden = false;
 			this.minimapEl.hidden = true;
 			return;
@@ -5460,6 +5573,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.copyRunReportToClipboard(prReportBtn);
 			}));
 
+			const exportSvgBtn = append(actions, $('button.ade-eng-action-btn.secondary', {
+				type: 'button',
+				title: localize('adeEngSheetExportSvgTooltip', "Export shareable vector SVG snapshot of this DAG"),
+			}, localize('adeEngSheetExportSvgBtn', "Export SVG")));
+			this.sheetRenderDisposables.add(addDisposableListener(exportSvgBtn, EventType.CLICK, () => {
+				this.exportDagSvg();
+			}));
+
 			const applyBtn = append(actions, $('button.ade-eng-action-btn.confirm', {
 				type: 'button',
 			}, localize('adeEngApplyRawBlueprintBtn', "Validate & Apply")));
@@ -5599,7 +5720,18 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				const ganttWrap = append(this.sheetContentEl, $('.ade-eng-gantt'));
 				const ganttHead = append(ganttWrap, $('.ade-eng-gantt-head'));
 				append(ganttHead, $('span.ade-eng-gantt-title', {}, localize('adeEngGanttTitle', "Execution Gantt · {0} ({1})", formatElapsedCompact(minT, maxT), formatUsdCost(fin.totalCostUsd))));
-				const ganttPrBtn = append(ganttHead, $('button.ade-eng-ta-pr-btn', {
+				const ganttActions = append(ganttHead, $('.ade-eng-gantt-actions'));
+				const ganttSvgBtn = append(ganttActions, $('button.ade-eng-ta-svg-btn', {
+					type: 'button',
+					title: localize('adeEngGanttExportSvgTip', "Export shareable vector SVG snapshot"),
+				}, localize('adeEngGanttExportSvgLabel', "SVG")));
+				this.sheetRenderDisposables.add(addDisposableListener(ganttSvgBtn, EventType.CLICK, () => this.exportDagSvg()));
+				const ganttDlBtn = append(ganttActions, $('button.ade-eng-ta-svg-btn', {
+					type: 'button',
+					title: localize('adeEngGanttDownloadPrTip', "Download PR Verification Report (.md)"),
+				}, localize('adeEngGanttDownloadPrLabel', "↓ .md")));
+				this.sheetRenderDisposables.add(addDisposableListener(ganttDlBtn, EventType.CLICK, () => this.downloadRunReportMarkdown()));
+				const ganttPrBtn = append(ganttActions, $('button.ade-eng-ta-pr-btn', {
 					type: 'button',
 					title: localize('adeEngGanttCopyPrTip', "Copy PR Verification Report Markdown"),
 				}, localize('adeEngGanttCopyPrLabel', "Copy PR Report")));

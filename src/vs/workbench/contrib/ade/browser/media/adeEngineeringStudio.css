@@ -99,13 +99,44 @@
 	white-space: nowrap;
 }
 
-@container ade-eng (max-width: 1020px) {
+@container ade-eng (max-width: 1040px) {
+	.monaco-workbench .ade-eng-editor .ade-eng-toolbar.floating {
+		gap: 4px;
+		left: 8px;
+		right: 8px;
+	}
 	.monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.island {
-		padding: 0 6px;
+		padding: 0 5px;
 		gap: 3px;
 	}
+	.monaco-workbench .ade-eng-editor .ade-eng-toolbar-group.left.island {
+		max-width: none;
+	}
+	.monaco-workbench .ade-eng-editor .ade-eng-title-icon,
+	.monaco-workbench .ade-eng-editor .ade-eng-toolbar-title,
+	.monaco-workbench .ade-eng-editor .ade-eng-progress-mini-bar,
 	.monaco-workbench .ade-eng-editor .ade-eng-progress-track {
 		display: none;
+	}
+	.monaco-workbench .ade-eng-editor .ade-eng-status-pill {
+		padding: 0 6px;
+		font-size: 10.5px;
+	}
+	.monaco-workbench .ade-eng-editor .ade-eng-progress-pill {
+		padding: 0 4px;
+		font-size: 10px;
+	}
+	.monaco-workbench .ade-eng-editor .ade-eng-tokens-pill {
+		padding: 0 6px;
+		font-size: 10px;
+	}
+	.monaco-workbench .ade-eng-editor .ade-eng-tool-btn {
+		padding: 0 5px;
+		font-size: 11px;
+	}
+	.monaco-workbench .ade-eng-editor .ade-eng-action-btn {
+		padding: 0 8px;
+		font-size: 11px;
 	}
 }
 
@@ -2594,6 +2625,143 @@
 .monaco-workbench.hc-light .ade-eng-editor .ade-eng-shortcuts-card,
 .monaco-workbench.hc-light .ade-eng-editor .ade-eng-pop-caret {
 	background: var(--vscode-editorWidget-background);
+}
+
+/* Wave 5 · Starter Onboarding Pill, Zero-Token Interactive Demo & Shareable SVG Export */
+.monaco-workbench .ade-eng-editor .ade-eng-starter-banner {
+	position: absolute;
+	top: 56px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 26;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	max-width: calc(100% - 36px);
+	padding: 6px 12px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #141824) 88%, #0f172a);
+	border: 1px solid color-mix(in srgb, var(--ade-mode-accent, #38bdf8) 38%, transparent);
+	box-shadow: 0 10px 26px rgba(0, 0, 0, 0.32);
+	backdrop-filter: blur(12px);
+	font-size: 11px;
+	color: var(--vscode-foreground);
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-banner[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-banner.demo-active {
+	border-color: rgba(52, 211, 153, 0.56);
+	background: color-mix(in srgb, #064e3b 24%, var(--vscode-editorWidget-background, #141824));
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-text {
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-btn,
+.monaco-workbench .ade-eng-editor .ade-eng-demo-btn {
+	height: 24px;
+	padding: 0 10px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	font-weight: 650;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-btn.primary {
+	background: color-mix(in srgb, var(--ade-mode-accent, #38bdf8) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mode-accent, #38bdf8) 52%, transparent);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-btn.demo,
+.monaco-workbench .ade-eng-editor .ade-eng-demo-btn {
+	background: rgba(16, 185, 129, 0.16);
+	border-color: rgba(52, 211, 153, 0.52);
+	color: #34d399;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-btn:hover,
+.monaco-workbench .ade-eng-editor .ade-eng-demo-btn:hover {
+	filter: brightness(1.12);
+	transform: translateY(-0.5px);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-dismiss {
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: none;
+	border-radius: 999px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-starter-dismiss:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-templates-head-actions,
+.monaco-workbench .ade-eng-editor .ade-eng-gantt-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-svg-btn {
+	height: 22px;
+	padding: 0 7px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 10.5px;
+	font-weight: 650;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-eng-editor .ade-eng-ta-svg-btn:hover {
+	border-color: var(--ade-mode-accent, #38bdf8);
+	background: color-mix(in srgb, var(--ade-mode-accent, #38bdf8) 14%, transparent);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-starter-banner {
+	background: rgba(255, 255, 255, 0.94);
+	border-color: rgba(37, 99, 235, 0.28);
+	box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-starter-banner.demo-active {
+	background: #ecfdf5;
+	border-color: rgba(5, 150, 105, 0.45);
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-starter-btn.primary {
+	color: #1d4ed8;
+}
+
+.monaco-workbench.vs .ade-eng-editor .ade-eng-starter-btn.demo,
+.monaco-workbench.vs .ade-eng-editor .ade-eng-demo-btn {
+	background: rgba(5, 150, 105, 0.12);
+	border-color: rgba(5, 150, 105, 0.45);
+	color: #047857;
 }
 
 /* ============================================================================

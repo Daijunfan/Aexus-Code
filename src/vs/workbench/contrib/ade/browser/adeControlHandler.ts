@@ -36,7 +36,7 @@ import {
 import { normalizeThinkingLevel, parseEngineeringBlueprint, serializeEngineeringBlueprint } from '../../../../platform/ade/common/adeEngineeringBlueprint.js';
 import { AdeBlueprintTemplatePreset, buildBlueprintFromTemplate, listBlueprintTemplates } from '../../../../platform/ade/common/adeBlueprintTemplates.js';
 import { computeTreeFinancialSummary } from '../../../../platform/ade/common/adePricing.js';
-import { buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
+import { buildEngineeringDagSvg, buildEngineeringRunReportMarkdown } from '../../../../platform/ade/common/adeRunReport.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
@@ -2477,6 +2477,48 @@ export async function executeAdeControlRequest(
 				treeType: snap.treeType,
 				financials: computeTreeFinancialSummary(snap),
 				markdown: buildEngineeringRunReportMarkdown(snap),
+				svg: buildEngineeringDagSvg(snap),
+			};
+		}
+
+		case 'engineering.demo': {
+			if (!engineeringService?.startDemoSimulation) {
+				throw new Error('ADE Engineering interactive demo is not available.');
+			}
+			await engineeringService.whenReady();
+			modes.setMode('ade');
+			const explicitGov = params.governor ?? params.governorSessionId ?? params.id;
+			let govId: string;
+			if (typeof explicitGov === 'string' && explicitGov.trim()) {
+				const gov = resolveAgentFromParams(projects, { id: explicitGov });
+				govId = gov.id;
+			} else {
+				const projectUri = projects.selectedProject?.uri ?? projects.projects[0]?.uri;
+				if (!projectUri) {
+					throw new Error('Add or select a project folder first before starting the interactive demo.');
+				}
+				const demoLabel = 'Interactive Demo · Feature Ship';
+				let demoGov = projects.agents.find(a => !a.parentId && a.label === demoLabel && a.projectUri.toString() === projectUri.toString());
+				if (!demoGov) {
+					demoGov = projects.addSession(
+						projectUri,
+						{ engineId: 'aexus-claude', resource: URI.parse(`aexus-claude://aexus-demo/${Date.now()}`) },
+						demoLabel,
+						{ role: 'governor' },
+					);
+				}
+				govId = demoGov.id;
+			}
+			if (!engineeringService.hasTree(govId)) {
+				await engineeringService.initTree({ governorSessionId: govId, treeType: 'engineering' });
+			}
+			await engineeringService.openEngineeringEditor(govId);
+			const snap = await engineeringService.startDemoSimulation(govId);
+			return {
+				governorSessionId: govId,
+				demo: true,
+				nodeCount: snap.blueprint.nodes.length,
+				managerCount: snap.blueprint.managers.length,
 			};
 		}
 

@@ -4,14 +4,6 @@ name: Code OSS (ripple)
 # saves it in the cache. Pull requests can only restore caches created on main, so this spares
 # each pull request a build. It runs when ripple changes, and daily in case the cache was evicted.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - build/ripple/**
-      - .github/workflows/pr-ripple.yml
-  schedule:
-    - cron: '23 4 * * *'
   workflow_dispatch:
 
 permissions: {}

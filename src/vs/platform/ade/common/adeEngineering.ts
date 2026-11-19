@@ -572,6 +572,8 @@ export interface IAdeEngineeringService {
 	ensureNodeAgentSessionOpen(governorSessionId: string, nodeId: string, role?: 'worker' | 'employee' | 'manager', options?: { side?: boolean }): Promise<string | undefined>;
 	mergeTreeWorktrees?(governorSessionId: string): Promise<{ readonly ok: boolean; readonly conflictedFiles: readonly string[]; readonly summary: string }>;
 	cleanupTreeWorktrees?(governorSessionId: string): Promise<void>;
+	startDemoSimulation?(governorSessionId: string): Promise<IAdeEngineeringTreeSnapshot>;
+	isDemoSimulation?(governorSessionId: string): boolean;
 }
 
 export const IAdeInboxService = createDecorator<IAdeInboxService>('adeInboxService');

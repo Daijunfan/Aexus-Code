@@ -1,8 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Question
-    url: https://stackoverflow.com/questions/tagged/visual-studio-code
-    about: Please ask and answer questions here.
-  - name: Extension Development
-    url: https://github.com/microsoft/vscode-discussions/discussions
-    about: Please use this for extension development questions and ideas.
+  - name: GitHub Discussions & Q&A
+    url: https://github.com/Daijunfan/Aexus-Code/discussions
+    about: Ask questions, share custom DAG Blueprint Recipes, and discuss ideas with the Aexus Code community.
+  - name: DAG Blueprint Recipes
+    url: https://github.com/Daijunfan/Aexus-Code/tree/main/examples/blueprints
+    about: Browse ready-to-apply Engineering & Research multi-agent workflow blueprints.
+  - name: Architecture & Contributing Guide
+    url: https://github.com/Daijunfan/Aexus-Code/blob/main/CONTRIBUTING.md
+    about: Review architectural invariants, local build commands, and test suites before opening a PR.

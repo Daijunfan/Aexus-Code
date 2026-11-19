@@ -1,16 +1,7 @@
 name: CodeQL
 
 on:
-  push:
-    branches:
-      - main
-      - 'release/**/*'
-  pull_request:
-    branches:
-      - main
-      - 'release/**/*'
-  schedule:
-    - cron: '17 19 * * 6'
+  workflow_dispatch:
 
 permissions: {}
 

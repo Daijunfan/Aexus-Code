@@ -1,12 +1,7 @@
 name: Code OSS (node_modules)
 
 on:
-  push:
-    branches:
-      - main
-      # Pull requests to a release branch restore the caches of the release branch, whose dependencies
-      # usually differ from those of main.
-      - 'release/*'
+  workflow_dispatch:
 
 permissions: {}
 

@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml"><img src="https://github.com/Daijunfan/Aexus-Code/actions/workflows/aexus-ci.yml/badge.svg" alt="Aexus Code CI" /></a>
   <a href="LICENSE.txt"><img src="https://img.shields.io/badge/License-MIT-0f172a?style=flat-square" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/Platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-0284c7?style=flat-square" alt="Cross-Platform macOS Windows Linux" />
   <img src="https://img.shields.io/badge/Modes-ADE%20%E2%87%84%20IDE%20Symmetry-2563eb?style=flat-square" alt="ADE IDE Symmetry" />
@@ -19,10 +20,14 @@
 </p>
 
 <p align="center">
-  <strong>English</strong> · <a href="docs/README.zh-CN.md">简体中文</a> · <a href="examples/blueprints/README.md">Blueprint Recipes</a> · <a href="AEXUS.md">Architecture (AEXUS.md)</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="CONTRIBUTING.md">Contributing</a>
+  <strong>English</strong> · <a href="docs/README.zh-CN.md">简体中文</a> · <a href="examples/blueprints/README.md">Blueprint Recipes</a> · <a href="AEXUS.md">Architecture (AEXUS.md)</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="CONTRIBUTING.md">Contributing</a> · <a href="CODE_OF_CONDUCT.md">Code of Conduct</a>
 </p>
 
 ---
+
+> [!TIP]
+> **Try the Full 4-Tier DAG Studio in 10 Seconds (`$0.00` API Spend, Zero File Changes):**
+> Launch Aexus Code and press `Cmd/Ctrl+Shift+P` → **`Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)`** (or run `aexus-ade engineering demo`) — watch Contract → 3-way parallel Git Worktree fan-out → adversarial L3 QA catch & recovery → live 4-tier FinOps & Execution Gantt → clickable golden **`Release Readiness Gate`** → 1-click **Vector SVG** & **GitHub PR Audit Report** export with zero API keys required! Toggle **`ADE ⇄ IDE`** anytime with `Alt+Cmd+A` (`Alt+Ctrl+A`).
 
 <p align="center">
   <img src="docs/assets/08-finops-budget-guardrails.png" width="100%" alt="Aexus Code — Armored Nested Dual-Shell DAG, Git Worktree Segment Lanes, 4-Tier FinOps & Hard Budget Guardrail" />
@@ -238,8 +243,11 @@ Every engine runs locally via its native CLI/RPC protocol (`requiresCopilotSignI
 Aexus Code exposes a local `0600` Unix socket (macOS/Linux: `~/.aexus-code/ade-control.sock`) or authenticated Windows Named Pipe (`\\.\pipe\aexus-ade-control-*`) and automatically injects `aexus-ade` into integrated terminals and orchestrated agent environments:
 
 ```bash
-# 0. Diagnose all 8 coding CLIs, Git worktree readiness, SSH, control plane & repo rule files
+# 0. Diagnose all 8 coding CLIs, enable shell completions, or launch the 0-token Interactive Demo
+aexus-ade --version
 aexus-ade doctor --project .
+eval "$(aexus-ade completion zsh)"   # also supports bash | fish
+aexus-ade engineering demo
 
 # 1. Inspect workbench state, switch mode & sync VS Code SSH Cloud Hosts
 aexus-ade status --json
@@ -263,14 +271,14 @@ aexus-ade engineering report --governor "$GOV_ID" --out ./pr-verification-report
 
 | Command Group | Subcommands |
 | :--- | :--- |
-| `doctor` | `doctor [--project <path>] [--json]` *(works standalone without a running window)* |
+| `doctor` / `completion` | `doctor [--project <path>] [--json]` · `completion <bash\|zsh\|fish>` · `--version` *(all work standalone without a running window)* |
 | `status` / `mode` / `view` | `status` · `mode [get \| set <ade\|ide>]` · `view [--archived] [--inspector <changes\|files\|hide>] [--refresh]` |
 | `project` | `list` · `add <path\|host:/path>` · `select` · `remove` · `delete` · `focus` · `home` · `forward` · `move` · `changes` · `files` · `open-file` · `open-diff` |
 | `host` | `list` · `info` · `add` · `update` · `remove` · `test` · `browse` · `import-vscode` · `open` |
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
 | `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
-| `engineering` | `list` · `init` · `open` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
+| `engineering` | `list` · `init` · `open` · `demo [--governor <id>]` · `template <list\|apply>` · `blueprint <get\|apply\|validate>` · `run` · `pause` · `resume` · `stop` · `reset` · `configure [--max-budget-usd <n> \| --clear-budget]` · `worktrees <merge\|cleanup>` · `report [--out <file>]` · `diff` · `reports` · `status` · `review` · `gate` · `watchdog-action` · `remove` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
 
 ---
