@@ -826,7 +826,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		const head = append(card, $('header.ade-ch-card-head'));
 		const osKind = resolveAdeOsIconKind({
 			os: host.os,
-			distribution: host.distribution,
+			distribution: host.lastTestStatus?.remoteUname,
 			hint: `${host.name} ${host.alias} ${host.hostName} ${host.notes ?? ''}`,
 		});
 		const osBadge = append(head, $(`span.ade-ch-os-badge.os-${host.os}.os-kind-${osKind}`));

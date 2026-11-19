@@ -37,10 +37,15 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            build/pnpm-lock.yaml
+            extensions/pnpm-lock.yaml
 
       - name: Install dependencies (no native C++ rebuilds needed for typecheck/Node tests)
         run: |
           pnpm install --frozen-lockfile --ignore-scripts
+          pnpm -C build install --frozen-lockfile --ignore-scripts
           pnpm -C extensions install --frozen-lockfile --ignore-scripts
 
       - name: Download Electron type definitions (.build/typings/electron.d.ts)
@@ -66,6 +71,8 @@ jobs:
 
       - name: Prepare Electron test runtime for headless Linux
         run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgtk-3-0 libgbm1 libnss3 libasound2t64
           pnpm run electron
           if [ -f .build/electron/chrome-sandbox ]; then
             sudo chown root .build/electron/chrome-sandbox
