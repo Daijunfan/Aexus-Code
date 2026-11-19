@@ -21,38 +21,38 @@
 }
 
 .monaco-workbench .ade-eng-editor {
-	--ade-rank-gov: #f2c35b;
-	--ade-rank-mgr: #818cf8;
-	--ade-rank-emp: #a78bfa;
-	--ade-rank-wrk: #34d399;
+	--ade-rank-gov: var(--vscode-ade-rank-governor, #f2c35b);
+	--ade-rank-mgr: var(--vscode-ade-rank-manager, #818cf8);
+	--ade-rank-emp: var(--vscode-ade-rank-employee, #a78bfa);
+	--ade-rank-wrk: var(--vscode-ade-rank-worker, #34d399);
 
-	--ade-eng-green: #34d399;
-	--ade-eng-green-solid: #10b981;
-	--ade-eng-emp-accent: #a78bfa;
-	--ade-eng-mgr-accent: #818cf8;
-	--ade-eng-amber-light: #f5b942;
-	--ade-eng-amber-deep: #d97706;
-	--ade-eng-red: #ef4444;
-	--ade-eng-gray: #6e7681;
+	--ade-eng-green: var(--vscode-ade-rank-worker, #34d399);
+	--ade-eng-green-solid: var(--vscode-ade-studio-success, #10b981);
+	--ade-eng-emp-accent: var(--vscode-ade-rank-employee, #a78bfa);
+	--ade-eng-mgr-accent: var(--vscode-ade-rank-manager, #818cf8);
+	--ade-eng-amber-light: var(--vscode-ade-studio-warning, #f5b942);
+	--ade-eng-amber-deep: var(--vscode-ade-studio-researchAccent, #d97706);
+	--ade-eng-red: var(--vscode-ade-severity-critical, #ef4444);
+	--ade-eng-gray: var(--vscode-ade-rank-member, #6e7681);
 
-	--ade-mode-accent: #38bdf8;
-	--ade-mode-accent-2: #34d399;
-	--ade-grid-minor: color-mix(in srgb, #38bdf8 9%, color-mix(in srgb, var(--vscode-foreground) 6%, transparent));
-	--ade-grid-major: color-mix(in srgb, #38bdf8 15%, transparent);
+	--ade-mode-accent: var(--vscode-ade-cloud, #38bdf8);
+	--ade-mode-accent-2: var(--vscode-ade-rank-worker, #34d399);
+	--ade-grid-minor: color-mix(in srgb, var(--ade-mode-accent) 9%, color-mix(in srgb, var(--vscode-foreground) 6%, transparent));
+	--ade-grid-major: color-mix(in srgb, var(--ade-mode-accent) 15%, transparent);
 }
 
 .monaco-workbench .ade-eng-editor.mode-engineering {
-	--ade-mode-accent: #38bdf8;
-	--ade-mode-accent-2: #34d399;
-	--ade-grid-minor: color-mix(in srgb, #38bdf8 8.5%, color-mix(in srgb, var(--vscode-foreground) 5.5%, transparent));
-	--ade-grid-major: color-mix(in srgb, #38bdf8 15%, transparent);
+	--ade-mode-accent: var(--vscode-ade-cloud, #38bdf8);
+	--ade-mode-accent-2: var(--vscode-ade-rank-worker, #34d399);
+	--ade-grid-minor: color-mix(in srgb, var(--ade-mode-accent) 8.5%, color-mix(in srgb, var(--vscode-foreground) 5.5%, transparent));
+	--ade-grid-major: color-mix(in srgb, var(--ade-mode-accent) 15%, transparent);
 }
 
 .monaco-workbench .ade-eng-editor.mode-research {
-	--ade-mode-accent: #f59e0b;
-	--ade-mode-accent-2: #ec4899;
-	--ade-grid-minor: color-mix(in srgb, #f59e0b 24%, color-mix(in srgb, var(--vscode-foreground) 9%, transparent));
-	--ade-grid-major: color-mix(in srgb, #ec4899 26%, transparent);
+	--ade-mode-accent: var(--vscode-ade-studio-researchAccent, #f59e0b);
+	--ade-mode-accent-2: var(--vscode-ade-studio-researchSecondary, #ec4899);
+	--ade-grid-minor: color-mix(in srgb, var(--ade-mode-accent) 24%, color-mix(in srgb, var(--vscode-foreground) 9%, transparent));
+	--ade-grid-major: color-mix(in srgb, var(--ade-mode-accent-2) 26%, transparent);
 }
 
 /* ============================================================================

@@ -77,3 +77,31 @@ export const ADE_CLOUD = registerColor('ade.cloud', {
 	hcDark: '#7DD3FC',
 	hcLight: '#075985'
 }, localize('ade.cloud', "Accent color for cloud hosts in Aexus ADE surfaces."));
+
+export const ADE_STUDIO_SUCCESS = registerColor('ade.studio.success', {
+	dark: '#10B981',
+	light: '#059669',
+	hcDark: '#6EE7B7',
+	hcLight: '#047857'
+}, localize('ade.studio.success', "Solid success accent in the ADE Engineering & Research Studio."));
+
+export const ADE_STUDIO_WARNING = registerColor('ade.studio.warning', {
+	dark: '#F5B942',
+	light: '#B45309',
+	hcDark: '#FDE047',
+	hcLight: '#92400E'
+}, localize('ade.studio.warning', "Warning accent in the ADE Engineering & Research Studio."));
+
+export const ADE_STUDIO_RESEARCH_ACCENT = registerColor('ade.studio.researchAccent', {
+	dark: '#F59E0B',
+	light: '#B45309',
+	hcDark: '#FCD34D',
+	hcLight: '#92400E'
+}, localize('ade.studio.researchAccent', "Primary accent for Research Mode canvases in the ADE Studio."));
+
+export const ADE_STUDIO_RESEARCH_SECONDARY = registerColor('ade.studio.researchSecondary', {
+	dark: '#EC4899',
+	light: '#BE185D',
+	hcDark: '#F9A8D4',
+	hcLight: '#9D174D'
+}, localize('ade.studio.researchSecondary', "Secondary accent for Research Mode canvases in the ADE Studio."));

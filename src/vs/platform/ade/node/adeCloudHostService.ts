@@ -617,6 +617,9 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		} catch {
 			// User ~/.ssh/config does not exist yet
 		}
+		// Fallback only when neither managed host config nor user ~/.ssh/config specifies StrictHostKeyChecking.
+		// Because OpenSSH uses first-match-wins, any StrictHostKeyChecking in user ~/.ssh/config takes precedence.
+		effectiveLines.push('', 'Host *', '    StrictHostKeyChecking accept-new');
 		const tmpEffective = `${this.effectiveSshConfPath}.${process.pid}.${Date.now()}.tmp`;
 		await fs.writeFile(tmpEffective, effectiveLines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
 		await fs.rename(tmpEffective, this.effectiveSshConfPath);
@@ -1184,8 +1187,9 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				// Proceed without ControlMaster if private mux directory cannot be secured
 			}
 		}
-		const hostKeyMode = options.host?.strictHostKeyChecking || 'accept-new';
-		sshArgs.push('-o', `StrictHostKeyChecking=${hostKeyMode}`);
+		if (options.host?.strictHostKeyChecking === 'yes' || options.host?.strictHostKeyChecking === 'accept-new' || options.host?.strictHostKeyChecking === 'no') {
+			sshArgs.push('-o', `StrictHostKeyChecking=${options.host.strictHostKeyChecking}`);
+		}
 		sshArgs.push('--', target, remoteCommand);
 
 		return new Promise((resolve, reject) => {
