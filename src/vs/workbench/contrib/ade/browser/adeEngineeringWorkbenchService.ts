@@ -279,6 +279,8 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 		readonly title?: string;
 		readonly nodeId?: string;
 		readonly severity?: AdeInboxSeverity;
+		readonly senderRank?: 'governor' | 'manager' | 'employee' | 'worker';
+		readonly senderAgentId?: string;
 	}): Promise<IAdeInboxItem> {
 		await this._readyPromise;
 		const gov = this.projects.getAgent(params.governorSessionId);
@@ -306,6 +308,8 @@ export class AdeInboxService extends Disposable implements IAdeInboxService {
 			resolved: false,
 			createdAt: Date.now(),
 			severity,
+			senderRank: params.senderRank ?? 'governor',
+			...(params.senderAgentId ? { senderAgentId: params.senderAgentId } : {}),
 		};
 		this._items = [item, ...this._items];
 		await this.backend.saveInbox(this._items);

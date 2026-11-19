@@ -468,8 +468,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 				const projectAgents = this.projects.agents.filter(agent => !this.projects.isArchived(agent.id) && this.uriIdentity.extUri.isEqual(agent.projectUri, item.project.uri));
 				const hasWorking = projectAgents.some(agent => agent.status === 'working');
 				const hasPending = !hasWorking && projectAgents.some(agent => agent.status === 'pending');
-				const hasUnread = !hasWorking && !hasPending && projectAgents.some(agent => Boolean(agent.unread));
-				this.applyStatusIndicator(template.statusIndicator, hasWorking ? 'working' : hasPending ? 'pending' : hasUnread ? 'unread' : 'none', true);
+				this.applyStatusIndicator(template.statusIndicator, hasWorking ? 'working' : hasPending ? 'pending' : 'none', true);
 			} else {
 				this.applyStatusIndicator(template.statusIndicator, 'none');
 			}
@@ -585,16 +584,14 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 
 		const ownStatus = agent.status === 'working' ? 'working'
 			: agent.status === 'pending' ? 'pending'
-				: agent.unread ? 'unread'
-					: 'none';
+				: 'none';
 		if (ownStatus !== 'none') {
 			this.applyStatusIndicator(template.statusIndicator, ownStatus, false);
 		} else if (node.collapsed) {
 			const descendants = this.projects.getSubtree(agent.id).slice(1);
 			const descWorking = descendants.some(child => child.status === 'working');
 			const descPending = !descWorking && descendants.some(child => child.status === 'pending');
-			const descUnread = !descWorking && !descPending && descendants.some(child => Boolean(child.unread));
-			this.applyStatusIndicator(template.statusIndicator, descWorking ? 'working' : descPending ? 'pending' : descUnread ? 'unread' : 'none', true);
+			this.applyStatusIndicator(template.statusIndicator, descWorking ? 'working' : descPending ? 'pending' : 'none', true);
 		} else {
 			this.applyStatusIndicator(template.statusIndicator, 'none');
 		}
@@ -790,6 +787,8 @@ export class AdeProjectsView extends ViewPane {
 				this.engineeringService,
 				this.editors,
 				msg => this.notificationService?.error(msg),
+				this.projects,
+				this.sessions,
 			));
 			this.inboxPanel.setVisible(false);
 		}
@@ -1294,9 +1293,10 @@ export class AdeProjectsView extends ViewPane {
 		}
 
 		if (this.inboxBadgeEl && this.inboxService) {
-			const unread = this.inboxService.unreadCount;
+			const unreadFormal = this.inboxService.unreadCount;
+			const unreadAgents = this.projects.agents.filter(agent => !this.projects.isArchived(agent.id) && Boolean(agent.unread)).length;
 			const critical = this.inboxService.items.filter(item => !item.resolved && resolveAdeInboxSeverity(item) === 'critical').length;
-			const shown = Math.max(unread, critical);
+			const shown = Math.max(unreadFormal + unreadAgents, critical);
 			this.inboxBadgeEl.textContent = String(shown);
 			this.inboxBadgeEl.hidden = shown <= 0;
 			this.inboxBadgeEl.classList.toggle('critical', critical > 0);

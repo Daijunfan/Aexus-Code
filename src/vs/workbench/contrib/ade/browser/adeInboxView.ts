@@ -3,26 +3,112 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { asCSSUrl } from '../../../../base/browser/cssValue.js';
 import { $, addDisposableListener, append, clearNode, EventType, isHTMLTextAreaElement } from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import {
+	AdeInboxSenderRank,
 	AdeInboxSeverity,
 	IAdeEngineeringService,
 	IAdeInboxItem,
 	IAdeInboxService,
 	resolveAdeInboxSeverity,
 } from '../../../../platform/ade/common/adeEngineering.js';
-import { IAdeEditorService } from '../common/ade.js';
+import {
+	AdeSessionRank,
+	IAdeAgent,
+	IAdeEditorService,
+	IAdeProjectsService,
+	resolveAdeAgentRank,
+} from '../common/ade.js';
+import { IAdeSessionsService } from './adeSessionsService.js';
 
-type AdeInboxLane = 'critical' | 'gate' | 'info' | 'resolved';
+type AdeInboxLane = 'critical' | 'gate' | 'replies' | 'info' | 'resolved';
 
-const ADE_INBOX_LANE_ORDER: readonly AdeInboxLane[] = ['critical', 'gate', 'info', 'resolved'];
+const ADE_INBOX_FORMAL_LANE_ORDER: readonly ('critical' | 'gate' | 'info' | 'resolved')[] = ['critical', 'gate', 'info', 'resolved'];
+const ADE_INBOX_RENDER_LANE_ORDER: readonly AdeInboxLane[] = ['critical', 'gate', 'replies', 'info', 'resolved'];
+
+export type AdeInboxRankFilter = 'all' | AdeInboxSenderRank;
+
+export const ADE_INBOX_RANK_FILTERS: readonly AdeInboxRankFilter[] = ['all', 'governor', 'manager', 'employee', 'worker'];
+
+const ADE_INBOX_RANK_PRIORITY: Readonly<Record<AdeInboxSenderRank, number>> = {
+	governor: 0,
+	manager: 1,
+	employee: 2,
+	worker: 3,
+};
 
 /** Message length beyond which a card is clamped to 3 lines with a "more" toggle. */
 const ADE_INBOX_CLAMP_CHARS = 180;
+
+export function normalizeAdeInboxRank(rank: AdeSessionRank | undefined): AdeInboxSenderRank {
+	switch (rank) {
+		case 'governor':
+			return 'governor';
+		case 'manager':
+			return 'manager';
+		case 'employee':
+		case 'subordinate':
+			return 'employee';
+		case 'worker':
+		default:
+			return 'worker';
+	}
+}
+
+export function resolveAdeInboxItemRank(item: IAdeInboxItem, projects?: IAdeProjectsService): AdeInboxSenderRank {
+	if (item.senderRank) {
+		return item.senderRank;
+	}
+	if (item.senderAgentId && projects) {
+		const sender = projects.getAgent(item.senderAgentId);
+		if (sender) {
+			return normalizeAdeInboxRank(resolveAdeAgentRank(sender, projects.hasSubordinates(sender.id)));
+		}
+	}
+	return 'governor';
+}
+
+function getRankTierLabel(rank: AdeInboxSenderRank): string {
+	switch (rank) {
+		case 'governor': return 'L1';
+		case 'manager': return 'L2';
+		case 'employee': return 'L3';
+		case 'worker': return 'L4';
+	}
+}
+
+function getRankShortLabel(rank: AdeInboxSenderRank): string {
+	switch (rank) {
+		case 'governor': return localize('adeInboxRankGovShort', "Gov");
+		case 'manager': return localize('adeInboxRankMgrShort', "Mgr");
+		case 'employee': return localize('adeInboxRankEmpShort', "Emp");
+		case 'worker': return localize('adeInboxRankWrkShort', "Wrk");
+	}
+}
+
+function getRankFullLabel(rank: AdeInboxSenderRank): string {
+	switch (rank) {
+		case 'governor': return localize('adeInboxRankGovFull', "Governor");
+		case 'manager': return localize('adeInboxRankMgrFull', "Manager");
+		case 'employee': return localize('adeInboxRankEmpFull', "Employee");
+		case 'worker': return localize('adeInboxRankWrkFull', "Worker");
+	}
+}
+
+function getRankIcon(rank: AdeInboxSenderRank): ThemeIcon {
+	switch (rank) {
+		case 'governor': return Codicon.organization;
+		case 'manager': return Codicon.briefcase;
+		case 'employee': return Codicon.shield;
+		case 'worker': return Codicon.tools;
+	}
+}
 
 function formatLaneTitle(lane: AdeInboxLane): string {
 	switch (lane) {
@@ -30,6 +116,8 @@ function formatLaneTitle(lane: AdeInboxLane): string {
 			return localize('adeInboxLaneCritical', "Critical");
 		case 'gate':
 			return localize('adeInboxLaneGate', "Needs Decision");
+		case 'replies':
+			return localize('adeInboxLaneReplies', "Unread Replies");
 		case 'info':
 			return localize('adeInboxLaneInfo', "Updates");
 		case 'resolved':
@@ -37,25 +125,32 @@ function formatLaneTitle(lane: AdeInboxLane): string {
 	}
 }
 
-/** Groups inbox items into ordered triage lanes (Critical → Needs Decision → Updates → Resolved). */
-export function groupAdeInboxItemsByLane(items: readonly IAdeInboxItem[]): Map<AdeInboxLane, IAdeInboxItem[]> {
-	const lanes = new Map<AdeInboxLane, IAdeInboxItem[]>();
-	for (const lane of ADE_INBOX_LANE_ORDER) {
+/** Groups formal inbox items into ordered triage lanes (Critical → Needs Decision → Updates → Resolved). */
+export function groupAdeInboxItemsByLane(items: readonly IAdeInboxItem[]): Map<'critical' | 'gate' | 'info' | 'resolved', IAdeInboxItem[]> {
+	const lanes = new Map<'critical' | 'gate' | 'info' | 'resolved', IAdeInboxItem[]>();
+	for (const lane of ADE_INBOX_FORMAL_LANE_ORDER) {
 		lanes.set(lane, []);
 	}
 	for (const item of items) {
-		const lane: AdeInboxLane = item.resolved ? 'resolved' : resolveAdeInboxSeverity(item);
+		const lane: 'critical' | 'gate' | 'info' | 'resolved' = item.resolved ? 'resolved' : resolveAdeInboxSeverity(item);
 		lanes.get(lane)!.push(item);
 	}
 	return lanes;
 }
 
+interface IUnreadReplyEntry {
+	readonly agent: IAdeAgent;
+	readonly rank: AdeInboxSenderRank;
+}
+
 export class AdeInboxPanel extends Disposable {
 	readonly element: HTMLElement;
 	private readonly filterBarEl: HTMLElement;
+	private readonly rankBarEl: HTMLElement;
 	private readonly listEl: HTMLElement;
 	private readonly renderDisposables = this._register(new DisposableStore());
 	private showResolved = false;
+	private selectedRank: AdeInboxRankFilter = 'all';
 	private expandedRollbackIds = new Set<string>();
 	private rollbackFeedbackDrafts = new Map<string, string>();
 	private rollbackTargetDrafts = new Map<string, string>();
@@ -84,13 +179,37 @@ export class AdeInboxPanel extends Disposable {
 		private readonly engineering: IAdeEngineeringService,
 		private readonly editors: IAdeEditorService,
 		private readonly onError?: (message: string) => void,
+		private readonly projects?: IAdeProjectsService,
+		private readonly sessions?: IAdeSessionsService,
 	) {
 		super();
 		this.element = append(container, $('.ade-inbox-panel'));
 		this.filterBarEl = append(this.element, $('.ade-inbox-toolbar'));
+		this.rankBarEl = append(this.element, $('.ade-inbox-rank-bar', {
+			role: 'toolbar',
+			'aria-label': localize('adeInboxRankFilterAria', "Filter Inbox by Agent Rank"),
+		}));
 		this.listEl = append(this.element, $('.ade-inbox-list'));
 
-		this._register(this.inbox.onDidChange(() => this.render()));
+		this._register(this.inbox.onDidChange(() => {
+			if (!this.element.hidden) {
+				this.render();
+			}
+		}));
+		if (this.projects) {
+			this._register(this.projects.onDidChange(() => {
+				if (!this.element.hidden) {
+					this.render();
+				}
+			}));
+		}
+		if (this.sessions) {
+			this._register(this.sessions.onDidChangeEngines(() => {
+				if (!this.element.hidden) {
+					this.render();
+				}
+			}));
+		}
 		this.render();
 	}
 
@@ -101,9 +220,34 @@ export class AdeInboxPanel extends Disposable {
 		}
 	}
 
+	setRankFilter(rank: AdeInboxRankFilter): void {
+		if (this.selectedRank === rank) {
+			return;
+		}
+		this.selectedRank = rank;
+		this.render();
+	}
+
 	layout(height: number): void {
-		const barH = this.filterBarEl.offsetHeight || 28;
+		const barH = (this.filterBarEl.offsetHeight || 28) + (this.rankBarEl.offsetHeight || 28);
 		this.listEl.style.maxHeight = `${Math.max(80, height - barH)}px`;
+	}
+
+	private collectUnreadReplies(): IUnreadReplyEntry[] {
+		if (!this.projects) {
+			return [];
+		}
+		const projects = this.projects;
+		const entries: IUnreadReplyEntry[] = [];
+		for (const agent of projects.agents) {
+			if (projects.isArchived(agent.id) || !agent.unread) {
+				continue;
+			}
+			const rank = normalizeAdeInboxRank(resolveAdeAgentRank(agent, projects.hasSubordinates(agent.id)));
+			entries.push({ agent, rank });
+		}
+		entries.sort((a, b) => ADE_INBOX_RANK_PRIORITY[a.rank] - ADE_INBOX_RANK_PRIORITY[b.rank]);
+		return entries;
 	}
 
 	render(): void {
@@ -117,7 +261,36 @@ export class AdeInboxPanel extends Disposable {
 
 		this.renderDisposables.clear();
 		clearNode(this.filterBarEl);
+		clearNode(this.rankBarEl);
 		clearNode(this.listEl);
+
+		const allFormalItems = this.inbox.list({ includeResolved: this.showResolved });
+		const allUnreadReplies = this.collectUnreadReplies();
+
+		// Compute per-rank counts across visible formal items + unread session replies
+		const rankCounts: Record<AdeInboxRankFilter, number> = {
+			all: allFormalItems.length + allUnreadReplies.length,
+			governor: 0,
+			manager: 0,
+			employee: 0,
+			worker: 0,
+		};
+		for (const item of allFormalItems) {
+			rankCounts[resolveAdeInboxItemRank(item, this.projects)]++;
+		}
+		for (const entry of allUnreadReplies) {
+			rankCounts[entry.rank]++;
+		}
+
+		const filteredFormalItems = this.selectedRank === 'all'
+			? allFormalItems
+			: allFormalItems.filter(item => resolveAdeInboxItemRank(item, this.projects) === this.selectedRank);
+		const filteredUnreadReplies = this.selectedRank === 'all'
+			? allUnreadReplies
+			: allUnreadReplies.filter(entry => entry.rank === this.selectedRank);
+
+		const unreadFormalMatching = filteredFormalItems.filter(item => item.unread && !item.resolved);
+		const hasMarkableUnread = unreadFormalMatching.length > 0 || filteredUnreadReplies.length > 0;
 
 		if (this.errorBannerText) {
 			const errBanner = append(this.listEl, $('.ade-inbox-card.ade-inbox-error-banner.sev-critical', { role: 'alert' }));
@@ -133,6 +306,7 @@ export class AdeInboxPanel extends Disposable {
 			append(errBanner, $('div.ade-inbox-card-message', {}, this.errorBannerText));
 		}
 
+		// Row 1: Pending / All toggle + Mark all read
 		const leftGroup = append(this.filterBarEl, $('.ade-inbox-toolbar-left'));
 		const pendingToggle = append(leftGroup, $(`button.ade-inbox-filter-btn${!this.showResolved ? '.active' : ''}`, {
 			type: 'button',
@@ -152,24 +326,70 @@ export class AdeInboxPanel extends Disposable {
 			this.render();
 		}));
 
-		if (this.inbox.unreadCount > 0) {
+		if (hasMarkableUnread) {
 			const markReadBtn = append(this.filterBarEl, $('button.ade-inbox-link-btn', {
 				type: 'button',
 			}, localize('adeInboxMarkAllRead', "Mark all read")));
 			this.renderDisposables.add(addDisposableListener(markReadBtn, EventType.CLICK, () => {
-				void this.inbox.markRead();
+				if (this.selectedRank === 'all') {
+					void this.inbox.markRead();
+				} else {
+					for (const item of unreadFormalMatching) {
+						void this.inbox.markRead(item.id);
+					}
+				}
+				if (this.projects) {
+					for (const entry of filteredUnreadReplies) {
+						this.projects.markRead(entry.agent.id);
+					}
+				}
 			}));
 		}
 
-		const items = this.inbox.list({ includeResolved: this.showResolved });
-		if (items.length === 0) {
-			this.renderEmptyState();
+		// Row 2: Rank filter bar (All / Gov / Mgr / Emp / Wrk — fits on 1 crisp row)
+		for (const rank of ADE_INBOX_RANK_FILTERS) {
+			const isActive = this.selectedRank === rank;
+			const count = rankCounts[rank];
+			const chipTooltip = rank === 'all'
+				? localize('adeInboxRankAllTooltip', "Show messages from all agent ranks")
+				: localize('adeInboxRankSingleTooltip', "Show only {0} {1} messages", getRankTierLabel(rank), getRankFullLabel(rank));
+			const chip = append(this.rankBarEl, $(`button.ade-inbox-rank-chip.rank-${rank}${isActive ? '.active' : ''}${count > 0 ? '.has-items' : ''}`, {
+				type: 'button',
+				'data-rank': rank,
+				'aria-pressed': String(isActive),
+				title: chipTooltip,
+			}));
+			if (rank === 'all') {
+				append(chip, $('span.ade-inbox-rank-chip-label', {}, localize('adeInboxRankAllLabel', "All")));
+			} else {
+				append(chip, $('span.ade-inbox-rank-chip-label', {}, getRankShortLabel(rank)));
+			}
+			if (count > 0) {
+				append(chip, $('span.ade-inbox-rank-count', {}, String(count)));
+			}
+			this.renderDisposables.add(addDisposableListener(chip, EventType.CLICK, () => {
+				this.setRankFilter(rank);
+			}));
+		}
+
+		if (filteredFormalItems.length === 0 && filteredUnreadReplies.length === 0) {
+			this.renderEmptyState(rankCounts.all > 0);
 			return;
 		}
 
-		const lanes = groupAdeInboxItemsByLane(items);
-		for (const lane of ADE_INBOX_LANE_ORDER) {
-			const laneItems = lanes.get(lane) ?? [];
+		const formalLanes = groupAdeInboxItemsByLane(filteredFormalItems);
+		for (const lane of ADE_INBOX_RENDER_LANE_ORDER) {
+			if (lane === 'replies') {
+				if (filteredUnreadReplies.length === 0) {
+					continue;
+				}
+				this.renderLaneHeader('replies', filteredUnreadReplies.length, false);
+				for (const entry of filteredUnreadReplies) {
+					this.renderUnreadReplyCard(entry);
+				}
+				continue;
+			}
+			const laneItems = formalLanes.get(lane) ?? [];
 			if (laneItems.length === 0) {
 				continue;
 			}
@@ -185,16 +405,28 @@ export class AdeInboxPanel extends Disposable {
 		this.listEl.scrollTop = prevScrollTop;
 	}
 
-	private renderEmptyState(): void {
+	private renderEmptyState(hasItemsInOtherRanks: boolean): void {
 		const empty = append(this.listEl, $('.ade-inbox-empty'));
 		const ico = append(empty, $('span.ade-inbox-empty-icon', { 'aria-hidden': 'true' }));
-		ico.classList.add(...ThemeIcon.asClassNameArray(this.showResolved ? Codicon.inbox : Codicon.passFilled));
+		ico.classList.add(...ThemeIcon.asClassNameArray(this.showResolved || hasItemsInOtherRanks ? Codicon.inbox : Codicon.passFilled));
+		if (this.selectedRank !== 'all') {
+			const rankLabel = `${getRankTierLabel(this.selectedRank)} ${getRankFullLabel(this.selectedRank)}`;
+			append(empty, $('h3.ade-inbox-empty-title', {}, localize('adeInboxEmptyRankTitle', "No {0} messages", rankLabel)));
+			append(empty, $('p', {}, hasItemsInOtherRanks
+				? localize('adeInboxEmptyRankOther', "Other ranks have active items in your Inbox.")
+				: localize('adeInboxEmptyRankNone', "All clear for {0}.", rankLabel)));
+			const resetBtn = append(empty, $('button.ade-inbox-link-btn.ade-inbox-empty-link', { type: 'button' }, localize('adeInboxShowAllRanks', "Show All Ranks")));
+			this.renderDisposables.add(addDisposableListener(resetBtn, EventType.CLICK, () => {
+				this.setRankFilter('all');
+			}));
+			return;
+		}
 		append(empty, $('h3.ade-inbox-empty-title', {}, this.showResolved
 			? localize('adeInboxEmptyAllTitle', "Inbox is empty")
 			: localize('adeInboxEmptyPendingTitle', "All clear")));
 		append(empty, $('p', {}, this.showResolved
-			? localize('adeInboxEmptyAll', "No messages or approval gates in ADE Inbox.")
-			: localize('adeInboxEmptyPending', "All clear — no pending User Acceptance Gates or Governor escalations.")));
+			? localize('adeInboxEmptyAll', "No messages, unread replies, or approval gates in ADE Inbox.")
+			: localize('adeInboxEmptyPending', "All clear — no unread agent replies, User Acceptance Gates, or escalations.")));
 		const trees = typeof this.engineering.listTrees === 'function' ? this.engineering.listTrees() : [];
 		const latestTree = [...trees].sort((a, b) => b.updatedAt - a.updatedAt)[0];
 		if (latestTree) {
@@ -236,6 +468,91 @@ export class AdeInboxPanel extends Disposable {
 		}
 	}
 
+	private renderUnreadReplyCard(entry: IUnreadReplyEntry): void {
+		const { agent, rank } = entry;
+		const card = append(this.listEl, $(`div.ade-inbox-card.kind-agent_reply.rank-${rank}.unread`, {
+			'data-inbox-agent-id': agent.id,
+			'data-rank': rank,
+			tabindex: '0',
+		}));
+
+		const openReply = () => {
+			this.projects?.markRead(agent.id);
+			void this.editors.openAgent(agent.id);
+		};
+
+		this.renderDisposables.add(addDisposableListener(card, EventType.CLICK, () => openReply()));
+		this.renderDisposables.add(addDisposableListener(card, EventType.KEY_DOWN, (ev: KeyboardEvent) => {
+			if ((ev.key === 'Enter' || ev.key === ' ') && ev.target === card) {
+				ev.preventDefault();
+				openReply();
+			}
+		}));
+
+		const topRow = append(card, $('.ade-inbox-card-top'));
+		const rankPill = append(topRow, $(`span.ade-inbox-rank-pill.rank-${rank}`, { 'data-tier': getRankTierLabel(rank) }));
+		const rankIco = append(rankPill, $('span.ade-inbox-rank-pill-icon', { 'aria-hidden': 'true' }));
+		rankIco.classList.add(...ThemeIcon.asClassNameArray(getRankIcon(rank)));
+		append(rankPill, $('span', {}, `${getRankTierLabel(rank)} ${getRankFullLabel(rank)}`));
+
+		const projectName = this.projects?.getProjectName(agent.projectUri) ?? '';
+		if (projectName) {
+			append(topRow, $('span.ade-inbox-project-pill', { title: agent.projectUri.fsPath }, projectName));
+		}
+		append(topRow, $('span.ade-inbox-unread-dot.reply-dot', { 'aria-label': localize('adeInboxUnreadReplyDot', "Unread reply") }));
+
+		const titleRow = append(card, $('.ade-inbox-agent-title-row'));
+		const effectiveEngineId = agent.session?.engineId ?? agent.preferredEngineId;
+		const icon = effectiveEngineId ? (this.sessions?.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
+		const iconEl = append(titleRow, $('span.ade-inbox-agent-icon', { 'aria-hidden': 'true' }));
+		if (URI.isUri(icon)) {
+			iconEl.classList.add('ade-tree-item-icon-svg');
+			iconEl.style.backgroundImage = asCSSUrl(icon);
+		} else {
+			iconEl.classList.add(...ThemeIcon.asClassNameArray(icon));
+		}
+		append(titleRow, $('div.ade-inbox-card-title', {}, agent.label));
+
+		const engineName = effectiveEngineId ? (this.sessions?.getEngineName(effectiveEngineId) ?? effectiveEngineId) : localize('adeInboxDraftEngine', "Session");
+		const parent = agent.parentId ? this.projects?.getAgent(agent.parentId) : undefined;
+		if (parent) {
+			const metaLine = append(card, $('.ade-inbox-card-meta.ade-inbox-reply-meta'));
+			append(metaLine, $('span.ade-inbox-reply-parent', {}, parent.label));
+			append(metaLine, $('span.ade-inbox-lineage-sep', { 'aria-hidden': 'true' }, '\u25B8'));
+			append(metaLine, $('span', {}, localize('adeInboxReplyMetaEngine', "{0} · Unread reply", engineName)));
+		} else {
+			append(card, $('.ade-inbox-card-meta.ade-inbox-reply-meta', {}, localize('adeInboxReplyMetaEngine', "{0} · Unread reply", engineName)));
+		}
+
+		const actionsRow = append(card, $('.ade-inbox-card-actions'));
+		const openBtn = append(actionsRow, $('button.ade-inbox-btn.primary', {
+			type: 'button',
+		}, localize('adeInboxOpenShortBtn', "Open ↗")));
+		this.renderDisposables.add(addDisposableListener(openBtn, EventType.CLICK, e => {
+			e.stopPropagation();
+			openReply();
+		}));
+
+		if (agent.treeGovernorId) {
+			const govId = agent.treeGovernorId;
+			const canvasBtn = append(actionsRow, $('button.ade-inbox-btn.ghost', {
+				type: 'button',
+			}, localize('adeInboxOpenCanvasBtn', "Canvas ↗")));
+			this.renderDisposables.add(addDisposableListener(canvasBtn, EventType.CLICK, e => {
+				e.stopPropagation();
+				void this.engineering.openEngineeringEditor(govId);
+			}));
+		}
+
+		const markReadBtn = append(actionsRow, $('button.ade-inbox-btn.secondary', {
+			type: 'button',
+		}, localize('adeInboxMarkSingleReadBtn', "Mark Read")));
+		this.renderDisposables.add(addDisposableListener(markReadBtn, EventType.CLICK, e => {
+			e.stopPropagation();
+			this.projects?.markRead(agent.id);
+		}));
+	}
+
 	private formatKindLabel(item: IAdeInboxItem, severity: AdeInboxSeverity): string {
 		if (item.kind === 'user_gate') {
 			return localize('adeInboxKindGate', "User Gate");
@@ -252,9 +569,11 @@ export class AdeInboxPanel extends Disposable {
 		restoreSelectionEnd?: number | null,
 	): void {
 		const severity = resolveAdeInboxSeverity(item);
-		const card = append(this.listEl, $(`div.ade-inbox-card.kind-${item.kind}.sev-${severity}${item.unread ? '.unread' : ''}${item.resolved ? '.resolved' : ''}`, {
+		const itemRank = resolveAdeInboxItemRank(item, this.projects);
+		const card = append(this.listEl, $(`div.ade-inbox-card.kind-${item.kind}.sev-${severity}.rank-${itemRank}${item.unread ? '.unread' : ''}${item.resolved ? '.resolved' : ''}`, {
 			'data-inbox-id': item.id,
 			'data-severity': severity,
+			'data-rank': itemRank,
 			tabindex: '0',
 		}));
 
@@ -276,6 +595,10 @@ export class AdeInboxPanel extends Disposable {
 		const badgeIco = append(badge, $('span'));
 		badgeIco.classList.add(...ThemeIcon.asClassNameArray(item.kind === 'user_gate' ? Codicon.verifiedFilled : severity === 'critical' ? Codicon.error : Codicon.warning));
 		append(badge, $('span', {}, this.formatKindLabel(item, severity)));
+
+		append(topRow, $(`span.ade-inbox-rank-pill.compact.rank-${itemRank}`, {
+			title: `${getRankTierLabel(itemRank)} ${getRankFullLabel(itemRank)}`,
+		}, getRankTierLabel(itemRank)));
 
 		if (item.projectName) {
 			append(topRow, $('span.ade-inbox-project-pill', { title: item.projectPath }, item.projectName));

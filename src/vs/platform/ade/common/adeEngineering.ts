@@ -368,6 +368,8 @@ export interface IAdeEngineeringTreeSummary {
 
 export type AdeInboxItemKind = 'governor_message' | 'user_gate';
 
+export type AdeInboxSenderRank = 'governor' | 'manager' | 'employee' | 'worker';
+
 /**
  * Triage severity of an ADE Inbox item.
  * - `critical`: RED Circuit-Breaker trips and other run-halting escalations.
@@ -413,6 +415,10 @@ export interface IAdeInboxItem {
 	readonly resolvedAt?: number;
 	/** Optional triage severity; see {@link resolveAdeInboxSeverity} for the legacy fallback. */
 	readonly severity?: AdeInboxSeverity;
+	/** Optional sender rank for Inbox rank classification (defaults to `'governor'`). */
+	readonly senderRank?: AdeInboxSenderRank;
+	/** Optional sender agent session ID when distinct from `governorSessionId`. */
+	readonly senderAgentId?: string;
 }
 
 export interface IAdeWorkspaceFileSnapshotEntry {
@@ -591,6 +597,8 @@ export interface IAdeInboxService {
 		readonly title?: string;
 		readonly nodeId?: string;
 		readonly severity?: AdeInboxSeverity;
+		readonly senderRank?: AdeInboxSenderRank;
+		readonly senderAgentId?: string;
 	}): Promise<IAdeInboxItem>;
 	upsertUserGateTodo(params: {
 		readonly governorSessionId: string;

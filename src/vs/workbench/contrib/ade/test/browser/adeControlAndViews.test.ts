@@ -2227,6 +2227,188 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		});
 	});
 
+	test('keeps Projects tree free of unread blue dots, surfaces unread agent replies in Inbox, and filters Inbox by rank (Governor / Manager / Employee / Worker)', async () => {
+		const h = createHarness([alpha]);
+		h.modes.setMode('ade');
+
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-antigravity', resource: URI.parse('aexus-antigravity:/rank-gov') }, 'Arch Governor', { role: 'governor' });
+		const mgr = h.projects.addSession(alpha, { engineId: 'aexus-cline', resource: URI.parse('aexus-cline:/rank-mgr') }, 'Backend Manager', { parentId: gov.id, role: 'manager' });
+		const emp = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/rank-emp') }, 'Reviewer Employee', { parentId: mgr.id, role: 'employee' });
+		const wrk = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rank-wrk') }, 'Fix Worker', { parentId: emp.id });
+
+		// Mark all four ranks unread in background (simulating completed replies)
+		h.projects.setAgentStatus(gov.id, 'idle', true);
+		h.projects.setAgentStatus(mgr.id, 'idle', true);
+		h.projects.setAgentStatus(emp.id, 'idle', true);
+		h.projects.setAgentStatus(wrk.id, 'idle', true);
+
+		const onInboxChanged = store.add(new Emitter<void>());
+		const formalItems: IAdeInboxItem[] = [
+			{
+				id: 'gov-alert-1',
+				kind: 'governor_message',
+				treeType: 'engineering',
+				governorSessionId: gov.id,
+				governorLabel: gov.label,
+				projectPath: alpha.fsPath,
+				projectName: 'Alpha',
+				title: 'Architecture milestone ready',
+				message: 'Ready for review.',
+				unread: true,
+				resolved: false,
+				createdAt: Date.now() - 1000,
+				senderRank: 'governor',
+			},
+			{
+				id: 'mgr-alert-1',
+				kind: 'governor_message',
+				treeType: 'engineering',
+				governorSessionId: gov.id,
+				governorLabel: mgr.label,
+				projectPath: alpha.fsPath,
+				projectName: 'Alpha',
+				title: 'Backend API report',
+				message: 'Manager status update.',
+				unread: true,
+				resolved: false,
+				createdAt: Date.now() - 500,
+				senderRank: 'manager',
+				senderAgentId: mgr.id,
+			},
+		];
+		const markedFormalRead: string[] = [];
+		const inboxStub = new class extends mock<IAdeInboxService>() {
+			override get items(): readonly IAdeInboxItem[] { return formalItems; }
+			override get unreadCount(): number { return formalItems.filter(i => i.unread && !i.resolved).length; }
+			override readonly onDidChange = onInboxChanged.event;
+			override list(opts?: { includeResolved?: boolean }): readonly IAdeInboxItem[] {
+				return opts?.includeResolved ? formalItems : formalItems.filter(i => !i.resolved);
+			}
+			override async markRead(id?: string): Promise<void> {
+				if (id) {
+					markedFormalRead.push(id);
+					const target = formalItems.find(i => i.id === id);
+					if (target) { (target as { unread: boolean }).unread = false; }
+				} else {
+					markedFormalRead.push('*');
+					for (const item of formalItems) { (item as { unread: boolean }).unread = false; }
+				}
+				onInboxChanged.fire();
+			}
+			override async resolveItem(): Promise<IAdeInboxItem | undefined> { return undefined; }
+		}();
+		const engStub = new class extends mock<IAdeEngineeringService>() {
+			override listTrees() { return []; }
+		}();
+
+		h.instantiation.stub(IAdeInboxService, inboxStub);
+		h.instantiation.stub(IAdeEngineeringService, engStub);
+
+		const dummySidebar = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.rankinbox'; }();
+		h.instantiation.stub(IViewDescriptorService, {
+			getViewLocationById: () => ViewContainerLocation.Sidebar,
+			onDidChangeLocation: Event.None,
+			getViewDescriptorById: () => null,
+			getViewContainerByViewId: () => dummySidebar,
+			getDefaultContainerById: () => dummySidebar,
+			getViewContainerModel: () => new class extends mock<IViewContainerModel>() {
+				override readonly title = 'Sessions';
+				override readonly onDidChangeContainerInfo = Event.None;
+			}(),
+			onDidChangeContainer: Event.None,
+		});
+
+		const host = append(document.body, $('.monaco-workbench.ade-rank-inbox-test-host'));
+		store.add({ dispose: () => host.remove() });
+		host.style.width = '280px';
+		host.style.height = '600px';
+
+		const view = store.add(h.instantiation.createInstance(AdeProjectsView, { id: ADE_PROJECTS_VIEW_ID, title: 'Sessions' }));
+		view.render();
+		host.appendChild(view.element);
+		view.setVisible(true);
+		view.orthogonalSize = 280;
+		view.layout(600);
+		await view.refresh();
+		await view.revealAgent(wrk.id);
+
+		// 1. Projects tree MUST NOT render any visible unread blue dot (so role badges stay aligned!)
+		const projectsTreeUnreadDots = [...host.querySelectorAll<HTMLElement>('.ade-projects-tree .ade-status-dot.unread')]
+			.filter(el => !el.hidden && mainWindow.getComputedStyle(el).display !== 'none').length;
+
+		// 2. Inbox tab badge MUST reflect formal unread (2) + unread agent replies (4) = 6
+		const inboxTabBadgeText = host.querySelector<HTMLElement>('.ade-inbox-count-badge')?.textContent;
+
+		// 3. Switch to Inbox tab -> verify rank chips, rank counts, and reply priority ordering (L1 -> L2 -> L3 -> L4)
+		view.setSidebarMode('inbox');
+		const panelEl = host.querySelector<HTMLElement>('.ade-inbox-panel')!;
+		const rankChipCounts = Object.fromEntries(
+			[...panelEl.querySelectorAll<HTMLElement>('.ade-inbox-rank-chip')].map(el => [
+				el.getAttribute('data-rank')!,
+				el.querySelector('.ade-inbox-rank-count')?.textContent ?? '0',
+			]),
+		);
+		const replyOrderAll = [...panelEl.querySelectorAll<HTMLElement>('.ade-inbox-card.kind-agent_reply')]
+			.map(el => el.getAttribute('data-rank'));
+
+		// 4. Filter to L1 Governor -> ONLY Governor formal item + Governor unread reply
+		panelEl.querySelector<HTMLButtonElement>('.ade-inbox-rank-chip[data-rank="governor"]')!.click();
+		const govFilteredFormalIds = [...panelEl.querySelectorAll<HTMLElement>('.ade-inbox-card[data-inbox-id]')].map(el => el.getAttribute('data-inbox-id'));
+		const govFilteredAgentIds = [...panelEl.querySelectorAll<HTMLElement>('.ade-inbox-card[data-inbox-agent-id]')].map(el => el.getAttribute('data-inbox-agent-id'));
+
+		// 5. Filter to L2 Manager -> ONLY Manager formal item + Manager unread reply
+		panelEl.querySelector<HTMLButtonElement>('.ade-inbox-rank-chip[data-rank="manager"]')!.click();
+		const mgrFilteredFormalIds = [...panelEl.querySelectorAll<HTMLElement>('.ade-inbox-card[data-inbox-id]')].map(el => el.getAttribute('data-inbox-id'));
+		const mgrFilteredAgentIds = [...panelEl.querySelectorAll<HTMLElement>('.ade-inbox-card[data-inbox-agent-id]')].map(el => el.getAttribute('data-inbox-agent-id'));
+
+		// 6. Click "Mark all read" while filtered to L2 Manager -> ONLY clears Manager unread (leaves Governor unread intact!)
+		panelEl.querySelector<HTMLButtonElement>('.ade-inbox-toolbar .ade-inbox-link-btn')!.click();
+		const mgrUnreadAfterScopedMarkRead = Boolean(h.projects.getAgent(mgr.id)?.unread);
+		const govUnreadAfterScopedMarkRead = Boolean(h.projects.getAgent(gov.id)?.unread);
+		const govFormalStillUnread = formalItems.find(i => i.id === 'gov-alert-1')!.unread;
+		const mgrFormalNowRead = !formalItems.find(i => i.id === 'mgr-alert-1')!.unread;
+
+		// 7. Clicking an unread reply card opens the agent and marks it read
+		panelEl.querySelector<HTMLButtonElement>('.ade-inbox-rank-chip[data-rank="worker"]')!.click();
+		panelEl.querySelector<HTMLElement>(`.ade-inbox-card[data-inbox-agent-id="${wrk.id}"]`)!.click();
+		const wrkUnreadAfterClick = Boolean(h.projects.getAgent(wrk.id)?.unread);
+		const emptyWorkerStateShown = Boolean(panelEl.querySelector('.ade-inbox-empty'));
+
+		assert.deepStrictEqual({
+			projectsTreeUnreadDots,
+			inboxTabBadgeText,
+			rankChipCounts,
+			replyOrderAll,
+			govFilteredFormalIds,
+			govFilteredAgentIds,
+			mgrFilteredFormalIds,
+			mgrFilteredAgentIds,
+			mgrUnreadAfterScopedMarkRead,
+			govUnreadAfterScopedMarkRead,
+			govFormalStillUnread,
+			mgrFormalNowRead,
+			wrkUnreadAfterClick,
+			emptyWorkerStateShown,
+			markedFormalRead,
+		}, {
+			projectsTreeUnreadDots: 0,
+			inboxTabBadgeText: '6',
+			rankChipCounts: { all: '6', governor: '2', manager: '2', employee: '1', worker: '1' },
+			replyOrderAll: ['governor', 'manager', 'employee', 'worker'],
+			govFilteredFormalIds: ['gov-alert-1'],
+			govFilteredAgentIds: [gov.id],
+			mgrFilteredFormalIds: ['mgr-alert-1'],
+			mgrFilteredAgentIds: [mgr.id],
+			mgrUnreadAfterScopedMarkRead: false,
+			govUnreadAfterScopedMarkRead: true,
+			govFormalStillUnread: true,
+			mgrFormalNowRead: true,
+			wrkUnreadAfterClick: false,
+			emptyWorkerStateShown: true,
+			markedFormalRead: ['mgr-alert-1'],
+		});
+	});
+
 	test('warms up lazy sessions via AdeSessionEditor 3-step stepper with Retry on failure, and surfaces lineage on connected ChatEditorInput', async () => {
 		const h = createHarness([alpha]);
 		h.modes.setMode('ade');

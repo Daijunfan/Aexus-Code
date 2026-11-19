@@ -2605,11 +2605,15 @@ export async function executeAdeControlRequest(
 				throw new Error('Inbox message text is required.');
 			}
 			const rawNode = params.node ?? params.nodeId;
+			const resolvedRank = resolveAdeAgentRank(gov, projects.hasSubordinates(gov.id));
+			const senderRank = resolvedRank === 'subordinate' ? 'employee' : resolvedRank;
 			return inboxService.postGovernorMessage({
 				governorSessionId: gov.id,
 				message,
 				title: typeof params.title === 'string' ? params.title : undefined,
 				nodeId: typeof rawNode === 'string' ? rawNode : undefined,
+				senderRank,
+				senderAgentId: gov.id,
 			});
 		}
 

@@ -1119,8 +1119,106 @@
 	align-items: center;
 	justify-content: space-between;
 	padding: 6px 8px;
-	border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, transparent));
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, transparent)) 60%, transparent);
 	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-inbox-rank-bar {
+	display: flex;
+	flex-wrap: nowrap;
+	align-items: center;
+	gap: 3px;
+	padding: 5px 8px 6px;
+	border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, transparent));
+	overflow-x: auto;
+	scrollbar-width: none;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-inbox-rank-bar::-webkit-scrollbar {
+	display: none;
+}
+
+.monaco-workbench .ade-inbox-rank-chip {
+	--ade-rank-chip-color: var(--vscode-foreground);
+	display: inline-flex;
+	align-items: center;
+	gap: 2.5px;
+	height: 19px;
+	padding: 0 4.5px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 9.5px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex-shrink: 0;
+	cursor: pointer;
+	user-select: none;
+	transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .ade-inbox-rank-chip.rank-governor {
+	--ade-rank-chip-color: var(--ade-deck-rank-governor, #F2C35B);
+}
+
+.monaco-workbench .ade-inbox-rank-chip.rank-manager {
+	--ade-rank-chip-color: var(--ade-deck-rank-manager, #818CF8);
+}
+
+.monaco-workbench .ade-inbox-rank-chip.rank-employee {
+	--ade-rank-chip-color: var(--ade-deck-rank-employee, #A78BFA);
+}
+
+.monaco-workbench .ade-inbox-rank-chip.rank-worker {
+	--ade-rank-chip-color: var(--ade-deck-rank-worker, #34D399);
+}
+
+.monaco-workbench .ade-inbox-rank-chip:hover {
+	color: var(--ade-rank-chip-color);
+	border-color: color-mix(in srgb, var(--ade-rank-chip-color) 42%, transparent);
+	background: color-mix(in srgb, var(--ade-rank-chip-color) 10%, transparent);
+}
+
+.monaco-workbench .ade-inbox-rank-chip.has-items:not(.active) {
+	color: color-mix(in srgb, var(--ade-rank-chip-color) 82%, var(--vscode-foreground));
+	border-color: color-mix(in srgb, var(--ade-rank-chip-color) 28%, transparent);
+}
+
+.monaco-workbench .ade-inbox-rank-chip.active {
+	color: var(--ade-rank-chip-color);
+	background: color-mix(in srgb, var(--ade-rank-chip-color) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-rank-chip-color) 55%, transparent);
+	font-weight: 600;
+}
+
+.monaco-workbench .ade-inbox-rank-chip:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.monaco-workbench .ade-inbox-rank-chip-tier {
+	font-size: 9px;
+	font-weight: 700;
+	opacity: 0.88;
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-inbox-rank-count {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 12px;
+	height: 13px;
+	padding: 0 2.5px;
+	border-radius: 999px;
+	font-size: 9px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	background: color-mix(in srgb, var(--ade-rank-chip-color) 22%, transparent);
+	color: var(--ade-rank-chip-color);
 }
 
 .monaco-workbench .ade-inbox-toolbar-left {
@@ -1235,6 +1333,10 @@
 	background: var(--ade-inbox-gate);
 }
 
+.monaco-workbench .ade-inbox-lane-header.lane-replies .ade-inbox-lane-rail {
+	background: var(--vscode-textLink-foreground, var(--ade-inbox-info));
+}
+
 .monaco-workbench .ade-inbox-lane-header.lane-info .ade-inbox-lane-rail {
 	background: var(--ade-inbox-info);
 }
@@ -1319,6 +1421,122 @@
 .monaco-workbench .ade-inbox-card.sev-gate,
 .monaco-workbench .ade-inbox-card.kind-user_gate {
 	--ade-card-accent: var(--ade-inbox-gate);
+}
+
+.monaco-workbench .ade-inbox-card.kind-agent_reply {
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-inbox-card.kind-agent_reply:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
+.monaco-workbench .ade-inbox-card.kind-agent_reply.rank-governor {
+	--ade-card-accent: var(--ade-deck-rank-governor, #F2C35B);
+}
+
+.monaco-workbench .ade-inbox-card.kind-agent_reply.rank-manager {
+	--ade-card-accent: var(--ade-deck-rank-manager, #818CF8);
+}
+
+.monaco-workbench .ade-inbox-card.kind-agent_reply.rank-employee {
+	--ade-card-accent: var(--ade-deck-rank-employee, #A78BFA);
+}
+
+.monaco-workbench .ade-inbox-card.kind-agent_reply.rank-worker {
+	--ade-card-accent: var(--ade-deck-rank-worker, #34D399);
+}
+
+.monaco-workbench .ade-inbox-rank-pill {
+	--ade-rank-pill-color: var(--ade-deck-rank-governor, #F2C35B);
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	height: 16px;
+	padding: 0 5px;
+	border-radius: 4px;
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 14px;
+	color: var(--ade-rank-pill-color);
+	background: color-mix(in srgb, var(--ade-rank-pill-color) 15%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-rank-pill-color) 42%, transparent);
+	box-sizing: border-box;
+}
+
+.monaco-workbench .ade-inbox-rank-pill.compact {
+	height: 15px;
+	padding: 0 4px;
+	font-size: 9px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-inbox-rank-pill.rank-governor {
+	--ade-rank-pill-color: var(--ade-deck-rank-governor, #F2C35B);
+}
+
+.monaco-workbench .ade-inbox-rank-pill.rank-manager {
+	--ade-rank-pill-color: var(--ade-deck-rank-manager, #818CF8);
+}
+
+.monaco-workbench .ade-inbox-rank-pill.rank-employee {
+	--ade-rank-pill-color: var(--ade-deck-rank-employee, #A78BFA);
+}
+
+.monaco-workbench .ade-inbox-rank-pill.rank-worker {
+	--ade-rank-pill-color: var(--ade-deck-rank-worker, #34D399);
+}
+
+.monaco-workbench .ade-inbox-rank-pill-icon {
+	font-size: 10px !important;
+	line-height: 1 !important;
+}
+
+.monaco-workbench .ade-inbox-unread-dot.reply-dot {
+	margin-left: auto;
+	background: var(--vscode-textLink-foreground, #3794FF);
+}
+
+.monaco-workbench .ade-inbox-agent-title-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-inbox-agent-icon {
+	width: 15px;
+	height: 15px;
+	flex: 0 0 15px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 14px !important;
+	background-size: 15px 15px;
+	background-position: center;
+	background-repeat: no-repeat;
+}
+
+.monaco-workbench .ade-inbox-reply-meta {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-inbox-reply-parent {
+	font-weight: 500;
+	color: var(--vscode-foreground);
+	opacity: 0.85;
+	flex: 0 1 auto;
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .monaco-workbench .ade-inbox-card.unread {
