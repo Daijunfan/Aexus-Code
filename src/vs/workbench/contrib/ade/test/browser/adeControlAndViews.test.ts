@@ -69,7 +69,9 @@ import {
 	AdeAutonomousModeStatusContribution,
 } from '../../browser/ade.contribution.js';
 import '../../browser/adeControlHandler.js';
+import { AdeConfigEditorPane } from '../../browser/adeConfigEditorPane.js';
 import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
+import { AdeEngineeringEditorPane } from '../../browser/adeEngineeringEditorPane.js';
 import { AdeInboxPanel, formatAdeInboxKindLabel } from '../../browser/adeInboxView.js';
 import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
@@ -79,7 +81,7 @@ import { AdeRoleStudioEditorInput, AdeRoleStudioEditorPane } from '../../browser
 import { ChatEditorInput } from '../../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { AdeExtensionWebviewEditorInput, AdeExtensionWebviewEditorPane, AdeSessionEditor, AdeSessionEditorInput } from '../../browser/adeSessionEditor.js';
 import { IAdeEngineSession, IAdeSessionsService } from '../../browser/adeSessionsService.js';
-import { ADE_CHANGES_VIEW_ID, ADE_FILES_VIEW_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
+import { ADE_CHANGES_VIEW_ID, ADE_FILES_VIEW_ID, ADE_OPEN_CONFIG_COMMAND_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
 import { AdeRoleSchemaService, IAdeRoleSchemaService } from '../../common/adeRoleSchemaService.js';
 
 suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
@@ -3332,5 +3334,48 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		} as never);
 		assert.strictEqual(latestEntry?.text, '$(flame) ADE: Autonomous');
 		assert.strictEqual(latestEntry?.kind, 'warning');
+	});
+
+	test('exposes ADE config in top-right settings menu (GlobalActivity) and renders blank ADE config + infinite-canvas-only Engineering pane', () => {
+		const configCommand = MenuRegistry.getMenuItems(MenuId.GlobalActivity)
+			.filter(isIMenuItem)
+			.find(item => item.command.id === ADE_OPEN_CONFIG_COMMAND_ID);
+		assert.ok(configCommand, `${ADE_OPEN_CONFIG_COMMAND_ID} must be contributed to MenuId.GlobalActivity`);
+		assert.strictEqual(
+			typeof configCommand.command.title === 'string' ? configCommand.command.title : configCommand.command.title.value,
+			'ADE config',
+		);
+
+		const h = createHarness([alpha]);
+		const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
+
+		const configHost = append(document.body, $('.ade-config-pane-test-host'));
+		store.add({ dispose: () => configHost.remove() });
+		const configPane = store.add(h.instantiation.createInstance(AdeConfigEditorPane, mockGroup));
+		configPane.create(configHost);
+		const configRoot = configHost.querySelector<HTMLElement>('.ade-config-editor');
+		assert.ok(configRoot, 'AdeConfigEditorPane renders .ade-config-editor');
+		assert.deepStrictEqual(
+			{
+				ariaLabel: configRoot.getAttribute('aria-label'),
+				childElements: configRoot.childElementCount,
+				text: configRoot.textContent,
+			},
+			{ ariaLabel: 'ADE config', childElements: 0, text: '' },
+		);
+
+		h.instantiation.stub(IAdeEngineeringService, new class extends mock<IAdeEngineeringService>() { }());
+		const engHost = append(document.body, $('.ade-eng-pane-test-host'));
+		store.add({ dispose: () => engHost.remove() });
+		const engPane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
+		engPane.create(engHost);
+		const engRoot = engHost.querySelector<HTMLElement>('.ade-eng-editor');
+		assert.ok(engRoot, 'AdeEngineeringEditorPane renders .ade-eng-editor');
+		assert.deepStrictEqual(
+			[...engRoot.querySelectorAll<HTMLElement>('*')].map(el => el.className),
+			['ade-eng-body', 'ade-eng-viewport', 'ade-eng-world'],
+			'Engineering pane renders only infinite canvas viewport + world without toolbar/HUD/minimap/nodes',
+		);
+		assert.strictEqual(engRoot.textContent, '');
 	});
 });

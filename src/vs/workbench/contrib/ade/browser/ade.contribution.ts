@@ -83,6 +83,7 @@ import {
 	ADE_FILES_VIEW_ID,
 	ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID,
 	ADE_INSPECTOR_CONTAINER_ID,
+	ADE_OPEN_CONFIG_COMMAND_ID,
 	ADE_OPEN_ENGINEERING_COMMAND_ID,
 	ADE_OPEN_RESEARCH_COMMAND_ID,
 	ADE_OPEN_ROLE_STUDIO_COMMAND_ID,
@@ -110,6 +111,11 @@ import {
 	AdeCloudHostsEditorPane,
 	AdeCloudHostsEditorSerializer,
 } from './adeCloudHostsEditorPane.js';
+import {
+	AdeConfigEditorInput,
+	AdeConfigEditorPane,
+	AdeConfigEditorSerializer,
+} from './adeConfigEditorPane.js';
 import { AdeEditorService } from './adeEditorService.js';
 import {
 	AdeEngineeringEditorInput,
@@ -346,6 +352,12 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	[new SyncDescriptor(AdeRoleStudioEditorInput)],
 );
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeRoleStudioEditorInput.ID, AdeRoleStudioEditorSerializer);
+
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(AdeConfigEditorPane, AdeConfigEditorPane.ID, localize('adeConfigEditorPaneTitle', "ADE config")),
+	[new SyncDescriptor(AdeConfigEditorInput)],
+);
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeConfigEditorInput.ID, AdeConfigEditorSerializer);
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'aexusAdeEngineering',
@@ -1483,6 +1495,25 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 			return;
 		}
 		await clipboard.writeText(compiled);
+	}
+});
+
+registerAction2(class OpenAdeConfigAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_OPEN_CONFIG_COMMAND_ID,
+			title: localize2('adeOpenConfigTitle', "ADE config"),
+			f1: true,
+			menu: [
+				{ id: MenuId.GlobalActivity, group: '2_configuration', order: 1 },
+				{ id: MenuId.MenubarPreferencesMenu, group: '2_configuration', order: 1 },
+			],
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const editors = accessor.get(IAdeEditorService);
+		await editors.openAdeConfig?.();
 	}
 });
 

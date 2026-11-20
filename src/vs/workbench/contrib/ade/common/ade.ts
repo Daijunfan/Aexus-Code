@@ -69,6 +69,7 @@ export const ADE_SESSION_SCHEME = 'aexus-agent';
 export const ADE_ENGINEERING_SCHEME = 'aexus-engineering';
 export const ADE_CLOUD_HOSTS_SCHEME = 'aexus-cloud-hosts';
 export const ADE_ROLE_STUDIO_SCHEME = 'aexus-roles';
+export const ADE_CONFIG_SCHEME = 'aexus-ade-config';
 export const ADE_SECRETARY_ID = '__secretary__';
 export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProjectFolder';
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
@@ -79,6 +80,7 @@ export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHos
 export const ADE_ADD_CLOUD_PROJECT_COMMAND_ID = 'workbench.action.aexusCloudHosts.addProject';
 export const ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID = 'workbench.action.aexusCloudHosts.importFromVSCode';
 export const ADE_OPEN_ROLE_STUDIO_COMMAND_ID = 'workbench.action.ade.openRoleStudio';
+export const ADE_OPEN_CONFIG_COMMAND_ID = 'workbench.action.ade.openConfig';
 
 export interface IAdeProject {
 	readonly uri: URI;
@@ -244,6 +246,7 @@ export interface IAdeEditorService {
 	openEngineering?(governorId: string, options?: { side?: boolean }): Promise<void>;
 	openCloudHosts?(hostIdOrAlias?: string, options?: { side?: boolean }): Promise<void>;
 	openRoleStudio?(focusRankId?: string, options?: { side?: boolean }): Promise<void>;
+	openAdeConfig?(options?: { side?: boolean }): Promise<void>;
 	openSecretary(options?: { side?: boolean }): Promise<void>;
 	closeAgents(agents: readonly IAdeAgent[]): Promise<void>;
 	openFile(resource: URI, projectUriOrAgentId?: URI | string, options?: IEditorOptions): Promise<void>;

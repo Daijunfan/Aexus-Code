@@ -26,6 +26,7 @@ import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
 import { AdeCloudHostsEditorInput, AdeCloudHostsEditorPane } from './adeCloudHostsEditorPane.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
+import { AdeConfigEditorInput } from './adeConfigEditorPane.js';
 import { AdeRoleStudioEditorInput, AdeRoleStudioEditorPane } from './adeRoleStudioEditorPane.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput, AdeSessionWarmupStep, formatAdeAgentLineage } from './adeSessionEditor.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
@@ -422,6 +423,20 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		}
 		const targetGroup = this.resolveTargetGroup(options?.side);
 		const input = this.instantiationService.createInstance(AdeRoleStudioEditorInput, focusRankId);
+		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
+	}
+
+	async openAdeConfig(options?: { side?: boolean }): Promise<void> {
+		for (const group of this.editorGroupsService.mainPart.groups) {
+			for (const editor of group.editors) {
+				if (editor instanceof AdeConfigEditorInput) {
+					await this.editorService.openEditor(editor, { pinned: true }, group.id);
+					return;
+				}
+			}
+		}
+		const targetGroup = this.resolveTargetGroup(options?.side);
+		const input = this.instantiationService.createInstance(AdeConfigEditorInput);
 		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
 	}
 
