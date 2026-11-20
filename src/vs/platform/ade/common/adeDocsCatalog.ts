@@ -220,6 +220,7 @@ export function renderMissionApiDoc(config: IAdeOrganizationConfig): string {
 		'',
 		'## Mermaid DAG Format (`mission.mmd`)',
 		'- Define flat, non-nested DAG topology using Mermaid (`flowchart LR` or `graph LR/TD`) with task nodes (`N1["Title"]`) and optional gate nodes (`U1{{"Gate"}}`).',
+		'- **Employee Context Reuse**: Assign the same employee to multiple DAG positions using `@Name: Task` (e.g. `N1["@Backend: API Spec"] --> N2["@Frontend: UI"] --> N3["@Backend: Integration"]`), `:::Name`, or `class N1,N3 Name`. One single locked employee session is created in the sidebar and reused across all assigned steps to share context.',
 		'- Edges support labels (`N1 -->|spec| N2`) and fan-in/fan-out (`N2 & N3 --> N4`); any `subgraph` wrappers are flattened into standalone nodes.',
 		'- Always validate with `aexus-ade mission blueprint validate` before applying.',
 		'',

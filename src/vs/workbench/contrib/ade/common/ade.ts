@@ -110,6 +110,8 @@ export interface IAdeAgent {
 	readonly treeGovernorId?: string;
 	readonly treeSegmentId?: string;
 	readonly treeNodeId?: string;
+	/** Ordered DAG node IDs assigned to this locked Mission employee (length > 1 when reused across multiple DAG positions). */
+	readonly treeNodeIds?: readonly string[];
 	readonly preferredEngineId?: string;
 	readonly preferredModel?: string;
 	readonly preferredThinking?: AdeThinkingLevel;
@@ -206,7 +208,7 @@ export interface IAdeProjectsService {
 	setAgentWorkTreeTag?(governorId: string, treeType: AdeWorkTreeType | undefined): void;
 	syncMissionMermaidEmployees?(
 		ownerOrMissionId: string,
-		nodes: readonly { readonly id: string; readonly title: string }[],
+		employees: readonly { readonly id: string; readonly title: string; readonly nodeIds?: readonly string[]; readonly isExplicitEmployee?: boolean }[],
 		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
 	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] };
 	clearMissionEmployees?(ownerOrMissionId: string): readonly IAdeAgent[];

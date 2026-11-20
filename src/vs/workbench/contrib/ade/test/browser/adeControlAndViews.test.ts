@@ -3533,4 +3533,113 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(userRemoved.removedEmployeeIds.length, 2);
 		assert.strictEqual(missionStore.getGeneratedEmployees(secMission.id).length, 0);
 	});
+
+	test('reuses the same locked sidebar employee session across multiple DAG positions, highlights same-employee context ribbons on hover, and supports 1-click canvas reassignment', async () => {
+		const h = createHarness([alpha]);
+		h.modes.setMode('ade');
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+		const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+		h.instantiation.stub(IAdeMissionService, missionStore);
+
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/reuse-gov') }, 'Lead L1', { role: 'governor' });
+		const reuseMermaid = [
+			'flowchart LR',
+			'  N1["@Backend: API Contract"] --> N2["@Frontend: UI Canvas"]',
+			'  N1 --> N3["@Backend: Core Engine"]',
+			'  N2 --> N4["@Backend: Integration & Fix"]',
+			'  N3 --> N4',
+			'  N4 --> U1{{"Signoff"}}',
+		].join('\n');
+
+		const created = await h.control<{ readonly id: string; readonly generatedEmployeeCount: number }>('mission.init', {
+			owner: gov.id,
+			title: 'Shared Context Pipeline',
+			mermaid: reuseMermaid,
+		});
+
+		// 4 task steps (N1, N2, N3, N4), but ONLY 2 unique locked sidebar employees (Backend reused 3x + Frontend 1x)!
+		assert.strictEqual(created.generatedEmployeeCount, 2, 'Shared @Backend across 3 positions creates ONE reusable locked employee, not 3 duplicates');
+		const genEmployees = missionStore.getGeneratedEmployees(created.id);
+		const backendEmp = genEmployees.find(e => e.label === 'Backend')!;
+		const frontendEmp = genEmployees.find(e => e.label === 'Frontend')!;
+		assert.ok(backendEmp && frontendEmp);
+		assert.deepStrictEqual(backendEmp.treeNodeIds, ['N1', 'N3', 'N4']);
+		assert.deepStrictEqual(frontendEmp.treeNodeIds, ['N2']);
+		assert.strictEqual(h.projects.isLockedByWorkTree?.(backendEmp.id), true);
+		assert.strictEqual(h.projects.isLockedByWorkTree?.(frontendEmp.id), true);
+
+		// Adding a 4th @Backend step reuses the EXACT SAME sidebar session ID (preserving conversation context!)
+		const extendedMermaid = `${reuseMermaid}\n  N4 --> N5["@Backend: Perf Tuning"]`;
+		await h.control('mission.blueprint.apply', { id: created.id, text: extendedMermaid, caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id });
+		const afterExtend = missionStore.getGeneratedEmployees(created.id).find(e => e.label === 'Backend')!;
+		assert.strictEqual(afterExtend.id, backendEmp.id, 'Adding another DAG step for @Backend must preserve the exact same session ID');
+		assert.deepStrictEqual(afterExtend.treeNodeIds, ['N1', 'N3', 'N4', 'N5']);
+
+		// Revert back to 3 steps for visual & canvas checks
+		await h.control('mission.blueprint.apply', { id: created.id, text: reuseMermaid, caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id });
+
+		// Left sidebar renders locked icon + ×3 reuse count pill on Backend!
+		const dummySidebar = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.reuse.sidebar'; }();
+		h.instantiation.stub(IViewDescriptorService, {
+			getViewLocationById: () => ViewContainerLocation.Sidebar,
+			onDidChangeLocation: Event.None,
+			getViewDescriptorById: () => null,
+			getViewContainerByViewId: () => dummySidebar,
+			getDefaultContainerById: () => dummySidebar,
+			getViewContainerModel: () => new class extends mock<IViewContainerModel>() {
+				override readonly title = 'Sessions';
+				override readonly onDidChangeContainerInfo = Event.None;
+			}(),
+			onDidChangeContainer: Event.None,
+		});
+		const viewHost = append(document.body, $('.monaco-workbench.ade-reuse-sidebar-test'));
+		store.add({ dispose: () => viewHost.remove() });
+		viewHost.style.width = '280px';
+		viewHost.style.height = '500px';
+		const view = store.add(h.instantiation.createInstance(AdeProjectsView, { id: ADE_PROJECTS_VIEW_ID, title: 'Sessions' }));
+		view.render();
+		viewHost.appendChild(view.element);
+		view.setVisible(true);
+		view.orthogonalSize = 280;
+		view.layout(500);
+		await view.refresh();
+		await view.revealAgent(backendEmp.id);
+
+		const backendRow = [...viewHost.querySelectorAll<HTMLElement>('.ade-tree-row')].find(el => el.querySelector('.label-name')?.textContent === 'Backend')!;
+		assert.strictEqual(backendRow.querySelector<HTMLElement>('.ade-reuse-badge')?.textContent, '×3');
+		assert.strictEqual(backendRow.querySelector<HTMLElement>('.ade-reuse-badge')?.hidden, false);
+		assert.strictEqual(backendRow.querySelector<HTMLElement>('.ade-lock-glyph')?.hidden, false);
+
+		// Canvas renders #1/3, #2/3, #3/3 employee pills + hovering N3 illuminates same-employee peers (N1, N4) + orthogonal context ribbons!
+		const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
+		const canvasHost = append(document.body, $('.monaco-workbench.ade-reuse-canvas-test'));
+		store.add({ dispose: () => canvasHost.remove() });
+		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
+		pane.create(canvasHost);
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+		await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N1"] .ade-mission-emp-seq')?.textContent, '#1/3');
+		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N3"] .ade-mission-emp-seq')?.textContent, '#2/3');
+		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N4"] .ade-mission-emp-seq')?.textContent, '#3/3');
+
+		pane.setHoveredNode('N3');
+		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N1"]')?.classList.contains('is-same-employee'), true);
+		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N4"]')?.classList.contains('is-same-employee'), true);
+		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N2"]')?.classList.contains('is-same-employee'), false);
+		assert.strictEqual(canvasHost.querySelectorAll('.ade-mission-context-edge').length, 2, 'Two orthogonal context-reuse ribbons link N1->N3->N4 on hover');
+
+		pane.setHoveredNode(undefined);
+		assert.strictEqual(canvasHost.querySelectorAll('.ade-mission-context-edge').length, 0, 'Context ribbons disappear cleanly on mouse leave');
+
+		// 1-click canvas reuse popover: click N2's employee pill -> pick Backend -> merges into single Backend employee (×4)!
+		canvasHost.querySelector<HTMLButtonElement>('[data-node-emp-btn="N2"]')!.click();
+		const popover = canvasHost.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
+		assert.strictEqual(popover.hidden, false);
+		popover.querySelector<HTMLButtonElement>('button[data-ade-emp-option="Backend"]')!.click();
+		assert.strictEqual(missionStore.getGeneratedEmployees(created.id).length, 1, 'Merging N2 onto Backend leaves 1 shared locked employee');
+		assert.deepStrictEqual(missionStore.getGeneratedEmployees(created.id)[0].treeNodeIds, ['N1', 'N2', 'N3', 'N4']);
+		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N2"] .ade-mission-emp-seq')?.textContent, '#2/4');
+	});
 });

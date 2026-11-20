@@ -14,6 +14,7 @@ import {
 	computeMissionWorldSize,
 	computeOrthogonalRoundedEdgeRoute,
 	parseMissionMermaidDag,
+	setNodeEmployeeInMermaid,
 } from '../../common/adeMissionDag.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, getMissionDisplayName } from '../../common/adeRoleSchema.js';
 import { renameMissionAlias } from '../../common/adeRankResize.js';
@@ -130,5 +131,66 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 			backend.dispose();
 			await fs.promises.rm(tmpDir, { recursive: true, force: true });
 		}
+	});
+
+	test('schedules the same employee across multiple DAG positions to reuse context (@Employee, :::Employee, class) without false positives', () => {
+		const mermaid = [
+			'flowchart LR',
+			'  N1["@Backend: API Contract"] --> N2["@Frontend: UI Canvas"]',
+			'  N1 --> N3["Core Engine (@backend)"]',
+			'  N2 --> N4["Integration & Review"]:::Backend',
+			'  N3 --> N4',
+			'  N4 --> N5["Fix user@example.com & @types/node"]',
+			'  N4 --> N6["架构评审"]',
+			'  N6 --> U1{{"Release Signoff"}}',
+			'  class N6 后端架构',
+		].join('\n');
+
+		const parsed = parseMissionMermaidDag(mermaid);
+		assert.strictEqual(parsed.error, undefined);
+
+		const byId = new Map(parsed.nodes.map(n => [n.id, n]));
+		assert.strictEqual(byId.get('N1')?.label, 'API Contract');
+		assert.strictEqual(byId.get('N1')?.employeeKey, 'backend');
+		assert.strictEqual(byId.get('N1')?.employeeName, 'Backend');
+		assert.strictEqual(byId.get('N1')?.employeeOccurrence, 1);
+		assert.strictEqual(byId.get('N1')?.employeeTotalOccurrences, 3);
+
+		assert.strictEqual(byId.get('N3')?.label, 'Core Engine');
+		assert.strictEqual(byId.get('N3')?.employeeKey, 'backend');
+		assert.strictEqual(byId.get('N3')?.employeeOccurrence, 2);
+		assert.strictEqual(byId.get('N3')?.employeeTotalOccurrences, 3);
+
+		assert.strictEqual(byId.get('N4')?.label, 'Integration & Review');
+		assert.strictEqual(byId.get('N4')?.employeeKey, 'backend');
+		assert.strictEqual(byId.get('N4')?.employeeOccurrence, 3);
+		assert.strictEqual(byId.get('N4')?.employeeTotalOccurrences, 3);
+
+		// Email & npm scoped package MUST NOT be misparsed as an employee assignment
+		assert.strictEqual(byId.get('N5')?.employeeKey, undefined);
+		assert.strictEqual(byId.get('N5')?.label, 'Fix user@example.com & @types/node');
+
+		// Unicode class assignment works cleanly
+		assert.strictEqual(byId.get('N6')?.employeeName, '后端架构');
+		assert.strictEqual(byId.get('U1')?.kind, 'gate');
+		assert.strictEqual(byId.get('U1')?.employeeKey, undefined);
+
+		// Deduplicated employee groups: Backend (3 steps), Frontend (1 step), N5 anonymous (1), 后端架构 (1) = 4 unique employees for 6 task steps
+		assert.strictEqual(parsed.employees?.length, 4);
+		const backendGroup = parsed.employees?.find(e => e.key === 'emp:backend');
+		assert.deepStrictEqual(backendGroup?.nodeIds, ['N1', 'N3', 'N4']);
+		assert.strictEqual(backendGroup?.displayName, 'Backend');
+
+		// Pure Mermaid rewriter updates N5 to reuse Backend, then clears N4 cleanly
+		const reassigned = setNodeEmployeeInMermaid(mermaid, 'N5', 'Backend');
+		const reparsed = parseMissionMermaidDag(reassigned);
+		assert.strictEqual(reparsed.error, undefined);
+		assert.deepStrictEqual(reparsed.employees?.find(e => e.key === 'emp:backend')?.nodeIds, ['N1', 'N3', 'N4', 'N5']);
+
+		const cleared = setNodeEmployeeInMermaid(reassigned, 'N4', undefined);
+		const reparsedCleared = parseMissionMermaidDag(cleared);
+		assert.strictEqual(reparsedCleared.error, undefined);
+		assert.deepStrictEqual(reparsedCleared.employees?.find(e => e.key === 'emp:backend')?.nodeIds, ['N1', 'N3', 'N5']);
+		assert.strictEqual(reparsedCleared.nodes.find(n => n.id === 'N4')?.employeeKey, undefined);
 	});
 });

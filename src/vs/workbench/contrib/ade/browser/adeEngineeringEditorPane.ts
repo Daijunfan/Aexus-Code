@@ -14,7 +14,9 @@ import {
 	computeMissionAutoLayout,
 	computeMissionWorldSize,
 	computeOrthogonalRoundedEdgeRoute,
+	getEmployeeColorIndex,
 	IMissionDagEdge,
+	IMissionDagEmployeeGroup,
 	IMissionDagNode,
 	IMissionEdgeObstacle,
 	IMissionNodePosition,
@@ -23,6 +25,7 @@ import {
 	MISSION_TASK_NODE_HEIGHT,
 	MISSION_TASK_NODE_WIDTH,
 	parseMissionMermaidDag,
+	setNodeEmployeeInMermaid,
 } from '../../../../platform/ade/common/adeMissionDag.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, getMissionDisplayName } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
@@ -46,11 +49,30 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 2.5;
 const MERMAID_PLACEHOLDER = [
 	'flowchart LR',
-	'  N1["Design Architecture"] --> N2["Core Engine"]',
-	'  N1 --> N3["UI Canvas"]',
-	'  N2 --> N4["Integration"]',
+	'  N1["@Backend: API Schema"] --> N2["@Frontend: UI Canvas"]',
+	'  N1 --> N3["@Backend: Core Engine"]',
+	'  N2 --> N4["@Backend: Integration"]',
 	'  N3 --> N4',
 ].join('\n');
+
+function buildOrthogonalContextRibbonPath(x1: number, y1: number, x2: number, y2: number, laneY: number, radius = 12): string {
+	const dx = x2 - x1;
+	const dirY1 = laneY >= y1 ? 1 : -1;
+	const dirY2 = y2 >= laneY ? 1 : -1;
+	const r = Math.max(0, Math.min(radius, Math.abs(dx) / 2, Math.abs(laneY - y1) / 2, Math.abs(y2 - laneY) / 2));
+	if (Math.abs(dx) < 2) {
+		return `M ${x1} ${y1} L ${x2} ${y2}`;
+	}
+	const dirX = dx > 0 ? 1 : -1;
+	return [
+		`M ${x1} ${y1}`,
+		`L ${x1} ${laneY - dirY1 * r}`,
+		`Q ${x1} ${laneY} ${x1 + dirX * r} ${laneY}`,
+		`L ${x2 - dirX * r} ${laneY}`,
+		`Q ${x2} ${laneY} ${x2} ${laneY + dirY2 * r}`,
+		`L ${x2} ${y2}`,
+	].join(' ');
+}
 
 function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs?: Record<string, string>): SVGElementTagNameMap[K] {
 	const el = document.createElementNS(SVG_NS, tag);
@@ -158,8 +180,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private worldEl!: HTMLElement;
 	private edgesSvgEl!: SVGSVGElement;
 	private edgesLayerEl!: SVGGElement;
+	private contextLinksLayerEl!: SVGGElement;
 	private nodesLayerEl!: HTMLElement;
 	private emptyHintEl!: HTMLElement;
+	private employeePopoverEl!: HTMLElement;
+	private readonly popoverDisposables = this._register(new DisposableStore());
 
 	private fileBtnEl!: HTMLButtonElement;
 	private fileDotEl!: HTMLElement;
@@ -173,6 +198,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private mermaidText = '';
 	private nodes: readonly IMissionDagNode[] = [];
 	private edges: readonly IMissionDagEdge[] = [];
+	private employees: readonly IMissionDagEmployeeGroup[] = [];
 	private positions = new Map<string, IMissionNodePosition>();
 	private nodeElements = new Map<string, HTMLElement>();
 	private edgeElements = new Map<string, { readonly group: SVGGElement; readonly path: SVGPathElement; readonly edge: IMissionDagEdge }>();
@@ -249,10 +275,18 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.edgesSvgEl = svgEl('svg', { class: 'ade-mission-edges-svg' });
 		this.buildSvgMarkers();
 		this.edgesLayerEl = svgEl('g', { class: 'ade-mission-edges-layer' });
+		this.contextLinksLayerEl = svgEl('g', { class: 'ade-mission-context-layer' });
 		this.edgesSvgEl.appendChild(this.edgesLayerEl);
+		this.edgesSvgEl.appendChild(this.contextLinksLayerEl);
 		this.worldEl.appendChild(this.edgesSvgEl);
 
 		this.nodesLayerEl = append(this.worldEl, $('.ade-mission-nodes-layer'));
+		this.employeePopoverEl = append(this.bodyEl, $('.ade-mission-emp-popover', {
+			role: 'dialog',
+			'aria-label': localize('adeMissionEmployeePickerAria', "Assign or Reuse Employee"),
+			'data-ade-mission-emp-popover': 'true',
+		}));
+		this.employeePopoverEl.hidden = true;
 
 		this.installCanvasInteractions();
 		this.applyWorldTransform();
@@ -277,6 +311,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		createArrow('ade-mission-arrow-default', '#52b788');
 		createArrow('ade-mission-arrow-in', '#38bdf8');
 		createArrow('ade-mission-arrow-out', '#34d399');
+		createArrow('ade-mission-arrow-ctx', '#a78bfa');
 		this.edgesSvgEl.appendChild(defs);
 	}
 
@@ -409,7 +444,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const hadNodesBefore = this.nodes.length > 0;
 		this.nodes = parsed.nodes;
 		this.edges = parsed.edges;
+		this.employees = parsed.employees ?? [];
 		this.hoveredNodeId = undefined;
+		this.closeEmployeePopover();
 
 		const ownerRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
 		const ownerPrefix = ownerRec ? `${formatTierTag(ownerRec.ownerTier)} · ` : '';
@@ -434,12 +471,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		this.positions = nextPositions;
 
-		this.drawerMetaEl.textContent = `${ownerPrefix}${localize(
-			'adeMissionMetaCounts',
-			"{0} nodes · {1} edges",
-			parsed.nodes.length,
-			parsed.edges.length,
-		)}`;
+		const hasReusedEmployee = this.employees.some(e => e.nodeIds.length > 1);
+		this.drawerMetaEl.textContent = hasReusedEmployee
+			? `${ownerPrefix}${localize('adeMissionMetaWithEmployees', "{0} steps · {1} employees", parsed.nodes.length, this.employees.length)}`
+			: `${ownerPrefix}${localize('adeMissionMetaCounts', "{0} nodes · {1} edges", parsed.nodes.length, parsed.edges.length)}`;
 		this.drawerStatusEl.textContent = localize('adeMissionStatusValid', "Valid DAG rendered");
 		this.drawerStatusEl.className = 'ade-mission-drawer-status ok';
 		this.renderGraphDom();
@@ -515,6 +550,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const pos = this.positions.get(node.id) ?? { x: 240, y: 240 };
 			const nodeEl = append(this.nodesLayerEl, $(`.ade-mission-node.kind-${node.kind}`, {
 				'data-node-id': node.id,
+				...(node.employeeKey ? { 'data-employee-key': node.employeeKey } : {}),
 			}));
 			nodeEl.style.left = `${pos.x}px`;
 			nodeEl.style.top = `${pos.y}px`;
@@ -524,6 +560,36 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			append(topRow, $('span.ade-mission-node-id', {}, node.id));
 			if (node.kind === 'gate') {
 				append(topRow, $('span.ade-mission-node-kind-tag', {}, localize('adeMissionGateTag', "Gate")));
+			} else {
+				const isAssigned = Boolean(node.employeeName && node.employeeKey);
+				const isReused = Boolean((node.employeeTotalOccurrences ?? 0) > 1);
+				const colorCls = isAssigned ? `.emp-color-${getEmployeeColorIndex(node.employeeKey!)}` : '.unassigned';
+				const empBtn = append(topRow, $(`button.ade-mission-emp-pill${colorCls}${isReused ? '.is-reused' : ''}`, {
+					type: 'button',
+					'data-node-emp-btn': node.id,
+					title: isAssigned
+						? (isReused
+							? localize('adeMissionEmpReusedTooltip', "Employee {0} (step #{1} of {2}, shared context) — Click to reassign", node.employeeName!, node.employeeOccurrence!, node.employeeTotalOccurrences!)
+							: localize('adeMissionEmpAssignedTooltip', "Employee {0} — Click to reuse across steps or reassign", node.employeeName!))
+						: localize('adeMissionEmpAssignTooltip', "Assign or reuse an employee for this step"),
+				})) as HTMLButtonElement;
+				if (isAssigned) {
+					append(empBtn, $('span.ade-mission-emp-dot', { 'aria-hidden': 'true' }));
+					append(empBtn, $('span.ade-mission-emp-name', {}, node.employeeName!));
+					if (isReused && node.employeeOccurrence && node.employeeTotalOccurrences) {
+						append(empBtn, $('span.ade-mission-emp-seq', {}, `#${node.employeeOccurrence}/${node.employeeTotalOccurrences}`));
+					}
+				} else {
+					append(empBtn, $('span.codicon.codicon-person-add', { 'aria-hidden': 'true' }));
+					append(empBtn, $('span.ade-mission-emp-name', {}, localize('adeMissionEmpAssignShort', "Assign")));
+				}
+				this.graphDisposables.add(addDisposableListener(empBtn, EventType.POINTER_DOWN, (e: PointerEvent) => {
+					e.stopPropagation();
+				}));
+				this.graphDisposables.add(addDisposableListener(empBtn, EventType.CLICK, (e: MouseEvent) => {
+					e.stopPropagation();
+					this.openEmployeePopover(node, empBtn);
+				}));
 			}
 			append(card, $('.ade-mission-node-title', {}, node.label));
 			append(card, $('.ade-mission-port.port-in', { 'aria-hidden': 'true' }));
@@ -534,6 +600,88 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 
 		this.renderEdgesSvg();
+	}
+
+	private closeEmployeePopover(): void {
+		this.popoverDisposables.clear();
+		if (this.employeePopoverEl) {
+			clearNode(this.employeePopoverEl);
+			this.employeePopoverEl.hidden = true;
+		}
+	}
+
+	private assignNodeEmployee(nodeId: string, employeeName: string | undefined): void {
+		const nextMermaid = setNodeEmployeeInMermaid(this.mermaidText, nodeId, employeeName);
+		this.mermaidText = nextMermaid;
+		if (this.mermaidTextareaEl) {
+			this.mermaidTextareaEl.value = nextMermaid;
+		}
+		if (this.activeMissionId) {
+			this.missionService?.updateMermaid(this.activeMissionId, nextMermaid);
+		}
+		this.closeEmployeePopover();
+		this.parseAndRenderGraph(nextMermaid);
+	}
+
+	private openEmployeePopover(node: IMissionDagNode, anchorEl: HTMLElement): void {
+		this.closeEmployeePopover();
+		if (!this.employeePopoverEl || !this.bodyEl) {
+			return;
+		}
+		const bodyRect = this.bodyEl.getBoundingClientRect();
+		const anchorRect = anchorEl.getBoundingClientRect();
+		const left = Math.max(12, Math.min(bodyRect.width - 236, anchorRect.left - bodyRect.left));
+		const top = Math.max(12, Math.min(bodyRect.height - 220, anchorRect.bottom - bodyRect.top + 6));
+		this.employeePopoverEl.style.left = `${Math.round(left)}px`;
+		this.employeePopoverEl.style.top = `${Math.round(top)}px`;
+		this.employeePopoverEl.hidden = false;
+
+		append(this.employeePopoverEl, $('.ade-mission-emp-popover-title', {}, localize('adeMissionReuseTitle', "Employee for {0} (Reuse Context)", node.id)));
+		const input = append(this.employeePopoverEl, $('input.ade-mission-emp-popover-input', {
+			type: 'text',
+			placeholder: localize('adeMissionEmpInputPlaceholder', "Employee name + Enter..."),
+			value: node.employeeName ?? '',
+			'data-ade-mission-emp-input': 'true',
+		})) as HTMLInputElement;
+		this.popoverDisposables.add(addDisposableListener(input, EventType.KEY_DOWN, (e: KeyboardEvent) => {
+			e.stopPropagation();
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				const val = input.value.trim();
+				this.assignNodeEmployee(node.id, val || undefined);
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				this.closeEmployeePopover();
+			}
+		}));
+
+		const explicitGroups = this.employees.filter(g => g.isExplicit);
+		const list = append(this.employeePopoverEl, $('.ade-mission-emp-popover-list'));
+		for (const group of explicitGroups) {
+			const isCurrent = Boolean(node.employeeKey && group.key === `emp:${node.employeeKey}`);
+			const btn = append(list, $(`button.ade-mission-emp-popover-item${isCurrent ? '.active' : ''}`, {
+				type: 'button',
+				'data-ade-emp-option': group.displayName,
+			}));
+			append(btn, $('span', {}, group.displayName));
+			append(btn, $('span.ade-mission-emp-popover-meta', {}, localize('adeMissionEmpStepCount', "{0} step(s)", group.nodeIds.length)));
+			this.popoverDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
+				this.assignNodeEmployee(node.id, group.displayName);
+			}));
+		}
+
+		if (node.employeeName) {
+			const clearBtn = append(list, $('button.ade-mission-emp-popover-item.clear', {
+				type: 'button',
+				'data-ade-emp-clear': 'true',
+			}, localize('adeMissionEmpClearBtn', "Detach (Standalone Step)")));
+			this.popoverDisposables.add(addDisposableListener(clearBtn, EventType.CLICK, () => {
+				this.assignNodeEmployee(node.id, undefined);
+			}));
+		}
+
+		input.focus();
+		input.select();
 	}
 
 	private bindNodeInteractions(node: IMissionDagNode, nodeEl: HTMLElement): void {
@@ -750,14 +898,93 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.edgesLayerEl.appendChild(g);
 		}
 
+		// Clear & redraw hover-only orthogonal context-reuse ribbons for repeated employees
+		while (this.contextLinksLayerEl.firstChild) {
+			this.contextLinksLayerEl.removeChild(this.contextLinksLayerEl.firstChild);
+		}
+		const hoveredNode = nodeId ? this.nodes.find(n => n.id === nodeId) : undefined;
+		const sameEmployeeIds = new Set<string>();
+		if (hoveredNode?.employeeKey && (hoveredNode.employeeTotalOccurrences ?? 0) > 1) {
+			const sequenceNodes = this.nodes
+				.filter(n => n.employeeKey === hoveredNode.employeeKey)
+				.sort((a, b) => (a.employeeOccurrence ?? 0) - (b.employeeOccurrence ?? 0));
+			for (const peer of sequenceNodes) {
+				if (peer.id !== hoveredNode.id) {
+					sameEmployeeIds.add(peer.id);
+				}
+			}
+			// Draw draw.io-style orthogonal rounded bridges connecting #1 -> #2 -> #3 of the same employee,
+			// automatically choosing the unobstructed top or bottom clearance lane so ribbons never cross cards.
+			let minTopY = Infinity;
+			let maxBottomY = -Infinity;
+			for (const n of this.nodes) {
+				const p = this.positions.get(n.id);
+				if (p) {
+					const sz = getNodeSize(n);
+					minTopY = Math.min(minTopY, p.y - sz.height / 2);
+					maxBottomY = Math.max(maxBottomY, p.y + sz.height / 2);
+				}
+			}
+			const hasNodeVertically = (target: IMissionDagNode, side: 'above' | 'below'): boolean => {
+				const tp = this.positions.get(target.id);
+				if (!tp) {
+					return false;
+				}
+				return this.nodes.some(other => {
+					if (other.id === target.id) {
+						return false;
+					}
+					const op = this.positions.get(other.id);
+					if (!op) {
+						return false;
+					}
+					const osz = getNodeSize(other);
+					const horizOverlap = Math.abs(op.x - tp.x) < osz.width / 2 + 16;
+					return horizOverlap && (side === 'above' ? op.y < tp.y - 10 : op.y > tp.y + 10);
+				});
+			};
+			const anyBlockedAbove = sequenceNodes.some(n => hasNodeVertically(n, 'above'));
+			const anyBlockedBelow = sequenceNodes.some(n => hasNodeVertically(n, 'below'));
+			const routeBelow = anyBlockedAbove && !anyBlockedBelow;
+
+			for (let i = 0; i + 1 < sequenceNodes.length; i++) {
+				const fromN = sequenceNodes[i];
+				const toN = sequenceNodes[i + 1];
+				const p1 = this.positions.get(fromN.id);
+				const p2 = this.positions.get(toN.id);
+				if (!p1 || !p2) {
+					continue;
+				}
+				const s1 = getNodeSize(fromN);
+				const s2 = getNodeSize(toN);
+				const x1 = p1.x + (i > 0 ? 12 : 0);
+				const x2 = p2.x - (i + 2 < sequenceNodes.length ? 12 : 0);
+				const y1 = routeBelow ? (p1.y + s1.height / 2) : (p1.y - s1.height / 2);
+				const y2 = routeBelow ? (p2.y + s2.height / 2 + 4) : (p2.y - s2.height / 2 - 4);
+				const laneY = routeBelow
+					? (Math.max(maxBottomY, y1, y2) + 28 + i * 16)
+					: (Math.min(minTopY, y1, y2) - 28 - i * 16);
+				const d = buildOrthogonalContextRibbonPath(x1, y1, x2, y2, laneY, 12);
+				const ribbon = svgEl('path', {
+					class: 'ade-mission-context-edge',
+					'data-context-link': `${fromN.id}->${toN.id}`,
+					d,
+					'marker-end': 'url(#ade-mission-arrow-ctx)',
+				});
+				this.contextLinksLayerEl.appendChild(ribbon);
+			}
+		}
+
 		for (const [id, el] of this.nodeElements.entries()) {
 			const isHovered = Boolean(nodeId && id === nodeId);
 			const isUp = upstreamIds.has(id);
 			const isDown = downstreamIds.has(id);
+			const isSameEmp = sameEmployeeIds.has(id);
 			el.classList.toggle('is-hovered', isHovered);
 			el.classList.toggle('is-neighbor', isUp || isDown);
 			el.classList.toggle('is-upstream', isUp);
 			el.classList.toggle('is-downstream', isDown);
+			el.classList.toggle('is-same-employee', isSameEmp);
 		}
 	}
 
@@ -785,6 +1012,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			if (e.button !== 0 && e.button !== 1) {
 				return;
 			}
+			this.closeEmployeePopover();
 			panning = true;
 			startClientX = e.clientX;
 			startClientY = e.clientY;
@@ -841,8 +1069,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const win = getWindow(this.rootEl);
 		this._register(addDisposableListener(win, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			if (e.key === 'Escape' && this.drawerOpen) {
-				this.toggleFileDrawer(false);
+			if (e.key === 'Escape') {
+				if (this.employeePopoverEl && !this.employeePopoverEl.hidden) {
+					this.closeEmployeePopover();
+				} else if (this.drawerOpen) {
+					this.toggleFileDrawer(false);
+				}
 			}
 		}));
 	}

@@ -65,6 +65,7 @@
 .monaco-workbench .ade-cloud-host-badge[hidden],
 .monaco-workbench .ade-project-count[hidden],
 .monaco-workbench .ade-icon-button[hidden],
+.monaco-workbench .ade-reuse-badge[hidden],
 .monaco-workbench .ade-lock-glyph[hidden],
 .monaco-workbench .ade-status-dot[hidden],
 .monaco-workbench .ade-tree-label-host[hidden],
@@ -514,7 +515,23 @@
 	border: 1px solid color-mix(in srgb, var(--ade-deck-rank-member) 48%, transparent);
 }
 
-/* Blueprint-locked rows: lock glyph + dotted non-interactive role pill */
+/* Blueprint-locked rows: lock glyph + optional context-reuse count + dotted non-interactive role pill */
+.monaco-workbench .ade-reuse-badge {
+	display: inline-flex;
+	align-items: center;
+	height: 14px;
+	padding: 0 4px;
+	border-radius: 999px;
+	font-size: 9px;
+	font-weight: 600;
+	line-height: 12px;
+	font-variant-numeric: tabular-nums;
+	color: #c4b5fd;
+	background: rgba(167, 139, 250, 0.14);
+	border: 1px solid rgba(167, 139, 250, 0.34);
+	flex-shrink: 0;
+}
+
 .monaco-workbench .ade-lock-glyph {
 	font-size: 11px !important;
 	line-height: 1 !important;

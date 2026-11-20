@@ -251,9 +251,12 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			// Preserve existing locked employees while the user is mid-edit on invalid Mermaid syntax.
 			return;
 		}
-		const taskNodes = parsed.nodes
-			.filter(node => node.kind === 'task')
-			.map(node => ({ id: node.id, title: node.label }));
+		const employeeSpecs = (parsed.employees ?? []).map(group => ({
+			id: group.key,
+			title: group.displayName,
+			nodeIds: group.nodeIds,
+			isExplicitEmployee: group.isExplicit,
+		}));
 
 		const ownerKey = this.getOwnerSyncKey(record);
 		const hasAgentOwner = Boolean(record.ownerSessionId && projects.getAgent(record.ownerSessionId));
@@ -261,7 +264,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		if (!hasAgentOwner && !parsedProjectUri) {
 			return;
 		}
-		const syncRes = projects.syncMissionMermaidEmployees?.(ownerKey, taskNodes, {
+		const syncRes = projects.syncMissionMermaidEmployees?.(ownerKey, employeeSpecs, {
 			projectUri: parsedProjectUri,
 			ownerTier: record.ownerTier,
 		});

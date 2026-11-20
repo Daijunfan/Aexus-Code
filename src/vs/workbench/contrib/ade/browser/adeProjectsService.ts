@@ -64,6 +64,7 @@ interface IStoredAgent {
 	treeGovernorId?: string;
 	treeSegmentId?: string;
 	treeNodeId?: string;
+	treeNodeIds?: string[];
 	preferredEngineId?: string;
 	preferredModel?: string;
 	preferredThinking?: AdeThinkingLevel;
@@ -332,6 +333,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					treeGovernorId: entry.treeGovernorId,
 					treeSegmentId: entry.treeSegmentId,
 					treeNodeId: entry.treeNodeId,
+					treeNodeIds: Array.isArray(entry.treeNodeIds) ? entry.treeNodeIds.filter((v): v is string => typeof v === 'string' && v.length > 0) : undefined,
 					preferredEngineId: entry.preferredEngineId,
 					preferredModel: entry.preferredModel,
 					preferredThinking: entry.preferredThinking,
@@ -913,7 +915,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 
 	syncMissionMermaidEmployees(
 		ownerOrMissionId: string,
-		nodes: readonly { readonly id: string; readonly title: string }[],
+		employees: readonly { readonly id: string; readonly title: string; readonly nodeIds?: readonly string[]; readonly isExplicitEmployee?: boolean }[],
 		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
 	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] } {
 		const ownerAgent = this.getAgent(ownerOrMissionId);
@@ -942,10 +944,10 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			&& entry.id !== ownerOrMissionId
 			&& Boolean(entry.treeNodeId),
 		);
-		const existingByNodeId = new Map<string, IAdeAgent>();
+		const existingByKey = new Map<string, IAdeAgent>();
 		for (const entry of existingGenerated) {
 			if (entry.treeNodeId) {
-				existingByNodeId.set(entry.treeNodeId, entry);
+				existingByKey.set(entry.treeNodeId, entry);
 			}
 		}
 
@@ -954,9 +956,10 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		const employeeAgentsByNode: Record<string, IAdeAgent> = {};
 		const inheritedEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId;
 
-		for (const node of nodes) {
-			const prev = existingByNodeId.get(node.id);
-			const defaultLabel = `[${node.id}] ${node.title}`;
+		for (const emp of employees) {
+			const prev = existingByKey.get(emp.id);
+			const nodeIds = emp.nodeIds && emp.nodeIds.length > 0 ? [...emp.nodeIds] : [emp.id];
+			const defaultLabel = emp.isExplicitEmployee ? emp.title : (emp.title.startsWith(`[${emp.id}] `) ? emp.title : `[${emp.id}] ${emp.title}`);
 			const nextAgent: IAdeAgent = prev
 				? {
 					...prev,
@@ -967,7 +970,8 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					archived: undefined,
 					treeType: 'mission',
 					treeGovernorId: ownerOrMissionId,
-					treeNodeId: node.id,
+					treeNodeId: emp.id,
+					treeNodeIds: nodeIds,
 				}
 				: {
 					id: generateUuid(),
@@ -980,11 +984,15 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					preferredEngineId: inheritedEngineId,
 					treeType: 'mission',
 					treeGovernorId: ownerOrMissionId,
-					treeNodeId: node.id,
+					treeNodeId: emp.id,
+					treeNodeIds: nodeIds,
 				};
 			keptIds.add(nextAgent.id);
 			nextGenerated.push(nextAgent);
-			employeeAgentsByNode[node.id] = nextAgent;
+			employeeAgentsByNode[emp.id] = nextAgent;
+			for (const nid of nodeIds) {
+				employeeAgentsByNode[nid] = nextAgent;
+			}
 		}
 
 		const oldGeneratedIds = new Set(existingGenerated.map(a => a.id));
@@ -1720,6 +1728,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				...(agent.treeGovernorId ? { treeGovernorId: agent.treeGovernorId } : {}),
 				...(agent.treeSegmentId ? { treeSegmentId: agent.treeSegmentId } : {}),
 				...(agent.treeNodeId ? { treeNodeId: agent.treeNodeId } : {}),
+				...(agent.treeNodeIds && agent.treeNodeIds.length > 0 ? { treeNodeIds: [...agent.treeNodeIds] } : {}),
 				...(agent.preferredEngineId ? { preferredEngineId: agent.preferredEngineId } : {}),
 				...(agent.preferredModel ? { preferredModel: agent.preferredModel } : {}),
 				...(agent.preferredThinking ? { preferredThinking: agent.preferredThinking } : {}),

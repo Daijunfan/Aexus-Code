@@ -107,6 +107,7 @@ export interface IAdeSessionSummary {
 	readonly treeGovernorId?: string;
 	readonly treeSegmentId?: string;
 	readonly treeNodeId?: string;
+	readonly treeNodeIds?: readonly string[];
 	readonly lockedByWorkTree?: boolean;
 }
 

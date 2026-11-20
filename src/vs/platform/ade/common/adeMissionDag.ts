@@ -9,6 +9,20 @@
  * Zero backend orchestration, zero prompts, zero nested node containers.
  */
 
+import {
+	buildMissionEmployeeGroups,
+	extractInlineEmployeeTag,
+	getEmployeeColorIndex,
+	IMissionDagEmployeeGroup,
+	normalizeMissionEmployeeKey,
+	parseClassAssignmentLine,
+	setNodeEmployeeInMermaid,
+	stripTrailingMermaidClass,
+} from './adeMissionEmployee.js';
+
+export type { IMissionDagEmployeeGroup };
+export { getEmployeeColorIndex, normalizeMissionEmployeeKey, setNodeEmployeeInMermaid };
+
 export type MissionDagDirection = 'LR' | 'TD';
 export type MissionDagNodeKind = 'task' | 'gate';
 
@@ -21,6 +35,14 @@ export interface IMissionDagNode {
 	readonly id: string;
 	readonly label: string;
 	readonly kind: MissionDagNodeKind;
+	/** Normalized shared employee key when assigned via `@Employee`, `:::Employee`, or `class ... Employee`. */
+	readonly employeeKey?: string;
+	/** Display name of the assigned employee (shared across all positions with the same `employeeKey`). */
+	readonly employeeName?: string;
+	/** 1-based topological order index when this employee appears in multiple DAG positions (`#1/3`, `#2/3`, ...). */
+	readonly employeeOccurrence?: number;
+	/** Total DAG positions occupied by this same employee (`>= 1`). */
+	readonly employeeTotalOccurrences?: number;
 }
 
 export interface IMissionDagEdge {
@@ -34,6 +56,8 @@ export interface IMissionDagParseResult {
 	readonly direction: MissionDagDirection;
 	readonly nodes: readonly IMissionDagNode[];
 	readonly edges: readonly IMissionDagEdge[];
+	/** Deduplicated employee groups (one locked employee session per unique employee, reused across multiple DAG positions). */
+	readonly employees?: readonly IMissionDagEmployeeGroup[];
 	readonly error?: string;
 }
 
@@ -117,44 +141,58 @@ function splitTopLevelStatements(line: string): string[] {
 	return splitTopLevelByDelimiter(line, ';');
 }
 
-function parseNodeToken(rawToken: string): { readonly id: string; readonly label?: string; readonly kind?: MissionDagNodeKind } | undefined {
-	const token = rawToken.trim();
+function parseNodeToken(rawToken: string): { readonly id: string; readonly label?: string; readonly kind?: MissionDagNodeKind; readonly employeeName?: string } | undefined {
+	const { baseToken: token, className } = stripTrailingMermaidClass(rawToken);
 	if (!token) {
 		return undefined;
 	}
 
+	const buildResult = (id: string, rawLabel: string, kind: MissionDagNodeKind) => {
+		const unquoted = stripOuterQuotes(rawLabel);
+		if (kind === 'gate') {
+			return { id, label: unquoted, kind };
+		}
+		const extracted = extractInlineEmployeeTag(unquoted);
+		return {
+			id,
+			label: extracted.label,
+			kind,
+			...(extracted.employeeName || className ? { employeeName: extracted.employeeName ?? className } : {}),
+		};
+	};
+
 	// Gate / hexagon / diamond shapes: id{{"Label"}} or id{"Label"}
 	const hexMatch = /^([A-Za-z0-9_-]+)\s*\{\{([\s\S]+?)\}\}$/.exec(token);
 	if (hexMatch) {
-		return { id: hexMatch[1], label: stripOuterQuotes(hexMatch[2]), kind: 'gate' };
+		return buildResult(hexMatch[1], hexMatch[2], 'gate');
 	}
 	const diamondMatch = /^([A-Za-z0-9_-]+)\s*\{([\s\S]+?)\}$/.exec(token);
 	if (diamondMatch) {
-		return { id: diamondMatch[1], label: stripOuterQuotes(diamondMatch[2]), kind: 'gate' };
+		return buildResult(diamondMatch[1], diamondMatch[2], 'gate');
 	}
 
 	// Stadium / circle / rounded / square task shapes: id(["..."]), id(("...")), id("..."), id["..."]
 	const stadiumMatch = /^([A-Za-z0-9_-]+)\s*\(\[([\s\S]+?)\]\)$/.exec(token);
 	if (stadiumMatch) {
-		return { id: stadiumMatch[1], label: stripOuterQuotes(stadiumMatch[2]), kind: 'task' };
+		return buildResult(stadiumMatch[1], stadiumMatch[2], 'task');
 	}
 	const circleMatch = /^([A-Za-z0-9_-]+)\s*\(\(([\s\S]+?)\)\)$/.exec(token);
 	if (circleMatch) {
-		return { id: circleMatch[1], label: stripOuterQuotes(circleMatch[2]), kind: 'task' };
+		return buildResult(circleMatch[1], circleMatch[2], 'task');
 	}
 	const rectMatch = /^([A-Za-z0-9_-]+)\s*\[([\s\S]+?)\]$/.exec(token);
 	if (rectMatch) {
-		return { id: rectMatch[1], label: stripOuterQuotes(rectMatch[2]), kind: 'task' };
+		return buildResult(rectMatch[1], rectMatch[2], 'task');
 	}
 	const roundMatch = /^([A-Za-z0-9_-]+)\s*\(([\s\S]+?)\)$/.exec(token);
 	if (roundMatch) {
-		return { id: roundMatch[1], label: stripOuterQuotes(roundMatch[2]), kind: 'task' };
+		return buildResult(roundMatch[1], roundMatch[2], 'task');
 	}
 
-	// Bare identifier: N1
+	// Bare identifier: N1 or N1:::Backend
 	const bareMatch = /^([A-Za-z0-9_-]+)$/.exec(token);
 	if (bareMatch) {
-		return { id: bareMatch[1] };
+		return { id: bareMatch[1], ...(className ? { employeeName: className } : {}) };
 	}
 	return undefined;
 }
@@ -206,21 +244,25 @@ function detectCycle(nodes: readonly IMissionDagNode[], edges: readonly IMission
 export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult {
 	const source = extractMermaidSource(rawText);
 	if (!source) {
-		return { direction: 'LR', nodes: [], edges: [] };
+		return { direction: 'LR', nodes: [], edges: [], employees: [] };
 	}
 
 	let direction: MissionDagDirection = 'LR';
-	const nodeMap = new Map<string, { id: string; label: string; kind: MissionDagNodeKind }>();
+	const nodeMap = new Map<string, { id: string; label: string; kind: MissionDagNodeKind; employeeKey?: string; employeeName?: string }>();
+	const classEmployeeByNodeId = new Map<string, string>();
 	const edges: IMissionDagEdge[] = [];
 	const edgeKeys = new Set<string>();
 
-	const upsertNode = (token: { readonly id: string; readonly label?: string; readonly kind?: MissionDagNodeKind }) => {
+	const upsertNode = (token: { readonly id: string; readonly label?: string; readonly kind?: MissionDagNodeKind; readonly employeeName?: string }) => {
 		const existing = nodeMap.get(token.id);
+		const empName = token.employeeName?.trim() || undefined;
+		const empKey = empName ? normalizeMissionEmployeeKey(empName) : undefined;
 		if (!existing) {
 			nodeMap.set(token.id, {
 				id: token.id,
 				label: token.label?.trim() || token.id,
 				kind: token.kind ?? 'task',
+				...(empKey && empName && token.kind !== 'gate' ? { employeeKey: empKey, employeeName: empName } : {}),
 			});
 		} else {
 			if (token.label?.trim() && existing.label === existing.id) {
@@ -228,6 +270,11 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 			}
 			if (token.kind === 'gate') {
 				existing.kind = 'gate';
+				existing.employeeKey = undefined;
+				existing.employeeName = undefined;
+			} else if (empKey && empName && !existing.employeeKey) {
+				existing.employeeKey = empKey;
+				existing.employeeName = empName;
 			}
 		}
 	};
@@ -243,6 +290,16 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 			if (headerMatch) {
 				const dir = headerMatch[1].toUpperCase();
 				direction = (dir === 'TD' || dir === 'TB' || dir === 'BT') ? 'TD' : 'LR';
+				continue;
+			}
+			// Parse standard Mermaid `class N1,N3 Backend` employee assignments
+			const classAssign = parseClassAssignmentLine(stmt);
+			if (classAssign) {
+				for (const nid of classAssign.nodeIds) {
+					if (!classEmployeeByNodeId.has(nid)) {
+						classEmployeeByNodeId.set(nid, classAssign.className);
+					}
+				}
 				continue;
 			}
 			// Explicitly flatten any subgraph wrappers so nodes are strictly non-nested
@@ -309,22 +366,32 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 		}
 	}
 
-	const nodes = [...nodeMap.values()];
-	if (nodes.length === 0) {
+	for (const [nid, empName] of classEmployeeByNodeId.entries()) {
+		const existing = nodeMap.get(nid);
+		if (existing && existing.kind === 'task' && !existing.employeeKey) {
+			existing.employeeKey = normalizeMissionEmployeeKey(empName);
+			existing.employeeName = empName;
+		}
+	}
+
+	const rawNodes = [...nodeMap.values()];
+	if (rawNodes.length === 0) {
 		return {
 			direction,
 			nodes: [],
 			edges: [],
+			employees: [],
 			error: 'No valid Mermaid nodes found. Example: flowchart LR\\n  N1["Design"] --> N2["Build"]',
 		};
 	}
 
-	const cycleError = detectCycle(nodes, edges);
+	const cycleError = detectCycle(rawNodes, edges);
 	if (cycleError) {
-		return { direction, nodes, edges, error: cycleError };
+		return { direction, nodes: rawNodes, edges, employees: [], error: cycleError };
 	}
 
-	return { direction, nodes, edges };
+	const { enrichedNodes, employees } = buildMissionEmployeeGroups(rawNodes, edges);
+	return { direction, nodes: enrichedNodes, edges, employees };
 }
 
 /**

@@ -333,6 +333,7 @@ function toSessionSummary(
 		...(agent.treeGovernorId ? { treeGovernorId: agent.treeGovernorId } : {}),
 		...(agent.treeSegmentId ? { treeSegmentId: agent.treeSegmentId } : {}),
 		...(agent.treeNodeId ? { treeNodeId: agent.treeNodeId } : {}),
+		...(agent.treeNodeIds && agent.treeNodeIds.length > 0 ? { treeNodeIds: [...agent.treeNodeIds] } : {}),
 		...(lockedByWorkTree ? { lockedByWorkTree: true } : {}),
 	};
 }

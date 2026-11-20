@@ -342,12 +342,12 @@
 	dominant-baseline: central;
 }
 
-/* Dim unrelated edges & nodes while hovering a node */
+/* Dim unrelated edges & nodes while hovering a node (keep same-employee context peers lit!) */
 .monaco-workbench .ade-mission-world.has-node-hover .ade-mission-edge-group:not(.is-hover-flow) {
 	opacity: 0.24;
 }
 
-.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-node:not(.is-hovered):not(.is-neighbor) {
+.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-node:not(.is-hovered):not(.is-neighbor):not(.is-same-employee) {
 	opacity: 0.34;
 }
 
@@ -538,4 +538,185 @@
 	border-color: var(--ade-mission-out);
 	background: var(--ade-mission-out);
 	box-shadow: 0 0 8px rgba(52, 211, 153, 0.65);
+}
+
+/* ============================================================================
+ * Shared Employee Identity Pill, Hover Context-Continuity Highlight & Picker
+ * ============================================================================ */
+
+.monaco-workbench .ade-mission-node.is-same-employee .ade-mission-node-card {
+	border-color: rgba(167, 139, 250, 0.85);
+	box-shadow:
+		0 0 0 1px rgba(167, 139, 250, 0.42),
+		0 8px 24px rgba(0, 0, 0, 0.34),
+		0 0 18px rgba(167, 139, 250, 0.22);
+}
+
+.monaco-workbench .ade-mission-context-edge {
+	fill: none;
+	stroke: #a78bfa;
+	stroke-width: 2px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-dasharray: 6 5;
+	animation: adeMissionEdgeFlow 0.9s linear infinite;
+	filter: drop-shadow(0 0 4px rgba(167, 139, 250, 0.55));
+}
+
+.monaco-workbench .ade-mission-emp-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	max-width: 154px;
+	height: 20px;
+	padding: 0 7px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 10.5px;
+	font-weight: 550;
+	line-height: 1;
+	cursor: pointer;
+	transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+
+.monaco-workbench .ade-mission-emp-pill:hover {
+	border-color: color-mix(in srgb, var(--ade-mission-accent) 60%, transparent);
+	background: color-mix(in srgb, var(--ade-mission-accent) 12%, transparent);
+}
+
+.monaco-workbench .ade-mission-emp-pill.unassigned {
+	opacity: 0;
+	color: var(--vscode-descriptionForeground);
+	border-style: dashed;
+}
+
+.monaco-workbench .ade-mission-node:hover .ade-mission-emp-pill.unassigned,
+.monaco-workbench .ade-mission-emp-pill.unassigned:focus-visible {
+	opacity: 0.85;
+}
+
+.monaco-workbench .ade-mission-emp-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-emp-pill.emp-color-0 .ade-mission-emp-dot { background: #38bdf8; }
+.monaco-workbench .ade-mission-emp-pill.emp-color-1 .ade-mission-emp-dot { background: #a78bfa; }
+.monaco-workbench .ade-mission-emp-pill.emp-color-2 .ade-mission-emp-dot { background: #34d399; }
+.monaco-workbench .ade-mission-emp-pill.emp-color-3 .ade-mission-emp-dot { background: #f59e0b; }
+.monaco-workbench .ade-mission-emp-pill.emp-color-4 .ade-mission-emp-dot { background: #f472b6; }
+.monaco-workbench .ade-mission-emp-pill.emp-color-5 .ade-mission-emp-dot { background: #2dd4bf; }
+
+.monaco-workbench .ade-mission-emp-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-emp-seq {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	font-weight: 600;
+	color: #c4b5fd;
+	opacity: 0.92;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-node.is-same-employee .ade-mission-emp-pill,
+.monaco-workbench .ade-mission-node.is-hovered .ade-mission-emp-pill.is-reused {
+	border-color: rgba(167, 139, 250, 0.72);
+	background: rgba(167, 139, 250, 0.16);
+}
+
+/* Floating 1-click employee reuse picker popover */
+.monaco-workbench .ade-mission-emp-popover {
+	position: absolute;
+	z-index: 40;
+	width: 224px;
+	padding: 8px;
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, #181c24);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-emp-popover[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-emp-popover-title {
+	font-size: 10.5px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	padding: 2px 4px;
+}
+
+.monaco-workbench .ade-mission-emp-popover-input {
+	width: 100%;
+	height: 26px;
+	padding: 0 8px;
+	box-sizing: border-box;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background, #11141a);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 12px;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-emp-popover-input:focus {
+	border-color: var(--ade-mission-accent);
+}
+
+.monaco-workbench .ade-mission-emp-popover-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: 150px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	width: 100%;
+	height: 26px;
+	padding: 0 8px;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	font-size: 11.5px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item:hover {
+	background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-emp-popover-item.active {
+	background: rgba(167, 139, 250, 0.16);
+	color: #ddd6fe;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item.clear {
+	color: var(--vscode-descriptionForeground);
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	margin-top: 2px;
+	padding-top: 2px;
+}
+
+.monaco-workbench .ade-mission-emp-popover-meta {
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
 }

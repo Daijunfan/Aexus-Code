@@ -290,6 +290,7 @@ interface IAdeTreeTemplate {
 	readonly countBadge: HTMLElement;
 	readonly addSessionBtn: HTMLElement;
 	readonly workTreeBadge: HTMLElement;
+	readonly reuseBadge: HTMLElement;
 	readonly roleBadge: HTMLElement;
 	readonly lockGlyph: HTMLElement;
 	readonly statusIndicator: HTMLElement;
@@ -338,6 +339,8 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		addSessionBtn.hidden = true;
 		const workTreeBadge = append(trailing, $('span.ade-worktree-badge'));
 		workTreeBadge.hidden = true;
+		const reuseBadge = append(trailing, $('span.ade-reuse-badge'));
+		reuseBadge.hidden = true;
 		const lockGlyph = append(trailing, $('span.ade-lock-glyph', { 'aria-hidden': 'true' }));
 		lockGlyph.classList.add(...ThemeIcon.asClassNameArray(Codicon.lock));
 		lockGlyph.hidden = true;
@@ -355,6 +358,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			countBadge,
 			addSessionBtn,
 			workTreeBadge,
+			reuseBadge,
 			roleBadge,
 			lockGlyph,
 			statusIndicator,
@@ -425,6 +429,8 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		resetAdeRowModifiers(template.row);
 		template.row.removeAttribute('data-child-rank');
 		template.row.removeAttribute('data-child-label');
+		template.reuseBadge.hidden = true;
+		template.reuseBadge.textContent = '';
 		template.lockGlyph.hidden = true;
 
 		const item = node.element;
@@ -537,6 +543,15 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		if (isLocked) {
 			template.row.classList.add('ade-worktree-locked');
 			template.lockGlyph.hidden = false;
+			if (agent.treeNodeIds && agent.treeNodeIds.length > 1) {
+				template.reuseBadge.textContent = `×${agent.treeNodeIds.length}`;
+				template.reuseBadge.hidden = false;
+				template.editDisposables.add(this.hoverService.setupManagedHover(
+					getDefaultHoverDelegate('mouse'),
+					template.reuseBadge,
+					localize('adeReuseBadgeTooltip', "Reused across {0} DAG steps ({1}) · Shared conversation context", agent.treeNodeIds.length, agent.treeNodeIds.join(' → ')),
+				));
+			}
 		}
 		if (nextLower.canSpawnSubSession) {
 			template.row.setAttribute('data-child-rank', nextLower.childRank);
@@ -636,6 +651,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.row.classList.add('editing');
 			template.labelHost.hidden = true;
 			template.workTreeBadge.hidden = true;
+			template.reuseBadge.hidden = true;
 			template.roleBadge.hidden = true;
 			template.lockGlyph.hidden = true;
 			template.editHost.hidden = false;
