@@ -23,6 +23,15 @@ export interface IAdeEngine {
 	readonly name: string;
 	readonly description: string;
 	readonly icon?: URI | ThemeIcon;
+	readonly remoteHost?: string;
+	readonly remoteOs?: string;
+}
+
+export interface IAdeEngineProbeResult {
+	readonly engines: readonly IAdeEngine[];
+	readonly remoteHost?: string;
+	readonly remoteOs?: string;
+	readonly error?: string;
 }
 
 export interface IAdeEngineSession extends IAdeSession {
@@ -39,7 +48,8 @@ export interface IAdeSessionsService {
 	readonly onDidChangeEngines: Event<void>;
 	getIcon(engineId: string): URI | ThemeIcon | undefined;
 	getEngineName(engineId: string): string;
-	getEngines(): Promise<readonly IAdeEngine[]>;
+	getEngines(projectUri?: URI, options?: { readonly forceRefresh?: boolean }): Promise<readonly IAdeEngine[]>;
+	probeEnginesForProject?(projectUri?: URI, options?: { readonly forceRefresh?: boolean }): Promise<IAdeEngineProbeResult>;
 	create(engineId: string, projectUri: URI): Promise<IAdeEngineSession>;
 	attach?(engineId: string, nativeId: string, projectUri?: URI): Promise<IAdeEngineSession>;
 	list(engineId: string, projectUri?: URI): Promise<readonly IAdeEngineSession[]>;
@@ -55,6 +65,9 @@ interface IBuiltinEngine {
 	id: string;
 	name: string;
 	available: boolean;
+	remoteHost?: string;
+	remoteOs?: string;
+	error?: string;
 }
 
 /** Adapts engine-owned sessions to the ADE catalog without owning transcripts or engine configuration. */
@@ -88,13 +101,50 @@ export class AdeSessionsService implements IAdeSessionsService {
 		return this.sessions.getChatSessionContribution(engineId)?.displayName ?? engineId;
 	}
 
-	async getEngines(): Promise<readonly IAdeEngine[]> {
+	async probeEnginesForProject(projectUri?: URI, options?: { readonly forceRefresh?: boolean }): Promise<IAdeEngineProbeResult> {
 		await this.extensions.whenInstalledExtensionsRegistered();
-		const builtin = await this.commands.executeCommand<IBuiltinEngine[]>('aexus.agentEngines.list');
-		const availability = new Map((builtin ?? []).map(engine => [engine.id, engine.available]));
-		return this.sessions.getAllChatSessionContributions()
-			.filter(contribution => contribution.type !== 'local' && contribution.type !== 'aexus-secretary' && contribution.type !== 'openai-codex' && (!contribution.hideFromSessionTypePicker || availability.has(contribution.type)) && !contribution.isReadOnly && (!availability.has(contribution.type) || availability.get(contribution.type)))
-			.map(contribution => ({ id: contribution.type, name: contribution.displayName, description: contribution.description, icon: this.getIcon(contribution.type) }));
+		const isCloud = projectUri?.scheme === AEXUS_SSH_SCHEME;
+		const builtin = await this.commands.executeCommand<IBuiltinEngine[]>(
+			'aexus.agentEngines.list',
+			isCloud ? projectUri : undefined,
+			options,
+		);
+		const byId = new Map((builtin ?? []).map(engine => [engine.id, engine]));
+		const firstCloudMeta = isCloud ? (builtin ?? []).find(e => e.remoteHost || e.error) : undefined;
+		const remoteHost = isCloud ? (firstCloudMeta?.remoteHost ?? projectUri?.authority) : undefined;
+		const remoteOs = isCloud ? firstCloudMeta?.remoteOs : undefined;
+		const error = isCloud ? firstCloudMeta?.error : undefined;
+
+		const engines = this.sessions.getAllChatSessionContributions()
+			.filter(contribution => {
+				if (contribution.type === 'local' || contribution.type === 'aexus-secretary' || contribution.type === 'openai-codex' || contribution.isReadOnly) {
+					return false;
+				}
+				const builtinEntry = byId.get(contribution.type);
+				if (isCloud) {
+					// Cloud projects ONLY run cloud-native aexus-* engines actually installed on that Cloud Host
+					return Boolean(builtinEntry?.available);
+				}
+				return (!contribution.hideFromSessionTypePicker || byId.has(contribution.type))
+					&& (!byId.has(contribution.type) || Boolean(builtinEntry?.available));
+			})
+			.map(contribution => ({
+				id: contribution.type,
+				name: contribution.displayName,
+				description: isCloud && remoteHost
+					? localize('adeCloudEngineDesc', "Native on {0}{1}", remoteHost, remoteOs ? ` (${remoteOs})` : '')
+					: contribution.description,
+				icon: this.getIcon(contribution.type),
+				...(remoteHost ? { remoteHost } : {}),
+				...(remoteOs ? { remoteOs } : {}),
+			}));
+
+		return { engines, remoteHost, remoteOs, error };
+	}
+
+	async getEngines(projectUri?: URI, options?: { readonly forceRefresh?: boolean }): Promise<readonly IAdeEngine[]> {
+		const res = await this.probeEnginesForProject(projectUri, options);
+		return res.engines;
 	}
 
 	private binding(engineId: string, item: IChatSessionItem): IAdeEngineSession | undefined {

@@ -22,6 +22,7 @@ export const ADE_CONTROL_ENV_KEYS = [
 	'AEXUS_ADE_CONTROL_FILE',
 	'AEXUS_ADE_TOKEN',
 	'AEXUS_ADE_SOCKET',
+	'AEXUS_ADE_TCP_PORT',
 	'AEXUS_ADE_SESSION_TOKEN',
 	'AEXUS_ADE_CALLER',
 ] as const;
@@ -50,6 +51,7 @@ export interface IAdeCapabilityTokenPayload {
 	readonly sid: string;
 	readonly rank: string;
 	readonly pure?: boolean;
+	readonly missionNode?: boolean;
 	readonly iat: number;
 }
 
@@ -57,6 +59,7 @@ export interface IAdeControlConnectionMetadata {
 	readonly socketPath: string;
 	readonly token: string;
 	readonly pid: number;
+	readonly tcpPort?: number;
 }
 
 export interface IAdeControlWireRequest {
@@ -169,6 +172,7 @@ export interface IAdeRoleSyncAgentEntry {
 	readonly rank: AdeSessionRank;
 	readonly isOrchestrated: boolean;
 	readonly isWorkTree?: boolean;
+	readonly isMissionNode?: boolean;
 	readonly rolePrompt?: string;
 	readonly preferredModel?: string;
 	readonly preferredThinking?: string;

@@ -1219,6 +1219,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 				for (const proj of boundProjects) {
 					this.adeProjects.unregisterProject(proj.uri);
 				}
+				void this.commandService?.executeCommand?.('aexus.agentEngines.invalidateCloudHost', host.alias);
 				if (this.drawer?.hostId === host.id) {
 					this.closeDrawer(false);
 				}
@@ -1686,6 +1687,9 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			});
 			if (previousAlias && previousAlias.toLowerCase() !== saved.alias.toLowerCase()) {
 				this.adeProjects.migrateCloudHostAlias?.(previousAlias, saved.alias);
+				void this.commandService?.executeCommand?.('aexus.agentEngines.invalidateCloudHost', previousAlias, saved.alias);
+			} else {
+				void this.commandService?.executeCommand?.('aexus.agentEngines.invalidateCloudHost', saved.alias);
 			}
 			this.selectedHostId = saved.id;
 			const fresh = hostToDraftForm(saved);

@@ -3276,11 +3276,9 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		}));
 		this._register(this.chatSessionsService.onDidChangeOptionGroups(chatSessionType => {
 			const sessionResource = this._widget?.viewModel?.model.sessionResource;
-			if (sessionResource) {
-				const delegateSessionType = this.options.sessionTypePickerDelegate?.getActiveSessionProvider?.();
-				if (getChatSessionType(sessionResource) === chatSessionType || delegateSessionType === chatSessionType) {
-					this.refreshChatSessionPickers();
-				}
+			const delegateSessionType = this.options.sessionTypePickerDelegate?.getActiveSessionProvider?.();
+			if ((sessionResource && getChatSessionType(sessionResource) === chatSessionType) || delegateSessionType === chatSessionType) {
+				this.refreshChatSessionPickers();
 			}
 		}));
 	}

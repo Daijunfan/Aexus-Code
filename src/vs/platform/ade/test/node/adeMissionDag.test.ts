@@ -9,10 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import {
+	buildMissionContextReusePaths,
 	buildOrthogonalRoundedEdgePath,
 	computeMissionAutoLayout,
 	computeMissionWorldSize,
 	computeOrthogonalRoundedEdgeRoute,
+	getMissionEdgeKind,
 	parseMissionMermaidDag,
 	setNodeEmployeeInMermaid,
 } from '../../common/adeMissionDag.js';
@@ -192,5 +194,77 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.strictEqual(reparsedCleared.error, undefined);
 		assert.deepStrictEqual(reparsedCleared.employees?.find(e => e.key === 'emp:backend')?.nodeIds, ['N1', 'N3', 'N5']);
 		assert.strictEqual(reparsedCleared.nodes.find(n => n.id === 'N4')?.employeeKey, undefined);
+	});
+
+	test('buildMissionContextReusePaths shares one gapless lane across same-employee hops and falls back to a separate lane on direction reversal', () => {
+		const laneY = 100;
+		const anchors = [
+			{ id: 'N2', x: 400, borderY: 200 },
+			{ id: 'N5', x: 720, borderY: 200 },
+			{ id: 'N8', x: 1040, borderY: 200 },
+		];
+		const hops = buildMissionContextReusePaths(anchors, laneY, false, 12);
+		assert.strictEqual(hops.length, 2);
+		assert.deepStrictEqual(hops.map(hop => [hop.fromId, hop.toId]), [['N2', 'N5'], ['N5', 'N8']]);
+
+		// Both hops ride the exact same horizontal lane with no gap: hop 1 starts at hop 0's final corner.
+		const hop0Corner = hops[0].path.match(/L ([^ ]+) 100/);
+		assert.ok(hop0Corner, `hop 0 must reach the shared lane: ${hops[0].path}`);
+		const sharedCornerX = Number(hop0Corner[1]);
+		assert.ok(hops[1].path.startsWith(`M ${sharedCornerX} 100`), `hop 1 must start exactly on hop 0's lane corner: ${hops[1].path}`);
+		assert.ok(sharedCornerX < anchors[1].x, 'shared corner must land before the next card center');
+		assert.deepStrictEqual(hops[1].junction, { x: 720, y: laneY });
+
+		const laneOf = (path: string): number => {
+			const match = path.match(/Q [^ ]+ ([^ ]+) /);
+			assert.ok(match, `expected a lane corner in ${path}`);
+			return Number(match[1]);
+		};
+		assert.strictEqual(laneOf(hops[0].path), laneY);
+		assert.strictEqual(laneOf(hops[1].path), laneY);
+
+		// Dragging #3 to the left of #2 (direction reversal) falls back to a second, non-overlapping lane.
+		const reversed = buildMissionContextReusePaths([
+			{ id: 'N2', x: 400, borderY: 200 },
+			{ id: 'N5', x: 720, borderY: 200 },
+			{ id: 'N8', x: 300, borderY: 200 },
+		], laneY, false, 12);
+		assert.strictEqual(reversed.length, 2);
+		assert.strictEqual(reversed[1].junction, undefined, 'direction reversal must not reuse the shared spine');
+		const reversedLaneY = laneOf(reversed[1].path);
+		assert.notStrictEqual(reversedLaneY, laneY, 'reversed hop must fall back to a separate lane');
+		assert.strictEqual(reversedLaneY, laneY - 18);
+	});
+
+	test('parses inline `-- fail -->` and `-. on_fail .->` as fail edges without phantom nodes', () => {
+		const graph = parseMissionMermaidDag([
+			'flowchart LR',
+			'  A -- fail --> B',
+			'  B -. on_fail .-> C',
+		].join('\n'));
+
+		assert.strictEqual(graph.error, undefined);
+		assert.deepStrictEqual(graph.nodes.map(n => n.id), ['A', 'B', 'C']);
+		assert.strictEqual(graph.edges.length, 2);
+
+		const first = graph.edges.find(e => e.id === 'A->B');
+		assert.ok(first);
+		assert.strictEqual(first.edgeKind, 'fail');
+		assert.strictEqual(first.label, 'fail');
+		assert.strictEqual(getMissionEdgeKind(first), 'fail');
+
+		const second = graph.edges.find(e => e.id === 'B->C');
+		assert.ok(second);
+		assert.strictEqual(second.edgeKind, 'fail');
+		assert.strictEqual(second.label, 'on_fail');
+		assert.strictEqual(getMissionEdgeKind(second), 'fail');
+	});
+
+	test('returns a non-empty error for unknown non-empty statements', () => {
+		const unknownNode = parseMissionMermaidDag('flowchart LR\n  ???');
+		assert.ok(unknownNode.error && unknownNode.error.length > 0, 'unknown node statement must surface an error');
+
+		const unknownAfterEdge = parseMissionMermaidDag('flowchart LR\n  A --> B\n  @@@');
+		assert.ok(unknownAfterEdge.error && unknownAfterEdge.error.length > 0, 'unknown statement after a valid edge must surface an error');
 	});
 });

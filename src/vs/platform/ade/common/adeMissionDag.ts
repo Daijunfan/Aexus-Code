@@ -24,7 +24,8 @@ export type { IMissionDagEmployeeGroup };
 export { getEmployeeColorIndex, normalizeMissionEmployeeKey, setNodeEmployeeInMermaid };
 
 export type MissionDagDirection = 'LR' | 'TD';
-export type MissionDagNodeKind = 'task' | 'gate';
+export type MissionDagNodeKind = 'task' | 'gate' | 'cluster';
+export type MissionDagEdgeKind = 'success' | 'fail';
 
 export interface IMissionNodePosition {
 	readonly x: number;
@@ -35,6 +36,8 @@ export interface IMissionDagNode {
 	readonly id: string;
 	readonly label: string;
 	readonly kind: MissionDagNodeKind;
+	/** Optional reserved sub-workflow ID when `kind === 'cluster'` (single-in / single-out multi-edge abstraction). */
+	readonly clusterMissionId?: string;
 	/** Normalized shared employee key when assigned via `@Employee`, `:::Employee`, or `class ... Employee`. */
 	readonly employeeKey?: string;
 	/** Display name of the assigned employee (shared across all positions with the same `employeeKey`). */
@@ -50,6 +53,36 @@ export interface IMissionDagEdge {
 	readonly from: string;
 	readonly to: string;
 	readonly label?: string;
+	/** Edge trigger polarity: regular `'success'` flow or `'fail'` fallback branch (e.g. `-->|fail|`, `-.->|on_fail|`). */
+	readonly edgeKind?: MissionDagEdgeKind;
+}
+
+const FAIL_EDGE_LABEL_RE = /^(?:fail|failed|on[_-]?fail|error|err|fallback|recover|recovery|失败|异常|兜底)$/i;
+
+export function isFailEdgeLabel(label: string | undefined): boolean {
+	return Boolean(label && FAIL_EDGE_LABEL_RE.test(label.trim()));
+}
+
+export function getMissionEdgeKind(edge: Pick<IMissionDagEdge, 'edgeKind' | 'label'>): MissionDagEdgeKind {
+	if (edge.edgeKind === 'fail' || edge.edgeKind === 'success') {
+		return edge.edgeKind;
+	}
+	return isFailEdgeLabel(edge.label) ? 'fail' : 'success';
+}
+
+/**
+ * Returns all `inDegree === 0` source nodes in the DAG (which may act as immediate start entries
+ * or timed/repeating/event-driven source generator nodes when `outDegree >= 1`).
+ */
+export function getMissionSourceNodes(graph: Pick<IMissionDagParseResult, 'nodes' | 'edges'>): readonly IMissionDagNode[] {
+	const inDeg = new Map<string, number>();
+	for (const n of graph.nodes) {
+		inDeg.set(n.id, 0);
+	}
+	for (const e of graph.edges) {
+		inDeg.set(e.to, (inDeg.get(e.to) ?? 0) + 1);
+	}
+	return graph.nodes.filter(n => (inDeg.get(n.id) ?? 0) === 0);
 }
 
 export interface IMissionDagParseResult {
@@ -83,7 +116,7 @@ export interface IMissionOrthogonalEdgeRoute {
 }
 
 export const MISSION_TASK_NODE_WIDTH = 248;
-export const MISSION_TASK_NODE_HEIGHT = 104;
+export const MISSION_TASK_NODE_HEIGHT = 114;
 export const MISSION_GATE_NODE_WIDTH = 216;
 export const MISSION_GATE_NODE_HEIGHT = 86;
 
@@ -197,7 +230,7 @@ function parseNodeToken(rawToken: string): { readonly id: string; readonly label
 	return undefined;
 }
 
-const EDGE_OP_RE = /\s*(?:--+>|-\.+->|==+>|--+)(?:\|([^|]*)\|)?\s*/g;
+const EDGE_OP_RE = /\s*(?:--\s+([^->\n|]+?)\s+-->|-\.\s*([^.->\n|]+?)\s*\.->|(?:--+>|-\.+->|==+>|--+)(?:\|([^|]*)\|)?)\s*/g;
 
 function detectCycle(nodes: readonly IMissionDagNode[], edges: readonly IMissionDagEdge[]): string | undefined {
 	const adj = new Map<string, string[]>();
@@ -311,15 +344,23 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 			const matches: { start: number; end: number; label?: string }[] = [];
 			let m: RegExpExecArray | null;
 			while ((m = EDGE_OP_RE.exec(stmt)) !== null) {
-				matches.push({ start: m.index, end: m.index + m[0].length, label: m[1]?.trim() || undefined });
+				const rawLabel = (m[1] ?? m[2] ?? m[3])?.trim() || undefined;
+				matches.push({ start: m.index, end: m.index + m[0].length, label: rawLabel });
 			}
 
 			if (matches.length === 0) {
 				const single = parseNodeToken(stmt);
 				if (single) {
 					upsertNode(single);
+					continue;
 				}
-				continue;
+				return {
+					direction,
+					nodes: [],
+					edges: [],
+					employees: [],
+					error: `Unrecognized Mermaid statement: "${stmt}". Use standard flowchart node or edge syntax (e.g. N1["Task"] --> N2 or N1 -->|fail| F1).`,
+				};
 			}
 
 			// Extract chained segments: seg0 --op0--> seg1 --op1--> seg2
@@ -353,11 +394,14 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 						const key = `${f.id}->${t.id}`;
 						if (!edgeKeys.has(key)) {
 							edgeKeys.add(key);
+							const edgeLabel = matches[s].label;
+							const isFail = isFailEdgeLabel(edgeLabel);
 							edges.push({
 								id: key,
 								from: f.id,
 								to: t.id,
-								...(matches[s].label ? { label: matches[s].label } : {}),
+								...(edgeLabel ? { label: edgeLabel } : {}),
+								...(isFail ? { edgeKind: 'fail' as const } : {}),
 							});
 						}
 					}
@@ -716,4 +760,113 @@ export function buildOrthogonalRoundedEdgePath(
 	options?: IMissionOrthogonalEdgeOptions,
 ): string {
 	return computeOrthogonalRoundedEdgeRoute(x1, y1, x2, y2, options).path;
+}
+
+export interface IMissionContextReuseAnchor {
+	readonly id: string;
+	readonly x: number;
+	readonly borderY: number;
+}
+
+export interface IMissionContextReuseHop {
+	readonly fromId: string;
+	readonly toId: string;
+	readonly path: string;
+	readonly junction?: { readonly x: number; readonly y: number };
+}
+
+/**
+ * Builds continuous, draw.io-style smooth rounded orthogonal context-reuse paths for an employee
+ * scheduled across multiple DAG positions (`#1 -> #2 -> #3 ...`).
+ *
+ * When consecutive hops travel in the same horizontal direction (the standard LR topological case),
+ * they share a single unobstructed horizontal spine at `laneY` with zero gaps or stair-stepping:
+ * hop `0` rises from `#1` onto `laneY` and branches smoothly into `#2`, and hop `1` continues
+ * seamlessly along `laneY` from that exact branch point into `#3`.
+ */
+export function buildMissionContextReusePaths(
+	anchors: readonly IMissionContextReuseAnchor[],
+	laneY: number,
+	routeBelow: boolean,
+	radius = 12,
+): readonly IMissionContextReuseHop[] {
+	if (anchors.length < 2) {
+		return [];
+	}
+	const dirIntoCard = routeBelow ? -1 : 1;
+	const arrowClearance = 6;
+	const hops: IMissionContextReuseHop[] = [];
+	let prevCornerRadius = 0;
+	let prevDirX = 0;
+	let prevLaneY = laneY;
+
+	for (let i = 0; i + 1 < anchors.length; i++) {
+		const from = anchors[i];
+		const to = anchors[i + 1];
+		const dx = to.x - from.x;
+		const dirX = dx >= 0 ? 1 : -1;
+		const endY = roundSvgCoord(to.borderY - dirIntoCard * arrowClearance);
+		const continuesOnSharedSpine = i > 0
+			&& prevDirX !== 0
+			&& Math.abs(dx) >= 2
+			&& Math.sign(dx) === prevDirX;
+
+		if (continuesOnSharedSpine) {
+			const curLaneY = prevLaneY;
+			const startX = roundSvgCoord(from.x - dirX * prevCornerRadius);
+			const rEnd = Math.max(0, Math.min(radius, Math.abs(to.x - from.x) / 2, Math.abs(endY - curLaneY) / 2));
+			const path = [
+				`M ${startX} ${roundSvgCoord(curLaneY)}`,
+				`L ${roundSvgCoord(to.x - dirX * rEnd)} ${roundSvgCoord(curLaneY)}`,
+				`Q ${roundSvgCoord(to.x)} ${roundSvgCoord(curLaneY)} ${roundSvgCoord(to.x)} ${roundSvgCoord(curLaneY + dirIntoCard * rEnd)}`,
+				`L ${roundSvgCoord(to.x)} ${endY}`,
+			].join(' ');
+			hops.push({
+				fromId: from.id,
+				toId: to.id,
+				path,
+				junction: { x: roundSvgCoord(from.x), y: roundSvgCoord(curLaneY) },
+			});
+			prevCornerRadius = rEnd;
+			prevDirX = dirX;
+			prevLaneY = curLaneY;
+			continue;
+		}
+
+		// First hop or direction reversal (e.g., user dragged a later step left of an earlier step).
+		const curLaneY = i === 0 ? laneY : roundSvgCoord(prevLaneY + (routeBelow ? 18 : -18));
+		const x1 = roundSvgCoord(from.x);
+		const y1 = roundSvgCoord(from.borderY);
+		const x2 = roundSvgCoord(to.x);
+		if (Math.abs(dx) < 2) {
+			hops.push({
+				fromId: from.id,
+				toId: to.id,
+				path: `M ${x1} ${y1} L ${x2} ${endY}`,
+			});
+			prevCornerRadius = 0;
+			prevDirX = 0;
+			prevLaneY = curLaneY;
+			continue;
+		}
+		const r = Math.max(0, Math.min(radius, Math.abs(dx) / 2, Math.abs(curLaneY - y1) / 2, Math.abs(endY - curLaneY) / 2));
+		const path = [
+			`M ${x1} ${y1}`,
+			`L ${x1} ${roundSvgCoord(curLaneY + dirIntoCard * r)}`,
+			`Q ${x1} ${roundSvgCoord(curLaneY)} ${roundSvgCoord(x1 + dirX * r)} ${roundSvgCoord(curLaneY)}`,
+			`L ${roundSvgCoord(x2 - dirX * r)} ${roundSvgCoord(curLaneY)}`,
+			`Q ${x2} ${roundSvgCoord(curLaneY)} ${x2} ${roundSvgCoord(curLaneY + dirIntoCard * r)}`,
+			`L ${x2} ${endY}`,
+		].join(' ');
+		hops.push({
+			fromId: from.id,
+			toId: to.id,
+			path,
+		});
+		prevCornerRadius = r;
+		prevDirX = dirX;
+		prevLaneY = curLaneY;
+	}
+
+	return hops;
 }

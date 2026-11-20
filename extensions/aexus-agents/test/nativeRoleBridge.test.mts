@@ -2174,5 +2174,58 @@ describe('ADE Native Extension Role Bridge', () => {
 			sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'employee' }, 'C:\\Repo\\Work\\', 'win32'),
 			sharedModule.computeAgentIdentityScopeKey('sess-1', { sessionId: 'sess-1', callerRole: 'employee' }, 'c:\\repo\\work', 'win32'),
 		);
+
+		// Pure-rank Mission node gets its own mnode: pool scope distinct from standalone pure workers
+		const missionNodePureKey = sharedModule.computeAgentIdentityScopeKey(
+			'sess-1',
+			{ sessionId: 'sess-1', callerRole: 'worker', pureWorker: false, isMissionNode: true },
+			'/repo/main',
+			'darwin',
+		);
+		assert.ok(missionNodePureKey.startsWith('mnode:'), `Expected mnode: scope key, got ${missionNodePureKey}`);
+		assert.notStrictEqual(missionNodePureKey, pureKey);
+	});
+
+	it('buildAgentChildEnv preserves CLI PATH and socket for pure-rank Mission nodes while keeping standalone pure workers fully isolated', () => {
+		const baseEnv: NodeJS.ProcessEnv = {
+			PATH: '/usr/bin:/bin',
+			AEXUS_ADE_TOKEN: 'master-secret',
+			AEXUS_ADE_CONTROL_FILE: '/tmp/ade-control.json',
+		};
+		const cliBinDir = '/opt/aexus/bin';
+
+		// Standalone pure worker: CLI bin stripped, socket deleted, fallback deny token injected
+		const standalone = sharedModule.buildAgentChildEnv({
+			sessionId: 'wrk-standalone',
+			callerRole: 'worker',
+			pureWorker: true,
+			isMissionNode: false,
+			baseEnv,
+			cliBinDirs: [cliBinDir],
+			socketPath: '/tmp/ade.sock',
+			platform: 'darwin',
+		});
+		assert.strictEqual(standalone.AEXUS_ADE_TOKEN, undefined);
+		assert.strictEqual(standalone.AEXUS_ADE_SOCKET, undefined);
+		assert.strictEqual((standalone.PATH ?? '').includes(cliBinDir), false);
+
+		// Pure-rank Mission node: CLI bin & socket preserved with scoped missionNode session token, master secrets still stripped
+		const missionNode = sharedModule.buildAgentChildEnv({
+			sessionId: 'wrk-mnode',
+			callerRole: 'worker',
+			pureWorker: false,
+			isMissionNode: true,
+			baseEnv,
+			cliBinDirs: [cliBinDir],
+			socketPath: '/tmp/ade.sock',
+			sessionToken: 'aexus-cap.signed-mission-node.abc',
+			platform: 'darwin',
+		});
+		assert.strictEqual(missionNode.AEXUS_ADE_TOKEN, undefined, 'Master token is never exposed');
+		assert.strictEqual(missionNode.AEXUS_ADE_CONTROL_FILE, undefined);
+		assert.strictEqual(missionNode.AEXUS_ADE_SOCKET, '/tmp/ade.sock', 'Pure-rank Mission node keeps control socket for token.*');
+		assert.strictEqual(missionNode.AEXUS_ADE_SESSION_TOKEN, 'aexus-cap.signed-mission-node.abc');
+		assert.strictEqual(missionNode.AEXUS_ADE_CALLER, 'worker');
+		assert.strictEqual((missionNode.PATH ?? '').includes(cliBinDir), true, 'Pure-rank Mission node keeps bundled aexus-ade CLI in PATH');
 	});
 });

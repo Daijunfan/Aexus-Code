@@ -112,6 +112,11 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'rank.get',
 			'rank.docs',
 			'mission.docs',
+			'whoami',
+			'docs.read',
+			'api.update',
+			'org.subordinates',
+			'org.context',
 		],
 		renderCliLines: ctx => ctx.isWorkTree
 			? [`  - Subordinate History: \`aexus-ade session history <subordinate-id> --limit 10 --json\``]
@@ -127,6 +132,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'session.stop',
 			'session.draft',
 			'session.markRead',
+			'org.send',
 		],
 		renderCliLines: ctx => ctx.isWorkTree
 			? []
@@ -248,6 +254,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'inbox.list',
 			'inbox.markRead',
 			'inbox.resolve',
+			'org.escalate',
 		],
 		renderCliLines: ctx => [
 			`  - Human Inbox: \`aexus-ade inbox post --from ${ctx.treeGovernorId ?? ctx.agentId} --message "<decision needed>"\``,
@@ -269,6 +276,8 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'engineering.blueprint.validate',
 			'engineering.template.list',
 			'engineering.templates.list',
+			'engineering.boundary.get',
+			'engineering.trigger.list',
 		],
 		renderCliLines: ctx => {
 			if (!ctx.isWorkTree) {
@@ -310,6 +319,11 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'engineering.templates.apply',
 			'engineering.configure',
 			'engineering.demo',
+			'engineering.boundary.set',
+			'engineering.patch',
+			'engineering.trigger.set',
+			'engineering.trigger.remove',
+			'engineering.host.bind',
 		],
 		renderCliLines: ctx => {
 			if (!ctx.isWorkTree) {
@@ -399,10 +413,13 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 		description: 'Start, pause, resume, stop, or approve/rollback User Acceptance Gates on a Work-Tree (typically reserved for User/Secretary).',
 		actions: [
 			'engineering.run',
+			'engineering.start',
 			'engineering.pause',
 			'engineering.resume',
 			'engineering.stop',
+			'engineering.timeout.set',
 			'engineering.gate',
+			'engineering.recall',
 			'engineering.open',
 		],
 		dangerous: true,
@@ -1232,9 +1249,26 @@ export interface IAdeApiPermissionResult {
 	readonly reason?: string;
 }
 
+const ADE_UNIVERSAL_COMMON_ACTIONS = new Set([
+	'whoami',
+	'docs.read',
+	'api.update',
+]);
+
+const ADE_IN_GRAPH_TOKEN_ACTIONS = new Set([
+	'token.current',
+	'token.trace',
+	'token.complete',
+	'token.reject',
+	'token.block',
+	'token.fail',
+]);
+
 /**
  * Kernel-level authorization check for fixed Aexus-Code primitive APIs.
  * - Unspecified caller (human user CLI) or `'secretary'` bypasses rank restriction.
+ * - Universal self/doc/update actions (`whoami`, `docs.read`, `api.update`) are allowed for all valid ranks `L0..LN`.
+ * - In-graph `token.*` actions pass the rank gate for any valid rank and are verified against Mission node assignment in the handler.
  * - Orchestrated/custom rank callers must hold the primitive API governing `action`.
  */
 export function checkAdeApiPermission(
@@ -1255,6 +1289,23 @@ export function checkAdeApiPermission(
 	if (!caller || caller === 'user' || caller === 'human' || caller === 'l-1' || caller === 'secretary' || caller === 'l0') {
 		return { allowed: true };
 	}
+
+	if (ADE_UNIVERSAL_COMMON_ACTIONS.has(action) || ADE_IN_GRAPH_TOKEN_ACTIONS.has(action)) {
+		const knownRank = findRankDefinition(config, caller);
+		if (!knownRank) {
+			return {
+				allowed: false,
+				rankId: caller,
+				reason: `Permission denied: unknown caller rank "${caller}" cannot invoke action "${action}".`,
+			};
+		}
+		return {
+			allowed: true,
+			rankId: knownRank.id,
+			rankName: knownRank.name,
+		};
+	}
+
 	const requiredApi = resolveActionPrimitiveApi(action);
 	if (!requiredApi) {
 		// System-only / unmapped actions (e.g. mode.set, role.schema.set) are not granted to non-Secretary agents.

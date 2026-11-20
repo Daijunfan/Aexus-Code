@@ -955,6 +955,21 @@ export class AdeFilesView extends ViewPane {
 			void this.refresh();
 		}));
 
+		let cloudRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+		this._register({ dispose: () => { if (cloudRefreshTimer) { clearTimeout(cloudRefreshTimer); } } });
+		this._register(fileService.onDidFilesChange(e => {
+			const active = this.getActiveProject();
+			if (active && active.uri.scheme === AEXUS_SSH_SCHEME && e.affects(active.uri)) {
+				if (cloudRefreshTimer) {
+					clearTimeout(cloudRefreshTimer);
+				}
+				cloudRefreshTimer = setTimeout(() => {
+					cloudRefreshTimer = undefined;
+					void this.refresh();
+				}, 300);
+			}
+		}));
+
 		this._register(configurationService.onDidChangeConfiguration(event => {
 			if (event.affectsConfiguration('explorer.decorations')) {
 				void this.refresh();

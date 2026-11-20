@@ -15,6 +15,14 @@ import {
 	RANK_SUBCOMMANDS,
 	rewriteEngineeringActionToMission,
 } from './adeCliRankMission.mjs';
+import {
+	parseApiCommand,
+	parseDocsCommand,
+	parseMissionRuntimeSubcommand,
+	parseOrgCommandIfRuntime,
+	parseTokenGroupCommand,
+	parseWhoamiCommand,
+} from './adeCliMissionRuntime.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +38,7 @@ export interface IAdeControlConnectionMetadata {
 	readonly socketPath: string;
 	readonly token: string;
 	readonly pid: number;
+	readonly tcpPort?: number;
 }
 
 export interface IAdeControlWireRequest {
@@ -95,6 +104,9 @@ Organizational Ranks (governor [L1] > manager [L2] > employee [L3] > worker [L4]
 Commands:
   status
   version
+  whoami
+  docs read <common|mission|manifest|L0..LN>
+  api update [--since <rev>] [--scope <all|common|in_graph|off_graph|mission>]
   doctor [--project <path>] [--strict]
   completion <bash|zsh|fish|powershell>
   mode [get | set <ade|ide>]
@@ -179,11 +191,32 @@ Commands:
 
   mission docs
   mission list [--project <path>]
-  mission init --governor <id> [--on-children <relocate|delete> --target <id>] [--open] [--side]
-  mission open --governor <id> [--side]
-  mission status --governor <id> [--node <nodeId>]
+  mission init [--mission <id> | --owner <id>] [--title "<name>"] [--open] [--side]
+  mission open --mission <id> [--side]
   mission blueprint (get | apply | validate) ...
-  mission (run | pause | resume | stop | reset | remove | configure | review | gate | diff | reports | template | generate) ...
+  mission start [--mission <id>] [--timeout <minutes>] [--prompt <text>]
+  mission status [--mission <id>]
+  mission pause|resume|stop [--mission <id>]
+  mission remove --mission <id>
+  mission timeout [--mission <id>] --minutes <n>
+  mission boundary get|set [--mission <id>] [--off-graph-max-tier <k>] [--supervisors-json <json>]
+  mission recall [--mission <id>] [--nodes <n1,n2>] [--branch <nodeId>] [--reason <text>]
+  mission patch [--mission <id>] (--file <path> | --text <mermaid>) [--reason <text>]
+  mission gate <approve|reject> [--mission <id>] --node <id> [--note <text>] [--rollback <nodeId>]
+  mission trigger list|set|remove [--mission <id>] ...
+  mission host bind [--mission <id>] --node <id> --host <local|alias> [--path <remotePath>]
+
+  token current [--mission <id>] [--agent <id>]
+  token trace <tracePtr> [--mission <id>] [--limit <n>]
+  token complete <tokenId> --summary <text> [--mission <id>]
+  token reject <tokenId> --reason <text> [--target <nodeId>] [--mission <id>]
+  token block <tokenId> --duration <duration> [--reason <text>] [--watch-pid <pid>] [--watch-file <path>] [--host <alias>]
+  token fail <tokenId> --reason <text> [--mission <id>]
+
+  org subordinates [supervisorId] [--mission <id>]
+  org send <nodeOrSessionId> <message> [--mission <id>] [--wait]
+  org context <nodeOrSessionId> [--limit <n>] [--mission <id>]
+  org escalate --reason <text> [--mission <id>] [--token <tokenId>] [--node <nodeId>]
   (legacy alias: aexus-ade engineering <subcommand> ...)
 
   engineering demo [--governor <id>]
@@ -285,7 +318,7 @@ async function canonicalizeParamsPaths(params: Record<string, unknown> | undefin
 }
 
 /** Flags whose next token is opaque user text and must never be treated as a global flag. */
-const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedback', '--text', '--draft']);
+const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedback', '--text', '--draft', '--summary', '--reason', '--mermaid', '--note', '--prompt']);
 
 export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): ParsedCliInvocation {
 	let help = false;
@@ -332,6 +365,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		if (activeGroup === 'session' && (sub === 'send' || sub === 'draft') && positionalCount >= 1) {
 			return true;
 		}
+		if (activeGroup === 'org' && sub === 'send' && positionalCount >= 1) {
+			return true;
+		}
 		return false;
 	};
 
@@ -352,7 +388,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			continue;
 		}
 		if (inFreeTextPayload()) {
-			if ((activeGroup === 'session' || activeGroup === 'secretary') && sub === 'send' && arg === '--wait') {
+			if ((activeGroup === 'session' || activeGroup === 'secretary' || activeGroup === 'org') && sub === 'send' && arg === '--wait') {
 				rest.push(arg);
 				continue;
 			}
@@ -415,6 +451,22 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	if (group === 'status') {
 		if (tail.length > 0) { throw new CliUsageError(`Unexpected arguments for status: ${tail.join(' ')}`); }
 		return { help: false, json, windowId, action: 'status', params: {} };
+	}
+
+	if (group === 'whoami') {
+		return parseWhoamiCommand(tail, json, windowId, msg => new CliUsageError(msg));
+	}
+
+	if (group === 'docs' || group === 'doc') {
+		return parseDocsCommand(tail, json, windowId, msg => new CliUsageError(msg));
+	}
+
+	if (group === 'api') {
+		return parseApiCommand(tail, json, windowId, msg => new CliUsageError(msg));
+	}
+
+	if (group === 'token' || group === 'tokens') {
+		return parseTokenGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
 	}
 
 	if (group === 'doctor') {
@@ -1298,6 +1350,10 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		if (missionDocs) {
 			return missionDocs;
 		}
+		const missionRuntimeCmd = parseMissionRuntimeSubcommand(tail, json, windowId, msg => new CliUsageError(msg));
+		if (missionRuntimeCmd) {
+			return missionRuntimeCmd;
+		}
 		const parseWorkTree = (): ParsedCliInvocation => {
 			const sub = tail[0] ?? 'list';
 		const args = tail.slice(1);
@@ -1370,6 +1426,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 
 		if (sub === 'init') {
 			let governor: string | undefined;
+			let title: string | undefined;
 			let onChildren: string | undefined;
 			let targetParentId: string | undefined;
 			let treeType: string | undefined;
@@ -1377,8 +1434,10 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			let side = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
+				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--owner' || arg.startsWith('--owner=')) {
+					governor = takeOptionVal(ref, '--owner', args);
+				} else if (arg === '--title' || arg.startsWith('--title=')) {
+					title = takeOptionVal(ref, '--title', args);
 				} else if (arg === '--on-children' || arg.startsWith('--on-children=')) {
 					onChildren = takeOptionVal(ref, '--on-children', args).toLowerCase();
 					if (onChildren !== 'relocate' && onChildren !== 'delete') {
@@ -1395,13 +1454,15 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (!arg.startsWith('-') && !governor) {
 					governor = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for engineering init: ${arg}`);
+					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} init: ${arg}`);
 				}
 			}
-			if (!governor) {
+			if (!isMission && !governor) {
 				throw new CliUsageError('Usage: aexus-ade engineering init --governor <id> [--tree-type <engineering|research>] [--on-children <relocate|delete> --target <id>] [--open] [--side]');
 			}
-			const params: Record<string, unknown> = { governor };
+			const params: Record<string, unknown> = {};
+			if (governor) { params.governor = governor; }
+			if (title) { params.title = title; }
 			if (onChildren) { params.onChildren = onChildren; }
 			if (targetParentId) { params.relocateTargetParentId = targetParentId; }
 			if (treeType) { params.treeType = treeType; }
@@ -1420,7 +1481,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (arg === '--tree-type' || arg.startsWith('--tree-type=')) {
 					treeType = takeOptionVal(ref, '--tree-type', args).toLowerCase();
 				} else {
-					throw new CliUsageError(`Unknown option for engineering list: ${arg}`);
+					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} list: ${arg}`);
 				}
 			}
 			const params: Record<string, unknown> = {};
@@ -1434,18 +1495,18 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			let side = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
+				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
+					governor = takeOptionVal(ref, '--mission', args);
 				} else if (arg === '--side') {
 					side = true;
 				} else if (!arg.startsWith('-') && !governor) {
 					governor = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for engineering open: ${arg}`);
+					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} open: ${arg}`);
 				}
 			}
 			if (!governor) {
-				throw new CliUsageError('Usage: aexus-ade engineering open --governor <id> [--side]');
+				throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission open --mission <id>' : 'engineering open --governor <id>'} [--side]`);
 			}
 			return { help: false, json, windowId, action: 'engineering.open', params: side ? { governor, side: true } : { governor } };
 		}
@@ -1458,18 +1519,18 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				let raw = false;
 				for (const ref = { i: 0 }; ref.i < bpArgs.length; ref.i++) {
 					const arg = bpArgs[ref.i];
-					if (arg === '--governor' || arg.startsWith('--governor=')) {
-						governor = takeOptionVal(ref, '--governor', bpArgs);
+					if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
+						governor = takeOptionVal(ref, '--mission', bpArgs);
 					} else if (arg === '--raw') {
 						raw = true;
 					} else if (!arg.startsWith('-') && !governor) {
 						governor = arg;
 					} else {
-						throw new CliUsageError(`Unknown option for engineering blueprint get: ${arg}`);
+						throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} blueprint get: ${arg}`);
 					}
 				}
 				if (!governor) {
-					throw new CliUsageError('Usage: aexus-ade engineering blueprint get --governor <id> [--raw]');
+					throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission blueprint get --mission <id>' : 'engineering blueprint get --governor <id>'} [--raw]`);
 				}
 				return { help: false, json, windowId, action: 'engineering.blueprint.get', params: raw ? { governor, raw: true } : { governor } };
 			}
@@ -1480,8 +1541,8 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				let forceStopRunning = false;
 				for (const ref = { i: 0 }; ref.i < bpArgs.length; ref.i++) {
 					const arg = bpArgs[ref.i];
-					if (arg === '--governor' || arg.startsWith('--governor=')) {
-						governor = takeOptionVal(ref, '--governor', bpArgs);
+					if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
+						governor = takeOptionVal(ref, '--mission', bpArgs);
 					} else if (arg === '--file' || arg.startsWith('--file=')) {
 						file = resolvePathIfRelative(takeOptionVal(ref, '--file', bpArgs), cwd);
 					} else if (arg === '--text' || arg.startsWith('--text=')) {
@@ -1489,11 +1550,11 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					} else if (arg === '--force-stop-running') {
 						forceStopRunning = true;
 					} else {
-						throw new CliUsageError(`Unknown option for engineering blueprint apply: ${arg}`);
+						throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} blueprint apply: ${arg}`);
 					}
 				}
 				if (!governor || (!file && text === undefined)) {
-					throw new CliUsageError('Usage: aexus-ade engineering blueprint apply --governor <id> (--file <path> | --text <markdown>) [--force-stop-running]');
+					throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission blueprint apply --mission <id>' : 'engineering blueprint apply --governor <id>'} (--file <path> | --text <markdown>) [--force-stop-running]`);
 				}
 				const params: Record<string, unknown> = { governor };
 				if (file) { params.file = file; }
@@ -1511,36 +1572,37 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					} else if (arg === '--text' || arg.startsWith('--text=')) {
 						text = takeOptionVal(ref, '--text', bpArgs);
 					} else {
-						throw new CliUsageError(`Unknown option for engineering blueprint validate: ${arg}`);
+						throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} blueprint validate: ${arg}`);
 					}
 				}
 				if (!file && text === undefined) {
-					throw new CliUsageError('Usage: aexus-ade engineering blueprint validate (--file <path> | --text <markdown>)');
+					throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission' : 'engineering'} blueprint validate (--file <path> | --text <markdown>)`);
 				}
 				const params: Record<string, unknown> = {};
 				if (file) { params.file = file; }
 				if (text !== undefined) { params.text = text; }
 				return { help: false, json, windowId, action: 'engineering.blueprint.validate', params };
 			}
-			throw new CliUsageError('Usage: aexus-ade engineering blueprint <get | apply | validate> ...');
+			throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission' : 'engineering'} blueprint <get | apply | validate> ...`);
 		}
 
 		if (sub === 'run' || sub === 'pause' || sub === 'resume' || sub === 'stop' || sub === 'remove') {
 			let governor: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
+				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
+					governor = takeOptionVal(ref, '--mission', args);
 				} else if (!arg.startsWith('-') && !governor) {
 					governor = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for engineering ${sub}: ${arg}`);
+					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} ${sub}: ${arg}`);
 				}
 			}
-			if (!governor) {
-				throw new CliUsageError(`Usage: aexus-ade engineering ${sub} --governor <id>`);
+			if (!governor && (!isMission || sub === 'remove')) {
+				throw new CliUsageError(`Usage: aexus-ade ${isMission ? `mission ${sub} --mission <id>` : `engineering ${sub} --governor <id>`}`);
 			}
-			const params: Record<string, unknown> = { governor };
+			const params: Record<string, unknown> = {};
+			if (governor) { params.governor = governor; }
 			return { help: false, json, windowId, action: `engineering.${sub}`, params };
 		}
 
@@ -1549,20 +1611,21 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			let node: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
+				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
+					governor = takeOptionVal(ref, '--mission', args);
 				} else if (arg === '--node' || arg.startsWith('--node=')) {
 					node = takeOptionVal(ref, '--node', args);
 				} else if (!arg.startsWith('-') && !governor) {
 					governor = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for engineering status: ${arg}`);
+					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} status: ${arg}`);
 				}
 			}
-			if (!governor) {
+			if (!governor && !isMission) {
 				throw new CliUsageError('Usage: aexus-ade engineering status --governor <id> [--node <nodeId>]');
 			}
-			const params: Record<string, unknown> = { governor };
+			const params: Record<string, unknown> = {};
+			if (governor) { params.governor = governor; }
 			if (node) { params.node = node; }
 			return { help: false, json, windowId, action: 'engineering.status', params };
 		}
@@ -1615,22 +1678,35 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			let feedback: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
+				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
+					governor = takeOptionVal(ref, '--mission', args);
 				} else if (arg === '--node' || arg.startsWith('--node=')) {
 					node = takeOptionVal(ref, '--node', args);
-				} else if (arg === '--verdict' || arg.startsWith('--verdict=')) {
-					verdict = takeOptionVal(ref, '--verdict', args).toLowerCase();
-					if (verdict !== 'pass' && verdict !== 'rollback') {
-						throw new CliUsageError('Option --verdict must be pass or rollback.');
+				} else if (arg === '--decision' || arg.startsWith('--decision=') || arg === '--verdict' || arg.startsWith('--verdict=')) {
+					verdict = takeOptionVal(ref, '--decision', args).toLowerCase();
+					if (verdict !== 'approve' && verdict !== 'reject' && verdict !== 'pass' && verdict !== 'rollback') {
+						throw new CliUsageError('Option --decision must be approve or reject (aliases: pass, rollback).');
 					}
-				} else if (arg === '--target-node' || arg.startsWith('--target-node=')) {
-					targetNode = takeOptionVal(ref, '--target-node', args);
-				} else if (arg === '--feedback' || arg.startsWith('--feedback=')) {
-					feedback = takeOptionVal(ref, '--feedback', args);
+				} else if (arg === '--rollback' || arg.startsWith('--rollback=') || arg === '--target-node' || arg.startsWith('--target-node=')) {
+					targetNode = takeOptionVal(ref, '--rollback', args);
+				} else if (arg === '--note' || arg.startsWith('--note=') || arg === '--feedback' || arg.startsWith('--feedback=') || arg === '--reason' || arg.startsWith('--reason=')) {
+					feedback = takeOptionVal(ref, '--note', args);
+				} else if (!arg.startsWith('-') && !verdict && (arg.toLowerCase() === 'approve' || arg.toLowerCase() === 'reject' || arg.toLowerCase() === 'pass' || arg.toLowerCase() === 'rollback')) {
+					verdict = arg.toLowerCase();
 				} else {
-					throw new CliUsageError(`Unknown option for engineering gate: ${arg}`);
+					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} gate: ${arg}`);
 				}
+			}
+			if (isMission) {
+				if (!node || !verdict) {
+					throw new CliUsageError('Usage: aexus-ade mission gate <approve|reject> [--mission <id>] --node <nodeId> [--note "<text>"] [--rollback <upstreamNodeId>]');
+				}
+				const decision = (verdict === 'pass' || verdict === 'approve') ? 'approve' : 'reject';
+				const params: Record<string, unknown> = { node, decision };
+				if (governor) { params.missionId = governor; }
+				if (targetNode) { params.rollback = targetNode; }
+				if (feedback !== undefined) { params.note = feedback; }
+				return { help: false, json, windowId, action: 'engineering.gate', params };
 			}
 			if (!governor || !node || !verdict) {
 				throw new CliUsageError('Usage: aexus-ade engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]');
@@ -2212,6 +2288,13 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		throw new CliUsageError(`Unknown host subcommand: ${sub}`);
 	}
 
+	if (group === 'org') {
+		const orgRuntimeCmd = parseOrgCommandIfRuntime(tail, json, windowId, msg => new CliUsageError(msg));
+		if (orgRuntimeCmd) {
+			return orgRuntimeCmd;
+		}
+	}
+
 	if (group === 'role' || group === 'roles' || group === 'org') {
 		const sub = tail[0] ?? 'list';
 		const args = tail.slice(1);
@@ -2256,11 +2339,14 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 }
 
 async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: string; token: string; usingSessionToken: boolean }> {
-	const socketOverride = env.AEXUS_ADE_SOCKET?.trim();
+	const tcpPortRaw = env.AEXUS_ADE_TCP_PORT?.trim();
+	const tcpPort = tcpPortRaw && /^\d+$/.test(tcpPortRaw) ? Number.parseInt(tcpPortRaw, 10) : undefined;
+	const tcpEndpoint = tcpPort && tcpPort > 0 && tcpPort <= 65535 ? `tcp://127.0.0.1:${tcpPort}` : undefined;
+	const socketOverride = tcpEndpoint || env.AEXUS_ADE_SOCKET?.trim();
 	const sessionToken = env.AEXUS_ADE_SESSION_TOKEN?.trim();
 	if (sessionToken) {
 		if (socketOverride) {
-			// Per-session capability token + explicit socket: never read the master token metadata file.
+			// Per-session capability token + explicit socket or SSH reverse TCP port: never read master token file.
 			return { socketPath: socketOverride, token: sessionToken, usingSessionToken: true };
 		}
 		const adeHomeDir = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
@@ -2308,7 +2394,10 @@ async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: 
 
 function sendSocketRequest(socketPath: string, payload: IAdeControlWireRequest): Promise<IAdeControlWireResponse> {
 	return new Promise<IAdeControlWireResponse>((resolve, reject) => {
-		const socket = net.createConnection(socketPath);
+		const tcpMatch = /^tcp:\/\/(127\.0\.0\.1|localhost):(\d+)$/i.exec(socketPath);
+		const socket = tcpMatch
+			? net.createConnection({ host: tcpMatch[1], port: Number.parseInt(tcpMatch[2], 10) })
+			: net.createConnection(socketPath);
 		let buffer = '';
 		let settled = false;
 		const timer = setTimeout(() => {
@@ -3052,10 +3141,16 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		const { socketPath, token, usingSessionToken } = await resolveConnection(env);
 		const normalizedParams = await canonicalizeParamsPaths(parsed.params, parsed.action);
 		if (
-			(parsed.action === 'engineering.blueprint.apply' || parsed.action === 'engineering.blueprint.validate')
+			(parsed.action === 'engineering.blueprint.apply' || parsed.action === 'engineering.blueprint.validate' || parsed.action === 'mission.blueprint.apply' || parsed.action === 'mission.blueprint.validate')
 			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.text === undefined
 		) {
 			normalizedParams.text = await fs.readFile(normalizedParams.file, 'utf8');
+		}
+		if (
+			parsed.action === 'mission.patch'
+			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.mermaid === undefined
+		) {
+			normalizedParams.mermaid = await fs.readFile(normalizedParams.file, 'utf8');
 		}
 		let effectiveParams: Record<string, unknown> | undefined = normalizedParams;
 		if (usingSessionToken) {
@@ -3118,6 +3213,9 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			: response.result;
 		if (parsed.json) {
 			writeOut(JSON.stringify(outputPayload ?? { ok: true }, null, 2) + '\n');
+		} else if (parsed.action === 'docs.read' && outputPayload && typeof outputPayload === 'object' && typeof (outputPayload as Record<string, unknown>).content === 'string') {
+			const content = (outputPayload as Record<string, unknown>).content as string;
+			writeOut(content.endsWith('\n') ? content : `${content}\n`);
 		} else if (parsed.action === 'engineering.blueprint.get' && parsed.params?.raw === true) {
 			writeOut(formatRawBlueprintOutput(outputPayload));
 		} else {

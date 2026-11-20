@@ -20,9 +20,30 @@ import {
 	discoverSlashCommands,
 	EngineId,
 	readSkillOrCommandTemplate,
+	registerRemoteCapabilitiesReader,
 	SessionConfigState,
 } from './capabilities';
 import { ClaudeRuntime } from './claude';
+import {
+	clearCloudTransportCaches,
+	CLOUD_PROJECT_SCHEME,
+	CloudHostSshContext,
+	CloudHostTarget,
+	execRemoteShell,
+	isCloudUri,
+	isLegacyCloudBridgeCwd,
+	normalizeCloudAuthority,
+	normalizeCloudProjectUriString,
+	normalizeRemoteCwdForCompare,
+	parseCloudProjectUri,
+	posixQuote,
+	probeRemoteEngines,
+	psSingleQuote,
+	readRemoteTextFilesBatch,
+	registerCloudTransportBridge,
+	resolveCloudHostTarget,
+	toRemoteNativePath,
+} from './cloudTransport';
 import { CodexRuntime } from './codex';
 import { KiloRuntime, OpenCodeRuntime } from './kilo';
 import { installNativeRoleBridge } from './nativeRoleBridge';
@@ -134,40 +155,42 @@ interface RecordEntry extends NativeSession {
 	cloudProjectUri?: string;
 }
 
-const CLOUD_PROJECT_SCHEME = 'aexus-ssh';
-
-function sanitizeCloudWorkspaceSegment(raw: string): string {
-	const cleaned = raw.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
-	return cleaned || 'root';
-}
-
-function computeCloudBridgeDirectory(projectUri: vscode.Uri): string {
-	const rawPath = projectUri.path || '/';
-	const tailSlug = sanitizeCloudWorkspaceSegment(path.posix.basename(rawPath) || 'root').slice(0, 48);
-	const pathHash = crypto.createHash('sha256').update(rawPath).digest('hex').slice(0, 12);
-	return path.join(
-		os.homedir(),
-		'.aexus-code',
-		'cloud-workspaces',
-		sanitizeCloudWorkspaceSegment(projectUri.authority).slice(0, 64),
-		`${tailSlug}-${pathHash}`,
-	);
-}
-
-async function resolveProjectLocalCwd(projectUri: vscode.Uri): Promise<{ localCwd: string; cloudProjectUri?: string }> {
-	if (projectUri.scheme === CLOUD_PROJECT_SCHEME) {
-		const localCwd = computeCloudBridgeDirectory(projectUri);
-		await fs.mkdir(localCwd, { recursive: true });
-		return {
-			localCwd,
-			cloudProjectUri: projectUri.with({ path: projectUri.path.replace(/\/+$/, '') || '/' }).toString(),
-		};
-	}
-	return { localCwd: projectUri.fsPath };
-}
-
 function recordProjectUri(record: RecordEntry): vscode.Uri {
 	return record.cloudProjectUri ? vscode.Uri.parse(record.cloudProjectUri) : vscode.Uri.file(record.cwd);
+}
+
+function recordCloudAuthority(record: Pick<RecordEntry, 'cloudProjectUri'> | undefined): string | undefined {
+	const parsed = parseCloudProjectUri(record?.cloudProjectUri);
+	return parsed ? normalizeCloudAuthority(parsed.authority) : undefined;
+}
+
+function remoteNativePathToCloudUri(alias: string, remotePath: string, hostOs: CloudHostTarget['os']): string {
+	const cleaned = (remotePath || '/').trim();
+	let uriPath: string;
+	if (hostOs === 'windows') {
+		const fwd = cleaned.replace(/\\/g, '/');
+		uriPath = fwd.startsWith('/') ? fwd : `/${fwd}`;
+	} else {
+		uriPath = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
+	}
+	return normalizeCloudProjectUriString(vscode.Uri.from({ scheme: CLOUD_PROJECT_SCHEME, authority: alias, path: uriPath }));
+}
+
+function parseOptionalUri(raw: vscode.Uri | string | undefined): vscode.Uri | undefined {
+	if (!raw) {
+		return undefined;
+	}
+	if (raw instanceof vscode.Uri) {
+		return raw;
+	}
+	if (typeof raw === 'string' && raw.trim()) {
+		try {
+			return vscode.Uri.parse(raw);
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
 }
 
 function formatRecordProjectLabel(record: RecordEntry): string {
@@ -191,7 +214,7 @@ interface EngineDefinition {
 	readonly type: EngineId;
 	readonly themeIcon?: string;
 	readonly svgIcon?: string;
-	readonly create: (command: string) => EngineRuntime;
+	readonly create: (command: string, remoteTarget?: CloudHostTarget) => EngineRuntime;
 }
 
 const SECRETARY_TYPE = 'aexus-secretary';
@@ -226,14 +249,14 @@ const ENGINE_ALIASES: Record<string, string> = {
 };
 
 const definitions: readonly EngineDefinition[] = [
-	{ id: 'claude', executable: 'claude', name: 'Claude Code', type: 'aexus-claude', themeIcon: 'claude', svgIcon: 'claude', create: command => new ClaudeRuntime(command) },
-	{ id: 'codex', executable: 'codex', name: 'Codex', type: 'aexus-codex', themeIcon: 'openai', svgIcon: 'codex', create: command => new CodexRuntime(command) },
-	{ id: 'kilo', executable: 'kilo', name: 'Kilo Code', type: 'aexus-kilo', svgIcon: 'kilo', create: command => new KiloRuntime(command) },
-	{ id: 'opencode', executable: 'opencode', name: 'OpenCode', type: 'aexus-opencode', svgIcon: 'opencode', create: command => new OpenCodeRuntime(command) },
-	{ id: 'dsh', executable: 'dsh', name: 'DeepSeek Harness', type: 'aexus-dsh', svgIcon: 'dsh', create: command => new DshRuntime(command) },
-	{ id: 'antigravity', executable: 'agy', name: 'Google Antigravity', type: 'aexus-antigravity', svgIcon: 'antigravity', create: command => new AntigravityRuntime(command) },
-	{ id: 'cline', executable: 'cline', name: 'Cline', type: 'aexus-cline', svgIcon: 'cline', create: command => new ClineRuntime(command) },
-	{ id: 'pi', executable: 'pi', name: 'Pi', type: 'aexus-pi', svgIcon: 'pi', create: command => new PiRuntime(command) },
+	{ id: 'claude', executable: 'claude', name: 'Claude Code', type: 'aexus-claude', themeIcon: 'claude', svgIcon: 'claude', create: (command, remoteTarget) => new ClaudeRuntime(command, remoteTarget) },
+	{ id: 'codex', executable: 'codex', name: 'Codex', type: 'aexus-codex', themeIcon: 'openai', svgIcon: 'codex', create: (command, remoteTarget) => new CodexRuntime(command, remoteTarget) },
+	{ id: 'kilo', executable: 'kilo', name: 'Kilo Code', type: 'aexus-kilo', svgIcon: 'kilo', create: (command, remoteTarget) => new KiloRuntime(command, remoteTarget) },
+	{ id: 'opencode', executable: 'opencode', name: 'OpenCode', type: 'aexus-opencode', svgIcon: 'opencode', create: (command, remoteTarget) => new OpenCodeRuntime(command, remoteTarget) },
+	{ id: 'dsh', executable: 'dsh', name: 'DeepSeek Harness', type: 'aexus-dsh', svgIcon: 'dsh', create: (command, remoteTarget) => new DshRuntime(command, remoteTarget) },
+	{ id: 'antigravity', executable: 'agy', name: 'Google Antigravity', type: 'aexus-antigravity', svgIcon: 'antigravity', create: (command, remoteTarget) => new AntigravityRuntime(command, remoteTarget) },
+	{ id: 'cline', executable: 'cline', name: 'Cline', type: 'aexus-cline', svgIcon: 'cline', create: (command, remoteTarget) => new ClineRuntime(command, remoteTarget) },
+	{ id: 'pi', executable: 'pi', name: 'Pi', type: 'aexus-pi', svgIcon: 'pi', create: (command, remoteTarget) => new PiRuntime(command, remoteTarget) },
 ];
 
 const OPTION_GROUP_ICONS: Record<string, string> = {
@@ -313,7 +336,7 @@ function toSessionOptionsRecord(groups: readonly vscode.ChatSessionProviderOptio
 	return out;
 }
 
-function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?: boolean; callerRole?: string; automatedEngineering?: boolean; attachments?: readonly EngineAttachment[]; onContextCompacted?: () => void }): EngineSendOptions {
+function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?: boolean; callerRole?: string; isMissionNode?: boolean; adeSessionId?: string; automatedEngineering?: boolean; attachments?: readonly EngineAttachment[]; onContextCompacted?: () => void }): EngineSendOptions {
 	return {
 		model: cfg?.model && cfg.model !== 'default' ? cfg.model : undefined,
 		thinking: cfg?.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined,
@@ -324,6 +347,8 @@ function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?
 		attachments: extra.attachments,
 		pureWorker: extra.pureWorker,
 		callerRole: extra.callerRole,
+		isMissionNode: extra.isMissionNode,
+		adeSessionId: extra.adeSessionId,
 		automatedEngineering: extra.automatedEngineering,
 		onContextCompacted: extra.onContextCompacted,
 	};
@@ -366,29 +391,54 @@ function resolveCompletedTurnUsage(engine: EngineRuntime, sessionId: string, pro
 	};
 }
 
-function extractAttachmentsAndRefs(references: readonly vscode.ChatPromptReference[]): { attachments: EngineAttachment[]; fileLines: string[] } {
+function extractAttachmentsAndRefs(
+	references: readonly vscode.ChatPromptReference[],
+	cloudTarget?: CloudHostTarget,
+): { attachments: EngineAttachment[]; fileLines: string[] } {
 	const attachments: EngineAttachment[] = [];
 	const fileLines: string[] = [];
 	const seenPaths = new Set<string>();
 	for (const ref of references) {
-		if (ref.value instanceof vscode.Uri && ref.value.scheme === 'file') {
-			const fsPath = ref.value.fsPath;
-			if (seenPaths.has(fsPath)) {
-				continue;
+		if (ref.value instanceof vscode.Uri) {
+			if (ref.value.scheme === CLOUD_PROJECT_SCHEME && cloudTarget && normalizeCloudAuthority(ref.value.authority) === cloudTarget.authority) {
+				const remotePath = toRemoteNativePath(ref.value.path || '/', cloudTarget.os, cloudTarget.remoteHome);
+				if (seenPaths.has(remotePath)) {
+					continue;
+				}
+				seenPaths.add(remotePath);
+				const ext = path.posix.extname(ref.value.path || '').toLowerCase();
+				const imageMime = IMAGE_MIME_BY_EXT[ext];
+				attachments.push({ kind: imageMime ? 'image' : 'file', filePath: remotePath, mimeType: imageMime, remote: true });
+				fileLines.push(remotePath);
+			} else if (ref.value.scheme === 'file') {
+				const fsPath = ref.value.fsPath;
+				if (seenPaths.has(fsPath)) {
+					continue;
+				}
+				seenPaths.add(fsPath);
+				const ext = path.extname(fsPath).toLowerCase();
+				const imageMime = IMAGE_MIME_BY_EXT[ext];
+				if (imageMime) {
+					attachments.push({ kind: 'image', filePath: fsPath, mimeType: imageMime, remote: false });
+					if (!cloudTarget) {
+						fileLines.push(fsPath);
+					}
+				} else if (!cloudTarget) {
+					attachments.push({ kind: 'file', filePath: fsPath, remote: false });
+					fileLines.push(fsPath);
+				}
 			}
-			seenPaths.add(fsPath);
-			const ext = path.extname(fsPath).toLowerCase();
-			const imageMime = IMAGE_MIME_BY_EXT[ext];
-			if (imageMime) {
-				attachments.push({ kind: 'image', filePath: fsPath, mimeType: imageMime });
-			} else {
-				attachments.push({ kind: 'file', filePath: fsPath });
+		} else if (ref.value instanceof vscode.Location) {
+			if (ref.value.uri.scheme === CLOUD_PROJECT_SCHEME && cloudTarget && normalizeCloudAuthority(ref.value.uri.authority) === cloudTarget.authority) {
+				const remotePath = toRemoteNativePath(ref.value.uri.path || '/', cloudTarget.os, cloudTarget.remoteHome);
+				const locText = `${remotePath}:${ref.value.range.start.line + 1}`;
+				attachments.push({ kind: 'file', filePath: remotePath, rangeText: locText, remote: true });
+				fileLines.push(locText);
+			} else if (ref.value.uri.scheme === 'file' && !cloudTarget) {
+				const locText = `${ref.value.uri.fsPath}:${ref.value.range.start.line + 1}`;
+				attachments.push({ kind: 'file', filePath: ref.value.uri.fsPath, rangeText: locText, remote: false });
+				fileLines.push(locText);
 			}
-			fileLines.push(fsPath);
-		} else if (ref.value instanceof vscode.Location && ref.value.uri.scheme === 'file') {
-			const locText = `${ref.value.uri.fsPath}:${ref.value.range.start.line + 1}`;
-			attachments.push({ kind: 'file', filePath: ref.value.uri.fsPath, rangeText: locText });
-			fileLines.push(locText);
 		}
 	}
 	return { attachments, fileLines };
@@ -487,6 +537,15 @@ function expandBuiltInWorkflowPrompt(cmd: string, argsText: string, engineId: En
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+	registerCloudTransportBridge({
+		getCloudHostSshContext: async authority => Promise.resolve(
+			vscode.commands.executeCommand<CloudHostSshContext | undefined>('aexus.ade.getCloudHostSshContext', authority),
+		).catch(() => undefined),
+		getConfiguredSshExecutable: () => vscode.workspace.getConfiguration('remote.SSH', null).get<string>('path')?.trim() || undefined,
+		getConfiguredRemoteCliPaths: () => vscode.workspace.getConfiguration('aexus.ade', null).get<Record<string, Record<string, string>>>('remoteCliPaths', {}),
+		createCancellationError: () => new vscode.CancellationError(),
+	});
+	registerRemoteCapabilitiesReader(readRemoteTextFilesBatch);
 	roleBridge.setEnabled(readNativeRoleBridgeEnabled());
 	const cliBinDir = await resolveCliBinDir(context.extensionPath);
 	setCliBinDirectory(cliBinDir);
@@ -506,7 +565,61 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	let secretaryState = context.globalState.get<SecretaryState>('secretaryState');
 
 	const runtimes = new Map<string, EngineRuntime>();
+	const cloudRuntimes = new Map<string, { runtime: EngineRuntime; command: string; os: CloudHostTarget['os']; alias: string; authority: string }>();
 	const runtimeCapsCache = new Map<string, EngineRuntimeCapabilities>();
+	const runtimeCapsPending = new Map<string, Promise<{ caps: EngineRuntimeCapabilities; changed: boolean }>>();
+	const runtimeCapsRefreshedAt = new Map<string, number>();
+	const runtimeCapsGeneration = new Map<string, number>();
+	const lastActiveCwdByType = new Map<string, string>();
+	const PERSISTED_CAPS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+	const persistedCapsRaw = context.globalState.get<unknown>('runtimeCapsCache');
+	if (persistedCapsRaw && typeof persistedCapsRaw === 'object' && !Array.isArray(persistedCapsRaw)) {
+		const nowMs = Date.now();
+		for (const [savedKey, savedCaps] of Object.entries(persistedCapsRaw as Record<string, EngineRuntimeCapabilities & { updatedAt?: number }>)) {
+			if (!savedCaps || typeof savedCaps !== 'object') {
+				continue;
+			}
+			if (typeof savedCaps.updatedAt === 'number' && nowMs - savedCaps.updatedAt > PERSISTED_CAPS_MAX_AGE_MS) {
+				continue;
+			}
+			const wildcardKey = savedKey.endsWith(':*') ? savedKey : `${savedKey}:*`;
+			runtimeCapsCache.set(wildcardKey, {
+				defaultModel: typeof savedCaps.defaultModel === 'string' && savedCaps.defaultModel.trim() ? savedCaps.defaultModel.trim() : undefined,
+				models: Array.isArray(savedCaps.models) ? savedCaps.models.map(m => ({ ...m })) : undefined,
+				modes: Array.isArray(savedCaps.modes) ? savedCaps.modes.map(m => ({ ...m })) : undefined,
+			});
+		}
+	}
+	context.subscriptions.push({
+		dispose: () => {
+			for (const entry of cloudRuntimes.values()) {
+				entry.runtime.dispose();
+			}
+			cloudRuntimes.clear();
+		},
+	});
+	const disposeCloudRuntimesForAuthority = (authority?: string) => {
+		const norm = authority ? normalizeCloudAuthority(authority) : undefined;
+		for (const [poolKey, entry] of [...cloudRuntimes.entries()]) {
+			if (!norm || entry.authority === norm) {
+				entry.runtime.dispose();
+				cloudRuntimes.delete(poolKey);
+			}
+		}
+	};
+	const clearCloudCapsCache = (authority?: string) => {
+		const prefix = authority ? `cloud:${normalizeCloudAuthority(authority)}:` : 'cloud:';
+		for (const k of [...runtimeCapsCache.keys()]) {
+			if (k.startsWith(prefix)) {
+				runtimeCapsCache.delete(k);
+			}
+		}
+		for (const k of [...runtimeCapsRefreshedAt.keys()]) {
+			if (k.startsWith(prefix)) {
+				runtimeCapsRefreshedAt.delete(k);
+			}
+		}
+	};
 	const controllers = new Map<string, vscode.ChatSessionItemController>();
 	const optionChangeEmitters = new Map<string, vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>>();
 	const providerOptionsChangeEmitters = new Map<string, vscode.EventEmitter<void>>();
@@ -556,6 +669,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (event.affectsConfiguration('aexus.ade.cliPaths')) {
 			void refreshAvailableEngines();
 		}
+		if (event.affectsConfiguration('aexus.ade.remoteCliPaths') || event.affectsConfiguration('remote.SSH.path')) {
+			clearCloudTransportCaches();
+			disposeCloudRuntimesForAuthority();
+			clearCloudCapsCache();
+		}
 		if (event.affectsConfiguration('aexus.ade.nativeExtensionRoleBridge.enabled')) {
 			roleBridge.setEnabled(readNativeRoleBridgeEnabled());
 		}
@@ -575,6 +693,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		});
 	};
 
+	const promptConfigureCloudHost = (message: string, hostAlias: string, isSshError: boolean) => {
+		const actionLabel = isSshError
+			? vscode.l10n.t('Manage Cloud Hosts…')
+			: vscode.l10n.t('Configure Remote CLI Paths…');
+		void vscode.window.showWarningMessage(message, actionLabel).then(choice => {
+			if (choice === actionLabel) {
+				if (isSshError) {
+					void vscode.commands.executeCommand('workbench.action.aexusCloudHosts.manage', hostAlias);
+				} else {
+					void vscode.commands.executeCommand('workbench.action.openSettings', 'aexus.ade.remoteCliPaths');
+				}
+			}
+		});
+	};
+
 	const formatMissingEngineMessage = (shortEngine: string): string => {
 		const def = available.find(entry => entry.id === shortEngine);
 		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
@@ -582,6 +715,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const installCmd = guide?.installCommand ?? `Install ${displayName} CLI`;
 		const cliKey = guide?.cliKey ?? def?.executable ?? shortEngine;
 		return vscode.l10n.t('{0} CLI is not installed ({1}). Configure "aexus.ade.cliPaths.{2}" in Settings or install the CLI first.', displayName, installCmd, cliKey);
+	};
+
+	const formatMissingRemoteEngineMessage = (shortEngine: string, hostAlias: string, probeError?: string): string => {
+		if (probeError) {
+			return vscode.l10n.t('Cannot connect to Cloud Host "{0}" via SSH: {1}', hostAlias, probeError);
+		}
+		const def = available.find(entry => entry.id === shortEngine);
+		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
+		const displayName = def?.name ?? shortEngine;
+		const installCmd = guide?.installCommand ?? `Install ${displayName} CLI`;
+		return vscode.l10n.t('{0} CLI is not installed on Cloud Host "{1}" ({2}). Install it on the remote host or configure "aexus.ade.remoteCliPaths".', displayName, hostAlias, installCmd);
 	};
 
 	const buildMissingEngineMarkdown = (shortEngine: string): string => {
@@ -599,6 +743,41 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			`2. **Or Configure Custom Binary Path**: [Open \`aexus.ade.cliPaths\` in Settings](${settingsCmdUri})`,
 			'',
 			`_Once installed or configured, send your message again — no restart required._`,
+		].join('\n');
+	};
+
+	const buildMissingRemoteEngineMarkdown = (shortEngine: string, hostAlias: string, probeError?: string): string => {
+		const def = available.find(entry => entry.id === shortEngine);
+		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
+		const displayName = def?.name ?? shortEngine;
+		const manageHostsUri = `command:workbench.action.aexusCloudHosts.manage?${encodeURIComponent(JSON.stringify([hostAlias]))}`;
+		const remoteCliSettingsUri = `command:workbench.action.openSettings?${encodeURIComponent(JSON.stringify(['aexus.ade.remoteCliPaths']))}`;
+		if (probeError) {
+			return [
+				`### Cannot Connect to Cloud Host \`${hostAlias}\``,
+				'',
+				`**Aexus Code** failed to reach \`${hostAlias}\` over SSH to launch **${displayName}** natively on the cloud host:`,
+				'',
+				'```text',
+				probeError,
+				'```',
+				'',
+				`- [Check SSH Settings in Cloud Hosts Manager](${manageHostsUri})`,
+				`- Verify passwordless SSH key authentication works non-interactively (\`ssh -o BatchMode=yes ${hostAlias} echo ok\`).`,
+				'',
+				`_Once SSH connectivity is restored, send your message again._`,
+			].join('\n');
+		}
+		return [
+			`### ${displayName} CLI Not Installed on Cloud Host \`${hostAlias}\``,
+			'',
+			`**Aexus Code** runs Cloud Agents natively on the Cloud Host, but could not find \`${def?.executable ?? shortEngine}\` on \`${hostAlias}\`.`,
+			'',
+			...(guide ? [`1. **Install on \`${hostAlias}\`**: \`${guide.installCommand}\` ([Documentation](${guide.docsUrl}))`] : []),
+			`2. **Or Specify Remote Binary Path**: [Open \`aexus.ade.remoteCliPaths\` in Settings](${remoteCliSettingsUri}) and set \`"${hostAlias}": { "${shortEngine}": "/path/to/${def?.executable ?? shortEngine}" }\``,
+			`3. **Manage Cloud Host**: [Open Cloud Hosts Manager](${manageHostsUri})`,
+			'',
+			`_Once installed or configured on \`${hostAlias}\`, send your message again — no restart required._`,
 		].join('\n');
 	};
 
@@ -741,31 +920,296 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return result;
 	};
 
+	const acceptCloud = (engine: string, session: NativeSession, target: CloudHostTarget, fallbackCloudUri?: string): RecordEntry => {
+		const existing = records.get(key(engine, session.id))
+			?? [...records.values()].find(record => record.engine === engine && record.id === session.id);
+		const computedCloudUri = session.cwd?.trim()
+			? remoteNativePathToCloudUri(target.alias, session.cwd, target.os)
+			: fallbackCloudUri;
+		if (existing && (!existing.cloudProjectUri || recordCloudAuthority(existing) === target.authority)) {
+			const label = existing.customLabel ? existing.label : session.label;
+			if (!existing.customLabel && session.label !== existing.initialTitle) { existing.initialTitle = undefined; }
+			Object.assign(existing, session, {
+				label,
+				provisional: session.provisional ?? existing.provisional,
+				cloudProjectUri: existing.cloudProjectUri ?? computedCloudUri,
+			});
+			return existing;
+		}
+		const sessionKey = existing ? `cloud:${target.authority}:${key(engine, session.id)}` : key(engine, session.id);
+		const record: RecordEntry = {
+			...session,
+			engine,
+			cloudProjectUri: computedCloudUri,
+		};
+		records.set(sessionKey, record);
+		return record;
+	};
+
+	const ensureRecordCloudReady = async (record: RecordEntry, forceRefresh = false): Promise<CloudHostTarget | undefined> => {
+		if (!record.cloudProjectUri) {
+			return undefined;
+		}
+		const parsed = parseCloudProjectUri(record.cloudProjectUri);
+		if (!parsed) {
+			return undefined;
+		}
+		const target = await resolveCloudHostTarget(parsed.authority, forceRefresh);
+		const expectedRemoteCwd = toRemoteNativePath(parsed.path || '/', target.os, target.remoteHome);
+		let mutated = false;
+		if (isLegacyCloudBridgeCwd(record.cwd)) {
+			// Seamless migration from legacy pseudo-remote Mac staging folder to real native remote cwd
+			record.cwd = expectedRemoteCwd;
+			record.provisional = true;
+			if (record.engine === 'codex' || record.engine === 'cline' || record.engine === 'dsh' || record.engine === 'antigravity' || record.engine === 'kilo' || record.engine === 'opencode') {
+				record.unmaterialized = true;
+			}
+			record.file = undefined;
+			record.roleInit = undefined;
+			record.lastDeltaContext = undefined;
+			mutated = true;
+		} else if ((record.cwd.startsWith('~') || record.cwd.startsWith('/~')) && target.remoteHome) {
+			record.cwd = expectedRemoteCwd;
+			mutated = true;
+		}
+		if (mutated) {
+			await save();
+		}
+		return target;
+	};
+
+	const resolveRemoteEngineInfo = async (
+		shortEngine: string,
+		target: CloudHostTarget,
+		forceRefresh = false,
+	): Promise<{ target: CloudHostTarget; command?: string; probeError?: string }> => {
+		const probe = await probeRemoteEngines(target, forceRefresh);
+		return {
+			target: probe.target,
+			command: probe.ok ? probe.executables[shortEngine] : undefined,
+			probeError: probe.ok ? undefined : (probe.error || vscode.l10n.t('SSH connection failed')),
+		};
+	};
+
+	const syncRecordCwdWithTarget = (record: RecordEntry, target: CloudHostTarget): void => {
+		const parsed = parseCloudProjectUri(record.cloudProjectUri);
+		if (!parsed) {
+			return;
+		}
+		const nextRemoteCwd = toRemoteNativePath(parsed.path || '/', target.os, target.remoteHome);
+		if (record.cwd !== nextRemoteCwd && (isLegacyCloudBridgeCwd(record.cwd) || record.cwd.startsWith('~') || record.cwd.startsWith('/~') || (target.os === 'windows' && record.cwd.startsWith('/')))) {
+			record.cwd = nextRemoteCwd;
+		}
+	};
+
+	const runtimeForCloud = (shortEngine: string, target: CloudHostTarget, command: string): EngineRuntime => {
+		const definition = available.find(entry => entry.id === shortEngine);
+		if (!definition) {
+			throw new Error(`Unknown Coding Agent engine: ${shortEngine}`);
+		}
+		const poolKey = `${target.authority}::${shortEngine}`;
+		const existing = cloudRuntimes.get(poolKey);
+		if (existing && existing.command === command && existing.os === target.os && existing.alias === target.alias) {
+			return existing.runtime;
+		}
+		if (existing) {
+			existing.runtime.dispose();
+			cloudRuntimes.delete(poolKey);
+		}
+		const created = definition.create(command, target);
+		cloudRuntimes.set(poolKey, {
+			runtime: created,
+			command,
+			os: target.os,
+			alias: target.alias,
+			authority: target.authority,
+		});
+		if (created.onDidChangeSessions) {
+			context.subscriptions.push(created.onDidChangeSessions(sessions => {
+				const controller = controllers.get(shortEngine);
+				for (const session of sessions) {
+					const record = acceptCloud(shortEngine, session, target);
+					if (controller) { controller.items.add(item(record)); }
+					void publishHistory(record).catch(error => console.warn(error));
+				}
+				void save();
+			}));
+		}
+		return created;
+	};
+
+	const runtimeForRecord = async (record: RecordEntry, options?: { forceProbe?: boolean }): Promise<{ engine: EngineRuntime; remoteTarget?: CloudHostTarget }> => {
+		if (!record.cloudProjectUri) {
+			await ensureEngineCommand(record.engine);
+			return { engine: runtime(record.engine) };
+		}
+		const target = await ensureRecordCloudReady(record, Boolean(options?.forceProbe));
+		if (!target) {
+			throw new Error(vscode.l10n.t('Invalid Cloud Project URI for this conversation.'));
+		}
+		const info = await resolveRemoteEngineInfo(record.engine, target, Boolean(options?.forceProbe));
+		syncRecordCwdWithTarget(record, info.target);
+		if (!info.command) {
+			const msg = formatMissingRemoteEngineMessage(record.engine, info.target.alias, info.probeError);
+			promptConfigureCloudHost(msg, info.target.alias, Boolean(info.probeError));
+			throw new Error(msg);
+		}
+		return { engine: runtimeForCloud(record.engine, info.target, info.command), remoteTarget: info.target };
+	};
+
+	const tryRuntimeForRecord = async (record: RecordEntry): Promise<{ engine: EngineRuntime; remoteTarget?: CloudHostTarget } | undefined> => {
+		if (!record.cloudProjectUri) {
+			const cmd = await ensureEngineCommand(record.engine);
+			if (!cmd) {
+				return undefined;
+			}
+			return { engine: runtime(record.engine) };
+		}
+		const target = await ensureRecordCloudReady(record).catch(() => undefined);
+		if (!target) {
+			return undefined;
+		}
+		const info = await resolveRemoteEngineInfo(record.engine, target).catch(() => undefined);
+		if (!info?.command) {
+			return undefined;
+		}
+		syncRecordCwdWithTarget(record, info.target);
+		return { engine: runtimeForCloud(record.engine, info.target, info.command), remoteTarget: info.target };
+	};
+
+	const notifyCloudProjectMutated = (cloudProjectUri: string | undefined) => {
+		if (!cloudProjectUri) {
+			return;
+		}
+		void Promise.resolve(vscode.commands.executeCommand('aexus.ade.cloudProjectDidMutate', cloudProjectUri)).catch(() => undefined);
+	};
+
 	const capsSignature = (c: EngineRuntimeCapabilities | undefined): string =>
-		`${c?.defaultModel ?? ''}:${(c?.models ?? []).map(m => m.id).join(',')}:${(c?.modes ?? []).map(m => m.id).join(',')}:${c?.commands?.length ?? 0}`;
+		`${c?.defaultModel ?? ''}:${(c?.models ?? []).map(m => `${m.id}=${m.name}|${m.description ?? ''}`).join(',')}:${(c?.modes ?? []).map(m => `${m.id}=${m.name}|${m.description ?? ''}`).join(',')}:${(c?.commands ?? []).map(cmd => `${cmd.name}|${cmd.description ?? ''}`).join(',')}`;
+
+	const mergeRuntimeCaps = (prev: EngineRuntimeCapabilities | undefined, next: EngineRuntimeCapabilities | undefined): EngineRuntimeCapabilities => ({
+		defaultModel: next?.defaultModel?.trim() || prev?.defaultModel?.trim() || undefined,
+		models: next?.models !== undefined
+			? next.models.map(m => ({ ...m }))
+			: (prev?.models !== undefined ? prev.models.map(m => ({ ...m })) : undefined),
+		modes: next?.modes !== undefined
+			? next.modes.map(m => ({ ...m }))
+			: (prev?.modes !== undefined ? prev.modes.map(m => ({ ...m })) : undefined),
+		commands: next?.commands !== undefined
+			? next.commands.map(cmd => ({ ...cmd }))
+			: (prev?.commands !== undefined ? prev.commands.map(cmd => ({ ...cmd })) : undefined),
+	});
+
+	const capsKeyFor = (shortEng: string, cwd: string, authority?: string): string =>
+		authority ? `cloud:${normalizeCloudAuthority(authority)}:${shortEng}:${cwd}` : `${shortEng}:${cwd}`;
+
+	const capsWildcardKeyFor = (shortEng: string, authority?: string): string =>
+		authority ? `cloud:${normalizeCloudAuthority(authority)}:${shortEng}:*` : `${shortEng}:*`;
+
+	const getCachedRuntimeCaps = (shortEng: string, cwd: string, authority?: string): EngineRuntimeCapabilities =>
+		mergeRuntimeCaps(runtimeCapsCache.get(capsWildcardKeyFor(shortEng, authority)), runtimeCapsCache.get(capsKeyFor(shortEng, cwd, authority)));
+
+	const persistRuntimeCaps = (): void => {
+		const toSave: Record<string, EngineRuntimeCapabilities & { updatedAt: number }> = {};
+		const nowMs = Date.now();
+		for (const [cacheKey, val] of runtimeCapsCache.entries()) {
+			if (!cacheKey.endsWith(':*')) {
+				continue;
+			}
+			const persistedKey = cacheKey.startsWith('cloud:') ? cacheKey : cacheKey.slice(0, -2);
+			if ((val.models && val.models.length > 0) || val.defaultModel || (val.modes && val.modes.length > 0)) {
+				toSave[persistedKey] = {
+					defaultModel: val.defaultModel,
+					models: val.models?.map(m => ({ ...m })),
+					modes: val.modes?.map(m => ({ ...m })),
+					updatedAt: nowMs,
+				};
+			}
+		}
+		void context.globalState.update('runtimeCapsCache', toSave);
+	};
+
+	const commitRuntimeCaps = (shortEngine: string, cwd: string, incoming: EngineRuntimeCapabilities | undefined, authority?: string): { caps: EngineRuntimeCapabilities; changed: boolean } => {
+		const cacheKey = capsKeyFor(shortEngine, cwd, authority);
+		const wildcardKey = capsWildcardKeyFor(shortEngine, authority);
+		const prevMerged = getCachedRuntimeCaps(shortEngine, cwd, authority);
+		const prevSig = capsSignature(prevMerged);
+		const mergedForCwd = mergeRuntimeCaps(runtimeCapsCache.get(cacheKey), incoming);
+		const mergedWildcard = mergeRuntimeCaps(runtimeCapsCache.get(wildcardKey), incoming);
+		runtimeCapsCache.set(cacheKey, mergedForCwd);
+		runtimeCapsCache.set(wildcardKey, mergedWildcard);
+		const effective = mergeRuntimeCaps(mergedWildcard, mergedForCwd);
+		const nextSig = capsSignature(effective);
+		const changed = nextSig !== prevSig;
+		if (changed) {
+			persistRuntimeCaps();
+		}
+		return { caps: effective, changed };
+	};
 
 	const fetchRuntimeCaps = async (shortEngine: string, cwd: string, record?: RecordEntry): Promise<{ caps: EngineRuntimeCapabilities; changed: boolean }> => {
-		const cacheKey = `${shortEngine}:${cwd}`;
-		const prev = runtimeCapsCache.get(cacheKey);
-		const prevSig = capsSignature(prev);
-		const def = available.find(entry => entry.id === shortEngine && entry.command);
-		if (!def) {
-			return { caps: prev ?? {}, changed: false };
+		const authority = recordCloudAuthority(record);
+		const cacheKey = capsKeyFor(shortEngine, cwd, authority);
+		const existingPending = runtimeCapsPending.get(cacheKey);
+		if (existingPending) {
+			return existingPending;
 		}
-		try {
-			const eng = runtime(shortEngine);
-			if (eng.getRuntimeCapabilities) {
-				const caps = await Promise.race([
-					eng.getRuntimeCapabilities(cwd, record),
-					new Promise<EngineRuntimeCapabilities>(resolve => setTimeout(() => resolve(prev ?? {}), 12000)),
-				]);
-				runtimeCapsCache.set(cacheKey, caps);
-				runtimeCapsCache.set(`${shortEngine}:*`, caps);
-				const nextSig = capsSignature(caps);
-				return { caps, changed: nextSig !== prevSig };
+		const prev = getCachedRuntimeCaps(shortEngine, cwd, authority);
+		if (!authority) {
+			const def = available.find(entry => entry.id === shortEngine && entry.command);
+			if (!def) {
+				return { caps: prev, changed: false };
 			}
-		} catch { /* Fall back to cached or empty runtime capabilities. */ }
-		return { caps: prev ?? {}, changed: false };
+		}
+		const generation = (runtimeCapsGeneration.get(cacheKey) ?? 0) + 1;
+		runtimeCapsGeneration.set(cacheKey, generation);
+		const task = (async (): Promise<{ caps: EngineRuntimeCapabilities; changed: boolean }> => {
+			try {
+				let eng: EngineRuntime | undefined;
+				if (record?.cloudProjectUri) {
+					const resolved = await tryRuntimeForRecord(record);
+					eng = resolved?.engine;
+				} else {
+					eng = runtime(shortEngine);
+				}
+				if (eng?.getRuntimeCapabilities) {
+					let settled = false;
+					const probePromise = eng.getRuntimeCapabilities(cwd, record).then(lateCaps => {
+						if (settled && runtimeCapsGeneration.get(cacheKey) === generation) {
+							const lateResult = commitRuntimeCaps(shortEngine, cwd, lateCaps, authority);
+							if (lateResult.changed) {
+								providerOptionsChangeEmitters.get(`aexus-${shortEngine}`)?.fire();
+								if (!authority && secretaryState?.engine === shortEngine) {
+									providerOptionsChangeEmitters.get(SECRETARY_TYPE)?.fire();
+								}
+							}
+						}
+						return lateCaps;
+					}).catch(() => undefined);
+					let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+					const raced = await Promise.race([
+						probePromise,
+						new Promise<undefined>(resolve => {
+							timeoutHandle = setTimeout(() => resolve(undefined), 12000);
+						}),
+					]).finally(() => {
+						if (timeoutHandle !== undefined) {
+							clearTimeout(timeoutHandle);
+						}
+					});
+					settled = true;
+					runtimeCapsRefreshedAt.set(cacheKey, Date.now());
+					if (raced && runtimeCapsGeneration.get(cacheKey) === generation) {
+						return commitRuntimeCaps(shortEngine, cwd, raced, authority);
+					}
+				}
+			} catch { /* Fall back to cached runtime capabilities. */ }
+			return { caps: getCachedRuntimeCaps(shortEngine, cwd, authority), changed: false };
+		})().finally(() => {
+			runtimeCapsPending.delete(cacheKey);
+		});
+		runtimeCapsPending.set(cacheKey, task);
+		return task;
 	};
 
 	const ensureSecretaryRecord = async (preferredEngine?: string, preferredProject?: vscode.Uri, forceNew = false): Promise<RecordEntry> => {
@@ -879,23 +1323,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		? vscode.workspace.workspaceFolders[0].uri.fsPath
 		: os.homedir();
 
-	const collectCustomModelsForEngine = (shortEng: string, baseModels: EngineRuntimeCapabilities['models']): Array<{ id: string; name: string; description?: string }> => {
-		const merged = [...(baseModels ?? [])];
-		const seen = new Set(merged.map(m => m.id));
+	const collectSavedCustomModels = (shortEng: string, targetRecord?: RecordEntry): string[] => {
+		const out: string[] = [];
+		const seen = new Set<string>();
 		const addCustom = (m?: string) => {
 			const trimmed = m?.trim();
 			if (trimmed && trimmed !== 'default' && !seen.has(trimmed)) {
 				seen.add(trimmed);
-				merged.push({ id: trimmed, name: trimmed, description: 'Custom model' });
+				out.push(trimmed);
 			}
 		};
+		if (targetRecord) {
+			addCustom(targetRecord.sessionConfig?.model);
+			if (secretaryState?.engine === shortEng) {
+				addCustom(secretaryState.perEngineConfig?.[shortEng]?.model);
+			}
+			return out;
+		}
 		for (const rec of records.values()) {
 			if (rec.engine === shortEng) {
 				addCustom(rec.sessionConfig?.model);
 			}
 		}
 		addCustom(secretaryState?.perEngineConfig?.[shortEng]?.model);
-		return merged;
+		return out;
 	};
 
 	const computeOptionGroupsForResource = async (sessionType: string, sessionUri?: vscode.Uri): Promise<vscode.ChatSessionProviderOptionGroup[]> => {
@@ -904,25 +1355,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const secRecord = findCachedRecord(SECRETARY_URI) ?? await ensureSecretaryRecord().catch(() => undefined);
 			const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
 			const cwd = secRecord?.cwd ?? defaultCwd();
-			const rawCaps = runtimeCapsCache.get(`${shortEng}:${cwd}`) ?? runtimeCapsCache.get(`${shortEng}:*`);
-			const caps: EngineRuntimeCapabilities = {
-				...rawCaps,
-				models: collectCustomModelsForEngine(shortEng, rawCaps?.models),
-			};
+			const rawCaps = getCachedRuntimeCaps(shortEng, cwd);
 			const cfg = secRecord ? getSessionConfig(secRecord, true) : { secretaryEngineId: toEngineType(shortEng) };
-			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', withSafeDefaultConfig(toEngineType(shortEng), cfg), cwd, caps), SECRETARY_TYPE);
+			return toVsCodeOptionGroups(await buildOptionGroupsForSession('secretary', withSafeDefaultConfig(toEngineType(shortEng), cfg), cwd, {
+				...rawCaps,
+				customModels: collectSavedCustomModels(shortEng, secRecord),
+			}), SECRETARY_TYPE);
 		}
 		const engineType = toEngineType(sessionType);
 		const shortEng = engineType.slice('aexus-'.length);
 		const rec = sessionUri ? findCachedRecord(sessionUri) : undefined;
-		const cwd = rec?.cwd ?? defaultCwd();
-		const rawCaps = runtimeCapsCache.get(`${shortEng}:${cwd}`) ?? runtimeCapsCache.get(`${shortEng}:*`);
-		const caps: EngineRuntimeCapabilities = {
-			...rawCaps,
-			models: collectCustomModelsForEngine(shortEng, rawCaps?.models),
-		};
+		const authority = recordCloudAuthority(rec);
+		const remoteTarget = rec?.cloudProjectUri ? await ensureRecordCloudReady(rec).catch(() => undefined) : undefined;
+		const cwd = rec?.cwd ?? lastActiveCwdByType.get(engineType) ?? defaultCwd();
+		const rawCaps = getCachedRuntimeCaps(shortEng, cwd, authority);
 		const cfg = rec ? getSessionConfig(rec, false) : {};
-		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, withSafeDefaultConfig(engineType, cfg), cwd, caps), engineType);
+		return toVsCodeOptionGroups(await buildOptionGroupsForSession(engineType, withSafeDefaultConfig(engineType, cfg), cwd, {
+			...rawCaps,
+			customModels: collectSavedCustomModels(shortEng, rec),
+			remoteTarget,
+		}), engineType);
 	};
 
 	const trackInputState = (sessionType: string, controller: vscode.ChatSessionItemController, groups: vscode.ChatSessionProviderOptionGroup[]): vscode.ChatSessionInputState => {
@@ -962,6 +1414,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 			}
 		}
+	};
+
+	const scheduleRuntimeCapsRefresh = (shortEng: string, cwd: string, record: RecordEntry | undefined, sessionType: string, sessionUri?: vscode.Uri, force = false): void => {
+		const authority = recordCloudAuthority(record);
+		const cacheKey = capsKeyFor(shortEng, cwd, authority);
+		const cached = getCachedRuntimeCaps(shortEng, cwd, authority);
+		const hasModels = Boolean(cached.models && cached.models.length > 0);
+		const lastAt = runtimeCapsRefreshedAt.get(cacheKey) ?? 0;
+		const cooldownMs = hasModels ? 30_000 : 5_000;
+		if (!force && (runtimeCapsPending.has(cacheKey) || (Date.now() - lastAt < cooldownMs))) {
+			return;
+		}
+		void fetchRuntimeCaps(shortEng, cwd, record).then(({ changed }) => {
+			if (!changed) {
+				return;
+			}
+			if (sessionUri) {
+				void notifySessionOptionsUpdated(sessionType, sessionUri, true);
+			} else {
+				providerOptionsChangeEmitters.get(sessionType)?.fire();
+			}
+			const engineSessionType = `aexus-${shortEng}`;
+			if (sessionType !== engineSessionType) {
+				providerOptionsChangeEmitters.get(engineSessionType)?.fire();
+			}
+			if (!authority && sessionType !== SECRETARY_TYPE && secretaryState?.engine === shortEng) {
+				void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
+			}
+		});
 	};
 
 	const applyOptionUpdates = async (
@@ -1111,17 +1592,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const publishHistory = async (record: RecordEntry): Promise<void> => {
 		const entry = opened.get(identity(record));
 		if (entry && !busy.has(identity(record))) {
-			const turns = await runtime(record.engine).history(record, entry.cancellation.token);
-			if (opened.get(identity(record)) === entry) {
-				entry.changed.fire(history(turns, `aexus-${record.engine}`));
+			const resolved = await tryRuntimeForRecord(record);
+			if (resolved) {
+				const turns = await resolved.engine.history(record, entry.cancellation.token);
+				if (opened.get(identity(record)) === entry) {
+					entry.changed.fire(history(turns, `aexus-${record.engine}`));
+				}
 			}
 		}
 		if (secretaryState && records.get(secretaryState.recordKey) === record) {
 			const secEntry = opened.get(SECRETARY_TYPE);
 			if (secEntry && !busy.has(identity(record))) {
-				const turns = await runtime(record.engine).history(record, secEntry.cancellation.token);
-				if (opened.get(SECRETARY_TYPE) === secEntry) {
-					secEntry.changed.fire(history(turns, SECRETARY_TYPE));
+				const resolved = await tryRuntimeForRecord(record);
+				if (resolved) {
+					const turns = await resolved.engine.history(record, secEntry.cancellation.token);
+					if (opened.get(SECRETARY_TYPE) === secEntry) {
+						secEntry.changed.fire(history(turns, SECRETARY_TYPE));
+					}
 				}
 			}
 		}
@@ -1192,6 +1679,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		isSecretary: boolean,
 		stream: vscode.ChatResponseStream,
 		token: vscode.CancellationToken,
+		cloudTarget?: CloudHostTarget,
 	): Promise<boolean> => {
 		const sessionType = isSecretary ? SECRETARY_TYPE : `aexus-${record.engine}`;
 		const engineType = toEngineType(record.engine);
@@ -1199,7 +1687,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const engineName = engineDef?.name ?? record.engine;
 		const cfg = getSessionConfig(record, isSecretary);
 		const { caps } = await fetchRuntimeCaps(record.engine, record.cwd, record);
-		const allCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands);
+		const allCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands, cloudTarget);
 
 		if (cmd === 'help') {
 			stream.markdown(buildSlashHelpMarkdown(isSecretary, engineName, cfg, record.activeGoal, allCommands));
@@ -1231,12 +1719,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				stream.markdown(`Secretary conversation context has been reset (**${engineName}**).`);
 			} else {
 				const preservedConfig = record.sessionConfig;
-				const fresh = await runtime(record.engine).create(record.cwd);
+				const preservedCloudUri = record.cloudProjectUri;
+				const { engine: activeEngine } = await runtimeForRecord(record);
+				const fresh = await activeEngine.create(record.cwd);
 				Object.assign(record, fresh, {
 					label: record.label,
 					customLabel: record.customLabel,
 					resourceId: record.resourceId ?? record.id,
 					sessionConfig: preservedConfig,
+					cloudProjectUri: preservedCloudUri,
 					activeGoal: undefined,
 					roleInit: undefined,
 					lastDeltaContext: undefined,
@@ -1251,17 +1742,59 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 		if (cmd === 'diff' && !argText.trim()) {
 			try {
-				const [statusRes, statRes, diffRes] = await Promise.all([
-					execFileAsync('git', ['status', '--short', '--branch'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
-					execFileAsync('git', ['diff', '--stat'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
-					execFileAsync('git', ['diff', '--no-color'], { cwd: record.cwd, timeout: 6000, maxBuffer: 2 * 1024 * 1024, windowsHide: true }),
-				]);
-				const statusText = statusRes.stdout.trim() || '(clean working tree)';
-				const statText = statRes.stdout.trim();
-				const rawPatch = diffRes.stdout.trim();
+				let statusText = '';
+				let statText = '';
+				let rawPatch = '';
+				if (cloudTarget) {
+					const qCwd = posixQuote(record.cwd);
+					const pCwd = psSingleQuote(record.cwd);
+					const posixScript = [
+						`cd -- ${qCwd} || exit 1`,
+						`git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 2`,
+						`printf '__AEX_STATUS__\\n'`,
+						`git status --short --branch`,
+						`printf '\\n__AEX_STAT__\\n'`,
+						`git diff --stat`,
+						`printf '\\n__AEX_PATCH__\\n'`,
+						`git diff --no-color | head -c 65536`,
+					].join('\n');
+					const winScript = [
+						`Set-Location -LiteralPath ${pCwd}`,
+						`git rev-parse --is-inside-work-tree 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { exit 2 }`,
+						`Write-Output '__AEX_STATUS__'`,
+						`git status --short --branch`,
+						`Write-Output '__AEX_STAT__'`,
+						`git diff --stat`,
+						`Write-Output '__AEX_PATCH__'`,
+						`$d = (git diff --no-color) -join "\`n"; if ($d.Length -gt 65536) { $d = $d.Substring(0, 65536) }; Write-Output $d`,
+					].join('; ');
+					const res = await execRemoteShell(cloudTarget, posixScript, winScript, { timeoutMs: 12_000, token });
+					if (res.code !== 0) {
+						throw new Error(res.stderr || 'git diff failed on cloud host');
+					}
+					const out = res.stdout.toString('utf8');
+					const statMarker = out.indexOf('__AEX_STAT__');
+					const patchMarker = out.indexOf('__AEX_PATCH__');
+					if (statMarker >= 0 && patchMarker > statMarker) {
+						statusText = out.slice(out.indexOf('__AEX_STATUS__') + '__AEX_STATUS__'.length, statMarker).trim() || '(clean working tree)';
+						statText = out.slice(statMarker + '__AEX_STAT__'.length, patchMarker).trim();
+						rawPatch = out.slice(patchMarker + '__AEX_PATCH__'.length).trim();
+					} else {
+						statusText = out.trim() || '(clean working tree)';
+					}
+				} else {
+					const [statusRes, statRes, diffRes] = await Promise.all([
+						execFileAsync('git', ['status', '--short', '--branch'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
+						execFileAsync('git', ['diff', '--stat'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
+						execFileAsync('git', ['diff', '--no-color'], { cwd: record.cwd, timeout: 6000, maxBuffer: 2 * 1024 * 1024, windowsHide: true }),
+					]);
+					statusText = statusRes.stdout.trim() || '(clean working tree)';
+					statText = statRes.stdout.trim();
+					rawPatch = diffRes.stdout.trim();
+				}
 				const patchPreview = rawPatch.length > 6000 ? `${rawPatch.slice(0, 6000)}\n... (diff truncated)` : rawPatch;
 				stream.markdown([
-					`### Git Working Tree Diff (\`${record.cwd}\`)`,
+					`### Git Working Tree Diff (\`${cloudTarget ? `${cloudTarget.alias}:${record.cwd}` : record.cwd}\`)`,
 					'```text',
 					statusText,
 					...(statText ? ['', statText] : []),
@@ -1462,8 +1995,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 
 		// Delegate native RPC/HTTP/CLI inspection & session commands directly to the active runtime
-		const eng = runtime(record.engine);
-		if (eng.executeCommand) {
+		const resolvedEng = await tryRuntimeForRecord(record);
+		const eng = resolvedEng?.engine;
+		if (eng?.executeCommand) {
 			const normalizedRuntimeCmd = cmd === 'smol' ? 'compact' : cmd;
 			const handledByRuntime = await eng.executeCommand(record, normalizedRuntimeCmd, argText, stream, token, toSendOptions(cfg, {}));
 			if (handledByRuntime) {
@@ -1491,6 +2025,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (record.readOnly) { throw new Error(vscode.l10n.t('Continue this subagent from its parent conversation.')); }
 		const recordKey = identity(record);
 		if (busy.has(recordKey)) { throw new Error(vscode.l10n.t('This conversation is already working. Stop or wait for its current response.')); }
+		const cloudTarget = !isSecretary && record.cloudProjectUri
+			? await ensureRecordCloudReady(record)
+			: undefined;
 
 		const trimmedPrompt = request.prompt.trim();
 		let parsedCmd = request.command?.trim().toLowerCase();
@@ -1526,7 +2063,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 
 		if (parsedCmd && parsedCmd !== 'goal') {
-			const handledDirectly = await handleDirectSlashCommand(parsedCmd, cmdArgText, record, sessionUri, isSecretary, stream, token);
+			const handledDirectly = await handleDirectSlashCommand(parsedCmd, cmdArgText, record, sessionUri, isSecretary, stream, token, cloudTarget);
 			if (handledDirectly) {
 				return {};
 			}
@@ -1543,8 +2080,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 		const engineType = toEngineType(record.engine);
 		const cfg = getSessionConfig(record, isSecretary);
-		const caps = runtimeCapsCache.get(`${record.engine}:${record.cwd}`);
-		const discoveredCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps?.commands);
+		const caps = getCachedRuntimeCaps(record.engine, record.cwd, cloudTarget?.authority);
+		const discoveredCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands, cloudTarget);
 
 		let effectiveUserPrompt: string;
 		if (parsedCmd === 'goal') {
@@ -1564,7 +2101,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			effectiveUserPrompt = request.prompt;
 		}
 
-		const { attachments, fileLines } = extractAttachmentsAndRefs(request.references);
+		const { attachments, fileLines } = extractAttachmentsAndRefs(request.references, cloudTarget);
 		const userPromptWithRefs = fileLines.length
 			? `${effectiveUserPrompt}\n\n${vscode.l10n.t('Attached files:')}\n${fileLines.join('\n')}`
 			: effectiveUserPrompt;
@@ -1603,24 +2140,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 		}
 
-		if (record.cloudProjectUri) {
-			const parsedCloud = vscode.Uri.parse(record.cloudProjectUri);
-			const sshInfo = await Promise.resolve(vscode.commands.executeCommand<{ effectiveSshConfigPath?: string; alias?: string; os?: string } | undefined>(
-				'aexus.ade.getCloudHostSshContext',
-				parsedCloud.authority,
-			)).catch(() => undefined);
-			const sshTarget = sshInfo?.alias || parsedCloud.authority;
-			const sshCfgFlag = sshInfo?.effectiveSshConfigPath ? `-F "${sshInfo.effectiveSshConfigPath}" ` : '';
-			const remotePath = parsedCloud.path || '/';
-			const quotedRemotePath = `'${remotePath.replace(/'/g, `'\\''`)}'`;
-			preambleSections.push([
-				`[Aexus Cloud Host Project Context]`,
-				`- Active Project is on SSH Cloud Host \`${sshTarget}\` at remote directory \`${remotePath}\` (URI: \`${record.cloudProjectUri}\`, OS: \`${sshInfo?.os ?? 'linux'}\`).`,
-				`- Local harness staging directory on this Mac: \`${record.cwd}\`.`,
-				`- Execute shell commands, builds, tests, and file edits on the Cloud Host via SSH: \`ssh ${sshCfgFlag}${sshTarget} "cd -- ${quotedRemotePath} && <command>"\` (or \`scp\`/\`rsync\` when transferring artifacts).`,
-			].join('\n'));
-		}
-
 		if (record.activeGoal) {
 			preambleSections.push([
 				`[Autonomous Session Goal Active]`,
@@ -1635,27 +2154,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			: userPromptWithRefs;
 
 		try {
-			if (!await ensureEngineCommand(record.engine)) {
-				stream.markdown(buildMissingEngineMarkdown(record.engine));
-				promptConfigureCliPaths(formatMissingEngineMessage(record.engine));
-				return {};
+			let engine: EngineRuntime;
+			if (cloudTarget) {
+				const remoteInfo = await resolveRemoteEngineInfo(record.engine, cloudTarget);
+				syncRecordCwdWithTarget(record, remoteInfo.target);
+				if (!remoteInfo.command) {
+					stream.markdown(buildMissingRemoteEngineMarkdown(record.engine, remoteInfo.target.alias, remoteInfo.probeError));
+					promptConfigureCloudHost(
+						formatMissingRemoteEngineMessage(record.engine, remoteInfo.target.alias, remoteInfo.probeError),
+						remoteInfo.target.alias,
+						Boolean(remoteInfo.probeError),
+					);
+					return {};
+				}
+				engine = runtimeForCloud(record.engine, remoteInfo.target, remoteInfo.command);
+			} else {
+				if (!await ensureEngineCommand(record.engine)) {
+					stream.markdown(buildMissingEngineMarkdown(record.engine));
+					promptConfigureCliPaths(formatMissingEngineMessage(record.engine));
+					return {};
+				}
+				engine = runtime(record.engine);
 			}
 			const snapEntry = roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+			const isMissionNode = !isSecretary && Boolean(snapEntry?.isMissionNode);
 			const callerRole = isSecretary
 				? 'secretary'
-				: (!snapEntry?.isOrchestrated ? undefined : snapEntry.rank);
+				: (!snapEntry?.isOrchestrated && !isMissionNode ? undefined : snapEntry?.rank);
 			let contextCompactedDuringTurn = false;
 			const sendOptions = toSendOptions(cfg, {
 				attachments,
-				pureWorker: !isSecretary && !snapEntry?.isOrchestrated,
+				pureWorker: !isSecretary && !snapEntry?.isOrchestrated && !isMissionNode,
 				callerRole,
+				isMissionNode,
+				adeSessionId: isSecretary ? '__secretary__' : snapEntry?.id,
 				onContextCompacted: () => {
 					contextCompactedDuringTurn = true;
 					record.roleInit = undefined;
 					record.lastDeltaContext = undefined;
 				},
 			});
-			const engine = runtime(record.engine);
 			const prevId = record.id;
 			if (engine.prepareSession) {
 				await engine.prepareSession(record, sendOptions);
@@ -1669,11 +2207,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			let roundMarkdown = '';
 			let pendingGoalText = '';
 			let lastHeartbeatSent = 0;
+			let lastCloudRefreshSent = 0;
 			const emitHeartbeat = () => {
 				const now = Date.now();
 				if (now - lastHeartbeatSent >= 1500) {
 					lastHeartbeatSent = now;
 					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', sessionUri.toString(), now)).catch(() => undefined);
+				}
+			};
+			const emitThrottledCloudRefresh = () => {
+				if (!record.cloudProjectUri) {
+					return;
+				}
+				const now = Date.now();
+				if (now - lastCloudRefreshSent >= 4000) {
+					lastCloudRefreshSent = now;
+					notifyCloudProjectMutated(record.cloudProjectUri);
 				}
 			};
 			const findMarkerPrefixTailLength = (text: string): number => {
@@ -1756,6 +2305,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					if (prop === 'progress') {
 						return (value: string) => {
 							emitHeartbeat();
+							emitThrottledCloudRefresh();
 							stream.progress(value);
 						};
 					}
@@ -1864,6 +2414,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (isSecretary) {
 				refreshSecretaryItem();
 			}
+			notifyCloudProjectMutated(record.cloudProjectUri);
 			await save();
 		}
 	};
@@ -1910,9 +2461,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					const rec = findCachedRecord(sessionResource) ?? (isSec ? await ensureSecretaryRecord().catch(() => undefined) : undefined);
 					const shortEng = rec?.engine ?? (isSec ? (resolveShortEngine() ?? 'claude') : sessionType.slice('aexus-'.length));
 					const effectiveEngineType = toEngineType(shortEng);
+					const remoteTarget = rec?.cloudProjectUri ? await ensureRecordCloudReady(rec).catch(() => undefined) : undefined;
 					const cwd = rec?.cwd ?? defaultCwd();
 					const { caps } = await fetchRuntimeCaps(shortEng, cwd, rec);
-					const files = await discoverCustomizationFiles(effectiveEngineType, cwd, caps.commands);
+					const files = await discoverCustomizationFiles(effectiveEngineType, cwd, caps.commands, remoteTarget);
 					return files.map((entry): vscode.ChatSessionCustomizationItem => ({
 						uri: entry.uriPath.startsWith('agent-builtin://') ? vscode.Uri.parse(entry.uriPath) : vscode.Uri.file(entry.uriPath),
 						type: mapCustomizationType(entry.type),
@@ -1940,6 +2492,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	});
 	secretaryParticipant.iconPath = { light: aexusAppIconUri, dark: aexusAppIconUri };
 	secretaryController.getChatSessionInputState = async sessionResource => {
+		const secRecord = findCachedRecord(SECRETARY_URI);
+		const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
+		scheduleRuntimeCapsRefresh(shortEng, secRecord?.cwd ?? defaultCwd(), secRecord, SECRETARY_TYPE, sessionResource ?? SECRETARY_URI);
 		const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, sessionResource ?? SECRETARY_URI);
 		return trackInputState(SECRETARY_TYPE, secretaryController!, groups);
 	};
@@ -1951,6 +2506,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			onDidChangeChatSessionOptions: secretaryOptEmitter.event,
 			onDidChangeChatSessionProviderOptions: secretaryProviderOptEmitter.event,
 			provideChatSessionProviderOptions: async () => {
+				const secRecord = findCachedRecord(SECRETARY_URI);
+				const shortEng = secRecord?.engine ?? resolveShortEngine() ?? 'claude';
+				scheduleRuntimeCapsRefresh(shortEng, secRecord?.cwd ?? defaultCwd(), secRecord, SECRETARY_TYPE, SECRETARY_URI);
 				const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, SECRETARY_URI);
 				return {
 					optionGroups: groups,
@@ -1966,11 +2524,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					? await runtime(secRecord.engine).history(secRecord, token).catch(() => [] as HistoryEntry[])
 					: [];
 				await save();
-				void fetchRuntimeCaps(secRecord.engine, secRecord.cwd, secRecord).then(({ changed }) => {
-					if (changed) {
-						void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
-					}
-				});
+				scheduleRuntimeCapsRefresh(secRecord.engine, secRecord.cwd, secRecord, SECRETARY_TYPE, SECRETARY_URI, true);
 				const groups = await computeOptionGroupsForResource(SECRETARY_TYPE, SECRETARY_URI);
 				if (secRecord.activeGoal) {
 					setTimeout(() => setGoalBannerInUi(SECRETARY_URI, secRecord.activeGoal), 80);
@@ -2021,6 +2575,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const controller = vscode.chat.createChatSessionItemController(definition.type, async () => refresh(definition.id));
 		controllers.set(definition.id, controller);
 		controller.getChatSessionInputState = async sessionResource => {
+			const rec = sessionResource ? findCachedRecord(sessionResource) : undefined;
+			const cwd = rec?.cwd ?? lastActiveCwdByType.get(definition.type) ?? defaultCwd();
+			scheduleRuntimeCapsRefresh(definition.id, cwd, rec, definition.type, sessionResource);
 			const groups = await computeOptionGroupsForResource(definition.type, sessionResource);
 			return trackInputState(definition.type, controller, groups);
 		};
@@ -2030,6 +2587,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			onDidChangeChatSessionOptions: optEmitter.event,
 			onDidChangeChatSessionProviderOptions: providerOptEmitter.event,
 			provideChatSessionProviderOptions: async () => {
+				const cwd = lastActiveCwdByType.get(definition.type) ?? defaultCwd();
+				const sampleRec = [...records.values()].find(r => r.engine === definition.id && !r.unmaterialized && !r.provisional);
+				scheduleRuntimeCapsRefresh(definition.id, cwd, sampleRec, definition.type);
 				const groups = await computeOptionGroupsForResource(definition.type);
 				return {
 					optionGroups: groups,
@@ -2041,15 +2601,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			},
 			provideChatSessionContent: async (uri, token) => {
 				const record = await getRecord(uri, token);
-				const turns = (await ensureEngineCommand(record.engine))
-					? await runtime(record.engine).history(record, token).catch(() => [] as HistoryEntry[])
+				if (record.cloudProjectUri) {
+					await ensureRecordCloudReady(record).catch(() => undefined);
+				} else {
+					lastActiveCwdByType.set(definition.type, record.cwd);
+				}
+				const resolved = await tryRuntimeForRecord(record);
+				const turns = resolved
+					? await resolved.engine.history(record, token).catch(() => [] as HistoryEntry[])
 					: [];
 				await save();
-				void fetchRuntimeCaps(record.engine, record.cwd, record).then(({ changed }) => {
-					if (changed) {
-						void notifySessionOptionsUpdated(definition.type, uri, true);
-					}
-				});
+				scheduleRuntimeCapsRefresh(record.engine, record.cwd, record, definition.type, uri, true);
 				const groups = await computeOptionGroupsForResource(definition.type, uri);
 				if (record.activeGoal) {
 					setTimeout(() => setGoalBannerInUi(uri, record.activeGoal), 80);
@@ -2072,6 +2634,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			},
 		}, participant, { supportsInterruptions: true }));
 		refresh(definition.id);
+	}
+
+	if (available.some(entry => entry.id === 'antigravity' && entry.command) && !(runtimeCapsCache.get('antigravity:*')?.models?.length)) {
+		scheduleRuntimeCapsRefresh('antigravity', defaultCwd(), undefined, 'aexus-antigravity', undefined, true);
 	}
 
 	context.subscriptions.push(vscode.commands.registerCommand('aexus.agents.selectCustomModel', async (firstArg?: unknown, secondArg?: unknown) => {
@@ -2105,8 +2671,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 		activeTurns.get(identity(record))?.cancel();
 		opened.get(identity(record))?.cancellation.cancel();
-		if (available.some(entry => entry.id === record.engine && entry.command)) {
-			await runtime(record.engine).delete(record, token).catch(() => { });
+		const rootResolved = await tryRuntimeForRecord(record).catch(() => undefined);
+		if (rootResolved) {
+			await rootResolved.engine.delete(record, token).catch(() => { });
 		}
 		const removedIds = new Set<string>([record.id]);
 		if (record.resourceId) { removedIds.add(record.resourceId); }
@@ -2133,9 +2700,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				activeTurns.delete(identity(candidate));
 				busy.delete(identity(candidate));
 				opened.get(identity(candidate))?.cancellation.cancel();
-				if (candidate !== record && available.some(entry => entry.id === candidate.engine && entry.command)) {
-					await runtime(candidate.engine).killSession?.(candidate).catch(() => { });
-					await runtime(candidate.engine).delete(candidate, token).catch(() => { });
+				if (candidate !== record) {
+					const childResolved = await tryRuntimeForRecord(candidate).catch(() => undefined);
+					if (childResolved) {
+						await childResolved.engine.killSession?.(candidate).catch(() => { });
+						await childResolved.engine.delete(candidate, token).catch(() => { });
+					}
 				}
 				records.delete(entryKey);
 				controller?.items.delete(resource(candidate));
@@ -2157,15 +2727,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				await save();
 			}
 		}),
-		vscode.commands.registerCommand('aexus.agentEngines.list', async () => {
-			if (available.some(entry => !entry.command)) {
+		vscode.commands.registerCommand('aexus.agentEngines.invalidateCloudHost', async (rawAuthority?: string, rawNewAlias?: string) => {
+			const authority = typeof rawAuthority === 'string' && rawAuthority.trim() ? rawAuthority.trim() : undefined;
+			const newAlias = typeof rawNewAlias === 'string' && rawNewAlias.trim() ? rawNewAlias.trim() : undefined;
+			clearCloudTransportCaches(authority);
+			if (newAlias) {
+				clearCloudTransportCaches(newAlias);
+			}
+			disposeCloudRuntimesForAuthority(authority);
+			clearCloudCapsCache(authority);
+			if (authority && newAlias && normalizeCloudAuthority(authority) !== normalizeCloudAuthority(newAlias)) {
+				const oldNorm = normalizeCloudAuthority(authority);
+				const affectedEngines = new Set<string>();
+				for (const record of records.values()) {
+					if (!record.cloudProjectUri) {
+						continue;
+					}
+					const parsed = parseCloudProjectUri(record.cloudProjectUri);
+					if (parsed && normalizeCloudAuthority(parsed.authority) === oldNorm) {
+						const parsedVs = vscode.Uri.parse(record.cloudProjectUri);
+						record.cloudProjectUri = normalizeCloudProjectUriString(parsedVs.with({ authority: newAlias }));
+						affectedEngines.add(record.engine);
+					}
+				}
+				if (affectedEngines.size > 0) {
+					await save();
+					for (const eng of affectedEngines) {
+						refresh(eng);
+					}
+				}
+			}
+		}),
+		vscode.commands.registerCommand('aexus.agentEngines.list', async (rawProject?: vscode.Uri | string, options?: { readonly forceRefresh?: boolean }) => {
+			const projectUri = parseOptionalUri(rawProject);
+			if (isCloudUri(projectUri)) {
+				const target = await resolveCloudHostTarget(projectUri.authority, Boolean(options?.forceRefresh));
+				const probe = await probeRemoteEngines(target, Boolean(options?.forceRefresh));
+				return available.map(definition => ({
+					id: definition.type,
+					name: definition.name,
+					available: Boolean(probe.ok && probe.executables[definition.id]),
+					remoteHost: probe.target.alias,
+					remoteOs: probe.os,
+					...(probe.ok ? {} : { error: probe.error }),
+				}));
+			}
+			if (options?.forceRefresh || available.some(entry => !entry.command)) {
 				await refreshAvailableEngines();
 			}
 			return available.map(definition => ({ id: definition.type, name: definition.name, available: !!definition.command }));
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.ensureSecretary', async (rawEngineId?: string, project?: vscode.Uri, forceReset?: boolean) => {
 			const secRecord = await ensureSecretaryRecord(rawEngineId, project, Boolean(forceReset));
-			void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI);
+			scheduleRuntimeCapsRefresh(secRecord.engine, secRecord.cwd, secRecord, SECRETARY_TYPE, SECRETARY_URI, true);
+			void notifySessionOptionsUpdated(SECRETARY_TYPE, SECRETARY_URI, true);
 			customizationChangedEmitter.fire();
 			return {
 				engineId: `aexus-${secRecord.engine}`,
@@ -2174,16 +2789,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.create', async (engineId: string, project: vscode.Uri) => {
 			const engine = engineId.slice('aexus-'.length);
+			if (isCloudUri(project)) {
+				const target = await resolveCloudHostTarget(project.authority);
+				const info = await resolveRemoteEngineInfo(engine, target);
+				if (!info.command) {
+					const msg = formatMissingRemoteEngineMessage(engine, info.target.alias, info.probeError);
+					promptConfigureCloudHost(msg, info.target.alias, Boolean(info.probeError));
+					throw new Error(msg);
+				}
+				const remoteCwd = toRemoteNativePath(project.path || '/', info.target.os, info.target.remoteHome);
+				const cloudProjectUri = normalizeCloudProjectUriString(project);
+				const eng = runtimeForCloud(engine, info.target, info.command);
+				const native = await eng.create(remoteCwd);
+				const record: RecordEntry = {
+					...native,
+					engine,
+					initialTitle: native.label,
+					resourceId: native.id,
+					sessionConfig: {},
+					cloudProjectUri,
+				};
+				records.set(key(engine, native.id), record);
+				await save();
+				refresh(engine);
+				return describe(record);
+			}
 			await ensureEngineCommand(engine);
-			const { localCwd, cloudProjectUri } = await resolveProjectLocalCwd(project);
-			const native = await runtime(engine).create(localCwd);
+			const native = await runtime(engine).create(project.fsPath);
 			const record: RecordEntry = {
 				...native,
 				engine,
 				initialTitle: native.label,
 				resourceId: native.id,
 				sessionConfig: {},
-				...(cloudProjectUri ? { cloudProjectUri } : {}),
 			};
 			records.set(key(engine, native.id), record);
 			await save();
@@ -2194,31 +2832,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const engine = engineId.startsWith('aexus-') ? engineId.slice('aexus-'.length) : (ENGINE_ALIASES[engineId.toLowerCase()] ?? engineId);
 			const token = new vscode.CancellationTokenSource();
 			try {
+				if (isCloudUri(project)) {
+					const target = await resolveCloudHostTarget(project.authority);
+					const info = await resolveRemoteEngineInfo(engine, target);
+					const effectiveTarget = info.target;
+					const cloudProjectUri = normalizeCloudProjectUriString(project);
+					const remoteCwd = toRemoteNativePath(project.path || '/', effectiveTarget.os, effectiveTarget.remoteHome);
+					if (info.command) {
+						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token).catch(() => [] as NativeSession[]);
+						for (const s of remoteSessions) {
+							acceptCloud(engine, s, effectiveTarget, cloudProjectUri);
+						}
+					}
+					let record = [...records.values()].find(entry =>
+						entry.engine === engine
+						&& recordCloudAuthority(entry) === effectiveTarget.authority
+						&& (entry.id === nativeId || entry.resourceId === nativeId || entry.id.startsWith(nativeId)),
+					);
+					if (!record) {
+						const now = Date.now();
+						record = acceptCloud(engine, {
+							id: nativeId,
+							cwd: remoteCwd,
+							label: vscode.l10n.t('{0} Session {1}', engine, nativeId.slice(0, 8)),
+							created: now,
+							updated: now,
+							provisional: false,
+						}, effectiveTarget, cloudProjectUri);
+					}
+					record.cloudProjectUri = cloudProjectUri;
+					record.resourceId ??= record.id;
+					await save();
+					refresh(engine);
+					return describe(record);
+				}
 				const sessions = await list(engine, token.token);
-				let record = sessions.find(entry => entry.id === nativeId || entry.resourceId === nativeId || entry.id.startsWith(nativeId));
+				let record = sessions.find(entry => !entry.cloudProjectUri && (entry.id === nativeId || entry.resourceId === nativeId || entry.id.startsWith(nativeId)));
 				if (!record) {
-					if (!project || (project.scheme !== 'file' && project.scheme !== CLOUD_PROJECT_SCHEME)) {
+					if (!project || project.scheme !== 'file') {
 						throw new Error(vscode.l10n.t('Conversation {0} was not found in {1}.', nativeId, engine));
 					}
-					const { localCwd, cloudProjectUri } = await resolveProjectLocalCwd(project);
 					const now = Date.now();
 					record = accept(engine, {
 						id: nativeId,
-						cwd: localCwd,
+						cwd: project.fsPath,
 						label: vscode.l10n.t('{0} Session {1}', engine, nativeId.slice(0, 8)),
 						created: now,
 						updated: now,
 						provisional: false,
 					});
-					if (cloudProjectUri) {
-						record.cloudProjectUri = cloudProjectUri;
-					}
 					record.resourceId ??= record.id;
-					await save();
-					refresh(engine);
-				} else if (project?.scheme === CLOUD_PROJECT_SCHEME && !record.cloudProjectUri) {
-					const { cloudProjectUri } = await resolveProjectLocalCwd(project);
-					record.cloudProjectUri = cloudProjectUri;
 					await save();
 					refresh(engine);
 				}
@@ -2230,38 +2893,68 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('aexus.agentEngines.sessions', async (engineId: string, project?: vscode.Uri) => {
 			const engine = engineId.slice('aexus-'.length);
 			const token = new vscode.CancellationTokenSource();
-			let sessions: RecordEntry[];
-			try { sessions = await list(engine, token.token); } finally { token.dispose(); }
-			const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
-			const requestedCloud = project?.scheme === CLOUD_PROJECT_SCHEME
-				? project.with({ path: project.path.replace(/\/+$/, '') || '/' }).toString()
-				: undefined;
-			const requestedCwd = project
-				? await canonical(project.scheme === CLOUD_PROJECT_SCHEME ? computeCloudBridgeDirectory(project) : project.fsPath)
-				: undefined;
-			const result = [];
-			for (const record of sessions) {
-				if (record.parentId) { continue; }
-				if (!project) {
-					result.push(describe(record));
-					continue;
+			try {
+				if (isCloudUri(project)) {
+					const target = await resolveCloudHostTarget(project.authority);
+					const info = await resolveRemoteEngineInfo(engine, target);
+					const effectiveTarget = info.target;
+					const requestedCloud = normalizeCloudProjectUriString(project);
+					const requestedRemoteCwd = toRemoteNativePath(project.path || '/', effectiveTarget.os, effectiveTarget.remoteHome);
+					const requestedNorm = normalizeRemoteCwdForCompare(requestedRemoteCwd, effectiveTarget.os);
+					if (info.command) {
+						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token).catch(() => [] as NativeSession[]);
+						for (const s of remoteSessions) {
+							acceptCloud(engine, s, effectiveTarget);
+						}
+						await save();
+						refresh(engine);
+					}
+					const result = [];
+					const matching = [...records.values()]
+						.filter(record => record.engine === engine && !record.parentId && recordCloudAuthority(record) === effectiveTarget.authority)
+						.sort((a, b) => b.updated - a.updated);
+					for (const record of matching) {
+						if (record.cloudProjectUri === requestedCloud || (record.cwd && normalizeRemoteCwdForCompare(record.cwd, effectiveTarget.os) === requestedNorm)) {
+							result.push(describe(record));
+						}
+					}
+					return result;
 				}
-				if (requestedCloud && record.cloudProjectUri === requestedCloud) {
-					result.push(describe(record));
-					continue;
+				const sessions = await list(engine, token.token);
+				const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
+				const requestedCwd = project ? await canonical(project.fsPath) : undefined;
+				const result = [];
+				for (const record of sessions) {
+					if (record.parentId) { continue; }
+					if (!project) {
+						result.push(describe(record));
+						continue;
+					}
+					if (record.cloudProjectUri) { continue; }
+					if (requestedCwd && requestedCwd === await canonical(record.cwd)) {
+						result.push(describe(record));
+					}
 				}
-				if (requestedCwd && requestedCwd === await canonical(record.cwd)) {
-					result.push(describe(record));
-				}
+				return result;
+			} finally {
+				token.dispose();
 			}
-			return result;
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.children', async (uri: vscode.Uri) => {
 			const token = new vscode.CancellationTokenSource();
 			try {
 				const parent = await getRecord(uri, token.token);
-				const children = await runtime(parent.engine).children?.(parent, token.token) ?? [];
-				const result = children.map(child => accept(parent.engine, child));
+				const resolved = await tryRuntimeForRecord(parent);
+				const children = await resolved?.engine.children?.(parent, token.token) ?? [];
+				const result = children.map(child => {
+					const accepted = resolved?.remoteTarget
+						? acceptCloud(parent.engine, child, resolved.remoteTarget, parent.cloudProjectUri)
+						: accept(parent.engine, child);
+					if (parent.cloudProjectUri && !accepted.cloudProjectUri) {
+						accepted.cloudProjectUri = parent.cloudProjectUri;
+					}
+					return accepted;
+				});
 				for (const child of result) { await publishHistory(child); }
 				await save();
 				return result.map(describe);
@@ -2288,8 +2981,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const token = new vscode.CancellationTokenSource();
 			try {
 				const record = await getRecord(uri, token.token);
-				const rawTurns = (await ensureEngineCommand(record.engine))
-					? await runtime(record.engine).history(record, token.token).catch(() => [] as HistoryEntry[])
+				const resolved = await tryRuntimeForRecord(record);
+				const rawTurns = resolved
+					? await resolved.engine.history(record, token.token).catch(() => [] as HistoryEntry[])
 					: [];
 				const turns = filterAndCleanHistoryTurns(rawTurns);
 				const messages = turns.map(entry => ({ role: entry.role, text: entry.text }));
@@ -2331,15 +3025,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			activeTurns.get(identity(record))?.cancel();
 			activeTurns.delete(identity(record));
 			busy.delete(identity(record));
-			if (available.some(entry => entry.id === record.engine && entry.command)) {
-				await runtime(record.engine).killSession?.(record).catch(() => undefined);
+			const resolved = await tryRuntimeForRecord(record).catch(() => undefined);
+			if (resolved) {
+				await resolved.engine.killSession?.(record).catch(() => undefined);
 			}
 			controllers.get(record.engine)?.items.add(item(record));
 			return { killed: true };
 		}),
-		vscode.commands.registerCommand('aexus.agentEngines.listConfiguredModels', async (): Promise<Record<string, readonly { readonly id: string; readonly label: string }[]>> => {
+		vscode.commands.registerCommand('aexus.agentEngines.listConfiguredModels', async (rawProject?: vscode.Uri | string): Promise<Record<string, readonly { readonly id: string; readonly label: string }[]>> => {
 			const out: Record<string, readonly { readonly id: string; readonly label: string }[]> = {};
-			const cwd = defaultCwd();
+			const parsedProject = parseOptionalUri(rawProject);
+			const remoteTarget = isCloudUri(parsedProject)
+				? await resolveCloudHostTarget(parsedProject.authority).catch(() => undefined)
+				: undefined;
+			const cwd = isCloudUri(parsedProject) && remoteTarget
+				? toRemoteNativePath(parsedProject.path || '/', remoteTarget.os, remoteTarget.remoteHome)
+				: (parsedProject?.scheme === 'file' ? parsedProject.fsPath : defaultCwd());
 			const legacyKeys: Record<EngineId, string[]> = {
 				'aexus-claude': ['claude-code', 'aexus-claude'],
 				'aexus-codex': ['codex', 'aexus-codex'],
@@ -2351,8 +3052,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				'aexus-pi': ['pi', 'aexus-pi'],
 			};
 			for (const def of definitions) {
-				const caps = runtimeCapsCache.get(`${def.id}:${cwd}`);
-				const items = (await discoverEngineModels(def.type, cwd, caps?.models))
+				const caps = getCachedRuntimeCaps(def.id, cwd, remoteTarget?.authority);
+				const items = (await discoverEngineModels(def.type, cwd, caps.models, caps.defaultModel, [], remoteTarget))
 					.filter(m => m.id !== 'default')
 					.map(m => ({ id: m.id, label: m.name !== m.id ? `${m.name} (${m.id})` : m.id }));
 				if (items.length > 0) {
@@ -2372,6 +3073,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				thinking?: EngineThinkingLevel;
 				pureWorker?: boolean;
 				callerRole?: string;
+				isMissionNode?: boolean;
 				autonomousApproved?: boolean;
 				sandboxMode?: string;
 			},
@@ -2395,7 +3097,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			activeTurns.set(recordKey, turnCancellation);
 			controllers.get(record.engine)?.items.add(item(record));
 
-			const isPureWorker = Boolean(rawOptions?.pureWorker);
+			const snapEntryForDispatch = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
+			const isMissionNodeDispatch = Boolean(rawOptions?.isMissionNode ?? snapEntryForDispatch?.isMissionNode);
+			const isPureWorker = Boolean(rawOptions?.pureWorker) && !isMissionNodeDispatch;
 			let finalPrompt = rawPrompt;
 			let callerRole: string | undefined;
 			let alreadyInit = false;
@@ -2403,7 +3107,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			let headlessTrimmedInjected: string | undefined;
 			let headlessPendingDelta: string | undefined;
 			if (!isPureWorker) {
-				const snapEntry = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
+				const snapEntry = snapEntryForDispatch;
 				callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
 				headlessPromptHash = snapEntry?.rolePrompt?.trim() ? hashRolePrompt(snapEntry.rolePrompt) : undefined;
 				alreadyInit = Boolean(
@@ -2509,8 +3213,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					estimated: finalUsage.estimated,
 				};
 			};
+			let activeEngine: EngineRuntime | undefined;
 			try {
-				const engine = runtime(record.engine);
+				const resolvedEng = await runtimeForRecord(record);
+				const engine = resolvedEng.engine;
+				activeEngine = engine;
 				const prevId = record.id;
 				let contextCompactedDuringTurn = false;
 				const cfg = record.sessionConfig ?? {};
@@ -2529,6 +3236,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					webSearch: cfg.webSearch,
 					pureWorker: isPureWorker,
 					callerRole,
+					isMissionNode: isMissionNodeDispatch,
+					adeSessionId: rawOptions?.agentId ?? snapEntryForDispatch?.id,
 					automatedEngineering: effectiveAutomatedEngineering,
 					onInterimUsage: reportInterimUsage,
 					onContextCompacted: () => {
@@ -2578,7 +3287,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						reply: streamedMarkdown.trim(),
 						nativeId: record.id,
 						stopped: true,
-						usage: finalizeTurnUsage(runtime(record.engine), streamedMarkdown),
+						usage: activeEngine ? finalizeTurnUsage(activeEngine, streamedMarkdown) : { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 1 },
 					};
 				}
 				const errText = error instanceof Error ? error.message : String(error);
@@ -2591,6 +3300,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
 					controllers.get(record.engine)?.items.add(item(record));
 				}
+				notifyCloudProjectMutated(record.cloudProjectUri);
 				await publishHistory(record).catch(() => undefined);
 				await save();
 			}
@@ -2613,24 +3323,41 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('aexus.agentEngines.deleteProjectSessions', async (project: vscode.Uri) => {
 			const token = new vscode.CancellationTokenSource();
 			try {
-				const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
-				const targetCloud = project.scheme === CLOUD_PROJECT_SCHEME
-					? project.with({ path: project.path.replace(/\/+$/, '') || '/' }).toString()
-					: undefined;
-				const targetCwd = await canonical(project.scheme === CLOUD_PROJECT_SCHEME ? computeCloudBridgeDirectory(project) : project.fsPath);
-				await Promise.allSettled(
-					available
-						.filter(entry => entry.command)
-						.map(entry => Promise.race([
-							list(entry.id, token.token).catch(() => []),
-							new Promise<RecordEntry[]>(resolve => setTimeout(() => resolve([]), 3000)),
-						])),
-				);
 				const matching: RecordEntry[] = [];
-				for (const candidate of records.values()) {
-					if (key(candidate.engine, candidate.id) === secretaryState?.recordKey) { continue; }
-					if ((targetCloud && candidate.cloudProjectUri === targetCloud) || await canonical(candidate.cwd) === targetCwd) {
-						matching.push(candidate);
+				if (isCloudUri(project)) {
+					const targetCloud = normalizeCloudProjectUriString(project);
+					const targetAuth = normalizeCloudAuthority(project.authority);
+					const resolvedTarget = await resolveCloudHostTarget(project.authority).catch(() => undefined);
+					const targetRemoteNorm = resolvedTarget
+						? normalizeRemoteCwdForCompare(toRemoteNativePath(project.path || '/', resolvedTarget.os, resolvedTarget.remoteHome), resolvedTarget.os)
+						: undefined;
+					for (const candidate of records.values()) {
+						if (key(candidate.engine, candidate.id) === secretaryState?.recordKey) { continue; }
+						if (candidate.cloudProjectUri === targetCloud) {
+							matching.push(candidate);
+							continue;
+						}
+						if (targetRemoteNorm && resolvedTarget && recordCloudAuthority(candidate) === targetAuth && candidate.cwd && normalizeRemoteCwdForCompare(candidate.cwd, resolvedTarget.os) === targetRemoteNorm) {
+							matching.push(candidate);
+						}
+					}
+				} else {
+					const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
+					const targetCwd = await canonical(project.fsPath);
+					await Promise.allSettled(
+						available
+							.filter(entry => entry.command)
+							.map(entry => Promise.race([
+								list(entry.id, token.token).catch(() => []),
+								new Promise<RecordEntry[]>(resolve => setTimeout(() => resolve([]), 3000)),
+							])),
+					);
+					for (const candidate of records.values()) {
+						if (key(candidate.engine, candidate.id) === secretaryState?.recordKey) { continue; }
+						if (candidate.cloudProjectUri) { continue; }
+						if (await canonical(candidate.cwd) === targetCwd) {
+							matching.push(candidate);
+						}
 					}
 				}
 				const deletedKeys = new Set<string>();
@@ -2719,7 +3446,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 			if (recUpdated) {
 				dirty = true;
-				void notifySessionOptionsUpdated(`aexus-${rec.engine}`, uri);
+				void notifySessionOptionsUpdated(`aexus-${rec.engine}`, uri, true);
 			}
 		}
 		if (dirty) {
@@ -2806,6 +3533,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			dispose: () => {
 				clearInterval(bindingSyncTimer);
 				roleBridge.dispose();
+				clearCloudTransportCaches();
 			},
 		},
 		vscode.commands.registerCommand('aexus.agentEngines.syncRoleContext', async (rawSnapshot?: RoleSyncSnapshot) => {

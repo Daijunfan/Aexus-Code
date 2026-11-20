@@ -8,6 +8,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { IMissionNodePosition, parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
+import type { IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
 import { ADE_SECRETARY_TIER, ADE_USER_TIER } from '../../../../platform/ade/common/adeRankResize.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { createDecorator, IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
@@ -35,6 +36,7 @@ export interface IAdeMissionRecord {
 	/** Legacy alias kept in sync with ownerSessionId. */
 	readonly linkedSessionId?: string;
 	readonly projectUri?: string;
+	readonly runtime?: IMissionRuntimeState;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 }
@@ -102,6 +104,7 @@ export interface IAdeMissionService {
 		readonly projectUri?: string;
 	}): IAdeMissionRecord;
 	updateMermaid(id: string, mermaidText: string): IAdeMissionRecord | undefined;
+	updateRuntime(id: string, runtime: IMissionRuntimeState | undefined): IAdeMissionRecord | undefined;
 	updateNodePositions(id: string, positions: Readonly<Record<string, IMissionNodePosition>>): IAdeMissionRecord | undefined;
 	clearNodePositions(id: string): IAdeMissionRecord | undefined;
 	renameMission(id: string, title: string): IAdeMissionRecord | undefined;
@@ -219,6 +222,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 						ownerTier,
 						...(ownerRankId ? { ownerRankId } : {}),
 						...(typeof entry.projectUri === 'string' ? { projectUri: entry.projectUri } : {}),
+						...(entry.runtime && typeof entry.runtime === 'object' ? { runtime: entry.runtime as IMissionRuntimeState } : {}),
 						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
 						updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
 					});
@@ -260,7 +264,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 
 		const ownerKey = this.getOwnerSyncKey(record);
 		const hasAgentOwner = Boolean(record.ownerSessionId && projects.getAgent(record.ownerSessionId));
-		const parsedProjectUri = record.projectUri ? URI.parse(record.projectUri) : undefined;
+		const parsedProjectUri = record.projectUri
+			? URI.parse(record.projectUri)
+			: (projects.selectedProject?.uri ?? projects.projects[0]?.uri);
 		if (!hasAgentOwner && !parsedProjectUri) {
 			return;
 		}
@@ -342,7 +348,10 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const now = Date.now();
 		const num = this.records.size + 1;
 		const ownerAgent = ownerMeta.ownerSessionId ? this.projectsService?.getAgent(ownerMeta.ownerSessionId) : undefined;
-		const projectUri = options?.projectUri ?? ownerAgent?.projectUri.toString();
+		const projectUri = options?.projectUri
+			?? ownerAgent?.projectUri.toString()
+			?? this.projectsService?.selectedProject?.uri.toString()
+			?? this.projectsService?.projects[0]?.uri.toString();
 		const record: IAdeMissionRecord = {
 			id,
 			title: options?.title?.trim() || ownerAgent?.label || `Mission ${num}`,
@@ -402,6 +411,22 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		this.records.set(existing.id, updated);
 		this.persist();
 		this.syncSidebarEmployeesForRecord(updated);
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateRuntime(id: string, runtime: IMissionRuntimeState | undefined): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			...(runtime ? { runtime } : { runtime: undefined }),
+			updatedAt: Date.now(),
+		};
+		this.records.set(existing.id, updated);
+		this.persist();
 		this._onDidChange.fire();
 		return updated;
 	}

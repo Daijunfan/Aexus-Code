@@ -1185,7 +1185,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 					sshArgs.push(
 						'-o', 'ControlMaster=auto',
 						'-o', `ControlPath=${muxDir}/%C`,
-						'-o', 'ControlPersist=60s',
+						'-o', 'ControlPersist=120s',
 					);
 				}
 			} catch {
@@ -1449,15 +1449,21 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			if (res.code !== 0) {
 				this.throwMappedRemoteError(res, target, norm);
 			}
-			return res.stdout.toString('utf8').split(/\r?\n/).filter(Boolean).map(line => {
+			return res.stdout.toString('utf8').split(/\r?\n/).filter(Boolean).flatMap(line => {
 				const tabIdx = line.indexOf('\t');
+				if (tabIdx <= 0) {
+					return [];
+				}
 				const kind = line.slice(0, tabIdx);
 				const name = line.slice(tabIdx + 1);
-				return {
+				if (!name) {
+					return [];
+				}
+				return [{
 					name,
 					type: kind === 'directory' ? 'directory' as const : 'file' as const,
-				};
-			}).filter(e => Boolean(e.name));
+				}];
+			});
 		}
 
 		const q = posixQuote(norm);
@@ -1684,27 +1690,39 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		let res: { code: number | null; stdout: Buffer; stderr: string };
 		if (hostOs === 'windows') {
 			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
-			const ps = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git status --porcelain=v1 -z 2>$null }`;
+			const ps = `$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { $pfx = (git rev-parse --show-prefix 2>$null | Out-String).Trim(); if ($LASTEXITCODE -eq 0) { [Console]::Out.Write($pfx + [char]0); git status --porcelain=v1 -z -- . 2>$null } }`;
 			res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 12_000, host });
 		} else {
-			const script = `cd -- ${posixQuote(norm)} 2>/dev/null && git status --porcelain=v1 -z 2>/dev/null || true`;
+			const script = `cd -- ${posixQuote(norm)} 2>/dev/null || exit 0; pfx=$(git rev-parse --show-prefix 2>/dev/null) || exit 0; printf '%s\\0' "$pfx"; git status --porcelain=v1 -z -- . 2>/dev/null || true`;
 			res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 12_000, host });
 		}
 		if (res.code !== 0 || res.stdout.length === 0) {
 			return [];
 		}
 		const tokens = res.stdout.toString('utf8').split('\0');
+		const rawPrefix = (tokens[0] ?? '').replace(/\\/g, '/').replace(/^\/+/, '');
+		const subdirPrefix = rawPrefix && !rawPrefix.endsWith('/') ? `${rawPrefix}/` : rawPrefix;
 		const items: IAdeRemoteScmStatusEntry[] = [];
-		for (let i = 0; i < tokens.length; i++) {
+		for (let i = 1; i < tokens.length; i++) {
 			const entry = tokens[i];
 			if (entry.length < 4) {
 				continue;
 			}
 			const x = entry[0];
 			const y = entry[1];
-			const relPath = entry.slice(3);
+			let relPath = entry.slice(3).replace(/\\/g, '/');
 			if (x === 'R' || x === 'C') {
 				i++; // skip rename source token in -z format
+			}
+			if (subdirPrefix) {
+				if (relPath.startsWith(subdirPrefix)) {
+					relPath = relPath.slice(subdirPrefix.length);
+				} else {
+					continue;
+				}
+			}
+			if (!relPath) {
+				continue;
 			}
 			let status: IAdeRemoteScmStatusEntry['status'] = 'M';
 			if (x === '?' || y === '?') {
@@ -1728,16 +1746,79 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 	async remoteGitShowHead(authority: string, projectPath: string, relativePath: string): Promise<string> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
 		const norm = normalizeRemoteProjectPath(projectPath, hostOs);
-		const cleanRel = relativePath.replace(/^[\\/]+/, '').replace(/\\/g, '/');
+		const cleanRel = relativePath.replace(/\\/g, '/').replace(/^(?:\/+|\.\/)+/, '');
 		if (hostOs === 'windows') {
 			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
 			const escapedRel = cleanRel.replace(/'/g, `''`);
-			const ps = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git show ('HEAD:' + '${escapedRel}') 2>$null }`;
+			const ps = `$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8; Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git show ('HEAD:./' + '${escapedRel}') 2>$null }`;
 			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 12_000, host });
 			return res.stdout.toString('utf8');
 		}
-		const script = `cd -- ${posixQuote(norm)} && git show ${posixQuote(`HEAD:${cleanRel}`)} 2>/dev/null || true`;
+		const script = `cd -- ${posixQuote(norm)} && git show ${posixQuote(`HEAD:./${cleanRel}`)} 2>/dev/null || true`;
 		const res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 12_000, host });
 		return res.stdout.toString('utf8');
+	}
+
+	async remoteIsPidAlive(authority: string, pid: number): Promise<boolean> {
+		if (!Number.isInteger(pid) || pid <= 0) {
+			return false;
+		}
+		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		const cmd = hostOs === 'windows'
+			? `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(`if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { 'ALIVE' } else { 'DEAD' }`)}`
+			: `sh -c ${posixQuote(`kill -0 ${pid} 2>/dev/null && printf ALIVE || printf DEAD`)}`;
+		const res = await this.runSshRaw(target, cmd, { timeoutMs: 10_000, host });
+		const out = res.stdout.toString('utf8').trim();
+		if (res.code === 0 && out === 'ALIVE') {
+			return true;
+		}
+		if (res.code === 0 && out === 'DEAD') {
+			return false;
+		}
+		throw new Error(`Remote PID probe failed on ${authority} (exit ${res.code}): ${res.stderr.trim() || out || 'empty stdout'}`);
+	}
+
+	async remoteFileStatMtime(authority: string, remotePath: string): Promise<number | undefined> {
+		try {
+			const stat = await this.remoteStat(authority, remotePath);
+			return stat.mtime;
+		} catch {
+			return undefined;
+		}
+	}
+
+	async remoteGitHeadCommit(authority: string, projectPath: string): Promise<string | undefined> {
+		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		const norm = normalizeRemoteProjectPath(projectPath, hostOs);
+		if (hostOs === 'windows') {
+			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
+			const ps = `Set-Location -LiteralPath '${winPath}' -ErrorAction SilentlyContinue; if ($?) { git rev-parse HEAD 2>$null }`;
+			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`, { timeoutMs: 10_000, host });
+			const sha = res.stdout.toString('utf8').trim();
+			return res.code === 0 && /^[0-9a-f]{7,64}$/i.test(sha) ? sha : undefined;
+		}
+		const script = `cd -- ${posixQuote(norm)} && git rev-parse HEAD 2>/dev/null`;
+		const res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 10_000, host });
+		const sha = res.stdout.toString('utf8').trim();
+		return res.code === 0 && /^[0-9a-f]{7,64}$/i.test(sha) ? sha : undefined;
+	}
+
+	async remoteGpuUtilizationPct(authority: string): Promise<number | undefined> {
+		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		const cmd = hostOs === 'windows'
+			? `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript('nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>$null')}`
+			: `sh -c ${posixQuote('nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null')}`;
+		const res = await this.runSshRaw(target, cmd, { timeoutMs: 10_000, host });
+		if (res.code !== 0) {
+			return undefined;
+		}
+		const values = res.stdout.toString('utf8')
+			.split(/\r?\n/)
+			.map(line => Number.parseFloat(line.trim()))
+			.filter(n => Number.isFinite(n));
+		if (values.length === 0) {
+			return undefined;
+		}
+		return Math.max(...values);
 	}
 }

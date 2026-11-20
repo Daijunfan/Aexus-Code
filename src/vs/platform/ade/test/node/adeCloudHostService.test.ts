@@ -1012,6 +1012,45 @@ suite('AdeCloudHosts', () => {
 			assert.deepStrictEqual(await svc.remoteGitStatus('win-host', 'C:\\repo'), []);
 		});
 
+		test('scopes git status and HEAD contents to a subdirectory inside a larger repository', async () => {
+			const repoDir = path.join(tmpDir, 'monorepo');
+			const appDir = path.join(repoDir, 'packages', 'app');
+			await fs.mkdir(appDir, { recursive: true });
+			runGitSync(repoDir, ['init']);
+			runGitSync(repoDir, ['config', 'user.name', 'Test']);
+			runGitSync(repoDir, ['config', 'user.email', 'test@example.com']);
+			await writeText(path.join(appDir, 'tracked.txt'), 'original app\n');
+			await writeText(path.join(appDir, 'other.txt'), 'other app\n');
+			await writeText(path.join(repoDir, 'packages', 'other', 'tracked.txt'), 'original other\n');
+			runGitSync(repoDir, ['add', '.']);
+			runGitSync(repoDir, ['commit', '-m', 'initial']);
+
+			// Changes inside packages/app plus changes outside it (sibling package and repo root).
+			await writeText(path.join(appDir, 'tracked.txt'), 'modified app\n');
+			await writeText(path.join(appDir, 'untracked.txt'), 'untracked app\n');
+			await writeText(path.join(repoDir, 'packages', 'other', 'tracked.txt'), 'modified other\n');
+			await writeText(path.join(repoDir, 'root-untracked.txt'), 'root untracked\n');
+
+			const svc = disposables.add(await createService(tmpDir));
+
+			// The repository-root-relative paths emitted by `git status --porcelain` must be
+			// stripped of the `packages/app/` prefix, and changes outside packages/app ignored.
+			const statuses = await svc.remoteGitStatus('mock-host', appDir);
+			assert.deepStrictEqual(
+				statuses
+					.map(entry => ({ relativePath: entry.relativePath, status: entry.status, staged: entry.staged }))
+					.sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+				[
+					{ relativePath: 'tracked.txt', status: 'M', staged: false },
+					{ relativePath: 'untracked.txt', status: 'U', staged: false },
+				],
+			);
+
+			// HEAD resolves both from the subdirectory and from the repository root.
+			assert.strictEqual(await svc.remoteGitShowHead('mock-host', appDir, 'tracked.txt'), 'original app\n');
+			assert.strictEqual(await svc.remoteGitShowHead('mock-host', repoDir, 'packages/app/tracked.txt'), 'original app\n');
+		});
+
 		test('respects user ~/.ssh/config StrictHostKeyChecking without overriding via CLI unless host specifies it', async () => {
 			const argsLog = path.join(tmpDir, 'ssh-args.log');
 			const spySsh = path.join(tmpDir, 'spy-ssh.sh');
@@ -1115,6 +1154,45 @@ suite('AdeCloudHosts', () => {
 					if (v === undefined) { delete process.env[k]; } else { process.env[k] = v; }
 				}
 			}
+		});
+
+		test('remoteIsPidAlive returns true for ALIVE, false for DEAD, and throws on SSH transport failure (P1-7)', async () => {
+			const modeFile = path.join(tmpDir, 'pid-probe-mode.txt');
+			const spySsh = path.join(tmpDir, 'spy-pid-ssh.sh');
+			await fs.writeFile(spySsh, [
+				'#!/bin/sh',
+				`MODE="$(cat "${modeFile}")"`,
+				'if [ "$MODE" = "alive" ]; then printf ALIVE; exit 0; fi',
+				'if [ "$MODE" = "dead" ]; then printf DEAD; exit 0; fi',
+				'echo "ssh: connect to host timed out" >&2',
+				'exit 255',
+				'',
+			].join('\n'), { encoding: 'utf8', mode: 0o755 });
+			await fs.chmod(spySsh, 0o755);
+
+			const homedir = path.join(tmpDir, 'home-pid');
+			const svc = disposables.add(new AdeCloudHostNodeService({
+				userDataPath: path.join(tmpDir, 'aexus-pid'),
+				homedir,
+				vsCodeUserDataDir: path.join(tmpDir, 'vscode-pid'),
+				sshConfigPath: path.join(homedir, '.ssh', 'config'),
+				autoImportOnFirstLoad: false,
+				sshExecutable: spySsh,
+			}));
+			await svc.upsertHost({ name: 'PID Box', alias: 'pid-box', hostName: '10.0.0.15' });
+
+			await fs.writeFile(modeFile, 'alive', 'utf8');
+			assert.strictEqual(await svc.remoteIsPidAlive('pid-box', 4242), true);
+
+			await fs.writeFile(modeFile, 'dead', 'utf8');
+			assert.strictEqual(await svc.remoteIsPidAlive('pid-box', 4242), false);
+
+			await fs.writeFile(modeFile, 'ssh_err', 'utf8');
+			await assert.rejects(
+				() => svc.remoteIsPidAlive('pid-box', 4242),
+				/Remote PID probe failed/i,
+				'SSH transport error must throw instead of falsely reporting PID dead',
+			);
 		});
 	});
 });

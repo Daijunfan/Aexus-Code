@@ -27,7 +27,8 @@ import {
 	IAdeSessionTreeResult,
 } from '../../../../../platform/ade/common/adeControl.js';
 import { isIMenuItem, MenuId, MenuRegistry } from '../../../../../platform/actions/common/actions.js';
-import { AEXUS_SSH_SCHEME } from '../../../../../platform/ade/common/adeCloudHosts.js';
+import { AEXUS_SSH_SCHEME, IAdeCloudHost, IAdeCloudHostBackendService } from '../../../../../platform/ade/common/adeCloudHosts.js';
+import { ADE_API_LATEST_REVISION } from '../../../../../platform/ade/common/adeApiRegistry.js';
 import { IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
 import { IAdeOrganizationConfig } from '../../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
@@ -68,11 +69,12 @@ import {
 	ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID,
 	AdeAutonomousModeStatusContribution,
 } from '../../browser/ade.contribution.js';
-import '../../browser/adeControlHandler.js';
+import { buildAdeAgentRoleContext } from '../../browser/adeControlHandler.js';
 import { AdeConfigEditorPane } from '../../browser/adeConfigEditorPane.js';
 import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
 import { AdeEngineeringEditorInput, AdeEngineeringEditorPane } from '../../browser/adeEngineeringEditorPane.js';
 import { AdeInboxPanel, formatAdeInboxKindLabel, IAdeInboxMissionBridge } from '../../browser/adeInboxView.js';
+import { AdeMissionRuntimeService, IAdeMissionRuntimeService } from '../../browser/adeMissionRuntime.js';
 import { AdeMissionStoreService, IAdeMissionService } from '../../browser/adeMissionStore.js';
 import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
@@ -542,6 +544,105 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			recursiveSubCount: 3,
 			workerFilterIds: [chainWorker.id],
 			secretaryRotatedOnReset: true,
+		});
+	});
+
+	test('executes cloud-host control actions for aexus-ssh project.changes, engine.list projectUri forwarding, and host.upsert alias migration', async () => {
+		const h = createHarness();
+		const cloudProjectUri = 'aexus-ssh://gpu1/workspace/repo';
+		const existingHost: IAdeCloudHost = {
+			id: 'host-1',
+			name: 'GPU Host',
+			alias: 'gpu-old',
+			hostName: 'gpu.example.com',
+			port: 22,
+			os: 'linux',
+			recentDirectories: ['/workspace'],
+			source: 'user',
+			createdAt: 1,
+			updatedAt: 2,
+		};
+		const remoteGitStatusCalls: Array<{ authority: string; projectPath: string }> = [];
+		const upsertCalls: Array<{ id?: string; name?: string; alias?: string; hostName?: string }> = [];
+		const migratedAliases: Array<{ from: string; to: string }> = [];
+
+		h.instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
+			_serviceBrand: undefined,
+			onDidChangeHosts: Event.None,
+			getHost: async () => existingHost,
+			upsertHost: async input => {
+				upsertCalls.push(input);
+				return { ...existingHost, ...input, alias: input.alias ?? existingHost.alias };
+			},
+			remoteGitStatus: async (authority, projectPath) => {
+				remoteGitStatusCalls.push({ authority, projectPath });
+				return [
+					{ relativePath: 'src/staged.ts', status: 'M', staged: true },
+					{ relativePath: 'src/removed.ts', status: 'D', staged: false },
+				];
+			},
+		}));
+
+		const engineListCalls: Array<{ projectUri?: string; forceRefresh: boolean }> = [];
+		h.instantiation.stub(IAdeSessionsService, upcastPartial<IAdeSessionsService>({
+			_serviceBrand: undefined,
+			getEngines: async (projectUri, options) => {
+				engineListCalls.push({ projectUri: projectUri?.toString(), forceRefresh: options?.forceRefresh === true });
+				return [{ id: 'aexus-claude', name: 'Claude Code', description: 'Anthropic Claude Code CLI', icon: Codicon.hubot }];
+			},
+		}));
+
+		h.projects.migrateCloudHostAlias = (from, to) => {
+			migratedAliases.push({ from, to });
+			return 1;
+		};
+
+		const changes = await h.control<{
+			project: string;
+			totalChanges: number;
+			groups: Array<{ id: string; label: string; count: number; resources: Array<{ path: string; relativePath: string; status: string; deleted: boolean }> }>;
+		}>('project.changes', { target: cloudProjectUri });
+
+		const engines = await h.control<Array<{ id: string; shortId: string }>>('engine.list', { project: cloudProjectUri, forceRefresh: true });
+
+		const savedHost = await h.control<{ alias: string }>('host.upsert', { id: 'host-1', alias: 'gpu-new', host: 'gpu.example.com' });
+
+		const invalidations = h.executedCommands
+			.filter(command => command.id === 'aexus.agentEngines.invalidateCloudHost')
+			.map(command => command.args);
+
+		assert.deepStrictEqual({
+			remoteGitStatusCalls,
+			changesProject: changes.project,
+			changesTotal: changes.totalChanges,
+			changeGroups: changes.groups.map(group => ({
+				id: group.id,
+				label: group.label,
+				count: group.count,
+				resources: group.resources.map(resource => `${resource.relativePath}:${resource.status}:${resource.deleted}:${resource.path}`),
+			})),
+			engineListCalls,
+			engines: engines.map(engine => `${engine.id}/${engine.shortId}`),
+			savedAlias: savedHost.alias,
+			upsert: upsertCalls.length === 1
+				? { id: upsertCalls[0].id, name: upsertCalls[0].name, alias: upsertCalls[0].alias, hostName: upsertCalls[0].hostName }
+				: upsertCalls,
+			migratedAliases,
+			invalidations,
+		}, {
+			remoteGitStatusCalls: [{ authority: 'gpu1', projectPath: '/workspace/repo' }],
+			changesProject: 'repo',
+			changesTotal: 2,
+			changeGroups: [
+				{ id: 'index', label: 'Staged Changes', count: 1, resources: ['src/staged.ts:M:false:gpu1:/workspace/repo/src/staged.ts'] },
+				{ id: 'workingTree', label: 'Changes', count: 1, resources: ['src/removed.ts:D:true:gpu1:/workspace/repo/src/removed.ts'] },
+			],
+			engineListCalls: [{ projectUri: cloudProjectUri, forceRefresh: true }],
+			engines: ['aexus-claude/claude'],
+			savedAlias: 'gpu-new',
+			upsert: { id: 'host-1', name: 'GPU Host', alias: 'gpu-new', hostName: 'gpu.example.com' },
+			migratedAliases: [{ from: 'gpu-old', to: 'gpu-new' }],
+			invalidations: [['gpu-old', 'gpu-new']],
 		});
 	});
 
@@ -3069,7 +3170,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			/outside your subordinate subtree/i,
 		);
 
-		// 6. session.send allows descendants + direct parent, blocks grandparent/unrelated roots/self
+		// 6. session.send strictly enforces top-down communication (blocks direct parent, grandparent, lateral, self; allows descendants)
 		await assert.rejects(
 			() => exec('session.send', { id: gov.id, prompt: 'upward jump', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
 			/cannot send messages to rank/i,
@@ -3082,8 +3183,11 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			() => exec('session.send', { id: emp.id, prompt: 'self msg', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
 			/cannot send messages to itself/i,
 		);
-		// Direct parent send succeeds
-		await exec('session.send', { id: mgr.id, prompt: 'status report', open: false, caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id });
+		// Direct parent send is now strictly blocked (Principle 7 top-down iron law)
+		await assert.rejects(
+			() => exec('session.send', { id: mgr.id, prompt: 'upward direct parent report', open: false, caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
+			/cannot send messages to rank/i,
+		);
 		// Descendant send succeeds
 		await exec('session.send', { id: wrk.id, prompt: 'fix unit test', open: false, caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id });
 
@@ -3270,7 +3374,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		// Hot-edit L2 alias in ADE config and save -> live rank.names reflects update immediately
 		const l2Input = configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L2"]')!;
 		l2Input.value = 'Director';
-		l2Input.dispatchEvent(new window.Event('input'));
+		l2Input.dispatchEvent(new l2Input.ownerDocument.defaultView!.Event('input'));
 		configRoot.querySelector<HTMLButtonElement>('button[data-ade-config-save]')!.click();
 		await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -3287,7 +3391,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		// Control plane hot-rename & rank.setCount >= 1 + mission.docs + rank.docs
 		await h.control('rank.rename', { target: 'L3', alias: 'Reviewer', shortName: 'Rev' });
 		const afterRename = await h.control<{ readonly namesByTier: Record<string, string> }>('rank.names', {});
-		assert.strictEqual(afterRename.namesByTier['L3'], 'Reviewer');
+		assert.strictEqual(afterRename.namesByTier.L3, 'Reviewer');
 
 		const userInfo = await h.control<{ readonly tierTag: string; readonly alias: string; readonly isSystemUser?: boolean }>('rank.get', { target: 'L-1' });
 		assert.strictEqual(userInfo.tierTag, 'L-1');
@@ -3316,7 +3420,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		const missionAliasInput = configRoot.querySelector<HTMLInputElement>('input[data-ade-mission-alias-input="true"]')!;
 		assert.strictEqual(missionAliasInput.value, 'Mission');
 		missionAliasInput.value = 'Engineering';
-		missionAliasInput.dispatchEvent(new window.Event('input'));
+		missionAliasInput.dispatchEvent(new missionAliasInput.ownerDocument.defaultView!.Event('input'));
 		configRoot.querySelector<HTMLButtonElement>('button[data-ade-config-save]')!.click();
 		await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -3351,7 +3455,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(drawer.hidden, false, 'Clicking top-left file icon opens Mermaid file drawer');
 		const textarea = engRoot.querySelector<HTMLTextAreaElement>('textarea[data-ade-mission-mermaid-input="true"]')!;
 		textarea.value = 'flowchart LR\n  N1["API Spec"] --> N2["Core Engine"]\n  N2 --> N3["UI Canvas"]\n  N2 --> N4["Tests"]';
-		textarea.dispatchEvent(new window.Event('input'));
+		textarea.dispatchEvent(new textarea.ownerDocument.defaultView!.Event('input'));
 		await new Promise(resolve => setTimeout(resolve, 140));
 
 		const renderedNodes = [...engRoot.querySelectorAll<HTMLElement>('.ade-mission-node')];
@@ -3624,6 +3728,29 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N3"] .ade-mission-emp-seq')?.textContent, '#2/3');
 		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N4"] .ade-mission-emp-seq')?.textContent, '#3/3');
 
+		// Every task card renders an engine badge naming the linked employee's engine (session.engineId inherited from the owner).
+		const engineBadge = (nodeId: string) => canvasHost.querySelector<HTMLElement>(`.ade-mission-node[data-node-id="${nodeId}"] [data-node-engine-id]`);
+		assert.strictEqual(engineBadge('N1')?.getAttribute('data-node-engine-id'), 'aexus-claude');
+		assert.strictEqual(engineBadge('N1')?.querySelector('.ade-mission-engine-name')?.textContent, 'Claude Code');
+		assert.strictEqual(engineBadge('N2')?.getAttribute('data-node-engine-id'), 'aexus-claude');
+
+		// A per-employee preferredEngineId override is reflected by the reusable employee's badges.
+		h.projects.updateAgentEnginePreferences(backendEmp.id, { preferredEngineId: 'aexus-codex' });
+		assert.strictEqual(engineBadge('N1')?.getAttribute('data-node-engine-id'), 'aexus-codex');
+		assert.strictEqual(engineBadge('N1')?.querySelector('.ade-mission-engine-name')?.textContent, 'Codex');
+		assert.strictEqual(engineBadge('N3')?.getAttribute('data-node-engine-id'), 'aexus-codex');
+		assert.strictEqual(engineBadge('N2')?.getAttribute('data-node-engine-id'), 'aexus-claude', 'Other employees keep their own engine');
+
+		// Hovering N1 must light up the middle reuse node N3 as BOTH a downstream neighbor and a same-employee peer,
+		// attaching exactly one context-port side for the shared ribbon lane.
+		pane.setHoveredNode('N1');
+		const middleNode = canvasHost.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N3"]')!;
+		assert.strictEqual(middleNode.classList.contains('is-downstream'), true, 'N3 is a downstream neighbor of hovered N1');
+		assert.strictEqual(middleNode.classList.contains('is-same-employee'), true, 'N3 is the same Backend employee as N1');
+		const hasTopPort = middleNode.classList.contains('has-ctx-port-top');
+		const hasBottomPort = middleNode.classList.contains('has-ctx-port-bottom');
+		assert.ok(hasTopPort !== hasBottomPort, 'Middle same-employee neighbor must attach exactly one context-port side');
+
 		pane.setHoveredNode('N3');
 		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N1"]')?.classList.contains('is-same-employee'), true);
 		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N4"]')?.classList.contains('is-same-employee'), true);
@@ -3641,5 +3768,610 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(missionStore.getGeneratedEmployees(created.id).length, 1, 'Merging N2 onto Backend leaves 1 shared locked employee');
 		assert.deepStrictEqual(missionStore.getGeneratedEmployees(created.id)[0].treeNodeIds, ['N1', 'N2', 'N3', 'N4']);
 		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N2"] .ade-mission-emp-seq')?.textContent, '#2/4');
+	});
+
+	suite('ADE Mission Runtime, Token Bus, Strictly Top-Down Org APIs & Safe Patch (mission_plan)', () => {
+
+		function createMissionHarness() {
+			const h = createHarness([alpha]);
+			h.modes.setMode('ade');
+			const onInboxChanged = store.add(new Emitter<void>());
+			const inboxItems: IAdeInboxItem[] = [];
+			let inboxSeq = 0;
+			const inboxStub = upcastPartial<IAdeInboxService>({
+				_serviceBrand: undefined,
+				get items(): readonly IAdeInboxItem[] { return inboxItems; },
+				get unreadCount(): number { return inboxItems.filter(i => i.unread && !i.resolved).length; },
+				onDidChange: onInboxChanged.event,
+				list(opts?: { includeResolved?: boolean }): readonly IAdeInboxItem[] {
+					return opts?.includeResolved === false ? inboxItems.filter(i => !i.resolved) : [...inboxItems];
+				},
+				async postGovernorMessage(input): Promise<IAdeInboxItem> {
+					const item: IAdeInboxItem = {
+						id: `inb-${++inboxSeq}`,
+						kind: 'governor_message',
+						treeType: 'mission',
+						governorSessionId: input.governorSessionId,
+						governorLabel: 'Owner',
+						projectPath: alpha.fsPath,
+						projectName: 'alpha',
+						nodeId: input.nodeId,
+						title: input.title ?? 'Message',
+						message: input.message,
+						senderAgentId: input.senderAgentId,
+						createdAt: Date.now(),
+						unread: true,
+						resolved: false,
+					};
+					inboxItems.push(item);
+					onInboxChanged.fire();
+					return item;
+				},
+				async upsertUserGateTodo(input): Promise<IAdeInboxItem> {
+					const item: IAdeInboxItem = {
+						id: `gate-${++inboxSeq}`,
+						kind: 'user_gate',
+						treeType: 'mission',
+						governorSessionId: input.governorSessionId,
+						governorLabel: 'Owner',
+						projectPath: alpha.fsPath,
+						projectName: 'alpha',
+						nodeId: input.nodeId,
+						title: input.nodeTitle,
+						message: input.description,
+						createdAt: Date.now(),
+						unread: true,
+						resolved: false,
+					};
+					inboxItems.push(item);
+					onInboxChanged.fire();
+					return item;
+				},
+				async resolveItem(id: string): Promise<IAdeInboxItem | undefined> {
+					const idx = inboxItems.findIndex(i => i.id === id);
+					if (idx < 0) {
+						return undefined;
+					}
+					const updated: IAdeInboxItem = { ...inboxItems[idx], resolved: true, unread: false };
+					inboxItems[idx] = updated;
+					onInboxChanged.fire();
+					return updated;
+				},
+			});
+			h.instantiation.stub(IAdeInboxService, inboxStub);
+			const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+			h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+			return { h, roleSchema, missionStore, missionRuntime };
+		}
+
+		async function seedMission(h: ReturnType<typeof createHarness>, title: string, mermaid: string) {
+			const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse(`aexus-claude:/${slug}-gov`) }, 'Gov L1', { role: 'governor' });
+			const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse(`aexus-claude:/${slug}-mgr`) }, 'Owner L2', { parentId: gov.id, role: 'manager' });
+			const created = await h.control<{ readonly id: string; readonly generatedEmployeeCount: number }>('mission.init', {
+				owner: mgr.id,
+				title,
+				mermaid,
+			});
+			return { gov, mgr, created };
+		}
+
+		function employeesByNode(missionStore: AdeMissionStoreService, missionId: string): Map<string, IAdeAgent> {
+			const byNode = new Map<string, IAdeAgent>();
+			for (const emp of missionStore.getGeneratedEmployees(missionId)) {
+				if (emp.treeNodeId) {
+					byNode.set(emp.treeNodeId, emp);
+				}
+			}
+			return byNode;
+		}
+
+		test('serves universal common APIs (api.update / docs.read) and reports in-graph identity via whoami', async () => {
+			const { h, missionStore } = createMissionHarness();
+			const { created } = await seedMission(h, 'Common APIs', 'flowchart LR\n  N1["API Spec"] --> N2["Core Engine"]');
+			assert.ok(created.generatedEmployeeCount >= 2);
+			const empN1 = employeesByNode(missionStore, created.id).get('N1')!;
+			assert.ok(empN1, 'Mission node N1 has a generated in-graph employee');
+
+			// 1. api.update --since 0 -> immutable diff contract with non-empty additions
+			const update = await h.control<{
+				readonly contractVersion: 1;
+				readonly currentRevision: number;
+				readonly latestRevision?: number;
+				readonly added: readonly unknown[];
+			}>('api.update', { since: 0 });
+			assert.strictEqual(update.contractVersion, 1, 'api.update contractVersion is frozen at 1');
+			assert.strictEqual(update.latestRevision ?? update.currentRevision, ADE_API_LATEST_REVISION, 'api.update exposes the latest API revision');
+			assert.ok(update.added.length > 0, 'api.update --since 0 reports non-empty additions');
+
+			// 2. docs.read -> single-copy common / L0 / mission documents
+			for (const target of ['common', 'L0', 'mission'] as const) {
+				const doc = await h.control<{ readonly ok: boolean; readonly content: string }>('docs.read', { target });
+				assert.strictEqual(doc.ok, true, `docs.read ${target} succeeds`);
+				assert.ok(doc.content.length > 0, `docs.read ${target} returns non-empty content`);
+			}
+
+			// 3. whoami -> numeric tier / tierTag / factory side / Mission & node identity / lazy docs entry
+			const me = await h.control<{
+				readonly id: string;
+				readonly tier: number;
+				readonly tierTag: string;
+				readonly factorySide: string;
+				readonly missionId?: string;
+				readonly nodeIds?: readonly string[];
+				readonly docsEntry?: Record<string, string>;
+			}>('whoami', { caller: 'employee', _verifiedCaller: true, _callerSessionId: empN1.id });
+			assert.strictEqual(me.id, empN1.id);
+			assert.strictEqual(me.tier, 3, 'Generated employee sits at L3');
+			assert.strictEqual(me.tierTag, 'L3');
+			assert.strictEqual(me.factorySide, 'in_graph');
+			assert.strictEqual(me.missionId, created.id);
+			assert.deepStrictEqual(me.nodeIds, ['N1']);
+			assert.ok(me.docsEntry?.common && me.docsEntry?.selfRank && me.docsEntry?.mission && me.docsEntry?.update, 'whoami exposes the on-demand docs entry map');
+		});
+
+		test('compiles a clean, minimal in-graph initialization prompt (buildAdeAgentRoleContext)', async () => {
+			const { h, roleSchema, missionStore } = createMissionHarness();
+			const { created } = await seedMission(h, 'Prompt Context', 'flowchart LR\n  N1["API Spec"] --> N2["Core Engine"]');
+			const empN1 = employeesByNode(missionStore, created.id).get('N1')!;
+
+			const prompt = buildAdeAgentRoleContext(h.projects, undefined, empN1, roleSchema.getConfig());
+			assert.ok(prompt, 'In-graph Mission node employee always gets an initialization prompt');
+			assert.ok(prompt!.includes(empN1.id), 'Prompt includes the agent ID');
+			assert.ok(prompt!.includes('L3'), 'Prompt identifies the numeric tier L3');
+			assert.ok(prompt!.includes(created.id), 'Prompt includes the owning Mission ID');
+			assert.ok(prompt!.includes('aexus-ade whoami'), 'Prompt points at whoami');
+			assert.ok(prompt!.includes('aexus-ade docs read'), 'Prompt points at docs read');
+			assert.ok(prompt!.includes('aexus-ade api update'), 'Prompt points at api update');
+			assert.ok(prompt!.length < 900, `In-graph prompt stays concise (was ${prompt!.length} chars)`);
+			assert.ok(!prompt!.includes('N2'), 'Prompt is scoped to the employee node, not the whole DAG');
+		});
+
+		test('drives the full Token Bus (join barrier, gate, block/complete/reject/fail escalation) through executeAdeControlRequest', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const { mgr, created } = await seedMission(h, 'Token Bus', [
+				'flowchart LR',
+				'  N1["API Spec"] --> U1{{"Signoff"}}',
+				'  N2["Core Engine"] --> U1',
+				'  U1 --> N3["Release"]',
+			].join('\n'));
+			const byNode = employeesByNode(missionStore, created.id);
+			const empN1 = byNode.get('N1')!;
+			const empN2 = byNode.get('N2')!;
+			const empN3 = byNode.get('N3')!;
+			assert.ok(empN1 && empN2 && empN3, 'Every task node gets an in-graph employee');
+
+			const callAsEmployee = <T = unknown>(empId: string, action: string, params: Record<string, unknown> = {}) =>
+				h.control<T>(action, { ...params, caller: 'employee', _verifiedCaller: true, _callerSessionId: empId });
+
+			// 1. start -> running, silence timeout supplied & locked
+			const started = await h.control<{ readonly status: string; readonly silenceTimeoutMinutes: number; readonly mintedTokenIds: readonly string[] }>('mission.start', {
+				id: created.id,
+				silenceTimeoutMinutes: 12,
+			});
+			assert.strictEqual(started.status, 'running');
+			assert.strictEqual(started.silenceTimeoutMinutes, 12);
+			assert.strictEqual(started.mintedTokenIds.length, 2, 'Both inDegree=0 source nodes mint active tokens');
+			await assert.rejects(
+				() => h.control('mission.timeout.set', { id: created.id, minutes: 20 }),
+				/locked/i,
+				'Mission timeout is locked once running',
+			);
+
+			// 2. token.current / token.block / token.complete on N1
+			const n1Current = await callAsEmployee<{ readonly tokens: ReadonlyArray<{ readonly id: string; readonly status: string }> }>(empN1.id, 'token.current', { mission: created.id });
+			assert.strictEqual(n1Current.tokens.length, 1);
+			const n1TokenId = n1Current.tokens[0].id;
+			const blocked = await callAsEmployee<{ readonly ok: boolean; readonly token: { readonly status: string } }>(empN1.id, 'token.block', {
+				mission: created.id,
+				tokenId: n1TokenId,
+				max: '30m',
+				reason: 'Long-running benchmark',
+			});
+			assert.strictEqual(blocked.ok, true);
+			assert.strictEqual(blocked.token.status, 'blocked');
+
+			const completedN1 = await callAsEmployee<{ readonly ok: boolean }>(empN1.id, 'token.complete', {
+				mission: created.id,
+				tokenId: n1TokenId,
+				summary: 'API spec finalized',
+			});
+			assert.strictEqual(completedN1.ok, true);
+			assert.strictEqual(Object.keys(missionRuntime.getRuntimeState(created.id).joinBarriers).length, 1, 'N1 completion parks a join barrier waiting for N2');
+
+			// 3. N2 completes -> join barrier releases a waiting Gate token
+			const n2Current = await callAsEmployee<{ readonly tokens: ReadonlyArray<{ readonly id: string }> }>(empN2.id, 'token.current', { mission: created.id });
+			assert.strictEqual(n2Current.tokens.length, 1);
+			const completedN2 = await callAsEmployee<{ readonly ok: boolean; readonly nextTokenIds?: readonly string[] }>(empN2.id, 'token.complete', {
+				mission: created.id,
+				tokenId: n2Current.tokens[0].id,
+				summary: 'Core engine built',
+			});
+			assert.strictEqual(completedN2.ok, true);
+			assert.strictEqual((completedN2.nextTokenIds ?? []).length, 1, 'Join barrier releases exactly one Gate token');
+			assert.strictEqual(Object.keys(missionRuntime.getRuntimeState(created.id).joinBarriers).length, 0);
+
+			const statusAtGate = await h.control<{ readonly waitingGateCount: number }>('mission.status', { mission: created.id });
+			assert.strictEqual(statusAtGate.waitingGateCount, 1);
+
+			// 4. Gate approve -> N3 token; employee reject -> bounced back to the Gate
+			const gate1 = await h.control<{ readonly nextTokenIds: readonly string[] }>('mission.gate', { mission: created.id, node: 'U1', decision: 'approve', note: 'Ship it' });
+			assert.strictEqual(gate1.nextTokenIds.length, 1);
+			const n3First = await callAsEmployee<{ readonly tokens: ReadonlyArray<{ readonly id: string }> }>(empN3.id, 'token.current', { mission: created.id });
+			assert.strictEqual(n3First.tokens.length, 1);
+			const rejected = await callAsEmployee<{ readonly ok: boolean; readonly bouncedTokenId: string; readonly targetNodeId: string }>(empN3.id, 'token.reject', {
+				mission: created.id,
+				tokenId: n3First.tokens[0].id,
+				reason: 'Release notes missing',
+			});
+			assert.strictEqual(rejected.ok, true);
+			assert.strictEqual(rejected.targetNodeId, 'U1', 'Reject bounces upstream to the Gate without a backward Mermaid arrow');
+
+			// 5. Gate approve again -> N3 token; employee fail -> freeze & escalate to off-graph supervisor
+			const gate2 = await h.control<{ readonly nextTokenIds: readonly string[] }>('mission.gate', { mission: created.id, node: 'U1', decision: 'approve' });
+			assert.strictEqual(gate2.nextTokenIds.length, 1);
+			const n3Again = await callAsEmployee<{ readonly tokens: ReadonlyArray<{ readonly id: string }> }>(empN3.id, 'token.current', { mission: created.id });
+			assert.strictEqual(n3Again.tokens.length, 1);
+			const failed = await callAsEmployee<{
+				readonly ok: boolean;
+				readonly escalatedToSupervisorId?: string;
+				readonly escalatedToInbox?: boolean;
+			}>(empN3.id, 'token.fail', { mission: created.id, tokenId: n3Again.tokens[0].id, reason: 'Missing production credentials' });
+			assert.strictEqual(failed.ok, true);
+			assert.strictEqual(failed.escalatedToSupervisorId, mgr.id, 'Failure without a fail-edge escalates to the bound off-graph supervisor');
+			assert.ok(!failed.escalatedToInbox);
+
+			// 6. Off-graph recall clears the frozen failure
+			const recalled = await h.control<{ readonly ok: boolean; readonly recalledTokenIds: readonly string[] }>('mission.recall', { mission: created.id, reason: 'Reset failed release node' });
+			assert.strictEqual(recalled.ok, true);
+			assert.ok(recalled.recalledTokenIds.includes(n3Again.tokens[0].id));
+
+			// 7. Standalone non-Mission pure Worker is denied token & patch access
+			const pureWorker = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/pure-runtime-worker') }, 'Pure Worker', { role: 'worker' });
+			await assert.rejects(
+				() => h.control('token.current', { mission: created.id, caller: 'worker', _verifiedCaller: true, _callerSessionId: pureWorker.id }),
+				/pure execution|FORBIDDEN/i,
+				'Standalone pure Worker cannot read Mission tokens',
+			);
+			await assert.rejects(
+				() => h.control('mission.patch', {
+					mission: created.id,
+					mermaid: 'flowchart LR\n  N9["Hijack"]',
+					caller: 'worker',
+					_verifiedCaller: true,
+					_callerSessionId: pureWorker.id,
+				}),
+				/Permission denied|FORBIDDEN/i,
+				'Standalone pure Worker cannot patch the Mission DAG',
+			);
+		});
+
+		test('enforces strictly top-down org.* APIs (org.send upward is forbidden; org.subordinates/org.context flow downward)', async () => {
+			const { h } = createMissionHarness();
+			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/org-gov') }, 'Org Gov', { role: 'governor' });
+			const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/org-mgr') }, 'Org Mgr', { parentId: gov.id, role: 'manager' });
+			const emp = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/org-emp') }, 'Org Emp', { parentId: mgr.id, role: 'employee' });
+
+			// Subordinate (L3) -> supervisor (L1) is an upward message and MUST be rejected.
+			await assert.rejects(
+				() => h.control('org.send', {
+					target: gov.id,
+					message: 'Status report',
+					caller: 'employee',
+					_verifiedCaller: true,
+					_callerSessionId: emp.id,
+				}),
+				/UPWARD_MESSAGE_FORBIDDEN/,
+				'Strictly top-down: an L3 employee cannot message an L1 governor',
+			);
+
+			// Supervisor (L1) -> downward inspection succeeds.
+			const subs = await h.control<{ readonly supervisorId: string; readonly directSubordinates: ReadonlyArray<{ readonly id: string; readonly tier: number }> }>('org.subordinates', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: gov.id,
+			});
+			assert.strictEqual(subs.supervisorId, gov.id);
+			assert.ok(subs.directSubordinates.some(sub => sub.id === mgr.id), 'L1 lists its direct L2 subordinate');
+			assert.ok(!subs.directSubordinates.some(sub => sub.id === emp.id), 'L3 grandchild is not a direct subordinate');
+
+			const ctx = await h.control<{ readonly agentId: string; readonly label: string; readonly role: string }>('org.context', {
+				target: emp.id,
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: gov.id,
+			});
+			assert.strictEqual(ctx.agentId, emp.id);
+			assert.strictEqual(ctx.label, 'Org Emp');
+			assert.strictEqual(ctx.role, 'employee');
+		});
+
+		test('rejects dangling Mission patches atomically, then applies replacements, source triggers, and SSH host binding', async () => {
+			const { h, missionStore } = createMissionHarness();
+			const cloudHost: IAdeCloudHost = {
+				id: 'host-gpu',
+				name: 'GPU Host',
+				alias: 'gpu-ssh',
+				hostName: 'gpu.example.com',
+				port: 22,
+				os: 'linux',
+				defaultDirectory: '/workspace/repo',
+				recentDirectories: ['/workspace/repo'],
+				source: 'user',
+				createdAt: 1,
+				updatedAt: 2,
+			};
+			h.instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
+				_serviceBrand: undefined,
+				onDidChangeHosts: Event.None,
+				getHost: async () => cloudHost,
+			}));
+
+			const originalMermaid = 'flowchart LR\n  N1["Design"] --> N2["Build"]\n  N2 --> N3["Ship"]';
+			const { created } = await seedMission(h, 'Safe Patch', originalMermaid);
+			assert.strictEqual(missionStore.getMission(created.id)?.mermaidText, originalMermaid);
+
+			// Removing intermediate N2 while leaving N3 without any incoming path is a hard anti-dangling violation.
+			await assert.rejects(
+				() => h.control('mission.patch', {
+					mission: created.id,
+					mermaid: 'flowchart LR\n  N1["Design"]\n  N3["Ship"]',
+					reason: 'Drop intermediate build step',
+				}),
+				/DANGLING_NODE_VIOLATION|Anti-dangling/i,
+			);
+			assert.strictEqual(missionStore.getMission(created.id)?.mermaidText, originalMermaid, 'Rejected patch is atomic: Mission text is unchanged');
+
+			// Atomic replacement patch: remove N2 and add N1 -> N3 in the same edit.
+			const replacementMermaid = 'flowchart LR\n  N1["Design"] --> N3["Ship"]';
+			const patched = await h.control<{
+				readonly ok: boolean;
+				readonly removedNodes: readonly string[];
+				readonly addedEdges: readonly string[];
+			}>('mission.patch', { mission: created.id, mermaid: replacementMermaid, reason: 'Atomic replacement route' });
+			assert.strictEqual(patched.ok, true);
+			assert.deepStrictEqual(patched.removedNodes, ['N2']);
+			assert.ok(patched.addedEdges.includes('N1->N3'), 'Replacement edge N1->N3 is created in the same patch');
+			assert.strictEqual(missionStore.getMission(created.id)?.mermaidText, replacementMermaid, 'Successful patch persists the new Mermaid text');
+
+			// Source triggers only attach to inDegree === 0 generator nodes.
+			const trigger = await h.control<{ readonly ok: boolean; readonly trigger: { readonly nodeId: string; readonly kind: string; readonly intervalMs?: number } }>('mission.trigger.set', {
+				mission: created.id,
+				node: 'N1',
+				kind: 'interval',
+				interval: '30s',
+			});
+			assert.strictEqual(trigger.ok, true);
+			assert.strictEqual(trigger.trigger.nodeId, 'N1');
+			assert.strictEqual(trigger.trigger.intervalMs, 30_000);
+			await assert.rejects(
+				() => h.control('mission.trigger.set', { mission: created.id, node: 'N3', kind: 'interval', interval: '30s' }),
+				/inDegree = 0/i,
+				'Downstream node N3 (inDegree > 0) cannot host a source trigger',
+			);
+
+			// Bind N1 to an SSH Cloud Host alias; the node employee's project URI becomes aexus-ssh://gpu-ssh/...
+			const empN1 = employeesByNode(missionStore, created.id).get('N1')!;
+			const bound = await h.control<{
+				readonly ok: boolean;
+				readonly assignment: { readonly agentId?: string; readonly hostAlias: string; readonly remoteProjectPath?: string };
+			}>('mission.host.bind', { mission: created.id, node: 'N1', host: 'gpu-ssh' });
+			assert.strictEqual(bound.ok, true);
+			assert.strictEqual(bound.assignment.hostAlias, 'gpu-ssh');
+			assert.strictEqual(bound.assignment.remoteProjectPath, '/workspace/repo');
+			assert.strictEqual(bound.assignment.agentId, empN1.id);
+			const boundAgent = h.projects.getAgent(empN1.id)!;
+			assert.strictEqual(boundAgent.projectUri.scheme, AEXUS_SSH_SCHEME);
+			assert.strictEqual(boundAgent.projectUri.authority, 'gpu-ssh');
+			assert.strictEqual(boundAgent.projectUri.path, '/workspace/repo');
+		});
+
+		test('renders minimal Mission canvas run controls, locked timeout, fail edges, Gate popover, and auto-redraws on patch (Section 6)', async () => {
+			const h = createHarness([URI.file('/workspace/ui-demo')]);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			const mermaid = [
+				'flowchart LR',
+				'  N1["Build"] --> G1{"Release Gate"}',
+				'  N1 -->|fail| F1["Fallback"]',
+				'  F1 --> G1',
+			].join('\n');
+			const created = missionStore.createMission({ title: 'Minimal UI', mermaidText: mermaid });
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+
+			const host = append(document.body, $('.monaco-workbench.ade-mission-runtime-ui-host'));
+			store.add({ dispose: () => host.remove() });
+			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
+			pane.create(host);
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			const runBar = host.querySelector<HTMLElement>('[data-ade-mission-run-bar="true"]')!;
+			const primaryBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-run-primary="true"]')!;
+			const stopBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-run-stop="true"]')!;
+			const timeoutInput = host.querySelector<HTMLInputElement>('[data-ade-mission-timeout-input="true"]')!;
+			const failEdge = host.querySelector<SVGGElement>('g[data-edge-kind="fail"]');
+			assert.ok(runBar && primaryBtn && stopBtn && timeoutInput, 'Minimal run bar and drawer config controls exist');
+			assert.ok(failEdge, 'Fail edge renders with data-edge-kind="fail"');
+			assert.strictEqual(timeoutInput.disabled, false, 'Timeout input is editable before Mission starts');
+			assert.strictEqual(stopBtn.hidden, true, 'Stop button is hidden while idle');
+
+			// Start via runtime control -> run bar reflects Running, timeout locks, N1 enters state-active
+			await missionRuntime.start(created.id, { silenceTimeoutMinutes: 7 });
+			assert.strictEqual(runBar.dataset.status, 'running');
+			assert.strictEqual(timeoutInput.value, '7');
+			assert.strictEqual(timeoutInput.disabled, true, 'Silence timeout locks once Mission starts');
+			assert.strictEqual(stopBtn.hidden, false);
+			assert.ok(host.querySelector('.ade-mission-node[data-node-id="N1"].state-active'), 'Active node N1 receives state-active highlight');
+
+			// P0-7 + R2-1: Editing Mermaid textarea while running ONLY validates on keystroke (never mutates or wipes typing mid-edit)
+			// and routes through atomic safe patch on explicit commit (Cmd/Ctrl+Enter or blur), reverting if rejected!
+			const textarea = host.querySelector<HTMLTextAreaElement>('[data-ade-mission-mermaid-input="true"]')!;
+			const validBefore = missionStore.getMission(created.id)!.mermaidText;
+			const danglingDraft = 'flowchart LR\n  N1["Build"]\n  G1{"Release Gate"}';
+			textarea.value = danglingDraft;
+			textarea.dispatchEvent(new (textarea.ownerDocument.defaultView!.Event)('input', { bubbles: true }));
+			assert.strictEqual(missionStore.getMission(created.id)!.mermaidText, validBefore, 'Live keystroke must NOT mutate live Mission Mermaid');
+			assert.strictEqual(textarea.value, danglingDraft, 'Live keystroke must NOT wipe user typing before explicit commit');
+			// Explicit commit via blur triggers patchMermaid -> dangling edit is rejected and reverted cleanly
+			textarea.dispatchEvent(new (textarea.ownerDocument.defaultView!.Event)('blur'));
+			await new Promise(resolve => setTimeout(resolve, 30));
+			assert.strictEqual(missionStore.getMission(created.id)!.mermaidText, validBefore, 'Dangling live edit must be rejected on commit');
+			assert.strictEqual(textarea.value, validBefore, 'Rejected live edit reverts textarea to valid Mermaid on commit');
+
+			// P1-12: Clicking node employee pill opens popover containing the compact Off-graph Supervisor selector
+			const empPill = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-node-emp');
+			if (empPill) {
+				empPill.click();
+				const supSelect = host.querySelector<HTMLSelectElement>('select[data-ade-node-supervisor-select="N1"]');
+				assert.ok(supSelect, 'Node popover exposes compact Off-graph Supervisor selector (§6.1)');
+				supSelect.value = ADE_SECRETARY_ID;
+				supSelect.dispatchEvent(new (supSelect.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
+				await new Promise(resolve => setTimeout(resolve, 20));
+				const boundSup = missionRuntime.getRuntimeState(created.id).boundary.supervisors.find(s => s.id === ADE_SECRETARY_ID);
+				assert.ok(boundSup?.managedNodeIds.includes('N1'), 'Selecting a supervisor persists node binding in mission boundary');
+			}
+
+			// Complete N1 -> Gate G1 transitions to state-waiting-gate; clicking G1 opens Approve/Reject popover
+			const activeTok = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
+			await missionRuntime.completeToken(created.id, { tokenId: activeTok.id, summary: 'Build artifact verified.' });
+			const gateEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="G1"].state-waiting-gate');
+			assert.ok(gateEl, 'Waiting Gate card receives state-waiting-gate highlight');
+
+			const win = gateEl.ownerDocument.defaultView!;
+			gateEl.dispatchEvent(new win.PointerEvent('pointerdown', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
+			gateEl.dispatchEvent(new win.PointerEvent('pointerup', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
+			const approveBtn = host.querySelector<HTMLButtonElement>('button[data-ade-gate-approve="G1"]');
+			assert.ok(approveBtn, 'Clicking waiting Gate card opens inline Approve/Reject popover');
+			approveBtn.click();
+			await new Promise(resolve => setTimeout(resolve, 15));
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).status, 'completed', 'Approving Gate completes the Mission');
+
+			// Patch Mermaid -> canvas automatically redraws new node N9 without manual refresh
+			const patchedMermaid = `${mermaid}\n  G1 --> N9["Deploy"]`;
+			await missionRuntime.patchMermaid(created.id, { caller: { isHumanUser: true }, newMermaidText: patchedMermaid, reason: 'Add deploy step' });
+			assert.ok(host.querySelector('.ade-mission-node[data-node-id="N9"]'), 'Canvas auto-redraws newly patched node N9');
+		});
+
+		test('enforces honest live-tier factory wall, blocks upward bypasses/non-human Gates, supports pure-rank Mission nodes & live safe-patch guard', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/sec-gov') }, 'Gov L1', { role: 'governor' });
+			const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/sec-mgr') }, 'Mgr L2', { parentId: gov.id, role: 'manager' });
+			const emp = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/sec-emp') }, 'Emp L3', { parentId: mgr.id, role: 'employee' });
+
+			// 1. User-owned Mission assigns generated employees strictly on in-graph side (tier > 1) so factory wall holds without artificial clamping (P0-1)
+			const mermaid = 'flowchart LR\n  N1["Build"] --> G1{"Gate"}\n  G1 --> N2["Ship"]';
+			const userMission = missionStore.createMission({ title: 'User Wall', mermaidText: mermaid });
+			const userEmps = employeesByNode(missionStore, userMission.id);
+			const uN1 = userEmps.get('N1')!;
+			const uN1Tier = missionRuntime.getBoundary(userMission.id).boundary.nodeAssignments.N1?.tier;
+			assert.ok(uN1Tier !== undefined && uN1Tier > 1, `User-owned Mission employee must be tier > 1 (got ${uN1Tier})`);
+			assert.strictEqual(missionRuntime.getBoundary(userMission.id).validation.valid, true);
+
+			// Moving cutoff to L2 when in-graph employees are live L2 MUST fail validation (no silent rewrite!)
+			const badCutoff = await missionRuntime.setBoundary(userMission.id, { offGraphMaxTier: 2 });
+			assert.strictEqual(badCutoff.ok, false, 'Raising offGraphMaxTier across live L2 node employees must fail honestly');
+
+			// Spoofing supervisor tier or unknown supervisor ID MUST fail validation
+			const spoofedSup = await missionRuntime.setBoundary(userMission.id, {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: emp.id, tier: 1, managedNodeIds: ['N1'] }],
+			});
+			assert.strictEqual(spoofedSup.ok, false, 'Spoofing an L3 employee as tier-1 supervisor must be rejected using live rank');
+			const unknownSup = await missionRuntime.setBoundary(userMission.id, {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: 'does-not-exist', tier: 1, managedNodeIds: ['N1'] }],
+			});
+			assert.strictEqual(unknownSup.ok, false, 'Unknown supervisor ID must be rejected');
+
+			// 2. Partial-branch supervisor cannot start/stop whole Mission, and non-Human cannot sign a Human Gate (P1-1)
+			const okPartial = await missionRuntime.setBoundary(userMission.id, {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: gov.id, tier: 1, managedNodeIds: ['N1'] }],
+			});
+			assert.strictEqual(okPartial.ok, true);
+			await assert.rejects(
+				() => h.control('mission.start', { mission: userMission.id, caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id }),
+				/FORBIDDEN|Permission denied/i,
+				'Partial-jurisdiction supervisor cannot start the entire Mission',
+			);
+
+			// Human starts Mission; Secretary cannot forge in-graph token.complete (P1-2); non-Human cannot approve Gate (P1-1)
+			await h.control('mission.start', { mission: userMission.id });
+			const tokN1 = Object.values(missionRuntime.getRuntimeState(userMission.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
+			await assert.rejects(
+				() => h.control('token.complete', { mission: userMission.id, tokenId: tokN1.id, summary: 'forged', caller: 'secretary', _verifiedCaller: true, _callerSessionId: ADE_SECRETARY_ID }),
+				/FORBIDDEN/i,
+				'Secretary (off-graph L0) cannot mutate in-graph tokens',
+			);
+			// In-graph node employee CANNOT call org.escalate (P0-3b)
+			await assert.rejects(
+				() => h.control('org.escalate', { mission: userMission.id, reason: 'sneak to human inbox', caller: uN1.role ?? 'manager', _verifiedCaller: true, _callerSessionId: uN1.id }),
+				/FORBIDDEN/i,
+				'In-graph employee cannot invoke org.escalate to reach Human Inbox',
+			);
+			// Verified non-Human caller cannot spoof --from on inbox.post (P0-3c)
+			const posted = await h.control<{ readonly senderAgentId?: string }>('inbox.post', {
+				from: gov.id,
+				message: 'Check sender identity',
+				caller: 'manager',
+				_verifiedCaller: true,
+				_callerSessionId: mgr.id,
+			});
+			assert.strictEqual(posted.senderAgentId, mgr.id, 'inbox.post forces verified caller identity instead of spoofed --from');
+
+			// Complete N1 -> waiting_gate -> non-Human mission.gate & inbox.resolve(user_gate) are blocked (P1-1, P2-9)
+			await h.control('token.complete', { mission: userMission.id, tokenId: tokN1.id, summary: 'N1 ready', caller: uN1.role ?? 'manager', _verifiedCaller: true, _callerSessionId: uN1.id });
+			await assert.rejects(
+				() => h.control('mission.gate', { mission: userMission.id, node: 'G1', decision: 'approve', caller: 'secretary', _verifiedCaller: true, _callerSessionId: ADE_SECRETARY_ID }),
+				/FORBIDDEN/i,
+				'Secretary cannot sign a Human Gate',
+			);
+			const inboxItems = await h.control<ReadonlyArray<{ readonly id: string; readonly kind?: string; readonly nodeId?: string }>>('inbox.list', { includeResolved: false });
+			const gateInbox = inboxItems.find(i => i.kind === 'user_gate' && i.nodeId === 'G1');
+			if (gateInbox) {
+				await assert.rejects(
+					() => h.control('inbox.resolve', { id: gateInbox.id, caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id }),
+					/FORBIDDEN/i,
+					'Agents cannot close Human Gate Inbox items via inbox.resolve',
+				);
+			}
+
+			// 3. Pure-rank Mission node (owned by L3 emp -> generated employees are L4 pure leaf 'worker') CAN run token.current & token.complete (P0-2)
+			const leafMission = await h.control<{ readonly id: string }>('mission.init', {
+				owner: emp.id,
+				title: 'Pure Leaf Mission',
+				open: false,
+			});
+			missionStore.updateMermaid(leafMission.id, 'flowchart LR\n  W1["Pure Build"] --> W2["Pure Test"]');
+			const leafW1 = employeesByNode(missionStore, leafMission.id).get('W1')!;
+			assert.strictEqual(leafW1.role, undefined, 'Employee generated under L3 owner inherits default pure-leaf rank (worker)');
+			await missionRuntime.setBoundary(leafMission.id, { offGraphMaxTier: 3 });
+			await h.control('mission.start', { mission: leafMission.id });
+			const pureCur = await h.control<{ readonly tokens: ReadonlyArray<{ readonly id: string }> }>('token.current', {
+				mission: leafMission.id,
+				caller: 'worker',
+				_verifiedCaller: true,
+				_callerSessionId: leafW1.id,
+			});
+			assert.strictEqual(pureCur.tokens.length, 1, 'Pure-rank Mission node can read its active token');
+			const pureDone = await h.control<{ readonly ok: boolean; readonly nextTokenIds: readonly string[] }>('token.complete', {
+				mission: leafMission.id,
+				tokenId: pureCur.tokens[0].id,
+				summary: 'Compiled cleanly on pure-leaf worker',
+				caller: 'worker',
+				_verifiedCaller: true,
+				_callerSessionId: leafW1.id,
+			});
+			assert.strictEqual(pureDone.ok, true);
+			assert.strictEqual(pureDone.nextTokenIds.length, 1, 'Pure-rank Mission node advances token downstream cleanly');
+		});
 	});
 });

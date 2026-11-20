@@ -1620,11 +1620,11 @@ export class CodeApplication extends Disposable {
 		process.env.AEXUS_ADE_CONTROL_FILE = adeControlServer.instanceMetaPath;
 		adeControlServer.whenReady().then(() => {
 			process.env.AEXUS_ADE_SOCKET = adeControlServer.socketPath;
+			if (adeControlServer.tcpPort) {
+				process.env.AEXUS_ADE_TCP_PORT = String(adeControlServer.tcpPort);
+			}
 		}, () => { /* logged in AdeControlServer */ });
 		this._register(this.lifecycleMainService.onWillShutdown(() => adeControlServer.dispose()));
-
-		const adeDocsBackendService = this._register(new AdeDocsBackendNodeService());
-		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, new AdeEngineeringBackendChannel(adeDocsBackendService));
 
 		const isCustomTestDataDir = Boolean(this.environmentMainService.args['user-data-dir'] || this.environmentMainService.args.extensionTestsPath);
 		const adeCloudHostNodeService = this._register(new AdeCloudHostNodeService({
@@ -1634,6 +1634,11 @@ export class CodeApplication extends Disposable {
 			logService: this.logService,
 		}));
 		mainProcessElectronServer.registerChannel(ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME, new AdeCloudHostBackendChannel(adeCloudHostNodeService));
+
+		const adeDocsBackendService = this._register(new AdeDocsBackendNodeService({
+			remoteProbe: adeCloudHostNodeService,
+		}));
+		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, new AdeEngineeringBackendChannel(adeDocsBackendService));
 
 		// Logger
 		const loggerChannel = this._register(new LoggerChannel(accessor.get(ILoggerMainService)));

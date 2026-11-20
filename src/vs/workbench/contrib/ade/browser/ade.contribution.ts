@@ -35,7 +35,7 @@ import {
 	IAdeOrganizationConfig,
 	resolveEffectiveRankDefinition,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
-import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
@@ -47,7 +47,7 @@ import { InstantiationType, registerSingleton } from '../../../../platform/insta
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
-import { IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
+import { IQuickInputButton, IQuickInputService, IQuickPickItem } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -119,6 +119,7 @@ import {
 	AdeEngineeringEditorSerializer,
 } from './adeEngineeringEditorPane.js';
 import { AdeInboxService } from './adeInboxService.js';
+import { AdeMissionRuntimeService, IAdeMissionRuntimeService } from './adeMissionRuntime.js';
 import { AdeMissionStoreService, IAdeMissionService } from './adeMissionStore.js';
 import { AdeChangesView, AdeFilesView } from './adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from './adeProjectManagement.js';
@@ -146,6 +147,7 @@ registerSingleton(IAdeEditorService, AdeEditorService, InstantiationType.Delayed
 registerSingleton(IAdeSessionsService, AdeSessionsService, InstantiationType.Delayed);
 registerSingleton(IAdeInboxService, AdeInboxService, InstantiationType.Delayed);
 registerSingleton(IAdeMissionService, AdeMissionStoreService, InstantiationType.Delayed);
+registerSingleton(IAdeMissionRuntimeService, AdeMissionRuntimeService, InstantiationType.Delayed);
 
 class AdeEditorContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.adeEditor';
@@ -154,6 +156,7 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 		@IAdeEditorService editors: IAdeEditorService,
 		@IAdeProjectsService projects: IAdeProjectsService,
 		@IAdeMissionService _missions: IAdeMissionService,
+		@IAdeMissionRuntimeService _missionRuntime: IAdeMissionRuntimeService,
 		@IAdeInboxService _inbox: IAdeInboxService,
 		@IChatSessionsService sessions: IChatSessionsService,
 		@IWorkspaceContextService contextService: IWorkspaceContextService,
@@ -382,21 +385,180 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 
 const viewTitleMenu = { id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', ADE_PROJECTS_VIEW_ID), group: 'navigation' };
 
-async function pickEngine(quickInput: IQuickInputService, sessions: IAdeSessionsService, title: string): Promise<IAdeEngine | undefined> {
-	const engines = await sessions.getEngines();
-	const picked = await quickInput.pick(engines.map(engine => ({
-		label: engine.name,
-		description: engine.description,
-		engine,
-		iconClass: ThemeIcon.isThemeIcon(engine.icon) ? ThemeIcon.asClassName(engine.icon) : undefined,
-		iconPath: URI.isUri(engine.icon) ? { dark: engine.icon, light: engine.icon } : undefined,
-	})), {
-		title,
-		placeHolder: engines.length
-			? localize('chooseAgentEngine', "Choose a Coding Agent engine")
-			: localize('noAgentEngines', "Install a Coding Agent CLI or a session provider to continue"),
+interface IEnginePickItem extends IQuickPickItem {
+	readonly engine?: IAdeEngine;
+	readonly action?: 'retry' | 'manage-host' | 'remote-terminal' | 'remote-cli-settings';
+}
+
+async function pickEngine(
+	quickInput: IQuickInputService,
+	sessions: IAdeSessionsService,
+	title: string,
+	projectUri?: URI,
+	commands?: ICommandService,
+): Promise<IAdeEngine | undefined> {
+	if (!projectUri || !isCloudProjectUri(projectUri)) {
+		const engines = await sessions.getEngines(projectUri);
+		const picked = await quickInput.pick(engines.map(engine => ({
+			label: engine.name,
+			description: engine.description,
+			engine,
+			iconClass: ThemeIcon.isThemeIcon(engine.icon) ? ThemeIcon.asClassName(engine.icon) : undefined,
+			iconPath: URI.isUri(engine.icon) ? { dark: engine.icon, light: engine.icon } : undefined,
+		})), {
+			title,
+			placeHolder: engines.length
+				? localize('chooseAgentEngine', "Choose a Coding Agent engine")
+				: localize('noAgentEngines', "Install a Coding Agent CLI or a session provider to continue"),
+		});
+		return picked?.engine;
+	}
+
+	const hostAlias = projectUri.authority;
+	const refreshButton: IQuickInputButton = {
+		iconClass: ThemeIcon.asClassName(Codicon.refresh),
+		tooltip: localize('adeRescanCloudEngines', "Re-scan Coding Agents installed on {0}", hostAlias),
+	};
+
+	const qp = quickInput.createQuickPick<IEnginePickItem>();
+	qp.title = `${title} · ${hostAlias}`;
+	qp.buttons = [refreshButton];
+	qp.matchOnDescription = true;
+	qp.ignoreFocusOut = false;
+
+	let disposed = false;
+	let generation = 0;
+
+	const loadCloudEngines = async (forceRefresh: boolean) => {
+		const myGen = ++generation;
+		qp.busy = true;
+		qp.items = [];
+		qp.placeholder = localize('adeProbingCloudEngines', "Checking native Coding Agents on Cloud Host '{0}'...", hostAlias);
+		try {
+			const probe = sessions.probeEnginesForProject
+				? await sessions.probeEnginesForProject(projectUri, { forceRefresh })
+				: { engines: await sessions.getEngines(projectUri, { forceRefresh }), remoteHost: hostAlias };
+			if (disposed || myGen !== generation) {
+				return;
+			}
+			const effectiveHost = probe.remoteHost || hostAlias;
+			if (probe.error) {
+				qp.placeholder = localize('adeCloudHostUnreachablePlaceholder', "Could not connect to Cloud Host '{0}' via SSH", effectiveHost);
+				qp.items = [
+					{
+						label: `$(warning) ${localize('adeCloudHostManageAction', "Manage Cloud Host '{0}'...", effectiveHost)}`,
+						description: localize('adeCloudHostFixSshDesc', "Check SSH host, port, user, key, or ProxyJump settings"),
+						detail: probe.error,
+						action: 'manage-host',
+					},
+					{
+						label: `$(refresh) ${localize('adeCloudHostRetryProbe', "Retry Connection to '{0}'", effectiveHost)}`,
+						description: localize('adeCloudHostRetryDesc', "Re-probe SSH connectivity and installed Coding Agents"),
+						action: 'retry',
+					},
+				];
+			} else if (probe.engines.length === 0) {
+				qp.placeholder = localize('adeNoCloudAgentEngines', "No Coding Agent CLI found on Cloud Host '{0}'", effectiveHost);
+				qp.items = [
+					{
+						label: `$(terminal) ${localize('adeOpenRemoteTerminalInstall', "Open Remote Terminal on '{0}'...", effectiveHost)}`,
+						description: localize('adeOpenRemoteTerminalInstallDesc', "Install Claude Code, Codex, OpenCode, Kilo, Cline, DSH, Antigravity, or Pi natively on the server"),
+						action: 'remote-terminal',
+					},
+					{
+						label: `$(settings-gear) ${localize('adeConfigureRemoteCliPaths', "Configure Remote CLI Paths (aexus.ade.remoteCliPaths)...")}`,
+						description: localize('adeConfigureRemoteCliPathsDesc', "Specify custom binary paths if CLIs are installed outside standard PATH"),
+						action: 'remote-cli-settings',
+					},
+					{
+						label: `$(refresh) ${localize('adeCloudHostRescanAction', "Re-scan Cloud Host '{0}'", effectiveHost)}`,
+						description: localize('adeCloudHostRescanDesc', "Check again after installing a Coding Agent CLI on the server"),
+						action: 'retry',
+					},
+				];
+			} else {
+				qp.placeholder = localize('chooseCloudAgentEngine', "Choose a native Coding Agent installed on '{0}'", effectiveHost);
+				qp.items = probe.engines.map(engine => ({
+					label: engine.name,
+					description: engine.description,
+					engine,
+					iconClass: ThemeIcon.isThemeIcon(engine.icon) ? ThemeIcon.asClassName(engine.icon) : undefined,
+					iconPath: URI.isUri(engine.icon) ? { dark: engine.icon, light: engine.icon } : undefined,
+				}));
+			}
+		} catch (err) {
+			if (disposed || myGen !== generation) {
+				return;
+			}
+			const msg = err instanceof Error ? err.message : String(err);
+			qp.placeholder = localize('adeCloudHostProbeFailedPlaceholder', "Failed to probe Cloud Host '{0}'", hostAlias);
+			qp.items = [
+				{
+					label: `$(warning) ${localize('adeCloudHostManageAction', "Manage Cloud Host '{0}'...", hostAlias)}`,
+					detail: msg,
+					action: 'manage-host',
+				},
+				{
+					label: `$(refresh) ${localize('adeCloudHostRetryProbe', "Retry Connection to '{0}'", hostAlias)}`,
+					action: 'retry',
+				},
+			];
+		} finally {
+			if (!disposed && myGen === generation) {
+				qp.busy = false;
+			}
+		}
+	};
+
+	return new Promise<IAdeEngine | undefined>(resolve => {
+		let settled = false;
+		const finish = (result: IAdeEngine | undefined) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			disposed = true;
+			qp.dispose();
+			resolve(result);
+		};
+
+		qp.onDidTriggerButton(btn => {
+			if (btn === refreshButton) {
+				void loadCloudEngines(true);
+			}
+		});
+
+		qp.onDidAccept(() => {
+			const selected = qp.selectedItems[0];
+			if (!selected) {
+				return;
+			}
+			if (selected.action === 'retry') {
+				void loadCloudEngines(true);
+				return;
+			}
+			if (selected.action === 'manage-host') {
+				finish(undefined);
+				void commands?.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, hostAlias);
+				return;
+			}
+			if (selected.action === 'remote-terminal') {
+				finish(undefined);
+				void commands?.executeCommand('workbench.action.terminal.new', { cwd: projectUri });
+				return;
+			}
+			if (selected.action === 'remote-cli-settings') {
+				finish(undefined);
+				void commands?.executeCommand('workbench.action.openSettings', 'aexus.ade.remoteCliPaths');
+				return;
+			}
+			finish(selected.engine);
+		});
+
+		qp.onDidHide(() => finish(undefined));
+		qp.show();
+		void loadCloudEngines(false);
 	});
-	return picked?.engine;
 }
 
 async function resolveTargetProjectUri(accessor: ServicesAccessor, explicitUri?: URI, requireLocalFile = false): Promise<URI | undefined> {
@@ -481,6 +643,7 @@ function sessionPicker(accessor: ServicesAccessor): (projectUri?: URI, mode?: 'c
 	const dialogs = accessor.get(IFileDialogService);
 	const projects = accessor.get(IAdeProjectsService);
 	const uriIdentity = accessor.get(IUriIdentityService);
+	const commands = tryGetOptionalService<ICommandService>(accessor, ICommandService);
 	const fileService = tryGetOptionalService<IFileService>(accessor, IFileService);
 	const contextService = tryGetOptionalService<IWorkspaceContextService>(accessor, IWorkspaceContextService);
 	const workspaceEditing = tryGetOptionalService<IWorkspaceEditingService>(accessor, IWorkspaceEditingService);
@@ -506,23 +669,30 @@ function sessionPicker(accessor: ServicesAccessor): (projectUri?: URI, mode?: 'c
 			create = operation.create;
 		}
 
+		// When creating without an explicit project, pick the project FIRST so Cloud Projects probe their own remote engines!
+		let folder = projectUri;
+		if (create && !folder) {
+			const pickedFolders = await instantiationService.invokeFunction(acc => pickProjectFoldersWithCloudOption(acc, {
+				title: localize('selectAgentProject', "Select Agent Project Folder"),
+			}));
+			folder = pickedFolders?.[0];
+			if (!folder) {
+				return undefined;
+			}
+		}
+
 		const engine = await pickEngine(
 			quickInput,
 			sessions,
 			customTitle ?? (create ? localize('newEngineConversation', "New Conversation") : localize('existingEngineConversation', "Open Existing Conversation")),
+			folder,
+			commands,
 		);
 		if (!engine) {
 			return undefined;
 		}
 
 		if (create) {
-			let folder = projectUri;
-			if (!folder) {
-				const pickedFolders = await instantiationService.invokeFunction(acc => pickProjectFoldersWithCloudOption(acc, {
-					title: localize('selectAgentProject', "Select Agent Project Folder"),
-				}));
-				folder = pickedFolders?.[0];
-			}
 			if (!folder) {
 				return undefined;
 			}
@@ -549,7 +719,7 @@ function sessionPicker(accessor: ServicesAccessor): (projectUri?: URI, mode?: 'c
 			return sessions.create(engine.id, normalized);
 		}
 
-		const conversations = sessions.list(engine.id, projectUri).then(items => items.map(session => ({
+		const conversations = sessions.list(engine.id, folder).then(items => items.map(session => ({
 			label: session.label,
 			description: formatProjectDisplayPath(session.projectUri),
 			session,

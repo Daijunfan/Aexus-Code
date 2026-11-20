@@ -28,8 +28,10 @@ import {
 } from '../../../../platform/ade/common/adeControl.js';
 import {
 	AdeThinkingLevel,
+	IAdeEngineeringBackendService,
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
+import { resolveSupervisorJurisdiction } from '../../../../platform/ade/common/adeMissionBoundary.js';
 import { parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
 import {
 	ADE_ORGANIZATION_PRESETS,
@@ -85,6 +87,8 @@ import {
 } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { executeAdeRankOrDocsAction, isAdeRankOrDocsAction } from './adeRankApiHandler.js';
+import { executeAdeMissionRuntimeAction, isAdeMissionRuntimeAction } from './adeMissionControlHandler.js';
+import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
 import { canCallerOperateMission, IAdeMissionCaller, IAdeMissionRecord, IAdeMissionService } from './adeMissionStore.js';
 import { findProjectScmRepository, openScmResourceInAde } from './adeInspectorViews.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
@@ -484,11 +488,32 @@ export function buildAdeAgentRoleContext(
 	docsPaths?: IAdeDocsPaths,
 ): string | undefined {
 	const subordinates = projects.getDirectSubordinates(agent.id);
+	const rankDef = resolveEffectiveRankDefinition(config, agent.role, subordinates.length > 0);
+	const tierTag = formatTierTag(rankDef.tier);
+
+	// Minimal, clean initialization prompt for in-graph Mission node employees (Principles 1 & 6):
+	// Injects ONLY identity, numeric tier Lk, Mission/node ID, and immutable lazy-read entry commands.
+	if (agent.treeNodeId && (agent.treeType === 'mission' || !agent.treeType)) {
+		const missionId = agent.treeGovernorId ?? 'unknown';
+		const nodeList = agent.treeNodeIds && agent.treeNodeIds.length > 0
+			? agent.treeNodeIds.join(', ')
+			: agent.treeNodeId;
+		return [
+			'[Aexus ADE · Mission Node Employee]',
+			`- Agent ID: ${agent.id} | Tier: ${tierTag} (in-graph) | Mission: ${missionId} | Node(s): ${nodeList}`,
+			'- Scope: Execute your assigned node in this workspace. Never message supervisors upward; pass plain-text results solely via `token` commands.',
+			'- Immutable Lazy-Read Commands (numeric tier only, never alias):',
+			`  - Self & Token: \`aexus-ade whoami --json\` | \`aexus-ade token current --json\``,
+			`  - Read Single-Copy Docs On Demand: \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read common\``,
+			`  - Check API Updates: \`aexus-ade api update --since 0 --json\``,
+			`  - Hand Off / Block / Fail: \`aexus-ade token complete <tokenId> --summary "<concise factual summary>"\` | \`aexus-ade token block <tokenId> --duration <10h|30m> --reason "<why>" [--watch-pid <pid>] [--watch-file <path>]\` | \`aexus-ade token fail <tokenId> --reason "<why>"\``,
+		].join('\n');
+	}
+
 	if (!agent.role && subordinates.length === 0) {
 		return undefined;
 	}
 
-	const rankDef = resolveEffectiveRankDefinition(config, agent.role, subordinates.length > 0);
 	if (rankDef.pureExecution && subordinates.length === 0) {
 		return undefined;
 	}
@@ -509,7 +534,6 @@ export function buildAdeAgentRoleContext(
 					? 'segment_owner' as const
 					: 'orchestrator' as const;
 
-	const tierTag = formatTierTag(rankDef.tier);
 	return compileAdeRolePrompt({
 		config,
 		rank: rankDef,
@@ -555,7 +579,8 @@ export function buildAdeRoleSyncSnapshot(
 	const selectedAgentId = projects.selectedAgentId && projects.getAgent(projects.selectedAgentId) ? projects.selectedAgentId : undefined;
 	const agents: IAdeRoleSyncAgentEntry[] = projects.agents.map(agent => {
 		const hasSubs = projects.hasSubordinates(agent.id);
-		const isOrchestrated = Boolean(hasSubs || (agent.role && !isPureExecutionRank(config, agent.role)));
+		const isMissionNodeEmployee = Boolean(agent.treeNodeId);
+		const isOrchestrated = Boolean(hasSubs || isMissionNodeEmployee || (agent.role && !isPureExecutionRank(config, agent.role)));
 		const rank = resolveAdeAgentRank(agent, hasSubs, config);
 		return {
 			id: agent.id,
@@ -566,6 +591,7 @@ export function buildAdeRoleSyncSnapshot(
 			rank,
 			isOrchestrated,
 			isWorkTree: Boolean(agent.treeType),
+			isMissionNode: isMissionNodeEmployee,
 			rolePrompt: isOrchestrated ? buildAdeAgentRoleContext(projects, sessions, agent, config, docsPaths) : undefined,
 			preferredModel: agent.preferredModel,
 			preferredThinking: agent.preferredThinking,
@@ -748,8 +774,8 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 	}
 
 	if (compactDeltaMode) {
-		// Work-tree topology is locked by blueprint.md, so subsequent turns need zero delta hierarchy overhead.
-		if (agent.treeType === 'engineering' || agent.treeType === 'research') {
+		// Work-tree and Mission node topology is locked, so subsequent turns need zero delta hierarchy overhead.
+		if (agent.treeType === 'engineering' || agent.treeType === 'research' || agent.treeType === 'mission' || Boolean(agent.treeNodeId)) {
 			return undefined;
 		}
 		const subordinates = projects.getDirectSubordinates(agent.id);
@@ -867,8 +893,8 @@ const SHORT_ENGINE_ALIASES: Record<string, string> = {
 	pi: 'aexus-pi',
 };
 
-async function resolveEngineId(sessions: IAdeSessionsService, rawEngine: unknown): Promise<string | undefined> {
-	const available = await sessions.getEngines();
+async function resolveEngineId(sessions: IAdeSessionsService, rawEngine: unknown, projectUri?: URI): Promise<string | undefined> {
+	const available = await sessions.getEngines(projectUri);
 	if (typeof rawEngine !== 'string' || !rawEngine.trim()) {
 		return available[0]?.id;
 	}
@@ -970,6 +996,8 @@ export async function executeAdeControlRequest(
 	const viewsService = tryGetService(accessor, IViewsService);
 	const layoutService = tryGetService(accessor, IWorkbenchLayoutService);
 	const missionService = tryGetService(accessor, IAdeMissionService);
+	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
+	const engineeringBackend = tryGetService(accessor, IAdeEngineeringBackendService);
 	const inboxService = tryGetService(accessor, IAdeInboxService);
 	const cloudHosts = tryGetService(accessor, IAdeCloudHostBackendService);
 	const roleSchemaService = tryGetService(accessor, IAdeRoleSchemaService);
@@ -1041,12 +1069,76 @@ export async function executeAdeControlRequest(
 		}
 	}
 
+	// Partial-jurisdiction bound supervisors may invoke scoped off-graph operations;
+	// whole-Mission lifecycle controls require owner or full-jurisdiction supervisor authority.
+	const PARTIAL_SUPERVISOR_MISSION_ACTIONS = new Set([
+		'engineering.status',
+		'engineering.boundary.get',
+		'engineering.recall',
+		'engineering.patch',
+		'engineering.trigger.list',
+		'engineering.trigger.set',
+		'engineering.trigger.remove',
+		'engineering.host.bind',
+		'org.escalate',
+	]);
+	const FULL_SUPERVISOR_MISSION_ACTIONS = new Set([
+		'engineering.start',
+		'engineering.run',
+		'engineering.pause',
+		'engineering.resume',
+		'engineering.stop',
+		'engineering.timeout.set',
+	]);
+	let isBoundOffGraphSupervisorAction = false;
+	const needsPartialSup = PARTIAL_SUPERVISOR_MISSION_ACTIONS.has(dispatchAction) || PARTIAL_SUPERVISOR_MISSION_ACTIONS.has(action);
+	const needsFullSup = FULL_SUPERVISOR_MISSION_ACTIONS.has(dispatchAction) || FULL_SUPERVISOR_MISSION_ACTIONS.has(action);
+	if (!isHumanUser && rawCallerSessionId && (needsPartialSup || needsFullSup)) {
+		const rawTarget = String(params.mission ?? params.missionId ?? params.id ?? params.governor ?? '').trim();
+		const targetMission = rawTarget
+			? (missionService?.getMission(rawTarget) ?? missionService?.getMissionByLinkedSession(rawTarget))
+			: (missionService?.getMissionByLinkedSession(rawCallerSessionId) ?? missionService?.listMissions().find(m =>
+				missionRuntime?.getRuntimeState(m.id).boundary.supervisors.some(s => s.id === rawCallerSessionId),
+			));
+		if (targetMission && missionRuntime) {
+			const rt = missionRuntime.getRuntimeState(targetMission.id);
+			const isOwner = targetMission.ownerSessionId === rawCallerSessionId;
+			const isBoundSup = isOwner || rt.boundary.supervisors.some(s => s.id === rawCallerSessionId);
+			if (needsPartialSup && isBoundSup) {
+				isBoundOffGraphSupervisorAction = true;
+			} else if (needsFullSup && isBoundSup) {
+				const graph = parseMissionMermaidDag(targetMission.mermaidText);
+				const jur = resolveSupervisorJurisdiction(
+					rt.boundary,
+					rawCallerSessionId,
+					graph.nodes.map(n => n.id),
+					{ ownerSessionId: targetMission.ownerSessionId },
+				);
+				if (isOwner || jur.hasFullJurisdiction) {
+					isBoundOffGraphSupervisorAction = true;
+				}
+			}
+		}
+	}
+
 	// Fixed Aexus-Code Kernel Primitive API Authorization Gate:
 	// User-customizable rank schemas control WHO may call WHICH fixed core primitive API.
 	const permission = checkAdeApiPermission(roleConfig, params.caller, action);
-	if (!permission.allowed && !isSelfOwnedMissionAction) {
+	if (!permission.allowed && !isSelfOwnedMissionAction && !isBoundOffGraphSupervisorAction) {
 		throw new Error(permission.reason ?? localize('adeApiPermissionDenied', "Permission denied for action '{0}'.", String(action)));
 	}
+
+	const MISSION_UNIVERSAL_OR_TOKEN_ACTIONS = new Set([
+		'whoami',
+		'docs.read',
+		'api.update',
+		'token.current',
+		'token.trace',
+		'token.complete',
+		'token.reject',
+		'token.block',
+		'token.fail',
+	]);
 
 	let callerAgent: IAdeAgent | undefined;
 	let callerHasSubs = false;
@@ -1063,7 +1155,9 @@ export async function executeAdeControlRequest(
 		callerHasSubs = projects.hasSubordinates(foundCaller.id);
 		const liveRank = resolveAdeAgentRank(foundCaller, callerHasSubs, roleConfig);
 		const liveRankDef = resolveEffectiveRankDefinition(roleConfig, foundCaller.role, callerHasSubs);
-		if (!isSelfOwnedMissionAction) {
+		const isInGraphAllowedAction = MISSION_UNIVERSAL_OR_TOKEN_ACTIONS.has(action)
+			&& (action === 'whoami' || action === 'docs.read' || action === 'api.update' || Boolean(foundCaller.treeNodeId));
+		if (!isSelfOwnedMissionAction && !isBoundOffGraphSupervisorAction && !isInGraphAllowedAction) {
 			if (liveRankDef.pureExecution || isPureExecutionRank(roleConfig, liveRank)) {
 				throw new Error(localize('adeCallerDemotedToPure', "Permission denied: caller session rank '{0}' is pure execution and cannot invoke ADE control APIs.", liveRankDef.name));
 			}
@@ -1215,7 +1309,38 @@ export async function executeAdeControlRequest(
 	};
 
 	if (isAdeRankOrDocsAction(action)) {
-		return executeAdeRankOrDocsAction(action, params, { roleSchemaService, roleConfig });
+		const userHomeUri = await pathService?.userHome().catch(() => undefined);
+		const defaultAdeHomeDir = userHomeUri ? joinPath(userHomeUri, '.aexus-code').fsPath : undefined;
+		return executeAdeRankOrDocsAction(action, params, {
+			roleSchemaService,
+			roleConfig,
+			backendService: engineeringBackend,
+			projectsService: projects,
+			missionRuntimeService: missionRuntime,
+			defaultAdeHomeDir,
+			caller: {
+				isHumanUser,
+				isSecretary: isSecretaryCaller,
+				sessionId: callerAgent?.id ?? rawCallerSessionId,
+				rankRaw: effectiveCallerRank || rawCallerStr || undefined,
+			},
+		});
+	}
+
+	if (isAdeMissionRuntimeAction(action) || isAdeMissionRuntimeAction(dispatchAction)) {
+		return executeAdeMissionRuntimeAction(action, params, {
+			projects,
+			sessions,
+			missionService,
+			missionRuntime,
+			commandService,
+			roleConfig,
+			isHumanUser,
+			isSecretary: isSecretaryCaller,
+			callerAgent,
+			callerSessionId: callerAgent?.id ?? rawCallerSessionId,
+			isStrictDescendant: (candidateId, ancestorId) => isStrictDescendantOf(projects, candidateId, ancestorId),
+		});
 	}
 
 	switch (dispatchAction) {
@@ -1314,7 +1439,21 @@ export async function executeAdeControlRequest(
 			const rawList = Array.isArray(params.paths)
 				? params.paths
 				: [params.path ?? params.projectPath ?? params.uri ?? params.target];
-			const uris = rawList.map(entry => toUri(entry)).filter((uri): uri is URI => Boolean(uri)).map(uri => removeTrailingPathSeparator(uri));
+			const parsedUris = rawList.map(entry => toUri(entry)).filter((uri): uri is URI => Boolean(uri)).map(uri => removeTrailingPathSeparator(uri));
+			const uris: URI[] = [];
+			for (let uri of parsedUris) {
+				if (uri.scheme === AEXUS_SSH_SCHEME && cloudHosts && (uri.path === '/~' || uri.path === '~' || uri.path.startsWith('/~/') || uri.path.startsWith('~/'))) {
+					const host = await cloudHosts.getHost(uri.authority).catch(() => undefined);
+					const remoteHome = host?.lastTestStatus?.remoteHome?.trim();
+					if (remoteHome) {
+						const normHome = remoteHome.replace(/\\/g, '/').replace(/\/+$/, '');
+						const prefix = normHome.startsWith('/') ? normHome : `/${normHome}`;
+						const tail = uri.path.replace(/^\/?~\/?/, '');
+						uri = removeTrailingPathSeparator(uri.with({ path: tail ? `${prefix}/${tail}` : prefix }));
+					}
+				}
+				uris.push(uri);
+			}
 			if (uris.length === 0) {
 				throw new Error(localize('adeMissingProjectPath', "Project path is required."));
 			}
@@ -1457,6 +1596,32 @@ export async function executeAdeControlRequest(
 
 		case 'project.changes': {
 			const projectUri = resolveActiveOrTargetProjectUri(params.target ?? params.project ?? params.path ?? params.name);
+			if (projectUri.scheme === AEXUS_SSH_SCHEME && cloudHosts) {
+				const entries = await cloudHosts.remoteGitStatus(projectUri.authority, projectUri.path || '/').catch(() => []);
+				const stagedResources = entries.filter(e => e.staged).map(e => ({
+					path: formatProjectDisplayPath(joinPath(projectUri, e.relativePath)),
+					relativePath: e.relativePath,
+					status: e.status,
+					deleted: e.status === 'D',
+				}));
+				const workingResources = entries.filter(e => !e.staged).map(e => ({
+					path: formatProjectDisplayPath(joinPath(projectUri, e.relativePath)),
+					relativePath: e.relativePath,
+					status: e.status,
+					deleted: e.status === 'D',
+				}));
+				const groups = [
+					...(stagedResources.length > 0 ? [{ id: 'index', label: 'Staged Changes', count: stagedResources.length, resources: stagedResources }] : []),
+					...(workingResources.length > 0 ? [{ id: 'workingTree', label: 'Changes', count: workingResources.length, resources: workingResources }] : []),
+				];
+				return {
+					project: projects.getProjectName(projectUri),
+					projectPath: formatProjectDisplayPath(projectUri),
+					repositoryRoot: formatProjectDisplayPath(projectUri),
+					totalChanges: entries.length,
+					groups,
+				};
+			}
 			let repository = scmService ? findProjectScmRepository(scmService, uriIdentity, projectUri) : undefined;
 			if (!repository && scmService && projectUri.scheme === Schemas.file) {
 				await commandService.executeCommand('git.openRepository', projectUri.fsPath).catch(() => undefined);
@@ -1570,24 +1735,29 @@ export async function executeAdeControlRequest(
 		}
 
 		case 'engine.list': {
-			const engines = await sessions.getEngines();
+			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri ?? params.target;
+			const projectUri = rawProject ? (findMatchingProject(projects, uriIdentity, rawProject)?.uri ?? toUri(rawProject)) : undefined;
+			const forceRefresh = params.forceRefresh === true || params.refresh === true;
+			const engines = await sessions.getEngines(projectUri, forceRefresh ? { forceRefresh: true } : undefined);
 			return engines.map(engine => ({
 				id: engine.id,
 				shortId: engine.id.startsWith('aexus-') ? engine.id.slice('aexus-'.length) : engine.id,
 				name: engine.name,
 				description: engine.description,
 				available: true,
+				...(engine.remoteHost ? { remoteHost: engine.remoteHost } : {}),
+				...(engine.remoteOs ? { remoteOs: engine.remoteOs } : {}),
 			}));
 		}
 
 		case 'engine.sessions': {
+			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.target;
+			const projectUri = rawProject ? (findMatchingProject(projects, uriIdentity, rawProject)?.uri ?? toUri(rawProject)) : undefined;
 			const rawEngine = params.engineId ?? params.engine;
-			const engineId = await resolveEngineId(sessions, rawEngine);
+			const engineId = await resolveEngineId(sessions, rawEngine, projectUri);
 			if (!engineId) {
 				throw new Error(localize('adeNoEngineAvailable', "No Coding Agent engines are available."));
 			}
-			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.target;
-			const projectUri = rawProject ? (findMatchingProject(projects, uriIdentity, rawProject)?.uri ?? toUri(rawProject)) : undefined;
 			const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.floor(params.limit) : 50;
 			const items = await sessions.list(engineId, projectUri);
 			return items.slice(0, limit).map(item => ({
@@ -1795,7 +1965,7 @@ export async function executeAdeControlRequest(
 				}
 			} else {
 				const rawEngine = params.engineId ?? params.engine;
-				const engineId = await resolveEngineId(sessions, rawEngine);
+				const engineId = await resolveEngineId(sessions, rawEngine, projectUri);
 				if (!engineId) {
 					throw new Error(localize('adeNoEngineAvailable', "No Coding Agent engines are available."));
 				}
@@ -1824,10 +1994,6 @@ export async function executeAdeControlRequest(
 
 		case 'session.attach': {
 			const rawEngine = params.engineId ?? params.engine;
-			const engineId = await resolveEngineId(sessions, rawEngine);
-			if (!engineId) {
-				throw new Error(localize('adeNoEngineAvailable', "No Coding Agent engines are available."));
-			}
 			const rawNativeId = params.nativeId ?? params.nativeSessionId ?? params.conversationId;
 			if (typeof rawNativeId !== 'string' || !rawNativeId.trim()) {
 				throw new Error(localize('adeMissingNativeId', "Native conversation ID is required for session attach."));
@@ -1859,6 +2025,10 @@ export async function executeAdeControlRequest(
 				?? projects.selectedProject?.uri
 				?? navigation.selectedProject?.uri
 				?? projects.projects[0]?.uri;
+			const engineId = await resolveEngineId(sessions, rawEngine, fallbackProjectUri);
+			if (!engineId) {
+				throw new Error(localize('adeNoEngineAvailable', "No Coding Agent engines are available."));
+			}
 
 			const attached = sessions.attach
 				? await sessions.attach(engineId, nativeId, fallbackProjectUri)
@@ -1932,7 +2102,7 @@ export async function executeAdeControlRequest(
 				throw new Error(localize('adeLockedByEngineeringConnect', "Subordinate session '{0}' is locked by an Engineering tree. Update its engine via Engineering blueprint or 'aexus-ade engineering configure'.", agent.label));
 			}
 			const rawEngine = params.engineId ?? params.engine;
-			const engineId = await resolveEngineId(sessions, rawEngine);
+			const engineId = await resolveEngineId(sessions, rawEngine, agent.projectUri);
 			if (!engineId) {
 				throw new Error(localize('adeNoEngineAvailable', "No Coding Agent engines are available."));
 			}
@@ -2104,10 +2274,8 @@ export async function executeAdeControlRequest(
 				if (callerAgent && agent.id === callerAgent.id) {
 					throw new Error(localize('adeCannotSendToSelf', "Permission denied: a session cannot send messages to itself."));
 				}
-				const isDirectSupervisor = Boolean(callerAgent && callerAgent.parentId && agent.id === callerAgent.parentId);
-				if (!isDirectSupervisor) {
-					assertCanManageTarget(agent, 'send messages to');
-				}
+				// Principle 7 hard iron law: strictly top-down messaging only (no upward direct-parent exemption).
+				assertCanManageTarget(agent, 'send messages to');
 			}
 			const rawMessage = params.message ?? params.prompt ?? params.text;
 			if (typeof rawMessage !== 'string' || !rawMessage.trim()) {
@@ -2695,7 +2863,10 @@ export async function executeAdeControlRequest(
 			if (!inboxService) {
 				throw new Error('ADE Inbox service is not available.');
 			}
-			const gov = resolveAgentFromParams(projects, { id: params.from ?? params.governor ?? params.governorId ?? params.id });
+			// Verified non-Human/non-Secretary callers cannot spoof --from to impersonate another session.
+			const gov = (!isHumanOrSecretary && callerAgent)
+				? callerAgent
+				: resolveAgentFromParams(projects, { id: params.from ?? params.governor ?? params.governorId ?? params.id });
 			const message = typeof params.message === 'string' ? params.message.trim() : '';
 			if (!message) {
 				throw new Error('Inbox message text is required.');
@@ -2720,6 +2891,12 @@ export async function executeAdeControlRequest(
 			const id = typeof params.id === 'string' ? params.id.trim() : '';
 			if (!id) {
 				throw new Error('Inbox message ID (--id) is required.');
+			}
+			if (!isHumanUser) {
+				const targetItem = inboxService.list({ includeResolved: true }).find(i => i.id === id);
+				if (targetItem?.kind === 'user_gate') {
+					throw new Error('FORBIDDEN: Human Gate Inbox items can only be resolved by the Human User (L-1).');
+				}
 			}
 			const resolved = await inboxService.resolveItem(id, typeof params.resolution === 'string' ? params.resolution : undefined);
 			if (!resolved) {
@@ -2769,6 +2946,7 @@ export async function executeAdeControlRequest(
 			}
 			const lookupKey = String(params.id ?? params.alias ?? params.target ?? '').trim();
 			const existing = lookupKey ? await cloudHosts.getHost(lookupKey) : undefined;
+			const previousAlias = existing?.alias;
 			const hostName = String(params.hostName ?? params.host ?? existing?.hostName ?? '').trim();
 			if (!hostName) {
 				throw new Error('Cloud Host address (--host) is required.');
@@ -2777,7 +2955,7 @@ export async function executeAdeControlRequest(
 			const osKind: AdeCloudHostOs | undefined = rawOs === 'windows' || rawOs === 'macos' || rawOs === 'linux' ? rawOs : existing?.os;
 			const rawStrict = typeof params.strictHostKeyChecking === 'string' ? params.strictHostKeyChecking.trim() : undefined;
 			const strictCheck = rawStrict === 'yes' || rawStrict === 'accept-new' || rawStrict === 'no' ? rawStrict : existing?.strictHostKeyChecking;
-			return cloudHosts.upsertHost({
+			const saved = await cloudHosts.upsertHost({
 				id: typeof params.id === 'string' && params.id.trim() ? params.id.trim() : existing?.id,
 				name: (typeof params.name === 'string' && params.name.trim() ? params.name.trim() : existing?.name) ?? hostName,
 				alias: typeof params.alias === 'string' && params.alias.trim() ? params.alias.trim() : existing?.alias,
@@ -2791,6 +2969,13 @@ export async function executeAdeControlRequest(
 				defaultDirectory: typeof params.defaultDirectory === 'string' ? params.defaultDirectory : existing?.defaultDirectory,
 				notes: typeof params.notes === 'string' ? params.notes : existing?.notes,
 			});
+			if (previousAlias && previousAlias.toLowerCase() !== saved.alias.toLowerCase()) {
+				projects.migrateCloudHostAlias?.(previousAlias, saved.alias);
+				void commandService?.executeCommand?.('aexus.agentEngines.invalidateCloudHost', previousAlias, saved.alias);
+			} else {
+				void commandService?.executeCommand?.('aexus.agentEngines.invalidateCloudHost', saved.alias);
+			}
+			return saved;
 		}
 
 		case 'host.delete': {
@@ -2801,10 +2986,12 @@ export async function executeAdeControlRequest(
 			if (!rawTarget) {
 				throw new Error('Cloud Host ID or alias is required.');
 			}
+			const existing = await cloudHosts.getHost(rawTarget).catch(() => undefined);
 			const ok = await cloudHosts.deleteHost(rawTarget);
 			if (!ok) {
 				throw new Error(`Cloud Host not found: ${rawTarget}`);
 			}
+			void commandService?.executeCommand?.('aexus.agentEngines.invalidateCloudHost', existing?.alias ?? rawTarget);
 			return { deleted: rawTarget };
 		}
 
@@ -2907,6 +3094,8 @@ CommandsRegistry.registerCommand('aexus.ade.getCloudHostSshContext', async (acce
 	if (!cloudHosts) {
 		return undefined;
 	}
+	const configService = tryGetService(accessor, IConfigurationService);
+	const configuredSshPath = configService?.getValue<string>('remote.SSH.path')?.trim() || undefined;
 	const alias = typeof rawAlias === 'string' ? rawAlias.trim() : '';
 	const [effectiveSshConfigPath, matched] = await Promise.all([
 		cloudHosts.getEffectiveSshConfigPath().catch(() => undefined),
@@ -2916,6 +3105,12 @@ CommandsRegistry.registerCommand('aexus.ade.getCloudHostSshContext', async (acce
 		effectiveSshConfigPath,
 		alias: matched?.alias || alias || undefined,
 		os: matched?.os ?? 'linux',
+		strictHostKeyChecking: matched?.strictHostKeyChecking,
+		remoteHome: matched?.lastTestStatus?.remoteHome,
+		hostName: matched?.hostName,
+		user: matched?.user,
+		port: matched?.port,
+		sshExecutable: configuredSshPath,
 	};
 });
 
@@ -2937,6 +3132,15 @@ CommandsRegistry.registerCommand(ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID, (accesso
 
 CommandsRegistry.registerCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, (accessor: ServicesAccessor, arg1: IAdeControlDispatchRequest | string, arg2?: Record<string, unknown>) => {
 	return executeAdeControlRequest(accessor, arg1, arg2);
+});
+
+CommandsRegistry.registerCommand('aexus.ade.engineering.workerHeartbeat', (accessor: ServicesAccessor, sessionResourceOrId: unknown, rawTimestamp?: unknown) => {
+	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
+	if (!missionRuntime || typeof sessionResourceOrId !== 'string' || !sessionResourceOrId.trim()) {
+		return;
+	}
+	const ts = typeof rawTimestamp === 'number' && Number.isFinite(rawTimestamp) ? rawTimestamp : Date.now();
+	missionRuntime.touchAgentActivity(sessionResourceOrId.trim(), ts);
 });
 
 CommandsRegistry.registerCommand(ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID, (accessor: ServicesAccessor, rawPayload: unknown) => {

@@ -36,7 +36,7 @@ import {
 	parseLiveRemotePathInput,
 	resolveInitialCloudHostDirectory,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
-import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import {
 	createFileSystemProviderError,
@@ -211,6 +211,13 @@ export class AexusSshFileSystemProvider extends Disposable implements
 			throw mapRemoteFsError(err);
 		}
 	}
+
+	notifyExternalChanges(resources: readonly URI[]): void {
+		if (resources.length === 0) {
+			return;
+		}
+		this._onDidChangeFile.fire(resources.map(resource => ({ type: FileChangeType.UPDATED, resource })));
+	}
 }
 
 class AexusSshGitHeadContentProvider implements ITextModelContentProvider {
@@ -272,6 +279,35 @@ export class AdeCloudHostWorkbenchContribution extends Disposable implements IWo
 		}
 		const provider = this._register(new AexusSshFileSystemProvider(backend));
 		this._register(fileService.registerProvider(AEXUS_SSH_SCHEME, provider));
+		this._register(CommandsRegistry.registerCommand('aexus.ade.cloudProjectDidMutate', (_accessor, rawProjectUri?: unknown) => {
+			let projectUri: URI | undefined;
+			if (URI.isUri(rawProjectUri)) {
+				projectUri = rawProjectUri;
+			} else if (typeof rawProjectUri === 'string' && rawProjectUri.trim()) {
+				try {
+					projectUri = URI.parse(rawProjectUri);
+				} catch {
+					projectUri = undefined;
+				}
+			}
+			if (!projectUri || projectUri.scheme !== AEXUS_SSH_SCHEME) {
+				return;
+			}
+			const projAuth = projectUri.authority.toLowerCase();
+			const projPath = (projectUri.path || '/').replace(/\/+$/, '');
+			const changed: URI[] = [projectUri];
+			for (const model of modelService.getModels()) {
+				const u = model.uri;
+				if (u.scheme !== AEXUS_SSH_SCHEME || u.authority.toLowerCase() !== projAuth) {
+					continue;
+				}
+				const modelPath = (u.path || '/').replace(/\/+$/, '');
+				if (!projPath || modelPath === projPath || modelPath.startsWith(`${projPath}/`)) {
+					changed.push(u);
+				}
+			}
+			provider.notifyExternalChanges(changed);
+		}));
 		this._register(textModelService.registerTextModelContentProvider(
 			AEXUS_SSH_GIT_HEAD_SCHEME,
 			new AexusSshGitHeadContentProvider(backend, modelService, languageService),
@@ -1438,5 +1474,6 @@ export async function pickProjectFoldersWithCloudOption(
 			));
 			continue;
 		}
+		return undefined;
 	}
 }

@@ -16,6 +16,7 @@ import {
 	discoverEngineModels,
 	discoverSlashCommands,
 	discoverCustomizationFiles,
+	parseAgyModelsOutput,
 	readSkillOrCommandTemplate,
 } from '../src/capabilities.ts';
 
@@ -406,6 +407,162 @@ describe('discoverEngineModels', () => {
 		assert.deepEqual(claudeIds, ['default', 'sonnet', 'opus', 'haiku', 'claude-sonnet-4-5', 'claude-opus-4-5']);
 		const codexIds = (await discoverEngineModels('aexus-codex', cleanCwd)).map(m => m.id);
 		assert.deepEqual(codexIds, ['default', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'codex-mini-latest']);
+	});
+
+	test('custom models do not suppress built-in fallback lists', async () => {
+		const cleanCwd = createCaseDir('custom-fallbacks');
+		const expectedFallbacks: Record<string, string[]> = {
+			'aexus-antigravity': ['gemini-2.5-pro', 'gemini-2.5-flash', 'claude-sonnet-4-5'],
+			'aexus-codex': ['gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'codex-mini-latest'],
+			'aexus-dsh': ['["deepseek-official","deepseek-reasoner"]', '["deepseek-official","deepseek-chat"]'],
+			'aexus-pi': ['claude-sonnet-4-5', 'gpt-5', 'gemini-2.5-pro', 'deepseek-reasoner'],
+			'aexus-cline': ['deepseek-reasoner', 'deepseek-chat', 'claude-sonnet-4-5', 'gpt-5', 'gemini-2.5-pro'],
+		};
+
+		for (const [engineId, fallbackIds] of Object.entries(expectedFallbacks)) {
+			const models = await discoverEngineModels(engineId, cleanCwd, [], undefined, ['my-saved-custom']);
+			const ids = models.map(model => model.id);
+			for (const fallbackId of fallbackIds) {
+				assert.ok(ids.includes(fallbackId), `${engineId} lost fallback model ${fallbackId}`);
+			}
+			assert.deepEqual(models[models.length - 1], {
+				id: 'my-saved-custom',
+				name: 'my-saved-custom',
+				description: 'Custom model',
+			}, `${engineId} should append real custom models at the tail`);
+		}
+	});
+
+	test('custom models never overwrite the display name or description of configured models', async () => {
+		const codexCwd = createCaseDir('custom-codex');
+		writeCaseFile(codexCwd, '.codex/models_cache.json', JSON.stringify({
+			models: [{ slug: 'gpt-5', display_name: 'GPT-5', description: 'Fast frontier model' }],
+		}));
+
+		const models = await discoverEngineModels('aexus-codex', codexCwd, [], undefined, ['gpt-5', 'my-saved-custom']);
+		const configured = models.filter(model => model.id === 'gpt-5');
+
+		assert.equal(configured.length, 1);
+		assert.deepEqual(configured[0], {
+			id: 'gpt-5',
+			name: 'GPT-5',
+			description: 'gpt-5 · Fast frontier model',
+		});
+		assert.deepEqual(models[models.length - 1], {
+			id: 'my-saved-custom',
+			name: 'my-saved-custom',
+			description: 'Custom model',
+		});
+		assert.equal(models.filter(model => model.description === 'Custom model').length, 1);
+	});
+
+	test('Codex models_cache.json hides entries marked visibility "hide" or hidden: true', async () => {
+		const cwd = createCaseDir('codex-visibility');
+		writeCaseFile(cwd, '.codex/models_cache.json', JSON.stringify({
+			models: [
+				{ slug: 'gpt-5', display_name: 'GPT-5', visibility: 'list' },
+				{ slug: 'hidden-by-visibility', display_name: 'Hidden By Visibility', visibility: 'hide' },
+				{ slug: 'hidden-by-visibility-alias', display_name: 'Hidden By Visibility Alias', visibility: 'hidden' },
+				{ slug: 'hidden-by-flag', display_name: 'Hidden By Flag', hidden: true },
+				{ slug: 'o3', display_name: 'o3', visibility: 'list' },
+			],
+		}));
+
+		const ids = (await discoverEngineModels('aexus-codex', cwd)).map(model => model.id);
+
+		assert.deepEqual(ids, ['default', 'gpt-5', 'o3']);
+	});
+
+	test('Kilo and OpenCode keep provider display names for default models, including array-form models', async () => {
+		const kiloCwd = createCaseDir('kilo-default-name');
+		writeCaseFile(kiloCwd, '.kilo/kilo.jsonc', JSON.stringify({
+			model: 'anthropic/claude-sonnet-4-5',
+			provider: {
+				anthropic: {
+					models: {
+						'claude-sonnet-4-5': { name: 'Claude Sonnet 4.5' },
+					},
+				},
+			},
+		}));
+
+		const kiloModels = await discoverEngineModels('aexus-kilo', kiloCwd);
+		const kiloDefault = kiloModels.filter(model => model.id === 'anthropic/claude-sonnet-4-5');
+		assert.equal(kiloDefault.length, 1);
+		assert.deepEqual(kiloDefault[0], {
+			id: 'anthropic/claude-sonnet-4-5',
+			name: 'Claude Sonnet 4.5',
+			description: 'anthropic/claude-sonnet-4-5',
+		});
+
+		const openCodeCwd = createCaseDir('opencode-array-models');
+		writeCaseFile(openCodeCwd, 'opencode.json', JSON.stringify({
+			model: 'openai/gpt-5',
+			provider: {
+				openai: {
+					models: [
+						{ id: 'gpt-5', name: 'GPT-5' },
+						'o3',
+					],
+				},
+			},
+		}));
+
+		const openCodeModels = await discoverEngineModels('aexus-opencode', openCodeCwd);
+		const openCodeDefault = openCodeModels.filter(model => model.id === 'openai/gpt-5');
+		assert.equal(openCodeDefault.length, 1);
+		assert.deepEqual(openCodeDefault[0], {
+			id: 'openai/gpt-5',
+			name: 'GPT-5',
+			description: 'openai/gpt-5',
+		});
+		assert.deepEqual(openCodeModels.find(model => model.id === 'openai/o3'), {
+			id: 'openai/o3',
+			name: 'openai/o3',
+		});
+
+		const openRouterCwd = createCaseDir('kilo-openrouter-nested-slash');
+		writeCaseFile(openRouterCwd, '.kilo/kilo.jsonc', JSON.stringify({
+			model: 'openrouter/anthropic/claude-sonnet-4-5',
+			provider: {
+				openrouter: {
+					models: {
+						'anthropic/claude-sonnet-4-5': { name: 'Claude Sonnet 4.5 (OR)' },
+						'openrouter/openai/gpt-5': { name: 'GPT-5 (OR)' },
+					},
+				},
+			},
+		}));
+		const orModels = await discoverEngineModels('aexus-kilo', openRouterCwd);
+		assert.deepEqual(orModels.filter(m => m.id === 'openrouter/anthropic/claude-sonnet-4-5'), [{
+			id: 'openrouter/anthropic/claude-sonnet-4-5',
+			name: 'Claude Sonnet 4.5 (OR)',
+			description: 'openrouter/anthropic/claude-sonnet-4-5',
+		}]);
+		assert.deepEqual(orModels.find(m => m.id === 'openrouter/openai/gpt-5'), {
+			id: 'openrouter/openai/gpt-5',
+			name: 'GPT-5 (OR)',
+			description: 'openrouter/openai/gpt-5',
+		});
+	});
+
+	test('parseAgyModelsOutput skips the header, blank lines, and duplicate IDs', () => {
+		const output = [
+			'Fetching available models...',
+			'',
+			'gemini-2.5-pro\tGemini 2.5 Pro',
+			'gemini-2.5-flash\tGemini 2.5 Flash',
+			'',
+			'claude-sonnet-4-5\tClaude Sonnet 4.5',
+			'gemini-2.5-pro\tGemini 2.5 Pro (duplicate)',
+			'',
+		].join('\n');
+
+		assert.deepEqual(parseAgyModelsOutput(output), [
+			{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+			{ id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+			{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
+		]);
 	});
 });
 

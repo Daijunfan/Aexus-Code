@@ -218,6 +218,7 @@ export interface IAdeProjectsService {
 		readonly preferredModel?: string;
 		readonly preferredThinking?: AdeThinkingLevel;
 		readonly workingDirectoryOverride?: string;
+		readonly projectUri?: URI;
 	}): void;
 
 	addProject(uri: URI, label?: string): IAdeAgent;

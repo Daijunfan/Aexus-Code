@@ -11,8 +11,19 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
+import { parseAgyModelsOutput } from './capabilities';
+import {
+	captureRemoteEngine,
+	CloudHostTarget,
+	execRemoteShell,
+	joinRemotePath,
+	posixQuote,
+	psSingleQuote,
+	readRemoteTextFile,
+	readRemoteTextFilesBatch,
+} from './cloudTransport';
 import { AgentChildIdentity, ROLE_INIT_MARKER, SHARED_PURE_SCOPE_KEY, stripAdeControlEnv, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { agentIdentityScopeKey, capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 
@@ -43,6 +54,9 @@ interface AcpSessionUpdate {
 	title?: string | null;
 	updatedAt?: string | null;
 	availableCommands?: Array<{ name?: string; description?: string }>;
+	configOptions?: AcpSessionSetupResult['configOptions'];
+	models?: AcpSessionSetupResult['models'];
+	modes?: AcpSessionSetupResult['modes'];
 	usage?: unknown;
 }
 
@@ -152,6 +166,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 	protected cachedCommands: Array<{ name: string; description?: string }> = [];
 	protected cachedConfigOptionIds = new Set<string>();
 	protected cachedModelConfigValues = new Set<string>();
+	protected hasReceivedModels = false;
+	protected hasReceivedModes = false;
+	protected hasReceivedCommands = false;
+	protected readonly probedSessionTimestamps = new Map<string, number>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
 
 	protected get client(): JsonLineClient | undefined {
@@ -167,7 +185,29 @@ export abstract class AcpRuntime implements EngineRuntime {
 	constructor(
 		protected readonly executable: string,
 		private readonly args: readonly string[],
+		readonly remoteTarget?: CloudHostTarget,
 	) { }
+
+	protected upsertCachedModel(id: string, name?: string, description?: string): void {
+		const trimmedId = id.trim();
+		if (!trimmedId) {
+			return;
+		}
+		const trimmedName = name?.trim() || trimmedId;
+		const trimmedDesc = description?.trim() || undefined;
+		const existing = this.cachedModels.find(m => m.id === trimmedId);
+		if (existing) {
+			if (trimmedName !== trimmedId && (existing.name === existing.id || !existing.name)) {
+				existing.name = trimmedName;
+			}
+			if (trimmedDesc && !existing.description) {
+				existing.description = trimmedDesc;
+			}
+			return;
+		}
+		this.hasReceivedModels = true;
+		this.cachedModels.push({ id: trimmedId, name: trimmedName, description: trimmedDesc });
+	}
 
 	protected ingestSessionSetup(setup: Partial<AcpSessionSetupResult> | undefined): void {
 		if (!setup) {
@@ -176,7 +216,6 @@ export abstract class AcpRuntime implements EngineRuntime {
 		if (setup.models?.currentModelId?.trim()) {
 			this.cachedDefaultModel = setup.models.currentModelId.trim();
 		}
-		let sawModelConfigOptions = false;
 		if (Array.isArray(setup.configOptions)) {
 			for (const opt of setup.configOptions) {
 				const optId = (opt.id ?? '').trim();
@@ -186,7 +225,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				const flatOptions = (opt.options ?? []).flatMap(entry => Array.isArray(entry.options) ? entry.options : [entry]);
 				if (optId === 'model') {
 					const rawCur = typeof opt.currentValue === 'string' ? opt.currentValue.trim() : '';
-					if (rawCur && !this.cachedDefaultModel) {
+					if (rawCur) {
 						try {
 							const tuple = JSON.parse(rawCur) as unknown;
 							this.cachedDefaultModel = Array.isArray(tuple) && typeof tuple[1] === 'string' ? tuple[1] : rawCur;
@@ -194,21 +233,17 @@ export abstract class AcpRuntime implements EngineRuntime {
 							this.cachedDefaultModel = rawCur;
 						}
 					}
-					if (flatOptions.length > 0) {
-						sawModelConfigOptions = true;
-						const seen = new Set(this.cachedModels.map(m => m.id));
-						for (const item of flatOptions) {
-							const val = (item.value ?? '').trim();
-							if (val) {
-								this.cachedModelConfigValues.add(val);
-								if (!seen.has(val)) {
-									seen.add(val);
-									this.cachedModels.push({ id: val, name: item.name?.trim() || val, description: item.description });
-								}
-							}
+					for (const item of flatOptions) {
+						const val = (item.value ?? '').trim();
+						if (val) {
+							this.cachedModelConfigValues.add(val);
+							this.upsertCachedModel(val, item.name, item.description);
 						}
 					}
 				} else if (optId === 'mode') {
+					if (flatOptions.length > 0) {
+						this.hasReceivedModes = true;
+					}
 					const seen = new Set(this.cachedModes.map(m => m.id));
 					for (const item of flatOptions) {
 						const val = (item.value ?? '').trim();
@@ -220,17 +255,17 @@ export abstract class AcpRuntime implements EngineRuntime {
 				}
 			}
 		}
-		if (!sawModelConfigOptions && Array.isArray(setup.models?.availableModels)) {
-			const seen = new Set(this.cachedModels.map(m => m.id));
+		if (Array.isArray(setup.models?.availableModels)) {
+			this.hasReceivedModels = true;
 			for (const m of setup.models.availableModels) {
 				const id = (m.modelId ?? m.id ?? '').trim();
-				if (id && !seen.has(id)) {
-					seen.add(id);
-					this.cachedModels.push({ id, name: m.name?.trim() || id, description: m.description });
+				if (id) {
+					this.upsertCachedModel(id, m.name, m.description);
 				}
 			}
 		}
 		if (Array.isArray(setup.modes?.availableModes)) {
+			this.hasReceivedModes = true;
 			const seen = new Set(this.cachedModes.map(m => m.id));
 			for (const m of setup.modes.availableModes) {
 				const id = (m.id ?? m.modeId ?? '').trim();
@@ -246,13 +281,29 @@ export abstract class AcpRuntime implements EngineRuntime {
 		if (!Array.isArray(commands)) {
 			return;
 		}
-		const seen = new Set(this.cachedCommands.map(c => c.name.toLowerCase()));
+		const next: Array<{ name: string; description?: string }> = [];
+		const seen = new Set<string>();
 		for (const cmd of commands) {
 			const name = (cmd.name ?? '').trim().replace(/^\//, '');
 			if (name && !seen.has(name.toLowerCase())) {
 				seen.add(name.toLowerCase());
-				this.cachedCommands.push({ name, description: cmd.description });
+				next.push({ name, description: cmd.description });
 			}
+		}
+		this.hasReceivedCommands = true;
+		this.cachedCommands = next;
+	}
+
+	protected ingestSessionUpdateMetadata(update: AcpSessionUpdate): void {
+		const kind = update.sessionUpdate ?? update.type;
+		if (kind === 'available_commands_update') {
+			this.ingestAvailableCommands(update.availableCommands);
+		} else if (kind === 'config_option_update' || kind === 'config_options_update' || Array.isArray(update.configOptions) || update.models || update.modes) {
+			this.ingestSessionSetup({
+				configOptions: update.configOptions,
+				models: update.models,
+				modes: update.modes,
+			});
 		}
 	}
 
@@ -275,16 +326,16 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const currentSlot = slot;
 		currentSlot.ready = (async () => {
 			const baseEnv = await this.buildSpawnEnv();
-			const childEnv = await prepareAgentChildEnv(identity ?? { sessionId: `${this.id}-pure`, pureWorker: true }, baseEnv);
-			const client = new JsonLineClient(this.executable, [...this.args], cwd, childEnv);
+			const childEnv = this.remoteTarget
+				? { ...(baseEnv ?? {}), ...(await prepareRemoteAgentChildEnv(this.remoteTarget, identity ?? { sessionId: `${this.id}-pure`, pureWorker: true })) }
+				: await prepareAgentChildEnv(identity ?? { sessionId: `${this.id}-pure`, pureWorker: true }, baseEnv);
+			const client = new JsonLineClient(this.executable, [...this.args], cwd, childEnv, this.remoteTarget);
 			currentSlot.client = client;
 			client.onPacket(packet => {
 				if (packet.method === 'session/update') {
 					const params = packet.params ?? {};
 					const update = (params.update ?? params) as AcpSessionUpdate;
-					if ((update.sessionUpdate ?? update.type) === 'available_commands_update') {
-						this.ingestAvailableCommands(update.availableCommands);
-					}
+					this.ingestSessionUpdateMetadata(update);
 				}
 			});
 			const result = await client.request<AcpInitializeResult>('initialize', {
@@ -354,6 +405,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			await slot.client.request('session/close', { sessionId }).catch(() => { });
 		}
 		this.sessionScopeKeys.delete(sessionId);
+		this.probedSessionTimestamps.delete(sessionId);
 		if (scopeKey && scopeKey !== SHARED_PURE_SCOPE_KEY) {
 			await this.resetClient(scopeKey);
 		}
@@ -377,6 +429,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				await current.waitForClose();
 			}
 		}
+		this.probedSessionTimestamps.clear();
 	}
 
 	async create(cwd: string): Promise<NativeSession> {
@@ -419,7 +472,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			? agentIdentityScopeKey(session.id, options, session.cwd)
 			: this.resolveLiveScopeKey(session.id);
 		const identity: AgentChildIdentity = options
-			? { sessionId: session.id, callerRole: options.callerRole, pureWorker: options.pureWorker }
+			? { sessionId: options.adeSessionId || session.id, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode }
 			: { sessionId: session.id, pureWorker: true };
 		await this.retireStaleSessionSlot(session.id, scopeKey);
 		if (!session.unmaterialized) {
@@ -446,11 +499,13 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 		try {
 			if (this.agentCapabilities?.sessionCapabilities?.resume) {
-				await client.request('session/resume', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+				const resumed = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/resume', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+				this.ingestSessionSetup(resumed);
 			} else if (this.agentCapabilities?.loadSession) {
 				slot.loadingSessions.add(session.id);
 				try {
-					await client.request('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+					const loaded = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+					this.ingestSessionSetup(loaded);
 				} finally {
 					slot.loadingSessions.delete(session.id);
 				}
@@ -458,6 +513,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
 				this.ingestSessionSetup(created);
 				session.id = created.sessionId;
+				this.knownSessions.set(session.id, session);
 			}
 			slot.openSessions.add(session.id);
 		} catch (error) {
@@ -468,6 +524,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			this.ingestSessionSetup(created);
 			session.id = created.sessionId;
 			slot.openSessions.add(session.id);
+			this.knownSessions.set(session.id, session);
 		}
 	}
 
@@ -500,7 +557,8 @@ export abstract class AcpRuntime implements EngineRuntime {
 			}
 		});
 		try {
-			await client.request('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+			const loaded = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+			this.ingestSessionSetup(loaded);
 			slot.openSessions.add(session.id);
 		} finally {
 			listener.dispose();
@@ -637,42 +695,76 @@ export abstract class AcpRuntime implements EngineRuntime {
 		await this.closeSession(session.id);
 	}
 
-	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
-		if (this.cachedModels.length === 0 && this.cachedModes.length === 0 && this.cachedCommands.length === 0 && session && !session.unmaterialized) {
-			try {
-				const scopeKey = this.resolveLiveScopeKey(session.id);
-				const { slot, client } = await withTimeout(this.ensureClientSlot(scopeKey), 8000);
-				if (!slot.openSessions.has(session.id) && cwd) {
-					await withTimeout(this.ensureSessionOpen(slot, client, session), 8000).catch(() => { });
-				}
-			} catch { /* Non-fatal capability probe. */ }
-		}
+	protected snapshotRuntimeCapabilities(): EngineRuntimeCapabilities {
 		return {
 			defaultModel: this.cachedDefaultModel,
-			models: this.cachedModels,
-			modes: this.cachedModes,
-			commands: this.cachedCommands,
+			models: this.hasReceivedModels ? this.cachedModels.map(m => ({ ...m })) : undefined,
+			modes: this.hasReceivedModes ? this.cachedModes.map(m => ({ ...m })) : undefined,
+			commands: this.hasReceivedCommands ? this.cachedCommands.map(c => ({ ...c })) : undefined,
 		};
+	}
+
+	async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+		const lastProbeAt = session ? (this.probedSessionTimestamps.get(session.id) ?? 0) : 0;
+		const cooldownElapsed = Date.now() - lastProbeAt >= 30_000;
+		const needsProbe = (this.cachedModels.length === 0 || !this.cachedDefaultModel)
+			&& Boolean(session && !session.unmaterialized && !session.provisional && cooldownElapsed);
+		if (needsProbe && session) {
+			if (this.probedSessionTimestamps.size > 256) {
+				this.probedSessionTimestamps.clear();
+			}
+			this.probedSessionTimestamps.set(session.id, Date.now());
+			try {
+				const scopeKey = this.resolveLiveScopeKey(session.id);
+				const { slot, client } = await withTimeout(this.ensureClientSlot(scopeKey), 5000);
+				if (!slot.openSessions.has(session.id) && cwd) {
+					await withTimeout(this.ensureSessionOpen(slot, client, session), 5000).catch(() => { });
+				}
+			} catch { /* Retry allowed after cooldown. */ }
+		}
+		return this.snapshotRuntimeCapabilities();
 	}
 
 	async executeCommand(session: NativeSession, command: string, _argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean> {
 		const cmd = command.trim().toLowerCase();
 		if (cmd === 'mcp') {
-			const configCandidates = [
-				path.join(session.cwd, '.mcp.json'),
-				path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json'),
-				path.join(os.homedir(), '.dsh', 'mcp.json'),
-				path.join(os.homedir(), '.cline', 'data', 'settings', 'cline_mcp_settings.json'),
-			];
 			const serverNames = new Set<string>();
-			for (const candidate of configCandidates) {
-				try {
-					const raw = await fs.readFile(candidate, 'utf8');
-					const parsed = JSON.parse(raw) as { mcpServers?: Record<string, unknown>; servers?: Record<string, unknown> };
-					for (const name of Object.keys(parsed.mcpServers ?? parsed.servers ?? {})) {
-						serverNames.add(name);
-					}
-				} catch { /* Ignore missing config. */ }
+			if (this.remoteTarget) {
+				const rHome = this.remoteTarget.remoteHome;
+				const remoteCandidates = [
+					joinRemotePath(this.remoteTarget.os, session.cwd, '.mcp.json'),
+					...(rHome ? [
+						joinRemotePath(this.remoteTarget.os, rHome, '.gemini', 'config', 'mcp_config.json'),
+						joinRemotePath(this.remoteTarget.os, rHome, '.dsh', 'mcp.json'),
+						joinRemotePath(this.remoteTarget.os, rHome, '.cline', 'data', 'settings', 'cline_mcp_settings.json'),
+					] : []),
+				];
+				const files = await readRemoteTextFilesBatch(this.remoteTarget, remoteCandidates);
+				for (const raw of files.values()) {
+					if (!raw) { continue; }
+					try {
+						const parsed = JSON.parse(raw) as { mcpServers?: Record<string, unknown>; servers?: Record<string, unknown> };
+						for (const name of Object.keys(parsed.mcpServers ?? parsed.servers ?? {})) {
+							serverNames.add(name);
+						}
+					} catch { /* Ignore invalid JSON. */ }
+				}
+			} else {
+				const configCandidates = [
+					path.join(session.cwd, '.mcp.json'),
+					path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json'),
+					path.join(os.homedir(), '.dsh', 'mcp.json'),
+					path.join(os.homedir(), '.cline', 'data', 'settings', 'cline_mcp_settings.json'),
+				];
+				for (const candidate of configCandidates) {
+					try {
+						const raw = await fs.readFile(candidate, 'utf8');
+						const parsed = JSON.parse(raw) as { mcpServers?: Record<string, unknown>; servers?: Record<string, unknown> };
+						for (const name of Object.keys(parsed.mcpServers ?? parsed.servers ?? {})) {
+							serverNames.add(name);
+						}
+					} catch { /* Ignore missing config. */ }
+				}
 			}
 			const listText = serverNames.size > 0
 				? [...serverNames].map(s => `- \`${s}\``).join('\n')
@@ -696,9 +788,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const scopeKey = agentIdentityScopeKey(session.id, options, session.cwd);
 		await this.retireStaleSessionSlot(session.id, scopeKey);
 		const { slot, client } = await this.ensureClientSlot(scopeKey, {
-			sessionId: session.id,
+			sessionId: options?.adeSessionId || session.id,
 			callerRole: options?.callerRole,
 			pureWorker: options?.pureWorker,
+			isMissionNode: options?.isMissionNode,
 		}, session.cwd);
 		await this.ensureSessionOpen(slot, client, session);
 		this.sessionScopeKeys.set(session.id, scopeKey);
@@ -833,8 +926,8 @@ export abstract class AcpRuntime implements EngineRuntime {
 				if (toolTitle || kind === 'tool_call') {
 					stream.progress(toolTitle ?? vscode.l10n.t('{0} is working…', this.name));
 				}
-			} else if (kind === 'available_commands_update') {
-				this.ingestAvailableCommands(update.availableCommands);
+			} else if (kind === 'available_commands_update' || kind === 'config_option_update' || kind === 'config_options_update') {
+				this.ingestSessionUpdateMetadata(update);
 			} else if (kind === 'session_info_update' && typeof update.title === 'string' && update.title.trim()) {
 				session.label = update.title.trim();
 				this.changed.fire([session]);
@@ -847,7 +940,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			const promptParts: Array<Record<string, unknown>> = [];
 			if (options?.attachments?.length) {
 				for (const att of options.attachments) {
-					if (att.kind === 'image') {
+					if (att.kind === 'image' && !att.remote) {
 						try {
 							const buf = await fs.readFile(att.filePath);
 							promptParts.push({
@@ -1028,15 +1121,95 @@ export class DshRuntime extends AcpRuntime {
 	readonly id = 'dsh';
 	readonly name = 'DeepSeek Harness';
 
-	constructor(executable: string) {
-		super(executable, ['--profile', 'acp']);
+	constructor(executable: string, remoteTarget?: CloudHostTarget) {
+		super(executable, ['--profile', 'acp'], remoteTarget);
 	}
 
 	private dshHome(): string {
 		return process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh');
 	}
 
+	private async scanRemoteSessions(token: vscode.CancellationToken): Promise<DshDiscoveredSession[]> {
+		if (!this.remoteTarget || token.isCancellationRequested) {
+			return [];
+		}
+		const posixScript = [
+			`pdir="\${DSH_HOME:-$HOME/.dsh}/storages/session_projcache/sessions"`,
+			`[ -d "$pdir" ] || exit 0`,
+			`for f in "$pdir"/*.json; do`,
+			`  [ -f "$f" ] || continue`,
+			`  m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)`,
+			`  printf '%s\\t%s\\n' "$m" "$f"`,
+			`done | sort -rn | head -n 120 | while IFS=$(printf '\\t') read -r m f; do`,
+			`  [ -f "$f" ] || continue`,
+			`  sz=$(wc -c < "$f" 2>/dev/null || echo 0)`,
+			`  [ "$sz" -le 524288 ] || continue`,
+			`  b=$(base64 < "$f" | tr -d '\\r\\n')`,
+			`  printf '%s\\t%s\\t%s\\n' "$m" "$(basename -- "$f" .json)" "$b"`,
+			`done`,
+		].join('\n');
+		const winScript = [
+			`$homeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }`,
+			`$pdir = Join-Path $homeDir 'storages\\session_projcache\\sessions'`,
+			`if (Test-Path -LiteralPath $pdir) {`,
+			`  Get-ChildItem -LiteralPath $pdir -Filter '*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -le 524288 } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 120 | ForEach-Object {`,
+			`    $ms = [int64]([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeMilliseconds()`,
+			`    $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))`,
+			`    Write-Output ($ms.ToString() + [char]9 + [IO.Path]::GetFileNameWithoutExtension($_.Name) + [char]9 + $b64)`,
+			`  }`,
+			`}`,
+		].join('; ');
+		const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 18_000, token }).catch(() => undefined);
+		if (!res || res.code !== 0) {
+			return [];
+		}
+		const discovered: DshDiscoveredSession[] = [];
+		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+			if (!rawLine.trim()) { continue; }
+			const parts = rawLine.split('\t');
+			if (parts.length < 3) { continue; }
+			const rawTs = Number(parts[0]) || 0;
+			const mtime = rawTs > 1e11 ? rawTs : (rawTs > 0 ? rawTs * 1000 : Date.now());
+			const id = parts[1].trim();
+			let parsed: DshProjCacheFile;
+			try {
+				parsed = JSON.parse(Buffer.from(parts[2].trim(), 'base64').toString('utf8')) as DshProjCacheFile;
+			} catch { continue; }
+			const proj = parsed.record ?? (parsed as DshProjCacheFile['record']);
+			const identity = proj?.identity;
+			const rows = proj?.rows;
+			const workDirVal = rows?.workingDirectory?.val;
+			const titleVal = rows?.title?.val;
+			const subagentVal = rows?.subagent?.val;
+			const listMetaVal = rows?.sessionListMetadata?.val;
+			const cwd = (typeof workDirVal === 'string' ? workDirVal : workDirVal?.cwd) || identity?.cwd || proj?.cwd;
+			if (!cwd || !id) { continue; }
+			const title = (typeof titleVal === 'string' ? titleVal : titleVal?.title) || proj?.title;
+			const created = identity?.createdAt ?? proj?.createdAt ?? mtime;
+			const updated = Math.max(mtime, listMetaVal?.lastPromptAt ?? 0, proj?.updatedAt ?? 0, proj?.updated ?? 0) || created;
+			const parentId = identity?.parentSessionId ?? identity?.parentId ?? subagentVal?.parentSessionId ?? subagentVal?.parentId ?? listMetaVal?.parentSessionId ?? listMetaVal?.parentId ?? proj?.parentSessionId ?? proj?.parentId;
+			const origin = identity?.origin ?? subagentVal?.origin ?? listMetaVal?.origin ?? proj?.origin ?? (parentId ? 'subagent' : undefined);
+			const session: DshDiscoveredSession = {
+				id,
+				parentId,
+				readOnly: origin === 'subagent' || !!parentId,
+				cwd,
+				label: title?.trim() || vscode.l10n.t('DeepSeek Harness {0}', id.replace(/^session-/, '').slice(0, 8)),
+				created,
+				updated,
+				provisional: false,
+				origin: origin ?? (parentId ? 'subagent' : undefined),
+			};
+			this.knownSessions.set(session.id, session);
+			discovered.push(session);
+		}
+		return discovered.sort((a, b) => b.updated - a.updated);
+	}
+
 	private async scanSessions(token: vscode.CancellationToken): Promise<DshDiscoveredSession[]> {
+		if (this.remoteTarget) {
+			return this.scanRemoteSessions(token);
+		}
 		const home = this.dshHome();
 		const projDir = path.join(home, 'storages', 'session_projcache', 'sessions');
 		const sessionsRoot = path.join(home, 'sessions');
@@ -1175,7 +1348,38 @@ export class DshRuntime extends AcpRuntime {
 	}
 
 	async history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
-		if (token.isCancellationRequested || session.unmaterialized) { return []; }
+		if (token.isCancellationRequested || session.unmaterialized || (session.provisional && !session.file)) { return []; }
+		if (this.remoteTarget) {
+			const replayed = await this.loadReplayedHistory(session, token).catch(() => [] as HistoryEntry[]);
+			if (replayed.length > 0) {
+				return replayed;
+			}
+			const safeId = session.id.replace(/[^A-Za-z0-9._-]/g, '');
+			if (!safeId) { return []; }
+			const posixScript = `root="\${DSH_HOME:-$HOME/.dsh}/sessions"; for f in "$root"/*/${posixQuote(safeId)}/*.jsonl.zstd "$root"/*/${posixQuote(safeId)}/*.jsonl; do if [ -f "$f" ]; then base64 < "$f" | tr -d '\\r\\n'; exit 0; fi; done; exit 2`;
+			const winScript = `$h = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }; $root = Join-Path $h 'sessions'; $found = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { $sd = Join-Path $_.FullName ${psSingleQuote(safeId)}; if (Test-Path -LiteralPath $sd) { Get-ChildItem -LiteralPath $sd -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.jsonl.zstd' -or $_.Name -like '*.jsonl' } } } | Select-Object -First 1; if ($found) { [Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes($found.FullName))); exit 0 }; exit 2`;
+			const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 20_000, token }).catch(() => undefined);
+			if (!res || res.code !== 0) { return []; }
+			const b64 = res.stdout.toString('utf8').trim();
+			if (!b64) { return []; }
+			const text = decodeDshLogBuffer(Buffer.from(b64, 'base64'));
+			const entries: HistoryEntry[] = [];
+			for (const line of text.split('\n')) {
+				if (token.isCancellationRequested || !line) { continue; }
+				let event: DshEvent;
+				try { event = JSON.parse(line) as DshEvent; } catch { continue; }
+				if (event.type === 'user/message' && event.data?.source?.kind === 'user') {
+					const content = event.data.content ?? event.data.message?.content ?? [];
+					const body = content.filter(part => part.type === 'text' && typeof part.text === 'string').map(part => part.text ?? '').join('\n').trim();
+					if (body) { entries.push({ id: event.data.id ?? `user-${entries.length}`, role: 'user', text: body }); }
+				} else if (event.type === 'assistant/message') {
+					const content = event.data?.message?.content ?? event.data?.content ?? [];
+					const body = content.filter(part => part.type === 'text' && typeof part.text === 'string').map(part => part.text ?? '').join('\n').trim();
+					if (body) { entries.push({ id: event.data?.message?.id ?? event.data?.id ?? `assistant-${entries.length}`, role: 'assistant', text: body }); }
+				}
+			}
+			return entries;
+		}
 		const file = session.file ?? await this.findLogFile(session.id);
 		if (!file) { return []; }
 		session.file = file;
@@ -1213,6 +1417,17 @@ export class DshRuntime extends AcpRuntime {
 	async delete(session: NativeSession, token: vscode.CancellationToken): Promise<void> {
 		if (session.unmaterialized) {
 			this.knownSessions.delete(session.id);
+			return;
+		}
+		if (this.remoteTarget) {
+			await this.closeSession(session.id);
+			this.knownSessions.delete(session.id);
+			const safeId = session.id.replace(/[^A-Za-z0-9._-]/g, '');
+			if (safeId) {
+				const posixScript = `h="\${DSH_HOME:-$HOME/.dsh}"; for d in "$h"/sessions/*/${posixQuote(safeId)}; do [ -d "$d" ] && rm -rf -- "$d"; done; rm -f -- "$h/storages/session_projcache/sessions/${safeId}.json"`;
+				const winScript = `$h = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }; $s = Join-Path $h 'sessions'; if (Test-Path -LiteralPath $s) { Get-ChildItem -LiteralPath $s -Directory -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath (Join-Path $_.FullName ${psSingleQuote(safeId)}) -Recurse -Force -ErrorAction SilentlyContinue } }; Remove-Item -LiteralPath (Join-Path $h ${psSingleQuote(`storages\\session_projcache\\sessions\\${safeId}.json`)}) -Force -ErrorAction SilentlyContinue`;
+				await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 12_000, token }).catch(() => undefined);
+			}
 			return;
 		}
 		for (const child of await this.children(session, token)) {
@@ -1270,9 +1485,58 @@ interface AgyTranscriptStep {
 export class AntigravityRuntime extends AcpRuntime {
 	readonly id = 'antigravity';
 	readonly name = 'Google Antigravity';
+	private cliModelsAttemptedAt = 0;
+	private cliModelsLastSucceeded = false;
+	private cliModelsPromise: Promise<void> | undefined;
 
-	constructor(executable: string) {
-		super(executable, ['acp', '--app_data_dir=antigravity']);
+	constructor(executable: string, remoteTarget?: CloudHostTarget) {
+		super(executable, ['acp', '--app_data_dir=antigravity'], remoteTarget);
+	}
+
+	private async fetchCliModels(): Promise<void> {
+		const cooldownMs = this.cliModelsLastSucceeded ? 60_000 : 30_000;
+		if (this.cliModelsAttemptedAt > 0 && Date.now() - this.cliModelsAttemptedAt < cooldownMs) {
+			return;
+		}
+		if (this.cliModelsPromise) {
+			return this.cliModelsPromise;
+		}
+		this.cliModelsPromise = (async () => {
+			let succeeded = false;
+			try {
+				const stdout = this.remoteTarget
+					? await captureRemoteEngine(this.remoteTarget, this.executable, ['models'], undefined, undefined, undefined, 10_000)
+					: (await execFile(this.executable, ['models'], {
+						timeout: 10000,
+						windowsHide: true,
+						env: stripAdeControlEnv(process.env),
+					})).stdout;
+				const parsed = parseAgyModelsOutput(stdout);
+				if (parsed.length > 0) {
+					const prevDescById = new Map(this.cachedModels.map(m => [m.id, m.description] as const));
+					this.cachedModels = parsed.map(item => {
+						const desc = prevDescById.get(item.id);
+						return desc ? { id: item.id, name: item.name, description: desc } : { id: item.id, name: item.name };
+					});
+					this.hasReceivedModels = true;
+					succeeded = true;
+				}
+			} catch { /* Non-fatal CLI model listing probe. */ } finally {
+				this.cliModelsLastSucceeded = succeeded;
+				this.cliModelsAttemptedAt = Date.now();
+			}
+		})().finally(() => {
+			this.cliModelsPromise = undefined;
+		});
+		return this.cliModelsPromise;
+	}
+
+	override async getRuntimeCapabilities(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
+		await Promise.all([
+			this.fetchCliModels(),
+			super.getRuntimeCapabilities(cwd, session),
+		]);
+		return this.snapshotRuntimeCapabilities();
 	}
 
 	private agyHomes(): string[] {
@@ -1366,11 +1630,18 @@ export class AntigravityRuntime extends AcpRuntime {
 				return sessions;
 			}
 		} catch { /* Fall back to local SQLite summary index without invoking authenticate. */ }
+		if (this.remoteTarget) {
+			return [];
+		}
 		return this.listFromSqlite();
 	}
 
 	async history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
 		if (token.isCancellationRequested || session.unmaterialized) { return []; }
+		if (this.remoteTarget) {
+			if (session.provisional) { return []; }
+			return this.loadReplayedHistory(session, token).catch(() => []);
+		}
 		let raw: string | undefined;
 		for (const home of this.agyHomes()) {
 			const logsDir = path.join(home, 'brain', session.id, '.system_generated', 'logs');
@@ -1449,6 +1720,9 @@ export class AntigravityRuntime extends AcpRuntime {
 			await this.resetClient();
 		}
 		this.knownSessions.delete(session.id);
+		if (this.remoteTarget) {
+			return;
+		}
 		const sqliteBin = await this.resolveSqliteExecutable();
 		const sqliteEnv = stripAdeControlEnv(process.env);
 		for (const root of this.agyHomes()) {
@@ -1528,8 +1802,8 @@ export class ClineRuntime extends AcpRuntime {
 	readonly id = 'cline';
 	readonly name = 'Cline';
 
-	constructor(executable: string) {
-		super(executable, ['--acp']);
+	constructor(executable: string, remoteTarget?: CloudHostTarget) {
+		super(executable, ['--acp'], remoteTarget);
 	}
 
 	private clineDataDir(): string {
@@ -1539,7 +1813,20 @@ export class ClineRuntime extends AcpRuntime {
 
 	protected override async buildSpawnEnv(): Promise<NodeJS.ProcessEnv | undefined> {
 		try {
-			const raw = await fs.readFile(path.join(this.clineDataDir(), 'settings', 'providers.json'), 'utf8');
+			let raw: string | undefined;
+			if (this.remoteTarget) {
+				const remoteHome = this.remoteTarget.remoteHome;
+				if (!remoteHome) {
+					return undefined;
+				}
+				const providersPath = joinRemotePath(this.remoteTarget.os, remoteHome, '.cline', 'data', 'settings', 'providers.json');
+				raw = await readRemoteTextFile(this.remoteTarget, providersPath);
+			} else {
+				raw = await fs.readFile(path.join(this.clineDataDir(), 'settings', 'providers.json'), 'utf8');
+			}
+			if (!raw) {
+				return undefined;
+			}
 			const parsed = JSON.parse(raw) as ClineProvidersFile;
 			const providerId = parsed.lastUsedProvider?.trim();
 			if (!providerId || ['cline', 'cline-pass', 'openai-codex'].includes(providerId)) {
@@ -1549,11 +1836,16 @@ export class ClineRuntime extends AcpRuntime {
 			if (!settings?.apiKey?.trim()) {
 				return undefined;
 			}
-			const env: NodeJS.ProcessEnv = {
-				...process.env,
-				CLINE_PROVIDER: settings.provider?.trim() || providerId,
-				CLINE_API_KEY: settings.apiKey,
-			};
+			const env: NodeJS.ProcessEnv = this.remoteTarget
+				? {
+					CLINE_PROVIDER: settings.provider?.trim() || providerId,
+					CLINE_API_KEY: settings.apiKey,
+				}
+				: {
+					...process.env,
+					CLINE_PROVIDER: settings.provider?.trim() || providerId,
+					CLINE_API_KEY: settings.apiKey,
+				};
 			if (settings.model?.trim()) {
 				env.CLINE_MODEL = settings.model.trim();
 			}
@@ -1570,7 +1862,7 @@ export class ClineRuntime extends AcpRuntime {
 	}
 
 	private async fetchHistoryItems(token: vscode.CancellationToken): Promise<ClineHistoryItem[]> {
-		const output = await withTimeout(capture(this.executable, ['history', '--json', '--limit', '500'], token), 8000);
+		const output = await withTimeout(capture(this.executable, ['history', '--json', '--limit', '500'], token, undefined, undefined, this.remoteTarget), 12000);
 		const parsed = readJsonOutput<ClineHistoryItem[] | { sessions?: ClineHistoryItem[]; items?: ClineHistoryItem[] }>(output);
 		return Array.isArray(parsed) ? parsed : (parsed.sessions ?? parsed.items ?? []);
 	}
@@ -1581,15 +1873,23 @@ export class ClineRuntime extends AcpRuntime {
 		const parentId = item.parentSessionId ?? item.metadata?.parentSessionId;
 		const cleanedPrompt = stripInjectedAdeContextFromUserTurn(unwrapClineUserInput(item.prompt ?? ''));
 		const rawTitle = item.metadata?.title || (cleanedPrompt.trimStart().startsWith(ROLE_INIT_MARKER) ? '' : cleanedPrompt);
+		const fallbackCwd = this.remoteTarget
+			? (this.remoteTarget.remoteHome || (this.remoteTarget.os === 'windows' ? 'C:\\' : '/'))
+			: os.homedir();
+		const fallbackFile = this.remoteTarget
+			? (this.remoteTarget.remoteHome
+				? joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.cline', 'data', 'sessions', item.sessionId, `${item.sessionId}.messages.json`)
+				: undefined)
+			: path.join(this.clineDataDir(), 'sessions', item.sessionId, `${item.sessionId}.messages.json`);
 		const session: NativeSession = {
 			id: item.sessionId,
 			parentId,
 			readOnly: !!item.isSubagent || !!parentId,
-			cwd: item.cwd || item.workspaceRoot || os.homedir(),
+			cwd: item.cwd || item.workspaceRoot || fallbackCwd,
 			label: rawTitle.split('\n')[0].slice(0, 100) || vscode.l10n.t('Cline Session {0}', item.sessionId.slice(0, 8)),
 			created: Number.isFinite(created) ? created : Date.now(),
 			updated: Number.isFinite(updated) ? updated : Date.now(),
-			file: item.messagesPath || path.join(this.clineDataDir(), 'sessions', item.sessionId, `${item.sessionId}.messages.json`),
+			file: item.messagesPath || fallbackFile,
 			provisional: false,
 		};
 		this.knownSessions.set(session.id, session);
@@ -1607,14 +1907,26 @@ export class ClineRuntime extends AcpRuntime {
 	}
 
 	async history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
-		if (token.isCancellationRequested || session.unmaterialized) { return []; }
-		const file = session.file ?? path.join(this.clineDataDir(), 'sessions', session.id, `${session.id}.messages.json`);
-		let raw: string;
-		try {
-			raw = await fs.readFile(file, 'utf8');
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
-			throw error;
+		if (token.isCancellationRequested || session.unmaterialized || (session.provisional && !session.file)) { return []; }
+		let raw: string | undefined;
+		if (this.remoteTarget) {
+			const remoteFile = session.file ?? (this.remoteTarget.remoteHome
+				? joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.cline', 'data', 'sessions', session.id, `${session.id}.messages.json`)
+				: undefined);
+			if (remoteFile) {
+				raw = await readRemoteTextFile(this.remoteTarget, remoteFile, { bypassCache: true, timeoutMs: 20_000, token });
+			}
+			if (!raw) {
+				return this.loadReplayedHistory(session, token).catch(() => []);
+			}
+		} else {
+			const file = session.file ?? path.join(this.clineDataDir(), 'sessions', session.id, `${session.id}.messages.json`);
+			try {
+				raw = await fs.readFile(file, 'utf8');
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
+				throw error;
+			}
 		}
 		const parsed = JSON.parse(raw) as ClineStoredMessage[] | { messages?: ClineStoredMessage[] };
 		const messages = Array.isArray(parsed) ? parsed : (parsed.messages ?? []);
@@ -1660,13 +1972,25 @@ export class ClineRuntime extends AcpRuntime {
 		this.knownSessions.delete(session.id);
 		if (!session.provisional) {
 			try {
-				await capture(this.executable, ['history', 'delete', '--session-id', session.id], token);
+				await capture(this.executable, ['history', 'delete', '--session-id', session.id], token, undefined, undefined, this.remoteTarget);
 			} catch (error) {
 				const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
 				if (!message.includes('not found') && !message.includes('does not exist') && !message.includes('no session')) {
 					throw error;
 				}
 			}
+		}
+		if (this.remoteTarget) {
+			const safeId = session.id.replace(/[^A-Za-z0-9._-]/g, '');
+			if (safeId) {
+				await execRemoteShell(
+					this.remoteTarget,
+					`rm -rf -- "\${CLINE_DIR:-$HOME/.cline}/data/sessions/${safeId}"`,
+					`$h = if ($env:CLINE_DIR) { $env:CLINE_DIR } else { Join-Path $env:USERPROFILE '.cline' }; Remove-Item -LiteralPath (Join-Path $h ${psSingleQuote(`data\\sessions\\${safeId}`)}) -Recurse -Force -ErrorAction SilentlyContinue`,
+					{ timeoutMs: 12_000, token },
+				).catch(() => undefined);
+			}
+			return;
 		}
 		await fs.rm(path.join(this.clineDataDir(), 'sessions', session.id), { recursive: true, force: true });
 	}

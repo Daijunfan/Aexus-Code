@@ -10,8 +10,17 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
+import {
+	CloudHostTarget,
+	execRemoteShell,
+	joinRemotePath,
+	posixQuote,
+	psSingleQuote,
+	readRemoteTextFile,
+	readRemoteTextFilesBatch,
+} from './cloudTransport';
 import { isPathWithinOrEqual, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, spawnEngine, stopEngine } from './runtime';
+import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, spawnEngine, stopEngine } from './runtime';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
 interface ContentBlock { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }
@@ -284,13 +293,120 @@ export class ClaudeRuntime implements EngineRuntime {
 	private readonly usageBySession = new Map<string, ClaudeUsageStats>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
 	private lastInit: ClaudeInitInfo | undefined;
-	constructor(private readonly executable: string) { }
+	constructor(private readonly executable: string, readonly remoteTarget?: CloudHostTarget) { }
 
 	private configDir(): string {
 		return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 	}
 
+	private remoteHomePrefix(): string {
+		if (this.remoteTarget?.remoteHome) {
+			return joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.claude');
+		}
+		return this.remoteTarget?.os === 'windows' ? '.claude' : '$HOME/.claude';
+	}
+
+	private parseTranscriptLines(lines: Iterable<string>): HistoryEntry[] {
+		const history: HistoryEntry[] = [];
+		for (const line of lines) {
+			if (!line) { continue; }
+			let event: ClaudeEvent;
+			try { event = JSON.parse(line) as ClaudeEvent; } catch { continue; }
+			const text = messageText(event);
+			if (text && (event.type === 'user' || event.type === 'assistant')) {
+				history.push({ id: event.uuid, role: event.type, text, isSystemInitiated: event.isMeta });
+			}
+		}
+		return history;
+	}
+
+	private async listRemote(token: vscode.CancellationToken): Promise<NativeSession[]> {
+		if (!this.remoteTarget || token.isCancellationRequested) {
+			return [];
+		}
+		const posixScript = [
+			`cfg="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"`,
+			`[ -d "$cfg" ] || exit 0`,
+			`for f in "$cfg"/*/*.jsonl; do`,
+			`  [ -f "$f" ] || continue`,
+			`  m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)`,
+			`  printf '%s\\t%s\\n' "$m" "$f"`,
+			`done | sort -rn | head -n 120 | while IFS=$(printf '\\t') read -r m f; do`,
+			`  [ -f "$f" ] || continue`,
+			`  printf '__AEX_CLAUDE_F__\\t%s\\t%s\\n' "$m" "$f"`,
+			`  head -n 80 -- "$f" 2>/dev/null || true`,
+			`done`,
+		].join('\n');
+		const winScript = [
+			`$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }`,
+			`$cfg = Join-Path $base 'projects'`,
+			`if (Test-Path -LiteralPath $cfg) {`,
+			`  Get-ChildItem -LiteralPath $cfg -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 120 | ForEach-Object {`,
+			`    $ms = [int64]([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeMilliseconds()`,
+			`    Write-Output ("__AEX_CLAUDE_F__" + [char]9 + $ms + [char]9 + $_.FullName)`,
+			`    Get-Content -LiteralPath $_.FullName -TotalCount 80 -Encoding UTF8 -ErrorAction SilentlyContinue`,
+			`  }`,
+			`}`,
+		].join('; ');
+		const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 20_000, token }).catch(() => undefined);
+		if (!res || res.code !== 0) {
+			return [];
+		}
+		const sessions: NativeSession[] = [];
+		let curFile: string | undefined;
+		let curMtime = Date.now();
+		let foundId: string | undefined;
+		let foundCwd: string | undefined;
+		let foundLabel: string | undefined;
+		const flush = () => {
+			if (curFile && foundId && foundCwd) {
+				sessions.push({
+					id: foundId,
+					cwd: foundCwd,
+					label: foundLabel || vscode.l10n.t('Claude Session {0}', foundId.slice(0, 8)),
+					created: curMtime,
+					updated: curMtime,
+					file: curFile,
+					provisional: false,
+				});
+			}
+		};
+		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+			if (rawLine.startsWith('__AEX_CLAUDE_F__\t')) {
+				flush();
+				const parts = rawLine.split('\t');
+				const rawTs = Number(parts[1]) || 0;
+				curMtime = rawTs > 1e11 ? rawTs : (rawTs > 0 ? rawTs * 1000 : Date.now());
+				curFile = parts.slice(2).join('\t').trim() || undefined;
+				foundId = undefined;
+				foundCwd = undefined;
+				foundLabel = undefined;
+				continue;
+			}
+			if (!curFile || foundLabel) {
+				continue;
+			}
+			let event: ClaudeEvent;
+			try { event = JSON.parse(rawLine) as ClaudeEvent; } catch { continue; }
+			if (event.cwd && event.sessionId) {
+				foundId ??= event.sessionId;
+				foundCwd ??= event.cwd;
+				if (event.type === 'user') {
+					const cleaned = stripInjectedAdeContextFromUserTurn(messageText(event)).trim();
+					if (cleaned && !cleaned.startsWith(ROLE_INIT_MARKER)) {
+						foundLabel = cleaned.split('\n')[0].slice(0, 100);
+					}
+				}
+			}
+		}
+		flush();
+		return sessions;
+	}
+
 	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+		if (this.remoteTarget) {
+			return this.listRemote(token);
+		}
 		const projects = path.join(this.configDir(), 'projects');
 		let directories: string[];
 		try { directories = await fs.readdir(projects); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; } throw error; }
@@ -347,7 +463,7 @@ export class ClaudeRuntime implements EngineRuntime {
 	}
 
 	async children(session: NativeSession, token: vscode.CancellationToken): Promise<NativeSession[]> {
-		if (session.readOnly || token.isCancellationRequested) { return []; }
+		if (this.remoteTarget || session.readOnly || token.isCancellationRequested) { return []; }
 		const file = session.file ?? (await this.list(token)).find(item => item.id === session.id)?.file;
 		if (!file) { return []; }
 		const directory = path.join(path.dirname(file), session.id, 'subagents');
@@ -381,6 +497,28 @@ export class ClaudeRuntime implements EngineRuntime {
 
 	async history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
 		if (session.provisional && !session.file) { return []; }
+		if (this.remoteTarget) {
+			if (session.file) {
+				const raw = await readRemoteTextFile(this.remoteTarget, session.file, { bypassCache: true, timeoutMs: 20_000, token });
+				if (raw !== undefined) {
+					return this.parseTranscriptLines(raw.split(/\r?\n/));
+				}
+			}
+			const safeId = session.id.replace(/[^A-Za-z0-9._-]/g, '');
+			if (!safeId) { return []; }
+			const posixScript = `cfg="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; for f in "$cfg"/*/${posixQuote(`${safeId}.jsonl`)}; do if [ -f "$f" ]; then printf '__AEX_PATH__:%s\\n' "$f"; cat -- "$f"; exit 0; fi; done; exit 2`;
+			const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $cfg = Join-Path $base 'projects'; $found = Get-ChildItem -LiteralPath $cfg -Recurse -Filter ${psSingleQuote(`${safeId}.jsonl`)} -File -ErrorAction SilentlyContinue | Select-Object -First 1; if ($found) { Write-Output ('__AEX_PATH__:' + $found.FullName); [Console]::Out.Write([IO.File]::ReadAllText($found.FullName, [Text.Encoding]::UTF8)); exit 0 }; exit 2`;
+			const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 20_000, token }).catch(() => undefined);
+			if (!res || res.code !== 0) {
+				return [];
+			}
+			const allLines = res.stdout.toString('utf8').split(/\r?\n/);
+			if (allLines[0]?.startsWith('__AEX_PATH__:')) {
+				session.file = allLines[0].slice('__AEX_PATH__:'.length).trim() || session.file;
+				allLines.shift();
+			}
+			return this.parseTranscriptLines(allLines);
+		}
 		const file = session.file ?? (await this.list(token)).find(item => item.id === session.id)?.file;
 		if (!file) { throw new Error(vscode.l10n.t('This Claude Code conversation is no longer available.')); }
 		const input = createReadStream(file);
@@ -466,7 +604,7 @@ export class ClaudeRuntime implements EngineRuntime {
 		const fileNotes: string[] = [];
 		const images: ContentPart[] = [];
 		for (const attachment of attachments ?? []) {
-			if (attachment.kind === 'image') {
+			if (attachment.kind === 'image' && !attachment.remote) {
 				try {
 					const data = (await fs.readFile(attachment.filePath)).toString('base64');
 					if (data) {
@@ -520,8 +658,20 @@ export class ClaudeRuntime implements EngineRuntime {
 
 	async listConfiguredModels(): Promise<readonly { readonly id: string; readonly label: string }[]> {
 		try {
-			const settingsPath = path.join(this.configDir(), 'settings.json');
-			const raw = JSON.parse(await fs.readFile(settingsPath, 'utf8')) as {
+			let rawText: string | undefined;
+			if (this.remoteTarget) {
+				const posixScript = `f="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"; [ -f "$f" ] && cat -- "$f" || exit 2`;
+				const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $f = Join-Path $base 'settings.json'; if (Test-Path -LiteralPath $f -PathType Leaf) { [Console]::Out.Write([IO.File]::ReadAllText($f, [Text.Encoding]::UTF8)) } else { exit 2 }`;
+				const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 8000 }).catch(() => undefined);
+				rawText = res && res.code === 0 ? res.stdout.toString('utf8') : undefined;
+			} else {
+				const settingsPath = path.join(this.configDir(), 'settings.json');
+				rawText = await fs.readFile(settingsPath, 'utf8');
+			}
+			if (!rawText) {
+				return [];
+			}
+			const raw = JSON.parse(rawText) as {
 				model?: unknown;
 				modelPicker?: { options?: Array<{ model?: unknown; label?: unknown }> };
 			};
@@ -567,6 +717,14 @@ export class ClaudeRuntime implements EngineRuntime {
 	}
 
 	private async hasPersistedTranscript(sessionId: string): Promise<boolean> {
+		if (this.remoteTarget) {
+			const safeId = sessionId.replace(/[^A-Za-z0-9._-]/g, '');
+			if (!safeId) { return false; }
+			const posixScript = `for f in "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"/*/${posixQuote(`${safeId}.jsonl`)}; do [ -f "$f" ] && exit 0; done; exit 1`;
+			const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $cfg = Join-Path $base 'projects'; if ((Test-Path -LiteralPath $cfg) -and (Get-ChildItem -LiteralPath $cfg -Recurse -Filter ${psSingleQuote(`${safeId}.jsonl`)} -File -ErrorAction SilentlyContinue | Select-Object -First 1)) { exit 0 }; exit 1`;
+			const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 6000 }).catch(() => undefined);
+			return Boolean(res && res.code === 0);
+		}
 		try {
 			const projectsRoot = path.join(this.configDir(), 'projects');
 			const dirs = await fs.readdir(projectsRoot);
@@ -617,11 +775,19 @@ export class ClaudeRuntime implements EngineRuntime {
 				session.id,
 			];
 			const thinkingTokens = this.mapClaudeThinkingTokens(options?.thinking);
-			const customEnv = await prepareAgentChildEnv({
-				sessionId: session.id,
-				callerRole: options?.callerRole,
-				pureWorker: options?.pureWorker,
-			});
+			const customEnv: NodeJS.ProcessEnv = this.remoteTarget
+				? await prepareRemoteAgentChildEnv(this.remoteTarget, {
+					sessionId: options?.adeSessionId || session.id,
+					callerRole: options?.callerRole,
+					pureWorker: options?.pureWorker,
+					isMissionNode: options?.isMissionNode,
+				})
+				: await prepareAgentChildEnv({
+					sessionId: options?.adeSessionId || session.id,
+					callerRole: options?.callerRole,
+					pureWorker: options?.pureWorker,
+					isMissionNode: options?.isMissionNode,
+				});
 			if (thinkingTokens !== undefined) {
 				customEnv.MAX_THINKING_TOKENS = thinkingTokens;
 			}
@@ -629,7 +795,7 @@ export class ClaudeRuntime implements EngineRuntime {
 				customEnv.CLAUDE_CODE_DISABLE_THINKING = '1';
 			}
 
-			const child = spawnEngine(this.executable, args, session.cwd, customEnv);
+			const child = spawnEngine(this.executable, args, session.cwd, customEnv, this.remoteTarget);
 			this.running.add(child);
 			let sessionSet = this.runningBySession.get(session.id);
 			if (!sessionSet) {
@@ -786,7 +952,8 @@ export class ClaudeRuntime implements EngineRuntime {
 	}
 
 	async getRuntimeCapabilities(_cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities> {
-		const init = (session ? this.initBySession.get(session.id) : undefined) ?? this.lastInit;
+		const sessionInit = session ? this.initBySession.get(session.id) : undefined;
+		const init = sessionInit ?? this.lastInit;
 		const commands: Array<{ name: string; description?: string }> = [];
 		const seen = new Set<string>();
 		const addCommand = (rawName: string, description?: string) => {
@@ -810,8 +977,8 @@ export class ClaudeRuntime implements EngineRuntime {
 				models.push({ id: model.id, name: model.label });
 			}
 		}
-		if (init?.model && !seenModels.has(init.model)) {
-			models.push({ id: init.model, name: init.model });
+		if (sessionInit?.model && !seenModels.has(sessionInit.model)) {
+			models.push({ id: sessionInit.model, name: sessionInit.model });
 		}
 		return { commands, models };
 	}
@@ -883,11 +1050,19 @@ export class ClaudeRuntime implements EngineRuntime {
 	}
 
 	private async renderMcp(session: NativeSession, stream: vscode.ChatResponseStream): Promise<void> {
-		const sources = [
-			{ label: vscode.l10n.t('Project .mcp.json'), file: path.join(session.cwd, '.mcp.json') },
-			{ label: vscode.l10n.t('User ~/.claude.json'), file: path.join(os.homedir(), '.claude.json') },
-			{ label: vscode.l10n.t('User settings.json'), file: path.join(this.configDir(), 'settings.json') },
-		];
+		const sources = this.remoteTarget
+			? [
+				{ label: vscode.l10n.t('Project .mcp.json'), file: joinRemotePath(this.remoteTarget.os, session.cwd, '.mcp.json') },
+				...(this.remoteTarget.remoteHome ? [
+					{ label: vscode.l10n.t('User ~/.claude.json'), file: joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.claude.json') },
+					{ label: vscode.l10n.t('User settings.json'), file: joinRemotePath(this.remoteTarget.os, this.remoteHomePrefix(), 'settings.json') },
+				] : []),
+			]
+			: [
+				{ label: vscode.l10n.t('Project .mcp.json'), file: path.join(session.cwd, '.mcp.json') },
+				{ label: vscode.l10n.t('User ~/.claude.json'), file: path.join(os.homedir(), '.claude.json') },
+				{ label: vscode.l10n.t('User settings.json'), file: path.join(this.configDir(), 'settings.json') },
+			];
 		const rows: Array<[string, string, string]> = [];
 		for (const source of sources) {
 			const json = await this.readJsonObject(source.file);
@@ -920,19 +1095,30 @@ export class ClaudeRuntime implements EngineRuntime {
 	}
 
 	private async renderMemory(session: NativeSession, stream: vscode.ChatResponseStream): Promise<void> {
-		const files = [
-			path.join(session.cwd, 'CLAUDE.md'),
-			path.join(session.cwd, '.claude', 'CLAUDE.md'),
-			path.join(this.configDir(), 'CLAUDE.md'),
-		];
+		const files = this.remoteTarget
+			? [
+				joinRemotePath(this.remoteTarget.os, session.cwd, 'CLAUDE.md'),
+				joinRemotePath(this.remoteTarget.os, session.cwd, '.claude', 'CLAUDE.md'),
+				...(this.remoteTarget.remoteHome ? [joinRemotePath(this.remoteTarget.os, this.remoteHomePrefix(), 'CLAUDE.md')] : []),
+			]
+			: [
+				path.join(session.cwd, 'CLAUDE.md'),
+				path.join(session.cwd, '.claude', 'CLAUDE.md'),
+				path.join(this.configDir(), 'CLAUDE.md'),
+			];
 		const rows: string[] = [];
 		for (const file of files) {
 			try {
-				const stat = await fs.stat(file);
-				const content = await fs.readFile(file, 'utf8');
+				const content = this.remoteTarget
+					? await readRemoteTextFile(this.remoteTarget, file)
+					: await fs.readFile(file, 'utf8');
+				if (content === undefined) {
+					continue;
+				}
+				const size = Buffer.byteLength(content, 'utf8');
 				const excerpt = content.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#')).slice(0, 3).join(' ').slice(0, 240);
-				const link = `[${file}](${vscode.Uri.file(file).toString()})`;
-				rows.push(`- ${link} — ${stat.size.toLocaleString()} bytes${excerpt ? ` — ${escapeTableCell(excerpt)}` : ''}`);
+				const label = this.remoteTarget ? `\`${file}\`` : `[${file}](${vscode.Uri.file(file).toString()})`;
+				rows.push(`- ${label} — ${size.toLocaleString()} bytes${excerpt ? ` — ${escapeTableCell(excerpt)}` : ''}`);
 			} catch { /* Missing memory files are expected. */ }
 		}
 		stream.markdown(`### ${vscode.l10n.t('Claude memory files')}\n\n`);
@@ -955,12 +1141,28 @@ export class ClaudeRuntime implements EngineRuntime {
 			}
 		};
 		await check(vscode.l10n.t('Executable'), async () => {
+			if (this.remoteTarget) {
+				return `${this.executable} (${this.remoteTarget.alias})`;
+			}
 			await fs.access(this.executable);
 			return this.executable;
 		});
-		await check(vscode.l10n.t('Version'), async () => (await capture(this.executable, ['--version'], token, session.cwd)).trim().split('\n')[0]);
+		await check(vscode.l10n.t('Version'), async () => (await capture(this.executable, ['--version'], token, session.cwd, undefined, this.remoteTarget)).trim().split('\n')[0]);
 		const configDir = this.configDir();
 		await check(vscode.l10n.t('Settings'), async () => {
+			if (this.remoteTarget) {
+				const remoteHome = this.remoteTarget.remoteHome;
+				const base = remoteHome ? joinRemotePath(this.remoteTarget.os, remoteHome, '.claude') : undefined;
+				if (!base) {
+					return vscode.l10n.t('remote home unknown');
+				}
+				const batch = await readRemoteTextFilesBatch(this.remoteTarget, [
+					joinRemotePath(this.remoteTarget.os, base, 'settings.json'),
+					joinRemotePath(this.remoteTarget.os, base, 'settings.local.json'),
+				]).catch(() => new Map<string, string | undefined>());
+				const found = [...batch.entries()].filter(([, v]) => v !== undefined).map(([p]) => path.posix.basename(p.replace(/\\/g, '/')));
+				return found.length ? found.join(', ') : vscode.l10n.t('none found');
+			}
 			const files = [path.join(configDir, 'settings.json'), path.join(configDir, 'settings.local.json')];
 			const found: string[] = [];
 			for (const file of files) {
@@ -972,13 +1174,26 @@ export class ClaudeRuntime implements EngineRuntime {
 			return found.length ? found.join(', ') : vscode.l10n.t('none found');
 		});
 		await check(vscode.l10n.t('MCP configuration'), async () => {
-			const files = [path.join(session.cwd, '.mcp.json'), path.join(os.homedir(), '.claude.json')];
 			const found: string[] = [];
-			for (const file of files) {
-				try {
-					await fs.access(file);
-					found.push(file);
-				} catch { /* Report the ones that exist. */ }
+			if (this.remoteTarget) {
+				const remoteFiles = [joinRemotePath(this.remoteTarget.os, session.cwd, '.mcp.json')];
+				if (this.remoteTarget.remoteHome) {
+					remoteFiles.push(joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.claude.json'));
+				}
+				const batch = await readRemoteTextFilesBatch(this.remoteTarget, remoteFiles).catch(() => new Map<string, string | undefined>());
+				for (const [file, content] of batch.entries()) {
+					if (content !== undefined) {
+						found.push(file);
+					}
+				}
+			} else {
+				const files = [path.join(session.cwd, '.mcp.json'), path.join(os.homedir(), '.claude.json')];
+				for (const file of files) {
+					try {
+						await fs.access(file);
+						found.push(file);
+					} catch { /* Report the ones that exist. */ }
+				}
 			}
 			const init = this.initBySession.get(session.id) ?? this.lastInit;
 			if (init?.mcpServers.length) {
@@ -998,6 +1213,9 @@ export class ClaudeRuntime implements EngineRuntime {
 		const reported = init?.agents ?? [];
 		stream.markdown(`**${vscode.l10n.t('Reported by Claude')}**\n\n`);
 		stream.markdown(reported.length ? reported.map(agent => `- ${escapeTableCell(agent)}`).join('\n') + '\n' : `${vscode.l10n.t('None reported yet. Send a message first.')}\n`);
+		if (this.remoteTarget) {
+			return;
+		}
 		const directories = [path.join(session.cwd, '.claude', 'agents'), path.join(this.configDir(), 'agents')];
 		const custom: string[] = [];
 		for (const directory of directories) {
@@ -1040,7 +1258,13 @@ export class ClaudeRuntime implements EngineRuntime {
 
 	private async readJsonObject(file: string): Promise<Record<string, unknown> | undefined> {
 		try {
-			const value: unknown = JSON.parse(await fs.readFile(file, 'utf8'));
+			const raw = this.remoteTarget
+				? await readRemoteTextFile(this.remoteTarget, file)
+				: await fs.readFile(file, 'utf8');
+			if (!raw) {
+				return undefined;
+			}
+			const value: unknown = JSON.parse(raw);
 			return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 		} catch {
 			return undefined;
@@ -1048,6 +1272,26 @@ export class ClaudeRuntime implements EngineRuntime {
 	}
 
 	async delete(session: NativeSession, token: vscode.CancellationToken): Promise<void> {
+		if (this.remoteTarget) {
+			const safeId = session.id.replace(/[^A-Za-z0-9._-]/g, '');
+			if (!safeId) { return; }
+			const posixParts = [
+				session.file ? `rm -f -- ${posixQuote(session.file)}` : '',
+				`cfg="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"`,
+				`for f in "$cfg"/projects/*/${posixQuote(`${safeId}.jsonl`)}; do [ -e "$f" ] && rm -f -- "$f"; done`,
+				`for d in "$cfg"/projects/*/${posixQuote(safeId)}; do [ -d "$d" ] && rm -rf -- "$d"; done`,
+				`rm -rf -- "$cfg/session-env/${safeId}" "$cfg/file-history/${safeId}"`,
+			].filter(Boolean).join('\n');
+			const winParts = [
+				`$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }`,
+				session.file ? `Remove-Item -LiteralPath ${psSingleQuote(session.file)} -Force -ErrorAction SilentlyContinue` : '',
+				`$proj = Join-Path $base 'projects'; if (Test-Path -LiteralPath $proj) { Get-ChildItem -LiteralPath $proj -Directory -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item -LiteralPath (Join-Path $_.FullName ${psSingleQuote(`${safeId}.jsonl`)}) -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path $_.FullName ${psSingleQuote(safeId)}) -Recurse -Force -ErrorAction SilentlyContinue } }`,
+				`Remove-Item -LiteralPath (Join-Path $base ${psSingleQuote(`session-env\\${safeId}`)}) -Recurse -Force -ErrorAction SilentlyContinue`,
+				`Remove-Item -LiteralPath (Join-Path $base ${psSingleQuote(`file-history\\${safeId}`)}) -Recurse -Force -ErrorAction SilentlyContinue`,
+			].filter(Boolean).join('; ');
+			await execRemoteShell(this.remoteTarget, posixParts, winParts, { timeoutMs: 12_000, token }).catch(() => undefined);
+			return;
+		}
 		if (session.readOnly && session.file) {
 			await fs.rm(session.file, { force: true });
 			await fs.rm(session.file.replace(/\.jsonl$/, '.meta.json'), { force: true });

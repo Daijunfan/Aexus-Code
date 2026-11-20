@@ -55,10 +55,13 @@ import { IWorkspaceContextService, IWorkspaceFoldersChangeEvent, toWorkspaceFold
 import { Workspace } from '../../../../../platform/workspace/test/common/testWorkspace.js';
 import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
 import { IWorkbenchEnvironmentService } from '../../../../services/environment/common/environmentService.js';
+import { IExtensionService } from '../../../../services/extensions/common/extensions.js';
 import { IWorkspaceEditingService } from '../../../../services/workspaces/common/workspaceEditing.js';
 import { workbenchInstantiationService } from '../../../../test/browser/workbenchTestServices.js';
+import { IChatSessionsService, ResolvedChatSessionsExtensionPoint } from '../../../chat/common/chatSessionsService.js';
 import { IProjectNavigationService, ProjectNavigationService } from '../../../files/browser/projectNavigationService.js';
 import { IShellLaunchConfig } from '../../../../../platform/terminal/common/terminal.js';
+import { IStorageService, StorageScope } from '../../../../../platform/storage/common/storage.js';
 import { ProjectTerminalService } from '../../../terminal/browser/projectTerminalService.js';
 import { AexusSshFileSystemProvider, pickProjectFoldersWithCloudOption } from '../../browser/adeCloudHostFileSystemProvider.js';
 import {
@@ -84,7 +87,7 @@ import {
 import { executeAdeControlRequest } from '../../browser/adeControlHandler.js';
 import { reconcileIdeWorkspaceWithCatalog } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
-import { IAdeSessionsService } from '../../browser/adeSessionsService.js';
+import { AdeSessionsService, IAdeSessionsService } from '../../browser/adeSessionsService.js';
 import { IAdeEditorService, IAdeProject, IAdeProjectsService } from '../../common/ade.js';
 
 class FakeCloudHostBackend {
@@ -265,6 +268,21 @@ suite('AexusSshFileSystemProvider', () => {
 				{ type: FileChangeType.DELETED, path: '/srv/project/new/renamed.txt' },
 			],
 		});
+	});
+
+	test('notifyExternalChanges emits UPDATED for each externally changed cloud resource', () => {
+		const { provider, changes } = createProvider();
+		const first = cloudUri('cloud-a', '/srv/project/src/app.ts');
+		const second = cloudUri('cloud-a', '/srv/project/src/nested');
+
+		provider.notifyExternalChanges([]);
+		assert.deepStrictEqual(changes, []);
+
+		provider.notifyExternalChanges([first, second]);
+		assert.deepStrictEqual(changes, [
+			{ type: FileChangeType.UPDATED, path: '/srv/project/src/app.ts' },
+			{ type: FileChangeType.UPDATED, path: '/srv/project/src/nested' },
+		]);
 	});
 
 	test('maps remote ENOENT/EEXIST/EISDIR/ENOTDIR/EACCES and unknown failures to FileSystemProviderErrorCode', async () => {
@@ -1853,5 +1871,150 @@ suite('AdeCloudHostsEditorPane Console Grid & Drawer', () => {
 		const savedCard = card(container, 'GPU-Server-');
 		assert.strictEqual(query<HTMLElement>(savedCard, '.ade-ch-card-name').textContent, 'GPU Server!');
 		assert.strictEqual(query<HTMLElement>(savedCard, 'code.ade-ch-target-badge').textContent, 'root@203.0.113.10:2222');
+	});
+});
+
+suite('AdeProjectsService cloud host alias migration', () => {
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('migrates cloud project URIs and the persisted selected project when an alias changes', () => {
+		const instantiation = workbenchInstantiationService(undefined, store);
+		const storage = instantiation.get(IStorageService);
+		const projects = store.add(instantiation.createInstance(AdeProjectsService));
+		const oldUri = cloudUri('old-host', '/srv/cloud-app');
+
+		projects.registerProject(oldUri, 'Cloud App');
+		projects.selectProject(oldUri);
+
+		const migrated = projects.migrateCloudHostAlias('OLD-HOST', 'new-host');
+
+		assert.deepStrictEqual({
+			migrated,
+			cloudProjectUris: projects.projects.filter(project => project.uri.scheme === 'aexus-ssh').map(project => project.uri.toString()),
+			selectedProject: projects.selectedProject?.uri.toString(),
+			persistedSelection: storage.get('aexus.ade.selectedProject', StorageScope.PROFILE),
+		}, {
+			migrated: 1,
+			cloudProjectUris: ['aexus-ssh://new-host/srv/cloud-app'],
+			selectedProject: 'aexus-ssh://new-host/srv/cloud-app',
+			persistedSelection: 'aexus-ssh://new-host/srv/cloud-app',
+		});
+	});
+});
+
+suite('AdeSessionsService cloud engine probing', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	const cloudProject = cloudUri('cloud-host', '/srv/cloud-app');
+
+	function contribution(type: string, displayName: string, extra: Partial<ResolvedChatSessionsExtensionPoint> = {}): ResolvedChatSessionsExtensionPoint {
+		return { type, name: type, displayName, description: `${displayName} description`, icon: undefined, ...extra };
+	}
+
+	interface IProbeEngineListEntry {
+		readonly id: string;
+		readonly available: boolean;
+		readonly remoteHost?: string;
+		readonly remoteOs?: string;
+		readonly error?: string;
+	}
+
+	function createHarness(contributions: readonly ResolvedChatSessionsExtensionPoint[], engineList: readonly IProbeEngineListEntry[]) {
+		const commandCalls: Array<{ commandId: string; args: unknown[] }> = [];
+		const commands = upcastPartial<ICommandService>({
+			executeCommand: ((commandId: string, ...args: unknown[]) => {
+				commandCalls.push({ commandId, args });
+				return Promise.resolve(engineList);
+			}) as unknown as ICommandService['executeCommand'],
+		});
+		const sessions = upcastPartial<IChatSessionsService>({
+			getAllChatSessionContributions: () => [...contributions],
+			getChatSessionContribution: (type: string) => contributions.find(entry => entry.type === type),
+		});
+		const extensions = upcastPartial<IExtensionService>({
+			extensions: [],
+			whenInstalledExtensionsRegistered: async () => true,
+		});
+		const service = new AdeSessionsService(sessions, commands, extensions, upcastPartial<IUriIdentityService>({}));
+		return { service, commandCalls };
+	}
+
+	test('forwards aexus-ssh project URIs, returns only cloud-available aexus-* engines with remote metadata and skips local-only providers', async () => {
+		const contributions = [
+			contribution('aexus-claude', 'Claude'),
+			contribution('aexus-codex', 'Codex'),
+			contribution('aexus-cline', 'Cline'),
+			contribution('copilot', 'Copilot', { hideFromSessionTypePicker: true }),
+			contribution('local', 'Local'),
+			contribution('openai-codex', 'OpenAI Codex'),
+		];
+		// The Cloud Host probe only advertises the aexus-* engines installed remotely;
+		// local-only providers such as Copilot never appear here.
+		const { service, commandCalls } = createHarness(contributions, [
+			{ id: 'aexus-claude', available: true, remoteHost: 'cloud-host', remoteOs: 'linux' },
+			{ id: 'aexus-codex', available: true, remoteHost: 'cloud-host', remoteOs: 'linux' },
+			{ id: 'aexus-cline', available: false, remoteHost: 'cloud-host', remoteOs: 'linux' },
+		]);
+
+		const probe = await service.probeEnginesForProject(cloudProject, { forceRefresh: true });
+		const engines = await service.getEngines(cloudProject);
+
+		assert.deepStrictEqual({
+			forwarded: commandCalls.map(call => ({
+				commandId: call.commandId,
+				forwardedSameUri: call.args[0] === cloudProject,
+				forwardedUri: (call.args[0] as URI | undefined)?.toString(),
+				options: call.args[1],
+			})),
+			probe: {
+				engines: probe.engines.map(engine => ({ id: engine.id, name: engine.name, remoteHost: engine.remoteHost, remoteOs: engine.remoteOs })),
+				remoteHost: probe.remoteHost,
+				remoteOs: probe.remoteOs,
+				error: probe.error,
+			},
+			getEnginesIds: engines.map(engine => engine.id),
+		}, {
+			forwarded: [
+				{ commandId: 'aexus.agentEngines.list', forwardedSameUri: true, forwardedUri: 'aexus-ssh://cloud-host/srv/cloud-app', options: { forceRefresh: true } },
+				{ commandId: 'aexus.agentEngines.list', forwardedSameUri: true, forwardedUri: 'aexus-ssh://cloud-host/srv/cloud-app', options: undefined },
+			],
+			probe: {
+				engines: [
+					{ id: 'aexus-claude', name: 'Claude', remoteHost: 'cloud-host', remoteOs: 'linux' },
+					{ id: 'aexus-codex', name: 'Codex', remoteHost: 'cloud-host', remoteOs: 'linux' },
+				],
+				remoteHost: 'cloud-host',
+				remoteOs: 'linux',
+				error: undefined,
+			},
+			getEnginesIds: ['aexus-claude', 'aexus-codex'],
+		});
+	});
+
+	test('surfaces the SSH probe error and returns no engines when the cloud host is unreachable', async () => {
+		const { service, commandCalls } = createHarness([contribution('aexus-claude', 'Claude')], [
+			{ id: 'aexus-claude', available: false, error: 'ssh: connect to host cloud-host port 22: Connection refused' },
+		]);
+
+		const probe = await service.probeEnginesForProject(cloudProject);
+		const engines = await service.getEngines(cloudProject);
+
+		assert.deepStrictEqual({
+			commandId: commandCalls[0]?.commandId,
+			forwardedUri: (commandCalls[0]?.args[0] as URI | undefined)?.toString(),
+			engines: probe.engines,
+			remoteHost: probe.remoteHost,
+			remoteOs: probe.remoteOs,
+			error: probe.error,
+			getEngines: engines,
+		}, {
+			commandId: 'aexus.agentEngines.list',
+			forwardedUri: 'aexus-ssh://cloud-host/srv/cloud-app',
+			engines: [],
+			remoteHost: 'cloud-host',
+			remoteOs: undefined,
+			error: 'ssh: connect to host cloud-host port 22: Connection refused',
+			getEngines: [],
+		});
 	});
 });

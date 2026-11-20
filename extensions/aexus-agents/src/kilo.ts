@@ -4,11 +4,19 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomBytes, randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
+import {
+	CloudHostTarget,
+	openRemotePortForward,
+	RemotePortForwardHandle,
+	remotePathToFileUrl,
+	spawnRemoteEngine,
+} from './cloudTransport';
 import { AgentChildIdentity, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { agentIdentityScopeKey, capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
@@ -221,6 +229,7 @@ const SHARED_PURE_SERVER_KEY = `${SHARED_PURE_SCOPE_KEY}:ask`;
 
 interface SharedServerSlot {
 	child?: ReturnType<typeof spawnEngine>;
+	tunnel?: RemotePortForwardHandle;
 	endpoint?: Promise<string>;
 	readonly password: string;
 	readonly identity: AgentChildIdentity;
@@ -248,7 +257,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		return usage;
 	}
 
-	constructor(protected readonly executable: string) { }
+	constructor(protected readonly executable: string, readonly remoteTarget?: CloudHostTarget) { }
 
 	private shouldAutoApprove(options?: EngineSendOptions): boolean {
 		if (options?.automatedEngineering) {
@@ -273,11 +282,12 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				autoApprove: false,
 			};
 		}
-		const identityScope = agentIdentityScopeKey(sessionId, options, cwd);
+		const effectiveSid = options.adeSessionId || sessionId;
+		const identityScope = agentIdentityScopeKey(effectiveSid, options, cwd);
 		const isPure = identityScope.startsWith('pure:');
 		const identity: AgentChildIdentity = isPure
-			? { sessionId, pureWorker: true }
-			: { sessionId, callerRole: options.callerRole, pureWorker: false };
+			? { sessionId: effectiveSid, pureWorker: true }
+			: { sessionId: effectiveSid, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode };
 		return {
 			key: `${identityScope}:${autoApprove ? 'auto' : 'ask'}`,
 			identity,
@@ -293,6 +303,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 		const prevSlot = this.servers.get(prevKey);
 		if (prevSlot) {
+			prevSlot.tunnel?.dispose();
+			prevSlot.tunnel = undefined;
 			if (prevSlot.child) {
 				stopEngine(prevSlot.child);
 			}
@@ -335,17 +347,39 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 		const load = (async (): Promise<EngineRuntimeCapabilities> => {
 			const [providers, agents, commands] = await Promise.all([
-				this.tryRequest<unknown>('/config/providers', cwd),
-				this.tryRequest<unknown>('/agent', cwd),
-				this.tryRequest<unknown>('/command', cwd),
+				this.tryRequest<unknown>('/config/providers', cwd, 8000),
+				this.tryRequest<unknown>('/agent', cwd, 6000),
+				this.tryRequest<unknown>('/command', cwd, 6000),
 			]);
+			const models = providers !== undefined ? extractProviderModels(providers) : undefined;
+			const modes = agents !== undefined ? extractModes(agents) : undefined;
+			const cmds = commands !== undefined ? extractCommands(commands) : undefined;
+			const defaultMap = asRecord(asRecord(providers)?.default);
+			let defaultModel: string | undefined;
+			if (defaultMap) {
+				for (const [providerID, rawModel] of Object.entries(defaultMap)) {
+					const modelID = stringValue(rawModel);
+					if (modelID) {
+						defaultModel = modelID.startsWith(`${providerID}/`) ? modelID : `${providerID}/${modelID}`;
+						break;
+					}
+				}
+			}
 			const value: EngineRuntimeCapabilities = {
-				models: extractProviderModels(providers),
-				modes: extractModes(agents),
-				commands: extractCommands(commands),
+				defaultModel,
+				models: models?.map(m => ({ ...m })),
+				modes: modes?.map(m => ({ ...m })),
+				commands: cmds?.map(c => ({ ...c })),
 			};
-			this.capabilityCache.set(cwd, { expiresAt: Date.now() + 15000, value });
-			return value;
+			const hasData = Boolean((models && models.length > 0) || (modes && modes.length > 0) || (cmds && cmds.length > 0));
+			const ttl = hasData ? 15_000 : 2_000;
+			this.capabilityCache.set(cwd, { expiresAt: Date.now() + ttl, value });
+			return {
+				defaultModel: value.defaultModel,
+				models: value.models?.map(m => ({ ...m })),
+				modes: value.modes?.map(m => ({ ...m })),
+				commands: value.commands?.map(c => ({ ...c })),
+			};
 		})();
 		this.capabilityPending.set(cwd, load);
 		try {
@@ -427,10 +461,29 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		return this.id === 'kilo' && value === 'off' ? 'none' : value;
 	}
 
-	private messageParts(text: string, attachments?: readonly EngineAttachment[]): object[] {
+	private async messageParts(text: string, attachments?: readonly EngineAttachment[]): Promise<object[]> {
 		const parts: object[] = [{ type: 'text', text }];
 		for (const attachment of attachments ?? []) {
 			const isImage = attachment.kind === 'image' || Boolean(attachment.mimeType?.startsWith('image/'));
+			if (this.remoteTarget) {
+				if (isImage && !attachment.remote) {
+					try {
+						const data = (await fs.readFile(attachment.filePath)).toString('base64');
+						if (data) {
+							parts.push({ type: 'file', mime: attachment.mimeType || 'image/png', url: `data:${attachment.mimeType || 'image/png'};base64,${data}` });
+							continue;
+						}
+					} catch { /* Fall back to text reference. */ }
+				}
+				if (attachment.rangeText) {
+					parts.push({ type: 'text', text: `${attachment.filePath}\n${attachment.rangeText}` });
+				} else if (attachment.remote) {
+					parts.push({ type: 'file', mime: attachment.mimeType || (isImage ? 'image/png' : 'text/plain'), url: remotePathToFileUrl(attachment.filePath, this.remoteTarget.os) });
+				} else {
+					parts.push({ type: 'text', text: attachment.filePath });
+				}
+				continue;
+			}
 			if (isImage) {
 				parts.push({ type: 'file', mime: attachment.mimeType || 'image/png', url: pathToFileURL(attachment.filePath).href });
 			} else if (attachment.rangeText) {
@@ -593,29 +646,62 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		);
 		if (!slot.endpoint) {
 			slot.endpoint = (async () => {
-				const childEnv = await prepareAgentChildEnv(slot.identity);
-				return await new Promise<string>((resolve, reject) => {
-					const child = slot.child = spawnEngine(this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], slot.cwd, {
-						...childEnv,
-						[`${this.envPrefix}_SERVER_USERNAME`]: 'aexus',
-						[`${this.envPrefix}_SERVER_PASSWORD`]: slot.password,
-						[`${this.envPrefix}_PERMISSION`]: slot.autoApprove ? '{"*":"allow"}' : '{"*":"ask"}',
-					});
+				const childEnv = this.remoteTarget
+					? await prepareRemoteAgentChildEnv(this.remoteTarget, slot.identity)
+					: await prepareAgentChildEnv(slot.identity);
+				const serverEnv: NodeJS.ProcessEnv = {
+					...childEnv,
+					[`${this.envPrefix}_SERVER_USERNAME`]: 'aexus',
+					[`${this.envPrefix}_SERVER_PASSWORD`]: slot.password,
+					[`${this.envPrefix}_PERMISSION`]: slot.autoApprove ? '{"*":"allow"}' : '{"*":"ask"}',
+				};
+				const remoteTarget = this.remoteTarget;
+				const boundAddress = await new Promise<string>((resolve, reject) => {
+					const child = slot.child = remoteTarget
+						? spawnRemoteEngine(remoteTarget, this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], slot.cwd, serverEnv, { killOnStdinClose: true })
+						: spawnEngine(this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], slot.cwd, serverEnv);
 					let output = '';
+					let settled = false;
 					const inspect = (data: Buffer) => {
+						if (settled) { return; }
 						output = (output + String(data)).slice(-8000);
 						const address = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
-						if (address) { resolve(address); }
+						if (address) {
+							settled = true;
+							resolve(address);
+						}
 					};
 					child.stdout.on('data', inspect);
 					child.stderr.on('data', inspect);
-					child.on('error', reject);
+					child.on('error', err => {
+						if (!settled) { settled = true; reject(err); }
+					});
 					child.on('exit', code => {
+						slot.tunnel?.dispose();
+						slot.tunnel = undefined;
 						slot.endpoint = undefined;
 						slot.child = undefined;
-						reject(new Error(vscode.l10n.t('{0} ended before its local connection was ready ({1}).', this.name, String(code))));
+						if (!settled) {
+							settled = true;
+							reject(new Error(vscode.l10n.t('{0} ended before its local connection was ready ({1}).', this.name, String(code))));
+						}
 					});
 				});
+				if (remoteTarget) {
+					const remotePort = Number(new URL(boundAddress).port);
+					if (!Number.isInteger(remotePort) || remotePort <= 0) {
+						throw new Error(`Could not determine remote port for ${this.name} on ${remoteTarget.alias}: ${boundAddress}`);
+					}
+					const tunnel = await openRemotePortForward(remoteTarget, remotePort);
+					if (!slot.child || slot.child.killed || slot.child.exitCode !== null) {
+						tunnel.dispose();
+						throw new Error(vscode.l10n.t('{0} on {1} exited while opening port forward.', this.name, remoteTarget.alias));
+					}
+					slot.tunnel?.dispose();
+					slot.tunnel = tunnel;
+					return tunnel.localUrl;
+				}
+				return boundAddress;
 			})();
 		}
 		return slot.endpoint.then(url => ({ url, password: slot.password }));
@@ -642,6 +728,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				lastError = error;
 				const slot = this.servers.get(serverKey);
 				if (attempt === 0 && !signal?.aborted && slot) {
+					slot.tunnel?.dispose();
+					slot.tunnel = undefined;
 					if (slot.child) {
 						stopEngine(slot.child);
 						slot.child = undefined;
@@ -680,6 +768,17 @@ abstract class SharedServerRuntime implements EngineRuntime {
 
 	async create(cwd: string): Promise<NativeSession> {
 		const now = Date.now();
+		if (this.remoteTarget) {
+			return {
+				id: randomUUID(),
+				cwd,
+				label: vscode.l10n.t('New {0} Session', this.name),
+				created: now,
+				updated: now,
+				provisional: true,
+				unmaterialized: true,
+			};
+		}
 		try {
 			return await withTimeout(
 				(async () => ({ ...this.session(await this.request<KiloSession>('/session', cwd, 'POST', {})), provisional: true }))(),
@@ -781,6 +880,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 		this.sessionServerKeys.delete(session.id);
 		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
+			slot.tunnel?.dispose();
+			slot.tunnel = undefined;
 			if (slot.child) { stopEngine(slot.child); }
 			this.servers.delete(serverKey);
 		}
@@ -792,7 +893,22 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		this.retireStaleServerSlot(session.id, desc.key);
 		this.sessionServerKeys.set(session.id, desc.key);
 		const abort = new AbortController();
-		const ep = await this.getEndpoint(desc.key, desc.identity, desc.autoApprove, desc.cwd);
+		let ep: { url: string; password: string };
+		try {
+			ep = await this.getEndpoint(desc.key, desc.identity, desc.autoApprove, desc.cwd);
+		} catch (error) {
+			const failedSlot = this.servers.get(desc.key);
+			if (failedSlot) {
+				failedSlot.tunnel?.dispose();
+				failedSlot.tunnel = undefined;
+				if (failedSlot.child) {
+					stopEngine(failedSlot.child);
+					failedSlot.child = undefined;
+				}
+				failedSlot.endpoint = undefined;
+			}
+			throw error;
+		}
 		const url = new URL('/event', ep.url);
 		url.searchParams.set('directory', session.cwd);
 		const response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}` }, signal: abort.signal });
@@ -881,7 +997,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		});
 		try {
 			stream.progress(vscode.l10n.t('{0} is working…', this.name));
-			const messageParts = this.messageParts(text, options?.attachments);
+			const messageParts = await this.messageParts(text, options?.attachments);
 			const payloadBase: Record<string, unknown> = { parts: messageParts };
 			const model = await this.resolveModel(options?.model, session.cwd);
 			if (model) {
@@ -926,7 +1042,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			if (slot?.endpoint) {
 				await this.request(`/session/${encodeURIComponent(session.id)}`, session.cwd, 'DELETE', undefined, undefined, serverKey, slot.identity, slot.autoApprove);
 			} else {
-				await capture(this.executable, ['session', 'delete', session.id], token);
+				await capture(this.executable, ['session', 'delete', session.id], token, undefined, undefined, this.remoteTarget);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
@@ -936,6 +1052,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 		this.sessionServerKeys.delete(session.id);
 		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
+			slot.tunnel?.dispose();
+			slot.tunnel = undefined;
 			if (slot.child) { stopEngine(slot.child); }
 			this.servers.delete(serverKey);
 		}
@@ -950,6 +1068,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 	dispose(): void {
 		this.changed.dispose();
 		for (const slot of this.servers.values()) {
+			slot.tunnel?.dispose();
+			slot.tunnel = undefined;
 			if (slot.child) { stopEngine(slot.child); }
 		}
 		this.servers.clear();
@@ -963,7 +1083,7 @@ export class KiloRuntime extends SharedServerRuntime {
 	protected readonly envPrefix = 'KILO';
 
 	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
-		const output = await capture(this.executable, ['session', 'list', '--all', '--format', 'json'], token);
+		const output = await capture(this.executable, ['session', 'list', '--all', '--format', 'json'], token, undefined, undefined, this.remoteTarget);
 		return readJsonOutput<KiloSessionListItem[]>(output).map(item => {
 			const entry: NativeSession = { id: item.id, cwd: item.directory, label: item.title, created: item.created, updated: item.updated };
 			this.knownSessions.set(entry.id, entry);
@@ -980,11 +1100,12 @@ export class OpenCodeRuntime extends SharedServerRuntime {
 	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
 		if (token.isCancellationRequested) { return []; }
 		try {
-			const items = await this.request<KiloSession[]>('/experimental/session?roots=true&limit=200', os.homedir());
+			const listCwd = this.remoteTarget ? (this.remoteTarget.remoteHome || (this.remoteTarget.os === 'windows' ? 'C:\\' : '/')) : os.homedir();
+			const items = await this.request<KiloSession[]>('/experimental/session?roots=true&limit=200', listCwd);
 			return items.map(item => this.session(item));
 		} catch {
 			const sql = 'SELECT id, directory, title, time_created AS created, time_updated AS updated FROM session WHERE time_archived IS NULL AND parent_id IS NULL ORDER BY time_updated DESC';
-			const output = await capture(this.executable, ['db', sql, '--format', 'json'], token);
+			const output = await capture(this.executable, ['db', sql, '--format', 'json'], token, undefined, undefined, this.remoteTarget);
 			return readJsonOutput<KiloSessionListItem[]>(output).map(item => {
 				const entry: NativeSession = { id: item.id, cwd: item.directory, label: item.title || vscode.l10n.t('OpenCode Session {0}', item.id.slice(0, 8)), created: item.created, updated: item.updated };
 				this.knownSessions.set(entry.id, entry);

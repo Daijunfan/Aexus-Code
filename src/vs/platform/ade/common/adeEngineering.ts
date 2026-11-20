@@ -6,6 +6,7 @@
 import { Event } from '../../../base/common/event.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
 import type { IAdeDocsPaths } from './adeDocsCatalog.js';
+import type { IMissionSourceTrigger, MissionRunStatus, MissionTokenStatus } from './adeMissionEngine.js';
 import type { IAdeOrganizationConfig } from './adeRoleSchema.js';
 
 export const ADE_ENGINEERING_BACKEND_CHANNEL_NAME = 'adeEngineeringBackend';
@@ -77,19 +78,80 @@ export function estimateTextTokens(text: string): number {
 	return Math.max(1, Math.ceil(cjkChars * 1.15 + nonCjkChars / 4));
 }
 
+export interface IAdeApiDocReadResult {
+	readonly ok: boolean;
+	readonly target: string;
+	readonly path?: string;
+	readonly revision: number;
+	readonly content?: string;
+	readonly error?: string;
+}
+
+export interface IAdeWatchdogTokenSpec {
+	readonly tokenId: string;
+	readonly nodeId: string;
+	readonly holderAgentId?: string;
+	readonly status: MissionTokenStatus;
+	readonly lastActivityAt: number;
+	readonly lastNudgeAt?: number;
+	readonly blocked?: {
+		readonly reason: string;
+		readonly startedAt: number;
+		readonly maxDurationMs: number;
+		readonly expiresAt: number;
+		readonly watchPid?: number;
+		readonly watchFile?: string;
+		readonly hostAlias?: string;
+	};
+}
+
+export interface IAdeMissionWatchdogSnapshot {
+	readonly missionId: string;
+	readonly status: MissionRunStatus;
+	readonly silenceTimeoutMinutes: number;
+	readonly tokens: readonly IAdeWatchdogTokenSpec[];
+	readonly triggers: readonly IMissionSourceTrigger[];
+}
+
+export interface IAdeWatchdogWakeupEvent {
+	readonly missionId: string;
+	readonly tokenId: string;
+	readonly nodeId: string;
+	readonly holderAgentId?: string;
+	readonly reason: 'silence_timeout' | 'block_expired' | 'pid_exited' | 'file_ready';
+	readonly detail?: string;
+	readonly timestamp: number;
+}
+
+export interface IAdeSourceTriggerFireEvent {
+	readonly missionId: string;
+	readonly triggerId: string;
+	readonly nodeId: string;
+	readonly kind: IMissionSourceTrigger['kind'];
+	readonly detail?: string;
+	readonly timestamp: number;
+}
+
 export const IAdeEngineeringBackendService = createDecorator<IAdeEngineeringBackendService>('adeEngineeringBackendService');
 
 /**
- * Minimal Node backend service strictly for single-copy API docs sync and lightweight Inbox JSON persistence.
- * Legacy Engineering runner/worktree/verify backend logic has been removed.
+ * Node main-process backend for:
+ * 1) Single-copy API docs sync & lazy read (`<adeHome>/docs/`)
+ * 2) Lightweight Inbox JSON persistence (`<adeHome>/inbox.json`)
+ * 3) Local Mission Watchdog Daemon & zero-token Source Trigger Monitor (local + remote SSH)
  */
 export interface IAdeEngineeringBackendService {
 	readonly _serviceBrand: undefined;
+	readonly onDidWatchdogWakeup?: Event<IAdeWatchdogWakeupEvent>;
+	readonly onDidSourceTriggerFire?: Event<IAdeSourceTriggerFireEvent>;
 
 	loadInbox(): Promise<IAdeInboxItem[]>;
 	saveInbox(items: readonly IAdeInboxItem[]): Promise<void>;
 	syncApiDocs?(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths>;
 	getApiDocsPaths?(rankCount: number): Promise<IAdeDocsPaths>;
+	readApiDoc?(target: string, config?: IAdeOrganizationConfig): Promise<IAdeApiDocReadResult>;
+	syncMissionWatchdog?(snapshot: IAdeMissionWatchdogSnapshot): Promise<void>;
+	removeMissionWatchdog?(missionId: string): Promise<void>;
 }
 
 export const IAdeInboxService = createDecorator<IAdeInboxService>('adeInboxService');

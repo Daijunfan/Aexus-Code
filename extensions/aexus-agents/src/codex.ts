@@ -10,8 +10,17 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
+import {
+	CloudHostTarget,
+	execRemoteShell,
+	joinRemotePath,
+	posixQuote,
+	psSingleQuote,
+	readRemoteTextFile,
+	stageLocalFileToRemote,
+} from './cloudTransport';
 import { AgentChildIdentity, CodexSandboxMode, resolveCodexSandboxMode, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, RpcPacket, withTimeout } from './runtime';
+import { agentIdentityScopeKey, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, RpcPacket, withTimeout } from './runtime';
 
 interface ThreadItem { type: string; text?: string; command?: string; server?: string; tool?: string; query?: string; content?: { type: string; text?: string }[] }
 interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[]; usage?: unknown }
@@ -163,13 +172,64 @@ export class CodexRuntime implements EngineRuntime {
 	readonly onDidChangeSessions = this.changed.event;
 	private readonly knownSessions = new Map<string, NativeSession>();
 	private readonly supportedModels = new Set<string>();
+	private cachedModelList: Array<{ id: string; name: string; description?: string }> = [];
 	private readonly threadModelOverrides = new Map<string, string>();
 	private readonly sessionSettings = new Map<string, SessionRuntimeSettings>();
 	private readonly capabilitiesCache = new Map<string, { value: EngineRuntimeCapabilities; expiresAt: number }>();
+	private readonly capabilitiesPending = new Map<string, Promise<EngineRuntimeCapabilities>>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
 	private defaultModel: string | undefined;
 
-	constructor(private readonly executable: string) { }
+	constructor(private readonly executable: string, readonly remoteTarget?: CloudHostTarget) { }
+
+	private async fetchModelList(client: JsonLineClient, timeoutMs = 4500): Promise<Array<{ id: string; name: string; description?: string }>> {
+		type ModelListItem = { id?: string; model?: string; displayName?: string; description?: string; isDefault?: boolean; hidden?: boolean };
+		const models: Array<{ id: string; name: string; description?: string }> = [];
+		const seen = new Set<string>();
+		let cursor: string | undefined;
+		let defaultCandidate: string | undefined;
+		for (let page = 0; page < 10; page++) {
+			const params: Record<string, unknown> = { includeHidden: false };
+			if (cursor) {
+				params.cursor = cursor;
+			}
+			const response = await withTimeout(
+				client.request<{ data?: ModelListItem[]; nextCursor?: string | null }>('model/list', params),
+				timeoutMs,
+			);
+			for (const item of response?.data ?? []) {
+				if (item.hidden) {
+					continue;
+				}
+				const id = (item.model || item.id || '').trim();
+				if (!id || seen.has(id)) {
+					continue;
+				}
+				seen.add(id);
+				this.supportedModels.add(id);
+				if (item.isDefault) {
+					defaultCandidate = id;
+				}
+				const name = item.displayName?.trim() || id;
+				const desc = item.description?.trim();
+				models.push(desc ? { id, name, description: desc } : { id, name });
+			}
+			const next = typeof response?.nextCursor === 'string' && response.nextCursor.trim() ? response.nextCursor.trim() : undefined;
+			if (!next || next === cursor) {
+				break;
+			}
+			cursor = next;
+		}
+		if (defaultCandidate) {
+			this.defaultModel = defaultCandidate;
+		} else if (!this.defaultModel && models.length > 0) {
+			this.defaultModel = models[0].id;
+		}
+		if (models.length > 0) {
+			this.cachedModelList = models.map(m => ({ ...m }));
+		}
+		return models;
+	}
 
 	private disposeSlot(scopeKey: string): void {
 		const slot = this.clientSlots.get(scopeKey);
@@ -198,8 +258,10 @@ export class CodexRuntime implements EngineRuntime {
 			ready: Promise.resolve(undefined as unknown as JsonLineClient),
 		};
 		slot.ready = (async () => {
-			const childEnv = await prepareAgentChildEnv(identity ?? { sessionId: 'codex-pure', pureWorker: true });
-			const client = new JsonLineClient(this.executable, ['app-server'], cwd, childEnv);
+			const childEnv = this.remoteTarget
+				? await prepareRemoteAgentChildEnv(this.remoteTarget, identity ?? { sessionId: 'codex-pure', pureWorker: true })
+				: await prepareAgentChildEnv(identity ?? { sessionId: 'codex-pure', pureWorker: true });
+			const client = new JsonLineClient(this.executable, ['app-server'], cwd, childEnv, this.remoteTarget);
 			slot.client = client;
 			slot.sessionListener = client.onPacket(packet => {
 				const params = packet.params as Notification | undefined;
@@ -223,16 +285,7 @@ export class CodexRuntime implements EngineRuntime {
 			client.write({ jsonrpc: '2.0', method: 'initialized' });
 			if (this.supportedModels.size === 0) {
 				try {
-					const modelsResp = await withTimeout(client.request<{ data?: { id?: string; model?: string; isDefault?: boolean }[] }>('model/list', {}), 4000);
-					for (const item of modelsResp?.data ?? []) {
-						const name = item.model || item.id;
-						if (name) {
-							this.supportedModels.add(name);
-							if (item.isDefault || !this.defaultModel) {
-								this.defaultModel = name;
-							}
-						}
-					}
+					await this.fetchModelList(client, 4000);
 				} catch { /* Keep CLI default model when model/list is unavailable. */ }
 			}
 			return client;
@@ -371,7 +424,154 @@ export class CodexRuntime implements EngineRuntime {
 		return session?.id === parent;
 	}
 
+	private parseRolloutHistory(lines: Iterable<string>, session: NativeSession, token?: vscode.CancellationToken): HistoryEntry[] {
+		const entries = new Map<string, HistoryEntry>();
+		for (const line of lines) {
+			if (token?.isCancellationRequested) { break; }
+			if (!line) { continue; }
+			let event: RolloutEntry;
+			try { event = JSON.parse(line) as RolloutEntry; } catch { continue; }
+			if (event.type === 'session_meta' && event.payload?.id === session.id) { session.readOnly = !!session.parentId && event.payload.multi_agent_version === 'v2'; }
+			if (session.parentId && event.type === 'response_item' && event.payload?.type === 'agent_message') {
+				const text = (event.payload.content ?? []).filter(part => part.type === 'input_text' || part.type === 'text').map(part => part.text ?? '').join('\n').split('\nPayload:\n').at(-1)?.trim();
+				const id = event.payload.id ?? `agent-message-${entries.size}`;
+				entries.set(id, { id, role: 'user', text: text || vscode.l10n.t('Agent message'), isSystemInitiated: true });
+				continue;
+			}
+			if (event.type !== 'event_msg') { continue; }
+			const item = event.payload?.type === 'item_completed' ? event.payload.item : undefined;
+			if (item?.type === 'UserMessage' || item?.type === 'AgentMessage') {
+				const text = (item.content ?? []).filter(part => part.type.toLowerCase() === 'text').map(part => part.text ?? '').join('\n');
+				if (text) { entries.set(item.id, { id: item.id, role: item.type === 'UserMessage' ? 'user' : 'assistant', text }); }
+			} else if (event.payload?.message && (event.payload.type === 'user_message' || event.payload.type === 'agent_message')) {
+				const id = `legacy-${entries.size}`;
+				entries.set(id, { id, role: event.payload.type === 'user_message' ? 'user' : 'assistant', text: event.payload.message });
+			}
+		}
+		return [...entries.values()];
+	}
+
+	private historyFromTurns(turns: readonly Turn[] | undefined): HistoryEntry[] {
+		const out: HistoryEntry[] = [];
+		for (const turn of turns ?? []) {
+			for (const item of turn.items ?? []) {
+				if (item.type === 'userMessage' || item.type === 'UserMessage') {
+					const text = (item.text ?? (item.content ?? []).map(p => p.text ?? '').join('\n')).trim();
+					if (text) { out.push({ id: `${turn.id}-u-${out.length}`, role: 'user', text }); }
+				} else if (item.type === 'agentMessage' || item.type === 'AgentMessage') {
+					const text = (item.text ?? (item.content ?? []).map(p => p.text ?? '').join('\n')).trim();
+					if (text) { out.push({ id: `${turn.id}-a-${out.length}`, role: 'assistant', text }); }
+				}
+			}
+		}
+		return out;
+	}
+
+	private async listRemote(token: vscode.CancellationToken): Promise<NativeSession[]> {
+		if (!this.remoteTarget || token.isCancellationRequested) {
+			return [];
+		}
+		try {
+			const client = await withTimeout(this.ensureReady(), 8000);
+			const rpcSessions: NativeSession[] = [];
+			const seen = new Set<string>();
+			let cursor: string | undefined;
+			for (let page = 0; page < 10 && !token.isCancellationRequested; page++) {
+				const resp = await withTimeout(
+					client.request<{ data?: Thread[]; threads?: Thread[]; nextCursor?: string | null }>('thread/list', cursor ? { cursor, limit: 100 } : { limit: 100 }),
+					5000,
+				);
+				const batch = resp?.data ?? resp?.threads ?? [];
+				for (const thread of batch) {
+					if (!thread?.id || seen.has(thread.id)) { continue; }
+					seen.add(thread.id);
+					rpcSessions.push(this.session(thread));
+				}
+				const next = typeof resp?.nextCursor === 'string' && resp.nextCursor.trim() ? resp.nextCursor.trim() : undefined;
+				if (!next || next === cursor) { break; }
+				cursor = next;
+			}
+			if (rpcSessions.length > 0) {
+				return rpcSessions;
+			}
+		} catch { /* Fall back to scanning remote codexHome sessions over SSH. */ }
+
+		const homeRoot = this.codexHome || (this.remoteTarget.remoteHome ? joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.codex') : undefined);
+		const posixScript = [
+			`root=${homeRoot ? posixQuote(homeRoot) : '"${CODEX_HOME:-$HOME/.codex}"'}`,
+			`[ -d "$root/sessions" ] || exit 0`,
+			`find "$root/sessions" -type f -name 'rollout-*.jsonl' 2>/dev/null | head -n 120 | while IFS= read -r f; do`,
+			`  m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)`,
+			`  printf '__AEX_CDX__\\t%s\\t%s\\n' "$m" "$f"`,
+			`  head -n 30 -- "$f" 2>/dev/null || true`,
+			`done`,
+		].join('\n');
+		const winScript = [
+			`$root = ${homeRoot ? psSingleQuote(homeRoot) : '(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" })'}`,
+			`$sdir = Join-Path $root 'sessions'`,
+			`if (Test-Path -LiteralPath $sdir) {`,
+			`  Get-ChildItem -LiteralPath $sdir -Recurse -Filter 'rollout-*.jsonl' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 120 | ForEach-Object {`,
+			`    $ms = [int64]([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeMilliseconds()`,
+			`    Write-Output ("__AEX_CDX__" + [char]9 + $ms + [char]9 + $_.FullName)`,
+			`    Get-Content -LiteralPath $_.FullName -TotalCount 30 -Encoding UTF8 -ErrorAction SilentlyContinue`,
+			`  }`,
+			`}`,
+		].join('; ');
+		const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 20_000, token }).catch(() => undefined);
+		if (!res || res.code !== 0) {
+			return [];
+		}
+		const sessions: NativeSession[] = [];
+		let curFile: string | undefined;
+		let curMtime = Date.now();
+		let current: NativeSession | undefined;
+		const flush = () => {
+			if (current) {
+				this.knownSessions.set(current.id, current);
+				sessions.push(current);
+			}
+		};
+		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+			if (rawLine.startsWith('__AEX_CDX__\t')) {
+				flush();
+				const parts = rawLine.split('\t');
+				const rawTs = Number(parts[1]) || 0;
+				curMtime = rawTs > 1e11 ? rawTs : (rawTs > 0 ? rawTs * 1000 : Date.now());
+				curFile = parts.slice(2).join('\t').trim() || undefined;
+				current = undefined;
+				continue;
+			}
+			if (!curFile) { continue; }
+			let event: RolloutEntry;
+			try { event = JSON.parse(rawLine) as RolloutEntry; } catch { continue; }
+			if (!current && event.type === 'session_meta' && event.payload?.id && event.payload.cwd) {
+				const meta = event.payload;
+				current = {
+					id: meta.id!,
+					parentId: meta.parent_thread_id ?? meta.source?.subagent?.thread_spawn?.parent_thread_id,
+					readOnly: meta.multi_agent_version === 'v2' && !!meta.parent_thread_id,
+					cwd: meta.cwd!,
+					file: curFile,
+					label: meta.agent_nickname || meta.source?.subagent?.thread_spawn?.agent_nickname || vscode.l10n.t('Codex Session {0}', meta.id!.slice(0, 8)),
+					created: meta.timestamp ? Date.parse(meta.timestamp) : curMtime,
+					updated: curMtime,
+					provisional: false,
+				};
+			} else if (current && event.type === 'event_msg' && event.payload?.type === 'item_completed' && event.payload.item?.type === 'UserMessage') {
+				const labelText = (event.payload.item.content ?? []).filter(part => part.type.toLowerCase() === 'text').map(part => part.text ?? '').join('\n').split('\n')[0].slice(0, 100);
+				if (labelText) { current.label = labelText; }
+			} else if (current && event.type === 'event_msg' && event.payload?.type === 'user_message' && event.payload.message) {
+				current.label = event.payload.message.split('\n')[0].slice(0, 100);
+			}
+		}
+		flush();
+		return sessions;
+	}
+
 	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+		if (this.remoteTarget) {
+			return this.listRemote(token);
+		}
 		await this.ensureReady();
 		const index = new Map<string, SessionIndexEntry>();
 		try {
@@ -453,7 +653,7 @@ export class CodexRuntime implements EngineRuntime {
 			? agentIdentityScopeKey(session.id, options, session.cwd)
 			: this.resolveLiveScopeKey(session.id);
 		const identity: AgentChildIdentity = options
-			? { sessionId: session.id, callerRole: options.callerRole, pureWorker: options.pureWorker }
+			? { sessionId: options.adeSessionId || session.id, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode }
 			: { sessionId: session.id, pureWorker: true };
 		await this.retireStaleSessionSlot(session.id, scopeKey);
 		const { client, loaded } = await this.ensureSlot(scopeKey, identity, scopeKey === SHARED_PURE_SCOPE_KEY ? undefined : session.cwd);
@@ -489,7 +689,27 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	async history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
-		if (session.unmaterialized) { return []; }
+		if (session.unmaterialized || (session.provisional && !session.file)) { return []; }
+		if (this.remoteTarget) {
+			if (token.isCancellationRequested) { return []; }
+			try {
+				const scopeKey = this.resolveLiveScopeKey(session.id);
+				const { client } = await this.ensureSlot(scopeKey, undefined, session.cwd);
+				const read = await withTimeout(client.request<{ thread?: Thread }>('thread/read', { threadId: session.id, includeTurns: true }), 8000);
+				if (read?.thread?.path) {
+					session.file = read.thread.path;
+				}
+				const fromRpc = this.historyFromTurns(read?.thread?.turns);
+				if (fromRpc.length > 0) {
+					return fromRpc;
+				}
+			} catch { /* Fall back to reading remote rollout file if available. */ }
+			if (!session.file) {
+				return [];
+			}
+			const raw = await readRemoteTextFile(this.remoteTarget, session.file, { bypassCache: true, timeoutMs: 20_000, token });
+			return raw ? this.parseRolloutHistory(raw.split(/\r?\n/), session, token) : [];
+		}
 		if (session.provisional || !session.file) { await this.prepareSession(session); }
 		if (session.provisional || token.isCancellationRequested) { return []; }
 		if (!session.file) { throw new Error(vscode.l10n.t('Codex did not report the native conversation history path.')); }
@@ -571,9 +791,10 @@ export class CodexRuntime implements EngineRuntime {
 		const scopeKey = agentIdentityScopeKey(session.id, options, session.cwd);
 		await this.retireStaleSessionSlot(session.id, scopeKey);
 		const { client } = await this.ensureSlot(scopeKey, {
-			sessionId: session.id,
+			sessionId: options?.adeSessionId || session.id,
 			callerRole: options?.callerRole,
 			pureWorker: options?.pureWorker,
+			isMissionNode: options?.isMissionNode,
 		}, session.cwd);
 		this.sessionScopeKeys.set(session.id, scopeKey);
 		let turnId: string | undefined;
@@ -584,7 +805,15 @@ export class CodexRuntime implements EngineRuntime {
 		const input: Array<Record<string, unknown>> = [{ type: 'text', text, text_elements: [] }];
 		for (const attachment of options?.attachments ?? []) {
 			if (attachment.kind === 'image') {
-				input.push({ type: 'localImage', path: attachment.filePath });
+				let imgPath = attachment.filePath;
+				if (this.remoteTarget && !attachment.remote) {
+					const staged = await stageLocalFileToRemote(this.remoteTarget, attachment.filePath, token);
+					if (!staged) {
+						continue;
+					}
+					imgPath = staged;
+				}
+				input.push({ type: 'localImage', path: imgPath });
 			}
 		}
 		const runSingleTurn = async (modelOverride?: string, effortOverride?: string): Promise<void> => {
@@ -666,37 +895,69 @@ export class CodexRuntime implements EngineRuntime {
 	async getRuntimeCapabilities(cwd: string, _session?: NativeSession): Promise<EngineRuntimeCapabilities> {
 		const cached = this.capabilitiesCache.get(cwd);
 		if (cached && cached.expiresAt > Date.now()) {
-			return cached.value;
+			return {
+				defaultModel: cached.value.defaultModel,
+				models: cached.value.models?.map(m => ({ ...m })),
+				commands: cached.value.commands?.map(c => ({ ...c })),
+			};
 		}
-		const client = await this.ensureReady();
-		const models: Array<{ id: string; name: string; description?: string }> = [];
-		try {
-			const response = await withTimeout(client.request<{ data?: Array<{ id?: string; model?: string; displayName?: string; description?: string }> }>('model/list', {}), 4000);
-			for (const item of response?.data ?? []) {
-				const id = item.model || item.id;
-				if (!id) {
-					continue;
-				}
-				const name = item.displayName || item.model || item.id || id;
-				models.push(item.description ? { id, name, description: item.description } : { id, name });
+		const pending = this.capabilitiesPending.get(cwd);
+		if (pending) {
+			return pending;
+		}
+		const load = (async (): Promise<EngineRuntimeCapabilities> => {
+			let client: JsonLineClient | undefined;
+			try {
+				client = await withTimeout(this.ensureReady(), 6000);
+			} catch {
+				return {
+					defaultModel: this.defaultModel,
+					models: this.cachedModelList.length > 0 ? this.cachedModelList.map(m => ({ ...m })) : undefined,
+					commands: undefined,
+				};
 			}
-		} catch { /* model/list is optional; keep going with an empty model list. */ }
-		const commands: Array<{ name: string; description?: string }> = [];
-		const seen = new Set<string>();
-		try {
-			const response = await withTimeout(client.request<unknown>('skills/list', { cwds: [cwd] }), 4000);
-			for (const entry of extractSkillEntries(response)) {
-				const raw = entry.name ?? entry.skill ?? entry.id ?? (entry.path ? path.basename(entry.path).replace(/\.(md|json)$/i, '') : '');
-				const name = raw.replace(/^\/+/, '').trim();
-				if (name && !seen.has(name)) {
-					seen.add(name);
-					commands.push(entry.description ? { name, description: entry.description } : { name });
-				}
+			let models: Array<{ id: string; name: string; description?: string }> | undefined;
+			try {
+				models = await this.fetchModelList(client, 4500);
+			} catch {
+				models = this.cachedModelList.length > 0 ? this.cachedModelList.map(m => ({ ...m })) : undefined;
 			}
-		} catch { /* skills/list is optional; keep an empty command list. */ }
-		const value: EngineRuntimeCapabilities = { defaultModel: this.defaultModel, models, commands };
-		this.capabilitiesCache.set(cwd, { value, expiresAt: Date.now() + 30000 });
-		return value;
+			if (models && models.length === 0 && this.cachedModelList.length > 0) {
+				models = this.cachedModelList.map(m => ({ ...m }));
+			}
+			let commands: Array<{ name: string; description?: string }> | undefined;
+			try {
+				const response = await withTimeout(client.request<unknown>('skills/list', { cwds: [cwd] }), 4000);
+				commands = [];
+				const seen = new Set<string>();
+				for (const entry of extractSkillEntries(response)) {
+					const raw = entry.name ?? entry.skill ?? entry.id ?? (entry.path ? path.basename(entry.path).replace(/\.(md|json)$/i, '') : '');
+					const name = raw.replace(/^\/+/, '').trim();
+					if (name && !seen.has(name)) {
+						seen.add(name);
+						commands.push(entry.description ? { name, description: entry.description } : { name });
+					}
+				}
+			} catch { /* skills/list is optional; keep undefined on failure. */ }
+			const value: EngineRuntimeCapabilities = {
+				defaultModel: this.defaultModel,
+				models: models?.map(m => ({ ...m })),
+				commands: commands?.map(c => ({ ...c })),
+			};
+			const ttl = (models && models.length > 0) || (commands && commands.length > 0) ? 30_000 : 2_000;
+			this.capabilitiesCache.set(cwd, { value, expiresAt: Date.now() + ttl });
+			return {
+				defaultModel: value.defaultModel,
+				models: value.models?.map(m => ({ ...m })),
+				commands: value.commands?.map(c => ({ ...c })),
+			};
+		})();
+		this.capabilitiesPending.set(cwd, load);
+		try {
+			return await load;
+		} finally {
+			this.capabilitiesPending.delete(cwd);
+		}
 	}
 
 	async executeCommand(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean> {
@@ -821,9 +1082,20 @@ export class CodexRuntime implements EngineRuntime {
 	}
 
 	private async readMcpServerNames(): Promise<string[]> {
-		const configFile = path.join(this.codexHome || path.join(os.homedir(), '.codex'), 'config.toml');
 		try {
-			const toml = await fs.readFile(configFile, 'utf8');
+			let toml: string | undefined;
+			if (this.remoteTarget) {
+				const remoteRoot = this.codexHome || (this.remoteTarget.remoteHome ? joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.codex') : undefined);
+				if (remoteRoot) {
+					toml = await readRemoteTextFile(this.remoteTarget, joinRemotePath(this.remoteTarget.os, remoteRoot, 'config.toml'));
+				}
+			} else {
+				const configFile = path.join(this.codexHome || path.join(os.homedir(), '.codex'), 'config.toml');
+				toml = await fs.readFile(configFile, 'utf8');
+			}
+			if (!toml) {
+				return [];
+			}
 			const names = new Set<string>();
 			for (const match of toml.matchAll(/^\s*\[mcp_servers\.(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+))\]/gm)) {
 				const name = (match[1] ?? match[2] ?? match[3] ?? '').trim();
@@ -867,7 +1139,7 @@ export class CodexRuntime implements EngineRuntime {
 			this.disposeSlot(scopeKey);
 		}
 		this.knownSessions.delete(session.id);
-		if (session.file) {
+		if (session.file && !this.remoteTarget) {
 			await fs.rm(session.file, { force: true });
 		}
 	}

@@ -52,6 +52,29 @@ function sendWireRequest(socketPath: string, payload: Record<string, unknown>): 
 	return sendRawLine(socketPath, JSON.stringify(payload) + '\n');
 }
 
+function sendWireRequestOverTcp(port: number, payload: Record<string, unknown>): Promise<IAdeControlWireResponse> {
+	return new Promise<IAdeControlWireResponse>((resolve, reject) => {
+		const client = net.createConnection({ host: '127.0.0.1', port });
+		const chunks: Buffer[] = [];
+
+		client.once('error', reject);
+		client.once('connect', () => {
+			client.end(JSON.stringify(payload) + '\n', 'utf8');
+		});
+		client.on('data', (chunk: Buffer) => {
+			chunks.push(chunk);
+		});
+		client.once('end', () => {
+			try {
+				const text = Buffer.concat(chunks).toString('utf8').trim();
+				resolve(JSON.parse(text) as IAdeControlWireResponse);
+			} catch (err) {
+				reject(err);
+			}
+		});
+	});
+}
+
 function spawnBundledAdeCli(repoRoot: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<{ status: number | null; stdout: string; stderr: string }> {
 	const binDir = path.join(repoRoot, 'extensions', 'aexus-agents', 'bin');
 	return new Promise((resolve, reject) => {
@@ -134,6 +157,7 @@ suite('AdeControlServer', () => {
 			socketPath: server.socketPath,
 			token: server.token,
 			pid: process.pid,
+			tcpPort: server.tcpPort,
 		});
 		assert.strictEqual(meta.token.length, 64);
 
@@ -263,6 +287,7 @@ suite('AdeControlServer', () => {
 				socketPath: expectedFallbackPath,
 				token: secondary.token,
 				pid: process.pid,
+				tcpPort: secondary.tcpPort,
 			});
 			assert.strictEqual(fs.statSync(secondary.instanceMetaPath).mode & 0o777, 0o600);
 			const secondaryRes = await sendWireRequest(secondary.socketPath, {
@@ -629,7 +654,7 @@ suite('AdeControlServer', () => {
 		assert.strictEqual(server.instanceMetaPath, expectedInstanceMetaPath);
 		assert.deepStrictEqual(
 			JSON.parse(fs.readFileSync(server.instanceMetaPath, 'utf8')) as IAdeControlConnectionMetadata,
-			{ socketPath: server.socketPath, token: server.token, pid: process.pid },
+			{ socketPath: server.socketPath, token: server.token, pid: process.pid, tcpPort: server.tcpPort },
 		);
 		if (!isWindows) {
 			assert.strictEqual(fs.statSync(server.instanceMetaPath).mode & 0o777, 0o600);
@@ -726,6 +751,48 @@ suite('AdeControlServer', () => {
 		]);
 	});
 
+	test('exposes loopback TCP bridge metadata and enforces capability tokens over TCP', async () => {
+		const dispatched: IAdeControlDispatchRequest[] = [];
+		const server = store.add(new AdeControlServer(async req => {
+			dispatched.push(req);
+			return { via: 'tcp', action: req.action };
+		}, { controlDir: tempDir }));
+		await server.whenReady();
+
+		// 1. The loopback listener owns a valid ephemeral port and persists it in metadata.
+		const tcpPort = server.tcpPort;
+		assert.ok(typeof tcpPort === 'number' && Number.isInteger(tcpPort) && tcpPort > 0, 'tcpPort must be a positive integer');
+		const meta = JSON.parse(fs.readFileSync(server.metaPath, 'utf8')) as IAdeControlConnectionMetadata;
+		assert.strictEqual(meta.tcpPort, tcpPort);
+
+		// 2. A server-minted capability token authenticates over TCP and is verified as the session caller.
+		const employeeToken = server.mintSessionCapabilityToken('emp-9', 'employee', false);
+		const employeeRes = await sendWireRequestOverTcp(tcpPort, { token: employeeToken, action: 'status' });
+		assert.deepStrictEqual(employeeRes, { ok: true, result: { via: 'tcp', action: 'status' } });
+		assert.deepStrictEqual(dispatched, [{
+			action: 'status',
+			params: {
+				caller: 'employee',
+				_verifiedCaller: true,
+				_callerSessionId: 'emp-9',
+			},
+		}]);
+
+		// 3. Pure Workers and invalid tokens are still rejected over TCP, before reaching the dispatcher.
+		const pureToken = server.mintSessionCapabilityToken('wrk-9', 'worker', true);
+		const [pureRes, invalidRes] = await Promise.all([
+			sendWireRequestOverTcp(tcpPort, { token: pureToken, action: 'status' }),
+			sendWireRequestOverTcp(tcpPort, { token: 'not-a-valid-token', action: 'status' }),
+		]);
+		assert.deepStrictEqual(pureRes, {
+			ok: false,
+			error: 'Permission denied: pure execution Worker sessions have no ADE control plane access.',
+		});
+		assert.strictEqual(invalidRes.ok, false);
+		assert.match(invalidRes.error ?? '', /^Unauthorized/);
+		assert.strictEqual(dispatched.length, 1, 'rejected TCP requests must not reach the dispatcher');
+	});
+
 	test('stripAdeControlEnv removes all ADE control-plane credentials case-insensitively without mutating source env', () => {
 		const original: NodeJS.ProcessEnv = {
 			PATH: '/usr/bin',
@@ -797,6 +864,64 @@ suite('AdeControlServer', () => {
 					_verifiedCaller: true,
 					_callerSessionId: 'mgr-7',
 				},
+			},
+		]);
+	});
+
+	test('allows pure-rank Mission node capability tokens strictly for token.*/whoami/docs.read/api.update while blocking all other actions', async () => {
+		const dispatched: IAdeControlDispatchRequest[] = [];
+		const server = store.add(new AdeControlServer(async req => {
+			dispatched.push(req);
+			return { ok: true, action: req.action };
+		}, { controlDir: tempDir }));
+		await server.whenReady();
+
+		// Mint pure + missionNode token via auth.mintSessionToken wire action
+		const mintRes = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'mnode-1', rank: 'worker', pure: true, missionNode: true },
+		});
+		assert.strictEqual(mintRes.ok, true);
+		const missionNodePureToken = (mintRes.result as { readonly token: string }).token;
+
+		// Allowed in-graph token/universal actions succeed with verified worker identity
+		const completeRes = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'token.complete',
+			params: { tokenId: 'tok-1', summary: 'Done' },
+		});
+		const whoamiRes = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'whoami',
+		});
+		assert.strictEqual(completeRes.ok, true);
+		assert.strictEqual(whoamiRes.ok, true);
+
+		// All non-token orchestration actions are strictly denied at the server boundary
+		const deniedPatch = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'mission.patch',
+			params: { mermaid: 'flowchart LR\n  A --> B' },
+		});
+		const deniedDelete = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'session.delete',
+			params: { id: 'gov-1' },
+		});
+		assert.strictEqual(deniedPatch.ok, false);
+		assert.match(deniedPatch.error ?? '', /pure-execution Mission node sessions/i);
+		assert.strictEqual(deniedDelete.ok, false);
+		assert.match(deniedDelete.error ?? '', /pure-execution Mission node sessions/i);
+
+		assert.deepStrictEqual(dispatched, [
+			{
+				action: 'token.complete',
+				params: { tokenId: 'tok-1', summary: 'Done', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
+			},
+			{
+				action: 'whoami',
+				params: { caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
 			},
 		]);
 	});

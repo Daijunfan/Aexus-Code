@@ -629,13 +629,19 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			}
 			return agent;
 		});
+		let migratedSelected = false;
+		if (this.selectedProjectUri?.scheme === 'aexus-ssh' && this.selectedProjectUri.authority.toLowerCase() === prev) {
+			this.selectedProjectUri = this.selectedProjectUri.with({ authority: next });
+			this.persistSelectedProject();
+			migratedSelected = true;
+		}
 		if (migratedProjects > 0) {
 			this.saveProjects();
 		}
 		if (migratedAgents > 0) {
 			this.saveAgents();
 		}
-		if (migratedProjects > 0 || migratedAgents > 0) {
+		if (migratedProjects > 0 || migratedAgents > 0 || migratedSelected) {
 			this.changeEmitter.fire();
 		}
 		return migratedProjects;
@@ -934,9 +940,11 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			const isDefaultPure = Boolean(nextTier.pureExecution && nextTier.id === defaultLeaf.id);
 			employeeRole = isDefaultPure ? undefined : nextTier.id;
 		} else {
-			const topRank = getTopRankDefinition(schema);
-			const isDefaultPure = Boolean(topRank.pureExecution && topRank.id === defaultLeaf.id);
-			employeeRole = isDefaultPure ? undefined : topRank.id;
+			// For User (L-1) or Secretary (L0)-owned Missions, default factory cutoff is L1 (when >= 2 ranks exist),
+			// so generated in-graph employees must start strictly on the in-graph side (tier > 1) rather than L1.
+			const inGraphRank = schema.ranks.find(r => r.tier > 1) ?? getTopRankDefinition(schema);
+			const isDefaultPure = Boolean(inGraphRank.pureExecution && inGraphRank.id === defaultLeaf.id);
+			employeeRole = isDefaultPure ? undefined : inGraphRank.id;
 		}
 
 		const existingGenerated = this.entries.filter(entry =>
@@ -1079,6 +1087,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		readonly preferredModel?: string;
 		readonly preferredThinking?: AdeThinkingLevel;
 		readonly workingDirectoryOverride?: string;
+		readonly projectUri?: URI;
 	}): void {
 		const current = this.getAgent(id);
 		if (!current) {
@@ -1090,6 +1099,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			...(Object.hasOwn(prefs, 'preferredModel') ? { preferredModel: prefs.preferredModel } : {}),
 			...(Object.hasOwn(prefs, 'preferredThinking') ? { preferredThinking: prefs.preferredThinking } : {}),
 			...(Object.hasOwn(prefs, 'workingDirectoryOverride') ? { workingDirectoryOverride: prefs.workingDirectoryOverride } : {}),
+			...(prefs.projectUri ? { projectUri: prefs.projectUri } : {}),
 		} : agent);
 		this.saveAgents();
 		this.changeEmitter.fire();

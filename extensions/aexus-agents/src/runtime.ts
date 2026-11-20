@@ -11,6 +11,13 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import * as vscode from 'vscode';
 import {
+	captureRemoteEngine,
+	CloudHostTarget,
+	ensureRemoteControlReverseBridge,
+	spawnRemoteEngine,
+	stageRemoteAdeCliShim,
+} from './cloudTransport';
+import {
 	ADE_MINT_SESSION_TOKEN_ACTION,
 	ADE_PURE_WORKER_FALLBACK_DENY_TOKEN,
 	AgentChildIdentity,
@@ -18,6 +25,7 @@ import {
 	computeAgentIdentityScopeKey,
 	isPureWorkerDenyToken,
 	isPureWorkerIdentity,
+	isRawPureRole,
 	SHARED_PURE_SCOPE_KEY,
 	stripDirectoriesFromPath,
 } from './roleBridgeShared';
@@ -42,6 +50,8 @@ export interface EngineAttachment {
 	readonly filePath: string;
 	readonly mimeType?: string;
 	readonly rangeText?: string;
+	/** True when `filePath` already refers to a path on the session's remote SSH Cloud Host. */
+	readonly remote?: boolean;
 }
 
 export interface EngineSendOptions {
@@ -54,6 +64,8 @@ export interface EngineSendOptions {
 	readonly attachments?: readonly EngineAttachment[];
 	readonly pureWorker?: boolean;
 	readonly callerRole?: string;
+	readonly isMissionNode?: boolean;
+	readonly adeSessionId?: string;
 	readonly automatedEngineering?: boolean;
 	/** Reports live (cumulative for the turn) token usage while the engine is still streaming. */
 	readonly onInterimUsage?: (cumulativeTurnUsage: EngineTurnTokenUsage) => void;
@@ -85,6 +97,7 @@ export interface EngineTurnTokenUsage {
 export interface EngineRuntime extends vscode.Disposable {
 	readonly id: string;
 	readonly name: string;
+	readonly remoteTarget?: CloudHostTarget;
 	readonly onDidChangeSessions?: vscode.Event<readonly NativeSession[]>;
 	list(token: vscode.CancellationToken): Promise<NativeSession[]>;
 	children?(session: NativeSession, token: vscode.CancellationToken): Promise<NativeSession[]>;
@@ -176,26 +189,32 @@ export function agentIdentityScopeKey(sessionId: string, identity?: AgentChildId
 interface MasterControlConnection {
 	readonly socketPath: string;
 	readonly token: string;
+	readonly tcpPort?: number;
 }
 
 const mintedCapabilityTokenCache = new Map<string, { readonly token: string; readonly socketPath: string }>();
 
 async function resolveMasterControlConnection(env: NodeJS.ProcessEnv = process.env): Promise<MasterControlConnection | undefined> {
+	const envTcpPortRaw = env.AEXUS_ADE_TCP_PORT?.trim();
+	const envTcpPort = envTcpPortRaw && /^\d+$/.test(envTcpPortRaw) ? Number.parseInt(envTcpPortRaw, 10) : undefined;
 	const socketOverride = env.AEXUS_ADE_SOCKET?.trim();
 	const tokenOverride = env.AEXUS_ADE_TOKEN?.trim();
 	if (socketOverride && tokenOverride) {
-		return { socketPath: socketOverride, token: tokenOverride };
+		return { socketPath: socketOverride, token: tokenOverride, ...(envTcpPort ? { tcpPort: envTcpPort } : {}) };
 	}
 	const adeHome = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), '.aexus-code');
 	const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(adeHome, 'ade-control.json');
 	try {
 		const raw = await fs.readFile(controlFile, 'utf8');
-		const parsed = JSON.parse(raw) as { socketPath?: unknown; token?: unknown };
+		const parsed = JSON.parse(raw) as { socketPath?: unknown; token?: unknown; tcpPort?: unknown };
 		const metaSocketPath = typeof parsed.socketPath === 'string' ? parsed.socketPath.trim() : '';
 		const socketPath = metaSocketPath || socketOverride || '';
 		const token = tokenOverride || (typeof parsed.token === 'string' ? parsed.token.trim() : '');
+		const tcpPort = typeof parsed.tcpPort === 'number' && Number.isInteger(parsed.tcpPort) && parsed.tcpPort > 0
+			? parsed.tcpPort
+			: envTcpPort;
 		if (socketPath && token) {
-			return { socketPath, token };
+			return { socketPath, token, ...(tcpPort ? { tcpPort } : {}) };
 		}
 	} catch {
 		// Control plane metadata may not exist in unit tests or standalone mode.
@@ -260,6 +279,7 @@ export async function mintSessionCapabilityToken(
 	rank: string,
 	pure = false,
 	env: NodeJS.ProcessEnv = process.env,
+	missionNode = false,
 ): Promise<{ readonly token: string; readonly socketPath: string } | undefined> {
 	const conn = await resolveMasterControlConnection(env);
 	if (!conn) {
@@ -267,7 +287,7 @@ export async function mintSessionCapabilityToken(
 	}
 	const normalizedSid = sessionId.trim() || 'session';
 	const normalizedRank = pure ? 'worker' : (rank.trim().toLowerCase() || 'worker');
-	const cacheKey = `${conn.socketPath}|${normalizedSid}|${normalizedRank}|${pure ? '1' : '0'}`;
+	const cacheKey = `${conn.socketPath}|${normalizedSid}|${normalizedRank}|${pure ? '1' : '0'}|${missionNode ? '1' : '0'}`;
 	const cached = mintedCapabilityTokenCache.get(cacheKey);
 	if (cached) {
 		return cached;
@@ -280,6 +300,7 @@ export async function mintSessionCapabilityToken(
 				sessionId: normalizedSid,
 				rank: normalizedRank,
 				pure,
+				...(missionNode ? { missionNode: true } : {}),
 			},
 		});
 		const mintedToken = response.ok && typeof response.result?.token === 'string' && response.result.token.trim()
@@ -303,20 +324,59 @@ export async function prepareAgentChildEnv(
 	identity?: AgentChildIdentity,
 	baseEnv?: NodeJS.ProcessEnv,
 ): Promise<NodeJS.ProcessEnv> {
-	const pure = isPureWorkerIdentity(identity);
+	const isMissionNode = identity?.isMissionNode === true;
+	const standalonePure = isPureWorkerIdentity(identity);
+	const rawPure = isRawPureRole(identity);
 	const sessionId = identity?.sessionId?.trim() || 'session';
-	const rank = pure ? 'worker' : identity!.callerRole!.trim().toLowerCase();
-	const minted = await mintSessionCapabilityToken(sessionId, rank, pure, process.env);
+	const rank = rawPure ? 'worker' : (identity?.callerRole?.trim().toLowerCase() || 'worker');
+	const minted = await mintSessionCapabilityToken(sessionId, rank, rawPure, process.env, isMissionNode);
 	const cliBinDirs = getBundledCliBinDirs();
 	return buildAgentChildEnv({
 		sessionId,
-		callerRole: pure ? undefined : rank,
-		pureWorker: pure,
+		callerRole: standalonePure ? undefined : rank,
+		pureWorker: standalonePure,
+		isMissionNode,
 		baseEnv: baseEnv ?? process.env,
 		cliBinDirs,
-		socketPath: pure ? undefined : (minted?.socketPath ?? process.env.AEXUS_ADE_SOCKET),
-		sessionToken: minted?.token ?? (pure ? ADE_PURE_WORKER_FALLBACK_DENY_TOKEN : undefined),
+		socketPath: standalonePure ? undefined : (minted?.socketPath ?? process.env.AEXUS_ADE_SOCKET),
+		sessionToken: minted?.token ?? (standalonePure ? ADE_PURE_WORKER_FALLBACK_DENY_TOKEN : undefined),
 	});
+}
+
+export async function prepareRemoteAgentChildEnv(
+	target: CloudHostTarget,
+	identity?: AgentChildIdentity,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<NodeJS.ProcessEnv> {
+	// Standalone pure workers on Cloud Hosts stay 100% isolated with zero control tokens or tunnels.
+	// Pure-rank Mission nodes (isMissionNode === true) receive a strictly token-scoped capability token & bridge.
+	if (isPureWorkerIdentity(identity)) {
+		return {};
+	}
+	const isMissionNode = identity?.isMissionNode === true;
+	const rawPure = isRawPureRole(identity);
+	const sessionId = identity?.sessionId?.trim() || 'session';
+	const rank = rawPure ? 'worker' : (identity?.callerRole?.trim().toLowerCase() || 'worker');
+	const conn = await resolveMasterControlConnection(env);
+	if (!conn?.tcpPort) {
+		return {};
+	}
+	const minted = await mintSessionCapabilityToken(sessionId, rank, rawPure, env, isMissionNode);
+	if (!minted?.token) {
+		return {};
+	}
+	try {
+		const [bridge] = await Promise.all([
+			ensureRemoteControlReverseBridge(target, conn.tcpPort),
+			stageRemoteAdeCliShim(target, path.join(__dirname, 'adeCli.js')).catch(() => undefined),
+		]);
+		return {
+			AEXUS_ADE_REMOTE_BRIDGE_PORT: String(bridge.remotePort),
+			AEXUS_ADE_SESSION_TOKEN: minted.token,
+		};
+	} catch {
+		return {};
+	}
 }
 
 function getStandardCliDirectories(): string[] {
@@ -623,7 +683,10 @@ export async function findExecutable(name: string): Promise<string | undefined> 
 	return undefined;
 }
 
-export function spawnEngine(executable: string, args: readonly string[], cwd?: string, env?: NodeJS.ProcessEnv): cp.ChildProcessWithoutNullStreams {
+export function spawnEngine(executable: string, args: readonly string[], cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget): cp.ChildProcessWithoutNullStreams {
+	if (remoteTarget) {
+		return spawnRemoteEngine(remoteTarget, executable, args, cwd, env);
+	}
 	const mergedEnv: NodeJS.ProcessEnv = env ? { ...env } : { ...process.env };
 	const isPureEnv = isPureWorkerDenyToken(mergedEnv.AEXUS_ADE_SESSION_TOKEN);
 	// Defense-in-depth: never leak master ADE credentials to spawned engine processes.
@@ -671,7 +734,10 @@ export function stopEngine(child: cp.ChildProcess, signal: NodeJS.Signals = 'SIG
 	} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') { throw error; } }
 }
 
-export async function capture(executable: string, args: readonly string[], token: vscode.CancellationToken, cwd?: string, env?: NodeJS.ProcessEnv): Promise<string> {
+export async function capture(executable: string, args: readonly string[], token: vscode.CancellationToken, cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget): Promise<string> {
+	if (remoteTarget) {
+		return captureRemoteEngine(remoteTarget, executable, args, token, cwd, env);
+	}
 	const child = spawnEngine(executable, args, cwd, env);
 	let output = '';
 	let error = '';
@@ -714,8 +780,8 @@ export class JsonLineClient implements vscode.Disposable {
 	private closedError: Error | undefined;
 	get isClosed(): boolean { return !!this.closedError; }
 
-	constructor(executable: string, args: string[], cwd?: string, env?: NodeJS.ProcessEnv) {
-		this.child = spawnEngine(executable, args, cwd, env);
+	constructor(executable: string, args: string[], cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget) {
+		this.child = spawnEngine(executable, args, cwd, env, remoteTarget);
 		this.child.stderr.on('data', data => this.error = (this.error + String(data)).slice(-8000));
 		const lines = readline.createInterface({ input: this.child.stdout });
 		lines.on('line', line => {

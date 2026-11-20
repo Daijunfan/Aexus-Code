@@ -407,13 +407,14 @@
 .monaco-workbench .ade-mission-node-card {
 	position: relative;
 	width: 248px;
-	height: 104px;
-	padding: 13px 16px 12px;
+	height: 114px;
+	padding: 11px 15px 10px;
 	border-radius: 13px;
 	box-sizing: border-box;
 	display: flex;
 	flex-direction: column;
 	justify-content: space-between;
+	gap: 6px;
 	background: color-mix(in srgb, var(--vscode-editorWidget-background, #181c24) 94%, #0f1219);
 	border: 1px solid color-mix(in srgb, var(--ade-mission-out) 38%, color-mix(in srgb, var(--vscode-foreground) 12%, transparent));
 	box-shadow:
@@ -493,7 +494,7 @@
 .monaco-workbench .ade-mission-node-title {
 	font-size: 13px;
 	font-weight: 600;
-	line-height: 1.32;
+	line-height: 1.3;
 	letter-spacing: -0.01em;
 	color: var(--vscode-foreground);
 	display: -webkit-box;
@@ -501,6 +502,72 @@
 	-webkit-box-orient: vertical;
 	overflow: hidden;
 	word-break: break-word;
+}
+
+.monaco-workbench .ade-mission-node-footer {
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 6px;
+	min-height: 20px;
+}
+
+.monaco-workbench .ade-mission-engine-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	max-width: 100%;
+	height: 20px;
+	padding: 0 7px 0 5px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+	color: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	font-weight: 500;
+	line-height: 1;
+	cursor: default;
+	transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .ade-mission-engine-pill.is-editable {
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-engine-pill.is-editable:hover {
+	border-color: color-mix(in srgb, var(--ade-mission-accent) 52%, transparent);
+	background: color-mix(in srgb, var(--ade-mission-accent) 12%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-mission-engine-icon {
+	width: 13px;
+	height: 13px;
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 12px;
+}
+
+.monaco-workbench .ade-mission-engine-icon-svg {
+	background-size: contain;
+	background-repeat: no-repeat;
+	background-position: center;
+}
+
+.monaco-workbench .ade-mission-engine-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-engine-option-lead {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+	overflow: hidden;
 }
 
 /* Symmetric Left/Right Ports aligned to ±0.5px with orthogonal edge endpoints */
@@ -526,6 +593,26 @@
 	left: 100%;
 }
 
+.monaco-workbench .ade-mission-port.port-ctx-top {
+	left: 50%;
+	top: 0;
+	opacity: 0;
+}
+
+.monaco-workbench .ade-mission-port.port-ctx-bottom {
+	left: 50%;
+	top: 100%;
+	opacity: 0;
+}
+
+.monaco-workbench .ade-mission-node.has-ctx-port-top .ade-mission-port.port-ctx-top,
+.monaco-workbench .ade-mission-node.has-ctx-port-bottom .ade-mission-port.port-ctx-bottom {
+	opacity: 1;
+	border-color: #a78bfa;
+	background: #a78bfa;
+	box-shadow: 0 0 9px rgba(167, 139, 250, 0.8);
+}
+
 .monaco-workbench .ade-mission-node.is-hovered .ade-mission-port.port-in,
 .monaco-workbench .ade-mission-node.is-neighbor.is-upstream .ade-mission-port.port-out {
 	border-color: var(--ade-mission-accent);
@@ -544,23 +631,24 @@
  * Shared Employee Identity Pill, Hover Context-Continuity Highlight & Picker
  * ============================================================================ */
 
-.monaco-workbench .ade-mission-node.is-same-employee .ade-mission-node-card {
-	border-color: rgba(167, 139, 250, 0.85);
+.monaco-workbench .ade-mission-node.is-same-employee .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.is-neighbor.is-same-employee .ade-mission-node-card {
+	border-color: rgba(167, 139, 250, 0.9);
 	box-shadow:
-		0 0 0 1px rgba(167, 139, 250, 0.42),
+		0 0 0 1px rgba(167, 139, 250, 0.48),
 		0 8px 24px rgba(0, 0, 0, 0.34),
-		0 0 18px rgba(167, 139, 250, 0.22);
+		0 0 20px rgba(167, 139, 250, 0.26);
 }
 
 .monaco-workbench .ade-mission-context-edge {
 	fill: none;
 	stroke: #a78bfa;
-	stroke-width: 2px;
+	stroke-width: 2.2px;
 	stroke-linecap: round;
 	stroke-linejoin: round;
 	stroke-dasharray: 6 5;
 	animation: adeMissionEdgeFlow 0.9s linear infinite;
-	filter: drop-shadow(0 0 4px rgba(167, 139, 250, 0.55));
+	filter: drop-shadow(0 0 5px rgba(167, 139, 250, 0.62));
 }
 
 .monaco-workbench .ade-mission-emp-pill {
@@ -719,4 +807,296 @@
 .monaco-workbench .ade-mission-emp-popover-meta {
 	font-size: 10px;
 	color: var(--vscode-descriptionForeground);
+}
+
+/* ============================================================================
+ * Minimal Runtime Controls, Node State Highlights & Fail Edges (Section 6)
+ * ============================================================================ */
+
+@keyframes adeMissionStatePulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.42; }
+}
+
+.monaco-workbench .ade-mission-run-bar {
+	position: absolute;
+	top: 14px;
+	left: 58px;
+	z-index: 30;
+	height: 36px;
+	padding: 0 8px 0 11px;
+	border-radius: 10px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #1c2028) 88%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	backdrop-filter: blur(12px);
+}
+
+.monaco-workbench .ade-mission-run-bar[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-run-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: color-mix(in srgb, var(--vscode-foreground) 35%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-run-bar[data-status="running"] .ade-mission-run-dot {
+	background: #38bdf8;
+	box-shadow: 0 0 8px rgba(56, 189, 248, 0.72);
+	animation: adeMissionStatePulse 1.6s ease-in-out infinite;
+}
+
+.monaco-workbench .ade-mission-run-bar[data-status="paused"] .ade-mission-run-dot {
+	background: #f59e0b;
+}
+
+.monaco-workbench .ade-mission-run-bar[data-status="completed"] .ade-mission-run-dot {
+	background: #34d399;
+}
+
+.monaco-workbench .ade-mission-run-bar[data-status="failed"] .ade-mission-run-dot {
+	background: #f87171;
+}
+
+.monaco-workbench .ade-mission-run-status {
+	font-size: 11.5px;
+	font-weight: 550;
+	color: var(--vscode-foreground);
+	padding-right: 2px;
+}
+
+.monaco-workbench .ade-mission-run-btn {
+	height: 24px;
+	padding: 0 9px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--ade-mission-accent) 44%, transparent);
+	background: color-mix(in srgb, var(--ade-mission-accent) 16%, transparent);
+	color: var(--vscode-foreground);
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 11.5px;
+	font-weight: 550;
+	cursor: pointer;
+	transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-mission-run-btn:hover:not(:disabled) {
+	border-color: var(--ade-mission-accent);
+	background: color-mix(in srgb, var(--ade-mission-accent) 24%, transparent);
+}
+
+.monaco-workbench .ade-mission-run-btn:disabled {
+	opacity: 0.42;
+	cursor: default;
+}
+
+.monaco-workbench .ade-mission-run-stop-btn {
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border-radius: 6px;
+	border: 1px solid rgba(248, 113, 113, 0.36);
+	background: rgba(248, 113, 113, 0.12);
+	color: #f87171;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-run-stop-btn[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-run-stop-btn:hover {
+	background: rgba(248, 113, 113, 0.22);
+}
+
+.monaco-workbench .ade-mission-drawer-config {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 8px 12px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+}
+
+.monaco-workbench .ade-mission-config-field {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-config-input,
+.monaco-workbench .ade-mission-config-select {
+	height: 22px;
+	padding: 0 6px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background, #11141a);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 11px;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-config-input {
+	width: 52px;
+}
+
+.monaco-workbench .ade-mission-config-select.full {
+	width: 100%;
+	height: 26px;
+}
+
+.monaco-workbench .ade-mission-config-input:disabled,
+.monaco-workbench .ade-mission-config-select:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+/* Restrained Node Runtime State Visuals (zero card size change) */
+.monaco-workbench .ade-mission-node-id-wrap {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.monaco-workbench .ade-mission-state-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-node.state-active .ade-mission-node-card {
+	border-color: rgba(56, 189, 248, 0.85);
+	box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35), 0 8px 22px rgba(0, 0, 0, 0.32);
+}
+
+.monaco-workbench .ade-mission-node.state-active .ade-mission-state-dot {
+	background: #38bdf8;
+	box-shadow: 0 0 7px rgba(56, 189, 248, 0.8);
+	animation: adeMissionStatePulse 1.5s ease-in-out infinite;
+}
+
+.monaco-workbench .ade-mission-node.state-blocked .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.state-waiting-join .ade-mission-node-card {
+	border-color: rgba(245, 158, 11, 0.78);
+}
+
+.monaco-workbench .ade-mission-node.state-blocked .ade-mission-state-dot,
+.monaco-workbench .ade-mission-node.state-waiting-join .ade-mission-state-dot {
+	background: #f59e0b;
+}
+
+.monaco-workbench .ade-mission-node.state-waiting-gate .ade-mission-node-card {
+	border-color: rgba(245, 185, 66, 0.92);
+	box-shadow: 0 0 0 1px rgba(245, 185, 66, 0.42), 0 8px 22px rgba(0, 0, 0, 0.34);
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-node.state-waiting-gate .ade-mission-state-dot {
+	background: #f5b942;
+	animation: adeMissionStatePulse 1.5s ease-in-out infinite;
+}
+
+.monaco-workbench .ade-mission-node.state-completed .ade-mission-node-card {
+	border-color: rgba(52, 211, 153, 0.52);
+}
+
+.monaco-workbench .ade-mission-node.state-completed .ade-mission-state-dot {
+	background: #34d399;
+}
+
+.monaco-workbench .ade-mission-node.state-failed .ade-mission-node-card {
+	border-color: rgba(248, 113, 113, 0.88);
+	box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.38), 0 8px 22px rgba(0, 0, 0, 0.34);
+}
+
+.monaco-workbench .ade-mission-node.state-failed .ade-mission-state-dot {
+	background: #f87171;
+}
+
+.monaco-workbench .ade-mission-host-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	max-width: 96px;
+	height: 18px;
+	padding: 0 6px;
+	border-radius: 999px;
+	background: rgba(56, 189, 248, 0.12);
+	border: 1px solid rgba(56, 189, 248, 0.32);
+	color: #7dd3fc;
+	font-size: 10px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-host-pill .codicon {
+	font-size: 10px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-host-section {
+	margin-top: 4px;
+	padding-top: 6px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-gate-actions {
+	display: flex;
+	gap: 6px;
+	margin-top: 4px;
+}
+
+.monaco-workbench .ade-mission-gate-btn {
+	flex: 1;
+	height: 26px;
+	border-radius: 6px;
+	font-size: 11.5px;
+	font-weight: 600;
+	cursor: pointer;
+	border: 1px solid transparent;
+}
+
+.monaco-workbench .ade-mission-gate-btn.approve {
+	background: rgba(52, 211, 153, 0.18);
+	border-color: rgba(52, 211, 153, 0.45);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-gate-btn.approve:hover {
+	background: rgba(52, 211, 153, 0.28);
+}
+
+.monaco-workbench .ade-mission-gate-btn.reject {
+	background: rgba(248, 113, 113, 0.16);
+	border-color: rgba(248, 113, 113, 0.42);
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-mission-gate-btn.reject:hover {
+	background: rgba(248, 113, 113, 0.26);
+}
+
+/* Fail-triggered alternative route edges */
+.monaco-workbench .ade-mission-edge-group.is-fail-edge .ade-mission-edge-path {
+	stroke: rgba(248, 113, 113, 0.72);
+	stroke-dasharray: 5 4;
 }

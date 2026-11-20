@@ -1432,8 +1432,8 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		let nextArgs = Array.isArray(argsOrOptions) ? [...argsOrOptions] : [];
 		let nextOptions = (Array.isArray(argsOrOptions) ? maybeOptions : argsOrOptions) as cp.SpawnOptions | undefined;
 
-		// Skip internal aexus-agents engineProcess.js workers; they already go through resolvePromptContext.
-		if (nextArgs.some(arg => path.basename(arg) === 'engineProcess.js')) {
+		// Skip internal aexus-agents engineProcess.js workers and SSH transports; they already go through resolvePromptContext.
+		if (nextArgs.some(arg => path.basename(arg) === 'engineProcess.js') || isExecutableMatch(nextCommand, ['ssh'])) {
 			return origSpawn.call(cpModule, nextCommand, nextArgs, nextOptions ?? {});
 		}
 

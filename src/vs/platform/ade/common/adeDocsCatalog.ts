@@ -4,6 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import {
+	ADE_API_LATEST_REVISION,
+	ADE_API_SPEC_CATALOG,
+	renderCommonApiDoc,
+} from './adeApiRegistry.js';
+import {
 	ADE_PRIMITIVE_APIS,
 	IAdeOrganizationConfig,
 	IAdeRankDefinition,
@@ -12,12 +17,18 @@ import {
 import { ADE_SECRETARY_TIER_TAG, formatTierTag } from './adeRankResize.js';
 
 export const ADE_DOCS_DIR_NAME = 'docs';
+export const ADE_DOCS_COMMON_DIR_NAME = 'common';
+export const ADE_DOCS_COMMON_FILE_NAME = 'COMMON_API.md';
 export const ADE_DOCS_RANKS_DIR_NAME = 'ranks';
 export const ADE_DOCS_MISSION_DIR_NAME = 'mission';
 export const ADE_DOCS_MISSION_FILE_NAME = 'MISSION_API.md';
+export const ADE_DOCS_MANIFEST_FILE_NAME = 'api-manifest.json';
 
 export interface IAdeDocsPaths {
 	readonly docsRoot: string;
+	readonly commonDir?: string;
+	readonly commonDoc?: string;
+	readonly manifestFile?: string;
 	readonly ranksDir: string;
 	readonly missionDir: string;
 	readonly missionDoc: string;
@@ -25,6 +36,8 @@ export interface IAdeDocsPaths {
 }
 
 export interface IAdeDocsBundle {
+	readonly commonFile?: string;
+	readonly manifestJson?: string;
 	readonly rankFiles: Readonly<Record<string, string>>;
 	readonly missionFile: string;
 }
@@ -37,11 +50,16 @@ function joinDocPath(base: string, ...parts: readonly string[]): string {
 
 /**
  * Computes canonical single-copy documentation paths under `<adeHome>/docs/`:
+ * - `<adeHome>/docs/common/COMMON_API.md` (universal base commands & immutable `api update`)
  * - `<adeHome>/docs/ranks/L0.md`, `L1.md`, ..., `L<N>.md`
- * - `<adeHome>/docs/mission/MISSION_API.md` (sibling directory alongside `ranks/`)
+ * - `<adeHome>/docs/mission/MISSION_API.md` (sibling directory alongside `ranks/` and `common/`)
+ * - `<adeHome>/docs/api-manifest.json` (versioned revision manifest)
  */
 export function buildAdeDocsPaths(adeHomeDir: string, rankCount: number): IAdeDocsPaths {
 	const docsRoot = joinDocPath(adeHomeDir, ADE_DOCS_DIR_NAME);
+	const commonDir = joinDocPath(docsRoot, ADE_DOCS_COMMON_DIR_NAME);
+	const commonDoc = joinDocPath(commonDir, ADE_DOCS_COMMON_FILE_NAME);
+	const manifestFile = joinDocPath(docsRoot, ADE_DOCS_MANIFEST_FILE_NAME);
 	const ranksDir = joinDocPath(docsRoot, ADE_DOCS_RANKS_DIR_NAME);
 	const missionDir = joinDocPath(docsRoot, ADE_DOCS_MISSION_DIR_NAME);
 	const missionDoc = joinDocPath(missionDir, ADE_DOCS_MISSION_FILE_NAME);
@@ -53,7 +71,7 @@ export function buildAdeDocsPaths(adeHomeDir: string, rankCount: number): IAdeDo
 		const tag = formatTierTag(tier);
 		rankDocs[tag] = joinDocPath(ranksDir, `${tag}.md`);
 	}
-	return { docsRoot, ranksDir, missionDir, missionDoc, rankDocs };
+	return { docsRoot, commonDir, commonDoc, manifestFile, ranksDir, missionDir, missionDoc, rankDocs };
 }
 
 /**
@@ -147,8 +165,26 @@ export function renderTierRankDoc(config: IAdeOrganizationConfig, rank: IAdeRank
 	if (rank.pureExecution || rank.allowedApis.length === 0) {
 		return [
 			...header,
+			'## Global Base & On-Demand API Update',
+			'```bash',
+			'aexus-ade whoami --json',
+			`aexus-ade api update --since ${ADE_API_LATEST_REVISION} --json`,
+			'```',
+			'',
+			'## In-Graph Mission Token Commands (When Participating in a Mission)',
+			'- Write plain, concrete human-readable summaries (key changes, file paths, results — no filler).',
+			'- Strictly top-down comms: never send private messages upward to supervisors; report blockers via `token block` or failures via `token fail`.',
+			'```bash',
+			'aexus-ade token current --json',
+			'aexus-ade token trace <tracePtr> --json',
+			'aexus-ade token complete <tokenId> --summary "<concrete human summary>" --json',
+			'aexus-ade token reject <tokenId> --reason "<specific defects>" [--target <nodeId>] --json',
+			'aexus-ade token block <tokenId> --duration <10h|30m> --reason "<reason>" [--watch-pid <pid>] [--watch-file <path>] --json',
+			'aexus-ade token fail <tokenId> --reason "<root cause>" --json',
+			'```',
+			'',
 			'## Authorized Aexus-Code Primitive APIs',
-			'- None. Agents at this tier execute coding tasks directly in a clean native Coding Agent context without ADE orchestration APIs.',
+			'- None outside Mission token reporting. Agents at this tier execute coding tasks directly in a clean native Coding Agent context without ADE orchestration APIs.',
 			'',
 		].join('\n');
 	}
@@ -167,6 +203,31 @@ export function renderTierRankDoc(config: IAdeOrganizationConfig, rank: IAdeRank
 
 	return [
 		...header,
+		'## Global Base & Immutable API Update Diff',
+		'```bash',
+		'aexus-ade whoami --json',
+		'aexus-ade docs read common',
+		`aexus-ade api update --since ${ADE_API_LATEST_REVISION} --json`,
+		'```',
+		'',
+		'## Off-Graph Supervision & Top-Down Communication (`org.*`)',
+		'- Communication is strictly top-down: supervisors may message and pull conversation context from managed subordinates; subordinates cannot message upward.',
+		'```bash',
+		'aexus-ade org subordinates [--mission <id>] --json',
+		'aexus-ade org send <nodeOrSessionId> "<directive>" [--mission <id>] [--wait] --json',
+		'aexus-ade org context <nodeOrSessionId> [--limit 20] [--mission <id>] --json',
+		'aexus-ade org escalate --reason "<reason>" [--node <nodeId>] [--token <tokenId>] [--mission <id>] --json',
+		'```',
+		'',
+		'## In-Graph Mission Token Commands (When Assigned to a Mission Node)',
+		'```bash',
+		'aexus-ade token current --json | token trace <tracePtr> --json',
+		'aexus-ade token complete <tokenId> --summary "<concrete human summary>" --json',
+		'aexus-ade token reject <tokenId> --reason "<defects>" [--target <nodeId>] --json',
+		'aexus-ade token block <tokenId> --duration <10h|30m> --reason "<reason>" [--watch-pid <pid>] [--watch-file <path>] --json',
+		'aexus-ade token fail <tokenId> --reason "<root cause>" --json',
+		'```',
+		'',
 		'## Authorized Aexus-Code Kernel Primitive APIs',
 		'All permissions below are enforced at the Aexus-Code control kernel boundary:',
 		...apiSpecs.map(spec => `- \`${spec.id}\` — ${spec.description}`),
@@ -176,7 +237,7 @@ export function renderTierRankDoc(config: IAdeOrganizationConfig, rank: IAdeRank
 		'',
 		...(hasMissionApis ? [
 			'## Mission API Reference (Read On Demand)',
-			'- When participating in or orchestrating a **Mission**, read the sibling specification `../mission/MISSION_API.md` (or run `aexus-ade mission docs --json` to locate it).',
+			'- When participating in or orchestrating a **Mission**, read the sibling specification `../mission/MISSION_API.md` (or run `aexus-ade docs read mission`).',
 			'',
 		] : []),
 	].join('\n');
@@ -184,51 +245,67 @@ export function renderTierRankDoc(config: IAdeOrganizationConfig, rank: IAdeRank
 
 /**
  * Renders the single-copy unified Mission API documentation (`mission/MISSION_API.md`),
- * stored in a sibling folder right next to `ranks/` and read ONLY on demand when working on a Mission.
+ * stored in a sibling folder right next to `ranks/` and `common/`, read ONLY on demand when working on a Mission.
  */
 export function renderMissionApiDoc(config: IAdeOrganizationConfig): string {
 	const totalTiers = config.ranks.length;
 	return [
 		'# Aexus ADE — Unified Mission API Reference',
 		'',
-		'This document is the single shared specification for **Mission** Mermaid DAG workspaces (`docs/mission/MISSION_API.md`, sibling to `docs/ranks/`).',
-		'Read this file **only on demand** when creating, editing, inspecting, or opening a Mission.',
+		`Current API Revision: **${ADE_API_LATEST_REVISION}**`,
 		'',
-		'## Concepts',
-		'- **Mission** is the single unified DAG canvas mode in Aexus Code (replacing any legacy Engineering/Research split; `"Engineering"` / `"Research"` are user-customizable display aliases).',
-		`- Full rank ladder: \`L-1\` User → \`L0\` Secretary (default) → \`L1\` highest → \`L${totalTiers}\` lowest.`,
-		'- **Strict Owner-Only Orchestration**: A Mission may be created on any rank session (`L0`, `L1`..`LN`), and **only that exact owner session** (plus User `L-1`) is permitted to operate its Mission orchestration.',
-		'- **Locked Mermaid-Generated Employees**: Employee sessions generated from a Mission\'s Mermaid DAG appear **locked** in the left sidebar and cannot be individually deleted, removed, moved, or re-roled unless the entire Mission and all of its employees are removed together.',
-		'- Rank display aliases and the Mission display alias are user-configurable and hot-reloadable. Query live names anytime via `aexus-ade rank names --json`.',
-		'- Mission DAG nodes are strictly flat (non-nested) and authored directly in Mermaid (`flowchart LR` / `graph TD`) via the top-left Mermaid file drawer or Mission APIs.',
+		'This document is the single shared specification for **Mission** Mermaid DAG workflows (`docs/mission/MISSION_API.md`, sibling to `docs/ranks/` and `docs/common/`).',
+		'Read this file **only on demand** when creating, editing, inspecting, or operating a Mission. Check diffs anytime via `aexus-ade api update --since <rev> --scope mission --json`.',
 		'',
-		'## Core Mission CLI Commands (`aexus-ade mission ...`)',
+		'## Core Architecture Rules',
+		'- **Unified Mission Mode**: All engineering and research tasks converge into one flat Mermaid DAG workflow.',
+		`- **Factory Wall (Off-Graph vs In-Graph)**: Hierarchy \`L-1\` User → \`L0\` Secretary → \`L1\` highest → \`L${totalTiers}\` lowest (depth ${totalTiers}). Tiers \`<= offGraphMaxTier\` are strictly off-graph supervisors (never occupy DAG task nodes); tiers \`> offGraphMaxTier\` work inside the DAG. No tier may span both sides.`,
+		'- **Plain-Text Token Bus**: Only plain-text tokens travel across edges (`last_summary` + rolling `compressed_history` + expandable `trace_ptr`). Code/data sync across local & SSH Cloud Hosts is performed directly by agents via Git/SCP/Rsync.',
+		'- **Dual-Polarity Edges**: Regular edges trigger on `token complete`; fail edges (`-->|fail|`, `-.->|on_fail|`, `A -- fail --> B`, plus synonyms `error`, `fallback`, `recover`) trigger automatically on `token fail` without waking supervisors.',
+		'- **Join Barrier & Anti-Deadlock**: Forked branches share a `wave_id`; join nodes wait only for active upstream branches belonging to that wave (untaken success/fail branches are automatically marked skipped).',
+		'- **Watchdog Daemon & `blocked`**: Silence timeout (default 5m) locks upon Mission start. Long-running tasks call `token block` with optional local/remote PID-exit or file-ready early wakeup.',
+		'- **Safe Jurisdiction Recall & Anti-Dangling Patch**: Only off-graph supervisors may recall/patch unfinished regions within their jurisdiction. Deleting the sole incoming path to a non-source downstream node without atomically providing a replacement path is strictly rejected; out-of-jurisdiction edits/recalls must escalate upward.',
+		'- **Zero-Token Source Triggers**: `inDegree = 0` source nodes support `once`, `interval`, `cron`, and `event` (`file_created`, `file_changed`, `git_updated`, `gpu_idle`) triggers.',
+		'',
+		'## Mission CLI Commands (`aexus-ade mission ...`)',
 		'```bash',
-		'# Discovery & Docs',
-		'aexus-ade mission docs --json',
-		'aexus-ade mission list [--project <path>] --json',
-		'aexus-ade mission status --governor <missionId> --json',
-		'',
-		'# Create, Open & Author Mermaid DAG',
-		'aexus-ade mission init [--governor <missionId>] [--title "<name>"] [--open]',
-		'aexus-ade mission open --governor <missionId> [--side]',
-		'aexus-ade mission blueprint get --governor <missionId> [--raw]',
+		'# Discovery, Docs & Blueprint',
+		'aexus-ade docs read mission',
+		'aexus-ade mission docs --json | mission list [--project <path>] --json',
+		'aexus-ade mission init [--owner <id>] [--title "<name>"] [--open]',
+		'aexus-ade mission open --mission <id> [--side]',
+		'aexus-ade mission blueprint get --mission <id> [--raw]',
 		'aexus-ade mission blueprint validate (--file <path> | --text "<mermaid>") --json',
-		'aexus-ade mission blueprint apply --governor <missionId> --file <path>',
-		'aexus-ade mission remove --governor <missionId>',
+		'aexus-ade mission blueprint apply --mission <id> --file <path>',
+		'aexus-ade mission remove --mission <id>',
+		'',
+		'# Lifecycle, Factory Boundary & Human Gates',
+		'aexus-ade mission boundary get|set --mission <id> [--off-graph-max-tier <k>] [--supervisors-json <json>] --json',
+		'aexus-ade mission start --mission <id> [--timeout <minutes>] --json',
+		'aexus-ade mission timeout --mission <id> --minutes <n> --json',
+		'aexus-ade mission pause|resume|stop|status --mission <id> --json',
+		'aexus-ade mission gate approve|reject --mission <id> --node <gateId> [--note "<text>"] [--rollback <nodeId>] --json',
+		'',
+		'# Jurisdiction Recall & Atomic Safe Patch (Off-Graph Supervisors Only)',
+		'aexus-ade mission recall --mission <id> [--nodes <N1,N2>] [--branch <nodeId>] [--reason "<reason>"] --json',
+		'aexus-ade mission patch --mission <id> (--file <path> | --text "<mermaid>") [--reason "<reason>"] --json',
+		'',
+		'# Source Triggers (inDegree = 0) & Cloud Host Binding',
+		'aexus-ade mission trigger list --mission <id> --json',
+		'aexus-ade mission trigger set --mission <id> --node <nodeId> --kind <once|interval|cron|event> [--delay <10m>|--interval <30m>|--cron "0 2 * * *"|--event-type <file_created|file_changed|git_updated|gpu_idle> --target <pathOrHost>] --json',
+		'aexus-ade mission trigger remove --mission <id> --trigger <triggerId> --json',
+		'aexus-ade mission host bind --mission <id> --node <nodeId> --host <local|sshAlias> [--path <remoteDir>] --json',
 		'```',
 		'',
 		'## Mermaid DAG Format (`mission.mmd`)',
-		'- Define flat, non-nested DAG topology using Mermaid (`flowchart LR` or `graph LR/TD`) with task nodes (`N1["Title"]`) and optional gate nodes (`U1{{"Gate"}}`).',
-		'- **Employee Context Reuse**: Assign the same employee to multiple DAG positions using `@Name: Task` (e.g. `N1["@Backend: API Spec"] --> N2["@Frontend: UI"] --> N3["@Backend: Integration"]`), `:::Name`, or `class N1,N3 Name`. One single locked employee session is created in the sidebar and reused across all assigned steps to share context.',
-		'- Edges support labels (`N1 -->|spec| N2`) and fan-in/fan-out (`N2 & N3 --> N4`); any `subgraph` wrappers are flattened into standalone nodes.',
-		'- Always validate with `aexus-ade mission blueprint validate` before applying.',
+		'- Define flat, non-nested DAG topology (`flowchart LR` / `graph TD`) with task nodes (`N1["Title"]`), gate nodes (`G1{{"Gate"}}`), and fail edges (`N1 -->|fail| N_Fallback`).',
+		'- Reuse the same employee across positions with `@Name: Task`, `:::Name`, or `class N1,N3 Name`.',
 		'',
 	].join('\n');
 }
 
 /**
- * Generates the complete single-copy documentation bundle (`ranks/L0.md..L<N>.md` + `mission/MISSION_API.md`).
+ * Generates the complete single-copy documentation bundle (`common/COMMON_API.md` + `ranks/L0..LN.md` + `mission/MISSION_API.md` + `api-manifest.json`).
  */
 export function buildAdeDocsBundle(config: IAdeOrganizationConfig): IAdeDocsBundle {
 	const sorted = [...config.ranks].sort((a, b) => a.tier - b.tier);
@@ -238,7 +315,15 @@ export function buildAdeDocsBundle(config: IAdeOrganizationConfig): IAdeDocsBund
 	for (const rank of sorted) {
 		rankFiles[`${formatTierTag(rank.tier)}.md`] = renderTierRankDoc(config, rank);
 	}
+	const manifestJson = JSON.stringify({
+		contractVersion: 1,
+		currentRevision: ADE_API_LATEST_REVISION,
+		rankCount: sorted.length,
+		apis: ADE_API_SPEC_CATALOG,
+	}, null, 2) + '\n';
 	return {
+		commonFile: renderCommonApiDoc(),
+		manifestJson,
 		rankFiles,
 		missionFile: renderMissionApiDoc(config),
 	};

@@ -6,6 +6,22 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { CloudHostTarget } from './cloudTransport';
+
+export type RemoteTextFilesBatchReader = (
+	target: CloudHostTarget,
+	remotePaths: readonly string[],
+) => Promise<Map<string, string | undefined>>;
+
+let registeredRemoteBatchReader: RemoteTextFilesBatchReader | undefined;
+
+export function registerRemoteCapabilitiesReader(reader: RemoteTextFilesBatchReader): void {
+	registeredRemoteBatchReader = reader;
+}
+
+function joinRemoteCapabilityPath(hostOs: CloudHostTarget['os'], ...segments: string[]): string {
+	return hostOs === 'windows' ? path.win32.join(...segments) : path.posix.join(...segments);
+}
 
 export type EngineId = 'aexus-claude' | 'aexus-codex' | 'aexus-kilo' | 'aexus-opencode' | 'aexus-dsh' | 'aexus-antigravity' | 'aexus-cline' | 'aexus-pi';
 
@@ -26,6 +42,38 @@ export interface DiscoveredOptionItem {
 	default?: boolean;
 	slashCommand?: string;
 	tooltip?: string;
+}
+
+/** Parses the tab-separated model table printed by the Antigravity `agy` CLI. */
+export function parseAgyModelsOutput(output: string): Array<{ id: string; name: string }> {
+	const models: Array<{ id: string; name: string }> = [];
+	const seen = new Set<string>();
+	for (const rawLine of output.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line || /^fetching\b/i.test(line)) {
+			continue;
+		}
+		const tabIdx = line.indexOf('\t');
+		let id: string;
+		let name: string;
+		if (tabIdx > 0) {
+			id = line.slice(0, tabIdx).trim();
+			name = line.slice(tabIdx + 1).trim() || id;
+		} else {
+			const match = /^([A-Za-z0-9._:/-]+)\s{2,}(.+)$/.exec(line);
+			if (!match) {
+				continue;
+			}
+			id = match[1].trim();
+			name = match[2].trim() || id;
+		}
+		if (!id || /\s/.test(id) || seen.has(id)) {
+			continue;
+		}
+		seen.add(id);
+		models.push({ id, name });
+	}
+	return models;
 }
 
 export interface DiscoveredOptionGroup {
@@ -288,9 +336,13 @@ interface ModelConfigRead {
 	models: DiscoveredOptionItem[];
 }
 
-async function readModelConfigFromCandidates(candidates: readonly string[], reader: (text: string) => ModelConfigRead): Promise<ModelConfigRead> {
+async function readModelConfigFromCandidates(
+	candidates: readonly string[],
+	reader: (text: string) => ModelConfigRead,
+	readText: (filePath: string) => Promise<string | undefined> = readTextFileCached,
+): Promise<ModelConfigRead> {
 	for (const candidate of candidates) {
-		const text = await readTextFileCached(candidate);
+		const text = await readText(candidate);
 		if (text === undefined) {
 			continue;
 		}
@@ -342,19 +394,44 @@ function providerModelItems(providerValue: unknown): DiscoveredOptionItem[] {
 		return [];
 	}
 	const items: DiscoveredOptionItem[] = [];
+	const seen = new Set<string>();
+	const addProviderModel = (providerId: string, modelId: string, modelRecord?: Record<string, unknown>): void => {
+		const fullId = modelId.startsWith(`${providerId}/`) ? modelId : `${providerId}/${modelId}`;
+		if (!modelId || seen.has(fullId)) {
+			return;
+		}
+		seen.add(fullId);
+		const displayName = stringValue(modelRecord?.name) ?? stringValue(modelRecord?.label);
+		items.push(displayName && displayName !== fullId
+			? { id: fullId, name: displayName, description: fullId }
+			: { id: fullId, name: fullId });
+	};
 	for (const [providerId, providerEntry] of Object.entries(provider)) {
 		const providerRecord = asRecord(providerEntry);
-		const models = providerRecord ? asRecord(providerRecord.models) : undefined;
+		const rawModels = providerRecord?.models;
+		if (Array.isArray(rawModels)) {
+			for (const entry of rawModels) {
+				if (typeof entry === 'string') {
+					const modelId = stringValue(entry);
+					if (modelId) {
+						addProviderModel(providerId, modelId);
+					}
+					continue;
+				}
+				const modelRecord = asRecord(entry);
+				const modelId = stringValue(modelRecord?.id) ?? stringValue(modelRecord?.model) ?? stringValue(modelRecord?.name);
+				if (modelId) {
+					addProviderModel(providerId, modelId, modelRecord);
+				}
+			}
+			continue;
+		}
+		const models = asRecord(rawModels);
 		if (!models) {
 			continue;
 		}
 		for (const [modelId, modelEntry] of Object.entries(models)) {
-			const modelRecord = asRecord(modelEntry);
-			const fullId = `${providerId}/${modelId}`;
-			const displayName = stringValue(modelRecord?.name) ?? stringValue(modelRecord?.label);
-			items.push(displayName && displayName !== fullId
-				? { id: fullId, name: displayName, description: fullId }
-				: { id: fullId, name: fullId });
+			addProviderModel(providerId, modelId, asRecord(modelEntry));
 		}
 	}
 	return items;
@@ -445,6 +522,10 @@ function readCodexModelsCache(text: string): ModelConfigRead {
 	const seen = new Set<string>();
 	for (const entry of list) {
 		const rec = asRecord(entry);
+		const visibility = stringValue(rec?.visibility)?.toLowerCase();
+		if (visibility === 'hide' || visibility === 'hidden' || rec?.hidden === true) {
+			continue;
+		}
 		const id = stringValue(rec?.slug) ?? stringValue(rec?.model) ?? stringValue(rec?.id);
 		if (!id || seen.has(id)) {
 			continue;
@@ -477,11 +558,12 @@ function readKiloConfig(text: string): ModelConfigRead {
 		return { defaultModel, models: defaultModel ? [{ id: defaultModel, name: defaultModel }] : [] };
 	}
 	const defaultModel = stringValue(parsed.model);
+	const providerModels = providerModelItems(parsed.provider);
 	const models: DiscoveredOptionItem[] = [];
-	if (defaultModel) {
+	if (defaultModel && !providerModels.some(m => m.id === defaultModel)) {
 		models.push({ id: defaultModel, name: defaultModel });
 	}
-	models.push(...providerModelItems(parsed.provider));
+	models.push(...providerModels);
 	return { defaultModel, models };
 }
 
@@ -493,15 +575,22 @@ function readOpenCodeConfig(text: string): ModelConfigRead {
 		return { defaultModel, models: defaultModel ? [{ id: defaultModel, name: defaultModel }] : [] };
 	}
 	const defaultModel = stringValue(parsed.model);
+	const smallModel = stringValue(parsed.small_model);
+	const providerModels = providerModelItems(parsed.provider);
 	const models: DiscoveredOptionItem[] = [];
-	if (defaultModel) {
+	if (defaultModel && !providerModels.some(m => m.id === defaultModel)) {
 		models.push({ id: defaultModel, name: defaultModel });
 	}
-	const smallModel = stringValue(parsed.small_model);
-	if (smallModel) {
+	if (smallModel && !providerModels.some(m => m.id === smallModel)) {
 		models.push({ id: smallModel, name: `${smallModel} (Small)` });
 	}
-	models.push(...providerModelItems(parsed.provider));
+	for (const item of providerModels) {
+		if (smallModel && item.id === smallModel) {
+			models.push({ ...item, name: item.name.includes('(Small)') ? item.name : `${item.name} (Small)` });
+		} else {
+			models.push(item);
+		}
+	}
 	return { defaultModel, models };
 }
 
@@ -769,18 +858,81 @@ export async function discoverEngineModels(
 	cwd: string,
 	runtimeModels: Array<{ id: string; name: string; description?: string }> = [],
 	runtimeDefaultModel?: string,
+	customModels: readonly string[] = [],
+	remoteTarget?: CloudHostTarget,
 ): Promise<DiscoveredOptionItem[]> {
-	const home = os.homedir();
+	const home = remoteTarget ? remoteTarget.remoteHome : os.homedir();
+	const join = remoteTarget
+		? (...parts: string[]) => joinRemoteCapabilityPath(remoteTarget.os, ...parts)
+		: (...parts: string[]) => path.join(...parts);
+	const withHome = (...rel: string[]): string[] => home ? [join(home, ...rel)] : [];
 	const items: DiscoveredOptionItem[] = [];
 	const seen = new Set<string>();
 	let resolvedDefault: string | undefined;
+
+	let readText: (filePath: string) => Promise<string | undefined> = readTextFileCached;
+	if (remoteTarget) {
+		const batchPaths: string[] = [];
+		switch (engineId) {
+			case 'aexus-claude':
+				batchPaths.push(join(cwd, '.claude', 'settings.json'), ...withHome('.claude', 'settings.json'));
+				break;
+			case 'aexus-codex':
+				batchPaths.push(
+					join(cwd, '.codex', 'config.toml'), ...withHome('.codex', 'config.toml'),
+					join(cwd, '.codex', 'models_cache.json'), ...withHome('.codex', 'models_cache.json'),
+				);
+				break;
+			case 'aexus-kilo':
+				batchPaths.push(join(cwd, '.kilo', 'kilo.jsonc'), ...withHome('.config', 'kilo', 'kilo.jsonc'));
+				break;
+			case 'aexus-opencode':
+				batchPaths.push(
+					join(cwd, 'opencode.json'), join(cwd, 'opencode.jsonc'),
+					join(cwd, '.opencode', 'opencode.json'), join(cwd, '.opencode', 'opencode.jsonc'),
+					...withHome('.config', 'opencode', 'opencode.json'), ...withHome('.config', 'opencode', 'opencode.jsonc'),
+				);
+				break;
+			case 'aexus-pi':
+				batchPaths.push(
+					join(cwd, '.pi', 'settings.json'), ...withHome('.pi', 'agent', 'settings.json'),
+					join(cwd, '.pi', 'models.json'), ...withHome('.pi', 'agent', 'models.json'),
+				);
+				break;
+			case 'aexus-antigravity':
+				batchPaths.push(
+					join(cwd, '.gemini', 'settings.json'), join(cwd, '.gemini', 'antigravity', 'settings.json'),
+					...withHome('.gemini', 'antigravity', 'settings.json'), ...withHome('.gemini', 'antigravity-cli', 'settings.json'), ...withHome('.gemini', 'settings.json'),
+				);
+				break;
+			case 'aexus-dsh':
+				batchPaths.push(
+					join(cwd, '.dsh', 'config.json'), join(cwd, '.dsh', 'settings.json'),
+					...withHome('.dsh', 'config.json'), ...withHome('.dsh', 'settings.json'),
+					join(cwd, '.dsh', 'cordis.patch.yml'), join(cwd, '.dsh', 'cordis.yml'),
+					...withHome('.dsh', 'cordis.patch.yml'), ...withHome('.dsh', 'cordis.yml'),
+				);
+				break;
+			case 'aexus-cline':
+				batchPaths.push(
+					join(cwd, '.cline', 'settings', 'models.json'), ...withHome('.cline', 'data', 'settings', 'models.json'),
+					join(cwd, '.cline', 'settings', 'providers.json'), ...withHome('.cline', 'data', 'settings', 'providers.json'),
+					join(cwd, '.cline', 'globalState.json'), ...withHome('.cline', 'data', 'globalState.json'), ...withHome('.cline', 'globalState.json'),
+				);
+				break;
+		}
+		const batch = registeredRemoteBatchReader
+			? await registeredRemoteBatchReader(remoteTarget, batchPaths).catch(() => new Map<string, string | undefined>())
+			: new Map<string, string | undefined>();
+		readText = async filePath => batch.get(filePath);
+	}
 
 	const appendRead = (read: ModelConfigRead): void => appendOptionItems(items, seen, read.models);
 
 	switch (engineId) {
 		case 'aexus-claude': {
-			const projectSettings = await readModelConfigFromCandidates([path.join(cwd, '.claude', 'settings.json')], readClaudeSettings);
-			const homeSettings = await readModelConfigFromCandidates([path.join(home, '.claude', 'settings.json')], readClaudeSettings);
+			const projectSettings = await readModelConfigFromCandidates([join(cwd, '.claude', 'settings.json')], readClaudeSettings, readText);
+			const homeSettings = await readModelConfigFromCandidates(withHome('.claude', 'settings.json'), readClaudeSettings, readText);
 			resolvedDefault = projectSettings.defaultModel ?? homeSettings.defaultModel ?? runtimeDefaultModel;
 			const replaceBuiltIns = Boolean(projectSettings.replaceBuiltInOptions || homeSettings.replaceBuiltInOptions);
 			appendRead(projectSettings);
@@ -793,15 +945,17 @@ export async function discoverEngineModels(
 		}
 		case 'aexus-codex': {
 			const config = await readModelConfigFromCandidates(
-				[path.join(cwd, '.codex', 'config.toml'), path.join(home, '.codex', 'config.toml')],
+				[join(cwd, '.codex', 'config.toml'), ...withHome('.codex', 'config.toml')],
 				text => {
 					const model = readTomlModel(text);
 					return { defaultModel: model, models: model ? [{ id: model, name: model }] : [] };
 				},
+				readText,
 			);
 			const modelsCache = await readModelConfigFromCandidates(
-				[path.join(cwd, '.codex', 'models_cache.json'), path.join(home, '.codex', 'models_cache.json')],
+				[join(cwd, '.codex', 'models_cache.json'), ...withHome('.codex', 'models_cache.json')],
 				readCodexModelsCache,
+				readText,
 			);
 			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
@@ -814,8 +968,9 @@ export async function discoverEngineModels(
 		}
 		case 'aexus-kilo': {
 			const config = await readModelConfigFromCandidates(
-				[path.join(cwd, '.kilo', 'kilo.jsonc'), path.join(home, '.config', 'kilo', 'kilo.jsonc')],
+				[join(cwd, '.kilo', 'kilo.jsonc'), ...withHome('.config', 'kilo', 'kilo.jsonc')],
 				readKiloConfig,
+				readText,
 			);
 			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
@@ -825,14 +980,15 @@ export async function discoverEngineModels(
 		case 'aexus-opencode': {
 			const config = await readModelConfigFromCandidates(
 				[
-					path.join(cwd, 'opencode.json'),
-					path.join(cwd, 'opencode.jsonc'),
-					path.join(cwd, '.opencode', 'opencode.json'),
-					path.join(cwd, '.opencode', 'opencode.jsonc'),
-					path.join(home, '.config', 'opencode', 'opencode.json'),
-					path.join(home, '.config', 'opencode', 'opencode.jsonc'),
+					join(cwd, 'opencode.json'),
+					join(cwd, 'opencode.jsonc'),
+					join(cwd, '.opencode', 'opencode.json'),
+					join(cwd, '.opencode', 'opencode.jsonc'),
+					...withHome('.config', 'opencode', 'opencode.json'),
+					...withHome('.config', 'opencode', 'opencode.jsonc'),
 				],
 				readOpenCodeConfig,
+				readText,
 			);
 			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
@@ -841,12 +997,14 @@ export async function discoverEngineModels(
 		}
 		case 'aexus-pi': {
 			const config = await readModelConfigFromCandidates(
-				[path.join(cwd, '.pi', 'settings.json'), path.join(home, '.pi', 'agent', 'settings.json')],
+				[join(cwd, '.pi', 'settings.json'), ...withHome('.pi', 'agent', 'settings.json')],
 				readPiSettings,
+				readText,
 			);
 			const modelsFile = await readModelConfigFromCandidates(
-				[path.join(cwd, '.pi', 'models.json'), path.join(home, '.pi', 'agent', 'models.json')],
+				[join(cwd, '.pi', 'models.json'), ...withHome('.pi', 'agent', 'models.json')],
 				readPiModelsJson,
+				readText,
 			);
 			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
@@ -860,13 +1018,14 @@ export async function discoverEngineModels(
 		case 'aexus-antigravity': {
 			const config = await readModelConfigFromCandidates(
 				[
-					path.join(cwd, '.gemini', 'settings.json'),
-					path.join(cwd, '.gemini', 'antigravity', 'settings.json'),
-					path.join(home, '.gemini', 'antigravity', 'settings.json'),
-					path.join(home, '.gemini', 'antigravity-cli', 'settings.json'),
-					path.join(home, '.gemini', 'settings.json'),
+					join(cwd, '.gemini', 'settings.json'),
+					join(cwd, '.gemini', 'antigravity', 'settings.json'),
+					...withHome('.gemini', 'antigravity', 'settings.json'),
+					...withHome('.gemini', 'antigravity-cli', 'settings.json'),
+					...withHome('.gemini', 'settings.json'),
 				],
 				readAntigravitySettings,
+				readText,
 			);
 			resolvedDefault = config.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
@@ -879,21 +1038,23 @@ export async function discoverEngineModels(
 		case 'aexus-dsh': {
 			const jsonConfig = await readModelConfigFromCandidates(
 				[
-					path.join(cwd, '.dsh', 'config.json'),
-					path.join(cwd, '.dsh', 'settings.json'),
-					path.join(home, '.dsh', 'config.json'),
-					path.join(home, '.dsh', 'settings.json'),
+					join(cwd, '.dsh', 'config.json'),
+					join(cwd, '.dsh', 'settings.json'),
+					...withHome('.dsh', 'config.json'),
+					...withHome('.dsh', 'settings.json'),
 				],
 				readDshJson,
+				readText,
 			);
 			const yamlConfig = await readModelConfigFromCandidates(
 				[
-					path.join(cwd, '.dsh', 'cordis.patch.yml'),
-					path.join(cwd, '.dsh', 'cordis.yml'),
-					path.join(home, '.dsh', 'cordis.patch.yml'),
-					path.join(home, '.dsh', 'cordis.yml'),
+					join(cwd, '.dsh', 'cordis.patch.yml'),
+					join(cwd, '.dsh', 'cordis.yml'),
+					...withHome('.dsh', 'cordis.patch.yml'),
+					...withHome('.dsh', 'cordis.yml'),
 				],
 				readDshYaml,
+				readText,
 			);
 			resolvedDefault = jsonConfig.defaultModel ?? yamlConfig.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
@@ -907,25 +1068,28 @@ export async function discoverEngineModels(
 		case 'aexus-cline': {
 			const modelsCfg = await readModelConfigFromCandidates(
 				[
-					path.join(cwd, '.cline', 'settings', 'models.json'),
-					path.join(home, '.cline', 'data', 'settings', 'models.json'),
+					join(cwd, '.cline', 'settings', 'models.json'),
+					...withHome('.cline', 'data', 'settings', 'models.json'),
 				],
 				readClineModelsFile,
+				readText,
 			);
 			const providersCfg = await readModelConfigFromCandidates(
 				[
-					path.join(cwd, '.cline', 'settings', 'providers.json'),
-					path.join(home, '.cline', 'data', 'settings', 'providers.json'),
+					join(cwd, '.cline', 'settings', 'providers.json'),
+					...withHome('.cline', 'data', 'settings', 'providers.json'),
 				],
 				readClineProvidersFile,
+				readText,
 			);
 			const globalCfg = await readModelConfigFromCandidates(
 				[
-					path.join(cwd, '.cline', 'globalState.json'),
-					path.join(home, '.cline', 'data', 'globalState.json'),
-					path.join(home, '.cline', 'globalState.json'),
+					join(cwd, '.cline', 'globalState.json'),
+					...withHome('.cline', 'data', 'globalState.json'),
+					...withHome('.cline', 'globalState.json'),
 				],
 				readClineGlobalState,
+				readText,
 			);
 			resolvedDefault = providersCfg.defaultModel ?? modelsCfg.defaultModel ?? globalCfg.defaultModel ?? runtimeDefaultModel;
 			appendOptionItems(items, seen, runtimeModelItems(runtimeModels));
@@ -936,6 +1100,14 @@ export async function discoverEngineModels(
 				appendOptionItems(items, seen, CLINE_KNOWN_MODELS);
 			}
 			break;
+		}
+	}
+
+	for (const rawCustom of customModels) {
+		const trimmed = rawCustom?.trim();
+		if (trimmed && trimmed !== 'default' && !seen.has(trimmed)) {
+			seen.add(trimmed);
+			items.push({ id: trimmed, name: trimmed, description: 'Custom model' });
 		}
 	}
 
@@ -1142,7 +1314,7 @@ export async function buildOptionGroupsForSession(
 	targetKind: 'secretary' | EngineId,
 	state: SessionConfigState,
 	cwd: string,
-	runtimeExtras?: { defaultModel?: string; models?: Array<{ id: string; name: string; description?: string }>; modes?: Array<{ id: string; name: string; description?: string }> },
+	runtimeExtras?: { defaultModel?: string; models?: Array<{ id: string; name: string; description?: string }>; modes?: Array<{ id: string; name: string; description?: string }>; customModels?: readonly string[]; remoteTarget?: CloudHostTarget },
 ): Promise<DiscoveredOptionGroup[]> {
 	const effectiveEngineId: EngineId = targetKind === 'secretary' ? state.secretaryEngineId ?? 'aexus-claude' : targetKind;
 	const groups: DiscoveredOptionGroup[] = [];
@@ -1157,7 +1329,7 @@ export async function buildOptionGroupsForSession(
 		});
 	}
 
-	const modelItems = await discoverEngineModels(effectiveEngineId, cwd, runtimeExtras?.models ?? [], runtimeExtras?.defaultModel);
+	const modelItems = await discoverEngineModels(effectiveEngineId, cwd, runtimeExtras?.models ?? [], runtimeExtras?.defaultModel, runtimeExtras?.customModels ?? [], runtimeExtras?.remoteTarget);
 	groups.push(optionGroup('model', 'Model', modelItems, selectedOr(state.model, 'default'), 'Model used for this session', 1));
 
 	const levels = THINKING_LEVELS[effectiveEngineId];
@@ -1457,6 +1629,7 @@ export async function discoverSlashCommands(
 	effectiveEngineId: EngineId,
 	cwd: string,
 	runtimeCommands?: Array<{ name: string; description?: string }>,
+	remoteTarget?: CloudHostTarget,
 ): Promise<DiscoveredSlashCommand[]> {
 	const home = os.homedir();
 	const results: DiscoveredSlashCommand[] = [];
@@ -1482,16 +1655,18 @@ export async function discoverSlashCommands(
 		push({ name: command.name, description: command.description, source: 'builtin', kind: 'command', engineId: effectiveEngineId });
 	}
 
-	for (const template of [...await scanSkillTemplates(cwd, home), ...await scanTemplateFiles(cwd, home)]) {
-		push({
-			name: template.name,
-			description: template.description ?? defaultTemplateDescription(template.kind),
-			argumentHint: template.argumentHint,
-			source: template.source,
-			kind: template.kind,
-			filePath: template.filePath,
-			engineId: effectiveEngineId,
-		});
+	if (!remoteTarget) {
+		for (const template of [...await scanSkillTemplates(cwd, home), ...await scanTemplateFiles(cwd, home)]) {
+			push({
+				name: template.name,
+				description: template.description ?? defaultTemplateDescription(template.kind),
+				argumentHint: template.argumentHint,
+				source: template.source,
+				kind: template.kind,
+				filePath: template.filePath,
+				engineId: effectiveEngineId,
+			});
+		}
 	}
 
 	for (const command of runtimeCommands ?? []) {
@@ -1674,6 +1849,7 @@ export async function discoverCustomizationFiles(
 	effectiveEngineId: EngineId,
 	cwd: string,
 	runtimeCommands?: Array<{ name: string; description?: string }>,
+	remoteTarget?: CloudHostTarget,
 ): Promise<DiscoveredCustomizationFile[]> {
 	const home = os.homedir();
 	const results: DiscoveredCustomizationFile[] = [];
@@ -1689,27 +1865,29 @@ export async function discoverCustomizationFiles(
 		results.push(entry);
 	};
 
-	for (const entry of await collectSkillFiles(cwd, home)) {
-		add(entry);
-	}
-	for (const entry of await collectPromptFiles(cwd, home)) {
-		add(entry);
-	}
-	for (const entry of await collectAgentFiles(cwd, home)) {
-		add(entry);
-	}
-	for (const entry of await collectInstructionFiles(cwd, home)) {
-		add(entry);
-	}
-	for (const entry of await collectHookFiles(cwd, home)) {
-		add(entry);
-	}
-	for (const entry of await collectPluginFiles(cwd, home)) {
-		add(entry);
+	if (!remoteTarget) {
+		for (const entry of await collectSkillFiles(cwd, home)) {
+			add(entry);
+		}
+		for (const entry of await collectPromptFiles(cwd, home)) {
+			add(entry);
+		}
+		for (const entry of await collectAgentFiles(cwd, home)) {
+			add(entry);
+		}
+		for (const entry of await collectInstructionFiles(cwd, home)) {
+			add(entry);
+		}
+		for (const entry of await collectHookFiles(cwd, home)) {
+			add(entry);
+		}
+		for (const entry of await collectPluginFiles(cwd, home)) {
+			add(entry);
+		}
 	}
 
 	const commandNames = new Set(results.filter(entry => entry.type === 'skill' || entry.type === 'prompt').map(entry => entry.name.toLowerCase()));
-	for (const command of await discoverSlashCommands(effectiveEngineId, effectiveEngineId, cwd, runtimeCommands)) {
+	for (const command of await discoverSlashCommands(effectiveEngineId, effectiveEngineId, cwd, runtimeCommands, remoteTarget)) {
 		if (command.filePath) {
 			continue;
 		}

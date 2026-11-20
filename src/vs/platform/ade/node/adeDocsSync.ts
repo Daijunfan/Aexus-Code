@@ -3,9 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import * as fs from 'fs';
+import * as path from '../../../base/common/path.js';
 import {
+	ADE_DOCS_COMMON_FILE_NAME,
+	ADE_DOCS_MANIFEST_FILE_NAME,
 	ADE_DOCS_MISSION_FILE_NAME,
 	buildAdeDocsBundle,
 	buildAdeDocsPaths,
@@ -40,6 +42,7 @@ export async function syncAdeApiDocsToDisk(
 	const bundle = buildAdeDocsBundle(config);
 
 	await Promise.all([
+		...(paths.commonDir ? [fs.promises.mkdir(paths.commonDir, { recursive: true, mode: 0o700 })] : []),
 		fs.promises.mkdir(paths.ranksDir, { recursive: true, mode: 0o700 }),
 		fs.promises.mkdir(paths.missionDir, { recursive: true, mode: 0o700 }),
 	]);
@@ -47,6 +50,12 @@ export async function syncAdeApiDocsToDisk(
 	const expectedRankFiles = new Set(Object.keys(bundle.rankFiles));
 	const writes: Promise<void>[] = [];
 
+	if (paths.commonDir && bundle.commonFile) {
+		writes.push(writeIfChanged(path.join(paths.commonDir, ADE_DOCS_COMMON_FILE_NAME), bundle.commonFile));
+	}
+	if (bundle.manifestJson) {
+		writes.push(writeIfChanged(path.join(paths.docsRoot, ADE_DOCS_MANIFEST_FILE_NAME), bundle.manifestJson));
+	}
 	for (const [fileName, content] of Object.entries(bundle.rankFiles)) {
 		writes.push(writeIfChanged(path.join(paths.ranksDir, fileName), content));
 	}

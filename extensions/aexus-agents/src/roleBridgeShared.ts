@@ -24,6 +24,7 @@ export interface RoleSyncAgentEntry {
 	readonly rank: AdeSessionRank;
 	readonly isOrchestrated: boolean;
 	readonly isWorkTree?: boolean;
+	readonly isMissionNode?: boolean;
 	readonly rolePrompt?: string;
 	readonly preferredModel?: string;
 	readonly preferredThinking?: string;
@@ -1272,7 +1273,10 @@ export function computeAgentIdentityScopeKey(
 	if (pure) {
 		return `pure:${normCwd}:${sid}`;
 	}
-	const rank = identity!.callerRole!.trim().toLowerCase();
+	const rank = identity?.callerRole?.trim().toLowerCase() || 'worker';
+	if (identity?.isMissionNode === true) {
+		return `mnode:${normCwd}:${sid}:${rank}`;
+	}
 	return `orch:${normCwd}:${sid}:${rank}`;
 }
 
@@ -1280,6 +1284,7 @@ export interface AgentChildIdentity {
 	readonly sessionId?: string;
 	readonly callerRole?: string;
 	readonly pureWorker?: boolean;
+	readonly isMissionNode?: boolean;
 }
 
 export interface AgentChildEnvOptions extends AgentChildIdentity {
@@ -1290,7 +1295,7 @@ export interface AgentChildEnvOptions extends AgentChildIdentity {
 	readonly platform?: NodeJS.Platform;
 }
 
-export function isPureWorkerIdentity(identity?: AgentChildIdentity): boolean {
+export function isRawPureRole(identity?: AgentChildIdentity): boolean {
 	if (identity?.pureWorker === true) {
 		return true;
 	}
@@ -1299,6 +1304,15 @@ export function isPureWorkerIdentity(identity?: AgentChildIdentity): boolean {
 		return true;
 	}
 	return false;
+}
+
+export function isPureWorkerIdentity(identity?: AgentChildIdentity): boolean {
+	// Pure-rank Mission nodes need scoped token-only CLI access (`token.*`, `whoami`, `docs.read`, `api.update`),
+	// while standalone pure workers remain 100% isolated with zero CLI PATH or control socket access.
+	if (identity?.isMissionNode === true) {
+		return false;
+	}
+	return isRawPureRole(identity);
 }
 
 export function isPureWorkerDenyToken(token: string | undefined): boolean {
@@ -1402,7 +1416,7 @@ export function buildAgentChildEnv(options: AgentChildEnvOptions): NodeJS.Proces
 		return env;
 	}
 
-	const normalizedRank = options.callerRole!.trim().toLowerCase();
+	const normalizedRank = options.callerRole?.trim().toLowerCase() || 'worker';
 	env.AEXUS_ADE_CALLER = normalizedRank;
 	if (options.socketPath?.trim()) {
 		env.AEXUS_ADE_SOCKET = options.socketPath.trim();

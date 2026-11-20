@@ -29,6 +29,18 @@ const DEFAULT_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const DEFAULT_SOCKET_TIMEOUT_MS = 120_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
 const PURE_WORKER_DENIED_ERROR = 'Permission denied: pure execution Worker sessions have no ADE control plane access.';
+const PURE_MISSION_NODE_DENIED_ERROR = 'Permission denied: pure-execution Mission node sessions may only invoke token.*, whoami, docs.read, or api.update.';
+const PURE_MISSION_NODE_ALLOWED_ACTIONS = new Set([
+	'whoami',
+	'docs.read',
+	'api.update',
+	'token.current',
+	'token.trace',
+	'token.complete',
+	'token.reject',
+	'token.block',
+	'token.fail',
+]);
 
 export type AdeControlDispatcher = (request: IAdeControlDispatchRequest, windowId?: number) => Promise<unknown>;
 
@@ -46,6 +58,11 @@ export interface IAdeControlServerOptions {
  *
  * Exposes a newline-delimited JSON request/response protocol over a `0600` Unix
  * domain socket (or Windows named pipe) guarded by a 32-byte random hex token.
+ *
+ * Trust-boundary note: in the local single-OS-user desktop model, processes spawned
+ * under the same OS user account share filesystem permissions on the `0600` master
+ * control metadata file; per-session HMAC capability tokens enforce least-privilege
+ * isolation across agent processes without OS-level containerization.
  */
 export class AdeControlServer extends Disposable {
 
@@ -63,6 +80,8 @@ export class AdeControlServer extends Disposable {
 	private readonly _readyPromise: Promise<void>;
 
 	private _server: net.Server | undefined;
+	private _tcpServer: net.Server | undefined;
+	private _tcpPort: number | undefined;
 	private _disposed = false;
 	private _startupError: unknown;
 
@@ -109,13 +128,18 @@ export class AdeControlServer extends Disposable {
 		return this._token;
 	}
 
-	mintSessionCapabilityToken(sessionId: string, rank: string, pure = false): string {
+	get tcpPort(): number | undefined {
+		return this._tcpPort;
+	}
+
+	mintSessionCapabilityToken(sessionId: string, rank: string, pure = false, missionNode = false): string {
 		const normalizedSid = sessionId.trim() || 'session';
 		const normalizedRank = pure ? 'worker' : (rank.trim().toLowerCase() || 'worker');
 		const payload: IAdeCapabilityTokenPayload = {
 			sid: normalizedSid,
 			rank: normalizedRank,
 			...(pure ? { pure: true } : {}),
+			...(missionNode ? { missionNode: true } : {}),
 			iat: Date.now(),
 		};
 		const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -216,11 +240,48 @@ export class AdeControlServer extends Disposable {
 			await fs.promises.chmod(listenPath, 0o600);
 		}
 
+		// Bind a loopback-only TCP listener (127.0.0.1:0) guarded by the exact same
+		// token / HMAC capability verification so remote SSH Cloud Host agents can
+		// reach this single local control plane over `ssh -R`.
+		if (!this._disposed) {
+			try {
+				const tcpServer = net.createServer({ allowHalfOpen: true }, socket => this._handleConnection(socket));
+				await new Promise<void>((resolve, reject) => {
+					const onErr = (err: Error) => {
+						tcpServer.removeListener('listening', onListen);
+						reject(err);
+					};
+					const onListen = () => {
+						tcpServer.removeListener('error', onErr);
+						resolve();
+					};
+					tcpServer.once('error', onErr);
+					tcpServer.once('listening', onListen);
+					tcpServer.listen(0, '127.0.0.1');
+				});
+				const addr = tcpServer.address();
+				if (this._disposed) {
+					tcpServer.close();
+				} else if (addr && typeof addr === 'object' && addr.port > 0) {
+					tcpServer.on('error', err => {
+						this._logService?.error('[AdeControlServer] Loopback TCP server error', err);
+					});
+					this._tcpServer = tcpServer;
+					this._tcpPort = addr.port;
+				} else {
+					tcpServer.close();
+				}
+			} catch (err) {
+				this._logService?.warn('[AdeControlServer] Loopback TCP bridge unavailable; continuing with local socket only', err);
+			}
+		}
+
 		if (!this._disposed) {
 			const metadata: IAdeControlConnectionMetadata = {
 				socketPath: listenPath,
 				token: this._token,
 				pid: process.pid,
+				...(this._tcpPort ? { tcpPort: this._tcpPort } : {}),
 			};
 			// Always persist a per-instance 0600 metadata file so secondary Aexus Code instances route to their own socket.
 			await this._writeMetadataFile(this._instanceMetaPath, metadata);
@@ -415,12 +476,13 @@ export class AdeControlServer extends Disposable {
 			}
 			const rawSessionId = typeof req.params?.sessionId === 'string' ? req.params.sessionId.trim() : '';
 			const pure = req.params?.pure === true;
+			const missionNode = req.params?.missionNode === true;
 			const rawRank = typeof req.params?.rank === 'string' ? req.params.rank.trim() : '';
 			if (!rawSessionId || (!pure && !rawRank)) {
 				this._writeResponse(socket, { ok: false, error: 'Invalid request: auth.mintSessionToken requires sessionId and rank' });
 				return;
 			}
-			const token = this.mintSessionCapabilityToken(rawSessionId, rawRank || 'worker', pure);
+			const token = this.mintSessionCapabilityToken(rawSessionId, rawRank || 'worker', pure, missionNode);
 			this._writeResponse(socket, { ok: true, result: { token } });
 			return;
 		}
@@ -428,8 +490,14 @@ export class AdeControlServer extends Disposable {
 		let effectiveParams = req.params;
 		if (capabilityPayload) {
 			if (capabilityPayload.pure === true) {
-				this._writeResponse(socket, { ok: false, error: PURE_WORKER_DENIED_ERROR });
-				return;
+				if (capabilityPayload.missionNode !== true) {
+					this._writeResponse(socket, { ok: false, error: PURE_WORKER_DENIED_ERROR });
+					return;
+				}
+				if (!PURE_MISSION_NODE_ALLOWED_ACTIONS.has(req.action)) {
+					this._writeResponse(socket, { ok: false, error: PURE_MISSION_NODE_DENIED_ERROR });
+					return;
+				}
 			}
 			effectiveParams = {
 				...(req.params ?? {}),
@@ -484,6 +552,7 @@ export class AdeControlServer extends Disposable {
 				|| typeof parsed.rank !== 'string'
 				|| parsed.rank.trim().length === 0
 				|| (parsed.pure !== undefined && typeof parsed.pure !== 'boolean')
+				|| (parsed.missionNode !== undefined && typeof parsed.missionNode !== 'boolean')
 			) {
 				return undefined;
 			}
@@ -491,6 +560,7 @@ export class AdeControlServer extends Disposable {
 				sid: parsed.sid.trim(),
 				rank: parsed.rank.trim().toLowerCase(),
 				...(parsed.pure === true ? { pure: true } : {}),
+				...(parsed.missionNode === true ? { missionNode: true } : {}),
 				iat: typeof parsed.iat === 'number' && Number.isFinite(parsed.iat) ? parsed.iat : 0,
 			};
 		} catch {
@@ -540,6 +610,16 @@ export class AdeControlServer extends Disposable {
 					// ignore
 				}
 				this._server = undefined;
+			}
+
+			if (this._tcpServer) {
+				try {
+					this._tcpServer.close();
+				} catch {
+					// ignore
+				}
+				this._tcpServer = undefined;
+				this._tcpPort = undefined;
 			}
 
 			if (!isWindows && this._activeSocketPath) {

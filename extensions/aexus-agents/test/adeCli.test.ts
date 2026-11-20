@@ -602,6 +602,296 @@ describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
 	});
 });
 
+describe('Mission Runtime CLI commands & AEXUS_ADE_TCP_PORT transport', () => {
+	test('parses whoami, docs read, and api update --since/--scope', () => {
+		assert.deepStrictEqual(parseCliCommand(['whoami', '--json'], CWD), {
+			help: false,
+			json: true,
+			windowId: undefined,
+			action: 'whoami',
+			params: {},
+		});
+		for (const target of ['L2', 'common', 'mission']) {
+			assert.deepStrictEqual(parseCliCommand(['docs', 'read', target], CWD), {
+				help: false,
+				json: false,
+				windowId: undefined,
+				action: 'docs.read',
+				params: { target },
+			});
+		}
+		assert.deepStrictEqual(parseCliCommand(['api', 'update', '--since', '1', '--scope', 'mission', '--json'], CWD), {
+			help: false,
+			json: true,
+			windowId: undefined,
+			action: 'api.update',
+			params: { since: 1, scope: 'mission' },
+		});
+	});
+
+	test('parses token bus current, trace, complete, reject, block, and fail', () => {
+		assert.deepStrictEqual(parseCliCommand(['token', 'current', '--mission', 'm1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'token.current',
+			params: { missionId: 'm1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['token', 'trace', 'tr-1', '--mission', 'm1', '--limit', '10'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'token.trace',
+			params: { missionId: 'm1', limit: 10, tracePtr: 'tr-1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['token', 'complete', 'tok-1', '--summary', 'shipped fix'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'token.complete',
+			params: { tokenId: 'tok-1', summary: 'shipped fix' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['token', 'reject', 'tok-1', '--reason', 'missing test', '--to', 'N1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'token.reject',
+			params: { tokenId: 'tok-1', reason: 'missing test', targetNodeId: 'N1' },
+		});
+		assert.deepStrictEqual(parseCliCommand([
+			'token', 'block', 'tok-1',
+			'--max', '4h',
+			'--reason', 'training',
+			'--watch-pid', '999',
+			'--watch-file', '/tmp/done',
+			'--host', 'gpu1',
+		], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'token.block',
+			params: {
+				tokenId: 'tok-1',
+				maxDuration: '4h',
+				reason: 'training',
+				watchPid: 999,
+				watchFile: '/tmp/done',
+				hostAlias: 'gpu1',
+			},
+		});
+		assert.deepStrictEqual(parseCliCommand(['token', 'fail', 'tok-1', '--reason', 'oom'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'token.fail',
+			params: { tokenId: 'tok-1', reason: 'oom' },
+		});
+	});
+
+	test('parses strictly top-down org control commands', () => {
+		assert.deepStrictEqual(parseCliCommand(['org', 'subordinates'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'org.subordinates',
+			params: {},
+		});
+		assert.deepStrictEqual(parseCliCommand(['org', 'send', 'emp-1', 'please', 'inspect', 'logs', '--wait'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'org.send',
+			params: { target: 'emp-1', message: 'please inspect logs', wait: true },
+		});
+		assert.deepStrictEqual(parseCliCommand(['org', 'context', 'emp-1', '--limit', '8'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'org.context',
+			params: { target: 'emp-1', limit: 8 },
+		});
+		assert.deepStrictEqual(parseCliCommand(['org', 'escalate', '--mission', 'm1', '--token', 'tok-1', '--reason', 'need patch'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'org.escalate',
+			params: { missionId: 'm1', tokenId: 'tok-1', reason: 'need patch' },
+		});
+	});
+
+	test('parses mission lifecycle, boundary, recall, patch, trigger, and host bind', () => {
+		assert.deepStrictEqual(parseCliCommand(['mission', 'start', '--mission', 'm1', '--timeout', '10'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.start',
+			params: { missionId: 'm1', silenceTimeoutMinutes: 10 },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'timeout', '--mission', 'm1', '--minutes', '8'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.timeout.set',
+			params: { missionId: 'm1', minutes: 8 },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'boundary', 'get', '--mission', 'm1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.boundary.get',
+			params: { missionId: 'm1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'boundary', 'set', '--mission', 'm1', '--off-graph-max-tier', '2'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.boundary.set',
+			params: { missionId: 'm1', offGraphMaxTier: 2 },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'recall', '--mission', 'm1', '--nodes', 'N2,N3', '--reason', 'pivot'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.recall',
+			params: { missionId: 'm1', nodes: ['N2', 'N3'], reason: 'pivot' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'patch', '--mission', 'm1', '--mermaid', 'graph LR\nN1-->N2', '--reason', 'fix'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.patch',
+			params: { missionId: 'm1', mermaid: 'graph LR\nN1-->N2', reason: 'fix' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'trigger', 'list', '--mission', 'm1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.trigger.list',
+			params: { missionId: 'm1' },
+		});
+		assert.deepStrictEqual(parseCliCommand([
+			'mission', 'trigger', 'set',
+			'--mission', 'm1',
+			'--node', 'N1',
+			'--kind', 'cron',
+			'--cron', '0 * * * *',
+		], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.trigger.set',
+			params: { missionId: 'm1', nodeId: 'N1', kind: 'cron', cronExpr: '0 * * * *' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'trigger', 'remove', '--mission', 'm1', '--trigger-id', 'trig-1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.trigger.remove',
+			params: { missionId: 'm1', triggerId: 'trig-1' },
+		});
+		assert.deepStrictEqual(parseCliCommand([
+			'mission', 'host', 'bind',
+			'--mission', 'm1',
+			'--node', 'N1',
+			'--host', 'gpu-box',
+			'--path', '/workspace/app',
+			'--role-kind', 'reviewer',
+		], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.host.bind',
+			params: {
+				missionId: 'm1',
+				nodeId: 'N1',
+				hostAlias: 'gpu-box',
+				remoteProjectPath: '/workspace/app',
+				roleKind: 'reviewer',
+			},
+		});
+	});
+
+	test('runCli sends the capability token over a real loopback TCP control socket', async () => {
+		const sessionToken = 'aexus-cap.fake.sig';
+		const received: Array<{ token?: string; action?: string; params?: Record<string, unknown> }> = [];
+		const server = net.createServer(socket => {
+			let buffer = '';
+			socket.setEncoding('utf8');
+			socket.on('data', chunk => {
+				buffer += chunk;
+				const newline = buffer.indexOf('\n');
+				if (newline < 0) {
+					return;
+				}
+				received.push(JSON.parse(buffer.slice(0, newline)));
+				socket.end(JSON.stringify({ ok: true, result: { agentId: 'emp-1', rank: 'employee' } }) + '\n');
+			});
+		});
+		await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+		const port = (server.address() as net.AddressInfo).port;
+		try {
+			let stdout = '';
+			let stderr = '';
+			const code = await runCli(['whoami', '--json'], {
+				stdout: text => { stdout += text; },
+				stderr: text => { stderr += text; },
+				env: {
+					AEXUS_ADE_TCP_PORT: String(port),
+					AEXUS_ADE_SESSION_TOKEN: sessionToken,
+					AEXUS_ADE_HOME: path.join(CWD, 'no-control-file'),
+					AEXUS_ADE_CONTROL_FILE: path.join(CWD, 'no-control-file', 'ade-control.json'),
+				},
+				cwd: CWD,
+			});
+			assert.strictEqual(code, 0, stderr || stdout);
+			assert.deepStrictEqual(received, [{ token: sessionToken, action: 'whoami', params: {} }]);
+			assert.deepStrictEqual(JSON.parse(stdout), { agentId: 'emp-1', rank: 'employee' });
+		} finally {
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		}
+	});
+
+	test('runCli prints raw markdown for docs read in non-JSON mode', async () => {
+		const request: Array<{ action?: string; params?: Record<string, unknown> }> = [];
+		const server = net.createServer(socket => {
+			let buffer = '';
+			socket.setEncoding('utf8');
+			socket.on('data', chunk => {
+				buffer += chunk;
+				const newline = buffer.indexOf('\n');
+				if (newline < 0) {
+					return;
+				}
+				request.push(JSON.parse(buffer.slice(0, newline)));
+				socket.end(JSON.stringify({
+					ok: true,
+					result: { target: 'common', content: '# Common\nHello **world**' },
+				}) + '\n');
+			});
+		});
+		await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+		const port = (server.address() as net.AddressInfo).port;
+		try {
+			let stdout = '';
+			let stderr = '';
+			const code = await runCli(['docs', 'read', 'common'], {
+				stdout: text => { stdout += text; },
+				stderr: text => { stderr += text; },
+				env: {
+					AEXUS_ADE_TCP_PORT: String(port),
+					AEXUS_ADE_SESSION_TOKEN: 'aexus-cap.fake.sig',
+				},
+				cwd: CWD,
+			});
+			assert.strictEqual(code, 0, stderr || stdout);
+			assert.deepStrictEqual(request, [{ token: 'aexus-cap.fake.sig', action: 'docs.read', params: { target: 'common' } }]);
+			assert.strictEqual(stdout, '# Common\nHello **world**\n');
+		} finally {
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		}
+	});
+});
+
 describe('parseCliCommand rank & unified mission commands', () => {
 	test('parses rank list, names, get, docs, rename, and set-count (>= 1)', () => {
 		assert.deepStrictEqual(parseCliCommand(['--json', 'rank', 'names'], CWD), {
@@ -673,5 +963,113 @@ describe('parseCliCommand rank & unified mission commands', () => {
 		});
 		assert.ok(HELP_TEXT.includes('rank names'));
 		assert.ok(HELP_TEXT.includes('mission docs'));
+	});
+
+	test('converges mission gate, --mission/--governor aliases, org --mission, recall --branch, token reject --target, and trigger flags', () => {
+		// mission gate positional approve/reject + --note + --rollback
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'gate', 'reject', '--mission', 'm-1', '--node', 'G1', '--note', 'Fix tests', '--rollback', 'N1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.gate',
+				params: { missionId: 'm-1', node: 'G1', decision: 'reject', note: 'Fix tests', rollback: 'N1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'gate', 'approve', '--governor', 'm-1', '--node', 'G1', '--note', 'LGTM'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.gate',
+				params: { missionId: 'm-1', node: 'G1', decision: 'approve', note: 'LGTM' },
+			},
+		);
+
+		// org send --mission must NOT fold --mission into the message text
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'org', 'send', 'N2', 'Focus on latency', '--mission', 'm-1', '--wait'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'org.send',
+				params: { target: 'N2', message: 'Focus on latency', missionId: 'm-1', wait: true },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'org', 'context', 'N2', '--limit', '15', '--mission', 'm-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'org.context',
+				params: { target: 'N2', limit: 15, missionId: 'm-1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'org', 'subordinates', '--mission', 'm-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'org.subordinates',
+				params: { missionId: 'm-1' },
+			},
+		);
+
+		// --branch on mission recall, --target on token reject, --event-type/--target/--trigger on triggers, --title on mission init, --governor alias everywhere
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'recall', '--governor', 'm-1', '--branch', 'N2', '--reason', 'pivot'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.recall',
+				params: { missionId: 'm-1', branchRootNodeId: 'N2', reason: 'pivot' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'reject', 'tok-5', '--reason', 'bad diff', '--target', 'N1', '--governor', 'm-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.reject',
+				params: { tokenId: 'tok-5', reason: 'bad diff', targetNodeId: 'N1', missionId: 'm-1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'trigger', 'set', '--mission', 'm-1', '--node', 'S1', '--kind', 'event', '--event-type', 'file_created', '--target', '/tmp/a.txt', '--trigger', 'tr-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.trigger.set',
+				params: { missionId: 'm-1', nodeId: 'S1', kind: 'event', eventType: 'file_created', targetPath: '/tmp/a.txt', triggerId: 'tr-1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'trigger', 'remove', '--mission', 'm-1', '--trigger', 'tr-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.trigger.remove',
+				params: { missionId: 'm-1', triggerId: 'tr-1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'init', '--title', 'Nightly Bench', '--open'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.init',
+				params: { title: 'Nightly Bench', open: true },
+			},
+		);
 	});
 });

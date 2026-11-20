@@ -278,6 +278,16 @@
 					},
 					"additionalProperties": false
 				},
+				"aexus.ade.remoteCliPaths": {
+					"type": "object",
+					"default": {},
+					"scope": "application",
+					"description": "Optional per-Cloud-Host Coding Agent CLI binary path overrides, keyed by SSH host alias (e.g. { \"ubuntu-target1\": { \"claude\": \"/opt/bin/claude\" } }).",
+					"additionalProperties": {
+						"type": "object",
+						"additionalProperties": { "type": "string" }
+					}
+				},
 				"aexus.ade.nativeExtensionRoleBridge.enabled": {
 					"type": "boolean",
 					"default": true,

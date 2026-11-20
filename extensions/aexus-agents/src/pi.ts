@@ -8,8 +8,15 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import {
+	CloudHostTarget,
+	execRemoteShell,
+	posixQuote,
+	psSingleQuote,
+	readRemoteTextFile,
+} from './cloudTransport';
 import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, spawnEngine, stopEngine, withTimeout } from './runtime';
 
 interface PiContentPart {
 	type?: string;
@@ -108,7 +115,8 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function modelEntries(value: unknown): PiModelInfo[] {
-	const container = Array.isArray(value) ? value : (asRecord(value)?.models ?? value);
+	const unwrapped = asRecord(value)?.data ?? value;
+	const container = Array.isArray(unwrapped) ? unwrapped : (asRecord(unwrapped)?.models ?? unwrapped);
 	const models: PiModelInfo[] = [];
 	const seen = new Set<string>();
 	const add = (provider: string | undefined, rawId: string | undefined, rawName: string | undefined, description?: string): void => {
@@ -270,14 +278,155 @@ export class PiRuntime implements EngineRuntime {
 		return usage;
 	}
 
-	constructor(private readonly executable: string) { }
+	constructor(private readonly executable: string, readonly remoteTarget?: CloudHostTarget) { }
 
 	private sessionsDir(): string {
 		const agentDir = process.env.PI_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), '.pi', 'agent');
 		return path.join(agentDir, 'sessions');
 	}
 
+	private parseSessionHistoryContent(content: string): HistoryEntry[] {
+		const byId = new Map<string, PiEntry>();
+		const ordered: PiEntry[] = [];
+		for (const rawLine of content.split('\n')) {
+			const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+			if (!line) { continue; }
+			let entry: PiEntry;
+			try { entry = JSON.parse(line) as PiEntry; } catch { continue; }
+			if (entry.type === 'session') { continue; }
+			ordered.push(entry);
+			if (entry.id) {
+				byId.set(entry.id, entry);
+			}
+		}
+
+		if (ordered.length === 0) { return []; }
+		let branch: PiEntry[];
+		if (ordered.some(entry => Boolean(entry.parentId))) {
+			branch = [];
+			const visited = new Set<string>();
+			let current: PiEntry | undefined = ordered.at(-1);
+			while (current) {
+				if (current.id) {
+					if (visited.has(current.id)) { break; }
+					visited.add(current.id);
+				}
+				branch.push(current);
+				current = current.parentId ? byId.get(current.parentId) : undefined;
+			}
+			branch.reverse();
+		} else {
+			branch = ordered;
+		}
+
+		const history: HistoryEntry[] = [];
+		for (const entry of branch) {
+			if (entry.type !== 'message') { continue; }
+			const role = entry.message?.role;
+			if (role !== 'user' && role !== 'assistant') { continue; }
+			const text = piMessageText(entry.message?.content).trim();
+			if (text) {
+				history.push({ id: entry.id, role, text });
+			}
+		}
+		return history;
+	}
+
+	private async listRemote(token: vscode.CancellationToken): Promise<NativeSession[]> {
+		if (!this.remoteTarget || token.isCancellationRequested) {
+			return [];
+		}
+		const posixScript = [
+			`root="\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions"`,
+			`[ -d "$root" ] || exit 0`,
+			`for f in "$root"/*/*.jsonl; do`,
+			`  [ -f "$f" ] || continue`,
+			`  m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)`,
+			`  printf '%s\\t%s\\n' "$m" "$f"`,
+			`done | sort -rn | head -n 120 | while IFS=$(printf '\\t') read -r m f; do`,
+			`  [ -f "$f" ] || continue`,
+			`  printf '__AEX_PI_F__\\t%s\\t%s\\n' "$m" "$f"`,
+			`  head -n 60 -- "$f" 2>/dev/null || true`,
+			`done`,
+		].join('\n');
+		const winScript = [
+			`$base = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } else { Join-Path $env:USERPROFILE '.pi\\agent' }`,
+			`$root = Join-Path $base 'sessions'`,
+			`if (Test-Path -LiteralPath $root) {`,
+			`  Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 120 | ForEach-Object {`,
+			`    $ms = [int64]([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeMilliseconds()`,
+			`    Write-Output ("__AEX_PI_F__" + [char]9 + $ms + [char]9 + $_.FullName)`,
+			`    Get-Content -LiteralPath $_.FullName -TotalCount 60 -Encoding UTF8 -ErrorAction SilentlyContinue`,
+			`  }`,
+			`}`,
+		].join('; ');
+		const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 20_000, token }).catch(() => undefined);
+		if (!res || res.code !== 0) {
+			return [];
+		}
+		const sessions: NativeSession[] = [];
+		let curFile: string | undefined;
+		let curMtime = Date.now();
+		let id: string | undefined;
+		let cwd: string | undefined;
+		let created = curMtime;
+		let sessionName: string | undefined;
+		let firstUserText: string | undefined;
+		const flush = () => {
+			if (curFile && id && cwd) {
+				sessions.push({
+					id,
+					cwd,
+					label: sessionName || firstUserText || vscode.l10n.t('Pi Session {0}', id.slice(0, 8)),
+					created,
+					updated: curMtime,
+					file: curFile,
+					provisional: false,
+				});
+			}
+		};
+		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+			if (rawLine.startsWith('__AEX_PI_F__\t')) {
+				flush();
+				const parts = rawLine.split('\t');
+				const rawTs = Number(parts[1]) || 0;
+				curMtime = rawTs > 1e11 ? rawTs : (rawTs > 0 ? rawTs * 1000 : Date.now());
+				curFile = parts.slice(2).join('\t').trim() || undefined;
+				id = undefined;
+				cwd = undefined;
+				created = curMtime;
+				sessionName = undefined;
+				firstUserText = undefined;
+				continue;
+			}
+			if (!curFile || !rawLine) { continue; }
+			let entry: PiEntry;
+			try { entry = JSON.parse(rawLine) as PiEntry; } catch { continue; }
+			if (entry.type === 'session' && entry.id && entry.cwd) {
+				id = entry.id;
+				cwd = entry.cwd;
+				if (entry.timestamp) {
+					const parsed = Date.parse(entry.timestamp);
+					if (Number.isFinite(parsed)) { created = parsed; }
+				}
+			} else if (entry.type === 'session_info' && typeof entry.name === 'string' && entry.name.trim()) {
+				sessionName = entry.name.trim();
+			} else if (!firstUserText && entry.type === 'message' && entry.message?.role === 'user') {
+				const rawMsg = piMessageText(entry.message.content).trim();
+				const cleanedMsg = stripInjectedAdeContextFromUserTurn(rawMsg).trim();
+				if (cleanedMsg && !cleanedMsg.startsWith(ROLE_INIT_MARKER)) {
+					firstUserText = cleanedMsg.split('\n')[0].slice(0, 100);
+				}
+			}
+		}
+		flush();
+		return sessions;
+	}
+
 	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+		if (this.remoteTarget) {
+			return this.listRemote(token);
+		}
 		const root = this.sessionsDir();
 		let groups: string[];
 		try {
@@ -378,58 +527,19 @@ export class PiRuntime implements EngineRuntime {
 		const file = session.file ?? (await this.list(token)).find(item => item.id === session.id)?.file;
 		if (!file) { return []; }
 		session.file = file;
-		let content: string;
-		try {
-			content = await fs.readFile(file, 'utf8');
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
-			throw error;
-		}
-
-		const byId = new Map<string, PiEntry>();
-		const ordered: PiEntry[] = [];
-		for (const rawLine of content.split('\n')) {
-			const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-			if (!line) { continue; }
-			let entry: PiEntry;
-			try { entry = JSON.parse(line) as PiEntry; } catch { continue; }
-			if (entry.type === 'session') { continue; }
-			ordered.push(entry);
-			if (entry.id) {
-				byId.set(entry.id, entry);
-			}
-		}
-
-		if (ordered.length === 0) { return []; }
-		let branch: PiEntry[];
-		if (ordered.some(entry => Boolean(entry.parentId))) {
-			branch = [];
-			const visited = new Set<string>();
-			let current: PiEntry | undefined = ordered.at(-1);
-			while (current) {
-				if (current.id) {
-					if (visited.has(current.id)) { break; }
-					visited.add(current.id);
-				}
-				branch.push(current);
-				current = current.parentId ? byId.get(current.parentId) : undefined;
-			}
-			branch.reverse();
+		let content: string | undefined;
+		if (this.remoteTarget) {
+			content = await readRemoteTextFile(this.remoteTarget, file, { bypassCache: true, timeoutMs: 20_000, token });
+			if (content === undefined) { return []; }
 		} else {
-			branch = ordered;
-		}
-
-		const history: HistoryEntry[] = [];
-		for (const entry of branch) {
-			if (entry.type !== 'message') { continue; }
-			const role = entry.message?.role;
-			if (role !== 'user' && role !== 'assistant') { continue; }
-			const text = piMessageText(entry.message?.content).trim();
-			if (text) {
-				history.push({ id: entry.id, role, text });
+			try {
+				content = await fs.readFile(file, 'utf8');
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
+				throw error;
 			}
 		}
-		return history;
+		return this.parseSessionHistoryContent(content);
 	}
 
 	private sessionArgs(session: NativeSession): string[] {
@@ -445,8 +555,10 @@ export class PiRuntime implements EngineRuntime {
 		if (token?.isCancellationRequested) {
 			return results;
 		}
-		const rpcEnv = await prepareAgentChildEnv({ sessionId: 'pi-rpc', pureWorker: true });
-		const child = spawnEngine(this.executable, ['--mode', 'rpc', ...extraArgs], cwd, rpcEnv);
+		const rpcEnv = this.remoteTarget
+			? undefined
+			: await prepareAgentChildEnv({ sessionId: 'pi-rpc', pureWorker: true });
+		const child = spawnEngine(this.executable, ['--mode', 'rpc', ...extraArgs], cwd, rpcEnv, this.remoteTarget);
 		const pending = new Map<string, (data: Record<string, unknown> | undefined) => void>();
 		let buffer = '';
 		child.stdout.setEncoding('utf8');
@@ -519,12 +631,18 @@ export class PiRuntime implements EngineRuntime {
 		}
 		const load = (async (): Promise<EngineRuntimeCapabilities> => {
 			const [models, commands] = await this.runRpc(cwd, [], [{ type: 'get_available_models' }, { type: 'get_commands' }], 8000);
+			const parsedModels = models !== undefined ? modelEntries(models) : undefined;
+			const parsedCommands = commands !== undefined ? commandEntries(commands) : undefined;
 			const value: EngineRuntimeCapabilities = {
-				models: modelEntries(models),
-				commands: commandEntries(commands),
+				models: parsedModels?.map(m => ({ ...m })),
+				commands: parsedCommands?.map(c => ({ ...c })),
 			};
-			this.capabilityCache.set(cwd, { expiresAt: Date.now() + 15000, value });
-			return value;
+			const ttl = (parsedModels && parsedModels.length > 0) || (parsedCommands && parsedCommands.length > 0) ? 15_000 : 2_000;
+			this.capabilityCache.set(cwd, { expiresAt: Date.now() + ttl, value });
+			return {
+				models: value.models?.map(m => ({ ...m })),
+				commands: value.commands?.map(c => ({ ...c })),
+			};
 		})();
 		this.capabilityPending.set(cwd, load);
 		try {
@@ -538,7 +656,7 @@ export class PiRuntime implements EngineRuntime {
 		const images: Array<{ type: string; mimeType: string; data: string }> = [];
 		for (const attachment of attachments ?? []) {
 			const isImage = attachment.kind === 'image' || Boolean(attachment.mimeType?.startsWith('image/'));
-			if (!isImage) {
+			if (!isImage || attachment.remote) {
 				continue;
 			}
 			try {
@@ -731,12 +849,20 @@ export class PiRuntime implements EngineRuntime {
 			...(toolMode === 'readonly' ? ['--tools', 'read,grep,find,ls'] : toolMode === 'chat' ? ['--no-tools'] : []),
 			...this.sessionArgs(session),
 		];
-		const customEnv = await prepareAgentChildEnv({
-			sessionId: session.id,
-			callerRole: options?.callerRole,
-			pureWorker: options?.pureWorker,
-		});
-		const child = spawnEngine(this.executable, args, session.cwd, customEnv);
+		const customEnv = this.remoteTarget
+			? await prepareRemoteAgentChildEnv(this.remoteTarget, {
+				sessionId: options?.adeSessionId || session.id,
+				callerRole: options?.callerRole,
+				pureWorker: options?.pureWorker,
+				isMissionNode: options?.isMissionNode,
+			})
+			: await prepareAgentChildEnv({
+				sessionId: options?.adeSessionId || session.id,
+				callerRole: options?.callerRole,
+				pureWorker: options?.pureWorker,
+				isMissionNode: options?.isMissionNode,
+			});
+		const child = spawnEngine(this.executable, args, session.cwd, customEnv, this.remoteTarget);
 		let sessionProcs = this.running.get(session.id);
 		if (!sessionProcs) {
 			sessionProcs = new Set();
@@ -925,7 +1051,16 @@ export class PiRuntime implements EngineRuntime {
 		}
 		const file = session.file ?? (!session.provisional ? (await this.list(token)).find(item => item.id === session.id)?.file : undefined);
 		if (file) {
-			await fs.rm(file, { force: true });
+			if (this.remoteTarget) {
+				await execRemoteShell(
+					this.remoteTarget,
+					`rm -f -- ${posixQuote(file)}`,
+					`Remove-Item -LiteralPath ${psSingleQuote(file)} -Force -ErrorAction SilentlyContinue`,
+					{ timeoutMs: 10_000, token },
+				).catch(() => undefined);
+			} else {
+				await fs.rm(file, { force: true });
+			}
 		}
 	}
 
