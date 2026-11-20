@@ -601,3 +601,77 @@ describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
 		}
 	});
 });
+
+describe('parseCliCommand rank & unified mission commands', () => {
+	test('parses rank list, names, get, docs, rename, and set-count (>= 1)', () => {
+		assert.deepStrictEqual(parseCliCommand(['--json', 'rank', 'names'], CWD), {
+			help: false,
+			json: true,
+			windowId: undefined,
+			action: 'rank.names',
+			params: {},
+		});
+		assert.deepStrictEqual(parseCliCommand(['rank', 'list'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'rank.list',
+			params: {},
+		});
+		assert.deepStrictEqual(parseCliCommand(['rank', 'get', 'L0'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'rank.get',
+			params: { target: 'L0' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['rank', 'docs', 'L2'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'rank.docs',
+			params: { target: 'L2' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['rank', 'rename', 'L2', 'Squad Lead', '--short', 'Lead'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'rank.rename',
+			params: { target: 'L2', alias: 'Squad Lead', shortName: 'Lead' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['rank', 'set-count', '1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'rank.setCount',
+			params: { count: 1 },
+		});
+		assert.throws(() => parseCliCommand(['rank', 'set-count', '0'], CWD), /at least 1/i);
+	});
+
+	test('parses unified mission docs and mission lifecycle actions cleanly', () => {
+		assert.deepStrictEqual(parseCliCommand(['--json', 'mission', 'docs'], CWD), {
+			help: false,
+			json: true,
+			windowId: undefined,
+			action: 'mission.docs',
+			params: {},
+		});
+		assert.deepStrictEqual(parseCliCommand(['--json', 'mission', 'status', '--governor', 'gov-1'], CWD), {
+			help: false,
+			json: true,
+			windowId: undefined,
+			action: 'mission.status',
+			params: { governor: 'gov-1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'init', '--governor', 'gov-1', '--open'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.init',
+			params: { governor: 'gov-1', open: true },
+		});
+		assert.ok(HELP_TEXT.includes('rank names'));
+		assert.ok(HELP_TEXT.includes('mission docs'));
+	});
+});

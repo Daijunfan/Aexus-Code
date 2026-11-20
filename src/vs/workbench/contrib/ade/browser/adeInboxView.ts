@@ -498,7 +498,7 @@ export class AdeInboxPanel extends Disposable {
 		const trees = typeof this.engineering.listTrees === 'function' ? this.engineering.listTrees() : [];
 		const latestTree = [...trees].sort((a, b) => b.updatedAt - a.updatedAt)[0];
 		if (latestTree) {
-			const link = append(empty, $('button.ade-inbox-link-btn.ade-inbox-empty-link', { type: 'button' }, localize('adeInboxOpenCanvases', "Open Engineering Canvas")));
+			const link = append(empty, $('button.ade-inbox-link-btn.ade-inbox-empty-link', { type: 'button' }, localize('adeInboxOpenCanvases', "Open Mission Canvas")));
 			this.renderDisposables.add(addDisposableListener(link, EventType.CLICK, () => {
 				void this.engineering.openEngineeringEditor(latestTree.governorSessionId);
 			}));
@@ -880,7 +880,7 @@ export class AdeInboxPanel extends Disposable {
 		} else {
 			const openEngBtn = append(actionsRow, $('button.ade-inbox-btn.ghost', {
 				type: 'button',
-			}, localize('adeInboxJumpEngineeringBtn', "Engineering ↗")));
+			}, localize('adeInboxJumpMissionBtn', "Mission ↗")));
 			this.renderDisposables.add(addDisposableListener(openEngBtn, EventType.CLICK, e => {
 				e.stopPropagation();
 				void this.engineering.openEngineeringEditor(item.governorSessionId);

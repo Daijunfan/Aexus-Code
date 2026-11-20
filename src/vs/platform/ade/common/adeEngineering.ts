@@ -5,6 +5,8 @@
 
 import { Event } from '../../../base/common/event.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
+import type { IAdeDocsPaths } from './adeDocsCatalog.js';
+import type { IAdeOrganizationConfig } from './adeRoleSchema.js';
 
 export const ADE_ENGINEERING_BACKEND_CHANNEL_NAME = 'adeEngineeringBackend';
 export const ADE_ENGINEERING_DIR_NAME = 'engineering';
@@ -542,6 +544,10 @@ export interface IAdeEngineeringBackendService {
 	cleanupTreeWorktrees(governorSessionId: string, projectPath: string, force?: boolean): Promise<void>;
 	/** Runs an optional deterministic build/lint/test verification shell command before waking LLM review. */
 	runNodeVerificationCommand?(cwd: string, command: string, timeoutMs?: number): Promise<IAdeVerificationResult>;
+	/** Synchronizes the single canonical copy of ADE API docs (`docs/ranks/L*.md` + `docs/mission/MISSION_API.md`). */
+	syncApiDocs?(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths>;
+	/** Resolves canonical single-copy ADE API doc paths without modifying disk. */
+	getApiDocsPaths?(rankCount: number): Promise<IAdeDocsPaths>;
 }
 
 export interface IAdeInitEngineeringOptions {

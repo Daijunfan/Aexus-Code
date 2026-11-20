@@ -51,7 +51,7 @@ import { ADE_OS_ICON_LABELS, AdeOsIconKind, formatProjectDisplayPath, IAdeCloudH
 import { IAdeEngineeringService, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_COMMAND_ID, ADE_OPEN_RESEARCH_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeInboxPanel } from './adeInboxView.js';
 import { resolveAdeRankCodicon } from './adeRoleStudioEditorPane.js';
@@ -557,16 +557,15 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		});
 
 		if (!agent.parentId && agent.treeType) {
-			const isRes = agent.treeType === 'research';
-			const treeLabel = isRes ? localize('adeBadgeResearch', "Research") : localize('adeBadgeEngineering', "Engineering");
-			template.workTreeBadge.className = `ade-worktree-badge type-${agent.treeType}`;
+			const treeLabel = localize('adeBadgeMission', "Mission");
+			template.workTreeBadge.className = `ade-worktree-badge type-engineering`;
 			const treeIcon = $('span.ade-worktree-badge-icon', { 'aria-hidden': 'true' });
-			treeIcon.classList.add(...ThemeIcon.asClassNameArray(isRes ? Codicon.beaker : Codicon.typeHierarchy));
+			treeIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchy));
 			template.workTreeBadge.replaceChildren(treeIcon, $('span.ade-badge-label', {}, treeLabel));
 			template.workTreeBadge.setAttribute('role', 'button');
 			template.workTreeBadge.setAttribute('tabindex', '0');
 			template.workTreeBadge.hidden = false;
-			const treeTooltip = localize('adeOpenEngineeringBadgeTooltip', "Open {0} DAG Canvas", treeLabel);
+			const treeTooltip = localize('adeOpenMissionBadgeTooltip', "Open Mission Canvas");
 			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.workTreeBadge, treeTooltip));
 			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.CLICK, event => {
 				EventHelper.stop(event, true);
@@ -589,7 +588,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		template.roleBadge.replaceChildren(rankIcon, $('span.ade-badge-label', {}, badgeLabel));
 		template.roleBadge.hidden = false;
 		const roleTooltip = isLocked
-			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel)
+			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Mission Blueprint)", badgeLabel)
 			: rankDef.pureExecution
 				? localize('adeWorkerBadgeTooltip', "Role: {0} (Clean Native Context) — Click to change role", badgeLabel)
 				: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
@@ -854,7 +853,7 @@ export class AdeProjectsView extends ViewPane {
 					projectUri => void this.commandService.executeCommand('workbench.action.ade.newSession', projectUri),
 					parentId => void this.commandService.executeCommand('workbench.action.ade.newSubSession', parentId),
 					agentId => void this.commandService.executeCommand('workbench.action.ade.setRole', agentId),
-					governorId => void this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, governorId),
+					governorId => void this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, governorId),
 					agent => this.getEditableData(agent),
 					authority => this.cloudHostMetaByAuthority.get(authority) ?? this.cloudHostMetaByAuthority.get(authority.toLowerCase()),
 					() => this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
@@ -1436,32 +1435,20 @@ export class AdeProjectsView extends ViewPane {
 
 		return [
 			...(isTopGovernor ? [
-				...(agent.treeType !== 'research' ? [toAction({
-					id: 'ade.engineering',
-					label: agent.treeType === 'engineering'
-						? localize('adeOpenEngineeringMenu', "Open Engineering")
-						: localize('adeEnableEngineeringMenu', "Engineering"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_COMMAND_ID, agentId),
-				})] : []),
-				...(agent.treeType !== 'engineering' ? [toAction({
-					id: 'ade.research',
-					label: agent.treeType === 'research'
-						? localize('adeOpenResearchMenu', "Open Research")
-						: localize('adeEnableResearchMenu', "Research"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_RESEARCH_COMMAND_ID, agentId),
-				})] : []),
+				toAction({
+					id: 'ade.mission',
+					label: agent.treeType
+						? localize('adeOpenMissionMenu', "Open Mission")
+						: localize('adeEnableMissionMenu', "Mission"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, agentId),
+				}),
 				new Separator(),
 			] : []),
 			...(isLocked && agent.parentId && workTreeGov ? [
 				toAction({
-					id: 'ade.openOwningEngineering',
-					label: workTreeGov.treeType === 'research'
-						? localize('adeOpenOwningResearchMenu', "Open Research Canvas")
-						: localize('adeOpenOwningEngineeringMenu', "Open Engineering Canvas"),
-					run: () => this.commandService.executeCommand(
-						workTreeGov.treeType === 'research' ? ADE_OPEN_RESEARCH_COMMAND_ID : ADE_OPEN_ENGINEERING_COMMAND_ID,
-						workTreeGov.id,
-					),
+					id: 'ade.openOwningMission',
+					label: localize('adeOpenOwningMissionMenu', "Open Mission Canvas"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, workTreeGov.id),
 				}),
 				new Separator(),
 			] : []),

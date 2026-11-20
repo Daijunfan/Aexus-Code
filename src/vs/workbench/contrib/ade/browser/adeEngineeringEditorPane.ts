@@ -189,15 +189,12 @@ export class AdeEngineeringEditorInput extends EditorInput {
 
 	override getName(): string {
 		const gov = this.projects.getAgent(this.governorSessionId);
-		const base = gov?.label ?? localize('adeEngineeringFallbackGov', "Governor");
-		return gov?.treeType === 'research'
-			? localize('adeResearchTabTitle', "{0} · Research", base)
-			: localize('adeEngineeringTabTitle', "{0} · Engineering", base);
+		const base = gov?.label ?? localize('adeMissionFallbackOwner', "Mission");
+		return localize('adeMissionTabTitle', "{0} · Mission", base);
 	}
 
 	override getIcon(): ThemeIcon {
-		const gov = this.projects.getAgent(this.governorSessionId);
-		return gov?.treeType === 'research' ? Codicon.beaker : Codicon.typeHierarchySub;
+		return Codicon.typeHierarchySub;
 	}
 
 	override matches(other: EditorInput): boolean {

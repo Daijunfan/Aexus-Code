@@ -5,6 +5,8 @@
 
 import { Event } from '../../../base/common/event.js';
 import { IChannel, IServerChannel } from '../../../base/parts/ipc/common/ipc.js';
+import type { IAdeDocsPaths } from './adeDocsCatalog.js';
+import type { IAdeOrganizationConfig } from './adeRoleSchema.js';
 import {
 	AdeWorkTreeType,
 	IAdeEngineeringBackendService,
@@ -74,6 +76,16 @@ export class AdeEngineeringBackendChannel implements IServerChannel<string> {
 					args[2] as number | undefined,
 				) as unknown as T;
 			}
+			case 'syncApiDocs':
+				if (!this.service.syncApiDocs) {
+					return undefined as unknown as T;
+				}
+				return await this.service.syncApiDocs(args[0] as IAdeOrganizationConfig) as unknown as T;
+			case 'getApiDocsPaths':
+				if (!this.service.getApiDocsPaths) {
+					return undefined as unknown as T;
+				}
+				return await this.service.getApiDocsPaths(args[0] as number) as unknown as T;
 			default:
 				throw new Error(`Unsupported AdeEngineeringBackendChannel command: ${command}`);
 		}
@@ -150,5 +162,13 @@ export class AdeEngineeringBackendChannelClient implements IAdeEngineeringBacken
 
 	runNodeVerificationCommand(cwd: string, command: string, timeoutMs?: number): Promise<IAdeVerificationResult> {
 		return this.channel.call('runNodeVerificationCommand', [cwd, command, timeoutMs]);
+	}
+
+	syncApiDocs(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths> {
+		return this.channel.call('syncApiDocs', [config]);
+	}
+
+	getApiDocsPaths(rankCount: number): Promise<IAdeDocsPaths> {
+		return this.channel.call('getApiDocsPaths', [rankCount]);
 	}
 }

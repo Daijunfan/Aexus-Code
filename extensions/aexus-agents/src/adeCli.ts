@@ -9,6 +9,12 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
+import {
+	parseMissionDocsCommand,
+	parseRankGroupCommand,
+	RANK_SUBCOMMANDS,
+	rewriteEngineeringActionToMission,
+} from './adeCliRankMission.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -94,6 +100,13 @@ Commands:
   mode [get | set <ade|ide>]
   view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
 
+  rank list
+  rank names
+  rank get <L0|L1..LN|rankId|alias>
+  rank docs [L0|L1..LN|mission]
+  rank rename <L1..LN|rankId> "<alias>" [--short <tag>]
+  rank set-count <N>
+
   role list
   role apis
   role presets
@@ -163,6 +176,15 @@ Commands:
   secretary stop
   secretary draft [<text> | --clear]
   secretary mark-read
+
+  mission docs
+  mission list [--project <path>]
+  mission init --governor <id> [--on-children <relocate|delete> --target <id>] [--open] [--side]
+  mission open --governor <id> [--side]
+  mission status --governor <id> [--node <nodeId>]
+  mission blueprint (get | apply | validate) ...
+  mission (run | pause | resume | stop | reset | remove | configure | review | gate | diff | reports | template | generate) ...
+  (legacy alias: aexus-ade engineering <subcommand> ...)
 
   engineering demo [--governor <id>]
   engineering generate --governor <id> --prompt "<goal>" [--engine <e>] [--max-budget-usd <usd>] [--force-stop-running]
@@ -1266,8 +1288,18 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		throw new CliUsageError(`Unknown secretary subcommand: ${sub}`);
 	}
 
-	if (group === 'engineering') {
-		const sub = tail[0] ?? 'list';
+	if (group === 'rank' || group === 'ranks') {
+		return parseRankGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
+	}
+
+	if (group === 'mission' || group === 'engineering') {
+		const isMission = group === 'mission';
+		const missionDocs = parseMissionDocsCommand(tail, json, windowId);
+		if (missionDocs) {
+			return missionDocs;
+		}
+		const parseWorkTree = (): ParsedCliInvocation => {
+			const sub = tail[0] ?? 'list';
 		const args = tail.slice(1);
 
 		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[]): string => {
@@ -1936,7 +1968,10 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			return { help: false, json, windowId, action: 'engineering.reports', params: includeStale ? { governor, includeStale: true } : { governor } };
 		}
 
-		throw new CliUsageError(`Unknown engineering subcommand: ${sub}`);
+			throw new CliUsageError(`Unknown ${isMission ? 'mission' : 'engineering'} subcommand: ${sub}`);
+		};
+		const parsed = parseWorkTree();
+		return isMission ? rewriteEngineeringActionToMission(parsed) : parsed;
 	}
 
 	if (group === 'inbox') {
@@ -2664,9 +2699,11 @@ function formatDoctorHuman(report: IDoctorReport, color: ICliColorizer): string 
 	return lines.join('\n');
 }
 
+export { RANK_SUBCOMMANDS };
+
 export const TOP_LEVEL_COMMANDS = [
-	'doctor', 'completion', 'status', 'mode', 'view', 'role', 'project', 'host',
-	'engine', 'session', 'secretary', 'engineering', 'inbox', 'version',
+	'doctor', 'completion', 'status', 'mode', 'view', 'rank', 'role', 'project', 'host',
+	'engine', 'session', 'secretary', 'mission', 'engineering', 'inbox', 'version',
 ] as const;
 
 export const ROLE_SUBCOMMANDS = [
@@ -2674,7 +2711,7 @@ export const ROLE_SUBCOMMANDS = [
 ] as const;
 
 export const ENGINEERING_SUBCOMMANDS = [
-	'demo', 'generate', 'init', 'list', 'open', 'blueprint', 'run', 'pause', 'resume', 'stop',
+	'docs', 'demo', 'generate', 'init', 'list', 'open', 'blueprint', 'run', 'pause', 'resume', 'stop',
 	'remove', 'reset', 'configure', 'template', 'report', 'worktrees', 'verify-trust', 'diff',
 	'reports', 'status', 'review', 'gate', 'watchdog-action',
 ] as const;
@@ -2691,6 +2728,7 @@ function buildBashCompletion(): string {
 		'\tcur="${COMP_WORDS[COMP_CWORD]}"',
 		'',
 		`\tlocal top_level="${TOP_LEVEL_COMMANDS.join(' ')}"`,
+		`\tlocal rank_subcommands="${RANK_SUBCOMMANDS.join(' ')}"`,
 		`\tlocal role_subcommands="${ROLE_SUBCOMMANDS.join(' ')}"`,
 		`\tlocal engineering_subcommands="${ENGINEERING_SUBCOMMANDS.join(' ')}"`,
 		`\tlocal verify_trust_subcommands="${VERIFY_TRUST_SUBCOMMANDS.join(' ')}"`,
@@ -2700,13 +2738,19 @@ function buildBashCompletion(): string {
 		`\t\t\tCOMPREPLY=( $(compgen -W "${COMPLETION_SHELLS.join(' ')}" -- "$cur") )`,
 		'\t\t\treturn 0',
 		'\t\t\t;;',
+		'\t\trank|ranks)',
+		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
+		'\t\t\t\tCOMPREPLY=( $(compgen -W "$rank_subcommands" -- "$cur") )',
+		'\t\t\tfi',
+		'\t\t\treturn 0',
+		'\t\t\t;;',
 		'\t\trole|roles|org)',
 		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
 		'\t\t\t\tCOMPREPLY=( $(compgen -W "$role_subcommands" -- "$cur") )',
 		'\t\t\tfi',
 		'\t\t\treturn 0',
 		'\t\t\t;;',
-		'\t\tengineering)',
+		'\t\tmission|engineering)',
 		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
 		'\t\t\t\tCOMPREPLY=( $(compgen -W "$engineering_subcommands" -- "$cur") )',
 		'\t\t\telif [ "$COMP_CWORD" -eq 3 ] && [ "${COMP_WORDS[2]}" = "verify-trust" ]; then',
@@ -2732,22 +2776,32 @@ function buildZshCompletion(): string {
 		'#compdef aexus-ade',
 		'',
 		'_aexus_ade() {',
-		'\tlocal -a top_level role_subcommands engineering_subcommands verify_trust_subcommands',
+		'\tlocal -a top_level rank_subcommands role_subcommands engineering_subcommands verify_trust_subcommands',
 		'\ttop_level=(',
 		`\t\t'doctor:Diagnose the ADE environment'`,
 		`\t\t'completion:Emit a shell completion script'`,
 		`\t\t'status:Show workbench status'`,
 		`\t\t'mode:Get or set ADE/IDE mode'`,
 		`\t\t'view:Inspect or change the ADE view'`,
+		`\t\t'rank:Inspect or hot-update rank tiers, aliases, and single-copy docs'`,
 		`\t\t'role:Manage organization roles and presets'`,
 		`\t\t'project:Manage projects'`,
 		`\t\t'host:Manage Cloud Hosts'`,
 		`\t\t'engine:List engines and sessions'`,
 		`\t\t'session:Manage sessions'`,
 		`\t\t'secretary:Control the secretary session'`,
-		`\t\t'engineering:Manage engineering trees'`,
+		`\t\t'mission:Manage Missions and Mission API docs'`,
+		`\t\t'engineering:Manage Missions (legacy alias)'`,
 		`\t\t'inbox:Manage the governor inbox'`,
 		`\t\t'version:Print the CLI version'`,
+		'\t)',
+		'\trank_subcommands=(',
+		`\t\t'list:List L0 and L1..LN live rank directory'`,
+		`\t\t'names:Print hot-updated tier alias map'`,
+		`\t\t'get:Inspect a specific tier or alias'`,
+		`\t\t'docs:Show canonical single-copy docs paths'`,
+		`\t\t'rename:Hot-update display alias for a tier'`,
+		`\t\t'set-count:Resize rank tier count (>= 1)'`,
 		'\t)',
 		'\trole_subcommands=(',
 		`\t\t'list:Show active organization role schema'`,
@@ -2760,7 +2814,8 @@ function buildZshCompletion(): string {
 		`\t\t'studio:Open Organization and Roles Studio'`,
 		'\t)',
 		'\tengineering_subcommands=(',
-		`\t\t'demo:Create a demo engineering tree'`,
+		`\t\t'docs:Locate sibling MISSION_API.md documentation'`,
+		`\t\t'demo:Create a demo mission'`,
 		`\t\t'generate:Generate an engineering DAG blueprint from a goal prompt'`,
 		`\t\t'init:Initialize an engineering tree'`,
 		`\t\t'list:List engineering trees'`,
@@ -2793,11 +2848,13 @@ function buildZshCompletion(): string {
 		`\t\t_describe -t commands 'aexus-ade command' top_level`,
 		'\telif [[ ${words[2]} == completion ]]; then',
 		`\t\t_values 'shell' ${COMPLETION_SHELLS.join(' ')}`,
+		'\telif [[ ( ${words[2]} == rank || ${words[2]} == ranks ) && CURRENT == 3 ]]; then',
+		`\t\t_describe -t commands 'rank command' rank_subcommands`,
 		'\telif [[ ( ${words[2]} == role || ${words[2]} == roles || ${words[2]} == org ) && CURRENT == 3 ]]; then',
 		`\t\t_describe -t commands 'role command' role_subcommands`,
-		'\telif [[ ${words[2]} == engineering && CURRENT == 3 ]]; then',
-		`\t\t_describe -t commands 'engineering command' engineering_subcommands`,
-		'\telif [[ ${words[2]} == engineering && ${words[3]} == verify-trust && CURRENT == 4 ]]; then',
+		'\telif [[ ( ${words[2]} == mission || ${words[2]} == engineering ) && CURRENT == 3 ]]; then',
+		`\t\t_describe -t commands 'mission command' engineering_subcommands`,
+		'\telif [[ ( ${words[2]} == mission || ${words[2]} == engineering ) && ${words[3]} == verify-trust && CURRENT == 4 ]]; then',
 		`\t\t_describe -t commands 'verify-trust command' verify_trust_subcommands`,
 		'\tfi',
 		'}',
@@ -2818,13 +2875,15 @@ function buildFishCompletion(): string {
 		status: 'Show workbench status',
 		mode: 'Get or set ADE/IDE mode',
 		view: 'Inspect or change the ADE view',
+		rank: 'Inspect or hot-update rank tiers, aliases, and single-copy docs',
 		role: 'Manage organization roles and presets',
 		project: 'Manage projects',
 		host: 'Manage Cloud Hosts',
 		engine: 'List engines and sessions',
 		session: 'Manage sessions',
 		secretary: 'Control the secretary session',
-		engineering: 'Manage engineering trees',
+		mission: 'Manage Missions and Mission API docs',
+		engineering: 'Manage Missions (legacy alias)',
 		inbox: 'Manage the governor inbox',
 		version: 'Print the CLI version',
 	};
@@ -2832,6 +2891,17 @@ function buildFishCompletion(): string {
 		lines.push(`complete -c aexus-ade -n '__fish_use_subcommand' -a ${command} -d '${descriptions[command]}'`);
 	}
 	lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_SHELLS.join(' ')}'`);
+	const rankDescriptions: Record<(typeof RANK_SUBCOMMANDS)[number], string> = {
+		list: 'List L0 and L1..LN live rank directory',
+		names: 'Print hot-updated tier alias map',
+		get: 'Inspect a specific tier or alias',
+		docs: 'Show canonical single-copy docs paths',
+		rename: 'Hot-update display alias for a tier',
+		'set-count': 'Resize rank tier count (>= 1)',
+	};
+	for (const command of RANK_SUBCOMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from rank' -a ${command} -d '${rankDescriptions[command]}'`);
+	}
 	const roleDescriptions: Record<(typeof ROLE_SUBCOMMANDS)[number], string> = {
 		list: 'Show active organization role schema',
 		apis: 'List available ADE control API primitives',
@@ -2846,7 +2916,8 @@ function buildFishCompletion(): string {
 		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from role' -a ${command} -d '${roleDescriptions[command]}'`);
 	}
 	const engineeringDescriptions: Record<(typeof ENGINEERING_SUBCOMMANDS)[number], string> = {
-		demo: 'Create a demo engineering tree',
+		docs: 'Locate sibling MISSION_API.md documentation',
+		demo: 'Create a demo mission',
 		generate: 'Generate an engineering DAG blueprint from a goal prompt',
 		init: 'Initialize an engineering tree',
 		list: 'List engineering trees',
@@ -2894,6 +2965,7 @@ function buildPowerShellCompletion(): string {
 		`\t$topLevel = @(${quoteList(TOP_LEVEL_COMMANDS)})`,
 		`\t$shells = @(${quoteList(COMPLETION_SHELLS)})`,
 		`\t$roleSubcommands = @(${quoteList(ROLE_SUBCOMMANDS)})`,
+		`\t$rankSubcommands = @(${quoteList(RANK_SUBCOMMANDS)})`,
 		`\t$engineeringSubcommands = @(${quoteList(ENGINEERING_SUBCOMMANDS)})`,
 		`\t$verifyTrustSubcommands = @(${quoteList(VERIFY_TRUST_SUBCOMMANDS)})`,
 		'\t$candidates = @()',
@@ -2902,8 +2974,9 @@ function buildPowerShellCompletion(): string {
 		'\t} elseif ($tokens.Count -ge 2) {',
 		'\t\tswitch ($tokens[1]) {',
 		'\t\t\t\'completion\' { $candidates = $shells }',
+		'\t\t\t{ $_ -in @(\'rank\', \'ranks\') } { $candidates = $rankSubcommands }',
 		'\t\t\t{ $_ -in @(\'role\', \'roles\', \'org\') } { $candidates = $roleSubcommands }',
-		'\t\t\t\'engineering\' {',
+		'\t\t\t{ $_ -in @(\'mission\', \'engineering\') } {',
 		'\t\t\t\tif ($tokens.Count -ge 3 -and $tokens[2] -eq \'verify-trust\') {',
 		'\t\t\t\t\t$candidates = $verifyTrustSubcommands',
 		'\t\t\t\t} else {',

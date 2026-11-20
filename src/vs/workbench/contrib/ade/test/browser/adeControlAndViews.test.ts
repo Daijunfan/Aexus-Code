@@ -71,7 +71,7 @@ import {
 import '../../browser/adeControlHandler.js';
 import { AdeConfigEditorPane } from '../../browser/adeConfigEditorPane.js';
 import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
-import { AdeEngineeringEditorPane } from '../../browser/adeEngineeringEditorPane.js';
+import { AdeEngineeringEditorInput, AdeEngineeringEditorPane } from '../../browser/adeEngineeringEditorPane.js';
 import { AdeInboxPanel, formatAdeInboxKindLabel } from '../../browser/adeInboxView.js';
 import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
@@ -2063,7 +2063,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			govTier: 'L1',
 			govBadgeText: 'Governor',
 			govBadgeHasOrgIcon: true,
-			govWorktreeText: 'Engineering',
+			govWorktreeText: 'Mission',
 			govChildRank: 'manager',
 			mgrLocked: true,
 			mgrBadgeLocked: true,
@@ -2932,7 +2932,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				return super.inspect<T>(key);
 			}
 		}();
-		const guardedSchemaSvc = store.add(new AdeRoleSchemaService(injectedConfigService));
+		const guardedSchemaSvc = store.add(new AdeRoleSchemaService(injectedConfigService, h.instantiation));
 		assert.strictEqual(guardedSchemaSvc.getConfig().ranks[0].id, 'governor', 'Workspace settings must NEVER override aexus.ade.organization');
 		assert.ok(!guardedSchemaSvc.getConfig().ranks.some(r => r.id === 'evil'));
 
@@ -3336,7 +3336,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(latestEntry?.kind, 'warning');
 	});
 
-	test('exposes ADE config in top-right settings menu (GlobalActivity) and renders blank ADE config + infinite-canvas-only Engineering pane', () => {
+	test('exposes ADE config with L0 Secretary, rank count >= 1, hot-reload aliases, single-copy docs, unified Mission labels, and infinite-canvas Mission pane', async () => {
 		const configCommand = MenuRegistry.getMenuItems(MenuId.GlobalActivity)
 			.filter(isIMenuItem)
 			.find(item => item.command.id === ADE_OPEN_CONFIG_COMMAND_ID);
@@ -3349,20 +3349,72 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		const h = createHarness([alpha]);
 		const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
 
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+
 		const configHost = append(document.body, $('.ade-config-pane-test-host'));
 		store.add({ dispose: () => configHost.remove() });
 		const configPane = store.add(h.instantiation.createInstance(AdeConfigEditorPane, mockGroup));
 		configPane.create(configHost);
 		const configRoot = configHost.querySelector<HTMLElement>('.ade-config-editor');
 		assert.ok(configRoot, 'AdeConfigEditorPane renders .ade-config-editor');
-		assert.deepStrictEqual(
-			{
-				ariaLabel: configRoot.getAttribute('aria-label'),
-				childElements: configRoot.childElementCount,
-				text: configRoot.textContent,
-			},
-			{ ariaLabel: 'ADE config', childElements: 0, text: '' },
-		);
+		assert.strictEqual(configRoot.getAttribute('aria-label'), 'ADE config');
+
+		// Shows L0 Secretary + default preset L1..L4 aliases
+		assert.ok(configRoot.querySelector('[data-tier="L0"]')?.textContent?.includes('Secretary'), 'L0 row shows Secretary');
+		assert.strictEqual(configRoot.querySelector<HTMLElement>('[data-ade-rank-count]')?.textContent, '4');
+		assert.strictEqual(configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L1"]')?.value, 'Governor');
+		assert.strictEqual(configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L2"]')?.value, 'Manager');
+		assert.strictEqual(configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L3"]')?.value, 'Employee');
+		assert.strictEqual(configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L4"]')?.value, 'Worker');
+
+		// Single-copy docs paths display sibling ranks/ and mission/MISSION_API.md
+		const ranksDocEl = configRoot.querySelector<HTMLElement>('[data-ade-docs-ranks]');
+		const missionDocEl = configRoot.querySelector<HTMLElement>('[data-ade-docs-mission]');
+		assert.ok(ranksDocEl?.textContent?.endsWith('/docs/ranks'), 'Docs card displays ranks/ directory');
+		assert.ok(missionDocEl?.textContent?.endsWith('/docs/mission/MISSION_API.md'), 'Docs card displays sibling mission/MISSION_API.md');
+
+		// Hot-edit L2 alias in ADE config and save -> live rank.names reflects update immediately
+		const l2Input = configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L2"]')!;
+		l2Input.value = 'Director';
+		l2Input.dispatchEvent(new window.Event('input'));
+		configRoot.querySelector<HTMLButtonElement>('button[data-ade-config-save]')!.click();
+		await new Promise(resolve => setTimeout(resolve, 10));
+
+		const liveNames = await h.control<{ readonly rankCount: number; readonly namesByTier: Record<string, string> }>('rank.names', {});
+		assert.deepStrictEqual(liveNames.namesByTier, {
+			L0: 'Secretary',
+			L1: 'Governor',
+			L2: 'Director',
+			L3: 'Employee',
+			L4: 'Worker',
+		});
+
+		// Control plane hot-rename & rank.setCount >= 1 + mission.docs + rank.docs
+		await h.control('rank.rename', { target: 'L3', alias: 'Reviewer', shortName: 'Rev' });
+		const afterRename = await h.control<{ readonly namesByTier: Record<string, string> }>('rank.names', {});
+		assert.strictEqual(afterRename.namesByTier['L3'], 'Reviewer');
+
+		const l0Info = await h.control<{ readonly tierTag: string; readonly alias: string; readonly isSystemL0?: boolean }>('rank.get', { target: 'L0' });
+		assert.strictEqual(l0Info.tierTag, 'L0');
+		assert.strictEqual(l0Info.alias, 'Secretary');
+		assert.strictEqual(l0Info.isSystemL0, true);
+
+		const missionDocs = await h.control<{ readonly missionDoc: string; readonly ranksDir: string }>('mission.docs', {});
+		assert.ok(missionDocs.missionDoc.endsWith('/docs/mission/MISSION_API.md'));
+		assert.ok(missionDocs.ranksDir.endsWith('/docs/ranks'));
+
+		await h.control('rank.setCount', { count: 1 });
+		const oneTier = await h.control<{ readonly rankCount: number; readonly namesByTier: Record<string, string> }>('rank.names', {});
+		assert.strictEqual(oneTier.rankCount, 1);
+		assert.deepStrictEqual(oneTier.namesByTier, { L0: 'Secretary', L1: 'Governor' });
+		// Stepper decrement is disabled at min count 1
+		assert.strictEqual(configRoot.querySelector<HTMLButtonElement>('button[data-ade-rank-dec]')?.disabled, true);
+
+		// Unified Mission tab title and infinite-canvas-only Mission pane
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude://mission-gov') }, 'Core Release', { role: 'governor' });
+		const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		assert.strictEqual(missionInput.getName(), 'Core Release · Mission');
 
 		h.instantiation.stub(IAdeEngineeringService, new class extends mock<IAdeEngineeringService>() { }());
 		const engHost = append(document.body, $('.ade-eng-pane-test-host'));
@@ -3374,7 +3426,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.deepStrictEqual(
 			[...engRoot.querySelectorAll<HTMLElement>('*')].map(el => el.className),
 			['ade-eng-body', 'ade-eng-viewport', 'ade-eng-world'],
-			'Engineering pane renders only infinite canvas viewport + world without toolbar/HUD/minimap/nodes',
+			'Mission pane renders only infinite canvas viewport + world without toolbar/HUD/minimap/nodes',
 		);
 		assert.strictEqual(engRoot.textContent, '');
 	});

@@ -11,6 +11,9 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import * as path from '../../../base/common/path.js';
 import { isWindows } from '../../../base/common/platform.js';
 import { ADE_CONTROL_DIR_NAME } from '../common/adeControl.js';
+import { buildAdeDocsPaths, IAdeDocsPaths } from '../common/adeDocsCatalog.js';
+import { IAdeOrganizationConfig } from '../common/adeRoleSchema.js';
+import { syncAdeApiDocsToDisk } from './adeDocsSync.js';
 import {
 	ADE_ENGINEERING_DIR_NAME,
 	ADE_INBOX_FILE_NAME,
@@ -1029,5 +1032,13 @@ export class AdeEngineeringNodeService extends Disposable implements IAdeEnginee
 				}
 			});
 		});
+	}
+
+	async syncApiDocs(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths> {
+		return syncAdeApiDocsToDisk(this.baseDir, config);
+	}
+
+	async getApiDocsPaths(rankCount: number): Promise<IAdeDocsPaths> {
+		return buildAdeDocsPaths(this.baseDir, rankCount);
 	}
 }

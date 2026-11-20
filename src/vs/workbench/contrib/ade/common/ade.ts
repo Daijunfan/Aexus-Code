@@ -74,6 +74,7 @@ export const ADE_SECRETARY_ID = '__secretary__';
 export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProjectFolder';
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
 export const ADE_RENAME_PROJECT_COMMAND_ID = 'workbench.action.ade.renameProjectFolder';
+export const ADE_OPEN_MISSION_COMMAND_ID = 'workbench.action.ade.openMission';
 export const ADE_OPEN_ENGINEERING_COMMAND_ID = 'workbench.action.ade.openEngineering';
 export const ADE_OPEN_RESEARCH_COMMAND_ID = 'workbench.action.ade.openResearch';
 export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHosts.manage';

@@ -1265,7 +1265,7 @@ suite('ADE Engineering Workflow, State Machine, CLI, Inbox & Visual DAG Canvas',
 		const segBtns = sidebarHost.querySelectorAll('.ade-sidebar-seg-btn');
 		assert.strictEqual(segBtns.length, 2, 'Sidebar renders Projects | Inbox segmented tabs');
 		const worktreeBadge = sidebarHost.querySelector('.ade-worktree-badge:not([hidden])') as HTMLElement | null;
-		assert.ok(worktreeBadge && worktreeBadge.textContent === 'Engineering', 'Governor row displays Engineering badge');
+		assert.ok(worktreeBadge && worktreeBadge.textContent === 'Mission', 'Governor row displays Mission badge');
 
 		sidebarView.setSidebarMode('inbox');
 		const embeddedInbox = sidebarHost.querySelector('.ade-inbox-panel') as HTMLElement | null;

@@ -5,6 +5,9 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { buildAdeDocsPaths, IAdeDocsPaths } from '../../../../platform/ade/common/adeDocsCatalog.js';
+import { IAdeEngineeringBackendService } from '../../../../platform/ade/common/adeEngineering.js';
+import { renameOrganizationRankAlias, resizeOrganizationRanks } from '../../../../platform/ade/common/adeRankResize.js';
 import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	ADE_ORGANIZATION_PRESETS,
@@ -25,7 +28,7 @@ import {
 	resolveEffectiveRankDefinition,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
-import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { createDecorator, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
 export const IAdeRoleSchemaService = createDecorator<IAdeRoleSchemaService>('adeRoleSchemaService');
 
@@ -67,6 +70,10 @@ export interface IAdeRoleSchemaService {
 	updateConfig(config: IAdeOrganizationConfig, target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
 	applyPreset(presetId: string, target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
 	resetToDefault(target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
+	resizeRankCount?(targetCount: number, target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
+	renameRankAlias?(tierOrId: string | number, newAlias: string, newShortName?: string, target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
+	getDocsPaths?(): IAdeDocsPaths;
+	syncDocs?(): Promise<IAdeDocsPaths>;
 
 	getRank(rankId: string | undefined): IAdeRankDefinition | undefined;
 	resolveRank(role: string | undefined, hasSubordinates?: boolean): IAdeRankDefinition;
@@ -93,19 +100,32 @@ export class AdeRoleSchemaService extends Disposable implements IAdeRoleSchemaSe
 	declare readonly _serviceBrand: undefined;
 
 	private currentConfig: IAdeOrganizationConfig;
+	private cachedDocsPaths: IAdeDocsPaths | undefined;
 	private readonly _onDidChangeSchema = this._register(new Emitter<IAdeOrganizationConfig>());
 	readonly onDidChangeSchema = this._onDidChangeSchema.event;
 
+	private readonly backend: IAdeEngineeringBackendService | undefined;
+
 	constructor(
 		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
+		this.backend = instantiationService.invokeFunction(accessor => {
+			try {
+				return accessor.get(IAdeEngineeringBackendService);
+			} catch {
+				return undefined;
+			}
+		});
 		this.currentConfig = this.readConfigFromSettings();
+		void this.syncDocs();
 		this._register(this.configurationService.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration(ADE_ORGANIZATION_CONFIG_KEY)) {
 				const next = this.readConfigFromSettings();
 				if (JSON.stringify(next) !== JSON.stringify(this.currentConfig)) {
 					this.currentConfig = next;
+					void this.syncDocs();
 					this._onDidChangeSchema.fire(next);
 				}
 			}
@@ -125,11 +145,33 @@ export class AdeRoleSchemaService extends Disposable implements IAdeRoleSchemaSe
 		return ADE_ORGANIZATION_PRESETS;
 	}
 
+	getDocsPaths(): IAdeDocsPaths {
+		return this.cachedDocsPaths ?? buildAdeDocsPaths('~/.aexus-code', this.currentConfig.ranks.length);
+	}
+
+	async syncDocs(): Promise<IAdeDocsPaths> {
+		if (this.backend?.syncApiDocs) {
+			try {
+				const synced = await this.backend.syncApiDocs(this.currentConfig);
+				if (synced) {
+					this.cachedDocsPaths = synced;
+					return synced;
+				}
+			} catch {
+				// Fallback to canonical default path descriptor in headless/test hosts
+			}
+		}
+		const fallback = buildAdeDocsPaths('~/.aexus-code', this.currentConfig.ranks.length);
+		this.cachedDocsPaths = fallback;
+		return fallback;
+	}
+
 	async updateConfig(config: IAdeOrganizationConfig, target = ConfigurationTarget.USER): Promise<IAdeOrganizationConfig> {
 		const normalized = normalizeAdeOrganizationConfig(config);
 		await this.configurationService.updateValue(ADE_ORGANIZATION_CONFIG_KEY, normalized, target);
 		if (JSON.stringify(normalized) !== JSON.stringify(this.currentConfig)) {
 			this.currentConfig = normalized;
+			void this.syncDocs();
 			this._onDidChangeSchema.fire(normalized);
 		}
 		return normalized;
@@ -145,6 +187,16 @@ export class AdeRoleSchemaService extends Disposable implements IAdeRoleSchemaSe
 
 	async resetToDefault(target = ConfigurationTarget.USER): Promise<IAdeOrganizationConfig> {
 		return this.updateConfig(DEFAULT_ADE_ORGANIZATION_CONFIG, target);
+	}
+
+	async resizeRankCount(targetCount: number, target = ConfigurationTarget.USER): Promise<IAdeOrganizationConfig> {
+		const next = resizeOrganizationRanks(this.currentConfig, targetCount);
+		return this.updateConfig(next, target);
+	}
+
+	async renameRankAlias(tierOrId: string | number, newAlias: string, newShortName?: string, target = ConfigurationTarget.USER): Promise<IAdeOrganizationConfig> {
+		const next = renameOrganizationRankAlias(this.currentConfig, tierOrId, newAlias, newShortName);
+		return this.updateConfig(next, target);
 	}
 
 	getRank(rankId: string | undefined): IAdeRankDefinition | undefined {

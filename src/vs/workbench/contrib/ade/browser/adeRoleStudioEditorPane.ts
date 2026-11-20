@@ -239,7 +239,7 @@ const API_CATEGORY_ORDER: readonly { readonly id: AdePrimitiveApiCategory; reado
 	{ id: 'messaging', title: 'Messaging, Context & Human Inbox' },
 	{ id: 'hierarchy', title: 'Hierarchy & Session Lifecycle' },
 	{ id: 'workspace', title: 'Workspace, Files & Cloud Hosts' },
-	{ id: 'engineering', title: 'Engineering & Research DAG Workflow' },
+	{ id: 'engineering', title: 'Mission DAG Workflow' },
 ];
 
 export class AdeRoleStudioEditorPane extends EditorPane {

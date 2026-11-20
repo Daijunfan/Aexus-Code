@@ -85,6 +85,7 @@ import {
 	ADE_INSPECTOR_CONTAINER_ID,
 	ADE_OPEN_CONFIG_COMMAND_ID,
 	ADE_OPEN_ENGINEERING_COMMAND_ID,
+	ADE_OPEN_MISSION_COMMAND_ID,
 	ADE_OPEN_RESEARCH_COMMAND_ID,
 	ADE_OPEN_ROLE_STUDIO_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
@@ -336,7 +337,7 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeExtensionWebviewEditorInput.ID, AdeExtensionWebviewEditorSerializer);
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
-	EditorPaneDescriptor.create(AdeEngineeringEditorPane, AdeEngineeringEditorPane.ID, localize('adeEngineeringEditorPaneTitle', "ADE Engineering Workflow")),
+	EditorPaneDescriptor.create(AdeEngineeringEditorPane, AdeEngineeringEditorPane.ID, localize('adeMissionEditorPaneTitle', "ADE Mission")),
 	[new SyncDescriptor(AdeEngineeringEditorInput)],
 );
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeEngineeringEditorInput.ID, AdeEngineeringEditorSerializer);
@@ -361,7 +362,7 @@ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEdit
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'aexusAdeEngineering',
-	title: localize('adeEngineeringConfigurationTitle', "ADE Engineering & Organization"),
+	title: localize('adeMissionConfigurationTitle', "ADE Mission & Organization"),
 	type: 'object',
 	properties: {
 		[ADE_WATCHDOG_TIMEOUT_CONFIG_KEY]: {
@@ -982,9 +983,9 @@ async function openOrInitializeWorkTree(
 		return;
 	}
 	const orchestratorRank = resolveWorkTreeSlotRank(roleConfig, 'orchestrator');
-	const modeLabel = requestedTreeType === 'research' ? 'Research' : 'Engineering';
+	const modeLabel = localize('adeMissionModeLabel', "Mission");
 	if (target.parentId) {
-		notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level {0} session can own an ADE {1} workflow tree.", orchestratorRank.name, modeLabel));
+		notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level {0} session can own an ADE {1}.", orchestratorRank.name, modeLabel));
 		return;
 	}
 	const rank = resolveAdeAgentRank(target, projects.hasSubordinates(target.id), roleConfig);
@@ -994,7 +995,7 @@ async function openOrInitializeWorkTree(
 	}
 
 	await engineering.whenReady();
-	if (engineering.hasTree(target.id) || target.treeType === requestedTreeType) {
+	if (engineering.hasTree(target.id) || target.treeType) {
 		modes.setMode('ade');
 		await engineering.openEngineeringEditor(target.id);
 		return;
@@ -1144,13 +1145,29 @@ registerAction2(class TryInteractiveEngineeringDemoAction extends Action2 {
 	}
 });
 
+registerAction2(class OpenAdeMissionAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_OPEN_MISSION_COMMAND_ID,
+			title: localize2('adeOpenMissionActionTitle', "Open ADE Mission..."),
+			icon: Codicon.typeHierarchySub,
+			f1: true,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+		accessor.get(IWorkbenchModeService).setMode('ade');
+		await openOrInitializeWorkTree(accessor, 'engineering', governorId);
+	}
+});
+
 registerAction2(class OpenAdeEngineeringAction extends Action2 {
 	constructor() {
 		super({
 			id: ADE_OPEN_ENGINEERING_COMMAND_ID,
-			title: localize2('adeOpenEngineeringActionTitle', "Open ADE Engineering..."),
+			title: localize2('adeOpenEngineeringActionTitle', "Open ADE Mission (Legacy Engineering Alias)"),
 			icon: Codicon.typeHierarchySub,
-			f1: true,
+			f1: false,
 		});
 	}
 
@@ -1164,15 +1181,15 @@ registerAction2(class OpenAdeResearchAction extends Action2 {
 	constructor() {
 		super({
 			id: ADE_OPEN_RESEARCH_COMMAND_ID,
-			title: localize2('adeOpenResearchActionTitle', "Open ADE Research..."),
-			icon: Codicon.beaker,
-			f1: true,
+			title: localize2('adeOpenResearchActionTitle', "Open ADE Mission (Legacy Research Alias)"),
+			icon: Codicon.typeHierarchySub,
+			f1: false,
 		});
 	}
 
 	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
 		accessor.get(IWorkbenchModeService).setMode('ade');
-		await openOrInitializeWorkTree(accessor, 'research', governorId);
+		await openOrInitializeWorkTree(accessor, 'engineering', governorId);
 	}
 });
 

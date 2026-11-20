@@ -107,6 +107,11 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'role.schema.get',
 			'role.apis',
 			'role.presets',
+			'rank.list',
+			'rank.names',
+			'rank.get',
+			'rank.docs',
+			'mission.docs',
 		],
 		renderCliLines: ctx => ctx.isWorkTree
 			? [`  - Subordinate History: \`aexus-ade session history <subordinate-id> --limit 10 --json\``]
@@ -428,7 +433,14 @@ export function getAdePrimitiveApiSpec(id: AdePrimitiveApiId): IAdePrimitiveApiS
 
 /** Resolves the fixed Aexus-Code primitive API governing a given control action (returns undefined for system-only actions like `mode.set` or `role.schema.set`). */
 export function resolveActionPrimitiveApi(action: string): AdePrimitiveApiId | undefined {
-	return ACTION_TO_PRIMITIVE_API.get(action);
+	const direct = ACTION_TO_PRIMITIVE_API.get(action);
+	if (direct) {
+		return direct;
+	}
+	if (action.startsWith('mission.')) {
+		return ACTION_TO_PRIMITIVE_API.get(`engineering.${action.slice('mission.'.length)}`);
+	}
+	return undefined;
 }
 
 export interface IAdeRankDefinition {
@@ -1273,11 +1285,16 @@ export interface IAdeRolePromptCompileInput {
 	readonly supervisor?: { readonly id: string; readonly label: string; readonly rankName: string };
 	readonly subtreeLines?: readonly string[];
 	readonly workTree?: {
-		readonly treeType: 'engineering' | 'research';
+		readonly treeType: 'engineering' | 'research' | 'mission';
 		readonly governorId: string;
 		readonly segmentId?: string;
 		readonly nodeId?: string;
 		readonly slot?: AdeWorkTreeSlot;
+	};
+	/** Canonical single-copy API doc paths (read by L<tier>, sibling Mission doc read on demand). */
+	readonly docsPaths?: {
+		readonly rankDoc: string;
+		readonly missionDoc: string;
 	};
 }
 
@@ -1337,14 +1354,19 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 		return undefined;
 	}
 	const { rank, config } = input;
+	const tierTag = `L${rank.tier}`;
+	const rankDocPath = input.docsPaths?.rankDoc ?? `~/.aexus-code/docs/ranks/${tierTag}.md`;
+	const missionDocPath = input.docsPaths?.missionDoc ?? '~/.aexus-code/docs/mission/MISSION_API.md';
 	const lines: string[] = [
 		'[Aexus Orchestrated Role Context]',
 		`You are an orchestrated agent in **Aexus Code ADE**.`,
+		`- Tier: ${tierTag} (aliases can hot-update; run \`aexus-ade rank names --json\` for live names)`,
 		`- Rank: ${rank.summary}`,
 		`- Role: ${rank.name}`,
 		`- Session: ${input.agentLabel} (id: ${input.agentId}, engine: ${input.engineDisplay} [${input.engineId}])`,
 		`- Project: ${input.projectName} (${input.projectPath})`,
-		`- Hierarchy: ${formatOrganizationLadder(config)}`,
+		`- Hierarchy: L0 (Secretary) > ${formatOrganizationLadder(config)}`,
+		`- API Docs (single copy, read by tier): Tier doc \`${rankDocPath}\` | Mission doc (read only when working on a Mission): \`${missionDocPath}\``,
 	];
 
 	if (input.supervisor) {
@@ -1357,7 +1379,7 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 
 	if (input.workTree) {
 		const govId = input.workTree.governorId;
-		const treeKindTitle = input.workTree.treeType === 'research' ? 'ADE Research Tree' : 'ADE Engineering Tree';
+		const treeKindTitle = 'ADE Mission';
 		const resolvedSlot: AdeWorkTreeSlot | undefined = input.workTree.slot
 			?? (input.workTree.nodeId ? 'reviewer'
 				: input.workTree.segmentId ? 'segment_owner'
@@ -1367,8 +1389,8 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 		const executorRank = resolveWorkTreeSlotRank(config, 'executor');
 
 		lines.push(
-			`- Work Tree: **${treeKindTitle}** (governor: \`${govId}\`${input.workTree.segmentId ? `, segment: \`${input.workTree.segmentId}\`` : ''}${input.workTree.nodeId ? `, node: \`${input.workTree.nodeId}\`` : ''}) — topology locked by \`blueprint.md\`; inspect live nodes/status via \`aexus-ade engineering status --governor ${govId} --json\`.`,
-			`- Identity Rule: When asked your role/rank, state **${rank.name}**, session \`${input.agentId}\`, project **${input.projectName}**, and work tree \`${govId}\`. NEVER claim that you are "not an employee" or have "no rank".`,
+			`- Mission: **${treeKindTitle}** (owner: \`${govId}\`${input.workTree.segmentId ? `, segment: \`${input.workTree.segmentId}\`` : ''}${input.workTree.nodeId ? `, node: \`${input.workTree.nodeId}\`` : ''}) — topology locked by \`blueprint.md\`; read sibling \`${missionDocPath}\` on demand and inspect live nodes via \`aexus-ade mission status --governor ${govId} --json\`.`,
+			`- Identity Rule: When asked your role/rank, state tier **${tierTag}** (**${rank.name}**), session \`${input.agentId}\`, project **${input.projectName}**, and Mission \`${govId}\`. NEVER claim that you are "not an employee" or have "no rank".`,
 		);
 		if (interpolatedCharter) {
 			lines.push('- Role Initialization Charter:');
@@ -1379,17 +1401,12 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 			}
 		}
 
-		// Preserve strict Work-Tree operational guardrails keyed by structural slot (works across all org presets)
-		const isResearchTree = input.workTree.treeType === 'research';
+		// Preserve strict Mission operational guardrails keyed by structural slot (works across all org presets)
 		if (resolvedSlot === 'orchestrator') {
 			lines.push(
-				isResearchTree
-					? `- Research ${rank.name} (L${rank.tier}) Operational Rules:`
-					: `- Engineering ${rank.name} (L${rank.tier}) Operational Rules:`,
-				isResearchTree
-					? '  - Design multi-track research synthesis & verification DAG topology in `blueprint.md`.'
-					: '  - Design task decomposition & DAG parallel topology in `blueprint.md` (supports optional node `files:` scope and `verify:` check commands, plus `max_concurrency`).',
-				`  - Asleep during normal execution; woken ONLY on 3rd formal ${segmentOwnerRank.name} failure (RED Circuit Breaker). NEVER call \`aexus-ade engineering run\` yourself unless explicitly authorized (normally User or Secretary starts execution).`,
+				`- Mission ${rank.name} (L${rank.tier}) Operational Rules:`,
+				'  - Design task decomposition & DAG parallel topology in `blueprint.md` (supports optional node `files:` scope and `verify:` check commands, plus `max_concurrency`).',
+				`  - Asleep during normal execution; woken ONLY on 3rd formal ${segmentOwnerRank.name} failure (RED Circuit Breaker). NEVER call \`aexus-ade mission run\` yourself unless explicitly authorized (normally User or L0 Secretary starts execution).`,
 			);
 		} else if (resolvedSlot === 'segment_owner') {
 			lines.push(

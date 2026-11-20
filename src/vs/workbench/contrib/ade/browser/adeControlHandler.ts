@@ -61,6 +61,8 @@ import {
 	resolveEffectiveRankDefinition,
 	resolveWorkTreeSlotRank,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
+import { IAdeDocsPaths } from '../../../../platform/ade/common/adeDocsCatalog.js';
+import { ADE_SECRETARY_TIER_TAG, findRankByTierOrId, formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
@@ -95,6 +97,7 @@ import {
 	resolveAdeAgentRank,
 } from '../common/ade.js';
 import { IAdeRoleSchemaService, readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
+import { executeAdeRankOrDocsAction, isAdeRankOrDocsAction } from './adeRankApiHandler.js';
 import { findProjectScmRepository, openScmResourceInAde } from './adeInspectorViews.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
@@ -244,7 +247,7 @@ function parseRole(raw: unknown, config: IAdeOrganizationConfig = DEFAULT_ADE_OR
 	if (str === 'member') {
 		return 'subordinate';
 	}
-	const configured = findRankDefinition(config, str);
+	const configured = findRankByTierOrId(config, str) ?? findRankDefinition(config, str);
 	if (configured) {
 		const defaultLeaf = getDefaultPureLeafRank(config);
 		if (configured.pureExecution && configured.id === defaultLeaf.id) {
@@ -269,7 +272,7 @@ function parseRankFilter(raw: unknown, config: IAdeOrganizationConfig = DEFAULT_
 	if (lower === 'member') {
 		return 'subordinate';
 	}
-	const configured = findRankDefinition(config, lower);
+	const configured = findRankByTierOrId(config, lower) ?? findRankDefinition(config, lower);
 	if (configured) {
 		return configured.id;
 	}
@@ -507,6 +510,7 @@ export function buildAdeAgentRoleContext(
 	sessions: IAdeSessionsService | undefined,
 	agent: IAdeAgent,
 	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+	docsPaths?: IAdeDocsPaths,
 ): string | undefined {
 	const subordinates = projects.getDirectSubordinates(agent.id);
 	if (!agent.role && subordinates.length === 0) {
@@ -534,6 +538,7 @@ export function buildAdeAgentRoleContext(
 					? 'segment_owner' as const
 					: 'orchestrator' as const;
 
+	const tierTag = formatTierTag(rankDef.tier);
 	return compileAdeRolePrompt({
 		config,
 		rank: rankDef,
@@ -551,13 +556,17 @@ export function buildAdeAgentRoleContext(
 			: undefined,
 		workTree: isWorkTree
 			? {
-				treeType: agent.treeType === 'research' ? 'research' : 'engineering',
+				treeType: 'mission',
 				governorId: agent.treeGovernorId ?? agent.id,
 				segmentId: agent.treeSegmentId,
 				nodeId: agent.treeNodeId,
 				slot: workTreeSlot,
 			}
 			: undefined,
+		docsPaths: docsPaths ? {
+			rankDoc: docsPaths.rankDocs[tierTag] ?? `${docsPaths.ranksDir}/${tierTag}.md`,
+			missionDoc: docsPaths.missionDoc,
+		} : undefined,
 	});
 }
 
@@ -568,6 +577,7 @@ export function buildAdeRoleSyncSnapshot(
 	sessions: IAdeSessionsService | undefined,
 	explicitActiveAgentId?: string,
 	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
+	docsPaths?: IAdeDocsPaths,
 ): IAdeRoleSyncSnapshot {
 	const rawActiveAgentId = explicitActiveAgentId ?? editors.getAgentIdForEditor?.(editors.activeEditor);
 	const activeAgentId = rawActiveAgentId && projects.getAgent(rawActiveAgentId) ? rawActiveAgentId : undefined;
@@ -585,7 +595,7 @@ export function buildAdeRoleSyncSnapshot(
 			rank,
 			isOrchestrated,
 			isWorkTree: Boolean(agent.treeType),
-			rolePrompt: isOrchestrated ? buildAdeAgentRoleContext(projects, sessions, agent, config) : undefined,
+			rolePrompt: isOrchestrated ? buildAdeAgentRoleContext(projects, sessions, agent, config, docsPaths) : undefined,
 			preferredModel: agent.preferredModel,
 			preferredThinking: agent.preferredThinking,
 		};
@@ -624,7 +634,9 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 	const sessions = tryGetService(accessor, IAdeSessionsService);
 	const engineering = tryGetService(accessor, IAdeEngineeringService);
 	const inbox = tryGetService(accessor, IAdeInboxService);
-	const roleConfig = tryGetService(accessor, IAdeRoleSchemaService)?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+	const roleSchemaService = tryGetService(accessor, IAdeRoleSchemaService);
+	const roleConfig = roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+	const docsPaths = roleSchemaService?.getDocsPaths?.();
 
 	const secretaryResource = projects.secretary.session?.resource;
 	if (sessionResource && (sessionResource.scheme === 'aexus-secretary' || (secretaryResource && (uriIdentity.extUri.isEqual(sessionResource, secretaryResource) || sessionResource.toString() === secretaryResource.toString())))) {
@@ -714,33 +726,38 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			return `  - \`${r.id}\` (L${r.tier} · ${r.name}): ${r.summary} [APIs: ${apiList}]`;
 		});
 
+		const l0DocPath = docsPaths?.rankDocs[ADE_SECRETARY_TIER_TAG] ?? '~/.aexus-code/docs/ranks/L0.md';
+		const missionDocPath = docsPaths?.missionDoc ?? '~/.aexus-code/docs/mission/MISSION_API.md';
+
 		return [
 			'[Aexus ADE Live Viewport & Macro Control Context]',
-			'You are the global **Secretary** in **Aexus Code ADE**, with complete macro-control authority over EVERYTHING inside ADE.',
+			'You are the global **Secretary (Tier L0)** in **Aexus Code ADE**, with complete macro-control authority over EVERYTHING inside ADE.',
 			'- Scope & Boundary Rule: Operate STRICTLY inside **ADE** (Agentic Development Environment). Do NOT switch workbench mode to IDE and do NOT manipulate IDE-only views or features.',
+			`- API Docs (single shared copy, read by tier): L0 doc \`${l0DocPath}\` | Mission doc (read on demand): \`${missionDocPath}\``,
 			`- Focus State: ${focusLine}`,
 			`- Selected Project: ${selectedLine}`,
 			`- Sidebar State: showArchived=${status.showArchived}`,
 			`- Active ADE Editor: ${activeEditorLine}`,
-			`- Counts: ${status.counts.projects} project(s), ${status.counts.activeRootSessions} root session(s), ${status.counts.totalActiveSessions} total active session(s), ${status.counts.archived} archived, ${engTrees.length} engineering tree(s), ${inbox?.unreadCount ?? 0} unread inbox item(s)`,
+			`- Counts: ${status.counts.projects} project(s), ${status.counts.activeRootSessions} root session(s), ${status.counts.totalActiveSessions} total active session(s), ${status.counts.archived} archived, ${engTrees.length} mission(s), ${inbox?.unreadCount ?? 0} unread inbox item(s)`,
 			'- ADE Projects:',
 			projectLines,
-			'- ADE Engineering Trees:',
+			'- ADE Missions:',
 			engBlock,
-			'- ADE Inbox (Pending Gates & Governor Escalations):',
+			'- ADE Inbox (Pending Gates & Escalations):',
 			inboxBlock,
 			'- Live ADE Session Hierarchy:',
 			hierarchyBlock,
 			rankHeaderLine,
-			`  - Strict Rank Order: ${formatOrganizationLadder(roleConfig)}.`,
+			`  - Strict Rank Order: L0 (Secretary) > ${formatOrganizationLadder(roleConfig)}.`,
 			...rankLines,
 			'- Complete ADE Macro Control CLI (`aexus-ade` is directly on your PATH; pass `--json` for structured output):',
 			'  - Viewport & Inspector: `aexus-ade status --json` | `aexus-ade view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh] --json`',
+			'  - Live Ranks, Hot-Updated Aliases & Single-Copy Docs: `aexus-ade rank names --json` | `aexus-ade rank list --json` | `aexus-ade rank get <L0|L1..LN|id> --json` | `aexus-ade rank docs [L0|L1..LN|mission] --json` | `aexus-ade rank rename <L1..LN> "<alias>" [--short <tag>]` | `aexus-ade rank set-count <N>`',
 			'  - Organization, Custom Ranks & Primitive APIs: `aexus-ade role list --json` | `aexus-ade role apis --json` | `aexus-ade role presets --json` | `aexus-ade role apply-preset <presetId>` | `aexus-ade role set-tier <rankId> ...` | `aexus-ade role reset` | `aexus-ade role studio`',
 			'  - Projects & Git/Files Inspector: `aexus-ade project list` | `aexus-ade project add <path...> [--name <label>]` | `aexus-ade project select <target>` | `aexus-ade project remove <target>` | `aexus-ade project delete <target> [--sessions] [--files] [--permanent]` | `aexus-ade project focus <target>` | `aexus-ade project home` | `aexus-ade project forward` | `aexus-ade project move <source> (--before <target> | --after <target>)` | `aexus-ade project changes [target]` | `aexus-ade project files [target] [--path <subpath>] [--depth <n>]` | `aexus-ade project open-file <file> [--project <target>] [--side]` | `aexus-ade project open-diff <file> [--project <target>]`',
 			'  - Coding Agent Engines (claude, codex, kilo, opencode, dsh, agy, cline, pi): `aexus-ade engine list` | `aexus-ade engine sessions <engine> [--project <target>] [--limit <n>]`',
-			'  - Sessions & Ranks: `aexus-ade session list [--project <p>] [--parent <id|root>] [--role <r>] [--engine <e>] [--status <s>] [--unread] [--archived] [--all]` | `aexus-ade session info <id>` | `aexus-ade session subordinates [id] [--recursive]` | `aexus-ade session tree [id]` | `aexus-ade session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <r>] [--draft [text]] [--side] [--no-open]` | `aexus-ade session attach --engine <e> --native-id <nid> [--project <p>] [--title <t>] [--parent <id>] [--role <r>] [--side] [--no-open]` | `aexus-ade session connect <id> --engine <e> [--native-id <nid>] [--side] [--no-open]` | `aexus-ade session open <id> [--side]` | `aexus-ade session select <id>` | `aexus-ade session close <id>` | `aexus-ade session mark-read <id|--all>` | `aexus-ade session draft <id> [text|--clear]` | `aexus-ade session rename <id> <title>` | `aexus-ade session role <id> <rankId|worker|none>` | `aexus-ade session move <id> <parentId|none> [--project <p>]` | `aexus-ade session reorder <id> (--before <targetId> | --after <targetId>)` | `aexus-ade session send <id> <prompt> [--wait]` | `aexus-ade session history <id> [--limit <n>]` | `aexus-ade session stop <id>` | `aexus-ade session archive <id>` | `aexus-ade session unarchive <id>` | `aexus-ade session detach <id>` | `aexus-ade session delete <id> [--force]`',
-			'  - Engineering DAG Orchestration: `aexus-ade engineering init --governor <id> [--on-children <relocate|delete> --target <id>] [--open]` | `aexus-ade engineering list [--project <path>]` | `aexus-ade engineering open --governor <id> [--side]` | `aexus-ade engineering generate --governor <id> --prompt "<goal>" [--engine <e>] [--budget <usd>]` | `aexus-ade engineering template list [--type <engineering|research>]` | `aexus-ade engineering template apply --governor <id> --template <id> [--preset <balanced|max-quality|fast-economy>]` | `aexus-ade engineering blueprint get --governor <id> [--raw]` | `aexus-ade engineering blueprint validate (--file <path> | --text <md>)` | `aexus-ade engineering blueprint apply --governor <id> --file <path> [--force-stop-running]` | `aexus-ade engineering configure --governor <id> [--node <nodeId>|--all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>]` | `aexus-ade engineering run --governor <id>` | `aexus-ade engineering pause --governor <id>` | `aexus-ade engineering resume --governor <id>` | `aexus-ade engineering stop --governor <id>` | `aexus-ade engineering reset --governor <id> [--node <nodeId>] [--keep-completed]` | `aexus-ade engineering remove --governor <id>` | `aexus-ade engineering status --governor <id> [--node <nodeId>]` | `aexus-ade engineering diff --governor <id> --node <nodeId>` | `aexus-ade engineering reports --governor <id>` | `aexus-ade engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]` | `aexus-ade engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]` | `aexus-ade engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]`',
+			'  - Sessions & Ranks: `aexus-ade session list [--project <p>] [--parent <id|root>] [--role <r>] [--engine <e>] [--status <s>] [--unread] [--archived] [--all]` | `aexus-ade session info <id>` | `aexus-ade session subordinates [id] [--recursive]` | `aexus-ade session tree [id]` | `aexus-ade session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <r>] [--draft [text]] [--side] [--no-open]` | `aexus-ade session attach --engine <e> --native-id <nid> [--project <p>] [--title <t>] [--parent <id>] [--role <r>] [--side] [--no-open]` | `aexus-ade session connect <id> --engine <e> [--native-id <nid>] [--side] [--no-open]` | `aexus-ade session open <id> [--side]` | `aexus-ade session select <id>` | `aexus-ade session close <id>` | `aexus-ade session mark-read <id|--all>` | `aexus-ade session draft <id> [text|--clear]` | `aexus-ade session rename <id> <title>` | `aexus-ade session role <id> <L1..LN|rankId|worker|none>` | `aexus-ade session move <id> <parentId|none> [--project <p>]` | `aexus-ade session reorder <id> (--before <targetId> | --after <targetId>)` | `aexus-ade session send <id> <prompt> [--wait]` | `aexus-ade session history <id> [--limit <n>]` | `aexus-ade session stop <id>` | `aexus-ade session archive <id>` | `aexus-ade session unarchive <id>` | `aexus-ade session detach <id>` | `aexus-ade session delete <id> [--force]`',
+			'  - Mission Orchestration (read sibling `MISSION_API.md` on demand via `aexus-ade mission docs --json`; legacy alias: `aexus-ade engineering ...`): `aexus-ade mission init --governor <id> [--on-children <relocate|delete> --target <id>] [--open]` | `aexus-ade mission list [--project <path>]` | `aexus-ade mission open --governor <id> [--side]` | `aexus-ade engineering generate --governor <id> --prompt "<goal>" [--engine <e>] [--budget <usd>]` | `aexus-ade engineering template list` | `aexus-ade mission blueprint get|validate|apply ...` | `aexus-ade mission configure ...` | `aexus-ade mission run|pause|resume|stop|reset|remove --governor <id>` | `aexus-ade mission status|diff|reports|review|gate|watchdog-action --governor <id> ...`',
 			'  - ADE Inbox: `aexus-ade inbox list [--unread-only] [--governor <id>]` | `aexus-ade inbox post --from <governorId> --message <text>` | `aexus-ade inbox mark-read (<id>|--all)` | `aexus-ade inbox resolve --id <msgId>`',
 			'  - Secretary Self-Management: `aexus-ade secretary [status | open [--side] | engine <e> | reset [--engine <e>] | send <prompt> [--wait] | history [--limit <n>] | stop | draft [text|--clear] | mark-read]`',
 		].join('\n');
@@ -783,7 +800,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 		].join('\n');
 	}
 
-	return buildAdeAgentRoleContext(projects, sessions, agent, roleConfig);
+	return buildAdeAgentRoleContext(projects, sessions, agent, roleConfig, docsPaths);
 }
 
 function findMatchingProject(projects: IAdeProjectsService, uriIdentity: IUriIdentityService, rawTarget: unknown): IAdeProject | undefined {
@@ -1149,7 +1166,15 @@ export async function executeAdeControlRequest(
 		return joinPath(projectUri, trimmed);
 	};
 
-	switch (action) {
+	if (isAdeRankOrDocsAction(action)) {
+		return executeAdeRankOrDocsAction(action, params, { roleSchemaService, roleConfig });
+	}
+
+	const dispatchAction = action.startsWith('mission.')
+		? `engineering.${action.slice('mission.'.length)}`
+		: action;
+
+	switch (dispatchAction) {
 		case 'status':
 			return buildControlStatus(modes, projects, navigation, editors, sessions, roleConfig);
 
@@ -3278,9 +3303,11 @@ CommandsRegistry.registerCommand(ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID, (accesso
 	const projects = accessor.get(IAdeProjectsService);
 	const editors = accessor.get(IAdeEditorService);
 	const sessions = tryGetService(accessor, IAdeSessionsService);
-	const roleConfig = tryGetService(accessor, IAdeRoleSchemaService)?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+	const roleSchemaService = tryGetService(accessor, IAdeRoleSchemaService);
+	const roleConfig = roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+	const docsPaths = roleSchemaService?.getDocsPaths?.();
 	const activeId = typeof explicitActiveAgentId === 'string' && explicitActiveAgentId.trim() ? explicitActiveAgentId.trim() : undefined;
-	return buildAdeRoleSyncSnapshot(modes, projects, editors, sessions, activeId, roleConfig);
+	return buildAdeRoleSyncSnapshot(modes, projects, editors, sessions, activeId, roleConfig, docsPaths);
 });
 
 CommandsRegistry.registerCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, (accessor: ServicesAccessor, arg1: IAdeControlDispatchRequest | string, arg2?: Record<string, unknown>) => {
