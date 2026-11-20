@@ -48,12 +48,13 @@ import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { ADE_OS_ICON_LABELS, AdeOsIconKind, formatProjectDisplayPath, IAdeCloudHost, IAdeCloudHostBackendService, isCloudProjectUri, resolveAdeOsIconKind } from '../../../../platform/ade/common/adeCloudHosts.js';
-import { IAdeEngineeringService, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
-import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
+import { IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
+import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, getMissionDisplayName, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeInboxPanel } from './adeInboxView.js';
+import { IAdeMissionService } from './adeMissionStore.js';
 import { resolveAdeRankCodicon } from './adeRoleStudioEditorPane.js';
 import { AdeSessionEditorInput } from './adeSessionEditor.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
@@ -313,6 +314,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		private readonly getEditableData: (agent: IAdeAgent) => IEditableData | undefined,
 		private readonly getCloudHostMeta: (authority: string) => IAdeCloudHost | undefined,
 		private readonly getRoleSchema: () => IAdeOrganizationConfig,
+		private readonly hasMissionForSession: (agentId: string) => boolean,
 	) { }
 
 	renderTemplate(container: HTMLElement): IAdeTreeTemplate {
@@ -556,8 +558,8 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			extraClasses: ['explorer-item', 'ade-agent-session-row'],
 		});
 
-		if (!agent.parentId && agent.treeType) {
-			const treeLabel = localize('adeBadgeMission', "Mission");
+		if (!agent.parentId && (agent.treeType || this.hasMissionForSession(agent.id))) {
+			const treeLabel = getMissionDisplayName(roleSchema);
 			template.workTreeBadge.className = `ade-worktree-badge type-engineering`;
 			const treeIcon = $('span.ade-worktree-badge-icon', { 'aria-hidden': 'true' });
 			treeIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchy));
@@ -565,7 +567,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.workTreeBadge.setAttribute('role', 'button');
 			template.workTreeBadge.setAttribute('tabindex', '0');
 			template.workTreeBadge.hidden = false;
-			const treeTooltip = localize('adeOpenMissionBadgeTooltip', "Open Mission Canvas");
+			const treeTooltip = localize('adeOpenMissionBadgeTooltip', "Open {0} Canvas", treeLabel);
 			template.editDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), template.workTreeBadge, treeTooltip));
 			template.editDisposables.add(addDisposableListener(template.workTreeBadge, EventType.CLICK, event => {
 				EventHelper.stop(event, true);
@@ -683,7 +685,7 @@ export class AdeProjectsView extends ViewPane {
 	private treeHost: HTMLElement | undefined;
 	private inboxPanel: AdeInboxPanel | undefined;
 	private sidebarMode: 'projects' | 'inbox' = 'projects';
-	private readonly engineeringService: IAdeEngineeringService | undefined;
+	private readonly missionService: IAdeMissionService | undefined;
 	private readonly inboxService: IAdeInboxService | undefined;
 	private readonly notificationService: INotificationService | undefined;
 	private readonly workbenchEditorService: IEditorService | undefined;
@@ -740,27 +742,30 @@ export class AdeProjectsView extends ViewPane {
 			this.refreshAgentIcons();
 		}));
 
-		const [engSvc, inbSvc, notifSvc, editorSvc, cloudSvc, roleSchemaSvc] = instantiationService.invokeFunction(accessor => {
-			let eng: IAdeEngineeringService | undefined;
+		const [missionSvc, inbSvc, notifSvc, editorSvc, cloudSvc, roleSchemaSvc] = instantiationService.invokeFunction(accessor => {
+			let mission: IAdeMissionService | undefined;
 			let inb: IAdeInboxService | undefined;
 			let notif: INotificationService | undefined;
 			let edit: IEditorService | undefined;
 			let cloud: IAdeCloudHostBackendService | undefined;
 			let roleSchema: IAdeRoleSchemaService | undefined;
-			try { eng = accessor.get(IAdeEngineeringService); } catch { eng = undefined; }
+			try { mission = accessor.get(IAdeMissionService); } catch { mission = undefined; }
 			try { inb = accessor.get(IAdeInboxService); } catch { inb = undefined; }
 			try { notif = accessor.get(INotificationService); } catch { notif = undefined; }
 			try { edit = accessor.get(IEditorService); } catch { edit = undefined; }
 			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
 			try { roleSchema = accessor.get(IAdeRoleSchemaService); } catch { roleSchema = undefined; }
-			return [eng, inb, notif, edit, cloud, roleSchema] as const;
+			return [mission, inb, notif, edit, cloud, roleSchema] as const;
 		});
-		this.engineeringService = engSvc;
+		this.missionService = missionSvc;
 		this.inboxService = inbSvc;
 		this.notificationService = notifSvc;
 		this.workbenchEditorService = editorSvc;
 		this.cloudHostBackend = cloudSvc;
 		this.roleSchemaService = roleSchemaSvc;
+		if (this.missionService) {
+			this._register(this.missionService.onDidChange(() => void this.refresh()));
+		}
 		if (this.roleSchemaService) {
 			this._register(this.roleSchemaService.onDidChangeSchema(() => void this.refresh()));
 		}
@@ -816,11 +821,11 @@ export class AdeProjectsView extends ViewPane {
 		this.renderFocusBanner(container);
 
 		const contentArea = append(container, $('.ade-projects-content'));
-		if (this.inboxService && this.engineeringService) {
+		if (this.inboxService) {
 			this.inboxPanel = this._register(new AdeInboxPanel(
 				contentArea,
 				this.inboxService,
-				this.engineeringService,
+				this.missionService,
 				this.editors,
 				msg => this.notificationService?.error(msg),
 				this.projects,
@@ -857,6 +862,7 @@ export class AdeProjectsView extends ViewPane {
 					agent => this.getEditableData(agent),
 					authority => this.cloudHostMetaByAuthority.get(authority) ?? this.cloudHostMetaByAuthority.get(authority.toLowerCase()),
 					() => this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
+					agentId => Boolean(this.missionService?.getMissionByLinkedSession(agentId)),
 				),
 			],
 			{
@@ -1361,6 +1367,8 @@ export class AdeProjectsView extends ViewPane {
 	}
 
 	getProjectContextActions(project: IAdeProject): IAction[] {
+		const roleSchema = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+		const missionAlias = getMissionDisplayName(roleSchema);
 		const actions: IAction[] = [];
 		if (!this.projectNavigation.focusedProject) {
 			actions.push(toAction({
@@ -1371,6 +1379,12 @@ export class AdeProjectsView extends ViewPane {
 			actions.push(new Separator());
 		}
 		actions.push(
+			toAction({
+				id: 'ade.project.newMission',
+				label: localize('adeProjectNewMission', "New {0}", missionAlias),
+				run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, project.uri),
+			}),
+			new Separator(),
 			toAction({
 				id: 'ade.project.newConversation',
 				label: localize('adeProjectNewConversation', "New Conversation..."),
@@ -1427,28 +1441,20 @@ export class AdeProjectsView extends ViewPane {
 		const hasSubs = this.projects.hasSubordinates(agentId);
 		const effectiveRank = resolveAdeAgentRank(agent, hasSubs, roleSchema);
 		const isLocked = Boolean(this.projects.isLockedByWorkTree?.(agentId));
-		const workTreeGov = this.projects.getWorkTreeGovernor?.(agentId);
 		const nextLower = getNextLowerAdeRole(agent.role, hasSubs, roleSchema);
 		const orchestrated = this.projects.isOrchestrated(agent);
 
-		const isTopGovernor = !agent.parentId && (effectiveRank === 'governor' || effectiveRank === roleSchema.ranks[0]?.id);
+		const missionAlias = getMissionDisplayName(roleSchema);
+		const hasLinkedMission = Boolean(agent.treeType || this.missionService?.getMissionByLinkedSession(agentId));
 
 		return [
-			...(isTopGovernor ? [
+			...(!agent.parentId ? [
 				toAction({
 					id: 'ade.mission',
-					label: agent.treeType
-						? localize('adeOpenMissionMenu', "Open Mission")
-						: localize('adeEnableMissionMenu', "Mission"),
+					label: hasLinkedMission
+						? localize('adeOpenMissionMenu', "Open {0}", missionAlias)
+						: localize('adeNewMissionMenu', "New {0}", missionAlias),
 					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, agentId),
-				}),
-				new Separator(),
-			] : []),
-			...(isLocked && agent.parentId && workTreeGov ? [
-				toAction({
-					id: 'ade.openOwningMission',
-					label: localize('adeOpenOwningMissionMenu', "Open Mission Canvas"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, workTreeGov.id),
 				}),
 				new Separator(),
 			] : []),

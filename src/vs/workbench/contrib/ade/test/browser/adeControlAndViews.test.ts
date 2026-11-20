@@ -28,7 +28,7 @@ import {
 } from '../../../../../platform/ade/common/adeControl.js';
 import { isIMenuItem, MenuId, MenuRegistry } from '../../../../../platform/actions/common/actions.js';
 import { AEXUS_SSH_SCHEME } from '../../../../../platform/ade/common/adeCloudHosts.js';
-import { IAdeEngineeringService, IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
+import { IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
 import { IAdeOrganizationConfig } from '../../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
@@ -72,7 +72,8 @@ import '../../browser/adeControlHandler.js';
 import { AdeConfigEditorPane } from '../../browser/adeConfigEditorPane.js';
 import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
 import { AdeEngineeringEditorInput, AdeEngineeringEditorPane } from '../../browser/adeEngineeringEditorPane.js';
-import { AdeInboxPanel, formatAdeInboxKindLabel } from '../../browser/adeInboxView.js';
+import { AdeInboxPanel, formatAdeInboxKindLabel, IAdeInboxMissionBridge } from '../../browser/adeInboxView.js';
+import { AdeMissionStoreService, IAdeMissionService } from '../../browser/adeMissionStore.js';
 import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
@@ -1883,9 +1884,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			}
 		}();
 		h.instantiation.stub(IAdeInboxService, inboxStub);
-		h.instantiation.stub(IAdeEngineeringService, new class extends mock<IAdeEngineeringService>() {
-			override listTrees() { return []; }
-		}());
 
 		const editorState: { current?: EditorInput } = {};
 		const onActiveEditorChange = store.add(new Emitter<void>());
@@ -2189,35 +2187,20 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				return items.find(i => i.id === id);
 			}
 		}();
-		const engStub = new class extends mock<IAdeEngineeringService>() {
-			override listTrees() {
-				return [{
-					governorSessionId: 'gov-1',
-					governorLabel: 'Alpha Gov',
-					projectPath: alpha.fsPath,
-					projectName: 'Alpha',
-					treeType: 'engineering' as const,
-					runStatus: 'idle' as const,
-					workspaceIsolation: 'shared' as const,
-					managerCount: 1,
-					totalNodes: 2,
-					completedNodes: 1,
-					runningNodes: 0,
-					failedNodes: 0,
-					waitingGates: 1,
-					updatedAt: Date.now(),
-				}];
-			}
-			override async openEngineeringEditor(govId: string): Promise<void> {
+		const engStub: IAdeInboxMissionBridge = {
+			listTrees() {
+				return [{ governorSessionId: 'gov-1', updatedAt: Date.now() }];
+			},
+			async openEngineeringEditor(govId: string): Promise<void> {
 				openedCanvases.push(govId);
-			}
-			override async submitGateVerdict(): Promise<never> {
+			},
+			async submitGateVerdict(): Promise<never> {
 				if (gateShouldThrow) {
 					throw new Error('Backend gate timeout');
 				}
 				return undefined as never;
-			}
-		}();
+			},
+		};
 
 		const host = append(document.body, $('.monaco-workbench.ade-inbox-lanes-test-host'));
 		store.add({ dispose: () => host.remove() });
@@ -2349,12 +2332,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			}
 			override async resolveItem(): Promise<IAdeInboxItem | undefined> { return undefined; }
 		}();
-		const engStub = new class extends mock<IAdeEngineeringService>() {
-			override listTrees() { return []; }
-		}();
-
 		h.instantiation.stub(IAdeInboxService, inboxStub);
-		h.instantiation.stub(IAdeEngineeringService, engStub);
 
 		const dummySidebar = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.rankinbox'; }();
 		h.instantiation.stub(IViewDescriptorService, {
@@ -2857,10 +2835,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			list: () => [],
 			markRead: async () => { },
 		});
-		const engStub = upcastPartial<IAdeEngineeringService>({
-			onDidChangeTree: Event.None,
+		const engStub: IAdeInboxMissionBridge = {
 			listTrees: () => [],
-		});
+		};
 		const inboxHost = append(document.body, $('.monaco-workbench.ade-custom-inbox-host'));
 		store.add({ dispose: () => inboxHost.remove() });
 		const inboxPanel = store.add(new AdeInboxPanel(inboxHost, inboxStub, engStub, h.editorsStub, undefined, h.projects, h.instantiation.get(IAdeSessionsService), roleSchema));
@@ -3019,84 +2996,27 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.ok(roleSchema.getConfig().ranks.find(r => r.id === 'manager')?.allowedApis.includes('engineering.integrate'), 'Permission Matrix grant persisted');
 	});
 
-	test('enforces RBAC lineage, live rank intersection, engineering.destroy on session delete/archive, review slot/session binding, and human-only verifyTrust (P0-01, P0-03, P1-04, P1-06)', async () => {
+	test('enforces RBAC lineage, live rank intersection, and engineering.destroy on tree-tagged roots (P0-01, P0-03, P1-04, P1-06)', async () => {
 		const h = createHarness([alpha, beta]);
 		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
 		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
 
 		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-gov') }, 'Gov Root', { role: 'governor' });
+		h.projects.setAgentWorkTreeTag?.(gov.id, 'mission');
 		const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-mgr') }, 'Mgr Sub', { parentId: gov.id, role: 'manager' });
 		const emp = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-emp') }, 'Emp Sub', { parentId: mgr.id, role: 'employee' });
 		const wrk = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/rbac-wrk') }, 'Wrk Leaf', { parentId: emp.id });
 		const otherGov = h.projects.addSession(beta, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-other-gov') }, 'Other Gov', { role: 'governor' });
 		const otherEmp = h.projects.addSession(beta, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-other-emp') }, 'Other Emp', { parentId: otherGov.id, role: 'employee' });
 
-		// Stub engineering service with a live tree owned by `gov`, bound to `emp` & `mgr` on node N1, plus verify-trust methods
-		let verifyTrustListCalls = 0;
-		let verifyTrustRevokeAllCalls = 0;
-		const reviewCalls: Array<{ nodeId: string; role: string; verdict: string }> = [];
-		const engStub = new class extends mock<IAdeEngineeringService>() {
-			override async whenReady(): Promise<void> { }
-			override hasTree(id: string): boolean { return id === gov.id; }
-			override listTrees() { return []; }
-			override getTreeSnapshot(id: string) {
-				if (id !== gov.id) { return undefined; }
-				return upcastPartial<NonNullable<ReturnType<IAdeEngineeringService['getTreeSnapshot']>>>({
-					governorSessionId: gov.id,
-					state: {
-						treeType: 'engineering',
-						governorSessionId: gov.id,
-						projectPath: alpha.fsPath,
-						runStatus: 'running',
-						createdAt: 0,
-						updatedAt: 0,
-						managerAgentsBySegment: {},
-						nodes: {},
-						reports: {},
-						events: [],
-					},
-					progress: { totalNodes: 1, completedNodes: 0, totalTasks: 1, completedTasks: 0, runningNodes: 1, failedNodes: 0, waitingGates: 0 },
-					nodes: [{
-						node: { id: 'N1', title: 'Core', type: 'task', critical: false },
-						runtime: {
-							nodeId: 'N1',
-							phase: 'employee_review',
-							completed: false,
-							employeeRejectCount: 0,
-							formalFailureCount: 0,
-							employeeAgentId: emp.id,
-							managerAgentId: mgr.id,
-							workerAgentId: wrk.id,
-						},
-						visualStatus: 'running',
-						isSegmentTail: true,
-						upstreamReports: [],
-					}],
-				});
-			}
-			override async submitReview(params: { nodeId: string; role: 'employee' | 'manager'; verdict: 'pass' | 'reject' | 'guidance' }) {
-				reviewCalls.push({ nodeId: params.nodeId, role: params.role, verdict: params.verdict });
-				return this.getTreeSnapshot(gov.id)!;
-			}
-			override listTrustedVerifyCommands() {
-				verifyTrustListCalls++;
-				return [{ projectPath: alpha.fsPath, hash: 'a'.repeat(64), commandPreview: 'npm test', approvedAt: 1000 }];
-			}
-			override revokeAllTrustedVerifyCommands() {
-				verifyTrustRevokeAllCalls++;
-				return 1;
-			}
-		}();
-		h.instantiation.stub(IAdeEngineeringService, engStub);
-
 		const exec = <T = unknown>(action: string, params: Record<string, unknown> = {}) =>
 			h.control<T>(action, params);
 
-		// 1. P1-06: Secretary compiled prompt exposes engineering generate, template, and role CLI docs
+		// 1. P1-06: Secretary compiled prompt exposes rank, mission & role CLI docs
 		h.projects.configureSecretary({ engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/rbac-sec') });
 		const secPreamble = h.resolvePrompt({ resource: URI.parse('aexus-claude:/rbac-sec'), agentId: ADE_SECRETARY_ID });
-		assert.ok(secPreamble?.includes('engineering generate'));
-		assert.ok(secPreamble?.includes('engineering template'));
+		assert.ok(secPreamble?.includes('rank names'));
+		assert.ok(secPreamble?.includes('mission docs'));
 		assert.ok(secPreamble?.includes('role apply-preset'));
 
 		// 2. Archived / missing caller session rejected when _verifiedCaller is true
@@ -3189,36 +3109,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			() => exec('session.create', { engine: 'claude', parent: demotedSub.id, caller: 'manager', _verifiedCaller: true, _callerSessionId: demotedSub.id }),
 			/Pure Execution/i,
 		);
-		// Restore mgr role for review checks
+		// Restore mgr role
 		h.projects.setAgentRole(mgr.id, 'manager');
-
-		// 9. engineering.review: Employee cannot spoof --role manager; unrelated tree or unbound reviewer rejected; bound reviewer succeeds
-		await assert.rejects(
-			() => exec('engineering.review', { governor: gov.id, node: 'N1', role: 'manager', verdict: 'pass', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id }),
-			/cannot submit a manager-tier review verdict/i,
-		);
-		await assert.rejects(
-			() => exec('engineering.review', { governor: gov.id, node: 'N1', role: 'employee', verdict: 'pass', caller: 'employee', _verifiedCaller: true, _callerSessionId: otherEmp.id }),
-			/does not belong to Engineering tree/i,
-		);
-		await assert.rejects(
-			() => exec('engineering.review', { governor: gov.id, node: 'N1', role: 'employee', verdict: 'pass', caller: 'employee', _verifiedCaller: true, _callerSessionId: createdUnderMgr!.id }),
-			/does not match bound reviewer session/i,
-		);
-		await exec('engineering.review', { governor: gov.id, node: 'N1', role: 'employee', verdict: 'pass', report: 'LGTM', caller: 'employee', _verifiedCaller: true, _callerSessionId: emp.id });
-		assert.strictEqual(reviewCalls.length, 1);
-		assert.strictEqual(reviewCalls[0].role, 'employee');
-
-		// 10. engineering.verifyTrust.list / revoke are strictly direct-human-only (denied even for Secretary & Governor)
-		await assert.rejects(() => exec('engineering.verifyTrust.list', { caller: 'secretary' }), /direct human/i);
-		await assert.rejects(() => exec('engineering.verifyTrust.revoke', { all: true, caller: 'secretary' }), /direct human/i);
-		await assert.rejects(() => exec('engineering.verifyTrust.list', { caller: 'governor' }), /Permission denied/i);
-		const listedTrust = await exec<{ entries: readonly unknown[] }>('engineering.verifyTrust.list', {});
-		assert.strictEqual(listedTrust?.entries.length, 1);
-		assert.strictEqual(verifyTrustListCalls, 1);
-		const revokedTrust = await exec<{ revokedCount: number }>('engineering.verifyTrust.revoke', { all: true });
-		assert.strictEqual(revokedTrust?.revokedCount, 1);
-		assert.strictEqual(verifyTrustRevokeAllCalls, 1);
+		assert.ok(createdUnderMgr?.id);
+		assert.ok(otherEmp?.id);
 	});
 
 	test('renders Role Studio 4-slot Work-Tree DAG mapping bar with dirty/save/revert and inline warnings (P1-02)', async () => {
@@ -3286,9 +3180,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			override readonly onDidChange = Event.None;
 			override list() { return []; }
 		}();
-		const engStub = new class extends mock<IAdeEngineeringService>() {
-			override listTrees() { return []; }
-		}();
+		const engStub: IAdeInboxMissionBridge = { listTrees: () => [] };
 		const host = append(document.body, $('.ade-inbox-pure-filter-test'));
 		store.add({ dispose: () => host.remove() });
 		const panel = store.add(new AdeInboxPanel(host, inboxStub, engStub, h.editorsStub, undefined, h.projects, h.instantiation.get(IAdeSessionsService), roleSchema));
@@ -3411,23 +3303,67 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		// Stepper decrement is disabled at min count 1
 		assert.strictEqual(configRoot.querySelector<HTMLButtonElement>('button[data-ade-rank-dec]')?.disabled, true);
 
-		// Unified Mission tab title and infinite-canvas-only Mission pane
-		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude://mission-gov') }, 'Core Release', { role: 'governor' });
-		const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, gov.id));
+		// Test Mission alias customization (Mission -> Engineering -> Research) hot-updating tab titles & rank.names
+		const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+		h.instantiation.stub(IAdeMissionService, missionStore);
+		const missionAliasInput = configRoot.querySelector<HTMLInputElement>('input[data-ade-mission-alias-input="true"]')!;
+		assert.strictEqual(missionAliasInput.value, 'Mission');
+		missionAliasInput.value = 'Engineering';
+		missionAliasInput.dispatchEvent(new window.Event('input'));
+		configRoot.querySelector<HTMLButtonElement>('button[data-ade-config-save]')!.click();
+		await new Promise(resolve => setTimeout(resolve, 10));
+
+		const renamedMissionNames = await h.control<{ readonly missionName: string }>('rank.names', {});
+		assert.strictEqual(renamedMissionNames.missionName, 'Engineering');
+
+		const createdMission = missionStore.createMission({ title: 'Core Release', mermaidText: '' });
+		const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, createdMission.id));
+		assert.strictEqual(missionInput.getName(), 'Core Release · Engineering');
+
+		// Reset Mission alias back to default Mission
+		await h.control('mission.renameAlias', { alias: 'Mission' });
 		assert.strictEqual(missionInput.getName(), 'Core Release · Mission');
 
-		h.instantiation.stub(IAdeEngineeringService, new class extends mock<IAdeEngineeringService>() { }());
-		const engHost = append(document.body, $('.ade-eng-pane-test-host'));
+		// Pure frontend Mission canvas: empty start -> top-left file icon -> Mermaid renders flat non-nested DAG -> hover lights up flowing dashed edges!
+		const engHost = append(document.body, $('.monaco-workbench.ade-eng-pane-test-host'));
 		store.add({ dispose: () => engHost.remove() });
 		const engPane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
 		engPane.create(engHost);
-		const engRoot = engHost.querySelector<HTMLElement>('.ade-eng-editor');
-		assert.ok(engRoot, 'AdeEngineeringEditorPane renders .ade-eng-editor');
-		assert.deepStrictEqual(
-			[...engRoot.querySelectorAll<HTMLElement>('*')].map(el => el.className),
-			['ade-eng-body', 'ade-eng-viewport', 'ade-eng-world'],
-			'Mission pane renders only infinite canvas viewport + world without toolbar/HUD/minimap/nodes',
-		);
-		assert.strictEqual(engRoot.textContent, '');
+		await engPane.setInput(missionInput, undefined, {}, CancellationToken.None);
+
+		const engRoot = engHost.querySelector<HTMLElement>('.ade-mission-editor');
+		assert.ok(engRoot, 'Mission pane renders .ade-mission-editor');
+		const fileBtn = engRoot.querySelector<HTMLButtonElement>('button[data-ade-mission-file-btn="true"]')!;
+		assert.ok(fileBtn, 'Top-left Mermaid file icon button is present');
+		const drawer = engRoot.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
+		assert.strictEqual(drawer.hidden, true, 'Drawer starts closed on empty Mission');
+		assert.strictEqual(engRoot.querySelectorAll('.ade-mission-node').length, 0, 'Empty Mission starts with 0 rendered nodes');
+
+		// Click top-left file icon -> enter Mermaid DAG -> flat non-nested nodes & smooth rounded orthogonal edges render
+		fileBtn.click();
+		assert.strictEqual(drawer.hidden, false, 'Clicking top-left file icon opens Mermaid file drawer');
+		const textarea = engRoot.querySelector<HTMLTextAreaElement>('textarea[data-ade-mission-mermaid-input="true"]')!;
+		textarea.value = 'flowchart LR\n  N1["API Spec"] --> N2["Core Engine"]\n  N2 --> N3["UI Canvas"]\n  N2 --> N4["Tests"]';
+		textarea.dispatchEvent(new window.Event('input'));
+		await new Promise(resolve => setTimeout(resolve, 140));
+
+		const renderedNodes = [...engRoot.querySelectorAll<HTMLElement>('.ade-mission-node')];
+		assert.strictEqual(renderedNodes.length, 4, 'Renders 4 strictly flat non-nested DAG nodes');
+		assert.strictEqual(engRoot.querySelectorAll('.ade-eng-segment-halo, .ade-eng-concentric').length, 0, 'Zero nested MGR/Employee containers');
+		const renderedEdges = [...engRoot.querySelectorAll<SVGGElement>('.ade-mission-edge-group')];
+		assert.strictEqual(renderedEdges.length, 3, 'Renders 3 smooth rounded orthogonal SVG edges');
+
+		// Hover N2 -> incoming edge (N1->N2) gets is-hover-flow + is-incoming, outgoing edges (N2->N3, N2->N4) get is-hover-flow + is-outgoing!
+		engPane.setHoveredNode('N2');
+		assert.ok(engRoot.querySelector('.ade-mission-world')?.classList.contains('has-node-hover'));
+		assert.ok(engRoot.querySelector('.ade-mission-node[data-node-id="N2"]')?.classList.contains('is-hovered'));
+		assert.ok(engRoot.querySelector('.ade-mission-node[data-node-id="N1"]')?.classList.contains('is-upstream'));
+		assert.ok(engRoot.querySelector('.ade-mission-node[data-node-id="N3"]')?.classList.contains('is-downstream'));
+		assert.ok(engRoot.querySelector('.ade-mission-edge-group[data-edge-id="N1->N2"]')?.classList.contains('is-hover-flow'));
+		assert.ok(engRoot.querySelector('.ade-mission-edge-group[data-edge-id="N1->N2"]')?.classList.contains('is-incoming'));
+		assert.ok(engRoot.querySelector('.ade-mission-edge-group[data-edge-id="N2->N3"]')?.classList.contains('is-hover-flow'));
+		assert.ok(engRoot.querySelector('.ade-mission-edge-group[data-edge-id="N2->N3"]')?.classList.contains('is-outgoing'));
+		engPane.setHoveredNode(undefined);
+		assert.strictEqual(engRoot.querySelectorAll('.ade-mission-edge-group.is-hover-flow').length, 0, 'Leaving node clears flowing dashed edges');
 	});
 });

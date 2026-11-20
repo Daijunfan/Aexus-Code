@@ -7,7 +7,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { buildAdeDocsPaths, IAdeDocsPaths } from '../../../../platform/ade/common/adeDocsCatalog.js';
 import { IAdeEngineeringBackendService } from '../../../../platform/ade/common/adeEngineering.js';
-import { renameOrganizationRankAlias, resizeOrganizationRanks } from '../../../../platform/ade/common/adeRankResize.js';
+import { renameMissionAlias, renameOrganizationRankAlias, resizeOrganizationRanks } from '../../../../platform/ade/common/adeRankResize.js';
 import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	ADE_ORGANIZATION_PRESETS,
@@ -72,6 +72,7 @@ export interface IAdeRoleSchemaService {
 	resetToDefault(target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
 	resizeRankCount?(targetCount: number, target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
 	renameRankAlias?(tierOrId: string | number, newAlias: string, newShortName?: string, target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
+	renameMissionAlias?(newMissionName: string, target?: ConfigurationTarget): Promise<IAdeOrganizationConfig>;
 	getDocsPaths?(): IAdeDocsPaths;
 	syncDocs?(): Promise<IAdeDocsPaths>;
 
@@ -196,6 +197,11 @@ export class AdeRoleSchemaService extends Disposable implements IAdeRoleSchemaSe
 
 	async renameRankAlias(tierOrId: string | number, newAlias: string, newShortName?: string, target = ConfigurationTarget.USER): Promise<IAdeOrganizationConfig> {
 		const next = renameOrganizationRankAlias(this.currentConfig, tierOrId, newAlias, newShortName);
+		return this.updateConfig(next, target);
+	}
+
+	async renameMissionAlias(newMissionName: string, target = ConfigurationTarget.USER): Promise<IAdeOrganizationConfig> {
+		const next = renameMissionAlias(this.currentConfig, newMissionName);
 		return this.updateConfig(next, target);
 	}
 

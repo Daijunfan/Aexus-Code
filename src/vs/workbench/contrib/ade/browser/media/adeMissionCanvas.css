@@ -1,0 +1,536 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* ============================================================================
+ * ADE Pure-Frontend Mission DAG Canvas
+ * - Calm dark matte infinite dot-grid canvas (reusing our proven visual tone)
+ * - Strictly FLAT non-nested node cards (zero nested shells)
+ * - Draw.io smooth rounded orthogonal edges
+ * - Luminous flowing dashed lines on hover for upstream & downstream edges
+ * ============================================================================ */
+
+@keyframes adeMissionEdgeFlow {
+	from {
+		stroke-dashoffset: 28;
+	}
+	to {
+		stroke-dashoffset: 0;
+	}
+}
+
+.monaco-workbench .ade-mission-editor {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	outline: none;
+	user-select: none;
+	background: var(--vscode-editor-background);
+	color: var(--vscode-foreground);
+	font-family: var(--vscode-font-family);
+
+	--ade-mission-accent: var(--vscode-ade-cloud, #38bdf8);
+	--ade-mission-out: var(--vscode-ade-rank-worker, #34d399);
+	--ade-mission-gate: #f5b942;
+	--ade-grid-minor: color-mix(in srgb, var(--vscode-foreground) 11%, transparent);
+	--ade-grid-major: color-mix(in srgb, var(--ade-mission-accent) 18%, color-mix(in srgb, var(--vscode-foreground) 14%, transparent));
+}
+
+.monaco-workbench .ade-mission-editor:focus {
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-body {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+}
+
+/* Infinite parallax dot-grid viewport */
+.monaco-workbench .ade-mission-viewport {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	cursor: grab;
+	background-color: var(--vscode-editor-background);
+	background-image:
+		radial-gradient(circle, var(--ade-grid-major) 1.15px, transparent 1.3px),
+		radial-gradient(circle, var(--ade-grid-minor) 0.85px, transparent 1px);
+	background-size:
+		calc(120px * var(--grid-scale, 1)) calc(120px * var(--grid-scale, 1)),
+		calc(24px * var(--grid-scale, 1)) calc(24px * var(--grid-scale, 1));
+	background-position: var(--grid-x, 0px) var(--grid-y, 0px);
+}
+
+.monaco-workbench .ade-mission-viewport.panning {
+	cursor: grabbing;
+}
+
+.monaco-workbench .ade-mission-viewport.zoom-macro {
+	--ade-grid-minor: transparent;
+}
+
+.monaco-workbench .ade-mission-viewport::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	z-index: 1;
+	background: radial-gradient(ellipse at center, transparent 66%, rgba(0, 0, 0, 0.09) 100%);
+}
+
+/* World container */
+.monaco-workbench .ade-mission-world {
+	position: absolute;
+	top: 0;
+	left: 0;
+	transform-origin: 0 0;
+	will-change: transform;
+	z-index: 2;
+}
+
+/* Top-left Mermaid File Icon Button */
+.monaco-workbench .ade-mission-file-btn {
+	position: absolute;
+	top: 14px;
+	left: 14px;
+	z-index: 30;
+	width: 36px;
+	height: 36px;
+	padding: 0;
+	border-radius: 10px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #1c2028) 88%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	backdrop-filter: blur(12px);
+	transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, transform 120ms ease;
+}
+
+.monaco-workbench .ade-mission-file-btn .codicon {
+	font-size: 16px;
+}
+
+.monaco-workbench .ade-mission-file-btn:hover {
+	border-color: color-mix(in srgb, var(--ade-mission-accent) 62%, transparent);
+	color: var(--ade-mission-accent);
+	transform: translateY(-1px);
+}
+
+.monaco-workbench .ade-mission-file-btn.active {
+	border-color: var(--ade-mission-accent);
+	background: color-mix(in srgb, var(--ade-mission-accent) 16%, var(--vscode-editorWidget-background, #1c2028));
+	color: var(--ade-mission-accent);
+}
+
+.monaco-workbench .ade-mission-file-btn .ade-mission-file-dot {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--ade-mission-out);
+	box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
+}
+
+.monaco-workbench .ade-mission-file-btn .ade-mission-file-dot[hidden] {
+	display: none;
+}
+
+/* Anchored Mermaid File Editor Drawer (top-left, right beneath file icon) */
+.monaco-workbench .ade-mission-file-drawer {
+	position: absolute;
+	top: 58px;
+	left: 14px;
+	width: min(400px, calc(100% - 28px));
+	max-height: calc(100% - 76px);
+	z-index: 30;
+	display: flex;
+	flex-direction: column;
+	border-radius: 12px;
+	overflow: hidden;
+	user-select: text;
+	background: var(--vscode-editorWidget-background, #181c24);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 15%, transparent);
+	box-shadow: 0 18px 44px rgba(0, 0, 0, 0.44), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.monaco-workbench .ade-mission-file-drawer[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-drawer-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 10px 12px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+}
+
+.monaco-workbench .ade-mission-drawer-title {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-mission-drawer-title .codicon {
+	color: var(--ade-mission-accent);
+	font-size: 14px;
+}
+
+.monaco-workbench .ade-mission-drawer-meta {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-mission-drawer-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-icon-btn {
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: none;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-icon-btn:hover {
+	background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-mission-mermaid-input {
+	width: 100%;
+	min-height: 240px;
+	max-height: 55vh;
+	padding: 12px 14px;
+	border: none;
+	resize: vertical;
+	box-sizing: border-box;
+	background: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground, var(--vscode-foreground));
+	font-family: var(--vscode-editor-font-family);
+	font-size: 12px;
+	line-height: 1.55;
+	tab-size: 2;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-drawer-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 12px;
+	font-size: 11px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-drawer-status.error {
+	color: #f87171;
+}
+
+.monaco-workbench .ade-mission-drawer-status.ok {
+	color: var(--ade-mission-out);
+}
+
+/* Whisper-quiet empty canvas hint (disappears once any Mermaid node exists) */
+.monaco-workbench .ade-mission-empty-hint {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	z-index: 5;
+	pointer-events: none;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+	text-align: center;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.72;
+}
+
+.monaco-workbench .ade-mission-empty-hint[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-empty-hint .codicon {
+	font-size: 22px;
+	opacity: 0.7;
+}
+
+.monaco-workbench .ade-mission-empty-hint-title {
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--vscode-foreground);
+	opacity: 0.78;
+}
+
+.monaco-workbench .ade-mission-empty-hint-sub {
+	font-size: 11.5px;
+}
+
+/* ============================================================================
+ * SVG Edge Layer — Draw.io Smooth Rounded Orthogonal Edges + Hover Dash Flow
+ * ============================================================================ */
+
+.monaco-workbench .ade-mission-edges-svg {
+	position: absolute;
+	top: 0;
+	left: 0;
+	overflow: visible;
+	pointer-events: none;
+	z-index: 3;
+}
+
+.monaco-workbench .ade-mission-edge-group {
+	transition: opacity 150ms ease;
+}
+
+.monaco-workbench .ade-mission-edge-path {
+	fill: none;
+	stroke: color-mix(in srgb, var(--ade-mission-out) 54%, color-mix(in srgb, var(--vscode-foreground) 34%, transparent));
+	stroke-width: 1.75px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	transition: stroke 140ms ease, stroke-width 140ms ease, opacity 150ms ease, filter 150ms ease;
+}
+
+.monaco-workbench .ade-mission-edge-label-bg {
+	fill: var(--vscode-editorWidget-background, #181c24);
+	stroke: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	stroke-width: 1px;
+}
+
+.monaco-workbench .ade-mission-edge-label-text {
+	fill: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	font-weight: 500;
+	font-family: var(--vscode-font-family);
+	text-anchor: middle;
+	dominant-baseline: central;
+}
+
+/* Dim unrelated edges & nodes while hovering a node */
+.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-edge-group:not(.is-hover-flow) {
+	opacity: 0.24;
+}
+
+.monaco-workbench .ade-mission-world.has-node-hover .ade-mission-node:not(.is-hovered):not(.is-neighbor) {
+	opacity: 0.34;
+}
+
+/* Flowing dashed lines on upstream & downstream edges connected to the hovered node */
+.monaco-workbench .ade-mission-edge-group.is-hover-flow {
+	opacity: 1;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-hover-flow .ade-mission-edge-path {
+	stroke-width: 2.4px;
+	stroke-dasharray: 8 6;
+	animation: adeMissionEdgeFlow 0.72s linear infinite;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-hover-flow.is-incoming .ade-mission-edge-path {
+	stroke: var(--ade-mission-accent);
+	filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.55));
+}
+
+.monaco-workbench .ade-mission-edge-group.is-hover-flow.is-outgoing .ade-mission-edge-path {
+	stroke: var(--ade-mission-out);
+	filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.55));
+}
+
+.monaco-workbench .ade-mission-edge-group.is-hover-flow .ade-mission-edge-label-text {
+	fill: var(--vscode-foreground);
+}
+
+/* ============================================================================
+ * Flat Non-Nested Mission DAG Nodes (Same Calm Matte Card Craft, Zero Nesting)
+ * ============================================================================ */
+
+.monaco-workbench .ade-mission-nodes-layer {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	z-index: 4;
+	pointer-events: none;
+}
+
+.monaco-workbench .ade-mission-node {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	pointer-events: auto;
+	cursor: grab;
+	box-sizing: border-box;
+	transition: opacity 150ms ease, transform 140ms ease, border-color 140ms ease, box-shadow 160ms ease;
+}
+
+.monaco-workbench .ade-mission-node.dragging {
+	cursor: grabbing;
+	z-index: 12;
+}
+
+.monaco-workbench .ade-mission-node-card {
+	position: relative;
+	width: 248px;
+	height: 104px;
+	padding: 13px 16px 12px;
+	border-radius: 13px;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #181c24) 94%, #0f1219);
+	border: 1px solid color-mix(in srgb, var(--ade-mission-out) 38%, color-mix(in srgb, var(--vscode-foreground) 12%, transparent));
+	box-shadow:
+		0 6px 20px rgba(0, 0, 0, 0.28),
+		inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	transition: border-color 140ms ease, box-shadow 160ms ease, transform 140ms ease;
+}
+
+.monaco-workbench .ade-mission-node.kind-gate .ade-mission-node-card {
+	width: 216px;
+	height: 86px;
+	padding: 11px 15px;
+	border-radius: 15px;
+	border-color: color-mix(in srgb, var(--ade-mission-gate) 56%, transparent);
+	background: color-mix(in srgb, var(--ade-mission-gate) 6%, var(--vscode-editorWidget-background, #181c24));
+}
+
+/* Hover & neighbor elevation */
+.monaco-workbench .ade-mission-node.is-hovered .ade-mission-node-card {
+	transform: translateY(-2px);
+	border-color: var(--ade-mission-accent);
+	box-shadow:
+		0 0 0 1.5px color-mix(in srgb, var(--ade-mission-accent) 45%, transparent),
+		0 12px 30px rgba(0, 0, 0, 0.38),
+		0 0 22px rgba(56, 189, 248, 0.16);
+}
+
+.monaco-workbench .ade-mission-node.is-neighbor.is-upstream .ade-mission-node-card {
+	border-color: color-mix(in srgb, var(--ade-mission-accent) 72%, transparent);
+	box-shadow:
+		0 8px 22px rgba(0, 0, 0, 0.32),
+		0 0 14px rgba(56, 189, 248, 0.12);
+}
+
+.monaco-workbench .ade-mission-node.is-neighbor.is-downstream .ade-mission-node-card {
+	border-color: color-mix(in srgb, var(--ade-mission-out) 76%, transparent);
+	box-shadow:
+		0 8px 22px rgba(0, 0, 0, 0.32),
+		0 0 14px rgba(52, 211, 153, 0.12);
+}
+
+.monaco-workbench .ade-mission-node-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-mission-node-id {
+	display: inline-flex;
+	align-items: center;
+	height: 19px;
+	padding: 0 7px;
+	border-radius: 5px;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	font-weight: 650;
+	letter-spacing: 0.02em;
+	background: color-mix(in srgb, var(--ade-mission-out) 14%, transparent);
+	color: color-mix(in srgb, var(--ade-mission-out) 88%, var(--vscode-foreground));
+	border: 1px solid color-mix(in srgb, var(--ade-mission-out) 26%, transparent);
+}
+
+.monaco-workbench .ade-mission-node.kind-gate .ade-mission-node-id {
+	background: rgba(245, 185, 66, 0.14);
+	color: #f5b942;
+	border-color: rgba(245, 185, 66, 0.32);
+}
+
+.monaco-workbench .ade-mission-node-kind-tag {
+	font-size: 10px;
+	font-weight: 550;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.78;
+}
+
+.monaco-workbench .ade-mission-node-title {
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 1.32;
+	letter-spacing: -0.01em;
+	color: var(--vscode-foreground);
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	word-break: break-word;
+}
+
+/* Symmetric Left/Right Ports aligned to ±0.5px with orthogonal edge endpoints */
+.monaco-workbench .ade-mission-port {
+	position: absolute;
+	top: 50%;
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	transform: translate(-50%, -50%);
+	background: var(--vscode-editor-background);
+	border: 1.75px solid color-mix(in srgb, var(--vscode-foreground) 34%, transparent);
+	pointer-events: none;
+	z-index: 6;
+	transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.monaco-workbench .ade-mission-port.port-in {
+	left: 0;
+}
+
+.monaco-workbench .ade-mission-port.port-out {
+	left: 100%;
+}
+
+.monaco-workbench .ade-mission-node.is-hovered .ade-mission-port.port-in,
+.monaco-workbench .ade-mission-node.is-neighbor.is-upstream .ade-mission-port.port-out {
+	border-color: var(--ade-mission-accent);
+	background: var(--ade-mission-accent);
+	box-shadow: 0 0 8px rgba(56, 189, 248, 0.65);
+}
+
+.monaco-workbench .ade-mission-node.is-hovered .ade-mission-port.port-out,
+.monaco-workbench .ade-mission-node.is-neighbor.is-downstream .ade-mission-port.port-in {
+	border-color: var(--ade-mission-out);
+	background: var(--ade-mission-out);
+	box-shadow: 0 0 8px rgba(52, 211, 153, 0.65);
+}

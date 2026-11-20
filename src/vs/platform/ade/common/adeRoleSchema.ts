@@ -470,11 +470,20 @@ export interface IAdeRankDefinition {
 	readonly allowedApis: readonly AdePrimitiveApiId[];
 }
 
+export const DEFAULT_ADE_MISSION_NAME = 'Mission';
+
 export interface IAdeOrganizationConfig {
 	readonly version: 1;
 	readonly presetId?: string;
+	/** User-customizable display alias for the unified Mission mode (defaults to "Mission"; e.g. "Engineering", "Research"). */
+	readonly missionName?: string;
 	readonly slots?: IAdeWorkTreeSlotMap;
 	readonly ranks: readonly IAdeRankDefinition[];
+}
+
+export function getMissionDisplayName(config?: Pick<IAdeOrganizationConfig, 'missionName'>): string {
+	const raw = config?.missionName?.trim();
+	return raw || DEFAULT_ADE_MISSION_NAME;
 }
 
 export interface IAdeOrganizationPreset {
@@ -501,6 +510,7 @@ export const ADE_PROMPT_TEMPLATE_VARIABLES: readonly { readonly token: string; r
 export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 	version: 1,
 	presetId: 'default-4tier',
+	missionName: DEFAULT_ADE_MISSION_NAME,
 	slots: {
 		orchestrator: 'governor',
 		segment_owner: 'manager',
@@ -876,6 +886,7 @@ function cloneDefaultOrganizationConfig(): IAdeOrganizationConfig {
 	return {
 		version: 1,
 		presetId: DEFAULT_ADE_ORGANIZATION_CONFIG.presetId,
+		missionName: DEFAULT_ADE_MISSION_NAME,
 		...(DEFAULT_ADE_ORGANIZATION_CONFIG.slots ? { slots: { ...DEFAULT_ADE_ORGANIZATION_CONFIG.slots } } : {}),
 		ranks: DEFAULT_ADE_ORGANIZATION_CONFIG.ranks.map(r => ({ ...r, allowedApis: [...r.allowedApis] })),
 	};
@@ -987,9 +998,14 @@ export function normalizeAdeOrganizationConfig(raw: unknown): IAdeOrganizationCo
 		}
 	}
 
+	const missionName = typeof obj.missionName === 'string' && obj.missionName.trim()
+		? obj.missionName.trim().slice(0, 32)
+		: DEFAULT_ADE_MISSION_NAME;
+
 	return {
 		version: 1,
 		presetId: typeof obj.presetId === 'string' && obj.presetId.trim() ? obj.presetId.trim() : undefined,
+		missionName,
 		...(normalizedSlots ? { slots: normalizedSlots } : {}),
 		ranks: cleaned,
 	};
@@ -1522,6 +1538,11 @@ export const ADE_ORGANIZATION_JSON_SCHEMA = {
 		presetId: {
 			type: 'string' as const,
 			description: 'Active preset identifier (e.g. default-4tier, startup-3tier, research-lab, security-audit, flat-swarm, custom).',
+		},
+		missionName: {
+			type: 'string' as const,
+			default: DEFAULT_ADE_MISSION_NAME,
+			description: 'Customizable display alias for unified Mission mode (e.g. Mission, Engineering, Research).',
 		},
 		slots: {
 			type: 'object' as const,

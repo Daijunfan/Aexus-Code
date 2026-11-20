@@ -11,6 +11,7 @@ import {
 	AdeRankColorToken,
 	AdeRankIconToken,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	getMissionDisplayName,
 	IAdeOrganizationConfig,
 	IAdeRankDefinition,
 	normalizeAdeOrganizationConfig,
@@ -42,6 +43,7 @@ export interface IAdeLiveRankEntry {
 export interface IAdeLiveRankDirectory {
 	readonly version: number;
 	readonly presetId: string;
+	readonly missionName: string;
 	readonly rankCount: number;
 	readonly ranks: readonly IAdeLiveRankEntry[];
 	readonly namesByTier: Readonly<Record<string, string>>;
@@ -217,8 +219,26 @@ export function resizeOrganizationRanks(
 	return normalizeAdeOrganizationConfig({
 		version: 1,
 		presetId: 'custom',
+		missionName: getMissionDisplayName(config),
 		ranks: linked,
 		slots: config.slots,
+	});
+}
+
+/**
+ * Hot-renames the unified Mission mode display alias (e.g. "Mission" -> "Engineering" or "Research").
+ */
+export function renameMissionAlias(
+	config: IAdeOrganizationConfig,
+	newMissionName: string,
+): IAdeOrganizationConfig {
+	const trimmed = newMissionName.trim();
+	if (!trimmed) {
+		throw new Error('Mission display alias cannot be empty.');
+	}
+	return normalizeAdeOrganizationConfig({
+		...config,
+		missionName: trimmed.slice(0, 32),
 	});
 }
 
@@ -304,6 +324,7 @@ export function buildLiveRankDirectory(
 	return {
 		version: config.version,
 		presetId: config.presetId ?? 'custom',
+		missionName: getMissionDisplayName(config),
 		rankCount: sorted.length,
 		ranks: allRanks,
 		namesByTier,

@@ -21,13 +21,14 @@ import {
 } from '../../../../platform/ade/common/adeRankResize.js';
 import {
 	ADE_ORGANIZATION_PRESETS,
+	DEFAULT_ADE_MISSION_NAME,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
+	getMissionDisplayName,
 	IAdeOrganizationConfig,
 	IAdeRankDefinition,
 	normalizeAdeOrganizationConfig,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
-import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -38,7 +39,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { EditorInputCapabilities, IEditorOpenContext, IEditorSerializer } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { ADE_CONFIG_SCHEME, ADE_OPEN_ROLE_STUDIO_COMMAND_ID } from '../common/ade.js';
+import { ADE_CONFIG_SCHEME } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import './media/adeConfigStudio.css';
 
@@ -59,13 +60,17 @@ interface IMutableRankEntry {
 
 interface IMutableConfigDraft {
 	presetId?: string;
+	missionName: string;
 	slots?: IAdeOrganizationConfig['slots'];
 	ranks: IMutableRankEntry[];
 }
 
+const MISSION_ALIAS_SUGGESTIONS = ['Mission', 'Engineering', 'Research'] as const;
+
 function cloneConfigToDraft(config: IAdeOrganizationConfig): IMutableConfigDraft {
 	return {
 		presetId: config.presetId,
+		missionName: getMissionDisplayName(config),
 		slots: config.slots ? { ...config.slots } : undefined,
 		ranks: [...config.ranks]
 			.sort((a, b) => a.tier - b.tier)
@@ -90,10 +95,12 @@ function draftToConfig(draft: IMutableConfigDraft): IAdeOrganizationConfig {
 	return normalizeAdeOrganizationConfig({
 		version: 1,
 		presetId: draft.presetId,
+		missionName: draft.missionName.trim() || DEFAULT_ADE_MISSION_NAME,
 		...(draft.slots ? { slots: draft.slots } : {}),
 		ranks: draft.ranks.map((r, idx) => ({
 			...r,
 			tier: idx + 1,
+			shortName: r.name.trim().slice(0, 4) || `L${idx + 1}`,
 			defaultChildRankId: idx + 1 < draft.ranks.length ? draft.ranks[idx + 1].id : undefined,
 		})),
 	});
@@ -140,9 +147,9 @@ export class AdeConfigEditorSerializer implements IEditorSerializer {
 
 /**
  * Core ADE configuration editor pane:
- * - Configure rank depth (`N >= 1`, `L1` highest → `LN` lowest, `L0` fixed as Secretary)
- * - Live hot-reloadable rank display aliases & short tags (defaulting to Governor / Manager / Employee / Worker)
- * - Single-copy tier-indexed API docs (`docs/ranks/L0..LN.md` alongside sibling `docs/mission/MISSION_API.md`)
+ * - Customize unified Mission mode display alias (e.g. Mission / Engineering / Research — hot-updates left sidebar)
+ * - Configure rank depth (`N >= 1`, `L1` highest → `LN` lowest, `L0` fixed as Secretary) and custom rank names
+ * - Inspect single-copy tier & sibling Mission API docs paths
  */
 export class AdeConfigEditorPane extends EditorPane {
 	static readonly ID = 'workbench.editor.adeConfig';
@@ -150,14 +157,12 @@ export class AdeConfigEditorPane extends EditorPane {
 	private rootEl!: HTMLElement;
 	private dirtyPillEl: HTMLElement | undefined;
 	private readonly renderDisposables = this._register(new DisposableStore());
-	private draft: IMutableConfigDraft;
-	private dirty = false;
-	private saving = false;
-
 	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
 	private readonly clipboardService: IClipboardService | undefined;
 	private readonly notificationService: INotificationService | undefined;
-	private readonly commandService: ICommandService | undefined;
+	private draft: IMutableConfigDraft;
+	private dirty = false;
+	private saving = false;
 
 	constructor(
 		group: IEditorGroup,
@@ -177,7 +182,6 @@ export class AdeConfigEditorPane extends EditorPane {
 		this.roleSchemaService = tryGet(IAdeRoleSchemaService);
 		this.clipboardService = tryGet(IClipboardService);
 		this.notificationService = tryGet(INotificationService);
-		this.commandService = tryGet(ICommandService);
 		this.draft = cloneConfigToDraft(this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG);
 		if (this.roleSchemaService) {
 			this._register(this.roleSchemaService.onDidChangeSchema(updated => {
@@ -252,7 +256,8 @@ export class AdeConfigEditorPane extends EditorPane {
 		if (!preset) {
 			return;
 		}
-		this.draft = cloneConfigToDraft(preset.config);
+		const currentMissionName = this.draft.missionName;
+		this.draft = cloneConfigToDraft({ ...preset.config, missionName: currentMissionName });
 		this.dirty = true;
 		this.render();
 		await this.saveDraft();
@@ -283,7 +288,8 @@ export class AdeConfigEditorPane extends EditorPane {
 			this.render();
 			this.notificationService?.info(localize(
 				'adeConfigSavedHotReload',
-				"ADE config applied ({0} rank tier(s), aliases hot-updated, single-copy API docs synced).",
+				"ADE config applied ({0} mode, {1} rank tier(s), hot-updated live).",
+				this.draft.missionName,
 				this.draft.ranks.length,
 			));
 		} catch (err) {
@@ -302,6 +308,7 @@ export class AdeConfigEditorPane extends EditorPane {
 
 		const shell = append(this.rootEl, $('.ade-cfg-shell'));
 		this.renderHeader(shell);
+		this.renderMissionAliasCard(shell);
 		this.renderRankHierarchyCard(shell);
 		this.renderDocsCard(shell);
 	}
@@ -315,7 +322,7 @@ export class AdeConfigEditorPane extends EditorPane {
 		this.dirtyPillEl.hidden = !this.dirty;
 		append(titleBlock, $('p.ade-cfg-subtitle', {}, localize(
 			'adeConfigSubtitle',
-			"Configure rank depth (L1 highest → LN lowest, L0 Secretary), hot-reloadable display aliases, and single-copy tier & Mission API docs.",
+			"Customize Mission mode display alias, rank depth (L1 highest → LN lowest, L0 Secretary), and custom tier names.",
 		)));
 
 		const actions = append(header, $('.ade-cfg-actions'));
@@ -345,13 +352,6 @@ export class AdeConfigEditorPane extends EditorPane {
 			void this.resetToDefault();
 		}));
 
-		if (this.commandService) {
-			const studioBtn = append(actions, $('button.ade-cfg-btn', { type: 'button' }, localize('adeConfigAdvancedBtn', "Advanced Roles")));
-			this.renderDisposables.add(addDisposableListener(studioBtn, EventType.CLICK, () => {
-				void this.commandService?.executeCommand(ADE_OPEN_ROLE_STUDIO_COMMAND_ID);
-			}));
-		}
-
 		const saveBtn = append(actions, $('button.ade-cfg-btn.primary', {
 			type: 'button',
 			'data-ade-config-save': 'true',
@@ -359,6 +359,46 @@ export class AdeConfigEditorPane extends EditorPane {
 		this.renderDisposables.add(addDisposableListener(saveBtn, EventType.CLICK, () => {
 			void this.saveDraft();
 		}));
+	}
+
+	private renderMissionAliasCard(shell: HTMLElement): void {
+		const card = append(shell, $('.ade-cfg-card'));
+		const header = append(card, $('.ade-cfg-card-header'));
+		const titleGroup = append(header, $('.ade-cfg-card-title-group'));
+		append(titleGroup, $('h2.ade-cfg-card-title', {}, localize('adeConfigMissionAliasTitle', "Mission Mode Display Name")));
+		append(titleGroup, $('p.ade-cfg-card-hint', {}, localize(
+			'adeConfigMissionAliasHint',
+			"Unified Mission mode replaces separate Engineering/Research modes. Rename freely — left sidebar badges & Mission tabs hot-update live.",
+		)));
+
+		const body = append(card, $('.ade-cfg-mission-row'));
+		const aliasInput = append(body, $('input.ade-cfg-input.mission-alias', {
+			type: 'text',
+			maxlength: '32',
+			value: this.draft.missionName,
+			placeholder: DEFAULT_ADE_MISSION_NAME,
+			'aria-label': localize('adeConfigMissionAliasInputAria', "Mission mode display alias"),
+			'data-ade-mission-alias-input': 'true',
+		})) as HTMLInputElement;
+
+		this.renderDisposables.add(addDisposableListener(aliasInput, EventType.INPUT, () => {
+			this.draft.missionName = aliasInput.value;
+			this.markDirty();
+		}));
+
+		const chipsWrap = append(body, $('.ade-cfg-chip-group'));
+		for (const suggestion of MISSION_ALIAS_SUGGESTIONS) {
+			const chip = append(chipsWrap, $(`button.ade-cfg-chip${this.draft.missionName === suggestion ? '.active' : ''}`, {
+				type: 'button',
+				'data-mission-alias-chip': suggestion,
+			}, suggestion)) as HTMLButtonElement;
+			this.renderDisposables.add(addDisposableListener(chip, EventType.CLICK, () => {
+				this.draft.missionName = suggestion;
+				aliasInput.value = suggestion;
+				this.markDirty();
+				this.render();
+			}));
+		}
 	}
 
 	private renderRankHierarchyCard(shell: HTMLElement): void {
@@ -369,7 +409,7 @@ export class AdeConfigEditorPane extends EditorPane {
 		append(titleGroup, $('h2.ade-cfg-card-title', {}, localize('adeConfigRanksTitle', "Rank Hierarchy & Live Aliases")));
 		append(titleGroup, $('p.ade-cfg-card-hint', {}, localize(
 			'adeConfigRanksHint',
-			"Roles read API docs by tier (L0..L{0}) rather than custom names. Alias edits hot-update live without restart.",
+			"Left sidebar strictly manages session hierarchy (L1..L{0}, decoupled from Mission DAG). Roles read API docs by tier.",
 			count,
 		)));
 
@@ -394,30 +434,26 @@ export class AdeConfigEditorPane extends EditorPane {
 		this.renderDisposables.add(addDisposableListener(incBtn, EventType.CLICK, () => this.applyRankCount(count + 1)));
 
 		const list = append(card, $('.ade-cfg-rank-list'));
-		const headRow = append(list, $('.ade-cfg-rank-row.head'));
+		const headRow = append(list, $('.ade-cfg-rank-row.compact.head'));
 		append(headRow, $('span', {}, localize('adeConfigColTier', "Tier")));
-		append(headRow, $('span', {}, localize('adeConfigColAlias', "Display Alias (Hot-Reload)")));
-		append(headRow, $('span', {}, localize('adeConfigColTag', "Short Tag")));
-		append(headRow, $('span', {}, localize('adeConfigColExec', "Execution")));
+		append(headRow, $('span', {}, localize('adeConfigColAlias', "Display Name (Hot-Reload)")));
 		append(headRow, $('span', { style: 'justify-self:end' }, localize('adeConfigColDoc', "API Doc")));
 
 		// Fixed L0 Secretary row
-		const l0Row = append(list, $('.ade-cfg-rank-row.system-l0', { 'data-tier': ADE_SECRETARY_TIER_TAG }));
+		const l0Row = append(list, $('.ade-cfg-rank-row.compact.system-l0', { 'data-tier': ADE_SECRETARY_TIER_TAG }));
 		const l0TierCell = append(l0Row, $('.ade-cfg-tier-cell'));
 		append(l0TierCell, $('span.ade-cfg-tier-pill.tier-l0', {}, ADE_SECRETARY_TIER_TAG));
 		append(l0TierCell, $('span.ade-cfg-tier-note', {}, localize('adeConfigSystemNote', "System")));
 		const l0Name = append(l0Row, $('.ade-cfg-static-name'));
 		append(l0Name, $('span', {}, ADE_SECRETARY_ALIAS));
 		append(l0Name, $('span.ade-cfg-static-badge', {}, localize('adeConfigFixedGlobal', "Global L0")));
-		append(l0Row, $('span.ade-cfg-tier-note', {}, 'Sec'));
-		append(l0Row, $('span.ade-cfg-tier-note', {}, localize('adeConfigMacroCtrl', "Macro")));
 		append(l0Row, $('span.ade-cfg-doc-pill', {}, `ranks/${ADE_SECRETARY_TIER_TAG}.md`));
 
-		// Editable L1..LN rows
+		// Editable L1..LN rows (L1, L2... always preserved!)
 		this.draft.ranks.forEach((rank, index) => {
 			const tier = index + 1;
 			const tierTag = formatTierTag(tier);
-			const row = append(list, $('.ade-cfg-rank-row', { 'data-tier': tierTag, 'data-rank-id': rank.id }));
+			const row = append(list, $('.ade-cfg-rank-row.compact', { 'data-tier': tierTag, 'data-rank-id': rank.id }));
 
 			const tierCell = append(row, $('.ade-cfg-tier-cell'));
 			append(tierCell, $(`span.ade-cfg-tier-pill${tier === 1 ? '.tier-top' : ''}`, {}, tierTag));
@@ -435,40 +471,13 @@ export class AdeConfigEditorPane extends EditorPane {
 			const aliasInput = append(row, $('input.ade-cfg-input.alias', {
 				type: 'text',
 				value: rank.name,
-				'aria-label': localize('adeConfigAliasInputAria', "{0} display alias", tierTag),
+				'aria-label': localize('adeConfigAliasInputAria', "{0} display name", tierTag),
 				'data-tier-alias': tierTag,
 			})) as HTMLInputElement;
 			this.renderDisposables.add(addDisposableListener(aliasInput, EventType.INPUT, () => {
 				rank.name = aliasInput.value;
 				if (this.draft.presetId === 'default-4tier') {
 					this.draft.presetId = 'custom';
-				}
-				this.markDirty();
-			}));
-
-			const shortInput = append(row, $('input.ade-cfg-input.short', {
-				type: 'text',
-				maxlength: '6',
-				value: rank.shortName,
-				'aria-label': localize('adeConfigShortInputAria', "{0} short tag", tierTag),
-				'data-tier-short': tierTag,
-			})) as HTMLInputElement;
-			this.renderDisposables.add(addDisposableListener(shortInput, EventType.INPUT, () => {
-				rank.shortName = shortInput.value;
-				this.markDirty();
-			}));
-
-			const pureDisabled = count === 1;
-			const pureLabel = append(row, $(`label.ade-cfg-pure-toggle${pureDisabled ? '.disabled' : ''}`));
-			const pureCb = append(pureLabel, $('input', { type: 'checkbox' })) as HTMLInputElement;
-			pureCb.checked = !pureDisabled && rank.pureExecution;
-			pureCb.disabled = pureDisabled;
-			append(pureLabel, $('span', {}, localize('adeConfigPureLeaf', "Pure leaf")));
-			this.renderDisposables.add(addDisposableListener(pureCb, EventType.CHANGE, () => {
-				rank.pureExecution = pureCb.checked;
-				if (rank.pureExecution) {
-					rank.canHaveSubordinates = false;
-					rank.allowedApis = [];
 				}
 				this.markDirty();
 			}));
@@ -527,11 +536,7 @@ export class AdeConfigEditorPane extends EditorPane {
 		append(missionBox, $('.ade-cfg-doc-box-path', { 'data-ade-docs-mission': docs.missionDoc }, docs.missionDoc));
 		append(missionBox, $('.ade-cfg-doc-box-desc', {}, localize(
 			'adeConfigMissionDocsBoxDesc',
-			"Unified Mission API manual placed alongside ranks/. Read only when an agent initializes or participates in a Mission.",
+			"Unified Mission API manual placed alongside ranks/. Read only on demand.",
 		)));
-
-		const cliStrip = append(body, $('.ade-cfg-cli-strip'));
-		append(cliStrip, $('span', {}, localize('adeConfigHotApiLabel', "Hot-reload query & update CLI:")));
-		append(cliStrip, $('code', {}, 'aexus-ade rank names --json  |  aexus-ade rank list --json  |  aexus-ade mission docs --json'));
 	}
 }

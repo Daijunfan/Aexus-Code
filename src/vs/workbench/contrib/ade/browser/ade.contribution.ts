@@ -22,25 +22,18 @@ import {
 	isCloudProjectUri,
 } from '../../../../platform/ade/common/adeCloudHosts.js';
 import {
-	ADE_WATCHDOG_TIMEOUT_CONFIG_KEY,
-	DEFAULT_WATCHDOG_TIMEOUT_MINUTES,
-	IAdeEngineeringService,
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
-import {
-	ADE_PRICING_CONFIG_KEY,
-	ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY,
-} from '../../../../platform/ade/common/adePricing.js';
 import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	ADE_ORGANIZATION_JSON_SCHEMA,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
 	findRankDefinition,
 	getDefaultPureLeafRank,
+	getMissionDisplayName,
 	getTopRankDefinition,
 	IAdeOrganizationConfig,
 	resolveEffectiveRankDefinition,
-	resolveWorkTreeSlotRank,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -123,7 +116,8 @@ import {
 	AdeEngineeringEditorPane,
 	AdeEngineeringEditorSerializer,
 } from './adeEngineeringEditorPane.js';
-import { AdeEngineeringWorkbenchService, AdeInboxService } from './adeEngineeringWorkbenchService.js';
+import { AdeInboxService } from './adeInboxService.js';
+import { AdeMissionStoreService, IAdeMissionService } from './adeMissionStore.js';
 import { AdeChangesView, AdeFilesView } from './adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from './adeProjectManagement.js';
 import { AdeProjectsService } from './adeProjectsService.js';
@@ -149,7 +143,7 @@ registerSingleton(IAdeProjectsService, AdeProjectsService, InstantiationType.Del
 registerSingleton(IAdeEditorService, AdeEditorService, InstantiationType.Delayed);
 registerSingleton(IAdeSessionsService, AdeSessionsService, InstantiationType.Delayed);
 registerSingleton(IAdeInboxService, AdeInboxService, InstantiationType.Delayed);
-registerSingleton(IAdeEngineeringService, AdeEngineeringWorkbenchService, InstantiationType.Delayed);
+registerSingleton(IAdeMissionService, AdeMissionStoreService, InstantiationType.Delayed);
 
 class AdeEditorContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.adeEditor';
@@ -157,7 +151,7 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 	constructor(
 		@IAdeEditorService editors: IAdeEditorService,
 		@IAdeProjectsService projects: IAdeProjectsService,
-		@IAdeEngineeringService engineering: IAdeEngineeringService,
+		@IAdeMissionService _missions: IAdeMissionService,
 		@IAdeInboxService _inbox: IAdeInboxService,
 		@IChatSessionsService sessions: IChatSessionsService,
 		@IWorkspaceContextService contextService: IWorkspaceContextService,
@@ -166,7 +160,6 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
-		void engineering.whenReady();
 		this._register(sessions.onDidChangeSessionItems(delta => {
 			for (const item of delta.addedOrUpdated ?? []) {
 				const status = item.status === ChatSessionStatus.InProgress
@@ -365,15 +358,6 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 	title: localize('adeMissionConfigurationTitle', "ADE Mission & Organization"),
 	type: 'object',
 	properties: {
-		[ADE_WATCHDOG_TIMEOUT_CONFIG_KEY]: {
-			type: 'number',
-			default: DEFAULT_WATCHDOG_TIMEOUT_MINUTES,
-			minimum: 1,
-			maximum: 240,
-			scope: ConfigurationScope.APPLICATION,
-			restricted: true,
-			description: localize('adeWatchdogTimeoutMinutesDesc', "Minutes of Worker execution inactivity before the ADE Engineering Watchdog wakes the Segment Manager to remind or kill-restart the stalled Worker."),
-		},
 		[ADE_ORGANIZATION_CONFIG_KEY]: {
 			...ADE_ORGANIZATION_JSON_SCHEMA,
 			default: DEFAULT_ADE_ORGANIZATION_CONFIG,
@@ -381,30 +365,8 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			restricted: true,
 			markdownDescription: localize(
 				'adeOrganizationConfigDesc',
-				"Customizable ADE multi-agent organization schema: define custom rank names/tiers, author each rank's initialization prompt template, and assign fixed Aexus-Code core primitive API permissions. For a guided fill-in-the-blank editor, open the [Organization & Roles Studio](command:workbench.action.ade.openRoleStudio).",
+				"Customizable ADE rank hierarchy (L1..LN + L0 Secretary) and Mission display alias. Configure visually in [ADE config](command:workbench.action.ade.openConfig).",
 			),
-		},
-		[ADE_PRICING_CONFIG_KEY]: {
-			type: 'object',
-			default: {},
-			scope: ConfigurationScope.APPLICATION,
-			additionalProperties: {
-				type: 'object',
-				properties: {
-					label: { type: 'string', description: localize('adePricingLabelDesc', "Optional human-readable display label for this model/engine rate.") },
-					inputPerMTok: { type: 'number', minimum: 0, description: localize('adePricingInputDesc', "USD cost per 1M input tokens.") },
-					outputPerMTok: { type: 'number', minimum: 0, description: localize('adePricingOutputDesc', "USD cost per 1M output tokens.") },
-					cacheReadPerMTok: { type: 'number', minimum: 0, description: localize('adePricingCacheReadDesc', "USD cost per 1M cache read tokens.") },
-					cacheWritePerMTok: { type: 'number', minimum: 0, description: localize('adePricingCacheWriteDesc', "USD cost per 1M cache write tokens.") },
-				},
-			},
-			description: localize('adePricingConfigDesc', "Optional custom USD-per-1M-token pricing override map keyed by model substring or engine ID (e.g. \"claude-opus-4-6\", \"gpt-5-pro\", \"aexus-claude\")."),
-		},
-		[ADE_PRICING_SUBSCRIPTION_MODE_CONFIG_KEY]: {
-			type: 'boolean',
-			default: false,
-			scope: ConfigurationScope.APPLICATION,
-			description: localize('adePricingSubscriptionModeDesc', "When enabled (e.g. Claude Max, ChatGPT Plus/Pro, or flat-rate enterprise subscriptions), estimated marginal token spend is reported as $0.00 while token counts remain tracked."),
 		},
 		'aexus.ade.autonomousMode': {
 			type: 'boolean',
@@ -966,87 +928,50 @@ registerAction2(class AddProjectAgentAction extends Action2 {
 	}
 });
 
-async function openOrInitializeWorkTree(
+async function openOrCreateMissionCanvas(
 	accessor: ServicesAccessor,
-	requestedTreeType: 'engineering' | 'research',
-	governorId?: string,
+	targetIdOrProject?: string | URI,
 ): Promise<void> {
+	const missions = accessor.get(IAdeMissionService);
 	const projects = accessor.get(IAdeProjectsService);
-	const engineering = accessor.get(IAdeEngineeringService);
-	const dialogs = accessor.get(IDialogService);
-	const notifications = accessor.get(INotificationService);
-	const modes = accessor.get(IWorkbenchModeService);
 	const roleConfig = getRoleConfig(accessor);
+	const missionAlias = getMissionDisplayName(roleConfig);
 
-	const target = await pickAgent(accessor, governorId);
-	if (!target) {
-		return;
-	}
-	const orchestratorRank = resolveWorkTreeSlotRank(roleConfig, 'orchestrator');
-	const modeLabel = localize('adeMissionModeLabel', "Mission");
-	if (target.parentId) {
-		notifications.warn(localize('adeEngRequiresRootGovernor', "Only a top-level {0} session can own an ADE {1}.", orchestratorRank.name, modeLabel));
-		return;
-	}
-	const rank = resolveAdeAgentRank(target, projects.hasSubordinates(target.id), roleConfig);
-	if (rank !== orchestratorRank.id) {
-		notifications.warn(localize('adeEngMustBeGovernorRank', "Promote '{0}' to {1} first before enabling ADE {2}.", target.label, orchestratorRank.name, modeLabel));
-		return;
-	}
-
-	await engineering.whenReady();
-	if (engineering.hasTree(target.id) || target.treeType) {
-		modes.setMode('ade');
-		await engineering.openEngineeringEditor(target.id);
-		return;
-	}
-
-	let onChildren: 'relocate' | 'delete' | undefined;
-	const existingSubs = projects.getDirectSubordinates(target.id);
-	if (existingSubs.length > 0) {
-		const promptRes = await dialogs.prompt<'relocate' | 'delete'>({
-			type: 'warning',
-			message: localize(
-				'adeEngExistingChildrenPromptTitle',
-				"Governor '{0}' already has {1} subordinate session(s). How should ADE {2} handle them?",
-				target.label,
-				existingSubs.length,
-				modeLabel,
-			),
-			detail: localize(
-				'adeEngExistingChildrenPromptDetail',
-				"A structured DAG work tree strictly manages its own 4-tier topology (Governor → Manager → Employee → Worker) and cannot mix with free-form subordinate sessions.",
-			),
-			buttons: [
-				{
-					label: localize('adeEngRelocateChildrenBtn', "&&Move Out to Independent Sessions"),
-					run: () => 'relocate',
-				},
-				{
-					label: localize('adeEngDeleteChildrenBtn', "&&Delete Existing Subordinates"),
-					run: () => 'delete',
-				},
-			],
-			cancelButton: true,
-			custom: true,
+	if (URI.isUri(targetIdOrProject)) {
+		const projName = projects.getProjectName(targetIdOrProject);
+		const created = missions.createMission({
+			title: projName || missionAlias,
+			projectUri: targetIdOrProject.toString(),
+			mermaidText: '',
 		});
-		if (!promptRes.result) {
+		await missions.openMissionEditor(created.id);
+		return;
+	}
+
+	if (typeof targetIdOrProject === 'string' && targetIdOrProject.trim()) {
+		const id = targetIdOrProject.trim();
+		const existing = missions.getMission(id) ?? missions.getMissionByLinkedSession(id);
+		if (existing) {
+			await missions.openMissionEditor(existing.id);
 			return;
 		}
-		onChildren = promptRes.result;
+		const linkedAgent = projects.getAgent(id);
+		const created = missions.createMission({
+			id,
+			title: linkedAgent?.label ?? missionAlias,
+			linkedSessionId: linkedAgent?.id,
+			projectUri: linkedAgent?.projectUri.toString(),
+			mermaidText: '',
+		});
+		await missions.openMissionEditor(created.id);
+		return;
 	}
 
-	try {
-		await engineering.initTree({
-			governorSessionId: target.id,
-			treeType: requestedTreeType,
-			onChildren,
-		});
-		modes.setMode('ade');
-		await engineering.openEngineeringEditor(target.id);
-	} catch (err) {
-		notifications.error(err instanceof Error ? err.message : String(err));
-	}
+	const created = missions.createMission({
+		title: `${missionAlias} ${missions.listMissions().length + 1}`,
+		mermaidText: '',
+	});
+	await missions.openMissionEditor(created.id);
 }
 
 registerAction2(class ToggleAdeIdeModeAction extends Action2 {
@@ -1097,67 +1022,22 @@ registerAction2(class SwitchToIdeModeAction extends Action2 {
 	}
 });
 
-registerAction2(class TryInteractiveEngineeringDemoAction extends Action2 {
-	constructor() {
-		super({
-			id: 'aexus.ade.tryInteractiveDemo',
-			title: localize2('aexusTryInteractiveDemoTitle', "Aexus ADE: Try Interactive Engineering DAG Demo (0 Tokens)"),
-			icon: Codicon.playCircle,
-			f1: true,
-		});
-	}
-
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const projects = accessor.get(IAdeProjectsService);
-		const engineering = accessor.get(IAdeEngineeringService);
-		const modes = accessor.get(IWorkbenchModeService);
-		const notifications = accessor.get(INotificationService);
-		const workspace = accessor.get(IWorkspaceContextService);
-		const roleConfig = getRoleConfig(accessor);
-
-		modes.setMode('ade');
-		await engineering.whenReady();
-
-		let projectUri = projects.selectedProject?.uri ?? projects.projects[0]?.uri ?? workspace.getWorkspace().folders[0]?.uri;
-		if (!projectUri) {
-			projectUri = URI.file('/tmp/aexus-interactive-demo');
-			projects.registerProject(projectUri, 'aexus-interactive-demo');
-		}
-		const orchestratorRankId = resolveWorkTreeSlotRank(roleConfig, 'orchestrator').id;
-		const demoLabel = 'Interactive Demo · Feature Ship';
-		let demoGov = projects.agents.find(a => !a.parentId && a.label === demoLabel && a.projectUri.toString() === projectUri!.toString());
-		if (!demoGov) {
-			demoGov = projects.addSession(
-				projectUri,
-				{ engineId: 'aexus-claude', resource: URI.parse(`aexus-claude://aexus-demo/${Date.now()}`) },
-				demoLabel,
-				{ role: orchestratorRankId },
-			);
-		}
-		if (!engineering.hasTree(demoGov.id)) {
-			await engineering.initTree({ governorSessionId: demoGov.id, treeType: 'engineering' });
-		}
-		await engineering.openEngineeringEditor(demoGov.id);
-		if (engineering.startDemoSimulation) {
-			await engineering.startDemoSimulation(demoGov.id);
-			notifications.info(localize('aexusInteractiveDemoStarted', "Interactive Engineering DAG Demo running (0 API tokens spent). Click ✓ Approve on Gate U1 or right-click any pod to explore."));
-		}
-	}
-});
-
 registerAction2(class OpenAdeMissionAction extends Action2 {
 	constructor() {
 		super({
 			id: ADE_OPEN_MISSION_COMMAND_ID,
-			title: localize2('adeOpenMissionActionTitle', "Open ADE Mission..."),
+			title: localize2('adeOpenMissionActionTitle', "New / Open ADE Mission"),
 			icon: Codicon.typeHierarchySub,
 			f1: true,
+			menu: [
+				{ id: MenuId.ViewTitle, when: ContextKeyExpr.equals('view', ADE_PROJECTS_VIEW_ID), group: 'navigation', order: 2 },
+			],
 		});
 	}
 
-	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
 		accessor.get(IWorkbenchModeService).setMode('ade');
-		await openOrInitializeWorkTree(accessor, 'engineering', governorId);
+		await openOrCreateMissionCanvas(accessor, target);
 	}
 });
 
@@ -1171,9 +1051,9 @@ registerAction2(class OpenAdeEngineeringAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
 		accessor.get(IWorkbenchModeService).setMode('ade');
-		await openOrInitializeWorkTree(accessor, 'engineering', governorId);
+		await openOrCreateMissionCanvas(accessor, target);
 	}
 });
 
@@ -1187,9 +1067,9 @@ registerAction2(class OpenAdeResearchAction extends Action2 {
 		});
 	}
 
-	async run(accessor: ServicesAccessor, governorId?: string): Promise<void> {
+	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
 		accessor.get(IWorkbenchModeService).setMode('ade');
-		await openOrInitializeWorkTree(accessor, 'engineering', governorId);
+		await openOrCreateMissionCanvas(accessor, target);
 	}
 });
 
@@ -1688,19 +1568,9 @@ registerAction2(class RemoveAgentAction extends Action2 {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
 		const sessions = accessor.get(IAdeSessionsService);
-		const engineering = accessor.get(IAdeEngineeringService);
-		const notifications = accessor.get(INotificationService);
 		const agent = await pickAgent(accessor, id);
 		if (agent) {
-			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
-				notifications.info(localize('adeLockedByWorkTreeRemoveChild', "'{0}' is managed by an ADE Engineering DAG. Delete or edit its node on the Engineering canvas instead.", agent.label));
-				return;
-			}
 			const initialSubtree = projects.getSubtree(agent.id);
-			await engineering.whenReady().catch(() => undefined);
-			if (!agent.parentId && (engineering.hasTree(agent.id) || Boolean(agent.treeType))) {
-				await engineering.removeTree(agent.id).catch(() => undefined);
-			}
 			const subtree = collectMergedSubtree(projects, agent.id, initialSubtree);
 			for (const member of subtree) {
 				if (member.session) {
@@ -1732,18 +1602,11 @@ registerAction2(class DeleteAgentPermanentlyAction extends Action2 {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
 		const sessions = accessor.get(IAdeSessionsService);
-		const engineering = accessor.get(IAdeEngineeringService);
 		const dialogs = accessor.get(IDialogService);
-		const notifications = accessor.get(INotificationService);
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
 			return;
 		}
-		if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeDeleteChild', "'{0}' is managed by an ADE Engineering DAG. Delete or edit its node on the Engineering canvas instead.", agent.label));
-			return;
-		}
-		await engineering.whenReady().catch(() => undefined);
 		const initialSubtree = projects.getSubtree(agent.id);
 		if (!options?.force) {
 			const confirmation = await dialogs.confirm({
@@ -1757,9 +1620,6 @@ registerAction2(class DeleteAgentPermanentlyAction extends Action2 {
 			if (!confirmation.confirmed) {
 				return;
 			}
-		}
-		if (!agent.parentId && (engineering.hasTree(agent.id) || Boolean(agent.treeType))) {
-			await engineering.removeTree(agent.id).catch(() => undefined);
 		}
 		const subtree = collectMergedSubtree(projects, agent.id, initialSubtree);
 		for (const member of subtree) {
@@ -2007,73 +1867,13 @@ registerAction2(class ToggleAdeAutonomousModeAction extends Action2 {
 	}
 });
 
-registerAction2(class ManageAdeTrustedVerifyCommandsAction extends Action2 {
-	constructor() {
-		super({
-			id: ADE_MANAGE_TRUSTED_VERIFY_COMMAND_ID,
-			title: localize2('adeManageTrustedVerifyTitle', "Manage Trusted Verify Commands..."),
-			category: localize2('adeCategory', "Aexus ADE"),
-			icon: Codicon.shield,
-			f1: true,
-		});
-	}
-
-	async run(accessor: ServicesAccessor): Promise<void> {
-		const engineering = accessor.get(IAdeEngineeringService);
-		const quickInput = accessor.get(IQuickInputService);
-		const notifications = accessor.get(INotificationService);
-		await engineering.whenReady();
-		const entries = engineering.listTrustedVerifyCommands?.() ?? [];
-		if (entries.length === 0) {
-			notifications.info(localize('adeNoTrustedVerifyCommands', "No trusted blueprint verification commands are currently stored."));
-			return;
-		}
-		const items: Array<IQuickPickItem & { readonly revokeAll?: boolean; readonly entry?: { readonly projectPath: string; readonly hash: string; readonly commandPreview: string } }> = [
-			...entries.map(entry => {
-				const preview = entry.commandPreview || `(sha256:${entry.hash.slice(0, 12)})`;
-				return {
-					label: preview,
-					description: entry.projectPath,
-					detail: localize('adeTrustedVerifyHashDetail', "SHA-256: {0}… — select to revoke trust", entry.hash.slice(0, 16)),
-					iconClass: ThemeIcon.asClassName(Codicon.terminal),
-					entry: { projectPath: entry.projectPath, hash: entry.hash, commandPreview: preview },
-				};
-			}),
-			{
-				label: localize('adeRevokeAllTrustedVerifyLabel', "Revoke All Trusted Verify Commands ({0})", entries.length),
-				description: localize('adeRevokeAllTrustedVerifyDesc', "Clear all SHA-256 hash-pinned verify approvals across projects"),
-				iconClass: ThemeIcon.asClassName(Codicon.trash),
-				revokeAll: true,
-			},
-		];
-		const picked = await quickInput.pick(items, {
-			title: localize('adeManageTrustedVerifyPickerTitle', "Trusted Blueprint Verify Commands"),
-			placeHolder: localize('adeManageTrustedVerifyPickerPlaceholder', "Select a trusted verify command to revoke its SHA-256 approval"),
-			matchOnDescription: true,
-			matchOnDetail: true,
-		});
-		if (!picked) {
-			return;
-		}
-		if (picked.revokeAll) {
-			const count = engineering.revokeAllTrustedVerifyCommands?.() ?? 0;
-			notifications.info(localize('adeRevokedAllTrustedVerifyNotice', "Revoked {0} trusted verification command(s).", count));
-		} else if (picked.entry) {
-			const revoked = engineering.revokeTrustedVerifyCommand?.(picked.entry.projectPath, picked.entry.hash) ?? false;
-			if (revoked) {
-				notifications.info(localize('adeRevokedSingleTrustedVerifyNotice', "Revoked trusted verify command '{0}'.", picked.entry.commandPreview));
-			}
-		}
-	}
-});
-
-registerAction2(class ToggleAdePromptToDagBarAction extends Action2 {
+registerAction2(class ToggleAdeMissionFileAction extends Action2 {
 	constructor() {
 		super({
 			id: ADE_TOGGLE_PROMPT_TO_DAG_COMMAND_ID,
-			title: localize2('adeTogglePromptToDagBarTitle', "Toggle Prompt-to-DAG Bar"),
+			title: localize2('adeToggleMissionFileTitle', "Toggle Mission Mermaid File"),
 			category: localize2('adeCategory', "Aexus ADE"),
-			icon: Codicon.wand,
+			icon: Codicon.fileCode,
 			f1: true,
 			keybinding: {
 				primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyK,
@@ -2087,7 +1887,7 @@ registerAction2(class ToggleAdePromptToDagBarAction extends Action2 {
 		const editorService = accessor.get(IEditorService);
 		const pane = editorService.activeEditorPane;
 		if (pane instanceof AdeEngineeringEditorPane) {
-			pane.togglePromptToDagBar();
+			pane.toggleFileDrawer();
 		}
 	}
 });

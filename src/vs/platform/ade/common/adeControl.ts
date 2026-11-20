@@ -103,7 +103,7 @@ export interface IAdeSessionSummary {
 	readonly unread: boolean;
 	readonly archived: boolean;
 	readonly childrenIds: readonly string[];
-	readonly treeType?: 'engineering' | 'research';
+	readonly treeType?: 'engineering' | 'research' | 'mission';
 	readonly treeGovernorId?: string;
 	readonly treeSegmentId?: string;
 	readonly treeNodeId?: string;

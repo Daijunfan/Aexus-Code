@@ -26,6 +26,8 @@ const RANK_API_ACTIONS = new Set([
 	'rank.docs',
 	'rank.rename',
 	'rank.setCount',
+	'rank.setMissionName',
+	'mission.renameAlias',
 	'mission.docs',
 ]);
 
@@ -66,6 +68,7 @@ export async function executeAdeRankOrDocsAction(
 			return {
 				rankCount: dir.rankCount,
 				presetId: dir.presetId,
+				missionName: dir.missionName,
 				namesByTier: dir.namesByTier,
 				tierByAlias: dir.tierByAlias,
 			};
@@ -142,6 +145,22 @@ export async function executeAdeRankOrDocsAction(
 			}
 			const updated = await ctx.roleSchemaService.resizeRankCount(rawCount);
 			const docs = await resolveDocsPaths(ctx, true);
+			return buildLiveRankDirectory(updated, docs);
+		}
+
+		case 'rank.setMissionName':
+		case 'mission.renameAlias': {
+			if (!ctx.roleSchemaService?.renameMissionAlias) {
+				throw new Error('ADE Role Schema service is not available.');
+			}
+			const alias = typeof (params.name ?? params.alias ?? params.missionName) === 'string'
+				? String(params.name ?? params.alias ?? params.missionName).trim()
+				: '';
+			if (!alias) {
+				throw new Error('Mission display alias is required.');
+			}
+			const updated = await ctx.roleSchemaService.renameMissionAlias(alias);
+			const docs = await resolveDocsPaths(ctx, false);
 			return buildLiveRankDirectory(updated, docs);
 		}
 

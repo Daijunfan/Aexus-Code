@@ -875,8 +875,9 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		return root?.treeType ? root : undefined;
 	}
 
-	isLockedByWorkTree(id: string): boolean {
-		return Boolean(this.getWorkTreeGovernor(id));
+	isLockedByWorkTree(_id: string): boolean {
+		// Left sidebar session hierarchy is completely decoupled from Mission panels (never locked).
+		return false;
 	}
 
 	setAgentWorkTreeTag(governorId: string, treeType: AdeWorkTreeType | undefined): void {

@@ -156,7 +156,7 @@ import { ADE_ENGINEERING_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/
 import { AdeEngineeringBackendChannel } from '../../platform/ade/common/adeEngineeringIpc.js';
 import { AdeCloudHostNodeService } from '../../platform/ade/node/adeCloudHostService.js';
 import { AdeControlServer } from '../../platform/ade/node/adeControlServer.js';
-import { AdeEngineeringNodeService } from '../../platform/ade/node/adeEngineeringService.js';
+import { AdeDocsBackendNodeService } from '../../platform/ade/node/adeDocsBackendService.js';
 import { IWebContentExtractorService } from '../../platform/webContentExtractor/common/webContentExtractor.js';
 import { NativeWebContentExtractorService } from '../../platform/webContentExtractor/electron-main/webContentExtractorService.js';
 import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../platform/networkFilter/common/networkFilterService.js';
@@ -1623,8 +1623,8 @@ export class CodeApplication extends Disposable {
 		}, () => { /* logged in AdeControlServer */ });
 		this._register(this.lifecycleMainService.onWillShutdown(() => adeControlServer.dispose()));
 
-		const adeEngineeringNodeService = this._register(new AdeEngineeringNodeService());
-		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, new AdeEngineeringBackendChannel(adeEngineeringNodeService));
+		const adeDocsBackendService = this._register(new AdeDocsBackendNodeService());
+		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, new AdeEngineeringBackendChannel(adeDocsBackendService));
 
 		const isCustomTestDataDir = Boolean(this.environmentMainService.args['user-data-dir'] || this.environmentMainService.args.extensionTestsPath);
 		const adeCloudHostNodeService = this._register(new AdeCloudHostNodeService({
