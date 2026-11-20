@@ -300,8 +300,18 @@
 	background: rgba(128, 128, 128, 0.04);
 }
 
+.ade-cfg-rank-row.system-user {
+	background: rgba(245, 158, 11, 0.05);
+}
+
 .ade-cfg-rank-row.system-l0 {
 	background: rgba(128, 128, 128, 0.06);
+}
+
+.ade-cfg-tier-pill.tier-user {
+	background: rgba(245, 158, 11, 0.16);
+	border-color: rgba(245, 158, 11, 0.42);
+	color: #f59e0b;
 }
 
 .ade-cfg-tier-cell {

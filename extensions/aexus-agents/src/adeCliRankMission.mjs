@@ -33,7 +33,7 @@ export function parseRankGroupCommand(tail, json, windowId, usageError) {
 	if (sub === 'get' || sub === 'info') {
 		const target = args[0]?.trim();
 		if (!target) {
-			throw usageError('Usage: aexus-ade rank get <L0|L1..LN|rankId|alias>');
+			throw usageError('Usage: aexus-ade rank get <L-1|L0|L1..LN|rankId|alias>');
 		}
 		return { help: false, json, windowId, action: 'rank.get', params: { target } };
 	}
@@ -98,7 +98,7 @@ export function parseRankGroupCommand(tail, json, windowId, usageError) {
 		}
 		const count = Number.parseInt(rawCount, 10);
 		if (count < 1) {
-			throw usageError('Rank count must be at least 1 (L1 highest → LN lowest; L0 is Secretary).');
+			throw usageError('Rank count must be at least 1 (L-1 User → L0 Secretary → L1 highest → LN lowest).');
 		}
 		return {
 			help: false,

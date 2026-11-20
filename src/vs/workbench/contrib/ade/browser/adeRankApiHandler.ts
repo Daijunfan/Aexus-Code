@@ -79,7 +79,11 @@ export async function executeAdeRankOrDocsAction(
 			const docs = await resolveDocsPaths(ctx, false);
 			const dir = buildLiveRankDirectory(config, docs);
 			const tierNum = parseTierNumber(rawTarget as string | number | undefined);
-			if (tierNum === 0 || (typeof rawTarget === 'string' && rawTarget.trim().toLowerCase() === 'secretary')) {
+			const rawLower = typeof rawTarget === 'string' ? rawTarget.trim().toLowerCase() : '';
+			if (tierNum === -1 || rawLower === 'user' || rawLower === 'human') {
+				return dir.ranks.find(r => r.tier === -1);
+			}
+			if (tierNum === 0 || rawLower === 'secretary') {
 				return dir.ranks.find(r => r.tier === 0);
 			}
 			const matched = findRankByTierOrId(config, rawTarget as string | number | undefined);

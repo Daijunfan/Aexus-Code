@@ -49,7 +49,7 @@ import {
 	resolveEffectiveRankDefinition,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IAdeDocsPaths } from '../../../../platform/ade/common/adeDocsCatalog.js';
-import { ADE_SECRETARY_TIER_TAG, findRankByTierOrId, formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
+import { ADE_SECRETARY_TIER, ADE_SECRETARY_TIER_TAG, ADE_USER_TIER, findRankByTierOrId, formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
@@ -85,7 +85,7 @@ import {
 } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { executeAdeRankOrDocsAction, isAdeRankOrDocsAction } from './adeRankApiHandler.js';
-import { IAdeMissionService } from './adeMissionStore.js';
+import { canCallerOperateMission, IAdeMissionCaller, IAdeMissionRecord, IAdeMissionService } from './adeMissionStore.js';
 import { findProjectScmRepository, openScmResourceInAde } from './adeInspectorViews.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
@@ -722,16 +722,16 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			'- Live ADE Session Hierarchy:',
 			hierarchyBlock,
 			rankHeaderLine,
-			`  - Strict Rank Order: L0 (Secretary) > ${formatOrganizationLadder(roleConfig)}.`,
+			`  - Strict Rank Order: L-1 (User) > L0 (Secretary) > ${formatOrganizationLadder(roleConfig)}.`,
 			...rankLines,
 			'- Complete ADE Macro Control CLI (`aexus-ade` is directly on your PATH; pass `--json` for structured output):',
 			'  - Viewport & Inspector: `aexus-ade status --json` | `aexus-ade view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh] --json`',
-			'  - Live Ranks, Hot-Updated Aliases & Single-Copy Docs: `aexus-ade rank names --json` | `aexus-ade rank list --json` | `aexus-ade rank get <L0|L1..LN|id> --json` | `aexus-ade rank docs [L0|L1..LN|mission] --json` | `aexus-ade rank rename <L1..LN> "<alias>" [--short <tag>]` | `aexus-ade rank set-count <N>`',
+			'  - Live Ranks, Hot-Updated Aliases & Single-Copy Docs: `aexus-ade rank names --json` | `aexus-ade rank list --json` | `aexus-ade rank get <L-1|L0|L1..LN|id> --json` | `aexus-ade rank docs [L0|L1..LN|mission] --json` | `aexus-ade rank rename <L1..LN> "<alias>" [--short <tag>]` | `aexus-ade rank set-count <N>`',
 			'  - Organization, Custom Ranks & Primitive APIs: `aexus-ade role list --json` | `aexus-ade role apis --json` | `aexus-ade role presets --json` | `aexus-ade role apply-preset <presetId>` | `aexus-ade role set-tier <rankId> ...` | `aexus-ade role reset` | `aexus-ade role studio`',
 			'  - Projects & Git/Files Inspector: `aexus-ade project list` | `aexus-ade project add <path...> [--name <label>]` | `aexus-ade project select <target>` | `aexus-ade project remove <target>` | `aexus-ade project delete <target> [--sessions] [--files] [--permanent]` | `aexus-ade project focus <target>` | `aexus-ade project home` | `aexus-ade project forward` | `aexus-ade project move <source> (--before <target> | --after <target>)` | `aexus-ade project changes [target]` | `aexus-ade project files [target] [--path <subpath>] [--depth <n>]` | `aexus-ade project open-file <file> [--project <target>] [--side]` | `aexus-ade project open-diff <file> [--project <target>]`',
 			'  - Coding Agent Engines (claude, codex, kilo, opencode, dsh, agy, cline, pi): `aexus-ade engine list` | `aexus-ade engine sessions <engine> [--project <target>] [--limit <n>]`',
 			'  - Sessions & Ranks: `aexus-ade session list [--project <p>] [--parent <id|root>] [--role <r>] [--engine <e>] [--status <s>] [--unread] [--archived] [--all]` | `aexus-ade session info <id>` | `aexus-ade session subordinates [id] [--recursive]` | `aexus-ade session tree [id]` | `aexus-ade session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <r>] [--draft [text]] [--side] [--no-open]` | `aexus-ade session attach --engine <e> --native-id <nid> [--project <p>] [--title <t>] [--parent <id>] [--role <r>] [--side] [--no-open]` | `aexus-ade session connect <id> --engine <e> [--native-id <nid>] [--side] [--no-open]` | `aexus-ade session open <id> [--side]` | `aexus-ade session select <id>` | `aexus-ade session close <id>` | `aexus-ade session mark-read <id|--all>` | `aexus-ade session draft <id> [text|--clear]` | `aexus-ade session rename <id> <title>` | `aexus-ade session role <id> <L1..LN|rankId|worker|none>` | `aexus-ade session move <id> <parentId|none> [--project <p>]` | `aexus-ade session reorder <id> (--before <targetId> | --after <targetId>)` | `aexus-ade session send <id> <prompt> [--wait]` | `aexus-ade session history <id> [--limit <n>]` | `aexus-ade session stop <id>` | `aexus-ade session archive <id>` | `aexus-ade session unarchive <id>` | `aexus-ade session detach <id>` | `aexus-ade session delete <id> [--force]`',
-			'  - Mission Orchestration (read sibling `MISSION_API.md` on demand via `aexus-ade mission docs --json`; legacy alias: `aexus-ade engineering ...`): `aexus-ade mission init --governor <id> [--on-children <relocate|delete> --target <id>] [--open]` | `aexus-ade mission list [--project <path>]` | `aexus-ade mission open --governor <id> [--side]` | `aexus-ade engineering generate --governor <id> --prompt "<goal>" [--engine <e>] [--budget <usd>]` | `aexus-ade engineering template list` | `aexus-ade mission blueprint get|validate|apply ...` | `aexus-ade mission configure ...` | `aexus-ade mission run|pause|resume|stop|reset|remove --governor <id>` | `aexus-ade mission status|diff|reports|review|gate|watchdog-action --governor <id> ...`',
+			'  - Mission Orchestration (read sibling `MISSION_API.md` on demand via `aexus-ade mission docs --json`; owner-only per Mission): `aexus-ade mission init [--open]` | `aexus-ade mission list` | `aexus-ade mission open --governor <id> [--side]` | `aexus-ade mission blueprint get|validate|apply --governor <id> ...` | `aexus-ade mission remove --governor <id>`',
 			'  - ADE Inbox: `aexus-ade inbox list [--unread-only] [--governor <id>]` | `aexus-ade inbox post --from <governorId> --message <text>` | `aexus-ade inbox mark-read (<id>|--all)` | `aexus-ade inbox resolve --id <msgId>`',
 			'  - Secretary Self-Management: `aexus-ade secretary [status | open [--side] | engine <e> | reset [--engine <e>] | send <prompt> [--wait] | history [--limit <n>] | stop | draft [text|--clear] | mark-read]`',
 		].join('\n');
@@ -974,20 +974,78 @@ export async function executeAdeControlRequest(
 	const roleSchemaService = tryGetService(accessor, IAdeRoleSchemaService);
 	const roleConfig = roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
 
-	// Fixed Aexus-Code Kernel Primitive API Authorization Gate:
-	// User-customizable rank schemas control WHO may call WHICH fixed core primitive API.
-	const permission = checkAdeApiPermission(roleConfig, params.caller, action);
-	if (!permission.allowed) {
-		throw new Error(permission.reason ?? localize('adeApiPermissionDenied', "Permission denied for action '{0}'.", String(action)));
-	}
+	const dispatchAction = action.startsWith('mission.')
+		? `engineering.${action.slice('mission.'.length)}`
+		: action;
 
 	const rawCallerStr = typeof params.caller === 'string' ? params.caller.trim().toLowerCase() : '';
-	const isHumanOrSecretary = params.caller === undefined || params.caller === null
-		|| (typeof params.caller === 'string' && (!rawCallerStr || rawCallerStr === 'user' || rawCallerStr === 'human' || rawCallerStr === 'secretary'));
+	const isVerifiedSessionCaller = params._verifiedCaller === true;
 	const rawCallerSessionId = typeof params._callerSessionId === 'string' && params._callerSessionId.trim()
 		? params._callerSessionId.trim()
 		: undefined;
-	const isVerifiedSessionCaller = params._verifiedCaller === true;
+	const isSecretaryCaller = (rawCallerStr === 'secretary' || rawCallerStr === 'l0')
+		&& (!isVerifiedSessionCaller || rawCallerSessionId === ADE_SECRETARY_ID);
+	const isHumanUser = !isVerifiedSessionCaller && !isSecretaryCaller && (
+		params.caller === undefined || params.caller === null || !rawCallerStr || rawCallerStr === 'user' || rawCallerStr === 'human' || rawCallerStr === 'l-1'
+	);
+	const isHumanOrSecretary = isHumanUser || isSecretaryCaller;
+
+	const MISSION_OWNER_SCOPED_ACTIONS = new Set([
+		'engineering.init',
+		'engineering.create',
+		'engineering.open',
+		'engineering.get',
+		'engineering.blueprint.get',
+		'engineering.setMermaid',
+		'engineering.blueprint.apply',
+		'engineering.remove',
+		'engineering.delete',
+	]);
+
+	// Any session (at any rank L1..LN) that creates or owns a Mission is exclusively authorized
+	// to operate THAT Mission's orchestration — independent of L1-only legacy engineering permissions.
+	let isSelfOwnedMissionAction = false;
+	if (!isHumanUser && MISSION_OWNER_SCOPED_ACTIONS.has(dispatchAction)) {
+		const rawTarget = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? params.sessionId ?? '').trim();
+		const targetMission = rawTarget
+			? (missionService?.getMission(rawTarget) ?? missionService?.getMissionByLinkedSession(rawTarget))
+			: (rawCallerSessionId ? missionService?.getMissionByLinkedSession(rawCallerSessionId) : (isSecretaryCaller ? missionService?.getMissionByLinkedSession(ADE_SECRETARY_ID) : undefined));
+		const preliminaryCaller: IAdeMissionCaller = {
+			isHumanUser,
+			isSecretary: isSecretaryCaller,
+			callerSessionId: rawCallerSessionId,
+		};
+		if (targetMission && !canCallerOperateMission(targetMission, preliminaryCaller)) {
+			const ownerTierTag = formatTierTag(targetMission.ownerTier);
+			const ownerLabel = targetMission.ownerSessionId === ADE_SECRETARY_ID
+				? 'Secretary'
+				: (targetMission.ownerSessionId ? (projects.getAgent(targetMission.ownerSessionId)?.label ?? targetMission.ownerSessionId) : 'User');
+			throw new Error(localize(
+				'adeMissionOwnerOnlyDeniedEarly',
+				"Permission denied: Mission '{0}' is owned by '{1}' ({2}). Only that owner session or User (L-1) can operate this Mission's orchestration.",
+				targetMission.title,
+				ownerLabel,
+				ownerTierTag,
+			));
+		}
+		if (!isHumanOrSecretary && rawCallerSessionId) {
+			const callerCandidate = projects.getAgent(rawCallerSessionId);
+			if (callerCandidate && !projects.isArchived(callerCandidate.id) && !projects.isLockedByWorkTree?.(callerCandidate.id)) {
+				if (dispatchAction === 'engineering.init' || dispatchAction === 'engineering.create') {
+					isSelfOwnedMissionAction = !rawTarget || rawTarget === callerCandidate.id;
+				} else {
+					isSelfOwnedMissionAction = Boolean(targetMission && targetMission.ownerSessionId === callerCandidate.id);
+				}
+			}
+		}
+	}
+
+	// Fixed Aexus-Code Kernel Primitive API Authorization Gate:
+	// User-customizable rank schemas control WHO may call WHICH fixed core primitive API.
+	const permission = checkAdeApiPermission(roleConfig, params.caller, action);
+	if (!permission.allowed && !isSelfOwnedMissionAction) {
+		throw new Error(permission.reason ?? localize('adeApiPermissionDenied', "Permission denied for action '{0}'.", String(action)));
+	}
 
 	let callerAgent: IAdeAgent | undefined;
 	let callerHasSubs = false;
@@ -1004,18 +1062,43 @@ export async function executeAdeControlRequest(
 		callerHasSubs = projects.hasSubordinates(foundCaller.id);
 		const liveRank = resolveAdeAgentRank(foundCaller, callerHasSubs, roleConfig);
 		const liveRankDef = resolveEffectiveRankDefinition(roleConfig, foundCaller.role, callerHasSubs);
-		if (liveRankDef.pureExecution || isPureExecutionRank(roleConfig, liveRank)) {
-			throw new Error(localize('adeCallerDemotedToPure', "Permission denied: caller session rank '{0}' is pure execution and cannot invoke ADE control APIs.", liveRankDef.name));
-		}
-		if (liveRank.toLowerCase() !== rawCallerStr) {
-			const livePerm = checkAdeApiPermission(roleConfig, liveRank, action);
-			if (!livePerm.allowed) {
-				throw new Error(livePerm.reason ?? localize('adeApiPermissionDeniedLive', "Permission denied: live rank '{0}' is not authorized for action '{1}'.", liveRankDef.name, String(action)));
+		if (!isSelfOwnedMissionAction) {
+			if (liveRankDef.pureExecution || isPureExecutionRank(roleConfig, liveRank)) {
+				throw new Error(localize('adeCallerDemotedToPure', "Permission denied: caller session rank '{0}' is pure execution and cannot invoke ADE control APIs.", liveRankDef.name));
+			}
+			if (liveRank.toLowerCase() !== rawCallerStr) {
+				const livePerm = checkAdeApiPermission(roleConfig, liveRank, action);
+				if (!livePerm.allowed) {
+					throw new Error(livePerm.reason ?? localize('adeApiPermissionDeniedLive', "Permission denied: live rank '{0}' is not authorized for action '{1}'.", liveRankDef.name, String(action)));
+				}
 			}
 		}
 		const tokenRankDef = resolveEffectiveRankDefinition(roleConfig, permission.rankId ?? rawCallerStr, false);
 		effectiveCallerRank = liveRankDef.tier >= tokenRankDef.tier ? liveRankDef.id : tokenRankDef.id;
 	}
+
+	const missionCaller: IAdeMissionCaller = {
+		isHumanUser,
+		isSecretary: isSecretaryCaller,
+		callerSessionId: callerAgent?.id ?? rawCallerSessionId,
+	};
+
+	const assertCanOperateMission = (mission: IAdeMissionRecord): void => {
+		if (canCallerOperateMission(mission, missionCaller)) {
+			return;
+		}
+		const ownerTierTag = formatTierTag(mission.ownerTier);
+		const ownerLabel = mission.ownerSessionId === ADE_SECRETARY_ID
+			? 'Secretary'
+			: (mission.ownerSessionId ? (projects.getAgent(mission.ownerSessionId)?.label ?? mission.ownerSessionId) : 'User');
+		throw new Error(localize(
+			'adeMissionOwnerOnlyDenied',
+			"Permission denied: Mission '{0}' is owned by '{1}' ({2}). Only that owner session or User (L-1) can operate this Mission's orchestration.",
+			mission.title,
+			ownerLabel,
+			ownerTierTag,
+		));
+	};
 
 	const topRankDef = getTopRankDefinition(roleConfig);
 	const effectiveCallerDef = !isHumanOrSecretary
@@ -1133,10 +1216,6 @@ export async function executeAdeControlRequest(
 	if (isAdeRankOrDocsAction(action)) {
 		return executeAdeRankOrDocsAction(action, params, { roleSchemaService, roleConfig });
 	}
-
-	const dispatchAction = action.startsWith('mission.')
-		? `engineering.${action.slice('mission.'.length)}`
-		: action;
 
 	switch (dispatchAction) {
 		case 'status':
@@ -1272,6 +1351,15 @@ export async function executeAdeControlRequest(
 				throw new Error(localize('adeProjectNotFound', "Project not found: {0}", String(rawTarget ?? '')));
 			}
 			const projectAgents = projects.agents.filter(agent => uriIdentity.extUri.isEqual(agent.projectUri, targetUri));
+			if (missionService) {
+				for (const m of missionService.listMissions()) {
+					const matchesProject = m.projectUri ? uriIdentity.extUri.isEqual(URI.parse(m.projectUri), targetUri) : false;
+					const ownedByProjectAgent = Boolean(m.ownerSessionId && projectAgents.some(a => a.id === m.ownerSessionId));
+					if (matchesProject || ownedByProjectAgent) {
+						await missionService.removeMissionWithEmployees(m.id);
+					}
+				}
+			}
 			await editors.closeAgents(projectAgents);
 			if (navigation.focusedProject && uriIdentity.extUri.isEqual(navigation.focusedProject.uri, targetUri)) {
 				navigation.goHome();
@@ -1296,6 +1384,15 @@ export async function executeAdeControlRequest(
 				throw new Error(localize('adeDeleteProjectNothingSelected', "Specify deleteSessions and/or deleteFiles when deleting a project."));
 			}
 			const projectAgents = projects.agents.filter(agent => uriIdentity.extUri.isEqual(agent.projectUri, targetUri));
+			if (missionService) {
+				for (const m of missionService.listMissions()) {
+					const matchesProject = m.projectUri ? uriIdentity.extUri.isEqual(URI.parse(m.projectUri), targetUri) : false;
+					const ownedByProjectAgent = Boolean(m.ownerSessionId && projectAgents.some(a => a.id === m.ownerSessionId));
+					if (matchesProject || ownedByProjectAgent) {
+						await missionService.removeMissionWithEmployees(m.id, { deleteEngineHistory: deleteSessions });
+					}
+				}
+			}
 			if (deleteSessions) {
 				for (const member of projectAgents) {
 					if (member.session) {
@@ -2091,6 +2188,9 @@ export async function executeAdeControlRequest(
 
 		case 'session.archive': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (projects.isLockedByWorkTree?.(agent.id)) {
+				throw new Error(localize('adeLockedByMissionArchive', "Session '{0}' is locked by a Mission and cannot be archived individually. Remove the entire Mission and all its employees together instead.", agent.label));
+			}
 			const root = projects.getRootAgent(agent.id) ?? agent;
 			assertCanManageTarget(agent, 'archive');
 			if (root.id !== agent.id) {
@@ -2112,9 +2212,27 @@ export async function executeAdeControlRequest(
 		case 'session.remove':
 		case 'session.detach': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (projects.isLockedByWorkTree?.(agent.id)) {
+				throw new Error(localize('adeLockedByMissionDetach', "Session '{0}' is locked by a Mission and cannot be removed individually. Remove the entire Mission and all its employees together instead.", agent.label));
+			}
 			assertCanManageTarget(agent, 'detach');
 			assertCanDestroyTreeIfPresent(agent);
 			const initialSubtree = projects.getSubtree(agent.id);
+			if (missionService) {
+				const ownedMissions = new Map<string, IAdeMissionRecord>();
+				for (const member of initialSubtree) {
+					const m = missionService.getMissionByLinkedSession(member.id);
+					if (m) {
+						ownedMissions.set(m.id, m);
+					}
+				}
+				for (const m of ownedMissions.values()) {
+					assertCanOperateMission(m);
+				}
+				for (const m of ownedMissions.values()) {
+					await missionService.removeMissionWithEmployees(m.id);
+				}
+			}
 			const mergedMap = new Map<string, IAdeAgent>(initialSubtree.map(item => [item.id, item]));
 			for (const item of projects.getSubtree(agent.id)) {
 				mergedMap.set(item.id, item);
@@ -2137,9 +2255,27 @@ export async function executeAdeControlRequest(
 
 		case 'session.delete': {
 			const agent = resolveAgentFromParams(projects, params);
+			if (projects.isLockedByWorkTree?.(agent.id)) {
+				throw new Error(localize('adeLockedByMissionDelete', "Session '{0}' is locked by a Mission and cannot be deleted individually. Remove the entire Mission and all its employees together instead.", agent.label));
+			}
 			assertCanManageTarget(agent, 'delete');
 			assertCanDestroyTreeIfPresent(agent);
 			const initialSubtree = projects.getSubtree(agent.id);
+			if (missionService) {
+				const ownedMissions = new Map<string, IAdeMissionRecord>();
+				for (const member of initialSubtree) {
+					const m = missionService.getMissionByLinkedSession(member.id);
+					if (m) {
+						ownedMissions.set(m.id, m);
+					}
+				}
+				for (const m of ownedMissions.values()) {
+					assertCanOperateMission(m);
+				}
+				for (const m of ownedMissions.values()) {
+					await missionService.removeMissionWithEmployees(m.id, { deleteEngineHistory: true });
+				}
+			}
 			const mergedMap = new Map<string, IAdeAgent>(initialSubtree.map(item => [item.id, item]));
 			for (const item of projects.getSubtree(agent.id)) {
 				mergedMap.set(item.id, item);
@@ -2300,42 +2436,115 @@ export async function executeAdeControlRequest(
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawLinked = params.governor ?? params.governorSessionId ?? params.sessionId;
-			const linkedAgent = typeof rawLinked === 'string' && rawLinked.trim()
-				? resolveAgentFromParams(projects, { id: rawLinked })
-				: undefined;
+			const rawOwner = params.owner ?? params.ownerSessionId ?? params.governor ?? params.governorSessionId ?? params.sessionId;
+			const rawOwnerStr = typeof rawOwner === 'string' ? rawOwner.trim() : '';
+			const rawOwnerLower = rawOwnerStr.toLowerCase();
+			let ownerSessionId: string | undefined;
+			let ownerTier: number = ADE_USER_TIER;
+			let ownerRankId: string = 'user';
+			let linkedAgent: IAdeAgent | undefined;
+
+			if (isHumanUser) {
+				if (rawOwnerStr && (rawOwnerLower === 'secretary' || rawOwnerLower === 'l0' || rawOwnerStr === ADE_SECRETARY_ID)) {
+					ownerSessionId = ADE_SECRETARY_ID;
+					ownerTier = ADE_SECRETARY_TIER;
+					ownerRankId = 'secretary';
+				} else if (rawOwnerStr) {
+					linkedAgent = resolveAgentFromParams(projects, { id: rawOwnerStr });
+					if (projects.isLockedByWorkTree?.(linkedAgent.id)) {
+						throw new Error(localize('adeMissionCreateOnLockedDenied', "Session '{0}' is a locked Mission-generated employee and cannot host another Mission.", linkedAgent.label));
+					}
+					const ownerRankDef = resolveEffectiveRankDefinition(roleConfig, linkedAgent.role, projects.hasSubordinates(linkedAgent.id));
+					ownerSessionId = linkedAgent.id;
+					ownerTier = ownerRankDef.tier;
+					ownerRankId = ownerRankDef.id;
+				}
+			} else if (isSecretaryCaller) {
+				if (rawOwnerStr && rawOwnerLower !== 'secretary' && rawOwnerLower !== 'l0' && rawOwnerStr !== ADE_SECRETARY_ID) {
+					throw new Error(localize(
+						'adeMissionForeignInitDenied',
+						"Permission denied: Secretary (L0) can only create and operate its own L0 Mission; only session '{0}' or User (L-1) may create a Mission on that session.",
+						rawOwnerStr,
+					));
+				}
+				ownerSessionId = ADE_SECRETARY_ID;
+				ownerTier = ADE_SECRETARY_TIER;
+				ownerRankId = 'secretary';
+			} else if (callerAgent) {
+				if (projects.isLockedByWorkTree?.(callerAgent.id)) {
+					throw new Error(localize('adeMissionCreateOnLockedDenied', "Session '{0}' is a locked Mission-generated employee and cannot host another Mission.", callerAgent.label));
+				}
+				if (rawOwnerStr && rawOwnerStr !== callerAgent.id) {
+					const targetAgent = resolveAgentFromParams(projects, { id: rawOwnerStr });
+					if (targetAgent.id !== callerAgent.id) {
+						throw new Error(localize(
+							'adeMissionForeignAgentInitDenied',
+							"Permission denied: session '{0}' can only create and operate a Mission on itself, not on '{1}'.",
+							callerAgent.label,
+							targetAgent.label,
+						));
+					}
+				}
+				linkedAgent = callerAgent;
+				const ownerRankDef = resolveEffectiveRankDefinition(roleConfig, callerAgent.role, projects.hasSubordinates(callerAgent.id));
+				ownerSessionId = callerAgent.id;
+				ownerTier = ownerRankDef.tier;
+				ownerRankId = ownerRankDef.id;
+			} else {
+				throw new Error(localize('adeMissionCallerRequired', "Permission denied: a verified owner session or User (L-1) identity is required to create a Mission."));
+			}
+
 			const title = typeof params.title === 'string' && params.title.trim()
 				? params.title.trim()
-				: linkedAgent?.label;
+				: (linkedAgent?.label ?? (ownerSessionId === ADE_SECRETARY_ID ? 'Secretary' : undefined));
 			const mermaidText = typeof (params.mermaid ?? params.mermaidText ?? params.text) === 'string'
 				? String(params.mermaid ?? params.mermaidText ?? params.text)
 				: '';
-			const record = linkedAgent
-				? (missionService.getMission(linkedAgent.id) ?? missionService.createMission({
-					id: linkedAgent.id,
-					title,
-					mermaidText,
-					linkedSessionId: linkedAgent.id,
-					projectUri: linkedAgent.projectUri.toString(),
-				}))
-				: missionService.createMission({
-					id: typeof params.id === 'string' && params.id.trim() ? params.id.trim() : undefined,
-					title,
-					mermaidText,
-				});
+			if (mermaidText) {
+				const validated = parseMissionMermaidDag(mermaidText);
+				if (validated.error) {
+					throw new Error(validated.error);
+				}
+			}
+
+			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
+			const resolvedProjectUri = linkedAgent?.projectUri
+				?? (rawProject ? (findMatchingProject(projects, uriIdentity, rawProject)?.uri ?? toUri(rawProject)) : undefined)
+				?? (ownerSessionId === ADE_SECRETARY_ID ? (navigation.focusedProject?.uri ?? projects.selectedProject?.uri ?? projects.projects[0]?.uri) : undefined);
+
+			const existing = ownerSessionId ? missionService.getMissionByLinkedSession(ownerSessionId) : undefined;
+			if (existing) {
+				assertCanOperateMission(existing);
+			}
+			const record = existing ?? missionService.createMission({
+				id: ownerSessionId ?? (typeof params.id === 'string' && params.id.trim() ? params.id.trim() : undefined),
+				title,
+				mermaidText,
+				ownerSessionId,
+				ownerTier,
+				ownerRankId,
+				linkedSessionId: ownerSessionId,
+				projectUri: resolvedProjectUri?.toString(),
+			});
 			if (mermaidText && record.mermaidText !== mermaidText) {
 				missionService.updateMermaid(record.id, mermaidText);
 			}
 			if (params.open === true) {
 				await missionService.openMissionEditor(record.id, { side: Boolean(params.side) });
 			}
-			const parsed = parseMissionMermaidDag(missionService.getMission(record.id)?.mermaidText ?? '');
+			const latest = missionService.getMission(record.id) ?? record;
+			const parsed = parseMissionMermaidDag(latest.mermaidText);
 			return {
-				id: record.id,
-				title: record.title,
+				id: latest.id,
+				title: latest.title,
+				ownerSessionId: latest.ownerSessionId,
+				ownerTier: latest.ownerTier,
+				ownerTierTag: formatTierTag(latest.ownerTier),
+				ownerRankId: latest.ownerRankId,
 				missionName: getMissionDisplayName(roleConfig),
 				nodeCount: parsed.nodes.length,
 				edgeCount: parsed.edges.length,
+				generatedEmployeeCount: missionService.getGeneratedEmployees(latest.id).length,
 			};
 		}
 
@@ -2348,9 +2557,15 @@ export async function executeAdeControlRequest(
 				return {
 					id: m.id,
 					title: m.title,
+					ownerSessionId: m.ownerSessionId,
+					ownerTier: m.ownerTier,
+					ownerTierTag: formatTierTag(m.ownerTier),
+					ownerRankId: m.ownerRankId,
 					linkedSessionId: m.linkedSessionId,
+					canOperate: canCallerOperateMission(m, missionCaller),
 					nodeCount: parsed.nodes.length,
 					edgeCount: parsed.edges.length,
+					generatedEmployeeCount: missionService.getGeneratedEmployees(m.id).length,
 					updatedAt: m.updatedAt,
 				};
 			});
@@ -2360,13 +2575,22 @@ export async function executeAdeControlRequest(
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.governor ?? params.governorSessionId ?? '').trim();
+			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
 			if (!rawId) {
 				throw new Error('Mission ID is required.');
 			}
+			const existing = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
+			if (existing) {
+				assertCanOperateMission(existing);
+				await missionService.openMissionEditor(existing.id, { side: Boolean(params.side) });
+				return { opened: existing.id, title: existing.title, ownerSessionId: existing.ownerSessionId, ownerTierTag: formatTierTag(existing.ownerTier) };
+			}
+			if (!isHumanUser) {
+				throw new Error(`Mission not found: ${rawId}`);
+			}
 			const rec = missionService.ensureMission(rawId);
 			await missionService.openMissionEditor(rec.id, { side: Boolean(params.side) });
-			return { opened: rec.id, title: rec.title };
+			return { opened: rec.id, title: rec.title, ownerSessionId: rec.ownerSessionId, ownerTierTag: formatTierTag(rec.ownerTier) };
 		}
 
 		case 'engineering.blueprint.get':
@@ -2374,12 +2598,25 @@ export async function executeAdeControlRequest(
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.governor ?? params.governorSessionId ?? '').trim();
-			const rec = missionService.getMission(rawId);
+			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
+			const rec = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
 			if (!rec) {
 				throw new Error(`Mission not found: ${rawId}`);
 			}
-			return params.raw === true ? rec.mermaidText : { id: rec.id, title: rec.title, mermaidText: rec.mermaidText, parsed: parseMissionMermaidDag(rec.mermaidText) };
+			assertCanOperateMission(rec);
+			return params.raw === true
+				? rec.mermaidText
+				: {
+					id: rec.id,
+					title: rec.title,
+					ownerSessionId: rec.ownerSessionId,
+					ownerTier: rec.ownerTier,
+					ownerTierTag: formatTierTag(rec.ownerTier),
+					ownerRankId: rec.ownerRankId,
+					mermaidText: rec.mermaidText,
+					parsed: parseMissionMermaidDag(rec.mermaidText),
+					generatedEmployeeIds: missionService.getGeneratedEmployees(rec.id).map(a => a.id),
+				};
 		}
 
 		case 'engineering.blueprint.validate': {
@@ -2396,8 +2633,15 @@ export async function executeAdeControlRequest(
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.governor ?? params.governorSessionId ?? '').trim();
-			const rec = missionService.ensureMission(rawId);
+			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
+			const existing = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
+			if (!existing) {
+				if (!isHumanUser) {
+					throw new Error(`Mission not found: ${rawId}`);
+				}
+			} else {
+				assertCanOperateMission(existing);
+			}
 			const text = typeof (params.text ?? params.mermaid ?? params.mermaidText) === 'string'
 				? String(params.text ?? params.mermaid ?? params.mermaidText)
 				: '';
@@ -2405,8 +2649,16 @@ export async function executeAdeControlRequest(
 			if (parsed.error) {
 				throw new Error(parsed.error);
 			}
+			const rec = existing ?? missionService.ensureMission(rawId);
 			missionService.updateMermaid(rec.id, text);
-			return { id: rec.id, nodeCount: parsed.nodes.length, edgeCount: parsed.edges.length };
+			return {
+				id: rec.id,
+				ownerSessionId: rec.ownerSessionId,
+				ownerTierTag: formatTierTag(rec.ownerTier),
+				nodeCount: parsed.nodes.length,
+				edgeCount: parsed.edges.length,
+				generatedEmployeeIds: missionService.getGeneratedEmployees(rec.id).map(a => a.id),
+			};
 		}
 
 		case 'engineering.remove':
@@ -2414,8 +2666,13 @@ export async function executeAdeControlRequest(
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.governor ?? params.governorSessionId ?? '').trim();
-			return { deleted: missionService.deleteMission(rawId), id: rawId };
+			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
+			const existing = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
+			if (!existing) {
+				return { deleted: false, id: rawId, removedEmployeeIds: [] };
+			}
+			assertCanOperateMission(existing);
+			return await missionService.removeMissionWithEmployees(existing.id, { deleteEngineHistory: params.deleteEngineHistory === true });
 		}
 
 		case 'inbox.list': {

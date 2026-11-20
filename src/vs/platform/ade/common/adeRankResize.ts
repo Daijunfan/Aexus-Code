@@ -18,6 +18,9 @@ import {
 } from './adeRoleSchema.js';
 import type { IAdeDocsPaths } from './adeDocsCatalog.js';
 
+export const ADE_USER_TIER = -1;
+export const ADE_USER_TIER_TAG = 'L-1';
+export const ADE_USER_ALIAS = 'User';
 export const ADE_SECRETARY_TIER = 0;
 export const ADE_SECRETARY_TIER_TAG = 'L0';
 export const ADE_SECRETARY_ALIAS = 'Secretary';
@@ -37,6 +40,7 @@ export interface IAdeLiveRankEntry {
 	readonly canHaveSubordinates: boolean;
 	readonly allowedApis: readonly AdePrimitiveApiId[];
 	readonly docPath: string;
+	readonly isSystemUser?: boolean;
 	readonly isSystemL0?: boolean;
 }
 
@@ -59,24 +63,24 @@ const DEFAULT_FALLBACK_NAMES: readonly { readonly id: string; readonly name: str
 ];
 
 export function formatTierTag(tier: number): string {
-	const n = Math.max(0, Math.floor(tier));
+	const n = Math.max(ADE_USER_TIER, Math.floor(tier));
 	return `L${n}`;
 }
 
 export function parseTierNumber(raw: string | number | undefined): number | undefined {
-	if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && Number.isInteger(raw)) {
+	if (typeof raw === 'number' && Number.isFinite(raw) && raw >= ADE_USER_TIER && Number.isInteger(raw)) {
 		return raw;
 	}
 	if (typeof raw !== 'string') {
 		return undefined;
 	}
 	const trimmed = raw.trim();
-	const m = /^l?(\d+)$/i.exec(trimmed);
+	const m = /^l?(-?\d+)$/i.exec(trimmed);
 	if (!m) {
 		return undefined;
 	}
 	const parsed = Number.parseInt(m[1], 10);
-	return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+	return Number.isFinite(parsed) && parsed >= ADE_USER_TIER ? parsed : undefined;
 }
 
 /**
@@ -272,19 +276,35 @@ export function renameOrganizationRankAlias(
 }
 
 /**
- * Builds the live, hot-updated rank directory including L0 (Secretary) and L1..LN.
+ * Builds the live, hot-updated rank directory including L-1 (User), L0 (Secretary), and L1..LN.
  */
 export function buildLiveRankDirectory(
 	config: IAdeOrganizationConfig,
 	docsPaths?: IAdeDocsPaths,
 ): IAdeLiveRankDirectory {
+	const userEntry: IAdeLiveRankEntry = {
+		tier: ADE_USER_TIER,
+		tierTag: ADE_USER_TIER_TAG,
+		id: 'user',
+		alias: ADE_USER_ALIAS,
+		shortName: 'Usr',
+		summary: 'Human operator (L-1), sovereign top authority above Secretary (L0) and all configured agent tiers.',
+		color: 'amber',
+		icon: 'organization',
+		pureExecution: false,
+		canHaveSubordinates: true,
+		allowedApis: ADE_PRIMITIVE_APIS.map(api => api.id),
+		docPath: '',
+		isSystemUser: true,
+	};
+
 	const l0Entry: IAdeLiveRankEntry = {
 		tier: ADE_SECRETARY_TIER,
 		tierTag: ADE_SECRETARY_TIER_TAG,
 		id: 'secretary',
 		alias: ADE_SECRETARY_ALIAS,
 		shortName: 'Sec',
-		summary: 'Global sovereign ADE assistant (L0) with full macro-control over projects, sessions, ranks, and Missions.',
+		summary: 'Global ADE assistant (default L0) positioned between User (L-1) and L1.',
 		color: 'cyan',
 		icon: 'sparkle',
 		pureExecution: false,
@@ -313,7 +333,7 @@ export function buildLiveRankDirectory(
 		};
 	});
 
-	const allRanks = [l0Entry, ...tierEntries];
+	const allRanks = [userEntry, l0Entry, ...tierEntries];
 	const namesByTier: Record<string, string> = {};
 	const tierByAlias: Record<string, string> = {};
 	for (const entry of allRanks) {

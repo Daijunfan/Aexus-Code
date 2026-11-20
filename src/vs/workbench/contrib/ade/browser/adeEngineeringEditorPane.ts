@@ -25,6 +25,8 @@ import {
 	parseMissionMermaidDag,
 } from '../../../../platform/ade/common/adeMissionDag.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, getMissionDisplayName } from '../../../../platform/ade/common/adeRoleSchema.js';
+import { formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
@@ -34,7 +36,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext, IEditorSerializer } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { ADE_ENGINEERING_SCHEME, IAdeProjectsService } from '../common/ade.js';
+import { ADE_ENGINEERING_SCHEME, ADE_REMOVE_MISSION_COMMAND_ID, IAdeProjectsService } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { IAdeMissionService } from './adeMissionStore.js';
 import './media/adeMissionCanvas.css';
@@ -147,6 +149,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	static readonly ID = 'workbench.editor.adeEngineering';
 
 	private readonly missionService: IAdeMissionService | undefined;
+	private readonly commandService: ICommandService | undefined;
 	private readonly graphDisposables = this._register(new DisposableStore());
 
 	private rootEl!: HTMLElement;
@@ -188,13 +191,33 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super(AdeEngineeringEditorPane.ID, group, telemetryService, themeService, storageService);
-		this.missionService = instantiationService.invokeFunction(accessor => {
+		const tryGet = <T>(id: ServiceIdentifier<T>): T | undefined => instantiationService.invokeFunction(accessor => {
 			try {
-				return accessor.get(IAdeMissionService);
+				return accessor.get(id);
 			} catch {
 				return undefined;
 			}
 		});
+		this.missionService = tryGet(IAdeMissionService);
+		this.commandService = tryGet(ICommandService);
+		if (this.missionService) {
+			this._register(this.missionService.onDidChange(() => {
+				if (!this.activeMissionId) {
+					return;
+				}
+				const latest = this.missionService?.getMission(this.activeMissionId);
+				if (!latest) {
+					return;
+				}
+				if (latest.mermaidText !== this.mermaidText) {
+					this.mermaidText = latest.mermaidText;
+					if (this.mermaidTextareaEl && this.mermaidTextareaEl.value !== this.mermaidText) {
+						this.mermaidTextareaEl.value = this.mermaidText;
+					}
+					this.parseAndRenderGraph(this.mermaidText);
+				}
+			}));
+		}
 		this._register({
 			dispose: () => {
 				if (this.parseTimer !== undefined) {
@@ -300,6 +323,19 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.resetToAutoLayout();
 		}));
 
+		const removeBtn = append(actions, $('button.ade-mission-icon-btn.danger', {
+			type: 'button',
+			title: localize('adeMissionRemoveAllBtn', "Remove Mission & All Employees"),
+			'aria-label': localize('adeMissionRemoveAllBtn', "Remove Mission & All Employees"),
+			'data-ade-mission-remove': 'true',
+		})) as HTMLButtonElement;
+		removeBtn.appendChild($('span.codicon.codicon-trash'));
+		this._register(addDisposableListener(removeBtn, EventType.CLICK, () => {
+			if (this.activeMissionId) {
+				void this.commandService?.executeCommand(ADE_REMOVE_MISSION_COMMAND_ID, this.activeMissionId);
+			}
+		}));
+
 		const closeBtn = append(actions, $('button.ade-mission-icon-btn', {
 			type: 'button',
 			title: localize('adeMissionCloseDrawer', "Close"),
@@ -375,9 +411,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.edges = parsed.edges;
 		this.hoveredNodeId = undefined;
 
+		const ownerRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
+		const ownerPrefix = ownerRec ? `${formatTierTag(ownerRec.ownerTier)} · ` : '';
+
 		if (parsed.nodes.length === 0) {
 			this.positions.clear();
-			this.drawerMetaEl.textContent = localize('adeMissionMetaEmpty', "Empty");
+			this.drawerMetaEl.textContent = `${ownerPrefix}${localize('adeMissionMetaEmpty', "Empty")}`;
 			this.drawerStatusEl.textContent = localize('adeMissionStatusEmpty', "Write Mermaid DAG syntax to render nodes");
 			this.drawerStatusEl.className = 'ade-mission-drawer-status';
 			this.renderGraphDom();
@@ -395,12 +434,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		this.positions = nextPositions;
 
-		this.drawerMetaEl.textContent = localize(
+		this.drawerMetaEl.textContent = `${ownerPrefix}${localize(
 			'adeMissionMetaCounts',
 			"{0} nodes · {1} edges",
 			parsed.nodes.length,
 			parsed.edges.length,
-		);
+		)}`;
 		this.drawerStatusEl.textContent = localize('adeMissionStatusValid', "Valid DAG rendered");
 		this.drawerStatusEl.className = 'ade-mission-drawer-status ok';
 		this.renderGraphDom();

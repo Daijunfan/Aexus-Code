@@ -17,6 +17,8 @@ import {
 	ADE_MIN_RANK_COUNT,
 	ADE_SECRETARY_ALIAS,
 	ADE_SECRETARY_TIER_TAG,
+	ADE_USER_ALIAS,
+	ADE_USER_TIER_TAG,
 	buildLiveRankDirectory,
 	findRankByTierOrId,
 	formatTierTag,
@@ -59,21 +61,25 @@ suite('ADE Rank Resize, Hot Aliases, Mission RBAC & Single-Copy API Docs', () =>
 		assert.strictEqual(findRankByTierOrId(renamed, 'Director')?.tier, 2);
 		assert.strictEqual(findRankByTierOrId(renamed, 'L3')?.name, 'Reviewer');
 
-		// Live rank directory includes L0 Secretary + L1..LN
+		// Live rank directory includes L-1 User + L0 Secretary + L1..LN
 		const dir = buildLiveRankDirectory(renamed, buildAdeDocsPaths('/ade', renamed.ranks.length));
 		assert.strictEqual(dir.rankCount, 4);
 		assert.deepStrictEqual(dir.namesByTier, {
+			'L-1': ADE_USER_ALIAS,
 			L0: ADE_SECRETARY_ALIAS,
 			L1: 'Governor',
 			L2: 'Director',
 			L3: 'Reviewer',
 			L4: 'Worker',
 		});
+		assert.strictEqual(dir.tierByAlias['user'], 'L-1');
 		assert.strictEqual(dir.tierByAlias['director'], 'L2');
-		assert.strictEqual(dir.ranks[0].tierTag, ADE_SECRETARY_TIER_TAG);
-		assert.strictEqual(dir.ranks[0].isSystemL0, true);
-		assert.strictEqual(dir.ranks[0].docPath, '/ade/docs/ranks/L0.md');
-		assert.strictEqual(dir.ranks[2].docPath, '/ade/docs/ranks/L2.md');
+		assert.strictEqual(dir.ranks[0].tierTag, ADE_USER_TIER_TAG);
+		assert.strictEqual(dir.ranks[0].isSystemUser, true);
+		assert.strictEqual(dir.ranks[1].tierTag, ADE_SECRETARY_TIER_TAG);
+		assert.strictEqual(dir.ranks[1].isSystemL0, true);
+		assert.strictEqual(dir.ranks[1].docPath, '/ade/docs/ranks/L0.md');
+		assert.strictEqual(dir.ranks[3].docPath, '/ade/docs/ranks/L2.md');
 
 		// Resize down to minimum 1 tier (clamping 0 -> 1)
 		const single = resizeOrganizationRanks(renamed, 0);
@@ -91,6 +97,9 @@ suite('ADE Rank Resize, Hot Aliases, Mission RBAC & Single-Copy API Docs', () =>
 		assert.strictEqual(sixTiers.ranks[5].tier, 6);
 		assert.strictEqual(sixTiers.ranks[5].pureExecution, true);
 
+		assert.strictEqual(parseTierNumber('L-1'), -1);
+		assert.strictEqual(parseTierNumber(-1), -1);
+		assert.strictEqual(formatTierTag(-1), 'L-1');
 		assert.strictEqual(parseTierNumber('L0'), 0);
 		assert.strictEqual(parseTierNumber('l3'), 3);
 		assert.strictEqual(parseTierNumber(2), 2);

@@ -51,7 +51,7 @@ import { ADE_OS_ICON_LABELS, AdeOsIconKind, formatProjectDisplayPath, IAdeCloudH
 import { IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, getMissionDisplayName, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_MISSION_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeInboxPanel } from './adeInboxView.js';
 import { IAdeMissionService } from './adeMissionStore.js';
@@ -558,7 +558,11 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			extraClasses: ['explorer-item', 'ade-agent-session-row'],
 		});
 
-		if (!agent.parentId && (agent.treeType || this.hasMissionForSession(agent.id))) {
+		const isMissionOwner = !isLocked && Boolean(
+			(agent.treeType && (!agent.treeGovernorId || agent.treeGovernorId === agent.id))
+			|| this.hasMissionForSession(agent.id),
+		);
+		if (isMissionOwner) {
 			const treeLabel = getMissionDisplayName(roleSchema);
 			template.workTreeBadge.className = `ade-worktree-badge type-engineering`;
 			const treeIcon = $('span.ade-worktree-badge-icon', { 'aria-hidden': 'true' });
@@ -1097,12 +1101,15 @@ export class AdeProjectsView extends ViewPane {
 		}));
 		this._register(addStandardDisposableListener(bar, EventType.CONTEXT_MENU, event => {
 			EventHelper.stop(event, true);
+			const roleSchema = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+			const missionAlias = getMissionDisplayName(roleSchema);
+			const secMission = this.missionService?.getMissionByLinkedSession(ADE_SECRETARY_ID);
 			this.contextMenuService.showContextMenu({
 				getAnchor: () => event,
 				getActions: () => [
 					toAction({
 						id: 'ade.secretary.open',
-						label: localize('adeOpenSecretaryMenu', "Open Secretary"),
+						label: localize('adeOpenSecretaryMenu', "Open Secretary (L0)"),
 						run: () => this.editors.openSecretary(),
 					}),
 					toAction({
@@ -1110,6 +1117,19 @@ export class AdeProjectsView extends ViewPane {
 						label: localize('adeOpenSecretarySideMenu', "Open to the Side"),
 						run: () => this.editors.openSecretary({ side: true }),
 					}),
+					new Separator(),
+					toAction({
+						id: 'ade.secretary.mission',
+						label: secMission
+							? localize('adeOpenMissionMenu', "Open {0}", missionAlias)
+							: localize('adeNewMissionMenu', "New {0}", missionAlias),
+						run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, ADE_SECRETARY_ID),
+					}),
+					...(secMission ? [toAction({
+						id: 'ade.secretary.removeMission',
+						label: localize('adeRemoveMissionAllEmployeesMenu', "Remove {0} & All Employees...", missionAlias),
+						run: () => this.commandService.executeCommand(ADE_REMOVE_MISSION_COMMAND_ID, secMission.id),
+					})] : []),
 					new Separator(),
 					toAction({
 						id: 'ade.secretary.switchEngine',
@@ -1445,19 +1465,33 @@ export class AdeProjectsView extends ViewPane {
 		const orchestrated = this.projects.isOrchestrated(agent);
 
 		const missionAlias = getMissionDisplayName(roleSchema);
-		const hasLinkedMission = Boolean(agent.treeType || this.missionService?.getMissionByLinkedSession(agentId));
+		const ownedMission = !isLocked ? this.missionService?.getMissionByLinkedSession(agentId) : undefined;
+		const hasLinkedMission = !isLocked && Boolean(ownedMission || (agent.treeType && (!agent.treeGovernorId || agent.treeGovernorId === agentId)));
+		const owningMissionTargetId = isLocked ? (agent.treeGovernorId ?? this.projects.getWorkTreeGovernor?.(agentId)?.id) : undefined;
 
 		return [
-			...(!agent.parentId ? [
+			...(!isLocked ? [
 				toAction({
 					id: 'ade.mission',
 					label: hasLinkedMission
 						? localize('adeOpenMissionMenu', "Open {0}", missionAlias)
 						: localize('adeNewMissionMenu', "New {0}", missionAlias),
-					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, agentId),
+					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, ownedMission?.id ?? agentId),
+				}),
+				...(hasLinkedMission ? [toAction({
+					id: 'ade.removeMission',
+					label: localize('adeRemoveMissionAllEmployeesMenu', "Remove {0} & All Employees...", missionAlias),
+					run: () => this.commandService.executeCommand(ADE_REMOVE_MISSION_COMMAND_ID, ownedMission?.id ?? agentId),
+				})] : []),
+				new Separator(),
+			] : (owningMissionTargetId ? [
+				toAction({
+					id: 'ade.mission.openParent',
+					label: localize('adeOpenParentMissionMenu', "Open {0} Canvas", missionAlias),
+					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, owningMissionTargetId),
 				}),
 				new Separator(),
-			] : []),
+			] : [])),
 			...(nextLower.canSpawnSubSession && !isLocked ? [toAction({
 				id: 'ade.newSubSession',
 				label: formatNewSubSessionLabel(nextLower.childRank, roleSchema),
@@ -1524,14 +1558,14 @@ export class AdeProjectsView extends ViewPane {
 				label: localize('adeRenameSessionMenu', "Rename..."),
 				run: () => this.startInlineRename(agentId),
 			}),
-			...(!agent.parentId ? [toAction({
+			...(!agent.parentId && !isLocked ? [toAction({
 				id: isArchived ? 'ade.restore' : 'ade.archive',
 				label: isArchived
 					? localize('adeRestoreConversation', "Restore Conversation")
 					: localize('adeArchiveConversation', "Archive Conversation"),
 				run: () => this.commandService.executeCommand(isArchived ? 'workbench.action.ade.restoreAgent' : 'workbench.action.ade.archiveAgent', agentId),
 			})] : []),
-			...(!isLocked || !agent.parentId ? (() => {
+			...(!isLocked ? (() => {
 				const descendantCount = Math.max(0, this.projects.getSubtree(agentId).length - 1);
 				return [
 					new Separator(),

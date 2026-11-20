@@ -260,6 +260,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 		description: 'Read Engineering/Research tree status, node diffs, incremental reports, raw blueprint, validation, and starter templates.',
 		actions: [
 			'engineering.list',
+			'engineering.get',
 			'engineering.status',
 			'engineering.diff',
 			'engineering.reports',
@@ -300,6 +301,8 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 		description: 'Initialize trees, apply blueprints/templates, and configure per-node engines, models, and thinking budgets.',
 		actions: [
 			'engineering.init',
+			'engineering.create',
+			'engineering.setMermaid',
 			'engineering.blueprint.apply',
 			'engineering.blueprint.generate',
 			'engineering.generate',
@@ -376,6 +379,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 		actions: [
 			'engineering.reset',
 			'engineering.remove',
+			'engineering.delete',
 		],
 		dangerous: true,
 		renderCliLines: ctx => {
@@ -1248,7 +1252,7 @@ export function checkAdeApiPermission(
 		};
 	}
 	const caller = callerRaw.trim().toLowerCase();
-	if (!caller || caller === 'user' || caller === 'human' || caller === 'secretary') {
+	if (!caller || caller === 'user' || caller === 'human' || caller === 'l-1' || caller === 'secretary' || caller === 'l0') {
 		return { allowed: true };
 	}
 	const requiredApi = resolveActionPrimitiveApi(action);

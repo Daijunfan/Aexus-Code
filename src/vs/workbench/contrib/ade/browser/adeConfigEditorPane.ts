@@ -16,6 +16,8 @@ import {
 	ADE_MIN_RANK_COUNT,
 	ADE_SECRETARY_ALIAS,
 	ADE_SECRETARY_TIER_TAG,
+	ADE_USER_ALIAS,
+	ADE_USER_TIER_TAG,
 	formatTierTag,
 	resizeOrganizationRanks,
 } from '../../../../platform/ade/common/adeRankResize.js';
@@ -322,7 +324,7 @@ export class AdeConfigEditorPane extends EditorPane {
 		this.dirtyPillEl.hidden = !this.dirty;
 		append(titleBlock, $('p.ade-cfg-subtitle', {}, localize(
 			'adeConfigSubtitle',
-			"Customize Mission mode display alias, rank depth (L1 highest → LN lowest, L0 Secretary), and custom tier names.",
+			"Customize Mission mode display alias, rank depth (L-1 User → L0 Secretary → L1 highest → LN lowest), and custom tier names.",
 		)));
 
 		const actions = append(header, $('.ade-cfg-actions'));
@@ -409,7 +411,7 @@ export class AdeConfigEditorPane extends EditorPane {
 		append(titleGroup, $('h2.ade-cfg-card-title', {}, localize('adeConfigRanksTitle', "Rank Hierarchy & Live Aliases")));
 		append(titleGroup, $('p.ade-cfg-card-hint', {}, localize(
 			'adeConfigRanksHint',
-			"Left sidebar strictly manages session hierarchy (L1..L{0}, decoupled from Mission DAG). Roles read API docs by tier.",
+			"Configure organization tiers (L1..L{0} beneath L-1 User & L0 Secretary) and hot-reload display names. Roles read API docs by tier.",
 			count,
 		)));
 
@@ -439,6 +441,16 @@ export class AdeConfigEditorPane extends EditorPane {
 		append(headRow, $('span', {}, localize('adeConfigColAlias', "Display Name (Hot-Reload)")));
 		append(headRow, $('span', { style: 'justify-self:end' }, localize('adeConfigColDoc', "API Doc")));
 
+		// Fixed L-1 User row (Human sovereign operator above L0)
+		const userRow = append(list, $('.ade-cfg-rank-row.compact.system-user', { 'data-tier': ADE_USER_TIER_TAG }));
+		const userTierCell = append(userRow, $('.ade-cfg-tier-cell'));
+		append(userTierCell, $('span.ade-cfg-tier-pill.tier-user', {}, ADE_USER_TIER_TAG));
+		append(userTierCell, $('span.ade-cfg-tier-note', {}, localize('adeConfigHumanNote', "Human")));
+		const userName = append(userRow, $('.ade-cfg-static-name'));
+		append(userName, $('span', {}, ADE_USER_ALIAS));
+		append(userName, $('span.ade-cfg-static-badge', {}, localize('adeConfigFixedUser', "Owner L-1")));
+		append(userRow, $('span.ade-cfg-doc-pill', {}, localize('adeConfigUserOperatorTag', "Operator")));
+
 		// Fixed L0 Secretary row
 		const l0Row = append(list, $('.ade-cfg-rank-row.compact.system-l0', { 'data-tier': ADE_SECRETARY_TIER_TAG }));
 		const l0TierCell = append(l0Row, $('.ade-cfg-tier-cell'));
@@ -446,7 +458,7 @@ export class AdeConfigEditorPane extends EditorPane {
 		append(l0TierCell, $('span.ade-cfg-tier-note', {}, localize('adeConfigSystemNote', "System")));
 		const l0Name = append(l0Row, $('.ade-cfg-static-name'));
 		append(l0Name, $('span', {}, ADE_SECRETARY_ALIAS));
-		append(l0Name, $('span.ade-cfg-static-badge', {}, localize('adeConfigFixedGlobal', "Global L0")));
+		append(l0Name, $('span.ade-cfg-static-badge', {}, localize('adeConfigFixedGlobal', "Default L0")));
 		append(l0Row, $('span.ade-cfg-doc-pill', {}, `ranks/${ADE_SECRETARY_TIER_TAG}.md`));
 
 		// Editable L1..LN rows (L1, L2... always preserved!)

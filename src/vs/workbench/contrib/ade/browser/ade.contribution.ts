@@ -82,8 +82,10 @@ import {
 	ADE_OPEN_RESEARCH_COMMAND_ID,
 	ADE_OPEN_ROLE_STUDIO_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
+	ADE_REMOVE_MISSION_COMMAND_ID,
 	ADE_REMOVE_PROJECT_COMMAND_ID,
 	ADE_RENAME_PROJECT_COMMAND_ID,
+	ADE_SECRETARY_ID,
 	AdeAgentRole,
 	AdeSessionRank,
 	getAdeRoleRankLevel,
@@ -941,6 +943,8 @@ async function openOrCreateMissionCanvas(
 		const projName = projects.getProjectName(targetIdOrProject);
 		const created = missions.createMission({
 			title: projName || missionAlias,
+			ownerTier: -1,
+			ownerRankId: 'user',
 			projectUri: targetIdOrProject.toString(),
 			mermaidText: '',
 		});
@@ -955,12 +959,50 @@ async function openOrCreateMissionCanvas(
 			await missions.openMissionEditor(existing.id);
 			return;
 		}
+		if (id === ADE_SECRETARY_ID) {
+			const selectedProjUri = projects.selectedProject?.uri ?? projects.projects[0]?.uri;
+			const created = missions.createMission({
+				id: ADE_SECRETARY_ID,
+				title: localize('adeSecretaryMissionTitle', "Secretary"),
+				ownerSessionId: ADE_SECRETARY_ID,
+				ownerTier: 0,
+				ownerRankId: 'secretary',
+				linkedSessionId: ADE_SECRETARY_ID,
+				projectUri: selectedProjUri?.toString(),
+				mermaidText: '',
+			});
+			await missions.openMissionEditor(created.id);
+			return;
+		}
 		const linkedAgent = projects.getAgent(id);
+		if (linkedAgent && projects.isLockedByWorkTree?.(linkedAgent.id)) {
+			// Locked Mermaid-generated employees cannot spawn nested Missions; jump straight to their owning Mission!
+			const owningId = linkedAgent.treeGovernorId ?? projects.getWorkTreeGovernor?.(linkedAgent.id)?.id;
+			if (owningId) {
+				await missions.openMissionEditor(owningId);
+				return;
+			}
+		}
+		if (linkedAgent) {
+			const ownerRankDef = resolveEffectiveRankDefinition(roleConfig, linkedAgent.role, projects.hasSubordinates(linkedAgent.id));
+			const created = missions.createMission({
+				id: linkedAgent.id,
+				title: linkedAgent.label,
+				ownerSessionId: linkedAgent.id,
+				ownerTier: ownerRankDef.tier,
+				ownerRankId: ownerRankDef.id,
+				linkedSessionId: linkedAgent.id,
+				projectUri: linkedAgent.projectUri.toString(),
+				mermaidText: '',
+			});
+			await missions.openMissionEditor(created.id);
+			return;
+		}
 		const created = missions.createMission({
 			id,
-			title: linkedAgent?.label ?? missionAlias,
-			linkedSessionId: linkedAgent?.id,
-			projectUri: linkedAgent?.projectUri.toString(),
+			title: missionAlias,
+			ownerTier: -1,
+			ownerRankId: 'user',
 			mermaidText: '',
 		});
 		await missions.openMissionEditor(created.id);
@@ -969,6 +1011,8 @@ async function openOrCreateMissionCanvas(
 
 	const created = missions.createMission({
 		title: `${missionAlias} ${missions.listMissions().length + 1}`,
+		ownerTier: -1,
+		ownerRankId: 'user',
 		mermaidText: '',
 	});
 	await missions.openMissionEditor(created.id);
@@ -1038,6 +1082,45 @@ registerAction2(class OpenAdeMissionAction extends Action2 {
 	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
 		accessor.get(IWorkbenchModeService).setMode('ade');
 		await openOrCreateMissionCanvas(accessor, target);
+	}
+});
+
+registerAction2(class RemoveAdeMissionAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_REMOVE_MISSION_COMMAND_ID,
+			title: localize2('adeRemoveMissionActionTitle', "Remove ADE Mission & All Employees..."),
+			icon: Codicon.trash,
+			f1: true,
+			precondition: WorkbenchModeContext.isEqualTo('ade'),
+		});
+	}
+
+	async run(accessor: ServicesAccessor, idOrOwnerId?: string, options?: { readonly force?: boolean; readonly deleteEngineHistory?: boolean }): Promise<void> {
+		const missions = accessor.get(IAdeMissionService);
+		const dialogs = accessor.get(IDialogService);
+		const roleConfig = getRoleConfig(accessor);
+		const missionAlias = getMissionDisplayName(roleConfig);
+		const rawId = typeof idOrOwnerId === 'string' && idOrOwnerId.trim() ? idOrOwnerId.trim() : undefined;
+		const mission = rawId ? (missions.getMission(rawId) ?? missions.getMissionByLinkedSession(rawId)) : undefined;
+		if (!mission) {
+			return;
+		}
+		const generatedCount = missions.getGeneratedEmployees(mission.id).length;
+		if (!options?.force) {
+			const confirmation = await dialogs.confirm({
+				type: 'warning',
+				message: localize('adeConfirmRemoveMissionTitle', "Remove {0} '{1}' and all generated employees?", missionAlias, mission.title),
+				detail: generatedCount > 0
+					? localize('adeConfirmRemoveMissionDetailWithEmployees', "This will remove the {0} canvas and all {1} locked Mermaid-generated employee session(s) together.", missionAlias, generatedCount)
+					: localize('adeConfirmRemoveMissionDetailEmpty', "This will remove the {0} canvas and unlock its owner session.", missionAlias),
+				primaryButton: localize('adeRemoveMissionPrimaryBtn', "&&Remove {0}", missionAlias),
+			});
+			if (!confirmation.confirmed) {
+				return;
+			}
+		}
+		await missions.removeMissionWithEmployees(mission.id, { deleteEngineHistory: options?.deleteEngineHistory });
 	}
 });
 
@@ -1511,8 +1594,14 @@ registerAction2(class ArchiveAgentAction extends Action2 {
 	async run(accessor: ServicesAccessor, id?: string): Promise<void> {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
+		const notifications = accessor.get(INotificationService);
+		const missionAlias = getMissionDisplayName(getRoleConfig(accessor));
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
+			return;
+		}
+		if (projects.isLockedByWorkTree?.(agent.id)) {
+			notifications.info(localize('adeLockedByMissionArchiveUi', "'{0}' is locked by a {1} and cannot be archived individually. Remove the entire {1} and all its employees together instead.", agent.label, missionAlias));
 			return;
 		}
 		const root = projects.getRootAgent(agent.id) ?? agent;
@@ -1568,23 +1657,39 @@ registerAction2(class RemoveAgentAction extends Action2 {
 		const projects = accessor.get(IAdeProjectsService);
 		const editors = accessor.get(IAdeEditorService);
 		const sessions = accessor.get(IAdeSessionsService);
+		const notifications = accessor.get(INotificationService);
+		const missions = tryGetOptionalService<IAdeMissionService>(accessor, IAdeMissionService);
+		const missionAlias = getMissionDisplayName(getRoleConfig(accessor));
 		const agent = await pickAgent(accessor, id);
-		if (agent) {
-			const initialSubtree = projects.getSubtree(agent.id);
-			const subtree = collectMergedSubtree(projects, agent.id, initialSubtree);
-			for (const member of subtree) {
-				if (member.session) {
-					await sessions.stop?.(member.session).catch(() => undefined);
-				}
-			}
-			projects.removeAgent(agent.id);
-			for (const member of subtree) {
-				if (projects.getAgent(member.id)) {
-					projects.removeAgent(member.id);
-				}
-			}
-			await editors.closeAgents(subtree);
+		if (!agent) {
+			return;
 		}
+		if (projects.isLockedByWorkTree?.(agent.id)) {
+			notifications.info(localize('adeLockedByMissionRemoveUi', "'{0}' is locked by a {1} and cannot be removed individually. Remove the entire {1} and all its employees together instead.", agent.label, missionAlias));
+			return;
+		}
+		const initialSubtree = projects.getSubtree(agent.id);
+		if (missions) {
+			for (const member of initialSubtree) {
+				const owned = missions.getMissionByLinkedSession(member.id);
+				if (owned) {
+					await missions.removeMissionWithEmployees(owned.id);
+				}
+			}
+		}
+		const subtree = collectMergedSubtree(projects, agent.id, initialSubtree);
+		for (const member of subtree) {
+			if (member.session) {
+				await sessions.stop?.(member.session).catch(() => undefined);
+			}
+		}
+		projects.removeAgent(agent.id);
+		for (const member of subtree) {
+			if (projects.getAgent(member.id)) {
+				projects.removeAgent(member.id);
+			}
+		}
+		await editors.closeAgents(subtree);
 	}
 });
 
@@ -1603,22 +1708,39 @@ registerAction2(class DeleteAgentPermanentlyAction extends Action2 {
 		const editors = accessor.get(IAdeEditorService);
 		const sessions = accessor.get(IAdeSessionsService);
 		const dialogs = accessor.get(IDialogService);
+		const notifications = accessor.get(INotificationService);
+		const missions = tryGetOptionalService<IAdeMissionService>(accessor, IAdeMissionService);
+		const missionAlias = getMissionDisplayName(getRoleConfig(accessor));
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
 			return;
 		}
+		if (projects.isLockedByWorkTree?.(agent.id)) {
+			notifications.info(localize('adeLockedByMissionDeleteUi', "'{0}' is locked by a {1} and cannot be deleted individually. Remove the entire {1} and all its employees together instead.", agent.label, missionAlias));
+			return;
+		}
 		const initialSubtree = projects.getSubtree(agent.id);
+		const ownedMissions = missions
+			? initialSubtree.map(m => missions.getMissionByLinkedSession(m.id)).filter((m): m is NonNullable<typeof m> => Boolean(m))
+			: [];
 		if (!options?.force) {
 			const confirmation = await dialogs.confirm({
 				type: 'warning',
 				message: localize('adeConfirmDeletePermanent', "Permanently delete '{0}' and its conversation history from the Coding Agent engine?", agent.label),
-				detail: initialSubtree.length > 1
-					? localize('adeConfirmDeleteSubtreeDetail', "This will also permanently delete {0} subordinate conversation(s). This action cannot be undone.", initialSubtree.length - 1)
-					: localize('adeConfirmDeleteSingleDetail', "This action cannot be undone."),
+				detail: ownedMissions.length > 0
+					? localize('adeConfirmDeleteMissionOwnerDetail', "This will also remove {0} {1} and permanently delete {2} subordinate/generated employee conversation(s). This action cannot be undone.", ownedMissions.length, missionAlias, Math.max(0, initialSubtree.length - 1))
+					: initialSubtree.length > 1
+						? localize('adeConfirmDeleteSubtreeDetail', "This will also permanently delete {0} subordinate conversation(s). This action cannot be undone.", initialSubtree.length - 1)
+						: localize('adeConfirmDeleteSingleDetail', "This action cannot be undone."),
 				primaryButton: localize('adeDeletePermanentlyBtn', "&&Delete Permanently"),
 			});
 			if (!confirmation.confirmed) {
 				return;
+			}
+		}
+		if (missions) {
+			for (const owned of ownedMissions) {
+				await missions.removeMissionWithEmployees(owned.id, { deleteEngineHistory: true });
 			}
 		}
 		const subtree = collectMergedSubtree(projects, agent.id, initialSubtree);

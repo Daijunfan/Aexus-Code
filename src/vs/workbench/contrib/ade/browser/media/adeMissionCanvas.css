@@ -223,6 +223,11 @@
 	color: var(--vscode-foreground);
 }
 
+.monaco-workbench .ade-mission-icon-btn.danger:hover {
+	background: rgba(248, 113, 113, 0.16);
+	color: #f87171;
+}
+
 .monaco-workbench .ade-mission-mermaid-input {
 	width: 100%;
 	min-height: 240px;

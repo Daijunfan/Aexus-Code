@@ -3252,7 +3252,8 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.ok(configRoot, 'AdeConfigEditorPane renders .ade-config-editor');
 		assert.strictEqual(configRoot.getAttribute('aria-label'), 'ADE config');
 
-		// Shows L0 Secretary + default preset L1..L4 aliases
+		// Shows L-1 User + L0 Secretary + default preset L1..L4 aliases
+		assert.ok(configRoot.querySelector('[data-tier="L-1"]')?.textContent?.includes('User'), 'L-1 row shows User');
 		assert.ok(configRoot.querySelector('[data-tier="L0"]')?.textContent?.includes('Secretary'), 'L0 row shows Secretary');
 		assert.strictEqual(configRoot.querySelector<HTMLElement>('[data-ade-rank-count]')?.textContent, '4');
 		assert.strictEqual(configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L1"]')?.value, 'Governor');
@@ -3275,6 +3276,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 
 		const liveNames = await h.control<{ readonly rankCount: number; readonly namesByTier: Record<string, string> }>('rank.names', {});
 		assert.deepStrictEqual(liveNames.namesByTier, {
+			'L-1': 'User',
 			L0: 'Secretary',
 			L1: 'Governor',
 			L2: 'Director',
@@ -3286,6 +3288,11 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		await h.control('rank.rename', { target: 'L3', alias: 'Reviewer', shortName: 'Rev' });
 		const afterRename = await h.control<{ readonly namesByTier: Record<string, string> }>('rank.names', {});
 		assert.strictEqual(afterRename.namesByTier['L3'], 'Reviewer');
+
+		const userInfo = await h.control<{ readonly tierTag: string; readonly alias: string; readonly isSystemUser?: boolean }>('rank.get', { target: 'L-1' });
+		assert.strictEqual(userInfo.tierTag, 'L-1');
+		assert.strictEqual(userInfo.alias, 'User');
+		assert.strictEqual(userInfo.isSystemUser, true);
 
 		const l0Info = await h.control<{ readonly tierTag: string; readonly alias: string; readonly isSystemL0?: boolean }>('rank.get', { target: 'L0' });
 		assert.strictEqual(l0Info.tierTag, 'L0');
@@ -3299,7 +3306,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		await h.control('rank.setCount', { count: 1 });
 		const oneTier = await h.control<{ readonly rankCount: number; readonly namesByTier: Record<string, string> }>('rank.names', {});
 		assert.strictEqual(oneTier.rankCount, 1);
-		assert.deepStrictEqual(oneTier.namesByTier, { L0: 'Secretary', L1: 'Governor' });
+		assert.deepStrictEqual(oneTier.namesByTier, { 'L-1': 'User', L0: 'Secretary', L1: 'Governor' });
 		// Stepper decrement is disabled at min count 1
 		assert.strictEqual(configRoot.querySelector<HTMLButtonElement>('button[data-ade-rank-dec]')?.disabled, true);
 
@@ -3365,5 +3372,165 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.ok(engRoot.querySelector('.ade-mission-edge-group[data-edge-id="N2->N3"]')?.classList.contains('is-outgoing'));
 		engPane.setHoveredNode(undefined);
 		assert.strictEqual(engRoot.querySelectorAll('.ade-mission-edge-group.is-hover-flow').length, 0, 'Leaving node clears flowing dashed edges');
+	});
+
+	test('enforces Mission owner-only orchestration across any rank (L-1 User, L0 Secretary, L1..LN), locks Mermaid-generated sidebar employees, and removes them only with the entire Mission', async () => {
+		const h = createHarness([alpha]);
+		h.modes.setMode('ade');
+		const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+		h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+		const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+		h.instantiation.stub(IAdeMissionService, missionStore);
+
+		const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/mo-gov') }, 'Gov L1', { role: 'governor' });
+		const mgr = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/mo-mgr') }, 'Mgr L2', { parentId: gov.id, role: 'manager' });
+		const mgrPeer = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/mo-mgr2') }, 'Mgr Peer', { parentId: gov.id, role: 'manager' });
+
+		// 1. User (L-1) creates a Mission on nested L2 Manager session (`mgr`) — owner keeps its L2 role!
+		const created = await h.control<{ readonly id: string; readonly ownerSessionId: string; readonly ownerTier: number; readonly ownerTierTag: string }>('mission.init', {
+			owner: mgr.id,
+			title: 'Payments Module',
+		});
+		assert.strictEqual(created.ownerSessionId, mgr.id);
+		assert.strictEqual(created.ownerTier, 2);
+		assert.strictEqual(created.ownerTierTag, 'L2');
+		assert.strictEqual(h.projects.getAgent(mgr.id)?.role, 'manager', 'Creating a Mission on L2 must preserve its L2 rank');
+
+		// 2. STRICT OWNER-ONLY ORCHESTRATION:
+		//    - L1 Governor (higher rank!), L2 peer, and L0 Secretary are ALL blocked from operating mgr's Mission!
+		const mermaidDag = 'flowchart LR\n  N1["API Schema"] --> N2["Checkout UI"]\n  N2 --> U1{{"Signoff"}}';
+		await assert.rejects(
+			() => h.control('mission.blueprint.apply', { id: created.id, text: mermaidDag, caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id }),
+			/owned by.*L2/i,
+		);
+		await assert.rejects(
+			() => h.control('mission.blueprint.apply', { id: created.id, text: mermaidDag, caller: 'manager', _verifiedCaller: true, _callerSessionId: mgrPeer.id }),
+			/owned by.*L2/i,
+		);
+		await assert.rejects(
+			() => h.control('mission.blueprint.apply', { id: created.id, text: mermaidDag, caller: 'secretary' }),
+			/owned by.*L2/i,
+		);
+		await assert.rejects(
+			() => h.control('mission.remove', { id: created.id, caller: 'secretary' }),
+			/owned by.*L2/i,
+		);
+		await assert.rejects(
+			() => h.control('mission.remove', { id: created.id, caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id }),
+			/owned by.*L2/i,
+		);
+
+		//    - ONLY the exact L2 owner session (`mgr`) itself (and L-1 User) can apply Mermaid & orchestrate!
+		const applied = await h.control<{ readonly nodeCount: number; readonly generatedEmployeeIds: string[] }>('mission.blueprint.apply', {
+			id: created.id,
+			text: mermaidDag,
+			caller: 'manager',
+			_verifiedCaller: true,
+			_callerSessionId: mgr.id,
+		});
+		assert.strictEqual(applied.nodeCount, 3, '2 tasks + 1 gate parsed');
+		assert.strictEqual(applied.generatedEmployeeIds.length, 2, 'Only the 2 task nodes generate sidebar employees (gate U1 does not)');
+
+		// 3. Mermaid-generated employees are directly under `mgr`, assigned L3 (next lower tier), and LOCKED in left sidebar!
+		const generated = missionStore.getGeneratedEmployees(created.id);
+		assert.strictEqual(generated.length, 2);
+		assert.deepStrictEqual(generated.map(g => g.label), ['[N1] API Schema', '[N2] Checkout UI']);
+		for (const emp of generated) {
+			assert.strictEqual(emp.parentId, mgr.id);
+			assert.strictEqual(emp.role, 'employee', 'Employees generated under L2 owner default to L3');
+			assert.strictEqual(h.projects.isLockedByWorkTree?.(emp.id), true, 'Mermaid-generated employee MUST be locked');
+			assert.strictEqual(h.projects.canReparentAgent(emp.id, gov.id), false, 'Locked employee cannot be reparented');
+		}
+		assert.strictEqual(h.projects.isLockedByWorkTree?.(mgr.id), false, 'Mission owner itself is not locked as a child');
+
+		// 4. Individual delete / remove / detach / archive / move / role-change on locked Mermaid employee MUST be blocked!
+		const lockedN1 = generated[0];
+		await assert.rejects(() => h.control('session.detach', { id: lockedN1.id }), /locked by a Mission/i);
+		await assert.rejects(() => h.control('session.delete', { id: lockedN1.id, force: true }), /locked by a Mission/i);
+		await assert.rejects(() => h.control('session.archive', { id: lockedN1.id }), /locked by a Mission/i);
+		await assert.rejects(() => h.control('session.move', { id: lockedN1.id, parent: gov.id }), /locked/i);
+		await assert.rejects(() => h.control('session.role', { id: lockedN1.id, role: 'worker' }), /locked/i);
+		assert.ok(h.projects.getAgent(lockedN1.id), 'Locked Mermaid employee remains intact after rejected individual removals');
+
+		// 5. Left sidebar view renders nested L2 owner Mission badge, locked glyph on generated children, and hides Remove/Delete on locked children!
+		const dummySidebar = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.mission.lock'; }();
+		h.instantiation.stub(IViewDescriptorService, {
+			getViewLocationById: () => ViewContainerLocation.Sidebar,
+			onDidChangeLocation: Event.None,
+			getViewDescriptorById: () => null,
+			getViewContainerByViewId: () => dummySidebar,
+			getDefaultContainerById: () => dummySidebar,
+			getViewContainerModel: () => new class extends mock<IViewContainerModel>() {
+				override readonly title = 'Sessions';
+				override readonly onDidChangeContainerInfo = Event.None;
+			}(),
+			onDidChangeContainer: Event.None,
+		});
+		const viewHost = append(document.body, $('.monaco-workbench.ade-mission-lock-sidebar-test'));
+		store.add({ dispose: () => viewHost.remove() });
+		viewHost.style.width = '280px';
+		viewHost.style.height = '500px';
+		const view = store.add(h.instantiation.createInstance(AdeProjectsView, { id: ADE_PROJECTS_VIEW_ID, title: 'Sessions' }));
+		view.render();
+		viewHost.appendChild(view.element);
+		view.setVisible(true);
+		view.orthogonalSize = 280;
+		view.layout(500);
+		await view.refresh();
+		await view.revealAgent(lockedN1.id);
+
+		const findRow = (labelText: string) => [...viewHost.querySelectorAll<HTMLElement>('.ade-tree-row')]
+			.find(el => el.querySelector('.label-name')?.textContent === labelText)!;
+		const mgrRow = findRow('Mgr L2');
+		const n1Row = findRow('[N1] API Schema');
+		assert.strictEqual(mgrRow.querySelector<HTMLElement>('.ade-worktree-badge')?.hidden, false, 'Nested L2 Mission owner shows Mission badge');
+		assert.strictEqual(n1Row.classList.contains('ade-worktree-locked'), true, 'Mermaid-generated employee row has locked class');
+		assert.strictEqual(n1Row.querySelector<HTMLElement>('.ade-lock-glyph')?.hidden, false, 'Mermaid-generated employee shows lock icon');
+
+		const lockedMenuIds = view.getAgentContextActions(lockedN1).map(a => a.id);
+		assert.ok(lockedMenuIds.includes('ade.mission.openParent'), 'Locked employee context menu jumps to owning Mission');
+		assert.ok(!lockedMenuIds.includes('ade.detach'), 'Locked employee cannot be individually removed from sidebar');
+		assert.ok(!lockedMenuIds.includes('ade.deletePermanently'), 'Locked employee cannot be individually deleted');
+
+		const ownerMenuIds = view.getAgentContextActions(h.projects.getAgent(mgr.id)!).map(a => a.id);
+		assert.ok(ownerMenuIds.includes('ade.mission'), 'L2 Mission owner menu offers Open Mission');
+		assert.ok(ownerMenuIds.includes('ade.removeMission'), 'L2 Mission owner menu offers Remove Mission & All Employees');
+
+		// 6. Removing the ENTIRE Mission via its L2 owner removes the Mission AND all locked employees together, unlocking mgr!
+		const removed = await h.control<{ readonly deleted: boolean; readonly removedEmployeeIds: string[] }>('mission.remove', {
+			id: created.id,
+			caller: 'manager',
+			_verifiedCaller: true,
+			_callerSessionId: mgr.id,
+		});
+		assert.strictEqual(removed.deleted, true);
+		assert.strictEqual(removed.removedEmployeeIds.length, 2);
+		assert.strictEqual(missionStore.getMission(created.id), undefined);
+		assert.strictEqual(missionStore.getGeneratedEmployees(created.id).length, 0);
+		assert.strictEqual(h.projects.getAgent(lockedN1.id), undefined, 'All generated employees removed with the Mission');
+		assert.ok(h.projects.getAgent(mgr.id), 'Owner session itself survives when removing Mission & employees');
+		assert.strictEqual(h.projects.getAgent(mgr.id)?.treeType, undefined, 'Owner Mission tag cleared');
+
+		// 7. Secretary (L0) can create & own its OWN L0 Mission; L1 Governor is blocked from operating L0's Mission!
+		const secMission = await h.control<{ readonly id: string; readonly ownerSessionId: string; readonly ownerTier: number; readonly ownerTierTag: string }>('mission.init', {
+			caller: 'secretary',
+			mermaid: 'flowchart LR\n  S1["Global Audit"] --> S2["Summary"]',
+		});
+		assert.strictEqual(secMission.ownerSessionId, ADE_SECRETARY_ID);
+		assert.strictEqual(secMission.ownerTier, 0);
+		assert.strictEqual(secMission.ownerTierTag, 'L0');
+		assert.strictEqual(missionStore.getGeneratedEmployees(secMission.id).length, 2);
+		await assert.rejects(
+			() => h.control('mission.blueprint.apply', { id: secMission.id, text: 'flowchart LR\n  X["Hijack"]', caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id }),
+			/owned by.*L0/i,
+		);
+		// User (L-1) retains full override to remove Secretary's Mission + all its generated employees together
+		const userRemoved = await h.control<{ readonly deleted: boolean; readonly removedEmployeeIds: string[] }>('mission.remove', {
+			id: secMission.id,
+			caller: 'L-1',
+		});
+		assert.strictEqual(userRemoved.deleted, true);
+		assert.strictEqual(userRemoved.removedEmployeeIds.length, 2);
+		assert.strictEqual(missionStore.getGeneratedEmployees(secMission.id).length, 0);
 	});
 });

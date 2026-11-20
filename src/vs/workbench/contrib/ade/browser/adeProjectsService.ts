@@ -871,31 +871,199 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				return explicit;
 			}
 		}
-		const root = this.getRootAgent(id);
-		return root?.treeType ? root : undefined;
+		const visited = new Set<string>();
+		let cursor: IAdeAgent | undefined = agent;
+		while (cursor && !visited.has(cursor.id)) {
+			visited.add(cursor.id);
+			if (cursor.treeType) {
+				return cursor;
+			}
+			cursor = cursor.parentId ? this.getAgent(cursor.parentId) : undefined;
+		}
+		return undefined;
 	}
 
-	isLockedByWorkTree(_id: string): boolean {
-		// Left sidebar session hierarchy is completely decoupled from Mission panels (never locked).
-		return false;
+	isLockedByWorkTree(id: string): boolean {
+		const agent = this.getAgent(id);
+		if (!agent || !agent.treeGovernorId || agent.treeGovernorId === agent.id) {
+			return false;
+		}
+		if (agent.treeType === 'mission' && agent.treeNodeId) {
+			return true;
+		}
+		const owner = this.getAgent(agent.treeGovernorId);
+		return Boolean(owner?.treeType && (agent.treeNodeId || agent.treeSegmentId));
 	}
 
 	setAgentWorkTreeTag(governorId: string, treeType: AdeWorkTreeType | undefined): void {
-		const gov = this.getAgent(governorId);
-		if (!gov || gov.parentId) {
+		const owner = this.getAgent(governorId);
+		if (!owner) {
 			return;
 		}
-		const orchestratorRankId = resolveWorkTreeSlotRank(this.getRoleSchema(), 'orchestrator').id;
 		this.entries = this.entries.map(agent => agent.id === governorId
 			? {
 				...agent,
-				role: treeType ? orchestratorRankId : agent.role,
 				treeType,
 				treeGovernorId: treeType ? governorId : undefined,
 			}
 			: agent);
 		this.saveAgents();
 		this.changeEmitter.fire();
+	}
+
+	syncMissionMermaidEmployees(
+		ownerOrMissionId: string,
+		nodes: readonly { readonly id: string; readonly title: string }[],
+		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
+	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] } {
+		const ownerAgent = this.getAgent(ownerOrMissionId);
+		const targetProjectUri = ownerAgent?.projectUri
+			?? (options?.projectUri ? removeTrailingPathSeparator(options.projectUri) : undefined);
+		if (!targetProjectUri) {
+			return { employeeAgentsByNode: {}, removedAgents: [] };
+		}
+
+		const schema = this.getRoleSchema();
+		const defaultLeaf = getDefaultPureLeafRank(schema);
+		let employeeRole: AdeAgentRole | undefined;
+		if (ownerAgent) {
+			const ownerDef = resolveEffectiveRankDefinition(schema, ownerAgent.role, true);
+			const nextTier = schema.ranks.find(r => r.tier > ownerDef.tier) ?? ownerDef;
+			const isDefaultPure = Boolean(nextTier.pureExecution && nextTier.id === defaultLeaf.id);
+			employeeRole = isDefaultPure ? undefined : nextTier.id;
+		} else {
+			const topRank = getTopRankDefinition(schema);
+			const isDefaultPure = Boolean(topRank.pureExecution && topRank.id === defaultLeaf.id);
+			employeeRole = isDefaultPure ? undefined : topRank.id;
+		}
+
+		const existingGenerated = this.entries.filter(entry =>
+			entry.treeGovernorId === ownerOrMissionId
+			&& entry.id !== ownerOrMissionId
+			&& Boolean(entry.treeNodeId),
+		);
+		const existingByNodeId = new Map<string, IAdeAgent>();
+		for (const entry of existingGenerated) {
+			if (entry.treeNodeId) {
+				existingByNodeId.set(entry.treeNodeId, entry);
+			}
+		}
+
+		const keptIds = new Set<string>();
+		const nextGenerated: IAdeAgent[] = [];
+		const employeeAgentsByNode: Record<string, IAdeAgent> = {};
+		const inheritedEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId;
+
+		for (const node of nodes) {
+			const prev = existingByNodeId.get(node.id);
+			const defaultLabel = `[${node.id}] ${node.title}`;
+			const nextAgent: IAdeAgent = prev
+				? {
+					...prev,
+					parentId: ownerAgent?.id,
+					projectUri: targetProjectUri,
+					label: prev.labelIsCustom ? prev.label : defaultLabel,
+					role: employeeRole,
+					archived: undefined,
+					treeType: 'mission',
+					treeGovernorId: ownerOrMissionId,
+					treeNodeId: node.id,
+				}
+				: {
+					id: generateUuid(),
+					parentId: ownerAgent?.id,
+					projectUri: targetProjectUri,
+					label: defaultLabel,
+					role: employeeRole,
+					status: 'idle',
+					draft: '',
+					preferredEngineId: inheritedEngineId,
+					treeType: 'mission',
+					treeGovernorId: ownerOrMissionId,
+					treeNodeId: node.id,
+				};
+			keptIds.add(nextAgent.id);
+			nextGenerated.push(nextAgent);
+			employeeAgentsByNode[node.id] = nextAgent;
+		}
+
+		const oldGeneratedIds = new Set(existingGenerated.map(a => a.id));
+		const removedAgents = existingGenerated.filter(a => !keptIds.has(a.id));
+
+		const nextEntries: IAdeAgent[] = [];
+		let inserted = false;
+		for (const entry of this.entries) {
+			if (ownerAgent && entry.id === ownerAgent.id) {
+				nextEntries.push({
+					...entry,
+					treeType: 'mission',
+					treeGovernorId: ownerAgent.id,
+				});
+				nextEntries.push(...nextGenerated);
+				inserted = true;
+			} else if (oldGeneratedIds.has(entry.id)) {
+				continue;
+			} else {
+				nextEntries.push(entry);
+			}
+		}
+		if (!inserted && nextGenerated.length > 0) {
+			this.ensureCatalogProject(targetProjectUri, basename(targetProjectUri));
+			nextEntries.push(...nextGenerated);
+		}
+
+		this.entries = nextEntries;
+		if (this._selectedAgentId && removedAgents.some(a => a.id === this._selectedAgentId)) {
+			this._selectedAgentId = ownerAgent?.id;
+		}
+		this.saveAgents();
+		if (removedAgents.length > 0) {
+			this.removedAgentsEmitter.fire(removedAgents);
+		}
+		this.changeEmitter.fire();
+		return { employeeAgentsByNode, removedAgents };
+	}
+
+	clearMissionEmployees(ownerOrMissionId: string): readonly IAdeAgent[] {
+		const generatedRoots = this.entries.filter(entry =>
+			entry.treeGovernorId === ownerOrMissionId
+			&& entry.id !== ownerOrMissionId
+			&& Boolean(entry.treeNodeId),
+		);
+		const removedIdSet = new Set<string>();
+		for (const gen of generatedRoots) {
+			for (const member of this.getSubtree(gen.id)) {
+				removedIdSet.add(member.id);
+			}
+		}
+		const removedAgents = this.entries.filter(entry => removedIdSet.has(entry.id));
+		const ownerExists = this.entries.some(entry => entry.id === ownerOrMissionId && Boolean(entry.treeType));
+
+		if (removedAgents.length === 0 && !ownerExists) {
+			return [];
+		}
+
+		this.entries = this.entries
+			.filter(entry => !removedIdSet.has(entry.id))
+			.map(entry => entry.id === ownerOrMissionId
+				? {
+					...entry,
+					treeType: undefined,
+					treeGovernorId: undefined,
+					treeSegmentId: undefined,
+					treeNodeId: undefined,
+				}
+				: entry);
+
+		if (this._selectedAgentId && removedIdSet.has(this._selectedAgentId)) {
+			this._selectedAgentId = this.getAgent(ownerOrMissionId)?.id;
+		}
+		this.saveAgents();
+		if (removedAgents.length > 0) {
+			this.removedAgentsEmitter.fire(removedAgents);
+		}
+		this.changeEmitter.fire();
+		return removedAgents;
 	}
 
 	updateAgentEnginePreferences(id: string, prefs: {

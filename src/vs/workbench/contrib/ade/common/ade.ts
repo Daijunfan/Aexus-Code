@@ -75,6 +75,7 @@ export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProject
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
 export const ADE_RENAME_PROJECT_COMMAND_ID = 'workbench.action.ade.renameProjectFolder';
 export const ADE_OPEN_MISSION_COMMAND_ID = 'workbench.action.ade.openMission';
+export const ADE_REMOVE_MISSION_COMMAND_ID = 'workbench.action.ade.removeMission';
 export const ADE_OPEN_ENGINEERING_COMMAND_ID = 'workbench.action.ade.openEngineering';
 export const ADE_OPEN_RESEARCH_COMMAND_ID = 'workbench.action.ade.openResearch';
 export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHosts.manage';
@@ -203,6 +204,12 @@ export interface IAdeProjectsService {
 	isLockedByWorkTree?(id: string): boolean;
 	getWorkTreeGovernor?(id: string): IAdeAgent | undefined;
 	setAgentWorkTreeTag?(governorId: string, treeType: AdeWorkTreeType | undefined): void;
+	syncMissionMermaidEmployees?(
+		ownerOrMissionId: string,
+		nodes: readonly { readonly id: string; readonly title: string }[],
+		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
+	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] };
+	clearMissionEmployees?(ownerOrMissionId: string): readonly IAdeAgent[];
 	syncWorkTreeHierarchy?(governorId: string, treeType: AdeWorkTreeType, segments: readonly IAdeWorkTreeSegmentSpec[]): IAdeWorkTreeSyncResult;
 	updateAgentEnginePreferences?(id: string, prefs: {
 		readonly preferredEngineId?: string;

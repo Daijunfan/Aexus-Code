@@ -26,6 +26,7 @@ import { IWorkingCopyFileService } from '../../../services/workingCopy/common/wo
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { IAdeEditorService, IAdeProject, IAdeProjectsService } from '../common/ade.js';
+import { IAdeMissionService } from './adeMissionStore.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 function tryGetService<T>(accessor: ServicesAccessor, identifier: ServiceIdentifier<T>): T | undefined {
@@ -248,6 +249,7 @@ export async function removeProjectsSynchronized(accessor: ServicesAccessor, raw
 	const contextService = tryGetService(accessor, IWorkspaceContextService);
 	const workspaceEditing = tryGetService(accessor, IWorkspaceEditingService);
 	const environmentService = tryGetService(accessor, IWorkbenchEnvironmentService);
+	const missionService = tryGetService(accessor, IAdeMissionService);
 
 	const targets = await resolveTargetProjectUris(
 		rawTargets,
@@ -264,6 +266,15 @@ export async function removeProjectsSynchronized(accessor: ServicesAccessor, raw
 
 	for (const targetUri of targets) {
 		const projectAgents = projects.agents.filter(agent => uriIdentity.extUri.isEqual(agent.projectUri, targetUri));
+		if (missionService) {
+			for (const m of missionService.listMissions()) {
+				const matchesProject = m.projectUri ? uriIdentity.extUri.isEqual(URI.parse(m.projectUri), targetUri) : false;
+				const ownedByProjectAgent = Boolean(m.ownerSessionId && projectAgents.some(a => a.id === m.ownerSessionId));
+				if (matchesProject || ownedByProjectAgent) {
+					await missionService.removeMissionWithEmployees(m.id);
+				}
+			}
+		}
 		await editors.closeAgents(projectAgents);
 		if (navigation.focusedProject && uriIdentity.extUri.isEqual(navigation.focusedProject.uri, targetUri)) {
 			navigation.goHome();
@@ -344,6 +355,7 @@ export async function deleteProjectsWithModePrompt(
 	const workspaceEditing = tryGetService(accessor, IWorkspaceEditingService);
 	const environmentService = tryGetService(accessor, IWorkbenchEnvironmentService);
 	const workingCopyFileService = tryGetService(accessor, IWorkingCopyFileService);
+	const missionService = tryGetService(accessor, IAdeMissionService);
 
 	const targets = await resolveTargetProjectUris(
 		rawTargets,
@@ -454,6 +466,16 @@ export async function deleteProjectsWithModePrompt(
 				}
 				for (const copy of dirtyCopies) {
 					await copy.revert({ soft: true }).catch(() => { });
+				}
+			}
+		}
+
+		if (missionService) {
+			for (const m of missionService.listMissions()) {
+				const matchesProject = m.projectUri ? uriIdentity.extUri.isEqual(URI.parse(m.projectUri), targetUri) : false;
+				const ownedByProjectAgent = Boolean(m.ownerSessionId && projectAgents.some(a => a.id === m.ownerSessionId));
+				if (matchesProject || ownedByProjectAgent) {
+					await missionService.removeMissionWithEmployees(m.id, { deleteEngineHistory: shouldDeleteSessions });
 				}
 			}
 		}
