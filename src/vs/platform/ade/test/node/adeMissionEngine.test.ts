@@ -14,11 +14,17 @@ import {
 	queryApiUpdateDiff,
 } from '../../common/adeApiRegistry.js';
 import { syncAdeApiDocsToDisk } from '../../node/adeDocsSync.js';
+import { AdeDocsBackendNodeService } from '../../node/adeDocsBackendService.js';
+import { computeAdeStorageFingerprint, encodeAdeMissionStorageFileName } from '../../common/adeEngineering.js';
 import {
+	computeNodeDragSnapAlignment,
 	getMissionEdgeKind,
 	getMissionSourceNodes,
 	IMissionDagParseResult,
+	MissionCanvasHistoryStack,
 	parseMissionMermaidDag,
+	removeNodesFromMermaid,
+	renameEdgeLabelInMermaid,
 } from '../../common/adeMissionDag.js';
 import {
 	findDirectSupervisorForNode,
@@ -31,10 +37,14 @@ import {
 	appendMissionDagRevision,
 	applySafeMissionPatch,
 	blockMissionToken,
+	buildMissionRunArchiveSnapshot,
 	buildTokenDispatchPrompt,
+	collectValidUpstreamRollbackCandidates,
+	compareMissionRuns,
 	completeMissionToken,
 	compressTokenHistory,
 	computeMissionFinOpsSummary,
+	computeMissionNodeContextBreakdown,
 	createInitialMissionRuntimeState,
 	distillMissionNodeContext,
 	escalateMissionIssue,
@@ -44,7 +54,10 @@ import {
 	IMissionRuntimeState,
 	IMissionSourceTrigger,
 	IMissionToken,
+	inferMissionConcurrencyProvider,
+	inferModelContextWindowTokens,
 	matchesCronExpression,
+	MAX_MISSION_RUN_HISTORY,
 	pauseMissionRun,
 	recallMissionTokens,
 	recordMissionNodeTurnUsage,
@@ -55,11 +68,19 @@ import {
 	resumeMissionRun,
 	retryMissionToken,
 	setMissionBudgetLimit,
+	setMissionConcurrencyLimits,
 	setMissionSilenceTimeout,
 	startMissionRun,
 	stopMissionRun,
 	validateSourceTrigger,
 } from '../../common/adeMissionEngine.js';
+import {
+	estimateTokenCostUsd,
+	isBuiltInLocalZeroCostModel,
+	parseExplicitModelContextWindowTag,
+	resolveModelContextWindowTokens,
+	resolveModelTokenPricingRate,
+} from '../../common/adeModelPricing.js';
 import {
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
 	IAdeOrganizationConfig,
@@ -2328,5 +2349,1029 @@ suite('ADE Mission Engine Regression Guards (wave joins, rework, patches & run-s
 		assert.strictEqual(state.revisions?.length, 2);
 		assert.strictEqual(state.revisions?.[1].version, 2);
 		assert.deepStrictEqual(state.revisions?.[1].addedNodeIds, ['C']);
+	});
+
+	test('unified model pricing catalog estimates input/output/cache rates across all 8 engines, handles local zero-cost & user overrides', () => {
+		// 1. OpenAI/Codex inclusive inputTokens avoids double-billing cached input tokens
+		const codexEst = estimateTokenCostUsd({
+			inputTokens: 1_000_000, // OpenAI style: includes 800k cached input tokens
+			outputTokens: 100_000,
+			cacheReadTokens: 800_000,
+			totalTokens: 1_100_000,
+			model: 'gpt-5.3-codex',
+			engineId: 'aexus-codex',
+		});
+		// Billable non-cached input = 200k * $1.75/M ($0.35) + cacheRead 800k * $0.175/M ($0.14) + output 100k * $14/M ($1.40) = $1.89
+		assert.strictEqual(codexEst.estimated, true);
+		assert.strictEqual(codexEst.isLocalFree, false);
+		assert.strictEqual(codexEst.costUsd, 1.89);
+
+		// 2. DSH JSON tuple model ID unwraps cleanly to deepseek-r1
+		const dshEst = estimateTokenCostUsd({
+			inputTokens: 500_000,
+			outputTokens: 200_000,
+			cacheReadTokens: 500_000,
+			model: '["deepseek-official","deepseek-r1"]',
+			engineId: 'aexus-dsh',
+		});
+		// 0.5*0.55 ($0.275) + 0.2*2.19 ($0.438) + 0.5*0.14 ($0.07) = $0.783
+		assert.strictEqual(dshEst.estimated, true);
+		assert.strictEqual(dshEst.costUsd, 0.783);
+
+		// 3. Antigravity / Gemini, OpenCode / Qwen, Pi / engine default fallback when model is omitted
+		const agyEst = estimateTokenCostUsd({ inputTokens: 400_000, outputTokens: 100_000, model: 'gemini-2.5-pro', engineId: 'aexus-antigravity' });
+		assert.strictEqual(agyEst.costUsd, 1.5); // 0.4*1.25 + 0.1*10
+		const opencodeEst = estimateTokenCostUsd({ inputTokens: 1_000_000, outputTokens: 500_000, engineId: 'aexus-opencode' });
+		assert.strictEqual(opencodeEst.source, 'engine_default');
+		assert.strictEqual(opencodeEst.costUsd, 0.9); // qwen3-coder: 1*0.3 + 0.5*1.2
+
+		// 4. Built-in local / self-hosted zero-cost models always price at $0.00
+		assert.strictEqual(isBuiltInLocalZeroCostModel('ollama/qwen3:32b'), true);
+		assert.strictEqual(isBuiltInLocalZeroCostModel('vllm/deepseek-r1-distill'), true);
+		assert.strictEqual(isBuiltInLocalZeroCostModel('openrouter/qwen/qwen3:free'), true);
+		const localEst = estimateTokenCostUsd({ inputTokens: 2_000_000, outputTokens: 500_000, model: 'ollama/qwen3:32b' });
+		assert.strictEqual(localEst.costUsd, 0);
+		assert.strictEqual(localEst.isLocalFree, true);
+		assert.strictEqual(localEst.estimated, false);
+
+		// 5. User settings overrides: custom rates, glob patterns, and explicit `local: true`
+		const overrides = {
+			'gpt-5.3-codex': { inputPerMillion: 4.0, outputPerMillion: 20.0, cacheReadPerMillion: 0.4, cacheWritePerMillion: 5.0 },
+			'corp-cluster/*': { local: true },
+		};
+		const customCodex = estimateTokenCostUsd({
+			inputTokens: 500_000,
+			outputTokens: 100_000,
+			cacheWriteTokens: 200_000,
+			model: 'openai/gpt-5.3-codex',
+			overrides,
+		});
+		// 0.5*4 + 0.1*20 + 0.2*5 = $5.00
+		assert.strictEqual(customCodex.source, 'override');
+		assert.strictEqual(customCodex.costUsd, 5);
+
+		const customLocal = resolveModelTokenPricingRate('corp-cluster/llama-70b', 'aexus-opencode', overrides);
+		assert.strictEqual(customLocal.isLocalFree, true);
+		assert.strictEqual(customLocal.source, 'override_local');
+	});
+
+	test('FinOps engine activates budget circuit-breaker on non-Claude engines via token estimation and reconciles interim estimates against real provider bills without double-counting', () => {
+		const graph = parseGraph('flowchart LR\n  A["Codex Worker"] --> B["Claude Reviewer"]\n  A --> C["Local Ollama"]');
+		let state = createState(graph);
+		state = {
+			...state,
+			boundary: {
+				...state.boundary,
+				nodeAssignments: {
+					A: { tier: 2, agentId: 'emp-codex', hostAlias: 'local' },
+					B: { tier: 3, agentId: 'emp-claude', hostAlias: 'local' },
+					C: { tier: 2, agentId: 'emp-local', hostAlias: 'gpu-box' },
+				},
+			},
+		};
+		state = setMissionBudgetLimit(state, 1.50, 1_000);
+		const started = startMissionRun(state, graph, ORG, { now: 1_100 });
+		assert.strictEqual(started.ok, true, started.error);
+		state = started.state;
+
+		// 1. Local Ollama model consumes massive tokens at $0.00 -> never trips budget
+		state = recordMissionNodeTurnUsage(state, 'C', {
+			inputTokens: 1_000_000,
+			outputTokens: 500_000,
+			model: 'ollama/qwen3:32b',
+			engineId: 'aexus-opencode',
+			timestamp: 1_200,
+		});
+		assert.strictEqual(state.nodeTelemetry?.C?.costUsd, 0);
+		assert.strictEqual(state.nodeTelemetry?.C?.costLocalFree, true);
+		assert.strictEqual(state.nodeTelemetry?.C?.costEstimated, undefined);
+		assert.strictEqual(state.status, 'running');
+
+		// 2. Claude streams interim delta (no real cost yet -> estimated $0.0625), then completes with real total_cost_usd=$0.08
+		//    Must reconcile to exact $0.08 with ZERO double-counting and clear costEstimated!
+		state = recordMissionNodeTurnUsage(state, 'B', {
+			inputTokens: 10_000,
+			outputTokens: 500,
+			model: 'claude-opus-4-6',
+			engineId: 'aexus-claude',
+			turns: 0,
+			timestamp: 1_300,
+		});
+		assert.strictEqual(state.nodeTelemetry?.B?.costUsd, 0.0625);
+		assert.strictEqual(state.nodeTelemetry?.B?.costEstimated, true);
+		state = recordMissionNodeTurnUsage(state, 'B', {
+			inputTokens: 2_000,
+			outputTokens: 200,
+			costUsd: 0.08,
+			model: 'claude-opus-4-6',
+			engineId: 'aexus-claude',
+			turns: 1,
+			timestamp: 1_400,
+		});
+		assert.strictEqual(state.nodeTelemetry?.B?.costUsd, 0.08, 'Real CLI bill replaces pending interim estimate without double-counting');
+		assert.strictEqual(state.nodeTelemetry?.B?.costEstimated, undefined, 'Reconciled real bill clears estimated flag');
+
+		// 3. Codex emits tokens WITHOUT costUsd -> auto-estimated & trips $1.50 hard budget circuit-breaker!
+		//    400k in * $1.75/M ($0.70) + 60k out * $14/M ($0.84) = $1.54 -> total $1.62 >= $1.50!
+		state = recordMissionNodeTurnUsage(state, 'A', {
+			inputTokens: 400_000,
+			outputTokens: 60_000,
+			model: 'gpt-5.3-codex',
+			engineId: 'aexus-codex',
+			timestamp: 1_500,
+		});
+		assert.strictEqual(state.nodeTelemetry?.A?.costUsd, 1.54);
+		assert.strictEqual(state.nodeTelemetry?.A?.costEstimated, true);
+		assert.strictEqual(state.budgetCircuitTripped, true, 'Codex token-estimated spend MUST trip hard budget circuit-breaker');
+		assert.strictEqual(state.status, 'paused', 'Mission pauses immediately upon non-Claude budget breach');
+
+		const summary = computeMissionFinOpsSummary(state, graph.nodes);
+		assert.strictEqual(summary.totalCostUsd, 1.62);
+		assert.strictEqual(summary.hasEstimatedCost, true);
+		assert.strictEqual(summary.estimatedCostUsd, 1.54);
+		assert.strictEqual(summary.hasLocalFreeNodes, true);
+		assert.strictEqual(summary.budgetCircuitTripped, true);
+		assert.strictEqual(summary.byNode.find(n => n.nodeId === 'A')?.costEstimated, true);
+		assert.strictEqual(summary.byNode.find(n => n.nodeId === 'B')?.costEstimated, undefined);
+		assert.strictEqual(summary.byNode.find(n => n.nodeId === 'C')?.costLocalFree, true);
+	});
+
+	test('canvas editing primitives: renameEdgeLabelInMermaid, removeNodesFromMermaid, magnetic snap alignment, and 50-step MissionCanvasHistoryStack', () => {
+		const initialMmd = [
+			'flowchart LR',
+			'  A["Plan"] --> B["Build"]',
+			'  B --> C["Verify"]',
+			'  C --> D["Ship"]',
+			'  %% check B [name=unit, command="npm test"]',
+			'  %% check D [name=release, command="npm run check"]',
+		].join('\n');
+
+		// 1. Edge label rename updates label and automatically switches polarity for fail keywords
+		const labeledMmd = renameEdgeLabelInMermaid(initialMmd, 'A', 'B', 'spec');
+		const parsedLabeled = parseMissionMermaidDag(labeledMmd);
+		assert.strictEqual(parsedLabeled.edges.find(e => e.from === 'A' && e.to === 'B')?.label, 'spec');
+		assert.strictEqual(getMissionEdgeKind(parsedLabeled.edges.find(e => e.from === 'A' && e.to === 'B')!), 'success');
+
+		const failMmd = renameEdgeLabelInMermaid(labeledMmd, 'A', 'B', 'fail');
+		const parsedFail = parseMissionMermaidDag(failMmd);
+		assert.strictEqual(getMissionEdgeKind(parsedFail.edges.find(e => e.from === 'A' && e.to === 'B')!), 'fail');
+
+		const clearedMmd = renameEdgeLabelInMermaid(failMmd, 'A', 'B', '');
+		const parsedCleared = parseMissionMermaidDag(clearedMmd);
+		assert.strictEqual(parsedCleared.edges.find(e => e.from === 'A' && e.to === 'B')?.label, undefined);
+		assert.strictEqual(getMissionEdgeKind(parsedCleared.edges.find(e => e.from === 'A' && e.to === 'B')!), 'success');
+
+		// 2. Batch node deletion removes target nodes, incident edges, and bound %% check directives atomically
+		const afterBatchDel = removeNodesFromMermaid(initialMmd, ['B', 'C']);
+		const parsedBatch = parseMissionMermaidDag(afterBatchDel);
+		assert.deepStrictEqual(parsedBatch.nodes.map(n => n.id), ['A', 'D']);
+		assert.strictEqual(parsedBatch.edges.length, 0);
+		assert.strictEqual(afterBatchDel.includes('%% check B'), false);
+		assert.strictEqual(afterBatchDel.includes('%% check D'), true);
+
+		// 3. Smart alignment snap guides lock X/Y within 8px threshold and stay 0 outside threshold
+		const stationary = [
+			{ id: 'N1', minX: 100, maxX: 300, minY: 100, maxY: 200 }, // center (200, 150)
+			{ id: 'N2', minX: 500, maxX: 700, minY: 300, maxY: 400 }, // center (600, 350)
+		];
+		const snapHit = computeNodeDragSnapAlignment({ minX: 104, maxX: 304, minY: 305, maxY: 405 }, stationary, 8);
+		assert.strictEqual(snapHit.dx, -4, 'Snaps left/center X to N1 (delta -4)');
+		assert.strictEqual(snapHit.dy, -5, 'Snaps top/middle Y to N2 (delta -5)');
+		assert.strictEqual(snapHit.guides.length, 2);
+		assert.ok(snapHit.guides.some(g => g.axis === 'x'));
+		assert.ok(snapHit.guides.some(g => g.axis === 'y'));
+
+		const snapMiss = computeNodeDragSnapAlignment({ minX: 120, maxX: 320, minY: 230, maxY: 330 }, stationary, 8);
+		assert.strictEqual(snapMiss.dx, 0);
+		assert.strictEqual(snapMiss.dy, 0);
+		assert.strictEqual(snapMiss.guides.length, 0);
+
+		// 4. 50-step bounded history stack enforces cap, deep-clones, coalesces rapid edits, and clears redo on new push
+		const stack = new MissionCanvasHistoryStack(50);
+		for (let i = 1; i <= 55; i++) {
+			stack.push({
+				mermaidText: `flowchart LR\n  N${i}["Step ${i}"]`,
+				positions: { [`N${i}`]: { x: i * 10, y: 100 } },
+				nodePrompts: { [`N${i}`]: `Prompt ${i}` },
+				nodeChecks: {},
+				label: `Step ${i}`,
+				timestamp: i * 5_000,
+			});
+		}
+		assert.strictEqual(stack.undoCount, 50, 'History stack caps at 50 entries');
+		assert.strictEqual(stack.peekUndoLabel(), 'Step 55');
+
+		const restored = stack.undo({
+			mermaidText: 'flowchart LR\n  N56["Current"]',
+			positions: { N56: { x: 560, y: 100 } },
+			nodePrompts: {},
+			nodeChecks: {},
+			label: '',
+		});
+		assert.ok(restored);
+		assert.strictEqual(restored.mermaidText, 'flowchart LR\n  N55["Step 55"]');
+		assert.strictEqual(stack.redoCount, 1);
+
+		const redone = stack.redo(restored);
+		assert.ok(redone);
+		assert.strictEqual(redone.mermaidText, 'flowchart LR\n  N56["Current"]');
+		assert.strictEqual(stack.redoCount, 0);
+
+		// Rapid coalesced edits keep original baseline
+		const coalStack = new MissionCanvasHistoryStack(50);
+		coalStack.push({ mermaidText: 'v0', positions: {}, nodePrompts: {}, nodeChecks: {}, label: 'Edit', timestamp: 1_000 }, { coalesceMs: 1200 });
+		coalStack.push({ mermaidText: 'v1', positions: {}, nodePrompts: {}, nodeChecks: {}, label: 'Edit', timestamp: 1_500 }, { coalesceMs: 1200 });
+		assert.strictEqual(coalStack.undoCount, 1);
+		assert.strictEqual(coalStack.undo({ mermaidText: 'v2', positions: {}, nodePrompts: {}, nodeChecks: {}, label: '' })?.mermaidText, 'v0');
+	});
+
+	test('collectValidUpstreamRollbackCandidates returns all executed upstream ancestors ordered earliest -> direct predecessor and syncs upsert_gate_inbox (Audit #9)', () => {
+		const graph = parseGraph([
+			'flowchart LR',
+			'  A["Design Spec"] --> B["Implement"]',
+			'  B --> C["Verify"]',
+			'  C --> G{"Release Gate"}',
+			'  G --> D["Deploy"]',
+			'  A --> X["Parallel Side"]',
+		].join('\n'));
+		let state = startMissionRun(createState(graph), graph, ORG, { now: 1_000 }).state;
+		const tokA = activeTokenOn(state, 'A')!;
+		state = completeMissionToken(state, graph, { tokenId: tokA.id, summary: 'Spec done', now: 2_000 }).state;
+		const tokB = activeTokenOn(state, 'B')!;
+		state = completeMissionToken(state, graph, { tokenId: tokB.id, summary: 'Impl done', now: 3_000 }).state;
+		const tokC = activeTokenOn(state, 'C')!;
+		const toGate = completeMissionToken(state, graph, { tokenId: tokC.id, summary: 'Verified', now: 4_000 });
+		state = toGate.state;
+
+		const gateTok = Object.values(state.tokens).find(t => t.nodeId === 'G' && t.status === 'waiting_gate')!;
+		assert.ok(gateTok);
+
+		// Helper returns all 3 executed upstream reachable ancestors [A, B, C], excludes downstream D and sibling X
+		const candidates = collectValidUpstreamRollbackCandidates(state, graph, 'G', gateTok.tracePtr, gateTok.fromNodeId);
+		assert.deepStrictEqual(candidates.map(c => c.id), ['A', 'B', 'C']);
+		assert.strictEqual(candidates[0].isDirectPredecessor, false);
+		assert.strictEqual(candidates[2].isDirectPredecessor, true);
+
+		// upsert_gate_inbox effect mirrors the exact same full upstream candidate list
+		const inboxEffect = toGate.effects.find(e => e.kind === 'upsert_gate_inbox');
+		assert.ok(inboxEffect && inboxEffect.kind === 'upsert_gate_inbox');
+		assert.deepStrictEqual(inboxEffect.rollbackCandidates.map(c => c.id), ['A', 'B', 'C']);
+
+		// Every single returned candidate is accepted by resolveMissionGate
+		for (const cand of candidates) {
+			const res = resolveMissionGate(state, graph, { nodeId: 'G', decision: 'reject', rollbackNodeId: cand.id, note: `Rework from ${cand.id}`, now: 5_000 });
+			assert.strictEqual(res.ok, true, `Rollback target ${cand.id} must be accepted by engine: ${res.error}`);
+			const bounced = res.state.tokens[res.data!.nextTokenIds[0]];
+			assert.strictEqual(bounced.nodeId, cand.id);
+		}
+
+		// Empty/unknown trace never emits invalid unexecuted candidates
+		assert.deepStrictEqual(
+			collectValidUpstreamRollbackCandidates(state, graph, 'G', 'missing-trace-ptr', 'C'),
+			[],
+		);
+	});
+
+	test('multi-level concurrency scheduler enforces global/host/provider caps, queues excess wide fan-out in FIFO order, protects GPU watchPid slots, and drains work-conservingly (Audit #15)', () => {
+		// 1. Provider inference maps cloud APIs cleanly and exempts self-hosted local engines
+		assert.strictEqual(inferMissionConcurrencyProvider('claude-opus-4-6', 'claude'), 'anthropic');
+		assert.strictEqual(inferMissionConcurrencyProvider('gpt-5.3-codex', 'codex'), 'openai');
+		assert.strictEqual(inferMissionConcurrencyProvider('gemini-2.5-pro', 'acp'), 'google');
+		assert.strictEqual(inferMissionConcurrencyProvider('deepseek-r1', 'kilo'), 'deepseek');
+		assert.strictEqual(inferMissionConcurrencyProvider('ollama/llama3.3', 'kilo'), undefined);
+		assert.strictEqual(inferMissionConcurrencyProvider('vllm/qwen2.5-72b', 'kilo'), undefined);
+		assert.strictEqual(inferMissionConcurrencyProvider('mlx-community/qwen', 'pi'), undefined);
+
+		// 2. Wide 6-branch fan-out across local, gpu-a, and gpu-b with distinct providers
+		const graph = parseGraph([
+			'flowchart LR',
+			'  Root["Dispatch"] --> L1["Local 1"]',
+			'  Root --> L2["Local 2"]',
+			'  Root --> G1["GPU-A 1"]',
+			'  Root --> G2["GPU-A 2"]',
+			'  Root --> B1["GPU-B 1"]',
+			'  Root --> G3["GPU-A 3"]',
+		].join('\n'));
+		const boundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'sup-l1', tier: 1, managedNodeIds: ['Root'] }],
+			nodeAssignments: {
+				Root: { tier: 2, agentId: 'a-root', provider: 'anthropic' },
+				L1: { tier: 3, agentId: 'a-l1', provider: 'anthropic' },
+				L2: { tier: 3, agentId: 'a-l2', provider: 'anthropic' },
+				G1: { tier: 3, agentId: 'a-g1', hostAlias: 'gpu-a', provider: 'openai' },
+				G2: { tier: 3, agentId: 'a-g2', hostAlias: 'gpu-a', provider: 'openai' },
+				B1: { tier: 3, agentId: 'a-b1', hostAlias: 'gpu-b', provider: 'google' },
+				G3: { tier: 3, agentId: 'a-g3', hostAlias: 'gpu-a', provider: 'anthropic' },
+			},
+		};
+		let state = createState(graph, boundary);
+		const started = startMissionRun(state, graph, ORG, {
+			now: 1_000,
+			concurrencyLimits: {
+				maxGlobal: 4,
+				maxLocalHost: 1,
+				maxPerCloudHost: 1,
+				maxPerProvider: 2,
+			},
+		});
+		assert.strictEqual(started.ok, true);
+		state = started.state;
+		const rootTok = activeTokenOn(state, 'Root')!;
+		assert.ok(rootTok);
+
+		// Completing Root fans out to 6 branches simultaneously:
+		// - L1 (local, anthropic): admitted (local 1/1, anthropic 1/2, global 1/4)
+		// - L2 (local, anthropic): queued (#1) due to local_host 1/1
+		// - G1 (gpu-a, openai): admitted (gpu-a 1/1, openai 1/2, global 2/4)
+		// - G2 (gpu-a, openai): queued (#2) due to cloud_host gpu-a 1/1
+		// - B1 (gpu-b, google): admitted work-conservingly! (gpu-b 1/1, google 1/2, global 3/4)
+		// - G3 (gpu-a, anthropic): queued (#3) due to cloud_host gpu-a 1/1
+		const fanned = completeMissionToken(state, graph, { tokenId: rootTok.id, summary: 'Fan-out ready', now: 2_000 });
+		assert.strictEqual(fanned.ok, true);
+		state = fanned.state;
+
+		const dispatchedNodes = fanned.effects
+			.filter((e): e is Extract<typeof e, { kind: 'dispatch_token' }> => e.kind === 'dispatch_token')
+			.map(e => e.nodeId);
+		assert.deepStrictEqual(dispatchedNodes, ['L1', 'G1', 'B1'], 'Only admitted branches may emit dispatch_token effects');
+		assert.strictEqual(state.nodeStates.L1, 'active');
+		assert.strictEqual(state.nodeStates.G1, 'active');
+		assert.strictEqual(state.nodeStates.B1, 'active');
+		assert.strictEqual(state.nodeStates.L2, 'queued');
+		assert.strictEqual(state.nodeStates.G2, 'queued');
+		assert.strictEqual(state.nodeStates.G3, 'queued');
+
+		const queuedToks = Object.values(state.tokens).filter(t => t.status === 'queued').sort((a, b) => (a.queued?.position ?? 0) - (b.queued?.position ?? 0));
+		assert.deepStrictEqual(queuedToks.map(t => [t.nodeId, t.queued?.position, t.queued?.totalQueued, t.queued?.blockedBy]), [
+			['L2', 1, 3, 'local_host'],
+			['G2', 2, 3, 'cloud_host'],
+			['G3', 3, 3, 'cloud_host'],
+		]);
+
+		// 3. Blocking G1 WITH watchPid keeps gpu-a host slot occupied (preventing GPU OOM!), so G2 stays queued!
+		const g1Tok = activeTokenOn(state, 'G1')!;
+		const blockedWithPid = blockMissionToken(state, {
+			tokenId: g1Tok.id,
+			reason: 'GPU training epoch 1/10',
+			maxDurationMs: 600_000,
+			watchPid: 42424,
+			hostAlias: 'gpu-a',
+			now: 3_000,
+		});
+		assert.strictEqual(blockedWithPid.ok, true);
+		state = blockedWithPid.state;
+		assert.strictEqual(blockedWithPid.effects.some(e => e.kind === 'dispatch_token'), false, 'watchPid block must keep host slot occupied');
+		assert.strictEqual(state.nodeStates.G2, 'queued');
+
+		// 4. Blocking G1 WITHOUT watchPid releases gpu-a slot and immediately promotes G2 (leaving L2=#1/2, G3=#2/2)
+		const blockedNoPid = blockMissionToken(state, {
+			tokenId: g1Tok.id,
+			reason: 'Waiting for external artifact upload',
+			maxDurationMs: 600_000,
+			now: 4_000,
+		});
+		assert.strictEqual(blockedNoPid.ok, true);
+		state = blockedNoPid.state;
+		assert.deepStrictEqual(
+			blockedNoPid.effects.filter(e => e.kind === 'dispatch_token').map(e => e.nodeId),
+			['G2'],
+			'Non-PID block frees cloud host slot and promotes queued G2',
+		);
+		assert.strictEqual(state.nodeStates.G2, 'active');
+		const remainingAfterBlock = Object.values(state.tokens).filter(t => t.status === 'queued').sort((a, b) => (a.queued?.position ?? 0) - (b.queued?.position ?? 0));
+		assert.deepStrictEqual(remainingAfterBlock.map(t => [t.nodeId, t.queued?.position, t.queued?.totalQueued]), [
+			['L2', 1, 2],
+			['G3', 2, 2],
+		]);
+
+		// 5. Completing L1 frees local_host and promotes L2 (G3 shifts to #1/1)
+		const l1Tok = activeTokenOn(state, 'L1')!;
+		const l1Done = completeMissionToken(state, graph, { tokenId: l1Tok.id, summary: 'L1 done', now: 5_000 });
+		assert.strictEqual(l1Done.ok, true);
+		state = l1Done.state;
+		assert.deepStrictEqual(l1Done.effects.filter(e => e.kind === 'dispatch_token').map(e => e.nodeId), ['L2']);
+		assert.strictEqual(state.nodeStates.L2, 'active');
+		const g3Queued = Object.values(state.tokens).find(t => t.nodeId === 'G3' && t.status === 'queued')!;
+		assert.strictEqual(g3Queued.queued?.position, 1);
+		assert.strictEqual(g3Queued.queued?.totalQueued, 1);
+
+		// 6. Raising concurrency limits dynamically via setMissionConcurrencyLimits immediately promotes G3
+		const raised = setMissionConcurrencyLimits(state, {
+			maxGlobal: 8,
+			maxLocalHost: 4,
+			maxPerCloudHost: 2,
+			maxPerProvider: 4,
+		}, 6_000);
+		assert.strictEqual(raised.ok, true);
+		state = raised.state;
+		assert.deepStrictEqual(raised.data?.promotedTokenIds, [g3Queued.id]);
+		assert.deepStrictEqual(raised.effects.filter(e => e.kind === 'dispatch_token').map(e => e.nodeId), ['G3']);
+		assert.strictEqual(state.nodeStates.G3, 'active');
+
+		// 7. Recalling a queued token emits zero stop_agent effects and shifts subsequent queue ranks cleanly
+		let recallState = startMissionRun(createState(graph, boundary), graph, ORG, {
+			now: 10_000,
+			concurrencyLimits: { maxGlobal: 1, maxLocalHost: 1, maxPerCloudHost: 1, maxPerProvider: 1 },
+		}).state;
+		const rRoot = activeTokenOn(recallState, 'Root')!;
+		recallState = completeMissionToken(recallState, graph, { tokenId: rRoot.id, summary: 'Fan out capped at 1', now: 11_000 }).state;
+		assert.strictEqual(recallState.nodeStates.L1, 'active');
+		assert.strictEqual(recallState.nodeStates.L2, 'queued');
+		assert.strictEqual(recallState.nodeStates.G1, 'queued');
+		const recQueued = recallMissionTokens(recallState, graph, {
+			caller: { isHumanUser: true },
+			nodeIds: ['L2'],
+			reason: 'Drop redundant queued branch',
+			now: 12_000,
+		});
+		assert.strictEqual(recQueued.ok, true);
+		assert.strictEqual(recQueued.effects.some(e => e.kind === 'stop_agent'), false, 'Recalling a queued token must not emit stop_agent');
+		const g1AfterRecall = Object.values(recQueued.state.tokens).find(t => t.nodeId === 'G1' && t.status === 'queued')!;
+		assert.strictEqual(g1AfterRecall.queued?.position, 1, 'Remaining queued token must renumber to #1');
+		assert.strictEqual(g1AfterRecall.queued?.totalQueued, 4);
+
+		// 8. Deterministic check escalation frees active slot and immediately drains queued token (no stall)
+		const l1ActiveForCheck = activeTokenOn(recallState, 'L1')!;
+		const escRes = recordTokenCheckResult(recallState, graph, {
+			tokenId: l1ActiveForCheck.id,
+			suiteResult: {
+				nodeId: 'L1',
+				passed: false,
+				summary: '1/1 failed: lint',
+				totalDurationMs: 120,
+				results: [{
+					checkId: 'chk-lint',
+					name: 'Lint',
+					hostAlias: 'local',
+					passed: false,
+					exitCode: 1,
+					expectedExitCode: 0,
+					durationMs: 120,
+					outputTail: 'lint failed',
+				}],
+			},
+			onFail: 'escalate',
+			maxAutoRetries: 1,
+			now: 13_000,
+		});
+		assert.strictEqual(escRes.ok, false);
+		assert.strictEqual(escRes.state.nodeStates.L1, 'failed');
+		assert.strictEqual(escRes.state.nodeStates.L2, 'active', 'Check escalation must free concurrency slot and promote queued L2');
+		assert.deepStrictEqual(
+			escRes.effects.filter(e => e.kind === 'dispatch_token').map(e => e.nodeId),
+			['L2'],
+		);
+
+		// 9. Distilling a node while Mission is paused defers its re-dispatch until resumeMissionRun
+		const paused = pauseMissionRun(escRes.state, 14_000);
+		assert.strictEqual(paused.ok, true);
+		const distilledPaused = distillMissionNodeContext(paused.state, graph, 'L2', { memo: 'Focus on parser', now: 15_000 });
+		assert.strictEqual(distilledPaused.ok, true);
+		assert.strictEqual(distilledPaused.effects.some(e => e.kind === 'dispatch_token'), false);
+		const resumed = resumeMissionRun(distilledPaused.state, 16_000);
+		assert.strictEqual(resumed.ok, true);
+		assert.ok(
+			resumed.effects.some(e => e.kind === 'dispatch_token' && e.nodeId === 'L2'),
+			'Resuming after paused distill must replay deferred dispatch_token for L2',
+		);
+	});
+
+	test('startMissionRun archives previous run ledgers (cost, duration, tokens, per-node metrics) for multi-run comparison, and AdeDocsBackendNodeService persists independent cold Mission files (Audit #18)', async () => {
+		const graph = parseGraph([
+			'flowchart LR',
+			'  A["Plan"] --> B["Build"]',
+		].join('\n'));
+		const boundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'sup-l1', tier: 1, managedNodeIds: ['A'] }],
+			nodeAssignments: {
+				A: { tier: 2, agentId: 'a-plan', hostAlias: 'local', provider: 'anthropic' },
+				B: { tier: 3, agentId: 'a-build', hostAlias: 'gpu-1', provider: 'openai' },
+			},
+		};
+
+		// Run #1: expensive & slower ($1.00, 40s, 100k tokens)
+		let state = startMissionRun(createState(graph, boundary), graph, ORG, { now: 10_000 }).state;
+		assert.strictEqual(state.runSeq, 1);
+		assert.strictEqual(state.runHistory, undefined);
+		state = recordMissionNodeTurnUsage(state, 'A', { inputTokens: 20_000, outputTokens: 10_000, totalTokens: 30_000, costUsd: 0.40, turns: 2, model: 'claude-opus-4-6', engineId: 'claude', timestamp: 25_000 });
+		const tokA1 = activeTokenOn(state, 'A')!;
+		state = completeMissionToken(state, graph, { tokenId: tokA1.id, summary: 'Plan v1 done', now: 25_000 }).state;
+		state = recordMissionNodeTurnUsage(state, 'B', { inputTokens: 50_000, outputTokens: 20_000, cacheReadTokens: 10_000, totalTokens: 70_000, costUsd: 0.60, turns: 3, model: 'gpt-5.3-codex', engineId: 'codex', timestamp: 50_000 });
+		const tokB1 = activeTokenOn(state, 'B')!;
+		state = completeMissionToken(state, graph, { tokenId: tokB1.id, summary: 'Build v1 done', now: 50_000 }).state;
+		assert.strictEqual(state.status, 'completed');
+		assert.strictEqual(state.completedAt, 50_000);
+
+		// Run #2: re-run archives Run #1 cleanly BEFORE clearing nodeTelemetry!
+		state = startMissionRun(state, graph, ORG, { now: 100_000 }).state;
+		assert.strictEqual(state.runSeq, 2);
+		assert.strictEqual(state.runHistory?.length, 1, 'Previous run ledger must be archived on re-run');
+		const run1 = state.runHistory![0];
+		assert.strictEqual(run1.runNumber, 1);
+		assert.strictEqual(run1.outcome, 'completed');
+		assert.strictEqual(run1.totalCostUsd, 1.0);
+		assert.strictEqual(run1.totalTokens, 100_000);
+		assert.strictEqual(run1.durationMs, 40_000);
+		assert.strictEqual(run1.completedNodeCount, 2);
+		assert.strictEqual(run1.nodeMetrics.length, 2);
+		assert.strictEqual(Object.keys(state.nodeTelemetry ?? {}).length, 0, 'Fresh run starts with clean live nodeTelemetry');
+
+		// Run #2 finishes cheaper & faster ($0.40, 20s, 50k tokens)
+		state = recordMissionNodeTurnUsage(state, 'A', { inputTokens: 10_000, outputTokens: 5_000, totalTokens: 15_000, costUsd: 0.15, turns: 1, model: 'claude-sonnet-4-6', engineId: 'claude', timestamp: 108_000 });
+		const tokA2 = activeTokenOn(state, 'A')!;
+		state = completeMissionToken(state, graph, { tokenId: tokA2.id, summary: 'Plan v2 fast', now: 108_000 }).state;
+		state = recordMissionNodeTurnUsage(state, 'B', { inputTokens: 25_000, outputTokens: 10_000, cacheReadTokens: 15_000, totalTokens: 35_000, costUsd: 0.25, turns: 1, model: 'gpt-5.3-codex', engineId: 'codex', timestamp: 120_000 });
+		const tokB2 = activeTokenOn(state, 'B')!;
+		state = completeMissionToken(state, graph, { tokenId: tokB2.id, summary: 'Build v2 fast', now: 120_000 }).state;
+
+		const liveRun2 = buildMissionRunArchiveSnapshot(state, graph.nodes, { runNumber: 2, now: 120_000 });
+		const cmp = compareMissionRuns(liveRun2, run1);
+		assert.strictEqual(cmp.currentRunNumber, 2);
+		assert.strictEqual(cmp.baselineRunNumber, 1);
+		assert.strictEqual(cmp.costDeltaUsd, -0.6);
+		assert.strictEqual(cmp.costDeltaPct, -60);
+		assert.strictEqual(cmp.durationDeltaMs, -20_000);
+		assert.strictEqual(cmp.durationDeltaPct, -50);
+		assert.strictEqual(cmp.tokensDelta, -50_000);
+		assert.strictEqual(cmp.tokensDeltaPct, -50);
+		assert.strictEqual(cmp.nodeDeltas.length, 2);
+
+		// Run #3 stopped mid-flight still records completedAt and archives accurately on Run #4
+		state = startMissionRun(state, graph, ORG, { now: 200_000 }).state;
+		assert.strictEqual(state.runHistory?.length, 2);
+		state = recordMissionNodeTurnUsage(state, 'A', { inputTokens: 5_000, outputTokens: 2_000, totalTokens: 7_000, costUsd: 0.08, turns: 1, timestamp: 205_000 });
+		state = stopMissionRun(state, 207_000).state;
+		assert.strictEqual(state.completedAt, 207_000);
+		state = startMissionRun(state, graph, ORG, { now: 250_000 }).state;
+		assert.strictEqual(state.runHistory?.length, 3);
+		assert.strictEqual(state.runHistory![2].outcome, 'stopped');
+		assert.strictEqual(state.runHistory![2].durationMs, 7_000);
+		assert.strictEqual(state.runHistory![2].totalCostUsd, 0.08);
+
+		// Bounded history never exceeds MAX_MISSION_RUN_HISTORY (20)
+		let capState = state;
+		let ts = 300_000;
+		for (let i = 0; i < MAX_MISSION_RUN_HISTORY + 5; i++) {
+			capState = stopMissionRun(capState, ts + 500).state;
+			capState = startMissionRun(capState, graph, ORG, { now: ts + 1_000 }).state;
+			ts += 2_000;
+		}
+		assert.strictEqual(capState.runHistory?.length, MAX_MISSION_RUN_HISTORY);
+		assert.ok(capState.runHistory![capState.runHistory!.length - 1].runNumber > MAX_MISSION_RUN_HISTORY);
+
+		// Cold per-Mission file persistence in AdeDocsBackendNodeService + compact storage fingerprint
+		assert.notStrictEqual(computeAdeStorageFingerprint('payload-a'), computeAdeStorageFingerprint('payload-b'));
+		const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ade-cold-missions-'));
+		const backend = new AdeDocsBackendNodeService({ baseDir: tmpHome });
+		try {
+			const events: Array<{ missionId: string; deleted?: boolean; writerId?: string }> = [];
+			const sub = backend.onDidMissionRecordChange(ev => events.push({ missionId: ev.missionId, deleted: ev.deleted, writerId: ev.writerId }));
+			try {
+				await backend.saveMissionRecord('mission/alpha', JSON.stringify({ id: 'mission/alpha', title: 'Alpha', mermaidText: 'flowchart LR\n  A-->B' }), 1_000, 'win-1');
+				await backend.saveMissionRecord('mission/beta', JSON.stringify({ id: 'mission/beta', title: 'Beta', mermaidText: 'flowchart LR\n  X-->Y' }), 2_000, 'win-1');
+
+				const fileAlpha = path.join(tmpHome, 'missions', encodeAdeMissionStorageFileName('mission/alpha'));
+				const fileBeta = path.join(tmpHome, 'missions', encodeAdeMissionStorageFileName('mission/beta'));
+				assert.ok(fs.existsSync(fileAlpha), 'Mission Alpha written to its own isolated cold file');
+				assert.ok(fs.existsSync(fileBeta), 'Mission Beta written to its own isolated cold file');
+				assert.notStrictEqual(fileAlpha, fileBeta);
+
+				const loadedAll = await backend.loadAllMissionRecords();
+				assert.deepStrictEqual(Object.keys(loadedAll).sort(), ['mission/alpha', 'mission/beta']);
+				const loadedAlpha = JSON.parse((await backend.loadMissionRecord('mission/alpha'))!);
+				assert.strictEqual(loadedAlpha.title, 'Alpha');
+
+				await backend.deleteMissionRecord('mission/alpha', 'win-2');
+				assert.strictEqual(fs.existsSync(fileAlpha), false);
+				assert.strictEqual(fs.existsSync(fileBeta), true, 'Deleting Alpha leaves Beta untouched');
+				assert.strictEqual(events.length, 3);
+				assert.strictEqual(events[2].missionId, 'mission/alpha');
+				assert.strictEqual(events[2].deleted, true);
+				assert.strictEqual(events[2].writerId, 'win-2');
+			} finally {
+				sub.dispose();
+			}
+		} finally {
+			backend.dispose();
+			fs.rmSync(tmpHome, { recursive: true, force: true });
+		}
+	});
+
+	test('resolves true per-model context windows across vendors & overrides and auto-marks production rework & tool-error turns into contextNoiseTokens (Audit #24)', () => {
+		// 1. Unified per-model context window catalog + explicit suffix tags + local fallback + user overrides
+		assert.strictEqual(inferModelContextWindowTokens('deepseek-r1'), 64_000);
+		assert.strictEqual(inferModelContextWindowTokens('deepseek-chat'), 64_000);
+		assert.strictEqual(inferModelContextWindowTokens('deepseek-v3.2'), 128_000);
+		assert.strictEqual(inferModelContextWindowTokens('gpt-4o'), 128_000);
+		assert.strictEqual(inferModelContextWindowTokens('claude-opus-4-6'), 200_000);
+		assert.strictEqual(inferModelContextWindowTokens('qwen3-coder'), 256_000);
+		assert.strictEqual(inferModelContextWindowTokens('gpt-5.3-codex'), 400_000);
+		assert.strictEqual(inferModelContextWindowTokens('gemini-2.5-pro'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('gpt-4.1'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('claude-sonnet-4-6[1m]'), 1_000_000);
+		assert.strictEqual(parseExplicitModelContextWindowTag('custom-coder-32k'), 32_000);
+		assert.strictEqual(inferModelContextWindowTokens('custom-coder-32k'), 32_000);
+		assert.strictEqual(inferModelContextWindowTokens('ollama/my-custom-7b'), 32_768);
+		assert.strictEqual(inferModelContextWindowTokens('ollama/deepseek-r1'), 64_000);
+		assert.strictEqual(resolveModelContextWindowTokens(undefined, 'aexus-antigravity'), 1_000_000);
+		assert.strictEqual(resolveModelContextWindowTokens(undefined, 'aexus-dsh'), 64_000);
+		assert.strictEqual(
+			inferModelContextWindowTokens('deepseek-r1', {
+				overrides: {
+					'deepseek-r1': { contextWindowTokens: 48_000 },
+				},
+			}),
+			48_000,
+			'User contextWindowTokens override must take precedence over built-in catalog',
+		);
+		assert.strictEqual(
+			inferModelContextWindowTokens('claude-sonnet-4-6[1m]', {
+				overrides: {
+					'claude-sonnet-4-6': { contextWindowTokens: 300_000 },
+				},
+			}),
+			300_000,
+			'User override on base model ID must win over [1m] suffix tag',
+		);
+		assert.strictEqual(
+			inferModelContextWindowTokens('claude-sonnet-4-6:thinking', {
+				overrides: {
+					'claude-sonnet-4-6': { contextWindowTokens: 300_000 },
+				},
+			}),
+			300_000,
+			'User override on base model ID must win over :thinking suffix',
+		);
+
+		// 2. 64k model hitting 58k tokens triggers critical >=90% severity (NOT masked at 29% by hardcoded 200k!)
+		const graph = parseGraph([
+			'flowchart LR',
+			'  N1["@Dev: Build"] --> R1["@Rev: Audit"]',
+			'  R1 --> G1{"Gate: Release"}',
+			'  G1 --> N2["@Ops: Deploy"]',
+		].join('\n'));
+		const baseBoundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'gov-1', tier: 1, managedNodeIds: ['N1', 'R1', 'G1', 'N2'] }],
+			nodeAssignments: {
+				N1: { agentId: 'dev-1', tier: 2, roleKind: 'worker' },
+				R1: { agentId: 'rev-1', tier: 2, roleKind: 'reviewer' },
+				G1: { tier: 2, roleKind: 'worker' },
+				N2: { agentId: 'ops-1', tier: 2, roleKind: 'worker' },
+			},
+		};
+		let state = createState(graph, baseBoundary);
+		const started = startMissionRun(state, graph, ORG, { now: 1_000 });
+		assert.strictEqual(started.ok, true);
+		state = started.state;
+
+		// Turn 1: clean work on 64k deepseek-r1 -> goes to contextSourceTokens, ZERO noise
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 50_000,
+			outputTokens: 8_000,
+			model: 'deepseek-r1',
+			engineId: 'aexus-dsh',
+			timestamp: 2_000,
+		});
+		const n1Tel1 = state.nodeTelemetry!.N1;
+		assert.strictEqual(n1Tel1.contextWindowMax, 64_000);
+		assert.strictEqual(n1Tel1.contextNoiseTokens, 0);
+		assert.strictEqual(n1Tel1.contextSourceTokens, 58_000);
+		const bd1 = computeMissionNodeContextBreakdown(n1Tel1);
+		assert.strictEqual(bd1.maxTokens, 64_000);
+		assert.strictEqual(bd1.usedPct, 91);
+		assert.strictEqual(bd1.severity, 'critical');
+
+		// Switching model on same node dynamically updates contextWindowMax (64k -> 200k),
+		// and adding/removing user overrides updates contextWindowMax immediately even on unchanged model!
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 2_000,
+			outputTokens: 500,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 2_500,
+		}, {
+			overrides: { 'claude-sonnet-4-6': { contextWindowTokens: 500_000 } },
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextWindowMax, 500_000);
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 500,
+			outputTokens: 200,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 2_600,
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextWindowMax, 200_000, 'Removing user override reverts contextWindowMax back to catalog 200k');
+
+		// 3. Tool-error turn (WITHOUT passing isNoiseTurn!) automatically routes into contextNoiseTokens,
+		//    and does NOT leak onto the next clean turn.
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 8_000,
+			outputTokens: 2_000,
+			hadToolError: true,
+			toolErrorCount: 2,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 3_000,
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextNoiseTokens, 10_000);
+		assert.strictEqual(state.nodeTelemetry!.N1.noiseTurns, 1);
+		assert.strictEqual(state.nodeTelemetry!.N1.pendingNoiseReason, undefined, 'One-shot tool_error clears after failing turn completes');
+
+		const sourceBeforeClean = state.nodeTelemetry!.N1.contextSourceTokens;
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 3_000,
+			outputTokens: 1_000,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 3_500,
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextNoiseTokens, 10_000, 'Next clean turn does NOT leak into noise');
+		assert.strictEqual(state.nodeTelemetry!.N1.contextSourceTokens, sourceBeforeClean + 4_000);
+
+		// 4. Deterministic check failure bounce automatically marks token & node telemetry as rework noise
+		const n1TokId = Object.values(state.tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!.id;
+		const noiseBeforeBounce = state.nodeTelemetry!.N1.contextNoiseTokens;
+		const bounced = recordTokenCheckResult(state, graph, {
+			tokenId: n1TokId,
+			suiteResult: {
+				nodeId: 'N1',
+				passed: false,
+				summary: 'FAIL unit-tests: TypeError cannot read property id of undefined',
+				totalDurationMs: 120,
+				results: [{
+					checkId: 'chk-1',
+					name: 'unit-tests',
+					command: 'pnpm test',
+					hostAlias: 'local',
+					passed: false,
+					exitCode: 1,
+					expectedExitCode: 0,
+					durationMs: 120,
+					outputTail: 'TypeError cannot read property id of undefined',
+				}],
+			},
+			onFail: 'bounce',
+			maxAutoRetries: 2,
+			now: 4_000,
+		});
+		assert.strictEqual(bounced.ok, false);
+		assert.strictEqual(bounced.data?.action, 'bounced');
+		state = bounced.state;
+		assert.strictEqual(state.tokens[n1TokId].isRework, true);
+		assert.strictEqual(state.tokens[n1TokId].reworkReason, 'check_failed');
+		assert.ok(state.nodeTelemetry!.N1.contextNoiseTokens > noiseBeforeBounce, 'Check bounce adds failure diagnostic tokens to noise');
+
+		const noiseAfterBounce = state.nodeTelemetry!.N1.contextNoiseTokens;
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 6_000,
+			outputTokens: 2_000,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 4_500,
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextNoiseTokens, noiseAfterBounce + 8_000, 'Rework turn after check bounce routes automatically into noise');
+
+		// Passing the deterministic check clears check_failed rework state so subsequent clean turns go back to source
+		const passedCheck = recordTokenCheckResult(state, graph, {
+			tokenId: n1TokId,
+			suiteResult: {
+				nodeId: 'N1',
+				passed: true,
+				summary: 'PASS unit-tests',
+				totalDurationMs: 90,
+				results: [{
+					checkId: 'chk-1',
+					name: 'unit-tests',
+					command: 'pnpm test',
+					hostAlias: 'local',
+					passed: true,
+					exitCode: 0,
+					expectedExitCode: 0,
+					durationMs: 90,
+					outputTail: '12 passing',
+				}],
+			},
+			now: 4_700,
+		});
+		assert.strictEqual(passedCheck.ok, true);
+		state = passedCheck.state;
+		assert.strictEqual(state.tokens[n1TokId].isRework, undefined);
+		assert.strictEqual(state.tokens[n1TokId].checkFailureCount, 0);
+		assert.strictEqual(state.nodeTelemetry!.N1.pendingNoiseReason, undefined);
+		const noiseAfterCheckPass = state.nodeTelemetry!.N1.contextNoiseTokens;
+		const srcAfterCheckPass = state.nodeTelemetry!.N1.contextSourceTokens;
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 1_000,
+			outputTokens: 200,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 4_800,
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextNoiseTokens, noiseAfterCheckPass, 'Clean turn after check passes must NOT accrue noise');
+		assert.strictEqual(state.nodeTelemetry!.N1.contextSourceTokens, srcAfterCheckPass + 1_200);
+
+		// 5. Complete N1 -> R1 Reviewer rejects back to N1 -> automatically marks reviewer_rejected rework noise
+		const comp1 = completeMissionToken(state, graph, { tokenId: n1TokId, summary: 'Fixed unit tests', now: 5_000 });
+		assert.strictEqual(comp1.ok, true);
+		state = comp1.state;
+		assert.strictEqual(state.nodeTelemetry!.N1.pendingNoiseReason, undefined);
+
+		const r1TokId = Object.values(state.tokens).find(t => t.nodeId === 'R1' && t.status === 'active')!.id;
+		const rejRes = rejectMissionToken(state, graph, {
+			tokenId: r1TokId,
+			reason: 'Missing input sanitization on webhook handler',
+			callerAgentId: 'rev-1',
+			now: 5_500,
+		});
+		assert.strictEqual(rejRes.ok, true);
+		state = rejRes.state;
+		const n1ReworkTok = Object.values(state.tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
+		assert.strictEqual(n1ReworkTok.isRework, true);
+		assert.strictEqual(n1ReworkTok.reworkReason, 'reviewer_rejected');
+		const noiseBeforeRevTurn = state.nodeTelemetry!.N1.contextNoiseTokens;
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 5_000,
+			outputTokens: 1_500,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 6_000,
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextNoiseTokens, noiseBeforeRevTurn + 6_500, 'Turn after Reviewer rejection routes automatically into noise');
+
+		// 6. Complete N1 -> R1 -> G1 Gate rejects back to N1 -> automatically marks gate_rejected rework noise
+		const comp2 = completeMissionToken(state, graph, { tokenId: n1ReworkTok.id, summary: 'Added webhook sanitization', now: 6_500 });
+		state = comp2.state;
+		const r1Tok2 = Object.values(state.tokens).find(t => t.nodeId === 'R1' && t.status === 'active')!;
+		const compR1 = completeMissionToken(state, graph, { tokenId: r1Tok2.id, summary: 'LGTM', now: 7_000 });
+		state = compR1.state;
+		const gateRej = resolveMissionGate(state, graph, {
+			nodeId: 'G1',
+			decision: 'reject',
+			rollbackNodeId: 'N1',
+			note: 'Rollback for security header check',
+			now: 7_500,
+		});
+		assert.strictEqual(gateRej.ok, true);
+		state = gateRej.state;
+		const n1GateReworkTok = Object.values(state.tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
+		assert.strictEqual(n1GateReworkTok.isRework, true);
+		assert.strictEqual(n1GateReworkTok.reworkReason, 'gate_rejected');
+
+		// 7. Watchdog silence_timeout wakeup marks watchdog_nudge rework noise
+		const noiseBeforeWd = state.nodeTelemetry!.N1.contextNoiseTokens;
+		const wdRes = recordWatchdogWakeup(state, {
+			tokenId: n1GateReworkTok.id,
+			reason: 'silence_timeout',
+			now: 8_000,
+		});
+		assert.strictEqual(wdRes.ok, true);
+		state = wdRes.state;
+		assert.strictEqual(state.tokens[n1GateReworkTok.id].nudgeCount, 1);
+		assert.strictEqual(state.nodeTelemetry!.N1.pendingNoiseReason, 'watchdog_nudge');
+		assert.ok(state.nodeTelemetry!.N1.contextNoiseTokens > noiseBeforeWd);
+
+		// 8. 4-color segment breakdown never exceeds 100% total even if model switches down to a smaller window
+		const bdOverflow = computeMissionNodeContextBreakdown({
+			...state.nodeTelemetry!.N1,
+			contextWindowMax: 32_000,
+		});
+		assert.ok(bdOverflow.noisePct > 0, 'Noise segment remains visible on overflow');
+		assert.ok(bdOverflow.initPct + bdOverflow.tierPct + bdOverflow.sourcePct + bdOverflow.noisePct <= 100.01, '4-segment sum must never overflow 100%');
+
+		// 9. Distill & Refresh clears contextNoiseTokens, pendingNoiseReason, and isRework
+		const distilled = distillMissionNodeContext(state, graph, 'N1', { memo: 'Keep sanitized handler', now: 9_000 });
+		assert.strictEqual(distilled.ok, true);
+		state = distilled.state;
+		assert.strictEqual(state.nodeTelemetry!.N1.contextNoiseTokens, 0);
+		assert.strictEqual(state.nodeTelemetry!.N1.pendingNoiseReason, undefined);
+		assert.strictEqual(state.tokens[n1GateReworkTok.id].isRework, undefined);
+
+		const sourceAfterDistill = state.nodeTelemetry!.N1.contextSourceTokens;
+		state = recordMissionNodeTurnUsage(state, 'N1', {
+			inputTokens: 4_000,
+			outputTokens: 1_000,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 9_500,
+		});
+		assert.strictEqual(state.nodeTelemetry!.N1.contextNoiseTokens, 0, 'Clean turn after distill stays noise-free');
+		assert.strictEqual(state.nodeTelemetry!.N1.contextSourceTokens, sourceAfterDistill + 5_000);
+	});
+
+	test('enforces per-employee exclusive session locking on parallel @Employee branches and during blocked waits without starving other employees (Audit #19)', () => {
+		const graph = parseGraph([
+			'flowchart LR',
+			'  S["@Lead: Kickoff"] --> P1["@Alice: API"]',
+			'  S --> P2["@Alice: Docs"]',
+			'  S --> P3["@Bob: UI"]',
+			'  P1 --> J["@Lead: Merge"]',
+			'  P2 --> J',
+			'  P3 --> J',
+		].join('\n'));
+		const boundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'gov-1', tier: 1, managedNodeIds: ['S', 'P1', 'P2', 'P3', 'J'] }],
+			nodeAssignments: {
+				S: { agentId: 'emp-lead', tier: 2, roleKind: 'worker' },
+				P1: { agentId: 'emp-alice', tier: 2, roleKind: 'worker' },
+				P2: { agentId: 'emp-alice', tier: 2, roleKind: 'worker' },
+				P3: { agentId: 'emp-bob', tier: 2, roleKind: 'worker' },
+				J: { agentId: 'emp-lead', tier: 2, roleKind: 'worker' },
+			},
+		};
+		let state = createState(graph, boundary);
+		const started = startMissionRun(state, graph, ORG, {
+			concurrencyLimits: { maxGlobal: 2, maxLocalHost: 4, maxPerCloudHost: 4, maxPerProvider: 4 },
+			now: 1_000,
+		});
+		assert.strictEqual(started.ok, true);
+		state = started.state;
+
+		const sTok = Object.values(state.tokens).find(t => t.nodeId === 'S' && t.status === 'active')!;
+		const compS = completeMissionToken(state, graph, { tokenId: sTok.id, summary: 'Fork ready', now: 2_000 });
+		assert.strictEqual(compS.ok, true);
+		state = compS.state;
+
+		// P1 (@Alice) is active, P2 (@Alice) MUST be queued exclusively with blockedBy='employee',
+		// and P3 (@Bob) is active (not blocked by @Alice's employee lock!).
+		const p1Tok = Object.values(state.tokens).find(t => t.nodeId === 'P1')!;
+		const p2Tok = Object.values(state.tokens).find(t => t.nodeId === 'P2')!;
+		const p3Tok = Object.values(state.tokens).find(t => t.nodeId === 'P3')!;
+		assert.strictEqual(p1Tok.status, 'active');
+		assert.strictEqual(p3Tok.status, 'active');
+		assert.strictEqual(p2Tok.status, 'queued', 'Second parallel node for @Alice must queue exclusively');
+		assert.strictEqual(p2Tok.queued?.blockedBy, 'employee');
+		assert.strictEqual(p2Tok.queued?.scopeKey, 'emp-alice');
+		assert.strictEqual(p2Tok.queued?.activeSlots, 1);
+		assert.strictEqual(p2Tok.queued?.maxSlots, 1);
+		assert.strictEqual(state.nodeStates.P2, 'queued');
+
+		// Raise global limit to unlimited (0) -> P2 STILL remains exclusively queued because @Alice owns P1!
+		const unlimited = setMissionConcurrencyLimits(state, { maxGlobal: 0, maxLocalHost: 0, maxPerCloudHost: 0, maxPerProvider: 0 }, 2_200);
+		state = unlimited.state;
+		assert.strictEqual(state.tokens[p2Tok.id].status, 'queued', 'Unlimited global caps never override per-employee exclusivity');
+		assert.strictEqual(state.tokens[p2Tok.id].queued?.blockedBy, 'employee');
+
+		// Block P1 (long-running file wait without watchPid) -> P2 MUST STAY queued so @Alice's blocked session is never contaminated!
+		const blockedP1 = blockMissionToken(state, {
+			tokenId: p1Tok.id,
+			reason: 'Waiting for migration snapshot file',
+			maxDurationMs: 600_000,
+			watchFile: '/tmp/migration.done',
+			now: 3_000,
+		});
+		assert.strictEqual(blockedP1.ok, true);
+		state = blockedP1.state;
+		assert.strictEqual(state.tokens[p1Tok.id].status, 'blocked');
+		assert.strictEqual(state.tokens[p2Tok.id].status, 'queued', 'Blocked token on @Alice keeps sibling P2 queued to prevent session pollution');
+		assert.strictEqual(state.tokens[p2Tok.id].queued?.blockedBy, 'employee');
+
+		// Watchdog wakes P1 (file_ready) -> P1 MUST NOT self-block against its own employee slot!
+		const wokeP1 = recordWatchdogWakeup(state, {
+			tokenId: p1Tok.id,
+			reason: 'file_ready',
+			detail: '/tmp/migration.done',
+			now: 4_000,
+		});
+		assert.strictEqual(wokeP1.ok, true);
+		state = wokeP1.state;
+		assert.strictEqual(state.tokens[p1Tok.id].status, 'active', 'Waking blocked token must not self-conflict with its own employee lock');
+		assert.strictEqual(state.tokens[p2Tok.id].status, 'queued');
+
+		// Completing P1 frees @Alice -> P2 automatically promotes from queued -> active with dispatch effect!
+		const compP1 = completeMissionToken(state, graph, { tokenId: p1Tok.id, summary: 'API shipped', now: 5_000 });
+		assert.strictEqual(compP1.ok, true);
+		state = compP1.state;
+		assert.strictEqual(state.tokens[p2Tok.id].status, 'active', 'Completing P1 automatically promotes @Alice queued sibling P2');
+		assert.ok(compP1.effects.some(e => e.kind === 'dispatch_token' && e.tokenId === p2Tok.id && e.nodeId === 'P2'));
+
+		// Completing P2 and P3 releases the 3-way Join barrier cleanly with zero deadlock
+		state = completeMissionToken(state, graph, { tokenId: p2Tok.id, summary: 'Docs written', now: 6_000 }).state;
+		state = completeMissionToken(state, graph, { tokenId: p3Tok.id, summary: 'UI ready', now: 6_500 }).state;
+		const jTok = Object.values(state.tokens).find(t => t.nodeId === 'J' && t.status === 'active');
+		assert.ok(jTok, 'Join barrier fires cleanly after serialized @Alice branches + parallel @Bob branch all complete');
+
+		// Mid-run reassignment consistency: when active P1 is reassigned from @Alice to @Dave via boundary update,
+		// queued sibling P2 (still @Alice) immediately promotes using live nodeAssignments rather than stale holderAgentId!
+		let state2 = startMissionRun(createState(graph, boundary), graph, ORG, { now: 10_000 }).state;
+		const s2 = Object.values(state2.tokens).find(t => t.nodeId === 'S' && t.status === 'active')!;
+		state2 = completeMissionToken(state2, graph, { tokenId: s2.id, summary: 'Fork 2', now: 11_000 }).state;
+		const p2Queued2 = Object.values(state2.tokens).find(t => t.nodeId === 'P2')!;
+		assert.strictEqual(p2Queued2.status, 'queued');
+		const reassignedState: IMissionRuntimeState = {
+			...state2,
+			boundary: {
+				...state2.boundary,
+				nodeAssignments: {
+					...state2.boundary.nodeAssignments,
+					P1: { ...state2.boundary.nodeAssignments.P1, agentId: 'emp-dave' },
+				},
+			},
+		};
+		const drainedAfterReassign = setMissionConcurrencyLimits(reassignedState, reassignedState.concurrencyLimits, 11_500);
+		assert.strictEqual(drainedAfterReassign.state.tokens[p2Queued2.id].status, 'active', 'Reassigning P1 away from @Alice frees @Alice and promotes queued P2');
 	});
 });

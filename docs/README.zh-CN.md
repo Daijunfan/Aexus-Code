@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>开源组织化智能体开发环境（ADE）与可视化多智能体控制面 IDE</strong><br/>
-  可扩展多级组织架构 · 8 大本机 BYO-CLI 编码引擎 · Mission Mermaid DAG 与 Token Bus 运行时 · 服务端签名能力令牌 · 免装机原生 SSH 云主机
+  可视化 Mermaid 任务流图画布 · 8 大本机 BYO-CLI 与全引擎 FinOps 熔断 · 免装机原生 SSH 云主机 · Factory Wall 与 Token Bus
 </p>
 
 <p align="center">
@@ -25,15 +25,15 @@
 ---
 
 > [!TIP]
-> **通过 `aexus-ade` 控制面快速体验 Mission DAG 与瞬切 `ADE ⇄ IDE`：**
-> - **一键本机体检**：运行 `aexus-ade doctor --project .`（无需启动窗口即可独立执行），快速检查 8 大编码 CLI、Git 与 OpenSSH 状态。
-> - **启动可视化 Mission DAG**：执行 `aexus-ade mission init --title "Feature Ship" --open`，通过 `aexus-ade mission blueprint apply --mission <id> --file ./examples/blueprints/feature-ship.md` 导入示例蓝图，在画布或左上角分栏抽屉编辑各节点前置提示词后点击 **Start**（或执行 `aexus-ade mission start --mission <id>`）。
-> - **瞬切 `ADE ⇄ IDE`**：随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）在组织化智能体视图与全功能 `Code - OSS` IDE 之间切换，不重启语言服务与终端。
+> **几分钟内上手可视化多智能体编排：**
+> 1. **极简无干扰的 Mission 流图画布**：打开 Mission 画布，右键空白处直接新建任务 / 审稿 / 人工 Gate 节点，或点击左上角 **Mermaid 源码与提示词抽屉** 同屏编辑 `mission.mmd` 与节点提示词，内置 **50 步撤销重做（`Cmd/Ctrl+Z`）**、框选多选、磁吸对齐参考线与 `Cmd/Ctrl+F` 大图搜索。
+> 2. **直连 8 大本机 BYO-CLI 与免装机 SSH 云主机**：为节点指派 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 或 **Pi**（本机或远端 SSH），点击 **Start** 即可驱动并行扇出、Check Hook 零成本打回、红色 `fail` 边自愈与人工门禁 `U1` 审批。
+> 3. **原位查看 FinOps 账本并瞬切 `ADE ⇄ IDE`**：点击节点打开右侧 **节点检视器** 查看实时令牌轨迹、校验规则与多轮 FinOps 预算账本；随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
 
 <p align="center">
   <img src="assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code 多级 Mission DAG 编排 — 并行扇出、返工流转与人工发布门禁 U1" />
   <br/>
-  <sub><strong>可视化多级 Mission DAG 编排：</strong>并行扇出 ➔ Token Bus 流转 ➔ 人工发布门禁 <code>U1</code> 审批 · <a href="assets/demos/02-live-dag-choreography.mp4">▶ 观看高清 MP4</a> · <a href="gallery.md">浏览完整图库与 5 段视频 →</a></sub>
+  <sub><strong>可视化多级 Mission DAG 编排：</strong>真实多机协同 — 并行扇出 ➔ Token Bus 流转 ➔ 人工发布门禁 <code>U1</code> · <a href="assets/demos/02-live-dag-choreography.mp4">▶ 观看高清 MP4</a> · <a href="gallery.md">浏览完整图库与 5 段视频 →</a></sub>
 </p>
 
 ---
@@ -44,12 +44,11 @@
 
 **Aexus Code**（`v1.1.0`）基于开源 `Code - OSS`（`1.146.0`）深度魔改打造，采用 **MIT 开源协议**，默认接入开源 **[Open VSX](https://open-vsx.org/)** 市场并兼容绝大多数 VS Code 插件，同时彻底移除微软闭源 Copilot 遥测，在一个本地优先的桌面窗口中融合全功能 **IDE** 与可扩展的 **组织化智能体开发环境（ADE）**：
 
-1. **一个面板管理多个项目，无视路径与系统差异（`macOS` · `Ubuntu` · `Kali` · `Windows`）**——在同一侧栏无缝混排本地 `file://` 仓库与免装机 `aexus-ssh://` 云端项目，自动呈现多平台图标、Smart Calm 悬停绽放徽章、一键全徽章切换与顶部常驻的视口感知 **`✦ Secretary`**。
-2. **一个面板同时掌控多个本地与云主机集成终端**——在同一个窗口内分屏直控本机 macOS/Linux/Windows 终端与多台 Ubuntu GPU、Kali 渗透、Windows 编译云主机终端，右侧标签自带彩色系统图标，零 `vscode-server` 侵入且绝不修改 `~/.ssh/config`。
-3. **8 大本机 BYO-CLI 编码引擎同台协作**——使用你自己的本机或 SSH 云端 CLI 与订阅直连 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 与 **Pi**，打开 Mission 时自动探测可用引擎并置灰不可用项，底部状态栏实时显示 **`ADE: Safe Mode` / `ADE: Autonomous`**，并配按职级过滤的 **`ADE Inbox`**。
-4. **多职级角色分工 + 组织与职级工作室（"Everything is Extensible"）**——内置 **5 套组织预设**并支持 `1..N` 级动态扩缩容，支持像做填空题一样自定义职级、编写 `{{variables}}` 提示词、配置**职级 × 固定内核 API 权限矩阵**，全链路服务端 HMAC 能力令牌鉴权与单副本职级手册（`docs/ranks/L0..LN.md`）。
-5. **可视化 Mission DAG 运行时、Token Bus 与 Factory Wall**——纯 Mermaid 流程图与 **`@Employee:` 跨阶段上下文复用**、画布卡片与左上角分栏抽屉双端实时同步的**节点前置提示词**、**按厂商分组且支持自定义归类的模型与思考深度选择器**（运行中锁定引擎切换、支持实时切换模型）、**Factory Wall** 厂内外职级边界、**零 Token Watchdog 活性探测**、**运行期原子热更 `mission.patch`** 与 **定时/文件触发器**。
-6. **深度魔改版 VS Code，保留全套原生 IDE 功能并兼容市场插件**——随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**，顶栏插件按钮与通用 **Agent 引擎**按钮完全解耦，100% 保留原生资源管理器、分屏 Diff、调试器、多端终端与 **Open VSX** 主流插件生态。
+1. **极简现代节点画布手感与无遮挡 HUD**——顶部仅保留左上角 **Mermaid 源码抽屉 + Start/Pause/Stop** 两个核心控件，内置 **50 步撤销重做**、Shift 框选多选与批量移动、拖拽磁吸对齐参考线、`Delete`/`Backspace` 删除、`Cmd/Ctrl+F` 大图搜索定位、双击边标签原地改字、宽屏左右双抽屉并存与运行期零销毁原位刷新的节点检视器。
+3. **8 大本机 BYO-CLI 编码引擎 + 全引擎统一 FinOps 预算熔断**——直连 **Claude Code**、**Codex**、**Google Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline** 与 **Pi**，内置全引擎模型单价目录（支持输入/输出/缓存费率、用户自定义覆写与本地模型 `$0` 识别），在所有 8 大引擎上激活真实与预估（`~$`）硬预算熔断。
+4. **一个面板掌控多端多系统项目（`macOS` · `Ubuntu` · `Kali` · `Windows`）与多云主机集成终端**——无缝混排本地仓库与免装机 `aexus-ssh://` 云端项目，同窗分屏直控本地与远程终端，零 `vscode-server` 侵入且绝不修改 `~/.ssh/config`。
+5. **多职级角色分工（"Everything is Extensible"）与 Factory Wall 运行时**——内置 **5 套组织预设**与 `1..N` 级动态扩缩容、服务端 HMAC 能力令牌鉴权、`@Employee:` 跨节点上下文复用、零 Token Watchdog 活性探测、Check Hook 校验与运行期原子热更 `mission.patch`。
+6. **深度魔改版 VS Code，保留全套原生 IDE 功能并兼容市场插件**——随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**，100% 保留原生资源管理器、分屏 Diff、调试器、多端终端与 **Open VSX** 主流插件生态。
 
 ---
 

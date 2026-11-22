@@ -901,3 +901,8 @@
 		animation: adeSecretaryPulseRing 2.4s ease-in-out infinite;
 	}
 }
+
+html.ade-page-hidden .monaco-workbench .ade-secretary-bar.is-working::before,
+html.ade-page-hidden .monaco-workbench .ade-secretary-bar.is-working .ade-secretary-icon-wrap::after {
+	animation-play-state: paused !important;
+}

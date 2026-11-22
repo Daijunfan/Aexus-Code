@@ -13,6 +13,8 @@ import { localize } from '../../../../nls.js';
 import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { isDark } from '../../../../platform/theme/common/theme.js';
+import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IChatSessionItem, IChatSessionsService } from '../../chat/common/chatSessionsService.js';
@@ -84,10 +86,15 @@ export class AdeSessionsService implements IAdeSessionsService {
 		@ICommandService private readonly commands: ICommandService,
 		@IExtensionService private readonly extensions: IExtensionService,
 		@IUriIdentityService private readonly identity: IUriIdentityService,
+		@IThemeService private readonly themeService: IThemeService,
 	) { }
 
 	get onDidChangeEngines(): Event<void> {
-		return Event.any(this.sessions.onDidChangeAvailability, Event.map(this.sessions.onDidChangeItemsProviders, () => { }));
+		return Event.any(
+			this.sessions.onDidChangeAvailability,
+			Event.map(this.sessions.onDidChangeItemsProviders, () => { }),
+			Event.map(this.extensions.onDidChangeExtensions, () => { }),
+		);
 	}
 
 	getIcon(engineId: string): URI | ThemeIcon | undefined {
@@ -95,11 +102,33 @@ export class AdeSessionsService implements IAdeSessionsService {
 		if (contribution?.icon) {
 			return contribution.icon;
 		}
-		const owner = this.extensions.extensions.find(extension => {
-			const contributes = extension.contributes as { chatSessions?: readonly { type: string }[] } | undefined;
-			return contributes?.chatSessions?.some(session => session.type === engineId);
-		});
-		return owner?.icon ? joinPath(owner.extensionLocation, owner.icon) : undefined;
+		type ContributedSessionEntry = {
+			readonly type: string;
+			readonly icon?: string | { readonly light?: string; readonly dark?: string };
+		};
+		for (const extension of this.extensions.extensions) {
+			const contributes = extension.contributes as { chatSessions?: readonly ContributedSessionEntry[] } | undefined;
+			const matched = contributes?.chatSessions?.find(session => session.type === engineId);
+			if (!matched) {
+				continue;
+			}
+			if (typeof matched.icon === 'string' && matched.icon.trim()) {
+				const raw = matched.icon.trim();
+				if (raw.startsWith('$(') && raw.endsWith(')')) {
+					return ThemeIcon.fromString(raw) ?? ThemeIcon.fromId(raw.slice(2, -1));
+				}
+				return joinPath(extension.extensionLocation, raw);
+			}
+			if (matched.icon && typeof matched.icon === 'object') {
+				const useDark = this.themeService ? isDark(this.themeService.getColorTheme().type) : true;
+				const relPath = useDark ? (matched.icon.dark || matched.icon.light) : (matched.icon.light || matched.icon.dark);
+				if (relPath) {
+					return joinPath(extension.extensionLocation, relPath);
+				}
+			}
+			return extension.icon ? joinPath(extension.extensionLocation, extension.icon) : undefined;
+		}
+		return undefined;
 	}
 
 	getEngineName(engineId: string): string {

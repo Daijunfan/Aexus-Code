@@ -27,8 +27,8 @@ import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, EngineAt
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
-interface KiloPart { id: string; type: string; text?: string; sessionID?: string; tool?: string; state?: { status?: string; title?: string } }
-interface KiloMessage { info: { id: string; role: string; error?: { data?: { message?: string } } }; parts: KiloPart[] }
+interface KiloPart { id: string; type: string; text?: string; sessionID?: string; tool?: string; cost?: number; tokens?: KiloTokens; state?: { status?: string; title?: string } }
+interface KiloMessage { info: { id: string; role: string; tokens?: KiloTokens; cost?: number; modelID?: string; providerID?: string; error?: { data?: { message?: string } } }; parts: KiloPart[] }
 interface KiloModelInfo { id: string; name: string; description?: string }
 interface KiloModeInfo { id: string; name: string; description?: string }
 interface KiloCommandInfo { name: string; description?: string }
@@ -212,12 +212,21 @@ interface KiloEventData {
 	permission?: string;
 	patterns?: string[];
 	part?: KiloPart;
-	info?: Partial<KiloSession> & { id: string; role?: string; sessionID?: string; tokens?: KiloTokens };
+	info?: Partial<KiloSession> & { id: string; role?: string; sessionID?: string; tokens?: KiloTokens; cost?: number; modelID?: string; providerID?: string };
 	questions?: { header: string; question: string; options: { label: string; description: string }[]; multiple?: boolean }[];
 }
 interface KiloEvent { type: string; properties?: KiloEventData; data?: KiloEventData }
 
-function turnUsageFromKiloTokens(tokens: KiloTokens | undefined): EngineTurnTokenUsage | undefined {
+function formatKiloModelId(providerID?: string, modelID?: string): string | undefined {
+	const m = modelID?.trim();
+	if (!m) {
+		return undefined;
+	}
+	const p = providerID?.trim();
+	return p && !m.startsWith(`${p}/`) ? `${p}/${m}` : m;
+}
+
+function turnUsageFromKiloTokens(tokens: KiloTokens | undefined, costUsd?: number, model?: string): EngineTurnTokenUsage | undefined {
 	if (!tokens) {
 		return undefined;
 	}
@@ -229,7 +238,18 @@ function turnUsageFromKiloTokens(tokens: KiloTokens | undefined): EngineTurnToke
 	if (totalTokens <= 0) {
 		return undefined;
 	}
-	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
+	const validCostUsd = typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd > 0 ? costUsd : undefined;
+	const validModel = model?.trim() && model.trim().toLowerCase() !== 'default' ? model.trim() : undefined;
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens,
+		...(validCostUsd !== undefined ? { costUsd: validCostUsd } : {}),
+		...(validModel !== undefined ? { model: validModel } : {}),
+		estimated: false,
+	};
 }
 
 const SHARED_PURE_SERVER_KEY = `${SHARED_PURE_SCOPE_KEY}:auto`;
@@ -1000,8 +1020,10 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				emitThinkingProgress(stream, text, `${this.id}-thinking`);
 			}
 		};
+		const requestedModelStr = options?.model && options.model !== 'default' ? options.model.trim() : undefined;
 		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
 			preTurnBaseline: this.lastTurnUsageBySession.get(session.id),
+			model: requestedModelStr,
 		});
 		const reader = response.body.getReader();
 		const events = (async () => {
@@ -1026,7 +1048,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					if (event.type === 'session.created' && data?.info?.parentID) { this.changed.fire([this.session(data.info as KiloSession)]); }
 					const sessionId = data?.sessionID ?? data?.part?.sessionID ?? data?.info?.sessionID;
 					if (sessionId && data?.info?.tokens) {
-						const usage = turnUsageFromKiloTokens(data.info.tokens);
+						const infoModel = formatKiloModelId(data.info.providerID, data.info.modelID) ?? requestedModelStr;
+						const usage = turnUsageFromKiloTokens(data.info.tokens, data.info.cost, infoModel);
 						if (usage) {
 							if (sessionId === session.id) {
 								const normalized = usageTracker.recordRealUsage(usage, { cumulativeAcrossThread: false });
@@ -1097,6 +1120,14 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: messageParts }, abort.signal, desc.key, desc.identity, desc.autoApprove);
 			}
 			if (result.info.error) { throw new Error(result.info.error.data?.message || vscode.l10n.t('{0} could not complete this request.', this.name)); }
+			if (result.info.tokens) {
+				const resolvedModelStr = formatKiloModelId(result.info.providerID ?? model?.providerID, result.info.modelID ?? model?.modelID) ?? requestedModelStr;
+				const resultUsage = turnUsageFromKiloTokens(result.info.tokens, result.info.cost, resolvedModelStr);
+				if (resultUsage) {
+					const normalized = usageTracker.recordRealUsage(resultUsage, { cumulativeAcrossThread: false });
+					this.lastTurnUsageBySession.set(session.id, normalized);
+				}
+			}
 			if (!streamed) { for (const part of result.parts) { if (part.type === 'text' && part.text) { stream.markdown(part.text); } } }
 		} finally {
 			cancellation.dispose();

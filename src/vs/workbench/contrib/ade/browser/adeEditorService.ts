@@ -22,6 +22,7 @@ import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEdito
 import { ChatModeKind } from '../../chat/common/constants.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
+import { onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
 import { AdeCloudHostsEditorInput, AdeCloudHostsEditorPane } from './adeCloudHostsEditorPane.js';
@@ -102,6 +103,7 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 				this.scheduleRoleContextSync();
 			}));
 		}
+		this._register(onDidChangeAdeLocale(() => this.updateTitles()));
 		this._register(projects.onDidChange(change => {
 			if (change !== 'selection') {
 				this.updateTitles();
@@ -269,7 +271,7 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 	private formatLineageForSession(sessionResource: URI): string | undefined {
 		const key = sessionResource.toString();
 		const agent = this.projects.agents.find(item => item.session?.resource.toString() === key);
-		return agent ? formatAdeAgentLineage(this.projects, agent) : undefined;
+		return agent ? formatAdeAgentLineage(this.projects, agent, this.roleSchemaService?.getConfig()) : undefined;
 	}
 
 	private createAgentChatInput(agent: IAdeAgent & { readonly session: NonNullable<IAdeAgent['session']> }): ChatEditorInput {

@@ -44,7 +44,7 @@ interface ClaudeEvent {
 	timestamp?: string;
 	customTitle?: string;
 	agentName?: string;
-	message?: { content: string | ContentBlock[]; usage?: UsagePayload };
+	message?: { content: string | ContentBlock[]; usage?: UsagePayload; model?: string };
 	event?: { type: string; delta?: { type?: string; text?: string; thinking?: string }; content_block?: ContentBlock };
 	request_id?: string;
 	request?: { subtype: string; tool_name: string; input: object };
@@ -107,7 +107,7 @@ export function extractClaudeUserLabel(rawText: string): string | undefined {
 	return firstLine ? firstLine.slice(0, 100) : undefined;
 }
 
-function turnUsageFromPayload(usage: UsagePayload | undefined, durationMs?: number, costUsd?: number): EngineTurnTokenUsage {
+function turnUsageFromPayload(usage: UsagePayload | undefined, durationMs?: number, costUsd?: number, model?: string): EngineTurnTokenUsage {
 	const inputTokens = usage?.input_tokens ?? 0;
 	const outputTokens = usage?.output_tokens ?? 0;
 	const cacheReadTokens = usage?.cache_read_input_tokens ?? 0;
@@ -120,6 +120,7 @@ function turnUsageFromPayload(usage: UsagePayload | undefined, durationMs?: numb
 		totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
 		durationMs,
 		costUsd,
+		...(model ? { model } : {}),
 		estimated: false,
 	};
 }
@@ -282,8 +283,12 @@ function contextWindowLabel(model?: string): string {
 		return vscode.l10n.t('Unknown');
 	}
 	const lower = model.toLowerCase();
-	if (lower.includes('[1m]') || /(^|[^0-9])1m([^0-9]|$)/.test(lower)) {
+	if (lower.includes('[1m]') || /(?:^|[\[\s:_(@-])1m(?:[\]\s)@_-]|$)/.test(lower)) {
 		return '1,000,000 tokens';
+	}
+	const kMatch = /(?:^|[\[\s:_(@-])(4|8|16|32|64|128|200|256|400|512)k(?:[\]\s)@_-]|$)/.exec(lower);
+	if (kMatch) {
+		return `${(Number.parseInt(kMatch[1], 10) * 1_000).toLocaleString('en-US')} tokens`;
 	}
 	return '200,000 tokens';
 }
@@ -1208,7 +1213,8 @@ export class ClaudeRuntime implements EngineRuntime {
 							interimUsage = assistantUsage;
 							const onInterimUsage = options?.onInterimUsage;
 							if (onInterimUsage) {
-								const snapshot = turnUsageFromPayload(assistantUsage);
+								const interimModel = event.message?.model ?? this.initBySession.get(session.id)?.model ?? (options?.model && options.model !== 'default' ? options.model : undefined);
+								const snapshot = turnUsageFromPayload(assistantUsage, undefined, undefined, interimModel);
 								const now = Date.now();
 								if (snapshot.totalTokens > lastInterimReportedTotal && now - lastInterimReportAt >= 1000) {
 									lastInterimReportAt = now;
@@ -1255,7 +1261,8 @@ export class ClaudeRuntime implements EngineRuntime {
 					if (!fromChild && event.type === 'result') {
 						sawResult = true;
 						this.recordUsage(session.id, event);
-						this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd)));
+						const resultModel = event.model ?? this.initBySession.get(session.id)?.model ?? (options?.model && options.model !== 'default' ? options.model : undefined);
+						this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd), resultModel));
 						if (event.is_error) { resultError = event.result || vscode.l10n.t('Claude Code could not complete this request.'); }
 						if (!event.is_error) { session.provisional = false; }
 						child.stdin.end();

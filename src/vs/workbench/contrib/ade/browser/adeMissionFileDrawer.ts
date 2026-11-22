@@ -9,7 +9,8 @@ import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.j
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
 import { IMissionDagNode, parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
-import { formatCompactTokenCount, IMissionFinOpsSummary, IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
+import { IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
+import { adeBi, onDidChangeAdeLocale } from '../common/adeLocalization.js';
 
 const MERMAID_PLACEHOLDER = [
 	'flowchart LR',
@@ -34,11 +35,7 @@ export interface IMissionFileDrawerDelegate {
 	onCutoffChange(offGraphMaxTier: number): Promise<void>;
 	onAutoLayoutClick(): void;
 	onRemoveMissionClick(): void;
-	onOpenGovernancePopover?(anchorEl: HTMLElement): void;
-	onOpenTriggersPopover?(anchorEl: HTMLElement): void;
-	onOpenTemplatesPopover?(anchorEl: HTMLElement): void;
-	onQuickAddNodeClick?(anchorEl: HTMLElement): void;
-	onOpenFinOpsLedger?(): void;
+	onDrawerOpenChanged?(isOpen: boolean): void;
 }
 
 /**
@@ -46,6 +43,7 @@ export interface IMissionFileDrawerDelegate {
  * and Split Drawer (Left: Mermaid DAG editor + runtime config; Right: Per-Node Pre-Prompts).
  */
 export class AdeMissionFileDrawer extends Disposable {
+	private readonly topBarSlotEl: HTMLElement;
 	private readonly topBarEl: HTMLElement;
 	private readonly fileBtnEl: HTMLButtonElement;
 	private readonly fileDotEl: HTMLElement;
@@ -53,23 +51,16 @@ export class AdeMissionFileDrawer extends Disposable {
 	private readonly runStatusLabelEl: HTMLElement;
 	private readonly runPrimaryBtnEl: HTMLButtonElement;
 	private readonly runStopBtnEl: HTMLButtonElement;
-	private readonly governanceBtnEl: HTMLButtonElement;
-	private readonly governanceLabelEl: HTMLElement;
-	private readonly governanceSupCountEl: HTMLElement;
-	private readonly triggersBtnEl: HTMLButtonElement;
-	private readonly triggersDotEl: HTMLElement;
-	private readonly triggersCountEl: HTMLElement;
-	private readonly addNodeBtnEl: HTMLButtonElement;
-	private readonly templatesBtnEl: HTMLButtonElement;
-	private readonly finOpsBtnEl: HTMLButtonElement;
-	private readonly finOpsTokensEl: HTMLElement;
-	private readonly finOpsSpendEl: HTMLElement;
-	private readonly finOpsBarFillEl: HTMLElement;
-	private readonly finOpsCacheEl: HTMLElement;
-	private readonly finOpsBreakerTagEl: HTMLElement;
 	private readonly fileDrawerEl: HTMLElement;
 	private readonly drawerMetaEl: HTMLElement;
 	private readonly drawerPromptCountEl: HTMLElement;
+	private readonly layoutBtnEl: HTMLButtonElement;
+	private readonly removeBtnEl: HTMLButtonElement;
+	private readonly closeBtnEl: HTMLButtonElement;
+	private readonly leftPaneTitleEl: HTMLElement;
+	private readonly rightPaneTitleEl: HTMLElement;
+	private readonly timeoutLabelEl: HTMLElement;
+	private readonly cutoffLabelEl: HTMLElement;
 	private readonly mermaidTextareaEl: HTMLTextAreaElement;
 	private readonly promptNodeListEl: HTMLElement;
 	private readonly promptEditorHeaderEl: HTMLElement;
@@ -95,6 +86,7 @@ export class AdeMissionFileDrawer extends Disposable {
 	// Diff keys to avoid rebuilding unchanged Run-bar / Cutoff DOM on every runtime tick
 	private lastRunBarPrimaryKey = '';
 	private lastCutoffSignature = '';
+	private lastRuntimeSyncArgs: readonly [IMissionRuntimeState | undefined, number, number] | undefined;
 
 	constructor(
 		bodyEl: HTMLElement,
@@ -102,14 +94,17 @@ export class AdeMissionFileDrawer extends Disposable {
 	) {
 		super();
 
-		this.topBarEl = append(bodyEl, $('.ade-mission-top-bar', {
+		this.topBarSlotEl = append(bodyEl, $('.ade-mission-top-bar-slot', {
+			'data-ade-mission-top-bar-slot': 'true',
+		}));
+		this.topBarEl = append(this.topBarSlotEl, $('.ade-mission-top-bar', {
 			'data-ade-mission-top-bar': 'true',
 		}));
 
 		this.fileBtnEl = append(this.topBarEl, $('button.ade-mission-file-btn', {
 			type: 'button',
-			title: localize('adeMissionFileBtnTooltip', "Mission Mermaid DAG File"),
-			'aria-label': localize('adeMissionFileBtnAria', "Open Mission Mermaid DAG File"),
+			title: adeBi(localize('adeMissionFileBtnTooltip', "Mission Mermaid DAG File"), '任务流图源码与提示词抽屉'),
+			'aria-label': adeBi(localize('adeMissionFileBtnAria', "Open Mission Mermaid DAG File"), '打开任务流图源码文件'),
 			'aria-expanded': 'false',
 			'data-ade-mission-file-btn': 'true',
 		})) as HTMLButtonElement;
@@ -127,15 +122,15 @@ export class AdeMissionFileDrawer extends Disposable {
 			'data-ade-mission-run-bar': 'true',
 		}));
 		append(this.runBarEl, $('span.ade-mission-run-dot', { 'aria-hidden': 'true' }));
-		this.runStatusLabelEl = append(this.runBarEl, $('span.ade-mission-run-status', {}, localize('adeMissionRunIdle', "Idle")));
+		this.runStatusLabelEl = append(this.runBarEl, $('span.ade-mission-run-status', {}, adeBi(localize('adeMissionRunIdle', "Idle"), '待命')));
 		this.runPrimaryBtnEl = append(this.runBarEl, $('button.ade-mission-run-btn', {
 			type: 'button',
 			'data-ade-mission-run-primary': 'true',
 		})) as HTMLButtonElement;
 		this.runStopBtnEl = append(this.runBarEl, $('button.ade-mission-run-stop-btn', {
 			type: 'button',
-			title: localize('adeMissionStopTooltip', "Stop Mission"),
-			'aria-label': localize('adeMissionStopTooltip', "Stop Mission"),
+			title: adeBi(localize('adeMissionStopTooltip', "Stop Mission"), '停止任务'),
+			'aria-label': adeBi(localize('adeMissionStopTooltip', "Stop Mission"), '停止任务'),
 			'data-ade-mission-run-stop': 'true',
 		})) as HTMLButtonElement;
 		this.runStopBtnEl.appendChild($('span.codicon.codicon-debug-stop'));
@@ -149,104 +144,9 @@ export class AdeMissionFileDrawer extends Disposable {
 			this.delegate.onStopClick();
 		}));
 
-		// First-class Supervisor & Runtime Rules pill right on the canvas bar
-		this.governanceBtnEl = append(this.topBarEl, $('button.ade-mission-toolbar-pill', {
-			type: 'button',
-			title: localize('adeMissionGovernanceBtnTip', "配置谁在流程图外担任监工、任务卡顿多久自动催办，以及查看各监工管辖的节点与汇报链"),
-			'data-ade-mission-governance-btn': 'true',
-		})) as HTMLButtonElement;
-		append(this.governanceBtnEl, $('span.codicon.codicon-shield', { 'aria-hidden': 'true' }));
-		this.governanceLabelEl = append(this.governanceBtnEl, $('span.ade-mission-toolbar-pill-label', {
-			'data-ade-mission-governance-label': 'true',
-		}, localize('adeMissionWallLabelL0', "监工规则 · L0")));
-		this.governanceSupCountEl = append(this.governanceBtnEl, $('span.ade-mission-toolbar-pill-badge', {
-			'data-ade-mission-governance-sup-count': 'true',
-		}));
-		this.governanceSupCountEl.hidden = true;
-		this.governanceBtnEl.hidden = true;
-		this._register(addDisposableListener(this.governanceBtnEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			this.delegate.onOpenGovernancePopover?.(this.governanceBtnEl);
-		}));
-
-		// First-class Source Triggers pill right on the canvas bar (shows live armed/standby dot)
-		this.triggersBtnEl = append(this.topBarEl, $('button.ade-mission-toolbar-pill', {
-			type: 'button',
-			title: localize('adeMissionTriggersBtnTip', "Manage Zero-Token Source Triggers (Interval / Cron / Once / File / Git / GPU Idle)"),
-			'data-ade-mission-triggers-btn': 'true',
-		})) as HTMLButtonElement;
-		this.triggersDotEl = append(this.triggersBtnEl, $('span.ade-mission-triggers-status-dot', { 'aria-hidden': 'true' }));
-		this.triggersDotEl.hidden = true;
-		append(this.triggersBtnEl, $('span.codicon.codicon-zap', { 'aria-hidden': 'true' }));
-		append(this.triggersBtnEl, $('span.ade-mission-toolbar-pill-label', {}, localize('adeMissionTriggersBtnLabel', "Triggers")));
-		this.triggersCountEl = append(this.triggersBtnEl, $('span.ade-mission-toolbar-pill-badge', {
-			'data-ade-mission-triggers-count': 'true',
-		}));
-		this.triggersCountEl.hidden = true;
-		this.triggersBtnEl.hidden = true;
-		this._register(addDisposableListener(this.triggersBtnEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			this.delegate.onOpenTriggersPopover?.(this.triggersBtnEl);
-		}));
-
-		// Visual Graph Authoring quick buttons: + Node & Classic DAG Templates
-		this.addNodeBtnEl = append(this.topBarEl, $('button.ade-mission-toolbar-pill', {
-			type: 'button',
-			title: localize('adeMissionAddNodeBtnTip', "Add a Task, Reviewer, or Human Gate node visually (or right-click anywhere on the canvas)"),
-			'data-ade-mission-add-node-btn': 'true',
-		})) as HTMLButtonElement;
-		append(this.addNodeBtnEl, $('span.codicon.codicon-add', { 'aria-hidden': 'true' }));
-		append(this.addNodeBtnEl, $('span.ade-mission-toolbar-pill-label', {}, localize('adeMissionAddNodeBtnLabel', "节点")));
-		this._register(addDisposableListener(this.addNodeBtnEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			this.delegate.onQuickAddNodeClick?.(this.addNodeBtnEl);
-		}));
-
-		this.templatesBtnEl = append(this.topBarEl, $('button.ade-mission-toolbar-pill', {
-			type: 'button',
-			title: localize('adeMissionTemplatesBtnTip', "Apply a 1-click multi-machine Engineering or Research DAG template"),
-			'data-ade-mission-templates-btn': 'true',
-		})) as HTMLButtonElement;
-		append(this.templatesBtnEl, $('span.codicon.codicon-sparkle', { 'aria-hidden': 'true' }));
-		append(this.templatesBtnEl, $('span.ade-mission-toolbar-pill-label', {}, localize('adeMissionTemplatesBtnLabel', "模板")));
-		this._register(addDisposableListener(this.templatesBtnEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			this.delegate.onOpenTemplatesPopover?.(this.templatesBtnEl);
-		}));
-
-		// First-class FinOps Guardrail Pill right on the top bar (live tokens · $USD / budget · mini bar · cache savings)
-		this.finOpsBtnEl = append(this.topBarEl, $('button.ade-mission-finops-pill', {
-			type: 'button',
-			title: localize('adeMissionFinOpsBtnTip', "Open FinOps Budget Guardrail & Spend Ledger (per-rank & per-host breakdown)"),
-			'data-ade-mission-finops-btn': 'true',
-		})) as HTMLButtonElement;
-		append(this.finOpsBtnEl, $('span.codicon.codicon-credit-card.ade-mission-finops-ico', { 'aria-hidden': 'true' }));
-		this.finOpsTokensEl = append(this.finOpsBtnEl, $('span.ade-mission-finops-tokens', {
-			'data-ade-finops-tokens': 'true',
-		}, '0'));
-		append(this.finOpsBtnEl, $('span.ade-mission-finops-sep', { 'aria-hidden': 'true' }, '·'));
-		this.finOpsSpendEl = append(this.finOpsBtnEl, $('span.ade-mission-finops-spend', {
-			'data-ade-finops-spend': 'true',
-		}, '$0.00'));
-		const finOpsTrack = append(this.finOpsBtnEl, $('.ade-mission-finops-track', { 'aria-hidden': 'true' }));
-		this.finOpsBarFillEl = append(finOpsTrack, $('.ade-mission-finops-bar-fill'));
-		this.finOpsCacheEl = append(this.finOpsBtnEl, $('span.ade-mission-finops-cache', {
-			'data-ade-finops-cache': 'true',
-		}));
-		this.finOpsCacheEl.hidden = true;
-		this.finOpsBreakerTagEl = append(this.finOpsBtnEl, $('span.ade-mission-finops-breaker-tag', {
-			'data-ade-finops-breaker': 'true',
-		}, localize('adeMissionFinOpsBreakerTag', "BREAKER")));
-		this.finOpsBreakerTagEl.hidden = true;
-		this.finOpsBtnEl.hidden = true;
-		this._register(addDisposableListener(this.finOpsBtnEl, EventType.CLICK, e => {
-			e.stopPropagation();
-			this.delegate.onOpenFinOpsLedger?.();
-		}));
-
 		this.fileDrawerEl = append(bodyEl, $('.ade-mission-file-drawer', {
 			role: 'dialog',
-			'aria-label': localize('adeMissionDrawerAria', "Mission Mermaid File"),
+			'aria-label': adeBi(localize('adeMissionDrawerAria', "Mission Mermaid File"), '任务流图源码与提示词文件'),
 			'data-ade-mission-drawer': 'true',
 		}));
 		this.fileDrawerEl.hidden = true;
@@ -256,41 +156,41 @@ export class AdeMissionFileDrawer extends Disposable {
 		const titleIcon = append(titleWrap, $('span', { 'aria-hidden': 'true' }));
 		titleIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.fileCode));
 		append(titleWrap, $('span', {}, 'mission.mmd'));
-		this.drawerMetaEl = append(titleWrap, $('span.ade-mission-drawer-meta', {}, 'Empty'));
+		this.drawerMetaEl = append(titleWrap, $('span.ade-mission-drawer-meta', {}, adeBi(localize('adeMissionDrawerMetaEmpty', "Empty"), '空画布')));
 		this.drawerPromptCountEl = append(titleWrap, $('span.ade-mission-drawer-prompt-pill', {
 			'data-ade-mission-prompt-count': 'true',
-		}, '0/0 Prompts'));
+		}, adeBi(localize('adeMissionPromptCountPill', "{0}/{1} Prompts", 0, 0), '{0}/{1} 条提示词', 0, 0)));
 
 		const actions = append(header, $('.ade-mission-drawer-actions'));
-		const layoutBtn = append(actions, $('button.ade-mission-icon-btn', {
+		this.layoutBtnEl = append(actions, $('button.ade-mission-icon-btn', {
 			type: 'button',
-			title: localize('adeMissionAutoLayoutBtn', "Auto Layout"),
-			'aria-label': localize('adeMissionAutoLayoutBtn', "Auto Layout"),
+			title: adeBi(localize('adeMissionAutoLayoutBtn', "Auto Layout"), '自动整理布局'),
+			'aria-label': adeBi(localize('adeMissionAutoLayoutBtn', "Auto Layout"), '自动整理布局'),
 			'data-ade-mission-autolayout': 'true',
 		})) as HTMLButtonElement;
-		layoutBtn.appendChild($('span.codicon.codicon-layout'));
-		this._register(addDisposableListener(layoutBtn, EventType.CLICK, () => {
+		this.layoutBtnEl.appendChild($('span.codicon.codicon-layout'));
+		this._register(addDisposableListener(this.layoutBtnEl, EventType.CLICK, () => {
 			this.delegate.onAutoLayoutClick();
 		}));
 
-		const removeBtn = append(actions, $('button.ade-mission-icon-btn.danger', {
+		this.removeBtnEl = append(actions, $('button.ade-mission-icon-btn.danger', {
 			type: 'button',
-			title: localize('adeMissionRemoveAllBtn', "Remove Mission & All Employees"),
-			'aria-label': localize('adeMissionRemoveAllBtn', "Remove Mission & All Employees"),
+			title: adeBi(localize('adeMissionRemoveAllBtn', "Remove Mission & All Employees"), '移除任务及全部执行成员'),
+			'aria-label': adeBi(localize('adeMissionRemoveAllBtn', "Remove Mission & All Employees"), '移除任务及全部执行成员'),
 			'data-ade-mission-remove': 'true',
 		})) as HTMLButtonElement;
-		removeBtn.appendChild($('span.codicon.codicon-trash'));
-		this._register(addDisposableListener(removeBtn, EventType.CLICK, () => {
+		this.removeBtnEl.appendChild($('span.codicon.codicon-trash'));
+		this._register(addDisposableListener(this.removeBtnEl, EventType.CLICK, () => {
 			this.delegate.onRemoveMissionClick();
 		}));
 
-		const closeBtn = append(actions, $('button.ade-mission-icon-btn', {
+		this.closeBtnEl = append(actions, $('button.ade-mission-icon-btn', {
 			type: 'button',
-			title: localize('adeMissionCloseDrawer', "Close"),
-			'aria-label': localize('adeMissionCloseDrawer', "Close"),
+			title: adeBi(localize('adeMissionCloseDrawer', "Close"), '关闭'),
+			'aria-label': adeBi(localize('adeMissionCloseDrawer', "Close"), '关闭'),
 		})) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this._register(addDisposableListener(closeBtn, EventType.CLICK, () => {
+		this.closeBtnEl.appendChild($('span.codicon.codicon-close'));
+		this._register(addDisposableListener(this.closeBtnEl, EventType.CLICK, () => {
 			this.toggle(false);
 		}));
 
@@ -304,12 +204,12 @@ export class AdeMissionFileDrawer extends Disposable {
 		}));
 		const leftHead = append(leftPane, $('.ade-mission-drawer-pane-head'));
 		append(leftHead, $('span.codicon.codicon-type-hierarchy', { 'aria-hidden': 'true' }));
-		append(leftHead, $('span', {}, localize('adeMissionLeftPaneTitle', "统筹编排 · Mermaid DAG")));
+		this.leftPaneTitleEl = append(leftHead, $('span', {}, adeBi(localize('adeMissionLeftPaneTitle', "Orchestration · Mermaid DAG"), '统筹编排 · Mermaid 流图')));
 
 		this.mermaidTextareaEl = append(leftPane, $('textarea.ade-mission-mermaid-input', {
 			spellcheck: 'false',
 			placeholder: MERMAID_PLACEHOLDER,
-			'aria-label': localize('adeMissionMermaidInputAria', "Mermaid DAG Definition"),
+			'aria-label': adeBi(localize('adeMissionMermaidInputAria', "Mermaid DAG Definition"), 'Mermaid 流图定义'),
 			'data-ade-mission-mermaid-input': 'true',
 		})) as HTMLTextAreaElement;
 
@@ -326,7 +226,7 @@ export class AdeMissionFileDrawer extends Disposable {
 			const missionId = this.delegate.getActiveMissionId();
 			this.livePatchInFlight = true;
 			this.syncLivePatchButtons();
-			this.setStatus(localize('adeMissionLivePatchValidating', "Applying atomic live patch..."));
+			this.setStatus(adeBi(localize('adeMissionLivePatchValidating', "Applying atomic live patch..."), '正在原子应用在线补丁...'));
 			void this.delegate.onCommitLiveMermaidPatch(nextText).then(res => {
 				this.livePatchInFlight = false;
 				if (this.delegate.getActiveMissionId() !== missionId) {
@@ -334,10 +234,10 @@ export class AdeMissionFileDrawer extends Disposable {
 					return;
 				}
 				if (res.ok) {
-					this.setStatus(localize('adeMissionLivePatchApplied', "Atomic live DAG patch applied"), 'ok');
+					this.setStatus(adeBi(localize('adeMissionLivePatchApplied', "Atomic live DAG patch applied"), '已原子应用在线流图补丁'), 'ok');
 				} else {
 					// Keep the user's draft intact in the textarea so they can fix the validation error or explicitly Revert.
-					this.setStatus(res.error ?? localize('adeMissionLivePatchRejected', "Live DAG patch rejected."), 'error');
+					this.setStatus(res.error ?? adeBi(localize('adeMissionLivePatchRejected', "Live DAG patch rejected."), '在线流图补丁未通过校验。'), 'error');
 				}
 				this.syncLivePatchButtons();
 			}, err => {
@@ -347,7 +247,7 @@ export class AdeMissionFileDrawer extends Disposable {
 					return;
 				}
 				const msg = err instanceof Error ? err.message : String(err);
-				this.setStatus(msg || localize('adeMissionLivePatchRejected', "Live DAG patch rejected."), 'error');
+				this.setStatus(msg || adeBi(localize('adeMissionLivePatchRejected', "Live DAG patch rejected."), '在线流图补丁未通过校验。'), 'error');
 				this.syncLivePatchButtons();
 			});
 		};
@@ -362,9 +262,12 @@ export class AdeMissionFileDrawer extends Disposable {
 				if (preview.error) {
 					this.setStatus(preview.error, 'error');
 				} else if (nextText !== this.delegate.getMermaidText()) {
-					this.setStatus(localize('adeMissionLivePatchPendingCommit', "Draft live edit valid — click Apply Patch or press Cmd/Ctrl+Enter"));
+					this.setStatus(adeBi(
+						localize('adeMissionLivePatchPendingCommit', "Draft live edit valid — click Apply Patch or press Cmd/Ctrl+Enter"),
+						'在线草稿校验通过 — 点击「应用补丁」或按 Cmd/Ctrl+Enter 提交',
+					));
 				} else {
-					this.setStatus(localize('adeMissionLivePatchSynced', "Synced with live Mission DAG"));
+					this.setStatus(adeBi(localize('adeMissionLivePatchSynced', "Synced with live Mission DAG"), '已与运行中的流图同步'));
 				}
 				return;
 			}
@@ -389,7 +292,7 @@ export class AdeMissionFileDrawer extends Disposable {
 			'data-ade-mission-drawer-config': 'true',
 		}));
 		const timeoutField = append(configStrip, $('label.ade-mission-config-field'));
-		append(timeoutField, $('span.ade-mission-config-label', {}, localize('adeMissionTimeoutLabel', "催办超时 (分)")));
+		this.timeoutLabelEl = append(timeoutField, $('span.ade-mission-config-label', {}, adeBi(localize('adeMissionTimeoutLabel', "Nudge Timeout (min)"), '催办超时 (分)')));
 		this.timeoutInputEl = append(timeoutField, $('input.ade-mission-config-input', {
 			type: 'number',
 			min: '1',
@@ -405,7 +308,7 @@ export class AdeMissionFileDrawer extends Disposable {
 		}));
 
 		const cutoffField = append(configStrip, $('label.ade-mission-config-field'));
-		append(cutoffField, $('span.ade-mission-config-label', {}, localize('adeMissionCutoffLabel', "图外监工")));
+		this.cutoffLabelEl = append(cutoffField, $('span.ade-mission-config-label', {}, adeBi(localize('adeMissionCutoffLabel', "Off-Graph Supervisors"), '图外监工')));
 		this.cutoffSelectEl = append(cutoffField, $('select.ade-mission-config-select', {
 			'data-ade-mission-cutoff-select': 'true',
 		})) as HTMLSelectElement;
@@ -422,12 +325,12 @@ export class AdeMissionFileDrawer extends Disposable {
 		}));
 		const rightHead = append(rightPane, $('.ade-mission-drawer-pane-head'));
 		append(rightHead, $('span.codicon.codicon-comment-discussion', { 'aria-hidden': 'true' }));
-		append(rightHead, $('span', {}, localize('adeMissionRightPaneTitle', "节点前置提示词 · Node Pre-Prompts")));
+		this.rightPaneTitleEl = append(rightHead, $('span', {}, adeBi(localize('adeMissionRightPaneTitle', "Node Prompts"), '节点提示词')));
 
 		const promptsWorkspace = append(rightPane, $('.ade-mission-prompts-workspace'));
 		this.promptNodeListEl = append(promptsWorkspace, $('.ade-mission-prompt-node-list', {
 			role: 'listbox',
-			'aria-label': localize('adeMissionPromptNodesAria', "Mission Nodes"),
+			'aria-label': adeBi(localize('adeMissionPromptNodesAria', "Mission Nodes"), '任务节点列表'),
 			'data-ade-prompt-node-list': 'true',
 		}));
 
@@ -435,11 +338,14 @@ export class AdeMissionFileDrawer extends Disposable {
 		this.promptEditorHeaderEl = append(promptEditorCol, $('.ade-mission-prompt-editor-head'));
 		this.nodePromptTextareaEl = append(promptEditorCol, $('textarea.ade-mission-node-prompt-input', {
 			spellcheck: 'false',
-			placeholder: localize(
-				'adeMissionNodePromptPlaceholder',
-				"编写该节点被唤醒时的前置提示词（任务目标、目录/技术约束、交付物与验收标准…）。\n节点收到令牌被唤醒时，会自动将此前置提示词与令牌信息一起打包发送给 Agent。",
+			placeholder: adeBi(
+				localize(
+					'adeMissionNodePromptPlaceholder',
+					"Describe what this node should do (goals, target files, acceptance criteria).\nSent automatically to the assigned Agent when execution reaches this node.",
+				),
+				'写明这个节点需要做什么（如任务目标、涉及文件、完成标准等）。\n运行到该节点时会自动发送给对应的 Agent。',
 			),
-			'aria-label': localize('adeMissionNodePromptAria', "Node Pre-Prompt"),
+			'aria-label': adeBi(localize('adeMissionNodePromptAria', "Node Prompt"), '节点提示词'),
 			'data-ade-node-prompt-input': 'true',
 		})) as HTMLTextAreaElement;
 		this._register(addDisposableListener(this.nodePromptTextareaEl, EventType.INPUT, () => {
@@ -455,23 +361,29 @@ export class AdeMissionFileDrawer extends Disposable {
 		}));
 		const promptHintBar = append(promptEditorCol, $('.ade-mission-prompt-hint-bar'));
 		append(promptHintBar, $('span.codicon.codicon-sparkle', { 'aria-hidden': 'true' }));
-		this.promptFooterHintEl = append(promptHintBar, $('span.ade-mission-prompt-hint-text', {}, localize('adeMissionPromptWakeupHint', "唤醒时自动与令牌信息打包下发")));
+		this.promptFooterHintEl = append(promptHintBar, $('span.ade-mission-prompt-hint-text', {}, adeBi(
+			localize('adeMissionPromptWakeupHint', "Sent automatically to the assigned Agent when this node runs"),
+			'运行到该节点时自动发送给对应 Agent',
+		)));
 
 		const footer = append(this.fileDrawerEl, $('.ade-mission-drawer-footer'));
-		this.drawerStatusEl = append(footer, $('span.ade-mission-drawer-status', {}, localize('adeMissionStatusEmpty', "Write Mermaid DAG syntax to render nodes")));
+		this.drawerStatusEl = append(footer, $('span.ade-mission-drawer-status', {}, adeBi(
+			localize('adeMissionStatusEmpty', "Write Mermaid DAG syntax to render nodes"),
+			'编写 Mermaid 流图语法以实时渲染节点',
+		)));
 		this.livePatchActionsEl = append(footer, $('.ade-mission-live-patch-actions', {
 			'data-ade-mission-live-patch-actions': 'true',
 		}));
 		this.revertPatchBtnEl = append(this.livePatchActionsEl, $('button.ade-mission-live-patch-btn.secondary', {
 			type: 'button',
-			title: localize('adeMissionRevertLivePatchTip', "Discard unsaved live DAG draft and restore current committed graph"),
+			title: adeBi(localize('adeMissionRevertLivePatchTip', "Discard unsaved live DAG draft and restore current committed graph"), '放弃未提交的在线草稿并恢复当前生效流图'),
 			'data-ade-mission-revert-patch': 'true',
-		}, localize('adeMissionRevertLivePatch', "Revert"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionRevertLivePatch', "Revert"), '还原'))) as HTMLButtonElement;
 		this.applyPatchBtnEl = append(this.livePatchActionsEl, $('button.ade-mission-live-patch-btn.primary', {
 			type: 'button',
-			title: localize('adeMissionApplyLivePatchTip', "Validate and atomically apply live DAG patch (Cmd/Ctrl+Enter)"),
+			title: adeBi(localize('adeMissionApplyLivePatchTip', "Validate and atomically apply live DAG patch (Cmd/Ctrl+Enter)"), '校验并原子应用在线流图补丁 (Cmd/Ctrl+Enter)'),
 			'data-ade-mission-apply-patch': 'true',
-		}, localize('adeMissionApplyLivePatch', "Apply Patch"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionApplyLivePatch', "Apply Patch"), '应用补丁'))) as HTMLButtonElement;
 		this.livePatchActionsEl.hidden = true;
 
 		this._register(addDisposableListener(this.applyPatchBtnEl, EventType.CLICK, () => {
@@ -482,9 +394,53 @@ export class AdeMissionFileDrawer extends Disposable {
 				return;
 			}
 			this.mermaidTextareaEl.value = this.delegate.getMermaidText();
-			this.setStatus(localize('adeMissionLivePatchReverted', "Draft reverted to live Mission DAG"));
+			this.setStatus(adeBi(localize('adeMissionLivePatchReverted', "Draft reverted to live Mission DAG"), '草稿已还原为当前生效流图'));
 			this.syncLivePatchButtons();
 		}));
+
+		this._register(onDidChangeAdeLocale(() => this.refreshLocale()));
+	}
+
+	private refreshLocale(): void {
+		const fileTip = adeBi(localize('adeMissionFileBtnTooltip', "Mission Mermaid DAG File"), '任务流图源码与提示词抽屉');
+		this.fileBtnEl.title = fileTip;
+		this.fileBtnEl.setAttribute('aria-label', adeBi(localize('adeMissionFileBtnAria', "Open Mission Mermaid DAG File"), '打开任务流图源码文件'));
+		const stopTip = adeBi(localize('adeMissionStopTooltip', "Stop Mission"), '停止任务');
+		this.runStopBtnEl.title = stopTip;
+		this.runStopBtnEl.setAttribute('aria-label', stopTip);
+		this.fileDrawerEl.setAttribute('aria-label', adeBi(localize('adeMissionDrawerAria', "Mission Mermaid File"), '任务流图源码与提示词文件'));
+		const layoutTip = adeBi(localize('adeMissionAutoLayoutBtn', "Auto Layout"), '自动整理布局');
+		this.layoutBtnEl.title = layoutTip;
+		this.layoutBtnEl.setAttribute('aria-label', layoutTip);
+		const removeTip = adeBi(localize('adeMissionRemoveAllBtn', "Remove Mission & All Employees"), '移除任务及全部执行成员');
+		this.removeBtnEl.title = removeTip;
+		this.removeBtnEl.setAttribute('aria-label', removeTip);
+		const closeTip = adeBi(localize('adeMissionCloseDrawer', "Close"), '关闭');
+		this.closeBtnEl.title = closeTip;
+		this.closeBtnEl.setAttribute('aria-label', closeTip);
+		this.leftPaneTitleEl.textContent = adeBi(localize('adeMissionLeftPaneTitle', "Orchestration · Mermaid DAG"), '统筹编排 · Mermaid 流图');
+		this.rightPaneTitleEl.textContent = adeBi(localize('adeMissionRightPaneTitle', "Node Prompts"), '节点提示词');
+		this.timeoutLabelEl.textContent = adeBi(localize('adeMissionTimeoutLabel', "Nudge Timeout (min)"), '催办超时 (分)');
+		this.cutoffLabelEl.textContent = adeBi(localize('adeMissionCutoffLabel', "Off-Graph Supervisors"), '图外监工');
+		this.nodePromptTextareaEl.placeholder = adeBi(
+			localize(
+				'adeMissionNodePromptPlaceholder',
+				"Describe what this node should do (goals, target files, acceptance criteria).\nSent automatically to the assigned Agent when execution reaches this node.",
+			),
+			'写明这个节点需要做什么（如任务目标、涉及文件、完成标准等）。\n运行到该节点时会自动发送给对应的 Agent。',
+		);
+		this.revertPatchBtnEl.textContent = adeBi(localize('adeMissionRevertLivePatch', "Revert"), '还原');
+		this.applyPatchBtnEl.textContent = adeBi(localize('adeMissionApplyLivePatch', "Apply Patch"), '应用补丁');
+
+		// Force dynamic controls & prompts pane to refresh labels in the new locale
+		this.lastRunBarPrimaryKey = '';
+		this.lastCutoffSignature = '';
+		if (this.lastRuntimeSyncArgs) {
+			this.syncRuntimeControls(...this.lastRuntimeSyncArgs);
+		} else {
+			this.runStatusLabelEl.textContent = adeBi(localize('adeMissionRunIdle', "Idle"), '待命');
+		}
+		this.syncPromptsPane(true);
 	}
 
 	override dispose(): void {
@@ -547,7 +503,9 @@ export class AdeMissionFileDrawer extends Disposable {
 	}
 
 	toggle(forceOpen?: boolean, focusNodeId?: string): void {
-		this.drawerOpen = forceOpen ?? !this.drawerOpen;
+		const nextOpen = forceOpen ?? !this.drawerOpen;
+		const changed = nextOpen !== this.drawerOpen;
+		this.drawerOpen = nextOpen;
 		if (focusNodeId) {
 			this.selectedPromptNodeId = focusNodeId;
 		}
@@ -562,14 +520,15 @@ export class AdeMissionFileDrawer extends Disposable {
 				this.mermaidTextareaEl.focus();
 			}
 		}
+		if (changed) {
+			this.delegate.onDrawerOpenChanged?.(this.drawerOpen);
+		}
 	}
 
-	syncRuntimeControls(state: IMissionRuntimeState | undefined, nodeCount: number, rankCount: number, boundaryValid = true, finOps?: IMissionFinOpsSummary): void {
+	syncRuntimeControls(state: IMissionRuntimeState | undefined, nodeCount: number, rankCount: number): void {
+		this.lastRuntimeSyncArgs = [state, nodeCount, rankCount];
 		const hasRuntime = Boolean(state);
 		this.runBarEl.hidden = !hasRuntime;
-		this.governanceBtnEl.hidden = !hasRuntime;
-		this.triggersBtnEl.hidden = !hasRuntime;
-		this.finOpsBtnEl.hidden = !hasRuntime;
 		if (!state) {
 			return;
 		}
@@ -578,16 +537,16 @@ export class AdeMissionFileDrawer extends Disposable {
 			this.runBarEl.dataset.status = status;
 		}
 		const statusLabel = status === 'running'
-			? localize('adeMissionRunRunning', "Running")
+			? adeBi(localize('adeMissionRunRunning', "Running"), '运行中')
 			: status === 'paused'
-				? localize('adeMissionRunPaused', "Paused")
+				? adeBi(localize('adeMissionRunPaused', "Paused"), '已暂停')
 				: status === 'completed'
-					? localize('adeMissionRunCompleted', "Done")
+					? adeBi(localize('adeMissionRunCompleted', "Done"), '已完成')
 					: status === 'failed'
-						? localize('adeMissionRunFailed', "Failed")
+						? adeBi(localize('adeMissionRunFailed', "Failed"), '失败')
 						: status === 'stopped'
-							? localize('adeMissionRunStopped', "Stopped")
-							: localize('adeMissionRunIdle', "Idle");
+							? adeBi(localize('adeMissionRunStopped', "Stopped"), '已停止')
+							: adeBi(localize('adeMissionRunIdle', "Idle"), '待命');
 		if (this.runStatusLabelEl.textContent !== statusLabel) {
 			this.runStatusLabelEl.textContent = statusLabel;
 		}
@@ -599,13 +558,13 @@ export class AdeMissionFileDrawer extends Disposable {
 			clearNode(this.runPrimaryBtnEl);
 			if (primaryBucket === 'pause') {
 				this.runPrimaryBtnEl.appendChild($('span.codicon.codicon-debug-pause'));
-				append(this.runPrimaryBtnEl, $('span', {}, localize('adeMissionPauseBtn', "Pause")));
+				append(this.runPrimaryBtnEl, $('span', {}, adeBi(localize('adeMissionPauseBtn', "Pause"), '暂停')));
 			} else if (primaryBucket === 'resume') {
 				this.runPrimaryBtnEl.appendChild($('span.codicon.codicon-debug-continue'));
-				append(this.runPrimaryBtnEl, $('span', {}, localize('adeMissionResumeBtn', "Resume")));
+				append(this.runPrimaryBtnEl, $('span', {}, adeBi(localize('adeMissionResumeBtn', "Resume"), '继续')));
 			} else {
 				this.runPrimaryBtnEl.appendChild($('span.codicon.codicon-play'));
-				append(this.runPrimaryBtnEl, $('span', {}, localize('adeMissionStartBtn', "Start")));
+				append(this.runPrimaryBtnEl, $('span', {}, adeBi(localize('adeMissionStartBtn', "Start"), '启动')));
 			}
 		}
 		this.runPrimaryBtnEl.disabled = nodeCount === 0 && status !== 'running' && status !== 'paused';
@@ -617,8 +576,8 @@ export class AdeMissionFileDrawer extends Disposable {
 		}
 		this.timeoutInputEl.disabled = state.silenceTimeoutLocked;
 		this.timeoutInputEl.title = state.silenceTimeoutLocked
-			? localize('adeMissionTimeoutLockedTip', "Locked while Mission is running")
-			: localize('adeMissionTimeoutEditTip', "Watchdog silence nudge timeout in minutes (locked once started)");
+			? adeBi(localize('adeMissionTimeoutLockedTip', "Locked while Mission is running"), '任务运行期间已锁定')
+			: adeBi(localize('adeMissionTimeoutEditTip', "Watchdog silence nudge timeout in minutes (locked once started)"), '卡顿静默自动催办超时分钟数（启动后锁定）');
 
 		const maxCutoff = Math.max(0, rankCount - 1);
 		const cutoffSig = `${maxCutoff}`;
@@ -628,8 +587,8 @@ export class AdeMissionFileDrawer extends Disposable {
 			for (let k = 0; k <= maxCutoff; k++) {
 				append(this.cutoffSelectEl, $('option', { value: String(k) },
 					k === 0
-						? localize('adeMissionCutoffL0', "L0 only")
-						: localize('adeMissionCutoffLk', "L0..L{0}", k),
+						? adeBi(localize('adeMissionCutoffL0', "L0 only"), '仅 L0')
+						: adeBi(localize('adeMissionCutoffLk', "L0..L{0}", k), 'L0..L{0}', k),
 				));
 			}
 		}
@@ -638,81 +597,6 @@ export class AdeMissionFileDrawer extends Disposable {
 			this.cutoffSelectEl.value = targetCutoff;
 		}
 		this.cutoffSelectEl.disabled = status === 'running' || status === 'paused';
-
-		// Update always-visible top-bar Governance pill & Source Triggers pill
-		const cutoffTier = state.boundary.offGraphMaxTier;
-		const wallLabel = cutoffTier === 0
-			? localize('adeMissionWallLabelL0', "监工规则 · L0")
-			: localize('adeMissionWallLabelLk', "监工规则 · L0..L{0}", cutoffTier);
-		if (this.governanceLabelEl.textContent !== wallLabel) {
-			this.governanceLabelEl.textContent = wallLabel;
-		}
-		this.governanceBtnEl.classList.toggle('has-warning', !boundaryValid);
-		this.governanceBtnEl.dataset.offGraphMaxTier = String(cutoffTier);
-		const boundSupCount = state.boundary.supervisors.filter(s => s.managedNodeIds.length > 0).length;
-		if (boundSupCount > 0) {
-			this.governanceSupCountEl.hidden = false;
-			const supText = localize('adeMissionGovSupCount', "{0} 位监工", boundSupCount);
-			if (this.governanceSupCountEl.textContent !== supText) {
-				this.governanceSupCountEl.textContent = supText;
-			}
-		} else {
-			this.governanceSupCountEl.hidden = true;
-		}
-
-		const triggerCount = state.triggers.length;
-		const enabledTriggers = state.triggers.filter(t => t.enabled).length;
-		const triggerState = enabledTriggers === 0
-			? (triggerCount > 0 ? 'paused' : 'none')
-			: (status === 'running' ? 'armed' : 'standby');
-		this.triggersBtnEl.classList.toggle('has-active', enabledTriggers > 0);
-		this.triggersBtnEl.classList.toggle('is-armed', triggerState === 'armed');
-		this.triggersBtnEl.classList.toggle('is-standby', triggerState === 'standby');
-		this.triggersBtnEl.dataset.triggerCount = String(triggerCount);
-		this.triggersBtnEl.dataset.triggersState = triggerState;
-		this.triggersDotEl.hidden = triggerState === 'none';
-		if (triggerCount > 0) {
-			this.triggersCountEl.hidden = false;
-			const countStr = String(triggerCount);
-			if (this.triggersCountEl.textContent !== countStr) {
-				this.triggersCountEl.textContent = countStr;
-			}
-		} else {
-			this.triggersCountEl.hidden = true;
-		}
-
-		// Update top-bar FinOps Guardrail Pill in place
-		if (finOps) {
-			const tokStr = formatCompactTokenCount(finOps.totalTokens);
-			if (this.finOpsTokensEl.textContent !== tokStr) {
-				this.finOpsTokensEl.textContent = tokStr;
-			}
-			const spendStr = finOps.budgetLimitUsd !== undefined
-				? `$${finOps.totalCostUsd.toFixed(2)} / $${finOps.budgetLimitUsd.toFixed(2)}`
-				: `$${finOps.totalCostUsd.toFixed(2)}`;
-			if (this.finOpsSpendEl.textContent !== spendStr) {
-				this.finOpsSpendEl.textContent = spendStr;
-			}
-			const barPct = finOps.budgetLimitUsd !== undefined
-				? Math.min(100, finOps.budgetUsedPct)
-				: (finOps.totalCostUsd > 0 ? Math.min(100, Math.round(Math.log10(1 + finOps.totalCostUsd * 10) * 45)) : 0);
-			this.finOpsBarFillEl.style.width = `${barPct}%`;
-			this.finOpsBtnEl.dataset.severity = finOps.severity;
-			this.finOpsBtnEl.classList.toggle('severity-warn', finOps.severity === 'warn');
-			this.finOpsBtnEl.classList.toggle('severity-critical', finOps.severity === 'critical');
-			this.finOpsBtnEl.classList.toggle('severity-tripped', finOps.severity === 'tripped');
-			if (finOps.cacheSavingsPct > 0) {
-				this.finOpsCacheEl.hidden = false;
-				const cacheStr = localize('adeMissionFinOpsCacheSaved', "省{0}%", finOps.cacheSavingsPct);
-				if (this.finOpsCacheEl.textContent !== cacheStr) {
-					this.finOpsCacheEl.textContent = cacheStr;
-				}
-			} else {
-				this.finOpsCacheEl.hidden = true;
-			}
-			this.finOpsBreakerTagEl.hidden = !finOps.budgetCircuitTripped;
-		}
-
 		this.syncLivePatchButtons();
 	}
 
@@ -721,7 +605,12 @@ export class AdeMissionFileDrawer extends Disposable {
 		const taskNodes = this.delegate.getNodes().filter(n => n.kind !== 'gate');
 
 		const configuredCount = taskNodes.filter(n => Boolean(prompts[n.id]?.trim())).length;
-		const countText = localize('adeMissionPromptCountPill', "{0}/{1} Prompts", configuredCount, taskNodes.length);
+		const countText = adeBi(
+			localize('adeMissionPromptCountPill', "{0}/{1} Prompts", configuredCount, taskNodes.length),
+			'{0}/{1} 条提示词',
+			configuredCount,
+			taskNodes.length,
+		);
 		if (this.drawerPromptCountEl.textContent !== countText) {
 			this.drawerPromptCountEl.textContent = countText;
 		}
@@ -734,10 +623,13 @@ export class AdeMissionFileDrawer extends Disposable {
 			this.promptNodeButtons.clear();
 			clearNode(this.promptNodeListEl);
 			clearNode(this.promptEditorHeaderEl);
-			append(this.promptNodeListEl, $('.ade-mission-prompt-empty', {}, localize('adeMissionPromptNoNodes', "暂无任务节点")));
+			append(this.promptNodeListEl, $('.ade-mission-prompt-empty', {}, adeBi(localize('adeMissionPromptNoNodes', "No task nodes yet"), '暂无任务节点')));
 			this.nodePromptTextareaEl.value = '';
 			this.nodePromptTextareaEl.disabled = true;
-			this.promptFooterHintEl.textContent = localize('adeMissionPromptAddMermaidFirst', "先在左侧编写 Mermaid 节点，即可为每个节点配置前置提示词");
+			this.promptFooterHintEl.textContent = adeBi(
+				localize('adeMissionPromptAddMermaidFirst', "Add nodes in the Mermaid editor on the left to write per-node instructions"),
+				'先在左侧添加节点，即可为每个节点编写任务说明',
+			);
 			return;
 		}
 
@@ -806,9 +698,9 @@ export class AdeMissionFileDrawer extends Disposable {
 		if (activePromptText.trim()) {
 			const clearBtn = append(this.promptEditorHeaderEl, $('button.ade-mission-prompt-clear-btn', {
 				type: 'button',
-				title: localize('adeMissionClearNodePromptTip', "Clear pre-prompt for {0}", activeNode.id),
+				title: adeBi(localize('adeMissionClearNodePromptTip', "Clear pre-prompt for {0}", activeNode.id), '清空 {0} 的节点提示词', activeNode.id),
 				'data-ade-node-prompt-clear': activeNode.id,
-			}, localize('adeMissionClearNodePrompt', "Clear"))) as HTMLButtonElement;
+			}, adeBi(localize('adeMissionClearNodePrompt', "Clear"), '清空'))) as HTMLButtonElement;
 			this.promptHeaderDisposables.add(addDisposableListener(clearBtn, EventType.CLICK, () => {
 				this.nodePromptTextareaEl.value = '';
 				this.delegate.onNodePromptEdit(activeNode.id, '');
@@ -822,7 +714,7 @@ export class AdeMissionFileDrawer extends Disposable {
 		}
 		const charCount = (preserveTextarea ? this.nodePromptTextareaEl.value : activePromptText).trim().length;
 		this.promptFooterHintEl.textContent = charCount > 0
-			? localize('adeMissionPromptSavedHint', "唤醒 {0} 时自动与令牌信息打包下发 · {1} chars", activeNode.id, charCount)
-			: localize('adeMissionPromptWakeupHint', "唤醒时自动与令牌信息打包下发");
+			? adeBi(localize('adeMissionPromptSavedHint', "Auto-sent when {0} runs · {1} chars", activeNode.id, charCount), '运行到 {0} 时自动发送 · {1} 字', activeNode.id, charCount)
+			: adeBi(localize('adeMissionPromptWakeupHint', "Sent automatically to the assigned Agent when this node runs"), '运行到该节点时自动发送给对应 Agent');
 	}
 }

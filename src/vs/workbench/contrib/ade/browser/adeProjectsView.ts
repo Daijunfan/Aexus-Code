@@ -52,6 +52,7 @@ import { IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, getMissionDisplayName, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
 import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_MISSION_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { adeBi, formatDynamicOrgLadderSummary, onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeInboxPanel } from './adeInboxView.js';
 import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
@@ -74,15 +75,15 @@ function formatRoleBadgeLabel(rank: AdeSessionRank, config: IAdeOrganizationConf
 	}
 	switch (rank) {
 		case 'governor':
-			return localize('adeRoleGovernor', "Governor");
+			return adeBi(localize('adeRoleGovernor', "Governor"), '统筹主管');
 		case 'manager':
-			return localize('adeRoleManager', "Manager");
+			return adeBi(localize('adeRoleManager', "Manager"), '团队经理');
 		case 'employee':
-			return localize('adeRoleEmployee', "Employee");
+			return adeBi(localize('adeRoleEmployee', "Employee"), '资深成员');
 		case 'subordinate':
-			return localize('adeRoleMember', "Member");
+			return adeBi(localize('adeRoleMember', "Member"), '成员');
 		case 'worker':
-			return localize('adeRoleWorker', "Worker");
+			return adeBi(localize('adeRoleWorker', "Worker"), '执行员工');
 		default:
 			return String(rank);
 	}
@@ -91,17 +92,17 @@ function formatRoleBadgeLabel(rank: AdeSessionRank, config: IAdeOrganizationConf
 function formatNewSubSessionLabel(childRank: AdeSessionRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG): string {
 	const def = findRankDefinition(config, childRank);
 	if (def) {
-		return localize('adeNewRankSubSession', "New {0} Sub-Session...", def.name);
+		return adeBi(localize('adeNewRankSubSession', "New {0} Sub-Session...", def.name), '新建 {0} 子会话...', def.name);
 	}
 	switch (childRank) {
 		case 'manager':
-			return localize('adeNewManagerSubSession', "New Manager Sub-Session...");
+			return adeBi(localize('adeNewManagerSubSession', "New Manager Sub-Session..."), '新建团队经理子会话...');
 		case 'employee':
-			return localize('adeNewEmployeeSubSession', "New Employee Sub-Session...");
+			return adeBi(localize('adeNewEmployeeSubSession', "New Employee Sub-Session..."), '新建资深成员子会话...');
 		case 'worker':
-			return localize('adeNewWorkerSubSession', "New Worker Sub-Session...");
+			return adeBi(localize('adeNewWorkerSubSession', "New Worker Sub-Session..."), '新建执行员工子会话...');
 		default:
-			return localize('adeAddSubSessionAria', "New Sub-Session...");
+			return adeBi(localize('adeAddSubSessionAria', "New Sub-Session..."), '新建子会话...');
 	}
 }
 
@@ -687,17 +688,21 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 export class AdeProjectsView extends ViewPane {
 	private tree: WorkbenchAsyncDataTree<AdeTreeItem[], AdeTreeItem, FuzzyScore> | undefined;
 	private secretaryBar: HTMLElement | undefined;
+	private secretaryTitleLabel: HTMLElement | undefined;
 	private secretaryContextPill: HTMLElement | undefined;
 	private secretaryStatusDot: HTMLElement | undefined;
 	private secretaryStatusChip: HTMLElement | undefined;
 	private secretaryStatusChipLabel: HTMLElement | undefined;
 	private controlsBar: HTMLElement | undefined;
 	private focusBanner: HTMLElement | undefined;
+	private focusBannerLabel: HTMLElement | undefined;
+	private focusBannerExitLabel: HTMLElement | undefined;
 	private focusBannerName: HTMLElement | undefined;
 	private focusBannerHost: HTMLElement | undefined;
 	private sectionTitleLabel: HTMLElement | undefined;
 	private projectsTabBtn: HTMLElement | undefined;
 	private inboxTabBtn: HTMLElement | undefined;
+	private inboxTabLabel: HTMLElement | undefined;
 	private inboxBadgeEl: HTMLElement | undefined;
 	private archivedToggleButton: HTMLElement | undefined;
 	private badgesToggleButton: HTMLButtonElement | undefined;
@@ -794,6 +799,10 @@ export class AdeProjectsView extends ViewPane {
 		if (this.roleSchemaService) {
 			this._register(this.roleSchemaService.onDidChangeSchema(() => void this.refresh()));
 		}
+		this._register(onDidChangeAdeLocale(() => {
+			this.updateHeaderControls();
+			void this.refresh();
+		}));
 		if (this.cloudHostBackend) {
 			void this.refreshCloudHostMeta();
 			this._register(this.cloudHostBackend.onDidChangeHosts(() => {
@@ -1120,7 +1129,7 @@ export class AdeProjectsView extends ViewPane {
 			}),
 		));
 		append(main, $('span.ade-secretary-spark', { 'aria-hidden': 'true' }, '\u2726'));
-		append(main, $('span.ade-secretary-title', {}, localize('adeSecretaryTitle', "Secretary")));
+		this.secretaryTitleLabel = append(main, $('span.ade-secretary-title', {}, adeBi(localize('adeSecretaryTitle', "Secretary"), '秘书')));
 		const chip = this.secretaryStatusChip = append(main, $('span.ade-secretary-status-chip', { role: 'status' }));
 		const chipIcon = append(chip, $('span.ade-secretary-status-chip-icon', { 'aria-hidden': 'true' }));
 		chipIcon.classList.add(...ThemeIcon.asClassNameArray(ThemeIcon.modify(Codicon.loading, 'spin')));
@@ -1214,17 +1223,17 @@ export class AdeProjectsView extends ViewPane {
 		banner.hidden = true;
 		const glyph = append(banner, $('span.ade-focus-banner-glyph', { 'aria-hidden': 'true' }));
 		glyph.classList.add(...ThemeIcon.asClassNameArray(Codicon.target));
-		append(banner, $('span.ade-focus-banner-label', {}, localize('adeFocusBannerLabel', "Focused")));
+		this.focusBannerLabel = append(banner, $('span.ade-focus-banner-label', {}, adeBi(localize('adeFocusBannerLabel', "Focused"), '已聚焦')));
 		append(banner, $('span.ade-focus-banner-sep', { 'aria-hidden': 'true' }, '\u00b7'));
 		this.focusBannerName = append(banner, $('span.ade-focus-banner-name'));
 		this.focusBannerHost = append(banner, $('span.ade-focus-banner-host'));
 		this.focusBannerHost.hidden = true;
-		const exitLabel = localize('adeFocusBannerExit', "Exit");
-		const exitTooltip = localize('adeFocusBannerExitTooltip', "Exit Focus and show all projects");
+		const exitLabel = adeBi(localize('adeFocusBannerExit', "Exit"), '退出');
+		const exitTooltip = adeBi(localize('adeFocusBannerExitTooltip', "Exit Focus and show all projects"), '退出聚焦并显示全部项目');
 		const exit = append(banner, $('button.ade-focus-banner-exit', { type: 'button', 'aria-label': exitTooltip }));
 		const exitIcon = append(exit, $('span', { 'aria-hidden': 'true' }));
 		exitIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.arrowLeft));
-		append(exit, $('span', {}, exitLabel));
+		this.focusBannerExitLabel = append(exit, $('span', {}, exitLabel));
 		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), exit, exitTooltip));
 		this._register(addDisposableListener(exit, EventType.CLICK, event => {
 			EventHelper.stop(event, true);
@@ -1245,7 +1254,9 @@ export class AdeProjectsView extends ViewPane {
 			this.focusBannerName.title = formatProjectDisplayPath(focused.uri);
 			const isCloud = isCloudProjectUri(focused.uri);
 			this.focusBannerHost.hidden = !isCloud;
-			this.focusBannerHost.textContent = isCloud ? localize('adeFocusBannerCloudHost', "Cloud: {0}", focused.uri.authority) : '';
+			this.focusBannerHost.textContent = isCloud
+				? adeBi(localize('adeFocusBannerCloudHost', "Cloud: {0}", focused.uri.authority), '云主机：{0}', focused.uri.authority)
+				: '';
 		}
 		if (wasHidden !== banner.hidden) {
 			this.layoutTree();
@@ -1281,14 +1292,14 @@ export class AdeProjectsView extends ViewPane {
 				role: 'tab',
 				'aria-selected': 'true',
 			}));
-			this.sectionTitleLabel = append(projTab, $('span.ade-sidebar-section-title', {}, localize('adeProjectsSectionTitle', "Projects")));
+			this.sectionTitleLabel = append(projTab, $('span.ade-sidebar-section-title', {}, adeBi(localize('adeProjectsSectionTitle', "Projects"), '项目')));
 
 			const inbTab = this.inboxTabBtn = append(segTabs, $('button.ade-sidebar-seg-btn', {
 				type: 'button',
 				role: 'tab',
 				'aria-selected': 'false',
 			}));
-			append(inbTab, $('span', {}, localize('adeInboxTabTitle', "Inbox")));
+			this.inboxTabLabel = append(inbTab, $('span', {}, adeBi(localize('adeInboxTabTitle', "Inbox"), '收件箱')));
 			this.inboxBadgeEl = append(inbTab, $('span.ade-inbox-count-badge'));
 			this.inboxBadgeEl.hidden = true;
 
@@ -1374,6 +1385,18 @@ export class AdeProjectsView extends ViewPane {
 
 	private updateHeaderControls(): void {
 		const secretary = this.projects.secretary;
+		if (this.secretaryTitleLabel) {
+			this.secretaryTitleLabel.textContent = adeBi(localize('adeSecretaryTitle', "Secretary"), '秘书');
+		}
+		if (this.focusBannerLabel) {
+			this.focusBannerLabel.textContent = adeBi(localize('adeFocusBannerLabel', "Focused"), '已聚焦');
+		}
+		if (this.focusBannerExitLabel) {
+			this.focusBannerExitLabel.textContent = adeBi(localize('adeFocusBannerExit', "Exit"), '退出');
+		}
+		if (this.inboxTabLabel) {
+			this.inboxTabLabel.textContent = adeBi(localize('adeInboxTabTitle', "Inbox"), '收件箱');
+		}
 		if (this.secretaryContextPill) {
 			const focused = this.projectNavigation.focusedProject;
 			const engineName = secretary.session ? this.sessions.getEngineName(secretary.session.engineId) : undefined;
@@ -1381,9 +1404,9 @@ export class AdeProjectsView extends ViewPane {
 			if (focused) {
 				summaryText = engineName
 					? localize('adeSecretaryEngineAndFocus', "{0} · {1}", engineName, focused.name)
-					: localize('adeFocusPill', "Focus: {0}", focused.name);
+					: adeBi(localize('adeFocusPill', "Focus: {0}", focused.name), '聚焦：{0}', focused.name);
 			} else {
-				summaryText = engineName ?? localize('adeHomePill', "Home");
+				summaryText = engineName ?? adeBi(localize('adeHomePill', "Home"), '总览');
 			}
 			this.secretaryContextPill.textContent = summaryText;
 			this.secretaryContextPill.title = summaryText;
@@ -1393,7 +1416,7 @@ export class AdeProjectsView extends ViewPane {
 		if (this.secretaryStatusChip && this.secretaryStatusChipLabel) {
 			this.secretaryStatusChip.hidden = !isWorking;
 			this.secretaryStatusChip.classList.toggle('working', isWorking);
-			this.secretaryStatusChipLabel.textContent = isWorking ? localize('adeSecretaryStatusWorking', "Working…") : '';
+			this.secretaryStatusChipLabel.textContent = isWorking ? adeBi(localize('adeSecretaryStatusWorking', "Working…"), '运行中…') : '';
 		}
 		if (this.secretaryStatusDot) {
 			if (secretary.unread) {
@@ -1413,8 +1436,8 @@ export class AdeProjectsView extends ViewPane {
 
 		if (this.sectionTitleLabel) {
 			this.sectionTitleLabel.textContent = this.projects.showArchived
-				? localize('adeProjectsArchivedSectionTitle', "Projects (Archived)")
-				: localize('adeProjectsSectionTitle', "Projects");
+				? adeBi(localize('adeProjectsArchivedSectionTitle', "Projects (Archived)"), '项目（已归档）')
+				: adeBi(localize('adeProjectsSectionTitle', "Projects"), '项目');
 			this.sectionTitleLabel.classList.toggle('archived', this.projects.showArchived);
 		}
 
@@ -1744,10 +1767,10 @@ export class AdeProjectsView extends ViewPane {
 
 		if (this.projects.showArchived) {
 			this.emptyStateMessage.textContent = focused
-				? localize('adeArchivedEmptyFocused', "No archived sessions in {0}.", focused.name)
-				: localize('adeArchivedEmpty', "No archived sessions.");
+				? adeBi(localize('adeArchivedEmptyFocused', "No archived sessions in {0}.", focused.name), '项目「{0}」中暂无已归档会话。', focused.name)
+				: adeBi(localize('adeArchivedEmpty', "No archived sessions."), '暂无已归档会话。');
 			const showActiveBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-			showActiveBtn.label = localize('adeBackToActiveProjectsBtn', "Back to Active Projects");
+			showActiveBtn.label = adeBi(localize('adeBackToActiveProjectsBtn', "Back to Active Projects"), '返回活跃项目');
 			this.emptyActionDisposables.add(showActiveBtn.onDidClick(() => {
 				this.projects.setShowArchived(false);
 			}));
@@ -1755,19 +1778,33 @@ export class AdeProjectsView extends ViewPane {
 		}
 
 		if (!focused && this.projects.projects.length === 0) {
-			this.emptyStateMessage.textContent = localize('adeNoProjectsWelcome', "Add a local project folder or connect an SSH Cloud Host workspace to orchestrate Coding Agents across 4 organizational tiers.");
+			const orgConfig = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+			const tierCount = Math.max(1, orgConfig.ranks.length);
+			const ladderSummary = formatDynamicOrgLadderSummary(orgConfig);
+			this.emptyStateMessage.dataset.dynamicTierCount = String(tierCount);
+			this.emptyStateMessage.textContent = adeBi(
+				localize(
+					'adeNoProjectsWelcomeDynamic',
+					"Add a local project folder or connect an SSH Cloud Host workspace to orchestrate Coding Agents across {0} dynamic organizational tiers ({1}).",
+					tierCount,
+					ladderSummary,
+				),
+				'添加本地项目文件夹或连接 SSH 云主机工作区，在 {0} 层动态组织职级（{1}）中协同调度编程智能体。',
+				tierCount,
+				ladderSummary,
+			);
 			const addProjectBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, defaultButtonStyles));
-			addProjectBtn.label = localize('adeAddProjectFolderButton', "Add Project Folder...");
+			addProjectBtn.label = adeBi(localize('adeAddProjectFolderButton', "Add Project Folder..."), '添加项目文件夹...');
 			this.emptyActionDisposables.add(addProjectBtn.onDidClick(() => {
 				void this.commandService.executeCommand('workbench.action.ade.addProjectFolder');
 			}));
 			const cloudHostsBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-			cloudHostsBtn.label = localize('adeManageCloudHostsEmptyBtn', "Manage SSH Cloud Hosts...");
+			cloudHostsBtn.label = adeBi(localize('adeManageCloudHostsEmptyBtn', "Manage SSH Cloud Hosts..."), '管理 SSH 云主机...');
 			this.emptyActionDisposables.add(cloudHostsBtn.onDidClick(() => {
 				void this.commandService.executeCommand(ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID);
 			}));
 			const openSecBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-			openSecBtn.label = localize('adeOpenSecretaryEmptyBtn', "Open Secretary");
+			openSecBtn.label = adeBi(localize('adeOpenSecretaryEmptyBtn', "Open Secretary"), '打开秘书（L0）');
 			this.emptyActionDisposables.add(openSecBtn.onDidClick(() => {
 				void this.commandService.executeCommand('workbench.action.ade.openSecretary');
 			}));
@@ -1775,17 +1812,17 @@ export class AdeProjectsView extends ViewPane {
 		}
 
 		this.emptyStateMessage.textContent = focused
-			? localize('adeNoSessionsFocusedWelcome', "No Agent sessions in {0} yet.", focused.name)
-			: localize('adeNoSessionsWelcome', "Start a new Agent session or open an existing conversation.");
+			? adeBi(localize('adeNoSessionsFocusedWelcome', "No Agent sessions in {0} yet.", focused.name), '项目「{0}」中尚无智能体会话。', focused.name)
+			: adeBi(localize('adeNoSessionsWelcome', "Start a new Agent session or open an existing conversation."), '新建智能体会话或打开已有对话以开始协作。');
 
 		const newSessionBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, defaultButtonStyles));
-		newSessionBtn.label = localize('adeNewSessionButton', "New Session...");
+		newSessionBtn.label = adeBi(localize('adeNewSessionButton', "New Session..."), '新建会话...');
 		this.emptyActionDisposables.add(newSessionBtn.onDidClick(() => {
 			void this.commandService.executeCommand('workbench.action.ade.newSession', focused?.uri);
 		}));
 
 		const openExistingBtn = this.emptyActionDisposables.add(new Button(this.emptyStateHost, { ...defaultButtonStyles, secondary: true }));
-		openExistingBtn.label = localize('adeOpenExistingButton', "Open Existing Session...");
+		openExistingBtn.label = adeBi(localize('adeOpenExistingButton', "Open Existing Session..."), '打开已有会话...');
 		this.emptyActionDisposables.add(openExistingBtn.onDidClick(() => {
 			void this.commandService.executeCommand('workbench.action.ade.openExistingSession', focused?.uri);
 		}));

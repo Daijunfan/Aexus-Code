@@ -66,6 +66,8 @@ export interface NativeRoleBridgeController {
 	promoteToPrimary(options?: { onNativeSessionBound?: (shortEngine: string, agentId: string, nativeSessionId: string) => void }): void;
 	readAgyBindings(): Promise<Record<string, string>>;
 	readExternalNativeBindings(): Promise<ExternalNativeBinding[]>;
+	/** Event-driven filesystem watcher on the role-bridge directory for agy & external native binding changes (zero idle polling). */
+	watchExternalBindings(onChange: () => void): () => void;
 	dispose(): void;
 }
 
@@ -208,7 +210,11 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 	let agyBindingsWriteQueue = Promise.resolve();
 	let lastSeenStateMtimeMs = -1;
 	let stateRefreshPromise: Promise<void> | undefined;
-	let followerTimer: ReturnType<typeof setInterval> | undefined;
+	let followerWatcher: fsSync.FSWatcher | undefined;
+	let followerStarting = false;
+	let followerDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+	let followerFallbackTimer: ReturnType<typeof setInterval> | undefined;
+	const externalBindingWatchDisposables = new Set<() => void>();
 
 	const probeEphemeralPort = (): void => {
 		if (disposed || !bridgeEnabled || freePortPool.length >= 2) {
@@ -415,14 +421,181 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		return stateRefreshPromise;
 	};
 
+	const stopFollowerWatcher = (): void => {
+		followerStarting = false;
+		if (followerDebounceTimer) {
+			clearTimeout(followerDebounceTimer);
+			followerDebounceTimer = undefined;
+		}
+		if (followerWatcher) {
+			try { followerWatcher.close(); } catch { }
+			followerWatcher = undefined;
+		}
+		if (followerFallbackTimer) {
+			clearInterval(followerFallbackTimer);
+			followerFallbackTimer = undefined;
+		}
+	};
+
+	const startDirectoryFileWatcher = (
+		targetBasenames: ReadonlySet<string>,
+		debounceMs: number,
+		onMatch: () => void,
+		fallbackPollMs: number,
+	): (() => void) => {
+		let closed = false;
+		let watcher: fsSync.FSWatcher | undefined;
+		let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+		let fallbackTimer: ReturnType<typeof setInterval> | undefined;
+
+		const scheduleTrigger = () => {
+			if (closed || disposed) {
+				return;
+			}
+			if (debounceTimer) {
+				clearTimeout(debounceTimer);
+			}
+			debounceTimer = setTimeout(() => {
+				debounceTimer = undefined;
+				if (!closed && !disposed) {
+					onMatch();
+				}
+			}, debounceMs);
+			debounceTimer.unref?.();
+		};
+
+		const startFallbackPolling = () => {
+			if (closed || disposed || fallbackTimer) {
+				return;
+			}
+			fallbackTimer = setInterval(() => {
+				if (!closed && !disposed) {
+					onMatch();
+				}
+			}, fallbackPollMs);
+			fallbackTimer.unref?.();
+		};
+
+		const attachWatcher = () => {
+			if (closed || disposed) {
+				return;
+			}
+			try {
+				watcher = fsSync.watch(bridgeDir, { persistent: false }, (_eventType, filename) => {
+					if (closed || disposed) {
+						return;
+					}
+					if (!filename) {
+						scheduleTrigger();
+						return;
+					}
+					const base = path.basename(String(filename));
+					if (targetBasenames.has(base)) {
+						scheduleTrigger();
+					}
+				});
+				watcher.on('error', () => {
+					try { watcher?.close(); } catch { }
+					watcher = undefined;
+					startFallbackPolling();
+				});
+			} catch {
+				startFallbackPolling();
+			}
+		};
+
+		void fs.mkdir(bridgeDir, { recursive: true, mode: 0o700 }).then(async () => {
+			attachWatcher();
+			if (closed || disposed) {
+				return;
+			}
+			// Reconcile once if any watched binding file already appeared during the tiny window before fs.watch attached.
+			for (const base of targetBasenames) {
+				try {
+					await fs.access(path.join(bridgeDir, base));
+					scheduleTrigger();
+					break;
+				} catch {
+					// File not yet present — stay completely idle
+				}
+			}
+		}, () => {
+			startFallbackPolling();
+		});
+
+		return () => {
+			if (closed) {
+				return;
+			}
+			closed = true;
+			if (debounceTimer) {
+				clearTimeout(debounceTimer);
+				debounceTimer = undefined;
+			}
+			if (watcher) {
+				try { watcher.close(); } catch { }
+				watcher = undefined;
+			}
+			if (fallbackTimer) {
+				clearInterval(fallbackTimer);
+				fallbackTimer = undefined;
+			}
+		};
+	};
+
 	const startFollowerTimer = (): void => {
-		if (disposed || !bridgeEnabled || !isFollower || followerTimer) {
+		if (disposed || !bridgeEnabled || !isFollower || followerStarting || followerWatcher || followerFallbackTimer) {
 			return;
 		}
-		followerTimer = setInterval(() => {
-			void refreshFromStateFile();
-		}, 250);
-		followerTimer.unref?.();
+		followerStarting = true;
+		const targetBase = path.basename(stateFilePath);
+		const scheduleRefresh = () => {
+			if (disposed || !isFollower) {
+				return;
+			}
+			if (followerDebounceTimer) {
+				clearTimeout(followerDebounceTimer);
+			}
+			followerDebounceTimer = setTimeout(() => {
+				followerDebounceTimer = undefined;
+				void refreshFromStateFile();
+			}, 30);
+			followerDebounceTimer.unref?.();
+		};
+		const startFallback = () => {
+			if (disposed || !isFollower || followerFallbackTimer) {
+				return;
+			}
+			followerFallbackTimer = setInterval(() => {
+				void refreshFromStateFile();
+			}, 5_000);
+			followerFallbackTimer.unref?.();
+		};
+		void fs.mkdir(bridgeDir, { recursive: true, mode: 0o700 }).then(() => {
+			followerStarting = false;
+			if (disposed || !bridgeEnabled || !isFollower || followerWatcher) {
+				return;
+			}
+			try {
+				followerWatcher = fsSync.watch(bridgeDir, { persistent: false }, (_ev, filename) => {
+					if (!filename || path.basename(String(filename)) === targetBase) {
+						scheduleRefresh();
+					}
+				});
+				followerWatcher.on('error', () => {
+					try { followerWatcher?.close(); } catch { }
+					followerWatcher = undefined;
+					startFallback();
+				});
+				// Re-check state file right after attaching so updates written during mkdir/startup are never missed.
+				void refreshFromStateFile();
+			} catch {
+				startFallback();
+			}
+		}, () => {
+			followerStarting = false;
+			startFallback();
+		});
 	};
 	startFollowerTimer();
 
@@ -1774,10 +1947,7 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 			if (fetchHost.fetch === wrappedFetch) {
 				fetchHost.fetch = origFetchRef;
 			}
-			if (followerTimer) {
-				clearInterval(followerTimer);
-				followerTimer = undefined;
-			}
+			stopFollowerWatcher();
 			for (const cleanup of [...activeDisposables]) {
 				cleanup();
 			}
@@ -1822,14 +1992,27 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 		setOnNativeSessionBound: cb => { onNativeSessionBound = cb; },
 		promoteToPrimary: promoteOpts => {
 			isFollower = false;
-			if (followerTimer) {
-				clearInterval(followerTimer);
-				followerTimer = undefined;
-			}
+			stopFollowerWatcher();
 			if (promoteOpts?.onNativeSessionBound) {
 				onNativeSessionBound = promoteOpts.onNativeSessionBound;
 			}
 			void persistState();
+		},
+		watchExternalBindings: onChange => {
+			if (disposed) {
+				return () => { };
+			}
+			const watchedNames = new Set<string>([
+				path.basename(agyBindingsFilePath),
+				path.basename(externalBindingsFilePath),
+			]);
+			const stop = startDirectoryFileWatcher(watchedNames, 60, onChange, 15_000);
+			const cleanup = () => {
+				externalBindingWatchDisposables.delete(cleanup);
+				stop();
+			};
+			externalBindingWatchDisposables.add(cleanup);
+			return cleanup;
 		},
 		readAgyBindings: async () => {
 			try {
@@ -1876,10 +2059,11 @@ export function createNativeRoleBridgeController(options?: NativeRoleBridgeOptio
 				cleanup();
 			}
 			activeDisposables.clear();
-			if (followerTimer) {
-				clearInterval(followerTimer);
-				followerTimer = undefined;
+			for (const cleanup of [...externalBindingWatchDisposables]) {
+				cleanup();
 			}
+			externalBindingWatchDisposables.clear();
+			stopFollowerWatcher();
 			if (cpModule.spawn === wrappedSpawn) {
 				cpModule.spawn = origSpawn;
 			}

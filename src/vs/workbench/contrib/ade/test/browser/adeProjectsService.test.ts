@@ -497,4 +497,50 @@ suite('ADE project sessions', () => {
 		assert.strictEqual(migratedCount, 1);
 		assert.strictEqual(projects.getAgent(root.id)?.role, 'swarm-lead');
 	});
+
+	test('debounces per-keystroke agent & secretary draft persistence, flushes on dispose, and preserves dirty drafts across external reloads (Audit #18)', async () => {
+		const instantiation = workbenchInstantiationService(undefined, store);
+		const storage = instantiation.get(IStorageService);
+		const projects = store.add(instantiation.createInstance(AdeProjectsService));
+		const agent = projects.addProject(URI.file('/ade/draft-debounce'));
+
+		let agentStoreWrites = 0;
+		let secretaryStoreWrites = 0;
+		const origStore = storage.store.bind(storage);
+		storage.store = ((key: string, value: unknown, scope: StorageScope, target: StorageTarget) => {
+			if (key === 'aexus.ade.agents') {
+				agentStoreWrites++;
+			} else if (key === 'aexus.ade.secretary') {
+				secretaryStoreWrites++;
+			}
+			return origStore(key, value as string, scope, target);
+		}) as typeof storage.store;
+
+		// Simulate typing 20 consecutive characters in both agent & secretary chat inputs
+		let text = '';
+		for (const ch of 'Hello debounced text') {
+			text += ch;
+			projects.setDraft(agent.id, text);
+			projects.setSecretaryDraft(`sec:${text}`);
+		}
+		assert.strictEqual(projects.getAgent(agent.id)?.draft, 'Hello debounced text', 'In-memory draft reflects every keystroke immediately');
+		assert.strictEqual(projects.secretary.draft, 'sec:Hello debounced text');
+		assert.strictEqual(agentStoreWrites, 0, 'Rapid agent draft typing must NOT write full agents JSON on every keystroke');
+		assert.strictEqual(secretaryStoreWrites, 0, 'Rapid secretary draft typing must NOT write secretary JSON on every keystroke');
+
+		// Wait past 350ms trailing debounce -> coalesces into 1 write each
+		await new Promise(resolve => setTimeout(resolve, 420));
+		assert.strictEqual(agentStoreWrites, 1, '20 agent keystrokes coalesce into 1 debounced storage write');
+		assert.strictEqual(secretaryStoreWrites, 1, '20 secretary keystrokes coalesce into 1 debounced storage write');
+
+		// Pending draft before debounce timer fires is flushed immediately on dispose()
+		projects.setDraft(agent.id, 'Unsaved before close');
+		assert.strictEqual(agentStoreWrites, 1);
+		projects.dispose();
+		assert.strictEqual(agentStoreWrites, 2, 'Dispose flushes pending dirty drafts cleanly');
+
+		const restored = store.add(instantiation.createInstance(AdeProjectsService));
+		assert.strictEqual(restored.getAgent(agent.id)?.draft, 'Unsaved before close');
+		assert.strictEqual(restored.secretary.draft, 'sec:Hello debounced text');
+	});
 });

@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import type { IJSONSchema } from '../../../base/common/jsonSchema.js';
 import {
 	createDefaultMissionBoundary,
 	findDirectSupervisorForNode,
@@ -18,11 +19,208 @@ import {
 	MissionCheckOnFailAction,
 	parseMissionMermaidDag,
 } from './adeMissionDag.js';
+import {
+	AdeModelPricingOverrides,
+	estimateTokenCostUsd,
+	resolveModelContextWindowTokens,
+} from './adeModelPricing.js';
 import type { IAdeOrganizationConfig } from './adeRoleSchema.js';
 
 export type MissionRunStatus = 'idle' | 'running' | 'paused' | 'completed' | 'stopped' | 'failed';
-export type MissionNodeRuntimeStatus = 'idle' | 'active' | 'blocked' | 'waiting_gate' | 'waiting_join' | 'completed' | 'failed';
-export type MissionTokenStatus = 'active' | 'blocked' | 'waiting_gate' | 'waiting_join' | 'frozen_failed' | 'recalled' | 'completed';
+export type MissionNodeRuntimeStatus = 'idle' | 'active' | 'queued' | 'blocked' | 'waiting_gate' | 'waiting_join' | 'completed' | 'failed';
+export type MissionTokenStatus = 'active' | 'queued' | 'blocked' | 'waiting_gate' | 'waiting_join' | 'frozen_failed' | 'recalled' | 'completed';
+
+export type MissionQueueBlockReason = 'global' | 'local_host' | 'cloud_host' | 'provider' | 'employee';
+
+export interface IMissionConcurrencyLimits {
+	/** Hard ceiling on total simultaneously active task tokens in a Mission (`0` = unlimited). Default: 8. */
+	readonly maxGlobal?: number;
+	/** Max simultaneously active task tokens on the local host (`0` = unlimited). Default: 4. */
+	readonly maxLocalHost?: number;
+	/** Default max simultaneously active task tokens per SSH Cloud Host (`0` = unlimited). Default: 2. */
+	readonly maxPerCloudHost?: number;
+	/** Default max simultaneously active task tokens per cloud LLM provider (`0` = unlimited). Default: 4. */
+	readonly maxPerProvider?: number;
+	/** Optional per-hostAlias overrides (e.g. `{ "gpu-h100": 1 }`). */
+	readonly hostOverrides?: Readonly<Record<string, number>>;
+	/** Optional per-provider overrides (e.g. `{ "anthropic": 3, "openai": 4 }`). */
+	readonly providerOverrides?: Readonly<Record<string, number>>;
+}
+
+export interface IResolvedMissionConcurrencyLimits {
+	readonly maxGlobal: number;
+	readonly maxLocalHost: number;
+	readonly maxPerCloudHost: number;
+	readonly maxPerProvider: number;
+	readonly hostOverrides: Readonly<Record<string, number>>;
+	readonly providerOverrides: Readonly<Record<string, number>>;
+}
+
+export const DEFAULT_MISSION_CONCURRENCY_LIMITS: Readonly<Pick<IResolvedMissionConcurrencyLimits, 'maxGlobal' | 'maxLocalHost' | 'maxPerCloudHost' | 'maxPerProvider'>> = {
+	maxGlobal: 8,
+	maxLocalHost: 4,
+	maxPerCloudHost: 2,
+	maxPerProvider: 4,
+};
+
+export const ADE_MISSION_CONCURRENCY_CONFIG_KEY = 'aexus.ade.mission.concurrency';
+
+export const ADE_MISSION_CONCURRENCY_JSON_SCHEMA: IJSONSchema = {
+	type: 'object',
+	additionalProperties: false,
+	properties: {
+		maxGlobal: {
+			type: 'integer',
+			minimum: 0,
+			maximum: 128,
+			default: DEFAULT_MISSION_CONCURRENCY_LIMITS.maxGlobal,
+			description: 'Hard ceiling on simultaneously active task nodes across a Mission (0 = unlimited).',
+		},
+		maxLocalHost: {
+			type: 'integer',
+			minimum: 0,
+			maximum: 64,
+			default: DEFAULT_MISSION_CONCURRENCY_LIMITS.maxLocalHost,
+			description: 'Maximum simultaneously active task nodes on the local machine (0 = unlimited).',
+		},
+		maxPerCloudHost: {
+			type: 'integer',
+			minimum: 0,
+			maximum: 64,
+			default: DEFAULT_MISSION_CONCURRENCY_LIMITS.maxPerCloudHost,
+			description: 'Default maximum simultaneously active task nodes per remote SSH Cloud Host (protects GPU VRAM & SSH MaxSessions; 0 = unlimited).',
+		},
+		maxPerProvider: {
+			type: 'integer',
+			minimum: 0,
+			maximum: 64,
+			default: DEFAULT_MISSION_CONCURRENCY_LIMITS.maxPerProvider,
+			description: 'Default maximum simultaneously active task nodes per cloud LLM provider (protects against API 429 rate limits; 0 = unlimited).',
+		},
+		hostOverrides: {
+			type: 'object',
+			default: {},
+			additionalProperties: { type: 'integer', minimum: 0, maximum: 64 },
+			description: 'Optional per-host concurrency overrides keyed by host alias (e.g. { "gpu-h100": 1 }).',
+		},
+		providerOverrides: {
+			type: 'object',
+			default: {},
+			additionalProperties: { type: 'integer', minimum: 0, maximum: 64 },
+			description: 'Optional per-provider concurrency overrides keyed by provider ID (e.g. { "anthropic": 3, "openai": 4 }).',
+		},
+	},
+};
+
+export function normalizeMissionConcurrencyLimits(raw?: IMissionConcurrencyLimits): IResolvedMissionConcurrencyLimits {
+	const clamp = (val: unknown, fallback: number): number => {
+		if (typeof val !== 'number' || !Number.isFinite(val)) {
+			return fallback;
+		}
+		return Math.max(0, Math.min(128, Math.floor(val)));
+	};
+	const normalizeMap = (src: unknown): Record<string, number> => {
+		const out: Record<string, number> = {};
+		if (!src || typeof src !== 'object' || Array.isArray(src)) {
+			return out;
+		}
+		for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
+			const key = k.trim().toLowerCase();
+			if (key && typeof v === 'number' && Number.isFinite(v)) {
+				out[key] = Math.max(0, Math.min(64, Math.floor(v)));
+			}
+		}
+		return out;
+	};
+	return {
+		maxGlobal: clamp(raw?.maxGlobal, DEFAULT_MISSION_CONCURRENCY_LIMITS.maxGlobal),
+		maxLocalHost: clamp(raw?.maxLocalHost, DEFAULT_MISSION_CONCURRENCY_LIMITS.maxLocalHost),
+		maxPerCloudHost: clamp(raw?.maxPerCloudHost, DEFAULT_MISSION_CONCURRENCY_LIMITS.maxPerCloudHost),
+		maxPerProvider: clamp(raw?.maxPerProvider, DEFAULT_MISSION_CONCURRENCY_LIMITS.maxPerProvider),
+		hostOverrides: normalizeMap(raw?.hostOverrides),
+		providerOverrides: normalizeMap(raw?.providerOverrides),
+	};
+}
+
+/**
+ * Infers the cloud LLM API provider bucket for per-provider concurrency limiting.
+ * Self-hosted / local models (ollama, lmstudio, vllm, mlx, llama.cpp) return `undefined`
+ * so they are governed by host CPU/VRAM slot ceilings rather than cloud API 429 buckets.
+ */
+export function inferMissionConcurrencyProvider(model?: string, engineId?: string): string | undefined {
+	const m = (model ?? '').trim().toLowerCase();
+	if (m) {
+		if (/(?:^|[:/_-])(ollama|lmstudio|lm-studio|vllm|llama\.?cpp|mlx|local)(?:$|[:/_-])/.test(m)) {
+			return undefined;
+		}
+		if (m.includes('claude') || m.includes('anthropic')) {
+			return 'anthropic';
+		}
+		if (m.includes('gpt-') || m.includes('codex') || m.includes('openai') || /^o[134](?:$|[-.])/.test(m)) {
+			return 'openai';
+		}
+		if (m.includes('gemini') || m.includes('google')) {
+			return 'google';
+		}
+		if (m.includes('deepseek')) {
+			return 'deepseek';
+		}
+		if (m.includes('qwen') || m.includes('qwq')) {
+			return 'qwen';
+		}
+		if (m.includes('kimi') || m.includes('moonshot')) {
+			return 'moonshot';
+		}
+		if (m.includes('glm') || m.includes('zhipu')) {
+			return 'zhipu';
+		}
+		if (m.includes('minimax')) {
+			return 'minimax';
+		}
+		if (m.includes('grok') || m.includes('xai')) {
+			return 'xai';
+		}
+		if (m.includes('mistral') || m.includes('codestral')) {
+			return 'mistral';
+		}
+	}
+	const e = (engineId ?? '').trim().toLowerCase();
+	if (!e) {
+		return undefined;
+	}
+	if (e.includes('claude')) {
+		return 'anthropic';
+	}
+	if (e.includes('codex') || e.includes('openai')) {
+		return 'openai';
+	}
+	if (e.includes('antigravity') || e.includes('gemini')) {
+		return 'google';
+	}
+	if (e.includes('dsh') || e.includes('deepseek')) {
+		return 'deepseek';
+	}
+	return undefined;
+}
+
+export interface IMissionTokenQueueInfo {
+	/** 1-based FIFO rank among all currently queued tokens (`#1`, `#2`, ...). */
+	readonly position: number;
+	/** Total number of tokens currently waiting in the concurrency queue. */
+	readonly totalQueued: number;
+	/** Primary concurrency semaphore level currently saturated. */
+	readonly blockedBy: MissionQueueBlockReason;
+	/** Scope label for the saturated semaphore (e.g. `'global'`, `'local'`, `'gpu-h100'`, `'anthropic'`). */
+	readonly scopeKey: string;
+	/** Active slot usage vs ceiling at scheduling time (e.g. `2/2`). */
+	readonly activeSlots: number;
+	readonly maxSlots: number;
+	/** Timestamp when the token entered the concurrency queue. */
+	readonly enqueuedAt: number;
+	/** Pending dispatch prompt preserved while queued so draining promotes cleanly with zero prompt loss. */
+	readonly pendingPrompt: string;
+	readonly isRejection?: boolean;
+}
 
 export type MissionSourceTriggerKind = 'once' | 'interval' | 'cron' | 'event';
 export type MissionExternalEventType = 'file_created' | 'file_changed' | 'git_updated' | 'gpu_idle';
@@ -82,6 +280,7 @@ export interface IMissionFinOpsBucket {
 	readonly tokens: number;
 	readonly nodeCount: number;
 	readonly pct: number;
+	readonly hasEstimatedCost?: boolean;
 }
 
 export interface IMissionFinOpsNodeSpend {
@@ -92,6 +291,8 @@ export interface IMissionFinOpsNodeSpend {
 	readonly turns: number;
 	readonly hostAlias: string;
 	readonly tier: number;
+	readonly costEstimated?: boolean;
+	readonly costLocalFree?: boolean;
 }
 
 export interface IMissionFinOpsSummary {
@@ -100,6 +301,12 @@ export interface IMissionFinOpsSummary {
 	readonly totalOutputTokens: number;
 	readonly totalCacheReadTokens: number;
 	readonly totalCostUsd: number;
+	/** Portion of totalCostUsd derived from the built-in/custom model pricing catalog rather than direct CLI billing. */
+	readonly estimatedCostUsd: number;
+	/** True when any positive spend in this mission is estimated via token pricing rather than reported directly by the engine CLI. */
+	readonly hasEstimatedCost: boolean;
+	/** True when at least one active node is running on a recognized local / self-hosted zero-cost model. */
+	readonly hasLocalFreeNodes?: boolean;
 	readonly cacheSavingsPct: number;
 	readonly budgetLimitUsd: number | undefined;
 	readonly budgetUsedPct: number;
@@ -182,6 +389,10 @@ export interface IMissionToken {
 	readonly returnWaveId?: string;
 	/** Marks a single-branch arrival token parked inside a multi-inDegree join barrier (must not be retried standalone as a released join execution). */
 	readonly isJoinArrival?: boolean;
+	/** True when this token represents rework (check failure bounce, Reviewer/Gate rejection, or failure retry). */
+	readonly isRework?: boolean;
+	/** Trigger that flagged this token as rework so subsequent turns auto-attribute into the crimson noise segment. */
+	readonly reworkReason?: MissionReworkNoiseReason;
 	readonly arrivedAt: number;
 	readonly lastActivityAt: number;
 	readonly lastNudgeAt?: number;
@@ -191,6 +402,7 @@ export interface IMissionToken {
 	/** Most recent deterministic verification failure details (surfaced in nudges & UI). */
 	readonly lastCheckFailure?: IMissionTokenCheckFailureInfo;
 	readonly blocked?: IMissionTokenBlockedInfo;
+	readonly queued?: IMissionTokenQueueInfo;
 	readonly failure?: IMissionTokenFailureInfo;
 }
 
@@ -204,18 +416,44 @@ export interface IMissionJoinBarrier {
 	readonly restoreWaveId?: string;
 }
 
+export type MissionReworkNoiseReason =
+	| 'check_failed'
+	| 'reviewer_rejected'
+	| 'gate_rejected'
+	| 'retry'
+	| 'watchdog_nudge'
+	| 'tool_error';
+
 export const DEFAULT_MISSION_CONTEXT_WINDOW_TOKENS = 200_000;
 export const MAX_SILENCE_NUDGES_BEFORE_ESCALATE = 3;
 
-export function inferModelContextWindowTokens(model?: string): number {
-	const m = (model ?? '').trim().toLowerCase();
-	if (!m) {
-		return DEFAULT_MISSION_CONTEXT_WINDOW_TOKENS;
+export function inferModelContextWindowTokens(
+	model?: string,
+	options?: {
+		readonly engineId?: string;
+		readonly overrides?: AdeModelPricingOverrides;
+	},
+): number {
+	return resolveModelContextWindowTokens(model, options?.engineId, options?.overrides);
+}
+
+function estimateNoiseDiagnosticTokens(text: string | undefined): number {
+	const trimmed = text?.trim() ?? '';
+	if (!trimmed) {
+		return 0;
 	}
-	if (m.includes('[1m]') || m.includes('-1m') || m.includes('gemini-')) {
-		return 1_000_000;
+	let cjk = 0;
+	for (let i = 0; i < trimmed.length; i++) {
+		const code = trimmed.charCodeAt(i);
+		if (
+			(code >= 0x3000 && code <= 0x9FFF)
+			|| (code >= 0xAC00 && code <= 0xD7AF)
+			|| (code >= 0xF900 && code <= 0xFAFF)
+		) {
+			cjk++;
+		}
 	}
-	return DEFAULT_MISSION_CONTEXT_WINDOW_TOKENS;
+	return Math.max(120, Math.min(4_000, Math.ceil(cjk * 1.15 + (trimmed.length - cjk) / 4)));
 }
 
 export interface IMissionNodeTelemetry {
@@ -225,6 +463,17 @@ export interface IMissionNodeTelemetry {
 	readonly cacheWriteTokens: number;
 	readonly totalTokens: number;
 	readonly costUsd: number;
+	/** True when any portion of this node's accumulated costUsd was estimated via token rates instead of direct CLI billing. */
+	readonly costEstimated?: boolean;
+	/** True when this node is accounted as a local / self-hosted zero-cost model ($0.00). */
+	readonly costLocalFree?: boolean;
+	/** Accumulated USD portion estimated from token rates (tracks mixed real + estimated turns cleanly). */
+	readonly estimatedCostUsd?: number;
+	/**
+	 * Temporary estimated USD accumulated during mid-turn streaming ticks (`turns === 0`).
+	 * Reconciled (subtracted) when a turn completes with a real provider-reported `costUsd`, avoiding double-counting.
+	 */
+	readonly pendingInterimEstimatedCostUsd?: number;
 	readonly turns: number;
 	readonly contextWindowMax: number;
 	/** Gray segment: minimal system/role initialization context. */
@@ -235,7 +484,12 @@ export interface IMissionNodeTelemetry {
 	readonly contextSourceTokens: number;
 	/** Crimson segment: compile errors / retries / rework noise. */
 	readonly contextNoiseTokens: number;
+	/** Active rework/error trigger that automatically attributes subsequent node turns into crimson rework noise until resolved or distilled. */
+	readonly pendingNoiseReason?: MissionReworkNoiseReason;
+	/** Count of turns attributed to rework/error noise on this node. */
+	readonly noiseTurns?: number;
 	readonly model?: string;
+	readonly engineId?: string;
 	readonly summary?: string;
 	readonly lastCheckStatus?: 'passed' | 'failed';
 	readonly lastCheckSummary?: string;
@@ -252,6 +506,7 @@ export interface IMissionTurnUsageInput {
 	readonly costUsd?: number;
 	readonly turns?: number;
 	readonly model?: string;
+	readonly engineId?: string;
 	readonly summary?: string;
 	readonly contextWindowMax?: number;
 	/** Measured system/role initialization context tokens (gray segment of 4-color bar). */
@@ -259,7 +514,21 @@ export interface IMissionTurnUsageInput {
 	/** Measured tier/mission contract & pre-prompt context tokens (blue segment of 4-color bar). */
 	readonly contextTierDocTokens?: number;
 	readonly isNoiseTurn?: boolean;
+	/** True when one or more tool/command/build failures occurred during this turn (automatically flags rework noise). */
+	readonly hadToolError?: boolean;
+	/** Number of tool/command failures observed during this turn. */
+	readonly toolErrorCount?: number;
+	/** Immutable turn identifier bound at dispatch/interactive start for exact node billing attribution. */
+	readonly turnId?: string;
+	/** Optional token identifier associated with this turn for deterministic fallback attribution. */
+	readonly tokenId?: string;
 	readonly timestamp?: number;
+}
+
+export interface IMissionTurnUsagePricingOptions {
+	readonly overrides?: AdeModelPricingOverrides;
+	readonly fallbackModel?: string;
+	readonly fallbackEngineId?: string;
 }
 
 export interface IMissionNodeContextBreakdown {
@@ -284,8 +553,14 @@ export function formatCompactTokenCount(tokens: number): string {
 	return String(safe);
 }
 
-export function computeMissionNodeContextBreakdown(telemetry: IMissionNodeTelemetry | undefined): IMissionNodeContextBreakdown {
-	const maxTokens = Math.max(1, telemetry?.contextWindowMax || DEFAULT_MISSION_CONTEXT_WINDOW_TOKENS);
+export function computeMissionNodeContextBreakdown(
+	telemetry: IMissionNodeTelemetry | undefined,
+	fallbackMaxTokens?: number,
+): IMissionNodeContextBreakdown {
+	const effectiveFallback = typeof fallbackMaxTokens === 'number' && Number.isFinite(fallbackMaxTokens) && fallbackMaxTokens > 0
+		? Math.round(fallbackMaxTokens)
+		: DEFAULT_MISSION_CONTEXT_WINDOW_TOKENS;
+	const maxTokens = Math.max(1, telemetry?.contextWindowMax || effectiveFallback);
 	if (!telemetry) {
 		return {
 			usedTokens: 0,
@@ -312,7 +587,9 @@ export function computeMissionNodeContextBreakdown(telemetry: IMissionNodeTeleme
 		: Math.max(0, usedTokens - initTokens - tierTokens - noiseTokens);
 
 	const usedPct = Math.min(100, Math.round((usedTokens / maxTokens) * 100));
-	const toPct = (v: number) => Math.max(0, Math.min(100, (v / maxTokens) * 100));
+	const segTotal = initTokens + tierTokens + sourceTokens + noiseTokens;
+	const segDenom = Math.max(maxTokens, segTotal);
+	const toPct = (v: number) => Math.max(0, Math.min(100, (v / segDenom) * 100));
 	const initPct = toPct(initTokens);
 	const tierPct = toPct(tierTokens);
 	const sourcePct = toPct(sourceTokens);
@@ -330,10 +607,23 @@ export function computeMissionNodeContextBreakdown(telemetry: IMissionNodeTeleme
 	};
 }
 
+function roundCostUsd(value: number): number {
+	return Math.round(Math.max(0, Number.isFinite(value) ? value : 0) * 1_000_000) / 1_000_000;
+}
+
+function roundSignedCostUsd(value: number): number {
+	if (!Number.isFinite(value)) {
+		return 0;
+	}
+	const rounded = Math.round(value * 1_000_000) / 1_000_000;
+	return rounded === 0 ? 0 : rounded;
+}
+
 export function recordMissionNodeTurnUsage(
 	state: IMissionRuntimeState,
 	nodeId: string,
 	usage: IMissionTurnUsageInput,
+	pricingOptions?: IMissionTurnUsagePricingOptions,
 ): IMissionRuntimeState {
 	const prev = state.nodeTelemetry?.[nodeId];
 	const now = usage.timestamp ?? Date.now();
@@ -342,14 +632,75 @@ export function recordMissionNodeTurnUsage(
 	const addCacheRead = Math.max(0, Math.round(usage.cacheReadTokens ?? 0));
 	const addCacheWrite = Math.max(0, Math.round(usage.cacheWriteTokens ?? 0));
 	const addTotal = Math.max(0, Math.round(usage.totalTokens ?? (addInput + addOutput + addCacheRead + addCacheWrite)));
-	const addCost = Math.max(0, Number.isFinite(usage.costUsd ?? 0) ? (usage.costUsd ?? 0) : 0);
 	const addTurns = Math.max(0, Math.round(usage.turns ?? 1));
-	const effectiveModel = usage.model?.trim() || prev?.model;
-	const inferredMax = inferModelContextWindowTokens(effectiveModel);
-	const contextWindowMax = Math.max(8_192, Math.round(
-		usage.contextWindowMax
-		?? (prev?.contextWindowMax && prev.contextWindowMax !== DEFAULT_MISSION_CONTEXT_WINDOW_TOKENS ? prev.contextWindowMax : inferredMax),
-	));
+	const effectiveModel = (usage.model?.trim() && usage.model.trim().toLowerCase() !== 'default' ? usage.model.trim() : undefined)
+		|| prev?.model
+		|| (pricingOptions?.fallbackModel?.trim() && pricingOptions.fallbackModel.trim().toLowerCase() !== 'default' ? pricingOptions.fallbackModel.trim() : undefined);
+	const effectiveEngineId = usage.engineId?.trim() || prev?.engineId || pricingOptions?.fallbackEngineId?.trim();
+	const inferredMax = inferModelContextWindowTokens(effectiveModel, {
+		engineId: effectiveEngineId,
+		overrides: pricingOptions?.overrides,
+	});
+	const contextWindowMax = Math.max(4_096, Math.round(usage.contextWindowMax ?? inferredMax));
+
+	// Cost accounting with multi-engine fallback pricing & interim-to-real reconciliation:
+	// - When an engine CLI reports a real USD bill (`usage.costUsd`), reconcile any temporary interim estimate
+	//   accumulated during streaming ticks of this turn so spend is never double-counted.
+	// - When an engine CLI only reports tokens (Codex, Kilo/OpenCode without cost, ACP/Antigravity/Cline/DSH, Pi),
+	//   convert tokens to USD via the unified pricing catalog + user overrides, marking `costEstimated` (or `costLocalFree`).
+	const prevCost = Math.max(0, Number.isFinite(prev?.costUsd ?? 0) ? (prev?.costUsd ?? 0) : 0);
+	const prevEstimatedCost = Math.max(
+		0,
+		Number.isFinite(prev?.estimatedCostUsd ?? NaN)
+			? (prev!.estimatedCostUsd!)
+			: (prev?.costEstimated ? prevCost : 0),
+	);
+	const prevPendingInterim = Math.max(0, Number.isFinite(prev?.pendingInterimEstimatedCostUsd ?? 0) ? (prev?.pendingInterimEstimatedCostUsd ?? 0) : 0);
+	const hasExplicitProviderCost = typeof usage.costUsd === 'number' && Number.isFinite(usage.costUsd) && usage.costUsd >= 0;
+	const hasBillableTokens = addInput > 0 || addOutput > 0 || addCacheRead > 0 || addCacheWrite > 0;
+
+	let nextCostUsd = prevCost;
+	let nextEstimatedCostUsd = prevEstimatedCost;
+	let nextPendingInterim = prevPendingInterim;
+	let nextCostLocalFree = Boolean(prev?.costLocalFree);
+
+	if (hasExplicitProviderCost) {
+		const realCost = Math.max(0, usage.costUsd!);
+		const shouldReconcilePending = prevPendingInterim > 0 && (addTurns > 0 || realCost > 0);
+		const reconciledCostBase = shouldReconcilePending ? Math.max(0, prevCost - prevPendingInterim) : prevCost;
+		const reconciledEstBase = shouldReconcilePending ? Math.max(0, prevEstimatedCost - prevPendingInterim) : prevEstimatedCost;
+		nextCostUsd = roundCostUsd(reconciledCostBase + realCost);
+		nextEstimatedCostUsd = roundCostUsd(reconciledEstBase);
+		nextPendingInterim = shouldReconcilePending || addTurns > 0 ? 0 : prevPendingInterim;
+		if (nextCostUsd > 0) {
+			nextCostLocalFree = false;
+		}
+	} else if (hasBillableTokens) {
+		const est = estimateTokenCostUsd({
+			inputTokens: addInput,
+			outputTokens: addOutput,
+			cacheReadTokens: addCacheRead,
+			cacheWriteTokens: addCacheWrite,
+			totalTokens: addTotal,
+			model: effectiveModel,
+			engineId: effectiveEngineId,
+			overrides: pricingOptions?.overrides,
+		});
+		if (est.isLocalFree) {
+			nextCostLocalFree = nextCostUsd === 0;
+			if (addTurns > 0) {
+				nextPendingInterim = 0;
+			}
+		} else {
+			nextCostUsd = roundCostUsd(prevCost + est.costUsd);
+			nextEstimatedCostUsd = roundCostUsd(prevEstimatedCost + est.costUsd);
+			nextCostLocalFree = false;
+			nextPendingInterim = addTurns === 0 ? roundCostUsd(prevPendingInterim + est.costUsd) : 0;
+		}
+	} else if (addTurns > 0) {
+		nextPendingInterim = 0;
+	}
+	const nextCostEstimated = nextEstimatedCostUsd > 0;
 
 	// Track actual measured init/tier segments when supplied, and track real working context growth
 	// (`input + output + cacheWrite`) without double-counting newly attributed init/tier tokens or cumulative cache reads.
@@ -369,9 +720,38 @@ export function recordMissionNodeTurnUsage(
 	const rawActiveDelta = netNewTokens > 0
 		? netNewTokens
 		: (addCacheRead > 0 && prevSource === 0 ? Math.min(Math.round(contextWindowMax * 0.25), addCacheRead) : 0);
+	// Automatically attribute rework/error turns into the crimson noise segment in production:
+	// - Explicit `usage.isNoiseTurn` always wins (true or false).
+	// - Otherwise, turns with tool/command failures (`hadToolError` / `toolErrorCount > 0`), active rework tokens
+	//   (check failure bounce, Reviewer/Gate rejection, retry, watchdog nudge), or `pendingNoiseReason` automatically
+	//   accumulate into `contextNoiseTokens` so the 4-color context heatbar visibly warns when distillation is needed.
+	const activeNodeToken = Object.values(state.tokens).find(t =>
+		t.nodeId === nodeId && (t.status === 'active' || t.status === 'blocked'),
+	);
+	const hasReworkToken = Boolean(
+		activeNodeToken?.isRework
+		|| (activeNodeToken?.checkFailureCount ?? 0) > 0
+		|| (activeNodeToken?.nudgeCount ?? 0) > 0,
+	);
+	const hasToolError = Boolean(usage.hadToolError || (usage.toolErrorCount ?? 0) > 0);
+	const effectiveIsNoiseTurn = usage.isNoiseTurn !== undefined
+		? Boolean(usage.isNoiseTurn)
+		: (hasToolError || hasReworkToken || Boolean(prev?.pendingNoiseReason));
+	const nextNoiseReason: MissionReworkNoiseReason | undefined = hasToolError
+		? 'tool_error'
+		: (activeNodeToken?.reworkReason
+			?? ((activeNodeToken?.checkFailureCount ?? 0) > 0 ? 'check_failed' : undefined)
+			?? ((activeNodeToken?.nudgeCount ?? 0) > 0 ? 'watchdog_nudge' : undefined)
+			?? prev?.pendingNoiseReason);
+
 	const activeDelta = Math.max(0, rawActiveDelta - initGrowth - tierGrowth);
-	const nextNoise = usage.isNoiseTurn ? Math.min(contextWindowMax, prevNoise + activeDelta) : prevNoise;
-	const nextSource = usage.isNoiseTurn ? prevSource : Math.min(Math.max(0, contextWindowMax - nextInit - nextTier - nextNoise), prevSource + activeDelta);
+	const nextNoise = effectiveIsNoiseTurn ? Math.min(contextWindowMax, prevNoise + activeDelta) : prevNoise;
+	const nextSource = effectiveIsNoiseTurn ? prevSource : Math.min(Math.max(0, contextWindowMax - nextInit - nextTier - nextNoise), prevSource + activeDelta);
+	const nextNoiseTurns = (prev?.noiseTurns ?? 0) + (effectiveIsNoiseTurn && addTurns > 0 ? addTurns : 0);
+	// Tool-error noise stays sticky only during the failing turn (clears on final turn completion unless token itself is in rework).
+	const retainedPendingNoiseReason: MissionReworkNoiseReason | undefined = (nextNoiseReason === 'tool_error' && addTurns > 0 && !hasReworkToken)
+		? undefined
+		: (effectiveIsNoiseTurn ? nextNoiseReason : prev?.pendingNoiseReason);
 
 	const nextEntry: IMissionNodeTelemetry = {
 		inputTokens: (prev?.inputTokens ?? 0) + addInput,
@@ -379,14 +759,21 @@ export function recordMissionNodeTurnUsage(
 		cacheReadTokens: (prev?.cacheReadTokens ?? 0) + addCacheRead,
 		cacheWriteTokens: (prev?.cacheWriteTokens ?? 0) + addCacheWrite,
 		totalTokens: (prev?.totalTokens ?? 0) + addTotal,
-		costUsd: Math.round(((prev?.costUsd ?? 0) + addCost) * 10_000) / 10_000,
+		costUsd: nextCostUsd,
+		...(nextCostEstimated ? { costEstimated: true } : {}),
+		...(nextCostLocalFree ? { costLocalFree: true } : {}),
+		...(nextEstimatedCostUsd > 0 ? { estimatedCostUsd: nextEstimatedCostUsd } : {}),
+		...(nextPendingInterim > 0 ? { pendingInterimEstimatedCostUsd: nextPendingInterim } : {}),
 		turns: (prev?.turns ?? 0) + addTurns,
 		contextWindowMax,
 		contextInitTokens: nextInit,
 		contextTierDocTokens: nextTier,
 		contextSourceTokens: nextSource,
 		contextNoiseTokens: nextNoise,
-		model: usage.model?.trim() || prev?.model,
+		...(retainedPendingNoiseReason ? { pendingNoiseReason: retainedPendingNoiseReason } : {}),
+		...(nextNoiseTurns > 0 ? { noiseTurns: nextNoiseTurns } : {}),
+		model: effectiveModel,
+		...(effectiveEngineId ? { engineId: effectiveEngineId } : {}),
 		summary: usage.summary?.trim() || prev?.summary,
 		...(prev?.lastCheckStatus ? { lastCheckStatus: prev.lastCheckStatus } : {}),
 		...(prev?.lastCheckSummary ? { lastCheckSummary: prev.lastCheckSummary } : {}),
@@ -401,7 +788,7 @@ export function recordMissionNodeTurnUsage(
 	for (const entry of Object.values(nextTelemetryMap)) {
 		totalCostUsd += Math.max(0, Number.isFinite(entry.costUsd) ? entry.costUsd : 0);
 	}
-	totalCostUsd = Math.round(totalCostUsd * 10_000) / 10_000;
+	totalCostUsd = roundCostUsd(totalCostUsd);
 	const hasLimit = typeof state.budgetLimitUsd === 'number' && Number.isFinite(state.budgetLimitUsd) && state.budgetLimitUsd > 0;
 	const shouldTripBudget = hasLimit && totalCostUsd >= state.budgetLimitUsd! && state.status === 'running';
 	return {
@@ -417,7 +804,7 @@ export function computeMissionTotalCostUsd(state: IMissionRuntimeState): number 
 	for (const entry of Object.values(state.nodeTelemetry ?? {})) {
 		sum += Math.max(0, Number.isFinite(entry.costUsd) ? entry.costUsd : 0);
 	}
-	return Math.round(sum * 10_000) / 10_000;
+	return roundCostUsd(sum);
 }
 
 export function computeMissionFinOpsSummary(
@@ -431,15 +818,28 @@ export function computeMissionFinOpsSummary(
 	let totalCacheReadTokens = 0;
 	let totalCacheWriteTokens = 0;
 	let totalCostUsd = 0;
+	let estimatedCostUsd = 0;
+	let hasLocalFreeNodes = false;
 
 	const nodeLabelMap = new Map(nodes.map(n => [n.id, n.label]));
-	const tierAgg = new Map<number, { costUsd: number; tokens: number; nodeIds: Set<string> }>();
-	const hostAgg = new Map<string, { costUsd: number; tokens: number; nodeIds: Set<string> }>();
+	const tierAgg = new Map<number, { costUsd: number; tokens: number; nodeIds: Set<string>; hasEstimatedCost: boolean }>();
+	const hostAgg = new Map<string, { costUsd: number; tokens: number; nodeIds: Set<string>; hasEstimatedCost: boolean }>();
 	const nodeSpends: IMissionFinOpsNodeSpend[] = [];
 
 	if (state?.nodeTelemetry) {
 		for (const [nodeId, tel] of Object.entries(state.nodeTelemetry)) {
 			const cost = Math.max(0, Number.isFinite(tel.costUsd) ? tel.costUsd : 0);
+			const nodeEstCost = Math.max(
+				0,
+				Number.isFinite(tel.estimatedCostUsd ?? NaN)
+					? tel.estimatedCostUsd!
+					: (tel.costEstimated ? cost : 0),
+			);
+			const nodeEstimated = Boolean(tel.costEstimated || nodeEstCost > 0);
+			const nodeLocalFree = Boolean(tel.costLocalFree);
+			if (nodeLocalFree) {
+				hasLocalFreeNodes = true;
+			}
 			const toks = Math.max(0, Number.isFinite(tel.totalTokens) ? tel.totalTokens : 0);
 			const inp = Math.max(0, Number.isFinite(tel.inputTokens) ? tel.inputTokens : 0);
 			const out = Math.max(0, Number.isFinite(tel.outputTokens) ? tel.outputTokens : 0);
@@ -451,38 +851,49 @@ export function computeMissionFinOpsSummary(
 			totalCacheReadTokens += cacheRead;
 			totalCacheWriteTokens += cacheWrite;
 			totalCostUsd += cost;
+			estimatedCostUsd += nodeEstCost;
 
 			const assign = state.boundary.nodeAssignments[nodeId];
 			const tier = assign?.tier ?? 2;
 			const hostAlias = hostByNodeId?.get(nodeId) ?? assign?.hostAlias ?? 'local';
 
-			const tBucket = tierAgg.get(tier) ?? { costUsd: 0, tokens: 0, nodeIds: new Set<string>() };
+			const tBucket = tierAgg.get(tier) ?? { costUsd: 0, tokens: 0, nodeIds: new Set<string>(), hasEstimatedCost: false };
 			tBucket.costUsd += cost;
 			tBucket.tokens += toks;
 			tBucket.nodeIds.add(nodeId);
+			if (nodeEstimated) {
+				tBucket.hasEstimatedCost = true;
+			}
 			tierAgg.set(tier, tBucket);
 
-			const hBucket = hostAgg.get(hostAlias) ?? { costUsd: 0, tokens: 0, nodeIds: new Set<string>() };
+			const hBucket = hostAgg.get(hostAlias) ?? { costUsd: 0, tokens: 0, nodeIds: new Set<string>(), hasEstimatedCost: false };
 			hBucket.costUsd += cost;
 			hBucket.tokens += toks;
 			hBucket.nodeIds.add(nodeId);
+			if (nodeEstimated) {
+				hBucket.hasEstimatedCost = true;
+			}
 			hostAgg.set(hostAlias, hBucket);
 
 			if (cost > 0 || toks > 0) {
 				nodeSpends.push({
 					nodeId,
 					label: nodeLabelMap.get(nodeId) ?? nodeId,
-					costUsd: Math.round(cost * 10_000) / 10_000,
+					costUsd: roundCostUsd(cost),
 					tokens: toks,
 					turns: tel.turns,
 					hostAlias,
 					tier,
+					...(nodeEstimated ? { costEstimated: true } : {}),
+					...(nodeLocalFree ? { costLocalFree: true } : {}),
 				});
 			}
 		}
 	}
 
-	totalCostUsd = Math.round(totalCostUsd * 10_000) / 10_000;
+	totalCostUsd = roundCostUsd(totalCostUsd);
+	estimatedCostUsd = roundCostUsd(estimatedCostUsd);
+	const hasEstimatedCost = estimatedCostUsd > 0;
 	const cacheDenom = totalInputTokens + totalCacheReadTokens + totalCacheWriteTokens;
 	const cacheSavingsPct = cacheDenom > 0 ? Math.min(99, Math.round((totalCacheReadTokens / cacheDenom) * 100)) : 0;
 	const budgetLimitUsd = typeof state?.budgetLimitUsd === 'number' && Number.isFinite(state.budgetLimitUsd) && state.budgetLimitUsd > 0
@@ -505,10 +916,11 @@ export function computeMissionFinOpsSummary(
 		.map(([tier, b]) => ({
 			key: `L${tier}`,
 			label: `L${tier}`,
-			costUsd: Math.round(b.costUsd * 10_000) / 10_000,
+			costUsd: roundCostUsd(b.costUsd),
 			tokens: b.tokens,
 			nodeCount: b.nodeIds.size,
 			pct: Math.round(((totalCostUsd > 0 ? b.costUsd : b.tokens) / denomForPct) * 100),
+			...(b.hasEstimatedCost ? { hasEstimatedCost: true } : {}),
 		}));
 
 	const byHost: IMissionFinOpsBucket[] = Array.from(hostAgg.entries())
@@ -516,10 +928,11 @@ export function computeMissionFinOpsSummary(
 		.map(([hostAlias, b]) => ({
 			key: hostAlias,
 			label: hostAlias === 'local' ? '@Local' : `@${hostAlias}`,
-			costUsd: Math.round(b.costUsd * 10_000) / 10_000,
+			costUsd: roundCostUsd(b.costUsd),
 			tokens: b.tokens,
 			nodeCount: b.nodeIds.size,
 			pct: Math.round(((totalCostUsd > 0 ? b.costUsd : b.tokens) / denomForPct) * 100),
+			...(b.hasEstimatedCost ? { hasEstimatedCost: true } : {}),
 		}));
 
 	nodeSpends.sort((a, b) => (b.costUsd - a.costUsd) || (b.tokens - a.tokens));
@@ -530,6 +943,9 @@ export function computeMissionFinOpsSummary(
 		totalOutputTokens,
 		totalCacheReadTokens,
 		totalCostUsd,
+		estimatedCostUsd,
+		hasEstimatedCost,
+		...(hasLocalFreeNodes ? { hasLocalFreeNodes: true } : {}),
 		cacheSavingsPct,
 		budgetLimitUsd,
 		budgetUsedPct,
@@ -562,7 +978,291 @@ export function setMissionBudgetLimit(
 	};
 }
 
+export interface IMissionRunNodeMetric {
+	readonly nodeId: string;
+	readonly label: string;
+	readonly costUsd: number;
+	readonly estimatedCostUsd?: number;
+	readonly costEstimated?: boolean;
+	readonly costLocalFree?: boolean;
+	readonly totalTokens: number;
+	readonly inputTokens: number;
+	readonly outputTokens: number;
+	readonly cacheReadTokens: number;
+	readonly turns: number;
+	readonly durationMs?: number;
+	readonly hostAlias: string;
+	readonly tier: number;
+	readonly model?: string;
+	readonly engineId?: string;
+	readonly finalStatus: MissionNodeRuntimeStatus;
+}
+
+export interface IMissionRunArchive {
+	readonly runNumber: number;
+	readonly runId: string;
+	readonly startedAt: number;
+	readonly finishedAt: number;
+	readonly durationMs: number;
+	readonly outcome: 'completed' | 'failed' | 'stopped';
+	readonly totalCostUsd: number;
+	readonly estimatedCostUsd: number;
+	readonly hasEstimatedCost: boolean;
+	readonly totalTokens: number;
+	readonly cacheSavingsPct: number;
+	readonly waveCount: number;
+	readonly completedNodeCount: number;
+	readonly failedNodeCount: number;
+	readonly totalCheckFailures: number;
+	readonly budgetLimitUsd?: number;
+	readonly budgetCircuitTripped?: boolean;
+	readonly dagRevision?: number;
+	readonly nodeMetrics: readonly IMissionRunNodeMetric[];
+}
+
+export interface IMissionRunComparisonNodeDelta {
+	readonly nodeId: string;
+	readonly label: string;
+	readonly currentCostUsd: number;
+	readonly baselineCostUsd: number;
+	readonly costDeltaUsd: number;
+	readonly currentTokens: number;
+	readonly baselineTokens: number;
+	readonly tokensDelta: number;
+	readonly currentDurationMs?: number;
+	readonly baselineDurationMs?: number;
+	readonly durationDeltaMs?: number;
+}
+
+export interface IMissionRunComparisonDelta {
+	readonly currentRunNumber: number;
+	readonly baselineRunNumber: number;
+	readonly costDeltaUsd: number;
+	readonly costDeltaPct?: number;
+	readonly durationDeltaMs: number;
+	readonly durationDeltaPct?: number;
+	readonly tokensDelta: number;
+	readonly tokensDeltaPct?: number;
+	readonly cacheSavingsDeltaPct: number;
+	readonly nodeDeltas: readonly IMissionRunComparisonNodeDelta[];
+}
+
 const MAX_STORED_REVISIONS = 30;
+export const MAX_MISSION_RUN_HISTORY = 20;
+
+export function buildMissionRunArchiveSnapshot(
+	state: Pick<
+		IMissionRuntimeState,
+		| 'status'
+		| 'startedAt'
+		| 'completedAt'
+		| 'updatedAt'
+		| 'boundary'
+		| 'nodeStates'
+		| 'tokens'
+		| 'nodeTelemetry'
+		| 'waveRoots'
+		| 'budgetLimitUsd'
+		| 'budgetCircuitTripped'
+		| 'revisions'
+		| 'runSeq'
+		| 'runHistory'
+	>,
+	nodes: readonly { readonly id: string; readonly label: string }[],
+	options?: {
+		readonly runNumber?: number;
+		readonly hostByNodeId?: ReadonlyMap<string, string>;
+		readonly now?: number;
+		readonly outcomeOverride?: IMissionRunArchive['outcome'];
+	},
+): IMissionRunArchive {
+	const now = options?.now ?? Date.now();
+	const startedAt = state.startedAt ?? now;
+	let latestActivityAt = startedAt;
+	const nodeWindow = new Map<string, { firstAt: number; lastAt: number }>();
+	const waveSet = new Set<string>(Object.keys(state.waveRoots ?? {}));
+	let totalCheckFailures = 0;
+
+	for (const tok of Object.values(state.tokens)) {
+		if (tok.arrivedAt < startedAt && tok.lastActivityAt < startedAt) {
+			continue;
+		}
+		if (tok.waveId) {
+			waveSet.add(tok.waveId);
+		}
+		totalCheckFailures += tok.checkFailureCount ?? 0;
+		const endAt = Math.max(tok.arrivedAt, tok.lastActivityAt);
+		if (endAt > latestActivityAt) {
+			latestActivityAt = endAt;
+		}
+		const prevWin = nodeWindow.get(tok.nodeId);
+		if (!prevWin) {
+			nodeWindow.set(tok.nodeId, { firstAt: tok.arrivedAt, lastAt: endAt });
+		} else {
+			if (tok.arrivedAt < prevWin.firstAt) {
+				prevWin.firstAt = tok.arrivedAt;
+			}
+			if (endAt > prevWin.lastAt) {
+				prevWin.lastAt = endAt;
+			}
+		}
+	}
+	for (const tel of Object.values(state.nodeTelemetry ?? {})) {
+		if (typeof tel.updatedAt === 'number' && tel.updatedAt > latestActivityAt) {
+			latestActivityAt = tel.updatedAt;
+		}
+	}
+
+	const finishedAt = state.completedAt !== undefined && state.completedAt >= startedAt
+		? state.completedAt
+		: Math.max(startedAt, state.status === 'running' || state.status === 'paused' ? now : latestActivityAt);
+	const durationMs = Math.max(0, finishedAt - startedAt);
+
+	const summary = computeMissionFinOpsSummary(state as IMissionRuntimeState, nodes, options?.hostByNodeId);
+	const nodeLabelMap = new Map(nodes.map(n => [n.id, n.label]));
+	const nodeIdSet = new Set<string>([
+		...Object.keys(state.nodeTelemetry ?? {}),
+		...nodes.map(n => n.id).filter(id => state.nodeStates[id] && state.nodeStates[id] !== 'idle'),
+	]);
+	const nodeMetrics: IMissionRunNodeMetric[] = [];
+	for (const nodeId of nodeIdSet) {
+		const tel = state.nodeTelemetry?.[nodeId];
+		const assign = state.boundary.nodeAssignments[nodeId];
+		const win = nodeWindow.get(nodeId);
+		const nodeDurationMs = win ? Math.max(0, win.lastAt - win.firstAt) : undefined;
+		const finalStatus = state.nodeStates[nodeId] ?? 'idle';
+		if (!tel && finalStatus === 'idle' && nodeDurationMs === undefined) {
+			continue;
+		}
+		const costUsd = roundCostUsd(Math.max(0, Number.isFinite(tel?.costUsd ?? NaN) ? tel!.costUsd : 0));
+		const estimatedCostUsd = tel?.estimatedCostUsd !== undefined && Number.isFinite(tel.estimatedCostUsd)
+			? roundCostUsd(Math.max(0, tel.estimatedCostUsd))
+			: (tel?.costEstimated ? costUsd : undefined);
+		nodeMetrics.push({
+			nodeId,
+			label: nodeLabelMap.get(nodeId) ?? nodeId,
+			costUsd,
+			...(estimatedCostUsd !== undefined && estimatedCostUsd > 0 ? { estimatedCostUsd } : {}),
+			...(tel?.costEstimated ? { costEstimated: true } : {}),
+			...(tel?.costLocalFree ? { costLocalFree: true } : {}),
+			totalTokens: Math.max(0, Number.isFinite(tel?.totalTokens ?? NaN) ? tel!.totalTokens : 0),
+			inputTokens: Math.max(0, Number.isFinite(tel?.inputTokens ?? NaN) ? tel!.inputTokens : 0),
+			outputTokens: Math.max(0, Number.isFinite(tel?.outputTokens ?? NaN) ? tel!.outputTokens : 0),
+			cacheReadTokens: Math.max(0, Number.isFinite(tel?.cacheReadTokens ?? NaN) ? tel!.cacheReadTokens : 0),
+			turns: tel?.turns ?? 0,
+			...(nodeDurationMs !== undefined ? { durationMs: nodeDurationMs } : {}),
+			hostAlias: options?.hostByNodeId?.get(nodeId) ?? assign?.hostAlias ?? 'local',
+			tier: assign?.tier ?? 2,
+			...(tel?.model ? { model: tel.model } : {}),
+			...(tel?.engineId ? { engineId: tel.engineId } : {}),
+			finalStatus,
+		});
+	}
+	nodeMetrics.sort((a, b) => (b.costUsd - a.costUsd) || (b.totalTokens - a.totalTokens) || a.nodeId.localeCompare(b.nodeId));
+
+	let completedNodeCount = 0;
+	let failedNodeCount = 0;
+	for (const status of Object.values(state.nodeStates)) {
+		if (status === 'completed') {
+			completedNodeCount += 1;
+		} else if (status === 'failed') {
+			failedNodeCount += 1;
+		}
+	}
+
+	const outcome: IMissionRunArchive['outcome'] = options?.outcomeOverride
+		?? (state.status === 'completed'
+			? 'completed'
+			: (state.status === 'failed' || failedNodeCount > 0 ? 'failed' : 'stopped'));
+	const nextRunNumber = options?.runNumber ?? Math.max(1, state.runSeq ?? ((state.runHistory?.length ?? 0) + 1));
+	const latestRev = state.revisions && state.revisions.length > 0
+		? state.revisions[state.revisions.length - 1].version
+		: undefined;
+
+	return {
+		runNumber: nextRunNumber,
+		runId: `run-${nextRunNumber}-${startedAt}`,
+		startedAt,
+		finishedAt,
+		durationMs,
+		outcome,
+		totalCostUsd: summary.totalCostUsd,
+		estimatedCostUsd: summary.estimatedCostUsd,
+		hasEstimatedCost: summary.hasEstimatedCost,
+		totalTokens: summary.totalTokens,
+		cacheSavingsPct: summary.cacheSavingsPct,
+		waveCount: Math.max(waveSet.size, Object.keys(state.tokens).length > 0 ? 1 : 0),
+		completedNodeCount,
+		failedNodeCount,
+		totalCheckFailures,
+		...(state.budgetLimitUsd !== undefined ? { budgetLimitUsd: state.budgetLimitUsd } : {}),
+		...(state.budgetCircuitTripped ? { budgetCircuitTripped: true } : {}),
+		...(latestRev !== undefined ? { dagRevision: latestRev } : {}),
+		nodeMetrics,
+	};
+}
+
+export function compareMissionRuns(
+	current: Pick<IMissionRunArchive, 'runNumber' | 'totalCostUsd' | 'durationMs' | 'totalTokens' | 'cacheSavingsPct' | 'nodeMetrics'>,
+	baseline: Pick<IMissionRunArchive, 'runNumber' | 'totalCostUsd' | 'durationMs' | 'totalTokens' | 'cacheSavingsPct' | 'nodeMetrics'>,
+): IMissionRunComparisonDelta {
+	const costDeltaUsd = roundSignedCostUsd(current.totalCostUsd - baseline.totalCostUsd);
+	const costDeltaPct = baseline.totalCostUsd > 0
+		? Math.round(((current.totalCostUsd - baseline.totalCostUsd) / baseline.totalCostUsd) * 100)
+		: undefined;
+	const durationDeltaMs = current.durationMs - baseline.durationMs;
+	const durationDeltaPct = baseline.durationMs > 0
+		? Math.round(((current.durationMs - baseline.durationMs) / baseline.durationMs) * 100)
+		: undefined;
+	const tokensDelta = current.totalTokens - baseline.totalTokens;
+	const tokensDeltaPct = baseline.totalTokens > 0
+		? Math.round(((current.totalTokens - baseline.totalTokens) / baseline.totalTokens) * 100)
+		: undefined;
+	const cacheSavingsDeltaPct = current.cacheSavingsPct - baseline.cacheSavingsPct;
+
+	const baseByNode = new Map(baseline.nodeMetrics.map(m => [m.nodeId, m]));
+	const curByNode = new Map(current.nodeMetrics.map(m => [m.nodeId, m]));
+	const allNodeIds = new Set<string>([...curByNode.keys(), ...baseByNode.keys()]);
+	const nodeDeltas: IMissionRunComparisonNodeDelta[] = [];
+	for (const nodeId of allNodeIds) {
+		const cur = curByNode.get(nodeId);
+		const base = baseByNode.get(nodeId);
+		const curCost = cur?.costUsd ?? 0;
+		const baseCost = base?.costUsd ?? 0;
+		const curToks = cur?.totalTokens ?? 0;
+		const baseToks = base?.totalTokens ?? 0;
+		const durationDelta = cur?.durationMs !== undefined && base?.durationMs !== undefined
+			? cur.durationMs - base.durationMs
+			: undefined;
+		nodeDeltas.push({
+			nodeId,
+			label: cur?.label ?? base?.label ?? nodeId,
+			currentCostUsd: curCost,
+			baselineCostUsd: baseCost,
+			costDeltaUsd: roundSignedCostUsd(curCost - baseCost),
+			currentTokens: curToks,
+			baselineTokens: baseToks,
+			tokensDelta: curToks - baseToks,
+			...(cur?.durationMs !== undefined ? { currentDurationMs: cur.durationMs } : {}),
+			...(base?.durationMs !== undefined ? { baselineDurationMs: base.durationMs } : {}),
+			...(durationDelta !== undefined ? { durationDeltaMs: durationDelta } : {}),
+		});
+	}
+	nodeDeltas.sort((a, b) => Math.abs(b.costDeltaUsd) - Math.abs(a.costDeltaUsd) || Math.abs(b.tokensDelta) - Math.abs(a.tokensDelta));
+
+	return {
+		currentRunNumber: current.runNumber,
+		baselineRunNumber: baseline.runNumber,
+		costDeltaUsd,
+		...(costDeltaPct !== undefined ? { costDeltaPct } : {}),
+		durationDeltaMs,
+		...(durationDeltaPct !== undefined ? { durationDeltaPct } : {}),
+		tokensDelta,
+		...(tokensDeltaPct !== undefined ? { tokensDeltaPct } : {}),
+		cacheSavingsDeltaPct,
+		nodeDeltas,
+	};
+}
 
 export function appendMissionDagRevision(
 	state: IMissionRuntimeState,
@@ -636,6 +1336,12 @@ export interface IMissionRuntimeState {
 	readonly budgetTrippedAt?: number;
 	/** Chronological snapshots of Mission Mermaid topologies (`v1 ▸ vN`) for non-destructive timeline replay. */
 	readonly revisions?: readonly IMissionDagRevision[];
+	/** Multi-level concurrency limits governing wide fan-out & multi-wave dispatch (global / local / cloud host / provider). */
+	readonly concurrencyLimits?: IMissionConcurrencyLimits;
+	/** Monotonic counter of Mission runs (1, 2, 3...) for run ledger indexing. */
+	readonly runSeq?: number;
+	/** Chronological archived run ledgers preserved across re-runs for multi-run cost/latency/token comparison. */
+	readonly runHistory?: readonly IMissionRunArchive[];
 	readonly waveSeq: number;
 	readonly tokenSeq: number;
 	readonly traceSeq: number;
@@ -1510,6 +2216,9 @@ interface IMutableEngineContext {
 	budgetCircuitTripped?: boolean;
 	budgetTrippedAt?: number;
 	revisions?: IMissionDagRevision[];
+	concurrencyLimits?: IMissionConcurrencyLimits;
+	runSeq: number;
+	runHistory: IMissionRunArchive[];
 	waveSeq: number;
 	tokenSeq: number;
 	traceSeq: number;
@@ -1537,6 +2246,9 @@ function cloneMutable(state: IMissionRuntimeState, now: number): IMutableEngineC
 		...(state.budgetCircuitTripped !== undefined ? { budgetCircuitTripped: state.budgetCircuitTripped } : {}),
 		...(state.budgetTrippedAt !== undefined ? { budgetTrippedAt: state.budgetTrippedAt } : {}),
 		...(state.revisions ? { revisions: [...state.revisions] } : {}),
+		...(state.concurrencyLimits ? { concurrencyLimits: state.concurrencyLimits } : {}),
+		runSeq: state.runSeq ?? (state.startedAt !== undefined ? Math.max(1, (state.runHistory?.length ?? 0) + 1) : (state.runHistory?.length ?? 0)),
+		runHistory: state.runHistory ? [...state.runHistory] : [],
 		waveSeq: state.waveSeq,
 		tokenSeq: state.tokenSeq,
 		traceSeq: state.traceSeq,
@@ -1555,6 +2267,7 @@ function recomputeNodeState(
 	let hasActive = false;
 	let hasWaitingGate = false;
 	let hasBlocked = false;
+	let hasQueued = false;
 	let hasFrozenFailed = false;
 	let hasWaitingJoin = false;
 	for (const tok of Object.values(ctx.tokens)) {
@@ -1569,6 +2282,8 @@ function recomputeNodeState(
 			hasWaitingGate = true;
 		} else if (tok.status === 'blocked') {
 			hasBlocked = true;
+		} else if (tok.status === 'queued') {
+			hasQueued = true;
 		} else if (tok.status === 'frozen_failed') {
 			hasFrozenFailed = true;
 		} else if (tok.status === 'waiting_join') {
@@ -1581,6 +2296,8 @@ function recomputeNodeState(
 		ctx.nodeStates[nodeId] = 'waiting_gate';
 	} else if (hasBlocked) {
 		ctx.nodeStates[nodeId] = 'blocked';
+	} else if (hasQueued) {
+		ctx.nodeStates[nodeId] = 'queued';
 	} else if (hasFrozenFailed) {
 		ctx.nodeStates[nodeId] = 'failed';
 	} else if (hasWaitingJoin || Object.values(ctx.joinBarriers).some(b => b.targetNodeId === nodeId)) {
@@ -1676,6 +2393,9 @@ function freezeMutable(missionId: string, ctx: IMutableEngineContext): IMissionR
 		...(ctx.budgetCircuitTripped !== undefined ? { budgetCircuitTripped: ctx.budgetCircuitTripped } : {}),
 		...(ctx.budgetTrippedAt !== undefined ? { budgetTrippedAt: ctx.budgetTrippedAt } : {}),
 		...(ctx.revisions && ctx.revisions.length > 0 ? { revisions: ctx.revisions } : {}),
+		...(ctx.concurrencyLimits ? { concurrencyLimits: ctx.concurrencyLimits } : {}),
+		...(ctx.runSeq > 0 ? { runSeq: ctx.runSeq } : {}),
+		...(ctx.runHistory.length > 0 ? { runHistory: ctx.runHistory } : {}),
 		waveSeq: ctx.waveSeq,
 		tokenSeq: ctx.tokenSeq,
 		traceSeq: ctx.traceSeq,
@@ -1711,7 +2431,7 @@ function pruneOldCompletedTraces(ctx: IMutableEngineContext): void {
 		}
 	};
 	for (const tok of Object.values(ctx.tokens)) {
-		if (tok.status === 'active' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed') {
+		if (tok.status === 'active' || tok.status === 'queued' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed') {
 			markReachable(tok.tracePtr);
 		}
 	}
@@ -2040,6 +2760,335 @@ function collectImpactedDownstreamJoins(
 	return joins;
 }
 
+interface IConcurrencySlotUsage {
+	activeGlobal: number;
+	readonly activeByHost: Map<string, number>;
+	readonly activeByProvider: Map<string, number>;
+	/** Tracks live (`active` or `blocked`) occupancy per employee agentId to enforce exclusive session access. */
+	readonly activeByAgent: Map<string, string>;
+}
+
+type ConcurrencyAdmissionDecision =
+	| { readonly admitted: true }
+	| {
+		readonly admitted: false;
+		readonly blockedBy: MissionQueueBlockReason;
+		readonly scopeKey: string;
+		readonly activeSlots: number;
+		readonly maxSlots: number;
+	};
+
+function parseTokenSeqNumber(tokenId: string): number {
+	const m = /^tok-(\d+)$/.exec(tokenId);
+	return m ? Number.parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+}
+
+function resolveNodeConcurrencyDimensions(
+	ctx: Pick<IMutableEngineContext, 'boundary' | 'nodeTelemetry'>,
+	nodeId: string,
+): { readonly hostKey: string; readonly hostLabel: string; readonly provider: string | undefined } {
+	const assign = ctx.boundary.nodeAssignments[nodeId];
+	const hostLabel = assign?.hostAlias?.trim() || 'local';
+	const hostKey = hostLabel.toLowerCase();
+	const explicitProvider = assign?.provider?.trim().toLowerCase() || undefined;
+	const provider = explicitProvider ?? inferMissionConcurrencyProvider(ctx.nodeTelemetry?.[nodeId]?.model);
+	return { hostKey, hostLabel, provider };
+}
+
+function computeConcurrencySlotUsage(
+	ctx: Pick<IMutableEngineContext, 'tokens' | 'boundary' | 'nodeTelemetry'>,
+	excludeTokenId?: string,
+): IConcurrencySlotUsage {
+	let activeGlobal = 0;
+	const activeByHost = new Map<string, number>();
+	const activeByProvider = new Map<string, number>();
+	const activeByAgent = new Map<string, string>();
+
+	for (const tok of Object.values(ctx.tokens)) {
+		if (excludeTokenId && tok.id === excludeTokenId) {
+			continue;
+		}
+		if (tok.status === 'active') {
+			activeGlobal += 1;
+			const { hostKey, provider } = resolveNodeConcurrencyDimensions(ctx, tok.nodeId);
+			activeByHost.set(hostKey, (activeByHost.get(hostKey) ?? 0) + 1);
+			if (provider) {
+				activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + 1);
+			}
+			const agentId = (ctx.boundary.nodeAssignments[tok.nodeId]?.agentId ?? tok.holderAgentId)?.trim();
+			if (agentId) {
+				activeByAgent.set(agentId, tok.id);
+			}
+		} else if (tok.status === 'blocked') {
+			// A blocked token still owns its employee's underlying LLM session until completed/failed/recalled;
+			// prevent parallel sibling nodes bound to the same @Employee from contaminating its suspended context.
+			// Prefer live nodeAssignments over historical holderAgentId so mid-run reassignments stay consistent.
+			const agentId = (ctx.boundary.nodeAssignments[tok.nodeId]?.agentId ?? tok.holderAgentId)?.trim();
+			if (agentId) {
+				activeByAgent.set(agentId, tok.id);
+			}
+			if (tok.blocked?.watchPid !== undefined) {
+				// A blocked token watching a live OS/GPU PID still occupies compute/VRAM on its host,
+				// while freeing cloud LLM API provider & active-turn global slots for OTHER employees.
+				const fallbackHost = resolveNodeConcurrencyDimensions(ctx, tok.nodeId).hostKey;
+				const blockedHost = (tok.blocked.hostAlias?.trim() || fallbackHost).toLowerCase();
+				activeByHost.set(blockedHost, (activeByHost.get(blockedHost) ?? 0) + 1);
+			}
+		}
+	}
+
+	return { activeGlobal, activeByHost, activeByProvider, activeByAgent };
+}
+
+function evaluateConcurrencySlot(
+	ctx: Pick<IMutableEngineContext, 'boundary' | 'nodeTelemetry'>,
+	usage: IConcurrencySlotUsage,
+	nodeId: string,
+	limits: IResolvedMissionConcurrencyLimits,
+): ConcurrencyAdmissionDecision {
+	// 0. Per-employee exclusive session lock (ALWAYS enforced regardless of host/provider/global caps):
+	//    a reused @Employee cannot execute two parallel nodes or accept a new node while blocked on another.
+	const agentId = ctx.boundary.nodeAssignments[nodeId]?.agentId?.trim();
+	if (agentId && usage.activeByAgent.has(agentId)) {
+		return {
+			admitted: false,
+			blockedBy: 'employee',
+			scopeKey: agentId,
+			activeSlots: 1,
+			maxSlots: 1,
+		};
+	}
+
+	const { hostKey, hostLabel, provider } = resolveNodeConcurrencyDimensions(ctx, nodeId);
+
+	// 1. Host slot cap (protects local RAM/CPU & cloud GPU VRAM / SSH MaxSessions)
+	const hostLimit = Object.hasOwn(limits.hostOverrides, hostKey)
+		? limits.hostOverrides[hostKey]
+		: (hostKey === 'local' ? limits.maxLocalHost : limits.maxPerCloudHost);
+	const hostUsed = usage.activeByHost.get(hostKey) ?? 0;
+	if (hostLimit > 0 && hostUsed >= hostLimit) {
+		return {
+			admitted: false,
+			blockedBy: hostKey === 'local' ? 'local_host' : 'cloud_host',
+			scopeKey: hostLabel,
+			activeSlots: hostUsed,
+			maxSlots: hostLimit,
+		};
+	}
+
+	// 2. Cloud LLM provider slot cap (protects against API 429 rate-limit bursts)
+	if (provider) {
+		const providerLimit = Object.hasOwn(limits.providerOverrides, provider)
+			? limits.providerOverrides[provider]
+			: limits.maxPerProvider;
+		const providerUsed = usage.activeByProvider.get(provider) ?? 0;
+		if (providerLimit > 0 && providerUsed >= providerLimit) {
+			return {
+				admitted: false,
+				blockedBy: 'provider',
+				scopeKey: provider,
+				activeSlots: providerUsed,
+				maxSlots: providerLimit,
+			};
+		}
+	}
+
+	// 3. Global Mission active slot cap
+	if (limits.maxGlobal > 0 && usage.activeGlobal >= limits.maxGlobal) {
+		return {
+			admitted: false,
+			blockedBy: 'global',
+			scopeKey: 'global',
+			activeSlots: usage.activeGlobal,
+			maxSlots: limits.maxGlobal,
+		};
+	}
+
+	return { admitted: true };
+}
+
+function recordActiveSlotOccupancy(
+	ctx: Pick<IMutableEngineContext, 'boundary' | 'nodeTelemetry'>,
+	usage: IConcurrencySlotUsage,
+	nodeId: string,
+	tokenId?: string,
+): void {
+	const { hostKey, provider } = resolveNodeConcurrencyDimensions(ctx, nodeId);
+	usage.activeGlobal += 1;
+	usage.activeByHost.set(hostKey, (usage.activeByHost.get(hostKey) ?? 0) + 1);
+	if (provider) {
+		usage.activeByProvider.set(provider, (usage.activeByProvider.get(provider) ?? 0) + 1);
+	}
+	const agentId = ctx.boundary.nodeAssignments[nodeId]?.agentId?.trim();
+	if (agentId) {
+		usage.activeByAgent.set(agentId, tokenId ?? nodeId);
+	}
+}
+
+function getSortedQueuedTokens(ctx: Pick<IMutableEngineContext, 'tokens'>): IMissionToken[] {
+	return Object.values(ctx.tokens)
+		.filter(t => t.status === 'queued')
+		.sort((a, b) => {
+			const enqDiff = (a.queued?.enqueuedAt ?? a.arrivedAt) - (b.queued?.enqueuedAt ?? b.arrivedAt);
+			if (enqDiff !== 0) {
+				return enqDiff;
+			}
+			const arrDiff = a.arrivedAt - b.arrivedAt;
+			if (arrDiff !== 0) {
+				return arrDiff;
+			}
+			return parseTokenSeqNumber(a.id) - parseTokenSeqNumber(b.id);
+		});
+}
+
+function renumberMissionConcurrencyQueue(ctx: IMutableEngineContext): void {
+	const queued = getSortedQueuedTokens(ctx);
+	if (queued.length === 0) {
+		return;
+	}
+	const limits = normalizeMissionConcurrencyLimits(ctx.concurrencyLimits);
+	const usage = computeConcurrencySlotUsage(ctx);
+	const totalQueued = queued.length;
+	for (let i = 0; i < queued.length; i++) {
+		const tok = queued[i];
+		const decision = evaluateConcurrencySlot(ctx, usage, tok.nodeId, limits);
+		const prev = tok.queued;
+		const nextQueueInfo: IMissionTokenQueueInfo = {
+			position: i + 1,
+			totalQueued,
+			blockedBy: !decision.admitted ? decision.blockedBy : (prev?.blockedBy ?? 'global'),
+			scopeKey: !decision.admitted ? decision.scopeKey : (prev?.scopeKey ?? 'global'),
+			activeSlots: !decision.admitted ? decision.activeSlots : (prev?.activeSlots ?? usage.activeGlobal),
+			maxSlots: !decision.admitted ? decision.maxSlots : (prev?.maxSlots ?? limits.maxGlobal),
+			enqueuedAt: prev?.enqueuedAt ?? tok.arrivedAt,
+			pendingPrompt: prev?.pendingPrompt ?? buildTokenDispatchPrompt(tok, tok.nodeId, prev?.isRejection),
+			...(prev?.isRejection ? { isRejection: true } : {}),
+		};
+		ctx.tokens[tok.id] = {
+			...tok,
+			queued: nextQueueInfo,
+		};
+		recomputeNodeState(ctx, tok.nodeId, 'queued');
+	}
+}
+
+/**
+ * Work-conserving multi-level FIFO concurrency scheduler:
+ * promotes every queued token whose `(host, provider, global)` semaphores have free capacity,
+ * avoiding head-of-line blocking across independent hosts/providers, then renumbers remaining ranks `#1..#K`.
+ */
+function drainMissionConcurrencyQueue(
+	missionId: string,
+	ctx: IMutableEngineContext,
+	now: number,
+): string[] {
+	const queued = getSortedQueuedTokens(ctx);
+	if (queued.length === 0) {
+		return [];
+	}
+	const limits = normalizeMissionConcurrencyLimits(ctx.concurrencyLimits);
+	const usage = computeConcurrencySlotUsage(ctx);
+	const promotedIds: string[] = [];
+
+	if (ctx.status === 'running') {
+		for (const tok of queued) {
+			const decision = evaluateConcurrencySlot(ctx, usage, tok.nodeId, limits);
+			if (!decision.admitted) {
+				continue;
+			}
+			const assignedHolder = ctx.boundary.nodeAssignments[tok.nodeId]?.agentId ?? tok.holderAgentId;
+			const pendingPrompt = tok.queued?.pendingPrompt || buildTokenDispatchPrompt(tok, tok.nodeId, tok.queued?.isRejection);
+			const isRejection = tok.queued?.isRejection;
+			ctx.tokens[tok.id] = {
+				...tok,
+				status: 'active',
+				holderAgentId: assignedHolder,
+				queued: undefined,
+				lastActivityAt: now,
+			};
+			recordActiveSlotOccupancy(ctx, usage, tok.nodeId, tok.id);
+			recomputeNodeState(ctx, tok.nodeId, 'active');
+			ctx.effects.push({
+				kind: 'dispatch_token',
+				missionId,
+				nodeId: tok.nodeId,
+				tokenId: tok.id,
+				holderAgentId: assignedHolder,
+				isRejection,
+				prompt: pendingPrompt,
+			});
+			promotedIds.push(tok.id);
+		}
+	}
+
+	renumberMissionConcurrencyQueue(ctx);
+	return promotedIds;
+}
+
+/**
+ * Updates a Mission's multi-level concurrency limits and immediately drains queued tokens
+ * whenever raising limits frees capacity.
+ */
+export function setMissionConcurrencyLimits(
+	state: IMissionRuntimeState,
+	limits: IMissionConcurrencyLimits | undefined,
+	now = Date.now(),
+): IMissionEngineTransitionResult<{ readonly promotedTokenIds: readonly string[] }> {
+	const ctx = cloneMutable(state, now);
+	ctx.concurrencyLimits = limits ? normalizeMissionConcurrencyLimits(limits) : undefined;
+	const promotedTokenIds = drainMissionConcurrencyQueue(state.missionId, ctx, now);
+	return {
+		ok: true,
+		state: freezeMutable(state.missionId, ctx),
+		effects: ctx.effects,
+		data: { promotedTokenIds },
+	};
+}
+
+function markNodeReworkNoise(
+	ctx: IMutableEngineContext,
+	nodeId: string,
+	reason: MissionReworkNoiseReason,
+	diagnosticText: string | undefined,
+	now: number,
+): void {
+	const prev = ctx.nodeTelemetry?.[nodeId];
+	const contextWindowMax = prev?.contextWindowMax
+		?? inferModelContextWindowTokens(prev?.model, { engineId: prev?.engineId });
+	const addedNoise = estimateNoiseDiagnosticTokens(diagnosticText);
+	const nextNoise = Math.min(contextWindowMax, (prev?.contextNoiseTokens ?? 0) + addedNoise);
+	ctx.nodeTelemetry = {
+		...(ctx.nodeTelemetry ?? {}),
+		[nodeId]: {
+			inputTokens: prev?.inputTokens ?? 0,
+			outputTokens: prev?.outputTokens ?? 0,
+			cacheReadTokens: prev?.cacheReadTokens ?? 0,
+			cacheWriteTokens: prev?.cacheWriteTokens ?? 0,
+			totalTokens: prev?.totalTokens ?? 0,
+			costUsd: prev?.costUsd ?? 0,
+			...(prev?.costEstimated ? { costEstimated: true } : {}),
+			...(prev?.costLocalFree ? { costLocalFree: true } : {}),
+			...(prev?.estimatedCostUsd !== undefined ? { estimatedCostUsd: prev.estimatedCostUsd } : {}),
+			...(prev?.pendingInterimEstimatedCostUsd !== undefined ? { pendingInterimEstimatedCostUsd: prev.pendingInterimEstimatedCostUsd } : {}),
+			turns: prev?.turns ?? 0,
+			contextWindowMax,
+			contextInitTokens: prev?.contextInitTokens ?? 0,
+			contextTierDocTokens: prev?.contextTierDocTokens ?? 0,
+			contextSourceTokens: prev?.contextSourceTokens ?? 0,
+			contextNoiseTokens: nextNoise,
+			pendingNoiseReason: reason,
+			...(prev?.noiseTurns !== undefined ? { noiseTurns: prev.noiseTurns } : {}),
+			...(prev?.model ? { model: prev.model } : {}),
+			...(prev?.engineId ? { engineId: prev.engineId } : {}),
+			...(prev?.summary ? { summary: prev.summary } : {}),
+			...(prev?.lastCheckStatus ? { lastCheckStatus: prev.lastCheckStatus } : {}),
+			...(prev?.lastCheckSummary ? { lastCheckSummary: prev.lastCheckSummary } : {}),
+			...(prev?.lastCheckAt !== undefined ? { lastCheckAt: prev.lastCheckAt } : {}),
+			updatedAt: now,
+		},
+	};
+}
+
 function materializeAndDispatchToken(
 	missionId: string,
 	ctx: IMutableEngineContext,
@@ -2054,6 +3103,7 @@ function materializeAndDispatchToken(
 		readonly tracePtr: string;
 		readonly now: number;
 		readonly isRejection?: boolean;
+		readonly reworkReason?: MissionReworkNoiseReason;
 		readonly returnToNodeId?: string;
 		readonly returnWaveId?: string;
 	},
@@ -2062,7 +3112,27 @@ function materializeAndDispatchToken(
 	const holderAgentId = ctx.boundary.nodeAssignments[targetNode.id]?.agentId;
 	ctx.tokenSeq += 1;
 	const isGate = targetNode.kind === 'gate';
-	const token: IMissionToken = {
+	const effectiveReworkReason: MissionReworkNoiseReason | undefined = params.reworkReason
+		?? (params.isRejection
+			? (params.fromNodeId && graph.nodes.find(n => n.id === params.fromNodeId)?.kind === 'gate'
+				? 'gate_rejected'
+				: 'reviewer_rejected')
+			: undefined);
+	const isRework = Boolean(effectiveReworkReason || params.isRejection);
+	if (isRework && !isGate && effectiveReworkReason) {
+		markNodeReworkNoise(ctx, targetNode.id, effectiveReworkReason, params.lastSummary, params.now);
+	} else if (!isRework && !isGate && ctx.nodeTelemetry?.[targetNode.id]?.pendingNoiseReason) {
+		// Starting a fresh clean token on a node whose previous rework wave was abandoned/recalled clears stale pendingNoiseReason.
+		const prevTel = ctx.nodeTelemetry[targetNode.id];
+		ctx.nodeTelemetry = {
+			...ctx.nodeTelemetry,
+			[targetNode.id]: {
+				...prevTel,
+				pendingNoiseReason: undefined,
+			},
+		};
+	}
+	const baseToken: IMissionToken = {
 		id: `tok-${ctx.tokenSeq}`,
 		missionId,
 		waveId: params.waveId,
@@ -2076,47 +3146,85 @@ function materializeAndDispatchToken(
 		fromNodeId: params.fromNodeId,
 		...(params.returnToNodeId ? { returnToNodeId: params.returnToNodeId } : {}),
 		...(params.returnWaveId ? { returnWaveId: params.returnWaveId } : {}),
+		...(isRework ? { isRework: true } : {}),
+		...(effectiveReworkReason ? { reworkReason: effectiveReworkReason } : {}),
 		arrivedAt: params.now,
 		lastActivityAt: params.now,
 		nudgeCount: 0,
 	};
-	ctx.tokens[token.id] = token;
-	ctx.nodeStates[targetNode.id] = isGate ? 'waiting_gate' : 'active';
 
 	if (isGate) {
-		const traceAncestors = new Set(expandTracePointer(ctx, params.tracePtr).map(t => t.nodeId));
-		const incomingEdges = getIncomingEdges(graph, targetNode.id);
-		const candidateEdges = incomingEdges.filter(e => traceAncestors.size === 0 || traceAncestors.has(e.from));
-		const rollbackCandidates = (candidateEdges.length > 0 ? candidateEdges : incomingEdges).map(e => {
-			const src = graph.nodes.find(n => n.id === e.from);
-			return { id: e.from, title: src?.label ?? e.from };
-		});
+		ctx.tokens[baseToken.id] = baseToken;
+		ctx.nodeStates[targetNode.id] = 'waiting_gate';
+		const rollbackCandidates = collectValidUpstreamRollbackCandidates(ctx, graph, targetNode.id, params.tracePtr, params.fromNodeId).map(c => ({
+			id: c.id,
+			title: c.title,
+		}));
 		ctx.effects.push({
 			kind: 'upsert_gate_inbox',
 			missionId,
 			nodeId: targetNode.id,
-			tokenId: token.id,
+			tokenId: baseToken.id,
 			nodeTitle: targetNode.label,
 			upstreamSummary: params.lastSummary,
 			rollbackCandidates,
 		});
-	} else {
-		const dispatchEffect: MissionEngineEffect = {
+		return baseToken;
+	}
+
+	const dispatchPrompt = buildTokenDispatchPrompt(baseToken, targetNode.label, params.isRejection);
+	if (ctx.status === 'paused') {
+		ctx.tokens[baseToken.id] = baseToken;
+		recomputeNodeState(ctx, targetNode.id, 'active');
+		ctx.deferredEffects.push({
 			kind: 'dispatch_token',
 			missionId,
 			nodeId: targetNode.id,
-			tokenId: token.id,
+			tokenId: baseToken.id,
 			holderAgentId,
 			isRejection: params.isRejection,
-			prompt: buildTokenDispatchPrompt(token, targetNode.label, params.isRejection),
-		};
-		if (ctx.status === 'paused') {
-			ctx.deferredEffects.push(dispatchEffect);
-		} else {
-			ctx.effects.push(dispatchEffect);
-		}
+			prompt: dispatchPrompt,
+		});
+		return baseToken;
 	}
-	return token;
+
+	const limits = normalizeMissionConcurrencyLimits(ctx.concurrencyLimits);
+	const usage = computeConcurrencySlotUsage(ctx);
+	const admission = evaluateConcurrencySlot(ctx, usage, targetNode.id, limits);
+	if (admission.admitted) {
+		ctx.tokens[baseToken.id] = baseToken;
+		recomputeNodeState(ctx, targetNode.id, 'active');
+		ctx.effects.push({
+			kind: 'dispatch_token',
+			missionId,
+			nodeId: targetNode.id,
+			tokenId: baseToken.id,
+			holderAgentId,
+			isRejection: params.isRejection,
+			prompt: dispatchPrompt,
+		});
+		return baseToken;
+	}
+
+	// Concurrency slot saturated (global / local / cloud host / provider) -> park token in FIFO queue!
+	const queuedToken: IMissionToken = {
+		...baseToken,
+		status: 'queued',
+		queued: {
+			position: 1,
+			totalQueued: 1,
+			blockedBy: admission.blockedBy,
+			scopeKey: admission.scopeKey,
+			activeSlots: admission.activeSlots,
+			maxSlots: admission.maxSlots,
+			enqueuedAt: params.now,
+			pendingPrompt: dispatchPrompt,
+			...(params.isRejection ? { isRejection: true } : {}),
+		},
+	};
+	ctx.tokens[queuedToken.id] = queuedToken;
+	renumberMissionConcurrencyQueue(ctx);
+	return ctx.tokens[queuedToken.id];
 }
 
 function checkMissionCompletion(ctx: IMutableEngineContext): void {
@@ -2124,7 +3232,7 @@ function checkMissionCompletion(ctx: IMutableEngineContext): void {
 		return;
 	}
 	const hasLiveTokens = Object.values(ctx.tokens).some(t =>
-		t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'waiting_join' || t.status === 'frozen_failed',
+		t.status === 'active' || t.status === 'queued' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'waiting_join' || t.status === 'frozen_failed',
 	);
 	const hasPendingBarriers = Object.keys(ctx.joinBarriers).length > 0;
 	const hasEnabledTriggers = ctx.triggers.some(tr => tr.enabled);
@@ -2146,6 +3254,7 @@ export function startMissionRun(
 		readonly silenceTimeoutMinutes?: number;
 		readonly initialPrompt?: string;
 		readonly requireAssignedNodes?: boolean;
+		readonly concurrencyLimits?: IMissionConcurrencyLimits;
 		readonly now?: number;
 	},
 ): IMissionEngineTransitionResult<{ readonly waveId?: string; readonly mintedTokenIds: readonly string[] }> {
@@ -2206,12 +3315,59 @@ export function startMissionRun(
 		}
 		ctx.silenceTimeoutMinutes = Math.max(1, Math.min(240, Math.round(options.silenceTimeoutMinutes)));
 	}
+	// Archive previous run's telemetry ledger (cost, duration, tokens, per-node metrics) before starting a fresh run
+	// so re-runs never erase historical optimization baselines.
+	const hadPreviousRun = ctx.startedAt !== undefined && (
+		Object.keys(ctx.nodeTelemetry ?? {}).length > 0
+		|| Object.keys(ctx.tokens).length > 0
+		|| state.status === 'completed'
+		|| state.status === 'stopped'
+		|| state.status === 'failed'
+	);
+	if (hadPreviousRun) {
+		const prevStartedAt = ctx.startedAt!;
+		const alreadyArchived = ctx.runHistory.some(entry => entry.startedAt === prevStartedAt);
+		if (!alreadyArchived) {
+			const archiveRunNumber = ctx.runSeq > 0 ? ctx.runSeq : (ctx.runHistory.length + 1);
+			const archived = buildMissionRunArchiveSnapshot(
+				{
+					status: state.status,
+					startedAt: prevStartedAt,
+					completedAt: ctx.completedAt,
+					updatedAt: state.updatedAt,
+					boundary: ctx.boundary,
+					nodeStates: ctx.nodeStates,
+					tokens: ctx.tokens,
+					nodeTelemetry: ctx.nodeTelemetry,
+					waveRoots: ctx.waveRoots,
+					budgetLimitUsd: ctx.budgetLimitUsd,
+					budgetCircuitTripped: ctx.budgetCircuitTripped,
+					revisions: ctx.revisions,
+					runSeq: archiveRunNumber,
+					runHistory: ctx.runHistory,
+				},
+				graph.nodes,
+				{ runNumber: archiveRunNumber, now },
+			);
+			ctx.runHistory.push(archived);
+			if (ctx.runHistory.length > MAX_MISSION_RUN_HISTORY) {
+				ctx.runHistory.splice(0, ctx.runHistory.length - MAX_MISSION_RUN_HISTORY);
+			}
+			ctx.runSeq = Math.max(ctx.runSeq, archiveRunNumber);
+		}
+	}
+	ctx.runSeq = Math.max(ctx.runSeq, ctx.runHistory.length) + 1;
 	ctx.silenceTimeoutLocked = true;
 	ctx.status = 'running';
 	ctx.startedAt = now;
 	ctx.completedAt = undefined;
+	ctx.budgetCircuitTripped = false;
+	ctx.budgetTrippedAt = undefined;
 	ctx.deferredEffects = [];
 	ctx.nodeTelemetry = {};
+	if (options?.concurrencyLimits) {
+		ctx.concurrencyLimits = normalizeMissionConcurrencyLimits(options.concurrencyLimits);
+	}
 	for (const node of graph.nodes) {
 		ctx.nodeStates[node.id] = 'idle';
 	}
@@ -2312,6 +3468,7 @@ export function distillMissionNodeContext(
 				...prevTel,
 				contextSourceTokens: Math.min(2_400, prevTel.contextSourceTokens),
 				contextNoiseTokens: 0,
+				pendingNoiseReason: undefined,
 				summary: `✨ Context distilled — fresh session ready`,
 				updatedAt: now,
 			},
@@ -2320,6 +3477,8 @@ export function distillMissionNodeContext(
 
 	const assignedAgentId = ctx.boundary.nodeAssignments[nodeId]?.agentId ?? liveTok?.holderAgentId;
 	if (liveTok) {
+		const wasActive = liveTok.status === 'active';
+		const hadWatchPid = liveTok.status === 'blocked' && liveTok.blocked?.watchPid !== undefined;
 		const distillTracePtr = appendTrace(ctx, {
 			parentPtrs: [liveTok.tracePtr],
 			nodeId,
@@ -2329,7 +3488,7 @@ export function distillMissionNodeContext(
 			summary: customMemo ? `Context distilled: ${customMemo}` : 'Context distilled & session refreshed',
 			timestamp: now,
 		});
-		const updatedTok: IMissionToken = {
+		const baseUpdatedTok: IMissionToken = {
 			...liveTok,
 			status: 'active',
 			holderAgentId: assignedAgentId,
@@ -2339,11 +3498,12 @@ export function distillMissionNodeContext(
 			nudgeCount: 0,
 			checkFailureCount: 0,
 			lastCheckFailure: undefined,
+			isRework: undefined,
+			reworkReason: undefined,
 			blocked: undefined,
+			queued: undefined,
 			failure: undefined,
 		};
-		ctx.tokens[liveTok.id] = updatedTok;
-		recomputeNodeState(ctx, nodeId);
 
 		if (assignedAgentId) {
 			ctx.effects.push({
@@ -2355,16 +3515,56 @@ export function distillMissionNodeContext(
 				reason: 'Context distillation refresh requested',
 			});
 		}
-		if (ctx.status === 'running') {
-			const basePrompt = buildTokenDispatchPrompt(updatedTok, node.label, false);
-			ctx.effects.push({
+
+		const distillPrompt = `[Context Distilled & Session Refreshed]\n${buildTokenDispatchPrompt(baseUpdatedTok, node.label, false)}`;
+		let shouldQueue = false;
+		let queueDecision: ReturnType<typeof evaluateConcurrencySlot> | undefined;
+		if (!wasActive && ctx.status === 'running') {
+			// Clear old blocked/failed record before measuring active slot occupancy so this token never double-counts itself.
+			ctx.tokens[liveTok.id] = { ...baseUpdatedTok, status: 'frozen_failed' };
+			const limits = normalizeMissionConcurrencyLimits(ctx.concurrencyLimits);
+			const usage = computeConcurrencySlotUsage(ctx);
+			queueDecision = evaluateConcurrencySlot(ctx, usage, nodeId, limits);
+			shouldQueue = !queueDecision.admitted;
+		}
+
+		if (shouldQueue && queueDecision && !queueDecision.admitted) {
+			ctx.tokens[liveTok.id] = {
+				...baseUpdatedTok,
+				status: 'queued',
+				queued: {
+					position: 0,
+					totalQueued: 0,
+					blockedBy: queueDecision.blockedBy,
+					scopeKey: queueDecision.scopeKey,
+					activeSlots: queueDecision.activeSlots,
+					maxSlots: queueDecision.maxSlots,
+					enqueuedAt: now,
+					pendingPrompt: distillPrompt,
+				},
+			};
+			if (hadWatchPid) {
+				drainMissionConcurrencyQueue(state.missionId, ctx, now);
+			} else {
+				renumberMissionConcurrencyQueue(ctx);
+			}
+			recomputeNodeState(ctx, nodeId);
+		} else {
+			ctx.tokens[liveTok.id] = baseUpdatedTok;
+			recomputeNodeState(ctx, nodeId);
+			const dispatchEffect: MissionEngineEffect = {
 				kind: 'dispatch_token',
 				missionId: state.missionId,
 				nodeId,
-				tokenId: updatedTok.id,
+				tokenId: baseUpdatedTok.id,
 				holderAgentId: assignedAgentId,
-				prompt: `[Context Distilled & Session Refreshed]\n${basePrompt}`,
-			});
+				prompt: distillPrompt,
+			};
+			if (ctx.status === 'running') {
+				ctx.effects.push(dispatchEffect);
+			} else if (ctx.status === 'paused') {
+				ctx.deferredEffects.push(dispatchEffect);
+			}
 		}
 	} else {
 		appendTrace(ctx, {
@@ -2438,29 +3638,72 @@ export function resumeMissionRun(state: IMissionRuntimeState, now = Date.now()):
 		}
 	}
 	if (ctx.deferredEffects.length > 0) {
+		const limits = normalizeMissionConcurrencyLimits(ctx.concurrencyLimits);
+		const deferredDispatchTokenIds = new Set(
+			ctx.deferredEffects
+				.filter((eff): eff is Extract<MissionEngineEffect, { kind: 'dispatch_token' }> => eff.kind === 'dispatch_token')
+				.map(eff => eff.tokenId),
+		);
+		// Temporarily exclude deferred-dispatch tokens from occupancy so we admit them fairly up to limits!
+		const usage = computeConcurrencySlotUsage({
+			...ctx,
+			tokens: Object.fromEntries(
+				Object.entries(ctx.tokens).filter(([tid]) => !deferredDispatchTokenIds.has(tid)),
+			),
+		});
 		for (const eff of ctx.deferredEffects) {
 			if (eff.kind === 'dispatch_token') {
 				const liveTok = ctx.tokens[eff.tokenId];
 				if (!liveTok || liveTok.status !== 'active') {
 					continue;
 				}
+				const decision = evaluateConcurrencySlot(ctx, usage, eff.nodeId, limits);
+				if (decision.admitted) {
+					recordActiveSlotOccupancy(ctx, usage, eff.nodeId, eff.tokenId);
+					ctx.effects.push(eff);
+				} else {
+					ctx.tokens[liveTok.id] = {
+						...liveTok,
+						status: 'queued',
+						queued: {
+							position: 1,
+							totalQueued: 1,
+							blockedBy: decision.blockedBy,
+							scopeKey: decision.scopeKey,
+							activeSlots: decision.activeSlots,
+							maxSlots: decision.maxSlots,
+							enqueuedAt: now,
+							pendingPrompt: eff.prompt,
+							...(eff.isRejection ? { isRejection: true } : {}),
+						},
+					};
+					recomputeNodeState(ctx, liveTok.nodeId, 'queued');
+				}
+				continue;
 			}
 			ctx.effects.push(eff);
 		}
 		ctx.deferredEffects = [];
 	}
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
 	checkMissionCompletion(ctx);
 	return { ok: true, state: freezeMutable(state.missionId, ctx), effects: ctx.effects };
 }
 
 export function stopMissionRun(state: IMissionRuntimeState, now = Date.now()): IMissionEngineTransitionResult {
 	const ctx = cloneMutable(state, now);
-	ctx.status = 'stopped';
+	// Preserve an already-completed Mission's outcome so subsequent re-runs archive it honestly as 'completed'.
+	if (state.status !== 'completed') {
+		ctx.status = 'stopped';
+	}
 	ctx.silenceTimeoutLocked = false;
 	ctx.budgetCircuitTripped = false;
+	if (ctx.startedAt !== undefined && ctx.completedAt === undefined) {
+		ctx.completedAt = now;
+	}
 	for (const [tid, tok] of Object.entries(ctx.tokens)) {
-		if (tok.status === 'active' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed') {
-			ctx.tokens[tid] = { ...tok, status: 'recalled', blocked: undefined, lastActivityAt: now };
+		if (tok.status === 'active' || tok.status === 'queued' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed') {
+			ctx.tokens[tid] = { ...tok, status: 'recalled', blocked: undefined, queued: undefined, lastActivityAt: now };
 			if (tok.status === 'active' || tok.status === 'blocked') {
 				ctx.effects.push({
 					kind: 'stop_agent',
@@ -2492,9 +3735,15 @@ function isAuthorizedTokenHolder(
 	return Boolean(assignedHolder && assignedHolder === callerAgentId);
 }
 
+export interface IMissionRollbackCandidate {
+	readonly id: string;
+	readonly title: string;
+	readonly isDirectPredecessor: boolean;
+}
+
 function isValidUpstreamRollbackTarget(
 	state: Pick<IMissionRuntimeState, 'traces'>,
-	graph: IMissionDagParseResult,
+	graph: Pick<IMissionDagParseResult, 'nodes' | 'edges'>,
 	currentNodeId: string,
 	targetNodeId: string,
 	tracePtr: string,
@@ -2516,6 +3765,69 @@ function isValidUpstreamRollbackTarget(
 			.filter(nid => nid !== currentNodeId),
 	);
 	return traceAncestors.has(targetNodeId);
+}
+
+/**
+ * Collects every executed upstream reachable rollback target for a Gate/node token,
+ * ordered from earliest upstream ancestor to closest/direct predecessor (last element = default target).
+ * Every returned candidate is guaranteed to pass `isValidUpstreamRollbackTarget` in `resolveMissionGate`.
+ */
+export function collectValidUpstreamRollbackCandidates(
+	state: Pick<IMissionRuntimeState, 'traces'>,
+	graph: Pick<IMissionDagParseResult, 'nodes' | 'edges'>,
+	currentNodeId: string,
+	tracePtr: string,
+	preferredDefaultId?: string,
+): readonly IMissionRollbackCandidate[] {
+	const nodeById = new Map(graph.nodes.map(n => [n.id, n]));
+	const directPredecessors = new Set(graph.edges.filter(e => e.to === currentNodeId).map(e => e.from));
+	const traceEntries = expandTracePointer(state, tracePtr);
+
+	// Track latest trace index per unique valid executed upstream ancestor (chronological: earliest -> closest).
+	const reachabilityCache = new Map<string, boolean>();
+	const latestIndexByTaskId = new Map<string, number>();
+	const latestIndexByAnyId = new Map<string, number>();
+	for (let i = 0; i < traceEntries.length; i++) {
+		const candidateId = traceEntries[i].nodeId;
+		if (!candidateId || candidateId === currentNodeId) {
+			continue;
+		}
+		const node = nodeById.get(candidateId);
+		if (!node) {
+			continue;
+		}
+		let canReachGate = reachabilityCache.get(candidateId);
+		if (canReachGate === undefined) {
+			canReachGate = collectReachableNodes(graph, [candidateId]).has(currentNodeId);
+			reachabilityCache.set(candidateId, canReachGate);
+		}
+		if (!canReachGate) {
+			continue;
+		}
+		latestIndexByAnyId.set(candidateId, i);
+		if (node.kind !== 'gate') {
+			latestIndexByTaskId.set(candidateId, i);
+		}
+	}
+
+	const chosenIndexMap = latestIndexByTaskId.size > 0 ? latestIndexByTaskId : latestIndexByAnyId;
+	let orderedIds = [...chosenIndexMap.entries()]
+		.sort((a, b) => a[1] - b[1])
+		.map(([id]) => id);
+
+	// Place preferredDefaultId (typically token.fromNodeId) at the end so both Inbox and Canvas default to it.
+	if (preferredDefaultId && orderedIds.includes(preferredDefaultId)) {
+		orderedIds = [...orderedIds.filter(id => id !== preferredDefaultId), preferredDefaultId];
+	}
+
+	return orderedIds.map(id => {
+		const node = nodeById.get(id);
+		return {
+			id,
+			title: node?.label ?? id,
+			isDirectPredecessor: directPredecessors.has(id),
+		};
+	});
 }
 
 export function formatCheckFailureDiagnostic(
@@ -2557,8 +3869,13 @@ function updateNodeCheckTelemetry(
 	status: 'passed' | 'failed',
 	summary: string,
 	now: number,
+	diagnosticText?: string,
 ): void {
 	const prev = ctx.nodeTelemetry?.[nodeId];
+	const contextWindowMax = prev?.contextWindowMax
+		?? inferModelContextWindowTokens(prev?.model, { engineId: prev?.engineId });
+	const addedNoise = status === 'failed' ? estimateNoiseDiagnosticTokens(diagnosticText || summary) : 0;
+	const nextNoise = Math.min(contextWindowMax, (prev?.contextNoiseTokens ?? 0) + addedNoise);
 	const nextEntry: IMissionNodeTelemetry = {
 		inputTokens: prev?.inputTokens ?? 0,
 		outputTokens: prev?.outputTokens ?? 0,
@@ -2566,13 +3883,22 @@ function updateNodeCheckTelemetry(
 		cacheWriteTokens: prev?.cacheWriteTokens ?? 0,
 		totalTokens: prev?.totalTokens ?? 0,
 		costUsd: prev?.costUsd ?? 0,
+		...(prev?.costEstimated ? { costEstimated: true } : {}),
+		...(prev?.costLocalFree ? { costLocalFree: true } : {}),
+		...(prev?.estimatedCostUsd !== undefined ? { estimatedCostUsd: prev.estimatedCostUsd } : {}),
+		...(prev?.pendingInterimEstimatedCostUsd !== undefined ? { pendingInterimEstimatedCostUsd: prev.pendingInterimEstimatedCostUsd } : {}),
 		turns: prev?.turns ?? 0,
-		contextWindowMax: prev?.contextWindowMax ?? DEFAULT_MISSION_CONTEXT_WINDOW_TOKENS,
+		contextWindowMax,
 		contextInitTokens: prev?.contextInitTokens ?? 0,
 		contextTierDocTokens: prev?.contextTierDocTokens ?? 0,
 		contextSourceTokens: prev?.contextSourceTokens ?? 0,
-		contextNoiseTokens: prev?.contextNoiseTokens ?? 0,
+		contextNoiseTokens: nextNoise,
+		...(status === 'failed'
+			? { pendingNoiseReason: 'check_failed' as const }
+			: (prev?.pendingNoiseReason && prev.pendingNoiseReason !== 'check_failed' ? { pendingNoiseReason: prev.pendingNoiseReason } : {})),
+		...(prev?.noiseTurns !== undefined ? { noiseTurns: prev.noiseTurns } : {}),
 		...(prev?.model ? { model: prev.model } : {}),
+		...(prev?.engineId ? { engineId: prev.engineId } : {}),
 		...(prev?.summary ? { summary: prev.summary } : {}),
 		lastCheckStatus: status,
 		lastCheckSummary: summary,
@@ -2643,13 +3969,26 @@ export function recordTokenCheckResult(
 			summary: params.suiteResult.summary,
 			timestamp: now,
 		});
+		const wasCheckRework = token.reworkReason === 'check_failed' || (token.isRework && !token.reworkReason);
 		ctx.tokens[token.id] = {
 			...token,
 			tracePtr: passPtr,
+			checkFailureCount: 0,
 			lastCheckFailure: undefined,
+			...(wasCheckRework ? { isRework: undefined, reworkReason: undefined } : {}),
 			lastActivityAt: now,
 		};
 		updateNodeCheckTelemetry(ctx, token.nodeId, 'passed', params.suiteResult.summary, now);
+		const passedTel = ctx.nodeTelemetry?.[token.nodeId];
+		if (passedTel && passedTel.pendingNoiseReason === 'check_failed') {
+			ctx.nodeTelemetry = {
+				...(ctx.nodeTelemetry ?? {}),
+				[token.nodeId]: {
+					...passedTel,
+					pendingNoiseReason: undefined,
+				},
+			};
+		}
 		return {
 			ok: true,
 			state: freezeMutable(state.missionId, ctx),
@@ -2686,12 +4025,14 @@ export function recordTokenCheckResult(
 		summary: trimCleanlyToBudget(params.suiteResult.summary, 280),
 		timestamp: now,
 	});
-	updateNodeCheckTelemetry(ctx, token.nodeId, 'failed', params.suiteResult.summary, now);
+	updateNodeCheckTelemetry(ctx, token.nodeId, 'failed', params.suiteResult.summary, now, diagnostic);
 
 	if (canBounce) {
 		ctx.tokens[token.id] = {
 			...token,
 			tracePtr: failCheckPtr,
+			isRework: true,
+			reworkReason: 'check_failed',
 			checkFailureCount: nextAttempt,
 			lastCheckFailure: {
 				summary: params.suiteResult.summary,
@@ -2753,6 +4094,9 @@ export function recordTokenCheckResult(
 				tokenId: token.id,
 				reason: diagnostic,
 			});
+			recomputeNodeState(ctx, token.nodeId, 'failed');
+			drainMissionConcurrencyQueue(state.missionId, ctx, now);
+			checkMissionCompletion(ctx);
 			return {
 				ok: false,
 				state: freezeMutable(state.missionId, ctx),
@@ -2794,6 +4138,9 @@ export function recordTokenCheckResult(
 			severity: 'critical',
 			senderAgentId: token.holderAgentId,
 		});
+		recomputeNodeState(ctx, token.nodeId, 'failed');
+		drainMissionConcurrencyQueue(state.missionId, ctx, now);
+		checkMissionCompletion(ctx);
 		return {
 			ok: false,
 			state: freezeMutable(state.missionId, ctx),
@@ -2875,6 +4222,17 @@ export function completeMissionToken(
 	const now = params.now ?? Date.now();
 	const ctx = cloneMutable(state, now);
 	ctx.tokens[token.id] = { ...token, status: 'completed', blocked: undefined, lastCheckFailure: undefined, lastActivityAt: now };
+	const prevNodeTel = ctx.nodeTelemetry?.[token.nodeId];
+	if (prevNodeTel?.pendingNoiseReason) {
+		ctx.nodeTelemetry = {
+			...(ctx.nodeTelemetry ?? {}),
+			[token.nodeId]: {
+				...prevNodeTel,
+				pendingNoiseReason: undefined,
+				updatedAt: now,
+			},
+		};
+	}
 	recomputeNodeState(ctx, token.nodeId, 'completed');
 
 	const rolledHistory = compressTokenHistoryState(token.historyState, token.compressedHistory, token.lastSummary, token.fromNodeId);
@@ -2945,6 +4303,7 @@ export function completeMissionToken(
 				nextTokenIds.push(delivered.id);
 			}
 		}
+		drainMissionConcurrencyQueue(state.missionId, ctx, now);
 		checkMissionCompletion(ctx);
 		return {
 			ok: true,
@@ -2970,6 +4329,7 @@ export function completeMissionToken(
 		}
 	}
 
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
 	checkMissionCompletion(ctx);
 	return {
 		ok: true,
@@ -3053,6 +4413,7 @@ export function rejectMissionToken(
 		returnToNodeId: token.nodeId,
 		returnWaveId: token.waveId,
 	})!;
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
 
 	return {
 		ok: true,
@@ -3109,7 +4470,8 @@ export function blockMissionToken(
 		},
 	};
 	recomputeNodeState(ctx, token.nodeId, 'blocked');
-	return { ok: true, state: freezeMutable(state.missionId, ctx), effects: [] };
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
+	return { ok: true, state: freezeMutable(state.missionId, ctx), effects: ctx.effects };
 }
 
 /**
@@ -3158,7 +4520,10 @@ export function recordWatchdogWakeup(
 			...token,
 			lastNudgeAt: now,
 			nudgeCount: nextNudgeCount,
+			isRework: true,
+			reworkReason: token.reworkReason ?? 'watchdog_nudge',
 		};
+		markNodeReworkNoise(ctx, token.nodeId, 'watchdog_nudge', params.detail || `Watchdog ${params.reason} reminder #${nextNudgeCount}`, now);
 		ctx.effects.push({
 			kind: 'wakeup_agent',
 			missionId: state.missionId,
@@ -3176,19 +4541,62 @@ export function recordWatchdogWakeup(
 	if (token.status !== 'blocked') {
 		return { ok: false, state, effects: [], code: 'INVALID_STATE', error: 'Token is not blocked.' };
 	}
-	ctx.tokens[token.id] = {
-		...token,
-		status: 'active',
-		blocked: undefined,
-		lastActivityAt: now,
-		lastNudgeAt: now,
-	};
-	ctx.nodeStates[token.nodeId] = 'active';
+	const hadWatchPid = token.blocked?.watchPid !== undefined;
 	const reasonLabel = params.reason === 'pid_exited'
 		? `Watched PID exited${params.detail ? ` (${params.detail})` : ''}`
 		: params.reason === 'file_ready'
 			? `Watched output file appeared${params.detail ? ` (${params.detail})` : ''}`
 			: 'Blocked maximum wait duration elapsed';
+	const wakeupMessage = `[Mission Watchdog Wakeup] ${reasonLabel} for token \`${token.id}\` on node \`${token.nodeId}\`. Inspect the results and proceed (or call \`token complete\`, \`token block\`, or \`token fail\`). Routine ${state.silenceTimeoutMinutes}m supervision has resumed.`;
+
+	// Exclude this token's own blocked record before evaluating concurrency admission (both host & employee exclusivity).
+	ctx.tokens[token.id] = {
+		...token,
+		status: 'blocked',
+		blocked: undefined,
+	};
+	const limits = normalizeMissionConcurrencyLimits(ctx.concurrencyLimits);
+	const usage = computeConcurrencySlotUsage(ctx, token.id);
+	const decision = ctx.status === 'running'
+		? evaluateConcurrencySlot(ctx, usage, token.nodeId, limits)
+		: { admitted: true as const };
+
+	if (!decision.admitted) {
+		ctx.tokens[token.id] = {
+			...token,
+			status: 'queued',
+			blocked: undefined,
+			lastActivityAt: now,
+			lastNudgeAt: now,
+			queued: {
+				position: 0,
+				totalQueued: 0,
+				blockedBy: decision.blockedBy,
+				scopeKey: decision.scopeKey,
+				activeSlots: decision.activeSlots,
+				maxSlots: decision.maxSlots,
+				enqueuedAt: now,
+				pendingPrompt: wakeupMessage,
+			},
+		};
+		if (hadWatchPid) {
+			drainMissionConcurrencyQueue(state.missionId, ctx, now);
+		} else {
+			renumberMissionConcurrencyQueue(ctx);
+		}
+		recomputeNodeState(ctx, token.nodeId);
+		return { ok: true, state: freezeMutable(state.missionId, ctx), effects: ctx.effects };
+	}
+
+	ctx.tokens[token.id] = {
+		...token,
+		status: 'active',
+		blocked: undefined,
+		queued: undefined,
+		lastActivityAt: now,
+		lastNudgeAt: now,
+	};
+	recomputeNodeState(ctx, token.nodeId, 'active');
 	ctx.effects.push({
 		kind: 'wakeup_agent',
 		missionId: state.missionId,
@@ -3196,7 +4604,7 @@ export function recordWatchdogWakeup(
 		tokenId: token.id,
 		holderAgentId: token.holderAgentId,
 		wakeupReason: params.reason,
-		message: `[Mission Watchdog Wakeup] ${reasonLabel} for token \`${token.id}\` on node \`${token.nodeId}\`. Inspect the results and proceed (or call \`token complete\`, \`token block\`, or \`token fail\`). Routine ${state.silenceTimeoutMinutes}m supervision has resumed.`,
+		message: wakeupMessage,
 	});
 	return { ok: true, state: freezeMutable(state.missionId, ctx), effects: ctx.effects };
 }
@@ -3272,6 +4680,7 @@ export function failMissionToken(
 				nextTokenIds.push(delivered.id);
 			}
 		}
+		drainMissionConcurrencyQueue(state.missionId, ctx, now);
 		checkMissionCompletion(ctx);
 		return {
 			ok: true,
@@ -3315,6 +4724,7 @@ export function failMissionToken(
 			tokenId: token.id,
 			reason,
 		});
+		drainMissionConcurrencyQueue(state.missionId, ctx, now);
 		return {
 			ok: true,
 			state: freezeMutable(state.missionId, ctx),
@@ -3348,6 +4758,7 @@ export function failMissionToken(
 		severity: 'critical',
 		senderAgentId: token.holderAgentId,
 	});
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
 	return {
 		ok: true,
 		state: freezeMutable(state.missionId, ctx),
@@ -3460,7 +4871,7 @@ export function retryMissionToken(
 	const hasLiveOnNode = Object.values(state.tokens).some(t =>
 		t.id !== candidate.id
 		&& t.nodeId === targetNodeId
-		&& (t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'waiting_join'),
+		&& (t.status === 'active' || t.status === 'queued' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'waiting_join'),
 	);
 	if (hasLiveOnNode) {
 		return {
@@ -3530,6 +4941,7 @@ export function retryMissionToken(
 		historyState: candidate.historyState,
 		tracePtr: retryPtr,
 		now,
+		reworkReason: 'retry',
 		returnToNodeId: candidate.returnToNodeId,
 		returnWaveId: candidate.returnWaveId,
 	});
@@ -3694,13 +5106,10 @@ export function resolveMissionGate(
 		if (remaining.length > 0) {
 			const nextGateTok = remaining[0];
 			const gateNode = graph.nodes.find(n => n.id === params.nodeId);
-			const traceAncestors = new Set(expandTracePointer(ctx, nextGateTok.tracePtr).map(t => t.nodeId));
-			const incomingEdges = getIncomingEdges(graph, params.nodeId);
-			const candidateEdges = incomingEdges.filter(e => traceAncestors.size === 0 || traceAncestors.has(e.from));
-			const rollbackCandidates = (candidateEdges.length > 0 ? candidateEdges : incomingEdges).map(e => {
-				const src = graph.nodes.find(n => n.id === e.from);
-				return { id: e.from, title: src?.label ?? e.from };
-			});
+			const rollbackCandidates = collectValidUpstreamRollbackCandidates(ctx, graph, params.nodeId, nextGateTok.tracePtr, nextGateTok.fromNodeId).map(c => ({
+				id: c.id,
+				title: c.title,
+			}));
 			ctx.effects.push({
 				kind: 'upsert_gate_inbox',
 				missionId: state.missionId,
@@ -3749,6 +5158,7 @@ export function resolveMissionGate(
 			markBranchSkipped(state.missionId, ctx, graph, waitingToken.waveId, params.nodeId, failEdge.to, now);
 		}
 		const remainingQueuedGateCount = surfaceNextQueuedGate();
+		drainMissionConcurrencyQueue(state.missionId, ctx, now);
 		checkMissionCompletion(ctx);
 		return {
 			ok: true,
@@ -3804,6 +5214,7 @@ export function resolveMissionGate(
 		returnWaveId: waitingToken.waveId,
 	})!;
 	const remainingQueuedGateCount = surfaceNextQueuedGate();
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
 	return {
 		ok: true,
 		state: freezeMutable(state.missionId, ctx),
@@ -3879,7 +5290,7 @@ export function recallMissionTokens(
 	} else {
 		targetNodeSet = new Set(
 			Object.values(state.tokens)
-				.filter(t => t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'frozen_failed')
+				.filter(t => t.status === 'active' || t.status === 'queued' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'frozen_failed')
 				.map(t => t.nodeId)
 				.filter(nid => jurisdiction.hasFullJurisdiction || jurisdiction.nodeIds.has(nid)),
 		);
@@ -3895,7 +5306,7 @@ export function recallMissionTokens(
 			}
 		}
 		const hasLiveInTarget = Object.values(state.tokens).some(t =>
-			targetNodeSet.has(t.nodeId) && (t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'waiting_join' || t.status === 'frozen_failed'),
+			targetNodeSet.has(t.nodeId) && (t.status === 'active' || t.status === 'queued' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'waiting_join' || t.status === 'frozen_failed'),
 		);
 		if (hasLiveInTarget) {
 			for (const joinNodeId of collectImpactedDownstreamJoins(graph, targetNodeSet)) {
@@ -3938,7 +5349,7 @@ export function recallMissionTokens(
 		if (!targetNodeSet.has(tok.nodeId)) {
 			continue;
 		}
-		if (tok.status === 'active' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed') {
+		if (tok.status === 'active' || tok.status === 'queued' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed') {
 			// When recalling via `branchRootNodeId`, preserve uncontaminated sibling `waiting_join` arrivals
 			// at a downstream join node (handled cleanly by join-barrier reconciliation below).
 			if (tok.status === 'waiting_join' && params.branchRootNodeId && !explicitNodeSet.has(tok.nodeId) && tok.fromNodeId && !targetNodeSet.has(tok.fromNodeId)) {
@@ -3953,7 +5364,7 @@ export function recallMissionTokens(
 				summary: reason,
 				timestamp: now,
 			});
-			ctx.tokens[tid] = { ...tok, status: 'recalled', blocked: undefined, tracePtr: recPtr, lastActivityAt: now };
+			ctx.tokens[tid] = { ...tok, status: 'recalled', blocked: undefined, queued: undefined, tracePtr: recPtr, lastActivityAt: now };
 			if (tok.status !== 'waiting_join' || explicitNodeSet.has(tok.nodeId) || !params.branchRootNodeId) {
 				recomputeNodeState(ctx, tok.nodeId, 'idle');
 				recordRecalledBranchWave(tok.nodeId, tok.waveId);
@@ -4042,6 +5453,7 @@ export function recallMissionTokens(
 		ctx.deferredEffects = ctx.deferredEffects.filter(eff => !(eff.kind === 'dispatch_token' && recalledSet.has(eff.tokenId)));
 	}
 
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
 	checkMissionCompletion(ctx);
 
 	return {
@@ -4257,9 +5669,9 @@ export function applySafeMissionPatch(
 		}
 	}
 	for (const [tid, tok] of Object.entries(ctx.tokens)) {
-		if (removedSet.has(tok.nodeId) && (tok.status === 'active' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed')) {
+		if (removedSet.has(tok.nodeId) && (tok.status === 'active' || tok.status === 'queued' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join' || tok.status === 'frozen_failed')) {
 			removedRecalledTokens.push(tok);
-			ctx.tokens[tid] = { ...tok, status: 'recalled', blocked: undefined, lastActivityAt: now };
+			ctx.tokens[tid] = { ...tok, status: 'recalled', blocked: undefined, queued: undefined, lastActivityAt: now };
 			if (tok.status === 'active' || tok.status === 'blocked') {
 				ctx.effects.push({
 					kind: 'stop_agent',
@@ -4386,7 +5798,7 @@ export function applySafeMissionPatch(
 				continue;
 			}
 			const hasLiveOnNode = Object.values(ctx.tokens).some(t =>
-				t.nodeId === cid && (t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'frozen_failed'),
+				t.nodeId === cid && (t.status === 'active' || t.status === 'queued' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'frozen_failed'),
 			);
 			if (hasLiveOnNode) {
 				continue;
@@ -4574,6 +5986,7 @@ export function applySafeMissionPatch(
 		newMermaidText: params.newMermaidText,
 		reason: params.reason,
 	});
+	drainMissionConcurrencyQueue(state.missionId, ctx, now);
 	checkMissionCompletion(ctx);
 
 	return {
@@ -4636,7 +6049,7 @@ export function fireMissionSourceTrigger(
 	}
 	const trigger = state.triggers[idx];
 	const hasLiveTokenOnSource = Object.values(state.tokens).some(t =>
-		t.nodeId === trigger.nodeId && (t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_gate' || t.status === 'waiting_join'),
+		t.nodeId === trigger.nodeId && (t.status === 'active' || t.status === 'blocked' || t.status === 'queued' || t.status === 'waiting_gate' || t.status === 'waiting_join'),
 	);
 	if (hasLiveTokenOnSource) {
 		return {

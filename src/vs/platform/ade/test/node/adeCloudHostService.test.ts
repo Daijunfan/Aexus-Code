@@ -1250,5 +1250,173 @@ suite('AdeCloudHosts', () => {
 			assert.strictEqual(result.gitHead[nonGitDir], undefined, 'non-git dir returns undefined without failing batch exit code');
 			assert.deepStrictEqual(result.persistentSessions['claude-sess1'], { aliveCount: 1, exitedCodes: [137] });
 		});
+
+		test('Audit #15: per-host async SSH pool bounds concurrent processes strictly below OpenSSH MaxSessions and micro-batches stat/readdir bursts', async () => {
+			if (isWindows) {
+				return;
+			}
+			const metricsDir = path.join(tmpDir, 'ssh-metrics');
+			const activeDir = path.join(metricsDir, 'active');
+			const countFile = path.join(metricsDir, 'invocations.log');
+			const peakFile = path.join(metricsDir, 'peak.log');
+			await fs.mkdir(activeDir, { recursive: true });
+
+			// Instrument mock SSH to record invocation count AND real overlapping concurrent SSH process count!
+			const pooledSsh = path.join(tmpDir, 'mock-pooled-ssh.sh');
+			await fs.writeFile(pooledSsh, [
+				'#!/bin/sh',
+				`ACTIVE_DIR="${activeDir}"`,
+				`COUNT_FILE="${countFile}"`,
+				`PEAK_FILE="${peakFile}"`,
+				'echo 1 >> "$COUNT_FILE"',
+				'MARKER="$ACTIVE_DIR/$$.$(date +%s%N 2>/dev/null || echo 0)"',
+				'touch "$MARKER"',
+				'CUR=$(ls -1 "$ACTIVE_DIR" 2>/dev/null | wc -l | tr -d " ")',
+				'echo "$CUR" >> "$PEAK_FILE"',
+				'cleanup() { rm -f "$MARKER"; }',
+				'trap cleanup EXIT',
+				'while [ "$#" -gt 0 ]; do',
+				'  if [ "$1" = "--" ]; then shift; break; fi',
+				'  shift',
+				'done',
+				'shift', // drop host alias
+				'/bin/sh -c "$1"',
+				'RC=$?',
+				'exit $RC',
+				'',
+			].join('\n'), { encoding: 'utf8', mode: 0o755 });
+			await fs.chmod(pooledSsh, 0o755);
+
+			const homedir = path.join(tmpDir, 'home-pool');
+			const svc = disposables.add(new AdeCloudHostNodeService({
+				userDataPath: path.join(tmpDir, 'aexus-pool'),
+				homedir,
+				vsCodeUserDataDir: path.join(tmpDir, 'vscode-pool'),
+				sshConfigPath: path.join(homedir, '.ssh', 'config'),
+				autoImportOnFirstLoad: false,
+				sshExecutable: pooledSsh,
+				maxConcurrentSshPerHost: 3,
+				fsMicroBatchWindowMs: 25,
+				fsMicroBatchMaxSize: 32,
+			}));
+			await svc.upsertHost({ name: 'Pool Box', alias: 'pool-box', hostName: '10.0.0.42', os: 'linux' });
+
+			// 1. Concurrency Pool Test: fire 10 overlapping remoteExecCommand calls -> peak active MUST stay <= 3!
+			const execResults = await Promise.all(
+				Array.from({ length: 10 }, (_, idx) =>
+					svc.remoteExecCommand('pool-box', { command: `sleep 0.06; printf "job-${idx}"` }),
+				),
+			);
+			for (let i = 0; i < execResults.length; i++) {
+				assert.strictEqual(execResults[i].exitCode, 0);
+				assert.strictEqual(execResults[i].outputTail, `job-${i}`);
+			}
+			const peakLines = (await fs.readFile(peakFile, 'utf8')).trim().split(/\r?\n/).map(n => Number.parseInt(n, 10)).filter(Number.isFinite);
+			const observedPeak = Math.max(...peakLines);
+			assert.ok(observedPeak <= 3, `Expected real concurrent SSH processes <= 3 (below MaxSessions 10), observed peak: ${observedPeak}`);
+			const statsAfterPool = svc.getHostSshPoolStats('pool-box');
+			assert.strictEqual(statsAfterPool.active, 0, 'All SSH pool slots released');
+			assert.strictEqual(statsAfterPool.queued, 0, 'No dangling waiters');
+			assert.ok(statsAfterPool.peakActive <= 3, `Pool stats peakActive <= 3, got ${statsAfterPool.peakActive}`);
+			assert.strictEqual(statsAfterPool.totalExecuted, 10);
+
+			// 2. Micro-Batched remoteStat Coalescing: 14 simultaneous stat calls (11 files/dirs + 2 missing + 1 duplicate) -> 1 single SSH process!
+			const treeRoot = path.join(tmpDir, 'remote-tree');
+			await fs.mkdir(path.join(treeRoot, 'sub dir'), { recursive: true });
+			const statTargets: string[] = [];
+			for (let i = 0; i < 10; i++) {
+				const fp = path.join(treeRoot, `file-${i}.txt`);
+				await fs.writeFile(fp, `payload-${i}`, 'utf8');
+				statTargets.push(fp);
+			}
+			statTargets.push(path.join(treeRoot, 'sub dir'));
+			const missingA = path.join(treeRoot, 'nope-a.txt');
+			const missingB = path.join(treeRoot, 'nope-b.txt');
+
+			const countBeforeStat = (await fs.readFile(countFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).length;
+			const statSettled = await Promise.allSettled([
+				...statTargets.map(p => svc.remoteStat('pool-box', p)),
+				svc.remoteStat('pool-box', statTargets[0]), // duplicate exact path coalesced
+				svc.remoteStat('pool-box', missingA),
+				svc.remoteStat('pool-box', missingB),
+			]);
+			const countAfterStat = (await fs.readFile(countFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).length;
+			assert.strictEqual(countAfterStat - countBeforeStat, 1, `Expected 14 concurrent remoteStat calls to coalesce into 1 SSH process, got ${countAfterStat - countBeforeStat}`);
+
+			for (let i = 0; i < 10; i++) {
+				const r = statSettled[i];
+				assert.strictEqual(r.status, 'fulfilled');
+				assert.strictEqual(r.value.type, 'file');
+				assert.strictEqual(r.value.size, `payload-${i}`.length);
+			}
+			assert.strictEqual(statSettled[10].status, 'fulfilled');
+			assert.strictEqual(statSettled[10].value.type, 'directory');
+			assert.strictEqual(statSettled[11].status, 'fulfilled');
+			assert.strictEqual(statSettled[11].value.type, 'file');
+			assert.strictEqual(statSettled[12].status, 'rejected');
+			assert.ok(String(statSettled[12].reason).includes('[ENOENT]'));
+			assert.strictEqual(statSettled[13].status, 'rejected');
+			assert.ok(String(statSettled[13].reason).includes('[ENOENT]'));
+
+			// 3. Micro-Batched remoteReadDir Coalescing: 6 simultaneous readdir calls (4 dirs incl. spaces/quotes + 1 missing + 1 file-as-dir) -> 1 single SSH process!
+			const dir1 = path.join(treeRoot, 'd1');
+			const dir2 = path.join(treeRoot, 'd2');
+			const dir3 = path.join(treeRoot, 'd3');
+			const dir4 = path.join(treeRoot, 'sub dir');
+			await fs.mkdir(dir1, { recursive: true });
+			await fs.mkdir(dir2, { recursive: true });
+			await fs.mkdir(dir3, { recursive: true });
+			await fs.writeFile(path.join(dir1, 'alpha.ts'), 'a', 'utf8');
+			await fs.writeFile(path.join(dir1, 'with space \'quote\'.txt'), 'q', 'utf8');
+			await fs.writeFile(path.join(dir2, '.hidden'), 'h', 'utf8');
+			await fs.mkdir(path.join(dir3, 'nested'), { recursive: true });
+			await fs.writeFile(path.join(dir4, 'inside.md'), 'm', 'utf8');
+
+			const countBeforeRd = (await fs.readFile(countFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).length;
+			const rdSettled = await Promise.allSettled([
+				svc.remoteReadDir('pool-box', dir1),
+				svc.remoteReadDir('pool-box', dir2),
+				svc.remoteReadDir('pool-box', dir3),
+				svc.remoteReadDir('pool-box', dir4),
+				svc.remoteReadDir('pool-box', path.join(treeRoot, 'missing-dir')),
+				svc.remoteReadDir('pool-box', statTargets[0]), // file, not dir -> ENOTDIR
+			]);
+			const countAfterRd = (await fs.readFile(countFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).length;
+			assert.strictEqual(countAfterRd - countBeforeRd, 1, `Expected 6 concurrent remoteReadDir calls to coalesce into 1 SSH process, got ${countAfterRd - countBeforeRd}`);
+
+			assert.strictEqual(rdSettled[0].status, 'fulfilled');
+			assert.deepStrictEqual(rdSettled[0].value.map(e => e.name).sort(), ['alpha.ts', 'with space \'quote\'.txt']);
+			assert.strictEqual(rdSettled[1].status, 'fulfilled');
+			assert.deepStrictEqual(rdSettled[1].value, [{ name: '.hidden', type: 'file' }]);
+			assert.strictEqual(rdSettled[2].status, 'fulfilled');
+			assert.deepStrictEqual(rdSettled[2].value, [{ name: 'nested', type: 'directory' }]);
+			assert.strictEqual(rdSettled[3].status, 'fulfilled');
+			assert.deepStrictEqual(rdSettled[3].value, [{ name: 'inside.md', type: 'file' }]);
+			assert.strictEqual(rdSettled[4].status, 'rejected');
+			assert.ok(String(rdSettled[4].reason).includes('[ENOENT]'));
+			assert.strictEqual(rdSettled[5].status, 'rejected');
+			assert.ok(String(rdSettled[5].reason).includes('[ENOTDIR]'));
+
+			// 4. Disposing service rejects queued SSH pool waiters immediately without hanging
+			const disposableSvc = new AdeCloudHostNodeService({
+				userDataPath: path.join(tmpDir, 'aexus-pool-dispose'),
+				homedir,
+				vsCodeUserDataDir: path.join(tmpDir, 'vscode-pool-dispose'),
+				sshConfigPath: path.join(homedir, '.ssh', 'config'),
+				autoImportOnFirstLoad: false,
+				sshExecutable: pooledSsh,
+				maxConcurrentSshPerHost: 1,
+			});
+			await disposableSvc.upsertHost({ name: 'Dispose Box', alias: 'dispose-box', hostName: '10.0.0.43', os: 'linux' });
+			const firstSlow = disposableSvc.remoteExecCommand('dispose-box', { command: 'sleep 0.25 && echo slow', cwd: treeRoot });
+			const secondQueued = disposableSvc.remoteExecCommand('dispose-box', { command: 'echo queued', cwd: treeRoot });
+			await new Promise(resolve => setTimeout(resolve, 25));
+			disposableSvc.dispose();
+			const secondRes = await secondQueued;
+			assert.strictEqual(secondRes.exitCode, 1);
+			assert.match(secondRes.error ?? '', /disposed/i);
+			assert.strictEqual(disposableSvc.getHostSshPoolStats('dispose-box').queued, 0);
+			await firstSlow.catch(() => undefined);
+		});
 	});
 });

@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Open-Source Organizational IDE &amp; Visual Multi-Agent Control Plane</strong><br/>
-  Extensible Multi-Tier Organizations · 8 Native BYO-CLI Coding Engines · Mission Mermaid DAG &amp; Token Bus Runtime · Server-Signed Capability Tokens · Zero-Server SSH Cloud Hosts
+  Visual Mermaid Mission DAG Canvas · 8 Native BYO-CLI Engines with Unified FinOps · Zero-Server SSH Cloud Hosts · Factory Wall &amp; Token Bus
 </p>
 
 <p align="center">
@@ -25,15 +25,15 @@
 ---
 
 > [!TIP]
-> **Quick Start with the Mission Control Plane (`aexus-ade`) & Instant `ADE ⇄ IDE` Flip:**
-> - **Diagnose Local Engines in 1 Command**: Run `aexus-ade doctor --project .` (works standalone without a running window) to inspect all 8 coding CLIs, Git, and OpenSSH.
-> - **Launch a Visual Mission DAG**: Run `aexus-ade mission init --title "Feature Ship" --open`, apply any recipe via `aexus-ade mission blueprint apply --mission <id> --file ./examples/blueprints/feature-ship.md`, edit per-node pre-prompts directly on the canvas or in the split drawer, and click **Start** (or run `aexus-ade mission start --mission <id>`).
-> - **Instant Mode Switch**: Press `Alt+Cmd+A` (`Alt+Ctrl+A`) anytime to flip between **`ADE`** (Agent Development Environment) and **`IDE`** (full-parity `Code - OSS` editor) without restarting terminals or language servers.
+> **Get Started Visually in Minutes:**
+> 1. **Author & Inspect on a Minimalist Mission Canvas**: Open any Mission canvas, right-click anywhere to add Task / Reviewer / Human Gate nodes, or click the top-left **Mermaid Source & Prompts Drawer** to edit `mission.mmd` and per-node pre-prompts side-by-side with **50-step Undo/Redo (`Cmd/Ctrl+Z`)**, marquee multi-select, magnetic snap guides, and `Cmd/Ctrl+F` node search.
+> 2. **Run Across 8 Native BYO-CLI Engines & Zero-Server SSH Cloud Hosts**: Assign nodes to **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, or **Pi** locally or over SSH, then click **Start** to orchestrate parallel fan-out, Check Hook auto-bounce, fail-edge self-healing, and interactive Human Gate sign-off.
+> 3. **Inspect Live FinOps & Flip `ADE ⇄ IDE` Instantly**: Open the docked **Node Inspector** for live token traces, Check Hooks, and multi-run FinOps budget ledgers, or press `Alt+Cmd+A` (`Alt+Ctrl+A`) to switch instantly between **`ADE`** and **`IDE`**.
 
 <p align="center">
   <img src="docs/assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code Multi-Tier Mission DAG Choreography — Parallel Fan-Out, Rework Loop &amp; Release Gate U1" />
   <br/>
-  <sub><strong>Visual Multi-Tier Mission DAG Choreography:</strong> Parallel Fan-Out ➔ Token Bus Handoffs ➔ Human Release Gate <code>U1</code> Approval · <a href="docs/assets/demos/02-live-dag-choreography.mp4">▶ Watch Full HD MP4</a> · <a href="docs/gallery.md">Explore Full Visual Gallery →</a></sub>
+  <sub><strong>Visual Multi-Tier Mission DAG Choreography:</strong> Real Multi-Agent Execution — Parallel Fan-Out ➔ Token Bus Handoffs ➔ Human Release Gate <code>U1</code> · <a href="docs/assets/demos/02-live-dag-choreography.mp4">▶ Watch Full HD MP4</a> · <a href="docs/gallery.md">Explore Full Visual Gallery →</a></sub>
 </p>
 
 ---
@@ -44,12 +44,11 @@ Most AI developer setups force you to choose between a closed-source single-agen
 
 **Aexus Code** (`v1.1.0`) is a 100% open-source (**MIT**), local-first desktop workbench supercharged on `Code - OSS` (`1.146.0`) with [Open VSX](https://open-vsx.org/) VS Code extensions compatibility and zero bundled Copilot telemetry, unifying a full-parity **IDE (`IDE`)** and an extensible **Agent Development Environment (`ADE`)**:
 
-1. **One Panel for Multi-Project, Multi-OS Workspaces (`macOS` · `Ubuntu` · `Kali` · `Windows`)** — Manage local `file://` repositories and zero-server `aexus-ssh://` cloud projects side-by-side in a single sidebar, ignoring path and OS differences, with crisp platform badges, Smart Calm hover-bloom pills, a 1-click full-badge toggle, and a pinned viewport-aware **`✦ Secretary`**.
-2. **Simultaneous Local & Multi-Cloud Integrated Terminals** — Control your local macOS/Linux/Windows shell alongside multiple remote Linux, Kali, and Windows SSH cloud host terminals in split panes inside the same window — complete with per-OS terminal tab badges and zero `vscode-server` installation or `~/.ssh/config` mutation.
-3. **8 Native BYO-CLI Coding Engines in One ADE Sidebar** — Orchestrate **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** locally or over SSH with official brand icons, your own subscriptions, proactive engine availability probing, visible **`ADE: Safe Mode`** / **`ADE: Autonomous`** status controls, and a rank-filtered **`ADE Inbox`**.
-4. **Extensible Multi-Tier Organizations ("Everything is Extensible")** — Start from **5 presets** (`Enterprise 4-Tier`, `Agile 3-Tier Startup`, `AI Research Lab`, `Security Red/Blue Audit`, `2-Tier Flat Swarm`) or resize dynamically from `1..N` tiers: author `{{variables}}` prompt templates, configure the **Rank × Fixed Kernel API Permission Matrix**, and enforce server-signed HMAC capability tokens with single-copy tier docs (`docs/ranks/L0..LN.md`).
-5. **Visual Mission DAG Runtime, Token Bus & Factory Wall** — Author pure Mermaid flowcharts with **`@Employee:` same-session context reuse**, synchronized **per-node pre-prompts** (canvas button + top-left split drawer backed by one Mission store), **vendor-categorized model & thinking pickers** (switchable at runtime while locking engine switches), **Factory Wall** off-graph/in-graph separation, **zero-token Watchdog liveness probes**, **atomic live `mission.patch`**, and **cron/interval/file source triggers**.
-6. **Full-Parity Native VS Code IDE & Open VSX Extension Compatibility** — Press `Alt+Cmd+A` (`Alt+Ctrl+A`) to flip instantly between **`ADE`** and **`IDE`** with 100% native `Code - OSS` editing, Git diffs, debugging, terminals, decoupled right-sidebar **Plugins** + **Agent Engine** switchers, and live **Open VSX** marketplace compatibility.
+1. **Distraction-Free Infinite-Canvas DAG Editor & Non-Colliding HUD** — Minimalist top-left **Mermaid Source Drawer + Start/Pause/Stop** controls, built-in **50-step Undo/Redo**, Shift-drag marquee multi-select & batch drag, smart magnetic alignment snap guides, `Delete`/`Backspace` removal, `Cmd/Ctrl+F` large-DAG node search, double-click inline edge label editing, wide-screen dual-drawer coexistence, and zero-teardown live Node Inspector.
+3. **8 Native BYO-CLI Coding Engines + Unified Multi-Engine FinOps Budget Breaker** — Orchestrate **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** locally or over SSH with official brand icons, unified per-model input/output/cache pricing (with `~$` estimated tags, custom overrides & local `$0` detection), and hard FinOps budget circuit-breakers across all 8 engines.
+4. **One Panel for Multi-Project, Multi-OS Workspaces (`macOS` · `Ubuntu` · `Kali` · `Windows`) & Multi-Cloud Terminals** — Manage local `file://` repositories and zero-server `aexus-ssh://` cloud projects side-by-side with simultaneous split local + remote SSH terminals and zero `vscode-server` installation or `~/.ssh/config` mutation.
+5. **Extensible Multi-Tier Organizations ("Everything is Extensible") & Factory Wall** — Start from **5 presets** (`Enterprise 4-Tier`, `Agile 3-Tier Startup`, `AI Research Lab`, `Security Red/Blue Audit`, `2-Tier Flat Swarm`) or resize `1..N` tiers, enforce server-signed HMAC capability tokens, `@Employee:` context reuse, zero-token Watchdog probes, Check Hooks, and atomic live `mission.patch`.
+6. **Full-Parity Native VS Code IDE & Open VSX Extension Compatibility** — Press `Alt+Cmd+A` (`Alt+Ctrl+A`) to flip instantly between **`ADE`** and **`IDE`** with 100% native `Code - OSS` editing, Git diffs, debugging, terminals, and live **Open VSX** marketplace compatibility.
 
 ---
 

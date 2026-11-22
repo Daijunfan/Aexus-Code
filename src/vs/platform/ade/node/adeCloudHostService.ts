@@ -43,6 +43,57 @@ export interface IAdeCloudHostNodeServiceOptions {
 	readonly autoImportOnFirstLoad?: boolean;
 	readonly sshExecutable?: string;
 	readonly logService?: ILogService;
+	/** Max concurrent SSH child sessions per target host (default 4, safely below OpenSSH MaxSessions=10). */
+	readonly maxConcurrentSshPerHost?: number;
+	/** Micro-batch coalescing window (ms) for remote stat/readdir bursts (default 12ms; 0 disables delay). */
+	readonly fsMicroBatchWindowMs?: number;
+	/** Max unique paths coalesced into a single batched SSH stat/readdir invocation (default 32). */
+	readonly fsMicroBatchMaxSize?: number;
+}
+
+export interface IAdeCloudHostSshPoolStats {
+	readonly active: number;
+	readonly queued: number;
+	readonly peakActive: number;
+	readonly totalExecuted: number;
+	readonly maxConcurrent: number;
+}
+
+interface IHostSshPool {
+	active: number;
+	peakActive: number;
+	totalExecuted: number;
+	readonly waiters: Array<{ readonly resolve: () => void; readonly reject: (err: Error) => void }>;
+}
+
+interface IStatBatchItem {
+	readonly normPath: string;
+	readonly dedupeKey: string;
+	readonly resolvers: Array<{ readonly resolve: (stat: IAdeRemoteFileStat) => void; readonly reject: (err: unknown) => void }>;
+}
+
+interface IStatBatchBucket {
+	readonly key: string;
+	readonly target: string;
+	readonly hostOs: AdeCloudHostOs;
+	readonly host?: IAdeCloudHost;
+	readonly byPath: Map<string, IStatBatchItem>;
+	timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+interface IReadDirBatchItem {
+	readonly normPath: string;
+	readonly dedupeKey: string;
+	readonly resolvers: Array<{ readonly resolve: (entries: readonly IAdeRemoteDirEntry[]) => void; readonly reject: (err: unknown) => void }>;
+}
+
+interface IReadDirBatchBucket {
+	readonly key: string;
+	readonly target: string;
+	readonly hostOs: AdeCloudHostOs;
+	readonly host?: IAdeCloudHost;
+	readonly byPath: Map<string, IReadDirBatchItem>;
+	timer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface IParsedSshHostRecord {
@@ -427,6 +478,9 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 	private readonly autoImportOnFirstLoad: boolean;
 	private readonly sshExecutable: string;
 	private readonly logService?: ILogService;
+	private readonly maxConcurrentSshPerHost: number;
+	private readonly fsMicroBatchWindowMs: number;
+	private readonly fsMicroBatchMaxSize: number;
 
 	private readonly storageFilePath: string;
 	private readonly managedSshConfPath: string;
@@ -435,6 +489,13 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 	private hosts: IAdeCloudHost[] = [];
 	private initPromise: Promise<void> | undefined;
 	private writeQueue: Promise<void> = Promise.resolve();
+
+	private readonly hostSshPools = new Map<string, IHostSshPool>();
+	private readonly statBatchBuckets = new Map<string, IStatBatchBucket>();
+	private readonly readDirBatchBuckets = new Map<string, IReadDirBatchBucket>();
+	private readonly inFlightStatByKey = new Map<string, Promise<IAdeRemoteFileStat>>();
+	private readonly inFlightReadDirByKey = new Map<string, Promise<readonly IAdeRemoteDirEntry[]>>();
+	private isServiceDisposed = false;
 
 	constructor(options: IAdeCloudHostNodeServiceOptions = {}) {
 		super();
@@ -446,11 +507,140 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		this.autoImportOnFirstLoad = options.autoImportOnFirstLoad ?? true;
 		this.sshExecutable = options.sshExecutable ?? resolveDefaultSshExecutable();
 		this.logService = options.logService;
+		this.maxConcurrentSshPerHost = Math.max(1, Math.min(16, Math.floor(options.maxConcurrentSshPerHost ?? 4)));
+		this.fsMicroBatchWindowMs = Math.max(0, Math.min(100, Math.floor(options.fsMicroBatchWindowMs ?? 12)));
+		this.fsMicroBatchMaxSize = Math.max(1, Math.min(64, Math.floor(options.fsMicroBatchMaxSize ?? 32)));
 
 		this.storageFilePath = path.join(this.userDataPath, 'cloud-hosts.json');
 		const sshConfigDir = this.resolveSafeSshConfigDir();
 		this.managedSshConfPath = path.join(sshConfigDir, 'aexus-managed-hosts.conf');
 		this.effectiveSshConfPath = path.join(sshConfigDir, 'effective_ssh_config');
+	}
+
+	override dispose(): void {
+		this.isServiceDisposed = true;
+		for (const bucket of this.statBatchBuckets.values()) {
+			if (bucket.timer !== undefined) {
+				clearTimeout(bucket.timer);
+				bucket.timer = undefined;
+			}
+			for (const item of bucket.byPath.values()) {
+				for (const r of item.resolvers) {
+					r.reject(new Error('AdeCloudHostNodeService disposed'));
+				}
+			}
+		}
+		this.statBatchBuckets.clear();
+		for (const bucket of this.readDirBatchBuckets.values()) {
+			if (bucket.timer !== undefined) {
+				clearTimeout(bucket.timer);
+				bucket.timer = undefined;
+			}
+			for (const item of bucket.byPath.values()) {
+				for (const r of item.resolvers) {
+					r.reject(new Error('AdeCloudHostNodeService disposed'));
+				}
+			}
+		}
+		this.readDirBatchBuckets.clear();
+		this.inFlightStatByKey.clear();
+		this.inFlightReadDirByKey.clear();
+		for (const pool of this.hostSshPools.values()) {
+			const pending = pool.waiters.splice(0, pool.waiters.length);
+			for (const waiter of pending) {
+				waiter.reject(new Error('AdeCloudHostNodeService disposed'));
+			}
+		}
+		super.dispose();
+	}
+
+	getHostSshPoolStats(authority: string): IAdeCloudHostSshPoolStats {
+		const key = authority.trim().toLowerCase();
+		const pool = this.hostSshPools.get(key);
+		return {
+			active: pool?.active ?? 0,
+			queued: pool?.waiters.length ?? 0,
+			peakActive: pool?.peakActive ?? 0,
+			totalExecuted: pool?.totalExecuted ?? 0,
+			maxConcurrent: this.maxConcurrentSshPerHost,
+		};
+	}
+
+	private acquireHostSshSlot(target: string): Promise<() => void> {
+		if (this.isServiceDisposed) {
+			return Promise.reject(new Error('AdeCloudHostNodeService disposed'));
+		}
+		const key = target.trim().toLowerCase();
+		let pool = this.hostSshPools.get(key);
+		if (!pool) {
+			pool = { active: 0, peakActive: 0, totalExecuted: 0, waiters: [] };
+			this.hostSshPools.set(key, pool);
+		}
+		const makeRelease = (p: IHostSshPool): (() => void) => {
+			let released = false;
+			return () => {
+				if (released) {
+					return;
+				}
+				released = true;
+				const next = p.waiters.shift();
+				if (next) {
+					if (this.isServiceDisposed) {
+						p.active = Math.max(0, p.active - 1);
+						next.reject(new Error('AdeCloudHostNodeService disposed'));
+					} else {
+						p.totalExecuted += 1;
+						next.resolve();
+					}
+				} else {
+					p.active = Math.max(0, p.active - 1);
+				}
+			};
+		};
+		if (pool.active < this.maxConcurrentSshPerHost) {
+			pool.active += 1;
+			pool.totalExecuted += 1;
+			if (pool.active > pool.peakActive) {
+				pool.peakActive = pool.active;
+			}
+			return Promise.resolve(makeRelease(pool));
+		}
+		const targetPool = pool;
+		return new Promise<() => void>((resolve, reject) => {
+			targetPool.waiters.push({
+				resolve: () => {
+					if (targetPool.active > targetPool.peakActive) {
+						targetPool.peakActive = targetPool.active;
+					}
+					resolve(makeRelease(targetPool));
+				},
+				reject,
+			});
+		});
+	}
+
+	private flushPendingFsBatchesForHost(target: string): void {
+		const prefix = `${target.trim().toLowerCase()}\0`;
+		for (const key of [...this.statBatchBuckets.keys()]) {
+			if (key.startsWith(prefix)) {
+				this.flushStatBatch(key);
+			}
+		}
+		for (const key of [...this.readDirBatchBuckets.keys()]) {
+			if (key.startsWith(prefix)) {
+				this.flushReadDirBatch(key);
+			}
+		}
+		for (const key of [...this.inFlightStatByKey.keys()]) {
+			if (key.startsWith(prefix)) {
+				this.inFlightStatByKey.delete(key);
+			}
+		}
+		for (const key of [...this.inFlightReadDirByKey.keys()]) {
+			if (key.startsWith(prefix)) {
+				this.inFlightReadDirByKey.delete(key);
+			}
+		}
 	}
 
 	private resolveSafeSshConfigDir(): string {
@@ -1165,6 +1355,19 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		remoteCommand: string,
 		options: { stdin?: Buffer; timeoutMs?: number; host?: IAdeCloudHost } = {},
 	): Promise<{ code: number; stdout: Buffer; stderr: string }> {
+		const release = await this.acquireHostSshSlot(target);
+		try {
+			return await this.spawnSshRaw(target, remoteCommand, options);
+		} finally {
+			release();
+		}
+	}
+
+	private async spawnSshRaw(
+		target: string,
+		remoteCommand: string,
+		options: { stdin?: Buffer; timeoutMs?: number; host?: IAdeCloudHost } = {},
+	): Promise<{ code: number; stdout: Buffer; stderr: string }> {
 		const timeoutMs = options.timeoutMs ?? 20_000;
 		const sshArgs: string[] = [
 			'-F', this.effectiveSshConfPath,
@@ -1360,7 +1563,225 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 	async remoteStat(authority: string, remotePath: string): Promise<IAdeRemoteFileStat> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
+		if (hostOs === 'windows' && norm === '/') {
+			return { type: 'directory', ctime: 0, mtime: 0, size: 0 };
+		}
+		if (this.isServiceDisposed) {
+			throw new Error('AdeCloudHostNodeService disposed');
+		}
+		const normalizedTargetKey = target.trim().toLowerCase();
+		const dedupeKey = `${normalizedTargetKey}\0${hostOs}\0${norm}`;
+		const existingInFlight = this.inFlightStatByKey.get(dedupeKey);
+		if (existingInFlight) {
+			return existingInFlight;
+		}
+		if (this.fsMicroBatchMaxSize <= 1) {
+			const singlePromise = this.remoteStatSingle(target, hostOs, host, norm);
+			this.inFlightStatByKey.set(dedupeKey, singlePromise);
+			singlePromise.finally(() => {
+				if (this.inFlightStatByKey.get(dedupeKey) === singlePromise) {
+					this.inFlightStatByKey.delete(dedupeKey);
+				}
+			}).catch(() => undefined);
+			return singlePromise;
+		}
 
+		const bucketKey = `${normalizedTargetKey}\0${hostOs}`;
+		let bucket = this.statBatchBuckets.get(bucketKey);
+		if (!bucket) {
+			bucket = {
+				key: bucketKey,
+				target,
+				hostOs,
+				host,
+				byPath: new Map(),
+				timer: undefined,
+			};
+			this.statBatchBuckets.set(bucketKey, bucket);
+		}
+		const promise = new Promise<IAdeRemoteFileStat>((resolve, reject) => {
+			let item = bucket!.byPath.get(norm);
+			if (!item) {
+				item = { normPath: norm, dedupeKey, resolvers: [] };
+				bucket!.byPath.set(norm, item);
+			}
+			item.resolvers.push({ resolve, reject });
+		});
+		this.inFlightStatByKey.set(dedupeKey, promise);
+		promise.finally(() => {
+			if (this.inFlightStatByKey.get(dedupeKey) === promise) {
+				this.inFlightStatByKey.delete(dedupeKey);
+			}
+		}).catch(() => undefined);
+
+		if (bucket.byPath.size >= this.fsMicroBatchMaxSize) {
+			this.flushStatBatch(bucketKey);
+		} else if (bucket.timer === undefined) {
+			bucket.timer = setTimeout(() => {
+				this.flushStatBatch(bucketKey);
+			}, this.fsMicroBatchWindowMs);
+		}
+		return promise;
+	}
+
+	private flushStatBatch(bucketKey: string): void {
+		const bucket = this.statBatchBuckets.get(bucketKey);
+		if (!bucket) {
+			return;
+		}
+		this.statBatchBuckets.delete(bucketKey);
+		if (bucket.timer !== undefined) {
+			clearTimeout(bucket.timer);
+			bucket.timer = undefined;
+		}
+		const items = [...bucket.byPath.values()];
+		if (items.length === 0) {
+			return;
+		}
+		if (items.length === 1) {
+			const only = items[0];
+			void this.remoteStatSingle(bucket.target, bucket.hostOs, bucket.host, only.normPath).then(
+				stat => {
+					for (const r of only.resolvers) { r.resolve(stat); }
+				},
+				err => {
+					for (const r of only.resolvers) { r.reject(err); }
+				},
+			);
+			return;
+		}
+		void this.remoteStatBatch(bucket.target, bucket.hostOs, bucket.host, items);
+	}
+
+	private async remoteStatBatch(
+		target: string,
+		hostOs: AdeCloudHostOs,
+		host: IAdeCloudHost | undefined,
+		items: readonly IStatBatchItem[],
+	): Promise<void> {
+		try {
+			if (hostOs === 'windows') {
+				const psLines: string[] = [
+					`$ErrorActionPreference='SilentlyContinue'`,
+					`$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8`,
+				];
+				for (let i = 0; i < items.length; i++) {
+					const winPath = toRemoteNativePath(items[i].normPath, 'windows').replace(/'/g, `''`);
+					psLines.push(
+						`$p='${winPath}'; if (-not (Test-Path -LiteralPath $p)) { Write-Output ('__AEXUS_STAT__' + [char]9 + '${i}' + [char]9 + 'ERR' + [char]9 + 'ENOENT') } else { $it = Get-Item -LiteralPath $p -Force; $t = if ($it.PSIsContainer) { 'directory' } else { 'file' }; $c = [int64]([DateTimeOffset]$it.CreationTimeUtc).ToUnixTimeMilliseconds(); $m = [int64]([DateTimeOffset]$it.LastWriteTimeUtc).ToUnixTimeMilliseconds(); $s = if ($it.PSIsContainer) { 0 } else { [int64]$it.Length }; Write-Output ('__AEXUS_STAT__' + [char]9 + '${i}' + [char]9 + 'OK' + [char]9 + $t + [char]9 + $c + [char]9 + $m + [char]9 + $s) }`,
+					);
+				}
+				psLines.push('exit 0');
+				const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(psLines.join('; '))}`, { host });
+				if (res.code !== 0) {
+					this.throwMappedRemoteError(res, target, items[0].normPath);
+				}
+				const results = new Map<number, { readonly ok: true; readonly stat: IAdeRemoteFileStat } | { readonly ok: false; readonly errCode: string }>();
+				for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+					if (!rawLine.startsWith('__AEXUS_STAT__\t')) {
+						continue;
+					}
+					const parts = rawLine.split('\t');
+					const idx = Number.parseInt(parts[1] ?? '', 10);
+					if (!Number.isInteger(idx) || idx < 0 || idx >= items.length) {
+						continue;
+					}
+					if (parts[2] === 'OK') {
+						results.set(idx, {
+							ok: true,
+							stat: {
+								type: parts[3] === 'directory' ? 'directory' : 'file',
+								ctime: Number(parts[4]) || Date.now(),
+								mtime: Number(parts[5]) || Date.now(),
+								size: Number(parts[6]) || 0,
+							},
+						});
+					} else {
+						results.set(idx, { ok: false, errCode: parts[3] || 'ENOENT' });
+					}
+				}
+				for (let i = 0; i < items.length; i++) {
+					const item = items[i];
+					const entry = results.get(i);
+					if (entry?.ok) {
+						for (const r of item.resolvers) { r.resolve(entry.stat); }
+					} else {
+						const err = new Error(`[${entry && !entry.ok ? entry.errCode : 'ENOENT'}] File or directory not found on ${target}: ${item.normPath}`);
+						for (const r of item.resolvers) { r.reject(err); }
+					}
+				}
+				return;
+			}
+
+			// POSIX micro-batched stat: 1 SSH process for up to N paths
+			const lines: string[] = [
+				`_stat_one() {`,
+				`  _idx="$1"; _p="$2"`,
+				`  if [ ! -e "$_p" ] && [ ! -L "$_p" ]; then printf '__AEXUS_STAT__\\t%s\\tERR\\tENOENT\\n' "$_idx"; return; fi`,
+				`  _is_link=0; if [ -L "$_p" ]; then _is_link=1; fi`,
+				`  if [ -d "$_p" ]; then _kind="directory"; elif [ -f "$_p" ]; then _kind="file"; else _kind="unknown"; fi`,
+				`  _meta=$(stat -c "%Y %s" "$_p" 2>/dev/null || stat -f "%m %z" "$_p" 2>/dev/null || echo "0 0")`,
+				`  printf '__AEXUS_STAT__\\t%s\\tOK\\t%s\\t%s\\t%s\\n' "$_idx" "$_kind" "$_is_link" "$_meta"`,
+				`}`,
+			];
+			for (let i = 0; i < items.length; i++) {
+				lines.push(`_stat_one ${i} ${posixQuote(items[i].normPath)}`);
+			}
+			lines.push('exit 0');
+			const res = await this.runSshRaw(target, `sh -c ${posixQuote(lines.join('\n'))}`, { host });
+			if (res.code !== 0) {
+				this.throwMappedRemoteError(res, target, items[0].normPath);
+			}
+			const results = new Map<number, { readonly ok: true; readonly stat: IAdeRemoteFileStat } | { readonly ok: false; readonly errCode: string }>();
+			for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+				if (!rawLine.startsWith('__AEXUS_STAT__\t')) {
+					continue;
+				}
+				const parts = rawLine.split('\t');
+				const idx = Number.parseInt(parts[1] ?? '', 10);
+				if (!Number.isInteger(idx) || idx < 0 || idx >= items.length) {
+					continue;
+				}
+				if (parts[2] === 'OK') {
+					const kindRaw = parts[3];
+					const [mtimeSecStr, sizeStr] = (parts[5] ?? '0 0').trim().split(/\s+/);
+					const mtimeMs = (Number(mtimeSecStr) || 0) * 1000;
+					results.set(idx, {
+						ok: true,
+						stat: {
+							type: kindRaw === 'directory' ? 'directory' : (kindRaw === 'file' ? 'file' : 'unknown'),
+							ctime: mtimeMs,
+							mtime: mtimeMs,
+							size: Number(sizeStr) || 0,
+						},
+					});
+				} else {
+					results.set(idx, { ok: false, errCode: parts[3] || 'ENOENT' });
+				}
+			}
+			for (let i = 0; i < items.length; i++) {
+				const item = items[i];
+				const entry = results.get(i);
+				if (entry?.ok) {
+					for (const r of item.resolvers) { r.resolve(entry.stat); }
+				} else {
+					const err = new Error(`[${entry && !entry.ok ? entry.errCode : 'ENOENT'}] File or directory not found on ${target}: ${item.normPath}`);
+					for (const r of item.resolvers) { r.reject(err); }
+				}
+			}
+		} catch (err) {
+			for (const item of items) {
+				for (const r of item.resolvers) { r.reject(err); }
+			}
+		}
+	}
+
+	private async remoteStatSingle(
+		target: string,
+		hostOs: AdeCloudHostOs,
+		host: IAdeCloudHost | undefined,
+		norm: string,
+	): Promise<IAdeRemoteFileStat> {
 		if (hostOs === 'windows') {
 			if (norm === '/') {
 				return { type: 'directory', ctime: 0, mtime: 0, size: 0 };
@@ -1419,7 +1840,270 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 	async remoteReadDir(authority: string, remotePath: string): Promise<readonly IAdeRemoteDirEntry[]> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
+		if (this.isServiceDisposed) {
+			throw new Error('AdeCloudHostNodeService disposed');
+		}
+		if (hostOs === 'windows' && norm === '/') {
+			return this.remoteReadDirSingle(target, hostOs, host, norm);
+		}
+		const normalizedTargetKey = target.trim().toLowerCase();
+		const dedupeKey = `${normalizedTargetKey}\0${hostOs}\0${norm}`;
+		const existingInFlight = this.inFlightReadDirByKey.get(dedupeKey);
+		if (existingInFlight) {
+			return existingInFlight;
+		}
+		if (this.fsMicroBatchMaxSize <= 1) {
+			const singlePromise = this.remoteReadDirSingle(target, hostOs, host, norm);
+			this.inFlightReadDirByKey.set(dedupeKey, singlePromise);
+			singlePromise.finally(() => {
+				if (this.inFlightReadDirByKey.get(dedupeKey) === singlePromise) {
+					this.inFlightReadDirByKey.delete(dedupeKey);
+				}
+			}).catch(() => undefined);
+			return singlePromise;
+		}
 
+		const bucketKey = `${normalizedTargetKey}\0${hostOs}`;
+		let bucket = this.readDirBatchBuckets.get(bucketKey);
+		if (!bucket) {
+			bucket = {
+				key: bucketKey,
+				target,
+				hostOs,
+				host,
+				byPath: new Map(),
+				timer: undefined,
+			};
+			this.readDirBatchBuckets.set(bucketKey, bucket);
+		}
+		const promise = new Promise<readonly IAdeRemoteDirEntry[]>((resolve, reject) => {
+			let item = bucket!.byPath.get(norm);
+			if (!item) {
+				item = { normPath: norm, dedupeKey, resolvers: [] };
+				bucket!.byPath.set(norm, item);
+			}
+			item.resolvers.push({ resolve, reject });
+		});
+		this.inFlightReadDirByKey.set(dedupeKey, promise);
+		promise.finally(() => {
+			if (this.inFlightReadDirByKey.get(dedupeKey) === promise) {
+				this.inFlightReadDirByKey.delete(dedupeKey);
+			}
+		}).catch(() => undefined);
+
+		if (bucket.byPath.size >= this.fsMicroBatchMaxSize) {
+			this.flushReadDirBatch(bucketKey);
+		} else if (bucket.timer === undefined) {
+			bucket.timer = setTimeout(() => {
+				this.flushReadDirBatch(bucketKey);
+			}, this.fsMicroBatchWindowMs);
+		}
+		return promise;
+	}
+
+	private flushReadDirBatch(bucketKey: string): void {
+		const bucket = this.readDirBatchBuckets.get(bucketKey);
+		if (!bucket) {
+			return;
+		}
+		this.readDirBatchBuckets.delete(bucketKey);
+		if (bucket.timer !== undefined) {
+			clearTimeout(bucket.timer);
+			bucket.timer = undefined;
+		}
+		const items = [...bucket.byPath.values()];
+		if (items.length === 0) {
+			return;
+		}
+		if (items.length === 1) {
+			const only = items[0];
+			void this.remoteReadDirSingle(bucket.target, bucket.hostOs, bucket.host, only.normPath).then(
+				entries => {
+					for (const r of only.resolvers) { r.resolve(entries); }
+				},
+				err => {
+					for (const r of only.resolvers) { r.reject(err); }
+				},
+			);
+			return;
+		}
+		void this.remoteReadDirBatch(bucket.target, bucket.hostOs, bucket.host, items);
+	}
+
+	private makeMappedBatchError(errCode: string, target: string, remotePath: string): Error {
+		if (errCode === 'ENOENT') {
+			return new Error(`[ENOENT] File or directory not found on ${target}: ${remotePath}`);
+		}
+		if (errCode === 'ENOTDIR') {
+			return new Error(`[ENOTDIR] Target is not a directory on ${target}: ${remotePath}`);
+		}
+		if (errCode === 'EACCES') {
+			return new Error(`[EACCES] Permission denied on ${target}: ${remotePath}`);
+		}
+		return new Error(`SSH command failed on ${target} (${remotePath}): ${errCode}`);
+	}
+
+	private async remoteReadDirBatch(
+		target: string,
+		hostOs: AdeCloudHostOs,
+		host: IAdeCloudHost | undefined,
+		items: readonly IReadDirBatchItem[],
+	): Promise<void> {
+		try {
+			if (hostOs === 'windows') {
+				const psLines: string[] = [
+					`$ErrorActionPreference='SilentlyContinue'`,
+					`$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8`,
+				];
+				for (let i = 0; i < items.length; i++) {
+					const winPath = toRemoteNativePath(items[i].normPath, 'windows').replace(/'/g, `''`);
+					psLines.push(
+						`$p='${winPath}'; if (-not (Test-Path -LiteralPath $p)) { Write-Output ('__AEXUS_RD_ERR__' + [char]9 + '${i}' + [char]9 + 'ENOENT') } else { $root = Get-Item -LiteralPath $p -Force; if (-not $root.PSIsContainer) { Write-Output ('__AEXUS_RD_ERR__' + [char]9 + '${i}' + [char]9 + 'ENOTDIR') } else { Write-Output ('__AEXUS_RD_OK__' + [char]9 + '${i}'); Get-ChildItem -LiteralPath $p -Force | ForEach-Object { $t = if ($_.PSIsContainer) { 'directory' } else { 'file' }; Write-Output ('__AEXUS_RD_ENT__' + [char]9 + '${i}' + [char]9 + $t + [char]9 + $_.Name) } } }`,
+					);
+				}
+				psLines.push('exit 0');
+				const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(psLines.join('; '))}`, { host });
+				if (res.code !== 0) {
+					this.throwMappedRemoteError(res, target, items[0].normPath);
+				}
+				const entriesByIdx = new Map<number, IAdeRemoteDirEntry[]>();
+				const errByIdx = new Map<number, string>();
+				for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+					if (rawLine.startsWith('__AEXUS_RD_OK__\t')) {
+						const idx = Number.parseInt(rawLine.slice('__AEXUS_RD_OK__\t'.length), 10);
+						if (Number.isInteger(idx) && !entriesByIdx.has(idx)) {
+							entriesByIdx.set(idx, []);
+						}
+					} else if (rawLine.startsWith('__AEXUS_RD_ERR__\t')) {
+						const parts = rawLine.split('\t');
+						const idx = Number.parseInt(parts[1] ?? '', 10);
+						if (Number.isInteger(idx)) {
+							errByIdx.set(idx, parts[2] || 'ENOENT');
+						}
+					} else if (rawLine.startsWith('__AEXUS_RD_ENT__\t')) {
+						const parts = rawLine.split('\t');
+						const idx = Number.parseInt(parts[1] ?? '', 10);
+						const kind = parts[2];
+						const name = parts.slice(3).join('\t');
+						if (Number.isInteger(idx) && name) {
+							let list = entriesByIdx.get(idx);
+							if (!list) {
+								list = [];
+								entriesByIdx.set(idx, list);
+							}
+							list.push({ name, type: kind === 'directory' ? 'directory' : 'file' });
+						}
+					}
+				}
+				for (let i = 0; i < items.length; i++) {
+					const item = items[i];
+					const errCode = errByIdx.get(i);
+					const list = entriesByIdx.get(i);
+					if (errCode) {
+						const err = this.makeMappedBatchError(errCode, target, item.normPath);
+						for (const r of item.resolvers) { r.reject(err); }
+					} else if (list) {
+						for (const r of item.resolvers) { r.resolve(list); }
+					} else {
+						const err = this.makeMappedBatchError('Missing batched directory listing response', target, item.normPath);
+						for (const r of item.resolvers) { r.reject(err); }
+					}
+				}
+				return;
+			}
+
+			// POSIX NUL-framed micro-batched readdir (binary-safe for spaces, tabs, quotes & newlines in filenames)
+			const lines: string[] = [
+				`printf '\\0'`,
+				`_rd_one() {`,
+				`  _idx="$1"; _p="$2"`,
+				`  if [ ! -e "$_p" ]; then printf '__AEXUS_RD_ERR__\\0%s\\0ENOENT\\0' "$_idx"; return; fi`,
+				`  if [ ! -d "$_p" ]; then printf '__AEXUS_RD_ERR__\\0%s\\0ENOTDIR\\0' "$_idx"; return; fi`,
+				`  if ! (cd -- "$_p" 2>/dev/null); then printf '__AEXUS_RD_ERR__\\0%s\\0EACCES\\0' "$_idx"; return; fi`,
+				`  printf '__AEXUS_RD_OK__\\0%s\\0' "$_idx"`,
+				`  (`,
+				`    cd -- "$_p" || exit 4`,
+				`    for _f in * .[!.]* ..?*; do`,
+				`      [ -e "$_f" ] || [ -L "$_f" ] || continue`,
+				`      if [ -d "$_f" ]; then _t="directory"; elif [ -f "$_f" ]; then _t="file"; else _t="unknown"; fi`,
+				`      printf '__AEXUS_RD_ENT__\\0%s\\0%s\\0%s\\0' "$_idx" "$_t" "$_f"`,
+				`    done`,
+				`  )`,
+				`}`,
+			];
+			for (let i = 0; i < items.length; i++) {
+				lines.push(`_rd_one ${i} ${posixQuote(items[i].normPath)}`);
+			}
+			lines.push('exit 0');
+			const res = await this.runSshRaw(target, `sh -c ${posixQuote(lines.join('\n'))}`, { host });
+			if (res.code !== 0) {
+				this.throwMappedRemoteError(res, target, items[0].normPath);
+			}
+			const entriesByIdx = new Map<number, IAdeRemoteDirEntry[]>();
+			const errByIdx = new Map<number, string>();
+			const tokens = res.stdout.toString('utf8').split('\0');
+			for (let pos = 0; pos < tokens.length;) {
+				const tag = tokens[pos];
+				if (tag === '__AEXUS_RD_OK__') {
+					const idx = Number.parseInt(tokens[pos + 1] ?? '', 10);
+					if (Number.isInteger(idx) && !entriesByIdx.has(idx)) {
+						entriesByIdx.set(idx, []);
+					}
+					pos += 2;
+				} else if (tag === '__AEXUS_RD_ERR__') {
+					const idx = Number.parseInt(tokens[pos + 1] ?? '', 10);
+					const code = tokens[pos + 2] || 'ENOENT';
+					if (Number.isInteger(idx)) {
+						errByIdx.set(idx, code);
+					}
+					pos += 3;
+				} else if (tag === '__AEXUS_RD_ENT__') {
+					const idx = Number.parseInt(tokens[pos + 1] ?? '', 10);
+					const kind = tokens[pos + 2];
+					const name = tokens[pos + 3];
+					if (Number.isInteger(idx) && name && name !== '.' && name !== '..') {
+						let list = entriesByIdx.get(idx);
+						if (!list) {
+							list = [];
+							entriesByIdx.set(idx, list);
+						}
+						list.push({
+							name,
+							type: kind === 'directory' ? 'directory' : (kind === 'file' ? 'file' : 'unknown'),
+						});
+					}
+					pos += 4;
+				} else {
+					pos += 1;
+				}
+			}
+			for (let i = 0; i < items.length; i++) {
+				const item = items[i];
+				const errCode = errByIdx.get(i);
+				const list = entriesByIdx.get(i);
+				if (errCode) {
+					const err = this.makeMappedBatchError(errCode, target, item.normPath);
+					for (const r of item.resolvers) { r.reject(err); }
+				} else if (list) {
+					for (const r of item.resolvers) { r.resolve(list); }
+				} else {
+					const err = this.makeMappedBatchError('Missing batched directory listing response', target, item.normPath);
+					for (const r of item.resolvers) { r.reject(err); }
+				}
+			}
+		} catch (err) {
+			for (const item of items) {
+				for (const r of item.resolvers) { r.reject(err); }
+			}
+		}
+	}
+
+	private async remoteReadDirSingle(
+		target: string,
+		hostOs: AdeCloudHostOs,
+		host: IAdeCloudHost | undefined,
+		norm: string,
+	): Promise<readonly IAdeRemoteDirEntry[]> {
 		if (hostOs === 'windows') {
 			if (norm === '/') {
 				const drivePs = `$ErrorActionPreference='Stop'; [IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady } | ForEach-Object { Write-Output ('directory' + [char]9 + $_.Name.TrimEnd('\\').TrimEnd('/')) }`;
@@ -1542,6 +2226,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		options: { readonly create: boolean; readonly overwrite: boolean },
 	): Promise<void> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		this.flushPendingFsBatchesForHost(target);
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 		const rawBytes = Buffer.from(content.buffer);
 
@@ -1587,6 +2272,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	async remoteMkdir(authority: string, remotePath: string): Promise<void> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		this.flushPendingFsBatchesForHost(target);
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 		if (hostOs === 'windows') {
 			const winPath = toRemoteNativePath(norm, 'windows').replace(/'/g, `''`);
@@ -1605,6 +2291,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	async remoteDelete(authority: string, remotePath: string, recursive: boolean): Promise<void> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		this.flushPendingFsBatchesForHost(target);
 		const norm = normalizeRemoteProjectPath(remotePath, hostOs);
 		if (norm === '/' || /^\/[A-Za-z]:\/?$/.test(norm)) {
 			throw new Error(`[EACCES] Refusing to delete filesystem root: ${norm}`);
@@ -1630,6 +2317,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	async remoteRename(authority: string, fromPath: string, toPath: string, overwrite: boolean): Promise<void> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		this.flushPendingFsBatchesForHost(target);
 		const src = normalizeRemoteProjectPath(fromPath, hostOs);
 		const dst = normalizeRemoteProjectPath(toPath, hostOs);
 		if (hostOs === 'windows') {
@@ -1658,6 +2346,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 
 	async remoteCopy(authority: string, fromPath: string, toPath: string, overwrite: boolean): Promise<void> {
 		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		this.flushPendingFsBatchesForHost(target);
 		const src = normalizeRemoteProjectPath(fromPath, hostOs);
 		const dst = normalizeRemoteProjectPath(toPath, hostOs);
 		if (hostOs === 'windows') {

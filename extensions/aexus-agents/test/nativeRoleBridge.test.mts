@@ -2231,4 +2231,50 @@ describe('ADE Native Extension Role Bridge', () => {
 		assert.strictEqual(missionNode.AEXUS_ADE_CALLER, 'worker');
 		assert.strictEqual((missionNode.PATH ?? '').includes(cliBinDir), true, 'Pure-rank Mission node keeps bundled aexus-ade CLI in PATH');
 	});
+
+	it('watchExternalBindings triggers event-driven sync on binding file changes with zero idle disk polling (Audit #18)', async () => {
+		const bridgeDir = path.join(tempDir, 'event-watch-bridge');
+		fs.mkdirSync(bridgeDir, { recursive: true });
+		const controller = bridgeModule.createNativeRoleBridgeController({
+			distDir,
+			bridgeDir,
+			scopeId: 'watch-test-18',
+			follower: false,
+			childProcessModule: { spawn: (() => createMockChild()) as unknown as typeof cp.spawn },
+			fetchHost: { fetch: (async () => new Response('{}', { status: 200 })) as typeof globalThis.fetch },
+		});
+		let watchHits = 0;
+		const stopWatch = controller.watchExternalBindings(() => {
+			watchHits += 1;
+		});
+		try {
+			// Wait for fs.watch to attach and confirm ZERO idle ticks over 350ms
+			await new Promise(resolve => setTimeout(resolve, 350));
+			assert.strictEqual(watchHits, 0, 'Idle binding watcher must fire 0 times (no 1Hz polling)');
+
+			// Atomic rename into externalBindingsFilePath triggers the watcher cleanly
+			const tmpFile = `${controller.externalBindingsFilePath}.tmp`;
+			fs.writeFileSync(tmpFile, JSON.stringify({ 'claude:ses-watched-1': 'agent-watch-1' }), 'utf8');
+			fs.renameSync(tmpFile, controller.externalBindingsFilePath);
+
+			const deadline = Date.now() + 2_000;
+			while (watchHits === 0 && Date.now() < deadline) {
+				await new Promise(resolve => setTimeout(resolve, 30));
+			}
+			assert.ok(watchHits >= 1, 'Writing external bindings file must trigger event-driven watcher');
+			const loaded = await controller.readExternalNativeBindings();
+			assert.deepStrictEqual(loaded, [
+				{ shortEngine: 'claude', nativeSessionId: 'ses-watched-1', agentId: 'agent-watch-1' },
+			]);
+
+			// Unrelated file change in the same directory must NOT trigger callback
+			const hitsBeforeNoise = watchHits;
+			fs.writeFileSync(path.join(bridgeDir, 'unrelated-other.json'), '{}', 'utf8');
+			await new Promise(resolve => setTimeout(resolve, 200));
+			assert.strictEqual(watchHits, hitsBeforeNoise, 'Unrelated file writes must not wake binding sync');
+		} finally {
+			stopWatch();
+			controller.dispose();
+		}
+	});
 });

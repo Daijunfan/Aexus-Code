@@ -25,6 +25,15 @@ import {
 	IAdeInboxService,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import {
+	ADE_MISSION_CONCURRENCY_CONFIG_KEY,
+	ADE_MISSION_CONCURRENCY_JSON_SCHEMA,
+	DEFAULT_MISSION_CONCURRENCY_LIMITS,
+} from '../../../../platform/ade/common/adeMissionEngine.js';
+import {
+	ADE_MODEL_PRICING_OVERRIDES_CONFIG_KEY,
+	ADE_MODEL_PRICING_OVERRIDES_JSON_SCHEMA,
+} from '../../../../platform/ade/common/adeModelPricing.js';
+import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	ADE_ORGANIZATION_JSON_SCHEMA,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
@@ -93,6 +102,12 @@ import {
 	IAdeProjectsService,
 	resolveAdeAgentRank,
 } from '../common/ade.js';
+import {
+	ADE_DISPLAY_LANGUAGE_CONFIG_KEY,
+	adeBi,
+	getAdeDisplayLanguageSetting,
+	setAdeDisplayLanguageOverride,
+} from '../common/adeLocalization.js';
 import { AdeRoleSchemaService, IAdeRoleSchemaService, readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
 import {
 	AdeCloudHostWorkbenchContribution,
@@ -115,6 +130,7 @@ import {
 	AdeEngineeringEditorInput,
 	AdeEngineeringEditorPane,
 	AdeEngineeringEditorSerializer,
+	AdePageVisibilityAnimationGuard,
 } from './adeEngineeringEditorPane.js';
 import { AdeInboxService } from './adeInboxService.js';
 import { AdeMissionRuntimeService, IAdeMissionRuntimeService } from './adeMissionRuntime.js';
@@ -161,8 +177,15 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 		@IUriIdentityService uriIdentity: IUriIdentityService,
 		@IFileService fileService: IFileService,
 		@IInstantiationService instantiationService: IInstantiationService,
+		@IConfigurationService configurationService: IConfigurationService,
 	) {
 		super();
+		setAdeDisplayLanguageOverride(configurationService.getValue<string>(ADE_DISPLAY_LANGUAGE_CONFIG_KEY));
+		this._register(configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration(ADE_DISPLAY_LANGUAGE_CONFIG_KEY)) {
+				setAdeDisplayLanguageOverride(configurationService.getValue<string>(ADE_DISPLAY_LANGUAGE_CONFIG_KEY));
+			}
+		}));
 		this._register(sessions.onDidChangeSessionItems(delta => {
 			for (const item of delta.addedOrUpdated ?? []) {
 				const status = item.status === ChatSessionStatus.InProgress
@@ -216,7 +239,8 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 }
 
 export const ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID = 'workbench.action.ade.toggleAutonomousMode';
-export const ADE_TOGGLE_PROMPT_TO_DAG_COMMAND_ID = 'workbench.action.ade.togglePromptToDagBar';
+export const ADE_TOGGLE_MISSION_FILE_DRAWER_COMMAND_ID = 'workbench.action.ade.toggleMissionFileDrawer';
+export const ADE_SWITCH_DISPLAY_LANGUAGE_COMMAND_ID = 'workbench.action.ade.switchDisplayLanguage';
 
 export class AdeAutonomousModeStatusContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.adeAutonomousModeStatus';
@@ -266,6 +290,7 @@ export class AdeAutonomousModeStatusContribution extends Disposable implements I
 registerWorkbenchContribution2(AdeCloudHostWorkbenchContribution.ID, AdeCloudHostWorkbenchContribution, WorkbenchPhase.BlockRestore);
 registerWorkbenchContribution2(AdeEditorContribution.ID, AdeEditorContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AdeAutonomousModeStatusContribution.ID, AdeAutonomousModeStatusContribution, WorkbenchPhase.AfterRestored);
+registerWorkbenchContribution2(AdePageVisibilityAnimationGuard.ID, AdePageVisibilityAnimationGuard, WorkbenchPhase.AfterRestored);
 
 const viewContainersRegistry = Registry.as<IViewContainersRegistry>(Extensions.ViewContainersRegistry);
 
@@ -376,6 +401,40 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			scope: ConfigurationScope.APPLICATION,
 			restricted: true,
 			description: localize('adeAutonomousModeDesc', "Application-scoped toggle controlling whether local and cloud ADE agent sessions default to Full Access / autonomous execution flags (enabled by default). Restricted to prevent repository settings from modifying it."),
+		},
+		[ADE_MODEL_PRICING_OVERRIDES_CONFIG_KEY]: {
+			...ADE_MODEL_PRICING_OVERRIDES_JSON_SCHEMA,
+			default: {},
+			scope: ConfigurationScope.APPLICATION,
+			markdownDescription: localize(
+				'adeFinOpsModelPricingOverridesDesc',
+				"Custom USD per-million-token pricing overrides for FinOps cost estimation and budget circuit-breaking across all Agent engines. Keys match exact model IDs or glob patterns (for example, `\"gpt-5.3-codex\"`, `\"ollama/*\"`, or `\"my-vllm-*\"`). Specify `inputPerMillion`, `outputPerMillion`, `cacheReadPerMillion`, `cacheWritePerMillion`, or set `\"local\": true` to mark self-hosted / local models as zero-cost (`$0.00`).",
+			),
+		},
+		[ADE_MISSION_CONCURRENCY_CONFIG_KEY]: {
+			...ADE_MISSION_CONCURRENCY_JSON_SCHEMA,
+			default: {
+				...DEFAULT_MISSION_CONCURRENCY_LIMITS,
+				hostOverrides: {},
+				providerOverrides: {},
+			},
+			scope: ConfigurationScope.APPLICATION,
+			markdownDescription: localize(
+				'adeMissionConcurrencyLimitsDesc',
+				"Multi-level concurrency slot ceilings for Mission wide fan-out and multi-wave execution (`maxGlobal`, `maxLocalHost`, `maxPerCloudHost`, `maxPerProvider`, plus per-host `hostOverrides` and per-provider `providerOverrides`). Excess ready nodes automatically enter `queued` state with live FIFO rank (`#1`, `#2`, ...) on their cards instead of causing GPU OOM, API 429 bursts, or SSH session exhaustion.",
+			),
+		},
+		[ADE_DISPLAY_LANGUAGE_CONFIG_KEY]: {
+			type: 'string',
+			enum: ['auto', 'en', 'zh-cn'],
+			enumDescriptions: [
+				localize('adeDisplayLanguageAutoDesc', "Follow VS Code's active display language (pure English for non-Chinese locales, pure Simplified Chinese for Chinese locales)."),
+				localize('adeDisplayLanguageEnDesc', "Render Aexus ADE panels (Mission Canvas, Inspector, Role Studio, Session Header, and Projects View) in pure English."),
+				localize('adeDisplayLanguageZhDesc', "Render Aexus ADE panels (Mission Canvas, Inspector, Role Studio, Session Header, and Projects View) in pure Simplified Chinese."),
+			],
+			default: 'auto',
+			scope: ConfigurationScope.APPLICATION,
+			description: localize('adeDisplayLanguageConfigDesc', "Display language for Aexus ADE surfaces (Mission Canvas, Inspector, Role Studio, Session Header, and Projects View)."),
 		},
 	},
 });
@@ -2127,16 +2186,11 @@ registerAction2(class ToggleAdeAutonomousModeAction extends Action2 {
 registerAction2(class ToggleAdeMissionFileAction extends Action2 {
 	constructor() {
 		super({
-			id: ADE_TOGGLE_PROMPT_TO_DAG_COMMAND_ID,
-			title: localize2('adeToggleMissionFileTitle', "Toggle Mission Mermaid File"),
+			id: ADE_TOGGLE_MISSION_FILE_DRAWER_COMMAND_ID,
+			title: localize2('adeToggleMissionFileTitle', "Toggle Mission Mermaid Source Drawer"),
 			category: localize2('adeCategory', "Aexus ADE"),
 			icon: Codicon.fileCode,
 			f1: true,
-			keybinding: {
-				primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyK,
-				weight: KeybindingWeight.WorkbenchContrib,
-				when: ActiveEditorContext.isEqualTo(AdeEngineeringEditorPane.ID),
-			},
 		});
 	}
 
@@ -2146,5 +2200,54 @@ registerAction2(class ToggleAdeMissionFileAction extends Action2 {
 		if (pane instanceof AdeEngineeringEditorPane) {
 			pane.toggleFileDrawer();
 		}
+	}
+});
+
+registerAction2(class SwitchAdeDisplayLanguageAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_SWITCH_DISPLAY_LANGUAGE_COMMAND_ID,
+			title: localize2('adeSwitchDisplayLanguageTitle', "Switch ADE Display Language (Auto / English / Simplified Chinese)"),
+			category: localize2('adeCategory', "Aexus ADE"),
+			icon: Codicon.globe,
+			f1: true,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const quickInput = accessor.get(IQuickInputService);
+		const configurationService = accessor.get(IConfigurationService);
+		const notifications = accessor.get(INotificationService);
+		const current = getAdeDisplayLanguageSetting();
+		const picked = await quickInput.pick([
+			{
+				value: 'auto' as const,
+				label: adeBi(localize('adeLangPickAuto', "Auto (Follow VS Code Display Language)"), '自动（跟随 VS Code 显示语言）'),
+				description: current === 'auto' ? adeBi(localize('adeLangCurrent', "Current"), '当前') : 'auto',
+			},
+			{
+				value: 'en' as const,
+				label: 'English (Pure English)',
+				description: current === 'en' ? adeBi(localize('adeLangCurrent', "Current"), '当前') : 'en',
+			},
+			{
+				value: 'zh-cn' as const,
+				label: '简体中文 (Pure Simplified Chinese)',
+				description: current === 'zh-cn' ? adeBi(localize('adeLangCurrent', "Current"), '当前') : 'zh-cn',
+			},
+		], {
+			title: adeBi(localize('adeSwitchLangQuickTitle', "Aexus ADE Display Language"), 'Aexus ADE 界面显示语言'),
+			placeHolder: adeBi(localize('adeSwitchLangQuickPh', "Choose pure English, pure Simplified Chinese, or follow VS Code locale"), '选择纯英文、纯简体中文，或自动跟随 VS Code 语言设置'),
+		});
+		if (!picked) {
+			return;
+		}
+		setAdeDisplayLanguageOverride(picked.value);
+		await configurationService.updateValue(ADE_DISPLAY_LANGUAGE_CONFIG_KEY, picked.value, ConfigurationTarget.USER);
+		notifications.info(adeBi(
+			localize('adeSwitchLangDone', "Aexus ADE display language updated to '{0}'."),
+			'Aexus ADE 界面语言已切换为「{0}」。',
+			picked.label,
+		));
 	}
 });

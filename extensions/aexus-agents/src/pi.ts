@@ -56,11 +56,11 @@ interface PiRpcPacket {
 	toolName?: string;
 	method?: string;
 	title?: string;
-	message?: string;
+	message?: string | { role?: string; usage?: unknown; model?: string; provider?: string; stopReason?: string; errorMessage?: string };
 	placeholder?: string;
 	prefill?: string;
 	options?: string[];
-	messages?: { role?: string; stopReason?: string; errorMessage?: string }[];
+	messages?: { role?: string; usage?: unknown; model?: string; provider?: string; stopReason?: string; errorMessage?: string }[];
 	finalError?: string;
 	assistantMessageEvent?: {
 		type?: string;
@@ -82,17 +82,59 @@ function readTokenCount(record: Record<string, unknown>, ...keys: string[]): num
 	return 0;
 }
 
+function readPiPositiveCostUsd(record: Record<string, unknown>): number | undefined {
+	for (const key of ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd', 'totalCost', 'cost']) {
+		const val = record[key];
+		if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+			return val;
+		}
+		if (val && typeof val === 'object') {
+			const total = (val as Record<string, unknown>).total;
+			if (typeof total === 'number' && Number.isFinite(total) && total > 0) {
+				return total;
+			}
+		}
+	}
+	return undefined;
+}
+
+function readPiModelString(record: Record<string, unknown>): string | undefined {
+	const provider = typeof record.provider === 'string' && record.provider.trim() ? record.provider.trim() : undefined;
+	for (const key of ['model', 'modelId', 'model_id']) {
+		const val = record[key];
+		if (typeof val === 'string' && val.trim() && val.trim().toLowerCase() !== 'default') {
+			const m = val.trim();
+			return provider && !m.startsWith(`${provider}/`) ? `${provider}/${m}` : m;
+		}
+		if (val && typeof val === 'object') {
+			const obj = val as Record<string, unknown>;
+			const id = typeof obj.id === 'string' && obj.id.trim() ? obj.id.trim() : undefined;
+			const p = typeof obj.provider === 'string' && obj.provider.trim() ? obj.provider.trim() : provider;
+			if (id) {
+				return p && !id.startsWith(`${p}/`) ? `${p}/${id}` : id;
+			}
+		}
+	}
+	return undefined;
+}
+
 function extractPiTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
 	if (!value || typeof value !== 'object' || depth > 3) {
 		return undefined;
 	}
 	const record = value as Record<string, unknown>;
+	const outerCostUsd = readPiPositiveCostUsd(record);
+	const outerModel = readPiModelString(record);
 	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
 		const nested = record[key];
 		if (nested && typeof nested === 'object') {
 			const usage = extractPiTurnUsage(nested, depth + 1);
 			if (usage) {
-				return usage;
+				return {
+					...usage,
+					...(usage.costUsd === undefined && outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
+					...(usage.model === undefined && outerModel !== undefined ? { model: outerModel } : {}),
+				};
 			}
 		}
 	}
@@ -104,7 +146,16 @@ function extractPiTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | u
 	if (totalTokens <= 0) {
 		return undefined;
 	}
-	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens,
+		...(outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
+		...(outerModel !== undefined ? { model: outerModel } : {}),
+		estimated: false,
+	};
 }
 
 interface PiModelInfo { id: string; name: string; description?: string }
@@ -934,7 +985,7 @@ export class PiRuntime implements EngineRuntime {
 			const confirmLabel = vscode.l10n.t('Allow Once');
 			const picked = await vscode.window.showQuickPick([confirmLabel, vscode.l10n.t('Deny')], {
 				title,
-				placeHolder: packet.message ? `${session.cwd}: ${packet.message}` : session.cwd,
+				placeHolder: typeof packet.message === 'string' && packet.message ? `${session.cwd}: ${packet.message}` : session.cwd,
 				ignoreFocusOut: true,
 			}, token);
 			respond(picked !== undefined ? { confirmed: picked === confirmLabel } : { cancelled: true });
@@ -1178,6 +1229,7 @@ export class PiRuntime implements EngineRuntime {
 
 		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
 			preTurnBaseline: this.lastRawSessionUsageBySession.get(session.id),
+			model: modelOption,
 		});
 		let promptDispatched = false;
 		let completedNormally = false;
@@ -1229,25 +1281,26 @@ export class PiRuntime implements EngineRuntime {
 			let packet: PiRpcPacket;
 			try { packet = JSON.parse(line) as PiRpcPacket; } catch { return; }
 
-			const packetUsage = extractPiTurnUsage(packet.usage ?? packet.tokens ?? packet.data?.usage);
+			const messageObj = asRecord(packet.message);
+			const packetUsage = extractPiTurnUsage(packet.usage ?? packet.tokens ?? packet.data?.usage ?? messageObj ?? packet.data);
 			if (packetUsage && promptDispatched) {
 				const normalized = usageTracker.recordRealUsage(packetUsage, { cumulativeAcrossThread: true });
 				this.lastRawSessionUsageBySession.set(session.id, packetUsage);
 				this.lastTurnUsageBySession.set(session.id, normalized);
-				}
+			}
 
-				if (packet.type === 'response' && packet.id) {
-					const req = pending.get(packet.id);
-					if (req) {
-						pending.delete(packet.id);
-						if (packet.success) {
-							req.resolve(packet.data);
-						} else {
-							req.reject(new Error(packet.error || vscode.l10n.t('Pi command {0} failed.', packet.command ?? '')));
-						}
+			if (packet.type === 'response' && packet.id) {
+				const req = pending.get(packet.id);
+				if (req) {
+					pending.delete(packet.id);
+					if (packet.success) {
+						req.resolve(packet.data);
+					} else {
+						req.reject(new Error(packet.error || vscode.l10n.t('Pi command {0} failed.', packet.command ?? '')));
 					}
-					return;
 				}
+				return;
+			}
 
 				if (packet.type === 'message_update' && !token.isCancellationRequested) {
 					const ame = packet.assistantMessageEvent;
@@ -1275,6 +1328,50 @@ export class PiRuntime implements EngineRuntime {
 						|| (requestedPerm !== 'ask' && requestedPerm !== 'manual' && (explicitBypass || isAutonomousModeEnabled()));
 					void this.handleUiRequest(child, packet, session, token, autoApprove).catch(() => { });
 				} else if (packet.type === 'agent_end' && Array.isArray(packet.messages)) {
+					if (promptDispatched && !usageTracker.getLatestRealUsage()) {
+						let sumIn = 0;
+						let sumOut = 0;
+						let sumCacheRead = 0;
+						let sumCacheWrite = 0;
+						let sumTotal = 0;
+						let sumCost = 0;
+						let hasCost = false;
+						let detectedModel: string | undefined;
+						for (const msg of packet.messages) {
+							if (msg.role !== 'assistant') {
+								continue;
+							}
+							const msgUsage = extractPiTurnUsage(msg);
+							if (msgUsage) {
+								sumIn += msgUsage.inputTokens;
+								sumOut += msgUsage.outputTokens;
+								sumCacheRead += msgUsage.cacheReadTokens ?? 0;
+								sumCacheWrite += msgUsage.cacheWriteTokens ?? 0;
+								sumTotal += msgUsage.totalTokens;
+								if (msgUsage.costUsd !== undefined) {
+									sumCost += msgUsage.costUsd;
+									hasCost = true;
+								}
+								if (msgUsage.model) {
+									detectedModel = msgUsage.model;
+								}
+							}
+						}
+						if (sumTotal > 0) {
+							const agg: EngineTurnTokenUsage = {
+								inputTokens: sumIn,
+								outputTokens: sumOut,
+								cacheReadTokens: sumCacheRead,
+								cacheWriteTokens: sumCacheWrite,
+								totalTokens: sumTotal,
+								...(hasCost ? { costUsd: Math.round(sumCost * 1_000_000) / 1_000_000 } : {}),
+								...(detectedModel ? { model: detectedModel } : {}),
+								estimated: false,
+							};
+							const normalized = usageTracker.recordRealUsage(agg, { cumulativeAcrossThread: false });
+							this.lastTurnUsageBySession.set(session.id, normalized);
+						}
+					}
 					const lastMsg = packet.messages.at(-1);
 					if (lastMsg?.stopReason === 'error' && lastMsg.errorMessage) {
 						turnError = lastMsg.errorMessage;

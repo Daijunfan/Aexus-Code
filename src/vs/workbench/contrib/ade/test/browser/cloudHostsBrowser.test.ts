@@ -39,6 +39,8 @@ import {
 	IFileSystemProviderError,
 } from '../../../../../platform/files/common/files.js';
 import { TestInstantiationService } from '../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
+import { ColorScheme } from '../../../../../platform/theme/common/theme.js';
+import { IColorTheme, IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import {
 	IQuickInputButton,
 	IQuickInputHideEvent,
@@ -1933,9 +1935,13 @@ suite('AdeSessionsService cloud engine probing', () => {
 		});
 		const extensions = upcastPartial<IExtensionService>({
 			extensions: [],
+			onDidChangeExtensions: Event.None,
 			whenInstalledExtensionsRegistered: async () => true,
 		});
-		const service = new AdeSessionsService(sessions, commands, extensions, upcastPartial<IUriIdentityService>({}));
+		const themeService = upcastPartial<IThemeService>({
+			getColorTheme: () => upcastPartial<IColorTheme>({ type: ColorScheme.DARK }),
+		});
+		const service = new AdeSessionsService(sessions, commands, extensions, upcastPartial<IUriIdentityService>({}), themeService);
 		return { service, commandCalls };
 	}
 

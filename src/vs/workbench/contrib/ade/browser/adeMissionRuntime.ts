@@ -32,6 +32,7 @@ import {
 	parseMissionMermaidDag,
 } from '../../../../platform/ade/common/adeMissionDag.js';
 import {
+	ADE_MISSION_CONCURRENCY_CONFIG_KEY,
 	appendMissionDagRevision,
 	applySafeMissionPatch,
 	blockMissionToken,
@@ -44,6 +45,7 @@ import {
 	expandTracePointer,
 	failMissionToken,
 	fireMissionSourceTrigger,
+	IMissionConcurrencyLimits,
 	IMissionEngineCaller,
 	IMissionEngineTransitionResult,
 	IMissionNodeTelemetry,
@@ -52,7 +54,10 @@ import {
 	IMissionToken,
 	IMissionTraceNode,
 	IMissionTurnUsageInput,
+	IMissionTurnUsagePricingOptions,
+	inferMissionConcurrencyProvider,
 	MissionEngineEffect,
+	normalizeMissionConcurrencyLimits,
 	parseDurationMs,
 	pauseMissionRun,
 	recallMissionTokens,
@@ -64,17 +69,23 @@ import {
 	resumeMissionRun,
 	retryMissionToken,
 	setMissionBudgetLimit,
+	setMissionConcurrencyLimits,
 	setMissionSilenceTimeout,
 	startMissionRun,
 	stopMissionRun,
 	validateSourceTrigger,
 } from '../../../../platform/ade/common/adeMissionEngine.js';
 import {
+	ADE_MODEL_PRICING_OVERRIDES_CONFIG_KEY,
+	AdeModelPricingOverrides,
+} from '../../../../platform/ade/common/adeModelPricing.js';
+import {
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
 	IAdeOrganizationConfig,
 	resolveEffectiveRankDefinition,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { createDecorator, IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
 import { ADE_SECRETARY_ID, IAdeAgent, IAdeProjectsService } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
@@ -94,10 +105,12 @@ export interface IMissionStatusView {
 	readonly nodeStates: IMissionRuntimeState['nodeStates'];
 	readonly tokens: readonly IMissionToken[];
 	readonly activeTokenCount: number;
+	readonly queuedTokenCount?: number;
 	readonly blockedTokenCount: number;
 	readonly waitingGateCount: number;
 	readonly waitingJoinCount?: number;
 	readonly failedTokenCount: number;
+	readonly concurrencyLimits?: IMissionConcurrencyLimits;
 	readonly triggers: readonly IMissionSourceTrigger[];
 	readonly nodeChecks?: Readonly<Record<string, readonly IMissionNodeCheckHook[]>>;
 	readonly nodeTelemetry?: Readonly<Record<string, IMissionNodeTelemetry>>;
@@ -121,11 +134,12 @@ export interface IAdeMissionRuntimeService {
 		readonly managedNodeIds?: readonly string[];
 	} | undefined;
 
-	start(missionId: string, options?: { readonly silenceTimeoutMinutes?: number; readonly initialPrompt?: string }): Promise<IMissionEngineTransitionResult>;
+	start(missionId: string, options?: { readonly silenceTimeoutMinutes?: number; readonly initialPrompt?: string; readonly concurrencyLimits?: IMissionConcurrencyLimits }): Promise<IMissionEngineTransitionResult>;
 	pause(missionId: string): Promise<IMissionEngineTransitionResult>;
 	resume(missionId: string): Promise<IMissionEngineTransitionResult>;
 	stop(missionId: string): Promise<IMissionEngineTransitionResult>;
 	setSilenceTimeout(missionId: string, minutes: number): Promise<IMissionEngineTransitionResult>;
+	setConcurrencyLimits(missionId: string, limits: IMissionConcurrencyLimits | undefined): Promise<IMissionEngineTransitionResult>;
 	setBudgetLimit(missionId: string, budgetLimitUsd: number | undefined): Promise<{ readonly ok: boolean; readonly state: IMissionRuntimeState; readonly error?: string }>;
 	distillNodeContext(missionId: string, nodeId: string, options?: { readonly memo?: string }): Promise<IMissionEngineTransitionResult>;
 
@@ -171,9 +185,40 @@ export interface IAdeMissionRuntimeService {
 	removeTrigger(missionId: string, triggerId: string, caller: IMissionEngineCaller): Promise<{ readonly ok: boolean; readonly removedId?: string; readonly error?: string; readonly code?: string }>;
 
 	touchAgentActivity(sessionResourceOrAgentId: string, timestamp?: number): void;
-	recordTurnUsageBySessionResource(sessionResource: string, usage: IMissionTurnUsageInput): void;
+	beginInteractiveTurn?(sessionResourceOrAgentId: string): {
+		readonly turnId: string;
+		readonly missionId: string;
+		readonly nodeId: string;
+		readonly tokenId?: string;
+	} | undefined;
+	endInteractiveTurn?(turnId: string): void;
+	recordTurnUsageBySessionResource(
+		sessionResource: string,
+		usage: IMissionTurnUsageInput,
+		options?: {
+			readonly turnId?: string;
+			readonly missionId?: string;
+			readonly nodeId?: string;
+			readonly tokenId?: string;
+		},
+	): void;
 	recordNodeTurnUsage(missionId: string, nodeId: string, usage: IMissionTurnUsageInput): void;
 }
+
+interface IMissionTurnAttribution {
+	readonly turnId: string;
+	readonly missionId: string;
+	readonly nodeId: string;
+	readonly tokenId?: string;
+	readonly agentId: string;
+	readonly sessionResource?: string;
+	readonly source: 'dispatch' | 'interactive';
+	readonly startedAt: number;
+	finishedAt?: number;
+}
+
+const MAX_RETAINED_TURN_ATTRIBUTIONS = 512;
+const DELAYED_TURN_USAGE_GRACE_MS = 60_000;
 
 export class AdeMissionRuntimeService extends Disposable implements IAdeMissionRuntimeService {
 	declare readonly _serviceBrand: undefined;
@@ -188,6 +233,12 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 	private readonly inFlightCheckTokens = new Set<string>();
 	private readonly pendingTurnNudgeTimers = new Set<ReturnType<typeof setTimeout>>();
 	private readonly activeTurnsByAgent = new Map<string, number>();
+	private turnAttributionSeq = 0;
+	private readonly turnAttributionById = new Map<string, IMissionTurnAttribution>();
+	private readonly inFlightTurnByAgent = new Map<string, IMissionTurnAttribution>();
+	private readonly inFlightTurnBySession = new Map<string, IMissionTurnAttribution>();
+	private readonly lastTurnByAgent = new Map<string, IMissionTurnAttribution>();
+	private readonly lastTurnBySession = new Map<string, IMissionTurnAttribution>();
 	private readonly pendingDispatchesByAgent = new Map<string, Array<{
 		readonly prompt: string;
 		readonly options?: {
@@ -199,6 +250,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			readonly dedupeKey?: string;
 			readonly retryAttempt?: number;
 			readonly preferReattach?: boolean;
+			readonly isNoiseTurn?: boolean;
 			readonly onDispatchError?: (reason: string) => void;
 		};
 	}>>();
@@ -221,6 +273,20 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			if (this._store.isDisposed) {
 				return;
 			}
+			const cfg = this.configurationService;
+			if (cfg?.onDidChangeConfiguration) {
+				this._register(cfg.onDidChangeConfiguration(e => {
+					if (e.affectsConfiguration(ADE_MISSION_CONCURRENCY_CONFIG_KEY)) {
+						void this.applyConfiguredConcurrencyLimitsToRunningMissions();
+					}
+				}));
+			}
+			const projects = this.projectsService;
+			if (projects?.onDidChange) {
+				this._register(projects.onDidChange(() => {
+					void this.reconcileRunningMissionConcurrencyQueues();
+				}));
+			}
 			const missions = this.missionService;
 			if (missions?.onDidChangeExternal) {
 				this._register(missions.onDidChangeExternal(() => {
@@ -229,24 +295,34 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 					}
 				}));
 			}
-			let hasRunningMissions = false;
-			for (const rec of missions?.listMissions() ?? []) {
-				if (rec.runtime?.status === 'running') {
-					hasRunningMissions = true;
-					this.syncWatchdog(rec.id, rec.runtime, { preserveExistingOwner: true });
+			void (async () => {
+				try {
+					await missions?.whenHydrated?.();
+				} catch {
+					// Proceed with whatever state is currently loaded
 				}
-			}
-			// After IDE restart, automatically resume interrupted active tokens instead of waiting for silence timeout.
-			if (hasRunningMissions) {
-				const recoveryTimer = setTimeout(() => {
-					this.pendingTurnNudgeTimers.delete(recoveryTimer);
-					if (this._store.isDisposed) {
-						return;
+				if (this._store.isDisposed) {
+					return;
+				}
+				let hasRunningMissions = false;
+				for (const rec of missions?.listMissions() ?? []) {
+					if (rec.runtime?.status === 'running') {
+						hasRunningMissions = true;
+						this.syncWatchdog(rec.id, rec.runtime, { preserveExistingOwner: true });
 					}
-					void this.recoverInterruptedActiveTokens().catch(() => undefined);
-				}, 1500);
-				this.pendingTurnNudgeTimers.add(recoveryTimer);
-			}
+				}
+				// After IDE restart & cold-file hydration, automatically resume interrupted active tokens instead of waiting for silence timeout.
+				if (hasRunningMissions) {
+					const recoveryTimer = setTimeout(() => {
+						this.pendingTurnNudgeTimers.delete(recoveryTimer);
+						if (this._store.isDisposed) {
+							return;
+						}
+						void this.recoverInterruptedActiveTokens().catch(() => undefined);
+					}, 1500);
+					this.pendingTurnNudgeTimers.add(recoveryTimer);
+				}
+			})();
 		});
 	}
 
@@ -288,6 +364,77 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 
 	private get commandService(): ICommandService | undefined {
 		return this.tryGet(ICommandService);
+	}
+
+	private get configurationService(): IConfigurationService | undefined {
+		return this.tryGet(IConfigurationService);
+	}
+
+	private getModelPricingOverrides(): AdeModelPricingOverrides | undefined {
+		const raw = this.configurationService?.getValue<unknown>(ADE_MODEL_PRICING_OVERRIDES_CONFIG_KEY);
+		return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as AdeModelPricingOverrides) : undefined;
+	}
+
+	private getConfiguredConcurrencyLimits(): IMissionConcurrencyLimits | undefined {
+		const raw = this.configurationService?.getValue<unknown>(ADE_MISSION_CONCURRENCY_CONFIG_KEY);
+		return raw && typeof raw === 'object' && !Array.isArray(raw) ? normalizeMissionConcurrencyLimits(raw as IMissionConcurrencyLimits) : undefined;
+	}
+
+	private async reconcileRunningMissionConcurrencyQueues(): Promise<void> {
+		const missions = this.missionService;
+		if (!missions) {
+			return;
+		}
+		for (const rec of missions.listMissions()) {
+			if (rec.runtime?.status !== 'running') {
+				continue;
+			}
+			const hasQueued = Object.values(rec.runtime.tokens).some(t => t.status === 'queued');
+			if (!hasQueued) {
+				continue;
+			}
+			const synced = this.ensureSynchronizedState(rec);
+			const res = setMissionConcurrencyLimits(synced, synced.concurrencyLimits);
+			if (res.ok && (res.data?.promotedTokenIds.length ?? 0) > 0) {
+				this.commitState(rec.id, res.state);
+				if (res.effects.length > 0) {
+					await this.executeEffects(rec, res.effects);
+				}
+			}
+		}
+	}
+
+	private async applyConfiguredConcurrencyLimitsToRunningMissions(): Promise<void> {
+		const missions = this.missionService;
+		if (!missions) {
+			return;
+		}
+		const configured = this.getConfiguredConcurrencyLimits();
+		for (const rec of missions.listMissions()) {
+			if (rec.runtime?.status === 'running' || rec.runtime?.status === 'paused') {
+				const res = setMissionConcurrencyLimits(this.ensureSynchronizedState(rec), configured);
+				if (res.ok) {
+					this.commitState(rec.id, res.state);
+					if (res.effects.length > 0) {
+						await this.executeEffects(this.requireMission(rec.id), res.effects);
+					}
+				}
+			}
+		}
+	}
+
+	private resolveNodePricingOptions(state: IMissionRuntimeState, nodeId: string, fallbackAgent?: IAdeAgent): IMissionTurnUsagePricingOptions {
+		const assignedAgentId = state.boundary.nodeAssignments[nodeId]?.agentId;
+		const agent = fallbackAgent ?? (assignedAgentId ? this.projectsService?.getAgent(assignedAgentId) : undefined);
+		const fallbackModel = agent?.preferredModel?.trim() && agent.preferredModel.trim().toLowerCase() !== 'default'
+			? agent.preferredModel.trim()
+			: undefined;
+		const fallbackEngineId = agent?.session?.engineId || agent?.preferredEngineId;
+		return {
+			overrides: this.getModelPricingOverrides(),
+			fallbackModel,
+			fallbackEngineId,
+		};
 	}
 
 	private get orgConfig(): IAdeOrganizationConfig {
@@ -389,13 +536,23 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 					: (existing?.tier ?? defaultInGraphTier);
 				const resolvedHost = existing?.hostAlias ?? (resolvedAgent?.projectUri.scheme === 'aexus-ssh' ? resolvedAgent.projectUri.authority : 'local');
 				const resolvedRemotePath = existing?.remoteProjectPath ?? (resolvedAgent?.projectUri.scheme === 'aexus-ssh' ? resolvedAgent.projectUri.path : undefined);
-				if (!existing || existing.agentId !== resolvedAgentId || existing.tier !== resolvedTier) {
+				const hasLiveModelOrEngine = Boolean(
+					resolvedAgent && (resolvedAgent.preferredModel || resolvedAgent.session?.engineId || resolvedAgent.preferredEngineId),
+				);
+				const resolvedProvider = hasLiveModelOrEngine
+					? inferMissionConcurrencyProvider(
+						resolvedAgent?.preferredModel,
+						resolvedAgent?.session?.engineId ?? resolvedAgent?.preferredEngineId,
+					)
+					: existing?.provider;
+				if (!existing || existing.agentId !== resolvedAgentId || existing.tier !== resolvedTier || existing.provider !== resolvedProvider) {
 					nextAssignments[node.id] = {
 						agentId: resolvedAgentId,
 						tier: resolvedTier,
 						roleKind: existing?.roleKind ?? 'worker',
 						hostAlias: resolvedHost,
 						...(resolvedRemotePath ? { remoteProjectPath: resolvedRemotePath } : {}),
+						...(resolvedProvider ? { provider: resolvedProvider } : {}),
 					};
 					assignmentsChanged = true;
 				}
@@ -451,11 +608,11 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			}
 		}
 
-		// Keep live active/blocked token holderAgentId and deferred dispatch effects synchronized with current node assignment.
+		// Keep live active/queued/blocked token holderAgentId and deferred dispatch effects synchronized with current node assignment.
 		let tokensChanged = false;
 		const nextTokens: Record<string, IMissionToken> = { ...base.tokens };
 		for (const [tid, tok] of Object.entries(base.tokens)) {
-			if (tok.status === 'active' || tok.status === 'blocked') {
+			if (tok.status === 'active' || tok.status === 'queued' || tok.status === 'blocked') {
 				const currentAssigned = nextAssignments[tok.nodeId]?.agentId;
 				if (currentAssigned && tok.holderAgentId !== currentAssigned) {
 					nextTokens[tid] = { ...tok, holderAgentId: currentAssigned };
@@ -566,10 +723,12 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			nodeStates: state.nodeStates,
 			tokens,
 			activeTokenCount: tokens.filter(t => t.status === 'active').length,
+			queuedTokenCount: tokens.filter(t => t.status === 'queued').length,
 			blockedTokenCount: tokens.filter(t => t.status === 'blocked').length,
 			waitingGateCount: tokens.filter(t => t.status === 'waiting_gate').length,
 			waitingJoinCount: tokens.filter(t => t.status === 'waiting_join').length,
 			failedTokenCount: tokens.filter(t => t.status === 'frozen_failed').length,
+			...(state.concurrencyLimits ? { concurrencyLimits: state.concurrencyLimits } : {}),
 			triggers: state.triggers,
 			...(Object.keys(nodeChecks).length > 0 ? { nodeChecks } : {}),
 			...(state.nodeTelemetry ? { nodeTelemetry: state.nodeTelemetry } : {}),
@@ -628,12 +787,14 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 		return undefined;
 	}
 
-	async start(missionId: string, options?: { readonly silenceTimeoutMinutes?: number; readonly initialPrompt?: string }): Promise<IMissionEngineTransitionResult> {
+	async start(missionId: string, options?: { readonly silenceTimeoutMinutes?: number; readonly initialPrompt?: string; readonly concurrencyLimits?: IMissionConcurrencyLimits }): Promise<IMissionEngineTransitionResult> {
 		const rec = this.requireMission(missionId);
 		const graph = parseMissionMermaidDag(rec.mermaidText);
 		const state = this.ensureSynchronizedState(rec);
+		const effectiveConcurrency = options?.concurrencyLimits ?? state.concurrencyLimits ?? this.getConfiguredConcurrencyLimits();
 		const result = startMissionRun(state, graph, this.orgConfig, {
 			...options,
+			...(effectiveConcurrency ? { concurrencyLimits: effectiveConcurrency } : {}),
 			requireAssignedNodes: Boolean(this.projectsService),
 		});
 		if (result.ok) {
@@ -641,6 +802,18 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			this.commitState(rec.id, withInitialRev);
 			await this.executeEffects(rec, result.effects);
 			return { ...result, state: withInitialRev };
+		}
+		return result;
+	}
+
+	async setConcurrencyLimits(missionId: string, limits: IMissionConcurrencyLimits | undefined): Promise<IMissionEngineTransitionResult> {
+		const rec = this.requireMission(missionId);
+		const result = setMissionConcurrencyLimits(this.ensureSynchronizedState(rec), limits);
+		if (result.ok) {
+			this.commitState(rec.id, result.state);
+			if (result.effects.length > 0) {
+				await this.executeEffects(this.requireMission(rec.id), result.effects);
+			}
 		}
 		return result;
 	}
@@ -673,9 +846,11 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 
 	async stop(missionId: string): Promise<IMissionEngineTransitionResult> {
 		const rec = this.requireMission(missionId);
-		const result = stopMissionRun(this.ensureSynchronizedState(rec));
+		const prevState = this.ensureSynchronizedState(rec);
+		const result = stopMissionRun(prevState);
 		if (result.ok) {
 			this.commitState(rec.id, result.state);
+			this.flushPendingDispatchesForReleasedAgents(prevState, result.state);
 			await this.executeEffects(rec, result.effects);
 		}
 		return result;
@@ -763,10 +938,12 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 	private notifyBudgetCircuitTripped(rec: IAdeMissionRecord, state: IMissionRuntimeState): void {
 		const spent = computeMissionTotalCostUsd(state);
 		const limit = state.budgetLimitUsd ?? 0;
+		const hasEstimated = Object.values(state.nodeTelemetry ?? {}).some(t => Boolean(t.costEstimated || (t.estimatedCostUsd ?? 0) > 0));
+		const spentLabel = hasEstimated ? `~$${spent.toFixed(2)} (estimated)` : `$${spent.toFixed(2)}`;
 		void this.inboxService?.postGovernorMessage?.({
 			governorSessionId: rec.ownerSessionId ?? rec.id,
 			title: `FinOps Budget Circuit-Breaker Tripped (${rec.title})`,
-			message: `Mission "${rec.title}" automatically paused after spending $${spent.toFixed(2)} against the $${limit.toFixed(2)} FinOps budget ceiling. Raise the budget limit in the FinOps Ledger to resume.`,
+			message: `Mission "${rec.title}" automatically paused after spending ${spentLabel} against the $${limit.toFixed(2)} FinOps budget ceiling. Raise the budget limit in the FinOps Ledger to resume.`,
 			severity: 'critical',
 		}).catch(() => undefined);
 	}
@@ -850,7 +1027,15 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			boundary: candidate,
 			updatedAt: Date.now(),
 		};
-		this.commitState(rec.id, nextState);
+		if (nextState.status === 'running' && Object.values(nextState.tokens).some(t => t.status === 'queued')) {
+			const drained = setMissionConcurrencyLimits(nextState, nextState.concurrencyLimits);
+			this.commitState(rec.id, drained.state);
+			if (drained.effects.length > 0) {
+				await this.executeEffects(rec, drained.effects);
+			}
+		} else {
+			this.commitState(rec.id, nextState);
+		}
 		return { ok: true, boundary: candidate, validation };
 	}
 
@@ -896,12 +1081,22 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			? resolveEffectiveRankDefinition(this.orgConfig, targetAgent.role, this.projectsService?.hasSubordinates(targetAgent.id) ?? false).tier
 			: (existing?.tier ?? Math.min(this.orgConfig.ranks.length, Math.max(1, freshState.boundary.offGraphMaxTier + 1)));
 
+		const hasLiveTargetMeta = Boolean(
+			targetAgent && (targetAgent.preferredModel || targetAgent.session?.engineId || targetAgent.preferredEngineId),
+		);
+		const resolvedProvider = hasLiveTargetMeta
+			? inferMissionConcurrencyProvider(
+				targetAgent?.preferredModel,
+				targetAgent?.session?.engineId ?? targetAgent?.preferredEngineId,
+			)
+			: existing?.provider;
 		const updatedAssignment: IMissionNodeAssignment = {
 			agentId: targetAgentId,
 			tier: resolvedTier,
 			roleKind: options.roleKind ?? existing?.roleKind ?? 'worker',
 			hostAlias,
 			...(hostAlias !== 'local' && remoteProjectPath ? { remoteProjectPath } : {}),
+			...(resolvedProvider ? { provider: resolvedProvider } : {}),
 		};
 		const nextState: IMissionRuntimeState = {
 			...freshState,
@@ -914,7 +1109,15 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			},
 			updatedAt: Date.now(),
 		};
-		this.commitState(freshRec.id, nextState);
+		if (nextState.status === 'running' && Object.values(nextState.tokens).some(t => t.status === 'queued')) {
+			const drained = setMissionConcurrencyLimits(nextState, nextState.concurrencyLimits);
+			this.commitState(freshRec.id, drained.state);
+			if (drained.effects.length > 0) {
+				await this.executeEffects(freshRec, drained.effects);
+			}
+		} else {
+			this.commitState(freshRec.id, nextState);
+		}
 		return { ok: true, assignment: updatedAssignment };
 	}
 
@@ -1187,7 +1390,8 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 
 		const latestRec = this.requireMission(initialRec.id);
 		const latestGraph = parseMissionMermaidDag(latestRec.mermaidText);
-		const result = completeMissionToken(this.ensureSynchronizedState(latestRec), latestGraph, {
+		const prevCompleteState = this.ensureSynchronizedState(latestRec);
+		const result = completeMissionToken(prevCompleteState, latestGraph, {
 			tokenId: params.tokenId,
 			summary: params.summary,
 			callerAgentId: params.callerAgentId,
@@ -1195,6 +1399,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 		});
 		if (result.ok) {
 			this.commitState(latestRec.id, result.state);
+			this.flushPendingDispatchesForReleasedAgents(prevCompleteState, result.state);
 			await this.executeEffects(latestRec, result.effects);
 			if (checkSuite) {
 				return {
@@ -1213,9 +1418,11 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 	async rejectToken(missionId: string, params: { readonly tokenId: string; readonly reason: string; readonly targetNodeId?: string; readonly callerAgentId?: string }): Promise<IMissionEngineTransitionResult> {
 		const rec = this.requireMission(missionId);
 		const graph = parseMissionMermaidDag(rec.mermaidText);
-		const result = rejectMissionToken(this.ensureSynchronizedState(rec), graph, params);
+		const prevState = this.ensureSynchronizedState(rec);
+		const result = rejectMissionToken(prevState, graph, params);
 		if (result.ok) {
 			this.commitState(rec.id, result.state);
+			this.flushPendingDispatchesForReleasedAgents(prevState, result.state);
 			await this.executeEffects(rec, result.effects);
 		}
 		return result;
@@ -1280,6 +1487,9 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 		});
 		if (result.ok) {
 			this.commitState(freshRec.id, result.state);
+			if (result.effects.length > 0) {
+				await this.executeEffects(this.requireMission(freshRec.id), result.effects);
+			}
 		}
 		return result;
 	}
@@ -1287,12 +1497,14 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 	async failToken(missionId: string, params: { readonly tokenId: string; readonly reason: string; readonly callerAgentId?: string }): Promise<IMissionEngineTransitionResult> {
 		const rec = this.requireMission(missionId);
 		const graph = parseMissionMermaidDag(rec.mermaidText);
-		const result = failMissionToken(this.ensureSynchronizedState(rec), graph, {
+		const prevState = this.ensureSynchronizedState(rec);
+		const result = failMissionToken(prevState, graph, {
 			...params,
 			owner: { ownerSessionId: rec.ownerSessionId, ownerTier: rec.ownerTier },
 		});
 		if (result.ok) {
 			this.commitState(rec.id, result.state);
+			this.flushPendingDispatchesForReleasedAgents(prevState, result.state);
 			await this.executeEffects(rec, result.effects);
 		}
 		return result;
@@ -1446,9 +1658,11 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 	async recallTokens(missionId: string, params: { readonly caller: IMissionEngineCaller; readonly nodeIds?: readonly string[]; readonly branchRootNodeId?: string; readonly reason?: string }): Promise<IMissionEngineTransitionResult> {
 		const rec = this.requireMission(missionId);
 		const graph = parseMissionMermaidDag(rec.mermaidText);
-		const result = recallMissionTokens(this.ensureSynchronizedState(rec), graph, params);
+		const prevState = this.ensureSynchronizedState(rec);
+		const result = recallMissionTokens(prevState, graph, params);
 		if (result.ok) {
 			this.commitState(rec.id, result.state);
+			this.flushPendingDispatchesForReleasedAgents(prevState, result.state);
 			await this.executeEffects(rec, result.effects);
 		}
 		return result;
@@ -1457,7 +1671,8 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 	async patchMermaid(missionId: string, params: { readonly caller: IMissionEngineCaller; readonly newMermaidText: string; readonly reason?: string }): Promise<IMissionEngineTransitionResult> {
 		const rec = this.requireMission(missionId);
 		const graph = parseMissionMermaidDag(rec.mermaidText);
-		const result = applySafeMissionPatch(this.ensureSynchronizedState(rec), graph, params);
+		const prevState = this.ensureSynchronizedState(rec);
+		const result = applySafeMissionPatch(prevState, graph, params);
 		if (result.ok) {
 			// Apply new Mermaid first so locked sidebar employees are created for any added nodes,
 			// then synchronize runtime assignments/tokens and hydrate newly minted dispatch effects before executing!
@@ -1476,6 +1691,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 				nextGraph,
 			);
 			this.commitState(rec.id, synchronized);
+			this.flushPendingDispatchesForReleasedAgents(prevState, synchronized);
 			const latest = this.requireMission(rec.id);
 			const hydratedEffects: MissionEngineEffect[] = result.effects
 				.filter(e => e.kind !== 'mermaid_patched')
@@ -1635,7 +1851,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 		if (!rec || !state) {
 			return;
 		}
-		const nextState = recordMissionNodeTurnUsage(state, nodeId, usage);
+		const nextState = recordMissionNodeTurnUsage(state, nodeId, usage, this.resolveNodePricingOptions(state, nodeId));
 		const trippedNow = Boolean(nextState.budgetCircuitTripped && !state.budgetCircuitTripped);
 		this.commitState(rec.id, nextState, trippedNow ? undefined : { deferPersist: true, skipWatchdogSync: true });
 		if (trippedNow) {
@@ -1644,49 +1860,319 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 		}
 	}
 
-	recordTurnUsageBySessionResource(sessionResource: string, usage: IMissionTurnUsageInput): void {
+	private registerTurnAttribution(entry: IMissionTurnAttribution): void {
+		this.turnAttributionById.set(entry.turnId, entry);
+		if (this.turnAttributionById.size > MAX_RETAINED_TURN_ATTRIBUTIONS) {
+			const oldestKey = this.turnAttributionById.keys().next().value;
+			if (oldestKey) {
+				this.turnAttributionById.delete(oldestKey);
+			}
+		}
+		this.inFlightTurnByAgent.set(entry.agentId, entry);
+		if (entry.sessionResource) {
+			this.inFlightTurnBySession.set(entry.sessionResource, entry);
+		}
+	}
+
+	private finalizeTurnAttribution(turnId: string | undefined, now = Date.now()): void {
+		if (!turnId) {
+			return;
+		}
+		const entry = this.turnAttributionById.get(turnId);
+		if (!entry) {
+			return;
+		}
+		entry.finishedAt = now;
+		if (this.inFlightTurnByAgent.get(entry.agentId)?.turnId === turnId) {
+			this.inFlightTurnByAgent.delete(entry.agentId);
+		}
+		if (entry.sessionResource && this.inFlightTurnBySession.get(entry.sessionResource)?.turnId === turnId) {
+			this.inFlightTurnBySession.delete(entry.sessionResource);
+		}
+		this.lastTurnByAgent.set(entry.agentId, entry);
+		if (this.lastTurnByAgent.size > MAX_RETAINED_TURN_ATTRIBUTIONS) {
+			const oldestAgent = this.lastTurnByAgent.keys().next().value;
+			if (oldestAgent) {
+				this.lastTurnByAgent.delete(oldestAgent);
+			}
+		}
+		if (entry.sessionResource) {
+			this.lastTurnBySession.set(entry.sessionResource, entry);
+			if (this.lastTurnBySession.size > MAX_RETAINED_TURN_ATTRIBUTIONS) {
+				const oldestSession = this.lastTurnBySession.keys().next().value;
+				if (oldestSession) {
+					this.lastTurnBySession.delete(oldestSession);
+				}
+			}
+		}
+	}
+
+	private hasBlockingTokenForAgent(agentId: string, targetMissionId?: string, targetNodeId?: string): boolean {
+		const missions = this.missionService;
+		if (!missions || !agentId) {
+			return false;
+		}
+		for (const rec of missions.listMissions()) {
+			const state = rec.runtime;
+			if (!state || (state.status !== 'running' && state.status !== 'paused')) {
+				continue;
+			}
+			for (const tok of Object.values(state.tokens)) {
+				if (tok.status !== 'blocked' && tok.status !== 'active') {
+					continue;
+				}
+				const holder = state.boundary.nodeAssignments[tok.nodeId]?.agentId ?? tok.holderAgentId;
+				if (holder !== agentId) {
+					continue;
+				}
+				if (targetMissionId && targetNodeId && rec.id === targetMissionId && tok.nodeId === targetNodeId) {
+					continue;
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private flushPendingDispatchesForReleasedAgents(prevState: IMissionRuntimeState, nextState: IMissionRuntimeState): void {
+		if (this.pendingDispatchesByAgent.size === 0) {
+			return;
+		}
+		const collectLiveAgents = (state: IMissionRuntimeState): Set<string> => {
+			const live = new Set<string>();
+			if (state.status !== 'running' && state.status !== 'paused') {
+				return live;
+			}
+			for (const tok of Object.values(state.tokens)) {
+				if (tok.status === 'active' || tok.status === 'blocked') {
+					const holder = state.boundary.nodeAssignments[tok.nodeId]?.agentId ?? tok.holderAgentId;
+					if (holder) {
+						live.add(holder);
+					}
+				}
+			}
+			return live;
+		};
+		const prevLive = collectLiveAgents(prevState);
+		const nextLive = collectLiveAgents(nextState);
+		for (const aid of prevLive) {
+			if (!nextLive.has(aid) && this.pendingDispatchesByAgent.has(aid)) {
+				this.flushNextQueuedDispatch(aid);
+			}
+		}
+	}
+
+	beginInteractiveTurn(sessionResourceOrAgentId: string): {
+		readonly turnId: string;
+		readonly missionId: string;
+		readonly nodeId: string;
+		readonly tokenId?: string;
+	} | undefined {
 		const projects = this.projectsService;
 		const missions = this.missionService;
-		if (!projects || !missions || !sessionResource) {
-			return;
+		const key = sessionResourceOrAgentId?.trim();
+		if (!projects || !missions || !key) {
+			return undefined;
 		}
-		const agent = projects.getAgent(sessionResource)
-			?? projects.agents.find(a => a.session?.resource.toString() === sessionResource);
+		const agent = projects.getAgent(key)
+			?? projects.agents.find(a => a.session?.resource.toString() === key);
 		if (!agent) {
-			return;
+			return undefined;
 		}
+		let blockedMatch: { readonly missionId: string; readonly token: IMissionToken } | undefined;
 		for (const rec of missions.listMissions()) {
 			const state = rec.runtime;
 			if (!state || state.status === 'completed' || state.status === 'stopped' || state.status === 'failed') {
 				continue;
 			}
-			// Prefer the currently active token held by this employee; while running, never bleed into idle/skipped sibling nodes
-			// (e.g., an unexecuted on_fail node owned by the same employee).
 			const activeTok = Object.values(state.tokens).find(tok => {
 				const assigned = state.boundary.nodeAssignments[tok.nodeId]?.agentId;
-				return tok.status === 'active' && (tok.holderAgentId === agent.id || assigned === agent.id);
+				return tok.status === 'active' && (assigned === agent.id || (!assigned && tok.holderAgentId === agent.id));
 			});
+			if (activeTok) {
+				const now = Date.now();
+				const turnId = `interactive-${++this.turnAttributionSeq}-${now.toString(36)}`;
+				this.registerTurnAttribution({
+					turnId,
+					missionId: rec.id,
+					nodeId: activeTok.nodeId,
+					tokenId: activeTok.id,
+					agentId: agent.id,
+					sessionResource: agent.session?.resource.toString() ?? (key.includes(':') ? key : undefined),
+					source: 'interactive',
+					startedAt: now,
+				});
+				return {
+					turnId,
+					missionId: rec.id,
+					nodeId: activeTok.nodeId,
+					tokenId: activeTok.id,
+				};
+			}
+			if (!blockedMatch) {
+				const blockedTok = Object.values(state.tokens).find(tok => {
+					const assigned = state.boundary.nodeAssignments[tok.nodeId]?.agentId;
+					return tok.status === 'blocked' && (assigned === agent.id || (!assigned && tok.holderAgentId === agent.id));
+				});
+				if (blockedTok) {
+					blockedMatch = { missionId: rec.id, token: blockedTok };
+				}
+			}
+		}
+		if (blockedMatch) {
+			const now = Date.now();
+			const turnId = `interactive-${++this.turnAttributionSeq}-${now.toString(36)}`;
+			this.registerTurnAttribution({
+				turnId,
+				missionId: blockedMatch.missionId,
+				nodeId: blockedMatch.token.nodeId,
+				tokenId: blockedMatch.token.id,
+				agentId: agent.id,
+				sessionResource: agent.session?.resource.toString() ?? (key.includes(':') ? key : undefined),
+				source: 'interactive',
+				startedAt: now,
+			});
+			return {
+				turnId,
+				missionId: blockedMatch.missionId,
+				nodeId: blockedMatch.token.nodeId,
+				tokenId: blockedMatch.token.id,
+			};
+		}
+		return undefined;
+	}
+
+	endInteractiveTurn(turnId: string): void {
+		this.finalizeTurnAttribution(turnId?.trim());
+	}
+
+	recordTurnUsageBySessionResource(
+		sessionResource: string,
+		usage: IMissionTurnUsageInput,
+		options?: {
+			readonly turnId?: string;
+			readonly missionId?: string;
+			readonly nodeId?: string;
+			readonly tokenId?: string;
+		},
+	): void {
+		const missions = this.missionService;
+		if (!missions) {
+			return;
+		}
+		const explicitTurnId = options?.turnId?.trim() || usage.turnId?.trim();
+		if (explicitTurnId) {
+			const bound = this.turnAttributionById.get(explicitTurnId);
+			if (bound) {
+				this.recordNodeTurnUsage(bound.missionId, bound.nodeId, usage);
+				return;
+			}
+		}
+		const explicitMissionId = options?.missionId?.trim();
+		const explicitNodeId = options?.nodeId?.trim();
+		if (explicitMissionId && explicitNodeId) {
+			this.recordNodeTurnUsage(explicitMissionId, explicitNodeId, usage);
+			return;
+		}
+		const explicitTokenId = options?.tokenId?.trim() || usage.tokenId?.trim();
+		if (explicitTokenId) {
+			for (const rec of missions.listMissions()) {
+				const tok = rec.runtime?.tokens[explicitTokenId];
+				if (tok) {
+					this.recordNodeTurnUsage(rec.id, tok.nodeId, usage);
+					return;
+				}
+			}
+		}
+
+		const projects = this.projectsService;
+		if (!projects || !sessionResource) {
+			return;
+		}
+		const key = sessionResource.trim();
+		const agent = projects.getAgent(key)
+			?? projects.agents.find(a => a.session?.resource.toString() === key);
+		if (!agent) {
+			return;
+		}
+		const agentSessionUri = agent.session?.resource.toString();
+
+		// Priority 4: An in-flight bound turn for this session/agent always owns incoming usage deltas
+		// (even if the employee already called `token complete` mid-turn and another node became active!).
+		const inFlight = (agentSessionUri ? this.inFlightTurnBySession.get(agentSessionUri) : undefined)
+			?? this.inFlightTurnBySession.get(key)
+			?? this.inFlightTurnByAgent.get(agent.id);
+		if (inFlight) {
+			this.recordNodeTurnUsage(inFlight.missionId, inFlight.nodeId, usage);
+			return;
+		}
+
+		// Priority 5: Active token OR recently-finished turn/token within delayed-callback grace window.
+		// Never fall back to `assignedNodes[0]` when this employee actually executed a later node!
+		const now = Date.now();
+		const allMissions = missions.listMissions();
+		let activeMatch: { readonly missionId: string; readonly nodeId: string; readonly arrivedAt: number } | undefined;
+		let recentFinishedToken: { readonly missionId: string; readonly nodeId: string; readonly lastActivityAt: number } | undefined;
+
+		for (const rec of allMissions) {
+			const state = rec.runtime;
+			if (!state) {
+				continue;
+			}
+			const isLiveMission = state.status !== 'completed' && state.status !== 'stopped' && state.status !== 'failed';
+			for (const tok of Object.values(state.tokens)) {
+				const assigned = state.boundary.nodeAssignments[tok.nodeId]?.agentId;
+				if (tok.holderAgentId !== agent.id && assigned !== agent.id) {
+					continue;
+				}
+				if (isLiveMission && tok.status === 'active') {
+					if (!activeMatch || tok.arrivedAt >= activeMatch.arrivedAt) {
+						activeMatch = { missionId: rec.id, nodeId: tok.nodeId, arrivedAt: tok.arrivedAt };
+					}
+				} else if (
+					(tok.status === 'completed' || tok.status === 'blocked' || tok.status === 'frozen_failed' || tok.status === 'recalled')
+					&& (now - tok.lastActivityAt) <= DELAYED_TURN_USAGE_GRACE_MS
+				) {
+					if (!recentFinishedToken || tok.lastActivityAt >= recentFinishedToken.lastActivityAt) {
+						recentFinishedToken = { missionId: rec.id, nodeId: tok.nodeId, lastActivityAt: tok.lastActivityAt };
+					}
+				}
+			}
+		}
+
+		if (activeMatch) {
+			this.recordNodeTurnUsage(activeMatch.missionId, activeMatch.nodeId, usage);
+			return;
+		}
+
+		const lastBound = (agentSessionUri ? this.lastTurnBySession.get(agentSessionUri) : undefined)
+			?? this.lastTurnBySession.get(key)
+			?? this.lastTurnByAgent.get(agent.id);
+		const lastBoundTime = lastBound?.finishedAt ?? lastBound?.startedAt ?? 0;
+		const hasFreshLastBound = Boolean(lastBound && (now - lastBoundTime) <= DELAYED_TURN_USAGE_GRACE_MS);
+
+		if (hasFreshLastBound && (!recentFinishedToken || lastBoundTime >= recentFinishedToken.lastActivityAt)) {
+			this.recordNodeTurnUsage(lastBound!.missionId, lastBound!.nodeId, usage);
+			return;
+		}
+		if (recentFinishedToken) {
+			this.recordNodeTurnUsage(recentFinishedToken.missionId, recentFinishedToken.nodeId, usage);
+			return;
+		}
+
+		// Priority 6: Unambiguous fallback ONLY when the employee owns a single node (or Mission is idle pre-run).
+		// NEVER guess `assignedNodes[0]` on a live (`running`/`paused`) multi-node reused @Employee!
+		for (const rec of allMissions) {
+			const state = rec.runtime;
+			if (!state || state.status === 'completed' || state.status === 'stopped' || state.status === 'failed') {
+				continue;
+			}
 			const assignedNodes = Object.entries(state.boundary.nodeAssignments)
 				.filter(([, assign]) => assign.agentId === agent.id)
 				.map(([nid]) => nid);
-			const targetNodeIds = activeTok
-				? [activeTok.nodeId]
-				: (assignedNodes.length > 0 ? [assignedNodes[0]] : []);
-			if (targetNodeIds.length === 0) {
-				continue;
-			}
-			let nextState = state;
-			for (const nid of targetNodeIds) {
-				nextState = recordMissionNodeTurnUsage(nextState, nid, usage);
-			}
-			const trippedNow = Boolean(nextState.budgetCircuitTripped && !state.budgetCircuitTripped);
-			this.commitState(rec.id, nextState, trippedNow ? undefined : { deferPersist: true, skipWatchdogSync: true });
-			if (trippedNow) {
-				void this.stopActiveAgentsOnBudgetTrip(nextState);
-				this.notifyBudgetCircuitTripped(rec, nextState);
-			}
-			if (activeTok) {
-				break;
+			if (assignedNodes.length === 1 || (state.status === 'idle' && assignedNodes.length > 0)) {
+				this.recordNodeTurnUsage(rec.id, assignedNodes[0], usage);
+				return;
 			}
 		}
 	}
@@ -1780,6 +2266,12 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 					continue;
 				}
 			}
+			// Respect cross-mission blocked-token session exclusivity: never inject a prompt into an employee
+			// whose underlying session is currently suspended in another Mission's `blocked` node.
+			if (this.hasBlockingTokenForAgent(agentId, next.options?.missionId, next.options?.nodeId)) {
+				deferredPaused.push(next);
+				continue;
+			}
 			if (deferredPaused.length > 0) {
 				queue.unshift(...deferredPaused);
 			}
@@ -1830,6 +2322,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			readonly dedupeKey?: string;
 			readonly retryAttempt?: number;
 			readonly preferReattach?: boolean;
+			readonly isNoiseTurn?: boolean;
 			readonly onDispatchError?: (reason: string) => void;
 		},
 	): Promise<boolean> {
@@ -1874,9 +2367,13 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			}
 		};
 
-		// Serialize ALL dispatches onto the same agent (both multi-position Mission tokens AND concurrent
-		// supervisor/Governor escalations!) so a second arrival NEVER force-cancels an in-flight turn.
-		if ((this.activeTurnsByAgent.get(agent.id) ?? 0) > 0) {
+		// Serialize ALL dispatches onto the same agent (both multi-position Mission tokens, cross-mission
+		// blocked-session protection, AND concurrent supervisor/Governor escalations!) so a second arrival
+		// NEVER force-cancels an in-flight turn or contaminates a suspended blocked session.
+		if (
+			(this.activeTurnsByAgent.get(agent.id) ?? 0) > 0
+			|| this.hasBlockingTokenForAgent(agent.id, trackedMissionId, trackedNodeId)
+		) {
 			enqueueForAgent();
 			return true;
 		}
@@ -1923,6 +2420,21 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 		}
 
 		const rankDef = resolveEffectiveRankDefinition(this.orgConfig, agent.role, this.projectsService.hasSubordinates(agent.id));
+		const boundTurnId = trackedMissionId && trackedNodeId
+			? `dispatch-${++this.turnAttributionSeq}-${Date.now().toString(36)}`
+			: undefined;
+		if (boundTurnId && trackedMissionId && trackedNodeId) {
+			this.registerTurnAttribution({
+				turnId: boundTurnId,
+				missionId: trackedMissionId,
+				nodeId: trackedNodeId,
+				tokenId: trackedTokenId,
+				agentId: agent.id,
+				sessionResource: resource.toString(),
+				source: 'dispatch',
+				startedAt: Date.now(),
+			});
+		}
 		this.projectsService.setAgentStatus(agent.id, 'working');
 		void this.commandService.executeCommand<{
 			readonly reply?: string;
@@ -1932,6 +2444,8 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			agentId: agent.id,
 			missionId: trackedMissionId,
 			nodeId: trackedNodeId,
+			tokenId: trackedTokenId,
+			turnId: boundTurnId,
 			model: agent.preferredModel,
 			thinking: agent.preferredThinking,
 			pureWorker: false,
@@ -1941,10 +2455,11 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 			...(options?.preferReattach ? { preferReattach: true } : {}),
 		}).then(
 			turnRes => {
-				releaseSlot();
 				if (trackedMissionId && trackedTokenId) {
 					this.transientRetryCount.delete(`${trackedMissionId}:${trackedTokenId}`);
 				}
+				// Record this turn's final usage BEFORE releasing the agent's slot / flushing the next queued turn
+				// so delayed or sequential handoff turns never race or cross-bill onto the wrong node.
 				if (turnRes && typeof turnRes === 'object') {
 					const latestAgent = this.projectsService?.getAgent(agent.id) ?? agent;
 					const conciseReply = typeof turnRes.reply === 'string' && turnRes.reply.trim()
@@ -1953,16 +2468,25 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 					if (turnRes.usage || conciseReply) {
 						const payload: IMissionTurnUsageInput = {
 							...(turnRes.usage ?? {}),
-							model: latestAgent.preferredModel,
+							...(boundTurnId ? { turnId: boundTurnId } : {}),
+							...(trackedTokenId ? { tokenId: trackedTokenId } : {}),
+							...(turnRes.usage?.isNoiseTurn === undefined && options?.isNoiseTurn ? { isNoiseTurn: true } : {}),
+							model: turnRes.usage?.model || latestAgent.preferredModel,
+							engineId: turnRes.usage?.engineId || latestAgent.session?.engineId || latestAgent.preferredEngineId,
 							...(conciseReply ? { summary: conciseReply } : {}),
 						};
 						if (trackedMissionId && trackedNodeId) {
 							this.recordNodeTurnUsage(trackedMissionId, trackedNodeId, payload);
 						} else {
-							this.recordTurnUsageBySessionResource(resource.toString(), payload);
+							this.recordTurnUsageBySessionResource(resource.toString(), payload, {
+								turnId: boundTurnId,
+								tokenId: trackedTokenId,
+							});
 						}
 					}
 				}
+				this.finalizeTurnAttribution(boundTurnId);
+				releaseSlot();
 				// If this was a Mission node turn and the agent finished without closing its active token,
 				// send a fast follow-up reminder (up to 2x) so low-thinking workers don't stall for the full silence window.
 				if (trackedMissionId && trackedTokenId && trackedNodeId && !turnRes?.stopped) {
@@ -1970,6 +2494,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 				}
 			},
 			err => {
+				this.finalizeTurnAttribution(boundTurnId);
 				releaseSlot();
 				const errMsg = err instanceof Error ? err.message : String(err ?? 'Unknown engine dispatch error');
 				const isTransient = this.isTransientDispatchError(errMsg);
@@ -2005,6 +2530,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 								void this.dispatchPromptToAgent(agent.id, retryPrompt, {
 									...options,
 									retryAttempt: attempt,
+									isNoiseTurn: true,
 								});
 							}, delayMs);
 							this.pendingTurnNudgeTimers.add(retryTimer);
@@ -2079,6 +2605,7 @@ export class AdeMissionRuntimeService extends Disposable implements IAdeMissionR
 					missionId,
 					tokenId,
 					nodeId,
+					isNoiseTurn: true,
 				});
 			} else {
 				this.unclosedTurnNudgeCount.delete(nudgeKey);

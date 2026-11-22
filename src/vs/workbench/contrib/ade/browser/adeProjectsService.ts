@@ -9,7 +9,7 @@ import { basename, removeTrailingPathSeparator } from '../../../../base/common/r
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { localize } from '../../../../nls.js';
-import { AdeThinkingLevel, AdeWorkTreeType } from '../../../../platform/ade/common/adeEngineering.js';
+import { AdeThinkingLevel, AdeWorkTreeType, computeAdeStorageFingerprint } from '../../../../platform/ade/common/adeEngineering.js';
 import {
 	ADE_ORGANIZATION_CONFIG_KEY,
 	DEFAULT_ADE_ORGANIZATION_CONFIG,
@@ -87,7 +87,11 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	private suppressNavEvents = false;
 	private suppressWorkspaceSyncCount = 0;
 	private isSavingStorage = false;
-	private readonly recentSavedAgentsJson = new Set<string>();
+	private readonly recentSavedAgentsFingerprints = new Set<string>();
+	private readonly dirtyAgentDraftIds = new Set<string>();
+	private draftAgentsPersistTimer: ReturnType<typeof setTimeout> | undefined;
+	private secretaryDraftDirty = false;
+	private draftSecretaryPersistTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastWorkspaceKeys: string;
 
 	private readonly changeEmitter = this._register(new Emitter<AdeProjectsChangeKind | void>());
@@ -108,6 +112,16 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				this.changeEmitter.fire();
 			}
 		}));
+		if (typeof this.storageService.onWillSaveState === 'function') {
+			this._register(this.storageService.onWillSaveState(() => {
+				this.flushPendingDraftPersists();
+			}));
+		}
+		this._register({
+			dispose: () => {
+				this.flushPendingDraftPersists();
+			},
+		});
 
 		const catalogInitialized = storageService.getBoolean('aexus.ade.catalogInitialized', StorageScope.PROFILE, false);
 		const hasStoredProjectsKey = storageService.get('aexus.ade.projects', StorageScope.PROFILE) !== undefined;
@@ -246,7 +260,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			}
 			if (e.key === 'aexus.ade.agents') {
 				const rawStored = this.storageService.get('aexus.ade.agents', StorageScope.PROFILE, '');
-				if (rawStored && this.recentSavedAgentsJson.has(rawStored)) {
+				if (rawStored && this.recentSavedAgentsFingerprints.has(computeAdeStorageFingerprint(rawStored))) {
 					// Ignore stale async self-echoes of our own earlier saveAgents() writes.
 					return;
 				}
@@ -445,7 +459,17 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 
 	private reloadFromExternalStorage(): void {
 		const nextCatalog = this.loadStoredCatalogProjects();
-		const nextAgents = this.loadStoredAgents(this.entries);
+		const loadedAgents = this.loadStoredAgents(this.entries);
+		// Preserve locally buffered keystroke drafts waiting on the debounce timer so cross-window writes never clobber typing.
+		const nextAgents = this.dirtyAgentDraftIds.size > 0
+			? loadedAgents.map(agent => {
+				if (!this.dirtyAgentDraftIds.has(agent.id)) {
+					return agent;
+				}
+				const local = this.entries.find(e => e.id === agent.id);
+				return local ? { ...agent, draft: local.draft } : agent;
+			})
+			: loadedAgents;
 		for (const agent of nextAgents) {
 			if (!agent.parentId) {
 				const normalized = removeTrailingPathSeparator(agent.projectUri);
@@ -1487,8 +1511,13 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	}
 
 	setDraft(id: string, draft: string): void {
+		const existing = this.entries.find(agent => agent.id === id);
+		if (!existing || existing.draft === draft) {
+			return;
+		}
 		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, draft } : agent);
-		this.saveAgents();
+		this.dirtyAgentDraftIds.add(id);
+		this.scheduleDraftAgentsPersist();
 	}
 
 	configureSecretary(session: IAdeSession): void {
@@ -1515,8 +1544,53 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	}
 
 	setSecretaryDraft(draft: string): void {
+		if (this._secretary.draft === draft) {
+			return;
+		}
 		this._secretary = { ...this._secretary, draft };
-		this.saveSecretary();
+		this.secretaryDraftDirty = true;
+		this.scheduleDraftSecretaryPersist();
+	}
+
+	private scheduleDraftAgentsPersist(delayMs = 350): void {
+		if (this.draftAgentsPersistTimer !== undefined) {
+			clearTimeout(this.draftAgentsPersistTimer);
+		}
+		this.draftAgentsPersistTimer = setTimeout(() => {
+			this.draftAgentsPersistTimer = undefined;
+			if (this.dirtyAgentDraftIds.size > 0) {
+				this.saveAgents();
+			}
+		}, delayMs);
+	}
+
+	private scheduleDraftSecretaryPersist(delayMs = 350): void {
+		if (this.draftSecretaryPersistTimer !== undefined) {
+			clearTimeout(this.draftSecretaryPersistTimer);
+		}
+		this.draftSecretaryPersistTimer = setTimeout(() => {
+			this.draftSecretaryPersistTimer = undefined;
+			if (this.secretaryDraftDirty) {
+				this.saveSecretary();
+			}
+		}, delayMs);
+	}
+
+	private flushPendingDraftPersists(): void {
+		if (this.draftAgentsPersistTimer !== undefined) {
+			clearTimeout(this.draftAgentsPersistTimer);
+			this.draftAgentsPersistTimer = undefined;
+		}
+		if (this.dirtyAgentDraftIds.size > 0) {
+			this.saveAgents();
+		}
+		if (this.draftSecretaryPersistTimer !== undefined) {
+			clearTimeout(this.draftSecretaryPersistTimer);
+			this.draftSecretaryPersistTimer = undefined;
+		}
+		if (this.secretaryDraftDirty) {
+			this.saveSecretary();
+		}
 	}
 
 	markSecretaryRead(): void {
@@ -1562,6 +1636,11 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	}
 
 	private saveAgents(): void {
+		if (this.draftAgentsPersistTimer !== undefined) {
+			clearTimeout(this.draftAgentsPersistTimer);
+			this.draftAgentsPersistTimer = undefined;
+		}
+		this.dirtyAgentDraftIds.clear();
 		this.isSavingStorage = true;
 		try {
 			const stored: IStoredAgent[] = this.entries.map(agent => ({
@@ -1586,11 +1665,12 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				...(agent.workingDirectoryOverride ? { workingDirectoryOverride: agent.workingDirectoryOverride } : {}),
 			}));
 			const serialized = JSON.stringify(stored);
-			this.recentSavedAgentsJson.add(serialized);
-			if (this.recentSavedAgentsJson.size > 16) {
-				const oldest = this.recentSavedAgentsJson.values().next().value;
+			const fp = computeAdeStorageFingerprint(serialized);
+			this.recentSavedAgentsFingerprints.add(fp);
+			if (this.recentSavedAgentsFingerprints.size > 24) {
+				const oldest = this.recentSavedAgentsFingerprints.values().next().value;
 				if (oldest !== undefined) {
-					this.recentSavedAgentsJson.delete(oldest);
+					this.recentSavedAgentsFingerprints.delete(oldest);
 				}
 			}
 			this.storageService.store('aexus.ade.agents', serialized, StorageScope.PROFILE, StorageTarget.MACHINE);
@@ -1600,6 +1680,11 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	}
 
 	private saveSecretary(): void {
+		if (this.draftSecretaryPersistTimer !== undefined) {
+			clearTimeout(this.draftSecretaryPersistTimer);
+			this.draftSecretaryPersistTimer = undefined;
+		}
+		this.secretaryDraftDirty = false;
 		this.isSavingStorage = true;
 		try {
 			const stored: IStoredSecretary = {

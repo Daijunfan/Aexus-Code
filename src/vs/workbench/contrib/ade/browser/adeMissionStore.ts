@@ -7,8 +7,12 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
+import {
+	computeAdeStorageFingerprint,
+	IAdeEngineeringBackendService,
+} from '../../../../platform/ade/common/adeEngineering.js';
 import { IMissionNodeCheckHook, IMissionNodePosition, parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
-import type { IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
+import { computeMissionTotalCostUsd, IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
 import { ADE_SECRETARY_TIER, ADE_USER_TIER } from '../../../../platform/ade/common/adeRankResize.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { createDecorator, IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
@@ -20,7 +24,36 @@ import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
-const ADE_MISSIONS_STORAGE_KEY = 'aexus.ade.missions.v1';
+/** Legacy monolithic single-key storage (auto-migrated to v2 hot index + cold per-Mission files). */
+export const ADE_MISSIONS_LEGACY_STORAGE_KEY = 'aexus.ade.missions.v1';
+/** Lightweight hot index stored in Application storage (metadata only — no Mermaid, tokens, traces, or revisions). */
+export const ADE_MISSIONS_INDEX_STORAGE_KEY = 'aexus.ade.missions.index.v2';
+/** Per-Mission cold payload key prefix used when Node file backend is unavailable (browser/in-memory tests). */
+export const ADE_MISSION_RECORD_STORAGE_PREFIX = 'aexus.ade.mission.v2.';
+
+export interface IAdeMissionIndexEntry {
+	readonly id: string;
+	readonly title: string;
+	readonly ownerSessionId?: string;
+	readonly ownerTier: number;
+	readonly ownerRankId?: string;
+	readonly linkedSessionId?: string;
+	readonly projectUri?: string;
+	readonly status?: string;
+	readonly runCount?: number;
+	readonly totalCostUsd?: number;
+	readonly createdAt: number;
+	readonly updatedAt: number;
+}
+
+interface IAdeMissionIndexEnvelope {
+	readonly version: 2;
+	readonly writerId?: string;
+	readonly coldBackend?: 'file' | 'storage';
+	readonly updatedIds?: readonly string[];
+	readonly removedIds?: readonly string[];
+	readonly entries: readonly IAdeMissionIndexEntry[];
+}
 
 export interface IAdeMissionRecord {
 	readonly id: string;
@@ -114,6 +147,8 @@ export interface IAdeMissionService {
 	readonly onDidChange: Event<void>;
 	/** Fires when Mission state is reloaded from another window's storage write (no local re-persist). */
 	readonly onDidChangeExternal?: Event<void>;
+	/** Resolves once initial async cold-file hydration completes (instant when using pure storage fallback). */
+	whenHydrated?(): Promise<void>;
 
 	listMissions(): readonly IAdeMissionRecord[];
 	getMission(id: string): IAdeMissionRecord | undefined;
@@ -156,16 +191,23 @@ export interface IAdeMissionService {
 export class AdeMissionStoreService extends Disposable implements IAdeMissionService {
 	declare readonly _serviceBrand: undefined;
 
+	private readonly writerId = generateUuid();
 	private readonly records = new Map<string, IAdeMissionRecord>();
-	private readonly serializedRecordCache = new Map<string, string>();
 	private readonly dirtyMissionIds = new Set<string>();
+	private readonly deletedMissionIds = new Set<string>();
+	private readonly hydratedColdIds = new Set<string>();
+	/** Missions seeded solely from the lightweight hot index awaiting cold-file hydration (never overwritten onto disk as empty stubs). */
+	private readonly indexOnlyIds = new Set<string>();
 	private readonly _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange = this._onDidChange.event;
 	private readonly _onDidChangeExternal = this._register(new Emitter<void>());
 	readonly onDidChangeExternal = this._onDidChangeExternal.event;
 	private isPersisting = false;
-	private readonly recentSavedJson = new Set<string>();
+	/** Compact 64-bit content fingerprints for O(1) self-echo filtering without retaining full JSON copies in RAM. */
+	private readonly recentSavedFingerprints = new Set<string>();
 	private deferredPersistTimer: ReturnType<typeof setTimeout> | undefined;
+	private coldHydrationPromise: Promise<void> | undefined;
+	private migratedLegacyIds: string[] = [];
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
@@ -175,9 +217,16 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 	) {
 		super();
 		this.loadFromStorage();
+		if (typeof this.storageService.onWillSaveState === 'function') {
+			this._register(this.storageService.onWillSaveState(() => {
+				if (this.deferredPersistTimer !== undefined || this.dirtyMissionIds.size > 0 || this.deletedMissionIds.size > 0) {
+					this.persist();
+				}
+			}));
+		}
 		this._register({
 			dispose: () => {
-				if (this.deferredPersistTimer !== undefined || this.dirtyMissionIds.size > 0) {
+				if (this.deferredPersistTimer !== undefined || this.dirtyMissionIds.size > 0 || this.deletedMissionIds.size > 0) {
 					if (this.deferredPersistTimer !== undefined) {
 						clearTimeout(this.deferredPersistTimer);
 						this.deferredPersistTimer = undefined;
@@ -187,45 +236,19 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			},
 		});
 		if (typeof this.storageService.onDidChangeValue === 'function') {
-			this._register(this.storageService.onDidChangeValue(StorageScope.APPLICATION, ADE_MISSIONS_STORAGE_KEY, this._store)(() => {
-				if (this.isPersisting) {
-					return;
-				}
-				const raw = this.storageService.get(ADE_MISSIONS_STORAGE_KEY, StorageScope.APPLICATION);
-				if (raw && this.recentSavedJson.has(raw)) {
-					this.recentSavedJson.delete(raw);
-					return;
-				}
-				// Preserve any locally buffered dirty Mission updates (e.g. recent token/cost updates
-				// waiting on deferredPersistTimer) instead of silently clobbering them on external writes!
-				const preservedDirty = new Map<string, IAdeMissionRecord>();
-				for (const dirtyId of this.dirtyMissionIds) {
-					const localRec = this.records.get(dirtyId);
-					if (localRec) {
-						preservedDirty.set(dirtyId, localRec);
-					}
-				}
-				this.records.clear();
-				this.serializedRecordCache.clear();
-				this.loadFromStorage();
-				if (preservedDirty.size > 0) {
-					for (const [dirtyId, localRec] of preservedDirty.entries()) {
-						const extRec = this.records.get(dirtyId);
-						if (!extRec || localRec.updatedAt >= extRec.updatedAt) {
-							this.records.set(dirtyId, localRec);
-							this.serializedRecordCache.delete(dirtyId);
-						} else {
-							this.dirtyMissionIds.delete(dirtyId);
-						}
-					}
-					if (this.dirtyMissionIds.size > 0) {
-						this.scheduleDeferredPersist();
-					}
-				}
-				this._onDidChangeExternal.fire();
-				this._onDidChange.fire();
+			this._register(this.storageService.onDidChangeValue(StorageScope.APPLICATION, ADE_MISSIONS_INDEX_STORAGE_KEY, this._store)(() => {
+				this.handleExternalIndexChange();
+			}));
+			this._register(this.storageService.onDidChangeValue(StorageScope.APPLICATION, ADE_MISSIONS_LEGACY_STORAGE_KEY, this._store)(() => {
+				this.handleExternalLegacyBlobChange();
 			}));
 		}
+		queueMicrotask(() => {
+			if (this._store.isDisposed) {
+				return;
+			}
+			this.attachColdBackendAndHydrate();
+		});
 	}
 
 	private tryGet<T>(id: ServiceIdentifier<T>): T | undefined {
@@ -234,6 +257,366 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		} catch {
 			return undefined;
 		}
+	}
+
+	private get backendService(): IAdeEngineeringBackendService | undefined {
+		return this.tryGet(IAdeEngineeringBackendService);
+	}
+
+	private hasColdFileBackend(): boolean {
+		const backend = this.backendService;
+		return Boolean(backend?.saveMissionRecord && backend?.loadAllMissionRecords);
+	}
+
+	whenHydrated(): Promise<void> {
+		if (!this.coldHydrationPromise && this.hasColdFileBackend()) {
+			this.attachColdBackendAndHydrate();
+		}
+		return this.coldHydrationPromise ?? Promise.resolve();
+	}
+
+	private attachColdBackendAndHydrate(): void {
+		if (this.coldHydrationPromise || this._store.isDisposed) {
+			return;
+		}
+		const backend = this.backendService;
+		if (!backend?.saveMissionRecord || !backend?.loadAllMissionRecords) {
+			if (this.migratedLegacyIds.length > 0) {
+				for (const mid of this.migratedLegacyIds) {
+					if (this.records.has(mid)) {
+						this.dirtyMissionIds.add(mid);
+					}
+				}
+				this.migratedLegacyIds = [];
+				this.persist();
+			}
+			this.coldHydrationPromise = Promise.resolve();
+			return;
+		}
+		if (backend.onDidMissionRecordChange) {
+			this._register(backend.onDidMissionRecordChange(ev => {
+				if (this._store.isDisposed || ev.writerId === this.writerId) {
+					return;
+				}
+				void this.handleExternalColdFileChange(ev.missionId, ev.updatedAt, Boolean(ev.deleted));
+			}));
+		}
+		this.coldHydrationPromise = this.hydrateFromColdFiles(backend).catch(() => undefined);
+	}
+
+	private async hydrateFromColdFiles(backend: IAdeEngineeringBackendService): Promise<void> {
+		const rawMap = await backend.loadAllMissionRecords?.();
+		if (this._store.isDisposed) {
+			return;
+		}
+		let changed = false;
+		const storageKeysToPurge: string[] = [];
+		const toMigrateToFile: IAdeMissionRecord[] = [];
+		if (rawMap) {
+			for (const [missionId, rawJson] of Object.entries(rawMap)) {
+				if (this.deletedMissionIds.has(missionId)) {
+					continue;
+				}
+				let parsedRaw: unknown;
+				try {
+					parsedRaw = JSON.parse(rawJson);
+				} catch {
+					continue;
+				}
+				const record = this.sanitizeMissionRecord(parsedRaw);
+				if (!record) {
+					continue;
+				}
+				const existing = this.records.get(record.id);
+				const wasIndexOnly = this.indexOnlyIds.has(record.id);
+				const isLocallyDirty = this.dirtyMissionIds.has(record.id);
+				if (wasIndexOnly) {
+					this.indexOnlyIds.delete(record.id);
+					this.hydratedColdIds.add(record.id);
+					const merged = (isLocallyDirty && existing && existing.updatedAt >= record.updatedAt)
+						? {
+							...record,
+							title: existing.title || record.title,
+							...(existing.mermaidText ? { mermaidText: existing.mermaidText } : {}),
+							...(Object.keys(existing.positions).length > 0 ? { positions: { ...record.positions, ...existing.positions } } : {}),
+							...(existing.nodePrompts ? { nodePrompts: { ...record.nodePrompts, ...existing.nodePrompts } } : {}),
+							...(existing.nodeChecks ? { nodeChecks: { ...record.nodeChecks, ...existing.nodeChecks } } : {}),
+							...(existing.runtime ? { runtime: existing.runtime } : {}),
+							updatedAt: Math.max(record.updatedAt, existing.updatedAt),
+						}
+						: record;
+					this.records.set(record.id, merged);
+					if (isLocallyDirty && merged !== record) {
+						toMigrateToFile.push(merged);
+					}
+					changed = true;
+				} else if (isLocallyDirty && existing && existing.updatedAt >= record.updatedAt) {
+					continue;
+				} else if (!existing || record.updatedAt > existing.updatedAt) {
+					this.records.set(record.id, record);
+					this.hydratedColdIds.add(record.id);
+					changed = true;
+				}
+				storageKeysToPurge.push(`${ADE_MISSION_RECORD_STORAGE_PREFIX}${record.id}`);
+			}
+		}
+
+		// Flush any records migrated from legacy single-key storage or per-key storage into independent cold files.
+		for (const mid of this.migratedLegacyIds) {
+			const rec = this.records.get(mid);
+			if (rec && !this.deletedMissionIds.has(mid) && !this.indexOnlyIds.has(mid) && !toMigrateToFile.some(m => m.id === mid)) {
+				toMigrateToFile.push(rec);
+			}
+		}
+		this.migratedLegacyIds = [];
+		for (const rec of this.records.values()) {
+			const hasOnDisk = Boolean(rawMap && Object.hasOwn(rawMap, rec.id));
+			if (!hasOnDisk && !this.deletedMissionIds.has(rec.id) && this.hydratedColdIds.has(rec.id) && !this.indexOnlyIds.has(rec.id) && !toMigrateToFile.some(m => m.id === rec.id)) {
+				toMigrateToFile.push(rec);
+			}
+		}
+		if (toMigrateToFile.length > 0 && backend.saveMissionRecord) {
+			await Promise.all(toMigrateToFile.map(async rec => {
+				const compact = rec.runtime ? { ...rec, runtime: this.compactRuntimeForStorage(rec.runtime) } : rec;
+				await backend.saveMissionRecord!(rec.id, JSON.stringify(compact), rec.updatedAt, this.writerId);
+				this.hydratedColdIds.add(rec.id);
+				storageKeysToPurge.push(`${ADE_MISSION_RECORD_STORAGE_PREFIX}${rec.id}`);
+			}));
+			this.writeHotIndexOnly([], [], 'file');
+		}
+		if (storageKeysToPurge.length > 0 && !this._store.isDisposed) {
+			this.isPersisting = true;
+			try {
+				for (const k of storageKeysToPurge) {
+					if (this.storageService.get(k, StorageScope.APPLICATION) !== undefined) {
+						this.storageService.remove(k, StorageScope.APPLICATION);
+					}
+				}
+				if (this.storageService.get(ADE_MISSIONS_LEGACY_STORAGE_KEY, StorageScope.APPLICATION) !== undefined) {
+					this.storageService.remove(ADE_MISSIONS_LEGACY_STORAGE_KEY, StorageScope.APPLICATION);
+				}
+			} finally {
+				this.isPersisting = false;
+			}
+		}
+		if (changed && !this._store.isDisposed) {
+			this._onDidChange.fire();
+		}
+	}
+
+	private async handleExternalColdFileChange(missionId: string, updatedAt: number, deleted: boolean): Promise<void> {
+		if (deleted) {
+			const localRec = this.records.get(missionId);
+			if (this.dirtyMissionIds.has(missionId) && localRec && localRec.updatedAt > updatedAt) {
+				return;
+			}
+			if (this.records.delete(missionId)) {
+				this.hydratedColdIds.delete(missionId);
+				this.indexOnlyIds.delete(missionId);
+				this.dirtyMissionIds.delete(missionId);
+				this._onDidChangeExternal.fire();
+				this._onDidChange.fire();
+			}
+			return;
+		}
+		const rawJson = await this.backendService?.loadMissionRecord?.(missionId);
+		if (this._store.isDisposed || !rawJson) {
+			return;
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(rawJson);
+		} catch {
+			return;
+		}
+		const extRec = this.sanitizeMissionRecord(parsed);
+		if (!extRec) {
+			return;
+		}
+		const localRec = this.records.get(extRec.id);
+		if (localRec && !this.indexOnlyIds.has(extRec.id) && extRec.updatedAt < localRec.updatedAt) {
+			return;
+		}
+		if (this.dirtyMissionIds.has(extRec.id) && localRec && localRec.updatedAt >= extRec.updatedAt) {
+			return;
+		}
+		this.dirtyMissionIds.delete(extRec.id);
+		this.indexOnlyIds.delete(extRec.id);
+		this.records.set(extRec.id, extRec);
+		this.hydratedColdIds.add(extRec.id);
+		this._onDidChangeExternal.fire();
+		this._onDidChange.fire();
+	}
+
+	private handleExternalIndexChange(): void {
+		if (this.isPersisting) {
+			return;
+		}
+		const raw = this.storageService.get(ADE_MISSIONS_INDEX_STORAGE_KEY, StorageScope.APPLICATION);
+		if (!raw) {
+			return;
+		}
+		const fp = computeAdeStorageFingerprint(raw);
+		if (this.recentSavedFingerprints.has(fp)) {
+			this.recentSavedFingerprints.delete(fp);
+			return;
+		}
+		let envelope: IAdeMissionIndexEnvelope | undefined;
+		try {
+			const parsed = JSON.parse(raw) as Partial<IAdeMissionIndexEnvelope>;
+			if (parsed && parsed.version === 2 && Array.isArray(parsed.entries)) {
+				envelope = parsed as IAdeMissionIndexEnvelope;
+			}
+		} catch {
+			return;
+		}
+		if (!envelope || envelope.writerId === this.writerId) {
+			return;
+		}
+		const preservedDirty = new Map<string, IAdeMissionRecord>();
+		for (const dirtyId of this.dirtyMissionIds) {
+			const localRec = this.records.get(dirtyId);
+			if (localRec) {
+				preservedDirty.set(dirtyId, localRec);
+			}
+		}
+
+		// Drive deletions from explicit `removedIds` tombstones when incremental metadata is present so a
+		// slightly stale index from another window never drops a concurrently created local Mission.
+		const hasDeltaMeta = (envelope.updatedIds && envelope.updatedIds.length > 0) || (envelope.removedIds && envelope.removedIds.length > 0);
+		if (hasDeltaMeta) {
+			for (const removedId of envelope.removedIds ?? []) {
+				if (!preservedDirty.has(removedId)) {
+					this.records.delete(removedId);
+					this.hydratedColdIds.delete(removedId);
+					this.indexOnlyIds.delete(removedId);
+				}
+			}
+		} else {
+			const indexIds = new Set(envelope.entries.map(e => e.id));
+			for (const existingId of [...this.records.keys()]) {
+				if (!indexIds.has(existingId) && !preservedDirty.has(existingId)) {
+					this.records.delete(existingId);
+					this.hydratedColdIds.delete(existingId);
+					this.indexOnlyIds.delete(existingId);
+				}
+			}
+		}
+		if (envelope.coldBackend === 'file' && this.hasColdFileBackend()) {
+			const changedIds = envelope.updatedIds && envelope.updatedIds.length > 0
+				? envelope.updatedIds
+				: envelope.entries.map(e => e.id);
+			for (const entry of envelope.entries) {
+				if (!this.records.has(entry.id)) {
+					this.records.set(entry.id, this.recordFromIndexEntry(entry));
+					this.indexOnlyIds.add(entry.id);
+				}
+			}
+			for (const id of changedIds) {
+				if (!preservedDirty.has(id)) {
+					const entry = envelope.entries.find(e => e.id === id);
+					void this.handleExternalColdFileChange(id, entry?.updatedAt ?? Date.now(), false);
+				}
+			}
+			return;
+		}
+
+		// Per-Mission storage fallback: reload ONLY the changed/missing Mission keys (never re-parse untouched Missions!).
+		const idsToReload = new Set<string>(envelope.updatedIds ?? []);
+		if (idsToReload.size === 0) {
+			for (const entry of envelope.entries) {
+				const existing = this.records.get(entry.id);
+				if (!existing || existing.updatedAt !== entry.updatedAt || existing.title !== entry.title) {
+					idsToReload.add(entry.id);
+				}
+			}
+		}
+		for (const entry of envelope.entries) {
+			if (!idsToReload.has(entry.id) && this.records.has(entry.id)) {
+				continue;
+			}
+			const coldRaw = this.storageService.get(`${ADE_MISSION_RECORD_STORAGE_PREFIX}${entry.id}`, StorageScope.APPLICATION);
+			let extRec: IAdeMissionRecord | undefined;
+			if (coldRaw) {
+				try {
+					extRec = this.sanitizeMissionRecord(JSON.parse(coldRaw));
+				} catch {
+					extRec = undefined;
+				}
+			}
+			extRec ??= this.recordFromIndexEntry(entry);
+			const localDirty = preservedDirty.get(entry.id);
+			if (localDirty && localDirty.updatedAt >= extRec.updatedAt) {
+				this.records.set(entry.id, localDirty);
+			} else {
+				this.dirtyMissionIds.delete(entry.id);
+				this.records.set(entry.id, extRec);
+				this.hydratedColdIds.add(entry.id);
+			}
+		}
+		if (this.dirtyMissionIds.size > 0) {
+			this.scheduleDeferredPersist();
+		}
+		this._onDidChangeExternal.fire();
+		this._onDidChange.fire();
+	}
+
+	private handleExternalLegacyBlobChange(): void {
+		if (this.isPersisting) {
+			return;
+		}
+		const raw = this.storageService.get(ADE_MISSIONS_LEGACY_STORAGE_KEY, StorageScope.APPLICATION);
+		if (!raw) {
+			return;
+		}
+		const fp = computeAdeStorageFingerprint(raw);
+		if (this.recentSavedFingerprints.has(fp)) {
+			this.recentSavedFingerprints.delete(fp);
+			return;
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw);
+		} catch {
+			return;
+		}
+		if (!Array.isArray(parsed)) {
+			return;
+		}
+		const preservedDirty = new Map<string, IAdeMissionRecord>();
+		for (const dirtyId of this.dirtyMissionIds) {
+			const localRec = this.records.get(dirtyId);
+			if (localRec) {
+				preservedDirty.set(dirtyId, localRec);
+			}
+		}
+		const incomingIds = new Set<string>();
+		for (const entry of parsed) {
+			const extRec = this.sanitizeMissionRecord(entry);
+			if (!extRec) {
+				continue;
+			}
+			incomingIds.add(extRec.id);
+			const localDirty = preservedDirty.get(extRec.id);
+			if (localDirty && localDirty.updatedAt >= extRec.updatedAt) {
+				this.records.set(extRec.id, localDirty);
+			} else {
+				this.dirtyMissionIds.delete(extRec.id);
+				this.records.set(extRec.id, extRec);
+				this.hydratedColdIds.add(extRec.id);
+			}
+		}
+		for (const existingId of [...this.records.keys()]) {
+			if (!incomingIds.has(existingId) && !preservedDirty.has(existingId)) {
+				this.records.delete(existingId);
+				this.hydratedColdIds.delete(existingId);
+			}
+		}
+		if (this.dirtyMissionIds.size > 0) {
+			this.scheduleDeferredPersist();
+		}
+		this._onDidChangeExternal.fire();
+		this._onDidChange.fire();
 	}
 
 	private get projectsService(): IAdeProjectsService | undefined {
@@ -290,93 +673,200 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		};
 	}
 
+	private recordFromIndexEntry(entry: IAdeMissionIndexEntry): IAdeMissionRecord {
+		return {
+			id: entry.id,
+			title: entry.title || 'Untitled',
+			mermaidText: '',
+			positions: {},
+			...(entry.ownerSessionId ? { ownerSessionId: entry.ownerSessionId, linkedSessionId: entry.ownerSessionId } : {}),
+			ownerTier: entry.ownerTier,
+			...(entry.ownerRankId ? { ownerRankId: entry.ownerRankId } : {}),
+			...(entry.projectUri ? { projectUri: entry.projectUri } : {}),
+			createdAt: entry.createdAt,
+			updatedAt: entry.updatedAt,
+		};
+	}
+
+	private toIndexEntry(record: IAdeMissionRecord): IAdeMissionIndexEntry {
+		const totalCostUsd = record.runtime ? computeMissionTotalCostUsd(record.runtime) : undefined;
+		const runCount = record.runtime
+			? ((record.runtime.runHistory?.length ?? 0) + (record.runtime.startedAt !== undefined ? 1 : 0))
+			: 0;
+		return {
+			id: record.id,
+			title: record.title,
+			...(record.ownerSessionId ? { ownerSessionId: record.ownerSessionId, linkedSessionId: record.ownerSessionId } : {}),
+			ownerTier: record.ownerTier,
+			...(record.ownerRankId ? { ownerRankId: record.ownerRankId } : {}),
+			...(record.projectUri ? { projectUri: record.projectUri } : {}),
+			...(record.runtime?.status ? { status: record.runtime.status } : {}),
+			...(runCount > 0 ? { runCount } : {}),
+			...(totalCostUsd !== undefined && totalCostUsd > 0 ? { totalCostUsd } : {}),
+			createdAt: record.createdAt,
+			updatedAt: record.updatedAt,
+		};
+	}
+
+	private sanitizeMissionRecord(rawEntry: unknown): IAdeMissionRecord | undefined {
+		if (!rawEntry || typeof rawEntry !== 'object') {
+			return undefined;
+		}
+		const entry = rawEntry as Record<string, unknown>;
+		if (typeof entry.id !== 'string' || !entry.id.trim()) {
+			return undefined;
+		}
+		const id = entry.id.trim();
+		const ownerSessionId = typeof entry.ownerSessionId === 'string' && entry.ownerSessionId.trim()
+			? entry.ownerSessionId.trim()
+			: (typeof entry.linkedSessionId === 'string' && entry.linkedSessionId.trim() ? entry.linkedSessionId.trim() : undefined);
+		const ownerTier = typeof entry.ownerTier === 'number' && Number.isFinite(entry.ownerTier)
+			? Math.floor(entry.ownerTier)
+			: (ownerSessionId === ADE_SECRETARY_ID ? ADE_SECRETARY_TIER : ownerSessionId ? 1 : ADE_USER_TIER);
+		const ownerRankId = typeof entry.ownerRankId === 'string' && entry.ownerRankId.trim()
+			? entry.ownerRankId.trim()
+			: (ownerTier <= ADE_USER_TIER ? 'user' : ownerTier === ADE_SECRETARY_TIER ? 'secretary' : undefined);
+		const sanitizedPrompts: Record<string, string> = {};
+		if (entry.nodePrompts && typeof entry.nodePrompts === 'object') {
+			for (const [nid, val] of Object.entries(entry.nodePrompts as Record<string, unknown>)) {
+				if (typeof val === 'string' && val.trim()) {
+					sanitizedPrompts[nid] = val;
+				}
+			}
+		}
+		const sanitizedChecks: Record<string, IMissionNodeCheckHook[]> = {};
+		if (entry.nodeChecks && typeof entry.nodeChecks === 'object') {
+			for (const [nid, list] of Object.entries(entry.nodeChecks as Record<string, unknown>)) {
+				if (!Array.isArray(list)) {
+					continue;
+				}
+				const cleanList: IMissionNodeCheckHook[] = [];
+				for (const rawHook of list) {
+					if (!rawHook || typeof rawHook !== 'object') {
+						continue;
+					}
+					const h = rawHook as Record<string, unknown>;
+					const hookId = typeof h.id === 'string' && h.id.trim() ? h.id.trim() : '';
+					const command = typeof h.command === 'string' && h.command.trim() ? h.command.trim() : undefined;
+					const expectFiles = Array.isArray(h.expectFiles)
+						? h.expectFiles.filter((f): f is string => typeof f === 'string' && f.trim().length > 0).map(f => f.trim())
+						: undefined;
+					if (!hookId || (!command && (!expectFiles || expectFiles.length === 0))) {
+						continue;
+					}
+					const onFailRaw = typeof h.onFail === 'string' ? h.onFail.trim().toLowerCase() : undefined;
+					const onFail = (onFailRaw === 'bounce' || onFailRaw === 'fail' || onFailRaw === 'escalate') ? onFailRaw : undefined;
+					cleanList.push({
+						id: hookId,
+						...(typeof h.name === 'string' && h.name.trim() ? { name: h.name.trim() } : {}),
+						...(command ? { command } : {}),
+						...(typeof h.expectExitCode === 'number' && Number.isInteger(h.expectExitCode) ? { expectExitCode: h.expectExitCode } : {}),
+						...(typeof h.cwd === 'string' && h.cwd.trim() ? { cwd: h.cwd.trim() } : {}),
+						...(typeof h.hostAlias === 'string' && h.hostAlias.trim() ? { hostAlias: h.hostAlias.trim() } : {}),
+						...(expectFiles && expectFiles.length > 0 ? { expectFiles } : {}),
+						...(typeof h.expectOutputMatch === 'string' && h.expectOutputMatch.trim() ? { expectOutputMatch: h.expectOutputMatch.trim() } : {}),
+						...(typeof h.timeoutMs === 'number' && Number.isFinite(h.timeoutMs) ? { timeoutMs: Math.max(1_000, Math.min(300_000, Math.round(h.timeoutMs))) } : {}),
+						...(onFail ? { onFail } : {}),
+						...(typeof h.maxAutoRetries === 'number' && Number.isInteger(h.maxAutoRetries) ? { maxAutoRetries: Math.max(0, Math.min(5, h.maxAutoRetries)) } : {}),
+						...(typeof h.enabled === 'boolean' ? { enabled: h.enabled } : {}),
+						source: 'config',
+					});
+				}
+				if (cleanList.length > 0) {
+					sanitizedChecks[nid] = cleanList;
+				}
+			}
+		}
+		return {
+			id,
+			title: typeof entry.title === 'string' && entry.title.trim() ? entry.title.trim() : 'Untitled',
+			mermaidText: typeof entry.mermaidText === 'string' ? entry.mermaidText : '',
+			...(Object.keys(sanitizedPrompts).length > 0 ? { nodePrompts: sanitizedPrompts } : {}),
+			...(Object.keys(sanitizedChecks).length > 0 ? { nodeChecks: sanitizedChecks } : {}),
+			positions: entry.positions && typeof entry.positions === 'object' ? entry.positions as Readonly<Record<string, IMissionNodePosition>> : {},
+			...(ownerSessionId ? { ownerSessionId, linkedSessionId: ownerSessionId } : {}),
+			ownerTier,
+			...(ownerRankId ? { ownerRankId } : {}),
+			...(typeof entry.projectUri === 'string' ? { projectUri: entry.projectUri } : {}),
+			...(entry.runtime && typeof entry.runtime === 'object' ? { runtime: entry.runtime as IMissionRuntimeState } : {}),
+			createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
+			updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
+		};
+	}
+
 	private loadFromStorage(): void {
+		// 1. Load v2 lightweight hot index + per-Mission cold payloads (if in storage fallback mode).
 		try {
-			const raw = this.storageService.get(ADE_MISSIONS_STORAGE_KEY, StorageScope.APPLICATION);
-			if (!raw) {
+			const indexRaw = this.storageService.get(ADE_MISSIONS_INDEX_STORAGE_KEY, StorageScope.APPLICATION);
+			if (indexRaw) {
+				const parsedIndex = JSON.parse(indexRaw) as Partial<IAdeMissionIndexEnvelope>;
+				if (parsedIndex && parsedIndex.version === 2 && Array.isArray(parsedIndex.entries)) {
+					for (const entry of parsedIndex.entries) {
+						if (!entry || typeof entry.id !== 'string' || !entry.id.trim()) {
+							continue;
+						}
+						const coldRaw = this.storageService.get(`${ADE_MISSION_RECORD_STORAGE_PREFIX}${entry.id}`, StorageScope.APPLICATION);
+						if (coldRaw) {
+							try {
+								const fullRec = this.sanitizeMissionRecord(JSON.parse(coldRaw));
+								if (fullRec) {
+									this.records.set(fullRec.id, fullRec);
+									this.hydratedColdIds.add(fullRec.id);
+									continue;
+								}
+							} catch {
+								// Fall through to lightweight index metadata
+							}
+						}
+						this.records.set(entry.id, this.recordFromIndexEntry(entry));
+						this.indexOnlyIds.add(entry.id);
+					}
+				}
+			}
+		} catch {
+			// Ignore malformed v2 index
+		}
+
+		// 2. Auto-migrate any legacy monolithic single-key storage (`aexus.ade.missions.v1`).
+		try {
+			const legacyRaw = this.storageService.get(ADE_MISSIONS_LEGACY_STORAGE_KEY, StorageScope.APPLICATION);
+			if (!legacyRaw) {
 				return;
 			}
-			const parsed = JSON.parse(raw);
+			const parsed = JSON.parse(legacyRaw);
 			if (!Array.isArray(parsed)) {
 				return;
 			}
+			const migratedIds: string[] = [];
 			for (const entry of parsed) {
-				if (entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id.trim()) {
-					const ownerSessionId = typeof entry.ownerSessionId === 'string' && entry.ownerSessionId.trim()
-						? entry.ownerSessionId.trim()
-						: (typeof entry.linkedSessionId === 'string' && entry.linkedSessionId.trim() ? entry.linkedSessionId.trim() : undefined);
-					const ownerTier = typeof entry.ownerTier === 'number' && Number.isFinite(entry.ownerTier)
-						? Math.floor(entry.ownerTier)
-						: (ownerSessionId === ADE_SECRETARY_ID ? ADE_SECRETARY_TIER : ownerSessionId ? 1 : ADE_USER_TIER);
-					const ownerRankId = typeof entry.ownerRankId === 'string' && entry.ownerRankId.trim()
-						? entry.ownerRankId.trim()
-						: (ownerTier <= ADE_USER_TIER ? 'user' : ownerTier === ADE_SECRETARY_TIER ? 'secretary' : undefined);
-					const sanitizedPrompts: Record<string, string> = {};
-					if (entry.nodePrompts && typeof entry.nodePrompts === 'object') {
-						for (const [nid, val] of Object.entries(entry.nodePrompts as Record<string, unknown>)) {
-							if (typeof val === 'string' && val.trim()) {
-								sanitizedPrompts[nid] = val;
-							}
-						}
+				const record = this.sanitizeMissionRecord(entry);
+				if (!record) {
+					continue;
+				}
+				const existing = this.records.get(record.id);
+				const existingIsIndexOnly = Boolean(existing && this.indexOnlyIds.has(record.id));
+				if (!existing || existingIsIndexOnly || record.updatedAt > existing.updatedAt) {
+					this.records.set(record.id, record);
+					this.indexOnlyIds.delete(record.id);
+					this.hydratedColdIds.add(record.id);
+					migratedIds.push(record.id);
+				}
+			}
+			if (migratedIds.length > 0) {
+				this.migratedLegacyIds = migratedIds;
+				// Immediately remove the legacy monolithic blob once migrated into per-Mission cold storage + hot index.
+				if (!this.hasColdFileBackend()) {
+					for (const mid of migratedIds) {
+						this.dirtyMissionIds.add(mid);
 					}
-					const sanitizedChecks: Record<string, IMissionNodeCheckHook[]> = {};
-					if (entry.nodeChecks && typeof entry.nodeChecks === 'object') {
-						for (const [nid, list] of Object.entries(entry.nodeChecks as Record<string, unknown>)) {
-							if (!Array.isArray(list)) {
-								continue;
-							}
-							const cleanList: IMissionNodeCheckHook[] = [];
-							for (const rawHook of list) {
-								if (!rawHook || typeof rawHook !== 'object') {
-									continue;
-								}
-								const h = rawHook as Record<string, unknown>;
-								const hookId = typeof h.id === 'string' && h.id.trim() ? h.id.trim() : '';
-								const command = typeof h.command === 'string' && h.command.trim() ? h.command.trim() : undefined;
-								const expectFiles = Array.isArray(h.expectFiles)
-									? h.expectFiles.filter((f): f is string => typeof f === 'string' && f.trim().length > 0).map(f => f.trim())
-									: undefined;
-								if (!hookId || (!command && (!expectFiles || expectFiles.length === 0))) {
-									continue;
-								}
-								const onFailRaw = typeof h.onFail === 'string' ? h.onFail.trim().toLowerCase() : undefined;
-								const onFail = (onFailRaw === 'bounce' || onFailRaw === 'fail' || onFailRaw === 'escalate') ? onFailRaw : undefined;
-								cleanList.push({
-									id: hookId,
-									...(typeof h.name === 'string' && h.name.trim() ? { name: h.name.trim() } : {}),
-									...(command ? { command } : {}),
-									...(typeof h.expectExitCode === 'number' && Number.isInteger(h.expectExitCode) ? { expectExitCode: h.expectExitCode } : {}),
-									...(typeof h.cwd === 'string' && h.cwd.trim() ? { cwd: h.cwd.trim() } : {}),
-									...(typeof h.hostAlias === 'string' && h.hostAlias.trim() ? { hostAlias: h.hostAlias.trim() } : {}),
-									...(expectFiles && expectFiles.length > 0 ? { expectFiles } : {}),
-									...(typeof h.expectOutputMatch === 'string' && h.expectOutputMatch.trim() ? { expectOutputMatch: h.expectOutputMatch.trim() } : {}),
-									...(typeof h.timeoutMs === 'number' && Number.isFinite(h.timeoutMs) ? { timeoutMs: Math.max(1_000, Math.min(300_000, Math.round(h.timeoutMs))) } : {}),
-									...(onFail ? { onFail } : {}),
-									...(typeof h.maxAutoRetries === 'number' && Number.isInteger(h.maxAutoRetries) ? { maxAutoRetries: Math.max(0, Math.min(5, h.maxAutoRetries)) } : {}),
-									...(typeof h.enabled === 'boolean' ? { enabled: h.enabled } : {}),
-									source: 'config',
-								});
-							}
-							if (cleanList.length > 0) {
-								sanitizedChecks[nid] = cleanList;
-							}
-						}
+					this.migratedLegacyIds = [];
+					this.persist();
+					this.isPersisting = true;
+					try {
+						this.storageService.remove(ADE_MISSIONS_LEGACY_STORAGE_KEY, StorageScope.APPLICATION);
+					} finally {
+						this.isPersisting = false;
 					}
-					this.records.set(entry.id, {
-						id: entry.id,
-						title: typeof entry.title === 'string' && entry.title.trim() ? entry.title.trim() : 'Untitled',
-						mermaidText: typeof entry.mermaidText === 'string' ? entry.mermaidText : '',
-						...(Object.keys(sanitizedPrompts).length > 0 ? { nodePrompts: sanitizedPrompts } : {}),
-						...(Object.keys(sanitizedChecks).length > 0 ? { nodeChecks: sanitizedChecks } : {}),
-						positions: entry.positions && typeof entry.positions === 'object' ? entry.positions : {},
-						...(ownerSessionId ? { ownerSessionId, linkedSessionId: ownerSessionId } : {}),
-						ownerTier,
-						...(ownerRankId ? { ownerRankId } : {}),
-						...(typeof entry.projectUri === 'string' ? { projectUri: entry.projectUri } : {}),
-						...(entry.runtime && typeof entry.runtime === 'object' ? { runtime: entry.runtime as IMissionRuntimeState } : {}),
-						createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
-						updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : Date.now(),
-					});
 				}
 			}
 		} catch {
@@ -425,52 +915,130 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 	}
 
 	private markRecordDirty(id: string): void {
-		this.serializedRecordCache.delete(id);
+		this.deletedMissionIds.delete(id);
 		this.dirtyMissionIds.add(id);
+		if (!this.indexOnlyIds.has(id)) {
+			this.hydratedColdIds.add(id);
+		}
+	}
+
+	private recordSavedFingerprint(serialized: string): void {
+		const fp = computeAdeStorageFingerprint(serialized);
+		this.recentSavedFingerprints.add(fp);
+		if (this.recentSavedFingerprints.size > 24) {
+			const oldest = this.recentSavedFingerprints.values().next().value;
+			if (oldest !== undefined) {
+				this.recentSavedFingerprints.delete(oldest);
+			}
+		}
+	}
+
+	private writeHotIndexOnly(
+		updatedIds: readonly string[],
+		removedIds: readonly string[],
+		coldBackend: 'file' | 'storage',
+	): void {
+		const envelope: IAdeMissionIndexEnvelope = {
+			version: 2,
+			writerId: this.writerId,
+			coldBackend,
+			...(updatedIds.length > 0 ? { updatedIds } : {}),
+			...(removedIds.length > 0 ? { removedIds } : {}),
+			entries: [...this.records.values()].map(rec => this.toIndexEntry(rec)),
+		};
+		const indexSerialized = JSON.stringify(envelope);
+		this.recordSavedFingerprint(indexSerialized);
+		this.isPersisting = true;
+		try {
+			this.storageService.store(ADE_MISSIONS_INDEX_STORAGE_KEY, indexSerialized, StorageScope.APPLICATION, StorageTarget.USER);
+		} finally {
+			this.isPersisting = false;
+		}
 	}
 
 	/**
-	 * Incremental per-Mission JSON assembly: only `JSON.stringify`s Missions mutated since the
-	 * last write, reusing cached JSON fragments for all untouched Missions to eliminate main-thread
-	 * serialization pauses on multi-Mission / long-running workspaces.
+	 * Cold/Hot separated per-Mission persistence:
+	 * - Only dirty Mission IDs are serialized & flushed (untouched Missions incur zero JSON serialization or I/O).
+	 * - Heavy cold payloads (Mermaid, tokens, traces, revisions, telemetry, runHistory) are persisted asynchronously
+	 *   to independent per-Mission files (`<adeHome>/missions/<safeId>.json`) via Node backend (with per-Mission
+	 *   storage key fallback in browser-only test environments).
+	 * - `IStorageService` retains ONLY a tiny metadata hot index (`aexus.ade.missions.index.v2`).
 	 */
 	private persist(): void {
 		if (this.deferredPersistTimer !== undefined) {
 			clearTimeout(this.deferredPersistTimer);
 			this.deferredPersistTimer = undefined;
 		}
-		const fragments: string[] = [];
-		for (const [id, record] of this.records.entries()) {
-			let fragment = this.serializedRecordCache.get(id);
-			if (fragment === undefined) {
+		const dirtyIds = [...this.dirtyMissionIds];
+		const removedIds = [...this.deletedMissionIds];
+		this.dirtyMissionIds.clear();
+		this.deletedMissionIds.clear();
+
+		const useColdFiles = this.hasColdFileBackend();
+		const backend = useColdFiles ? this.backendService : undefined;
+
+		if (useColdFiles && backend?.saveMissionRecord) {
+			const persistedColdIds: string[] = [];
+			for (const id of dirtyIds) {
+				const record = this.records.get(id);
+				if (!record) {
+					continue;
+				}
+				if (this.indexOnlyIds.has(id)) {
+					// Never overwrite a cold file on disk with an unhydrated index-only stub; retain dirty until hydration merges.
+					this.dirtyMissionIds.add(id);
+					continue;
+				}
 				const compactRecord = record.runtime
 					? { ...record, runtime: this.compactRuntimeForStorage(record.runtime) }
 					: record;
-				fragment = JSON.stringify(compactRecord);
-				this.serializedRecordCache.set(id, fragment);
+				const payloadJson = JSON.stringify(compactRecord);
+				persistedColdIds.push(id);
+				void backend.saveMissionRecord(id, payloadJson, record.updatedAt, this.writerId).catch(() => {
+					if (!this._store.isDisposed && this.records.has(id)) {
+						this.dirtyMissionIds.add(id);
+						this.scheduleDeferredPersist(1500);
+					}
+				});
 			}
-			fragments.push(fragment);
-		}
-		for (const cachedId of Array.from(this.serializedRecordCache.keys())) {
-			if (!this.records.has(cachedId)) {
-				this.serializedRecordCache.delete(cachedId);
+			for (const id of removedIds) {
+				this.indexOnlyIds.delete(id);
+				void backend.deleteMissionRecord?.(id, this.writerId).catch(() => {
+					if (!this._store.isDisposed && !this.records.has(id)) {
+						this.deletedMissionIds.add(id);
+						this.scheduleDeferredPersist(1500);
+					}
+				});
 			}
+			this.writeHotIndexOnly(persistedColdIds, removedIds, 'file');
+			return;
 		}
-		this.dirtyMissionIds.clear();
-		const serialized = `[${fragments.join(',')}]`;
-		this.recentSavedJson.add(serialized);
-		if (this.recentSavedJson.size > 24) {
-			const oldest = this.recentSavedJson.values().next().value;
-			if (oldest !== undefined) {
-				this.recentSavedJson.delete(oldest);
-			}
-		}
+
+		// Per-Mission storage key fallback (still strictly 1-Mission-per-key — zero monolithic mega-blob!).
 		this.isPersisting = true;
 		try {
-			this.storageService.store(ADE_MISSIONS_STORAGE_KEY, serialized, StorageScope.APPLICATION, StorageTarget.USER);
+			for (const id of dirtyIds) {
+				const record = this.records.get(id);
+				if (!record) {
+					continue;
+				}
+				const compactRecord = record.runtime
+					? { ...record, runtime: this.compactRuntimeForStorage(record.runtime) }
+					: record;
+				this.storageService.store(
+					`${ADE_MISSION_RECORD_STORAGE_PREFIX}${id}`,
+					JSON.stringify(compactRecord),
+					StorageScope.APPLICATION,
+					StorageTarget.USER,
+				);
+			}
+			for (const id of removedIds) {
+				this.storageService.remove(`${ADE_MISSION_RECORD_STORAGE_PREFIX}${id}`, StorageScope.APPLICATION);
+			}
 		} finally {
 			this.isPersisting = false;
 		}
+		this.writeHotIndexOnly(dirtyIds, removedIds, 'storage');
 	}
 
 	private scheduleDeferredPersist(delayMs = 150): void {
@@ -620,6 +1188,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			updatedAt: now,
 		};
 		this.records.set(id, record);
+		this.indexOnlyIds.delete(id);
 		this.markRecordDirty(id);
 		this.persist();
 		this.syncSidebarEmployeesForRecord(record);
@@ -662,7 +1231,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			mermaidText,
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -696,7 +1265,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			nodePrompts: Object.keys(nextPrompts).length > 0 ? nextPrompts : undefined,
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -725,7 +1294,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			nodePrompts: Object.keys(nextPrompts).length > 0 ? nextPrompts : undefined,
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -749,7 +1318,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			nodeChecks: Object.keys(nextMap).length > 0 ? nextMap : undefined,
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -795,7 +1364,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			...(runtime ? { runtime } : { runtime: undefined }),
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -816,7 +1385,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			positions: { ...existing.positions, ...positions },
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -832,7 +1401,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			positions: {},
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -850,7 +1419,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const updated: IAdeMissionRecord = {
 			...existing,
 			title: trimmed,
-			updatedAt: Date.now(),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
@@ -867,8 +1436,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const ownerKey = this.getOwnerSyncKey(existing);
 		const removedAgents = this.projectsService?.clearMissionEmployees?.(ownerKey) ?? [];
 		this.records.delete(existing.id);
-		this.serializedRecordCache.delete(existing.id);
 		this.dirtyMissionIds.delete(existing.id);
+		this.hydratedColdIds.delete(existing.id);
+		this.deletedMissionIds.add(existing.id);
 		this.persist();
 		this._onDidChange.fire();
 		if (removedAgents.length > 0) {
@@ -909,8 +1479,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const removed = projects?.clearMissionEmployees?.(ownerKey) ?? [];
 		const deleted = existing ? this.records.delete(existing.id) : false;
 		if (deleted && existing) {
-			this.serializedRecordCache.delete(existing.id);
 			this.dirtyMissionIds.delete(existing.id);
+			this.hydratedColdIds.delete(existing.id);
+			this.deletedMissionIds.add(existing.id);
 			this.persist();
 		}
 		const closeList = removed.length > 0 ? removed : toStop;

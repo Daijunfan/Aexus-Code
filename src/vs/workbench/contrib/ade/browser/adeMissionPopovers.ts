@@ -15,8 +15,9 @@ import {
 } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { AdeThinkingLevel } from '../../../../platform/ade/common/adeEngineering.js';
 import { IMissionSupervisorBinding } from '../../../../platform/ade/common/adeMissionBoundary.js';
-import { IMissionDagEdge, IMissionDagEmployeeGroup, IMissionDagNode, IMissionDagTemplate, MISSION_DAG_TEMPLATES } from '../../../../platform/ade/common/adeMissionDag.js';
+import { IMissionDagEdge, IMissionDagEmployeeGroup, IMissionDagNode } from '../../../../platform/ade/common/adeMissionDag.js';
 import {
+	collectValidUpstreamRollbackCandidates,
 	IMissionRuntimeState,
 	IMissionSourceTrigger,
 	IMissionToken,
@@ -40,6 +41,7 @@ import {
 } from '../../../browser/adeLlmIcon.js';
 import { renderAdeOsIcon, resolveLocalOsIconKind } from '../../../browser/adeOsIcon.js';
 import { ADE_SECRETARY_ID, IAdeAgent, IAdeProjectsService } from '../common/ade.js';
+import { adeBi } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import {
 	AdeMissionHostCatalog,
@@ -58,6 +60,7 @@ import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
 
 export interface IMissionPopoversDelegate {
 	getActiveMissionId(): string | undefined;
+	getMissionGraph?(): { readonly nodes: readonly IMissionDagNode[]; readonly edges: readonly IMissionDagEdge[] };
 	getNodePrompt(missionId: string, nodeId: string): string;
 	canSwitchAgentEngine(agent: IAdeAgent): boolean;
 	getExplicitNodeHost(missionId: string, nodeId: string): string | undefined;
@@ -67,9 +70,6 @@ export interface IMissionPopoversDelegate {
 	onOpenDrawerForNodePrompt(nodeId: string): void;
 	onOpenAgentSession?(agentId: string): void;
 	onHoverSupervisor?(supervisorId: string | undefined): void;
-	onTimeoutChange?(minutes: number): Promise<void>;
-	onCutoffChange?(offGraphMaxTier: number): Promise<void>;
-	onApplyTemplate?(template: IMissionDagTemplate): void;
 	onQuickRetryNode?(node: IMissionDagNode, token: IMissionToken, guidance?: string): Promise<void>;
 	onActionFeedback?(message: string, kind: 'ok' | 'error' | 'info'): void;
 	onGraphVisualInvalidated(prewarmHosts?: boolean): void;
@@ -133,7 +133,7 @@ export class AdeMissionPopovers extends Disposable {
 		this.activePromptClearBtn = undefined;
 		this.activeTokenInspectorId = undefined;
 		this.activeTokenCountdownEl = undefined;
-		this.popoverEl.classList.remove('is-model-popover', 'is-prompt-popover', 'is-token-popover', 'is-governance-popover', 'is-triggers-popover', 'is-context-menu', 'is-templates-popover');
+		this.popoverEl.classList.remove('is-model-popover', 'is-prompt-popover', 'is-token-popover', 'is-triggers-popover', 'is-context-menu');
 		delete this.popoverEl.dataset.popoverKind;
 		delete this.popoverEl.dataset.adeCanvasContextMenu;
 		delete this.popoverEl.dataset.popoverNodeId;
@@ -179,8 +179,8 @@ export class AdeMissionPopovers extends Disposable {
 		}
 		if (this.activePromptHintEl) {
 			this.activePromptHintEl.textContent = trimmedLen > 0
-				? localize('adeMissionPromptPopoverSavedHint', "唤醒时与令牌一起打包下发 · {0} chars · 已与左上角面板实时同步", trimmedLen)
-				: localize('adeMissionPromptPopoverEmptyHint', "唤醒时与令牌一起打包下发 · 与左上角面板共用同一数据源");
+				? localize('adeMissionPromptPopoverSavedHint', "运行到该节点时自动发送 · {0} 字", trimmedLen)
+				: localize('adeMissionPromptPopoverEmptyHint', "运行到该节点时自动发送给该节点 Agent");
 		}
 	}
 
@@ -705,7 +705,7 @@ export class AdeMissionPopovers extends Disposable {
 		const headActions = append(head, $('.ade-mission-prompt-pop-actions'));
 		const openDrawerBtn = append(headActions, $('button.ade-mission-prompt-pop-btn', {
 			type: 'button',
-			title: localize('adeMissionPromptPopOpenDrawerTip', "在左上角文件分栏面板中打开并编辑（共享同一数据源）"),
+			title: localize('adeMissionPromptPopOpenDrawerTip', "在完整编辑器中打开"),
 			'data-ade-prompt-pop-open-drawer': node.id,
 		})) as HTMLButtonElement;
 		append(openDrawerBtn, $('span.codicon.codicon-split-horizontal', { 'aria-hidden': 'true' }));
@@ -735,9 +735,9 @@ export class AdeMissionPopovers extends Disposable {
 			spellcheck: 'false',
 			placeholder: localize(
 				'adeMissionNodePromptPlaceholder',
-				"编写该节点被唤醒时的前置提示词（任务目标、目录/技术约束、交付物与验收标准…）。\n节点收到令牌被唤醒时，会自动将此前置提示词与令牌信息一起打包发送给 Agent。",
+				"写明这个节点需要做什么（如任务目标、涉及文件、完成标准等）。\n运行到该节点时会自动发送给对应的 Agent。",
 			),
-			'aria-label': localize('adeMissionNodePromptPopoverAria', "Pre-Prompt for {0}", node.id),
+			'aria-label': localize('adeMissionNodePromptPopoverAria', "Prompt for {0}", node.id),
 			'data-ade-node-prompt-popover-input': node.id,
 		})) as HTMLTextAreaElement;
 		textarea.value = currentPrompt;
@@ -1151,6 +1151,7 @@ export class AdeMissionPopovers extends Disposable {
 			// Action bar (Retry with guidance, Recall, Gate Review, Open Session)
 			const canRetry = selectedToken.status === 'frozen_failed' || selectedToken.status === 'recalled';
 			const canRecall = selectedToken.status === 'active'
+				|| selectedToken.status === 'queued'
 				|| selectedToken.status === 'blocked'
 				|| selectedToken.status === 'waiting_gate'
 				|| selectedToken.status === 'waiting_join'
@@ -1262,27 +1263,56 @@ export class AdeMissionPopovers extends Disposable {
 		renderSelectedToken();
 	}
 
-	openGateDecisionPopover(missionId: string, node: IMissionDagNode, anchorEl: HTMLElement, preferredTokenId?: string): void {
+	openGateDecisionPopover(
+		missionId: string,
+		node: IMissionDagNode,
+		anchorEl: HTMLElement,
+		preferredTokenId?: string,
+		options?: { readonly focusReject?: boolean },
+	): void {
 		this.close();
 		if (!this.missionRuntimeService) {
 			return;
 		}
 		const openGen = ++this.popoverGeneration;
-		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 310, 210, 8);
+		this.popoverEl.dataset.popoverKind = 'gate';
+		this.popoverEl.dataset.popoverNodeId = node.id;
+		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 326, 260, 8);
 
 		const rt = this.missionRuntimeService.getRuntimeState(missionId);
+		const graph = this.delegate.getMissionGraph?.() ?? { nodes: [node], edges: [] };
 		const waitingTokens = Object.values(rt.tokens)
 			.filter(t => t.nodeId === node.id && t.status === 'waiting_gate')
 			.sort((a, b) => a.arrivedAt - b.arrivedAt);
 		let selectedTokenId: string | undefined = (preferredTokenId && waitingTokens.some(t => t.id === preferredTokenId))
 			? preferredTokenId
 			: waitingTokens[0]?.id;
+		const selectedRollbackByTokenId = new Map<string, string>();
 
-		append(this.popoverEl, $('.ade-mission-emp-popover-title', {}, localize('adeMissionGateSignoffTitle', "Human Gate · {0}", node.label)));
+		append(this.popoverEl, $('.ade-mission-emp-popover-title', {}, adeBi(
+			localize('adeMissionGateSignoffTitle', "Human Gate · {0}", node.label),
+			'人工审批门 · {0}',
+			node.label,
+		)));
 
 		const summaryPreviewEl = append(this.popoverEl, $('.ade-mission-gate-summary-preview', {
 			'data-ade-gate-summary': 'true',
 		}));
+
+		const rollbackFieldEl = append(this.popoverEl, $('.ade-mission-gate-rollback-field', {
+			'data-ade-gate-rollback-wrap': 'true',
+		}));
+		const rollbackSelectId = `ade-gate-rollback-${node.id}`;
+		append(rollbackFieldEl, $('label.ade-mission-gate-rollback-label', { for: rollbackSelectId }, adeBi(
+			localize('adeMissionGateRollbackLabel', "Rollback Target (on Reject)"),
+			'驳回打回目标节点',
+		)));
+		const rollbackSelectEl = append(rollbackFieldEl, $('select.ade-mission-config-select.ade-mission-gate-rollback-select', {
+			id: rollbackSelectId,
+			'aria-label': adeBi(localize('adeMissionGateRollbackAria', "Rollback Target Node"), '选择打回目标节点'),
+			'data-ade-gate-rollback-select': 'true',
+		})) as HTMLSelectElement;
+
 		const syncGatePreview = () => {
 			const activeTok = waitingTokens.find(t => t.id === selectedTokenId) ?? waitingTokens[0];
 			if (activeTok?.lastSummary?.trim()) {
@@ -1291,13 +1321,44 @@ export class AdeMissionPopovers extends Disposable {
 			} else {
 				summaryPreviewEl.hidden = true;
 			}
+
+			clearNode(rollbackSelectEl);
+			const candidates = activeTok
+				? collectValidUpstreamRollbackCandidates(rt, graph, node.id, activeTok.tracePtr, activeTok.fromNodeId)
+				: [];
+			if (candidates.length === 0) {
+				rollbackFieldEl.hidden = true;
+				return;
+			}
+			rollbackFieldEl.hidden = false;
+			const tokenKey = activeTok?.id ?? '__default__';
+			const remembered = selectedRollbackByTokenId.get(tokenKey);
+			const defaultTarget = (remembered && candidates.some(c => c.id === remembered))
+				? remembered
+				: candidates[candidates.length - 1].id;
+			selectedRollbackByTokenId.set(tokenKey, defaultTarget);
+			const directTag = adeBi(localize('adeMissionGateDirectPredTag', "Direct"), '紧邻上游');
+			for (const c of candidates) {
+				const optLabel = c.isDirectPredecessor ? `[${c.id}] ${c.title} · ${directTag}` : `[${c.id}] ${c.title}`;
+				const opt = append(rollbackSelectEl, $('option', { value: c.id }, optLabel)) as HTMLOptionElement;
+				if (c.id === defaultTarget) {
+					opt.selected = true;
+				}
+			}
 		};
 
+		this.popoverDisposables.add(addDisposableListener(rollbackSelectEl, EventType.CHANGE, () => {
+			const tokenKey = selectedTokenId ?? waitingTokens[0]?.id ?? '__default__';
+			if (rollbackSelectEl.value) {
+				selectedRollbackByTokenId.set(tokenKey, rollbackSelectEl.value);
+			}
+		}));
+
+		const waveBtns: HTMLButtonElement[] = [];
 		if (waitingTokens.length > 1) {
 			const waveBar = append(this.popoverEl, $('.ade-mission-token-wave-switcher', {
 				'data-ade-gate-wave-switcher': 'true',
 			}));
-			const waveBtns: HTMLButtonElement[] = [];
 			for (const tok of waitingTokens) {
 				const btn = append(waveBar, $(`button.ade-mission-token-wave-btn${tok.id === selectedTokenId ? '.active' : ''}`, {
 					type: 'button',
@@ -1317,31 +1378,42 @@ export class AdeMissionPopovers extends Disposable {
 
 		const noteInput = append(this.popoverEl, $('input.ade-mission-emp-popover-input', {
 			type: 'text',
-			placeholder: localize('adeMissionGateNotePlaceholder', "Optional note or rejection reason..."),
+			placeholder: adeBi(localize('adeMissionGateNotePlaceholder', "Optional note or rejection reason..."), '可选：填写审批备注或打回原因...'),
 			'data-ade-gate-note': 'true',
 		})) as HTMLInputElement;
 		const btnRow = append(this.popoverEl, $('.ade-mission-gate-actions'));
 		const approveBtn = append(btnRow, $('button.ade-mission-gate-btn.approve', {
 			type: 'button',
 			'data-ade-gate-approve': node.id,
-		}, localize('adeMissionGateApproveBtn', "Approve"))) as HTMLButtonElement;
-		const rejectBtn = append(btnRow, $('button.ade-mission-gate-btn.reject', {
+		}, adeBi(localize('adeMissionGateApproveBtn', "Approve"), '通过'))) as HTMLButtonElement;
+		const rejectBtn = append(btnRow, $(`button.ade-mission-gate-btn.reject${options?.focusReject ? '.is-emphasized' : ''}`, {
 			type: 'button',
 			'data-ade-gate-reject': node.id,
-		}, localize('adeMissionGateRejectBtn', "Reject"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionGateRejectBtn', "Reject & Roll Back"), '驳回并打回'))) as HTMLButtonElement;
 		const gateErrEl = append(this.popoverEl, $('.ade-mission-drawer-status.error', {
 			hidden: 'true',
 			'data-ade-gate-error': 'true',
 		}));
 
+		let inFlight = false;
+		const setBusy = (busy: boolean) => {
+			inFlight = busy;
+			approveBtn.disabled = busy;
+			rejectBtn.disabled = busy;
+			rollbackSelectEl.disabled = busy;
+			for (const b of waveBtns) {
+				b.disabled = busy;
+			}
+		};
 		const handleGateResult = (res: { readonly ok: boolean; readonly error?: string } | undefined) => {
 			if (openGen !== this.popoverGeneration) {
 				return;
 			}
+			setBusy(false);
 			if (res?.ok) {
 				this.close();
 			} else {
-				const msg = res?.error ?? localize('adeMissionGateFailed', "Gate decision failed.");
+				const msg = res?.error ?? adeBi(localize('adeMissionGateFailed', "Gate decision failed."), '审批决策提交失败。');
 				gateErrEl.textContent = msg;
 				gateErrEl.hidden = false;
 				this.delegate.onActionFeedback?.(msg, 'error');
@@ -1351,16 +1423,21 @@ export class AdeMissionPopovers extends Disposable {
 			if (openGen !== this.popoverGeneration) {
 				return;
 			}
-			const msg = err instanceof Error ? err.message : localize('adeMissionGateFailed', "Gate decision failed.");
+			setBusy(false);
+			const msg = err instanceof Error ? err.message : adeBi(localize('adeMissionGateFailed', "Gate decision failed."), '审批决策提交失败。');
 			gateErrEl.textContent = msg;
 			gateErrEl.hidden = false;
 			this.delegate.onActionFeedback?.(msg, 'error');
 		};
 		this.popoverDisposables.add(addDisposableListener(approveBtn, EventType.CLICK, () => {
-			if (!this.missionRuntimeService) {
-				handleGateReject(new Error(localize('adeMissionGateRuntimeUnavailable', "Mission runtime is unavailable.")));
+			if (inFlight) {
 				return;
 			}
+			if (!this.missionRuntimeService) {
+				handleGateReject(new Error(adeBi(localize('adeMissionGateRuntimeUnavailable', "Mission runtime is unavailable."), '任务运行时不可用。')));
+				return;
+			}
+			setBusy(true);
 			void this.missionRuntimeService.resolveGate(missionId, {
 				nodeId: node.id,
 				tokenId: selectedTokenId,
@@ -1369,19 +1446,31 @@ export class AdeMissionPopovers extends Disposable {
 			}).then(handleGateResult, handleGateReject);
 		}));
 		this.popoverDisposables.add(addDisposableListener(rejectBtn, EventType.CLICK, () => {
-			if (!this.missionRuntimeService) {
-				handleGateReject(new Error(localize('adeMissionGateRuntimeUnavailable', "Mission runtime is unavailable.")));
+			if (inFlight) {
 				return;
 			}
+			if (!this.missionRuntimeService) {
+				handleGateReject(new Error(adeBi(localize('adeMissionGateRuntimeUnavailable', "Mission runtime is unavailable."), '任务运行时不可用。')));
+				return;
+			}
+			setBusy(true);
+			const chosenRollback = !rollbackFieldEl.hidden && rollbackSelectEl.value
+				? rollbackSelectEl.value
+				: undefined;
 			void this.missionRuntimeService.resolveGate(missionId, {
 				nodeId: node.id,
 				tokenId: selectedTokenId,
 				decision: 'reject',
+				rollbackNodeId: chosenRollback,
 				note: noteInput.value.trim() || undefined,
 			}).then(handleGateResult, handleGateReject);
 		}));
 		this.clampTopToViewport(bodyRect, anchorRect, 8);
-		noteInput.focus();
+		if (options?.focusReject && !rollbackFieldEl.hidden) {
+			rollbackSelectEl.focus();
+		} else {
+			noteInput.focus();
+		}
 	}
 
 	openSupervisorPopover(missionId: string, node: IMissionDagNode, anchorEl: HTMLElement): void {
@@ -1577,223 +1666,6 @@ export class AdeMissionPopovers extends Disposable {
 		}
 
 		this.clampTopToViewport(bodyRect, anchorRect, 6);
-	}
-
-	openGovernancePopover(missionId: string, anchorEl: HTMLElement): void {
-		this.close();
-		if (!this.missionRuntimeService) {
-			return;
-		}
-		const openGen = ++this.popoverGeneration;
-		this.popoverEl.classList.add('is-governance-popover');
-		this.popoverEl.dataset.popoverKind = 'governance';
-		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 360, 320, 8);
-
-		const rt = this.missionRuntimeService.getRuntimeState(missionId);
-		const { validation } = this.missionRuntimeService.getBoundary(missionId);
-		const isLive = rt.status === 'running' || rt.status === 'paused';
-		const rankCount = (this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG).ranks.length;
-		const maxCutoff = Math.max(0, rankCount - 1);
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, localize('adeMissionGovTitle', "监工与运行规则")));
-		append(head, $(`span.ade-mission-token-status-badge${validation.valid ? '.status-completed' : '.status-frozen-failed'}`, {
-			'data-ade-gov-valid': String(validation.valid),
-		}, validation.valid ? localize('adeMissionGovValid', "配置正常") : localize('adeMissionGovInvalid', "{0} 项异常", validation.errors.length)));
-
-		append(this.popoverEl, $('.ade-mission-gov-intro', {}, localize(
-			'adeMissionGovIntro',
-			"设定哪些高层 Agent 在流程图外负责监工与异常纠偏（不直接做图内任务）、节点卡顿多久自动催办，以及查看各监工的汇报层级。",
-		)));
-
-		// Off-graph Max Tier selector (right on canvas, no digging into mission.mmd drawer!)
-		const controls = append(this.popoverEl, $('.ade-mission-gov-grid'));
-
-		const cutoffRow = append(controls, $('label.ade-mission-gov-row'));
-		const cutoffLabelCol = append(cutoffRow, $('.ade-mission-gov-label-col'));
-		append(cutoffLabelCol, $('span.ade-mission-gov-label', {}, localize('adeMissionGovCutoffLabel', "图外监工职级")));
-		append(cutoffLabelCol, $('span.ade-mission-gov-hint', {}, localize('adeMissionGovCutoffHint', "该职级及以上仅在图外监工，不占图内节点")));
-		const cutoffSelect = append(cutoffRow, $('select.ade-mission-config-select', {
-			'data-ade-gov-cutoff-select': 'true',
-		})) as HTMLSelectElement;
-		for (let k = 0; k <= maxCutoff; k++) {
-			const opt = append(cutoffSelect, $('option', { value: String(k) },
-				k === 0
-					? localize('adeMissionGovCutoffL0', "仅 L0（秘书）在图外")
-					: localize('adeMissionGovCutoffLk', "L0..L{0} 在图外监工", k),
-			)) as HTMLOptionElement;
-			if (k === rt.boundary.offGraphMaxTier) {
-				opt.selected = true;
-			}
-		}
-		cutoffSelect.disabled = isLive;
-
-		const timeoutRow = append(controls, $('label.ade-mission-gov-row'));
-		const timeoutLabelCol = append(timeoutRow, $('.ade-mission-gov-label-col'));
-		append(timeoutLabelCol, $('span.ade-mission-gov-label', {}, localize('adeMissionGovTimeoutLabel', "卡顿自动催办 (分钟)")));
-		append(timeoutLabelCol, $('span.ade-mission-gov-hint', {}, localize('adeMissionGovTimeoutHint', "节点超时无响应自动催办，3 次后升级监工")));
-		const timeoutInput = append(timeoutRow, $('input.ade-mission-config-input', {
-			type: 'number',
-			min: '1',
-			max: '240',
-			value: String(rt.silenceTimeoutMinutes),
-			'data-ade-gov-timeout-input': 'true',
-		})) as HTMLInputElement;
-		timeoutInput.disabled = rt.silenceTimeoutLocked;
-
-		const errEl = append(this.popoverEl, $('.ade-mission-drawer-status.error', {
-			hidden: 'true',
-			'data-ade-gov-error': 'true',
-		}));
-
-		if (!validation.valid && validation.errors.length > 0) {
-			const warnBox = append(this.popoverEl, $('.ade-mission-token-box.is-failed'));
-			const humanizeError = (raw: string): string => {
-				let text = raw;
-				for (const s of rt.boundary.supervisors) {
-					if (s.id && text.includes(s.id)) {
-						const disp = this.delegate.resolveSupervisorDisplay?.(s.id);
-						if (disp && disp.label && disp.label !== s.id) {
-							text = text.split(s.id).join(`${disp.label} (${formatTierTag(s.tier)})`);
-						}
-					}
-				}
-				return text;
-			};
-			for (const err of validation.errors) {
-				append(warnBox, $('.ade-mission-token-box-body', {}, `• ${humanizeError(err)}`));
-			}
-		}
-
-		this.popoverDisposables.add(addDisposableListener(cutoffSelect, EventType.CHANGE, () => {
-			const cutoff = Number.parseInt(cutoffSelect.value, 10);
-			if (!Number.isInteger(cutoff) || cutoff < 0) {
-				return;
-			}
-			const task = this.delegate.onCutoffChange
-				? this.delegate.onCutoffChange(cutoff)
-				: this.missionRuntimeService?.setBoundary(missionId, { offGraphMaxTier: cutoff }).then(res => {
-					if (!res.ok && res.error) {
-						errEl.textContent = res.error;
-						errEl.hidden = false;
-					}
-				});
-			void task?.then(() => {
-				if (openGen === this.popoverGeneration) {
-					this.openGovernancePopover(missionId, anchorEl);
-				}
-			});
-		}));
-
-		this.popoverDisposables.add(addDisposableListener(timeoutInput, EventType.CHANGE, () => {
-			const mins = Number.parseInt(timeoutInput.value, 10);
-			if (!Number.isFinite(mins) || mins < 1) {
-				return;
-			}
-			void this.delegate.onTimeoutChange?.(mins);
-		}));
-
-		// Bound Off-Graph Supervisors summary + parentSupervisorId hierarchy selector
-		const supSection = append(this.popoverEl, $('.ade-mission-host-section'));
-		append(supSection, $('.ade-mission-emp-popover-title', {}, localize('adeMissionGovSupSection', "已绑定监工与汇报链")));
-		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const inGraphAgentIds = new Set(
-			Object.values(rt.boundary.nodeAssignments)
-				.map(a => a.agentId)
-				.filter((id): id is string => Boolean(id)),
-		);
-		const eligibleHigherPool: { readonly id: string; readonly label: string; readonly tier: number }[] = [
-			{ id: ADE_SECRETARY_ID, label: 'Secretary', tier: 0 },
-		];
-		for (const agent of this.projectsService?.agents ?? []) {
-			if (this.projectsService?.isArchived(agent.id) || inGraphAgentIds.has(agent.id) || agent.treeNodeId) {
-				continue;
-			}
-			const liveTier = resolveEffectiveRankDefinition(org, agent.role, this.projectsService?.hasSubordinates(agent.id) ?? false).tier;
-			if (liveTier <= rt.boundary.offGraphMaxTier) {
-				eligibleHigherPool.push({ id: agent.id, label: agent.label, tier: liveTier });
-			}
-		}
-		for (const s of rt.boundary.supervisors) {
-			if (!eligibleHigherPool.some(c => c.id === s.id)) {
-				const d = this.delegate.resolveSupervisorDisplay?.(s.id) ?? { label: s.id, shortLabel: s.id, tier: s.tier };
-				eligibleHigherPool.push({ id: s.id, label: d.label, tier: s.tier });
-			}
-		}
-		const referencedParentIds = new Set(rt.boundary.supervisors.map(s => s.parentSupervisorId).filter((id): id is string => Boolean(id)));
-		const visibleSups = rt.boundary.supervisors.filter(s => s.managedNodeIds.length > 0 || referencedParentIds.has(s.id));
-		if (visibleSups.length === 0) {
-			append(supSection, $('.ade-mission-ni-muted-hint', {}, localize('adeMissionGovNoSups', "暂未手动指定单节点监工 — 点击任意节点卡片的「+ 监工」按钮即可指派（未指定时默认由 Mission 所属上级负责）。")));
-		} else {
-			const supList = append(supSection, $('.ade-mission-gov-sup-list'));
-			for (const sup of visibleSups) {
-				const disp = this.delegate.resolveSupervisorDisplay?.(sup.id) ?? { label: sup.id, shortLabel: sup.id, tier: sup.tier };
-				const colorIdx = getMissionSupervisorColorIndex(sup.id);
-				const card = append(supList, $('.ade-mission-gov-sup-card', {
-					'data-ade-gov-sup-row': sup.id,
-				}));
-				const topLine = append(card, $('.ade-mission-gov-sup-item'));
-				const lead = append(topLine, $('.ade-mission-sup-option-lead'));
-				append(lead, $(`span.ade-mission-sup-dot.sup-color-${colorIdx}`, { 'aria-hidden': 'true' }));
-				append(lead, $('span', {}, `${disp.label} (${formatTierTag(sup.tier)})`));
-				append(topLine, $('span.ade-mission-token-meta-chip', {}, sup.managedNodeIds.length > 0 ? sup.managedNodeIds.join(', ') : localize('adeMissionGovUpperSupTag', "上级监工")));
-				if (sup.tier > 0) {
-					const higherOpts = eligibleHigherPool.filter(c => c.id !== sup.id && c.tier < sup.tier);
-					const parentRow = append(card, $('.ade-mission-gov-parent-row'));
-					append(parentRow, $('span.ade-mission-gov-parent-label', {}, localize('adeMissionGovParentLabel', "上级监工:")));
-					const parentSelect = append(parentRow, $('select.ade-mission-config-select', {
-						'data-ade-gov-sup-parent': sup.id,
-						'aria-label': localize('adeMissionGovParentSelectAria', "Parent supervisor for {0}", disp.label),
-					})) as HTMLSelectElement;
-					const noneOpt = append(parentSelect, $('option', { value: '' }, localize('adeMissionSupParentHumanInbox', "Human Inbox (顶层直报人工)"))) as HTMLOptionElement;
-					if (!sup.parentSupervisorId) {
-						noneOpt.selected = true;
-					}
-					for (const cand of higherOpts) {
-						const opt = append(parentSelect, $('option', { value: cand.id }, `${cand.label} (${formatTierTag(cand.tier)})`)) as HTMLOptionElement;
-						if (sup.parentSupervisorId === cand.id) {
-							opt.selected = true;
-						}
-					}
-					this.popoverDisposables.add(addDisposableListener(parentSelect, EventType.CHANGE, () => {
-						if (!this.missionRuntimeService) {
-							return;
-						}
-						const nextParentId = parentSelect.value.trim() || undefined;
-						const latestRt = this.missionRuntimeService.getRuntimeState(missionId);
-						if (!latestRt.boundary.supervisors.some(s => s.id === sup.id)) {
-							return;
-						}
-						const updated: IMissionSupervisorBinding[] = latestRt.boundary.supervisors.map(s =>
-							s.id === sup.id
-								? { ...s, parentSupervisorId: nextParentId }
-								: s,
-						);
-						if (nextParentId && !updated.some(s => s.id === nextParentId)) {
-							const parentMeta = higherOpts.find(c => c.id === nextParentId);
-							updated.push({ id: nextParentId, tier: parentMeta?.tier ?? 0, managedNodeIds: [] });
-						}
-						void this.missionRuntimeService.setBoundary(missionId, { supervisors: updated }).then(res => {
-							if (openGen !== this.popoverGeneration) {
-								return;
-							}
-							if (res.ok) {
-								this.delegate.onGraphVisualInvalidated(false);
-								this.delegate.onRuntimeControlsInvalidated();
-								this.openGovernancePopover(missionId, anchorEl);
-							} else {
-								errEl.textContent = res.error ?? localize('adeMissionSupParentSaveFail', "Failed to update parent supervisor.");
-								errEl.hidden = false;
-							}
-						});
-					}));
-				}
-				this.popoverDisposables.add(addDisposableListener(card, 'pointerenter', () => this.delegate.onHoverSupervisor?.(sup.id)));
-				this.popoverDisposables.add(addDisposableListener(card, 'pointerleave', () => this.delegate.onHoverSupervisor?.(undefined)));
-			}
-		}
-
-		this.clampTopToViewport(bodyRect, anchorRect, 8);
 	}
 
 	openTriggersPopover(
@@ -2198,38 +2070,6 @@ export class AdeMissionPopovers extends Disposable {
 
 		this.clampTopToViewport(bodyRect, anchorRect, 6);
 		input.focus();
-	}
-
-	openTemplatesPopover(anchorEl: HTMLElement): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-templates-popover');
-		this.popoverEl.dataset.popoverKind = 'templates';
-		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 390, 380, 8);
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, localize('adeMissionTemplatesPopTitle', "一键套用经典多机工程 / 科研模板")));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button', title: localize('adeMissionClose', "Close") })) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		const list = append(this.popoverEl, $('.ade-mission-template-pop-list'));
-		for (const tpl of MISSION_DAG_TEMPLATES) {
-			const card = append(list, $('button.ade-mission-template-card', {
-				type: 'button',
-				'data-ade-popover-template': tpl.id,
-			})) as HTMLButtonElement;
-			const top = append(card, $('.ade-mission-template-card-top'));
-			append(top, $('span.ade-mission-template-card-title', {}, tpl.title));
-			append(top, $(`span.ade-mission-template-card-badge.cat-${tpl.category}`, {}, tpl.badge));
-			append(card, $('.ade-mission-template-card-desc', {}, tpl.description));
-			this.popoverDisposables.add(addDisposableListener(card, EventType.CLICK, () => {
-				this.close();
-				this.delegate.onApplyTemplate?.(tpl);
-			}));
-		}
-
-		this.clampTopToViewport(bodyRect, anchorRect, 8);
 	}
 
 	openCanvasContextMenu(

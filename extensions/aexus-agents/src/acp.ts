@@ -74,17 +74,49 @@ function readTokenCount(record: Record<string, unknown>, ...keys: string[]): num
 	return 0;
 }
 
+function readAcpPositiveCostUsd(record: Record<string, unknown>): number | undefined {
+	for (const key of ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd', 'totalCost', 'cost']) {
+		const val = record[key];
+		if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+			return val;
+		}
+		if (val && typeof val === 'object') {
+			const total = (val as Record<string, unknown>).total;
+			if (typeof total === 'number' && Number.isFinite(total) && total > 0) {
+				return total;
+			}
+		}
+	}
+	return undefined;
+}
+
+function readAcpModelString(record: Record<string, unknown>): string | undefined {
+	for (const key of ['model', 'modelId', 'model_id']) {
+		const val = record[key];
+		if (typeof val === 'string' && val.trim() && val.trim().toLowerCase() !== 'default') {
+			return val.trim();
+		}
+	}
+	return undefined;
+}
+
 function extractAcpTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
 	if (!value || typeof value !== 'object' || depth > 3) {
 		return undefined;
 	}
 	const record = value as Record<string, unknown>;
+	const outerCostUsd = readAcpPositiveCostUsd(record);
+	const outerModel = readAcpModelString(record);
 	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
 		const nested = record[key];
 		if (nested && typeof nested === 'object') {
 			const usage = extractAcpTurnUsage(nested, depth + 1);
 			if (usage) {
-				return usage;
+				return {
+					...usage,
+					...(usage.costUsd === undefined && outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
+					...(usage.model === undefined && outerModel !== undefined ? { model: outerModel } : {}),
+				};
 			}
 		}
 	}
@@ -96,7 +128,16 @@ function extractAcpTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | 
 	if (totalTokens <= 0) {
 		return undefined;
 	}
-	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens,
+		...(outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
+		...(outerModel !== undefined ? { model: outerModel } : {}),
+		estimated: false,
+	};
 }
 
 interface AcpSessionSetupResult {
@@ -993,8 +1034,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 			return;
 		}
 		this.knownSessions.set(session.id, session);
+		const activeAcpModel = (options?.model && options.model !== 'default' ? options.model.trim() : undefined) ?? this.cachedDefaultModel;
 		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
 			preTurnBaseline: this.lastRawSessionUsageBySession.get(session.id),
+			model: activeAcpModel,
 		});
 		const listener = client.onPacket(packet => {
 			const params = packet.params ?? {};
@@ -1041,7 +1084,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 				const thought = extractAcpText(update);
 				if (thought) {
 					emitThinkingProgress(stream, thought, `${this.id}-thinking`);
-					usageTracker.recordStreamDelta(thought);
+					usageTracker.recordStreamDelta(thought, { skipToolErrorScan: true });
 				}
 			} else if (!token.isCancellationRequested && (kind === 'tool_call' || kind === 'tool_call_update')) {
 				const toolTitle = typeof update.title === 'string' && update.title.trim() ? update.title.trim() : undefined;

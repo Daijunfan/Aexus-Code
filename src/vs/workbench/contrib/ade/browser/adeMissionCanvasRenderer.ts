@@ -11,9 +11,12 @@ import {
 	buildMissionContextReusePaths,
 	computeMissionEdgeLabelLayout,
 	computeMissionWorldSize,
+	computeNodeDragSnapAlignment,
 	computeOrthogonalRoundedEdgeRoute,
 	getEmployeeColorIndex,
 	getMissionEdgeKind,
+	IMissionAlignGuide,
+	IMissionAlignRect,
 	IMissionContextReuseAnchor,
 	IMissionDagEdge,
 	IMissionDagNode,
@@ -31,8 +34,10 @@ import {
 	IMissionRuntimeState,
 	IMissionSourceTrigger,
 	IMissionToken,
+	inferModelContextWindowTokens,
 	MissionTokenStatus,
 } from '../../../../platform/ade/common/adeMissionEngine.js';
+import { formatFinOpsUsd } from '../../../../platform/ade/common/adeModelPricing.js';
 import { IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
 import {
@@ -42,13 +47,42 @@ import {
 } from '../../../browser/adeLlmIcon.js';
 import { renderAdeOsIcon } from '../../../browser/adeOsIcon.js';
 import { IAdeAgent } from '../common/ade.js';
+import { adeBi } from '../common/adeLocalization.js';
 import {
 	AdeMissionHostCatalog,
 	applyMissionEngineIcon,
 	MISSION_ENGINE_DEFAULT_MODELS,
+	serializeMissionEngineIconKey,
 } from './adeMissionHostCatalog.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const NODE_DRAG_THRESHOLD_PX = 5;
+const NODE_DRAG_EXCLUSION_SELECTOR = '.ade-mission-inline-rename-input, .ade-mission-port.port-out.is-connectable';
+const NODE_SUB_INTERACTIVE_SELECTOR = 'button:not(:disabled), .ade-mission-core-model-row.is-editable, input, textarea, select, [contenteditable="true"]';
+export const MISSION_EDGE_TRANSIT_DURATION_MS = 800;
+const EDGE_TRANSIT_MAX_FUTURE_SKEW_MS = 5_000;
+const MAX_SEEN_TOKEN_HOPS = 500;
+
+interface IEdgeTransitBurst {
+	readonly edgeKey: string;
+	readonly edgeId: string;
+	readonly tokenId: string;
+	readonly waveId: string;
+	readonly isFail: boolean;
+	readonly hopSignature: string;
+	readonly expiresAt: number;
+}
+
+function resolveEventTargetElement(target: EventTarget | null): Element | null {
+	if (!target || typeof target !== 'object') {
+		return null;
+	}
+	const node = target as Partial<Node>;
+	if (typeof node.nodeType !== 'number') {
+		return null;
+	}
+	return node.nodeType === 1 ? (target as Element) : (node.parentElement ?? null);
+}
 
 export function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs?: Record<string, string>): SVGElementTagNameMap[K] {
 	const el = document.createElementNS(SVG_NS, tag);
@@ -87,7 +121,8 @@ export interface IMissionCanvasNodeCallbacks {
 	onHoverNode(nodeId: string | undefined): void;
 	onHoverToken?(token: IMissionToken | undefined): void;
 	onHoverSupervisor?(supervisorId: string | undefined): void;
-	onSelectNode?(node: IMissionDagNode, anchorEl: HTMLElement): void;
+	onSelectNode?(node: IMissionDagNode, anchorEl: HTMLElement, options?: { readonly toggleMulti?: boolean }): void;
+	onSelectEdge?(edge: IMissionDagEdge | undefined): void;
 	onDoubleClickNode?(node: IMissionDagNode, agentId: string): void;
 	onOpenEmployeePopover(node: IMissionDagNode, anchorEl: HTMLElement): void;
 	onOpenSupervisorPopover?(node: IMissionDagNode, anchorEl: HTMLElement): void;
@@ -96,21 +131,26 @@ export interface IMissionCanvasNodeCallbacks {
 	onOpenHostPopover(node: IMissionDagNode, currentHost: string, anchorEl: HTMLElement): void;
 	onOpenNodePromptPopover(node: IMissionDagNode, anchorEl: HTMLElement): void;
 	onOpenNodeTriggersPopover?(node: IMissionDagNode, anchorEl: HTMLElement): void;
-	onOpenGateDecisionPopover(node: IMissionDagNode, anchorEl: HTMLElement, preferredTokenId?: string): void;
+	onOpenGateDecisionPopover(node: IMissionDagNode, anchorEl: HTMLElement, preferredTokenId?: string, options?: { readonly focusReject?: boolean }): void;
+	onQuickGateApprove?(node: IMissionDagNode, token: IMissionToken | undefined, anchorEl: HTMLElement): void;
 	onOpenTokenInspectorPopover?(node: IMissionDagNode, token: IMissionToken, allNodeTokens: readonly IMissionToken[], anchorEl: HTMLElement): void;
 	onQuickRetryNode?(node: IMissionDagNode, token: IMissionToken): void;
 	onOpenGuidedRetryPopover?(node: IMissionDagNode, token: IMissionToken, anchorEl: HTMLElement): void;
 	onQuickRecallNode?(node: IMissionDagNode, token: IMissionToken | undefined): void;
 	onRenameNode?(nodeId: string, nextLabel: string): void;
+	onRenameEdgeLabel?(fromId: string, toId: string, nextLabel: string): void;
 	onConnectNodes?(fromNodeId: string, toNodeId: string, options?: { readonly fail?: boolean }): void;
 	onNodeContextMenu?(node: IMissionDagNode, clientX: number, clientY: number): void;
 	onEdgeContextMenu?(edge: IMissionDagEdge, clientX: number, clientY: number): void;
 	getEffectiveNodeChecksCount?(nodeId: string): number;
 	isRevisionPreview?(): boolean;
 	onOpenAgentSession(agentId: string): void;
+	getDragGroupNodeIds?(anchorNodeId: string): readonly string[];
 	onStartNodeDrag(): void;
 	onDragNodeMove(nodeId: string, nextPos: IMissionNodePosition): void;
+	onDragNodesMove?(moves: ReadonlyArray<{ readonly nodeId: string; readonly pos: IMissionNodePosition }>): void;
 	onEndNodeDrag(nodeId: string, movedPx: number): void;
+	onEndNodesDrag?(movedNodeIds: readonly string[], movedPx: number): void;
 	getNodePosition(nodeId: string): IMissionNodePosition | undefined;
 	getZoom(): number;
 }
@@ -147,6 +187,8 @@ interface IRenderedNodeHandle {
 	readonly modelNameEl?: HTMLElement;
 	readonly thinkingTagEl?: HTMLElement;
 	readonly engineBadgeEl?: HTMLButtonElement;
+	readonly engineIconEl?: HTMLElement;
+	readonly engineNameEl?: HTMLElement;
 	engineWarnDotEl?: HTMLElement;
 	lastModel?: string;
 	lastThinking?: AdeThinkingLevel;
@@ -179,6 +221,11 @@ interface IRenderedNodeHandle {
 	readonly guidedRetryBtnEl: HTMLButtonElement;
 	readonly recallBtnEl: HTMLButtonElement;
 	readonly gateMetaEl?: HTMLElement;
+	readonly gateInlineActionsEl?: HTMLElement;
+	readonly gateApproveBtnEl?: HTMLButtonElement;
+	readonly gateApproveLabelEl?: HTMLElement;
+	readonly gateRejectBtnEl?: HTMLButtonElement;
+	readonly gateRejectLabelEl?: HTMLElement;
 	readonly contextSummaryEl?: HTMLElement;
 	readonly promptBtnEl?: HTMLButtonElement;
 	readonly promptPreviewEl?: HTMLElement;
@@ -252,9 +299,10 @@ export function formatMissionTriggerShortLabel(trigger: IMissionSourceTrigger): 
 }
 
 const TOKEN_STATUS_PRIORITY: Readonly<Record<MissionTokenStatus, number>> = {
-	active: 6,
-	blocked: 5,
-	waiting_gate: 4,
+	active: 7,
+	blocked: 6,
+	waiting_gate: 5,
+	queued: 4,
 	frozen_failed: 3,
 	waiting_join: 2,
 	completed: 1,
@@ -298,6 +346,7 @@ export function extractMissionWatchFileBasename(filePath: string): string {
 
 function isLiveMissionTokenStatus(status: MissionTokenStatus): boolean {
 	return status === 'active'
+		|| status === 'queued'
 		|| status === 'blocked'
 		|| status === 'waiting_gate'
 		|| status === 'waiting_join'
@@ -313,7 +362,10 @@ interface IRenderedEdgeHandle {
 	readonly pillW: number;
 	readonly edge: IMissionDagEdge;
 	readonly isCrossHost: boolean;
+	midX: number;
+	midY: number;
 	bbox: IMissionEdgeObstacle;
+	lastFlowHopSignature?: string;
 }
 
 function boxesOverlap(a: IMissionEdgeObstacle, b: IMissionEdgeObstacle): boolean {
@@ -347,6 +399,7 @@ function computeRouteBbox(points: readonly { readonly x: number; readonly y: num
 export class AdeMissionCanvasRenderer extends Disposable {
 	private readonly graphDisposables = this._register(new DisposableStore());
 	private readonly edgeDisposables = this._register(new DisposableStore());
+	private readonly nodeDragDisposables = this._register(new DisposableStore());
 	private readonly connectDragDisposables = this._register(new DisposableStore());
 	private readonly inlineRenameDisposables = this._register(new DisposableStore());
 	private readonly edgesSvgEl: SVGSVGElement;
@@ -355,18 +408,30 @@ export class AdeMissionCanvasRenderer extends Disposable {
 	private readonly contextLinksLayerEl: SVGGElement;
 	private readonly supervisorBeamsLayerEl: SVGGElement;
 	private readonly tokenGliderLayerEl: SVGGElement;
+	private readonly alignGuidesLayerEl: SVGGElement;
 	private readonly connectPreviewPathEl: SVGPathElement;
 	private readonly nodesLayerEl: HTMLElement;
+	private inlineEdgeEditorEl: HTMLElement | undefined;
 
 	private readonly nodeHandles = new Map<string, IRenderedNodeHandle>();
 	private readonly edgeHandles = new Map<string, IRenderedEdgeHandle>();
-	private readonly tokenGliderHandles = new Map<string, { readonly group: SVGGElement; readonly text: SVGTextElement; waveClass: string }>();
+	private readonly tokenGliderHandles = new Map<string, { readonly group: SVGGElement; readonly text: SVGTextElement; waveClass: string; hopSignature: string }>();
+	private readonly seenTokenHopSignatures = new Set<string>();
+	private readonly activeEdgeTransits = new Map<string, IEdgeTransitBurst>();
+	private edgeTransitCleanupTimer: number | undefined;
+	private trackedMissionId: string | undefined;
+	private trackedMissionStartedAt: number | undefined;
+	private trackedMissionTokenSeq = 0;
+	private animationsPaused = false;
 	private readonly lastNodeObstacleById = new Map<string, IMissionEdgeObstacle>();
 	private lastStructureKey = '';
 	private lastEdgeStructureKey = '';
 	private lastDirection: 'LR' | 'TD' = 'LR';
 	private hoveredNodeId: string | undefined;
-	private selectedNodeId: string | undefined;
+	private selectedNodeIds = new Set<string>();
+	private selectedEdgeKey: string | undefined;
+	private searchMatchNodeIds: ReadonlySet<string> | undefined;
+	private activeSearchNodeId: string | undefined;
 	private highlightedSupervisorId: string | undefined;
 	private hoveredTraceEdgeKeys: ReadonlySet<string> | undefined;
 	private lastRuntimeState: IMissionRuntimeState | undefined;
@@ -390,6 +455,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		this.contextLinksLayerEl = svgEl('g', { class: 'ade-mission-context-layer' });
 		this.supervisorBeamsLayerEl = svgEl('g', { class: 'ade-mission-supervisor-beams-layer' });
 		this.tokenGliderLayerEl = svgEl('g', { class: 'ade-mission-token-gliders-layer' });
+		this.alignGuidesLayerEl = svgEl('g', { class: 'ade-mission-align-guides-layer' });
 		this.connectPreviewPathEl = svgEl('path', {
 			class: 'ade-mission-connect-preview',
 			'marker-end': 'url(#ade-mission-arrow-active)',
@@ -400,17 +466,63 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		this.edgesSvgEl.appendChild(this.contextLinksLayerEl);
 		this.edgesSvgEl.appendChild(this.supervisorBeamsLayerEl);
 		this.edgesSvgEl.appendChild(this.tokenGliderLayerEl);
+		this.edgesSvgEl.appendChild(this.alignGuidesLayerEl);
 		this.edgesSvgEl.appendChild(this.connectPreviewPathEl);
 		this.worldEl.appendChild(this.edgesSvgEl);
 		this.nodesLayerEl = append(this.worldEl, $('.ade-mission-nodes-layer'));
 		this._register({
 			dispose: () => {
+				this.clearInlineEdgeEditor();
+				this.clearAlignGuides();
+				this.clearEdgeTransitTimer();
+				this.activeEdgeTransits.clear();
+				this.seenTokenHopSignatures.clear();
 				if (this.focusPulseTimer !== undefined) {
 					clearTimeout(this.focusPulseTimer);
 					this.focusPulseTimer = undefined;
 				}
 			},
 		});
+	}
+
+	private clearEdgeTransitTimer(): void {
+		if (this.edgeTransitCleanupTimer !== undefined) {
+			getWindow(this.worldEl).clearTimeout(this.edgeTransitCleanupTimer);
+			this.edgeTransitCleanupTimer = undefined;
+		}
+	}
+
+	private clearGliderDom(): void {
+		this.tokenGliderHandles.clear();
+		while (this.tokenGliderLayerEl.firstChild) {
+			this.tokenGliderLayerEl.removeChild(this.tokenGliderLayerEl.firstChild);
+		}
+	}
+
+	setAnimationsPaused(paused: boolean): void {
+		if (this.animationsPaused === paused) {
+			return;
+		}
+		this.animationsPaused = paused;
+		if (paused) {
+			this.clearEdgeTransitTimer();
+		} else if (this.edgeHandles.size > 0) {
+			this.patchEdgeRuntimeStates(this.lastRuntimeState);
+		}
+	}
+
+	resetTransitTracking(): void {
+		this.clearEdgeTransitTimer();
+		this.activeEdgeTransits.clear();
+		this.seenTokenHopSignatures.clear();
+		this.trackedMissionId = undefined;
+		this.trackedMissionStartedAt = undefined;
+		this.trackedMissionTokenSeq = 0;
+		this.clearGliderDom();
+		for (const handle of this.edgeHandles.values()) {
+			handle.group.classList.remove('is-token-flowing');
+			handle.lastFlowHopSignature = undefined;
+		}
 	}
 
 	private buildSvgMarkers(): void {
@@ -500,10 +612,162 @@ export class AdeMissionCanvasRenderer extends Disposable {
 	}
 
 	setSelectedNodeId(nodeId: string | undefined): void {
-		this.selectedNodeId = nodeId;
+		this.setSelectedNodeIds(nodeId ? [nodeId] : []);
+	}
+
+	setSelectedNodeIds(nodeIds: Iterable<string>): void {
+		this.selectedNodeIds = new Set(nodeIds);
+		const isMulti = this.selectedNodeIds.size > 1;
 		for (const [id, handle] of this.nodeHandles.entries()) {
-			handle.rootEl.classList.toggle('is-selected', Boolean(nodeId && id === nodeId));
+			const isSelected = this.selectedNodeIds.has(id);
+			handle.rootEl.classList.toggle('is-selected', isSelected);
+			handle.rootEl.classList.toggle('is-multi-selected', isSelected && isMulti);
+			if (isSelected) {
+				handle.rootEl.setAttribute('data-node-selected', 'true');
+			} else {
+				handle.rootEl.removeAttribute('data-node-selected');
+			}
 		}
+	}
+
+	setSelectedEdgeKey(edgeKey: string | undefined): void {
+		this.selectedEdgeKey = edgeKey;
+		for (const handle of this.edgeHandles.values()) {
+			const key = `${handle.edge.from}->${handle.edge.to}`;
+			const isSelected = Boolean(edgeKey && key === edgeKey);
+			handle.group.classList.toggle('is-selected', isSelected);
+			if (isSelected) {
+				handle.group.setAttribute('data-edge-selected', 'true');
+				handle.path.setAttribute('marker-end', 'url(#ade-mission-arrow-active)');
+				this.edgesLayerEl.appendChild(handle.group);
+			} else {
+				handle.group.removeAttribute('data-edge-selected');
+			}
+		}
+		if (!edgeKey) {
+			this.patchEdgeRuntimeStates(this.lastRuntimeState);
+		}
+	}
+
+	setSearchMatches(matchNodeIds: ReadonlySet<string> | undefined, activeMatchNodeId: string | undefined): void {
+		this.searchMatchNodeIds = matchNodeIds && matchNodeIds.size > 0 ? matchNodeIds : undefined;
+		this.activeSearchNodeId = activeMatchNodeId;
+		this.worldEl.classList.toggle('has-search-filter', Boolean(this.searchMatchNodeIds));
+		for (const [id, handle] of this.nodeHandles.entries()) {
+			const isMatch = Boolean(this.searchMatchNodeIds?.has(id));
+			const isActive = Boolean(activeMatchNodeId && id === activeMatchNodeId);
+			handle.rootEl.classList.toggle('is-search-match', isMatch);
+			handle.rootEl.classList.toggle('is-search-active', isActive);
+			if (isMatch) {
+				handle.rootEl.setAttribute('data-search-match', 'true');
+			} else {
+				handle.rootEl.removeAttribute('data-search-match');
+			}
+			if (isActive) {
+				handle.rootEl.setAttribute('data-search-active', 'true');
+			} else {
+				handle.rootEl.removeAttribute('data-search-active');
+			}
+		}
+	}
+
+	private clearAlignGuides(): void {
+		while (this.alignGuidesLayerEl.firstChild) {
+			this.alignGuidesLayerEl.removeChild(this.alignGuidesLayerEl.firstChild);
+		}
+	}
+
+	private renderAlignGuides(guides: readonly IMissionAlignGuide[]): void {
+		this.clearAlignGuides();
+		for (const guide of guides) {
+			const attrs: Record<string, string> = guide.axis === 'x'
+				? {
+					class: 'ade-mission-align-guide is-vertical',
+					'data-ade-align-guide': 'x',
+					'data-guide-coord': String(guide.coord),
+					x1: String(guide.coord),
+					y1: String(guide.start),
+					x2: String(guide.coord),
+					y2: String(guide.end),
+				}
+				: {
+					class: 'ade-mission-align-guide is-horizontal',
+					'data-ade-align-guide': 'y',
+					'data-guide-coord': String(guide.coord),
+					x1: String(guide.start),
+					y1: String(guide.coord),
+					x2: String(guide.end),
+					y2: String(guide.coord),
+				};
+			this.alignGuidesLayerEl.appendChild(svgEl('line', attrs));
+		}
+	}
+
+	private clearInlineEdgeEditor(): void {
+		if (this.inlineEdgeEditorEl) {
+			this.inlineEdgeEditorEl.remove();
+			this.inlineEdgeEditorEl = undefined;
+		}
+	}
+
+	startInlineEdgeLabelEdit(edgeId: string): void {
+		if (!this.callbacks.onRenameEdgeLabel || this.callbacks.isRevisionPreview?.()) {
+			return;
+		}
+		const handle = this.edgeHandles.get(edgeId)
+			?? [...this.edgeHandles.values()].find(h => `${h.edge.from}->${h.edge.to}` === edgeId);
+		if (!handle) {
+			return;
+		}
+		this.inlineRenameDisposables.clear();
+		this.clearInlineEdgeEditor();
+		const { edge, midX, midY } = handle;
+		const originalLabel = (edge.label ?? '').trim();
+		const wrap = append(this.worldEl, $('.ade-mission-inline-edge-editor', {
+			'data-ade-inline-edge-editor': `${edge.from}->${edge.to}`,
+		}));
+		wrap.style.left = `${Math.round(midX)}px`;
+		wrap.style.top = `${Math.round(midY)}px`;
+		this.inlineEdgeEditorEl = wrap;
+
+		const input = append(wrap, $('input.ade-mission-inline-edge-input', {
+			type: 'text',
+			value: originalLabel,
+			placeholder: localize('adeMissionInlineEdgeLabelPlaceholder', "边标签 (如 fail / spec，留空清除)"),
+			'data-ade-inline-edge-rename': `${edge.from}->${edge.to}`,
+			'aria-label': localize('adeMissionInlineEdgeRenameAria', "Edit label for edge {0} to {1}", edge.from, edge.to),
+		})) as HTMLInputElement;
+
+		let done = false;
+		const finish = (commit: boolean) => {
+			if (done) {
+				return;
+			}
+			done = true;
+			this.inlineRenameDisposables.clear();
+			const nextVal = input.value.trim();
+			this.clearInlineEdgeEditor();
+			if (commit && nextVal !== originalLabel) {
+				this.callbacks.onRenameEdgeLabel?.(edge.from, edge.to, nextVal);
+			}
+		};
+		this.inlineRenameDisposables.add(addDisposableListener(wrap, EventType.POINTER_DOWN, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.POINTER_DOWN, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.CLICK, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.DBLCLICK, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.KEY_DOWN, (e: KeyboardEvent) => {
+			e.stopPropagation();
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				finish(true);
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				finish(false);
+			}
+		}));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.BLUR, () => finish(true)));
+		input.focus();
+		input.select();
 	}
 
 	pulseFocusNode(nodeId: string, durationMs = 3600): void {
@@ -844,6 +1108,17 @@ export class AdeMissionCanvasRenderer extends Disposable {
 	}
 
 	private clearAllDom(): void {
+		this.nodeDragDisposables.clear();
+		this.connectDragDisposables.clear();
+		this.inlineRenameDisposables.clear();
+		this.clearInlineEdgeEditor();
+		this.clearAlignGuides();
+		this.clearEdgeTransitTimer();
+		this.activeEdgeTransits.clear();
+		this.seenTokenHopSignatures.clear();
+		this.trackedMissionId = undefined;
+		this.trackedMissionStartedAt = undefined;
+		this.trackedMissionTokenSeq = 0;
 		this.graphDisposables.clear();
 		this.nodeHandles.clear();
 		this.edgeHandles.clear();
@@ -852,13 +1127,16 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		this.lastStructureKey = '';
 		this.lastEdgeStructureKey = '';
 		this.hoveredNodeId = undefined;
-		this.selectedNodeId = undefined;
+		this.selectedNodeIds.clear();
+		this.selectedEdgeKey = undefined;
+		this.searchMatchNodeIds = undefined;
+		this.activeSearchNodeId = undefined;
 		this.highlightedSupervisorId = undefined;
 		this.hoveredTraceEdgeKeys = undefined;
 		this.tabSpotlightActive = false;
-		this.worldEl.classList.remove('has-node-hover', 'has-trace-hover', 'has-supervisor-highlight', 'is-tab-spotlight-active');
+		this.worldEl.classList.remove('has-node-hover', 'has-trace-hover', 'has-supervisor-highlight', 'is-tab-spotlight-active', 'has-search-filter');
 		clearNode(this.nodesLayerEl);
-		for (const layer of [this.cloudTerritoriesLayerEl, this.edgesLayerEl, this.contextLinksLayerEl, this.supervisorBeamsLayerEl, this.tokenGliderLayerEl]) {
+		for (const layer of [this.cloudTerritoriesLayerEl, this.edgesLayerEl, this.contextLinksLayerEl, this.supervisorBeamsLayerEl, this.tokenGliderLayerEl, this.alignGuidesLayerEl]) {
 			while (layer.firstChild) {
 				layer.removeChild(layer.firstChild);
 			}
@@ -1079,13 +1357,18 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			handle.triggerBadgeEl.title = `${localize('adeMissionNodeTriggerBadgeTip', "Source Triggers ({0}) — Click to manage", triggers.length)}\n${trigTipLines.join('\n')}`;
 		}
 
-		// 1. Floating Token Puck (top-right of node, with physical wave-color ring)
+		// 1. Floating Token Puck (top-right of node, with physical wave-color ring & concurrency queue rank)
 		if (!primary) {
 			handle.tokenPuckEl.hidden = true;
 			handle.tokenPuckEl.removeAttribute('data-token-id');
 			handle.tokenPuckEl.removeAttribute('data-token-status');
 			handle.tokenPuckEl.removeAttribute('data-wave-id');
 			handle.tokenPuckEl.removeAttribute('data-live-token-count');
+			handle.tokenPuckEl.removeAttribute('data-queue-position');
+			handle.rootEl.removeAttribute('data-node-queue-position');
+			handle.rootEl.removeAttribute('data-node-queue-total');
+			handle.rootEl.removeAttribute('data-node-queue-scope');
+			handle.rootEl.removeAttribute('data-node-queue-reason');
 		} else {
 			const liveCount = tokens.filter(t => isLiveMissionTokenStatus(t.status)).length;
 			const statusClass = `status-${primary.status.replace(/_/g, '-')}`;
@@ -1106,6 +1389,9 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			if (primary.status === 'blocked' && primary.blocked) {
 				iconGlyph = '⏳';
 				puckLabel = `${waveTag} · ${formatMissionBlockedRemaining(primary.blocked.expiresAt, now).text}`;
+			} else if (primary.status === 'queued' && primary.queued) {
+				iconGlyph = '⏱';
+				puckLabel = `${waveTag} · #${primary.queued.position}/${primary.queued.totalQueued}`;
 			} else if (primary.status === 'waiting_gate') {
 				iconGlyph = '◆';
 				puckLabel = `${waveTag} · Gate`;
@@ -1121,6 +1407,19 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			} else if (primary.status === 'recalled') {
 				iconGlyph = '↩';
 				puckLabel = waveTag;
+			}
+			if (primary.status === 'queued' && primary.queued) {
+				handle.tokenPuckEl.setAttribute('data-queue-position', String(primary.queued.position));
+				handle.rootEl.setAttribute('data-node-queue-position', String(primary.queued.position));
+				handle.rootEl.setAttribute('data-node-queue-total', String(primary.queued.totalQueued));
+				handle.rootEl.setAttribute('data-node-queue-scope', primary.queued.scopeKey);
+				handle.rootEl.setAttribute('data-node-queue-reason', primary.queued.blockedBy);
+			} else {
+				handle.tokenPuckEl.removeAttribute('data-queue-position');
+				handle.rootEl.removeAttribute('data-node-queue-position');
+				handle.rootEl.removeAttribute('data-node-queue-total');
+				handle.rootEl.removeAttribute('data-node-queue-scope');
+				handle.rootEl.removeAttribute('data-node-queue-reason');
 			}
 			if (handle.tokenPuckIconEl.textContent !== iconGlyph) {
 				handle.tokenPuckIconEl.textContent = iconGlyph;
@@ -1138,8 +1437,45 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			} else {
 				handle.tokenPuckExtraEl.hidden = true;
 			}
+			const queueScopeLabel = primary.status === 'queued' && primary.queued?.blockedBy === 'employee'
+				? (handle.node.employeeName ? `@${handle.node.employeeName}` : primary.queued.scopeKey)
+				: (primary.queued?.scopeKey ?? '');
+			const queueTip = primary.status === 'queued' && primary.queued
+				? (primary.queued.blockedBy === 'employee'
+					? adeBi(
+						localize(
+							'adeMissionTokenPuckQueuedEmpTip',
+							"Exclusive Queue #{0}/{1} — waiting for {2} to finish its active/blocked step (prevents parallel context contamination)",
+							primary.queued.position,
+							primary.queued.totalQueued,
+							queueScopeLabel,
+						),
+						'员工排他排队第 {0}/{1} 位 — 等待 {2} 完成当前进行/阻塞节点（防止并行上下文串台）',
+						primary.queued.position,
+						primary.queued.totalQueued,
+						queueScopeLabel,
+					)
+					: adeBi(
+						localize(
+							'adeMissionTokenPuckQueuedTip',
+							"Queued #{0}/{1} — waiting for concurrency slot on {2} ({3}/{4} active)",
+							primary.queued.position,
+							primary.queued.totalQueued,
+							primary.queued.scopeKey,
+							primary.queued.activeSlots,
+							primary.queued.maxSlots,
+						),
+						'并发排队第 {0}/{1} 位 — 等待 {2} 槽位（当前 {3}/{4} 占用）',
+						primary.queued.position,
+						primary.queued.totalQueued,
+						primary.queued.scopeKey,
+						primary.queued.activeSlots,
+						primary.queued.maxSlots,
+					))
+				: undefined;
 			const tipParts = [
 				`${primary.id} (${primary.waveId}) · ${primary.status}`,
+				queueTip,
 				primary.lastSummary ? primary.lastSummary : undefined,
 				localize('adeMissionTokenPuckInspectTip', "Click to inspect token summary, history & trace_ptr; hover to trace ancestry"),
 			].filter((v): v is string => Boolean(v));
@@ -1193,17 +1529,23 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			}
 		}
 
-		// 3. Gate card inline queued summary subtitle
+		// 3. Gate card inline queued summary subtitle & inline quick Approve / Reject bar
+		const waitingGateTokens = handle.node.kind === 'gate'
+			? tokens.filter(t => t.status === 'waiting_gate').sort((a, b) => a.arrivedAt - b.arrivedAt)
+			: [];
 		if (handle.gateMetaEl) {
-			const waitingGateTokens = tokens.filter(t => t.status === 'waiting_gate');
 			if (waitingGateTokens.length > 0) {
 				const lead = waitingGateTokens[0];
 				const summarySnippet = lead.lastSummary?.trim();
 				const gateText = waitingGateTokens.length > 1
-					? localize('adeMissionGateMetaMulti', "{0} waves waiting · Click to review", waitingGateTokens.length)
+					? adeBi(
+						localize('adeMissionGateMetaMulti', "{0} waves waiting · Click to review", waitingGateTokens.length),
+						'{0} 个波次待审批 · 点击详情',
+						waitingGateTokens.length,
+					)
 					: (summarySnippet
 						? summarySnippet
-						: localize('adeMissionGateMetaSingle', "Waiting human sign-off · Click to review"));
+						: adeBi(localize('adeMissionGateMetaSingle', "Waiting human sign-off · Click to review"), '等待人工审批 · 点击查看详情'));
 				handle.gateMetaEl.hidden = false;
 				if (handle.gateMetaEl.textContent !== gateText) {
 					handle.gateMetaEl.textContent = gateText;
@@ -1211,6 +1553,22 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				}
 			} else {
 				handle.gateMetaEl.hidden = true;
+			}
+		}
+		const showGateInline = Boolean(handle.gateInlineActionsEl && waitingGateTokens.length > 0);
+		if (handle.gateInlineActionsEl) {
+			handle.gateInlineActionsEl.hidden = !showGateInline;
+			if (handle.gateApproveLabelEl) {
+				const approveLabel = adeBi(localize('adeMissionGateCardApprove', "Approve"), '通过');
+				if (handle.gateApproveLabelEl.textContent !== approveLabel) {
+					handle.gateApproveLabelEl.textContent = approveLabel;
+				}
+			}
+			if (handle.gateRejectLabelEl) {
+				const rejectLabel = adeBi(localize('adeMissionGateCardReject', "Reject…"), '打回…');
+				if (handle.gateRejectLabelEl.textContent !== rejectLabel) {
+					handle.gateRejectLabelEl.textContent = rejectLabel;
+				}
 			}
 		}
 
@@ -1292,9 +1650,10 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		}
 
 		const isActiveTok = Boolean(primary && primary.status === 'active');
+		const isQueuedTok = Boolean(primary && primary.status === 'queued');
 		const hasActiveCheckFail = Boolean(primary && primary.status === 'active' && primary.lastCheckFailure);
 		const showRetry = Boolean(failedToken);
-		const showRecall = Boolean(failedToken || isBlocked || isActiveTok);
+		const showRecall = Boolean(failedToken || isBlocked || isActiveTok || isQueuedTok);
 		if (hasActiveCheckFail && primary?.lastCheckFailure) {
 			handle.checkFailChipEl.hidden = false;
 			const chkText = localize('adeMissionCheckFailChip', "Check {0}/{1}", primary.lastCheckFailure.attempt, primary.lastCheckFailure.maxAutoRetries);
@@ -1310,20 +1669,65 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		handle.recallBtnEl.hidden = !showRecall;
 		const showRecoveryBar = showRetry || showRecall || hasActiveCheckFail;
 		handle.recoveryBarEl.hidden = !showRecoveryBar;
-		handle.bottomDockEl.hidden = !isBlocked && !failedToken && !showRecoveryBar;
+		handle.bottomDockEl.hidden = !isBlocked && !failedToken && !showRecoveryBar && !showGateInline;
 	}
 
-	private patchEdgeRuntimeStates(runtimeState: IMissionRuntimeState | undefined): void {
+	private patchEdgeRuntimeStates(runtimeState: IMissionRuntimeState | undefined, now = Date.now()): void {
 		const flowingEdgeKeys = new Set<string>();
-		const flowingEdgeTokenByKey = new Map<string, IMissionToken>();
+		const flowingEdgeBurstByKey = new Map<string, IEdgeTransitBurst>();
 		const failTakenEdgeKeys = new Set<string>();
 		const joinArrivedEdgeKeys = new Set<string>();
 		const skippedEdgeKeys = new Set<string>();
 
-		if (runtimeState) {
-			const edgeKindByKey = new Map<string, string>();
-			for (const h of this.edgeHandles.values()) {
-				edgeKindByKey.set(`${h.edge.from}->${h.edge.to}`, getMissionEdgeKind(h.edge));
+		const edgeByKey = new Map<string, IRenderedEdgeHandle>();
+		const edgeKindByKey = new Map<string, string>();
+		for (const h of this.edgeHandles.values()) {
+			const edgeKey = `${h.edge.from}->${h.edge.to}`;
+			edgeByKey.set(edgeKey, h);
+			edgeKindByKey.set(edgeKey, getMissionEdgeKind(h.edge));
+		}
+
+		if (!runtimeState) {
+			this.clearEdgeTransitTimer();
+			this.activeEdgeTransits.clear();
+			this.seenTokenHopSignatures.clear();
+			this.trackedMissionId = undefined;
+			this.trackedMissionStartedAt = undefined;
+			this.trackedMissionTokenSeq = 0;
+		} else {
+			const missionReset = runtimeState.missionId !== this.trackedMissionId
+				|| runtimeState.startedAt !== this.trackedMissionStartedAt
+				|| runtimeState.tokenSeq < this.trackedMissionTokenSeq;
+			if (missionReset) {
+				this.clearEdgeTransitTimer();
+				this.activeEdgeTransits.clear();
+				this.seenTokenHopSignatures.clear();
+				this.trackedMissionId = runtimeState.missionId;
+				this.trackedMissionStartedAt = runtimeState.startedAt;
+				this.trackedMissionTokenSeq = runtimeState.tokenSeq;
+			} else if (runtimeState.tokenSeq > this.trackedMissionTokenSeq) {
+				this.trackedMissionTokenSeq = runtimeState.tokenSeq;
+			}
+
+			if (this.seenTokenHopSignatures.size > MAX_SEEN_TOKEN_HOPS) {
+				for (const sig of [...this.seenTokenHopSignatures]) {
+					const sep = sig.indexOf('|');
+					const tokId = sep >= 0 ? sig.slice(0, sep) : sig;
+					if (!runtimeState.tokens[tokId]) {
+						this.seenTokenHopSignatures.delete(sig);
+					}
+				}
+			}
+
+			if (runtimeState.status === 'idle' || runtimeState.status === 'stopped') {
+				this.activeEdgeTransits.clear();
+			} else {
+				for (const [edgeKey, burst] of [...this.activeEdgeTransits.entries()]) {
+					const liveTok = runtimeState.tokens[burst.tokenId];
+					if (now >= burst.expiresAt || !liveTok || liveTok.status === 'recalled' || !edgeByKey.has(edgeKey)) {
+						this.activeEdgeTransits.delete(edgeKey);
+					}
+				}
 			}
 
 			for (const tok of Object.values(runtimeState.tokens)) {
@@ -1335,11 +1739,40 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				if (isFailEdge) {
 					failTakenEdgeKeys.add(key);
 				}
-				if (tok.status === 'active' || tok.status === 'blocked' || tok.status === 'waiting_gate' || tok.status === 'waiting_join') {
-					flowingEdgeKeys.add(key);
-					const prev = flowingEdgeTokenByKey.get(key);
-					if (!prev || TOKEN_STATUS_PRIORITY[tok.status] > TOKEN_STATUS_PRIORITY[prev.status]) {
-						flowingEdgeTokenByKey.set(key, tok);
+
+				const hopSignature = `${tok.id}|${key}|${tok.arrivedAt}`;
+				if (!this.seenTokenHopSignatures.has(hopSignature)) {
+					this.seenTokenHopSignatures.add(hopSignature);
+					const edgeHandle = edgeByKey.get(key);
+					const isArrivalLiveStatus = tok.status === 'active'
+						|| tok.status === 'queued'
+						|| tok.status === 'blocked'
+						|| tok.status === 'waiting_gate'
+						|| tok.status === 'waiting_join';
+					if (
+						edgeHandle
+						&& isArrivalLiveStatus
+						&& runtimeState.status !== 'idle'
+						&& runtimeState.status !== 'stopped'
+						&& !this.animationsPaused
+					) {
+						const ageMs = now - tok.arrivedAt;
+						if (ageMs >= -EDGE_TRANSIT_MAX_FUTURE_SKEW_MS && ageMs < MISSION_EDGE_TRANSIT_DURATION_MS) {
+							const remainingMs = Math.max(1, MISSION_EDGE_TRANSIT_DURATION_MS - Math.max(0, ageMs));
+							const expiresAt = now + remainingMs;
+							const existing = this.activeEdgeTransits.get(key);
+							if (!existing || expiresAt >= existing.expiresAt) {
+								this.activeEdgeTransits.set(key, {
+									edgeKey: key,
+									edgeId: edgeHandle.edge.id,
+									tokenId: tok.id,
+									waveId: tok.waveId,
+									isFail: isFailEdge,
+									hopSignature,
+									expiresAt,
+								});
+							}
+						}
 					}
 				}
 			}
@@ -1364,27 +1797,59 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					skippedEdgeKeys.add(`${skippedId}->${barrier.targetNodeId}`);
 				}
 			}
+
+			for (const [key, burst] of this.activeEdgeTransits.entries()) {
+				flowingEdgeKeys.add(key);
+				flowingEdgeBurstByKey.set(key, {
+					...burst,
+					isFail: burst.isFail || failTakenEdgeKeys.has(key),
+				});
+			}
 		}
 
 		const traceKeys = this.hoveredTraceEdgeKeys;
 		const raisedGroups: SVGGElement[] = [];
-		for (const { group, path, edge, isCrossHost } of this.edgeHandles.values()) {
+		for (const handle of this.edgeHandles.values()) {
+			const { group, path, edge, isCrossHost } = handle;
 			const key = `${edge.from}->${edge.to}`;
+			const burst = flowingEdgeBurstByKey.get(key);
 			const isFlowing = flowingEdgeKeys.has(key);
 			const isFailTaken = failTakenEdgeKeys.has(key);
 			const isJoinArrived = joinArrivedEdgeKeys.has(key);
 			const isSkipped = skippedEdgeKeys.has(key) && !isFlowing && !isJoinArrived;
 			const isTraceHit = Boolean(traceKeys?.has(key));
 
-			group.classList.toggle('is-token-flowing', isFlowing);
+			if (isFlowing && burst) {
+				if (handle.lastFlowHopSignature !== burst.hopSignature && group.classList.contains('is-token-flowing')) {
+					// Restart one-shot 800ms edge flow dash when a subsequent wave crosses the same edge mid-flight.
+					group.classList.remove('is-token-flowing');
+					void path.getBoundingClientRect();
+				}
+				group.classList.add('is-token-flowing');
+				handle.lastFlowHopSignature = burst.hopSignature;
+			} else {
+				group.classList.remove('is-token-flowing');
+				handle.lastFlowHopSignature = undefined;
+			}
 			group.classList.toggle('is-fail-taken', isFailTaken);
 			group.classList.toggle('is-join-arrived', isJoinArrived);
 			group.classList.toggle('is-branch-skipped', isSkipped);
 			group.classList.toggle('is-trace-highlighted', isTraceHit);
 
+			const isSelectedEdge = Boolean(this.selectedEdgeKey && key === this.selectedEdgeKey);
+			group.classList.toggle('is-selected', isSelectedEdge);
+			if (isSelectedEdge) {
+				group.setAttribute('data-edge-selected', 'true');
+			} else {
+				group.removeAttribute('data-edge-selected');
+			}
+
 			// Trace hover takes arrow marker priority over node hover; otherwise preserve node-hover markers.
 			const isNodeHoverConnected = Boolean(this.hoveredNodeId && (edge.to === this.hoveredNodeId || edge.from === this.hoveredNodeId));
-			if (isTraceHit) {
+			if (isSelectedEdge) {
+				path.setAttribute('marker-end', 'url(#ade-mission-arrow-active)');
+				raisedGroups.push(group);
+			} else if (isTraceHit) {
 				path.setAttribute('marker-end', 'url(#ade-mission-arrow-trace)');
 				raisedGroups.push(group);
 			} else if (!isNodeHoverConnected) {
@@ -1403,33 +1868,67 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		for (const g of raisedGroups) {
 			this.edgesLayerEl.appendChild(g);
 		}
-		this.patchTokenGliders(flowingEdgeTokenByKey, failTakenEdgeKeys);
+		this.patchTokenGliders(flowingEdgeBurstByKey, now);
+		this.scheduleEdgeTransitCleanup(now);
+	}
+
+	private scheduleEdgeTransitCleanup(now: number): void {
+		this.clearEdgeTransitTimer();
+		if (this.animationsPaused || this.activeEdgeTransits.size === 0) {
+			return;
+		}
+		let earliestExpiry = Infinity;
+		for (const burst of this.activeEdgeTransits.values()) {
+			if (burst.expiresAt < earliestExpiry) {
+				earliestExpiry = burst.expiresAt;
+			}
+		}
+		if (!Number.isFinite(earliestExpiry)) {
+			return;
+		}
+		const delayMs = Math.max(0, earliestExpiry - now) + 4;
+		this.edgeTransitCleanupTimer = getWindow(this.worldEl).setTimeout(() => {
+			this.edgeTransitCleanupTimer = undefined;
+			this.patchEdgeRuntimeStates(this.lastRuntimeState);
+		}, delayMs);
 	}
 
 	private patchTokenGliders(
-		flowingEdgeTokenByKey: ReadonlyMap<string, IMissionToken>,
-		failTakenEdgeKeys: ReadonlySet<string>,
+		flowingEdgeBurstByKey: ReadonlyMap<string, IEdgeTransitBurst>,
+		now: number,
 	): void {
 		const activeEdgeIds = new Set<string>();
 		for (const handle of this.edgeHandles.values()) {
 			const key = `${handle.edge.from}->${handle.edge.to}`;
-			const tok = flowingEdgeTokenByKey.get(key);
-			if (!tok) {
+			const burst = flowingEdgeBurstByKey.get(key);
+			if (!burst) {
 				continue;
 			}
 			activeEdgeIds.add(handle.edge.id);
 			const d = handle.path.getAttribute('d') ?? '';
-			const waveColorClass = `wave-color-${getMissionWaveColorIndex(tok.waveId)}`;
-			const isFail = failTakenEdgeKeys.has(key);
-			const waveLabel = formatMissionWaveTag(tok.waveId);
+			const waveColorClass = `wave-color-${getMissionWaveColorIndex(burst.waveId)}`;
+			const isFail = burst.isFail;
+			const waveLabel = formatMissionWaveTag(burst.waveId);
 			let glider = this.tokenGliderHandles.get(handle.edge.id);
+			if (glider && glider.hopSignature !== burst.hopSignature) {
+				// New hop across the same edge: recreate SVG group so the 800ms one-shot animation restarts cleanly.
+				glider.group.remove();
+				this.tokenGliderHandles.delete(handle.edge.id);
+				glider = undefined;
+			}
 			if (!glider) {
 				const group = svgEl('g', {
 					class: `ade-mission-edge-puck ${waveColorClass}${isFail ? ' is-fail' : ''}`,
 					'data-ade-edge-puck': handle.edge.id,
-					'data-wave-id': tok.waveId,
-					'data-token-id': tok.id,
+					'data-wave-id': burst.waveId,
+					'data-token-id': burst.tokenId,
+					'data-transit-once': 'true',
+					'data-transit-duration-ms': String(MISSION_EDGE_TRANSIT_DURATION_MS),
 				});
+				const elapsedMs = Math.max(0, Math.min(MISSION_EDGE_TRANSIT_DURATION_MS - 1, now - (burst.expiresAt - MISSION_EDGE_TRANSIT_DURATION_MS)));
+				if (elapsedMs >= 20) {
+					group.style.animationDelay = `-${Math.round(elapsedMs)}ms`;
+				}
 				group.appendChild(svgEl('circle', {
 					class: 'ade-mission-edge-puck-glow',
 					cx: '0',
@@ -1452,7 +1951,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				text.textContent = waveLabel;
 				group.appendChild(text);
 				this.tokenGliderLayerEl.appendChild(group);
-				glider = { group, text, waveClass: waveColorClass };
+				glider = { group, text, waveClass: waveColorClass, hopSignature: burst.hopSignature };
 				this.tokenGliderHandles.set(handle.edge.id, glider);
 			} else {
 				const desiredCls = `ade-mission-edge-puck ${waveColorClass}${isFail ? ' is-fail' : ''}`;
@@ -1460,8 +1959,8 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					glider.group.setAttribute('class', desiredCls);
 					glider.waveClass = waveColorClass;
 				}
-				glider.group.setAttribute('data-wave-id', tok.waveId);
-				glider.group.setAttribute('data-token-id', tok.id);
+				glider.group.setAttribute('data-wave-id', burst.waveId);
+				glider.group.setAttribute('data-token-id', burst.tokenId);
 				if (glider.text.textContent !== waveLabel) {
 					glider.text.textContent = waveLabel;
 				}
@@ -1594,21 +2093,57 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		tokenSummary: string | undefined,
 		failureReason?: string,
 		waveId?: string,
+		queued?: IMissionToken['queued'],
 	): string {
 		if (nodeState === 'failed' && failureReason?.trim()) {
 			const wavePrefix = waveId ? `${formatMissionWaveTag(waveId)} · ` : '';
 			return `⚠ ${wavePrefix}${failureReason.trim()}`;
 		}
+		if (nodeState === 'queued' && queued) {
+			if (queued.blockedBy === 'employee') {
+				const empLabel = node.employeeName ? `@${node.employeeName}` : queued.scopeKey;
+				return adeBi(
+					localize(
+						'adeMissionCtxSummaryQueuedEmp',
+						"Exclusive Queue #{0}/{1} · Waiting for {2}",
+						queued.position,
+						queued.totalQueued,
+						empLabel,
+					),
+					'排他排队 #{0}/{1} · 等待 {2} 释放会话',
+					queued.position,
+					queued.totalQueued,
+					empLabel,
+				);
+			}
+			return adeBi(
+				localize(
+					'adeMissionCtxSummaryQueued',
+					"Queued #{0}/{1} · Waiting for {2} ({3}/{4})",
+					queued.position,
+					queued.totalQueued,
+					queued.scopeKey,
+					queued.activeSlots,
+					queued.maxSlots,
+				),
+				'排队 #{0}/{1} · 等待 {2} 槽位 ({3}/{4})',
+				queued.position,
+				queued.totalQueued,
+				queued.scopeKey,
+				queued.activeSlots,
+				queued.maxSlots,
+			);
+		}
 		const isReused = Boolean((node.employeeTotalOccurrences ?? 0) > 1);
 		return telemetrySummary
 			|| tokenSummary
 			|| (nodeState === 'active'
-				? localize('adeMissionCtxSummaryActive', "执行中 · 实时上下文同步")
+				? adeBi(localize('adeMissionCtxSummaryActive', "Running · Live context sync"), '执行中 · 实时上下文同步')
 				: nodeState === 'completed'
-					? localize('adeMissionCtxSummaryDone', "✓ 阶段产物已交付上游/下游")
+					? adeBi(localize('adeMissionCtxSummaryDone', "✓ Deliverables handed off"), '✓ 阶段产物已交付上游/下游')
 					: isReused && node.employeeOccurrence && node.employeeTotalOccurrences
-						? localize('adeMissionCtxSummaryReuse', "上下文复用 #{0}/{1} · 准备就绪", node.employeeOccurrence, node.employeeTotalOccurrences)
-						: localize('adeMissionCtxSummaryReady', "上下文已预热 · 待派发"));
+						? adeBi(localize('adeMissionCtxSummaryReuse', "Context reuse #{0}/{1} · Ready", node.employeeOccurrence, node.employeeTotalOccurrences), '上下文复用 #{0}/{1} · 准备就绪', node.employeeOccurrence, node.employeeTotalOccurrences)
+						: adeBi(localize('adeMissionCtxSummaryReady', "Context warm · Standby"), '上下文已预热 · 待派发'));
 	}
 
 	/**
@@ -1744,7 +2279,9 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			}
 
 			const engineLocked = Boolean(linkedAgent && !canSwitchEngine);
-			const nextEngineBadgeKey = `${canSwitchEngine ? 1 : 0}|${engineLocked ? 1 : 0}|${isAssignedEngineUnavailable ? 1 : 0}|${isMissionLive ? 1 : 0}`;
+			const engineIcon = this.hostCatalog.getEngineIcon(engineId);
+			const engineIconKey = serializeMissionEngineIconKey(engineIcon);
+			const nextEngineBadgeKey = `${engineId}|${engineName}|${engineIconKey}|${canSwitchEngine ? 1 : 0}|${engineLocked ? 1 : 0}|${isAssignedEngineUnavailable ? 1 : 0}|${isMissionLive ? 1 : 0}`;
 			if (handle.engineBadgeEl && handle.lastEngineBadgeKey !== nextEngineBadgeKey) {
 				handle.lastEngineBadgeKey = nextEngineBadgeKey;
 				const hostNameForTip = handle.isRemoteHost ? (handle.displayHost ?? handle.hostAlias ?? '') : localize('adeMissionLocalHostShort', "Local");
@@ -1753,8 +2290,15 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					handle.engineBadgeEl.className = badgeCls;
 				}
 				handle.engineBadgeEl.disabled = !canSwitchEngine;
+				handle.engineBadgeEl.setAttribute('data-node-engine-id', engineId);
 				handle.engineBadgeEl.setAttribute('data-engine-locked', String(engineLocked));
 				handle.engineBadgeEl.setAttribute('data-engine-available', String(!isAssignedEngineUnavailable));
+				if (handle.engineIconEl) {
+					applyMissionEngineIcon(handle.engineIconEl, engineIcon);
+				}
+				if (handle.engineNameEl && handle.engineNameEl.textContent !== engineName) {
+					handle.engineNameEl.textContent = engineName;
+				}
 				handle.engineBadgeEl.title = isAssignedEngineUnavailable
 					? localize('adeMissionEngineUnavailablePillTooltip', "{0} is not installed on {1} — Click to switch to an available Agent engine", engineName, hostNameForTip)
 					: canSwitchEngine
@@ -1798,6 +2342,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				tokInfo?.lastSummary,
 				tokInfo?.failure?.reason,
 				tokInfo?.waveId,
+				tokInfo?.queued,
 			);
 			if (handle.contextSummaryEl && handle.contextSummaryEl.textContent !== nextSummary) {
 				handle.contextSummaryEl.textContent = nextSummary;
@@ -1805,10 +2350,22 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			}
 
 			if (handle.ctxRowEl) {
-				const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry);
+				const modelContextFallback = inferModelContextWindowTokens(resolvedModel, { engineId });
+				const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry, modelContextFallback);
 				handle.ctxRowEl.className = `ade-mission-ctx-row severity-${ctxBreakdown.severity}`;
 				handle.ctxRowEl.setAttribute('data-node-context-pct', String(ctxBreakdown.usedPct));
 				handle.ctxRowEl.setAttribute('data-node-context-used', String(ctxBreakdown.usedTokens));
+				handle.ctxRowEl.setAttribute('data-node-context-max', String(ctxBreakdown.maxTokens));
+				handle.ctxRowEl.setAttribute('data-node-context-noise-pct', String(Math.round(ctxBreakdown.noisePct)));
+				const costUsd = nodeTelemetry?.costUsd ?? 0;
+				const costEstimated = Boolean(nodeTelemetry?.costEstimated);
+				const costLocalFree = Boolean(nodeTelemetry?.costLocalFree && costUsd === 0 && ((nodeTelemetry?.totalTokens ?? 0) > 0 || (nodeTelemetry?.turns ?? 0) > 0));
+				const tooltipNoiseSuffix = ctxBreakdown.noisePct > 0
+					? ` · ${adeBi(localize('adeMissionCtxTooltipNoiseTag', "Rework Noise {0}%", Math.round(ctxBreakdown.noisePct)), '返工噪音 {0}%', Math.round(ctxBreakdown.noisePct))}`
+					: '';
+				const tooltipCostSuffix = costUsd > 0
+					? ` · ${formatFinOpsUsd(costUsd, { estimated: costEstimated })}${costEstimated ? localize('adeMissionCtxTooltipEstTag', " (预估)") : ''}`
+					: (costLocalFree ? ` · ${localize('adeMissionCtxTooltipLocalFree', "Local $0.00")}` : '');
 				handle.ctxRowEl.title = localize(
 					'adeMissionCtxTooltip',
 					"Context Window: {0} / {1} ({2}%) · Init {3}% · Contract {4}% · Workspace {5}%{6}",
@@ -1818,7 +2375,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					Math.round(ctxBreakdown.initPct),
 					Math.round(ctxBreakdown.tierPct),
 					Math.round(ctxBreakdown.sourcePct),
-					nodeTelemetry && nodeTelemetry.costUsd > 0 ? ` · $${nodeTelemetry.costUsd.toFixed(2)}` : '',
+					`${tooltipNoiseSuffix}${tooltipCostSuffix}`,
 				);
 				if (handle.ctxSegInitEl) { handle.ctxSegInitEl.style.width = `${ctxBreakdown.initPct.toFixed(1)}%`; }
 				if (handle.ctxSegTierEl) { handle.ctxSegTierEl.style.width = `${ctxBreakdown.tierPct.toFixed(1)}%`; }
@@ -1830,17 +2387,37 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					handle.ctxTokensEl.textContent = tokensLabel;
 				}
 				if (handle.ctxCostEl) {
-					const costUsd = nodeTelemetry?.costUsd ?? 0;
 					if (costUsd > 0) {
 						handle.ctxCostEl.hidden = false;
 						handle.ctxCostEl.setAttribute('data-node-cost-usd', costUsd.toFixed(4));
-						const costTxt = `$${costUsd >= 0.01 ? costUsd.toFixed(2) : costUsd.toFixed(3)}`;
+						if (costEstimated) {
+							handle.ctxCostEl.setAttribute('data-node-cost-estimated', 'true');
+							handle.ctxCostEl.title = localize('adeMissionNodeCostEstTip', "按内置/自定义模型单价预估费用（可在设置 aexus.ade.finOps.modelPricingOverrides 中覆盖）");
+						} else {
+							handle.ctxCostEl.removeAttribute('data-node-cost-estimated');
+							handle.ctxCostEl.title = '';
+						}
+						handle.ctxCostEl.removeAttribute('data-node-cost-local');
+						const costTxt = formatFinOpsUsd(costUsd, { estimated: costEstimated, compact: true });
 						if (handle.ctxCostEl.textContent !== costTxt) {
 							handle.ctxCostEl.textContent = costTxt;
+						}
+					} else if (costLocalFree) {
+						handle.ctxCostEl.hidden = false;
+						handle.ctxCostEl.setAttribute('data-node-cost-usd', '0');
+						handle.ctxCostEl.removeAttribute('data-node-cost-estimated');
+						handle.ctxCostEl.setAttribute('data-node-cost-local', 'true');
+						handle.ctxCostEl.title = localize('adeMissionNodeCostLocalFreeTip', "本地/自托管零成本模型 ($0.00)");
+						const localTxt = 'Local $0';
+						if (handle.ctxCostEl.textContent !== localTxt) {
+							handle.ctxCostEl.textContent = localTxt;
 						}
 					} else {
 						handle.ctxCostEl.hidden = true;
 						handle.ctxCostEl.setAttribute('data-node-cost-usd', '0');
+						handle.ctxCostEl.removeAttribute('data-node-cost-estimated');
+						handle.ctxCostEl.removeAttribute('data-node-cost-local');
+						handle.ctxCostEl.title = '';
 					}
 				}
 				if (handle.ctxPctEl && handle.ctxPctEl.textContent !== pctLabel) {
@@ -1868,11 +2445,11 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			handle.promptBtnEl.classList.toggle('has-prompt', hasPrompt);
 			handle.promptBtnEl.setAttribute('data-has-prompt', String(hasPrompt));
 			handle.promptBtnEl.title = hasPrompt
-				? localize('adeMissionNodePromptBtnTip', "节点 {0} 前置提示词（点击查看/编辑）：\n{1}", nodeId, raw)
-				: localize('adeMissionNodePromptBtnEmptyTip', "节点 {0} 尚未配置前置提示词 — 点击编写（与左上角文件面板同步）", nodeId);
+				? localize('adeMissionNodePromptBtnTip', "节点 {0} 提示词（点击编辑）：\n{1}", nodeId, raw)
+				: localize('adeMissionNodePromptBtnEmptyTip', "点击编写节点 {0} 的任务说明", nodeId);
 			const nextPreview = hasPrompt
 				? singleLine
-				: localize('adeMissionNodePromptEmptyPreview', "未配置前置提示词 · 点击编辑");
+				: localize('adeMissionNodePromptEmptyPreview', "点击添加节点任务说明…");
 			if (handle.promptPreviewEl.textContent !== nextPreview) {
 				handle.promptPreviewEl.textContent = nextPreview;
 			}
@@ -1886,6 +2463,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 	}
 
 	private rebuildFullGraphDom(snapshot: IMissionCanvasRenderSnapshot): void {
+		this.nodeDragDisposables.clear();
 		this.graphDisposables.clear();
 		this.edgeDisposables.clear();
 		this.connectDragDisposables.clear();
@@ -1983,6 +2561,8 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			let modelNameEl: HTMLElement | undefined;
 			let thinkingTagEl: HTMLElement | undefined;
 			let engineBadgeEl: HTMLButtonElement | undefined;
+			let engineIconEl: HTMLElement | undefined;
+			let engineNameEl: HTMLElement | undefined;
 			let engineWarnDotEl: HTMLElement | undefined;
 			let handleEngineId = snapshot.fallbackOwnerEngineId;
 			let handleCanSwitchEngine = false;
@@ -2022,19 +2602,9 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				handleLastRoleKind = initRoleKind;
 				nodeEl.classList.toggle('is-reviewer-node', isInitReviewer);
 				nodeEl.setAttribute('data-node-role-kind', initRoleKind);
-				roleBadgeEl = append(idWrap, $('span.ade-mission-reviewer-pill', {
-					'data-node-role-badge': node.id,
-					title: localize('adeMissionReviewerPillTip', "In-Graph Reviewer Node — audits upstream deliverables and can reject back upstream"),
-				}, localize('adeMissionReviewerPillLabel', "Reviewer")));
-				roleBadgeEl.hidden = !isInitReviewer;
 
 				const initChecksCount = this.callbacks.getEffectiveNodeChecksCount?.(node.id) ?? (node.checks?.length ?? 0);
 				handleLastChecksCount = initChecksCount;
-				checksBadgeEl = append(idWrap, $('span.ade-mission-checks-pill', {
-					'data-node-checks-count': String(initChecksCount),
-					title: localize('adeMissionNodeChecksBadgeTip', "{0} deterministic verification check hook(s) active", initChecksCount),
-				}, `✓ ${initChecksCount}`));
-				checksBadgeEl.hidden = initChecksCount <= 0;
 
 				const topPills = append(topRow, $('.ade-mission-top-pills'));
 				supBtnEl = append(topPills, $('button.ade-mission-sup-pill.is-auto', {
@@ -2045,7 +2615,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				supDotEl.hidden = true;
 				append(supBtnEl, $('span.codicon.codicon-shield.ade-mission-sup-ico', { 'aria-hidden': 'true' }));
 				supNameEl = append(supBtnEl, $('span.ade-mission-sup-name', {}, localize('adeMissionSupAutoShort', "+ Sup")));
-				this.graphDisposables.add(addDisposableListener(supBtnEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
 				this.graphDisposables.add(addDisposableListener(supBtnEl, EventType.CLICK, e => {
 					e.stopPropagation();
 					this.callbacks.onOpenSupervisorPopover?.(node, supBtnEl!);
@@ -2073,7 +2642,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					append(empBtn, $('span.codicon.codicon-person-add', { 'aria-hidden': 'true' }));
 					append(empBtn, $('span.ade-mission-emp-name', {}, localize('adeMissionEmpAssignShort', "Assign")));
 				}
-				this.graphDisposables.add(addDisposableListener(empBtn, EventType.POINTER_DOWN, e => e.stopPropagation()));
 				this.graphDisposables.add(addDisposableListener(empBtn, EventType.CLICK, e => {
 					e.stopPropagation();
 					this.callbacks.onOpenEmployeePopover(node, empBtn);
@@ -2089,7 +2657,8 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				const resolvedThinking: AdeThinkingLevel = linkedAgent?.preferredThinking ?? 'medium';
 				const canSwitchModel = Boolean(linkedAgent && snapshot.canSwitchModel);
 				const canSwitchEngine = Boolean(linkedAgent && snapshot.canSwitchEngine(linkedAgent));
-				const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry);
+				const modelContextFallback = inferModelContextWindowTokens(resolvedModel, { engineId });
+				const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry, modelContextFallback);
 				const effectiveProbeUri = linkedAgent ? this.hostCatalog.resolveEffectiveNodeProbeUri(explicitHost, linkedAgent) : undefined;
 				const cachedHostProbe = effectiveProbeUri ? this.hostCatalog.getCachedHostEngines(effectiveProbeUri) : undefined;
 				const isAssignedEngineUnavailable = Boolean(cachedHostProbe && !cachedHostProbe.availableIds.has(engineId));
@@ -2123,7 +2692,18 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				}
 
 				const coreMeta = append(coreHead, $('.ade-mission-core-meta'));
-				titleEl = append(coreMeta, $('.ade-mission-node-title', { title: node.label }, node.label));
+				const coreTitleRow = append(coreMeta, $('.ade-mission-core-title-row'));
+				titleEl = append(coreTitleRow, $('.ade-mission-node-title', { title: node.label }, node.label));
+				roleBadgeEl = append(coreTitleRow, $('span.ade-mission-reviewer-pill', {
+					'data-node-role-badge': node.id,
+					title: localize('adeMissionReviewerPillTip', "In-Graph Reviewer Node — audits upstream deliverables and can reject back upstream"),
+				}, localize('adeMissionReviewerPillLabel', "Reviewer")));
+				roleBadgeEl.hidden = !isInitReviewer;
+				checksBadgeEl = append(coreTitleRow, $('span.ade-mission-checks-pill', {
+					'data-node-checks-count': String(initChecksCount),
+					title: localize('adeMissionNodeChecksBadgeTip', "{0} deterministic verification check hook(s) active", initChecksCount),
+				}, `✓ ${initChecksCount}`));
+				checksBadgeEl.hidden = initChecksCount <= 0;
 				const modelRow = append(coreMeta, $(`.ade-mission-core-model-row${canSwitchModel ? '.is-editable' : ''}`, {
 					'data-node-model': resolvedModel,
 					'data-node-thinking': resolvedThinking,
@@ -2144,6 +2724,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					tokInfo?.lastSummary,
 					tokInfo?.failure?.reason,
 					tokInfo?.waveId,
+					tokInfo?.queued,
 				);
 				contextSummaryEl = append(coreWell, $('.ade-mission-core-context', { title: contextSummaryText }, contextSummaryText));
 
@@ -2156,25 +2737,33 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					'data-ade-node-prompt-btn': node.id,
 					'data-has-prompt': String(hasNodePrompt),
 					title: hasNodePrompt
-						? localize('adeMissionNodePromptBtnTip', "节点 {0} 前置提示词（点击查看/编辑）：\n{1}", node.id, rawNodePrompt)
-						: localize('adeMissionNodePromptBtnEmptyTip', "节点 {0} 尚未配置前置提示词 — 点击编写（与左上角文件面板同步）", node.id),
+						? localize('adeMissionNodePromptBtnTip', "节点 {0} 提示词（点击编辑）：\n{1}", node.id, rawNodePrompt)
+						: localize('adeMissionNodePromptBtnEmptyTip', "点击编写节点 {0} 的任务说明", node.id),
 				})) as HTMLButtonElement;
 				append(promptBtnEl, $('span.codicon.codicon-note.ade-mission-node-prompt-ico', { 'aria-hidden': 'true' }));
 				promptPreviewEl = append(promptBtnEl, $('span.ade-mission-node-prompt-preview', {
 					'data-ade-node-prompt-preview': node.id,
 				}, hasNodePrompt
 					? trimmedNodePrompt.replace(/\s+/g, ' ')
-					: localize('adeMissionNodePromptEmptyPreview', "未配置前置提示词 · 点击编辑")));
+					: localize('adeMissionNodePromptEmptyPreview', "点击添加节点任务说明…")));
 				promptTagEl = append(promptBtnEl, $('span.ade-mission-node-prompt-tag', {}, hasNodePrompt
 					? localize('adeMissionNodePromptTagEdit', "提示词")
 					: localize('adeMissionNodePromptTagAdd', "+ 提示词")));
-				this.graphDisposables.add(addDisposableListener(promptBtnEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
 				this.graphDisposables.add(addDisposableListener(promptBtnEl, EventType.CLICK, e => {
 					e.stopPropagation();
 					this.callbacks.onOpenNodePromptPopover(node, promptBtnEl!);
 				}));
 
 				// 4-Segment Context Window Usage Progress Bar
+				const initCostUsd = nodeTelemetry?.costUsd ?? 0;
+				const initCostEstimated = Boolean(nodeTelemetry?.costEstimated);
+				const initCostLocalFree = Boolean(nodeTelemetry?.costLocalFree && initCostUsd === 0 && ((nodeTelemetry?.totalTokens ?? 0) > 0 || (nodeTelemetry?.turns ?? 0) > 0));
+				const initNoiseTooltipSuffix = ctxBreakdown.noisePct > 0
+					? ` · ${adeBi(localize('adeMissionCtxTooltipNoiseTag', "Rework Noise {0}%", Math.round(ctxBreakdown.noisePct)), '返工噪音 {0}%', Math.round(ctxBreakdown.noisePct))}`
+					: '';
+				const initCostTooltipSuffix = initCostUsd > 0
+					? ` · ${formatFinOpsUsd(initCostUsd, { estimated: initCostEstimated })}${initCostEstimated ? localize('adeMissionCtxTooltipEstTag', " (预估)") : ''}`
+					: (initCostLocalFree ? ` · ${localize('adeMissionCtxTooltipLocalFree', "Local $0.00")}` : '');
 				const ctxTooltip = localize(
 					'adeMissionCtxTooltip',
 					"Context Window: {0} / {1} ({2}%) · Init {3}% · Contract {4}% · Workspace {5}%{6}",
@@ -2184,12 +2773,14 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					Math.round(ctxBreakdown.initPct),
 					Math.round(ctxBreakdown.tierPct),
 					Math.round(ctxBreakdown.sourcePct),
-					nodeTelemetry && nodeTelemetry.costUsd > 0 ? ` · $${nodeTelemetry.costUsd.toFixed(2)}` : '',
+					`${initNoiseTooltipSuffix}${initCostTooltipSuffix}`,
 				);
 				ctxRowEl = append(card, $(`.ade-mission-ctx-row.severity-${ctxBreakdown.severity}`, {
 					title: ctxTooltip,
 					'data-node-context-pct': String(ctxBreakdown.usedPct),
 					'data-node-context-used': String(ctxBreakdown.usedTokens),
+					'data-node-context-max': String(ctxBreakdown.maxTokens),
+					'data-node-context-noise-pct': String(Math.round(ctxBreakdown.noisePct)),
 				}));
 				const ctxTrack = append(ctxRowEl, $('.ade-mission-ctx-track'));
 				ctxSegInitEl = append(ctxTrack, $('.ade-ctx-seg.seg-init'));
@@ -2203,11 +2794,21 @@ export class AdeMissionCanvasRenderer extends Disposable {
 
 				const ctxStats = append(ctxRowEl, $('.ade-mission-ctx-stats'));
 				ctxTokensEl = append(ctxStats, $('span.ade-mission-ctx-tokens', {}, `${formatCompactTokenCount(ctxBreakdown.usedTokens)}/${formatCompactTokenCount(ctxBreakdown.maxTokens)}`));
-				const initCostUsd = nodeTelemetry?.costUsd ?? 0;
-				ctxCostEl = append(ctxStats, $('span.ade-mission-ctx-cost', {
+				const initCostAttrs: Record<string, string> = {
 					'data-node-cost-usd': initCostUsd > 0 ? initCostUsd.toFixed(4) : '0',
-				}, initCostUsd > 0 ? `$${initCostUsd >= 0.01 ? initCostUsd.toFixed(2) : initCostUsd.toFixed(3)}` : ''));
-				ctxCostEl.hidden = initCostUsd <= 0;
+				};
+				if (initCostUsd > 0 && initCostEstimated) {
+					initCostAttrs['data-node-cost-estimated'] = 'true';
+					initCostAttrs.title = localize('adeMissionNodeCostEstTip', "按内置/自定义模型单价预估费用（可在设置 aexus.ade.finOps.modelPricingOverrides 中覆盖）");
+				} else if (initCostLocalFree) {
+					initCostAttrs['data-node-cost-local'] = 'true';
+					initCostAttrs.title = localize('adeMissionNodeCostLocalFreeTip', "本地/自托管零成本模型 ($0.00)");
+				}
+				const initCostLabel = initCostUsd > 0
+					? formatFinOpsUsd(initCostUsd, { estimated: initCostEstimated, compact: true })
+					: (initCostLocalFree ? 'Local $0' : '');
+				ctxCostEl = append(ctxStats, $('span.ade-mission-ctx-cost', initCostAttrs, initCostLabel));
+				ctxCostEl.hidden = initCostUsd <= 0 && !initCostLocalFree;
 				ctxPctEl = append(ctxStats, $('span.ade-mission-ctx-pct', {}, `${ctxBreakdown.usedPct}%`));
 
 				// Bottom Telemetry Footer: Agent Engine Pill (left) + Colorful OS & Host Pill (right)
@@ -2231,7 +2832,9 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				engineBadgeEl = engineBadge;
 				const iconEl = append(engineBadge, $('span.ade-mission-engine-icon', { 'aria-hidden': 'true' }));
 				applyMissionEngineIcon(iconEl, engineIcon);
-				append(engineBadge, $('span.ade-mission-engine-name', {}, engineName));
+				engineIconEl = iconEl;
+				engineNameEl = append(engineBadge, $('span.ade-mission-engine-name', {}, engineName));
+				handleLastEngineBadgeKey = `${engineId}|${engineName}|${serializeMissionEngineIconKey(engineIcon)}|${canSwitchEngine ? 1 : 0}|${engineLocked ? 1 : 0}|${isAssignedEngineUnavailable ? 1 : 0}|${isMissionLive ? 1 : 0}`;
 				if (isAssignedEngineUnavailable) {
 					engineWarnDotEl = append(engineBadge, $('span.ade-mission-engine-warn-dot', { 'aria-hidden': 'true' }));
 				}
@@ -2257,7 +2860,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					const hostDisplayLabel = hostInfo.isRemote ? hostInfo.displayHost : `Local · ${hostInfo.osLabel}`;
 					append(hostPill, $('span.ade-mission-host-name', {}, hostDisplayLabel));
 					if (snapshot.canSwitchHost) {
-						this.graphDisposables.add(addDisposableListener(hostPill, EventType.POINTER_DOWN, e => e.stopPropagation()));
 						this.graphDisposables.add(addDisposableListener(hostPill, EventType.CLICK, e => {
 							e.stopPropagation();
 							this.callbacks.onOpenHostPopover(node, hostInfo.hostAlias, hostPill);
@@ -2282,7 +2884,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				})) as HTMLButtonElement;
 				append(pacemakerPortEl, $('span.ade-mission-pacemaker-ring.ring-1', { 'aria-hidden': 'true' }));
 				append(pacemakerPortEl, $('span.ade-mission-pacemaker-ring.ring-2', { 'aria-hidden': 'true' }));
-				this.graphDisposables.add(addDisposableListener(pacemakerPortEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
 				this.graphDisposables.add(addDisposableListener(pacemakerPortEl, EventType.CLICK, e => {
 					e.stopPropagation();
 					this.callbacks.onOpenNodeTriggersPopover?.(node, pacemakerPortEl!);
@@ -2400,6 +3001,33 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			append(recallBtnEl, $('span', {}, localize('adeMissionNodeRecallBtn', "Recall")));
 			recallBtnEl.hidden = true;
 
+			let gateInlineActionsEl: HTMLElement | undefined;
+			let gateApproveBtnEl: HTMLButtonElement | undefined;
+			let gateApproveLabelEl: HTMLElement | undefined;
+			let gateRejectBtnEl: HTMLButtonElement | undefined;
+			let gateRejectLabelEl: HTMLElement | undefined;
+			if (node.kind === 'gate') {
+				gateInlineActionsEl = append(bottomDockEl, $('.ade-mission-gate-inline-bar', {
+					'data-ade-gate-inline-actions': node.id,
+				}));
+				gateInlineActionsEl.hidden = true;
+				gateApproveBtnEl = append(gateInlineActionsEl, $('button.ade-mission-gate-inline-btn.approve', {
+					type: 'button',
+					'data-ade-gate-card-approve': node.id,
+					title: adeBi(localize('adeMissionGateCardApproveTip', "Approve waiting token on {0} immediately", node.id), '一键通过 {0} 当前待审批波次', node.id),
+				})) as HTMLButtonElement;
+				append(gateApproveBtnEl, $('span.codicon.codicon-check', { 'aria-hidden': 'true' }));
+				gateApproveLabelEl = append(gateApproveBtnEl, $('span', {}, adeBi(localize('adeMissionGateCardApprove', "Approve"), '通过')));
+
+				gateRejectBtnEl = append(gateInlineActionsEl, $('button.ade-mission-gate-inline-btn.reject', {
+					type: 'button',
+					'data-ade-gate-card-reject': node.id,
+					title: adeBi(localize('adeMissionGateCardRejectTip', "Reject and choose an upstream rollback target node"), '驳回并指定上游打回目标节点'),
+				})) as HTMLButtonElement;
+				append(gateRejectBtnEl, $('span.codicon.codicon-discard', { 'aria-hidden': 'true' }));
+				gateRejectLabelEl = append(gateRejectBtnEl, $('span', {}, adeBi(localize('adeMissionGateCardReject', "Reject…"), '打回…')));
+			}
+
 			const handle: IRenderedNodeHandle = {
 				node,
 				rootEl: nodeEl,
@@ -2432,6 +3060,8 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				modelNameEl,
 				thinkingTagEl,
 				engineBadgeEl,
+				engineIconEl,
+				engineNameEl,
 				engineWarnDotEl,
 				lastModel: handleLastModel,
 				lastThinking: handleLastThinking,
@@ -2464,6 +3094,11 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				guidedRetryBtnEl,
 				recallBtnEl,
 				gateMetaEl,
+				gateInlineActionsEl,
+				gateApproveBtnEl,
+				gateApproveLabelEl,
+				gateRejectBtnEl,
+				gateRejectLabelEl,
 				contextSummaryEl,
 				promptBtnEl,
 				promptPreviewEl,
@@ -2487,17 +3122,52 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				now,
 				isMissionRunning,
 			);
-			nodeEl.classList.toggle('is-selected', Boolean(this.selectedNodeId && this.selectedNodeId === node.id));
+			if (gateApproveBtnEl) {
+				const approveAnchor = gateApproveBtnEl;
+				this.graphDisposables.add(addDisposableListener(approveAnchor, EventType.CLICK, e => {
+					e.stopPropagation();
+					const waitingTok = handle.allTokens
+						.filter(t => t.status === 'waiting_gate')
+						.sort((a, b) => a.arrivedAt - b.arrivedAt)[0];
+					if (this.callbacks.onQuickGateApprove) {
+						this.callbacks.onQuickGateApprove(node, waitingTok, approveAnchor);
+					} else {
+						this.callbacks.onOpenGateDecisionPopover(node, approveAnchor, waitingTok?.id);
+					}
+				}));
+			}
+			if (gateRejectBtnEl) {
+				const rejectAnchor = gateRejectBtnEl;
+				this.graphDisposables.add(addDisposableListener(rejectAnchor, EventType.CLICK, e => {
+					e.stopPropagation();
+					const waitingTok = handle.allTokens
+						.filter(t => t.status === 'waiting_gate')
+						.sort((a, b) => a.arrivedAt - b.arrivedAt)[0];
+					this.callbacks.onOpenGateDecisionPopover(node, rejectAnchor, waitingTok?.id, { focusReject: true });
+				}));
+			}
+			const isSelectedNode = this.selectedNodeIds.has(node.id);
+			nodeEl.classList.toggle('is-selected', isSelectedNode);
+			nodeEl.classList.toggle('is-multi-selected', isSelectedNode && this.selectedNodeIds.size > 1);
+			if (isSelectedNode) {
+				nodeEl.setAttribute('data-node-selected', 'true');
+			}
+			const isSearchMatch = Boolean(this.searchMatchNodeIds?.has(node.id));
+			const isSearchActive = Boolean(this.activeSearchNodeId && this.activeSearchNodeId === node.id);
+			nodeEl.classList.toggle('is-search-match', isSearchMatch);
+			nodeEl.classList.toggle('is-search-active', isSearchActive);
+			if (isSearchMatch) {
+				nodeEl.setAttribute('data-search-match', 'true');
+			}
+			if (isSearchActive) {
+				nodeEl.setAttribute('data-search-active', 'true');
+			}
 			const isRevAdded = Boolean(this.previewAddedNodeIds?.has(node.id));
 			nodeEl.classList.toggle('is-revision-added', isRevAdded);
 			if (isRevAdded) {
 				nodeEl.setAttribute('data-revision-added', 'true');
 			}
 
-			const stopPointer = (e: Event) => e.stopPropagation();
-			for (const interactiveEl of [triggerBadgeEl, tokenPuckEl, blockedStripEl, failedStripEl, checkFailChipEl, retryBtnEl, guidedRetryBtnEl, recallBtnEl]) {
-				this.graphDisposables.add(addDisposableListener(interactiveEl, EventType.POINTER_DOWN, stopPointer));
-			}
 			this.graphDisposables.add(addDisposableListener(titleEl, EventType.DBLCLICK, e => {
 				if (!this.callbacks.onRenameNode || this.callbacks.isRevisionPreview?.()) {
 					return;
@@ -2520,11 +3190,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				}
 			}));
 			if (coreIconTileEl) {
-				this.graphDisposables.add(addDisposableListener(coreIconTileEl, EventType.POINTER_DOWN, e => {
-					if (handle.canSwitchModel && handle.linkedAgent) {
-						e.stopPropagation();
-					}
-				}));
 				this.graphDisposables.add(addDisposableListener(coreIconTileEl, EventType.CLICK, e => {
 					if (!handle.canSwitchModel || !handle.linkedAgent) {
 						return;
@@ -2534,11 +3199,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				}));
 			}
 			if (modelRowEl) {
-				this.graphDisposables.add(addDisposableListener(modelRowEl, EventType.POINTER_DOWN, e => {
-					if (handle.canSwitchModel && handle.linkedAgent) {
-						e.stopPropagation();
-					}
-				}));
 				this.graphDisposables.add(addDisposableListener(modelRowEl, EventType.CLICK, e => {
 					if (!handle.canSwitchModel || !handle.linkedAgent) {
 						return;
@@ -2548,11 +3208,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				}));
 			}
 			if (engineBadgeEl) {
-				this.graphDisposables.add(addDisposableListener(engineBadgeEl, EventType.POINTER_DOWN, e => {
-					if (handle.canSwitchEngine && handle.linkedAgent) {
-						e.stopPropagation();
-					}
-				}));
 				this.graphDisposables.add(addDisposableListener(engineBadgeEl, EventType.CLICK, e => {
 					if (!handle.canSwitchEngine || !handle.linkedAgent) {
 						return;
@@ -2749,6 +3404,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		handle: IRenderedNodeHandle,
 	): void {
 		const { node, rootEl: nodeEl } = handle;
+		const win = getWindow(nodeEl);
 		this.graphDisposables.add(addDisposableListener(nodeEl, EventType.CONTEXT_MENU, (e: MouseEvent) => {
 			if (!this.callbacks.onNodeContextMenu) {
 				return;
@@ -2765,57 +3421,97 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				this.callbacks.onHoverNode(undefined);
 			}
 		}));
+		this.graphDisposables.add(addDisposableListener(nodeEl, EventType.DRAG_START, (e: DragEvent) => {
+			const targetEl = resolveEventTargetElement(e.target);
+			if (targetEl?.closest('.ade-mission-inline-rename-input')) {
+				return;
+			}
+			e.preventDefault();
+		}));
 
-		let dragging = false;
+		let pendingDrag = false;
+		let activeDrag = false;
+		let startedOnSubInteractive = false;
+		let startedWithMultiModifier = false;
+		let activePointerId = 0;
 		let startClientX = 0;
 		let startClientY = 0;
-		let startNodeX = 0;
-		let startNodeY = 0;
+		let dragGroupIds: readonly string[] = [node.id];
+		const dragStartPosById = new Map<string, IMissionNodePosition>();
+		const dragSizeById = new Map<string, { readonly width: number; readonly height: number }>();
+		let stationaryAlignRects: IMissionAlignRect[] = [];
+		let suppressNextClick = false;
+		let suppressClickTimer: number | undefined;
 
-		this.graphDisposables.add(addDisposableListener(nodeEl, EventType.POINTER_DOWN, (e: PointerEvent) => {
-			if (e.button !== 0 || this.callbacks.isRevisionPreview?.()) {
+		const clearSuppressNextClick = () => {
+			suppressNextClick = false;
+			if (suppressClickTimer !== undefined) {
+				win.clearTimeout(suppressClickTimer);
+				suppressClickTimer = undefined;
+			}
+		};
+
+		const armSuppressNextClick = () => {
+			clearSuppressNextClick();
+			suppressNextClick = true;
+			suppressClickTimer = win.setTimeout(() => {
+				suppressClickTimer = undefined;
+				suppressNextClick = false;
+			}, 0);
+		};
+
+		this.graphDisposables.add({ dispose: () => clearSuppressNextClick() });
+
+		// Capture-phase click guard: suppresses the trailing browser-synthesized click after
+		// a drag that started on an inner button/pill so dragging never opens a popover or action.
+		this.graphDisposables.add(addDisposableListener(nodeEl, EventType.CLICK, (e: MouseEvent) => {
+			if (!suppressNextClick) {
 				return;
 			}
+			clearSuppressNextClick();
+			e.preventDefault();
 			e.stopPropagation();
-			dragging = true;
-			this.callbacks.onStartNodeDrag();
-			startClientX = e.clientX;
-			startClientY = e.clientY;
-			const cur = this.callbacks.getNodePosition(node.id) ?? { x: 240, y: 240 };
-			startNodeX = cur.x;
-			startNodeY = cur.y;
-			nodeEl.classList.add('dragging');
-			try {
-				nodeEl.setPointerCapture(e.pointerId);
-			} catch { /* synthetic events */ }
-		}));
+		}, true));
 
-		this.graphDisposables.add(addDisposableListener(nodeEl, EventType.POINTER_MOVE, (e: PointerEvent) => {
-			if (!dragging) {
+		const clearDraggingClasses = () => {
+			for (const id of dragGroupIds) {
+				this.nodeHandles.get(id)?.rootEl.classList.remove('dragging');
+			}
+		};
+
+		const finishInteraction = (endEv: PointerEvent | undefined, cancelled: boolean) => {
+			if (!pendingDrag) {
 				return;
 			}
-			const zoom = this.callbacks.getZoom();
-			const nextPos: IMissionNodePosition = {
-				x: Math.round(startNodeX + (e.clientX - startClientX) / zoom),
-				y: Math.round(startNodeY + (e.clientY - startClientY) / zoom),
-			};
-			nodeEl.style.left = `${nextPos.x}px`;
-			nodeEl.style.top = `${nextPos.y}px`;
-			this.callbacks.onDragNodeMove(node.id, nextPos);
-		}));
-
-		const finishDrag = (e: PointerEvent) => {
-			if (!dragging) {
+			pendingDrag = false;
+			const wasActiveDrag = activeDrag;
+			activeDrag = false;
+			const pointerId = activePointerId;
+			const finishedGroup = dragGroupIds;
+			this.nodeDragDisposables.clear();
+			this.clearAlignGuides();
+			if (wasActiveDrag) {
+				clearDraggingClasses();
+				try {
+					if (nodeEl.hasPointerCapture?.(pointerId)) {
+						nodeEl.releasePointerCapture(pointerId);
+					}
+				} catch { /* ignore */ }
+				const movedPx = endEv ? Math.hypot(endEv.clientX - startClientX, endEv.clientY - startClientY) : NODE_DRAG_THRESHOLD_PX;
+				armSuppressNextClick();
+				const effectiveMoved = Math.max(NODE_DRAG_THRESHOLD_PX, movedPx);
+				if (this.callbacks.onEndNodesDrag) {
+					this.callbacks.onEndNodesDrag(finishedGroup, effectiveMoved);
+				} else {
+					this.callbacks.onEndNodeDrag(node.id, effectiveMoved);
+				}
 				return;
 			}
-			dragging = false;
-			nodeEl.classList.remove('dragging');
-			try {
-				nodeEl.releasePointerCapture(e.pointerId);
-			} catch { /* ignore */ }
-			const movedPx = Math.hypot(e.clientX - startClientX, e.clientY - startClientY);
-			this.callbacks.onEndNodeDrag(node.id, movedPx);
-			if (movedPx < 5) {
+			if (!cancelled && !startedOnSubInteractive) {
+				if (startedWithMultiModifier && this.callbacks.onSelectNode) {
+					this.callbacks.onSelectNode(node, nodeEl, { toggleMulti: true });
+					return;
+				}
 				// Clean single-click keeps user on the Mission Canvas (opens Gate sign-off or in-canvas Node Command Inspector)
 				if (node.kind === 'gate' && handle.nodeState === 'waiting_gate') {
 					this.callbacks.onOpenGateDecisionPopover(node, nodeEl);
@@ -2826,10 +3522,193 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				}
 			}
 		};
-		this.graphDisposables.add(addDisposableListener(nodeEl, EventType.POINTER_UP, finishDrag));
-		this.graphDisposables.add(addDisposableListener(nodeEl, 'pointercancel', finishDrag));
+
+		this.graphDisposables.add(addDisposableListener(nodeEl, EventType.POINTER_DOWN, (e: PointerEvent) => {
+			if (e.button !== 0 || this.callbacks.isRevisionPreview?.()) {
+				return;
+			}
+			const targetEl = resolveEventTargetElement(e.target);
+			if (targetEl?.closest(NODE_DRAG_EXCLUSION_SELECTOR)) {
+				return;
+			}
+			e.stopPropagation();
+			clearSuppressNextClick();
+			this.nodeDragDisposables.clear();
+
+			pendingDrag = true;
+			activeDrag = false;
+			startedOnSubInteractive = Boolean(targetEl?.closest(NODE_SUB_INTERACTIVE_SELECTOR));
+			startedWithMultiModifier = Boolean(e.shiftKey || e.metaKey || e.ctrlKey);
+			activePointerId = e.pointerId;
+			startClientX = e.clientX;
+			startClientY = e.clientY;
+			dragGroupIds = [node.id];
+			dragStartPosById.clear();
+			dragSizeById.clear();
+			stationaryAlignRects = [];
+
+			this.nodeDragDisposables.add({
+				dispose: () => {
+					this.clearAlignGuides();
+					if (activeDrag) {
+						activeDrag = false;
+						pendingDrag = false;
+						clearDraggingClasses();
+						try {
+							if (nodeEl.hasPointerCapture?.(activePointerId)) {
+								nodeEl.releasePointerCapture(activePointerId);
+							}
+						} catch { /* ignore */ }
+						if (this.callbacks.onEndNodesDrag) {
+							this.callbacks.onEndNodesDrag(dragGroupIds, 0);
+						} else {
+							this.callbacks.onEndNodeDrag(node.id, 0);
+						}
+					} else {
+						pendingDrag = false;
+					}
+				},
+			});
+
+			this.nodeDragDisposables.add(addDisposableListener(win, EventType.POINTER_MOVE, (mv: PointerEvent) => {
+				if (!pendingDrag || mv.pointerId !== activePointerId) {
+					return;
+				}
+				const dx = mv.clientX - startClientX;
+				const dy = mv.clientY - startClientY;
+				if (!activeDrag) {
+					if (Math.hypot(dx, dy) < NODE_DRAG_THRESHOLD_PX) {
+						return;
+					}
+					activeDrag = true;
+					const requestedGroup = this.callbacks.getDragGroupNodeIds?.(node.id);
+					dragGroupIds = requestedGroup && requestedGroup.length > 0 && requestedGroup.includes(node.id)
+						? [...requestedGroup]
+						: [node.id];
+					const movingSet = new Set(dragGroupIds);
+					dragStartPosById.clear();
+					dragSizeById.clear();
+					for (const id of dragGroupIds) {
+						const h = this.nodeHandles.get(id);
+						const pos = this.callbacks.getNodePosition(id) ?? { x: 240, y: 240 };
+						dragStartPosById.set(id, { x: pos.x, y: pos.y });
+						dragSizeById.set(id, h ? getMissionNodeSize(h.node) : getMissionNodeSize(node));
+						h?.rootEl.classList.add('dragging');
+					}
+					stationaryAlignRects = [];
+					for (const [otherId, otherHandle] of this.nodeHandles.entries()) {
+						if (movingSet.has(otherId)) {
+							continue;
+						}
+						const otherPos = this.callbacks.getNodePosition(otherId);
+						if (!otherPos) {
+							continue;
+						}
+						const osz = getMissionNodeSize(otherHandle.node);
+						stationaryAlignRects.push({
+							id: otherId,
+							minX: otherPos.x - osz.width / 2,
+							maxX: otherPos.x + osz.width / 2,
+							minY: otherPos.y - osz.height / 2,
+							maxY: otherPos.y + osz.height / 2,
+						});
+					}
+					this.callbacks.onStartNodeDrag();
+					try {
+						nodeEl.setPointerCapture(activePointerId);
+					} catch { /* synthetic events */ }
+				}
+				const zoom = this.callbacks.getZoom();
+				const rawDx = dx / zoom;
+				const rawDy = dy / zoom;
+
+				let snapDx = 0;
+				let snapDy = 0;
+				if (!mv.altKey && stationaryAlignRects.length > 0) {
+					let minX = Infinity;
+					let maxX = -Infinity;
+					let minY = Infinity;
+					let maxY = -Infinity;
+					for (const id of dragGroupIds) {
+						const sp = dragStartPosById.get(id);
+						const sz = dragSizeById.get(id);
+						if (!sp || !sz) {
+							continue;
+						}
+						const nx = sp.x + rawDx;
+						const ny = sp.y + rawDy;
+						minX = Math.min(minX, nx - sz.width / 2);
+						maxX = Math.max(maxX, nx + sz.width / 2);
+						minY = Math.min(minY, ny - sz.height / 2);
+						maxY = Math.max(maxY, ny + sz.height / 2);
+					}
+					if (Number.isFinite(minX)) {
+						const snap = computeNodeDragSnapAlignment({ minX, maxX, minY, maxY }, stationaryAlignRects, 8);
+						snapDx = snap.dx;
+						snapDy = snap.dy;
+						this.renderAlignGuides(snap.guides);
+					} else {
+						this.clearAlignGuides();
+					}
+				} else {
+					this.clearAlignGuides();
+				}
+
+				const appliedDx = Math.round(rawDx + snapDx);
+				const appliedDy = Math.round(rawDy + snapDy);
+				const moves: Array<{ readonly nodeId: string; readonly pos: IMissionNodePosition }> = [];
+				for (const id of dragGroupIds) {
+					const sp = dragStartPosById.get(id) ?? { x: 240, y: 240 };
+					const nextPos: IMissionNodePosition = {
+						x: sp.x + appliedDx,
+						y: sp.y + appliedDy,
+					};
+					const h = this.nodeHandles.get(id);
+					if (h) {
+						h.rootEl.style.left = `${nextPos.x}px`;
+						h.rootEl.style.top = `${nextPos.y}px`;
+					}
+					moves.push({ nodeId: id, pos: nextPos });
+				}
+				if (this.callbacks.onDragNodesMove) {
+					this.callbacks.onDragNodesMove(moves);
+				} else if (moves.length > 0) {
+					this.callbacks.onDragNodeMove(moves[0].nodeId, moves[0].pos);
+				}
+			}));
+
+			this.nodeDragDisposables.add(addDisposableListener(win, EventType.POINTER_UP, (upEv: PointerEvent) => {
+				if (!pendingDrag || upEv.pointerId !== activePointerId) {
+					return;
+				}
+				finishInteraction(upEv, false);
+			}));
+			this.nodeDragDisposables.add(addDisposableListener(win, 'pointercancel', (cancelEv: PointerEvent) => {
+				if (!pendingDrag || cancelEv.pointerId !== activePointerId) {
+					return;
+				}
+				finishInteraction(cancelEv, true);
+			}));
+			this.nodeDragDisposables.add(addDisposableListener(nodeEl, 'lostpointercapture', (capEv: PointerEvent) => {
+				if (!pendingDrag || !activeDrag || capEv.pointerId !== activePointerId) {
+					return;
+				}
+				finishInteraction(capEv, true);
+			}));
+			this.nodeDragDisposables.add(addDisposableListener(win, EventType.BLUR, () => {
+				if (!pendingDrag) {
+					return;
+				}
+				finishInteraction(undefined, true);
+			}));
+		}));
+
 		if (node.kind !== 'gate') {
 			this.graphDisposables.add(addDisposableListener(nodeEl, EventType.DBLCLICK, e => {
+				const targetEl = resolveEventTargetElement(e.target);
+				if (targetEl?.closest(NODE_SUB_INTERACTIVE_SELECTOR)) {
+					return;
+				}
 				if (!handle.linkedAgent) {
 					return;
 				}
@@ -2906,6 +3785,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		if (!canPatchInPlace) {
 			this.edgeDisposables.clear();
 			this.edgeHandles.clear();
+			this.clearGliderDom();
 			this.lastNodeObstacleById.clear();
 			while (this.edgesLayerEl.firstChild) {
 				this.edgesLayerEl.removeChild(this.edgesLayerEl.firstChild);
@@ -2987,6 +3867,8 @@ export class AdeMissionCanvasRenderer extends Disposable {
 
 			if (existing) {
 				existing.bbox = routeBbox;
+				existing.midX = route.midX;
+				existing.midY = route.midY;
 				if (existing.path.getAttribute('d') !== route.path) {
 					existing.path.setAttribute('d', route.path);
 					existing.hitPath.setAttribute('d', route.path);
@@ -3013,6 +3895,10 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			} else if (isCrossHost) {
 				edgeClasses.push('is-cross-host');
 			}
+			const edgeKey = `${edge.from}->${edge.to}`;
+			if (this.selectedEdgeKey && this.selectedEdgeKey === edgeKey) {
+				edgeClasses.push('is-selected');
+			}
 			const group = svgEl('g', {
 				class: edgeClasses.join(' '),
 				'data-edge-id': edge.id,
@@ -3020,6 +3906,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				'data-cross-host': String(isCrossHost),
 				'data-from': edge.from,
 				'data-to': edge.to,
+				...(this.selectedEdgeKey && this.selectedEdgeKey === edgeKey ? { 'data-edge-selected': 'true' } : {}),
 			});
 
 			const hitPath = svgEl('path', {
@@ -3031,13 +3918,32 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			const path = svgEl('path', {
 				class: 'ade-mission-edge-path',
 				d: route.path,
-				'marker-end': edgeKind === 'fail'
-					? 'url(#ade-mission-arrow-fail)'
-					: isCrossHost
-						? 'url(#ade-mission-arrow-cloud)'
-						: 'url(#ade-mission-arrow-default)',
+				'marker-end': this.selectedEdgeKey === edgeKey
+					? 'url(#ade-mission-arrow-active)'
+					: edgeKind === 'fail'
+						? 'url(#ade-mission-arrow-fail)'
+						: isCrossHost
+							? 'url(#ade-mission-arrow-cloud)'
+							: 'url(#ade-mission-arrow-default)',
 			});
 			group.appendChild(path);
+			this.edgeDisposables.add(addDisposableListener(group, EventType.POINTER_DOWN, (e: PointerEvent) => {
+				if (e.button === 0) {
+					e.stopPropagation();
+				}
+			}));
+			this.edgeDisposables.add(addDisposableListener(group, EventType.CLICK, (e: MouseEvent) => {
+				e.stopPropagation();
+				this.callbacks.onSelectEdge?.(edge);
+			}));
+			this.edgeDisposables.add(addDisposableListener(group, EventType.DBLCLICK, (e: MouseEvent) => {
+				if (!this.callbacks.onRenameEdgeLabel || this.callbacks.isRevisionPreview?.()) {
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				this.startInlineEdgeLabelEdit(edge.id);
+			}));
 			this.edgeDisposables.add(addDisposableListener(group, EventType.CONTEXT_MENU, (e: MouseEvent) => {
 				if (!this.callbacks.onEdgeContextMenu) {
 					return;
@@ -3077,7 +3983,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			}
 
 			this.edgesLayerEl.appendChild(group);
-			this.edgeHandles.set(edge.id, { group, path, hitPath, labelBg, labelText, pillW, edge, isCrossHost, bbox: routeBbox });
+			this.edgeHandles.set(edge.id, { group, path, hitPath, labelBg, labelText, pillW, edge, isCrossHost, midX: route.midX, midY: route.midY, bbox: routeBbox });
 		}
 
 		// Record latest obstacle footprints so subsequent incremental drag frames know prior bounds.

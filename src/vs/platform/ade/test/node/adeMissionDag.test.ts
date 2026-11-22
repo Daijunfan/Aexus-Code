@@ -19,7 +19,6 @@ import {
 	computeOrthogonalRoundedEdgeRoute,
 	getMissionEdgeKind,
 	measureMissionEdgeLabelTextWidth,
-	MISSION_DAG_TEMPLATES,
 	MISSION_TASK_NODE_HEIGHT,
 	MISSION_TASK_NODE_WIDTH,
 	parseMissionMermaidDag,
@@ -411,26 +410,8 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.ok(longPill.pillWidth <= 260, `Truncated pill width stays within cap, got ${longPill.pillWidth}`);
 	});
 
-	test('validates all curated 1-click DAG templates and lossless Mermaid visual authoring mutations', () => {
-		// 1. All curated templates parse cleanly, lay out cleanly, and reference valid reviewer nodes
-		assert.ok(MISSION_DAG_TEMPLATES.length >= 4, 'At least 4 curated templates');
-		for (const tpl of MISSION_DAG_TEMPLATES) {
-			const parsed = parseMissionMermaidDag(tpl.mermaidText);
-			assert.strictEqual(parsed.error, undefined, `Template "${tpl.id}" must parse cleanly: ${parsed.error}`);
-			assert.ok(parsed.nodes.length >= 2, `Template "${tpl.id}" has >= 2 nodes`);
-			assert.ok(parsed.edges.length >= 1, `Template "${tpl.id}" has >= 1 edge`);
-			const pos = computeMissionAutoLayout(parsed);
-			assert.strictEqual(pos.size, parsed.nodes.length, `Template "${tpl.id}" lays out all nodes`);
-			for (const revId of tpl.reviewerNodeIds ?? []) {
-				assert.ok(parsed.nodes.some(n => n.id === revId && n.kind === 'task'), `Template "${tpl.id}" reviewer ${revId} must be a task node`);
-			}
-		}
-		const researchTpl = MISSION_DAG_TEMPLATES.find(t => t.id === 'multi-gpu-research')!;
-		const researchParsed = parseMissionMermaidDag(researchTpl.mermaidText);
-		assert.ok(researchParsed.edges.some(e => e.from === 'R2' && e.to === 'F1' && getMissionEdgeKind(e) === 'fail'), 'Research template includes on_fail fallback edge');
-		assert.strictEqual(researchParsed.nodes.find(n => n.id === 'R4')?.checks?.[0]?.expectFiles?.[0], 'research/benchmarks/metrics.json');
-
-		// 2. addNodeToMermaid builds from empty text with distinct IDs for task / reviewer / gate
+	test('validates lossless Mermaid visual authoring mutations', () => {
+		// 1. addNodeToMermaid builds from empty text with distinct IDs for task / reviewer / gate
 		const step1 = addNodeToMermaid('', { kind: 'task', label: 'Spec & Plan', employeeName: 'Architect' });
 		assert.strictEqual(step1.nodeId, 'N1');
 		const step2 = addNodeToMermaid(step1.mermaidText, { kind: 'task', roleHint: 'reviewer', label: 'Code Review' });
@@ -443,7 +424,7 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.deepStrictEqual(parsed3.nodes.map(n => [n.id, n.kind]), [['N1', 'task'], ['R1', 'task'], ['U1', 'gate']]);
 		assert.strictEqual(parsed3.nodes[0].employeeName, 'Architect');
 
-		// 3. addEdgeToMermaid supports regular + fail edges and rejects self-loops, duplicates, and cycles
+		// 2. addEdgeToMermaid supports regular + fail edges and rejects self-loops, duplicates, and cycles
 		const e1 = addEdgeToMermaid(step3.mermaidText, 'N1', 'R1');
 		assert.strictEqual(e1.ok, true);
 		const e2 = addEdgeToMermaid(e1.mermaidText!, 'R1', 'U1', { kind: 'fail', label: 'fail' });
@@ -452,7 +433,7 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.strictEqual(addEdgeToMermaid(e2.mermaidText!, 'N1', 'R1').ok, false, 'Rejects duplicate edge');
 		assert.strictEqual(addEdgeToMermaid(e2.mermaidText!, 'U1', 'N1').ok, false, 'Rejects cycle');
 
-		// 4. renameNodeInMermaid preserves @Employee, :::Class, Gate {{...}}, and %% check comments
+		// 3. renameNodeInMermaid preserves @Employee, :::Class, Gate {{...}}, and %% check comments
 		const withCheck = `${e2.mermaidText!}\n  %% check R1 [name=tests]: pnpm test\n  %% check N1 [name=spec, expect_file=spec.md]`;
 		const renamed1 = renameNodeInMermaid(withCheck, 'N1', 'API Contract v2');
 		const renamed2 = renameNodeInMermaid(renamed1, 'U1', 'Release Gate v2');
@@ -464,7 +445,7 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.strictEqual(parsedRenamed.nodes.find(n => n.id === 'U1')?.label, 'Release Gate v2');
 		assert.strictEqual(parsedRenamed.nodes.find(n => n.id === 'R1')?.checks?.length, 1, '%% check preserved across rename');
 
-		// 5. toggleEdgeFailInMermaid & removeEdgeFromMermaid & removeNodeFromMermaid
+		// 4. toggleEdgeFailInMermaid & removeEdgeFromMermaid & removeNodeFromMermaid
 		const toggled = toggleEdgeFailInMermaid(renamed2, 'R1', 'U1');
 		const parsedToggled = parseMissionMermaidDag(toggled);
 		assert.strictEqual(getMissionEdgeKind(parsedToggled.edges.find(e => e.from === 'R1' && e.to === 'U1')!), 'success', 'Toggled fail edge back to success');

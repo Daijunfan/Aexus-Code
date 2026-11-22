@@ -77,6 +77,13 @@ export interface IMissionNodeHostInfo {
 	readonly osLabel: string;
 }
 
+export function serializeMissionEngineIconKey(icon: URI | ThemeIcon | undefined): string {
+	if (URI.isUri(icon)) {
+		return `uri:${icon.toString()}`;
+	}
+	return icon ? `theme:${icon.id}:${icon.color?.id ?? ''}` : 'theme:hubot';
+}
+
 export function applyMissionEngineIcon(iconEl: HTMLElement, icon: URI | ThemeIcon | undefined): void {
 	const isCore = iconEl.classList.contains('is-core');
 	const coreCls = isCore ? ' is-core' : '';
@@ -166,7 +173,17 @@ export class AdeMissionHostCatalog extends Disposable {
 	}
 
 	getEngineIcon(engineId: string): URI | ThemeIcon | undefined {
-		return this.sessionsService?.getIcon(engineId);
+		const liveIcon = this.sessionsService?.getIcon(engineId);
+		if (liveIcon) {
+			return liveIcon;
+		}
+		for (const entry of this.hostEnginesCache.values()) {
+			const match = entry.allEngines.find(e => e.id === engineId);
+			if (match?.icon) {
+				return match.icon;
+			}
+		}
+		return undefined;
 	}
 
 	clearEngineCache(): void {

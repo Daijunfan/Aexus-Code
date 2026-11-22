@@ -1569,3 +1569,9 @@
 		animation: none !important;
 	}
 }
+
+html.ade-page-hidden .monaco-workbench .ade-ch-console *,
+html.ade-page-hidden .monaco-workbench .ade-ch-console *::before,
+html.ade-page-hidden .monaco-workbench .ade-ch-console *::after {
+	animation-play-state: paused !important;
+}

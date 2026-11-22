@@ -87,13 +87,41 @@ export interface IAdeApiDocReadResult {
 	readonly error?: string;
 }
 
-function fnv1aHash32Hex(input: string, seed: number): string {
+export function fnv1aHash32Hex(input: string, seed: number): string {
 	let hash = seed >>> 0;
 	for (let i = 0; i < input.length; i++) {
 		hash ^= input.charCodeAt(i);
 		hash = Math.imul(hash, 0x01000193) >>> 0;
 	}
 	return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Compact 64-bit content fingerprint (`<byteLen>:<h1><h2`) used for O(1) self-echo deduplication
+ * without retaining full serialized JSON snapshots in memory.
+ */
+export function computeAdeStorageFingerprint(raw: string): string {
+	const h1 = fnv1aHash32Hex(raw, 0x811c9dc5);
+	const h2 = fnv1aHash32Hex(raw, 0x9e3779b9);
+	return `${raw.length}:${h1}${h2}`;
+}
+
+/**
+ * Deterministic filesystem-safe filename for per-Mission cold storage under `<adeHome>/missions/`.
+ */
+export function encodeAdeMissionStorageFileName(missionId: string): string {
+	const trimmed = missionId.trim() || 'mission';
+	const safeHead = trimmed.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._-]+|[._-]+$/g, '').slice(0, 48) || 'mission';
+	const h1 = fnv1aHash32Hex(trimmed, 0x811c9dc5);
+	const h2 = fnv1aHash32Hex(`mission:${trimmed}`, 0x9e3779b9);
+	return `${safeHead}-${h1}${h2.slice(0, 6)}.json`;
+}
+
+export interface IAdeMissionColdChangeEvent {
+	readonly missionId: string;
+	readonly updatedAt: number;
+	readonly deleted?: boolean;
+	readonly writerId?: string;
 }
 
 /**
@@ -215,12 +243,18 @@ export interface IAdeEngineeringBackendService {
 	readonly onDidWatchdogWakeup?: Event<IAdeWatchdogWakeupEvent>;
 	readonly onDidSourceTriggerFire?: Event<IAdeSourceTriggerFireEvent>;
 	readonly onDidInboxChange?: Event<readonly IAdeInboxItem[]>;
+	/** Fired when a cold per-Mission file is saved or deleted under `<adeHome>/missions/`. */
+	readonly onDidMissionRecordChange?: Event<IAdeMissionColdChangeEvent>;
 	/** Fired when the OS resumes from sleep/suspend so renderer & extension host immediately heal SSH tunnels and reattach. */
 	readonly onDidSystemResume?: Event<number>;
 
 	loadInbox(): Promise<IAdeInboxItem[]>;
 	saveInbox(items: readonly IAdeInboxItem[]): Promise<void>;
 	mutateInbox?(mutation: IAdeInboxMutation): Promise<IAdeInboxItem[]>;
+	loadMissionRecord?(missionId: string): Promise<string | undefined>;
+	loadAllMissionRecords?(): Promise<Readonly<Record<string, string>>>;
+	saveMissionRecord?(missionId: string, payloadJson: string, updatedAt: number, writerId?: string): Promise<void>;
+	deleteMissionRecord?(missionId: string, writerId?: string): Promise<void>;
 	syncApiDocs?(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths>;
 	getApiDocsPaths?(rankCount: number): Promise<IAdeDocsPaths>;
 	readApiDoc?(target: string, config?: IAdeOrganizationConfig): Promise<IAdeApiDocReadResult>;

@@ -16,12 +16,14 @@ import { stripAdeControlEnv } from '../common/adeControl.js';
 import { buildAdeDocsPaths, IAdeDocsPaths } from '../common/adeDocsCatalog.js';
 import {
 	ADE_INBOX_FILE_NAME,
+	encodeAdeMissionStorageFileName,
 	IAdeApiDocReadResult,
 	IAdeDeterministicCheckRequest,
 	IAdeDeterministicCheckResponse,
 	IAdeEngineeringBackendService,
 	IAdeInboxItem,
 	IAdeInboxMutation,
+	IAdeMissionColdChangeEvent,
 	IAdeMissionWatchdogSnapshot,
 	IAdeSourceTriggerFireEvent,
 	IAdeWatchdogWakeupEvent,
@@ -176,10 +178,14 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 	private readonly watchdog: AdeMissionWatchdogService;
 	private readonly remoteProbe?: IAdeRemoteWatchdogProbe;
 	private inboxWriteChain: Promise<void> = Promise.resolve();
+	private readonly missionWriteChains = new Map<string, Promise<void>>();
 	private inboxTmpSeq = 0;
 
 	private readonly _onDidInboxChange = this._register(new Emitter<readonly IAdeInboxItem[]>());
 	readonly onDidInboxChange: Event<readonly IAdeInboxItem[]> = this._onDidInboxChange.event;
+
+	private readonly _onDidMissionRecordChange = this._register(new Emitter<IAdeMissionColdChangeEvent>());
+	readonly onDidMissionRecordChange: Event<IAdeMissionColdChangeEvent> = this._onDidMissionRecordChange.event;
 
 	private readonly _onDidSystemResume = this._register(new Emitter<number>());
 	readonly onDidSystemResume: Event<number> = this._onDidSystemResume.event;
@@ -271,6 +277,105 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		const queued = this.inboxWriteChain.then(mutateOp, mutateOp);
 		this.inboxWriteChain = queued.then(() => undefined, () => undefined);
 		return queued;
+	}
+
+	private get missionsDir(): string {
+		return path.join(this.baseDir, 'missions');
+	}
+
+	private missionFilePath(missionId: string): string {
+		return path.join(this.missionsDir, encodeAdeMissionStorageFileName(missionId));
+	}
+
+	private enqueueMissionFileOp(missionId: string, op: () => Promise<void>): Promise<void> {
+		const prev = this.missionWriteChains.get(missionId) ?? Promise.resolve();
+		const next = prev.then(op, op);
+		const settled = next.then(() => undefined, () => undefined);
+		this.missionWriteChains.set(missionId, settled);
+		void settled.finally(() => {
+			if (this.missionWriteChains.get(missionId) === settled) {
+				this.missionWriteChains.delete(missionId);
+			}
+		});
+		return next;
+	}
+
+	async loadMissionRecord(missionId: string): Promise<string | undefined> {
+		const trimmed = missionId.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		try {
+			return await fs.promises.readFile(this.missionFilePath(trimmed), 'utf8');
+		} catch {
+			return undefined;
+		}
+	}
+
+	async loadAllMissionRecords(): Promise<Readonly<Record<string, string>>> {
+		const out: Record<string, string> = {};
+		let entries: string[];
+		try {
+			entries = await fs.promises.readdir(this.missionsDir);
+		} catch {
+			return out;
+		}
+		await Promise.all(entries.map(async name => {
+			if (!name.endsWith('.json') || name.includes('.tmp.')) {
+				return;
+			}
+			try {
+				const raw = await fs.promises.readFile(path.join(this.missionsDir, name), 'utf8');
+				const parsed = JSON.parse(raw) as { id?: unknown };
+				if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string' && parsed.id.trim()) {
+					out[parsed.id.trim()] = raw;
+				}
+			} catch {
+				// Skip corrupt or half-written file cleanly
+			}
+		}));
+		return out;
+	}
+
+	async saveMissionRecord(missionId: string, payloadJson: string, updatedAt: number, writerId?: string): Promise<void> {
+		const trimmed = missionId.trim();
+		if (!trimmed) {
+			return;
+		}
+		return this.enqueueMissionFileOp(trimmed, async () => {
+			await fs.promises.mkdir(this.missionsDir, { recursive: true, mode: 0o700 });
+			const target = this.missionFilePath(trimmed);
+			const uniqueSuffix = `${process.pid}.${Date.now()}.${++this.inboxTmpSeq}.${crypto.randomBytes(6).toString('hex')}`;
+			const tmp = `${target}.tmp.${uniqueSuffix}`;
+			try {
+				await fs.promises.writeFile(tmp, payloadJson, { encoding: 'utf8', mode: 0o600 });
+				await fs.promises.rename(tmp, target);
+			} catch (err) {
+				await fs.promises.unlink(tmp).catch(() => undefined);
+				throw err;
+			}
+			this._onDidMissionRecordChange.fire({
+				missionId: trimmed,
+				updatedAt,
+				...(writerId ? { writerId } : {}),
+			});
+		});
+	}
+
+	async deleteMissionRecord(missionId: string, writerId?: string): Promise<void> {
+		const trimmed = missionId.trim();
+		if (!trimmed) {
+			return;
+		}
+		return this.enqueueMissionFileOp(trimmed, async () => {
+			await fs.promises.unlink(this.missionFilePath(trimmed)).catch(() => undefined);
+			this._onDidMissionRecordChange.fire({
+				missionId: trimmed,
+				updatedAt: Date.now(),
+				deleted: true,
+				...(writerId ? { writerId } : {}),
+			});
+		});
 	}
 
 	async syncApiDocs(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths> {

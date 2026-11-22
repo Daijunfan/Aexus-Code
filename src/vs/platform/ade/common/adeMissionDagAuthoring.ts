@@ -8,122 +8,13 @@ import {
 	getMissionEdgeKind,
 	IMissionDagEdge,
 	IMissionDagNode,
+	IMissionNodeCheckHook,
+	IMissionNodePosition,
 	MissionDagDirection,
 	MissionDagEdgeKind,
 	parseMissionMermaidDag,
 } from './adeMissionDag.js';
 import { extractInlineEmployeeTag, stripTrailingMermaidClass } from './adeMissionEmployee.js';
-
-export interface IMissionDagTemplate {
-	readonly id: string;
-	readonly title: string;
-	readonly badge: string;
-	readonly category: 'engineering' | 'research' | 'security' | 'starter';
-	readonly description: string;
-	readonly mermaidText: string;
-	readonly nodePrompts: Readonly<Record<string, string>>;
-	readonly reviewerNodeIds?: readonly string[];
-}
-
-/**
- * Curated 1-click classic multi-machine engineering & research Mission DAG templates
- * so new users can go from an empty canvas to a production-grade multi-agent pipeline in 1 click.
- */
-export const MISSION_DAG_TEMPLATES: readonly IMissionDagTemplate[] = [
-	{
-		id: 'multi-gpu-research',
-		title: '多机科研训练与评测流水线',
-		badge: 'Multi-GPU Research',
-		category: 'research',
-		description: '文献与实验设计 → 并行双路 GPU 训练 + 自动基准评测（含显存 OOM 降参兜底）→ 人工方法学 Gate → 论文结论报告。',
-		mermaidText: [
-			'flowchart LR',
-			'  R1["@PI: 文献调研与实验方案"] -->|spec| R2["@TrainA: 主实验 GPU 训练"]',
-			'  R1 -->|spec| R3["@TrainB: 消融对比基线"]',
-			'  R1 -->|spec| R4["@Bench: 基准评测与指标审稿"]',
-			'  R2 -->|fail| F1["@Ops: 显存诊断与降参恢复"]',
-			'  R2 --> U1{{"方法学人工审核 Gate"}}',
-			'  R3 --> U1',
-			'  R4 --> U1',
-			'  F1 --> U1',
-			'  U1 --> R5["@PI: 论文结论与实验报告"]',
-			'  %% check R4 [name=metrics-json, expect_file=research/benchmarks/metrics.json, on_fail=bounce, max_retries=2]',
-		].join('\n'),
-		nodePrompts: {
-			R1: '调研核心基线与失败模式，在 `research/spec.md` 中固化可证伪假设、超参矩阵与统一量化指标后交出令牌。',
-			R2: '按 `research/spec.md` 在云端 GPU 节点启动主实验训练；长耗时训练请使用 `aexus-ade token block --watch-pid <pid>` 零 Token 挂起等待。',
-			R3: '在相同数据切分与随机种子下完成对比基线/消融实验，输出可复现日志与 checkpoint 路径。',
-			R4: '作为图内 Reviewer 运行统一评测脚本，产出 `research/benchmarks/metrics.json`；若数据泄露或统计不显著请 `token reject` 打回上游。',
-			F1: '分析上游训练失败原因（OOM / NaN / 依赖异常），自动调整 batch size 或混合精度并产出一份可复现的降参兜底结果。',
-			R5: '汇总 `R1`–`R4` 经人工审核通过的量化结果与图表，撰写最终论文实验章节与结论简报。',
-		},
-		reviewerNodeIds: ['R4'],
-	},
-	{
-		id: 'fullstack-ship',
-		title: '跨端全栈并行工程发布',
-		badge: 'Full-Stack Ship',
-		category: 'engineering',
-		description: '接口契约先行 → 后端 / 前端 / QA 审稿三路并行 → 发布人工 Gate → 架构师联调验收发版（上下文复用）。',
-		mermaidText: [
-			'flowchart LR',
-			'  N1["@Architect: 接口与数据契约"] -->|contract| N2["@Backend: 服务端核心实现"]',
-			'  N1 -->|contract| N3["@Frontend: 前端交互画布"]',
-			'  N1 -->|contract| N4["@QA: 自动化测试与审稿"]',
-			'  N2 --> U1{{"发布上线人工 Gate"}}',
-			'  N3 --> U1',
-			'  N4 --> U1',
-			'  U1 --> N5["@Architect: 全链路联调与发版"]',
-		].join('\n'),
-		nodePrompts: {
-			N1: '定义共享 TypeScript/API 契约与文件边界，确保并行轨道 `N2` / `N3` / `N4` 零冲突开发并通过类型检查。',
-			N2: '按 `N1` 契约完成核心后端服务与持久化逻辑，补齐边界单元测试。',
-			N3: '按 `N1` 契约构建响应式暗色/亮色前端交互组件，确保可访问性与零布局溢出。',
-			N4: '作为图内 Reviewer 编写端到端与回归测试，验证全部正向/异常路径；发现阻塞缺陷时打回对应上游节点。',
-			N5: '复用架构师上下文完成跨模块联调、全量编译/Lint/单测验收并输出发布说明。',
-		},
-		reviewerNodeIds: ['N4'],
-	},
-	{
-		id: 'security-audit',
-		title: '并行安全审计与缺陷闭环',
-		badge: 'Security Swarm',
-		category: 'security',
-		description: '静态扫描 + 模糊测试双路并行 → 漏洞归因分级 → 补丁修复（含异常兜底）→ 安全合入 Gate。',
-		mermaidText: [
-			'flowchart LR',
-			'  S1["@Scanner: 静态审计与攻击面测绘"] --> S3["@Triage: 漏洞归因与风险分级"]',
-			'  S2["@Fuzzer: 模糊测试与边界探测"] --> S3',
-			'  S3 --> S4["@Fixer: 补丁修复与安全单测"]',
-			'  S4 -->|fail| F1["@Escalation: 回滚与应急止血"]',
-			'  S4 --> U1{{"安全合入审核 Gate"}}',
-			'  F1 --> U1',
-		].join('\n'),
-		nodePrompts: {
-			S1: '扫描权限校验、路径穿越、命令注入与密钥泄露风险，按严重级别输出可复现定位清单。',
-			S2: '针对关键输入解析与 IPC/CLI 通道构造异常边界用例与 fuzz 负载，记录崩溃与越权现象。',
-			S3: '合并去重 `S1`/`S2` 发现，按 P0/P1/P2 排序并给出最小修复方案。',
-			S4: '实施最小高内聚安全补丁并补充回归单测，确保全部测试通过后交出令牌。',
-			F1: '若补丁引入回归或无法自动验证，立即整理最小复现与止血建议提交人工 Gate。',
-		},
-		reviewerNodeIds: ['S3'],
-	},
-	{
-		id: 'minimal-starter',
-		title: '双节点最小快速起步',
-		badge: 'Quick Start',
-		category: 'starter',
-		description: '最简洁的 2 节点任务骨架，支持右键加节点、拖线建边、双击改名快速扩展。',
-		mermaidText: [
-			'flowchart LR',
-			'  N1["需求拆解与方案"] --> N2["实现与验收交付"]',
-		].join('\n'),
-		nodePrompts: {
-			N1: '梳理任务目标、关键约束与验证标准，输出清晰执行方案后交出令牌。',
-			N2: '按方案完成实现、运行测试验收并汇报关键变更与验证结果。',
-		},
-	},
-];
 
 function escapeMermaidQuotedLabel(label: string): string {
 	return label.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ').trim();
@@ -445,14 +336,321 @@ export function toggleEdgeFailInMermaid(mermaidText: string, fromId: string, toI
  * Removes a node and all of its incident edges (plus any `%% check` directives bound to it).
  */
 export function removeNodeFromMermaid(mermaidText: string, nodeId: string): string {
+	return removeNodesFromMermaid(mermaidText, [nodeId]);
+}
+
+/**
+ * Atomically removes one or more nodes and all of their incident edges (plus bound `%% check` directives).
+ */
+export function removeNodesFromMermaid(mermaidText: string, nodeIds: readonly string[]): string {
+	const removeSet = new Set(nodeIds.map(id => id.trim()).filter(Boolean));
+	if (removeSet.size === 0) {
+		return mermaidText;
+	}
 	const parsed = parseMissionMermaidDag(mermaidText);
 	if (parsed.error) {
 		return mermaidText;
 	}
-	const nextNodes = parsed.nodes.filter(n => n.id !== nodeId);
+	const nextNodes = parsed.nodes.filter(n => !removeSet.has(n.id));
 	if (nextNodes.length === parsed.nodes.length) {
 		return mermaidText;
 	}
-	const nextEdges = parsed.edges.filter(e => e.from !== nodeId && e.to !== nodeId);
+	const nextEdges = parsed.edges.filter(e => !removeSet.has(e.from) && !removeSet.has(e.to));
 	return serializePreservingDirectives(mermaidText, parsed.direction, nextNodes, nextEdges);
+}
+
+const FAIL_EDGE_LABEL_RE = /^(?:fail|failed|error|err|on_fail|on-fail|retry_fail|fallback|异常|失败|兜底)$/i;
+
+/**
+ * Updates or clears an edge's label in Mermaid source text while automatically syncing
+ * fail/success edge polarity when a failure keyword (e.g. `fail`, `on_fail`) is entered or cleared.
+ */
+export function renameEdgeLabelInMermaid(
+	mermaidText: string,
+	fromId: string,
+	toId: string,
+	nextLabel: string,
+): string {
+	const parsed = parseMissionMermaidDag(mermaidText);
+	if (parsed.error) {
+		return mermaidText;
+	}
+	const sanitized = nextLabel.replace(/\|/g, '/').replace(/\r?\n/g, ' ').trim();
+	let changed = false;
+	const nextEdges = parsed.edges.map(e => {
+		if (e.from !== fromId || e.to !== toId) {
+			return e;
+		}
+		const prevLabel = (e.label ?? '').trim();
+		const nextKind: MissionDagEdgeKind = sanitized && FAIL_EDGE_LABEL_RE.test(sanitized) ? 'fail' : 'success';
+		const prevKind = getMissionEdgeKind(e);
+		if (prevLabel === sanitized && prevKind === nextKind) {
+			return e;
+		}
+		changed = true;
+		return {
+			id: e.id,
+			from: e.from,
+			to: e.to,
+			...(sanitized ? { label: sanitized } : {}),
+			edgeKind: nextKind,
+		};
+	});
+	if (!changed) {
+		return mermaidText;
+	}
+	return serializePreservingDirectives(mermaidText, parsed.direction, parsed.nodes, nextEdges);
+}
+
+export interface IMissionAlignRect {
+	readonly id: string;
+	readonly minX: number;
+	readonly maxX: number;
+	readonly minY: number;
+	readonly maxY: number;
+}
+
+export interface IMissionAlignGuide {
+	readonly axis: 'x' | 'y';
+	/** World coordinate along the snapped axis (X for vertical line, Y for horizontal line). */
+	readonly coord: number;
+	/** Start coordinate along the perpendicular axis. */
+	readonly start: number;
+	/** End coordinate along the perpendicular axis. */
+	readonly end: number;
+}
+
+export interface IMissionSnapAlignmentResult {
+	readonly dx: number;
+	readonly dy: number;
+	readonly guides: readonly IMissionAlignGuide[];
+}
+
+/**
+ * Computes magnetic drag alignment snap deltas & visual reference guide lines against stationary nodes.
+ * Checks left/center/right X edges and top/middle/bottom Y edges within `threshold` world pixels.
+ */
+export function computeNodeDragSnapAlignment(
+	movingBounds: Omit<IMissionAlignRect, 'id'>,
+	stationaryRects: readonly IMissionAlignRect[],
+	threshold = 8,
+): IMissionSnapAlignmentResult {
+	if (stationaryRects.length === 0 || threshold <= 0) {
+		return { dx: 0, dy: 0, guides: [] };
+	}
+	const movCx = (movingBounds.minX + movingBounds.maxX) / 2;
+	const movCy = (movingBounds.minY + movingBounds.maxY) / 2;
+	const movXs = [movingBounds.minX, movCx, movingBounds.maxX];
+	const movYs = [movingBounds.minY, movCy, movingBounds.maxY];
+
+	let bestDx: number | undefined;
+	let bestXAbs = threshold + 1;
+	let bestXCoord = 0;
+	let bestXRefs: IMissionAlignRect[] = [];
+
+	let bestDy: number | undefined;
+	let bestYAbs = threshold + 1;
+	let bestYCoord = 0;
+	let bestYRefs: IMissionAlignRect[] = [];
+
+	for (const ref of stationaryRects) {
+		const refCx = (ref.minX + ref.maxX) / 2;
+		const refCy = (ref.minY + ref.maxY) / 2;
+		const refXs = [ref.minX, refCx, ref.maxX];
+		const refYs = [ref.minY, refCy, ref.maxY];
+
+		for (const mx of movXs) {
+			for (const rx of refXs) {
+				const delta = rx - mx;
+				const abs = Math.abs(delta);
+				if (abs <= threshold) {
+					if (abs < bestXAbs - 0.01) {
+						bestXAbs = abs;
+						bestDx = delta;
+						bestXCoord = rx;
+						bestXRefs = [ref];
+					} else if (Math.abs(abs - bestXAbs) <= 0.01 && Math.abs(rx - bestXCoord) <= 0.5) {
+						bestXRefs.push(ref);
+					}
+				}
+			}
+		}
+
+		for (const my of movYs) {
+			for (const ry of refYs) {
+				const delta = ry - my;
+				const abs = Math.abs(delta);
+				if (abs <= threshold) {
+					if (abs < bestYAbs - 0.01) {
+						bestYAbs = abs;
+						bestDy = delta;
+						bestYCoord = ry;
+						bestYRefs = [ref];
+					} else if (Math.abs(abs - bestYAbs) <= 0.01 && Math.abs(ry - bestYCoord) <= 0.5) {
+						bestYRefs.push(ref);
+					}
+				}
+			}
+		}
+	}
+
+	const dx = bestDx !== undefined ? Math.round(bestDx) : 0;
+	const dy = bestDy !== undefined ? Math.round(bestDy) : 0;
+	const guides: IMissionAlignGuide[] = [];
+	const pad = 20;
+
+	if (bestDx !== undefined && bestXRefs.length > 0) {
+		let startY = movingBounds.minY + dy;
+		let endY = movingBounds.maxY + dy;
+		for (const ref of bestXRefs) {
+			startY = Math.min(startY, ref.minY);
+			endY = Math.max(endY, ref.maxY);
+		}
+		guides.push({
+			axis: 'x',
+			coord: Math.round(bestXCoord),
+			start: Math.round(startY - pad),
+			end: Math.round(endY + pad),
+		});
+	}
+
+	if (bestDy !== undefined && bestYRefs.length > 0) {
+		let startX = movingBounds.minX + dx;
+		let endX = movingBounds.maxX + dx;
+		for (const ref of bestYRefs) {
+			startX = Math.min(startX, ref.minX);
+			endX = Math.max(endX, ref.maxX);
+		}
+		guides.push({
+			axis: 'y',
+			coord: Math.round(bestYCoord),
+			start: Math.round(startX - pad),
+			end: Math.round(endX + pad),
+		});
+	}
+
+	return { dx, dy, guides };
+}
+
+export interface IMissionCanvasHistorySnapshot {
+	readonly mermaidText: string;
+	readonly positions: Readonly<Record<string, IMissionNodePosition>>;
+	readonly nodePrompts: Readonly<Record<string, string>>;
+	readonly nodeChecks: Readonly<Record<string, readonly IMissionNodeCheckHook[]>>;
+	readonly label: string;
+	readonly timestamp?: number;
+}
+
+function cloneHistorySnapshot(snap: IMissionCanvasHistorySnapshot): IMissionCanvasHistorySnapshot {
+	const positions: Record<string, IMissionNodePosition> = {};
+	for (const [k, v] of Object.entries(snap.positions)) {
+		positions[k] = { x: v.x, y: v.y };
+	}
+	const nodePrompts: Record<string, string> = {};
+	for (const [k, v] of Object.entries(snap.nodePrompts)) {
+		nodePrompts[k] = v;
+	}
+	const nodeChecks: Record<string, readonly IMissionNodeCheckHook[]> = {};
+	for (const [k, list] of Object.entries(snap.nodeChecks)) {
+		nodeChecks[k] = list.map(c => ({
+			...c,
+			...(c.expectFiles ? { expectFiles: [...c.expectFiles] } : {}),
+		}));
+	}
+	return {
+		mermaidText: snap.mermaidText,
+		positions,
+		nodePrompts,
+		nodeChecks,
+		label: snap.label,
+		timestamp: snap.timestamp,
+	};
+}
+
+/**
+ * Bounded 50-step in-memory undo/redo snapshot stack for Mission Canvas visual DAG editing.
+ */
+export class MissionCanvasHistoryStack {
+	private undoStack: IMissionCanvasHistorySnapshot[] = [];
+	private redoStack: IMissionCanvasHistorySnapshot[] = [];
+
+	constructor(private readonly maxEntries = 50) { }
+
+	get undoCount(): number {
+		return this.undoStack.length;
+	}
+
+	get redoCount(): number {
+		return this.redoStack.length;
+	}
+
+	canUndo(): boolean {
+		return this.undoStack.length > 0;
+	}
+
+	canRedo(): boolean {
+		return this.redoStack.length > 0;
+	}
+
+	peekUndoLabel(): string | undefined {
+		return this.undoStack[this.undoStack.length - 1]?.label;
+	}
+
+	peekRedoLabel(): string | undefined {
+		return this.redoStack[this.redoStack.length - 1]?.label;
+	}
+
+	/**
+	 * Pushes a pre-mutation snapshot onto the undo stack and clears redo history.
+	 * When `coalesceMs > 0` and the top snapshot shares the same `label` within that window,
+	 * keeps the earlier baseline so rapid edits (e.g. Mermaid typing) collapse into one Undo step.
+	 */
+	push(beforeSnapshot: IMissionCanvasHistorySnapshot, options?: { readonly coalesceMs?: number }): void {
+		const now = beforeSnapshot.timestamp ?? Date.now();
+		const top = this.undoStack[this.undoStack.length - 1];
+		if (
+			options?.coalesceMs
+			&& top
+			&& top.label === beforeSnapshot.label
+			&& top.timestamp !== undefined
+			&& now - top.timestamp <= options.coalesceMs
+		) {
+			this.redoStack = [];
+			return;
+		}
+		this.undoStack.push(cloneHistorySnapshot({ ...beforeSnapshot, timestamp: now }));
+		if (this.undoStack.length > this.maxEntries) {
+			this.undoStack.splice(0, this.undoStack.length - this.maxEntries);
+		}
+		this.redoStack = [];
+	}
+
+	undo(currentSnapshot: IMissionCanvasHistorySnapshot): IMissionCanvasHistorySnapshot | undefined {
+		const prev = this.undoStack.pop();
+		if (!prev) {
+			return undefined;
+		}
+		this.redoStack.push(cloneHistorySnapshot({ ...currentSnapshot, label: prev.label }));
+		if (this.redoStack.length > this.maxEntries) {
+			this.redoStack.splice(0, this.redoStack.length - this.maxEntries);
+		}
+		return cloneHistorySnapshot(prev);
+	}
+
+	redo(currentSnapshot: IMissionCanvasHistorySnapshot): IMissionCanvasHistorySnapshot | undefined {
+		const next = this.redoStack.pop();
+		if (!next) {
+			return undefined;
+		}
+		this.undoStack.push(cloneHistorySnapshot({ ...currentSnapshot, label: next.label }));
+		if (this.undoStack.length > this.maxEntries) {
+			this.undoStack.splice(0, this.undoStack.length - this.maxEntries);
+		}
+		return cloneHistorySnapshot(next);
+	}
+
+	clear(): void {
+		this.undoStack = [];
+		this.redoStack = [];
+	}
 }

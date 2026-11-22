@@ -32,7 +32,9 @@ import { ADE_API_LATEST_REVISION } from '../../../../../platform/ade/common/adeA
 import { IAdeEngineeringBackendService, IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
 import { IAdeOrganizationConfig } from '../../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
+import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
+import { ADE_MODEL_PRICING_OVERRIDES_CONFIG_KEY } from '../../../../../platform/ade/common/adeModelPricing.js';
 import { IDialogService, IPrompt } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { ExtensionIdentifier } from '../../../../../platform/extensions/common/extensions.js';
@@ -73,11 +75,17 @@ import {
 import { buildAdeAgentRoleContext } from '../../browser/adeControlHandler.js';
 import { AdeConfigEditorPane } from '../../browser/adeConfigEditorPane.js';
 import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
-import { AdeEngineeringEditorInput, AdeEngineeringEditorPane } from '../../browser/adeEngineeringEditorPane.js';
+import { AdeEngineeringEditorInput, AdeEngineeringEditorPane, AdePageVisibilityAnimationGuard } from '../../browser/adeEngineeringEditorPane.js';
 import { AdeInboxService } from '../../browser/adeInboxService.js';
 import { AdeInboxPanel, formatAdeInboxKindLabel, IAdeInboxMissionBridge } from '../../browser/adeInboxView.js';
 import { AdeMissionRuntimeService, IAdeMissionRuntimeService } from '../../browser/adeMissionRuntime.js';
-import { AdeMissionStoreService, IAdeMissionService } from '../../browser/adeMissionStore.js';
+import {
+	ADE_MISSION_RECORD_STORAGE_PREFIX,
+	ADE_MISSIONS_INDEX_STORAGE_KEY,
+	ADE_MISSIONS_LEGACY_STORAGE_KEY,
+	AdeMissionStoreService,
+	IAdeMissionService,
+} from '../../browser/adeMissionStore.js';
 import { AdeChangesView, AdeFilesView, findProjectScmRepository, openScmResourceInAde } from '../../browser/adeInspectorViews.js';
 import { deleteProjectsWithModePrompt, reconcileIdeWorkspaceWithCatalog, removeProjectsSynchronized } from '../../browser/adeProjectManagement.js';
 import { AdeProjectsService } from '../../browser/adeProjectsService.js';
@@ -87,6 +95,7 @@ import { ChatEditorInput } from '../../../chat/browser/widgetHosts/editor/chatEd
 import { AdeExtensionWebviewEditorInput, AdeExtensionWebviewEditorPane, AdeSessionEditor, AdeSessionEditorInput } from '../../browser/adeSessionEditor.js';
 import { IAdeEngineSession, IAdeSessionsService } from '../../browser/adeSessionsService.js';
 import { ADE_CHANGES_VIEW_ID, ADE_FILES_VIEW_ID, ADE_OPEN_CONFIG_COMMAND_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
+import { setAdeDisplayLanguageOverride } from '../../common/adeLocalization.js';
 import { AdeRoleSchemaService, IAdeRoleSchemaService } from '../../common/adeRoleSchemaService.js';
 
 suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
@@ -4516,7 +4525,8 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			});
 			const n2AfterUsage = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
 			const ctxRow = n2AfterUsage.querySelector<HTMLElement>('.ade-mission-ctx-row')!;
-			assert.ok(Number(ctxRow.dataset.nodeContextPct) >= 20, `Context bar percentage updates live (got ${ctxRow.dataset.nodeContextPct}%)`);
+			assert.strictEqual(Number(ctxRow.dataset.nodeContextMax), 400_000, 'gpt-5.3-codex uses real 400k context window');
+			assert.strictEqual(Number(ctxRow.dataset.nodeContextPct), 12, `Context bar percentage updates live for 48k/400k (got ${ctxRow.dataset.nodeContextPct}%)`);
 			assert.strictEqual(n2AfterUsage.querySelector('.ade-mission-core-model-row')?.getAttribute('data-node-model'), 'gpt-5.3-codex');
 			assert.strictEqual(n2AfterUsage.querySelector('.ade-mission-core-icon-well')?.getAttribute('data-llm-provider'), 'openai', 'GPT model switches big core icon to OpenAI GPT brand icon');
 			assert.strictEqual(n2AfterUsage.querySelector('.ade-mission-core-context')?.textContent, '分布式状态机与云端存储接口已就绪');
@@ -5617,7 +5627,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			let storageWriteCount = 0;
 			const origStore = storageService.store.bind(storageService);
 			storageService.store = ((key: string, value: unknown, scope: StorageScope, target: StorageTarget) => {
-				if (key === 'aexus.ade.missions.v1') {
+				if (key === `${ADE_MISSION_RECORD_STORAGE_PREFIX}${created.id}`) {
 					storageWriteCount++;
 				}
 				return origStore(key, value as string, scope, target);
@@ -5852,7 +5862,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(gateMissionRuntime.getRuntimeState(gateMission.id).tokens[w2GateTokenId]?.status, 'completed', 'Approving selected Wave 2 resolves Wave 2 token specifically');
 		});
 
-		test('exposes first-class canvas Governance pill, always-visible Supervisor pills & jurisdiction spotlight, Source Triggers studio, non-disruptive Node Command Drawer, and position-preserving Fit-to-View', async () => {
+		test('keeps only top-left File Drawer & Start pills on top bar, exposes Factory Wall cutoff in drawer, always-visible Supervisor pills & spotlight, Source Triggers studio from entry port, docked Node Inspector, and position-preserving Fit-to-View', async () => {
 			const { h, missionStore, missionRuntime } = createMissionHarness();
 			const openedAgents: Array<{ readonly id: string; readonly side?: boolean }> = [];
 			h.instantiation.stub(IAdeEditorService, upcastPartial<IAdeEditorService>({
@@ -5876,19 +5886,19 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
 			await pane.setInput(input, undefined, {}, CancellationToken.None);
 
-			// 1. Off-graph Factory Wall Governance pill is directly on the canvas bar while File Drawer stays closed
+			// 1. Minimalist top bar exposes ONLY File Drawer toggle + Run Control pill; Cutoff lives inside File Drawer
+			const topBar = host.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
+			assert.strictEqual(topBar.children.length, 2, 'Top bar contains ONLY File Drawer toggle and Run Control pill');
+			assert.ok(topBar.querySelector('[data-ade-mission-file-btn="true"]'));
+			assert.ok(topBar.querySelector('[data-ade-mission-run-bar="true"]'));
 			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')?.hidden, true);
-			const govBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-governance-btn="true"]')!;
-			assert.ok(govBtn && !govBtn.hidden, 'Governance Factory Wall pill is visible directly on canvas toolbar');
-			govBtn.click();
-			const govCutoff = host.querySelector<HTMLSelectElement>('select[data-ade-gov-cutoff-select="true"]')!;
-			assert.ok(govCutoff, 'Governance popover exposes Off-graph Factory Wall cutoff directly');
-			govCutoff.value = '1';
-			govCutoff.dispatchEvent(new (govCutoff.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
+			host.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!.click();
+			const drawerCutoff = host.querySelector<HTMLSelectElement>('[data-ade-mission-cutoff-select="true"]')!;
+			drawerCutoff.value = '1';
+			drawerCutoff.dispatchEvent(new (drawerCutoff.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
 			await new Promise(resolve => setTimeout(resolve, 25));
 			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).boundary.offGraphMaxTier, 1);
-			assert.ok(host.querySelector('[data-ade-mission-governance-label="true"]')?.textContent?.includes('L0..L1'), 'Top bar updates live to Wall: L0..L1');
-			assert.strictEqual(host.querySelector<HTMLSelectElement>('[data-ade-mission-cutoff-select="true"]')?.value, '1', 'Drawer cutoff stays bidirectionally synchronized');
+			host.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!.click();
 
 			// 2. Always-visible Supervisor pill & jurisdiction legend + spotlight (no opacity:0 hunting!)
 			const n1SupBtn = host.querySelector<HTMLButtonElement>('button[data-node-sup-btn="N1"]')!;
@@ -5913,10 +5923,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			secLegendChip.click();
 			assert.strictEqual(host.querySelector('.ade-mission-world.has-supervisor-highlight'), null, 'Clicking again unpins spotlight');
 
-			// 3. Zero-Token Source Triggers Studio & On-Canvas Entry Node Badge
-			const trigBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-triggers-btn="true"]')!;
-			assert.ok(trigBtn && !trigBtn.hidden, 'Source Triggers pill is directly accessible on canvas toolbar');
-			trigBtn.click();
+			// 3. Zero-Token Source Triggers Studio opened directly from entry node Pacemaker port
+			const n1PacemakerBtn = host.querySelector<HTMLButtonElement>('button[data-ade-pacemaker-port="N1"]')!;
+			assert.ok(n1PacemakerBtn, 'Entry node exposes Pacemaker port to open Source Triggers studio');
+			n1PacemakerBtn.click();
 			const nodeSel = host.querySelector<HTMLSelectElement>('select[data-ade-trigger-node-select="true"]')!;
 			assert.strictEqual(nodeSel.options.length, 1, 'Only inDegree===0 && outDegree>=1 entry node N1 is eligible for source triggers');
 			assert.strictEqual(nodeSel.options[0].value, 'N1');
@@ -5936,7 +5946,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			await new Promise(resolve => setTimeout(resolve, 25));
 
 			assert.strictEqual(missionRuntime.listTriggers(mission.id).length, 2, 'Both interval and gpu_idle triggers persisted');
-			assert.strictEqual(host.querySelector('[data-ade-mission-triggers-count="true"]')?.textContent, '2');
 			const n1TrigBadge = host.querySelector<HTMLButtonElement>('button[data-ade-node-trigger-badge="N1"]')!;
 			assert.strictEqual(n1TrigBadge.hidden, false, 'Entry node N1 displays on-canvas Source Trigger badge');
 			assert.strictEqual(n1TrigBadge.getAttribute('data-trigger-count'), '2');
@@ -6157,15 +6166,13 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(n2CostEl.hidden, false);
 			assert.strictEqual(n2CostEl.textContent, '$1.25');
 
-			const finOpsPill = host.querySelector<HTMLButtonElement>('[data-ade-mission-finops-btn="true"]')!;
-			assert.strictEqual(finOpsPill.hidden, false, 'FinOps Guardrail Pill is visible in top bar');
-			assert.ok(finOpsPill.querySelector('[data-ade-finops-spend="true"]')?.textContent?.includes('$1.25'));
-			assert.ok(finOpsPill.querySelector('[data-ade-finops-cache="true"]')?.textContent?.includes('80%'));
-
-			// Clicking top-bar FinOps pill opens 4-in-1 Inspector directly on FinOps Ledger tab
-			finOpsPill.click();
+			// Open 4-in-1 Inspector by clicking N2 and switching to FinOps Ledger tab
+			const win = n2ElAfter.ownerDocument.defaultView!;
+			n2ElAfter.dispatchEvent(new win.PointerEvent('pointerdown', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
+			n2ElAfter.dispatchEvent(new win.PointerEvent('pointerup', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
 			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
 			assert.strictEqual(inspector.hidden, false);
+			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="finops"]')!.click();
 			assert.strictEqual(inspector.dataset.activeTab, 'finops');
 			assert.ok(inspector.querySelector('[data-ade-finops-by-tier="true"]')?.textContent?.includes('L2'));
 			assert.ok(inspector.querySelector('[data-ade-finops-by-host="true"]')?.textContent?.includes('@ubuntu-h100'));
@@ -6177,7 +6184,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			await new Promise(resolve => setTimeout(resolve, 25));
 			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).status, 'paused', 'Budget ceiling auto-pauses Mission');
 			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).budgetCircuitTripped, true);
-			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-finops-breaker="true"]')?.hidden, false, 'Top-bar BREAKER badge appears');
 			assert.ok(inspector.querySelector('[data-ade-finops-tripped-banner="true"]'), 'Inspector shows tripped breaker alert');
 
 			// Clicking "Raise & Resume" atomically increases limit and resumes Mission!
@@ -6187,9 +6193,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).budgetCircuitTripped, false);
 
 			// 3. 4-in-1 Inspector tabs (Token + lazy trace_ptr, Distill one-click context refresh) + dblclick opens full chat tab
-			const win = n2ElAfter.ownerDocument.defaultView!;
-			n2ElAfter.dispatchEvent(new win.PointerEvent('pointerdown', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
-			n2ElAfter.dispatchEvent(new win.PointerEvent('pointerup', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
 			assert.strictEqual(openedAgents.length, 0, 'Single-click stays on canvas');
 
 			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="token"]')!.click();
@@ -6472,43 +6475,44 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			const storageService = h.instantiation.get(IStorageService);
 			// Mark m2 dirty via deferred persist (does not flush immediately to storageService yet)
 			missionStore.updateRuntime(m2.id, compactedRt, { deferPersist: true });
-			// Simulate another window updating m1 in storageService BEFORE m2's deferred timer flushes!
-			const currentRaw = JSON.parse(storageService.get('aexus.ade.missions.v1', StorageScope.APPLICATION) ?? '[]') as Array<{ id: string; title: string; updatedAt: number }>;
-			const externalPayload = currentRaw.map(r => r.id === m1.id ? { ...r, title: 'Updated By Window 2', updatedAt: Date.now() + 5000 } : r);
-			storageService.store('aexus.ade.missions.v1', JSON.stringify(externalPayload), StorageScope.APPLICATION, StorageTarget.USER);
+			// Simulate another window updating ONLY m1 in per-Mission v2 storage + hot index BEFORE m2's deferred timer flushes!
+			const m1Key = `${ADE_MISSION_RECORD_STORAGE_PREFIX}${m1.id}`;
+			const m1Prev = JSON.parse(storageService.get(m1Key, StorageScope.APPLICATION) ?? '{}') as { id: string; title: string; updatedAt: number };
+			const nextM1UpdatedAt = Date.now() + 5000;
+			storageService.store(m1Key, JSON.stringify({ ...m1Prev, title: 'Updated By Window 2', updatedAt: nextM1UpdatedAt }), StorageScope.APPLICATION, StorageTarget.USER);
+			const idxPrev = JSON.parse(storageService.get(ADE_MISSIONS_INDEX_STORAGE_KEY, StorageScope.APPLICATION) ?? '{"version":2,"entries":[]}') as {
+				version: 2;
+				entries: Array<{ id: string; title: string; updatedAt: number }>;
+			};
+			storageService.store(ADE_MISSIONS_INDEX_STORAGE_KEY, JSON.stringify({
+				version: 2,
+				writerId: 'external-win-2',
+				coldBackend: 'storage',
+				updatedIds: [m1.id],
+				entries: idxPrev.entries.map(e => e.id === m1.id ? { ...e, title: 'Updated By Window 2', updatedAt: nextM1UpdatedAt } : e),
+			}), StorageScope.APPLICATION, StorageTarget.USER);
 
 			// External update to m1 is loaded, AND m2's locally buffered dirty runtime MUST survive!
 			assert.strictEqual(missionStore.getMission(m1.id)?.title, 'Updated By Window 2', 'External update to untouched Mission m1 is applied');
 			assert.ok(missionStore.getMission(m2.id)?.runtime?.tokens[tokId], 'Locally dirty buffered update to m2 must NOT be clobbered by external write');
 
-			// Flush deferred persist and confirm huge lastSummary is capped in persisted storage JSON
+			// Flush deferred persist and confirm huge lastSummary is capped in m2's isolated cold storage payload
 			await new Promise(resolve => setTimeout(resolve, 320));
-			const persistedRaw = JSON.parse(storageService.get('aexus.ade.missions.v1', StorageScope.APPLICATION) ?? '[]') as Array<{
-				id: string;
+			const savedM2 = JSON.parse(storageService.get(`${ADE_MISSION_RECORD_STORAGE_PREFIX}${m2.id}`, StorageScope.APPLICATION) ?? '{}') as {
+				id?: string;
 				runtime?: { tokens?: Record<string, { lastSummary?: string }> };
-			}>;
-			const savedM2 = persistedRaw.find(r => r.id === m2.id);
-			assert.ok(savedM2?.runtime?.tokens?.[tokId]?.lastSummary, 'm2 flushed to storage');
-			assert.ok((savedM2!.runtime!.tokens![tokId].lastSummary!.length) <= 2005, 'Oversized lastSummary is capped during compaction');
+			};
+			assert.ok(savedM2.runtime?.tokens?.[tokId]?.lastSummary, 'm2 flushed to isolated cold storage');
+			assert.ok((savedM2.runtime!.tokens![tokId].lastSummary!.length) <= 2005, 'Oversized lastSummary is capped during compaction');
 		});
 
-		test('Visual DAG authoring & templates, supervisor parent hierarchy & guided retry, Reviewer & checks CRUD + Triggers standby, failed/blocked wave card telemetry, and Inbox Open Node deep-jump focus', async () => {
+		test('Visual DAG authoring, supervisor parent hierarchy & guided retry, Reviewer & checks CRUD + Triggers standby, failed/blocked wave card telemetry, and Inbox Open Node deep-jump focus', async () => {
 			const projUri = URI.file('/tmp/mission-ux-all4');
 			const h = createHarness([projUri]);
 			h.modes.setMode('ade');
 			const dispatchedTurns: Array<{ readonly args: readonly unknown[] }> = [];
 			const openedAgentCalls: Array<{ readonly agentId: string; readonly side?: boolean }> = [];
 			const openedMissionCalls: Array<{ readonly id: string; readonly options?: unknown }> = [];
-			const confirmCalls: Array<{ readonly message: string; readonly detail?: string }> = [];
-			let nextConfirmResult = false;
-
-			h.instantiation.stub(IDialogService, upcastPartial<IDialogService>({
-				confirm: async confirmation => {
-					const detailText = typeof confirmation.detail === 'string' ? confirmation.detail : confirmation.detail?.value;
-					confirmCalls.push({ message: confirmation.message, detail: detailText });
-					return { confirmed: nextConfirmResult };
-				},
-			}));
 
 			h.instantiation.stub(IAdeEngineeringBackendService, upcastPartial<IAdeEngineeringBackendService>({
 				loadInbox: async () => [],
@@ -6557,7 +6561,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				{ role: 'governor' },
 			);
 
-			// Start with a BLANK Mission (empty Mermaid) to test onboarding & visual authoring
+			// Start with a BLANK Mission (empty Mermaid) to test clean empty onboarding & visual authoring
 			const mission = missionStore.createMission({
 				id: 'm-ux-all4',
 				title: 'UX Complete Mission',
@@ -6581,58 +6585,39 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
 			await pane.setInput(input, undefined, {}, CancellationToken.None);
 
-			// ── (1) Empty-canvas 1-click template onboarding & visual authoring ──
+			// ── (1) Clean empty-canvas onboarding (zero templates/sandbox/doctor/prompt-to-dag clutter) + self-healing boundary ──
 			const onboarding = host.querySelector<HTMLElement>('[data-ade-mission-empty-onboarding]');
-			assert.ok(onboarding && !onboarding.hidden, 'Empty canvas shows interactive template onboarding gallery');
-			assert.ok(host.querySelectorAll('[data-ade-template-card]').length >= 4, 'Shows >= 4 classic multi-machine engineering/research templates');
+			assert.ok(onboarding && !onboarding.hidden, 'Empty canvas shows minimalist authoring onboarding');
+			assert.strictEqual(host.querySelector('[data-ade-template-card]'), null, 'Removed templates gallery is absent');
+			assert.strictEqual(host.querySelector('[data-ade-empty-sandbox-demo]'), null, 'Removed sandbox CTA is absent');
+			assert.strictEqual(host.querySelector('[data-ade-empty-doctor]'), null, 'Removed doctor CTA is absent');
+			assert.strictEqual(host.querySelector('[data-ade-empty-prompt-input]'), null, 'Removed prompt-to-DAG form is absent');
 
-			// Apply "Multi-GPU Research" template in 1 click on EMPTY canvas (no replacement confirmation needed)
-			host.querySelector<HTMLButtonElement>('[data-ade-template-card="multi-gpu-research"]')!.click();
+			const researchMermaid = [
+				'flowchart LR',
+				'  R1["@PI: 文献调研与实验方案"] -->|spec| R2["@TrainA: 主实验 GPU 训练"]',
+				'  R1 -->|spec| R3["@TrainB: 消融对比基线"]',
+				'  R1 -->|spec| R4["@Bench: 基准评测与指标审稿"]',
+				'  R2 -->|fail| F1["@Ops: 显存诊断与降参恢复"]',
+				'  R2 --> U1{{"方法学人工审核 Gate"}}',
+				'  R3 --> U1',
+				'  R4 --> U1',
+				'  F1 --> U1',
+				'  U1 --> R5["@PI: 论文结论与实验报告"]',
+				'  %% check R4 [name=metrics-json, expect_file=research/benchmarks/metrics.json, on_fail=bounce, max_retries=2]',
+			].join('\n');
+			missionStore.updateMermaid(mission.id, researchMermaid);
+			missionStore.updateNodePrompts(mission.id, { R1: 'Write detailed research spec in research/spec.md' });
+			await missionRuntime.bindNodeHost(mission.id, 'R4', { roleKind: 'reviewer' });
 			await timeout(20);
-			assert.strictEqual(confirmCalls.length, 0, 'Applying template on an empty canvas must NOT show replacement confirm dialog');
-			assert.strictEqual(onboarding.hidden, true, 'Onboarding gallery hides after applying template');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Template renders R1');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R4"]'), 'Template renders R4');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="U1"]'), 'Template renders Gate U1');
-			assert.ok((missionStore.getMission(mission.id)?.nodePrompts?.R1 ?? '').length > 10, 'Template populates pre-prompts');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R4"]')?.getAttribute('data-node-role-kind'), 'reviewer', 'Template marks R4 as Reviewer');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R4"] .ade-mission-checks-pill')?.getAttribute('data-node-checks-count'), '1', 'Template check directive shows ✓ 1 badge on R4');
+			assert.strictEqual(onboarding.hidden, true, 'Onboarding hides after graph is populated');
+			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Renders R1');
+			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R4"]'), 'Renders R4');
+			assert.ok(host.querySelector('.ade-mission-node[data-node-id="U1"]'), 'Renders Gate U1');
+			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R4"]')?.getAttribute('data-node-role-kind'), 'reviewer', 'R4 marked as Reviewer');
+			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R4"] .ade-mission-checks-pill')?.getAttribute('data-node-checks-count'), '1', 'Check directive shows ✓ 1 badge on R4');
 
-			// Attach a custom check on R1 and toggle R1 to reviewer before replacing, to verify clean replacement hygiene
-			missionStore.upsertNodeCheck(mission.id, 'R1', { id: 'stale-chk', name: 'stale', command: 'echo old', onFail: 'bounce', maxAutoRetries: 1, enabled: true, source: 'config' });
-			await missionRuntime.bindNodeHost(mission.id, 'R1', { roleKind: 'reviewer' });
-
-			// Replacing a NON-EMPTY canvas with another template MUST prompt confirmation!
-			nextConfirmResult = false;
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-templates-btn="true"]')!.click();
-			host.querySelector<HTMLButtonElement>('[data-ade-popover-template="fullstack-ship"]')!.click();
-			await timeout(20);
-			assert.strictEqual(confirmCalls.length, 1, 'Replacing non-empty canvas with a template triggers confirmation dialog');
-			assert.ok(confirmCalls[0].message.includes('跨端全栈并行工程发布'), 'Confirm dialog names target template');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Cancelling confirm dialog keeps existing R1 graph untouched');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N2"]'), null, 'Cancelling confirm dialog does NOT apply new template');
-
-			// Confirming replacement swaps graph cleanly, clears obsolete old prompts/checks/assignments, and marks N4 as Reviewer!
-			nextConfirmResult = true;
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-templates-btn="true"]')!.click();
-			host.querySelector<HTMLButtonElement>('[data-ade-popover-template="fullstack-ship"]')!.click();
-			await timeout(30);
-			assert.strictEqual(confirmCalls.length, 2, 'Second replacement attempt prompts confirmation');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="N2"]'), 'Confirmed template replacement renders new Full-Stack nodes');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R1"]'), null, 'Old nodes removed after confirmed replacement');
-			assert.strictEqual(missionStore.getMission(mission.id)?.nodePrompts?.R1, undefined, 'Obsolete prompts from replaced graph are cleared');
-			assert.strictEqual(missionStore.getMission(mission.id)?.nodeChecks?.R1, undefined, 'Obsolete deterministic checks from replaced graph are cleared');
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).boundary.nodeAssignments.R1, undefined, 'Obsolete nodeAssignments from replaced graph are pruned');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N4"]')?.getAttribute('data-node-role-kind'), 'reviewer', 'New template marks N4 as Reviewer');
-
-			// Switch back to multi-gpu-research (confirmed), then verify ensureSynchronizedState self-heals stale supervisor managedNodeIds when Mermaid nodes are deleted/replaced
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-templates-btn="true"]')!.click();
-			host.querySelector<HTMLButtonElement>('[data-ade-popover-template="multi-gpu-research"]')!.click();
-			await timeout(30);
-			assert.strictEqual(confirmCalls.length, 3);
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Restored research template after confirmation');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R1"]')?.getAttribute('data-node-role-kind'), 'worker', 'Reused node ID R1 does NOT inherit stale reviewer role from before replacement');
-
+			// Verify ensureSynchronizedState self-heals stale supervisor managedNodeIds when Mermaid nodes are deleted/replaced
 			const bindAll7 = await missionRuntime.setBoundary(mission.id, {
 				offGraphMaxTier: 1,
 				supervisors: [{ id: supLead.id, tier: 1, managedNodeIds: ['R1', 'R2', 'R3', 'R4', 'F1', 'U1', 'R5'] }],
@@ -6647,12 +6632,11 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			});
 			assert.strictEqual(explicitBadRes.ok, false, 'Explicit setBoundary with unknown DAG node still rejects cleanly');
 
-			// Restore research template (confirmed) so downstream assertions continue exercising R1..R5/F1/U1
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-templates-btn="true"]')!.click();
-			host.querySelector<HTMLButtonElement>('[data-ade-popover-template="multi-gpu-research"]')!.click();
-			await timeout(30);
-			assert.strictEqual(confirmCalls.length, 4);
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Restored research template cleanly after self-heal test');
+			// Restore research DAG so downstream assertions continue exercising R1..R5/F1/U1
+			missionStore.updateMermaid(mission.id, researchMermaid);
+			await missionRuntime.bindNodeHost(mission.id, 'R4', { roleKind: 'reviewer' });
+			await timeout(20);
+			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Restored research DAG cleanly after self-heal test');
 
 			// Canvas right-click -> Add Task Node here
 			const viewport = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
@@ -6689,23 +6673,18 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			// ── (2) Off-graph parentSupervisorId hierarchy UI + Hold-Tab X-Ray golden beam ──
 			const setSupRes = await missionRuntime.setBoundary(mission.id, {
 				offGraphMaxTier: 1,
-				supervisors: [{ id: supLead.id, tier: 1, managedNodeIds: ['R2'] }],
+				supervisors: [
+					{ id: supLead.id, tier: 1, managedNodeIds: ['R2'], parentSupervisorId: ADE_SECRETARY_ID },
+					{ id: ADE_SECRETARY_ID, tier: 0, managedNodeIds: [] },
+				],
 			});
 			assert.strictEqual(setSupRes.ok, true, `setBoundary failed: ${setSupRes.error}`);
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-governance-btn="true"]')!.click();
-			const govParentSelect = host.querySelector<HTMLSelectElement>(`[data-ade-gov-sup-parent="${supLead.id}"]`);
-			assert.ok(govParentSelect, 'Governance popover exposes parentSupervisorId selector for L1 supervisor');
-			govParentSelect!.value = ADE_SECRETARY_ID;
-			govParentSelect!.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
 			await timeout(20);
 
 			const updatedBoundary = missionRuntime.getBoundary(mission.id);
 			assert.strictEqual(updatedBoundary.validation.valid, true, 'Boundary remains valid after setting parentSupervisorId');
 			assert.strictEqual(updatedBoundary.boundary.supervisors.find(s => s.id === supLead.id)?.parentSupervisorId, ADE_SECRETARY_ID);
-			assert.ok(updatedBoundary.boundary.supervisors.some(s => s.id === ADE_SECRETARY_ID), 'Parent supervisor auto-inserted into boundary.supervisors');
 
-			// Close popover so Legend & Hold-Tab X-Ray can activate
-			mainWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 			const supLegendChip = host.querySelector<HTMLElement>(`[data-ade-sup-legend-id="${supLead.id}"]`);
 			assert.ok(supLegendChip, 'Supervisor legend displays bound supervisor');
 			assert.strictEqual(supLegendChip!.getAttribute('data-ade-sup-parent-id'), ADE_SECRETARY_ID, 'Supervisor legend surfaces parentSupervisorId');
@@ -6741,14 +6720,13 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			delChkBtn.click();
 			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R1"] .ade-mission-checks-pill')?.getAttribute('data-node-checks-count'), '0', 'Deleting check hook clears R1 check badge');
 
-			// Source Triggers Studio: add interval trigger (with Fire immediately on Start) & verify Standby -> Paused -> Armed states
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-triggers-btn="true"]')!.click();
+			// Source Triggers Studio opened from entry node R1 pacemaker port: verify Standby -> Paused -> Armed states
+			host.querySelector<HTMLButtonElement>('[data-ade-pacemaker-port="R1"]')!.click();
 			host.querySelector<HTMLInputElement>('[data-ade-trigger-autostart="true"]')!.checked = true;
 			const trigSubmit = host.querySelector<HTMLButtonElement>('[data-ade-trigger-submit="true"]')!;
 			trigSubmit.click();
 			await timeout(20);
 			assert.strictEqual(host.querySelector('[data-ade-trigger-status]')?.getAttribute('data-trigger-state'), 'standby', 'Trigger shows standby status while Mission is idle');
-			assert.strictEqual(host.querySelector('[data-ade-mission-triggers-btn]')?.getAttribute('data-triggers-state'), 'standby', 'Top-bar Triggers pill reflects standby state');
 			host.querySelector<HTMLButtonElement>('[data-ade-trigger-toggle]')!.click();
 			await timeout(20);
 			assert.strictEqual(host.querySelector('[data-ade-trigger-status]')?.getAttribute('data-trigger-state'), 'paused', 'Pausing trigger updates status chip to paused');
@@ -6759,7 +6737,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			// ── (4) Failed & Blocked Wave Card Telemetry + Guided Retry + Active Recall + Inbox Deep-Jump Focus ──
 			const startRes = await missionRuntime.start(mission.id);
 			assert.strictEqual(startRes.ok, true);
-			assert.strictEqual(host.querySelector('[data-ade-mission-triggers-btn]')?.getAttribute('data-triggers-state'), 'armed', 'Top-bar Triggers pill switches to armed when Mission runs');
+			assert.strictEqual(host.querySelector('[data-ade-pacemaker-port="R1"]')?.getAttribute('data-pacemaker-armed'), 'true', 'Entry node pacemaker switches to armed when Mission runs');
 
 			// Complete R1 to spawn parallel active tokens on R2, R3, R4
 			const r1Tok = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'R1' && t.status === 'active')!;
@@ -6864,5 +6842,1793 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.ok(host.querySelector('[data-ade-inspector-tab="token"].active'), 'Deep-jump opens Mission Inspector directly on Token tab');
 			assert.ok(openedAgentCalls.some(c => c.side === true), 'Deep-jump also opens bound employee chat beside the canvas');
 		});
-	});
-});
+
+		test('allows dragging a Mission node card from ANY surface (buttons, pills, prompt bar, LLM tile, model row, engine/host pills) without misfiring popovers while keeping clean clicks intact', async () => {
+			const h = createHarness([alpha]);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			const created = missionStore.createMission({
+				title: 'Universal Node Drag',
+				mermaidText: 'flowchart LR\n  N1["@Arch: Design"] --> N2["@Dev: Build"]',
+			});
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-mission-universal-drag-test-host'));
+			host.style.width = '1200px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1200, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			const n1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
+			const popoverEl = host.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
+			const inspectorEl = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
+
+			// Every inner interactive control on the node card must support drag-to-move (>= 5px)
+			// AND suppress the trailing click so no popover opens on mouseup.
+			const dragSurfaces: Array<{ readonly label: string; readonly selector: string }> = [
+				{ label: 'Supervisor pill', selector: '[data-node-sup-btn="N1"]' },
+				{ label: 'Employee pill', selector: '[data-node-emp-btn="N1"]' },
+				{ label: 'LLM core icon tile', selector: '.ade-mission-core-icon-well' },
+				{ label: 'Model & thinking row', selector: '.ade-mission-core-model-row' },
+				{ label: 'Pre-prompt bar', selector: '[data-ade-node-prompt-btn="N1"]' },
+				{ label: 'Agent Engine pill', selector: '.ade-mission-engine-pill' },
+				{ label: 'Host & OS pill', selector: '.ade-mission-host-pill' },
+				{ label: 'Source Pacemaker port', selector: '[data-ade-pacemaker-port="N1"]' },
+			];
+
+			for (let idx = 0; idx < dragSurfaces.length; idx++) {
+				const { label, selector } = dragSurfaces[idx];
+				const surface = n1El.querySelector<HTMLElement>(selector)!;
+				assert.ok(surface, `${label} exists on N1 card`);
+				const beforeLeft = Number.parseFloat(n1El.style.left);
+				const beforeTop = Number.parseFloat(n1El.style.top);
+				const startX = 120 + idx * 10;
+				const startY = 120 + idx * 10;
+
+				surface.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: idx + 1, clientX: startX, clientY: startY, bubbles: true }));
+				assert.strictEqual(n1El.classList.contains('dragging'), false, `${label}: pointerdown alone does not enter dragging state before threshold`);
+				mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: idx + 1, clientX: startX + 36, clientY: startY + 24, bubbles: true }));
+				assert.strictEqual(n1El.classList.contains('dragging'), true, `${label}: moving past 5px threshold activates node drag`);
+				mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: idx + 1, clientX: startX + 36, clientY: startY + 24, bubbles: true }));
+
+				// Simulate browser's trailing click dispatched synchronously on the button after pointerup
+				surface.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+				const afterLeft = Number.parseFloat(n1El.style.left);
+				const afterTop = Number.parseFloat(n1El.style.top);
+				assert.ok(afterLeft > beforeLeft && afterTop > beforeTop, `${label}: dragging moved N1 from (${beforeLeft},${beforeTop}) to (${afterLeft},${afterTop})`);
+				assert.strictEqual(n1El.classList.contains('dragging'), false, `${label}: pointerup clears dragging class`);
+				assert.strictEqual(popoverEl.hidden, true, `${label}: trailing click after drag must NOT open popover`);
+				assert.strictEqual(inspectorEl.hidden, true, `${label}: drag must NOT open Node Inspector`);
+			}
+
+			// Wait one macrotask so the 0ms post-drag click suppression resets, then verify clean clicks still work!
+			await timeout(5);
+			const promptBtn = n1El.querySelector<HTMLButtonElement>('[data-ade-node-prompt-btn="N1"]')!;
+			promptBtn.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 99, clientX: 200, clientY: 200, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 99, clientX: 201, clientY: 201, bubbles: true }));
+			promptBtn.click();
+			assert.strictEqual(popoverEl.hidden, false, 'Clean click (< 5px) on Pre-prompt bar still opens popover');
+			assert.strictEqual(inspectorEl.hidden, true, 'Clean click on inner button must NOT also open Node Inspector');
+
+			// Clean click (< 5px) on non-interactive node title selects the node & opens Node Inspector
+			const titleEl = n1El.querySelector<HTMLElement>('.ade-mission-node-title')!;
+			titleEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 100, clientX: 210, clientY: 210, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 100, clientX: 211, clientY: 211, bubbles: true }));
+			assert.strictEqual(inspectorEl.hidden, false, 'Clean click on node title selects node and opens Mission Inspector');
+
+			// Disabled inner buttons (e.g. locked engine pill while running) expose pointer-events: none so drags fall through
+			const enginePill = n1El.querySelector<HTMLButtonElement>('.ade-mission-engine-pill')!;
+			enginePill.disabled = true;
+			assert.strictEqual(mainWindow.getComputedStyle(enginePill).pointerEvents, 'none', 'Disabled buttons inside node cards pass pointer events through for dragging');
+
+			// Out-port drag still connects edges instead of moving the node
+			const n2El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
+			const n2BeforeLeft = Number.parseFloat(n2El.style.left);
+			const n2OutPort = n2El.querySelector<HTMLButtonElement>('[data-ade-connect-port="N2"]')!;
+			n2OutPort.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 101, clientX: 400, clientY: 200, bubbles: true, cancelable: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 101, clientX: 460, clientY: 230, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 101, clientX: 460, clientY: 230, bubbles: true }));
+			assert.strictEqual(Number.parseFloat(n2El.style.left), n2BeforeLeft, 'Dragging from connectable out-port does not drag the node card');
+
+			// Deleting a node clears its prompt & checks so a newly added node reusing the same ID starts clean
+			missionStore.updateNodePrompt(created.id, 'R1', 'Stale prompt from deleted template node');
+			missionStore.updateNodeChecks(created.id, 'R1', [{ id: 'stale-chk', name: 'stale', command: 'echo 1', onFail: 'bounce', maxAutoRetries: 1 }]);
+			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
+			const vpRect = viewportEl.getBoundingClientRect();
+			viewportEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: vpRect.left + 80, clientY: vpRect.top + 80 }));
+			const addReviewerItem = host.querySelector<HTMLButtonElement>('[data-ade-ctx-action="add-reviewer"]')!;
+			addReviewerItem.click();
+			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.R1, undefined, 'Newly added Reviewer node R1 does not ghost-inherit stale prompt');
+			assert.strictEqual(missionStore.getMission(created.id)?.nodeChecks?.R1, undefined, 'Newly added Reviewer node R1 does not ghost-inherit stale checks');
+
+			// Write a prompt on R1, delete R1 via context menu, and verify prompt is removed immediately
+			missionStore.updateNodePrompt(created.id, 'R1', '核对接口返回格式并补充测试');
+			missionStore.updateNodeChecks(created.id, 'R1', [
+				{ id: 'c1', name: 'unit', command: 'pnpm test', onFail: 'bounce', maxAutoRetries: 1 },
+				{ id: 'c2', name: 'lint', command: 'pnpm lint', onFail: 'bounce', maxAutoRetries: 1 },
+			]);
+			const longSup = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/long-sup') }, 'Aexus Governor Role Initialization', { role: 'governor' });
+			await missionRuntime.setBoundary(created.id, {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: longSup.id, tier: 1, managedNodeIds: ['R1'] }],
+			});
+			await missionRuntime.bindNodeHost(created.id, 'R1', { roleKind: 'reviewer', hostAlias: 'ubuntu-gpu-a100-cluster-01' });
+			const r1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="R1"]')!;
+			const r1Card = r1El.querySelector<HTMLElement>('.ade-mission-node-card')!;
+			const cardRect = r1Card.getBoundingClientRect();
+			assert.ok(cardRect.width > 200, 'R1 node card has concrete rendered geometry');
+			const boundedSelectors = [
+				'.ade-mission-node-top',
+				'.ade-mission-node-id-wrap',
+				'.ade-mission-top-pills',
+				'[data-node-sup-btn="R1"]',
+				'[data-node-emp-btn="R1"]',
+				'.ade-mission-core-well',
+				'.ade-mission-core-title-row',
+				'.ade-mission-node-title',
+				'[data-node-role-badge="R1"]',
+				'.ade-mission-checks-pill',
+				'[data-ade-node-prompt-btn="R1"]',
+				'.ade-mission-ctx-row',
+				'.ade-mission-node-footer',
+				'.ade-mission-engine-pill',
+				'.ade-mission-host-pill',
+			];
+			for (const sel of boundedSelectors) {
+				const el = r1Card.querySelector<HTMLElement>(sel);
+				assert.ok(el && !el.hidden, `Expected visible element ${sel} inside R1 card`);
+				const rect = el.getBoundingClientRect();
+				assert.ok(
+					rect.left >= cardRect.left - 0.5 && rect.right <= cardRect.right + 0.5 && rect.top >= cardRect.top - 0.5 && rect.bottom <= cardRect.bottom + 0.5,
+					`${sel} must stay strictly inside .ade-mission-node-card bounds (el=[${rect.left.toFixed(1)},${rect.top.toFixed(1)},${rect.right.toFixed(1)},${rect.bottom.toFixed(1)}], card=[${cardRect.left.toFixed(1)},${cardRect.top.toFixed(1)},${cardRect.right.toFixed(1)},${cardRect.bottom.toFixed(1)}])`,
+				);
+			}
+
+			const r1PromptBtn = host.querySelector<HTMLButtonElement>('[data-ade-node-prompt-btn="R1"]')!;
+			r1PromptBtn.click();
+			const hintText = host.querySelector<HTMLElement>('.ade-mission-prompt-hint-text')?.textContent ?? '';
+			assert.ok(!hintText.includes('令牌') && !hintText.includes('唤醒'), `Prompt popover hint should use plain human copy, got: ${hintText}`);
+			r1El.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 180, clientY: 180 }));
+			host.querySelector<HTMLButtonElement>('[data-ade-ctx-action="delete-node"]')!.click();
+			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.R1, undefined, 'Deleting node R1 clears its stored prompt');
+		});
+
+		test('Mission Inspector patches 1Hz streaming telemetry in place without destroying forms, dropping focus, wiping drafts, interrupting FinOps slider drag, or resetting scroll', async () => {
+			const h = createHarness([alpha]);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			const created = missionStore.createMission({
+				title: 'Inspector Zero-Teardown Telemetry',
+				mermaidText: 'flowchart LR\n  N1["@Arch: Plan"] --> N2["@Dev: Implement"]',
+			});
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-mission-inspector-live-test-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			// Start mission and fail N1 so Token tab shows the Guided Retry input while N2/runtime stream telemetry
+			await missionRuntime.start(created.id);
+			const n1Tok = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
+			await missionRuntime.failToken(created.id, { tokenId: n1Tok.id, reason: 'Compile error on step 1' });
+
+			// Select N1 to open 4-in-1 Inspector
+			const n1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
+			n1El.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, clientX: 40, clientY: 40, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, clientX: 40, clientY: 40, bubbles: true }));
+
+			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
+			const bodyScroll = inspector.querySelector<HTMLElement>('.ade-mission-ni-body')!;
+			assert.strictEqual(inspector.hidden, false, 'Inspector opens on N1');
+
+			// 1. Overview tab: telemetry line patches in place without rebuilding DOM
+			const overviewSupBtnBefore = inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-sup-btn="N1"]')!;
+			missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
+				inputTokens: 12000,
+				outputTokens: 3000,
+				totalTokens: 15000,
+				costUsd: 0.45,
+			});
+			assert.strictEqual(inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-sup-btn="N1"]'), overviewSupBtnBefore, 'Overview tab DOM is preserved across telemetry tick');
+			assert.strictEqual(inspector.querySelector<HTMLElement>('.ade-mission-ni-body'), bodyScroll, 'Persistent scroll container is never recreated');
+			assert.ok(inspector.querySelector('.ade-mission-ni-telemetry-line')?.textContent?.includes('$0.45'), 'Overview telemetry line patches live cost in place');
+
+			// 2. Token tab: typing into Guided Retry input must survive multiple 1Hz telemetry ticks with focus & scroll intact
+			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="token"]')!.click();
+			const guidanceInput = inspector.querySelector<HTMLInputElement>('[data-ade-ni-retry-guidance="true"]')!;
+			assert.strictEqual(guidanceInput.hidden, false, 'Guided retry input is visible for frozen_failed token');
+			guidanceInput.focus();
+			guidanceInput.value = 'Fix missing import in parser.ts';
+			guidanceInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			Object.defineProperty(bodyScroll, 'scrollHeight', { value: 900, configurable: true });
+			bodyScroll.scrollTop = 95;
+
+			for (let tick = 1; tick <= 3; tick++) {
+				missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
+					inputTokens: 5000,
+					outputTokens: 1000,
+					totalTokens: 6000,
+					costUsd: 0.20,
+				});
+			}
+			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-ni-retry-guidance="true"]'), guidanceInput, 'Guided retry input DOM node is never recreated during 1Hz ticks');
+			assert.strictEqual(document.activeElement, guidanceInput, 'Guided retry input retains focus across 1Hz telemetry ticks');
+			assert.strictEqual(guidanceInput.value, 'Fix missing import in parser.ts', 'Guided retry draft text is never wiped');
+			assert.strictEqual(inspector.querySelector<HTMLElement>('.ade-mission-ni-body'), bodyScroll, 'Body scroll container stays mounted on Token tab');
+
+			// 3. Distill tab: typing Distill memo + Check Hook form survives 1Hz ticks while thermal % updates live
+			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="distill"]')!.click();
+			const memoInput = inspector.querySelector<HTMLInputElement>('[data-ade-ni-distill-memo="true"]')!;
+			const chkName = inspector.querySelector<HTMLInputElement>('[data-ade-check-name-input="true"]')!;
+			const chkCmd = inspector.querySelector<HTMLInputElement>('[data-ade-check-cmd-input="true"]')!;
+			const chkFiles = inspector.querySelector<HTMLInputElement>('[data-ade-check-files-input="true"]')!;
+			const chkOnFail = inspector.querySelector<HTMLSelectElement>('[data-ade-check-onfail-select="true"]')!;
+			memoInput.value = 'Keep schema contract only';
+			memoInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			chkName.value = 'unit-suite';
+			chkName.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			chkFiles.value = 'dist/bundle.js';
+			chkFiles.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			chkOnFail.value = 'escalate';
+			chkOnFail.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+			chkCmd.focus();
+			chkCmd.value = 'pnpm test --run';
+			chkCmd.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+
+			const pctBefore = inspector.querySelector('.ade-mission-ni-section-head .ade-mission-token-status-badge')?.textContent;
+			missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
+				inputTokens: 60000,
+				outputTokens: 20000,
+				totalTokens: 80000,
+				costUsd: 1.05,
+				isNoiseTurn: true,
+			});
+
+			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-ni-distill-memo="true"]'), memoInput, 'Distill memo input is never recreated on 1Hz telemetry tick');
+			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-check-cmd-input="true"]'), chkCmd, 'Check hook form input is never recreated on 1Hz telemetry tick');
+			assert.strictEqual(document.activeElement, chkCmd, 'Check hook cmd input retains focus across 1Hz telemetry tick');
+			assert.strictEqual(memoInput.value, 'Keep schema contract only', 'Distill memo draft is preserved');
+			assert.strictEqual(chkName.value, 'unit-suite', 'Check hook name draft is preserved');
+			assert.strictEqual(chkCmd.value, 'pnpm test --run', 'Check hook cmd draft is preserved');
+			assert.strictEqual(chkFiles.value, 'dist/bundle.js', 'Check hook files draft is preserved');
+			assert.strictEqual(chkOnFail.value, 'escalate', 'Check hook select value is preserved');
+			const pctAfter = inspector.querySelector('.ade-mission-ni-section-head .ade-mission-token-status-badge')?.textContent;
+			assert.notStrictEqual(pctAfter, pctBefore, `Thermal context % patches live in place (${pctBefore} -> ${pctAfter})`);
+
+			// 4. FinOps tab: dragging budget slider & editing budget USD input survive 1Hz spend ticks while hero spend patches in place
+			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="finops"]')!.click();
+			const slider = inspector.querySelector<HTMLInputElement>('[data-ade-finops-budget-slider="true"]')!;
+			const budgetInput = inspector.querySelector<HTMLInputElement>('[data-ade-finops-budget-input="true"]')!;
+
+			slider.focus();
+			slider.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, bubbles: true }));
+			slider.value = '25';
+			slider.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			assert.strictEqual(budgetInput.value, '25', 'Dragging slider mirrors value into USD input');
+
+			// Fire 1Hz spend ticks MID-DRAG (cumulative: 0.45 + 0.60 + 1.05 = 2.10 -> +1.35 +0.80 = $4.25)
+			missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
+				inputTokens: 20000,
+				outputTokens: 5000,
+				totalTokens: 25000,
+				costUsd: 1.35,
+			});
+			missionRuntime.recordNodeTurnUsage(created.id, 'N2', {
+				inputTokens: 20000,
+				outputTokens: 8000,
+				totalTokens: 28000,
+				costUsd: 0.80,
+			});
+
+			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-finops-budget-slider="true"]'), slider, 'FinOps slider DOM node is never recreated during drag');
+			assert.strictEqual(document.activeElement, slider, 'FinOps slider retains focus during live spend ticks');
+			assert.strictEqual(slider.value, '25', 'In-progress slider drag value is NOT overwritten by 1Hz spend ticks');
+			assert.strictEqual(budgetInput.value, '25', 'Mirrored USD value is NOT overwritten mid-drag');
+			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '$4.25', 'Hero spend patches live to $4.25 in place while dragging slider');
+
+			// Release drag & test direct number input editing under live telemetry
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, bubbles: true }));
+			slider.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+			await timeout(20);
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).budgetLimitUsd, 25, 'Releasing slider commits $25 budget limit');
+
+			budgetInput.focus();
+			budgetInput.value = '42';
+			missionRuntime.recordNodeTurnUsage(created.id, 'N2', {
+				inputTokens: 5000,
+				outputTokens: 2000,
+				totalTokens: 7000,
+				costUsd: 0.25,
+			});
+			assert.strictEqual(document.activeElement, budgetInput, 'Focused USD input retains focus across live spend tick');
+			assert.strictEqual(budgetInput.value, '42', 'Focused USD input draft is NOT overwritten by live spend tick');
+			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '$4.50', 'Hero spend updates in place to $4.50 while editing USD input');
+		});
+
+		test('FinOps Ledger & budget breaker work on non-Claude engines via pricing catalog, show estimated (~$) indicators, and honor custom & local zero-cost settings overrides', async () => {
+			const h = createHarness([alpha]);
+			h.instantiation.stub(IConfigurationService, new TestConfigurationService({
+				[ADE_MODEL_PRICING_OVERRIDES_CONFIG_KEY]: {
+					'my-local-vllm/*': { local: true },
+					'custom-coder-xl': { inputPerMillion: 10, outputPerMillion: 20 },
+				},
+			}));
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			const created = missionStore.createMission({
+				title: 'Multi-Engine FinOps Breaker',
+				mermaidText: 'flowchart LR\n  N1["@Codex: Build"] --> N2["@Local: Bench"]\n  N1 --> N3["@Custom: Audit"]',
+			});
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-mission-finops-multiengine-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			await missionRuntime.setBudgetLimit(created.id, 2.00);
+			await missionRuntime.start(created.id);
+
+			// 1. Local zero-cost override (`my-local-vllm/qwen3-32b`) reports huge tokens with $0.00 spend & Local $0 badge
+			missionRuntime.recordNodeTurnUsage(created.id, 'N2', {
+				inputTokens: 1_500_000,
+				outputTokens: 300_000,
+				model: 'my-local-vllm/qwen3-32b',
+				engineId: 'aexus-opencode',
+			});
+			const n2CostEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-ctx-cost')!;
+			assert.strictEqual(n2CostEl.hidden, false, 'Local zero-cost model surfaces Local $0 chip');
+			assert.strictEqual(n2CostEl.getAttribute('data-node-cost-local'), 'true');
+			assert.strictEqual(n2CostEl.textContent, 'Local $0');
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).budgetCircuitTripped, false, 'Local zero-cost tokens never trip USD budget');
+
+			// 2. Non-Claude Codex node (`gpt-5.3-codex`) omits costUsd -> auto-estimated ~$1.05 (200k in * 1.75 + 50k out * 14 = $1.05)
+			missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
+				inputTokens: 200_000,
+				outputTokens: 50_000,
+				model: 'gpt-5.3-codex',
+				engineId: 'aexus-codex',
+			});
+			const n1CostEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-ctx-cost')!;
+			assert.strictEqual(n1CostEl.hidden, false, 'Codex node displays estimated USD badge');
+			assert.strictEqual(n1CostEl.getAttribute('data-node-cost-estimated'), 'true');
+			assert.strictEqual(n1CostEl.textContent, '~$1.05');
+
+			// Open FinOps Ledger Inspector via clicking N1 + FinOps tab and verify estimated badge + ~$ hero spend
+			const n1Card = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
+			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
+			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
+			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
+			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="finops"]')!.click();
+			const estBadge = inspector.querySelector<HTMLElement>('[data-ade-finops-estimated-badge="true"]')!;
+			assert.strictEqual(estBadge.hidden, false, 'FinOps hero displays estimated (预估) badge');
+			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '~$1.05');
+
+			// 3. Custom pricing override (`custom-coder-xl`: $10/M in, $20/M out -> 50k in $0.50 + 50k out $1.00 = $1.50)
+			//    Pushes total to ~$2.55 >= $2.00 -> trips hard budget circuit-breaker!
+			missionRuntime.recordNodeTurnUsage(created.id, 'N3', {
+				inputTokens: 50_000,
+				outputTokens: 50_000,
+				model: 'custom-coder-xl',
+				engineId: 'aexus-dsh',
+			});
+			const rtAfter = missionRuntime.getRuntimeState(created.id);
+			assert.strictEqual(rtAfter.budgetCircuitTripped, true, 'Estimated non-Claude spend trips hard budget circuit-breaker');
+			assert.strictEqual(rtAfter.status, 'paused', 'Mission pauses when estimated spend breaches ceiling');
+			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '~$2.55');
+			assert.strictEqual(inspector.querySelector<HTMLElement>('[data-ade-finops-tripped-banner="true"]')?.hidden, false, 'Breaker banner renders after non-Claude breach');
+		});
+
+		test('Canvas editing ergonomics: 50-step Undo/Redo, Marquee multi-select & batch drag, snap alignment guides, Delete/Backspace node & edge removal, Cmd/Ctrl+F node search, and double-click edge label rename', async () => {
+			const h = createHarness([alpha]);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			const created = missionStore.createMission({
+				title: 'Canvas Ergonomics Suite',
+				mermaidText: 'flowchart LR\n  N1["@Arch: Plan"] --> N2["@Dev: Implement"]\n  N2 --> N3["@QA: Verify"]',
+			});
+			// Place nodes at known deterministic world positions for marquee, batch drag, and snap-guide assertions
+			missionStore.updateNodePositions(created.id, {
+				N1: { x: 200, y: 200 },
+				N2: { x: 560, y: 200 },
+				N3: { x: 200, y: 460 },
+			});
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-mission-ergonomics-test-host'));
+			host.style.width = '1280px';
+			host.style.height = '800px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 800));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			const rootEl = host.querySelector<HTMLElement>('.ade-mission-editor')!;
+			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
+			const undoBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-undo="true"]')!;
+			const redoBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-redo="true"]')!;
+			rootEl.focus();
+			assert.strictEqual(undoBtn.disabled, true, 'Undo starts disabled');
+			assert.strictEqual(redoBtn.disabled, true, 'Redo starts disabled');
+
+			// 1. Double-click edge on canvas to inline-edit edge label + Undo/Redo
+			const edgeN1N2 = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')!;
+			edgeN1N2.dispatchEvent(new mainWindow.MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+			const edgeInput = host.querySelector<HTMLInputElement>('[data-ade-inline-edge-rename="N1->N2"]')!;
+			assert.ok(edgeInput, 'Double-clicking edge opens inline edge label input');
+			edgeInput.value = 'fail';
+			edgeInput.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+
+			assert.strictEqual(
+				host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')?.getAttribute('data-edge-kind'),
+				'fail',
+				'Inline edge edit updates edge label & switches to fail polarity',
+			);
+			assert.strictEqual(undoBtn.disabled, false, 'Edge edit pushes snapshot onto Undo stack');
+
+			// Cmd+Z undoes edge label edit; Cmd+Shift+Z redoes it
+			rootEl.focus();
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }));
+			assert.strictEqual(
+				host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')?.getAttribute('data-edge-kind'),
+				'success',
+				'Cmd+Z restores previous edge label & polarity',
+			);
+			assert.strictEqual(redoBtn.disabled, false, 'Redo becomes enabled after Undo');
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'z', metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+			assert.strictEqual(
+				host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')?.getAttribute('data-edge-kind'),
+				'fail',
+				'Cmd+Shift+Z redoes edge label change',
+			);
+
+			// 2. Click edge to select -> press Delete to remove edge -> Cmd+Z restores edge
+			const edgeToSelect = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')!;
+			edgeToSelect.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
+			assert.strictEqual(edgeToSelect.getAttribute('data-edge-selected'), 'true', 'Clicking edge marks it selected');
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+			assert.strictEqual(host.querySelector('.ade-mission-edge-group[data-from="N1"][data-to="N2"]'), null, 'Delete key removes selected edge');
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }));
+			assert.ok(host.querySelector('.ade-mission-edge-group[data-from="N1"][data-to="N2"]'), 'Cmd+Z restores deleted edge');
+
+			// 3. Marquee Box Selection (Shift+Drag) + Batch Drag Move + Single-Step Undo
+			const n1Rect = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!.getBoundingClientRect();
+			const n2Rect = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!.getBoundingClientRect();
+			const boxStartX = Math.min(n1Rect.left, n2Rect.left) - 20;
+			const boxStartY = Math.min(n1Rect.top, n2Rect.top) - 20;
+			const boxEndX = Math.max(n1Rect.right, n2Rect.right) + 20;
+			const boxEndY = Math.max(n1Rect.bottom, n2Rect.bottom) + 20;
+
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, shiftKey: true, pointerId: 11, clientX: boxStartX, clientY: boxStartY, bubbles: true }));
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, shiftKey: true, pointerId: 11, clientX: boxEndX, clientY: boxEndY, bubbles: true }));
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-marquee-box="true"]')?.hidden, false, 'Marquee box overlay renders during Shift+Drag');
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, shiftKey: true, pointerId: 11, clientX: boxEndX, clientY: boxEndY, bubbles: true }));
+
+			const n1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
+			const n2El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
+			const n3El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N3"]')!;
+			assert.strictEqual(n1El.getAttribute('data-node-selected'), 'true', 'Marquee selects N1');
+			assert.strictEqual(n2El.getAttribute('data-node-selected'), 'true', 'Marquee selects N2');
+			assert.strictEqual(n3El.getAttribute('data-node-selected'), null, 'Marquee excludes N3 outside box');
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-selection-hud="true"]')?.hidden, false, 'Multi-select HUD pill appears for >=2 nodes');
+
+			// Drag N1 while both N1 & N2 are selected -> BOTH translate together!
+			const n1LeftBefore = Number.parseFloat(n1El.style.left);
+			const n2LeftBefore = Number.parseFloat(n2El.style.left);
+			const n3LeftBefore = Number.parseFloat(n3El.style.left);
+			n1El.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 12, clientX: 200, clientY: 200, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 12, clientX: 260, clientY: 245, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 12, clientX: 260, clientY: 245, bubbles: true }));
+			const n1LeftAfter = Number.parseFloat(n1El.style.left);
+			const n2LeftAfter = Number.parseFloat(n2El.style.left);
+			assert.ok(n1LeftAfter > n1LeftBefore + 20, 'Batch drag moved N1');
+			assert.strictEqual(n2LeftAfter - n2LeftBefore, n1LeftAfter - n1LeftBefore, 'Batch drag translated N2 in exact lockstep with N1');
+			assert.strictEqual(Number.parseFloat(n3El.style.left), n3LeftBefore, 'Unselected N3 stays stationary');
+
+			// Single Cmd+Z undoes batch drag for BOTH nodes
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }));
+			assert.strictEqual(Number.parseFloat(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!.style.left), n1LeftBefore, 'Cmd+Z restores N1 position');
+			assert.strictEqual(Number.parseFloat(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!.style.left), n2LeftBefore, 'Cmd+Z restores N2 position in same step');
+
+			// 4. Drag Alignment Snap Guides: drag N3 slightly off N1's X (within 8px) -> snaps & renders guide line, clears on pointerup
+			const n3Live = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N3"]')!;
+			const n1CurX = Number.parseFloat(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!.style.left);
+			n3Live.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 13, clientX: 300, clientY: 300, bubbles: true }));
+			// Move 3px horizontally and 24px vertically -> crosses 5px drag threshold while staying within 8px of N1's X!
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 13, clientX: 303, clientY: 324, bubbles: true }));
+			assert.strictEqual(Number.parseFloat(n3Live.style.left), n1CurX, 'Smart alignment snaps N3 X exactly onto N1 X');
+			assert.ok(host.querySelector('[data-ade-align-guide="x"]'), 'Vertical alignment reference guide line renders during snapped drag');
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 13, clientX: 303, clientY: 324, bubbles: true }));
+			assert.strictEqual(host.querySelector('[data-ade-align-guide="x"]'), null, 'Alignment guide lines clear immediately on pointerup');
+
+			// 5. Cmd/Ctrl+F Large-DAG Node Search & Jump Locator
+			rootEl.focus();
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true }));
+			const searchBar = host.querySelector<HTMLElement>('[data-ade-canvas-search="true"]')!;
+			const searchInput = host.querySelector<HTMLInputElement>('[data-ade-canvas-search-input="true"]')!;
+			const searchCount = host.querySelector<HTMLElement>('[data-ade-canvas-search-count="true"]')!;
+			assert.strictEqual(searchBar.hidden, false, 'Cmd+F opens floating node search bar');
+			assert.strictEqual(document.activeElement, searchInput, 'Cmd+F focuses search input');
+
+			searchInput.value = 'N';
+			searchInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			assert.strictEqual(searchCount.textContent, '1 / 3', 'Search matches all 3 nodes (N1, N2, N3)');
+			assert.strictEqual(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')?.getAttribute('data-search-active'), 'true');
+
+			searchInput.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+			assert.strictEqual(searchCount.textContent, '2 / 3', 'Enter cycles to next matching node');
+			assert.strictEqual(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')?.getAttribute('data-search-active'), 'true');
+
+			// Typing Delete/Backspace inside search input MUST NOT delete canvas nodes!
+			searchInput.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node').length, 3, 'Backspace inside search input never deletes canvas nodes');
+
+			searchInput.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+			assert.strictEqual(searchBar.hidden, true, 'Escape closes search bar');
+			assert.strictEqual(host.querySelector('[data-search-active="true"]'), null, 'Closing search clears search highlights');
+
+			// 6. Batch Backspace deletion of multi-selected nodes + single-step Undo restore
+			const n2ForDel = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
+			const n3ForDel = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N3"]')!;
+			n2ForDel.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 20, clientX: 50, clientY: 50, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 20, clientX: 50, clientY: 50, bubbles: true }));
+			n3ForDel.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, shiftKey: true, pointerId: 21, clientX: 50, clientY: 50, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, shiftKey: true, pointerId: 21, clientX: 50, clientY: 50, bubbles: true }));
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-selected="true"]').length, 2, 'Shift+Click multi-selects N2 and N3');
+
+			rootEl.focus();
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node').length, 1, 'Backspace removes both multi-selected nodes atomically');
+			assert.ok(host.querySelector('.ade-mission-node[data-node-id="N1"]'));
+
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true, cancelable: true }));
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node').length, 3, 'Cmd+Z restores both batch-deleted nodes in one step');
+		});
+
+		test('Minimalist top bar keeps ONLY File Drawer & Start controls, HUD safe zones prevent overlap, wide screens allow dual drawers, opening Inspector auto-pans occluded nodes, and canvas drag-pan preserves Inspector', async () => {
+			const h = createHarness([alpha]);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			const created = missionStore.createMission({
+				title: 'Minimalist Top Bar & HUD Safe Zones',
+				mermaidText: 'flowchart LR\n  N1["@Arch: Plan"] --> N2["@Dev: Implement"]',
+			});
+			// Put N2 near the right edge so opening the 352px right Inspector initially overlaps it
+			missionStore.updateNodePositions(created.id, {
+				N1: { x: 220, y: 240 },
+				N2: { x: 1060, y: 240 },
+			});
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-mission-hud-safezone-test-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			const topBarSlot = host.querySelector<HTMLElement>('[data-ade-mission-top-bar-slot="true"]')!;
+			const topBar = host.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
+			const fileBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!;
+			const runBar = host.querySelector<HTMLElement>('[data-ade-mission-run-bar="true"]')!;
+			const fileDrawer = host.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
+			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
+			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
+			const rootEl = host.querySelector<HTMLElement>('.ade-mission-editor')!;
+
+			// 1. Minimalist top bar contains ONLY the two top-left controls (File Drawer toggle + Run Control pill)
+			assert.strictEqual(topBar.children.length, 2, 'Top bar renders ONLY 2 top-left controls');
+			assert.strictEqual(topBar.children[0], fileBtn);
+			assert.strictEqual(topBar.children[1], runBar);
+			for (const removedSel of [
+				'[data-ade-mission-governance-btn]',
+				'[data-ade-mission-triggers-btn]',
+				'[data-ade-mission-add-node-btn]',
+				'[data-ade-mission-ai-dag-btn]',
+				'[data-ade-mission-templates-btn]',
+				'[data-ade-mission-doctor-btn]',
+				'[data-ade-mission-finops-btn]',
+				'[data-ade-mission-topbar-more]',
+				'[data-ade-prompt-to-dag-bar]',
+				'[data-ade-mission-doctor-backdrop]',
+				'[data-ade-mission-sandbox-banner]',
+			]) {
+				assert.strictEqual(host.querySelector(removedSel), null, `Removed UI ${removedSel} must not exist`);
+			}
+			assert.ok(topBar.scrollWidth <= topBarSlot.clientWidth + 1, `Top bar does not overflow wide container (${topBar.scrollWidth} <= ${topBarSlot.clientWidth})`);
+
+			// 2. Auto-pan avoidance: place N2 into right-side Inspector zone (reset zoom to 100% and pan=0 via click on N2)
+			host.querySelector<HTMLButtonElement>('[data-ade-mission-zoom-label="true"]')!.click();
+			const n2El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
+			// Force N2 to be occluded on the right side by panning world so N2 sits under right 352px zone
+			const n2BeforeRect = n2El.getBoundingClientRect();
+			const vpRect = viewportEl.getBoundingClientRect();
+			if (n2BeforeRect.right < vpRect.right - 360) {
+				const shiftRight = (vpRect.right - 80) - n2BeforeRect.right;
+				viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 30, clientX: 200, clientY: 200, bubbles: true }));
+				viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 30, clientX: 200 + shiftRight, clientY: 200, bubbles: true }));
+				viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 30, clientX: 200 + shiftRight, clientY: 200, bubbles: true }));
+			}
+			const n2OccludedRect = n2El.getBoundingClientRect();
+			assert.ok(n2OccludedRect.right > vpRect.right - 352, 'Precondition: N2 is positioned inside right 352px Inspector zone');
+
+			// Click N2 -> Inspector opens AND canvas auto-pans leftward so N2 is no longer occluded!
+			n2El.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 31, clientX: 50, clientY: 50, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 31, clientX: 50, clientY: 50, bubbles: true }));
+			assert.strictEqual(inspector.hidden, false, 'Clicking N2 opens right-side Inspector');
+			const n2AfterRect = n2El.getBoundingClientRect();
+			const inspectorRect = inspector.getBoundingClientRect();
+			assert.ok(
+				n2AfterRect.right <= inspectorRect.left + 2,
+				`Opening Inspector auto-pans canvas so N2 (${Math.round(n2AfterRect.right)}) is clear of Inspector (${Math.round(inspectorRect.left)})`,
+			);
+
+			// 3. Drag-pan on empty canvas preserves open Inspector; stationary click on empty canvas closes it!
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 32, clientX: 300, clientY: 300, bubbles: true }));
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 32, clientX: 380, clientY: 330, bubbles: true }));
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 32, clientX: 380, clientY: 330, bubbles: true }));
+			assert.strictEqual(inspector.hidden, false, 'Dragging empty canvas to pan MUST NOT close right-side Inspector');
+			assert.strictEqual(n2El.getAttribute('data-node-selected'), 'true', 'Dragging empty canvas to pan preserves selected node');
+
+			// 4. Wide screen (1280px >= 1120px): opening left File Drawer keeps right Inspector open with zero overlap!
+			fileBtn.click();
+			assert.strictEqual(fileDrawer.hidden, false, 'File Drawer opens on wide screen');
+			assert.strictEqual(inspector.hidden, false, 'Wide screen preserves right Inspector alongside File Drawer');
+			const drawerRect = fileDrawer.getBoundingClientRect();
+			assert.ok(
+				drawerRect.right <= inspectorRect.left - 4,
+				`Left File Drawer (${Math.round(drawerRect.right)}) never overlaps Right Inspector (${Math.round(inspectorRect.left)})`,
+			);
+
+			// Close File Drawer, then verify non-overlapping HUD safe zones (Top Bar vs Sup Legend vs Canvas Alert vs Spotlight vs Search vs Revision Bar vs Viewport Bar)
+			fileBtn.click();
+			assert.strictEqual(fileDrawer.hidden, true);
+			await missionRuntime.setBoundary(created.id, {
+				supervisors: [{ id: ADE_SECRETARY_ID, tier: 0, managedNodeIds: ['N1', 'N2'] }],
+			});
+			await missionRuntime.start(created.id);
+			// Apply a live v2 revision patch so Revision Timeline Bar renders alongside Viewport Bar
+			const patchRes = await missionRuntime.patchMermaid(created.id, {
+				caller: { isHumanUser: true },
+				newMermaidText: 'flowchart LR\n  N1["@Arch: Plan"] --> N2["@Dev: Implement"]\n  N2 --> N3["@QA: Verify"]',
+				reason: 'Add QA stage',
+			});
+			assert.strictEqual(patchRes.ok, true, 'Live revision patch creates v2 timeline bar');
+			rootEl.focus();
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true }));
+			// Trigger a live canvas alert toast via blank-canvas context menu add-task during live run
+			viewportEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: vpRect.left + 80, clientY: vpRect.top + 80 }));
+			const addTaskItem = host.querySelector<HTMLButtonElement>('[data-ade-ctx-action="add-task"]');
+			if (addTaskItem) {
+				addTaskItem.click();
+			}
+			const topBarRect = topBarSlot.getBoundingClientRect();
+			const supLegend = host.querySelector<HTMLElement>('[data-ade-mission-sup-legend="true"]')!;
+			const searchBar = host.querySelector<HTMLElement>('[data-ade-canvas-search="true"]')!;
+			const revBar = host.querySelector<HTMLElement>('[data-ade-mission-revision-bar="true"]')!;
+			const vpBar = host.querySelector<HTMLElement>('.ade-mission-viewport-bar')!;
+			const supRect = supLegend.getBoundingClientRect();
+			const searchRect = searchBar.getBoundingClientRect();
+			const revRect = revBar.getBoundingClientRect();
+			const vpBarRect = vpBar.getBoundingClientRect();
+			assert.strictEqual(revBar.hidden, false, 'Revision timeline bar visible after live patch');
+			assert.ok(topBarRect.bottom <= supRect.top + 1, `Top Bar (${Math.round(topBarRect.bottom)}) never overlaps Supervisor Legend (${Math.round(supRect.top)})`);
+			assert.ok(supRect.bottom <= searchRect.top + 1, `Supervisor Legend (${Math.round(supRect.bottom)}) never overlaps Search Bar (${Math.round(searchRect.top)})`);
+			assert.ok(searchRect.right <= inspectorRect.left + 1, `Search Bar (${Math.round(searchRect.right)}) stays clear of Right Inspector (${Math.round(inspectorRect.left)})`);
+			assert.ok(revRect.right <= vpBarRect.left + 1, `Wide Revision Bar (${Math.round(revRect.right)}) never collides with Bottom-Right Viewport Bar (${Math.round(vpBarRect.left)})`);
+			const canvasAlert = host.querySelector<HTMLElement>('[data-ade-mission-canvas-alert="true"]')!;
+			if (!canvasAlert.hidden) {
+				const alertRect = canvasAlert.getBoundingClientRect();
+				assert.ok(topBarRect.bottom <= alertRect.top + 1, `Canvas Alert (${Math.round(alertRect.top)}) sits strictly below Top Bar (${Math.round(topBarRect.bottom)})`);
+				assert.ok(supRect.right <= alertRect.left + 1, `Canvas Alert (${Math.round(alertRect.left)}) never overlaps Supervisor Legend (${Math.round(supRect.right)})`);
+				assert.ok(alertRect.right <= inspectorRect.left + 1, `Canvas Alert (${Math.round(alertRect.right)}) stays clear of Right Inspector (${Math.round(inspectorRect.left)})`);
+			}
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+
+			// Hold Tab X-Ray spotlight banner sits cleanly below Top Bar & Supervisor Legend
+			rootEl.focus();
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+			const spotBanner = host.querySelector<HTMLElement>('[data-ade-tab-spotlight-banner="true"]')!;
+			assert.strictEqual(spotBanner.hidden, false);
+			const spotRect = spotBanner.getBoundingClientRect();
+			assert.ok(topBarRect.bottom <= spotRect.top + 1, `Tab Spotlight Banner (${Math.round(spotRect.top)}) sits strictly below Top Bar (${Math.round(topBarRect.bottom)})`);
+			assert.ok(supRect.bottom <= spotRect.top + 1, `Tab Spotlight Banner (${Math.round(spotRect.top)}) sits strictly below Supervisor Legend (${Math.round(supRect.bottom)})`);
+			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keyup', { key: 'Tab', bubbles: true }));
+
+			// Stationary click (< 5px) on empty canvas DOES close Inspector cleanly!
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 33, clientX: 300, clientY: 300, bubbles: true }));
+			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 33, clientX: 301, clientY: 301, bubbles: true }));
+			assert.strictEqual(inspector.hidden, true, 'Stationary click on empty canvas closes right-side Inspector');
+
+			// 5. Intermediate laptop width (980px) & narrow split-pane width (620px): top bar stays clean, revision bar stacks cleanly above viewport bar, and narrow drawers auto-collapse mutually
+			host.style.width = '980px';
+			pane.layout(new Dimension(980, 760));
+			assert.ok(topBar.scrollWidth <= topBarSlot.clientWidth + 1, `Top bar stays within 980px container without clipping (${topBar.scrollWidth} <= ${topBarSlot.clientWidth})`);
+
+			host.style.width = '620px';
+			pane.layout(new Dimension(620, 760));
+			assert.ok(topBar.scrollWidth <= topBarSlot.clientWidth + 1, `Top bar stays within 620px container without clipping (${topBar.scrollWidth} <= ${topBarSlot.clientWidth})`);
+			const narrowRevRect = revBar.getBoundingClientRect();
+			const narrowVpBarRect = vpBar.getBoundingClientRect();
+			assert.ok(narrowRevRect.bottom <= narrowVpBarRect.top + 1, `Narrow Revision Bar (${Math.round(narrowRevRect.bottom)}) stacks cleanly above Viewport Bar (${Math.round(narrowVpBarRect.top)})`);
+
+			// At narrow width (620px < 1120px), opening File Drawer collapses Inspector
+			const n2NarrowEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
+			n2NarrowEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 34, clientX: 50, clientY: 50, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 34, clientX: 50, clientY: 50, bubbles: true }));
+			assert.strictEqual(inspector.hidden, false);
+			fileBtn.click();
+			assert.strictEqual(fileDrawer.hidden, false, 'File Drawer opens on narrow screen');
+			assert.strictEqual(inspector.hidden, true, 'Narrow screen auto-closes Inspector when opening File Drawer');
+		});
+
+		test('Audit #8: enforces pure EN / pure ZH-CN localization with zero mixed lines across all 5 surfaces and unifies dynamic 1..N rank schema + Mission v2 Factory Wall', async () => {
+			const cjkRe = /[\u4e00-\u9fff]/;
+			try {
+				setAdeDisplayLanguageOverride('en');
+
+				const h = createHarness([alpha]);
+				const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+				h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+				const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+				h.instantiation.stub(IAdeMissionService, missionStore);
+				const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+				h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+				// --- A. Mission Top Bar, File Drawer & 4-in-1 Node Inspector (EN vs ZH-CN) ---
+				const created = missionStore.createMission({
+					projectUri: alpha.toString(),
+					title: 'Audit 8 Localization Mission',
+					mermaidText: 'flowchart LR\n  N1["@Backend: Build API"] --> N2["@Frontend: Ship UI"]',
+				});
+				const mInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+				const mHost = append(document.body, $('.monaco-workbench.ade-audit8-mission-host'));
+				mHost.style.width = '1280px';
+				mHost.style.height = '760px';
+				store.add({ dispose: () => mHost.remove() });
+				const mPane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+				mPane.create(mHost);
+				mPane.layout(new Dimension(1280, 760));
+				await mPane.setInput(mInput, undefined, {}, CancellationToken.None);
+
+				// Open File Drawer + Node Inspector (wide 1280px screen keeps both open simultaneously!)
+				mHost.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!.click();
+				const n1Title = mHost.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-node-title')!;
+				n1Title.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 301, clientX: 220, clientY: 220, bubbles: true }));
+				mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 301, clientX: 221, clientY: 221, bubbles: true }));
+
+				const topBar = mHost.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
+				const drawer = mHost.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
+				const inspector = mHost.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
+				assert.strictEqual(drawer.hidden, false);
+				assert.strictEqual(inspector.hidden, false);
+
+				// 1. Pure EN verification: ZERO CJK anywhere in Top Bar, Split Drawer, and all 4 Inspector Tabs!
+				assert.strictEqual(topBar.children.length, 2, 'Top bar has only File Drawer toggle + Run Control pill');
+				assert.strictEqual(cjkRe.test(topBar.textContent ?? ''), false, `Top bar must have 0 CJK in EN mode (got: "${topBar.textContent}")`);
+				assert.ok((topBar.textContent ?? '').includes('Idle') && (topBar.textContent ?? '').includes('Start'), 'Top bar renders pure EN Idle/Start labels');
+				assert.strictEqual(cjkRe.test(drawer.textContent ?? ''), false, `File drawer must have 0 CJK in EN mode (got: "${drawer.textContent}")`);
+				assert.ok((drawer.textContent ?? '').includes('Orchestration · Mermaid DAG'));
+				assert.ok((drawer.textContent ?? '').includes('Node Prompts'));
+
+				for (const tabId of ['overview', 'token', 'distill', 'finops'] as const) {
+					inspector.querySelector<HTMLButtonElement>(`[data-ade-inspector-tab="${tabId}"]`)!.click();
+					assert.strictEqual(cjkRe.test(inspector.textContent ?? ''), false, `Inspector tab "${tabId}" must have 0 CJK in EN mode (got: "${inspector.textContent}")`);
+				}
+				inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="overview"]')!.click();
+				assert.ok((inspector.textContent ?? '').includes('Node Role'), 'Inspector overview renders pure EN Node Role row');
+				assert.ok((inspector.textContent ?? '').includes('Worker · Executor'), 'Inspector overview renders pure EN role chip');
+
+				// 2. Switch to pure Simplified Chinese -> immediate live re-render across Top Bar, Drawer, and all 4 Inspector Tabs!
+				setAdeDisplayLanguageOverride('zh-cn');
+				assert.ok((topBar.textContent ?? '').includes('待命') && (topBar.textContent ?? '').includes('启动'), 'Top bar switches live to ZH-CN 待命/启动');
+				assert.ok(!(topBar.textContent ?? '').includes('Start') && !(topBar.textContent ?? '').includes('Idle'), 'Top bar has no leftover mixed English labels in ZH-CN');
+
+				assert.ok((drawer.textContent ?? '').includes('统筹编排 · Mermaid 流图'));
+				assert.ok((drawer.textContent ?? '').includes('节点提示词'));
+				assert.ok((drawer.textContent ?? '').includes('催办超时 (分)'));
+				assert.ok((drawer.textContent ?? '').includes('图外监工'));
+
+				const zhOverviewText = inspector.textContent ?? '';
+				assert.ok(zhOverviewText.includes('概览') && zhOverviewText.includes('令牌轨迹') && zhOverviewText.includes('提纯校验') && zhOverviewText.includes('费用账本'), 'Inspector tabs switch cleanly to ZH-CN');
+				assert.ok(zhOverviewText.includes('所属监工') && zhOverviewText.includes('节点角色') && zhOverviewText.includes('执行者 · 任务节点'), 'Inspector overview KV rows switch cleanly to ZH-CN');
+				assert.ok(!zhOverviewText.includes('Supervisor') && !zhOverviewText.includes('Split Chat Beside') && !zhOverviewText.includes('Worker ·'), 'Inspector overview has no mixed English labels in ZH-CN');
+
+				// --- B. Dynamic 1..N Rank Schema Unity across Role Studio, Session Editor & Projects View ---
+				setAdeDisplayLanguageOverride('en');
+
+				const custom3TierConfig: IAdeOrganizationConfig = {
+					version: 1,
+					presetId: 'custom',
+					ranks: [
+						{ id: 'architect', name: 'Chief Architect', shortName: 'Arch', tier: 1, color: 'amber', icon: 'organization', summary: 'Top architect', initPrompt: 'You are L1 Chief Architect.', pureExecution: false, canHaveSubordinates: true, allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read'] },
+						{ id: 'auditor', name: 'Code Auditor', shortName: 'Aud', tier: 2, color: 'purple', icon: 'shield', summary: 'Mid auditor', initPrompt: 'You are L2 Code Auditor.', pureExecution: false, canHaveSubordinates: true, allowedApis: ['session.read_context', 'project.read'] },
+						{ id: 'builder', name: 'Pure Builder', shortName: 'Bld', tier: 3, color: 'emerald', icon: 'tools', summary: 'Pure leaf builder', initPrompt: '', pureExecution: true, canHaveSubordinates: false, allowedApis: [] },
+					],
+				};
+				await roleSchema.updateConfig(custom3TierConfig);
+
+				// B1. Role Studio shows Mission v2 Dynamic 1..3 Tiers & interactive Factory Wall (offGraphMaxTier) bar + preserves Legacy v1 slots
+				const studioHost = append(document.body, $('.monaco-workbench.ade-audit8-studio-host'));
+				store.add({ dispose: () => studioHost.remove() });
+				const studioPane = store.add(h.instantiation.createInstance(AdeRoleStudioEditorPane, upcastPartial<IEditorGroup>({ id: 2 })));
+				studioPane.create(studioHost);
+				const studioInput = store.add(h.instantiation.createInstance(AdeRoleStudioEditorInput, 'architect'));
+				await studioPane.setInput(studioInput, undefined, {}, CancellationToken.None);
+
+				const wallBar = studioHost.querySelector<HTMLElement>('[data-ade-rs-factory-wall-bar="true"]')!;
+				assert.ok(wallBar, 'Role Studio renders Mission v2 Dynamic Ranks & Factory Wall bar');
+				assert.strictEqual(wallBar.dataset.dynamicRankCount, '3', 'Factory Wall reflects 3 dynamic ranks');
+				assert.strictEqual(cjkRe.test(studioHost.textContent ?? ''), false, 'Role Studio has 0 CJK in EN mode');
+				assert.ok(studioHost.querySelectorAll('.ade-rs-slot-select[data-slot]').length === 4, 'Legacy v1 slot compatibility selects remain intact');
+
+				// Change Factory Wall cutoff preview to L0..L1 -> L1 Chief Architect moves to Off-Graph Supervisors, L2/L3 stay In-Graph!
+				const cutoffSelect = studioHost.querySelector<HTMLSelectElement>('[data-ade-rs-wall-cutoff="true"]')!;
+				cutoffSelect.value = '1';
+				cutoffSelect.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+				const offGraphZone = studioHost.querySelector<HTMLElement>('[data-ade-rs-wall-zone="off-graph"]')!;
+				const inGraphZone = studioHost.querySelector<HTMLElement>('[data-ade-rs-wall-zone="in-graph"]')!;
+				assert.ok((offGraphZone.textContent ?? '').includes('L1 · Chief Architect'), 'L1 rank moves into Off-Graph Supervisors when offGraphMaxTier=1');
+				assert.ok((inGraphZone.textContent ?? '').includes('L2 · Code Auditor') && (inGraphZone.textContent ?? '').includes('L3 · Pure Builder'), 'L2..L3 stay in In-Graph Mission Nodes');
+
+				// Role Studio live locale switch to ZH-CN
+				setAdeDisplayLanguageOverride('zh-cn');
+				assert.ok((studioHost.textContent ?? '').includes('组织架构与角色工坊'));
+				assert.ok((studioHost.textContent ?? '').includes('厂外监工层') && (studioHost.textContent ?? '').includes('厂内执行节点'));
+
+				// B2. Session Editor & Session EditorInput subscribe to IAdeRoleSchemaService (zero hardcoded 4-tier labels!)
+				setAdeDisplayLanguageOverride('en');
+				const archAgent = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/audit8-arch') }, 'Arch Lead', { role: 'architect' });
+				const auditAgent = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/audit8-aud') }, 'Audit Lead', { parentId: archAgent.id, role: 'auditor' });
+				const sessionInput = store.add(h.instantiation.createInstance(AdeSessionEditorInput, auditAgent.id));
+				assert.strictEqual(sessionInput.getDescription(), 'Alpha › Arch Lead › Code Auditor', 'SessionEditorInput description reflects live dynamic rank name');
+
+				const sessionHost = append(document.body, $('.monaco-workbench.ade-audit8-session-host'));
+				store.add({ dispose: () => sessionHost.remove() });
+				const sessionEditor = store.add(h.instantiation.createInstance(AdeSessionEditor, upcastPartial<IEditorGroup>({ id: 3 })));
+				sessionEditor.create(sessionHost);
+				await sessionEditor.setInput(sessionInput, undefined, {}, CancellationToken.None);
+
+				const rankPill = sessionHost.querySelector<HTMLElement>('.ade-session-rank-pill')!;
+				assert.strictEqual(rankPill.textContent, 'Code Auditor', 'Session Editor header pill renders dynamic rank name');
+				assert.strictEqual(rankPill.getAttribute('data-tier'), 'L2', 'Session Editor header pill renders dynamic tier L2');
+				assert.strictEqual(cjkRe.test(sessionHost.textContent ?? ''), false, 'Session Editor has 0 CJK in EN mode');
+
+				setAdeDisplayLanguageOverride('zh-cn');
+				assert.ok((sessionHost.textContent ?? '').includes('连接会话...'), 'Session Editor switches cleanly to ZH-CN');
+
+				// B3. Projects View Empty State dynamically reflects 1..N tiers (no hardcoded "across 4 organizational tiers"!)
+				setAdeDisplayLanguageOverride('en');
+				const emptyHarness = createHarness([]);
+				const emptyRoleSchema = store.add(emptyHarness.instantiation.createInstance(AdeRoleSchemaService));
+				await emptyRoleSchema.updateConfig(custom3TierConfig);
+				emptyHarness.instantiation.stub(IAdeRoleSchemaService, emptyRoleSchema);
+				const dummySidebar = new class extends mock<ViewContainer>() { override readonly id = 'test.ade.audit8'; }();
+				emptyHarness.instantiation.stub(IViewDescriptorService, {
+					getViewLocationById: () => ViewContainerLocation.Sidebar,
+					onDidChangeLocation: Event.None,
+					getViewDescriptorById: () => null,
+					getViewContainerByViewId: () => dummySidebar,
+					getDefaultContainerById: () => dummySidebar,
+					getViewContainerModel: () => new class extends mock<IViewContainerModel>() {
+						override readonly title = 'Sessions';
+						override readonly onDidChangeContainerInfo = Event.None;
+					}(),
+					onDidChangeContainer: Event.None,
+				});
+				const pvHost = append(document.body, $('.monaco-workbench.ade-audit8-projects-host'));
+				pvHost.style.width = '280px';
+				pvHost.style.height = '500px';
+				store.add({ dispose: () => pvHost.remove() });
+				const pv = store.add(emptyHarness.instantiation.createInstance(AdeProjectsView, { id: ADE_PROJECTS_VIEW_ID, title: 'Sessions' }));
+				pv.render();
+				pvHost.appendChild(pv.element);
+				pv.setVisible(true);
+				pv.orthogonalSize = 280;
+				pv.layout(500);
+				await pv.refresh();
+
+				const emptyTextEl = pvHost.querySelector<HTMLElement>('.ade-projects-empty-text')!;
+				assert.strictEqual(emptyTextEl.dataset.dynamicTierCount, '3', 'Projects View empty state tracks live dynamic tier count (3)');
+				assert.ok((emptyTextEl.textContent ?? '').includes('3 dynamic organizational tiers') && (emptyTextEl.textContent ?? '').includes('L1 Chief Architect → L2 Code Auditor → L3 Pure Builder'));
+				assert.ok(!(emptyTextEl.textContent ?? '').includes('4 organizational tiers'), 'Projects View empty state no longer hardcodes 4 tiers');
+				assert.strictEqual(cjkRe.test(pvHost.textContent ?? ''), false, 'Projects View has 0 CJK in EN mode');
+
+				setAdeDisplayLanguageOverride('zh-cn');
+				await timeout(10);
+				assert.ok((emptyTextEl.textContent ?? '').includes('3 层动态组织职级'), 'Projects View empty state switches cleanly to ZH-CN');
+				assert.ok((pvHost.textContent ?? '').includes('添加项目文件夹...'));
+			} finally {
+				setAdeDisplayLanguageOverride('auto');
+			}
+		});
+
+		test('Audit #9: Gate card renders inline Approve / Reject quick actions and canvas Gate popover selects any executed upstream rollback target', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const created = missionStore.createMission({
+				title: 'Audit 9 Gate Rollback Mission',
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  A["Design Spec"] --> B["Implement"]',
+					'  B --> C["Verify"]',
+					'  C --> G1{"Release Gate"}',
+					'  G1 --> D["Deploy"]',
+					'  A --> X["Side Branch"]',
+				].join('\n'),
+			});
+			await missionRuntime.start(created.id);
+			const completeActive = async (nodeId: string, summary: string) => {
+				const tok = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === nodeId && t.status === 'active')!;
+				assert.ok(tok, `Expected active token on ${nodeId}`);
+				const res = await missionRuntime.completeToken(created.id, { tokenId: tok.id, summary });
+				assert.strictEqual(res.ok, true, res.error);
+			};
+
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-audit9-gate-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			// Before Gate is reached, inline quick-approval bar stays hidden
+			const inlineBar = host.querySelector<HTMLElement>('[data-ade-gate-inline-actions="G1"]')!;
+			assert.ok(inlineBar, 'Gate card mounts inline approval bar');
+			assert.strictEqual(inlineBar.hidden, true, 'Inline Gate actions are hidden while Gate is idle');
+
+			// Advance A -> B -> C -> G1
+			await completeActive('A', 'Spec ready');
+			await completeActive('B', 'Implementation ready');
+			await completeActive('C', 'All tests green');
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
+
+			// Inline Approve / Reject buttons become visible directly on the Gate card
+			assert.strictEqual(inlineBar.hidden, false, 'Inline Gate Approve/Reject bar appears when Gate enters waiting_gate');
+			const cardApproveBtn = host.querySelector<HTMLButtonElement>('[data-ade-gate-card-approve="G1"]')!;
+			const cardRejectBtn = host.querySelector<HTMLButtonElement>('[data-ade-gate-card-reject="G1"]')!;
+			assert.ok(cardApproveBtn && cardRejectBtn);
+
+			// Dragging the Gate card starting on its inline Approve button must move the card and NOT accidentally approve!
+			cardApproveBtn.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 401, clientX: 300, clientY: 300, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 401, clientX: 335, clientY: 325, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 401, clientX: 335, clientY: 325, bubbles: true }));
+			cardApproveBtn.click();
+			await timeout(20);
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate', 'Dragging from inline Approve button must suppress click and NOT approve Gate');
+
+			// Clean click on inline Reject opens the Gate decision popover with ALL executed upstream reachable targets (A, B, C)
+			cardRejectBtn.click();
+			const rollbackSelect = host.querySelector<HTMLSelectElement>('[data-ade-gate-rollback-select="true"]')!;
+			assert.ok(rollbackSelect, 'Canvas Gate popover renders upstream rollback target dropdown');
+			const optionValues = [...rollbackSelect.options].map(o => o.value);
+			assert.deepStrictEqual(optionValues, ['A', 'B', 'C'], 'Dropdown lists all executed upstream reachable ancestors [A, B, C] and excludes downstream D / side branch X');
+			assert.strictEqual(rollbackSelect.value, 'C', 'Dropdown defaults to direct predecessor C');
+
+			// Choose earliest upstream ancestor A (not direct predecessor C!) + note -> Reject bounces directly to A
+			rollbackSelect.value = 'A';
+			rollbackSelect.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
+			const noteInput = host.querySelector<HTMLInputElement>('[data-ade-gate-note="true"]')!;
+			noteInput.value = 'Re-specify API contract from A';
+			host.querySelector<HTMLButtonElement>('[data-ade-gate-reject="G1"]')!.click();
+			await timeout(30);
+
+			const rtAfterReject = missionRuntime.getRuntimeState(created.id);
+			assert.notStrictEqual(rtAfterReject.nodeStates.G1, 'waiting_gate', 'Rejecting Gate releases waiting_gate');
+			assert.ok(Object.values(rtAfterReject.tokens).some(t => t.nodeId === 'A' && t.status === 'active'), 'Reject with explicit rollbackNodeId=A bounces token directly to A');
+			assert.ok(!Object.values(rtAfterReject.tokens).some(t => t.nodeId === 'C' && t.status === 'active'), 'Token did not default-bounce to direct predecessor C');
+			assert.strictEqual(inlineBar.hidden, true, 'Inline Gate actions hide once Gate leaves waiting_gate');
+
+			// Complete rework chain A -> B -> C -> returns to G1 waiting_gate (without touching sibling X) -> 1-click inline Approve!
+			await completeActive('A', 'Spec v2 revised');
+			await completeActive('B', 'Implementation v2 revised');
+			await completeActive('C', 'Verification v2 green');
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
+			assert.strictEqual(inlineBar.hidden, false, 'Inline Gate actions reappear when rework returns to G1');
+
+			cardApproveBtn.click();
+			await timeout(30);
+			const rtAfterApprove = missionRuntime.getRuntimeState(created.id);
+			assert.strictEqual(rtAfterApprove.nodeStates.G1, 'completed', '1-click inline Approve on Gate card completes Gate');
+			assert.ok(Object.values(rtAfterApprove.tokens).some(t => t.nodeId === 'D' && t.status === 'active'), 'Inline Approve dispatches downstream node D');
+			assert.strictEqual(inlineBar.hidden, true, 'Inline Gate actions hide after approval');
+		});
+
+		test('Audit #11: edge transit glider plays once for 800ms on cross-node hops (no infinite loop / double shadow) and pauses all infinite CSS animations when page or tab is hidden', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const created = missionStore.createMission({
+				title: 'Audit 11 Transit & Visibility Mission',
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  A["Fetch"] --> B["Train"]',
+					'  B --> G1{"Release Gate"}',
+					'  A --> C["Audit"]',
+					'  G1 --> J["Merge"]',
+					'  C --> J',
+				].join('\n'),
+			});
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-audit11-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			const started = await missionRuntime.start(created.id);
+			assert.strictEqual(started.ok, true, started.error);
+			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, 'Entry node mint spawns no incoming edge puck');
+
+			// 1. Live cross-node hop A -> B & A -> C plays a single-shot 800ms edge glide
+			const tokA = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+			const compA = await missionRuntime.completeToken(created.id, { tokenId: tokA.id, summary: 'Fetched dataset' });
+			assert.strictEqual(compA.ok, true, compA.error);
+
+			const edgeAB = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="A"][data-to="B"]')!;
+			const edgeAC = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="A"][data-to="C"]')!;
+			assert.ok(edgeAB.classList.contains('is-token-flowing'), 'Incoming edge A->B briefly enters is-token-flowing right after cross-node hop');
+			assert.ok(edgeAC.classList.contains('is-token-flowing'), 'Incoming edge A->C briefly enters is-token-flowing right after cross-node hop');
+
+			const puckAB = host.querySelector<SVGGElement>(`[data-ade-edge-puck="${edgeAB.getAttribute('data-edge-id')}"]`)!;
+			assert.ok(puckAB, 'Cross-node hop A->B spawns one-shot edge transit puck');
+			assert.strictEqual(puckAB.getAttribute('data-transit-once'), 'true');
+			assert.strictEqual(puckAB.getAttribute('data-transit-duration-ms'), '800');
+			const puckStyle = mainWindow.getComputedStyle(puckAB);
+			assert.strictEqual(puckStyle.animationIterationCount, '1', 'Edge puck animation plays once (never infinite)');
+			assert.strictEqual(puckStyle.animationDuration, '0.8s', 'Edge puck animation duration is 800ms');
+			const edgeABPathStyle = mainWindow.getComputedStyle(edgeAB.querySelector('.ade-mission-edge-path')!);
+			assert.strictEqual(edgeABPathStyle.animationIterationCount, '1', 'Incoming edge flow dash plays once (never infinite)');
+
+			// 2. Block B and advance C -> J (waiting_join), then wait past 800ms: all edge gliders & flowing states MUST clear (zero double shadow!)
+			const tokB = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
+			await missionRuntime.blockToken(created.id, {
+				tokenId: tokB.id,
+				reason: 'Waiting GPU checkpoint',
+				maxDuration: '15m',
+				watchPid: 9101,
+			});
+			const tokC = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'C' && t.status === 'active')!;
+			const compC = await missionRuntime.completeToken(created.id, { tokenId: tokC.id, summary: 'Audit green' });
+			assert.strictEqual(compC.ok, true, compC.error);
+			const edgeCJ = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="C"][data-to="J"]')!;
+			assert.ok(edgeCJ.classList.contains('is-token-flowing'), 'Join arrival C->J plays brief transit immediately after hop');
+
+			await timeout(880);
+			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, 'After 800ms, ALL edge pucks are removed even while B is blocked and J is waiting_join');
+			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), false, 'Blocked incoming edge A->B stops flowing after 800ms');
+			assert.strictEqual(edgeCJ.classList.contains('is-token-flowing'), false, 'Waiting-join incoming edge C->J stops flowing after 800ms');
+			assert.strictEqual(edgeCJ.classList.contains('is-join-arrived'), true, 'Static join-arrived highlight persists cleanly without infinite animation');
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-token-puck="B"]')?.hidden, false, 'Target node B still displays its own docked blocked token puck');
+
+			// Subsequent 1Hz telemetry updates on blocked B must NOT respawn edge gliders or flowing dashes
+			missionRuntime.recordNodeTurnUsage(created.id, 'B', { inputTokens: 1200, outputTokens: 200, totalTokens: 1400, costUsd: 0.02 });
+			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, '1Hz telemetry tick on blocked node does not respawn edge glider');
+			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), false);
+
+			// 3. Complete B -> G1 (waiting_gate): plays one fresh 800ms glide ONLY on B->G1, then clears while G1 stays waiting_gate
+			const compB = await missionRuntime.completeToken(created.id, { tokenId: tokB.id, summary: 'Model trained' });
+			assert.strictEqual(compB.ok, true, compB.error);
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
+			const edgeBG1 = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="B"][data-to="G1"]')!;
+			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 1, 'Only newly crossed edge B->G1 spawns an edge puck');
+			assert.ok(host.querySelector(`[data-ade-edge-puck="${edgeBG1.getAttribute('data-edge-id')}"]`), 'Edge puck belongs to B->G1');
+			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), false, 'Previously settled edge A->B does not replay');
+
+			await timeout(880);
+			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, 'After 800ms, waiting_gate edge puck is removed (no infinite loop on Gate)');
+			assert.strictEqual(edgeBG1.classList.contains('is-token-flowing'), false, 'Waiting-gate incoming edge stops flowing after 800ms');
+
+			// 4. Cold-opening a Mission whose waiting_gate / waiting_join tokens are >800ms old spawns ZERO edge pucks
+			const coldHost = append(document.body, $('.monaco-workbench.ade-audit11-cold-host'));
+			coldHost.style.width = '1280px';
+			coldHost.style.height = '760px';
+			store.add({ dispose: () => coldHost.remove() });
+			const coldInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const coldPane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 2, index: 1 })));
+			coldPane.create(coldHost);
+			coldPane.layout(new Dimension(1280, 760));
+			await coldPane.setInput(coldInput, undefined, {}, CancellationToken.None);
+			assert.strictEqual(coldHost.querySelectorAll('[data-ade-edge-puck]').length, 0, 'Cold-opening stalled/waiting Mission spawns zero stale edge pucks');
+			assert.strictEqual(coldHost.querySelectorAll('.ade-mission-edge-group.is-token-flowing').length, 0, 'Cold-opening stalled/waiting Mission leaves zero edges flowing');
+
+			// 4b. Rework rollback G1 -> A -> B crosses the SAME edge A->B a second time and plays a fresh 800ms glide with a new token id
+			const firstTokenIdAB = puckAB.getAttribute('data-token-id');
+			const rejGate = await missionRuntime.resolveGate(created.id, { nodeId: 'G1', decision: 'reject', rollbackNodeId: 'A', note: 'Re-run A->B' });
+			assert.strictEqual(rejGate.ok, true, rejGate.error);
+			const tokA2 = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+			const compA2 = await missionRuntime.completeToken(created.id, { tokenId: tokA2.id, summary: 'Re-fetched dataset v2' });
+			assert.strictEqual(compA2.ok, true, compA2.error);
+			const puckAB2 = host.querySelector<SVGGElement>(`[data-ade-edge-puck="${edgeAB.getAttribute('data-edge-id')}"]`)!;
+			assert.ok(puckAB2, 'Second hop across the same edge A->B spawns a fresh one-shot puck');
+			assert.notStrictEqual(puckAB2.getAttribute('data-token-id'), firstTokenIdAB, 'Second hop uses new token id and restarts animation');
+			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), true);
+			const tokB2 = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
+			const compB2 = await missionRuntime.completeToken(created.id, { tokenId: tokB2.id, summary: 'Re-trained model v2' });
+			assert.strictEqual(compB2.ok, true, compB2.error);
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
+
+			// 5. Approve G1 -> J becomes active; verify page visibilitychange & setVisible(false) pause ALL infinite CSS animations
+			const resGate = await missionRuntime.resolveGate(created.id, { nodeId: 'G1', decision: 'approve' });
+			assert.strictEqual(resGate.ok, true, resGate.error);
+			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.J, 'active');
+
+			const editorRoot = host.querySelector<HTMLElement>('.ade-mission-editor')!;
+			const activeCoreWell = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="J"] .ade-mission-core-well')!;
+			const activeStateDot = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="J"] .ade-mission-state-dot')!;
+			const runDot = host.querySelector<HTMLElement>('.ade-mission-run-bar .ade-mission-run-dot')!;
+			const pacemakerRing = host.querySelector<HTMLElement>('.ade-mission-port.port-in.is-pacemaker.is-armed .ade-mission-pacemaker-ring.ring-1')!;
+			// Also illuminate a trace-highlighted edge (uses !important animation) to confirm pause overrides it!
+			edgeBG1.classList.add('is-trace-highlighted');
+			const traceEdgePath = edgeBG1.querySelector<SVGPathElement>('.ade-mission-edge-path')!;
+
+			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false);
+			assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'running', 'Active node breath runs while visible');
+			assert.strictEqual(mainWindow.getComputedStyle(activeStateDot).animationPlayState, 'running', 'Active state dot pulses while visible');
+			assert.strictEqual(mainWindow.getComputedStyle(runDot).animationPlayState, 'running', 'Run bar dot pulses while visible');
+			assert.strictEqual(mainWindow.getComputedStyle(pacemakerRing).animationPlayState, 'running', 'Pacemaker ring pulses while visible');
+			assert.strictEqual(mainWindow.getComputedStyle(traceEdgePath).animationPlayState, 'running', 'Trace-highlighted edge flows while visible');
+
+			const doc = editorRoot.ownerDocument;
+			const origHiddenDesc = Object.getOwnPropertyDescriptor(doc, 'hidden');
+			const origVisDesc = Object.getOwnPropertyDescriptor(doc, 'visibilityState');
+			try {
+				Object.defineProperty(doc, 'hidden', { configurable: true, get: () => true });
+				Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => 'hidden' });
+				doc.dispatchEvent(new mainWindow.Event('visibilitychange'));
+
+				assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), true, 'visibilitychange(hidden) sets ade-animations-paused on Mission Canvas');
+				assert.strictEqual(editorRoot.getAttribute('data-animations-paused'), 'true');
+				assert.strictEqual(doc.documentElement.classList.contains('ade-page-hidden'), true, 'visibilitychange(hidden) sets ade-page-hidden on documentElement');
+				assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'paused', 'Active node breath pauses when page is hidden');
+				assert.strictEqual(mainWindow.getComputedStyle(activeStateDot).animationPlayState, 'paused', 'Active state dot pauses when page is hidden');
+				assert.strictEqual(mainWindow.getComputedStyle(runDot).animationPlayState, 'paused', 'Run bar dot pauses when page is hidden');
+				assert.strictEqual(mainWindow.getComputedStyle(pacemakerRing).animationPlayState, 'paused', 'Pacemaker ring pauses when page is hidden');
+				assert.strictEqual(mainWindow.getComputedStyle(traceEdgePath).animationPlayState, 'paused', 'Trace-highlighted edge (!important) pauses when page is hidden');
+
+				Object.defineProperty(doc, 'hidden', { configurable: true, get: () => false });
+				Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => 'visible' });
+				doc.dispatchEvent(new mainWindow.Event('visibilitychange'));
+
+				assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false, 'visibilitychange(visible) resumes Mission Canvas animations');
+				assert.strictEqual(doc.documentElement.classList.contains('ade-page-hidden'), false);
+				assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'running', 'Active node breath resumes when page returns visible');
+			} finally {
+				if (origHiddenDesc) {
+					Object.defineProperty(doc, 'hidden', origHiddenDesc);
+				} else {
+					delete (doc as unknown as { hidden?: boolean }).hidden;
+				}
+				if (origVisDesc) {
+					Object.defineProperty(doc, 'visibilityState', origVisDesc);
+				} else {
+					delete (doc as unknown as { visibilityState?: DocumentVisibilityState }).visibilityState;
+				}
+				doc.dispatchEvent(new mainWindow.Event('visibilitychange'));
+			}
+
+			// 6. Switching away from the Mission editor tab (setVisible(false)) also pauses animations without hiding the OS window
+			pane.setVisible(false);
+			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), true, 'Editor tab backgrounded pauses Mission Canvas animations');
+			assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'paused');
+			pane.setVisible(true);
+			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false, 'Editor tab foregrounded resumes Mission Canvas animations');
+			assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'running');
+
+			// 7. Workbench-wide AdePageVisibilityAnimationGuard pauses global ADE animations even with ZERO Mission panes open!
+			pane.dispose();
+			coldPane.dispose();
+			const globalGuard = store.add(new AdePageVisibilityAnimationGuard());
+			assert.ok(globalGuard);
+			const gDoc = mainWindow.document;
+			const gOrigHidden = Object.getOwnPropertyDescriptor(gDoc, 'hidden');
+			const gOrigVis = Object.getOwnPropertyDescriptor(gDoc, 'visibilityState');
+			try {
+				Object.defineProperty(gDoc, 'hidden', { configurable: true, get: () => true });
+				Object.defineProperty(gDoc, 'visibilityState', { configurable: true, get: () => 'hidden' });
+				gDoc.dispatchEvent(new mainWindow.Event('visibilitychange'));
+				assert.strictEqual(gDoc.documentElement.classList.contains('ade-page-hidden'), true, 'Global visibility guard sets ade-page-hidden even when no Mission pane is open');
+
+				Object.defineProperty(gDoc, 'hidden', { configurable: true, get: () => false });
+				Object.defineProperty(gDoc, 'visibilityState', { configurable: true, get: () => 'visible' });
+				gDoc.dispatchEvent(new mainWindow.Event('visibilitychange'));
+				assert.strictEqual(gDoc.documentElement.classList.contains('ade-page-hidden'), false, 'Global visibility guard clears ade-page-hidden on visible return');
+			} finally {
+				if (gOrigHidden) {
+					Object.defineProperty(gDoc, 'hidden', gOrigHidden);
+				} else {
+					delete (gDoc as unknown as { hidden?: boolean }).hidden;
+				}
+				if (gOrigVis) {
+					Object.defineProperty(gDoc, 'visibilityState', gOrigVis);
+				} else {
+					delete (gDoc as unknown as { visibilityState?: DocumentVisibilityState }).visibilityState;
+				}
+				gDoc.dispatchEvent(new mainWindow.Event('visibilitychange'));
+			}
+		});
+
+		test('Audit #15: wide fan-out obeys multi-level concurrency semaphores, shows live FIFO queue ranks (#1/3..#3/3) on cards, and promotes queued nodes cleanly in place', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const created = missionStore.createMission({
+				title: 'Audit 15 Wide Fan-Out Concurrency Mission',
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  S["Dispatch Root"] --> W1["Worker 1"]',
+					'  S --> W2["Worker 2"]',
+					'  S --> W3["Worker 3"]',
+					'  S --> W4["Worker 4"]',
+					'  S --> W5["Worker 5"]',
+				].join('\n'),
+			});
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const host = append(document.body, $('.monaco-workbench.ade-audit15-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			// Start with maxLocalHost=2 so a 5-way fan-out admits W1 & W2 immediately and queues W3, W4, W5 as #1/3, #2/3, #3/3!
+			const started = await missionRuntime.start(created.id, {
+				concurrencyLimits: { maxGlobal: 8, maxLocalHost: 2, maxPerCloudHost: 2, maxPerProvider: 8 },
+			});
+			assert.strictEqual(started.ok, true, started.error);
+			const tokS = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'S' && t.status === 'active')!;
+			const compS = await missionRuntime.completeToken(created.id, { tokenId: tokS.id, summary: 'Root split 5 parallel jobs' });
+			assert.strictEqual(compS.ok, true, compS.error);
+
+			const rtAfterFanout = missionRuntime.getRuntimeState(created.id);
+			assert.strictEqual(rtAfterFanout.nodeStates.W1, 'active');
+			assert.strictEqual(rtAfterFanout.nodeStates.W2, 'active');
+			assert.strictEqual(rtAfterFanout.nodeStates.W3, 'queued');
+			assert.strictEqual(rtAfterFanout.nodeStates.W4, 'queued');
+			assert.strictEqual(rtAfterFanout.nodeStates.W5, 'queued');
+
+			const statusView = missionRuntime.getMissionStatus(created.id);
+			assert.strictEqual(statusView.activeTokenCount, 2);
+			assert.strictEqual(statusView.queuedTokenCount, 3);
+
+			// Verify Mission Canvas node cards display live FIFO queue ranks #1/3, #2/3, #3/3
+			const cardW3Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="W3"]')!;
+			const cardW4Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="W4"]')!;
+			const cardW5Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="W5"]')!;
+			assert.strictEqual(cardW3Before.getAttribute('data-node-state'), 'queued');
+			assert.strictEqual(cardW3Before.getAttribute('data-node-queue-position'), '1');
+			assert.strictEqual(cardW3Before.getAttribute('data-node-queue-total'), '3');
+			assert.strictEqual(cardW4Before.getAttribute('data-node-queue-position'), '2');
+			assert.strictEqual(cardW5Before.getAttribute('data-node-queue-position'), '3');
+			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W3"]')?.textContent?.includes('#1/3'), 'W3 puck shows queue rank #1/3');
+			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W4"]')?.textContent?.includes('#2/3'), 'W4 puck shows queue rank #2/3');
+			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W5"]')?.textContent?.includes('#3/3'), 'W5 puck shows queue rank #3/3');
+			assert.ok(cardW3Before.querySelector('.ade-mission-core-context')?.textContent?.includes('#1/3'), 'W3 card summary shows queue rank & saturated scope');
+
+			// Complete W1 -> W3 promotes to active in place, W4 shifts #2/3 -> #1/2, W5 shifts #3/3 -> #2/2 (zero DOM teardown!)
+			const tokW1 = Object.values(rtAfterFanout.tokens).find(t => t.nodeId === 'W1' && t.status === 'active')!;
+			const compW1 = await missionRuntime.completeToken(created.id, { tokenId: tokW1.id, summary: 'W1 done' });
+			assert.strictEqual(compW1.ok, true, compW1.error);
+			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="W3"]'), cardW3Before, 'Promotion patches W3 card in place without DOM teardown');
+			assert.strictEqual(cardW3Before.getAttribute('data-node-state'), 'active', 'W3 promoted from queued to active');
+			assert.strictEqual(cardW3Before.getAttribute('data-node-queue-position'), null, 'W3 queue rank cleared upon activation');
+			assert.strictEqual(cardW4Before.getAttribute('data-node-queue-position'), '1', 'W4 shifted up to #1/2');
+			assert.strictEqual(cardW4Before.getAttribute('data-node-queue-total'), '2');
+			assert.strictEqual(cardW5Before.getAttribute('data-node-queue-position'), '2', 'W5 shifted up to #2/2');
+			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W4"]')?.textContent?.includes('#1/2'));
+			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W5"]')?.textContent?.includes('#2/2'));
+
+			// Raising concurrency limit dynamically drains W4 & W5 immediately to active!
+			const raised = await missionRuntime.setConcurrencyLimits(created.id, { maxGlobal: 8, maxLocalHost: 4, maxPerCloudHost: 2, maxPerProvider: 8 });
+			assert.strictEqual(raised.ok, true, raised.error);
+			const rtAfterRaise = missionRuntime.getRuntimeState(created.id);
+			assert.strictEqual(rtAfterRaise.nodeStates.W4, 'active');
+			assert.strictEqual(rtAfterRaise.nodeStates.W5, 'active');
+			assert.strictEqual(missionRuntime.getMissionStatus(created.id).queuedTokenCount, 0);
+			assert.strictEqual(cardW4Before.getAttribute('data-node-state'), 'active');
+			assert.strictEqual(cardW5Before.getAttribute('data-node-state'), 'active');
+		});
+
+		test('Audit #18: separates cold per-Mission files from lightweight hot index, migrates legacy v1 blob, and renders multi-run FinOps comparison ledger', async () => {
+			setAdeDisplayLanguageOverride('en');
+			store.add({ dispose: () => setAdeDisplayLanguageOverride(undefined) });
+
+			const h = createHarness([alpha]);
+			const storageService = h.instantiation.get(IStorageService);
+
+			// 1. Seed a legacy single-key v1 blob and attach a cold-file backend stub
+			const coldFiles = new Map<string, string>();
+			const savedCalls: Array<{ missionId: string; writerId?: string }> = [];
+			const onColdChange = store.add(new Emitter<{ readonly missionId: string; readonly updatedAt: number; readonly deleted?: boolean; readonly writerId?: string }>());
+			h.instantiation.stub(IAdeEngineeringBackendService, upcastPartial<IAdeEngineeringBackendService>({
+				onDidMissionRecordChange: onColdChange.event,
+				loadInbox: async () => [],
+				saveInbox: async () => undefined,
+				loadMissionRecord: async id => coldFiles.get(id),
+				loadAllMissionRecords: async () => Object.fromEntries(coldFiles.entries()),
+				saveMissionRecord: async (id, json, updatedAt, writerId) => {
+					coldFiles.set(id, json);
+					savedCalls.push({ missionId: id, writerId });
+					onColdChange.fire({ missionId: id, updatedAt, writerId });
+				},
+				deleteMissionRecord: async (id, writerId) => {
+					coldFiles.delete(id);
+					onColdChange.fire({ missionId: id, updatedAt: Date.now(), deleted: true, writerId });
+				},
+			}));
+			storageService.store(ADE_MISSIONS_LEGACY_STORAGE_KEY, JSON.stringify([
+				{
+					id: 'legacy-m1',
+					title: 'Legacy Migrated Mission',
+					mermaidText: 'flowchart LR\n  A["Plan"] --> B["Ship"]',
+					positions: { A: { x: 10, y: 20 } },
+					ownerTier: -1,
+					createdAt: 1_000,
+					updatedAt: 2_000,
+				},
+			]), StorageScope.APPLICATION, StorageTarget.USER);
+
+			const storeA = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			await storeA.whenHydrated();
+
+			// Legacy single-key blob migrated to independent cold file and purged from globalState!
+			assert.strictEqual(storeA.getMission('legacy-m1')?.title, 'Legacy Migrated Mission');
+			assert.ok(coldFiles.has('legacy-m1'), 'Legacy mission migrated to its own cold file');
+			assert.strictEqual(storageService.get(ADE_MISSIONS_LEGACY_STORAGE_KEY, StorageScope.APPLICATION), undefined, 'Legacy monolithic v1 blob removed after migration');
+
+			// Creating & mutating Mission 2 only writes Mission 2's cold file (NEVER touches legacy-m1!)
+			const m2 = storeA.createMission({
+				id: 'cold-m2',
+				title: 'Multi-Run Mission',
+				mermaidText: 'flowchart LR\n  A["Analyze"] --> B["Build"]',
+				projectUri: alpha.toString(),
+			});
+			const savesBefore = savedCalls.length;
+			storeA.renameMission(m2.id, 'Multi-Run Tuned');
+			const newlySaved = savedCalls.slice(savesBefore).map(c => c.missionId);
+			assert.deepStrictEqual(newlySaved, ['cold-m2'], 'Mutating m2 only writes m2 cold file without touching legacy-m1');
+
+			// Hot index in IStorageService contains ONLY lightweight metadata (ZERO Mermaid/tokens/traces!)
+			const hotIndexRaw = storageService.get(ADE_MISSIONS_INDEX_STORAGE_KEY, StorageScope.APPLICATION)!;
+			assert.ok(hotIndexRaw && !hotIndexRaw.includes('flowchart LR'), 'Hot index must NOT inline Mermaid DAG or heavy payloads');
+			assert.strictEqual(storageService.get(`${ADE_MISSION_RECORD_STORAGE_PREFIX}${m2.id}`, StorageScope.APPLICATION), undefined, 'Cold payload lives on disk, not duplicated in IStorageService');
+
+			// Window B hydrates from cold files and receives targeted single-Mission updates on change
+			const storeB = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			await storeB.whenHydrated();
+			assert.strictEqual(storeB.getMission(m2.id)?.title, 'Multi-Run Tuned');
+			storeA.updateNodePrompt(m2.id, 'A', 'Use cached AST summary');
+			await new Promise(resolve => setTimeout(resolve, 25));
+			assert.strictEqual(storeB.getMission(m2.id)?.nodePrompts?.A, 'Use cached AST summary');
+
+			// 2. FinOps Ledger UI renders archived multi-run history & comparison delta across re-runs
+			h.instantiation.stub(IAdeMissionService, storeA);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			const runStart1 = await missionRuntime.start(m2.id);
+			assert.strictEqual(runStart1.ok, true, runStart1.error);
+			missionRuntime.recordNodeTurnUsage(m2.id, 'A', { inputTokens: 30_000, outputTokens: 15_000, totalTokens: 45_000, costUsd: 1.0, turns: 2, model: 'claude-opus-4-6', engineId: 'claude' });
+			await missionRuntime.stop(m2.id);
+
+			// Re-run #2 archives Run #1 ($1.00) and records cheaper Run #2 ($0.40)
+			const runStart2 = await missionRuntime.start(m2.id);
+			assert.strictEqual(runStart2.ok, true, runStart2.error);
+			missionRuntime.recordNodeTurnUsage(m2.id, 'A', { inputTokens: 12_000, outputTokens: 6_000, totalTokens: 18_000, costUsd: 0.4, turns: 1, model: 'claude-sonnet-4-6', engineId: 'claude' });
+			const rt2 = missionRuntime.getRuntimeState(m2.id);
+			assert.strictEqual(rt2.runHistory?.length, 1, 'Run #1 archived in runHistory');
+			assert.strictEqual(rt2.runHistory![0].totalCostUsd, 1.0);
+
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, m2.id));
+			const host = append(document.body, $('.monaco-workbench.ade-audit18-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			// Open FinOps Ledger tab via Node Inspector
+			pane.focusNode('A', { inspectorTab: 'finops' });
+			const historySection = host.querySelector<HTMLElement>('[data-ade-finops-run-history="true"]')!;
+			assert.ok(historySection && !historySection.hidden, 'Run History & Multi-Run Comparison section is visible');
+			const deltaBanner = host.querySelector<HTMLElement>('[data-ade-finops-run-delta="true"]')!;
+			assert.ok(deltaBanner && !deltaBanner.hidden);
+			assert.ok(deltaBanner.textContent?.includes('Run #2 vs Run #1'), `Expected Run #2 vs Run #1 delta, got: ${deltaBanner.textContent}`);
+			assert.ok(deltaBanner.textContent?.includes('-$0.60 (-60%)'), `Expected -$0.60 (-60%) savings delta, got: ${deltaBanner.textContent}`);
+			assert.ok(host.querySelector('[data-ade-finops-run-row="1"][data-selected-baseline="true"]'), 'Archived Run #1 selected as comparison baseline');
+		});
+
+		test('renders true per-model context windows on idle/active cards and lights up crimson rework noise segment on tool-error & review rejection turns (Audit #24)', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/gov-audit24') }, 'Gov Audit24', { role: 'governor' });
+			const mission = missionStore.createMission({
+				title: 'Context Window & Noise Audit24',
+				ownerSessionId: gov.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  N1["@DeepWorker: Code"] --> R1["@GeminiRev: Review"]',
+				].join('\n'),
+			});
+			await missionRuntime.setBoundary(mission.id, {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: gov.id, tier: 1, managedNodeIds: ['N1', 'R1'] }],
+			});
+			const rtInit = missionRuntime.getRuntimeState(mission.id);
+			const n1AgentId = rtInit.boundary.nodeAssignments.N1?.agentId!;
+			const r1AgentId = rtInit.boundary.nodeAssignments.R1?.agentId!;
+			h.projects.updateAgentEnginePreferences(n1AgentId, { preferredEngineId: 'aexus-dsh', preferredModel: 'deepseek-r1' });
+			h.projects.updateAgentEnginePreferences(r1AgentId, { preferredEngineId: 'aexus-antigravity', preferredModel: 'gemini-2.5-pro' });
+			await missionRuntime.bindNodeHost(mission.id, 'R1', { roleKind: 'reviewer' });
+
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
+			const host = append(document.body, $('.monaco-workbench.ade-audit24-host'));
+			host.style.width = '1360px';
+			host.style.height = '820px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1360, 820));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			// 1. Idle cards display true per-model windows (64k for deepseek-r1, 1.0M for gemini-2.5-pro — NOT 200k!)
+			const n1Card = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
+			const r1Card = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="R1"]')!;
+			const n1CtxRow = n1Card.querySelector<HTMLElement>('.ade-mission-ctx-row')!;
+			const r1CtxRow = r1Card.querySelector<HTMLElement>('.ade-mission-ctx-row')!;
+			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-max'), '64000');
+			assert.strictEqual(n1Card.querySelector('.ade-mission-ctx-tokens')?.textContent, '0/64k');
+			assert.strictEqual(r1CtxRow.getAttribute('data-node-context-max'), '1000000');
+			assert.strictEqual(r1Card.querySelector('.ade-mission-ctx-tokens')?.textContent, '0/1.0M');
+
+			// 2. Active 64k model hitting 58k tokens triggers critical severity (91%) instead of being masked at 29%
+			await missionRuntime.start(mission.id);
+			missionRuntime.recordNodeTurnUsage(mission.id, 'N1', {
+				inputTokens: 42_000,
+				outputTokens: 6_000,
+				model: 'deepseek-r1',
+				engineId: 'aexus-dsh',
+			});
+			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-max'), '64000');
+			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-pct'), '75');
+			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-noise-pct'), '0');
+
+			// 3. Tool-error turn (WITHOUT passing isNoiseTurn!) lights up the crimson noise segment on card & Inspector!
+			missionRuntime.recordNodeTurnUsage(mission.id, 'N1', {
+				inputTokens: 8_000,
+				outputTokens: 2_000,
+				hadToolError: true,
+				toolErrorCount: 1,
+				model: 'deepseek-r1',
+				engineId: 'aexus-dsh',
+			});
+			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-pct'), '91');
+			assert.ok(n1CtxRow.classList.contains('severity-critical'), '64k model at 58k tokens must render critical severity');
+			const cardNoisePct = Number(n1CtxRow.getAttribute('data-node-context-noise-pct'));
+			assert.ok(cardNoisePct >= 15, `Expected crimson noise segment >=15%, got ${cardNoisePct}%`);
+			const cardNoiseSeg = n1Card.querySelector<HTMLElement>('.ade-ctx-seg.seg-noise')!;
+			assert.ok(Number.parseFloat(cardNoiseSeg.style.width) > 0, `Card crimson noise segment width must be > 0%, got ${cardNoiseSeg.style.width}`);
+
+			// 4. Open Node Inspector -> Distill tab reflects real 64k window & crimson noise segment
+			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerup', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+			host.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="distill"]')!.click();
+			const distillBadge = host.querySelector<HTMLElement>('[data-ade-distill-context-max]')!;
+			assert.strictEqual(distillBadge.getAttribute('data-ade-distill-context-max'), '64000');
+			assert.ok(Number(distillBadge.getAttribute('data-ade-distill-noise-pct')) >= 15);
+			const distillNoiseSeg = host.querySelector<HTMLElement>('.ade-mission-ni-thermal-track .ade-ctx-seg.seg-noise')!;
+			assert.ok(Number.parseFloat(distillNoiseSeg.style.width) > 0, 'Inspector Distill tab crimson noise bar must be > 0%');
+
+			// 5. Distill & Refresh clears crimson rework noise back to 0%
+			await missionRuntime.distillNodeContext(mission.id, 'N1', { memo: 'Reset after tool error' });
+			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-noise-pct'), '0');
+			assert.strictEqual(Number.parseFloat(cardNoiseSeg.style.width), 0);
+		});
+
+		test('Audit #19: attributes delayed turn usage accurately across multi-node @Employee reuse (zero fallback to first node) and isolates parallel & blocked @Employee sessions', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const dispatchedCalls: Array<{
+				readonly resource: string;
+				readonly agentId?: string;
+				readonly missionId?: string;
+				readonly nodeId?: string;
+				readonly tokenId?: string;
+				readonly turnId?: string;
+				readonly resolve: (res?: { readonly reply?: string; readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number; readonly costUsd?: number; readonly turns?: number } }) => void;
+			}> = [];
+			h.instantiation.stub(ICommandService, {
+				onWillExecuteCommand: Event.None,
+				onDidExecuteCommand: Event.None,
+				executeCommand: async <T>(id: string, ...args: unknown[]): Promise<T> => {
+					if (id === 'aexus.agentEngines.dispatchEngineeringTurn') {
+						const opts = args[2] as {
+							readonly agentId?: string;
+							readonly missionId?: string;
+							readonly nodeId?: string;
+							readonly tokenId?: string;
+							readonly turnId?: string;
+						} | undefined;
+						return await new Promise<T>(resolve => {
+							dispatchedCalls.push({
+								resource: String(args[0] ?? ''),
+								agentId: opts?.agentId,
+								missionId: opts?.missionId,
+								nodeId: opts?.nodeId,
+								tokenId: opts?.tokenId,
+								turnId: opts?.turnId,
+								resolve: res => resolve(res as T),
+							});
+						});
+					}
+					return undefined as T;
+				},
+			});
+
+			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/gov-audit19') }, 'Gov Audit19', { role: 'governor' });
+
+			// ── Part A: Sequential multi-node @Alice reuse & delayed billing attribution ──
+			const seqMission = missionStore.createMission({
+				title: 'Reused Employee Billing Audit19',
+				ownerSessionId: gov.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  N1["@Alice: Spec"] --> N2["@Alice: Implement"]',
+					'  N2 --> N3["@Alice: Polish"]',
+				].join('\n'),
+			});
+			await missionRuntime.setBoundary(seqMission.id, {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: gov.id, tier: 1, managedNodeIds: ['N1', 'N2', 'N3'] }],
+			});
+			const aliceAgentId = missionRuntime.getRuntimeState(seqMission.id).boundary.nodeAssignments.N1?.agentId!;
+			const aliceSessionUri = URI.parse('aexus-claude:/alice-audit19');
+			h.projects.bindSession(aliceAgentId, { engineId: 'aexus-claude', resource: aliceSessionUri });
+
+			await missionRuntime.start(seqMission.id);
+			await timeout(10);
+			assert.strictEqual(dispatchedCalls.length, 1);
+			const turn1 = dispatchedCalls[0];
+			assert.strictEqual(turn1.nodeId, 'N1');
+			assert.ok(turn1.turnId && turn1.tokenId, 'Dispatch binds immutable turnId and tokenId');
+
+			// Employee completes N1 mid-turn (releasing N1 and activating N2) BEFORE Turn 1 finishes!
+			await missionRuntime.completeToken(seqMission.id, { tokenId: turn1.tokenId!, summary: 'Spec done' });
+			await timeout(10);
+			// Even though N2 is now active in engine state, Turn 2 MUST wait in per-agent queue until Turn 1 finishes
+			assert.strictEqual(dispatchedCalls.length, 1, 'Turn 2 waits for in-flight Turn 1 to finish');
+
+			// Delayed interim usage arriving via sessionResource (NO turnId) while Turn 1 is still in flight lands on N1 (NOT N2!)
+			missionRuntime.recordTurnUsageBySessionResource(aliceSessionUri.toString(), {
+				inputTokens: 4_000,
+				outputTokens: 1_000,
+				costUsd: 0.11,
+				turns: 0,
+			});
+			assert.strictEqual(missionRuntime.getRuntimeState(seqMission.id).nodeTelemetry?.N1?.costUsd, 0.11);
+			assert.strictEqual(missionRuntime.getRuntimeState(seqMission.id).nodeTelemetry?.N2, undefined);
+
+			// Finish Turn 1 -> records final Turn 1 usage to N1 BEFORE releasing slot to flush Turn 2 on N2!
+			turn1.resolve({ reply: 'Spec finished', usage: { inputTokens: 2_000, outputTokens: 500, costUsd: 0.09, turns: 1 } });
+			await timeout(15);
+			assert.strictEqual(missionRuntime.getRuntimeState(seqMission.id).nodeTelemetry?.N1?.costUsd, 0.2);
+			assert.strictEqual(dispatchedCalls.length, 2, 'Turn 2 flushes cleanly onto N2 after Turn 1 settles');
+			const turn2 = dispatchedCalls[1];
+			assert.strictEqual(turn2.nodeId, 'N2');
+			assert.ok(turn2.turnId && turn2.turnId !== turn1.turnId);
+
+			// Late callback carrying Turn 1's immutable turnId STILL bills N1 even while N2 is running!
+			missionRuntime.recordTurnUsageBySessionResource(aliceSessionUri.toString(), {
+				inputTokens: 1_000,
+				outputTokens: 200,
+				costUsd: 0.05,
+				turns: 0,
+			}, { turnId: turn1.turnId });
+			assert.strictEqual(missionRuntime.getRuntimeState(seqMission.id).nodeTelemetry?.N1?.costUsd, 0.25);
+			assert.strictEqual(missionRuntime.getRuntimeState(seqMission.id).nodeTelemetry?.N2, undefined);
+
+			// Complete N2, finish Turn 2 -> dispatches N3
+			await missionRuntime.completeToken(seqMission.id, { tokenId: turn2.tokenId!, summary: 'Impl done' });
+			turn2.resolve({ reply: 'Impl done', usage: { inputTokens: 8_000, outputTokens: 2_000, costUsd: 0.4, turns: 1 } });
+			await timeout(15);
+			assert.strictEqual(missionRuntime.getRuntimeState(seqMission.id).nodeTelemetry?.N2?.costUsd, 0.4);
+			assert.strictEqual(dispatchedCalls.length, 3);
+			const turn3 = dispatchedCalls[2];
+			assert.strictEqual(turn3.nodeId, 'N3');
+
+			// Interactive turn binding on N3: beginInteractiveTurn -> complete N3 (Mission becomes 'completed') -> delayed usage bills N3, NEVER N1!
+			const interactiveBinding = missionRuntime.beginInteractiveTurn!(aliceSessionUri.toString());
+			assert.strictEqual(interactiveBinding?.nodeId, 'N3');
+			await missionRuntime.completeToken(seqMission.id, { tokenId: turn3.tokenId!, summary: 'Polish done' });
+			turn3.resolve({ reply: 'Polish done', usage: { inputTokens: 3_000, outputTokens: 800, costUsd: 0.15, turns: 1 } });
+			await timeout(15);
+			assert.strictEqual(missionRuntime.getRuntimeState(seqMission.id).status, 'completed');
+
+			// Delayed interactive callback with turnId after Mission completed -> bills N3 accurately!
+			missionRuntime.recordTurnUsageBySessionResource(aliceSessionUri.toString(), {
+				inputTokens: 2_000,
+				outputTokens: 600,
+				costUsd: 0.35,
+				turns: 1,
+			}, { turnId: interactiveBinding!.turnId });
+			missionRuntime.endInteractiveTurn!(interactiveBinding!.turnId);
+
+			// Delayed legacy callback WITHOUT turnId arriving 50ms after N3 completed -> STILL bills N3 (NEVER falls back to N1 = assignedNodes[0]!)
+			missionRuntime.recordTurnUsageBySessionResource(aliceSessionUri.toString(), {
+				inputTokens: 1_500,
+				outputTokens: 500,
+				costUsd: 0.2,
+				turns: 0,
+			});
+			const finalSeqRt = missionRuntime.getRuntimeState(seqMission.id);
+			assert.strictEqual(finalSeqRt.nodeTelemetry?.N1?.costUsd, 0.25, 'N1 must NEVER absorb delayed bills from N2 or N3');
+			assert.strictEqual(finalSeqRt.nodeTelemetry?.N2?.costUsd, 0.4, 'N2 keeps exact N2 spend');
+			assert.strictEqual(finalSeqRt.nodeTelemetry?.N3?.costUsd, 0.7, 'N3 absorbs all N3 turns & delayed callbacks ($0.15 + $0.35 + $0.20)');
+
+			// ── Part B: Parallel & Blocked @Employee Exclusive Queueing + Canvas UI ──
+			const parMission = missionStore.createMission({
+				title: 'Parallel Reuse Isolation Audit19',
+				ownerSessionId: gov.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  S["@Lead: Split"] --> A["@Alice: Backend"]',
+					'  S --> B["@Alice: Frontend"]',
+					'  A --> J["@Lead: Join"]',
+					'  B --> J',
+				].join('\n'),
+			});
+			await missionRuntime.setBoundary(parMission.id, {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: gov.id, tier: 1, managedNodeIds: ['S', 'A', 'B', 'J'] }],
+			});
+			for (const emp of missionStore.getGeneratedEmployees(parMission.id)) {
+				h.projects.bindSession(emp.id, { engineId: 'aexus-claude', resource: URI.parse(`aexus-claude:/${emp.id}`) });
+			}
+
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, parMission.id));
+			const host = append(document.body, $('.monaco-workbench.ade-audit19-host'));
+			host.style.width = '1360px';
+			host.style.height = '820px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1360, 820));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			const dispatchesBeforePar = dispatchedCalls.length;
+			await missionRuntime.start(parMission.id);
+			await timeout(10);
+			const sTok = Object.values(missionRuntime.getRuntimeState(parMission.id).tokens).find(t => t.nodeId === 'S' && t.status === 'active')!;
+			await missionRuntime.completeToken(parMission.id, { tokenId: sTok.id, summary: 'Forked' });
+			dispatchedCalls[dispatchesBeforePar]?.resolve({ reply: 'Split done' });
+			await timeout(15);
+
+			// Only Branch A is dispatched & active; Branch B is queued with data-node-queue-reason="employee"
+			const parRt1 = missionRuntime.getRuntimeState(parMission.id);
+			const tokA = Object.values(parRt1.tokens).find(t => t.nodeId === 'A')!;
+			const tokB = Object.values(parRt1.tokens).find(t => t.nodeId === 'B')!;
+			assert.strictEqual(tokA.status, 'active');
+			assert.strictEqual(tokB.status, 'queued');
+			assert.strictEqual(tokB.queued?.blockedBy, 'employee');
+			assert.strictEqual(
+				dispatchedCalls.slice(dispatchesBeforePar).filter(d => d.nodeId === 'B').length,
+				0,
+				'Branch B must NOT dispatch onto @Alice session while Branch A is active',
+			);
+			const cardB = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="B"]')!;
+			assert.strictEqual(cardB.getAttribute('data-node-queue-reason'), 'employee');
+			assert.ok(cardB.querySelector('.ade-mission-core-context')?.textContent?.includes('@Alice'), 'Queued card explains waiting on @Alice');
+
+			// Block Branch A -> Branch B MUST stay queued & NOT contaminate @Alice's suspended session!
+			// Also verify beginInteractiveTurn binds accurately to blocked Branch A while it is suspended.
+			await missionRuntime.blockToken(parMission.id, { tokenId: tokA.id, reason: 'Waiting for build artifact', maxDuration: '30m', watchFile: '/tmp/a.out' });
+			dispatchedCalls.find(d => d.missionId === parMission.id && d.nodeId === 'A')?.resolve({ reply: 'Blocked on build' });
+			await timeout(15);
+			const parAliceId = missionRuntime.getRuntimeState(parMission.id).boundary.nodeAssignments.A?.agentId!;
+			const blockedInteractive = missionRuntime.beginInteractiveTurn!(parAliceId);
+			assert.strictEqual(blockedInteractive?.nodeId, 'A', 'Interactive turn while Branch A is blocked binds to Branch A');
+			missionRuntime.endInteractiveTurn!(blockedInteractive!.turnId);
+			assert.strictEqual(missionRuntime.getRuntimeState(parMission.id).tokens[tokB.id].status, 'queued', 'Branch B stays queued while Branch A is blocked');
+			assert.strictEqual(
+				dispatchedCalls.slice(dispatchesBeforePar).filter(d => d.nodeId === 'B').length,
+				0,
+				'Branch B must NOT hijack @Alice session during Branch A blocked wait',
+			);
+
+			// Complete Branch A -> Branch B immediately promotes from queued -> active and dispatches!
+			await missionRuntime.completeToken(parMission.id, { tokenId: tokA.id, summary: 'Backend ready' });
+			await timeout(15);
+			assert.strictEqual(missionRuntime.getRuntimeState(parMission.id).tokens[tokB.id].status, 'active');
+			assert.strictEqual(
+				dispatchedCalls.slice(dispatchesBeforePar).filter(d => d.nodeId === 'B').length,
+				1,
+				'Branch B dispatches cleanly once Branch A finishes and releases @Alice',
+			);
+			for (const call of dispatchedCalls) {
+				call.resolve({ reply: 'cleanup' });
+			}
+		});
+
+		test('patches Mission node bottom-left engine pill SVG icon in place once extensions register (never stuck on Codicon.hubot)', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const onEnginesChanged = store.add(new Emitter<void>());
+			let agyIcon: URI | undefined = undefined;
+			const darkAgySvg = URI.file('/ext/aexus-agents/resources/antigravity-dark.svg');
+			const lightAgySvg = URI.file('/ext/aexus-agents/resources/antigravity-light.svg');
+			h.instantiation.stub(IAdeSessionsService, upcastPartial<IAdeSessionsService>({
+				onDidChangeEngines: onEnginesChanged.event,
+				getIcon: (engineId: string) => engineId === 'aexus-antigravity' ? agyIcon : undefined,
+				getEngineName: (engineId: string) => engineId === 'aexus-antigravity' ? 'Google Antigravity' : engineId,
+				getEngines: async () => agyIcon
+					? [{ id: 'aexus-antigravity', name: 'Google Antigravity', description: 'Antigravity', icon: agyIcon }]
+					: [],
+			}));
+
+			const mission = missionStore.createMission({
+				title: 'Engine Icon Hot Patch',
+				projectUri: alpha.toString(),
+				mermaidText: 'flowchart LR\n  N1["@Lead: Review"]',
+			});
+			const n1AgentId = missionRuntime.getRuntimeState(mission.id).boundary.nodeAssignments.N1?.agentId!;
+			h.projects.updateAgentEnginePreferences(n1AgentId, { preferredEngineId: 'aexus-antigravity', preferredModel: 'gemini-2.5-pro' });
+
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
+			const host = append(document.body, $('.monaco-workbench.ade-engine-icon-patch-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+
+			const n1CardBefore = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
+			const iconElBefore = n1CardBefore.querySelector<HTMLElement>('.ade-mission-engine-pill .ade-mission-engine-icon')!;
+			assert.ok(iconElBefore.classList.contains('codicon-hubot'), 'Initial pre-registration fallback renders hubot');
+
+			// Extension finishes registering -> onDidChangeEngines fires -> icon upgrades in place from hubot to antigravity-dark.svg!
+			agyIcon = darkAgySvg;
+			onEnginesChanged.fire();
+			const n1CardAfter = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
+			const iconElAfter = n1CardAfter.querySelector<HTMLElement>('.ade-mission-engine-pill .ade-mission-engine-icon')!;
+			assert.strictEqual(n1CardAfter, n1CardBefore, 'Icon upgrade patches in place without rebuilding node DOM');
+			assert.ok(!iconElAfter.classList.contains('codicon-hubot'), 'Hubot fallback must be cleared once brand SVG is registered');
+...[truncated for diff preview]

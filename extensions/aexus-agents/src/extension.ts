@@ -75,6 +75,7 @@ import {
 	setHostWindowId,
 } from './runtime';
 import { SessionTurnCoordinator } from './turnCoordinator';
+import { createStreamToolErrorScanner, detectToolErrorInProgressText, detectToolErrorInStreamPart } from './usageTracker';
 
 const execFileAsync = promisify(cp.execFile);
 const roleBridge = installNativeRoleBridge({ distDir: __dirname });
@@ -2177,6 +2178,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 		const turnCancellation = lease.cts;
 		let link: vscode.Disposable | undefined;
+		let interactiveTurnBinding: {
+			readonly turnId?: string;
+			readonly missionId?: string;
+			readonly nodeId?: string;
+			readonly tokenId?: string;
+		} | undefined;
 		try {
 			link = token.onCancellationRequested(() => turnCancellation.cancel());
 			if (token.isCancellationRequested) {
@@ -2293,9 +2300,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const callerRole = isSecretary
 				? 'secretary'
 				: (!snapEntry?.isOrchestrated && !isMissionNode ? undefined : snapEntry?.rank);
+			// Snapshot the active Mission node & mint an immutable turnId BEFORE engine.send(...) starts so that
+			// if the employee runs `token complete` mid-turn, delayed interim/final usage still bills the exact node.
+			interactiveTurnBinding = !isSecretary && isMissionNode
+				? await Promise.resolve(vscode.commands.executeCommand<{
+					readonly turnId?: string;
+					readonly missionId?: string;
+					readonly nodeId?: string;
+					readonly tokenId?: string;
+				} | undefined>('aexus.ade.engineering.beginInteractiveTurn', {
+					sessionResource: sessionUri.toString(),
+					agentId: snapEntry?.id,
+				})).catch(() => undefined)
+				: undefined;
 			let contextCompactedDuringTurn = false;
 			const interactiveInjectedContract = (!alreadyInitializedForRank || pendingDeltaContext !== undefined) ? trimmedInjected : undefined;
-			const interactiveReportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+			const interactiveReportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, costUsd: 0 };
+			let interactiveToolErrorCount = 0;
 			let lastInteractiveInterimAt = 0;
 			const reportInteractiveInterimUsage = isSecretary ? undefined : (cumulative: EngineTurnTokenUsage) => {
 				const now = Date.now();
@@ -2318,6 +2339,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				interactiveReportedSoFar.cacheReadTokens += delta.cacheReadTokens;
 				interactiveReportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
 				interactiveReportedSoFar.totalTokens += delta.totalTokens;
+				let deltaCostUsd: number | undefined;
+				if (typeof cumulative.costUsd === 'number' && Number.isFinite(cumulative.costUsd) && cumulative.costUsd > interactiveReportedSoFar.costUsd) {
+					deltaCostUsd = Math.round((cumulative.costUsd - interactiveReportedSoFar.costUsd) * 1_000_000) / 1_000_000;
+					interactiveReportedSoFar.costUsd = cumulative.costUsd;
+				}
 				const segments = computeMeasuredContextSegments({
 					injectedContractText: interactiveInjectedContract,
 					rawPrompt: userPromptWithRefs,
@@ -2325,9 +2351,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					usage: cumulative,
 					isFirstTurn: !alreadyInitializedForRank,
 				});
+				const effectiveToolErrors = Math.max(interactiveToolErrorCount, cumulative.toolErrorCount ?? 0);
+				const effectiveModel = cumulative.model || (cfg?.model && cfg.model !== 'default' ? cfg.model : undefined);
 				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
 					sessionResource: sessionUri.toString(),
-					usage: { ...delta, ...segments, model: cfg?.model && cfg.model !== 'default' ? cfg.model : undefined, turns: 0 },
+					agentId: snapEntry?.id,
+					...(interactiveTurnBinding?.turnId ? { turnId: interactiveTurnBinding.turnId } : {}),
+					...(interactiveTurnBinding?.missionId ? { missionId: interactiveTurnBinding.missionId } : {}),
+					...(interactiveTurnBinding?.nodeId ? { nodeId: interactiveTurnBinding.nodeId } : {}),
+					...(interactiveTurnBinding?.tokenId ? { tokenId: interactiveTurnBinding.tokenId } : {}),
+					usage: {
+						...delta,
+						...segments,
+						...(deltaCostUsd !== undefined ? { costUsd: deltaCostUsd } : {}),
+						...(effectiveToolErrors > 0 || cumulative.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, effectiveToolErrors) } : {}),
+						model: effectiveModel,
+						engineId: record.engine,
+						turns: 0,
+					},
 				})).catch(() => undefined);
 			};
 			const sendOptions = toSendOptions(cfg, {
@@ -2417,6 +2458,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					stream.markdown(safeOut);
 				}
 			};
+			const interactiveErrorScanner = createStreamToolErrorScanner();
 			const proxyTarget: vscode.ChatResponseStream = Object.create(null);
 			const wrappedStream: vscode.ChatResponseStream = new Proxy(proxyTarget, {
 				get(_dummy, prop) {
@@ -2424,6 +2466,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						return (value: string | vscode.MarkdownString) => {
 							const chunkText = typeof value === 'string' ? value : value.value;
 							if (chunkText) {
+								if (interactiveErrorScanner.scan(chunkText)) {
+									interactiveToolErrorCount += 1;
+								}
 								roundMarkdown += chunkText;
 								emitHeartbeat();
 							}
@@ -2453,9 +2498,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					}
 					if (prop === 'progress') {
 						return (value: string) => {
+							if (detectToolErrorInProgressText(value)) {
+								interactiveToolErrorCount += 1;
+							}
 							emitHeartbeat();
 							emitThrottledCloudRefresh();
 							stream.progress(value);
+						};
+					}
+					if (prop === 'push') {
+						return (part: vscode.ChatResponsePart) => {
+							if (detectToolErrorInStreamPart(part)) {
+								interactiveToolErrorCount += 1;
+							}
+							emitHeartbeat();
+							stream.push(part);
 						};
 					}
 					const val = Reflect.get(stream, prop, stream);
@@ -2518,6 +2575,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					usage: turnUsage,
 					isFirstTurn: !alreadyInitializedForRank,
 				});
+				const finalCostUsd = typeof turnUsage.costUsd === 'number' && Number.isFinite(turnUsage.costUsd)
+					? Math.max(0, Math.round((turnUsage.costUsd - interactiveReportedSoFar.costUsd) * 1_000_000) / 1_000_000)
+					: undefined;
+				const finalInteractiveToolErrors = Math.max(interactiveToolErrorCount, turnUsage.toolErrorCount ?? 0);
 				const finalDeltaUsage = {
 					inputTokens: Math.max(0, turnUsage.inputTokens - interactiveReportedSoFar.inputTokens),
 					outputTokens: Math.max(0, turnUsage.outputTokens - interactiveReportedSoFar.outputTokens),
@@ -2526,11 +2587,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					totalTokens: Math.max(0, turnUsage.totalTokens - interactiveReportedSoFar.totalTokens),
 					...segments,
 					durationMs: turnUsage.durationMs,
-					costUsd: turnUsage.costUsd,
+					...(finalCostUsd !== undefined ? { costUsd: finalCostUsd } : {}),
+					...(finalInteractiveToolErrors > 0 || turnUsage.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, finalInteractiveToolErrors) } : {}),
+					model: turnUsage.model || (cfg?.model && cfg.model !== 'default' ? cfg.model : undefined),
+					engineId: record.engine,
 					turns: 1,
 					estimated: turnUsage.estimated,
 				};
-				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', { sessionResource: sessionUri.toString(), usage: finalDeltaUsage })).catch(() => undefined);
+				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
+					sessionResource: sessionUri.toString(),
+					agentId: snapEntry?.id,
+					...(interactiveTurnBinding?.turnId ? { turnId: interactiveTurnBinding.turnId } : {}),
+					...(interactiveTurnBinding?.missionId ? { missionId: interactiveTurnBinding.missionId } : {}),
+					...(interactiveTurnBinding?.nodeId ? { nodeId: interactiveTurnBinding.nodeId } : {}),
+					...(interactiveTurnBinding?.tokenId ? { tokenId: interactiveTurnBinding.tokenId } : {}),
+					usage: finalDeltaUsage,
+				})).catch(() => undefined);
 			}
 
 			if (streamedMarkdown.trim()) {
@@ -2576,6 +2648,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 			throw error;
 		} finally {
+			if (interactiveTurnBinding?.turnId) {
+				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.endInteractiveTurn', { turnId: interactiveTurnBinding.turnId })).catch(() => undefined);
+			}
 			lease.markSettling();
 			link?.dispose();
 			turnCancellation.dispose();
@@ -3338,6 +3413,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				agentId?: string;
 				missionId?: string;
 				nodeId?: string;
+				tokenId?: string;
+				turnId?: string;
 				model?: string;
 				thinking?: EngineThinkingLevel;
 				pureWorker?: boolean;
@@ -3439,6 +3516,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					}
 				};
 
+				let headlessToolErrorCount = 0;
+				const headlessErrorScanner = createStreamToolErrorScanner();
 				const headlessStreamTarget: vscode.ChatResponseStream = Object.create(null);
 				const headlessStream: vscode.ChatResponseStream = new Proxy(headlessStreamTarget, {
 					get(_dummy, prop) {
@@ -3446,13 +3525,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 							return (value: string | vscode.MarkdownString) => {
 								const textChunk = typeof value === 'string' ? value : value.value;
 								if (textChunk) {
+									if (headlessErrorScanner.scan(textChunk)) {
+										headlessToolErrorCount += 1;
+									}
 									streamedMarkdown += textChunk;
 									emitHeartbeat();
 								}
 							};
 						}
 						if (prop === 'progress') {
-							return () => {
+							return (value?: string) => {
+								if (typeof value === 'string' && detectToolErrorInProgressText(value)) {
+									headlessToolErrorCount += 1;
+								}
+								emitHeartbeat();
+							};
+						}
+						if (prop === 'push') {
+							return (part: unknown) => {
+								if (detectToolErrorInStreamPart(part)) {
+									headlessToolErrorCount += 1;
+								}
 								emitHeartbeat();
 							};
 						}
@@ -3462,7 +3555,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 				const turnStartedAt = Date.now();
 				const headlessInjectedContract = (!alreadyInit || headlessPendingDelta !== undefined) ? headlessTrimmedInjected : undefined;
-				const reportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+				const reportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, costUsd: 0 };
 				let lastInterimReportAt = 0;
 				const reportInterimUsage = (cumulative: EngineTurnTokenUsage) => {
 					const now = Date.now();
@@ -3485,6 +3578,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					reportedSoFar.cacheReadTokens += delta.cacheReadTokens;
 					reportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
 					reportedSoFar.totalTokens += delta.totalTokens;
+					let deltaCostUsd: number | undefined;
+					if (typeof cumulative.costUsd === 'number' && Number.isFinite(cumulative.costUsd) && cumulative.costUsd > reportedSoFar.costUsd) {
+						deltaCostUsd = Math.round((cumulative.costUsd - reportedSoFar.costUsd) * 1_000_000) / 1_000_000;
+						reportedSoFar.costUsd = cumulative.costUsd;
+					}
 					const segments = computeMeasuredContextSegments({
 						injectedContractText: headlessInjectedContract,
 						rawPrompt,
@@ -3492,12 +3590,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						usage: cumulative,
 						isFirstTurn: !alreadyInit,
 					});
+					const effectiveHeadlessToolErrors = Math.max(headlessToolErrorCount, cumulative.toolErrorCount ?? 0);
+					const effectiveModel = cumulative.model || (rawOptions?.model && rawOptions.model !== 'default' ? rawOptions.model : undefined);
 					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
 						sessionResource: uri.toString(),
 						agentId: rawOptions?.agentId,
 						missionId: rawOptions?.missionId,
 						nodeId: rawOptions?.nodeId,
-						usage: { ...delta, ...segments, model: rawOptions?.model, turns: 0 },
+						tokenId: rawOptions?.tokenId,
+						turnId: rawOptions?.turnId,
+						usage: {
+							...delta,
+							...segments,
+							...(deltaCostUsd !== undefined ? { costUsd: deltaCostUsd } : {}),
+							...(effectiveHeadlessToolErrors > 0 || cumulative.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, effectiveHeadlessToolErrors) } : {}),
+							model: effectiveModel,
+							engineId: record.engine,
+							turns: 0,
+						},
 					})).catch(() => undefined);
 				};
 				finalizeTurnUsage = (engine: EngineRuntime, replyText: string) => {
@@ -3509,6 +3619,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						usage: finalUsage,
 						isFirstTurn: !alreadyInit,
 					});
+					const finalCostUsd = typeof finalUsage.costUsd === 'number' && Number.isFinite(finalUsage.costUsd)
+						? Math.max(0, Math.round((finalUsage.costUsd - reportedSoFar.costUsd) * 1_000_000) / 1_000_000)
+						: undefined;
+					const finalToolErrors = Math.max(headlessToolErrorCount, finalUsage.toolErrorCount ?? 0);
 					return {
 						inputTokens: Math.max(0, finalUsage.inputTokens - reportedSoFar.inputTokens),
 						outputTokens: Math.max(0, finalUsage.outputTokens - reportedSoFar.outputTokens),
@@ -3517,7 +3631,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						totalTokens: Math.max(0, finalUsage.totalTokens - reportedSoFar.totalTokens),
 						...segments,
 						durationMs: finalUsage.durationMs,
-						costUsd: finalUsage.costUsd,
+						...(finalCostUsd !== undefined ? { costUsd: finalCostUsd } : {}),
+						...(finalToolErrors > 0 || finalUsage.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, finalToolErrors) } : {}),
+						model: finalUsage.model || (rawOptions?.model && rawOptions.model !== 'default' ? rawOptions.model : undefined),
+						engineId: record.engine,
 						turns: 1,
 						estimated: finalUsage.estimated,
 					};
@@ -3858,27 +3975,41 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	});
 
+	let bindingSyncInFlight = false;
+	let bindingSyncPending = false;
 	const syncExternalBindingsIntoSnapshot = async () => {
-		const current = roleBridge.getSnapshot();
-		if (!current.agents.length) {
+		if (bindingSyncInFlight) {
+			bindingSyncPending = true;
 			return;
 		}
-		const enriched = await enrichRoleSnapshot(current);
-		const changed = enriched.agents.some((entry, idx) => entry.nativeSessionId !== current.agents[idx]?.nativeSessionId);
-		if (changed) {
-			await roleBridge.updateSnapshot(enriched);
+		bindingSyncInFlight = true;
+		try {
+			do {
+				bindingSyncPending = false;
+				const current = roleBridge.getSnapshot();
+				if (!current.agents.length) {
+					continue;
+				}
+				const enriched = await enrichRoleSnapshot(current);
+				const changed = enriched.agents.some((entry, idx) => entry.nativeSessionId !== current.agents[idx]?.nativeSessionId);
+				if (changed) {
+					await roleBridge.updateSnapshot(enriched);
+				}
+			} while (bindingSyncPending);
+		} finally {
+			bindingSyncInFlight = false;
 		}
 	};
 
-	const bindingSyncTimer = setInterval(() => {
+	// Event-driven fs.watch on role-bridge binding files (replaces legacy 1Hz idle disk polling timer).
+	const stopBindingWatcher = roleBridge.watchExternalBindings(() => {
 		void syncExternalBindingsIntoSnapshot();
-	}, 1000);
-	bindingSyncTimer.unref?.();
+	});
 
 	context.subscriptions.push(
 		{
 			dispose: () => {
-				clearInterval(bindingSyncTimer);
+				stopBindingWatcher();
 				roleBridge.dispose();
 				clearCloudTransportCaches();
 			},

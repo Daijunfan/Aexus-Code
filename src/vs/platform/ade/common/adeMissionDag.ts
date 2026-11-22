@@ -25,14 +25,22 @@ export { getEmployeeColorIndex, normalizeMissionEmployeeKey, setNodeEmployeeInMe
 export {
 	addEdgeToMermaid,
 	addNodeToMermaid,
+	computeNodeDragSnapAlignment,
 	generateNextMissionNodeId,
-	MISSION_DAG_TEMPLATES,
+	MissionCanvasHistoryStack,
 	removeEdgeFromMermaid,
 	removeNodeFromMermaid,
+	removeNodesFromMermaid,
+	renameEdgeLabelInMermaid,
 	renameNodeInMermaid,
 	toggleEdgeFailInMermaid,
 } from './adeMissionDagAuthoring.js';
-export type { IMissionDagTemplate } from './adeMissionDagAuthoring.js';
+export type {
+	IMissionAlignGuide,
+	IMissionAlignRect,
+	IMissionCanvasHistorySnapshot,
+	IMissionSnapAlignmentResult,
+} from './adeMissionDagAuthoring.js';
 
 export type MissionDagDirection = 'LR' | 'TD';
 export type MissionDagNodeKind = 'task' | 'gate' | 'cluster';

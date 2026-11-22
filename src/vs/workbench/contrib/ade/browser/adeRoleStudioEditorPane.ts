@@ -11,6 +11,7 @@ import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
+import { formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
 import {
 	ADE_ORGANIZATION_PRESETS,
 	ADE_PRIMITIVE_APIS,
@@ -54,6 +55,7 @@ import {
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { ADE_ROLE_STUDIO_SCHEME, IAdeProjectsService } from '../common/ade.js';
+import { adeBi, onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 
 export function resolveAdeRankCodicon(icon: AdeRankIconToken | string | undefined): ThemeIcon {
@@ -121,7 +123,7 @@ export class AdeRoleStudioEditorInput extends EditorInput {
 	}
 
 	override getName(): string {
-		return localize('adeRoleStudioEditorTitle', "Organization & Roles Studio");
+		return adeBi(localize('adeRoleStudioEditorTitle', "Organization & Roles Studio"), '组织架构与角色工坊');
 	}
 
 	override getIcon(): ThemeIcon {
@@ -235,12 +237,14 @@ function tryResolveOptional<T>(instantiationService: IInstantiationService, id: 
 	});
 }
 
-const API_CATEGORY_ORDER: readonly { readonly id: AdePrimitiveApiCategory; readonly title: string }[] = [
-	{ id: 'messaging', title: 'Messaging, Context & Human Inbox' },
-	{ id: 'hierarchy', title: 'Hierarchy & Session Lifecycle' },
-	{ id: 'workspace', title: 'Workspace, Files & Cloud Hosts' },
-	{ id: 'mission', title: 'Mission DAG Workflow' },
-];
+function getApiCategoryList(): readonly { readonly id: AdePrimitiveApiCategory; readonly title: string }[] {
+	return [
+		{ id: 'messaging', title: adeBi(localize('adeRoleCatMessaging', "Messaging, Context & Human Inbox"), '消息通信、上下文与人工收件箱') },
+		{ id: 'hierarchy', title: adeBi(localize('adeRoleCatHierarchy', "Hierarchy & Session Lifecycle"), '组织层级与会话生命周期') },
+		{ id: 'workspace', title: adeBi(localize('adeRoleCatWorkspace', "Workspace, Files & Cloud Hosts"), '工作区、文件与云主机') },
+		{ id: 'mission', title: adeBi(localize('adeRoleCatMission', "Mission DAG Workflow"), '任务流图（Mission DAG）编排') },
+	];
+}
 
 export class AdeRoleStudioEditorPane extends EditorPane {
 	static readonly ID = 'workbench.editor.adeRoleStudio';
@@ -251,6 +255,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 	private readonly projectsService: IAdeProjectsService | undefined;
 	private draft: IMutableOrgDraft;
 	private selectedRankId: string;
+	private previewOffGraphMaxTier = 0;
 	private viewMode: 'editor' | 'matrix' = 'editor';
 	private dirty = false;
 	private isSaving = false;
@@ -291,12 +296,13 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 				this.render();
 			}
 		}));
+		this._register(onDidChangeAdeLocale(() => this.render()));
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
 		this.rootEl = append(parent, $('.ade-role-studio', {
 			role: 'region',
-			'aria-label': localize('adeRoleStudioRegionAria', "Organization & Roles Studio"),
+			'aria-label': adeBi(localize('adeRoleStudioRegionAria', "Organization & Roles Studio"), '组织架构与角色工坊'),
 		}));
 		this._register(addDisposableListener(this.rootEl, EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 's') {
@@ -395,7 +401,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const normalizedRank = normalized.ranks.find(r => r.id === rank.id) ?? rank as IAdeRankDefinition;
 		const preview = previewCompiledRankPrompt(normalized, normalizedRank);
 		this.previewPreEl.textContent = preview.prompt;
-		this.previewTokenPillEl.textContent = localize('adeRoleStudioTokenCount', "~{0} tokens", preview.estimatedTokens);
+		this.previewTokenPillEl.textContent = adeBi(localize('adeRoleStudioTokenCount', "~{0} tokens", preview.estimatedTokens), '约 {0} 令牌', preview.estimatedTokens);
 	}
 
 	private updateSelectedCardMetaInPlace(rank: IMutableRankDraft): void {
@@ -411,8 +417,8 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		ref.nameEl.textContent = rank.name;
 		ref.pillEl.classList.toggle('pure', rank.pureExecution);
 		ref.pillEl.textContent = rank.pureExecution
-			? localize('adeRoleStudioPureLeafPill', "Pure Leaf · 0 APIs")
-			: localize('adeRoleStudioApiCountPill', "{0} Core APIs", rank.allowedApis.length);
+			? adeBi(localize('adeRoleStudioPureLeafPill', "Pure Leaf · 0 APIs"), '纯执行叶节点 · 0 API')
+			: adeBi(localize('adeRoleStudioApiCountPill', "{0} Core APIs", rank.allowedApis.length), '{0} 项内核 API', rank.allowedApis.length);
 		ref.pillEl.title = rank.id;
 	}
 
@@ -461,23 +467,37 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 			this.setDirty(false);
 			this.render();
 			this.notificationService.info(migratedCount > 0
-				? localize(
-					'adeRoleStudioSavedMigrated',
-					"Saved ADE organization schema ({0} rank(s)) and migrated {1} live session(s) to updated rank IDs.",
+				? adeBi(
+					localize(
+						'adeRoleStudioSavedMigrated',
+						"Saved ADE organization schema ({0} rank(s)) and migrated {1} live session(s) to updated rank IDs.",
+						normalized.ranks.length,
+						migratedCount,
+					),
+					'已保存组织职级架构（共 {0} 层），并将 {1} 个活跃会话迁移至新职级 ID。',
 					normalized.ranks.length,
 					migratedCount,
 				)
-				: localize(
-					'adeRoleStudioSaved',
-					"Saved ADE organization schema ({0} rank(s)) to Settings. All prompts, sidebar badges, and kernel API permissions are now live.",
+				: adeBi(
+					localize(
+						'adeRoleStudioSaved',
+						"Saved ADE organization schema ({0} rank(s)) to Settings. All prompts, sidebar badges, and kernel API permissions are now live.",
+						normalized.ranks.length,
+					),
+					'已将组织职级架构（共 {0} 层）保存至设置，所有提示词、侧边栏徽章与内核 API 权限已实时生效。',
 					normalized.ranks.length,
 				));
 			return true;
 		} catch (err) {
-			this.notificationService.error(localize(
-				'adeRoleStudioSaveFailed',
-				"Failed to save ADE organization settings: {0}",
-				err instanceof Error ? err.message : String(err),
+			const errMsg = err instanceof Error ? err.message : String(err);
+			this.notificationService.error(adeBi(
+				localize(
+					'adeRoleStudioSaveFailed',
+					"Failed to save ADE organization settings: {0}",
+					errMsg,
+				),
+				'保存组织架构设置失败：{0}',
+				errMsg,
 			));
 			return false;
 		} finally {
@@ -507,12 +527,16 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const newRank: IMutableRankDraft = {
 			originalId: id,
 			id,
-			name: localize('adeNewCustomRankName', "Custom Rank {0}", idx),
+			name: adeBi(localize('adeNewCustomRankName', "Custom Rank {0}", idx), '自定义职级 {0}', idx),
 			shortName: `R${idx}`,
 			tier: maxTier + 1,
 			color: colors[idx % colors.length],
 			icon: 'person',
-			summary: `L${maxTier + 1} Custom Rank: Fill in role responsibilities and allowed APIs.`,
+			summary: adeBi(
+				localize('adeNewCustomRankSummary', "L{0} Custom Rank: Fill in role responsibilities and allowed APIs.", maxTier + 1),
+				'L{0} 自定义职级：请填写该角色的职责说明与允许调用的内核 API。',
+				maxTier + 1,
+			),
 			initPrompt: 'You are {{rank.tier}} **{{rank.name}}** in **{{project.name}}** under {{supervisor.label}}.\nState your key responsibilities, review criteria, and boundaries here.',
 			pureExecution: false,
 			canHaveSubordinates: true,
@@ -542,7 +566,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 
 	private deleteRank(rankId: string): void {
 		if (this.draft.ranks.length <= 1) {
-			this.notificationService.warn(localize('adeRoleStudioMinOneRank', "At least one rank is required in the organization."));
+			this.notificationService.warn(adeBi(localize('adeRoleStudioMinOneRank', "At least one rank is required in the organization."), '组织架构至少需要保留一个职级。'));
 			return;
 		}
 		this.draft.ranks = this.draft.ranks.filter(r => r.id !== rankId);
@@ -568,27 +592,30 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 	private renderPermissionMatrix(body: HTMLElement): void {
 		const matrixWrap = append(body, $('.ade-rs-matrix-wrap', {
 			role: 'tabpanel',
-			'aria-label': localize('adeRoleStudioMatrixPanelAria', "Rank by Kernel API Permission Matrix"),
+			'aria-label': adeBi(localize('adeRoleStudioMatrixPanelAria', "Rank by Kernel API Permission Matrix"), '职级与内核 API 权限矩阵'),
 		}));
 		const matrixCard = append(matrixWrap, $('.ade-rs-card'));
 		const head = append(matrixCard, $('.ade-rs-card-head'));
 		const title = append(head, $('h3.ade-rs-card-title'));
-		append(title, $('span', {}, localize('adeRoleStudioMatrixTitle', "Rank × Fixed Kernel API Permission Matrix")));
-		append(head, $('span.ade-rs-kernel-badge', {}, localize('adeRoleStudioKernelLocked', "Fixed Kernel Primitives · Runtime Enforced")));
-		append(matrixCard, $('p.ade-rs-card-hint', {}, localize(
-			'adeRoleStudioMatrixHint',
-			"Audit and toggle kernel primitive API grants across every rank in one view. Pure Execution leaf ranks are permanently locked to 0 APIs; High Privilege APIs are highlighted in rose.",
+		append(title, $('span', {}, adeBi(localize('adeRoleStudioMatrixTitle', "Rank × Fixed Kernel API Permission Matrix"), '动态职级 × 固定内核 API 权限矩阵')));
+		append(head, $('span.ade-rs-kernel-badge', {}, adeBi(localize('adeRoleStudioKernelLocked', "Fixed Kernel Primitives · Runtime Enforced"), '固定内核原语 · 运行期强制鉴权')));
+		append(matrixCard, $('p.ade-rs-card-hint', {}, adeBi(
+			localize(
+				'adeRoleStudioMatrixHint',
+				"Audit and toggle kernel primitive API grants across every rank in one view. Pure Execution leaf ranks are permanently locked to 0 APIs; High Privilege APIs are highlighted in rose.",
+			),
+			'在一个视图中集中审计并开关每个动态职级的内核原语权限。纯执行叶节点永久锁定为 0 API；高权限操作以玫红色高亮标出。',
 		)));
 
 		const sortedRanks = [...this.draft.ranks].sort((a, b) => a.tier - b.tier);
 		const tableScroll = append(matrixCard, $('.ade-rs-matrix-scroll'));
 		const table = append(tableScroll, $('table.ade-rs-matrix-table', {
 			role: 'grid',
-			'aria-label': localize('adeRoleStudioMatrixTableAria', "Permission Matrix"),
+			'aria-label': adeBi(localize('adeRoleStudioMatrixTableAria', "Permission Matrix"), '权限矩阵'),
 		}));
 		const thead = append(table, $('thead'));
 		const headRow = append(thead, $('tr'));
-		append(headRow, $('th.ade-rs-matrix-api-col', { scope: 'col' }, localize('adeRoleStudioMatrixApiCol', "Fixed Kernel Primitive API")));
+		append(headRow, $('th.ade-rs-matrix-api-col', { scope: 'col' }, adeBi(localize('adeRoleStudioMatrixApiCol', "Fixed Kernel Primitive API"), '固定内核原语 API')));
 
 		const countBadgesByRank = new Map<string, HTMLElement>();
 		for (const rank of sortedRanks) {
@@ -600,13 +627,13 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 			append(colHead, $('span.ade-rs-tier-badge', {}, `L${rank.tier}`));
 			append(colHead, $('span.ade-rs-matrix-rank-name', {}, rank.name));
 			const countEl = append(colHead, $(`span.ade-rs-rank-pill${rank.pureExecution ? '.pure' : ''}`, {}, rank.pureExecution
-				? localize('adeRoleStudioMatrixPureShort', "Pure · 0")
+				? adeBi(localize('adeRoleStudioMatrixPureShort', "Pure · 0"), '纯执行 · 0')
 				: `${rank.allowedApis.length}/${ADE_PRIMITIVE_APIS.length}`));
 			countBadgesByRank.set(rank.id, countEl);
 		}
 
 		const tbody = append(table, $('tbody'));
-		for (const cat of API_CATEGORY_ORDER) {
+		for (const cat of getApiCategoryList()) {
 			const catApis = ADE_PRIMITIVE_APIS.filter(api => api.category === cat.id);
 			if (catApis.length === 0) {
 				continue;
@@ -623,7 +650,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 				append(apiTop, $('span.ade-rs-api-label', {}, api.label));
 				append(apiTop, $('code.ade-rs-api-id', {}, api.id));
 				if (api.dangerous) {
-					append(apiTop, $('span.ade-rs-api-danger', {}, localize('adeRoleApiHighPriv', "High Privilege")));
+					append(apiTop, $('span.ade-rs-api-danger', {}, adeBi(localize('adeRoleApiHighPriv', "High Privilege"), '高权限')));
 				}
 				append(apiCell, $('div.ade-rs-api-desc', {}, api.description));
 
@@ -632,7 +659,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 					const td = append(row, $(`td.ade-rs-matrix-cell${isChecked ? '.granted' : ''}${rank.pureExecution ? '.pure-locked' : ''}`));
 					const cb = append(td, $('input.ade-rs-matrix-cb', {
 						type: 'checkbox',
-						'aria-label': localize('adeRoleStudioMatrixCellAria', "Grant {0} ({1}) to {2}", api.label, api.id, rank.name),
+						'aria-label': adeBi(localize('adeRoleStudioMatrixCellAria', "Grant {0} ({1}) to {2}", api.label, api.id, rank.name), '向 {2} 授予 {0}（{1}）', api.label, api.id, rank.name),
 					})) as HTMLInputElement;
 					cb.checked = isChecked;
 					cb.disabled = rank.pureExecution;
@@ -672,18 +699,21 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const headerTop = append(header, $('.ade-rs-header-top'));
 		const titleGroup = append(headerTop, $('.ade-rs-title-group'));
 		const titleRow = append(titleGroup, $('.ade-rs-title-row'));
-		append(titleRow, $('h2.ade-rs-title', {}, localize('adeRoleStudioHeaderTitle', "Organization & Roles Studio")));
-		append(titleRow, $('span.ade-rs-philosophy-pill', {}, localize('adeRoleStudioPhilosophyBadge', "Everything is Extensible")));
-		this.dirtyPillEl = append(titleRow, $('span.ade-rs-dirty-pill', { 'aria-live': 'polite' }, localize('adeRoleStudioUnsavedBadge', "Unsaved Changes")));
+		append(titleRow, $('h2.ade-rs-title', {}, adeBi(localize('adeRoleStudioHeaderTitle', "Organization & Roles Studio"), '组织架构与角色工坊')));
+		append(titleRow, $('span.ade-rs-philosophy-pill', {}, adeBi(localize('adeRoleStudioPhilosophyBadge', "Everything is Extensible"), '万物皆可扩展')));
+		this.dirtyPillEl = append(titleRow, $('span.ade-rs-dirty-pill', { 'aria-live': 'polite' }, adeBi(localize('adeRoleStudioUnsavedBadge', "Unsaved Changes"), '未保存更改')));
 		this.dirtyPillEl.hidden = !this.dirty;
-		append(titleGroup, $('p.ade-rs-subtitle', {}, localize(
-			'adeRoleStudioSubtitle',
-			"Design your own multi-agent hierarchy like filling in the blanks: define ranks, author each rank's initialization prompt, and grant fixed Aexus-Code kernel API permissions.",
+		append(titleGroup, $('p.ade-rs-subtitle', {}, adeBi(
+			localize(
+				'adeRoleStudioSubtitle',
+				"Design a unified dynamic 1..N agent hierarchy for Projects, Sessions, and Mission v2: define ranks, preview the Off-Graph vs. In-Graph Factory Wall (offGraphMaxTier), author init prompts, and grant fixed kernel APIs.",
+			),
+			'统一设计项目树、会话与任务图 v2 的 1..N 动态职级体系：自定义任意层级、预览厂外监工与厂内执行边界（offGraphMaxTier）、编写初始化提示词并配置固定内核 API 权限。',
 		)));
 
 		const toolbar = append(headerTop, $('.ade-rs-toolbar', {
 			role: 'toolbar',
-			'aria-label': localize('adeRoleStudioToolbarAria', "Role Studio Actions"),
+			'aria-label': adeBi(localize('adeRoleStudioToolbarAria', "Role Studio Actions"), '角色工坊操作栏'),
 		}));
 		const addToolbarBtn = (label: string, icon: ThemeIcon, cls: string, onClick: () => void, disabled = false) => {
 			const btn = append(toolbar, $(`button.ade-rs-btn${cls ? `.${cls}` : ''}`, { type: 'button', 'aria-label': label })) as HTMLButtonElement;
@@ -695,31 +725,31 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 			return btn;
 		};
 
-		addToolbarBtn(localize('adeRoleStudioSave', "Save to Settings"), Codicon.check, 'primary', () => {
+		addToolbarBtn(adeBi(localize('adeRoleStudioSave', "Save to Settings"), '保存至设置'), Codicon.check, 'primary', () => {
 			void this.saveDraft();
 		});
-		this.revertBtnEl = addToolbarBtn(localize('adeRoleStudioRevert', "Revert"), Codicon.history, '', () => {
+		this.revertBtnEl = addToolbarBtn(adeBi(localize('adeRoleStudioRevert', "Revert"), '撤销修改'), Codicon.history, '', () => {
 			void this.revertDraft();
 		}, !this.dirty);
-		addToolbarBtn(localize('adeRoleStudioReset', "Reset Default"), Codicon.discard, '', () => {
+		addToolbarBtn(adeBi(localize('adeRoleStudioReset', "Reset Default"), '恢复默认'), Codicon.discard, '', () => {
 			this.draft = cloneToDraft(DEFAULT_ADE_ORGANIZATION_CONFIG);
 			this.prePureSnapshots.clear();
 			this.selectedRankId = this.draft.ranks[0]?.id ?? 'governor';
 			this.markDirty(false);
 			this.render();
 		});
-		addToolbarBtn(localize('adeRoleStudioCopyJson', "Copy JSON"), Codicon.copy, '', () => {
+		addToolbarBtn(adeBi(localize('adeRoleStudioCopyJson', "Copy JSON"), '复制 JSON'), Codicon.copy, '', () => {
 			const json = JSON.stringify(draftToConfig(this.draft), null, 2);
 			void this.clipboardService.writeText(json).then(() => {
-				this.notificationService.info(localize('adeRoleStudioCopied', "Copied organization schema JSON to clipboard."));
+				this.notificationService.info(adeBi(localize('adeRoleStudioCopied', "Copied organization schema JSON to clipboard."), '已复制组织架构 JSON 到剪贴板。'));
 			});
 		});
-		const importBtn = addToolbarBtn(localize('adeRoleStudioImportJson', "Import JSON"), Codicon.cloudUpload, '', () => {
+		const importBtn = addToolbarBtn(adeBi(localize('adeRoleStudioImportJson', "Import JSON"), '导入 JSON'), Codicon.cloudUpload, '', () => {
 			this.importBarVisible = !this.importBarVisible;
 			this.render();
 		});
 		importBtn.setAttribute('aria-expanded', String(this.importBarVisible));
-		addToolbarBtn(localize('adeRoleStudioOpenSettingsJson', "settings.json"), Codicon.json, '', () => {
+		addToolbarBtn(adeBi(localize('adeRoleStudioOpenSettingsJson', "settings.json"), '打开 settings.json'), Codicon.json, '', () => {
 			void this.commandService.executeCommand('workbench.action.openSettingsJson');
 		});
 
@@ -727,9 +757,9 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const controlsBar = append(header, $('.ade-rs-controls-bar'));
 		const presetsRow = append(controlsBar, $('.ade-rs-presets-row', {
 			role: 'group',
-			'aria-label': localize('adeRoleStudioPresetsAria', "Starter Organization Presets"),
+			'aria-label': adeBi(localize('adeRoleStudioPresetsAria', "Starter Organization Presets"), '预设组织架构模板'),
 		}));
-		append(presetsRow, $('span.ade-rs-presets-label', {}, localize('adeRoleStudioPresetsLabel', "Starter Presets:")));
+		append(presetsRow, $('span.ade-rs-presets-label', {}, adeBi(localize('adeRoleStudioPresetsLabel', "Starter Presets:"), '预设模板：')));
 		for (const preset of ADE_ORGANIZATION_PRESETS) {
 			const isActive = this.draft.presetId === preset.id;
 			const chip = append(presetsRow, $('button.ade-rs-preset-chip', {
@@ -749,7 +779,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 
 		const viewToggle = append(controlsBar, $('.ade-rs-view-toggle', {
 			role: 'tablist',
-			'aria-label': localize('adeRoleStudioViewModeAria', "Role Studio View"),
+			'aria-label': adeBi(localize('adeRoleStudioViewModeAria', "Role Studio View"), '工坊视图模式'),
 		}));
 		const addViewTab = (mode: 'editor' | 'matrix', label: string, icon: ThemeIcon) => {
 			const active = this.viewMode === mode;
@@ -769,24 +799,115 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 				}
 			}));
 		};
-		addViewTab('editor', localize('adeRoleStudioViewEditor', "Rank Editor"), Codicon.edit);
-		addViewTab('matrix', localize('adeRoleStudioViewMatrix', "Permission Matrix"), Codicon.table);
+		addViewTab('editor', adeBi(localize('adeRoleStudioViewEditor', "Rank Editor"), '职级编辑器'), Codicon.edit);
+		addViewTab('matrix', adeBi(localize('adeRoleStudioViewMatrix', "Permission Matrix"), '权限矩阵'), Codicon.table);
 
-		// Work-Tree DAG 4-Slot Mapping Bar (P1-02)
+		// Primary Mission v2 Dynamic 1..N Tiers & Factory Wall (offGraphMaxTier) Alignment Bar
 		const normalizedForSlots = draftToConfig(this.draft);
 		const sortedSlotRanks = [...this.draft.ranks].sort((a, b) => a.tier - b.tier);
+		const maxWallCutoff = Math.max(0, sortedSlotRanks.length - 1);
+		if (this.previewOffGraphMaxTier > maxWallCutoff) {
+			this.previewOffGraphMaxTier = maxWallCutoff;
+		}
+		const wallBar = append(header, $('.ade-rs-factory-wall-bar', {
+			role: 'group',
+			'aria-label': adeBi(localize('adeRoleStudioWallBarAria', "Mission v2 Dynamic Ranks and Factory Wall Alignment"), '任务图 v2 动态职级与厂内外分界线预览'),
+			'data-ade-rs-factory-wall-bar': 'true',
+			'data-dynamic-rank-count': String(sortedSlotRanks.length),
+			'data-off-graph-max-tier': String(this.previewOffGraphMaxTier),
+		}));
+		const wallHead = append(wallBar, $('.ade-rs-wall-head'));
+		const wallTitleWrap = append(wallHead, $('.ade-rs-wall-title-wrap'));
+		append(wallTitleWrap, $('span.ade-rs-wall-v2-badge', {}, adeBi(localize('adeRoleStudioWallV2Tag', "Mission v2 · 1..{0} Dynamic Tiers", sortedSlotRanks.length), '任务图 v2 · 1..{0} 动态职级', sortedSlotRanks.length)));
+		append(wallTitleWrap, $('span.ade-rs-presets-label', {}, adeBi(
+			localize('adeRoleStudioWallBarTitle', "Factory Wall (offGraphMaxTier) — Off-Graph Supervisors vs. In-Graph Executors"),
+			'厂内外分界线（offGraphMaxTier）— 图外监工层 vs 图内执行层',
+		)));
+
+		const wallCutoffWrap = append(wallHead, $('label.ade-rs-wall-cutoff-control'));
+		append(wallCutoffWrap, $('span', {}, adeBi(localize('adeRoleStudioWallCutoffLabel', "Preview Cutoff:"), '预览分界线：')));
+		const wallCutoffSelect = append(wallCutoffWrap, $('select.ade-rs-select.ade-rs-wall-cutoff-select', {
+			'data-ade-rs-wall-cutoff': 'true',
+			'aria-label': adeBi(localize('adeRoleStudioWallCutoffAria', "Preview Factory Wall offGraphMaxTier cutoff"), '预览厂外监工职级上限'),
+		})) as HTMLSelectElement;
+		for (let k = 0; k <= maxWallCutoff; k++) {
+			const opt = append(wallCutoffSelect, $('option', { value: String(k) }, k === 0
+				? adeBi(localize('adeRoleStudioWallOptL0', "L0 only (Secretary)"), '仅 L0（秘书监工）')
+				: adeBi(localize('adeRoleStudioWallOptLk', "L0..L{0} off-graph", k), 'L0..L{0} 图外监工', k),
+			)) as HTMLOptionElement;
+			opt.selected = k === this.previewOffGraphMaxTier;
+		}
+		this.renderDisposables.add(addDisposableListener(wallCutoffSelect, EventType.CHANGE, () => {
+			const parsed = Number.parseInt(wallCutoffSelect.value, 10);
+			if (Number.isInteger(parsed) && parsed >= 0) {
+				this.previewOffGraphMaxTier = Math.min(maxWallCutoff, parsed);
+				this.render();
+			}
+		}));
+
+		const wallLanes = append(wallBar, $('.ade-rs-wall-lanes'));
+		const offGraphLane = append(wallLanes, $('.ade-rs-wall-lane.off-graph', { 'data-ade-rs-wall-zone': 'off-graph' }));
+		append(offGraphLane, $('.ade-rs-wall-lane-label', {}, adeBi(
+			localize('adeRoleStudioOffGraphLaneLabel', "Off-Graph Supervisors (L0..L{0})", this.previewOffGraphMaxTier),
+			'厂外监工层（L0..L{0} · 不上流程图）',
+			this.previewOffGraphMaxTier,
+		)));
+		const offGraphChips = append(offGraphLane, $('.ade-rs-wall-chips'));
+		append(offGraphChips, $('span.ade-rs-wall-chip.is-secretary', { 'data-wall-tier': '0' }, adeBi(localize('adeRoleStudioWallL0Chip', "L0 · Secretary"), 'L0 · 秘书')));
+		for (const r of sortedSlotRanks.filter(rank => rank.tier <= this.previewOffGraphMaxTier)) {
+			append(offGraphChips, $('span.ade-rs-wall-chip', { 'data-wall-tier': String(r.tier), 'data-wall-rank-id': r.id }, `${formatTierTag(r.tier)} · ${r.name}`));
+		}
+
+		const inGraphRanks = sortedSlotRanks.filter(rank => rank.tier > this.previewOffGraphMaxTier);
+		const inGraphLane = append(wallLanes, $('.ade-rs-wall-lane.in-graph', { 'data-ade-rs-wall-zone': 'in-graph' }));
+		const minInTier = inGraphRanks[0]?.tier ?? 1;
+		const maxInTier = inGraphRanks[inGraphRanks.length - 1]?.tier ?? minInTier;
+		append(inGraphLane, $('.ade-rs-wall-lane-label', {}, adeBi(
+			localize('adeRoleStudioInGraphLaneLabel', "In-Graph Mission Nodes (L{0}..L{1})", minInTier, maxInTier),
+			'厂内执行节点（L{0}..L{1} · 流程图上运行）',
+			minInTier,
+			maxInTier,
+		)));
+		const inGraphChips = append(inGraphLane, $('.ade-rs-wall-chips'));
+		for (const r of inGraphRanks) {
+			const chipText = r.pureExecution
+				? `${formatTierTag(r.tier)} · ${r.name} · ${adeBi(localize('adeRoleStudioWallPureTag', "Pure"), '纯执行')}`
+				: `${formatTierTag(r.tier)} · ${r.name}`;
+			append(inGraphChips, $(`span.ade-rs-wall-chip${r.pureExecution ? '.is-pure' : ''}`, {
+				'data-wall-tier': String(r.tier),
+				'data-wall-rank-id': r.id,
+			}, chipText));
+		}
+
+		// Legacy v1 Work-Tree DAG 4-Slot Compatibility Mapping Bar (preserved for backward compatibility)
 		const slotsBar = append(header, $('.ade-rs-slots-bar', {
 			role: 'group',
-			'aria-label': localize('adeRoleStudioSlotsAria', "Work-Tree DAG Slot Mapping"),
+			'aria-label': adeBi(localize('adeRoleStudioSlotsAria', "Legacy Work-Tree DAG Slot Compatibility Mapping"), '旧版工作树槽位兼容映射'),
 		}));
 		const slotsHead = append(slotsBar, $('.ade-rs-slots-head'));
-		append(slotsHead, $('span.ade-rs-presets-label', {}, localize('adeRoleStudioSlotsLabel', "Work-Tree DAG Slots:")));
+		append(slotsHead, $('span.ade-rs-presets-label', {}, adeBi(localize('adeRoleStudioSlotsLabel', "Legacy v1 Slot Compatibility (Optional):"), '旧版 v1 槽位兼容映射（可选）：')));
 		const slotsGrid = append(slotsBar, $('.ade-rs-slots-grid'));
 		const slotDefs: readonly { readonly slot: AdeWorkTreeSlot; readonly label: string; readonly hint: string }[] = [
-			{ slot: 'orchestrator', label: localize('adeRoleSlotOrchestrator', "Orchestrator"), hint: localize('adeRoleSlotOrchestratorHint', "Owns the DAG tree & blueprint") },
-			{ slot: 'segment_owner', label: localize('adeRoleSlotSegmentOwner', "Segment Owner"), hint: localize('adeRoleSlotSegmentOwnerHint', "Secondary review, merge & escalation") },
-			{ slot: 'reviewer', label: localize('adeRoleSlotReviewer', "Adversarial Reviewer"), hint: localize('adeRoleSlotReviewerHint', "Single-node diff & QA verification") },
-			{ slot: 'executor', label: localize('adeRoleSlotExecutor', "Pure Executor"), hint: localize('adeRoleSlotExecutorHint', "Clean coding leaf worker") },
+			{
+				slot: 'orchestrator',
+				label: adeBi(localize('adeRoleSlotOrchestrator', "Orchestrator"), '统筹编排槽'),
+				hint: adeBi(localize('adeRoleSlotOrchestratorHint', "Legacy v1 compatibility: owns the Work-Tree DAG blueprint"), '旧版兼容：负责工作树蓝图编排'),
+			},
+			{
+				slot: 'segment_owner',
+				label: adeBi(localize('adeRoleSlotSegmentOwner', "Segment Owner"), '分段负责槽'),
+				hint: adeBi(localize('adeRoleSlotSegmentOwnerHint', "Legacy v1 compatibility: secondary review, merge & escalation"), '旧版兼容：二次评审、合入与异常升级'),
+			},
+			{
+				slot: 'reviewer',
+				label: adeBi(localize('adeRoleSlotReviewer', "Adversarial Reviewer"), '对抗审稿槽'),
+				hint: adeBi(localize('adeRoleSlotReviewerHint', "Legacy v1 compatibility: single-node diff & QA verification"), '旧版兼容：单节点 Diff 与质量验收'),
+			},
+			{
+				slot: 'executor',
+				label: adeBi(localize('adeRoleSlotExecutor', "Pure Executor"), '纯执行槽'),
+				hint: adeBi(localize('adeRoleSlotExecutorHint', "Legacy v1 compatibility: clean coding leaf worker"), '旧版兼容：纯净编码叶节点执行者'),
+			},
 		];
 		const resolvedSlotRanks: Record<AdeWorkTreeSlot, IAdeRankDefinition> = {
 			orchestrator: resolveWorkTreeSlotRank(normalizedForSlots, 'orchestrator'),
@@ -801,7 +922,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 			const selectEl = append(slotItem, $('select.ade-rs-select.ade-rs-slot-select', {
 				id: selectId,
 				'data-slot': def.slot,
-				'aria-label': localize('adeRoleSlotSelectAria', "DAG slot {0}", def.label),
+				'aria-label': adeBi(localize('adeRoleSlotSelectAria', "DAG slot {0}", def.label), '工作树槽位：{0}', def.label),
 			})) as HTMLSelectElement;
 			const currentId = this.draft.slots?.[def.slot] ?? resolvedSlotRanks[def.slot].id;
 			for (const r of sortedSlotRanks) {
@@ -826,9 +947,13 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		if (resolvedSlotRanks.reviewer.id === resolvedSlotRanks.executor.id) {
 			slotWarnings.push({
 				code: 'reviewer-equals-executor',
-				text: localize(
-					'adeRoleSlotWarnSameReviewerExecutor',
-					"Adversarial Reviewer and Pure Executor share rank '{0}' — self-review disables independent adversarial QA.",
+				text: adeBi(
+					localize(
+						'adeRoleSlotWarnSameReviewerExecutor',
+						"Adversarial Reviewer and Pure Executor share rank '{0}' — self-review disables independent adversarial QA.",
+						resolvedSlotRanks.reviewer.name,
+					),
+					'对抗审稿槽与纯执行槽共用了同一职级「{0}」，自我评审将导致独立质量把关失效。',
 					resolvedSlotRanks.reviewer.name,
 				),
 			});
@@ -836,9 +961,13 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		if (!resolvedSlotRanks.executor.pureExecution) {
 			slotWarnings.push({
 				code: 'executor-not-pure',
-				text: localize(
-					'adeRoleSlotWarnExecutorNotPure',
-					"Pure Executor slot '{0}' does not have Pure Execution Leaf enabled — DAG workers will receive ADE control prompts/APIs.",
+				text: adeBi(
+					localize(
+						'adeRoleSlotWarnExecutorNotPure',
+						"Pure Executor slot '{0}' does not have Pure Execution Leaf enabled — DAG workers will receive ADE control prompts/APIs.",
+						resolvedSlotRanks.executor.name,
+					),
+					'纯执行槽「{0}」未开启纯执行叶节点模式，任务执行者将会注入额外控制提示词与内核 API。',
 					resolvedSlotRanks.executor.name,
 				),
 			});
@@ -856,7 +985,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		// Optional Import JSON Drawer
 		if (this.importBarVisible) {
 			const importBar = append(this.rootEl, $('.ade-rs-import-bar'));
-			append(importBar, $('label.ade-rs-label', { for: 'ade-rs-import-ta' }, localize('adeRoleStudioImportLabel', "Paste an ADE organization schema JSON below and click Apply:")));
+			append(importBar, $('label.ade-rs-label', { for: 'ade-rs-import-ta' }, adeBi(localize('adeRoleStudioImportLabel', "Paste an ADE organization schema JSON below and click Apply:"), '在下方粘贴组织架构 JSON 配置并点击应用：')));
 			const importTa = append(importBar, $('textarea.ade-rs-import-textarea', {
 				id: 'ade-rs-import-ta',
 				placeholder: '{"version": 1, "ranks": [...]}',
@@ -866,8 +995,8 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 				this.importDraftText = importTa.value;
 			}));
 			const actionsRow = append(importBar, $('.ade-rs-import-actions'));
-			const applyBtn = append(actionsRow, $('button.ade-rs-btn.primary', { type: 'button' }, localize('adeRoleStudioApplyImport', "Apply JSON")));
-			const cancelBtn = append(actionsRow, $('button.ade-rs-btn', { type: 'button' }, localize('adeRoleStudioCancelImport', "Cancel")));
+			const applyBtn = append(actionsRow, $('button.ade-rs-btn.primary', { type: 'button' }, adeBi(localize('adeRoleStudioApplyImport', "Apply JSON"), '应用 JSON')));
+			const cancelBtn = append(actionsRow, $('button.ade-rs-btn', { type: 'button' }, adeBi(localize('adeRoleStudioCancelImport', "Cancel"), '取消')));
 			this.renderDisposables.add(addDisposableListener(applyBtn, EventType.CLICK, () => {
 				try {
 					const parsed = JSON.parse(importTa.value);
@@ -880,7 +1009,8 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 					this.markDirty();
 					this.render();
 				} catch (err) {
-					this.notificationService.error(localize('adeRoleStudioImportError', "Invalid JSON schema: {0}", err instanceof Error ? err.message : String(err)));
+					const errMsg = err instanceof Error ? err.message : String(err);
+					this.notificationService.error(adeBi(localize('adeRoleStudioImportError', "Invalid JSON schema: {0}", errMsg), '无效的 JSON 架构配置：{0}', errMsg));
 				}
 			}));
 			this.renderDisposables.add(addDisposableListener(cancelBtn, EventType.CLICK, () => {
@@ -902,12 +1032,12 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		// 2A. Left Visual Hierarchy Ladder
 		const ladderCol = append(body, $('.ade-rs-ladder-col'));
 		const ladderHead = append(ladderCol, $('.ade-rs-ladder-head'));
-		append(ladderHead, $('span', {}, localize('adeRoleStudioLadderTitle', "Hierarchy Ladder (High → Low)")));
+		append(ladderHead, $('span', {}, adeBi(localize('adeRoleStudioLadderTitle', "Hierarchy Ladder (High → Low)"), '动态职级阶梯（高 → 低）')));
 		append(ladderHead, $('span', {}, `${this.draft.ranks.length}`));
 
 		const ladderList = append(ladderCol, $('.ade-rs-ladder-list', {
 			role: 'listbox',
-			'aria-label': localize('adeRoleStudioLadderAria', "Organizational Ranks"),
+			'aria-label': adeBi(localize('adeRoleStudioLadderAria', "Organizational Ranks"), '组织职级列表'),
 		}));
 		const sortedRanks = [...this.draft.ranks].sort((a, b) => a.tier - b.tier);
 		for (let i = 0; i < sortedRanks.length; i++) {
@@ -929,8 +1059,8 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 
 			const meta = append(card, $('.ade-rs-rank-meta'));
 			const pill = append(meta, $(`span.ade-rs-rank-pill${rank.pureExecution ? '.pure' : ''}`, {}, rank.pureExecution
-				? localize('adeRoleStudioPureLeafPill', "Pure Leaf · 0 APIs")
-				: localize('adeRoleStudioApiCountPill', "{0} Core APIs", rank.allowedApis.length)));
+				? adeBi(localize('adeRoleStudioPureLeafPill', "Pure Leaf · 0 APIs"), '纯执行叶节点 · 0 API')
+				: adeBi(localize('adeRoleStudioApiCountPill', "{0} Core APIs", rank.allowedApis.length), '{0} 项内核 API', rank.allowedApis.length)));
 			pill.title = rank.id;
 			this.rankCardRefs.set(rank.id, { card, iconEl, nameEl, pillEl: pill });
 
@@ -944,9 +1074,9 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 					fn();
 				}));
 			};
-			addMiniBtn(Codicon.arrowUp, localize('adeRoleStudioMoveUp', "Promote Tier Up"), i === 0, () => this.moveRank(rank.id, -1));
-			addMiniBtn(Codicon.arrowDown, localize('adeRoleStudioMoveDown', "Demote Tier Down"), i === sortedRanks.length - 1, () => this.moveRank(rank.id, 1));
-			addMiniBtn(Codicon.trash, localize('adeRoleStudioDeleteRank', "Delete Rank"), sortedRanks.length <= 1, () => this.deleteRank(rank.id));
+			addMiniBtn(Codicon.arrowUp, adeBi(localize('adeRoleStudioMoveUp', "Promote Tier Up"), '上调职级'), i === 0, () => this.moveRank(rank.id, -1));
+			addMiniBtn(Codicon.arrowDown, adeBi(localize('adeRoleStudioMoveDown', "Demote Tier Down"), '下调职级'), i === sortedRanks.length - 1, () => this.moveRank(rank.id, 1));
+			addMiniBtn(Codicon.trash, adeBi(localize('adeRoleStudioDeleteRank', "Delete Rank"), '删除职级'), sortedRanks.length <= 1, () => this.deleteRank(rank.id));
 
 			this.renderDisposables.add(addDisposableListener(card, EventType.CLICK, () => {
 				this.selectedRankId = rank.id;
@@ -978,13 +1108,13 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const addRankBtn = append(ladderFooter, $('button.ade-rs-btn.ade-rs-add-btn', { type: 'button' }));
 		const addIcon = append(addRankBtn, $('span', { 'aria-hidden': 'true' }));
 		addIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.add));
-		append(addRankBtn, $('span', {}, localize('adeRoleStudioAddCustomRank', "Add Custom Rank")));
+		append(addRankBtn, $('span', {}, adeBi(localize('adeRoleStudioAddCustomRank', "Add Custom Rank"), '新增自定义职级')));
 		this.renderDisposables.add(addDisposableListener(addRankBtn, EventType.CLICK, () => this.addCustomRank()));
 
 		// 2B. Right Fill-in-the-Blank Form
 		const editorCol = this.editorColEl = append(body, $('.ade-rs-editor-col', {
 			role: 'tabpanel',
-			'aria-label': localize('adeRoleStudioEditorPanelAria', "Selected Rank Editor"),
+			'aria-label': adeBi(localize('adeRoleStudioEditorPanelAria', "Selected Rank Editor"), '当前职级编辑器'),
 		}));
 		const selected = this.getSelectedRank();
 		if (!selected) {
@@ -996,7 +1126,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const c1Head = append(card1, $('.ade-rs-card-head'));
 		const c1Title = append(c1Head, $('h3.ade-rs-card-title'));
 		append(c1Title, $('span.ade-rs-step-badge', { 'aria-hidden': 'true' }, '1'));
-		append(c1Title, $('span', {}, localize('adeRoleStudioStep1', "Rank Identity & Hierarchy Position")));
+		append(c1Title, $('span', {}, adeBi(localize('adeRoleStudioStep1', "Rank Identity & Hierarchy Position"), '职级标识与层级位置')));
 
 		const grid = append(card1, $('.ade-rs-grid'));
 
@@ -1023,75 +1153,108 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 			return input;
 		};
 
-		const nameInput = addTextField('ade-rs-field-name', localize('adeRoleFieldName', "Rank Display Name"), selected.name, 'e.g. Governor, Tech Lead, QA Auditor', val => {
-			selected.name = val;
-			this.markDirty();
-			this.updateSelectedCardMetaInPlace(selected);
-			this.updateLivePreviewOnly();
-		});
-		this.renderDisposables.add(addDisposableListener(nameInput, EventType.CHANGE, () => this.render()));
-		const idInput = addTextField('ade-rs-field-id', localize('adeRoleFieldId', "Rank Machine ID (slug)"), selected.id, 'e.g. tech-lead', val => {
-			const sanitized = sanitizeRankId(val);
-			if (sanitized && sanitized !== selected.id && !this.draft.ranks.some(r => r !== selected && r.id === sanitized)) {
-				const prevId = selected.id;
-				selected.id = sanitized;
-				this.selectedRankId = sanitized;
-				for (const r of this.draft.ranks) {
-					if (r.defaultChildRankId === prevId) {
-						r.defaultChildRankId = sanitized;
-					}
-				}
-				if (this.draft.slots) {
-					for (const slot of ADE_WORK_TREE_SLOTS) {
-						if (this.draft.slots[slot] === prevId) {
-							this.draft.slots[slot] = sanitized;
-						}
-					}
-				}
-				const prevRef = this.rankCardRefs.get(prevId);
-				if (prevRef) {
-					prevRef.card.setAttribute('data-rank-id', sanitized);
-					this.rankCardRefs.delete(prevId);
-					this.rankCardRefs.set(sanitized, prevRef);
-				}
+		const nameInput = addTextField(
+			'ade-rs-field-name',
+			adeBi(localize('adeRoleFieldName', "Rank Display Name"), '职级显示名称'),
+			selected.name,
+			adeBi(localize('adeRoleFieldNamePh', "e.g. Governor, Tech Lead, QA Auditor"), '例如：首席架构师、团队经理、代码审稿员'),
+			val => {
+				selected.name = val;
 				this.markDirty();
 				this.updateSelectedCardMetaInPlace(selected);
 				this.updateLivePreviewOnly();
-			}
-		});
+			},
+		);
+		this.renderDisposables.add(addDisposableListener(nameInput, EventType.CHANGE, () => this.render()));
+		const idInput = addTextField(
+			'ade-rs-field-id',
+			adeBi(localize('adeRoleFieldId', "Rank Machine ID (slug)"), '职级机器 ID（英文短标识）'),
+			selected.id,
+			adeBi(localize('adeRoleFieldIdPh', "e.g. tech-lead"), '例如：tech-lead'),
+			val => {
+				const sanitized = sanitizeRankId(val);
+				if (sanitized && sanitized !== selected.id && !this.draft.ranks.some(r => r !== selected && r.id === sanitized)) {
+					const prevId = selected.id;
+					selected.id = sanitized;
+					this.selectedRankId = sanitized;
+					for (const r of this.draft.ranks) {
+						if (r.defaultChildRankId === prevId) {
+							r.defaultChildRankId = sanitized;
+						}
+					}
+					if (this.draft.slots) {
+						for (const slot of ADE_WORK_TREE_SLOTS) {
+							if (this.draft.slots[slot] === prevId) {
+								this.draft.slots[slot] = sanitized;
+							}
+						}
+					}
+					const prevRef = this.rankCardRefs.get(prevId);
+					if (prevRef) {
+						prevRef.card.setAttribute('data-rank-id', sanitized);
+						this.rankCardRefs.delete(prevId);
+						this.rankCardRefs.set(sanitized, prevRef);
+					}
+					this.markDirty();
+					this.updateSelectedCardMetaInPlace(selected);
+					this.updateLivePreviewOnly();
+				}
+			},
+		);
 		idInput.dataset.field = 'rank-id';
-		idInput.title = localize('adeRoleFieldIdHint', "Lowercase alphanumeric slug used in CLI --role and settings.json");
+		idInput.title = adeBi(localize('adeRoleFieldIdHint', "Lowercase alphanumeric slug used in CLI --role and settings.json"), '用于 CLI --role 参数及 settings.json 的小写字母数字标识');
 		this.renderDisposables.add(addDisposableListener(idInput, EventType.BLUR, () => {
 			if (idInput.value !== selected.id) {
 				idInput.value = selected.id;
 			}
 		}));
 
-		addTextField('ade-rs-field-short', localize('adeRoleFieldShort', "Inbox Short Tag (2–6 chars)"), selected.shortName, 'e.g. Gov, Lead, QA', val => {
-			selected.shortName = val.slice(0, 6);
-			this.markDirty();
-		});
-		const tierInput = addTextField('ade-rs-field-tier', localize('adeRoleFieldTier', "Hierarchy Tier (L1 = highest)"), String(selected.tier), '1', val => {
-			const parsed = Number(val);
-			if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 99) {
-				selected.tier = Math.round(parsed);
+		addTextField(
+			'ade-rs-field-short',
+			adeBi(localize('adeRoleFieldShort', "Inbox Short Tag (2–6 chars)"), '收件箱短标签（2–6 字符）'),
+			selected.shortName,
+			adeBi(localize('adeRoleFieldShortPh', "e.g. Gov, Lead, QA"), '例如：主管、架构、审稿'),
+			val => {
+				selected.shortName = val.slice(0, 6);
 				this.markDirty();
-				this.updateLivePreviewOnly();
-			}
-		}, '', 'number');
+			},
+		);
+		const tierInput = addTextField(
+			'ade-rs-field-tier',
+			adeBi(localize('adeRoleFieldTier', "Hierarchy Tier (L1 = highest)"), '职级层号（L1 为最高层）'),
+			String(selected.tier),
+			'1',
+			val => {
+				const parsed = Number(val);
+				if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 99) {
+					selected.tier = Math.round(parsed);
+					this.markDirty();
+					this.updateLivePreviewOnly();
+				}
+			},
+			'',
+			'number',
+		);
 		tierInput.min = '1';
 		tierInput.max = '99';
 		this.renderDisposables.add(addDisposableListener(tierInput, EventType.CHANGE, () => this.render()));
 
-		addTextField('ade-rs-field-summary', localize('adeRoleFieldSummary', "One-Line Role Summary"), selected.summary, 'Shown in role pickers and hierarchy headers', val => {
-			selected.summary = val;
-			this.markDirty();
-			this.updateLivePreviewOnly();
-		}, 'full');
+		addTextField(
+			'ade-rs-field-summary',
+			adeBi(localize('adeRoleFieldSummary', "One-Line Role Summary"), '一句话角色职责说明'),
+			selected.summary,
+			adeBi(localize('adeRoleFieldSummaryPh', "Shown in role pickers and hierarchy headers"), '展示在角色选择器与层级标题栏中'),
+			val => {
+				selected.summary = val;
+				this.markDirty();
+				this.updateLivePreviewOnly();
+			},
+			'full',
+		);
 
 		// Color & Icon Pickers (incremental DOM updates preserve keyboard focus!)
 		const colorField = append(grid, $('.ade-rs-field'));
-		append(colorField, $('span.ade-rs-label', { id: 'ade-rs-color-label' }, localize('adeRoleFieldColor', "Badge Accent Color")));
+		append(colorField, $('span.ade-rs-label', { id: 'ade-rs-color-label' }, adeBi(localize('adeRoleFieldColor', "Badge Accent Color"), '徽章强调色')));
 		const colorRow = append(colorField, $('.ade-rs-picker-row', { role: 'group', 'aria-labelledby': 'ade-rs-color-label' }));
 		const swatchButtons: Array<{ token: AdeRankColorToken; el: HTMLButtonElement }> = [];
 		for (const token of ADE_RANK_COLOR_TOKENS) {
@@ -1099,7 +1262,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 			const sw = append(colorRow, $(`button.ade-rs-swatch.color-${token}`, {
 				type: 'button',
 				title: token,
-				'aria-label': localize('adeRoleColorChoiceAria', "Badge color: {0}", token),
+				'aria-label': adeBi(localize('adeRoleColorChoiceAria', "Badge color: {0}", token), '徽章颜色：{0}', token),
 				'aria-pressed': String(isSelectedColor),
 			})) as HTMLButtonElement;
 			sw.classList.toggle('selected', isSelectedColor);
@@ -1117,7 +1280,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		}
 
 		const iconField = append(grid, $('.ade-rs-field'));
-		append(iconField, $('span.ade-rs-label', { id: 'ade-rs-icon-label' }, localize('adeRoleFieldIcon', "Badge Icon")));
+		append(iconField, $('span.ade-rs-label', { id: 'ade-rs-icon-label' }, adeBi(localize('adeRoleFieldIcon', "Badge Icon"), '徽章图标')));
 		const iconRow = append(iconField, $('.ade-rs-picker-row', { role: 'group', 'aria-labelledby': 'ade-rs-icon-label' }));
 		const iconButtons: Array<{ iconToken: AdeRankIconToken; el: HTMLButtonElement }> = [];
 		for (const iconToken of ADE_RANK_ICON_TOKENS) {
@@ -1125,7 +1288,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 			const btn = append(iconRow, $('button.ade-rs-icon-choice', {
 				type: 'button',
 				title: iconToken,
-				'aria-label': localize('adeRoleIconChoiceAria', "Badge icon: {0}", iconToken),
+				'aria-label': adeBi(localize('adeRoleIconChoiceAria', "Badge icon: {0}", iconToken), '徽章图标：{0}', iconToken),
 				'aria-pressed': String(isSelectedIcon),
 			})) as HTMLButtonElement;
 			btn.classList.add(...ThemeIcon.asClassNameArray(resolveAdeRankCodicon(iconToken)));
@@ -1146,10 +1309,10 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		// Default Child Rank selector
 		const lowerCandidates = sortedRanks.filter(r => r.tier > selected.tier);
 		const childField = append(grid, $('.ade-rs-field'));
-		append(childField, $('label.ade-rs-label', { for: 'ade-rs-field-child' }, localize('adeRoleFieldDefaultChild', "Default Sub-Session Rank")));
+		append(childField, $('label.ade-rs-label', { for: 'ade-rs-field-child' }, adeBi(localize('adeRoleFieldDefaultChild', "Default Sub-Session Rank"), '默认下级子会话职级')));
 		const childSelect = append(childField, $('select.ade-rs-select', { id: 'ade-rs-field-child' })) as HTMLSelectElement;
 		childSelect.disabled = selected.pureExecution || !selected.canHaveSubordinates || lowerCandidates.length === 0;
-		const autoOpt = append(childSelect, $('option', { value: '' }, localize('adeRoleChildAuto', "Auto (Next Lower Tier)"))) as HTMLOptionElement;
+		const autoOpt = append(childSelect, $('option', { value: '' }, adeBi(localize('adeRoleChildAuto', "Auto (Next Lower Tier)"), '自动（紧邻下一职级）'))) as HTMLOptionElement;
 		autoOpt.selected = !selected.defaultChildRankId;
 		for (const cand of lowerCandidates) {
 			const opt = append(childSelect, $('option', { value: cand.id }, `L${cand.tier} · ${cand.name}`)) as HTMLOptionElement;
@@ -1166,7 +1329,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const canSubCb = append(canSubLabel, $('input', { type: 'checkbox' })) as HTMLInputElement;
 		canSubCb.checked = selected.canHaveSubordinates && !selected.pureExecution;
 		canSubCb.disabled = selected.pureExecution;
-		append(canSubLabel, $('span', {}, localize('adeRoleCanSupervise', "Can spawn & supervise lower-tier subordinate sessions")));
+		append(canSubLabel, $('span', {}, adeBi(localize('adeRoleCanSupervise', "Can spawn & supervise lower-tier subordinate sessions"), '允许创建并监督更低职级的下级会话')));
 		this.renderDisposables.add(addDisposableListener(canSubCb, EventType.CHANGE, () => {
 			selected.canHaveSubordinates = canSubCb.checked;
 			this.markDirty();
@@ -1176,7 +1339,10 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const pureLabel = append(switches, $('label.ade-rs-check-row'));
 		const pureCb = append(pureLabel, $('input', { type: 'checkbox', 'data-field': 'pure-execution' })) as HTMLInputElement;
 		pureCb.checked = selected.pureExecution;
-		append(pureLabel, $('span', {}, localize('adeRolePureExecution', "Pure Execution Leaf — 0 ADE role/API prompt injection (100% clean native Coding Agent context)")));
+		append(pureLabel, $('span', {}, adeBi(
+			localize('adeRolePureExecution', "Pure Execution Leaf — 0 ADE role/API prompt injection (100% clean native Coding Agent context)"),
+			'纯执行叶节点 — 零 ADE 角色/API 提示词注入（100% 纯净原生编程智能体上下文）',
+		)));
 		this.renderDisposables.add(addDisposableListener(pureCb, EventType.CHANGE, () => {
 			const snapshotKey = selected.originalId || selected.id;
 			selected.pureExecution = pureCb.checked;
@@ -1210,27 +1376,36 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const c2Head = append(card2, $('.ade-rs-card-head'));
 		const c2Title = append(c2Head, $('h3.ade-rs-card-title'));
 		append(c2Title, $('span.ade-rs-step-badge', { 'aria-hidden': 'true' }, '2'));
-		append(c2Title, $('span', {}, localize('adeRoleStudioStep2', "Initialization Prompt Template")));
+		append(c2Title, $('span', {}, adeBi(localize('adeRoleStudioStep2', "Initialization Prompt Template"), '初始化提示词模板')));
 
 		if (selected.pureExecution) {
-			append(card2, $('.ade-rs-pure-banner', { role: 'status' }, localize(
-				'adeRolePurePromptNote',
-				"Pure Execution Leaf is enabled for this rank. Sessions with this rank receive ZERO ADE prompt injection and ZERO control APIs so they operate with 100% native Coding Agent focus.",
+			append(card2, $('.ade-rs-pure-banner', { role: 'status' }, adeBi(
+				localize(
+					'adeRolePurePromptNote',
+					"Pure Execution Leaf is enabled for this rank. Sessions with this rank receive ZERO ADE prompt injection and ZERO control APIs so they operate with 100% native Coding Agent focus.",
+				),
+				'该职级已启用纯执行叶节点模式。所属会话不会注入任何 ADE 控制提示词或 API，保持 100% 原生编码专注度。',
 			)));
 		} else {
-			append(card2, $('p.ade-rs-card-hint', {}, localize(
-				'adeRolePromptHint',
-				"Write this rank's mission, review standards, or guardrails below. Click any placeholder chip to insert live session/project metadata (all cache-stable).",
+			append(card2, $('p.ade-rs-card-hint', {}, adeBi(
+				localize(
+					'adeRolePromptHint',
+					"Write this rank's mission, review standards, or guardrails below. Click any placeholder chip to insert live session/project metadata (all cache-stable).",
+				),
+				'在下方编写该职级的职责边界、评审标准或护栏规则。点击任意占位符标签即可插入缓存友好的实时会话/项目元数据。',
 			)));
 
 			const varsStrip = append(card2, $('.ade-rs-vars-strip', {
 				role: 'group',
-				'aria-label': localize('adeRoleTemplateVarsAria', "Prompt Template Variables"),
+				'aria-label': adeBi(localize('adeRoleTemplateVarsAria', "Prompt Template Variables"), '提示词模板变量'),
 			}));
 			const promptTa = append(card2, $('textarea.ade-rs-textarea', {
 				id: 'ade-rs-field-prompt',
-				'aria-label': localize('adeRoleStudioStep2', "Initialization Prompt Template"),
-				placeholder: localize('adeRolePromptPlaceholder', "Example: You are {{rank.tier}} {{rank.name}} for {{project.name}}. Review diffs strictly and delegate implementation to lower-tier subordinates..."),
+				'aria-label': adeBi(localize('adeRoleStudioStep2', "Initialization Prompt Template"), '初始化提示词模板'),
+				placeholder: adeBi(
+					localize('adeRolePromptPlaceholder', "Example: You are {{rank.tier}} {{rank.name}} for {{project.name}}. Review diffs strictly and delegate implementation to lower-tier subordinates..."),
+					'示例：你是 {{project.name}} 的 {{rank.tier}} {{rank.name}}，请严格审查代码改动并将具体实现拆解给下级执行成员…',
+				),
 			})) as HTMLTextAreaElement;
 			promptTa.value = selected.initPrompt;
 
@@ -1260,18 +1435,21 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const c3Head = append(card3, $('.ade-rs-card-head'));
 		const c3Title = append(c3Head, $('h3.ade-rs-card-title'));
 		append(c3Title, $('span.ade-rs-step-badge', { 'aria-hidden': 'true' }, '3'));
-		append(c3Title, $('span', {}, localize('adeRoleStudioStep3', "Core Aexus-Code Primitive API Permissions")));
-		append(c3Head, $('span.ade-rs-kernel-badge', {}, localize('adeRoleStudioKernelLocked', "Fixed Kernel Primitives · Runtime Enforced")));
+		append(c3Title, $('span', {}, adeBi(localize('adeRoleStudioStep3', "Core Aexus-Code Primitive API Permissions"), '核心内核原语 API 权限')));
+		append(c3Head, $('span.ade-rs-kernel-badge', {}, adeBi(localize('adeRoleStudioKernelLocked', "Fixed Kernel Primitives · Runtime Enforced"), '固定内核原语 · 运行期强制鉴权')));
 
-		append(card3, $('p.ade-rs-card-hint', {}, localize(
-			'adeRoleApisHint',
-			"Core primitive APIs (messaging, reading context, hierarchy ops, project inspection, Inbox, DAG control) are fixed by Aexus-Code. Toggling an API both grants/revokes runtime kernel authorization AND auto-updates the CLI instructions injected into this rank's prompt.",
+		append(card3, $('p.ade-rs-card-hint', {}, adeBi(
+			localize(
+				'adeRoleApisHint',
+				"Core primitive APIs (messaging, reading context, hierarchy ops, project inspection, Inbox, DAG control) are fixed by Aexus-Code. Toggling an API both grants/revokes runtime kernel authorization AND auto-updates the CLI instructions injected into this rank's prompt.",
+			),
+			'核心原语 API（消息、上下文读取、层级操作、项目检视、收件箱与任务图控制）由内核统一托管。开关权限将同步生效于运行期鉴权与自动注入的 CLI 指令。',
 		)));
 
 		if (!selected.pureExecution) {
 			const quickBar = append(card3, $('.ade-rs-api-actions-bar', {
 				role: 'group',
-				'aria-label': localize('adeRoleQuickGrantAria', "Quick Permission Presets"),
+				'aria-label': adeBi(localize('adeRoleQuickGrantAria', "Quick Permission Presets"), '快捷权限预设'),
 			}));
 			const addQuickBtn = (label: string, apis: readonly AdePrimitiveApiId[], requireConfirm = false) => {
 				const b = append(quickBar, $(`button.ade-rs-btn${requireConfirm ? '.danger' : ''}`, {
@@ -1285,13 +1463,17 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 								const dangerousList = ADE_PRIMITIVE_APIS.filter(a => a.dangerous).map(a => `${a.label} (${a.id})`).join('\n• ');
 								const res = await this.dialogService.confirm({
 									type: 'warning',
-									message: localize('adeRoleConfirmGrantAllTitle', "Grant ALL kernel APIs to '{0}'?", selected.name),
-									detail: localize(
-										'adeRoleConfirmGrantAllDetail',
-										"This includes High Privilege APIs that can delete projects, manage Cloud Hosts, start/stop Mission runs, and remove Missions:\n• {0}",
+									message: adeBi(localize('adeRoleConfirmGrantAllTitle', "Grant ALL kernel APIs to '{0}'?", selected.name), '确定向「{0}」授予全部内核 API 权限吗？', selected.name),
+									detail: adeBi(
+										localize(
+											'adeRoleConfirmGrantAllDetail',
+											"This includes High Privilege APIs that can delete projects, manage Cloud Hosts, start/stop Mission runs, and remove Missions:\n• {0}",
+											dangerousList,
+										),
+										'此操作包含可删除项目、管理云主机、启停或移除任务的高权限 API：\n• {0}',
 										dangerousList,
 									),
-									primaryButton: localize('adeRoleConfirmGrantAllBtn', "&&Grant All"),
+									primaryButton: adeBi(localize('adeRoleConfirmGrantAllBtn', "&&Grant All"), '&&全部授予'),
 								});
 								if (!res.confirmed) {
 									return;
@@ -1308,13 +1490,13 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 					this.render();
 				}));
 			};
-			addQuickBtn(localize('adeRoleApisRecommended', "Recommended Orchestrator"), ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post']);
-			addQuickBtn(localize('adeRoleApisReadOnly', "Read-Only Reviewer"), ['session.read_context', 'project.read', 'mission.read']);
-			addQuickBtn(localize('adeRoleApisSelectAll', "Grant All"), ALL_ADE_PRIMITIVE_API_IDS, true);
-			addQuickBtn(localize('adeRoleApisClearAll', "Revoke All"), []);
+			addQuickBtn(adeBi(localize('adeRoleApisRecommended', "Recommended Orchestrator"), '推荐统筹权限'), ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post']);
+			addQuickBtn(adeBi(localize('adeRoleApisReadOnly', "Read-Only Reviewer"), '只读审稿权限'), ['session.read_context', 'project.read', 'mission.read']);
+			addQuickBtn(adeBi(localize('adeRoleApisSelectAll', "Grant All"), '全部授予'), ALL_ADE_PRIMITIVE_API_IDS, true);
+			addQuickBtn(adeBi(localize('adeRoleApisClearAll', "Revoke All"), '全部撤销'), []);
 		}
 
-		for (const cat of API_CATEGORY_ORDER) {
+		for (const cat of getApiCategoryList()) {
 			const catApis = ADE_PRIMITIVE_APIS.filter(api => api.category === cat.id);
 			if (catApis.length === 0) {
 				continue;
@@ -1339,7 +1521,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 				append(tRow, $('span.ade-rs-api-label', {}, api.label));
 				append(tRow, $('code.ade-rs-api-id', {}, api.id));
 				if (api.dangerous) {
-					append(tRow, $('span.ade-rs-api-danger', {}, localize('adeRoleApiHighPriv', "High Privilege")));
+					append(tRow, $('span.ade-rs-api-danger', {}, adeBi(localize('adeRoleApiHighPriv', "High Privilege"), '高权限')));
 				}
 				append(apiBody, $('span.ade-rs-api-desc', {}, api.description));
 				append(apiBody, $('span.ade-rs-api-cmds', {}, api.actions.join(' · ')));
@@ -1365,7 +1547,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		const c4Head = append(card4, $('.ade-rs-card-head'));
 		const c4Title = append(c4Head, $('h3.ade-rs-card-title'));
 		append(c4Title, $('span.ade-rs-step-badge', { 'aria-hidden': 'true' }, '4'));
-		append(c4Title, $('span', {}, localize('adeRoleStudioStep4', "Live Compiled Prompt Preview")));
+		append(c4Title, $('span', {}, adeBi(localize('adeRoleStudioStep4', "Live Compiled Prompt Preview"), '实时编译提示词预览')));
 		this.previewTokenPillEl = append(c4Head, $('span.ade-rs-token-pill', { 'aria-live': 'polite' }));
 		this.previewPreEl = append(card4, $('pre.ade-rs-preview-pre'));
 		this.updateLivePreviewOnly();

@@ -53,17 +53,49 @@ function readTokenCount(record: Record<string, unknown>, ...keys: string[]): num
 	return 0;
 }
 
+function readPositiveCostUsd(record: Record<string, unknown>): number | undefined {
+	for (const key of ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd', 'totalCost', 'cost']) {
+		const val = record[key];
+		if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+			return val;
+		}
+		if (val && typeof val === 'object') {
+			const total = (val as Record<string, unknown>).total;
+			if (typeof total === 'number' && Number.isFinite(total) && total > 0) {
+				return total;
+			}
+		}
+	}
+	return undefined;
+}
+
+function readOptionalModelString(record: Record<string, unknown>): string | undefined {
+	for (const key of ['model', 'modelId', 'model_id']) {
+		const val = record[key];
+		if (typeof val === 'string' && val.trim() && val.trim().toLowerCase() !== 'default') {
+			return val.trim();
+		}
+	}
+	return undefined;
+}
+
 function extractTurnTokenUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
 	if (!value || typeof value !== 'object' || depth > 3) {
 		return undefined;
 	}
 	const record = value as Record<string, unknown>;
+	const outerCostUsd = readPositiveCostUsd(record);
+	const outerModel = readOptionalModelString(record);
 	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
 		const nested = record[key];
 		if (nested && typeof nested === 'object') {
 			const usage = extractTurnTokenUsage(nested, depth + 1);
 			if (usage) {
-				return usage;
+				return {
+					...usage,
+					...(usage.costUsd === undefined && outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
+					...(usage.model === undefined && outerModel !== undefined ? { model: outerModel } : {}),
+				};
 			}
 		}
 	}
@@ -75,7 +107,16 @@ function extractTurnTokenUsage(value: unknown, depth = 0): EngineTurnTokenUsage 
 	if (totalTokens <= 0) {
 		return undefined;
 	}
-	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens,
+		...(outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
+		...(outerModel !== undefined ? { model: outerModel } : {}),
+		estimated: false,
+	};
 }
 
 function extractSkillEntries(value: unknown, depth = 0): SkillEntry[] {
@@ -1056,7 +1097,11 @@ export class CodexRuntime implements EngineRuntime {
 			const completed = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
 			void completed.catch(() => { });
 			const preTurnBaseline = this.lastRawThreadUsageBySession.get(session.id);
-			const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, { preTurnBaseline });
+			const activeModel = modelOverride ?? this.sessionSettings.get(session.id)?.model ?? this.defaultModel;
+			const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
+				preTurnBaseline,
+				model: activeModel,
+			});
 			const listener = client.onPacket(packet => {
 				if (packet.method === 'aexus/connectionClosed') { fail(new Error(String(packet.params?.message))); return; }
 				const params = packet.params as (Notification & { type?: string }) | undefined;
@@ -1102,7 +1147,7 @@ export class CodexRuntime implements EngineRuntime {
 				if (!token.isCancellationRequested && (packet.method === 'item/reasoning/summaryTextDelta' || packet.method === 'item/reasoning/textDelta')) {
 					const reasoningDelta = String(packet.params?.delta ?? '');
 					emitThinkingProgress(stream, reasoningDelta, 'codex-thinking');
-					usageTracker.recordStreamDelta(reasoningDelta);
+					usageTracker.recordStreamDelta(reasoningDelta, { skipToolErrorScan: true });
 				}
 				if (!token.isCancellationRequested && packet.method === 'item/started' && params.item && params.item.type !== 'agentMessage' && params.item.type !== 'userMessage' && params.item.type !== 'reasoning') {
 					stream.progress(this.describeItem(params.item));

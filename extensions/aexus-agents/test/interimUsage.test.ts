@@ -5,7 +5,15 @@
 
 import * as assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { createTurnInterimUsageTracker, estimateTextTokens, type EngineTurnTokenUsage } from '../src/usageTracker.ts';
+import {
+	createStreamToolErrorScanner,
+	createTurnInterimUsageTracker,
+	detectToolErrorInProgressText,
+	detectToolErrorInStreamChunk,
+	detectToolErrorInStreamPart,
+	estimateTextTokens,
+	type EngineTurnTokenUsage,
+} from '../src/usageTracker.ts';
 
 describe('createTurnInterimUsageTracker (multi-engine live streaming usage)', () => {
 	test('emits estimated delta usage mid-turn before real usage arrives, then transitions cleanly to real usage', () => {
@@ -94,5 +102,96 @@ describe('createTurnInterimUsageTracker (multi-engine live streaming usage)', ()
 		assert.equal(perTurn.inputTokens, 400);
 		assert.equal(perTurn.outputTokens, 120);
 		assert.equal(perTurn.totalTokens, 520);
+	});
+
+	test('propagates resolved model and subtracts cumulative real costUsd across thread turns', () => {
+		const emitted: EngineTurnTokenUsage[] = [];
+		const turn1Raw: EngineTurnTokenUsage = {
+			inputTokens: 2000,
+			outputTokens: 500,
+			totalTokens: 2500,
+			costUsd: 0.015,
+			model: 'openai/gpt-5.3-codex',
+			estimated: false,
+		};
+		const tracker = createTurnInterimUsageTracker('Second turn', u => emitted.push(u), {
+			preTurnBaseline: turn1Raw,
+			model: 'openai/gpt-5.3-codex',
+			throttleMs: 0,
+		});
+
+		tracker.recordStreamDelta('Streaming response chunk...');
+		assert.equal(emitted.length, 1);
+		assert.equal(emitted[0].model, 'openai/gpt-5.3-codex');
+
+		const turn2Delta = tracker.recordRealUsage({
+			inputTokens: 3200,
+			outputTokens: 900,
+			totalTokens: 4100,
+			costUsd: 0.028,
+			estimated: false,
+		}, { cumulativeAcrossThread: true });
+
+		assert.equal(turn2Delta.inputTokens, 1200);
+		assert.equal(turn2Delta.outputTokens, 400);
+		assert.equal(turn2Delta.costUsd, 0.013);
+		assert.equal(turn2Delta.model, 'openai/gpt-5.3-codex');
+	});
+
+	test('detects tool/command failures in stream chunks & parts and propagates hadToolError / toolErrorCount (Audit #24)', () => {
+		// Positive detections for real shell / compiler / test / tool failures
+		assert.equal(detectToolErrorInStreamChunk('Command failed with exit code 1'), true);
+		assert.equal(detectToolErrorInStreamChunk('Process exited with code 127'), true);
+		assert.equal(detectToolErrorInStreamChunk('src/foo.ts(12,5): error TS2304: Cannot find name "foo".'), true);
+		assert.equal(detectToolErrorInStreamChunk('FAIL src/auth.test.ts\nAssertionError: expected 1 to equal 2'), true);
+		assert.equal(detectToolErrorInStreamChunk('Traceback (most recent call last):\n  File "app.py", line 4'), true);
+		assert.equal(detectToolErrorInStreamChunk('Tool failed: ENOENT no such file or directory'), true);
+
+		// Negative checks: normal prose / zero-error summaries must NOT false-positive
+		assert.equal(detectToolErrorInStreamChunk('All 42 tests passed with 0 errors and exit code 0.'), false);
+		assert.equal(detectToolErrorInStreamChunk('Added error handling middleware to src/server.ts.'), false);
+		assert.equal(detectToolErrorInStreamChunk('Refactored retry logic for network timeouts.'), false);
+
+		// Structured ChatToolInvocationPart error detection (including errorMessage, resultDetails, invocationMessage)
+		assert.equal(detectToolErrorInStreamPart({ isError: true }), true);
+		assert.equal(detectToolErrorInStreamPart({ errorMessage: 'Permission denied' }), true);
+		assert.equal(detectToolErrorInStreamPart({ resultDetails: { isError: true } }), true);
+		assert.equal(detectToolErrorInStreamPart({ invocationMessage: 'Command failed with exit code 2' }), true);
+		assert.equal(detectToolErrorInStreamPart({ isError: false, invocationMessage: 'Running pnpm test' }), false);
+
+		// Rolling stream scanner catches errors split across consecutive token deltas without false-positiving on progress thinking text
+		const scanner = createStreamToolErrorScanner();
+		assert.equal(scanner.scan('Running build... exit '), false);
+		assert.equal(scanner.scan('code 2 in src/app.ts'), true);
+		assert.equal(scanner.scan('continuing cleanly'), false);
+		assert.equal(detectToolErrorInProgressText('Thinking about how to guard TypeError: undefined property'), false);
+		assert.equal(detectToolErrorInProgressText('Command failed with exit code 1'), true);
+
+		// Tracker propagates tool error flags onto both interim and final usage packets and skips thinking deltas
+		const emitted: EngineTurnTokenUsage[] = [];
+		const tracker = createTurnInterimUsageTracker('Fix failing build', u => emitted.push(u), {
+			model: 'deepseek-r1',
+			throttleMs: 0,
+		});
+		tracker.recordStreamDelta('Reasoning: TypeError: x is undefined could happen if null', { skipToolErrorScan: true });
+		assert.equal(tracker.getToolErrorCount(), 0);
+		assert.equal(emitted[0].hadToolError, undefined);
+
+		tracker.recordToolError();
+		tracker.recordStreamDelta('Investigating failing test output...');
+		assert.equal(emitted[emitted.length - 1].hadToolError, true);
+		assert.equal(emitted[emitted.length - 1].toolErrorCount, 1);
+
+		tracker.recordToolError(2);
+		const real = tracker.recordRealUsage({
+			inputTokens: 4500,
+			outputTokens: 900,
+			totalTokens: 5400,
+			estimated: false,
+		});
+		assert.equal(real.hadToolError, true);
+		assert.equal(real.toolErrorCount, 3);
+		assert.equal(emitted[emitted.length - 1].hadToolError, true);
+		assert.equal(emitted[emitted.length - 1].toolErrorCount, 3);
 	});
 });

@@ -45,6 +45,8 @@ export interface IMissionNodeAssignment {
 	readonly hostAlias?: string;
 	/** Optional remote project directory path on `hostAlias` (for cross-host relay). */
 	readonly remoteProjectPath?: string;
+	/** Optional normalized LLM API provider key (e.g. `'anthropic'`, `'openai'`, `'google'`, `'deepseek'`) for per-provider concurrency limiting. */
+	readonly provider?: string;
 }
 
 /**

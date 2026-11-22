@@ -5601,3 +5601,11 @@
 	border-color: color-mix(in srgb, #58a6ff 38%, transparent);
 	background: color-mix(in srgb, #388bfd 14%, transparent);
 }
+
+/* Pause all infinite ADE CSS animations when the host window/page is hidden */
+html.ade-page-hidden .monaco-workbench .ade-session-warmup-bar::after,
+html.ade-page-hidden .monaco-workbench .ade-eng-editor *,
+html.ade-page-hidden .monaco-workbench .ade-eng-editor *::before,
+html.ade-page-hidden .monaco-workbench .ade-eng-editor *::after {
+	animation-play-state: paused !important;
+}

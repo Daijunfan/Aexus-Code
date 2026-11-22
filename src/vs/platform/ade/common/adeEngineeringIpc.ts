@@ -14,6 +14,7 @@ import {
 	IAdeEngineeringBackendService,
 	IAdeInboxItem,
 	IAdeInboxMutation,
+	IAdeMissionColdChangeEvent,
 	IAdeMissionWatchdogSnapshot,
 	IAdeSourceTriggerFireEvent,
 	IAdeWatchdogWakeupEvent,
@@ -146,6 +147,8 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 				return this.createWindowScopedEvent(this.service.onDidSourceTriggerFire, ctx, this.triggerRouter) as Event<T>;
 			case 'onDidInboxChange':
 				return (this.service.onDidInboxChange ?? Event.None) as Event<T>;
+			case 'onDidMissionRecordChange':
+				return (this.service.onDidMissionRecordChange ?? Event.None) as Event<T>;
 			case 'onDidSystemResume':
 				return (this.service.onDidSystemResume ?? Event.None) as Event<T>;
 			default:
@@ -163,6 +166,32 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 				return (this.service.mutateInbox
 					? this.service.mutateInbox(arg as IAdeInboxMutation)
 					: this.service.loadInbox()) as Promise<T>;
+			case 'loadMissionRecord':
+				return (this.service.loadMissionRecord
+					? this.service.loadMissionRecord(String(arg ?? ''))
+					: Promise.resolve(undefined)) as Promise<T>;
+			case 'loadAllMissionRecords':
+				return (this.service.loadAllMissionRecords
+					? this.service.loadAllMissionRecords()
+					: Promise.resolve({})) as Promise<T>;
+			case 'saveMissionRecord': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; payloadJson?: string; updatedAt?: number; writerId?: string }
+					: undefined;
+				if (!this.service.saveMissionRecord || !params?.missionId || typeof params.payloadJson !== 'string') {
+					return Promise.resolve() as Promise<T>;
+				}
+				return this.service.saveMissionRecord(params.missionId, params.payloadJson, params.updatedAt ?? Date.now(), params.writerId) as Promise<T>;
+			}
+			case 'deleteMissionRecord': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; writerId?: string }
+					: { missionId: String(arg ?? '') };
+				if (!this.service.deleteMissionRecord || !params.missionId) {
+					return Promise.resolve() as Promise<T>;
+				}
+				return this.service.deleteMissionRecord(params.missionId, params.writerId) as Promise<T>;
+			}
 			case 'syncApiDocs':
 				return (this.service.syncApiDocs
 					? this.service.syncApiDocs(arg as IAdeOrganizationConfig)
@@ -247,12 +276,14 @@ export class AdeEngineeringBackendChannelClient implements IAdeEngineeringBacken
 	readonly onDidWatchdogWakeup: Event<IAdeWatchdogWakeupEvent>;
 	readonly onDidSourceTriggerFire: Event<IAdeSourceTriggerFireEvent>;
 	readonly onDidInboxChange: Event<readonly IAdeInboxItem[]>;
+	readonly onDidMissionRecordChange: Event<IAdeMissionColdChangeEvent>;
 	readonly onDidSystemResume: Event<number>;
 
 	constructor(private readonly channel: IChannel) {
 		this.onDidWatchdogWakeup = this.channel.listen<IAdeWatchdogWakeupEvent>('onDidWatchdogWakeup');
 		this.onDidSourceTriggerFire = this.channel.listen<IAdeSourceTriggerFireEvent>('onDidSourceTriggerFire');
 		this.onDidInboxChange = this.channel.listen<readonly IAdeInboxItem[]>('onDidInboxChange');
+		this.onDidMissionRecordChange = this.channel.listen<IAdeMissionColdChangeEvent>('onDidMissionRecordChange');
 		this.onDidSystemResume = this.channel.listen<number>('onDidSystemResume');
 	}
 
@@ -266,6 +297,22 @@ export class AdeEngineeringBackendChannelClient implements IAdeEngineeringBacken
 
 	mutateInbox(mutation: IAdeInboxMutation): Promise<IAdeInboxItem[]> {
 		return this.channel.call('mutateInbox', mutation);
+	}
+
+	loadMissionRecord(missionId: string): Promise<string | undefined> {
+		return this.channel.call('loadMissionRecord', missionId);
+	}
+
+	loadAllMissionRecords(): Promise<Readonly<Record<string, string>>> {
+		return this.channel.call('loadAllMissionRecords');
+	}
+
+	saveMissionRecord(missionId: string, payloadJson: string, updatedAt: number, writerId?: string): Promise<void> {
+		return this.channel.call('saveMissionRecord', { missionId, payloadJson, updatedAt, writerId });
+	}
+
+	deleteMissionRecord(missionId: string, writerId?: string): Promise<void> {
+		return this.channel.call('deleteMissionRecord', { missionId, writerId });
 	}
 
 	syncApiDocs(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths> {

@@ -3305,6 +3305,36 @@ CommandsRegistry.registerCommand('aexus.ade.engineering.workerHeartbeat', (acces
 	missionRuntime.touchAgentActivity(sessionResourceOrId.trim(), ts);
 });
 
+CommandsRegistry.registerCommand('aexus.ade.engineering.beginInteractiveTurn', (accessor: ServicesAccessor, rawPayload: unknown) => {
+	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
+	if (!missionRuntime?.beginInteractiveTurn || !rawPayload || typeof rawPayload !== 'object') {
+		return undefined;
+	}
+	const payload = rawPayload as { sessionResource?: unknown; agentId?: unknown };
+	const target = (typeof payload.agentId === 'string' && payload.agentId.trim())
+		? payload.agentId.trim()
+		: (typeof payload.sessionResource === 'string' ? payload.sessionResource.trim() : '');
+	if (!target) {
+		return undefined;
+	}
+	return missionRuntime.beginInteractiveTurn(target);
+});
+
+CommandsRegistry.registerCommand('aexus.ade.engineering.endInteractiveTurn', (accessor: ServicesAccessor, rawPayload: unknown) => {
+	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
+	if (!missionRuntime?.endInteractiveTurn) {
+		return;
+	}
+	const turnId = typeof rawPayload === 'string'
+		? rawPayload.trim()
+		: (rawPayload && typeof rawPayload === 'object' && typeof (rawPayload as { turnId?: unknown }).turnId === 'string'
+			? String((rawPayload as { turnId: string }).turnId).trim()
+			: '');
+	if (turnId) {
+		missionRuntime.endInteractiveTurn(turnId);
+	}
+});
+
 CommandsRegistry.registerCommand('aexus.ade.engineering.recordTurnUsage', (accessor: ServicesAccessor, rawPayload: unknown) => {
 	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
 	if (!missionRuntime || !rawPayload || typeof rawPayload !== 'object') {
@@ -3315,6 +3345,8 @@ CommandsRegistry.registerCommand('aexus.ade.engineering.recordTurnUsage', (acces
 		agentId?: unknown;
 		missionId?: unknown;
 		nodeId?: unknown;
+		tokenId?: unknown;
+		turnId?: unknown;
 		usage?: {
 			inputTokens?: number;
 			outputTokens?: number;
@@ -3327,8 +3359,13 @@ CommandsRegistry.registerCommand('aexus.ade.engineering.recordTurnUsage', (acces
 			costUsd?: number;
 			turns?: number;
 			model?: string;
+			engineId?: string;
 			summary?: string;
 			estimated?: boolean;
+			hadToolError?: boolean;
+			toolErrorCount?: number;
+			turnId?: string;
+			tokenId?: string;
 		};
 	};
 	const target = (typeof payload.agentId === 'string' && payload.agentId.trim())
@@ -3342,14 +3379,27 @@ CommandsRegistry.registerCommand('aexus.ade.engineering.recordTurnUsage', (acces
 	}
 	const missionId = typeof payload.missionId === 'string' ? payload.missionId.trim() : '';
 	const nodeId = typeof payload.nodeId === 'string' ? payload.nodeId.trim() : '';
+	const tokenId = typeof payload.tokenId === 'string' ? payload.tokenId.trim() : (typeof payload.usage.tokenId === 'string' ? payload.usage.tokenId.trim() : '');
+	const turnId = typeof payload.turnId === 'string' ? payload.turnId.trim() : (typeof payload.usage.turnId === 'string' ? payload.usage.turnId.trim() : '');
+	if (turnId) {
+		missionRuntime.recordTurnUsageBySessionResource(target, payload.usage, {
+			turnId,
+			...(missionId ? { missionId } : {}),
+			...(nodeId ? { nodeId } : {}),
+			...(tokenId ? { tokenId } : {}),
+		});
+		return;
+	}
 	if (missionId && nodeId) {
 		missionRuntime.recordNodeTurnUsage(missionId, nodeId, payload.usage);
 		return;
 	}
-	if (!target) {
+	if (!target && !tokenId) {
 		return;
 	}
-	missionRuntime.recordTurnUsageBySessionResource(target, payload.usage);
+	missionRuntime.recordTurnUsageBySessionResource(target, payload.usage, {
+		...(tokenId ? { tokenId } : {}),
+	});
 });
 
 CommandsRegistry.registerCommand(ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID, (accessor: ServicesAccessor, rawPayload: unknown) => {
