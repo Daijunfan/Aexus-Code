@@ -13,17 +13,21 @@ import * as zlib from 'node:zlib';
 import * as vscode from 'vscode';
 import { parseAgyModelsOutput } from './capabilities';
 import {
+	buildRemotePersistentPrefix,
 	captureRemoteEngine,
 	CloudHostTarget,
 	execRemoteShell,
 	joinRemotePath,
+	normalizeRemoteCwdForCompare,
 	posixQuote,
 	psSingleQuote,
 	readRemoteTextFile,
 	readRemoteTextFilesBatch,
+	resolveRemoteRealpath,
+	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
 import { AgentChildIdentity, ROLE_INIT_MARKER, SHARED_PURE_SCOPE_KEY, stripAdeControlEnv, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
 
@@ -171,6 +175,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 	protected hasReceivedCommands = false;
 	protected readonly probedSessionTimestamps = new Map<string, number>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
+	private readonly lastRawSessionUsageBySession = new Map<string, EngineTurnTokenUsage>();
 
 	protected get client(): JsonLineClient | undefined {
 		return this.clientPool.get(SHARED_PURE_SCOPE_KEY)?.client;
@@ -311,7 +316,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		return undefined;
 	}
 
-	protected ensureClientSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string): Promise<{ readonly slot: AcpClientSlot; readonly client: JsonLineClient }> {
+	protected ensureClientSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string, persistentOwnerId?: string): Promise<{ readonly slot: AcpClientSlot; readonly client: JsonLineClient }> {
 		let slot = this.clientPool.get(scopeKey);
 		if (slot?.client && !slot.client.isClosed && slot.ready) {
 			const existingSlot = slot;
@@ -329,7 +334,23 @@ export abstract class AcpRuntime implements EngineRuntime {
 			const childEnv = this.remoteTarget
 				? { ...(baseEnv ?? {}), ...(await prepareRemoteAgentChildEnv(this.remoteTarget, identity ?? { sessionId: `${this.id}-pure`, pureWorker: true })) }
 				: await prepareAgentChildEnv(identity ?? { sessionId: `${this.id}-pure`, pureWorker: true }, baseEnv);
-			const client = new JsonLineClient(this.executable, [...this.args], cwd, childEnv, this.remoteTarget);
+			const persistentKey = scopeKey === SHARED_PURE_SCOPE_KEY
+				? `${buildRemotePersistentPrefix(this.id, SHARED_PURE_SCOPE_KEY)}-${randomUUID().slice(0, 8)}`
+				: `${buildRemotePersistentPrefix(this.id, persistentOwnerId || scopeKey)}-${randomUUID().slice(0, 8)}`;
+			const client = new JsonLineClient(
+				this.executable,
+				[...this.args],
+				cwd,
+				childEnv,
+				this.remoteTarget,
+				this.remoteTarget && this.remoteTarget.os !== 'windows'
+					? { persistentSessionId: persistentKey }
+					: undefined,
+			);
+			if (this.clientPool.get(scopeKey) !== currentSlot) {
+				client.dispose();
+				throw new Error('ACP client slot was reset during startup.');
+			}
 			currentSlot.client = client;
 			client.onPacket(packet => {
 				if (packet.method === 'session/update') {
@@ -346,7 +367,11 @@ export abstract class AcpRuntime implements EngineRuntime {
 					terminal: false,
 					elicitation: { form: {} },
 				},
-			});
+			}, { timeoutMs: 25_000 });
+			if (this.clientPool.get(scopeKey) !== currentSlot) {
+				client.dispose();
+				throw new Error('ACP client slot was reset during initialization.');
+			}
 			this.agentCapabilities = result?.agentCapabilities;
 			return client;
 		})();
@@ -383,7 +408,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const prevSlot = this.clientPool.get(prevScopeKey);
 		if (prevSlot) {
 			if (prevSlot.client && !prevSlot.client.isClosed && prevSlot.openSessions.has(sessionId)) {
-				await prevSlot.client.request('session/close', { sessionId }).catch(() => { });
+				await prevSlot.client.request('session/close', { sessionId }, { timeoutMs: 2500 }).catch(() => { });
 			}
 			prevSlot.openSessions.delete(sessionId);
 			if (prevScopeKey !== SHARED_PURE_SCOPE_KEY) {
@@ -395,6 +420,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 	protected async closeSession(sessionId: string): Promise<void> {
 		const scopeKey = this.sessionScopeKeys.get(sessionId);
 		const keys = scopeKey ? [scopeKey] : [...this.clientPool.keys()];
+		let closeFailedOnShared = false;
 		for (const key of keys) {
 			const slot = this.clientPool.get(key);
 			if (!slot || !slot.client || slot.client.isClosed || !slot.openSessions.has(sessionId)) {
@@ -402,12 +428,21 @@ export abstract class AcpRuntime implements EngineRuntime {
 				continue;
 			}
 			slot.openSessions.delete(sessionId);
-			await slot.client.request('session/close', { sessionId }).catch(() => { });
+			await slot.client.request('session/close', { sessionId }, { timeoutMs: 2500 }).catch(() => {
+				if (key === SHARED_PURE_SCOPE_KEY) {
+					closeFailedOnShared = true;
+				}
+			});
 		}
 		this.sessionScopeKeys.delete(sessionId);
 		this.probedSessionTimestamps.delete(sessionId);
 		if (scopeKey && scopeKey !== SHARED_PURE_SCOPE_KEY) {
 			await this.resetClient(scopeKey);
+		} else if (closeFailedOnShared) {
+			const sharedSlot = this.clientPool.get(SHARED_PURE_SCOPE_KEY);
+			if (sharedSlot && sharedSlot.openSessions.size === 0 && sharedSlot.loadingSessions.size === 0) {
+				await this.resetClient(SHARED_PURE_SCOPE_KEY);
+			}
 		}
 	}
 
@@ -425,7 +460,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			slot.openSessions.clear();
 			slot.loadingSessions.clear();
 			if (current) {
-				current.dispose();
+				await current.disposeAsync().catch(() => undefined);
 				await current.waitForClose();
 			}
 		}
@@ -467,7 +502,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 	}
 
-	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
+	async prepareSession(session: NativeSession, options?: EngineSendOptions, token?: vscode.CancellationToken): Promise<void> {
+		if (token?.isCancellationRequested) {
+			return;
+		}
 		const scopeKey = options
 			? agentIdentityScopeKey(session.id, options, session.cwd)
 			: this.resolveLiveScopeKey(session.id);
@@ -475,11 +513,17 @@ export abstract class AcpRuntime implements EngineRuntime {
 			? { sessionId: options.adeSessionId || session.id, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode }
 			: { sessionId: session.id, pureWorker: true };
 		await this.retireStaleSessionSlot(session.id, scopeKey);
-		if (!session.unmaterialized) {
+		if (!session.unmaterialized || token?.isCancellationRequested) {
 			return;
 		}
-		const { slot, client } = await this.ensureClientSlot(scopeKey, identity, scopeKey === SHARED_PURE_SCOPE_KEY ? undefined : session.cwd);
-		const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
+		const { slot, client } = await raceWithCancellation(
+			this.ensureClientSlot(scopeKey, identity, scopeKey === SHARED_PURE_SCOPE_KEY ? undefined : session.cwd),
+			token,
+		);
+		if (token?.isCancellationRequested) {
+			return;
+		}
+		const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] }, { timeoutMs: 25_000, token });
 		this.ingestSessionSetup(created);
 		session.id = created.sessionId;
 		session.unmaterialized = false;
@@ -493,34 +537,37 @@ export abstract class AcpRuntime implements EngineRuntime {
 		this.knownSessions.set(session.id, session);
 	}
 
-	protected async ensureSessionOpen(slot: AcpClientSlot, client: JsonLineClient, session: NativeSession): Promise<void> {
-		if (slot.openSessions.has(session.id)) {
+	protected async ensureSessionOpen(slot: AcpClientSlot, client: JsonLineClient, session: NativeSession, token?: vscode.CancellationToken): Promise<void> {
+		if (slot.openSessions.has(session.id) || token?.isCancellationRequested) {
 			return;
 		}
 		try {
 			if (this.agentCapabilities?.sessionCapabilities?.resume) {
-				const resumed = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/resume', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+				const resumed = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/resume', { sessionId: session.id, cwd: session.cwd, mcpServers: [] }, { timeoutMs: 25_000, token });
 				this.ingestSessionSetup(resumed);
 			} else if (this.agentCapabilities?.loadSession) {
 				slot.loadingSessions.add(session.id);
 				try {
-					const loaded = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+					const loaded = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] }, { timeoutMs: 25_000, token });
 					this.ingestSessionSetup(loaded);
 				} finally {
 					slot.loadingSessions.delete(session.id);
 				}
 			} else if (session.provisional) {
-				const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
+				const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] }, { timeoutMs: 25_000, token });
 				this.ingestSessionSetup(created);
 				session.id = created.sessionId;
 				this.knownSessions.set(session.id, session);
 			}
 			slot.openSessions.add(session.id);
 		} catch (error) {
+			if (token?.isCancellationRequested || error instanceof vscode.CancellationError) {
+				return;
+			}
 			if (!session.provisional) {
 				throw error;
 			}
-			const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] });
+			const created = await client.request<AcpSessionSetupResult>('session/new', { cwd: session.cwd, mcpServers: [] }, { timeoutMs: 25_000, token });
 			this.ingestSessionSetup(created);
 			session.id = created.sessionId;
 			slot.openSessions.add(session.id);
@@ -693,6 +740,20 @@ export abstract class AcpRuntime implements EngineRuntime {
 			}
 		}
 		await this.closeSession(session.id);
+		// If this session was the only open session on the shared slot, recycle the client
+		// so a wedged ACP process (e.g. `agy acp` ignoring `session/cancel`) cannot poison future turns.
+		const sharedSlot = this.clientPool.get(SHARED_PURE_SCOPE_KEY);
+		if (sharedSlot && sharedSlot.openSessions.size === 0 && sharedSlot.loadingSessions.size === 0) {
+			await this.resetClient(SHARED_PURE_SCOPE_KEY);
+		}
+		// Guarantee full remote process-group + descendant termination even after an Electron window reload.
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			await terminateRemotePersistentSessionsByPrefix(
+				this.remoteTarget,
+				buildRemotePersistentPrefix(this.id, session.id),
+				{ killTree: true },
+			);
+		}
 	}
 
 	protected snapshotRuntimeCapabilities(): EngineRuntimeCapabilities {
@@ -785,16 +846,32 @@ export abstract class AcpRuntime implements EngineRuntime {
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
+		if (token.isCancellationRequested) {
+			return;
+		}
 		const scopeKey = agentIdentityScopeKey(session.id, options, session.cwd);
 		await this.retireStaleSessionSlot(session.id, scopeKey);
-		const { slot, client } = await this.ensureClientSlot(scopeKey, {
-			sessionId: options?.adeSessionId || session.id,
-			callerRole: options?.callerRole,
-			pureWorker: options?.pureWorker,
-			isMissionNode: options?.isMissionNode,
-		}, session.cwd);
-		await this.ensureSessionOpen(slot, client, session);
+		if (token.isCancellationRequested) {
+			return;
+		}
+		const { slot, client } = await raceWithCancellation(
+			this.ensureClientSlot(scopeKey, {
+				sessionId: options?.adeSessionId || session.id,
+				callerRole: options?.callerRole,
+				pureWorker: options?.pureWorker,
+				isMissionNode: options?.isMissionNode,
+			}, session.cwd, session.id),
+			token,
+		);
+		if (token.isCancellationRequested) {
+			return;
+		}
+		await this.ensureSessionOpen(slot, client, session, token);
+		if (token.isCancellationRequested) {
+			return;
+		}
 		this.sessionScopeKeys.set(session.id, scopeKey);
+		const cfgReqOpts = { timeoutMs: 8_000, token };
 		if (options?.model && options.model !== 'default') {
 			let normalizedModel = options.model.trim();
 			if (this.id === 'dsh' && !normalizedModel.startsWith('[')) {
@@ -824,22 +901,25 @@ export abstract class AcpRuntime implements EngineRuntime {
 				}
 			}
 			if (this.id === 'dsh') {
-				await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
 			} else if (this.id === 'antigravity') {
 				if (this.cachedModelConfigValues.has(normalizedModel)) {
-					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
 				} else {
-					await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }).catch(() => { });
+					await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }, cfgReqOpts).catch(() => { });
 					if (this.cachedConfigOptionIds.has('model')) {
-						await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+						await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
 					}
 				}
 			} else {
-				await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }).catch(() => { });
+				await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }, cfgReqOpts).catch(() => { });
 				if (this.cachedConfigOptionIds.has('model')) {
-					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }).catch(() => { });
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
 				}
 			}
+		}
+		if (token.isCancellationRequested) {
+			return;
 		}
 		const autonomous = Boolean(options?.automatedEngineering) || isAutonomousModeEnabled();
 		const effectiveMode = options?.mode && options.mode !== 'default'
@@ -848,29 +928,45 @@ export abstract class AcpRuntime implements EngineRuntime {
 		if (effectiveMode) {
 			if (this.id === 'cline') {
 				const clineSessionMode = effectiveMode === 'plan' ? 'plan' : 'act';
-				await client.request('session/set_mode', { sessionId: session.id, modeId: clineSessionMode }).catch(() => { });
+				await client.request('session/set_mode', { sessionId: session.id, modeId: clineSessionMode }, cfgReqOpts).catch(() => { });
 				if (this.cachedConfigOptionIds.has('mode')) {
-					await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: clineSessionMode }).catch(() => { });
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: clineSessionMode }, cfgReqOpts).catch(() => { });
 				}
 				if (this.cachedConfigOptionIds.has('auto_approve')) {
-					await client.request('session/set_config_option', { sessionId: session.id, configId: 'auto_approve', value: effectiveMode === 'yolo' || Boolean(options?.automatedEngineering) }).catch(() => { });
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'auto_approve', value: effectiveMode === 'yolo' || Boolean(options?.automatedEngineering) }, cfgReqOpts).catch(() => { });
 				}
 			} else {
-				await client.request('session/set_mode', { sessionId: session.id, modeId: effectiveMode }).catch(() => { });
+				await client.request('session/set_mode', { sessionId: session.id, modeId: effectiveMode }, cfgReqOpts).catch(() => { });
 				if (this.cachedConfigOptionIds.has('mode')) {
-					await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: effectiveMode }).catch(() => { });
+					await client.request('session/set_config_option', { sessionId: session.id, configId: 'mode', value: effectiveMode }, cfgReqOpts).catch(() => { });
 				}
 			}
 		}
+		if (token.isCancellationRequested) {
+			return;
+		}
 		if (options?.thinking && options.thinking !== 'default') {
-			const normalizedThinking = options.thinking === 'none' ? 'off' : options.thinking === 'xhigh' || options.thinking === 'extra-high' ? 'high' : options.thinking;
+			const rawThinking = options.thinking.trim().toLowerCase();
+			const isExtraHigh = rawThinking === 'xhigh' || rawThinking === 'extra-high' || rawThinking === 'max';
+			const normalizedThinking = rawThinking === 'none' ? 'off' : isExtraHigh ? 'xhigh' : rawThinking;
 			if (this.cachedConfigOptionIds.has('thought_level')) {
-				const agyLevel = normalizedThinking === 'off' ? 'low' : (normalizedThinking === 'max' ? 'high' : normalizedThinking);
-				await client.request('session/set_config_option', { sessionId: session.id, configId: 'thought_level', value: agyLevel }).catch(() => { });
+				const agyLevel = normalizedThinking === 'off' ? 'low' : normalizedThinking;
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'thought_level', value: agyLevel }, cfgReqOpts).catch(async () => {
+					if (agyLevel === 'xhigh' && !token.isCancellationRequested) {
+						await client.request('session/set_config_option', { sessionId: session.id, configId: 'thought_level', value: 'high' }, cfgReqOpts).catch(() => { });
+					}
+				});
 			}
 			if (this.cachedConfigOptionIds.has('reasoning_effort')) {
-				await client.request('session/set_config_option', { sessionId: session.id, configId: 'reasoning_effort', value: normalizedThinking }).catch(() => { });
+				await client.request('session/set_config_option', { sessionId: session.id, configId: 'reasoning_effort', value: normalizedThinking }, cfgReqOpts).catch(async () => {
+					if (normalizedThinking === 'xhigh' && !token.isCancellationRequested) {
+						await client.request('session/set_config_option', { sessionId: session.id, configId: 'reasoning_effort', value: 'high' }, cfgReqOpts).catch(() => { });
+					}
+				});
 			}
+		}
+		if (token.isCancellationRequested) {
+			return;
 		}
 		const requestedPerm = options?.permissionMode?.trim();
 		const requestedMode = options?.mode?.trim();
@@ -883,7 +979,23 @@ export abstract class AcpRuntime implements EngineRuntime {
 			|| (this.id === 'antigravity' && requestedMode === 'auto');
 		const autoApprove = Boolean(options?.automatedEngineering)
 			|| (!explicitAskOrPlan && (explicitBypass || isAutonomousModeEnabled()));
+		if (this.id === 'dsh') {
+			const effectiveDshPerm = requestedPerm && requestedPerm !== 'default'
+				? requestedPerm
+				: (autoApprove ? 'danger-full-access' : 'ask');
+			for (const cfgId of ['permission_mode', 'sandbox', 'approval_mode'] as const) {
+				if (this.cachedConfigOptionIds.has(cfgId)) {
+					await client.request('session/set_config_option', { sessionId: session.id, configId: cfgId, value: effectiveDshPerm }, cfgReqOpts).catch(() => { });
+				}
+			}
+		}
+		if (token.isCancellationRequested) {
+			return;
+		}
 		this.knownSessions.set(session.id, session);
+		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
+			preTurnBaseline: this.lastRawSessionUsageBySession.get(session.id),
+		});
 		const listener = client.onPacket(packet => {
 			const params = packet.params ?? {};
 			if (packet.id !== undefined && packet.method) {
@@ -891,7 +1003,9 @@ export abstract class AcpRuntime implements EngineRuntime {
 				if (!targetSessionId || targetSessionId === session.id) {
 					if (packet.method === 'session/request_permission' && autoApprove) {
 						const permOpts = Array.isArray(params.options) ? (params.options as AcpPermissionOption[]) : [];
-						const allowOpt = permOpts.find(opt => opt.kind === 'allow_always') ?? permOpts.find(opt => opt.kind === 'allow_once') ?? permOpts[0];
+						const allowOpt = permOpts.find(opt => opt.kind === 'allow_always')
+							?? permOpts.find(opt => opt.kind === 'allow_once')
+							?? permOpts.find(opt => typeof opt.kind === 'string' && !opt.kind.startsWith('reject'));
 						if (allowOpt) {
 							client.write({ jsonrpc: '2.0', id: packet.id, result: { outcome: { outcome: 'selected', optionId: allowOpt.optionId } } });
 							return;
@@ -907,7 +1021,9 @@ export abstract class AcpRuntime implements EngineRuntime {
 			const update = (params.update ?? params) as AcpSessionUpdate;
 			const updateUsage = extractAcpTurnUsage(update.usage ?? params.usage);
 			if (updateUsage) {
-				this.lastTurnUsageBySession.set(session.id, updateUsage);
+				const normalized = usageTracker.recordRealUsage(updateUsage, { cumulativeAcrossThread: true });
+				this.lastRawSessionUsageBySession.set(session.id, updateUsage);
+				this.lastTurnUsageBySession.set(session.id, normalized);
 			}
 			const kind = update.sessionUpdate ?? update.type;
 			if (kind === 'compact_boundary' || kind === 'context_compacted') {
@@ -917,10 +1033,16 @@ export abstract class AcpRuntime implements EngineRuntime {
 			}
 			if (!token.isCancellationRequested && kind === 'agent_message_chunk') {
 				const chunk = extractAcpText(update);
-				if (chunk) { stream.markdown(chunk); }
+				if (chunk) {
+					stream.markdown(chunk);
+					usageTracker.recordStreamDelta(chunk);
+				}
 			} else if (!token.isCancellationRequested && (kind === 'agent_thought_chunk' || kind === 'thought_chunk')) {
 				const thought = extractAcpText(update);
-				if (thought) { emitThinkingProgress(stream, thought, `${this.id}-thinking`); }
+				if (thought) {
+					emitThinkingProgress(stream, thought, `${this.id}-thinking`);
+					usageTracker.recordStreamDelta(thought);
+				}
 			} else if (!token.isCancellationRequested && (kind === 'tool_call' || kind === 'tool_call_update')) {
 				const toolTitle = typeof update.title === 'string' && update.title.trim() ? update.title.trim() : undefined;
 				if (toolTitle || kind === 'tool_call') {
@@ -933,9 +1055,9 @@ export abstract class AcpRuntime implements EngineRuntime {
 				this.changed.fire([session]);
 			}
 		});
-		const cancellation = token.onCancellationRequested(() => {
+		const sendCancelNotification = () => {
 			try { client.write({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } }); } catch { /* Connection may already be closed. */ }
-		});
+		};
 		try {
 			const promptParts: Array<Record<string, unknown>> = [];
 			if (options?.attachments?.length) {
@@ -957,15 +1079,39 @@ export abstract class AcpRuntime implements EngineRuntime {
 				finalPromptText = `[Mode: Plan Mode — Analyze the codebase and present a clear step-by-step plan without modifying files until confirmed.]\n\n${text}`;
 			}
 			promptParts.push({ type: 'text', text: finalPromptText });
-			await client.request('session/prompt', { sessionId: session.id, prompt: promptParts });
-			session.provisional = false;
+			if (token.isCancellationRequested) {
+				return;
+			}
+			try {
+				await client.request('session/prompt', { sessionId: session.id, prompt: promptParts }, {
+					token,
+					cancelGraceMs: 1500,
+					onCancel: sendCancelNotification,
+				});
+				session.provisional = false;
+			} catch (err) {
+				if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
+					// If the ACP server did not settle `session/prompt` within the cancel grace window,
+					// recycle this session/client so the next prompt never collides with a wedged turn.
+					slot.openSessions.delete(session.id);
+					const stillOwnsSlot = this.clientPool.get(scopeKey) === slot && slot.client === client;
+					if (stillOwnsSlot) {
+						if (scopeKey !== SHARED_PURE_SCOPE_KEY || (slot.openSessions.size === 0 && slot.loadingSessions.size === 0)) {
+							await this.resetClient(scopeKey).catch(() => { });
+						} else {
+							await client.request('session/close', { sessionId: session.id }, { timeoutMs: 1000 }).catch(() => { });
+						}
+					}
+					return;
+				}
+				throw err;
+			}
 		} finally {
 			listener.dispose();
-			cancellation.dispose();
 		}
 	}
 
-	abstract list(token: vscode.CancellationToken): Promise<NativeSession[]>;
+	abstract list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]>;
 	abstract history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]>;
 	abstract delete(session: NativeSession, token: vscode.CancellationToken): Promise<void>;
 
@@ -980,6 +1126,8 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 		this.clientPool.clear();
 		this.sessionScopeKeys.clear();
+		this.lastTurnUsageBySession.clear();
+		this.lastRawSessionUsageBySession.clear();
 	}
 }
 
@@ -1129,11 +1277,68 @@ export class DshRuntime extends AcpRuntime {
 		return process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh');
 	}
 
-	private async scanRemoteSessions(token: vscode.CancellationToken): Promise<DshDiscoveredSession[]> {
+	private async scanRemoteSessions(token: vscode.CancellationToken, projectCwd?: string): Promise<DshDiscoveredSession[]> {
 		if (!this.remoteTarget || token.isCancellationRequested) {
 			return [];
 		}
+		const targetCwds: string[] = [];
+		if (projectCwd?.trim()) {
+			targetCwds.push(normalizeRemoteCwdForCompare(projectCwd, this.remoteTarget.os));
+			const realCwd = await resolveRemoteRealpath(this.remoteTarget, projectCwd, token).catch(() => undefined);
+			if (realCwd) {
+				const realNorm = normalizeRemoteCwdForCompare(realCwd, this.remoteTarget.os);
+				if (!targetCwds.includes(realNorm)) {
+					targetCwds.push(realNorm);
+				}
+			}
+		}
+
+		const pyDsh = [
+			`import json, os, sys`,
+			`target_cwds = set(json.loads(sys.argv[1]))`,
+			`pdir = os.path.join(os.environ.get("DSH_HOME") or os.path.expanduser("~/.dsh"), "storages", "session_projcache", "sessions")`,
+			`if not os.path.isdir(pdir): sys.exit(0)`,
+			`def norm(p):`,
+			`    p = os.path.normpath((p or "").strip())`,
+			`    return p[:-1] if len(p) > 1 and p.endswith("/") else p`,
+			`files = []`,
+			`for fn in os.listdir(pdir):`,
+			`    if not fn.endswith(".json"): continue`,
+			`    fp = os.path.join(pdir, fn)`,
+			`    try: files.append((os.path.getmtime(fp), fn[:-5], fp))`,
+			`    except OSError: pass`,
+			`files.sort(key=lambda x: x[0], reverse=True)`,
+			`for mtime, sid, fp in files[:200]:`,
+			`    try:`,
+			`        with open(fp, "r", encoding="utf-8", errors="replace") as f: parsed = json.load(f)`,
+			`    except Exception: continue`,
+			`    if not isinstance(parsed, dict): continue`,
+			`    proj = parsed.get("record") if isinstance(parsed.get("record"), dict) else parsed`,
+			`    identity = proj.get("identity") if isinstance(proj.get("identity"), dict) else {}`,
+			`    rows = proj.get("rows") if isinstance(proj.get("rows"), dict) else {}`,
+			`    wd_val = (rows.get("workingDirectory") or {}).get("val") if isinstance(rows.get("workingDirectory"), dict) else None`,
+			`    cwd = (wd_val if isinstance(wd_val, str) else (wd_val.get("cwd") if isinstance(wd_val, dict) else None)) or identity.get("cwd") or proj.get("cwd")`,
+			`    if not cwd or not sid: continue`,
+			`    if target_cwds and norm(str(cwd)) not in target_cwds: continue`,
+			`    t_val = (rows.get("title") or {}).get("val") if isinstance(rows.get("title"), dict) else None`,
+			`    title = (t_val if isinstance(t_val, str) else (t_val.get("title") if isinstance(t_val, dict) else None)) or proj.get("title") or ""`,
+			`    sub_val = (rows.get("subagent") or {}).get("val") if isinstance(rows.get("subagent"), dict) else {}`,
+			`    if not isinstance(sub_val, dict): sub_val = {}`,
+			`    lm_val = (rows.get("sessionListMetadata") or {}).get("val") if isinstance(rows.get("sessionListMetadata"), dict) else {}`,
+			`    if not isinstance(lm_val, dict): lm_val = {}`,
+			`    parent_id = identity.get("parentSessionId") or identity.get("parentId") or sub_val.get("parentSessionId") or sub_val.get("parentId") or lm_val.get("parentSessionId") or lm_val.get("parentId") or proj.get("parentSessionId") or proj.get("parentId")`,
+			`    origin = identity.get("origin") or sub_val.get("origin") or lm_val.get("origin") or proj.get("origin") or ("subagent" if parent_id else None)`,
+			`    mtime_ms = int(mtime * 1000)`,
+			`    created = identity.get("createdAt") or proj.get("createdAt") or mtime_ms`,
+			`    updated = max(mtime_ms, lm_val.get("lastPromptAt") or 0, proj.get("updatedAt") or 0, proj.get("updated") or 0) or created`,
+			`    print("__AEX_DSH_J__\\t" + json.dumps({"id": sid, "cwd": str(cwd), "title": str(title), "created": created, "updated": updated, "parentId": parent_id, "origin": origin}, ensure_ascii=False))`,
+		].join('\n');
+
 		const posixScript = [
+			`if command -v python3 >/dev/null 2>&1; then`,
+			`  python3 -c ${posixQuote(pyDsh)} ${posixQuote(JSON.stringify(targetCwds))}`,
+			`  exit $?`,
+			`fi`,
 			`pdir="\${DSH_HOME:-$HOME/.dsh}/storages/session_projcache/sessions"`,
 			`[ -d "$pdir" ] || exit 0`,
 			`for f in "$pdir"/*.json; do`,
@@ -1166,6 +1371,28 @@ export class DshRuntime extends AcpRuntime {
 		const discovered: DshDiscoveredSession[] = [];
 		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
 			if (!rawLine.trim()) { continue; }
+			if (rawLine.startsWith('__AEX_DSH_J__\t')) {
+				try {
+					const row = JSON.parse(rawLine.slice('__AEX_DSH_J__\t'.length)) as {
+						id?: string; cwd?: string; title?: string; created?: number; updated?: number; parentId?: string; origin?: string;
+					};
+					if (!row.id || !row.cwd) { continue; }
+					const session: DshDiscoveredSession = {
+						id: row.id,
+						parentId: row.parentId || undefined,
+						readOnly: row.origin === 'subagent' || !!row.parentId,
+						cwd: row.cwd,
+						label: row.title?.trim() || vscode.l10n.t('DeepSeek Harness {0}', row.id.replace(/^session-/, '').slice(0, 8)),
+						created: typeof row.created === 'number' && Number.isFinite(row.created) ? row.created : Date.now(),
+						updated: typeof row.updated === 'number' && Number.isFinite(row.updated) ? row.updated : Date.now(),
+						provisional: false,
+						origin: row.origin ?? (row.parentId ? 'subagent' : undefined),
+					};
+					this.knownSessions.set(session.id, session);
+					discovered.push(session);
+				} catch { /* ignore */ }
+				continue;
+			}
 			const parts = rawLine.split('\t');
 			if (parts.length < 3) { continue; }
 			const rawTs = Number(parts[0]) || 0;
@@ -1206,9 +1433,9 @@ export class DshRuntime extends AcpRuntime {
 		return discovered.sort((a, b) => b.updated - a.updated);
 	}
 
-	private async scanSessions(token: vscode.CancellationToken): Promise<DshDiscoveredSession[]> {
+	private async scanSessions(token: vscode.CancellationToken, projectCwd?: string): Promise<DshDiscoveredSession[]> {
 		if (this.remoteTarget) {
-			return this.scanRemoteSessions(token);
+			return this.scanRemoteSessions(token, projectCwd);
 		}
 		const home = this.dshHome();
 		const projDir = path.join(home, 'storages', 'session_projcache', 'sessions');
@@ -1321,8 +1548,8 @@ export class DshRuntime extends AcpRuntime {
 		return discovered.sort((a, b) => b.updated - a.updated);
 	}
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
-		const all = await this.scanSessions(token);
+	async list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
+		const all = await this.scanSessions(token, projectCwd);
 		return all.filter(session => session.origin !== 'subagent' && !session.parentId);
 	}
 
@@ -1598,10 +1825,94 @@ export class AntigravityRuntime extends AcpRuntime {
 		return result.sort((a, b) => b.updated - a.updated);
 	}
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
-		if (token.isCancellationRequested) { return []; }
+	private async listRemoteFromSqlite(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[] | undefined> {
+		if (!this.remoteTarget || this.remoteTarget.os === 'windows' || token.isCancellationRequested) {
+			return undefined;
+		}
+		const targetCwds: string[] = [];
+		if (projectCwd?.trim()) {
+			targetCwds.push(normalizeRemoteCwdForCompare(projectCwd, this.remoteTarget.os));
+			const realCwd = await resolveRemoteRealpath(this.remoteTarget, projectCwd, token).catch(() => undefined);
+			if (realCwd) {
+				const realNorm = normalizeRemoteCwdForCompare(realCwd, this.remoteTarget.os);
+				if (!targetCwds.includes(realNorm)) {
+					targetCwds.push(realNorm);
+				}
+			}
+		}
+		const pyAgy = [
+			`import json, os, sqlite3, sys, urllib.parse`,
+			`target_cwds = set(json.loads(sys.argv[1]))`,
+			`homes = [os.path.expanduser("~/.gemini/antigravity"), os.path.expanduser("~/.gemini/antigravity-cli")]`,
+			`def norm(p):`,
+			`    p = os.path.normpath((p or "").strip())`,
+			`    return p[:-1] if len(p) > 1 and p.endswith("/") else p`,
+			`def uri_to_path(raw):`,
+			`    if not isinstance(raw, str) or not raw: return ""`,
+			`    if raw.startswith("file://"):`,
+			`        return urllib.parse.unquote(urllib.parse.urlparse(raw).path)`,
+			`    return raw`,
+			`seen = set(); out = []`,
+			`for home in homes:`,
+			`    db = os.path.join(home, "conversation_summaries.db")`,
+			`    if not os.path.isfile(db): continue`,
+			`    try:`,
+			`        con = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=3.0)`,
+			`        cur = con.cursor()`,
+			`        rows = cur.execute("SELECT conversation_id, title, preview, last_modified_time, workspace_uris, parent_conversation_id, last_user_input_time FROM conversation_summaries WHERE parent_conversation_id = '' AND killed = 0 ORDER BY last_modified_time DESC LIMIT 200").fetchall()`,
+			`        con.close()`,
+			`    except Exception: continue`,
+			`    for cid, title, preview, lmt, wuris, _pcid, luit in rows:`,
+			`        if not cid or cid in seen: continue`,
+			`        cwd = ""`,
+			`        try:`,
+			`            arr = json.loads(wuris or "[]")`,
+			`            if isinstance(arr, list) and arr: cwd = uri_to_path(arr[0])`,
+			`        except Exception: pass`,
+			`        if not cwd: cwd = os.path.expanduser("~")`,
+			`        if target_cwds and norm(cwd) not in target_cwds: continue`,
+			`        seen.add(cid)`,
+			`        out.append({"id": str(cid), "cwd": cwd, "title": str(title or ""), "preview": str(preview or ""), "lmt": str(lmt or ""), "luit": str(luit or "")})`,
+			`print(json.dumps(out, ensure_ascii=False))`,
+		].join('\n');
+		const res = await execRemoteShell(
+			this.remoteTarget,
+			`if command -v python3 >/dev/null 2>&1; then python3 -c ${posixQuote(pyAgy)} ${posixQuote(JSON.stringify(targetCwds))}; else exit 127; fi`,
+			'',
+			{ timeoutMs: 8_000, token },
+		).catch(() => undefined);
+		if (!res || res.code !== 0) {
+			return undefined;
+		}
 		try {
-			const client = await this.ensureClient();
+			const rows = JSON.parse(res.stdout.toString('utf8').trim() || '[]') as Array<{
+				id?: string; cwd?: string; title?: string; preview?: string; lmt?: string; luit?: string;
+			}>;
+			const now = Date.now();
+			return rows.filter(r => r.id && r.cwd).map(row => {
+				const updated = this.parseTimestamp(row.lmt, this.parseTimestamp(row.luit, now));
+				const cleanedTitle = stripInjectedAdeContextFromUserTurn(row.title || row.preview || '');
+				const label = (cleanedTitle.trimStart().startsWith(ROLE_INIT_MARKER) ? '' : cleanedTitle).split('\n')[0].slice(0, 100)
+					|| vscode.l10n.t('Antigravity Session {0}', row.id!.slice(0, 8));
+				const session: NativeSession = { id: row.id!, cwd: row.cwd!, label, created: updated, updated, provisional: false };
+				this.knownSessions.set(session.id, session);
+				return session;
+			});
+		} catch {
+			return undefined;
+		}
+	}
+
+	async list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
+		if (token.isCancellationRequested) { return []; }
+		if (this.remoteTarget && this.clientPool.size === 0) {
+			const fastRemote = await this.listRemoteFromSqlite(token, projectCwd);
+			if (fastRemote !== undefined) {
+				return fastRemote;
+			}
+		}
+		try {
+			const client = await withTimeout(this.ensureClient(), 6000);
 			if (this.agentCapabilities?.sessionCapabilities?.list) {
 				const sessions: NativeSession[] = [];
 				const seenCursors = new Set<string>();
@@ -1613,7 +1924,7 @@ export class AntigravityRuntime extends AcpRuntime {
 						const updated = this.parseTimestamp(item.updatedAt, Date.now());
 						const entry: NativeSession = {
 							id: item.sessionId,
-							cwd: item.cwd || os.homedir(),
+							cwd: item.cwd || (this.remoteTarget?.remoteHome || os.homedir()),
 							label: item.title?.trim() || vscode.l10n.t('Antigravity Session {0}', item.sessionId.slice(0, 8)),
 							created: updated,
 							updated,
@@ -1716,9 +2027,6 @@ export class AntigravityRuntime extends AcpRuntime {
 			return;
 		}
 		await this.closeSession(session.id);
-		if ([...this.clientPool.values()].some(slot => slot.client && !slot.client.isClosed)) {
-			await this.resetClient();
-		}
 		this.knownSessions.delete(session.id);
 		if (this.remoteTarget) {
 			return;
@@ -1896,7 +2204,7 @@ export class ClineRuntime extends AcpRuntime {
 		return session;
 	}
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	async list(token: vscode.CancellationToken, _projectCwd?: string): Promise<NativeSession[]> {
 		const items = await this.fetchHistoryItems(token);
 		return items.filter(item => !item.isSubagent).map(item => this.toNativeSession(item));
 	}

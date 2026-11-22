@@ -37,25 +37,22 @@ node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts doctor --p
 
 ## Contribute a Blueprint Recipe
 
-Shareable Markdown DAG recipes (`examples/blueprints/*.md`) are one of the highest-leverage ways to contribute domain workflows (e.g., Kubernetes upgrades, Rust perf profiling, data-pipeline migrations, or paper replications).
+Shareable Mission DAG blueprints (`examples/blueprints/*.md`) are one of the highest-leverage ways to contribute domain workflows (e.g., Kubernetes upgrades, Rust perf profiling, data-pipeline migrations, or paper replications).
 
-1. **Author the Built-In Template** in [`src/vs/platform/ade/common/adeBlueprintTemplates.ts`](src/vs/platform/ade/common/adeBlueprintTemplates.ts):
-   - Define `recommendedBudgetUsd`, `maxConcurrency`, `recommendedIsolation` (`worktree` or `shared`), `defaultVerify`, per-node `files:` globs, per-node `verify:` checks, `critical:` flags, and DAG edges.
-   - Use realistic, project-portable `files:` and `verify:` defaults.
-2. **Sync the Markdown Recipe 1:1** in [`examples/blueprints/`](examples/blueprints/README.md):
-   - Keep `examples/blueprints/<recipe-id>.md` synchronized 100% with the `balanced` preset output of `adeBlueprintTemplates.ts` (including `max_budget_usd`, `max_concurrency`, `verify`, `files`, `critical`, and Mermaid edges).
+1. **Author the Markdown Blueprint** in [`examples/blueprints/`](examples/blueprints/README.md):
+   - Include a fenced ```` ```mermaid ```` block starting with `flowchart LR` using clean node labels, `@EmployeeName:` context-reuse tags where appropriate, `U1{{"..."}}` human gates, and optional `-->|fail|` fallback edges.
+   - Do **not** embed legacy `worker=engine:thinking` pipes inside node labels or legacy `## Tree Metadata` sections.
+   - Add a `## Node Pre-Prompts` section documenting the concrete pre-prompt for every node (`### N1`, `### N2`, …).
    - Add a summary row in [`examples/blueprints/README.md`](examples/blueprints/README.md).
-3. **Validate Before Opening a PR**:
+2. **Validate Before Opening a PR**:
    ```bash
-   # Validate Mermaid + Markdown schema parsing
-   node --experimental-strip-types extensions/aexus-agents/src/adeCli.ts engineering blueprint validate --file ./examples/blueprints/<recipe-id>.md
-
-   # Run blueprint parser & template tests
+   # Validate Mermaid DAG syntax via the standalone parser tests
    ./scripts/aexus-env.sh node test/unit/node/index.js \
-     --run src/vs/platform/ade/test/node/adeEngineeringBlueprintParser.test.ts \
-     --run src/vs/platform/ade/test/node/adeFinOpsAndTemplates.test.ts
+     --runGlob "vs/platform/ade/test/node/adeMissionDag.test.js"
+
+   # Or validate a single blueprint against a running workbench
+   aexus-ade mission blueprint validate --file ./examples/blueprints/<recipe-id>.md
    ```
-   *(Optional: declare `- org_preset: <presetId>` in `## Tree Metadata` when your recipe pairs best with a specific Organization Preset like `security-audit` or `research-lab`.)*
 
 ---
 
@@ -63,9 +60,9 @@ Shareable Markdown DAG recipes (`examples/blueprints/*.md`) are one of the highe
 
 | Layer | Path | Responsibilities |
 | :--- | :--- | :--- |
-| **Platform ADE Contracts & Core** | [`src/vs/platform/ade/common/`](src/vs/platform/ade/common/) | Control env scrubber (`adeControl.ts`), extensible organization & 4-slot role schema (`adeRoleSchema.ts`), Engineering/Research DAG types & Mermaid+Markdown parser (`adeEngineeringBlueprint.ts`), deterministic keyword scaffolding (`adePromptToDag.ts`), configurable FinOps pricing (`adePricing.ts`), 6 curated Blueprint Recipes (`adeBlueprintTemplates.ts`), PR Verification Report generator (`adeRunReport.ts`), SSH Cloud Host contracts (`adeCloudHosts.ts`). |
-| **Platform Node Services** | [`src/vs/platform/ade/node/`](src/vs/platform/ade/node/) | Local `0600` socket / Windows Named Pipe control plane with HMAC capability tokens (`adeControlServer.ts`), Git worktrees (`-c core.hooksPath=/dev/null`), Git-native change detection & scrubbed `verify:` runner (`adeEngineeringService.ts`), non-destructive OpenSSH transport (`adeCloudHostService.ts`, `syncUserSshDir: false`), VS Code SSH migration (`vscodeConfigMigration.ts`). |
-| **Workbench ADE UI** | [`src/vs/workbench/contrib/ade/browser/`](src/vs/workbench/contrib/ade/browser/) | Lineage-scoped RBAC handler (`adeControlHandler.ts`), Smart Calm `Sessions` tree & accurate rank-filtered `Inbox` (`adeProjectsView.ts`, `adeInboxView.ts`), Organization & Roles Studio with 4-Slot Binding bar & Rank × API Matrix (`adeRoleStudioEditorPane.ts`), Armored Nested Dual-Shell DAG Studio (`adeEngineeringEditorPane.ts`, `adeEngineeringWorkbenchService.ts`), Safe/Autonomous Status Bar pill & `verify:` revocation QuickPick (`ade.contribution.ts`), Cloud Host Studio & `aexus-ssh://` FS (`adeCloudHostsEditorPane.ts`, `adeCloudHostFileSystemProvider.ts`). |
+| **Platform ADE Contracts & Core** | [`src/vs/platform/ade/common/`](src/vs/platform/ade/common/) | Control env scrubber (`adeControl.ts`), extensible organization & 4-slot role schema (`adeRoleSchema.ts`), Mission Mermaid DAG parser, `@Employee:` context reuse, auto-layout & orthogonal edge router (`adeMissionDag.ts`, `adeMissionEmployee.ts`), Mission Token Bus engine (`adeMissionEngine.ts`), Factory Wall boundary (`adeMissionBoundary.ts`), dynamic rank resize & single-copy docs catalog (`adeRankResize.ts`, `adeDocsCatalog.ts`, `adeApiRegistry.ts`), SSH Cloud Host contracts (`adeCloudHosts.ts`). |
+| **Platform Node Services** | [`src/vs/platform/ade/node/`](src/vs/platform/ade/node/) | Local `0600` socket / Windows Named Pipe / loopback TCP control plane with HMAC capability tokens (`adeControlServer.ts`), single-copy API docs & Inbox persistence (`adeDocsBackendService.ts`, `adeDocsSync.ts`), zero-token Mission watchdog probes (`adeMissionWatchdogService.ts`), non-destructive OpenSSH transport (`adeCloudHostService.ts`, `syncUserSshDir: false`), VS Code SSH migration (`vscodeConfigMigration.ts`). |
+| **Workbench ADE UI & Mission Runtime** | [`src/vs/workbench/contrib/ade/browser/`](src/vs/workbench/contrib/ade/browser/) | Lineage-scoped RBAC & Token Bus handlers (`adeControlHandler.ts`, `adeMissionControlHandler.ts`, `adeRankApiHandler.ts`), Mission store & live runtime (`adeMissionStore.ts`, `adeMissionRuntime.ts`), modular high-performance Mission Canvas (`adeEngineeringEditorPane.ts`, `adeMissionHostCatalog.ts`, `adeMissionFileDrawer.ts`, `adeMissionPopovers.ts`, `adeMissionCanvasRenderer.ts`), Smart Calm `Sessions` tree & rank-filtered `Inbox` (`adeProjectsView.ts`, `adeInboxView.ts`), Organization & Roles Studio (`adeRoleStudioEditorPane.ts`), Cloud Host Studio & `aexus-ssh://` FS (`adeCloudHostsEditorPane.ts`, `adeCloudHostFileSystemProvider.ts`). |
 | **Native Coding Agent Bridges & CLI** | [`extensions/aexus-agents/`](extensions/aexus-agents/) | Centralized child-env isolation (`runtime.ts`), adapters for all 8 native Coding Agents (`claude.ts`, `codex.ts`, `acp.ts`, `kilo.ts`, `pi.ts`), public model discovery (`capabilities.ts`), zero-warmup Turn-1 prompt injection with prompt-hash cache invalidation & auto-compaction recovery (`extension.ts`), opt-out third-party role bridge (`nativeRoleBridge.ts`), and the `aexus-ade` CLI (`src/adeCli.ts`). |
 
 ---
@@ -74,12 +71,11 @@ Shareable Markdown DAG recipes (`examples/blueprints/*.md`) are one of the highe
 
 Before opening a PR, please ensure your changes preserve these core invariants:
 
-1. **Pure Execution Isolation (`Reviewer ≠ Executor`) & Subprocess Scrubbing**: Pure execution leaf ranks (`Worker [L4]`, `Builder`, `Agent`) must never receive orchestration prompts or ADE control-plane credentials. All `verify:`, automated `git`, SSH, and helper subprocesses must strip `AEXUS_ADE_*` via `stripAdeControlEnv()`, and automated worktree `git` operations must pass `-c core.hooksPath=/dev/null`.
-2. **Server-Enforced Capability Tokens & Lineage RBAC**: Never trust client-supplied `caller` strings on the control plane. Validate `_callerSessionId` against live session state, intersect token rank with live rank, enforce `canRankSupervise` + subtree lineage on `session.*`, require `engineering.destroy` on tree-owner deletion, and verify slot + bound session identity on `engineering.review`.
-3. **ADE ⇄ IDE Mirror Symmetry**: Both modes share one unified local + `aexus-ssh://` project catalog, file ordering, open editors, and `Focus → Home ⇄ Forward` navigation state. Never hijack standard VS Code `Cmd/Ctrl+K` chords (`Prompt-to-DAG` uses `Cmd/Ctrl+Shift+K` or `/`).
-4. **Non-Destructive Host & Git Hygiene**: Blueprint/runtime state persists outside repos under `~/.aexus-code/engineering/` and `~/.aexus-code/research/`. Worktree lanes use `aexus-eng/*` branches with dirty-tree preflight and preserved user Git identity. `AdeCloudHostNodeService` defaults `syncUserSshDir` to `false` and never mutates global `~/.ssh/config`.
-5. **Safe Defaults, Upfront Trust Gates & Version Parity**: Interactive sessions default to safe modes; automated DAGs gate untrusted `verify:` commands upfront before dispatching Workers and confine Codex to `workspace-write` when `aexus.ade.autonomousMode` is `false`. Keep `product.json#aexusVersion`, `extensions/aexus-agents/package.json#version`, and `ADE_CLI_VERSION` in lockstep.
-6. **Cross-Platform Parity & Open-Source Hygiene**: Keep Open VSX gallery compliance in `product.json`, preserve MIT headers, and verify behavior across macOS (`arm64`/`x64`), Windows 10/11 (`x64`/`arm64`), and Linux (`x64`/`arm64`).
+1. **Pure Execution Isolation & Subprocess Scrubbing**: Interactive pure execution leaf ranks (`Worker [L4]`, `Builder`, `Agent`) must never receive orchestration prompts or ADE control-plane credentials; in-graph pure Mission nodes may only call `token.*`, `whoami`, `docs.read`, and `api.update`. All SSH, watchdog, and helper subprocesses must strip `AEXUS_ADE_*` via `stripAdeControlEnv()`.
+2. **Server-Enforced Capability Tokens & Strictly Top-Down Lineage RBAC**: Never trust client-supplied `caller` strings on the control plane. Validate `_callerSessionId` against live session state, intersect token rank with live rank, enforce `canRankSupervise` + subtree lineage on `session.*` and `org.*`, enforce the Factory Wall on Mission actions, and require `mission.destroy` on Mission-owner deletion.
+3. **ADE ⇄ IDE Mirror Symmetry**: Both modes share one unified local + `aexus-ssh://` project catalog, file ordering, open editors, and `Focus → Home ⇄ Forward` navigation state.
+4. **Non-Destructive Host & Settings Hygiene**: `AdeCloudHostNodeService` defaults `syncUserSshDir` to `false` and never mutates global `~/.ssh/config`. Security-critical settings (`aexus.ade.organization`, `aexus.ade.autonomousMode`, `aexus.ade.nativeExtensionRoleBridge.enabled`) stay `scope: application` and `restricted: true`.
+5. **Version Parity & Open-Source Hygiene**: Keep `product.json#aexusVersion`, `extensions/aexus-agents/package.json#version`, and `ADE_CLI_VERSION` in strict lockstep, keep Open VSX gallery compliance in `product.json`, preserve MIT headers, and verify behavior across macOS (`arm64`/`x64`), Windows (`x64`/`arm64`), and Linux (`x64`/`arm64`).
 
 ---
 
@@ -109,7 +105,6 @@ For changes touching `src/vs/platform/ade/` or `src/vs/workbench/contrib/ade/`:
 ./scripts/aexus-env.sh node test/unit/node/index.js --runGlob "vs/platform/ade/test/node/*.test.js"
 ./scripts/aexus-env.sh ./scripts/test.sh \
   --run src/vs/workbench/contrib/ade/test/browser/adeControlAndViews.test.ts \
-  --run src/vs/workbench/contrib/ade/test/browser/adeEngineering.test.ts \
   --run src/vs/workbench/contrib/ade/test/browser/adeProjectsService.test.ts \
   --run src/vs/workbench/contrib/ade/test/browser/cloudHostsBrowser.test.ts
 ./scripts/aexus-env.sh node --test --experimental-strip-types extensions/aexus-agents/test/*.test.*

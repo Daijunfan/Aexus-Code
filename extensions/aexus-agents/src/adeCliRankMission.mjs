@@ -118,13 +118,3 @@ export function parseMissionDocsCommand(tail, json, windowId) {
 	}
 	return undefined;
 }
-
-export function rewriteEngineeringActionToMission(parsed) {
-	if (parsed.action && parsed.action.startsWith('engineering.')) {
-		return {
-			...parsed,
-			action: `mission.${parsed.action.slice('engineering.'.length)}`,
-		};
-	}
-	return parsed;
-}

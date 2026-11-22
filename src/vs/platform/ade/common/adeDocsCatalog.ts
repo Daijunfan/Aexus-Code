@@ -90,7 +90,7 @@ export function renderL0SecretaryDoc(config: IAdeOrganizationConfig): string {
 		'- Global ADE assistant at **default Tier L0** (positioned directly beneath **User `L-1`** and above `L1..LN`).',
 		'- Never switch workbench mode to IDE or touch IDE-only UI.',
 		`- Current organization depth: **${tierCount} rank tier(s)** (\`L-1\` User → \`L0\` Secretary → \`L1\` highest → \`L${tierCount}\` lowest).`,
-		'- Mission APIs live in the sibling folder `../mission/MISSION_API.md` — read it **only when working with a Mission** (note: only the session that owns a Mission, or User `L-1`, may operate that Mission).',
+		'- Mission APIs live in the sibling folder `../mission/MISSION_API.md` — read it **only when working with a Mission** (note: Mission structural writes `init/blueprint apply/remove` are owner-only or User `L-1`, while `L0` Secretary and bound off-graph supervisors may read topology and run jurisdiction-scoped runtime commands).',
 		'',
 		'## Live Rank & Alias Query APIs (Hot-Reload Safe)',
 		'```bash',
@@ -199,7 +199,7 @@ export function renderTierRankDoc(config: IAdeOrganizationConfig, rank: IAdeRank
 		rankId: rank.id,
 	});
 
-	const hasMissionApis = rank.allowedApis.some(api => api.startsWith('engineering.'));
+	const hasMissionApis = rank.allowedApis.some(api => api.startsWith('mission.'));
 
 	return [
 		...header,
@@ -258,9 +258,11 @@ export function renderMissionApiDoc(config: IAdeOrganizationConfig): string {
 		'Read this file **only on demand** when creating, editing, inspecting, or operating a Mission. Check diffs anytime via `aexus-ade api update --since <rev> --scope mission --json`.',
 		'',
 		'## Core Architecture Rules',
-		'- **Unified Mission Mode**: All engineering and research tasks converge into one flat Mermaid DAG workflow.',
+		'- **Unified Mission Workflow**: All multi-agent engineering and exploration workflows run on one flat Mermaid DAG with per-node Pre-Prompts.',
+		'- **Access Model**: Structural ownership writes (`mission init`, `blueprint apply`, `remove`) belong strictly to the Mission owner session or User (`L-1`); bound off-graph supervisors (`L1..Lk`) and Secretary (`L0`) may read topology (`mission get`, `mission blueprint get`, `mission status`) and execute jurisdiction-scoped runtime operations (`recall`, `retry`, `patch`, `trigger`, `host bind`, `prompt`).',
 		`- **Factory Wall (Off-Graph vs In-Graph)**: Hierarchy \`L-1\` User → \`L0\` Secretary → \`L1\` highest → \`L${totalTiers}\` lowest (depth ${totalTiers}). Tiers \`<= offGraphMaxTier\` are strictly off-graph supervisors (never occupy DAG task nodes); tiers \`> offGraphMaxTier\` work inside the DAG. No tier may span both sides.`,
-		'- **Plain-Text Token Bus**: Only plain-text tokens travel across edges (`last_summary` + rolling `compressed_history` + expandable `trace_ptr`). Code/data sync across local & SSH Cloud Hosts is performed directly by agents via Git/SCP/Rsync.',
+		'- **Plain-Text Token Bus & Hierarchical Rolling History**: Plain-text tokens travel across edges (`last_summary` + signal-preserving hierarchical `compressed_history` + expandable `trace_ptr`). Earlier hops roll up cumulatively with traversed node trails, touched file artifacts, and critical verdicts instead of hard truncation. Code/data sync across local & SSH Cloud Hosts is performed directly by agents via Git/SCP/Rsync.',
+		'- **Zero-Cost Deterministic Verification Hooks (`mission check`)**: Attach build/test/lint/file-existence checks to any task node via `mission check set` or inline Mermaid `%% check <nodeId> [opts]: <cmd>` directives. Checks execute locally or over SSH at **0 LLM token cost** BEFORE `token complete` advances downstream; failures auto-bounce to the worker with exact exit code & stderr tail (up to `maxAutoRetries`, default 2) before triggering `-->|fail|` or escalating to off-graph supervisors.',
 		'- **Dual-Polarity Edges**: Regular edges trigger on `token complete`; fail edges (`-->|fail|`, `-.->|on_fail|`, `A -- fail --> B`, plus synonyms `error`, `fallback`, `recover`) trigger automatically on `token fail` without waking supervisors.',
 		'- **Join Barrier & Anti-Deadlock**: Forked branches share a `wave_id`; join nodes wait only for active upstream branches belonging to that wave (untaken success/fail branches are automatically marked skipped).',
 		'- **Watchdog Daemon & `blocked`**: Silence timeout (default 5m) locks upon Mission start. Long-running tasks call `token block` with optional local/remote PID-exit or file-ready early wakeup.',
@@ -286,11 +288,20 @@ export function renderMissionApiDoc(config: IAdeOrganizationConfig): string {
 		'aexus-ade mission pause|resume|stop|status --mission <id> --json',
 		'aexus-ade mission gate approve|reject --mission <id> --node <gateId> [--note "<text>"] [--rollback <nodeId>] --json',
 		'',
-		'# Jurisdiction Recall & Atomic Safe Patch (Off-Graph Supervisors Only)',
+		'# Jurisdiction Recall, In-Place Retry & Atomic Safe Patch (Off-Graph Supervisors Only)',
+		'aexus-ade mission retry --mission <id> (--node <nodeId> | --token <tokenId>) [--guidance "<instructions>"] --json',
 		'aexus-ade mission recall --mission <id> [--nodes <N1,N2>] [--branch <nodeId>] [--reason "<reason>"] --json',
 		'aexus-ade mission patch --mission <id> (--file <path> | --text "<mermaid>") [--reason "<reason>"] --json',
 		'',
-		'# Source Triggers (inDegree = 0) & Cloud Host Binding',
+		'# Node Pre-Prompts, Deterministic Check Hooks, Source Triggers (inDegree = 0) & Cloud Host Binding',
+		'aexus-ade mission prompt list --mission <id> --json',
+		'aexus-ade mission prompt get --mission <id> --node <nodeId> --json',
+		'aexus-ade mission prompt set --mission <id> --node <nodeId> (--prompt "<text>" | --file <path> | --clear) --json',
+		'aexus-ade mission check list [--mission <id>] [--node <nodeId>] --json',
+		'aexus-ade mission check get [--mission <id>] --node <nodeId> --json',
+		'aexus-ade mission check set [--mission <id>] --node <nodeId> [--cmd "<shell>"] [--expect-file <path>] [--match "<pattern>"] [--on-fail bounce|fail|escalate] [--max-retries <n>] [--timeout <duration>] [--cwd <dir>] [--host <local|alias>] --json',
+		'aexus-ade mission check remove [--mission <id>] --node <nodeId> [--id <checkId> | --all] --json',
+		'aexus-ade mission check run [--mission <id>] --node <nodeId> [--id <checkId>] --json',
 		'aexus-ade mission trigger list --mission <id> --json',
 		'aexus-ade mission trigger set --mission <id> --node <nodeId> --kind <once|interval|cron|event> [--delay <10m>|--interval <30m>|--cron "0 2 * * *"|--event-type <file_created|file_changed|git_updated|gpu_idle> --target <pathOrHost>] --json',
 		'aexus-ade mission trigger remove --mission <id> --trigger <triggerId> --json',
@@ -300,6 +311,7 @@ export function renderMissionApiDoc(config: IAdeOrganizationConfig): string {
 		'## Mermaid DAG Format (`mission.mmd`)',
 		'- Define flat, non-nested DAG topology (`flowchart LR` / `graph TD`) with task nodes (`N1["Title"]`), gate nodes (`G1{{"Gate"}}`), and fail edges (`N1 -->|fail| N_Fallback`).',
 		'- Reuse the same employee across positions with `@Name: Task`, `:::Name`, or `class N1,N3 Name`.',
+		'- Optionally declare zero-cost deterministic checks inline using standard Mermaid comments: `%% check N1 [timeout=90s, on_fail=bounce, max_retries=2, expect_file=dist/out.js]: pnpm test`.',
 		'',
 	].join('\n');
 }
@@ -315,10 +327,12 @@ export function buildAdeDocsBundle(config: IAdeOrganizationConfig): IAdeDocsBund
 	for (const rank of sorted) {
 		rankFiles[`${formatTierTag(rank.tier)}.md`] = renderTierRankDoc(config, rank);
 	}
+	const configFingerprint = sorted.map(r => `${r.tier}:${r.id}:${r.pureExecution ? '1' : '0'}:${r.canHaveSubordinates ? '1' : '0'}:${r.allowedApis.join(',')}`).join('|');
 	const manifestJson = JSON.stringify({
 		contractVersion: 1,
 		currentRevision: ADE_API_LATEST_REVISION,
 		rankCount: sorted.length,
+		configFingerprint,
 		apis: ADE_API_SPEC_CATALOG,
 	}, null, 2) + '\n';
 	return {

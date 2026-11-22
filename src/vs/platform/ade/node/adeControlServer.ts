@@ -26,10 +26,22 @@ import {
 } from '../common/adeControl.js';
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
-const DEFAULT_SOCKET_TIMEOUT_MS = 120_000;
+const DEFAULT_SOCKET_TIMEOUT_MS = 310_000;
+const DEFAULT_EXECUTION_TIMEOUT_MS = 300_000;
+const DEFAULT_WAIT_EXECUTION_TIMEOUT_MS = 600_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
+/** macOS limits AF_UNIX sun_path to 104 bytes (Linux 108); keep comfortable margin for `.pid.sock` suffixes. */
+const MAX_UNIX_SOCKET_PATH_BYTES = 90;
+
+function normalizeUnixSocketPath(candidate: string): string {
+	if (isWindows || Buffer.byteLength(candidate, 'utf8') <= MAX_UNIX_SOCKET_PATH_BYTES) {
+		return candidate;
+	}
+	const hash = crypto.createHash('sha256').update(candidate, 'utf8').digest('hex').slice(0, 12);
+	return path.join('/tmp', `aexus-ade-${hash}.sock`);
+}
 const PURE_WORKER_DENIED_ERROR = 'Permission denied: pure execution Worker sessions have no ADE control plane access.';
-const PURE_MISSION_NODE_DENIED_ERROR = 'Permission denied: pure-execution Mission node sessions may only invoke token.*, whoami, docs.read, or api.update.';
+const PURE_MISSION_NODE_DENIED_ERROR = 'Permission denied: pure-execution Mission node sessions may only invoke token.*, mission.check.{list,get,run}, whoami, docs.read, or api.update.';
 const PURE_MISSION_NODE_ALLOWED_ACTIONS = new Set([
 	'whoami',
 	'docs.read',
@@ -40,9 +52,17 @@ const PURE_MISSION_NODE_ALLOWED_ACTIONS = new Set([
 	'token.reject',
 	'token.block',
 	'token.fail',
+	'mission.check.list',
+	'mission.check.get',
+	'mission.check.run',
 ]);
 
-export type AdeControlDispatcher = (request: IAdeControlDispatchRequest, windowId?: number) => Promise<unknown>;
+export interface IAdeControlDispatchOptions {
+	/** When true, windowId came from a capability token pin rather than explicit `--window`, so gracefully fall back if that window closed. */
+	readonly softWindowPin?: boolean;
+}
+
+export type AdeControlDispatcher = (request: IAdeControlDispatchRequest, windowId?: number, options?: IAdeControlDispatchOptions) => Promise<unknown>;
 
 export interface IAdeControlServerOptions {
 	readonly controlDir?: string;
@@ -51,6 +71,8 @@ export interface IAdeControlServerOptions {
 	readonly logService?: ILogService;
 	readonly maxPayloadBytes?: number;
 	readonly socketTimeoutMs?: number;
+	/** Hard upper bound (ms) for awaiting the control action dispatcher before failing with a timeout error. */
+	readonly executionTimeoutMs?: number;
 }
 
 /**
@@ -76,6 +98,7 @@ export class AdeControlServer extends Disposable {
 	private readonly _logService: ILogService | undefined;
 	private readonly _maxPayloadBytes: number;
 	private readonly _socketTimeoutMs: number;
+	private readonly _executionTimeoutMs: number | undefined;
 	private readonly _sockets = new Set<net.Socket>();
 	private readonly _readyPromise: Promise<void>;
 
@@ -92,11 +115,12 @@ export class AdeControlServer extends Disposable {
 		super();
 
 		this._controlDir = options?.controlDir || process.env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
-		this._requestedSocketPath = options?.socketPath
+		const rawSocketPath = options?.socketPath
 			|| process.env.AEXUS_ADE_SOCKET
 			|| (isWindows
 				? `\\\\.\\pipe\\aexus-ade-control-${process.pid}`
 				: path.join(this._controlDir, ADE_CONTROL_SOCKET_NAME));
+		this._requestedSocketPath = normalizeUnixSocketPath(rawSocketPath);
 		this._activeSocketPath = this._requestedSocketPath;
 		this._metaPath = options?.metaPath
 			|| process.env.AEXUS_ADE_CONTROL_FILE
@@ -108,6 +132,7 @@ export class AdeControlServer extends Disposable {
 		this._logService = options?.logService;
 		this._maxPayloadBytes = options?.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
 		this._socketTimeoutMs = options?.socketTimeoutMs ?? DEFAULT_SOCKET_TIMEOUT_MS;
+		this._executionTimeoutMs = options?.executionTimeoutMs;
 
 		this._readyPromise = this._start();
 	}
@@ -132,14 +157,16 @@ export class AdeControlServer extends Disposable {
 		return this._tcpPort;
 	}
 
-	mintSessionCapabilityToken(sessionId: string, rank: string, pure = false, missionNode = false): string {
+	mintSessionCapabilityToken(sessionId: string, rank: string, pure = false, missionNode = false, windowId?: number): string {
 		const normalizedSid = sessionId.trim() || 'session';
 		const normalizedRank = pure ? 'worker' : (rank.trim().toLowerCase() || 'worker');
+		const normalizedWid = typeof windowId === 'number' && Number.isInteger(windowId) && windowId > 0 ? windowId : undefined;
 		const payload: IAdeCapabilityTokenPayload = {
 			sid: normalizedSid,
 			rank: normalizedRank,
 			...(pure ? { pure: true } : {}),
 			...(missionNode ? { missionNode: true } : {}),
+			...(normalizedWid !== undefined ? { wid: normalizedWid } : {}),
 			iat: Date.now(),
 		};
 		const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -190,7 +217,11 @@ export class AdeControlServer extends Disposable {
 			}
 
 			if (probeResult === 'live') {
-				listenPath = path.join(path.dirname(listenPath), `ade-control.${process.pid}.sock`);
+				listenPath = normalizeUnixSocketPath(path.join(path.dirname(listenPath), `ade-control.${process.pid}.sock`));
+				if (listenPath === this._requestedSocketPath) {
+					const hash = crypto.createHash('sha256').update(`${this._requestedSocketPath}:${process.pid}`, 'utf8').digest('hex').slice(0, 12);
+					listenPath = path.join('/tmp', `aexus-ade-${hash}.sock`);
+				}
 				writeGlobalMeta = false;
 				this._logService?.info(`[AdeControlServer] Live ADE control socket already bound at ${this._requestedSocketPath}; falling back to ${listenPath}`);
 				if (await this._pathExists(listenPath)) {
@@ -478,11 +509,15 @@ export class AdeControlServer extends Disposable {
 			const pure = req.params?.pure === true;
 			const missionNode = req.params?.missionNode === true;
 			const rawRank = typeof req.params?.rank === 'string' ? req.params.rank.trim() : '';
+			const paramWindowId = req.params?.windowId;
+			const rawWindowId = typeof paramWindowId === 'number' && Number.isInteger(paramWindowId) && paramWindowId > 0
+				? paramWindowId
+				: (typeof req.windowId === 'number' && Number.isInteger(req.windowId) && req.windowId > 0 ? req.windowId : undefined);
 			if (!rawSessionId || (!pure && !rawRank)) {
 				this._writeResponse(socket, { ok: false, error: 'Invalid request: auth.mintSessionToken requires sessionId and rank' });
 				return;
 			}
-			const token = this.mintSessionCapabilityToken(rawSessionId, rawRank || 'worker', pure, missionNode);
+			const token = this.mintSessionCapabilityToken(rawSessionId, rawRank || 'worker', pure, missionNode, rawWindowId);
 			this._writeResponse(socket, { ok: true, result: { token } });
 			return;
 		}
@@ -512,12 +547,56 @@ export class AdeControlServer extends Disposable {
 			effectiveParams = sanitized;
 		}
 
+		const isWaitAction = Boolean(effectiveParams && effectiveParams.wait === true);
+		const rawTimeoutMs = this._executionTimeoutMs !== undefined
+			? this._executionTimeoutMs
+			: (isWaitAction ? DEFAULT_WAIT_EXECUTION_TIMEOUT_MS : DEFAULT_EXECUTION_TIMEOUT_MS);
+		const executionTimeoutMs = Number.isFinite(rawTimeoutMs)
+			? Math.max(50, Math.min(2_147_483_647, Math.floor(rawTimeoutMs)))
+			: DEFAULT_WAIT_EXECUTION_TIMEOUT_MS;
+
+		let execTimer: ReturnType<typeof setTimeout> | undefined;
+		let timedOut = false;
 		try {
-			const result = await this._dispatcher({ action: req.action, params: effectiveParams }, req.windowId);
-			this._writeResponse(socket, { ok: true, result });
+			const effectiveWindowId = req.windowId ?? capabilityPayload?.wid;
+			const dispatchOptions: IAdeControlDispatchOptions | undefined = req.windowId === undefined && capabilityPayload?.wid !== undefined
+				? { softWindowPin: true }
+				: undefined;
+			const dispatchPromise = this._dispatcher({ action: req.action, params: effectiveParams }, effectiveWindowId, dispatchOptions);
+			// Prevent unhandled rejection if dispatcher rejects after timeout already settled the socket.
+			dispatchPromise.catch(() => undefined);
+			const result = await new Promise<unknown>((resolve, reject) => {
+				execTimer = setTimeout(() => {
+					timedOut = true;
+					reject(new Error(`ADE control action "${req.action}" timed out after ${executionTimeoutMs}ms`));
+				}, executionTimeoutMs);
+				if (typeof (execTimer as { unref?: () => void }).unref === 'function') {
+					(execTimer as { unref?: () => void }).unref!();
+				}
+				dispatchPromise.then(resolve, reject);
+			});
+			if (execTimer !== undefined) {
+				clearTimeout(execTimer);
+			}
+			if (!timedOut) {
+				this._writeResponse(socket, { ok: true, result });
+			}
 		} catch (err) {
+			if (execTimer !== undefined) {
+				clearTimeout(execTimer);
+			}
 			const message = err instanceof Error && err.message ? err.message : toErrorMessage(err, false);
 			this._writeResponse(socket, { ok: false, error: message });
+			if (timedOut) {
+				const forceCloseTimer = setTimeout(() => {
+					if (!socket.destroyed) {
+						socket.destroy();
+					}
+				}, 1000);
+				if (typeof (forceCloseTimer as { unref?: () => void }).unref === 'function') {
+					(forceCloseTimer as { unref?: () => void }).unref!();
+				}
+			}
 		}
 	}
 
@@ -553,6 +632,7 @@ export class AdeControlServer extends Disposable {
 				|| parsed.rank.trim().length === 0
 				|| (parsed.pure !== undefined && typeof parsed.pure !== 'boolean')
 				|| (parsed.missionNode !== undefined && typeof parsed.missionNode !== 'boolean')
+				|| (parsed.wid !== undefined && (typeof parsed.wid !== 'number' || !Number.isInteger(parsed.wid) || parsed.wid <= 0))
 			) {
 				return undefined;
 			}
@@ -561,6 +641,7 @@ export class AdeControlServer extends Disposable {
 				rank: parsed.rank.trim().toLowerCase(),
 				...(parsed.pure === true ? { pure: true } : {}),
 				...(parsed.missionNode === true ? { missionNode: true } : {}),
+				...(typeof parsed.wid === 'number' ? { wid: parsed.wid } : {}),
 				iat: typeof parsed.iat === 'number' && Number.isFinite(parsed.iat) ? parsed.iat : 0,
 			};
 		} catch {

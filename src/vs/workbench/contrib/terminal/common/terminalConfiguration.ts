@@ -701,6 +701,39 @@ export const terminalConfiguration: IStringDictionary<IConfigurationPropertySche
 		type: 'boolean',
 		default: false
 	},
+	[TerminalSettingId.ShowGridPaneHeaders]: {
+		description: localize('terminal.integrated.showGridPaneHeaders', "Controls whether each pane shows a compact host and quick-action header bar when a terminal panel is split into multiple rows or columns."),
+		type: 'boolean',
+		default: true
+	},
+	[TerminalSettingId.GridLayouts]: {
+		description: localize('terminal.integrated.gridLayouts', "Saved multi-row and multi-column terminal grid presets. Each preset specifies rows, columns, and optional per-cell Local or SSH Cloud Host targets (`file://...` or `aexus-ssh://<alias>/<path>`)."),
+		type: 'array',
+		default: [],
+		items: {
+			type: 'object',
+			required: ['name', 'rows', 'cols'],
+			properties: {
+				id: { type: 'string', description: localize('terminal.integrated.gridLayouts.id', "Unique identifier for the layout preset.") },
+				name: { type: 'string', description: localize('terminal.integrated.gridLayouts.name', "Display name of the terminal grid layout preset.") },
+				rows: { type: 'integer', minimum: 1, maximum: 6, description: localize('terminal.integrated.gridLayouts.rows', "Number of rows in the terminal grid.") },
+				cols: { type: 'integer', minimum: 1, maximum: 6, description: localize('terminal.integrated.gridLayouts.cols', "Number of columns in the terminal grid.") },
+				broadcastInput: { type: 'boolean', default: false, description: localize('terminal.integrated.gridLayouts.broadcastInput', "Whether to enable synchronized input broadcast when applying this layout.") },
+				cells: {
+					type: 'array',
+					description: localize('terminal.integrated.gridLayouts.cells', "Per-cell target bindings in row-major order."),
+					items: {
+						type: 'object',
+						properties: {
+							targetUri: { type: 'string', description: localize('terminal.integrated.gridLayouts.cell.targetUri', "Target URI such as `aexus-ssh://<hostAlias>/<path>` or `file:///path/to/project`. Omit or use `active` for the active project.") },
+							label: { type: 'string', description: localize('terminal.integrated.gridLayouts.cell.label', "Optional custom label for this cell.") },
+							cwd: { type: 'string', description: localize('terminal.integrated.gridLayouts.cell.cwd', "Optional remote or local working directory override.") }
+						}
+					}
+				}
+			}
+		}
+	},
 	[TerminalSettingId.DeveloperPtyHostLatency]: {
 		description: localize('terminal.integrated.developer.ptyHost.latency', "Simulated latency in milliseconds applied to all calls made to the pty host. This is useful for testing terminal behavior under high latency conditions."),
 		type: 'number',

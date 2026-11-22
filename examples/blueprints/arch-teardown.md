@@ -1,97 +1,31 @@
+# Architecture Teardown & Engineering RFC
+
+Parallel systems and UX teardown workflow: inventory module boundaries and APIs, analyze concurrency/scale failure modes in parallel with developer ergonomics, compile a trade-off matrix & Engineering RFC, and review at Gate `U1`.
+
 ```mermaid
 flowchart LR
-  %% @pos R1 204,260
-  %% @pos R2 598,132
-  %% @pos R3 598,388
-  %% @pos R4 992,260
-  %% @pos U1 1386,260
-  R1["System & API Surface Inventory ★Critical | worker=claude:high"] --> R2["Concurrency, Scale & Failure Analysis ★Critical | worker=claude:high"]
-  R1 --> R3["Developer Experience & UX Teardown | worker=claude:medium"]
-  R2 --> R4["Trade-Off Matrix & Engineering RFC ★Critical | worker=claude:high"]
+  R1["@Architect: System & API Surface Inventory"] --> R2["@Systems: Concurrency, Scale & Failure Analysis"]
+  R1 --> R3["@UX: Developer Experience & UX Teardown"]
+  R2 --> R4["@Architect: Trade-Off Matrix & Engineering RFC"]
   R3 --> R4
   R4 --> U1{{"Architecture Review Gate"}}
 ```
 
-## Tree Metadata
-- tree_type: research
-- governor_session_id: <governor-session-id>
-- workspace_isolation: shared
-- watchdog_timeout_minutes: 10
-- max_budget_usd: 5
-- max_concurrency: 2
-- verify: git status --short
+## Node Pre-Prompts
 
-## Auto-Partitioned Managers
-### [Segment: R1]
-- engine: claude-code
-- thinking: medium
+Apply the Mermaid DAG with `aexus-ade mission blueprint apply --mission <id> --file ./examples/blueprints/arch-teardown.md`, then bind each node's pre-prompt via the Canvas / Split Drawer or `aexus-ade mission prompt set`:
 
-### [Segment: R2]
-- engine: claude-code
-- thinking: medium
+### R1
+Map module architecture, IPC/RPC boundaries, state ownership, and extension points with exact file references under `docs/rfc/inventory/`. Identify core invariants and primary bottlenecks.
 
-### [Segment: R3]
-- engine: claude-code
-- thinking: medium
+### R2
+Analyze scalability limits, failure domains, latency hot paths, and cross-platform edge cases under `docs/rfc/systems/`. Provide concrete complexity bounds and ranked mitigation options.
 
-### [Segment: R4]
-- engine: claude-code
-- thinking: medium
+### R3
+Evaluate onboarding friction, workflow ergonomics, visual clarity, and competitive trade-offs under `docs/rfc/ux/`. Prioritize friction points by user impact with concrete UX improvements.
 
-## Nodes
-### [R1] System & API Surface Inventory
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: docs/rfc/inventory/**
-- verify: test -d docs/rfc
-- goal: |
-    Map module architecture, IPC/RPC boundaries, state ownership, and external extension points with concrete file references.
-- acceptance: |
-    1. Architecture diagram matches actual code;
-    2. All major bottlenecks and invariants identified.
+### R4
+Compile `R1`–`R3` into a concise Engineering RFC at `docs/rfc/RFC.md` containing a decision matrix, phased rollout plan, risk mitigations, and measurable success metrics.
 
-### [R2] Concurrency, Scale & Failure Analysis
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: docs/rfc/systems/**
-- verify: test -d docs/rfc/systems
-- goal: |
-    Analyze scalability limits, failure domains, latency hot paths, and cross-platform edge cases.
-- acceptance: |
-    1. Concrete failure modes and complexity bounds documented;
-    2. Ranked mitigation options provided.
-
-### [R3] Developer Experience & UX Teardown
-- type: task
-- critical: false
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=medium
-- files: docs/rfc/ux/**
-- verify: test -d docs/rfc/ux
-- goal: |
-    Evaluate onboarding friction, workflow ergonomics, visual clarity, and competitive differentiation.
-- acceptance: |
-    1. Friction points prioritized by user impact;
-    2. Concrete UX improvements specified.
-
-### [R4] Trade-Off Matrix & Engineering RFC
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: docs/rfc/RFC.md
-- verify: test -f docs/rfc/RFC.md
-- goal: |
-    Compile R1–R3 into a concise Engineering RFC with decision matrix, rollout phases, and measurable success metrics.
-- acceptance: |
-    1. RFC addresses alternatives, risks, and migration strategy;
-    2. Ready for team review and Engineering DAG execution.
-
-### [U1] Architecture Review Gate
-- type: user_gate
-- description: |
-    Approve the final RFC or roll back a track for deeper analysis.
+### U1
+Human Acceptance Gate: review the final RFC and either approve for execution or roll back a track for deeper analysis.

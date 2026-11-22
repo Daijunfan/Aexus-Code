@@ -1,58 +1,51 @@
-# Aexus Code · Curated Blueprint Recipes
+# Aexus Code · Mission Blueprint Recipes
 
-These ready-to-run `.md` DAG blueprints are synchronized 1:1 with the built-in `ADE_BLUEPRINT_TEMPLATES` (`balanced` preset in [`src/vs/platform/ade/common/adeBlueprintTemplates.ts`](../../src/vs/platform/ade/common/adeBlueprintTemplates.ts)). Each recipe showcases Aexus Code's **Extensible Multi-Tier Organization** (mapping `orchestrator`, `segment_owner`, `reviewer`, and `executor` onto your active preset), automatic **Maximal Non-Branching Path (`MNP`)** segment lanes, **Git Worktree Isolation**, **SHA-256 Hash-Pinned `verify:` Pre-Review Checks**, **`files:` Scope Serialization**, **`max_concurrency` Critical-Path Scheduling**, **FinOps Budget Guardrails (`max_budget_usd`)**, and **Human Acceptance Gates**.
+These ready-to-apply Markdown blueprints use Aexus Code's **Pure Mermaid DAG** syntax (parsed directly by [`parseMissionMermaidDag`](../../src/vs/platform/ade/common/adeMissionDag.ts)) paired with **Per-Node Pre-Prompts** stored in the Mission Store. Each recipe demonstrates:
 
-## Available Blueprints (All 6 Built-In Recipes)
+- **Flat Layered DAG Choreography**: Parallel fan-out, convergence joins, and explicit `-->|fail|` fallback routes.
+- **Same-Employee Context Reuse (`@Employee:`)**: Assigning multiple DAG positions to the same employee (`@Backend:`, `@Reviewer:`, etc.) reuses one continuous agent session across stages instead of cold-starting from scratch.
+- **Human Acceptance Gates (`U1{{...}}`)**: Explicit release/review checkpoints with approve or directed rollback via `aexus-ade mission gate` or the Mission Canvas.
+- **Factory Wall & Token Bus**: In-graph execution nodes communicate exclusively via the Token Bus (`aexus-ade token complete|reject|block|fail`), while off-graph tiers (`L1` / `L2`) supervise top-down (`org.*`) and patch topology (`mission.patch`).
 
-| Blueprint | Mode | Topology | Isolation | Concurrency | Budget Cap | Default `verify:` | Ideal Use Case |
-| :--- | :---: | :--- | :---: | :---: | :---: | :--- | :--- |
-| [`feature-ship.md`](feature-ship.md) | `engineering` | `N1 → (N2 ∥ N3 ∥ N4) → U1 → N5` | `worktree` | `3` | `$8.00` | `npm test` | Shipping full-stack features across backend, UI & test tracks in parallel without file collisions |
-| [`bug-hunt-fix.md`](bug-hunt-fix.md) | `engineering` | `N1 → (N2 ∥ N3) → N4 → U1` | `shared` | `2` | `$4.00` | `npm test` | Repro-first root-cause debugging with parallel surgical fix & edge-case regression suite |
-| [`security-audit-swarm.md`](security-audit-swarm.md) | `engineering` | `(N1 ∥ N2 ∥ N3) → N4 → U1 → N5` | `worktree` | `3` | `$6.00` | `npm test` | Multi-engine threat-model & PR security audit with consolidated remediation & sign-off |
-| [`safe-migration.md`](safe-migration.md) | `engineering` | `N1 → (N2 ∥ N3) → U1 → N4` | `worktree` | `2` | `$7.00` | `npm test` | Zero-downtime architecture refactoring with baseline characterization tests & safe rollback |
-| [`deep-research-lab.md`](deep-research-lab.md) | `research` | `R1 → (R2 ∥ R3 ∥ R4) → U1 → R5` | `shared` | `3` | `$6.00` | `git status --short` | Multi-track literature synthesis, competing hypothesis ablations & reproducible benchmarks |
-| [`arch-teardown.md`](arch-teardown.md) | `research` | `R1 → (R2 ∥ R3) → R4 → U1` | `shared` | `2` | `$5.00` | `git status --short` | Competitive & codebase architecture teardown converging into a decision-ready engineering RFC |
+## Available Blueprints (All 6 Curated Recipes)
 
-## Deterministic Guardrail Fields
-
-Every recipe in this directory includes all deterministic blueprint guardrail fields:
-
-- **`max_budget_usd`** (`## Tree Metadata`): automatically applied when selecting a recipe, enforcing pre-dispatch budget admission and post-turn ceiling pauses (`pauseTree`).
-- **`max_concurrency`** (`## Tree Metadata`): caps simultaneous active task pods; ready nodes are prioritized along the graph's **critical path**.
-- **`files:`** (per task node): declares glob ownership boundaries (`src/services/**`, `test/**`, etc.). In `shared` workspace isolation, nodes with overlapping scopes are serialized automatically to prevent concurrent edit collisions.
-- **`verify:`** (tree default + per task node): runs a deterministic shell check in a scrubbed environment (`AEXUS_ADE_*` stripped, detached process group on POSIX, `cmd.exe /d /s /c` on Windows) after the Pure Executor finishes and **before** waking the Adversarial Reviewer.
-- **`org_preset`** *(optional in `## Tree Metadata`)*: pairs a shareable blueprint with a matching Organization Preset (e.g., `security-audit`, `research-lab`, `startup-3tier`).
-
-> [!IMPORTANT]
-> **Upfront SHA-256 Hash-Pinned `verify:` Approval & Revocation**: Imported or agent-modified `verify:` commands are checked **upfront before any Worker runs** — never wasting tokens before consent. Aexus Code pins trusted commands by SHA-256 hash per project and lets you inspect or revoke them anytime via **`Aexus ADE: Manage Trusted Verify Commands...`** or `aexus-ade engineering verify-trust list|revoke`. Customize placeholder `verify:` and `files:` globs to match your repository.
-
-> [!NOTE]
-> **Local Git Workspace Requirement**: Engineering and Research DAG worktrees currently require a local Git repository. Interactive ADE sessions, remote editing, Git diffs, and SSH terminals work directly on `aexus-ssh://` Cloud Host projects.
+| Blueprint | Topology | Employee Context Reuse | Ideal Use Case |
+| :--- | :--- | :--- | :--- |
+| [`feature-ship.md`](feature-ship.md) | `N1 → (N2 ∥ N3 ∥ N4) → U1 → N5` | `@Architect`, `@Backend`, `@Frontend`, `@QA` | Contract-first full-stack delivery with parallel backend, UI, and test tracks + Release Gate |
+| [`bug-hunt-fix.md`](bug-hunt-fix.md) | `N1 → (N2 ∥ N3) → N4 → U1` | `@Debugger`, `@QA`, `@Auditor` | Repro-first root-cause debugging with surgical fix, edge-case regression suite & audit |
+| [`security-audit-swarm.md`](security-audit-swarm.md) | `(N1 ∥ N2 ∥ N3) → N4 → U1 → N5` | `@AuthAudit`, `@IpcAudit`, `@SupplyAudit`, `@Hardening` | Multi-track auth, IPC & supply-chain threat audit converging into hardened patches |
+| [`safe-migration.md`](safe-migration.md) | `N1 → (N2 ∥ N3) → U1 → N4` | `@Architect`, `@CoreDev`, `@CallerDev` | Characterization-tested refactor with rollback verification gate & legacy cleanup |
+| [`deep-research-lab.md`](deep-research-lab.md) | `R1 → (R2 ∥ R3 ∥ R4) → U1 → R5` | `@PI`, `@TrackA`, `@TrackB`, `@Bench` | Multi-track hypothesis probing, counter-baseline ablations & quantitative benchmark synthesis |
+| [`arch-teardown.md`](arch-teardown.md) | `R1 → (R2 ∥ R3) → R4 → U1` | `@Systems`, `@UX`, `@Architect` | Parallel codebase & UX teardown converging into a decision-ready Engineering RFC |
 
 ## Usage
 
-### Option 1: One-Click inside Aexus Code UI
-1. Open any top-level orchestrator (`Governor` in 4-tier, `Tech Lead` in 3-tier, or `Coordinator` in 2-tier) on a local Git workspace in **ADE** mode and right-click → **Engineering** (or **Research**).
-2. Click **`Recipes`** in the DAG Studio toolbar.
-3. Choose any of the 6 recipes, pick an engine preset (`Balanced` / `Max Quality` / `Fast · $2 Cap`), and click **`Apply Recipe`**.
+### Option 1: Directly in the Mission Canvas
+1. Open or initialize a Mission in **ADE** mode.
+2. Click the top-left **File** button to open the **Mermaid & Node Pre-Prompts** split drawer.
+3. Paste the ```` ```mermaid ```` block from any recipe on the left, copy each node's pre-prompt into the right-hand **Node Pre-Prompts** panel (or click the prompt icon on any node card — both sync directly to the same Mission store), pick each node's **Host**, **Engine**, and **Model/Thinking**, then click **Start**.
 
 ### Option 2: Scriptable CLI (`aexus-ade`)
 ```bash
-# List all 6 built-in recipes
-aexus-ade engineering template list
+# 1. Create a Mission owned by a Governor (or standalone with --title)
+GOV_ID=$(aexus-ade session create --project . --engine claude --role governor --title "Release Lead" --no-open --json | jq -r .id)
+MISSION_ID=$(aexus-ade mission init --governor "$GOV_ID" --title "Feature Ship" --open --json | jq -r .id)
 
-# Apply directly from the built-in gallery (enforces recipe max_budget_usd automatically)
-aexus-ade engineering template apply --governor "$GOV_ID" --template feature-ship --preset balanced --isolation worktree --max-budget-usd 8
+# 2. Validate & apply a blueprint file directly (extracts the ```mermaid fence automatically)
+aexus-ade mission blueprint validate --file ./examples/blueprints/feature-ship.md
+aexus-ade mission blueprint apply --mission "$MISSION_ID" --file ./examples/blueprints/feature-ship.md
 
-# Or apply any custom/shared Markdown blueprint file directly
-aexus-ade engineering blueprint apply --governor "$GOV_ID" --file ./examples/blueprints/feature-ship.md
+# 3. Attach per-node pre-prompts (synced immediately with the Canvas & Split Drawer)
+aexus-ade mission prompt set --mission "$MISSION_ID" --node N1 --text "Define shared TypeScript/API contracts and file ownership boundaries."
+aexus-ade mission prompt list --mission "$MISSION_ID"
 
-# Manage trusted verify: command hashes before or after a run
-aexus-ade engineering verify-trust list
+# 4. Optional: bind a node to a remote SSH Cloud Host, then start the Mission
+# aexus-ade mission host bind --mission "$MISSION_ID" --node N2 --host gpu-box --path /workspace/app
+aexus-ade mission start --mission "$MISSION_ID" --timeout 15
 
-# Run the DAG and export a GitHub PR-ready Verification & FinOps Report
-aexus-ade engineering run --governor "$GOV_ID"
-aexus-ade engineering report --governor "$GOV_ID" --out ./verification-report.md
+# 5. Inspect live runtime status and approve the release gate when ready
+aexus-ade mission status --mission "$MISSION_ID" --json
+aexus-ade mission gate approve --mission "$MISSION_ID" --node U1 --note "All tracks verified"
 ```
 
-Want to share your own workflow recipe? See the **[Contribute a Blueprint Recipe](../../CONTRIBUTING.md#contribute-a-blueprint-recipe)** guide!
+Want to share your own Mission workflow recipe? See the **[Contribute a Blueprint Recipe](../../CONTRIBUTING.md#contribute-a-blueprint-recipe)** guide!

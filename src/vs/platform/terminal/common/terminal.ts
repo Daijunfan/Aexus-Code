@@ -130,6 +130,8 @@ export const enum TerminalSettingId {
 	EnableKittyKeyboardProtocol = 'terminal.integrated.enableKittyKeyboardProtocol',
 	EnableWin32InputMode = 'terminal.integrated.enableWin32InputMode',
 	AllowInUntrustedWorkspace = 'terminal.integrated.allowInUntrustedWorkspace',
+	GridLayouts = 'terminal.integrated.gridLayouts',
+	ShowGridPaneHeaders = 'terminal.integrated.showGridPaneHeaders',
 
 	// Developer/debug settings
 
@@ -505,6 +507,8 @@ export interface IHeartbeatService {
 
 export const remoteResolverTerminal = Symbol('remoteResolverTerminal');
 
+export type TerminalSplitDirection = 'right' | 'down' | 'left' | 'up';
+
 export interface IShellLaunchConfig {
 	/**
 	 * The name of the terminal, if this is not set the name of the process will be used.
@@ -681,6 +685,11 @@ export interface IShellLaunchConfig {
 	 * directly to the right of its parent.
 	 */
 	parentTerminalId?: number;
+
+	/**
+	 * Optional 2D grid split direction relative to the parent terminal.
+	 */
+	splitDirection?: TerminalSplitDirection;
 
 	/**
 	 * The dimensions for the instance as set by the user

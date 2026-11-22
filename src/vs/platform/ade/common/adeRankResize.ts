@@ -135,7 +135,7 @@ function buildGeneratedRankForTier(tier: number, totalCount: number, usedIds: Se
 			initPrompt: 'You operate at tier L1 for {{project.name}}. Read your tier API doc and collaborate cleanly.',
 			pureExecution: false,
 			canHaveSubordinates: false,
-			allowedApis: ['session.read_context', 'session.message', 'project.read', 'host.access', 'inbox.post', 'engineering.read', 'engineering.design', 'engineering.review', 'engineering.integrate'],
+			allowedApis: ['session.read_context', 'session.message', 'project.read', 'host.access', 'inbox.post', 'mission.read', 'mission.design'],
 		};
 	}
 
@@ -180,7 +180,7 @@ function buildGeneratedRankForTier(tier: number, totalCount: number, usedIds: Se
 		initPrompt: `You operate at tier L${tier} for {{project.name}}. Consult your L${tier} API reference doc and delegate execution downward.`,
 		pureExecution: false,
 		canHaveSubordinates: true,
-		allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'host.access', 'engineering.read', 'engineering.review'],
+		allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'host.access', 'mission.read'],
 	};
 }
 

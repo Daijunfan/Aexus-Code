@@ -2139,10 +2139,13 @@ describe('ADE Native Extension Role Bridge', () => {
 		assert.strictEqual(rawEnv.AEXUS_ADE_TOKEN, 'master-token');
 	});
 
-	it('resolveCodexSandboxMode bounds automated engineering workers to workspace-write unless autonomousMode or explicit danger-full-access is set', () => {
-		// Automated DAG worker with autonomousMode=false stays bounded to workspace-write (worktree cwd)
+	it('resolveCodexSandboxMode defaults to danger-full-access and honors explicit Safe Mode (autonomousMode=false) or sandboxMode overrides', () => {
+		// Default (autonomousMode omitted -> true) unlocks danger-full-access for both local & cloud sessions
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({}), 'danger-full-access');
+		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true }), 'danger-full-access');
+		// Automated DAG worker with explicit autonomousMode=false stays bounded to workspace-write (worktree cwd)
 		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true }, undefined, false), 'workspace-write');
-		// Interactive session with autonomousMode=false also defaults to workspace-write
+		// Interactive session with explicit autonomousMode=false also defaults to workspace-write
 		assert.strictEqual(sharedModule.resolveCodexSandboxMode({}, undefined, false), 'workspace-write');
 		// Explicit autonomousMode=true unlocks danger-full-access
 		assert.strictEqual(sharedModule.resolveCodexSandboxMode({ automatedEngineering: true }, undefined, true), 'danger-full-access');

@@ -239,7 +239,7 @@ const API_CATEGORY_ORDER: readonly { readonly id: AdePrimitiveApiCategory; reado
 	{ id: 'messaging', title: 'Messaging, Context & Human Inbox' },
 	{ id: 'hierarchy', title: 'Hierarchy & Session Lifecycle' },
 	{ id: 'workspace', title: 'Workspace, Files & Cloud Hosts' },
-	{ id: 'engineering', title: 'Mission DAG Workflow' },
+	{ id: 'mission', title: 'Mission DAG Workflow' },
 ];
 
 export class AdeRoleStudioEditorPane extends EditorPane {
@@ -1288,7 +1288,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 									message: localize('adeRoleConfirmGrantAllTitle', "Grant ALL kernel APIs to '{0}'?", selected.name),
 									detail: localize(
 										'adeRoleConfirmGrantAllDetail',
-										"This includes High Privilege APIs that can delete projects, merge Git worktrees, start/stop DAG runs, and remove Engineering trees:\n• {0}",
+										"This includes High Privilege APIs that can delete projects, manage Cloud Hosts, start/stop Mission runs, and remove Missions:\n• {0}",
 										dangerousList,
 									),
 									primaryButton: localize('adeRoleConfirmGrantAllBtn', "&&Grant All"),
@@ -1309,7 +1309,7 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 				}));
 			};
 			addQuickBtn(localize('adeRoleApisRecommended', "Recommended Orchestrator"), ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post']);
-			addQuickBtn(localize('adeRoleApisReadOnly', "Read-Only Reviewer"), ['session.read_context', 'project.read', 'engineering.read', 'engineering.review']);
+			addQuickBtn(localize('adeRoleApisReadOnly', "Read-Only Reviewer"), ['session.read_context', 'project.read', 'mission.read']);
 			addQuickBtn(localize('adeRoleApisSelectAll', "Grant All"), ALL_ADE_PRIMITIVE_API_IDS, true);
 			addQuickBtn(localize('adeRoleApisClearAll', "Revoke All"), []);
 		}

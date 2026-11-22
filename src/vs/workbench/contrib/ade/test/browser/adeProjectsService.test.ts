@@ -443,7 +443,7 @@ suite('ADE project sessions', () => {
 			userValue: undefined,
 			workspaceValue: {
 				version: 1,
-				ranks: [{ id: 'evil-root', name: 'Evil', tier: 1, initPrompt: 'INJECTED', allowedApis: ['engineering.control'] }],
+				ranks: [{ id: 'evil-root', name: 'Evil', tier: 1, initPrompt: 'INJECTED', allowedApis: ['mission.control'] }],
 			},
 		};
 		const configStub = new class extends TestConfigurationService {
@@ -468,45 +468,33 @@ suite('ADE project sessions', () => {
 		const root = projects.addSession(projUri, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/slot-root') }, 'Root', { role: 'governor' });
 
 		// Even though workspaceValue tried to inject 'evil-root', default 4-tier applies!
-		projects.syncWorkTreeHierarchy(root.id, 'engineering', [{
-			segmentId: 'S1',
-			label: 'Segment S1',
-			managerEngineId: 'aexus-claude',
-			tasks: [{ nodeId: 'N1', title: 'Task 1', employeeEngineId: 'aexus-claude', workerEngineId: 'aexus-codex' }],
-		}]);
+		const sync4 = projects.syncMissionMermaidEmployees(root.id, [
+			{ id: 'N1', title: 'Task 1', nodeIds: ['N1'] },
+		]);
 		assert.strictEqual(projects.getAgent(root.id)?.role, 'governor');
+		assert.strictEqual(projects.getAgent(sync4.employeeAgentsByNode.N1.id)?.role, 'manager');
 
-		// 2. Switch trusted user config to startup-3tier -> slots resolve to tech-lead / tech-lead / reviewer / pure builder (undefined)
+		// 2. Switch trusted user config to startup-3tier -> next lower tier under tech-lead resolves to reviewer
 		inspectedOverride = { userValue: startup };
-		const sync3 = projects.syncWorkTreeHierarchy(root.id, 'engineering', [{
-			segmentId: 'S1',
-			label: 'Segment S1',
-			managerEngineId: 'aexus-claude',
-			tasks: [{ nodeId: 'N1', title: 'Task 1', employeeEngineId: 'aexus-claude', workerEngineId: 'aexus-codex' }],
-		}]);
+		projects.setAgentRole(root.id, 'tech-lead');
+		const sync3 = projects.syncMissionMermaidEmployees(root.id, [
+			{ id: 'N2', title: 'Task 2', nodeIds: ['N2'] },
+		]);
 		assert.strictEqual(projects.getAgent(root.id)?.role, 'tech-lead');
-		assert.strictEqual(projects.getAgent(sync3.managerAgentsBySegment.S1)?.role, 'tech-lead');
-		assert.strictEqual(projects.getAgent(sync3.employeeAgentsByNode.N1)?.role, 'reviewer');
-		assert.strictEqual(projects.getAgent(sync3.workerAgentsByNode.N1)?.role, undefined);
+		assert.strictEqual(projects.getAgent(sync3.employeeAgentsByNode.N2.id)?.role, 'reviewer');
 
-		// 3. Switch trusted user config to flat-swarm -> slots resolve to coordinator / coordinator / coordinator / pure agent (undefined)
+		// 3. Switch trusted user config to flat-swarm -> next lower tier under coordinator is pure leaf agent (undefined role)
 		inspectedOverride = { userValue: flat };
-		const sync2 = projects.syncWorkTreeHierarchy(root.id, 'engineering', [{
-			segmentId: 'S1',
-			label: 'Segment S1',
-			managerEngineId: 'aexus-claude',
-			tasks: [{ nodeId: 'N1', title: 'Task 1', employeeEngineId: 'aexus-claude', workerEngineId: 'aexus-codex' }],
-		}]);
+		projects.setAgentRole(root.id, 'coordinator');
+		const sync2 = projects.syncMissionMermaidEmployees(root.id, [
+			{ id: 'N3', title: 'Task 3', nodeIds: ['N3'] },
+		]);
 		assert.strictEqual(projects.getAgent(root.id)?.role, 'coordinator');
-		assert.strictEqual(projects.getAgent(sync2.managerAgentsBySegment.S1)?.role, 'coordinator');
-		assert.strictEqual(projects.getAgent(sync2.employeeAgentsByNode.N1)?.role, 'coordinator');
-		assert.strictEqual(projects.getAgent(sync2.workerAgentsByNode.N1)?.role, undefined);
+		assert.strictEqual(projects.getAgent(sync2.employeeAgentsByNode.N3.id)?.role, undefined);
 
-		// 4. Rank ID migration updates live sessions (including worktree-locked sessions) cleanly
+		// 4. Rank ID migration updates live sessions (including Mission-locked sessions) cleanly
 		const migratedCount = projects.migrateRankId('coordinator', 'swarm-lead');
-		assert.strictEqual(migratedCount, 3);
+		assert.strictEqual(migratedCount, 1);
 		assert.strictEqual(projects.getAgent(root.id)?.role, 'swarm-lead');
-		assert.strictEqual(projects.getAgent(sync2.managerAgentsBySegment.S1)?.role, 'swarm-lead');
-		assert.strictEqual(projects.getAgent(sync2.employeeAgentsByNode.N1)?.role, 'swarm-lead');
 	});
 });

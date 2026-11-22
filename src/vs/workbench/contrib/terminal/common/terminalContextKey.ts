@@ -38,6 +38,8 @@ export const enum TerminalContextKeyStrings {
 	TabsSingularSelection = 'terminalTabsSingularSelection',
 	SplitTerminal = 'terminalSplitTerminal',
 	SplitPaneActive = 'terminalSplitPaneActive',
+	GridBroadcastActive = 'terminalGridBroadcastActive',
+	PaneMaximized = 'terminalPaneMaximized',
 	ShellType = 'terminalShellType',
 	InTerminalRunCommandPicker = 'inTerminalRunCommandPicker',
 	TerminalShellIntegrationEnabled = 'terminalShellIntegrationEnabled',
@@ -134,6 +136,12 @@ export namespace TerminalContextKeys {
 
 	/** Whether the active terminal is a split pane */
 	export const splitTerminalActive = new RawContextKey<boolean>(TerminalContextKeyStrings.SplitPaneActive, false, localize('splitPaneActive', "Whether the active terminal is a split pane."));
+
+	/** Whether input broadcasting is enabled for the active terminal grid group. */
+	export const gridBroadcastActive = new RawContextKey<boolean>(TerminalContextKeyStrings.GridBroadcastActive, false, localize('gridBroadcastActive', "Whether input broadcasting is active for the current terminal grid."));
+
+	/** Whether a single pane is currently maximized inside the active terminal grid group. */
+	export const paneMaximized = new RawContextKey<boolean>(TerminalContextKeyStrings.PaneMaximized, false, localize('paneMaximized', "Whether a terminal pane is maximized inside the active terminal grid."));
 
 	/** Whether the terminal run command picker is currently open. */
 	export const inTerminalRunCommandPicker = new RawContextKey<boolean>(TerminalContextKeyStrings.InTerminalRunCommandPicker, false, localize('inTerminalRunCommandPickerContextKey', "Whether the terminal run command picker is currently open."));

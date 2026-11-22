@@ -4,19 +4,30 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from '../../../../base/common/path.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import {
+	addEdgeToMermaid,
+	addNodeToMermaid,
 	buildMissionContextReusePaths,
 	buildOrthogonalRoundedEdgePath,
 	computeMissionAutoLayout,
+	computeMissionEdgeLabelLayout,
 	computeMissionWorldSize,
 	computeOrthogonalRoundedEdgeRoute,
 	getMissionEdgeKind,
+	measureMissionEdgeLabelTextWidth,
+	MISSION_DAG_TEMPLATES,
+	MISSION_TASK_NODE_HEIGHT,
+	MISSION_TASK_NODE_WIDTH,
 	parseMissionMermaidDag,
+	removeEdgeFromMermaid,
+	removeNodeFromMermaid,
+	renameNodeInMermaid,
 	setNodeEmployeeInMermaid,
+	toggleEdgeFailInMermaid,
 } from '../../common/adeMissionDag.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, getMissionDisplayName } from '../../common/adeRoleSchema.js';
 import { renameMissionAlias } from '../../common/adeRankResize.js';
@@ -108,8 +119,8 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		try {
 			const paths = await backend.syncApiDocs(resAlias);
 			assert.ok(fs.existsSync(paths.missionDoc));
-			assert.ok(fs.existsSync(paths.rankDocs['L0']));
-			assert.ok(fs.existsSync(paths.rankDocs['L1']));
+			assert.ok(fs.existsSync(paths.rankDocs.L0));
+			assert.ok(fs.existsSync(paths.rankDocs.L1));
 
 			assert.deepStrictEqual(await backend.loadInbox(), []);
 			await backend.saveInbox([{
@@ -266,5 +277,211 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 
 		const unknownAfterEdge = parseMissionMermaidDag('flowchart LR\n  A --> B\n  @@@');
 		assert.ok(unknownAfterEdge.error && unknownAfterEdge.error.length > 0, 'unknown statement after a valid edge must surface an error');
+	});
+
+	test('parses every official blueprint in examples/blueprints/*.md cleanly without legacy worker= syntax or swallowed metadata', () => {
+		const blueprintsDir = path.resolve(process.cwd(), 'examples', 'blueprints');
+		const required = [
+			'feature-ship.md',
+			'bug-hunt-fix.md',
+			'security-audit-swarm.md',
+			'safe-migration.md',
+			'deep-research-lab.md',
+			'arch-teardown.md',
+		];
+		for (const fileName of required) {
+			const fullPath = path.join(blueprintsDir, fileName);
+			assert.ok(fs.existsSync(fullPath), `Missing official blueprint: ${fullPath}`);
+			const content = fs.readFileSync(fullPath, 'utf8');
+			assert.ok(content.includes('```mermaid'), `${fileName} must contain a fenced mermaid block`);
+			assert.ok(content.includes('## Node Pre-Prompts'), `${fileName} must contain ## Node Pre-Prompts`);
+			assert.ok(!content.includes('## Tree Metadata'), `${fileName} must not contain legacy ## Tree Metadata`);
+			assert.ok(!content.includes('## Auto-Partitioned Managers'), `${fileName} must not contain legacy ## Auto-Partitioned Managers`);
+			assert.ok(!/worker=[a-z0-9_-]+:/i.test(content), `${fileName} must not contain legacy worker=engine:thinking syntax`);
+
+			const parsed = parseMissionMermaidDag(content);
+			assert.strictEqual(parsed.error, undefined, `${fileName} failed to parse: ${parsed.error}`);
+			assert.ok(parsed.nodes.length >= 4, `${fileName} should define at least 4 DAG nodes`);
+			assert.ok(parsed.edges.length >= 4, `${fileName} should define at least 4 DAG edges`);
+			assert.ok(parsed.nodes.some(n => n.kind === 'gate'), `${fileName} should include a human gate node`);
+			for (const node of parsed.nodes) {
+				assert.ok(!node.label.includes('worker='), `${fileName} node ${node.id} leaked legacy syntax: ${node.label}`);
+				assert.ok(!node.label.includes('|'), `${fileName} node ${node.id} contains pipe syntax: ${node.label}`);
+			}
+		}
+	});
+
+	test('parses inline Mermaid %% check / %% verify directives onto task nodes while ignoring gates and regular comments', () => {
+		const graph = parseMissionMermaidDag([
+			'flowchart LR',
+			'  %% Regular human comment that must be ignored',
+			'  N1["@Dev: Build Core"] --> N2["Review"] --> G1{{"Signoff"}}',
+			'  %% check N1 [name=typecheck, timeout=90s, on_fail=bounce, max_retries=3, cwd=packages/core, expect_file=dist/index.js|dist/index.d.ts, match=/0 errors/i]: pnpm run typecheck',
+			'  %% verify N1 [on_fail=fail, expect_exit=0]: pnpm test',
+			'  %% check N2 [expect_file=REPORT.md, host=bupt208]',
+			'  %% check G1: echo should-ignore-gates',
+		].join('\n'));
+
+		assert.strictEqual(graph.error, undefined);
+		const n1 = graph.nodes.find(n => n.id === 'N1');
+		const n2 = graph.nodes.find(n => n.id === 'N2');
+		const g1 = graph.nodes.find(n => n.id === 'G1');
+		assert.strictEqual(n1?.checks?.length, 2);
+		assert.strictEqual(n1?.checks?.[0].name, 'typecheck');
+		assert.strictEqual(n1?.checks?.[0].command, 'pnpm run typecheck');
+		assert.strictEqual(n1?.checks?.[0].timeoutMs, 90_000);
+		assert.strictEqual(n1?.checks?.[0].onFail, 'bounce');
+		assert.strictEqual(n1?.checks?.[0].maxAutoRetries, 3);
+		assert.strictEqual(n1?.checks?.[0].cwd, 'packages/core');
+		assert.deepStrictEqual(n1?.checks?.[0].expectFiles, ['dist/index.js', 'dist/index.d.ts']);
+		assert.strictEqual(n1?.checks?.[0].expectOutputMatch, '/0 errors/i');
+		assert.strictEqual(n1?.checks?.[1].command, 'pnpm test');
+		assert.strictEqual(n1?.checks?.[1].onFail, 'fail');
+		assert.strictEqual(n1?.checks?.[1].expectExitCode, 0);
+
+		assert.strictEqual(n2?.checks?.length, 1);
+		assert.strictEqual(n2?.checks?.[0].command, undefined);
+		assert.deepStrictEqual(n2?.checks?.[0].expectFiles, ['REPORT.md']);
+		assert.strictEqual(n2?.checks?.[0].hostAlias, 'bupt208');
+		assert.strictEqual(g1?.checks, undefined, 'Human Gate nodes do not accept task check hooks');
+	});
+
+	test('clamps wide parallel layers (7+ siblings) to strictly positive bounds in both LR and TD, routes vertical TD orthogonally, and sizes CJK edge labels accurately', () => {
+		// 1. LR 7 parallel nodes in a single layer -> ZERO negative top/left coordinates!
+		const lrWide = parseMissionMermaidDag([
+			'flowchart LR',
+			'  S["Start"] --> P1["B1"]',
+			'  S --> P2["B2"]',
+			'  S --> P3["B3"]',
+			'  S --> P4["B4"]',
+			'  S --> P5["B5"]',
+			'  S --> P6["B6"]',
+			'  S --> P7["B7"]',
+		].join('\n'));
+		const lrPos = computeMissionAutoLayout(lrWide);
+		for (const [id, p] of lrPos.entries()) {
+			assert.ok(p.x - MISSION_TASK_NODE_WIDTH / 2 >= 100, `LR node ${id} left edge must be >= 100, got ${p.x - MISSION_TASK_NODE_WIDTH / 2}`);
+			assert.ok(p.y - MISSION_TASK_NODE_HEIGHT / 2 >= 100, `LR node ${id} top edge must be >= 100, got ${p.y - MISSION_TASK_NODE_HEIGHT / 2}`);
+		}
+
+		// 2. TD 7 parallel nodes in a single layer -> ZERO negative left/top coordinates & top-down layering!
+		const tdWide = parseMissionMermaidDag([
+			'flowchart TD',
+			'  S["Start"] --> P1["B1"]',
+			'  S --> P2["B2"]',
+			'  S --> P3["B3"]',
+			'  S --> P4["B4"]',
+			'  S --> P5["B5"]',
+			'  S --> P6["B6"]',
+			'  S --> P7["B7"]',
+		].join('\n'));
+		assert.strictEqual(tdWide.direction, 'TD');
+		const tdPos = computeMissionAutoLayout(tdWide);
+		assert.ok(tdPos.get('S')!.y < tdPos.get('P1')!.y, 'TD parent sits above child');
+		for (const [id, p] of tdPos.entries()) {
+			assert.ok(p.x - MISSION_TASK_NODE_WIDTH / 2 >= 100, `TD node ${id} left edge must be >= 100, got ${p.x - MISSION_TASK_NODE_WIDTH / 2}`);
+			assert.ok(p.y - MISSION_TASK_NODE_HEIGHT / 2 >= 100, `TD node ${id} top edge must be >= 100, got ${p.y - MISSION_TASK_NODE_HEIGHT / 2}`);
+		}
+
+		// 3. Vertical orthogonal routing (bottom-out -> top-in) produces strictly horizontal/vertical segments & obstacle detour
+		const vRoute = computeOrthogonalRoundedEdgeRoute(300, 220, 620, 520, { orientation: 'vertical', cornerRadius: 14 });
+		assert.ok(vRoute.path.includes('Q '), 'Vertical elbow includes smooth rounded Q corners');
+		assert.strictEqual(vRoute.points[0].x, 300);
+		assert.strictEqual(vRoute.points[0].y, 220);
+		assert.strictEqual(vRoute.points[vRoute.points.length - 1].x, 620);
+		assert.strictEqual(vRoute.points[vRoute.points.length - 1].y, 520);
+		// First segment drops vertically (same X, increasing Y)
+		assert.strictEqual(vRoute.points[1].x, 300);
+		assert.ok(vRoute.points[1].y > 220);
+		for (let i = 1; i < vRoute.points.length; i++) {
+			const a = vRoute.points[i - 1];
+			const b = vRoute.points[i];
+			assert.ok(Math.abs(a.x - b.x) < 0.1 || Math.abs(a.y - b.y) < 0.1, 'Every vertical-mode segment must be strictly orthogonal');
+		}
+
+		// 4. CJK edge label width measurement gives wide glyphs proper pill width and truncates extreme labels gracefully
+		const cjkWidth = measureMissionEdgeLabelTextWidth('失败降级路由');
+		const asciiWidth = measureMissionEdgeLabelTextWidth('abcdef');
+		assert.ok(cjkWidth > asciiWidth * 1.5, `CJK text width (${cjkWidth}) must be substantially wider than ASCII (${asciiWidth})`);
+		const cjkPill = computeMissionEdgeLabelLayout('审批不通过打回重做');
+		assert.strictEqual(cjkPill.displayText, '审批不通过打回重做');
+		assert.ok(cjkPill.pillWidth >= 120, `9-char Chinese label pill width should be >=120px, got ${cjkPill.pillWidth}`);
+		const longPill = computeMissionEdgeLabelLayout('这是一段极其冗长的中文边标签说明文本用于验证胶囊最大宽度截断保护机制');
+		assert.ok(longPill.displayText.endsWith('…'), 'Extreme labels truncate with ellipsis inside capsule');
+		assert.ok(longPill.pillWidth <= 260, `Truncated pill width stays within cap, got ${longPill.pillWidth}`);
+	});
+
+	test('validates all curated 1-click DAG templates and lossless Mermaid visual authoring mutations', () => {
+		// 1. All curated templates parse cleanly, lay out cleanly, and reference valid reviewer nodes
+		assert.ok(MISSION_DAG_TEMPLATES.length >= 4, 'At least 4 curated templates');
+		for (const tpl of MISSION_DAG_TEMPLATES) {
+			const parsed = parseMissionMermaidDag(tpl.mermaidText);
+			assert.strictEqual(parsed.error, undefined, `Template "${tpl.id}" must parse cleanly: ${parsed.error}`);
+			assert.ok(parsed.nodes.length >= 2, `Template "${tpl.id}" has >= 2 nodes`);
+			assert.ok(parsed.edges.length >= 1, `Template "${tpl.id}" has >= 1 edge`);
+			const pos = computeMissionAutoLayout(parsed);
+			assert.strictEqual(pos.size, parsed.nodes.length, `Template "${tpl.id}" lays out all nodes`);
+			for (const revId of tpl.reviewerNodeIds ?? []) {
+				assert.ok(parsed.nodes.some(n => n.id === revId && n.kind === 'task'), `Template "${tpl.id}" reviewer ${revId} must be a task node`);
+			}
+		}
+		const researchTpl = MISSION_DAG_TEMPLATES.find(t => t.id === 'multi-gpu-research')!;
+		const researchParsed = parseMissionMermaidDag(researchTpl.mermaidText);
+		assert.ok(researchParsed.edges.some(e => e.from === 'R2' && e.to === 'F1' && getMissionEdgeKind(e) === 'fail'), 'Research template includes on_fail fallback edge');
+		assert.strictEqual(researchParsed.nodes.find(n => n.id === 'R4')?.checks?.[0]?.expectFiles?.[0], 'research/benchmarks/metrics.json');
+
+		// 2. addNodeToMermaid builds from empty text with distinct IDs for task / reviewer / gate
+		const step1 = addNodeToMermaid('', { kind: 'task', label: 'Spec & Plan', employeeName: 'Architect' });
+		assert.strictEqual(step1.nodeId, 'N1');
+		const step2 = addNodeToMermaid(step1.mermaidText, { kind: 'task', roleHint: 'reviewer', label: 'Code Review' });
+		assert.strictEqual(step2.nodeId, 'R1');
+		const step3 = addNodeToMermaid(step2.mermaidText, { kind: 'gate', label: 'Ship Sign-Off' });
+		assert.strictEqual(step3.nodeId, 'U1');
+
+		const parsed3 = parseMissionMermaidDag(step3.mermaidText);
+		assert.strictEqual(parsed3.error, undefined);
+		assert.deepStrictEqual(parsed3.nodes.map(n => [n.id, n.kind]), [['N1', 'task'], ['R1', 'task'], ['U1', 'gate']]);
+		assert.strictEqual(parsed3.nodes[0].employeeName, 'Architect');
+
+		// 3. addEdgeToMermaid supports regular + fail edges and rejects self-loops, duplicates, and cycles
+		const e1 = addEdgeToMermaid(step3.mermaidText, 'N1', 'R1');
+		assert.strictEqual(e1.ok, true);
+		const e2 = addEdgeToMermaid(e1.mermaidText!, 'R1', 'U1', { kind: 'fail', label: 'fail' });
+		assert.strictEqual(e2.ok, true);
+		assert.strictEqual(addEdgeToMermaid(e2.mermaidText!, 'N1', 'N1').ok, false, 'Rejects self-loop');
+		assert.strictEqual(addEdgeToMermaid(e2.mermaidText!, 'N1', 'R1').ok, false, 'Rejects duplicate edge');
+		assert.strictEqual(addEdgeToMermaid(e2.mermaidText!, 'U1', 'N1').ok, false, 'Rejects cycle');
+
+		// 4. renameNodeInMermaid preserves @Employee, :::Class, Gate {{...}}, and %% check comments
+		const withCheck = `${e2.mermaidText!}\n  %% check R1 [name=tests]: pnpm test\n  %% check N1 [name=spec, expect_file=spec.md]`;
+		const renamed1 = renameNodeInMermaid(withCheck, 'N1', 'API Contract v2');
+		const renamed2 = renameNodeInMermaid(renamed1, 'U1', 'Release Gate v2');
+		const parsedRenamed = parseMissionMermaidDag(renamed2);
+		assert.strictEqual(parsedRenamed.error, undefined);
+		assert.strictEqual(parsedRenamed.nodes.find(n => n.id === 'N1')?.label, 'API Contract v2');
+		assert.strictEqual(parsedRenamed.nodes.find(n => n.id === 'N1')?.employeeName, 'Architect', 'Inline @Employee preserved across rename');
+		assert.strictEqual(parsedRenamed.nodes.find(n => n.id === 'U1')?.kind, 'gate', 'Gate shape preserved across rename');
+		assert.strictEqual(parsedRenamed.nodes.find(n => n.id === 'U1')?.label, 'Release Gate v2');
+		assert.strictEqual(parsedRenamed.nodes.find(n => n.id === 'R1')?.checks?.length, 1, '%% check preserved across rename');
+
+		// 5. toggleEdgeFailInMermaid & removeEdgeFromMermaid & removeNodeFromMermaid
+		const toggled = toggleEdgeFailInMermaid(renamed2, 'R1', 'U1');
+		const parsedToggled = parseMissionMermaidDag(toggled);
+		assert.strictEqual(getMissionEdgeKind(parsedToggled.edges.find(e => e.from === 'R1' && e.to === 'U1')!), 'success', 'Toggled fail edge back to success');
+
+		const toggledFail = toggleEdgeFailInMermaid(toggled, 'N1', 'R1');
+		assert.strictEqual(getMissionEdgeKind(parseMissionMermaidDag(toggledFail).edges.find(e => e.from === 'N1' && e.to === 'R1')!), 'fail', 'Toggled success edge to fail');
+
+		const edgeRemoved = removeEdgeFromMermaid(toggledFail, 'N1', 'R1');
+		const parsedEdgeRemoved = parseMissionMermaidDag(edgeRemoved);
+		assert.strictEqual(parsedEdgeRemoved.edges.some(e => e.from === 'N1' && e.to === 'R1'), false, 'Edge removed cleanly');
+		assert.strictEqual(parsedEdgeRemoved.nodes.length, 3, 'Endpoints retained after edge removal');
+
+		const nodeRemoved = removeNodeFromMermaid(toggledFail, 'R1');
+		const parsedNodeRemoved = parseMissionMermaidDag(nodeRemoved);
+		assert.strictEqual(parsedNodeRemoved.nodes.some(n => n.id === 'R1'), false, 'Node R1 removed');
+		assert.strictEqual(parsedNodeRemoved.edges.length, 0, 'Incident edges removed with R1');
+		assert.strictEqual(parsedNodeRemoved.nodes.find(n => n.id === 'N1')?.checks?.length, 1, 'Surviving node N1 check preserved');
+		assert.ok(!nodeRemoved.includes('%% check R1'), 'Deleted node check directive pruned');
 	});
 });

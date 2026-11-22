@@ -11,21 +11,25 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import {
+	buildRemotePersistentPrefix,
 	CloudHostTarget,
 	execRemoteShell,
 	joinRemotePath,
+	normalizeRemoteCwdForCompare,
 	posixQuote,
 	psSingleQuote,
 	readRemoteTextFile,
+	resolveRemoteRealpath,
 	stageLocalFileToRemote,
+	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
 import { AgentChildIdentity, CodexSandboxMode, resolveCodexSandboxMode, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, RpcPacket, withTimeout } from './runtime';
+import { agentIdentityScopeKey, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, RpcPacket, withTimeout } from './runtime';
 
 interface ThreadItem { type: string; text?: string; command?: string; server?: string; tool?: string; query?: string; content?: { type: string; text?: string }[] }
 interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[]; usage?: unknown }
 interface Thread { id: string; parentThreadId?: string; agentNickname?: string; cwd: string; name?: string; preview: string; path?: string; createdAt: number; updatedAt: number; turns: Turn[] }
-interface RolloutEntry { type: string; payload?: { type?: string; id?: string; content?: { type: string; text?: string }[]; cwd?: string; parent_thread_id?: string; multi_agent_version?: string; agent_nickname?: string; source?: { subagent?: { thread_spawn?: { parent_thread_id: string; agent_nickname?: string } } }; timestamp?: string; message?: string; item?: { type: string; id: string; content?: { type: string; text?: string }[] } } }
+interface RolloutEntry { type: string; payload?: { type?: string; id?: string; session_id?: string; role?: string; content?: { type: string; text?: string }[]; cwd?: string; parent_thread_id?: string; multi_agent_version?: string; agent_nickname?: string; source?: { subagent?: { thread_spawn?: { parent_thread_id: string; agent_nickname?: string } } }; timestamp?: string; message?: string; item?: { type: string; id: string; content?: { type: string; text?: string }[] } } }
 interface SessionIndexEntry { id: string; thread_name: string; updated_at: string }
 interface Notification { threadId?: string; delta?: string; turn?: Turn; item?: ThreadItem; message?: string; usage?: unknown; tokenUsage?: unknown }
 interface Question { id: string; header: string; question: string; options?: { label: string; description: string }[]; isSecret?: boolean }
@@ -178,6 +182,7 @@ export class CodexRuntime implements EngineRuntime {
 	private readonly capabilitiesCache = new Map<string, { value: EngineRuntimeCapabilities; expiresAt: number }>();
 	private readonly capabilitiesPending = new Map<string, Promise<EngineRuntimeCapabilities>>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
+	private readonly lastRawThreadUsageBySession = new Map<string, EngineTurnTokenUsage>();
 	private defaultModel: string | undefined;
 
 	constructor(private readonly executable: string, readonly remoteTarget?: CloudHostTarget) { }
@@ -242,7 +247,21 @@ export class CodexRuntime implements EngineRuntime {
 		slot.loaded.clear();
 	}
 
-	private async ensureSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
+	private async disposeSlotAsync(scopeKey: string): Promise<void> {
+		const slot = this.clientSlots.get(scopeKey);
+		if (!slot) {
+			return;
+		}
+		this.clientSlots.delete(scopeKey);
+		slot.sessionListener?.dispose();
+		const client = slot.client;
+		slot.loaded.clear();
+		if (client) {
+			await client.disposeAsync().catch(() => undefined);
+		}
+	}
+
+	private async ensureSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string, persistentOwnerId?: string): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
 		const existing = this.clientSlots.get(scopeKey);
 		if (existing && (!existing.client || !existing.client.isClosed)) {
 			const client = await existing.ready;
@@ -261,16 +280,21 @@ export class CodexRuntime implements EngineRuntime {
 			const childEnv = this.remoteTarget
 				? await prepareRemoteAgentChildEnv(this.remoteTarget, identity ?? { sessionId: 'codex-pure', pureWorker: true })
 				: await prepareAgentChildEnv(identity ?? { sessionId: 'codex-pure', pureWorker: true });
-			const client = new JsonLineClient(this.executable, ['app-server'], cwd, childEnv, this.remoteTarget);
+			const persistentKey = scopeKey === SHARED_PURE_SCOPE_KEY
+				? `${buildRemotePersistentPrefix('codex', SHARED_PURE_SCOPE_KEY)}-${randomUUID().slice(0, 8)}`
+				: `${buildRemotePersistentPrefix('codex', persistentOwnerId || scopeKey)}-${randomUUID().slice(0, 8)}`;
+			const client = new JsonLineClient(
+				this.executable,
+				['app-server'],
+				cwd,
+				childEnv,
+				this.remoteTarget,
+				this.remoteTarget && this.remoteTarget.os !== 'windows'
+					? { persistentSessionId: persistentKey }
+					: undefined,
+			);
 			slot.client = client;
 			slot.sessionListener = client.onPacket(packet => {
-				const params = packet.params as Notification | undefined;
-				if ((packet.method === 'thread/tokenUsage/updated' || packet.method === 'turn/completed') && params?.threadId) {
-					const usage = extractTurnTokenUsage(params.tokenUsage ?? params.usage ?? params.turn?.usage);
-					if (usage) {
-						this.lastTurnUsageBySession.set(params.threadId, usage);
-					}
-				}
 				if (packet.method === 'thread/started') {
 					const thread = (packet.params as { thread: Thread }).thread;
 					loaded.add(thread.id);
@@ -280,7 +304,7 @@ export class CodexRuntime implements EngineRuntime {
 			const info = await client.request<{ codexHome: string }>('initialize', {
 				clientInfo: { name: 'aexus-code', title: 'Aexus Code', version: '0.1.0' },
 				capabilities: { experimentalApi: true },
-			});
+			}, { timeoutMs: 25_000 });
 			this.codexHome = info.codexHome;
 			client.write({ jsonrpc: '2.0', method: 'initialized' });
 			if (this.supportedModels.size === 0) {
@@ -331,9 +355,11 @@ export class CodexRuntime implements EngineRuntime {
 				return 'on-request';
 			case 'never':
 			case 'bypassPermissions':
+			case 'danger-full-access':
+			case 'auto':
 				return 'never';
 			default:
-				// Safe by default for interactive sessions unless autonomousMode is explicitly enabled.
+				// Full Access (never ask) by default for local & cloud sessions unless Safe Mode is explicitly selected.
 				return isAutonomousModeEnabled() ? 'never' : 'on-request';
 		}
 	}
@@ -346,7 +372,7 @@ export class CodexRuntime implements EngineRuntime {
 		const prevSlot = this.clientSlots.get(prevScopeKey);
 		if (prevSlot) {
 			if (prevSlot.client && !prevSlot.client.isClosed) {
-				await prevSlot.client.request('thread/unsubscribe', { threadId: sessionId }).catch(() => { });
+				await prevSlot.client.request('thread/unsubscribe', { threadId: sessionId }, { timeoutMs: 2500 }).catch(() => { });
 			}
 			prevSlot.loaded.delete(sessionId);
 			if (prevScopeKey !== SHARED_PURE_SCOPE_KEY) {
@@ -467,10 +493,169 @@ export class CodexRuntime implements EngineRuntime {
 		return out;
 	}
 
-	private async listRemote(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	private async listRemote(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
 		if (!this.remoteTarget || token.isCancellationRequested) {
 			return [];
 		}
+		const targetCwds: string[] = [];
+		if (projectCwd?.trim()) {
+			targetCwds.push(normalizeRemoteCwdForCompare(projectCwd, this.remoteTarget.os));
+			const realCwd = await resolveRemoteRealpath(this.remoteTarget, projectCwd, token).catch(() => undefined);
+			if (realCwd) {
+				const realNorm = normalizeRemoteCwdForCompare(realCwd, this.remoteTarget.os);
+				if (!targetCwds.includes(realNorm)) {
+					targetCwds.push(realNorm);
+				}
+			}
+		}
+
+		const byId = new Map<string, NativeSession>();
+		const homeRoot = this.codexHome || (this.remoteTarget.remoteHome ? joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.codex') : undefined);
+
+		// Fast read-only remote scan first on POSIX (handles .jsonl AND .jsonl.zst + session_index.jsonl without booting app-server!)
+		if (this.remoteTarget.os !== 'windows') {
+			const pyCodex = [
+				`import json, os, subprocess, sys`,
+				`root = sys.argv[1] or os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")`,
+				`target_cwds = set(json.loads(sys.argv[2]))`,
+				`sdir = os.path.join(root, "sessions")`,
+				`if not os.path.isdir(sdir): sys.exit(0)`,
+				`idx = {}`,
+				`idx_path = os.path.join(root, "session_index.jsonl")`,
+				`if os.path.isfile(idx_path):`,
+				`    try:`,
+				`        with open(idx_path, "r", encoding="utf-8", errors="replace") as f:`,
+				`            for line in f:`,
+				`                try: d = json.loads(line)`,
+				`                except Exception: continue`,
+				`                if isinstance(d, dict) and d.get("id"): idx[str(d["id"])] = d`,
+				`    except OSError: pass`,
+				`files = []`,
+				`for dirpath, _, filenames in os.walk(sdir):`,
+				`    for fn in filenames:`,
+				`        if fn.startswith("rollout-") and (fn.endswith(".jsonl") or fn.endswith(".jsonl.zst")):`,
+				`            fp = os.path.join(dirpath, fn)`,
+				`            try: files.append((os.path.getmtime(fp), fp))`,
+				`            except OSError: pass`,
+				`files.sort(key=lambda x: x[0], reverse=True)`,
+				`def norm_cwd(p):`,
+				`    p = os.path.normpath((p or "").strip())`,
+				`    return p[:-1] if len(p) > 1 and p.endswith("/") else p`,
+				`def read_head_lines(fp, limit=40):`,
+				`    lines = []`,
+				`    if fp.endswith(".zst"):`,
+				`        proc = None`,
+				`        try:`,
+				`            proc = subprocess.Popen(["zstd", "-dc", fp], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)`,
+				`            for raw in proc.stdout:`,
+				`                lines.append(raw.decode("utf-8", errors="replace"))`,
+				`                if len(lines) >= limit: break`,
+				`        except Exception: pass`,
+				`        finally:`,
+				`            if proc:`,
+				`                try: proc.stdout.close()`,
+				`                except Exception: pass`,
+				`                try: proc.terminate()`,
+				`                except Exception: pass`,
+				`                try: proc.wait(timeout=1)`,
+				`                except Exception: pass`,
+				`    else:`,
+				`        try:`,
+				`            with open(fp, "r", encoding="utf-8", errors="replace") as f:`,
+				`                for raw in f:`,
+				`                    lines.append(raw)`,
+				`                    if len(lines) >= limit: break`,
+				`        except OSError: pass`,
+				`    return lines`,
+				`for mtime, fp in files[:200]:`,
+				`    meta = None; label = ""`,
+				`    for line in read_head_lines(fp, 45):`,
+				`        try: ev = json.loads(line)`,
+				`        except Exception: continue`,
+				`        if not isinstance(ev, dict): continue`,
+				`        pl = ev.get("payload")`,
+				`        if not isinstance(pl, dict): continue`,
+				`        if meta is None and ev.get("type") == "session_meta":`,
+				`            sid = pl.get("id") or pl.get("session_id")`,
+				`            cwd = pl.get("cwd")`,
+				`            if sid and cwd:`,
+				`                if target_cwds and norm_cwd(str(cwd)) not in target_cwds:`,
+				`                    meta = False`,
+				`                    break`,
+				`                src = pl.get("source") if isinstance(pl.get("source"), dict) else {}`,
+				`                sub = src.get("subagent") if isinstance(src.get("subagent"), dict) else {}`,
+				`                ts = sub.get("thread_spawn") if isinstance(sub.get("thread_spawn"), dict) else {}`,
+				`                parent_id = pl.get("parent_thread_id") or ts.get("parent_thread_id")`,
+				`                nick = pl.get("agent_nickname") or ts.get("agent_nickname") or ""`,
+				`                named = idx.get(str(sid)) or {}`,
+				`                meta = {"id": str(sid), "cwd": str(cwd), "parentId": parent_id, "readOnly": bool(pl.get("multi_agent_version") == "v2" and parent_id), "nick": nick, "threadName": named.get("thread_name") or "", "updatedAt": named.get("updated_at") or "", "ts": pl.get("timestamp") or "", "mtime": int(mtime * 1000), "file": fp}`,
+				`                if meta["threadName"] or nick: break`,
+				`        elif meta and ev.get("type") == "event_msg":`,
+				`            pt = pl.get("type")`,
+				`            if pt == "item_completed":`,
+				`                item = pl.get("item") if isinstance(pl.get("item"), dict) else {}`,
+				`                if item.get("type") == "UserMessage":`,
+				`                    parts = [c.get("text", "") for c in (item.get("content") or []) if isinstance(c, dict) and str(c.get("type", "")).lower() == "text"]`,
+				`                    t = "\\n".join(parts).strip()`,
+				`                    if t: label = t.splitlines()[0][:100]; break`,
+				`            elif pt == "user_message" and isinstance(pl.get("message"), str) and pl["message"].strip():`,
+				`                label = pl["message"].strip().splitlines()[0][:100]; break`,
+				`        elif meta and not label and ev.get("type") == "response_item" and pl.get("role") == "user":`,
+				`            parts = [c.get("text", "") for c in (pl.get("content") or []) if isinstance(c, dict) and c.get("type") in ("input_text", "text")]`,
+				`            t = "\\n".join(parts).strip()`,
+				`            if t and not t.startswith("#") and not t.startswith("<environment_context>"):`,
+				`                label = t.splitlines()[0][:100]`,
+				`    if isinstance(meta, dict):`,
+				`        meta["userLabel"] = label`,
+				`        print("__AEX_CDX_J__\\t" + json.dumps(meta, ensure_ascii=False))`,
+			].join('\n');
+			const pyRes = await execRemoteShell(
+				this.remoteTarget,
+				`if command -v python3 >/dev/null 2>&1; then python3 -c ${posixQuote(pyCodex)} ${posixQuote(homeRoot ?? '')} ${posixQuote(JSON.stringify(targetCwds))}; else exit 127; fi`,
+				'',
+				{ timeoutMs: 20_000, token },
+			).catch(() => undefined);
+			if (pyRes && pyRes.code === 0) {
+				for (const line of pyRes.stdout.toString('utf8').split(/\r?\n/)) {
+					if (!line.startsWith('__AEX_CDX_J__\t')) { continue; }
+					try {
+						const row = JSON.parse(line.slice('__AEX_CDX_J__\t'.length)) as {
+							id: string; cwd: string; parentId?: string; readOnly?: boolean; nick?: string; threadName?: string; userLabel?: string; updatedAt?: string; ts?: string; mtime?: number; file?: string;
+						};
+						if (!row.id || !row.cwd) { continue; }
+						const created = row.ts && Number.isFinite(Date.parse(row.ts)) ? Date.parse(row.ts) : (row.mtime || Date.now());
+						const updated = row.updatedAt && Number.isFinite(Date.parse(row.updatedAt)) ? Math.max(Date.parse(row.updatedAt), row.mtime || 0) : (row.mtime || created);
+						const session: NativeSession = {
+							id: row.id,
+							parentId: row.parentId || undefined,
+							readOnly: Boolean(row.readOnly),
+							cwd: row.cwd,
+							file: row.file,
+							label: row.threadName?.trim() || row.nick?.trim() || row.userLabel?.trim() || vscode.l10n.t('Codex Session {0}', row.id.slice(0, 8)),
+							created,
+							updated,
+							provisional: false,
+						};
+						this.knownSessions.set(session.id, session);
+						byId.set(session.id, session);
+					} catch { /* ignore */ }
+				}
+				// Merge any live threads from already-running app-server slots without spinning up a cold daemon
+				if (this.clientSlots.size > 0) {
+					try {
+						const client = await withTimeout(this.ensureReady(), 4000);
+						const resp = await withTimeout(client.request<{ data?: Thread[]; threads?: Thread[] }>('thread/list', { limit: 100 }), 4000);
+						for (const thread of resp?.data ?? resp?.threads ?? []) {
+							if (!thread?.id) { continue; }
+							if (targetCwds.length > 0 && !targetCwds.includes(normalizeRemoteCwdForCompare(thread.cwd || '', this.remoteTarget.os))) { continue; }
+							byId.set(thread.id, this.session(thread));
+						}
+					} catch { /* keep disk scan results */ }
+				}
+				return [...byId.values()].sort((a, b) => b.updated - a.updated);
+			}
+		}
+
 		try {
 			const client = await withTimeout(this.ensureReady(), 8000);
 			const rpcSessions: NativeSession[] = [];
@@ -485,7 +670,10 @@ export class CodexRuntime implements EngineRuntime {
 				for (const thread of batch) {
 					if (!thread?.id || seen.has(thread.id)) { continue; }
 					seen.add(thread.id);
-					rpcSessions.push(this.session(thread));
+					const s = this.session(thread);
+					if (targetCwds.length === 0 || targetCwds.includes(normalizeRemoteCwdForCompare(s.cwd, this.remoteTarget.os))) {
+						rpcSessions.push(s);
+					}
 				}
 				const next = typeof resp?.nextCursor === 'string' && resp.nextCursor.trim() ? resp.nextCursor.trim() : undefined;
 				if (!next || next === cursor) { break; }
@@ -496,7 +684,6 @@ export class CodexRuntime implements EngineRuntime {
 			}
 		} catch { /* Fall back to scanning remote codexHome sessions over SSH. */ }
 
-		const homeRoot = this.codexHome || (this.remoteTarget.remoteHome ? joinRemotePath(this.remoteTarget.os, this.remoteTarget.remoteHome, '.codex') : undefined);
 		const posixScript = [
 			`root=${homeRoot ? posixQuote(homeRoot) : '"${CODEX_HOME:-$HOME/.codex}"'}`,
 			`[ -d "$root/sessions" ] || exit 0`,
@@ -544,15 +731,16 @@ export class CodexRuntime implements EngineRuntime {
 			if (!curFile) { continue; }
 			let event: RolloutEntry;
 			try { event = JSON.parse(rawLine) as RolloutEntry; } catch { continue; }
-			if (!current && event.type === 'session_meta' && event.payload?.id && event.payload.cwd) {
+			const metaId = event.payload?.id || event.payload?.session_id;
+			if (!current && event.type === 'session_meta' && metaId && event.payload?.cwd) {
 				const meta = event.payload;
 				current = {
-					id: meta.id!,
+					id: metaId,
 					parentId: meta.parent_thread_id ?? meta.source?.subagent?.thread_spawn?.parent_thread_id,
 					readOnly: meta.multi_agent_version === 'v2' && !!meta.parent_thread_id,
 					cwd: meta.cwd!,
 					file: curFile,
-					label: meta.agent_nickname || meta.source?.subagent?.thread_spawn?.agent_nickname || vscode.l10n.t('Codex Session {0}', meta.id!.slice(0, 8)),
+					label: meta.agent_nickname || meta.source?.subagent?.thread_spawn?.agent_nickname || vscode.l10n.t('Codex Session {0}', metaId.slice(0, 8)),
 					created: meta.timestamp ? Date.parse(meta.timestamp) : curMtime,
 					updated: curMtime,
 					provisional: false,
@@ -568,9 +756,9 @@ export class CodexRuntime implements EngineRuntime {
 		return sessions;
 	}
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	async list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
 		if (this.remoteTarget) {
-			return this.listRemote(token);
+			return this.listRemote(token, projectCwd);
 		}
 		await this.ensureReady();
 		const index = new Map<string, SessionIndexEntry>();
@@ -601,11 +789,12 @@ export class CodexRuntime implements EngineRuntime {
 				if (token.isCancellationRequested) { break; }
 				let event: RolloutEntry;
 				try { event = JSON.parse(line) as RolloutEntry; } catch { continue; }
-				if (!session && event.type === 'session_meta' && event.payload?.id && event.payload.cwd) {
+				const metaId = event.payload?.id || event.payload?.session_id;
+				if (!session && event.type === 'session_meta' && metaId && event.payload?.cwd) {
 					const meta = event.payload;
-					const named = index.get(meta.id!);
+					const named = index.get(metaId);
 					const stat = await fs.stat(file);
-					session = { id: meta.id!, parentId: meta.parent_thread_id ?? meta.source?.subagent?.thread_spawn?.parent_thread_id, readOnly: meta.multi_agent_version === 'v2' && !!meta.parent_thread_id, cwd: meta.cwd!, file, label: named?.thread_name || meta.agent_nickname || meta.source?.subagent?.thread_spawn?.agent_nickname || vscode.l10n.t('Codex Session {0}', meta.id!.slice(0, 8)), created: meta.timestamp ? Date.parse(meta.timestamp) : stat.birthtimeMs, updated: named?.updated_at ? Date.parse(named.updated_at) : stat.mtimeMs, provisional: false };
+					session = { id: metaId, parentId: meta.parent_thread_id ?? meta.source?.subagent?.thread_spawn?.parent_thread_id, readOnly: meta.multi_agent_version === 'v2' && !!meta.parent_thread_id, cwd: meta.cwd!, file, label: named?.thread_name || meta.agent_nickname || meta.source?.subagent?.thread_spawn?.agent_nickname || vscode.l10n.t('Codex Session {0}', metaId.slice(0, 8)), created: meta.timestamp ? Date.parse(meta.timestamp) : stat.birthtimeMs, updated: named?.updated_at ? Date.parse(named.updated_at) : stat.mtimeMs, provisional: false };
 					if (named?.thread_name || meta.agent_nickname) { break; }
 				}
 				if (session && event.type === 'event_msg' && event.payload?.type === 'item_completed' && event.payload.item?.type === 'UserMessage') {
@@ -648,7 +837,10 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
-	async prepareSession(session: NativeSession, options?: EngineSendOptions): Promise<void> {
+	async prepareSession(session: NativeSession, options?: EngineSendOptions, token?: vscode.CancellationToken): Promise<void> {
+		if (token?.isCancellationRequested) {
+			return;
+		}
 		const scopeKey = options
 			? agentIdentityScopeKey(session.id, options, session.cwd)
 			: this.resolveLiveScopeKey(session.id);
@@ -656,10 +848,20 @@ export class CodexRuntime implements EngineRuntime {
 			? { sessionId: options.adeSessionId || session.id, callerRole: options.callerRole, pureWorker: options.pureWorker, isMissionNode: options.isMissionNode }
 			: { sessionId: session.id, pureWorker: true };
 		await this.retireStaleSessionSlot(session.id, scopeKey);
-		const { client, loaded } = await this.ensureSlot(scopeKey, identity, scopeKey === SHARED_PURE_SCOPE_KEY ? undefined : session.cwd);
+		if (token?.isCancellationRequested) {
+			return;
+		}
+		const { client, loaded } = await raceWithCancellation(
+			this.ensureSlot(scopeKey, identity, scopeKey === SHARED_PURE_SCOPE_KEY ? undefined : session.cwd),
+			token,
+		);
+		if (token?.isCancellationRequested) {
+			return;
+		}
 		this.sessionScopeKeys.set(session.id, scopeKey);
+		const reqOpts = { timeoutMs: 25_000, token };
 		if (session.unmaterialized) {
-			const result = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options));
+			const result = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options), reqOpts);
 			loaded.add(result.thread.id);
 			this.sessionScopeKeys.set(result.thread.id, scopeKey);
 			this.recordThreadModelIfUnsupported(result.thread.id, result.model);
@@ -667,20 +869,21 @@ export class CodexRuntime implements EngineRuntime {
 			return;
 		}
 		if (session.parentId && !loaded.has(session.parentId)) {
-			const parent = await client.request<{ thread: Thread }>('thread/read', { threadId: session.parentId, includeTurns: false });
-			await this.prepareSession(this.session(parent.thread), options);
+			const parent = await client.request<{ thread: Thread }>('thread/read', { threadId: session.parentId, includeTurns: false }, reqOpts);
+			await this.prepareSession(this.session(parent.thread), options, token);
 		}
-		if (loaded.has(session.id)) { return; }
+		if (loaded.has(session.id) || token?.isCancellationRequested) { return; }
 		try {
-			const result = await client.request<{ thread: Thread; model?: string }>('thread/resume', { threadId: session.id, cwd: session.cwd, excludeTurns: true });
+			const result = await client.request<{ thread: Thread; model?: string }>('thread/resume', { threadId: session.id, cwd: session.cwd, excludeTurns: true }, reqOpts);
 			loaded.add(session.id);
 			this.recordThreadModelIfUnsupported(session.id, result.model);
 			session.file = result.thread.path;
 			session.provisional = false;
 		} catch (error) {
+			if (token?.isCancellationRequested || error instanceof vscode.CancellationError) { return; }
 			// Empty native threads have no rollout until their first user message.
 			if (!session.provisional || !(error instanceof Error) || !error.message.includes('no rollout found')) { throw error; }
-			const started = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options));
+			const started = await client.request<{ thread: Thread; model?: string }>('thread/start', this.threadStartParams(session.cwd, options), reqOpts);
 			loaded.add(started.thread.id);
 			this.sessionScopeKeys.set(started.thread.id, scopeKey);
 			this.recordThreadModelIfUnsupported(started.thread.id, started.model);
@@ -706,6 +909,10 @@ export class CodexRuntime implements EngineRuntime {
 			} catch { /* Fall back to reading remote rollout file if available. */ }
 			if (!session.file) {
 				return [];
+			}
+			if (this.remoteTarget.os !== 'windows' && session.file.endsWith('.zst')) {
+				const res = await execRemoteShell(this.remoteTarget, `zstd -dc -- ${posixQuote(session.file)} 2>/dev/null`, '', { timeoutMs: 20_000, token }).catch(() => undefined);
+				return res && res.code === 0 ? this.parseRolloutHistory(res.stdout.toString('utf8').split(/\r?\n/), session, token) : [];
 			}
 			const raw = await readRemoteTextFile(this.remoteTarget, session.file, { bypassCache: true, timeoutMs: 20_000, token });
 			return raw ? this.parseRolloutHistory(raw.split(/\r?\n/), session, token) : [];
@@ -774,28 +981,55 @@ export class CodexRuntime implements EngineRuntime {
 		const keys = scopeKey ? [scopeKey] : [...this.clientSlots.keys()];
 		for (const key of keys) {
 			const slot = this.clientSlots.get(key);
+			let unsubscribeFailed = false;
 			if (slot?.client && !slot.client.isClosed) {
-				await slot.client.request('thread/unsubscribe', { threadId: session.id }).catch(() => { });
+				await slot.client.request('thread/unsubscribe', { threadId: session.id }, { timeoutMs: 2500 }).catch(() => {
+					unsubscribeFailed = true;
+				});
 				slot.loaded.delete(session.id);
 			}
-			if (key !== SHARED_PURE_SCOPE_KEY && key.includes(`:${session.id}`)) {
-				this.disposeSlot(key);
+			if ((key !== SHARED_PURE_SCOPE_KEY && key.includes(`:${session.id}`)) || (key === SHARED_PURE_SCOPE_KEY && slot && slot.loaded.size === 0 && unsubscribeFailed)) {
+				await this.disposeSlotAsync(key);
 			}
 		}
 		this.sessionScopeKeys.delete(session.id);
+		// Guarantee full remote process-group + descendant kill even after an Electron window reload
+		// when `this.clientSlots` is empty.
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			await terminateRemotePersistentSessionsByPrefix(
+				this.remoteTarget,
+				buildRemotePersistentPrefix('codex', session.id),
+				{ killTree: true },
+			);
+		}
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
-		await this.prepareSession(session, options);
+		if (token.isCancellationRequested) {
+			return;
+		}
+		await this.prepareSession(session, options, token);
+		if (token.isCancellationRequested) {
+			return;
+		}
 		this.knownSessions.set(session.id, session);
 		const scopeKey = agentIdentityScopeKey(session.id, options, session.cwd);
 		await this.retireStaleSessionSlot(session.id, scopeKey);
-		const { client } = await this.ensureSlot(scopeKey, {
-			sessionId: options?.adeSessionId || session.id,
-			callerRole: options?.callerRole,
-			pureWorker: options?.pureWorker,
-			isMissionNode: options?.isMissionNode,
-		}, session.cwd);
+		if (token.isCancellationRequested) {
+			return;
+		}
+		const { client } = await raceWithCancellation(
+			this.ensureSlot(scopeKey, {
+				sessionId: options?.adeSessionId || session.id,
+				callerRole: options?.callerRole,
+				pureWorker: options?.pureWorker,
+				isMissionNode: options?.isMissionNode,
+			}, session.cwd, session.id),
+			token,
+		);
+		if (token.isCancellationRequested) {
+			return;
+		}
 		this.sessionScopeKeys.set(session.id, scopeKey);
 		let turnId: string | undefined;
 		const mappedEffort = mapReasoningEffort(options?.thinking);
@@ -821,6 +1055,8 @@ export class CodexRuntime implements EngineRuntime {
 			let fail!: (error: Error) => void;
 			const completed = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
 			void completed.catch(() => { });
+			const preTurnBaseline = this.lastRawThreadUsageBySession.get(session.id);
+			const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, { preTurnBaseline });
 			const listener = client.onPacket(packet => {
 				if (packet.method === 'aexus/connectionClosed') { fail(new Error(String(packet.params?.message))); return; }
 				const params = packet.params as (Notification & { type?: string }) | undefined;
@@ -830,6 +1066,19 @@ export class CodexRuntime implements EngineRuntime {
 					return;
 				}
 				if (params?.threadId !== session.id) { return; }
+				if (packet.method === 'thread/tokenUsage/updated' || packet.method === 'turn/completed') {
+					const rawUsage = extractTurnTokenUsage(params.tokenUsage ?? params.usage ?? params.turn?.usage);
+					if (rawUsage) {
+						const isCumulative = packet.method === 'thread/tokenUsage/updated';
+						const normalized = usageTracker.recordRealUsage(rawUsage, {
+							cumulativeAcrossThread: isCumulative,
+						});
+						if (isCumulative) {
+							this.lastRawThreadUsageBySession.set(session.id, rawUsage);
+						}
+						this.lastTurnUsageBySession.set(session.id, normalized);
+					}
+				}
 				const isCompactionEvent = packet.method === 'thread/compacted'
 					|| packet.method === 'context/compacted'
 					|| packet.method === 'context_compacted'
@@ -846,9 +1095,14 @@ export class CodexRuntime implements EngineRuntime {
 						options?.onContextCompacted?.();
 					} catch { /* Compaction callback must never break the turn. */ }
 				}
-				if (!token.isCancellationRequested && packet.method === 'item/agentMessage/delta' && params.delta) { stream.markdown(params.delta); }
+				if (!token.isCancellationRequested && packet.method === 'item/agentMessage/delta' && params.delta) {
+					stream.markdown(params.delta);
+					usageTracker.recordStreamDelta(params.delta);
+				}
 				if (!token.isCancellationRequested && (packet.method === 'item/reasoning/summaryTextDelta' || packet.method === 'item/reasoning/textDelta')) {
-					emitThinkingProgress(stream, String(packet.params?.delta ?? ''), 'codex-thinking');
+					const reasoningDelta = String(packet.params?.delta ?? '');
+					emitThinkingProgress(stream, reasoningDelta, 'codex-thinking');
+					usageTracker.recordStreamDelta(reasoningDelta);
 				}
 				if (!token.isCancellationRequested && packet.method === 'item/started' && params.item && params.item.type !== 'agentMessage' && params.item.type !== 'userMessage' && params.item.type !== 'reasoning') {
 					stream.progress(this.describeItem(params.item));
@@ -857,22 +1111,35 @@ export class CodexRuntime implements EngineRuntime {
 					if (params.turn.error) { fail(new Error(params.turn.error.message)); } else { finish(); }
 				}
 			});
-			const cancellation = token.onCancellationRequested(() => { if (turnId) { void client.request('turn/interrupt', { threadId: session.id, turnId }).catch(() => { }); } });
+			const sendInterrupt = () => {
+				if (turnId) {
+					void client.request('turn/interrupt', { threadId: session.id, turnId }, { timeoutMs: 2500 }).catch(() => { });
+				}
+			};
 			try {
-				const started = await client.request<{ turn: Turn }>('turn/start', {
-					threadId: session.id,
-					input,
-					approvalPolicy,
-					...(modelOverride ? { model: modelOverride } : {}),
-					...(effortOverride ? { effort: effortOverride } : {}),
-				});
-				turnId = started.turn.id;
-				session.provisional = false;
-				if (token.isCancellationRequested) { await client.request('turn/interrupt', { threadId: session.id, turnId }); }
-				await completed;
+				try {
+					const started = await client.request<{ turn: Turn }>('turn/start', {
+						threadId: session.id,
+						input,
+						approvalPolicy,
+						...(modelOverride ? { model: modelOverride } : {}),
+						...(effortOverride ? { effort: effortOverride } : {}),
+					}, { token, cancelGraceMs: 1500 });
+					turnId = started.turn.id;
+					session.provisional = false;
+					if (token.isCancellationRequested) {
+						sendInterrupt();
+					}
+					await raceWithCancellation(completed, token, 1500, sendInterrupt);
+				} catch (err) {
+					if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
+						await this.killSession(session).catch(() => { });
+						return;
+					}
+					throw err;
+				}
 			} finally {
 				listener.dispose();
-				cancellation.dispose();
 			}
 		};
 
@@ -1139,6 +1406,8 @@ export class CodexRuntime implements EngineRuntime {
 			this.disposeSlot(scopeKey);
 		}
 		this.knownSessions.delete(session.id);
+		this.lastTurnUsageBySession.delete(session.id);
+		this.lastRawThreadUsageBySession.delete(session.id);
 		if (session.file && !this.remoteTarget) {
 			await fs.rm(session.file, { force: true });
 		}
@@ -1149,6 +1418,8 @@ export class CodexRuntime implements EngineRuntime {
 			this.disposeSlot(key);
 		}
 		this.sessionScopeKeys.clear();
+		this.lastTurnUsageBySession.clear();
+		this.lastRawThreadUsageBySession.clear();
 		this.changed.dispose();
 	}
 }

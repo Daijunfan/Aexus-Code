@@ -512,7 +512,7 @@ suite('AdeControlServer', () => {
 		]);
 	});
 
-	test('executes aexus-ade engineering and inbox CLI subcommands end-to-end with blueprint file reading and AEXUS_ADE_CALLER forwarding', async function () {
+	test('executes aexus-ade mission, token, org and inbox CLI subcommands end-to-end with blueprint file reading and AEXUS_ADE_CALLER forwarding', async function () {
 		this.timeout(30_000);
 		const dispatched: IAdeControlDispatchRequest[] = [];
 		const server = store.add(new AdeControlServer(async req => {
@@ -521,26 +521,26 @@ suite('AdeControlServer', () => {
 		}, { controlDir: tempDir }));
 		await server.whenReady();
 
-		const sampleBpPath = path.join(tempDir, 'blueprint.md');
-		fs.writeFileSync(sampleBpPath, '# Sample Blueprint\n', 'utf8');
+		const sampleBpPath = path.join(tempDir, 'mission.mmd');
+		fs.writeFileSync(sampleBpPath, 'flowchart LR\n  N1["Spec"] --> N2["Build"]\n', 'utf8');
 
 		const repoRoot = path.resolve(FileAccess.asFileUri('').fsPath, '..');
 		const runCli = (args: string[], extraEnv?: Record<string, string>) => spawnBundledAdeCli(repoRoot, args, { ...process.env, AEXUS_ADE_CONTROL_FILE: server.metaPath, ...(extraEnv ?? {}) });
 
 		for (const [args, env] of [
-			[['--json', 'engineering', 'init', '--governor', 'gov-1', '--on-children', 'relocate'], undefined],
-			[['--json', 'engineering', 'list', '--tree-type', 'engineering'], undefined],
-			[['--json', 'engineering', 'open', '--governor', 'gov-1'], undefined],
-			[['--json', 'engineering', 'blueprint', 'get', '--governor', 'gov-1'], undefined],
-			[['--json', 'engineering', 'blueprint', 'apply', '--governor', 'gov-1', '--file', sampleBpPath, '--force-stop-running'], undefined],
-			[['--json', 'engineering', 'run', '--governor', 'gov-1'], { AEXUS_ADE_CALLER: 'secretary' }],
-			[['--json', 'engineering', 'pause', '--governor', 'gov-1'], undefined],
-			[['--json', 'engineering', 'resume', '--governor', 'gov-1'], { AEXUS_ADE_CALLER: 'secretary' }],
-			[['--json', 'engineering', 'stop', '--governor', 'gov-1'], undefined],
-			[['--json', 'engineering', 'status', '--governor', 'gov-1', '--node', 'N1'], undefined],
-			[['--json', 'engineering', 'review', '--governor', 'gov-1', '--node', 'N1', '--role', 'employee', '--verdict', 'pass', '--report', 'Clean diff'], { AEXUS_ADE_CALLER: 'employee' }],
-			[['--json', 'engineering', 'gate', '--governor', 'gov-1', '--node', 'U1', '--verdict', 'rollback', '--target-node', 'N1', '--feedback', 'Fix schema'], undefined],
-			[['--json', 'engineering', 'watchdog-action', '--governor', 'gov-1', '--node', 'N1', '--action', 'kill-restart'], { AEXUS_ADE_CALLER: 'manager' }],
+			[['--json', 'mission', 'init', '--governor', 'gov-1', '--open'], undefined],
+			[['--json', 'mission', 'list'], undefined],
+			[['--json', 'mission', 'open', '--governor', 'gov-1'], undefined],
+			[['--json', 'mission', 'blueprint', 'get', '--governor', 'gov-1'], undefined],
+			[['--json', 'mission', 'blueprint', 'apply', '--governor', 'gov-1', '--file', sampleBpPath], undefined],
+			[['--json', 'mission', 'run', '--governor', 'gov-1'], { AEXUS_ADE_CALLER: 'secretary' }],
+			[['--json', 'mission', 'pause', '--governor', 'gov-1'], undefined],
+			[['--json', 'mission', 'resume', '--governor', 'gov-1'], { AEXUS_ADE_CALLER: 'secretary' }],
+			[['--json', 'mission', 'stop', '--governor', 'gov-1'], undefined],
+			[['--json', 'mission', 'status', '--governor', 'gov-1'], undefined],
+			[['--json', 'token', 'complete', 'tok-1', '--summary', 'Clean diff'], { AEXUS_ADE_CALLER: 'employee' }],
+			[['--json', 'mission', 'gate', 'reject', '--mission', 'm-1', '--node', 'U1', '--rollback', 'N1', '--note', 'Fix schema'], undefined],
+			[['--json', 'mission', 'prompt', 'set', '--mission', 'm-1', '--node', 'N1', '--text', 'Verify invariants'], { AEXUS_ADE_CALLER: 'manager' }],
 			[['--json', 'inbox', 'list', '--unread-only'], undefined],
 			[['--json', 'inbox', 'post', '--from', 'gov-1', '--title', 'Need Decision', '--message', 'Approve migration?'], { AEXUS_ADE_CALLER: 'governor' }],
 			[['--json', 'inbox', 'resolve', 'inb-1', '--note', 'Approved'], undefined],
@@ -552,27 +552,26 @@ suite('AdeControlServer', () => {
 
 		assert.strictEqual(dispatched.length, 17);
 		assert.deepStrictEqual(dispatched[0], {
-			action: 'engineering.init',
-			params: { governor: 'gov-1', onChildren: 'relocate' },
+			action: 'mission.init',
+			params: { owner: 'gov-1', open: true },
 		});
-		assert.strictEqual(dispatched[4].action, 'engineering.blueprint.apply');
-		assert.strictEqual(dispatched[4].params?.text, '# Sample Blueprint\n');
-		assert.strictEqual(dispatched[4].params?.forceStopRunning, true);
+		assert.strictEqual(dispatched[4].action, 'mission.blueprint.apply');
+		assert.strictEqual(dispatched[4].params?.text, 'flowchart LR\n  N1["Spec"] --> N2["Build"]\n');
 		assert.deepStrictEqual(dispatched[5], {
-			action: 'engineering.run',
-			params: { governor: 'gov-1', caller: 'secretary' },
+			action: 'mission.run',
+			params: { missionId: 'gov-1', caller: 'secretary' },
 		});
 		assert.deepStrictEqual(dispatched[10], {
-			action: 'engineering.review',
-			params: { governor: 'gov-1', node: 'N1', role: 'employee', verdict: 'pass', report: 'Clean diff', caller: 'employee' },
+			action: 'token.complete',
+			params: { tokenId: 'tok-1', summary: 'Clean diff', caller: 'employee' },
 		});
 		assert.deepStrictEqual(dispatched[11], {
-			action: 'engineering.gate',
-			params: { governor: 'gov-1', node: 'U1', verdict: 'rollback', targetNode: 'N1', feedback: 'Fix schema' },
+			action: 'mission.gate',
+			params: { missionId: 'm-1', node: 'U1', decision: 'reject', rollback: 'N1', note: 'Fix schema' },
 		});
 		assert.deepStrictEqual(dispatched[12], {
-			action: 'engineering.watchdogAction',
-			params: { governor: 'gov-1', node: 'N1', watchdogAction: 'kill-restart', caller: 'manager' },
+			action: 'mission.prompt.set',
+			params: { missionId: 'm-1', nodeId: 'N1', prompt: 'Verify invariants', caller: 'manager' },
 		});
 		assert.deepStrictEqual(dispatched[14], {
 			action: 'inbox.post',
@@ -580,7 +579,7 @@ suite('AdeControlServer', () => {
 		});
 	});
 
-	test('parses free-text prompts, engineering options, and inbox mark-read usage end-to-end', async function () {
+	test('parses free-text prompts, mission options, and inbox mark-read usage end-to-end', async function () {
 		this.timeout(30_000);
 		const dispatched: IAdeControlDispatchRequest[] = [];
 		const server = store.add(new AdeControlServer(async req => {
@@ -594,26 +593,23 @@ suite('AdeControlServer', () => {
 
 		// `--json` after the positional prompt is opaque text, never a global flag.
 		const sendRun = await runCli(['session', 'send', 'sess-1', 'Please', 'explain', '--json', 'output']);
-		// Bracketed model IDs and `off` thinking levels pass through verbatim.
-		const configureRun = await runCli(['engineering', 'configure', '--governor', 'g1', '--all', '--engine', 'claude-code', '--model', 'claude-sonnet-4-5[1m]', '--thinking', 'off']);
-		const resetRun = await runCli(['engineering', 'reset', '--governor', 'g1', '--node', 'N2']);
-		const diffRun = await runCli(['engineering', 'diff', '--governor', 'g1', '--node', 'N1']);
-		const reportsRun = await runCli(['engineering', 'reports', '--governor', 'g1']);
-		const blueprintGetRun = await runCli(['engineering', 'blueprint', 'get', '--governor', 'g1', '--raw']);
+		const promptGetRun = await runCli(['mission', 'prompt', 'get', '--mission', 'm1', '--node', 'N2']);
+		const recallRun = await runCli(['mission', 'recall', '--mission', 'm1', '--nodes', 'N2', '--reason', 'pivot']);
+		const retryRun = await runCli(['mission', 'retry', '--mission', 'm1', '--node', 'N1']);
+		const blueprintGetRun = await runCli(['mission', 'blueprint', 'get', '--governor', 'g1', '--raw']);
 		const validateText = 'flowchart LR\n  A["Only Node"]';
-		const validateRun = await runCli(['engineering', 'blueprint', 'validate', '--text', validateText]);
+		const validateRun = await runCli(['mission', 'blueprint', 'validate', '--text', validateText]);
 		const bareMarkReadRun = await runCli(['inbox', 'mark-read']);
 		const markReadAllRun = await runCli(['inbox', 'mark-read', '--all']);
-		const runWithCaller = await runCli(['engineering', 'run', '--governor', 'g1'], { AEXUS_ADE_CALLER: 'manager' });
+		const runWithCaller = await runCli(['mission', 'run', '--governor', 'g1'], { AEXUS_ADE_CALLER: 'manager' });
 
 		assert.deepStrictEqual(
 			{
 				statuses: [
 					sendRun.status,
-					configureRun.status,
-					resetRun.status,
-					diffRun.status,
-					reportsRun.status,
+					promptGetRun.status,
+					recallRun.status,
+					retryRun.status,
 					blueprintGetRun.status,
 					validateRun.status,
 					bareMarkReadRun.status,
@@ -624,18 +620,17 @@ suite('AdeControlServer', () => {
 				dispatched,
 			},
 			{
-				statuses: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+				statuses: [0, 0, 0, 0, 0, 0, 1, 0, 0],
 				bareMarkReadUsage: true,
 				dispatched: [
 					{ action: 'session.send', params: { id: 'sess-1', prompt: 'Please explain --json output' } },
-					{ action: 'engineering.configure', params: { governor: 'g1', all: true, engine: 'claude-code', model: 'claude-sonnet-4-5[1m]', thinking: 'off' } },
-					{ action: 'engineering.reset', params: { governor: 'g1', node: 'N2' } },
-					{ action: 'engineering.diff', params: { governor: 'g1', node: 'N1' } },
-					{ action: 'engineering.reports', params: { governor: 'g1' } },
-					{ action: 'engineering.blueprint.get', params: { governor: 'g1', raw: true } },
-					{ action: 'engineering.blueprint.validate', params: { text: validateText } },
+					{ action: 'mission.prompt.get', params: { missionId: 'm1', nodeId: 'N2' } },
+					{ action: 'mission.recall', params: { missionId: 'm1', nodes: ['N2'], reason: 'pivot' } },
+					{ action: 'mission.retry', params: { missionId: 'm1', nodeId: 'N1' } },
+					{ action: 'mission.blueprint.get', params: { missionId: 'g1', raw: true } },
+					{ action: 'mission.blueprint.validate', params: { text: validateText } },
 					{ action: 'inbox.markRead', params: { all: true } },
-					{ action: 'engineering.run', params: { governor: 'g1', caller: 'manager' } },
+					{ action: 'mission.run', params: { missionId: 'g1', caller: 'manager' } },
 				],
 			},
 		);
@@ -720,8 +715,8 @@ suite('AdeControlServer', () => {
 		// 6. Valid capability token forcibly overwrites spoofed/absent caller with verified rank + sessionId.
 		const spoofAttemptRes = await sendWireRequest(server.socketPath, {
 			token: employeeToken,
-			action: 'engineering.review',
-			params: { governor: 'gov-1', node: 'N1', caller: 'secretary', _verifiedCaller: false, _callerSessionId: 'fake' },
+			action: 'token.complete',
+			params: { tokenId: 'tok-1', summary: 'Done', caller: 'secretary', _verifiedCaller: false, _callerSessionId: 'fake' },
 		});
 		assert.strictEqual(spoofAttemptRes.ok, true);
 		const omittedCallerRes = await sendWireRequest(server.socketPath, {
@@ -731,10 +726,10 @@ suite('AdeControlServer', () => {
 		assert.strictEqual(omittedCallerRes.ok, true);
 		assert.deepStrictEqual(dispatched, [
 			{
-				action: 'engineering.review',
+				action: 'token.complete',
 				params: {
-					governor: 'gov-1',
-					node: 'N1',
+					tokenId: 'tok-1',
+					summary: 'Done',
 					caller: 'employee',
 					_verifiedCaller: true,
 					_callerSessionId: 'emp-42',
@@ -829,7 +824,7 @@ suite('AdeControlServer', () => {
 		const nonexistentHome = path.join(tempDir, 'no-such-ade-home');
 
 		// Even with AEXUS_ADE_CALLER=secretary and no control file, server enforces manager from the signed token.
-		const mgrRun = await spawnBundledAdeCli(repoRoot, ['--json', 'engineering', 'watchdog-action', '--governor', 'gov-1', '--node', 'N1', '--action', 'remind'], {
+		const mgrRun = await spawnBundledAdeCli(repoRoot, ['--json', 'mission', 'retry', '--mission', 'm-1', '--node', 'N1'], {
 			...process.env,
 			AEXUS_ADE_HOME: nonexistentHome,
 			AEXUS_ADE_CONTROL_FILE: path.join(nonexistentHome, 'missing.json'),
@@ -855,11 +850,10 @@ suite('AdeControlServer', () => {
 
 		assert.deepStrictEqual(dispatched, [
 			{
-				action: 'engineering.watchdogAction',
+				action: 'mission.retry',
 				params: {
-					governor: 'gov-1',
-					node: 'N1',
-					watchdogAction: 'remind',
+					missionId: 'm-1',
+					nodeId: 'N1',
 					caller: 'manager',
 					_verifiedCaller: true,
 					_callerSessionId: 'mgr-7',
@@ -885,7 +879,7 @@ suite('AdeControlServer', () => {
 		assert.strictEqual(mintRes.ok, true);
 		const missionNodePureToken = (mintRes.result as { readonly token: string }).token;
 
-		// Allowed in-graph token/universal actions succeed with verified worker identity
+		// Allowed in-graph token/universal/read-only check actions succeed with verified worker identity
 		const completeRes = await sendWireRequest(server.socketPath, {
 			token: missionNodePureToken,
 			action: 'token.complete',
@@ -895,14 +889,30 @@ suite('AdeControlServer', () => {
 			token: missionNodePureToken,
 			action: 'whoami',
 		});
+		const dryRunCheckRes = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'mission.check.run',
+			params: { missionId: 'm1', nodeId: 'N1' },
+		});
 		assert.strictEqual(completeRes.ok, true);
 		assert.strictEqual(whoamiRes.ok, true);
+		assert.strictEqual(dryRunCheckRes.ok, true);
 
-		// All non-token orchestration actions are strictly denied at the server boundary
+		// All non-token orchestration actions (including modifying/removing checks) are strictly denied at the server boundary
 		const deniedPatch = await sendWireRequest(server.socketPath, {
 			token: missionNodePureToken,
 			action: 'mission.patch',
 			params: { mermaid: 'flowchart LR\n  A --> B' },
+		});
+		const deniedCheckSet = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'mission.check.set',
+			params: { missionId: 'm1', nodeId: 'N1', command: 'true' },
+		});
+		const deniedCheckRemove = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'mission.check.remove',
+			params: { missionId: 'm1', nodeId: 'N1' },
 		});
 		const deniedDelete = await sendWireRequest(server.socketPath, {
 			token: missionNodePureToken,
@@ -911,6 +921,10 @@ suite('AdeControlServer', () => {
 		});
 		assert.strictEqual(deniedPatch.ok, false);
 		assert.match(deniedPatch.error ?? '', /pure-execution Mission node sessions/i);
+		assert.strictEqual(deniedCheckSet.ok, false);
+		assert.match(deniedCheckSet.error ?? '', /pure-execution Mission node sessions/i);
+		assert.strictEqual(deniedCheckRemove.ok, false);
+		assert.match(deniedCheckRemove.error ?? '', /pure-execution Mission node sessions/i);
 		assert.strictEqual(deniedDelete.ok, false);
 		assert.match(deniedDelete.error ?? '', /pure-execution Mission node sessions/i);
 
@@ -923,6 +937,80 @@ suite('AdeControlServer', () => {
 				action: 'whoami',
 				params: { caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
 			},
+			{
+				action: 'mission.check.run',
+				params: { missionId: 'm1', nodeId: 'N1', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
+			},
 		]);
+	});
+
+	test('pins originating windowId into signed capability token and routes background requests with softWindowPin fallback', async () => {
+		const routed: Array<{ action: string; windowId: number | undefined; softWindowPin: boolean | undefined }> = [];
+		const server = store.add(new AdeControlServer(async (req, windowId, opts) => {
+			routed.push({ action: req.action, windowId, softWindowPin: opts?.softWindowPin });
+			return { ok: true };
+		}, { controlDir: tempDir }));
+		await server.whenReady();
+
+		const mintRes = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'emp-bg', rank: 'employee', windowId: 42 },
+		});
+		assert.strictEqual(mintRes.ok, true);
+		const pinnedToken = (mintRes.result as { readonly token: string }).token;
+
+		// 1. Omitting wire windowId automatically routes to signed wid=42 with softWindowPin=true
+		const implicitRes = await sendWireRequest(server.socketPath, {
+			token: pinnedToken,
+			action: 'token.complete',
+			params: { tokenId: 'tok-1', summary: 'done' },
+		});
+		assert.strictEqual(implicitRes.ok, true);
+
+		// 2. Explicit wire windowId overrides token wid with strict routing (softWindowPin undefined)
+		const explicitRes = await sendWireRequest(server.socketPath, {
+			token: pinnedToken,
+			action: 'token.current',
+			windowId: 7,
+		});
+		assert.strictEqual(explicitRes.ok, true);
+
+		assert.deepStrictEqual(routed, [
+			{ action: 'token.complete', windowId: 42, softWindowPin: true },
+			{ action: 'token.current', windowId: 7, softWindowPin: undefined },
+		]);
+	});
+
+	test('fails hung control requests cleanly after executionTimeoutMs instead of hanging CLI forever', async () => {
+		const server = store.add(new AdeControlServer(async req => {
+			if (req.action === 'org.send') {
+				return new Promise(() => { /* intentionally never settles */ });
+			}
+			return { ok: true };
+		}, {
+			controlDir: tempDir,
+			executionTimeoutMs: 120,
+		}));
+		await server.whenReady();
+
+		const startedAt = Date.now();
+		const res = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: 'org.send',
+			params: { target: 'emp-1', message: 'ping' },
+		});
+		const elapsed = Date.now() - startedAt;
+
+		assert.strictEqual(res.ok, false);
+		assert.match(res.error ?? '', /timed out after 120ms/i);
+		assert.ok(elapsed < 2000, `Expected bounded timeout, took ${elapsed}ms`);
+
+		// Subsequent healthy requests continue working after a timed-out request.
+		const healthy = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: 'status',
+		});
+		assert.deepStrictEqual(healthy, { ok: true, result: { ok: true } });
 	});
 });

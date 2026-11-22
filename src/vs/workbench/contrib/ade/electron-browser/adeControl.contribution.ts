@@ -6,14 +6,15 @@
 import { Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IServerChannel } from '../../../../base/parts/ipc/common/ipc.js';
-import { ADE_CONTROL_CHANNEL_NAME, ADE_CONTROL_EXECUTE_COMMAND_ID, IAdeControlDispatchRequest } from '../../../../platform/ade/common/adeControl.js';
+import { ADE_CONTROL_CHANNEL_NAME, ADE_CONTROL_EXECUTE_COMMAND_ID, ADE_GET_WINDOW_ID_COMMAND_ID, IAdeControlDispatchRequest } from '../../../../platform/ade/common/adeControl.js';
 import { ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME, IAdeCloudHostBackendService } from '../../../../platform/ade/common/adeCloudHosts.js';
 import { AdeCloudHostBackendChannelClient } from '../../../../platform/ade/common/adeCloudHostsIpc.js';
 import { ADE_ENGINEERING_BACKEND_CHANNEL_NAME, IAdeEngineeringBackendService } from '../../../../platform/ade/common/adeEngineering.js';
 import { AdeEngineeringBackendChannelClient } from '../../../../platform/ade/common/adeEngineeringIpc.js';
-import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
+import { INativeHostService } from '../../../../platform/native/common/native.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
 import { ILifecycleService, LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
@@ -42,8 +43,11 @@ export class AdeControlRendererContribution extends Disposable implements IWorkb
 		@ICommandService private readonly commandService: ICommandService,
 		@ILifecycleService private readonly lifecycleService: ILifecycleService,
 		@IWorkbenchEnvironmentService environmentService: IWorkbenchEnvironmentService,
+		@INativeHostService nativeHostService: INativeHostService,
 	) {
 		super();
+
+		this._register(CommandsRegistry.registerCommand(ADE_GET_WINDOW_ID_COMMAND_ID, () => nativeHostService.windowId));
 
 		if (environmentService.isSessionsWindow) {
 			return;

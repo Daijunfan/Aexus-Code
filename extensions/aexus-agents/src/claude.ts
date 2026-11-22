@@ -11,16 +11,23 @@ import * as readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
+	buildRemotePersistentPrefix,
 	CloudHostTarget,
+	encodeClaudeProjectSlug,
 	execRemoteShell,
+	healAllRemoteControlBridges,
+	inspectRemotePersistentSessionsByPrefix,
 	joinRemotePath,
 	posixQuote,
 	psSingleQuote,
 	readRemoteTextFile,
 	readRemoteTextFilesBatch,
+	resolveRemoteRealpath,
+	terminateRemotePersistentSession,
+	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
 import { isPathWithinOrEqual, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, spawnEngine, stopEngine } from './runtime';
+import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, REMOTE_REATTACH_BACKOFFS_MS, spawnEngine, stopEngine, stopEngineWithFallback, waitForBackoffOrResume } from './runtime';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
 interface ContentBlock { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }
@@ -35,6 +42,8 @@ interface ClaudeEvent {
 	isMeta?: boolean;
 	cwd?: string;
 	timestamp?: string;
+	customTitle?: string;
+	agentName?: string;
 	message?: { content: string | ContentBlock[]; usage?: UsagePayload };
 	event?: { type: string; delta?: { type?: string; text?: string; thinking?: string }; content_block?: ContentBlock };
 	request_id?: string;
@@ -76,6 +85,26 @@ interface ClaudeUsageStats {
 function messageText(event: ClaudeEvent): string {
 	const content = event.message?.content;
 	return typeof content === 'string' ? content : (content ?? []).filter(part => part.type === 'text').map(part => part.text ?? '').join('\n');
+}
+
+export { encodeClaudeProjectSlug };
+
+export function extractClaudeUserLabel(rawText: string): string | undefined {
+	const cleaned = stripInjectedAdeContextFromUserTurn(rawText).trim();
+	if (!cleaned || cleaned.startsWith(ROLE_INIT_MARKER)) {
+		return undefined;
+	}
+	if (
+		cleaned.startsWith('<local-command-caveat>')
+		|| cleaned.startsWith('<command-name>')
+		|| cleaned.startsWith('<system-reminder>')
+		|| cleaned.startsWith('<task-notification>')
+		|| cleaned.startsWith('[Request interrupted')
+	) {
+		return undefined;
+	}
+	const firstLine = cleaned.split(/\r?\n/).find(line => line.trim().length > 0)?.trim();
+	return firstLine ? firstLine.slice(0, 100) : undefined;
 }
 
 function turnUsageFromPayload(usage: UsagePayload | undefined, durationMs?: number, costUsd?: number): EngineTurnTokenUsage {
@@ -289,6 +318,7 @@ export class ClaudeRuntime implements EngineRuntime {
 	readonly name = 'Claude Code';
 	private readonly running = new Set<ReturnType<typeof spawnEngine>>();
 	private readonly runningBySession = new Map<string, Set<ReturnType<typeof spawnEngine>>>();
+	private readonly activePersistentIdsBySession = new Map<string, Set<string>>();
 	private readonly initBySession = new Map<string, ClaudeInitInfo>();
 	private readonly usageBySession = new Map<string, ClaudeUsageStats>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
@@ -320,50 +350,194 @@ export class ClaudeRuntime implements EngineRuntime {
 		return history;
 	}
 
-	private async listRemote(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	private async listRemote(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
 		if (!this.remoteTarget || token.isCancellationRequested) {
 			return [];
 		}
+		const targetCwds: string[] = [];
+		const targetSlugs: string[] = [];
+		if (projectCwd?.trim()) {
+			const canonical = projectCwd.trim();
+			targetCwds.push(canonical);
+			const realCwd = await resolveRemoteRealpath(this.remoteTarget, canonical, token).catch(() => undefined);
+			if (realCwd && !targetCwds.includes(realCwd)) {
+				targetCwds.push(realCwd);
+			}
+			for (const candidate of targetCwds) {
+				const slug = encodeClaudeProjectSlug(candidate);
+				if (slug && !targetSlugs.includes(slug)) {
+					targetSlugs.push(slug);
+				}
+			}
+		}
+
+		const pyScript = [
+			`import glob, json, os, sys`,
+			`cfg = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")`,
+			`if not os.path.isdir(cfg): sys.exit(0)`,
+			`target_slugs = json.loads(sys.argv[1])`,
+			`canonical_cwd = sys.argv[2]`,
+			`files = []`,
+			`if target_slugs:`,
+			`    seen_fp = set()`,
+			`    for slug in target_slugs:`,
+			`        d = os.path.join(cfg, slug)`,
+			`        if not os.path.isdir(d): continue`,
+			`        for name in os.listdir(d):`,
+			`            if not name.endswith(".jsonl"): continue`,
+			`            fp = os.path.join(d, name)`,
+			`            if fp in seen_fp or not os.path.isfile(fp): continue`,
+			`            seen_fp.add(fp)`,
+			`            try: st = os.stat(fp)`,
+			`            except OSError: continue`,
+			`            files.append((st.st_mtime, st.st_ctime, st.st_size, fp, True))`,
+			`else:`,
+			`    for fp in glob.glob(os.path.join(cfg, "*", "*.jsonl")):`,
+			`        if not os.path.isfile(fp): continue`,
+			`        try: st = os.stat(fp)`,
+			`        except OSError: continue`,
+			`        files.append((st.st_mtime, st.st_ctime, st.st_size, fp, False))`,
+			`files.sort(key=lambda x: x[0], reverse=True)`,
+			`B_CT = b'"custom-title"'`,
+			`B_AN = b'"agent-name"'`,
+			`B_SID = b'"sessionId"'`,
+			`B_CWD = b'"cwd"'`,
+			`B_U1 = b'"type":"user"'`,
+			`B_U2 = b'"type": "user"'`,
+			`SKIP_PFX = ("<local-command-caveat>", "<command-name>", "<system-reminder>", "<task-notification>", "[Request interrupted")`,
+			`def parse_title_lines(buf):`,
+			`    ct = None; an = None`,
+			`    for raw in buf.splitlines():`,
+			`        if B_CT not in raw and B_AN not in raw: continue`,
+			`        try: ev = json.loads(raw.decode("utf-8", "replace"))`,
+			`        except Exception: continue`,
+			`        if not isinstance(ev, dict): continue`,
+			`        t = ev.get("type")`,
+			`        if t == "custom-title" and isinstance(ev.get("customTitle"), str) and ev["customTitle"].strip(): ct = ev["customTitle"].strip()`,
+			`        elif t == "agent-name" and isinstance(ev.get("agentName"), str) and ev["agentName"].strip(): an = ev["agentName"].strip()`,
+			`    return ct, an`,
+			`for mtime, ctime, fsize, fp, in_target_slug in files[:200]:`,
+			`    sid = None; first_cwd = None; custom_title = None; agent_name = None; raw_user = None; first_ts = None`,
+			`    try:`,
+			`        with open(fp, "rb") as f:`,
+			`            head_end = 0`,
+			`            for _ in range(150):`,
+			`                raw = f.readline()`,
+			`                if not raw: break`,
+			`                head_end = f.tell()`,
+			`                want = (B_CT in raw or B_AN in raw)`,
+			`                if not want and (not sid or not first_cwd) and (B_SID in raw or B_CWD in raw): want = True`,
+			`                if not want and not raw_user and len(raw) < 524288 and (B_U1 in raw or B_U2 in raw): want = True`,
+			`                if not want: continue`,
+			`                try: ev = json.loads(raw.decode("utf-8", "replace"))`,
+			`                except Exception: continue`,
+			`                if not isinstance(ev, dict): continue`,
+			`                if not sid and isinstance(ev.get("sessionId"), str) and ev["sessionId"]: sid = ev["sessionId"]`,
+			`                if not first_cwd and isinstance(ev.get("cwd"), str) and ev["cwd"]: first_cwd = ev["cwd"]`,
+			`                if not first_ts and isinstance(ev.get("timestamp"), str) and ev["timestamp"]: first_ts = ev["timestamp"]`,
+			`                t = ev.get("type")`,
+			`                if t == "custom-title" and isinstance(ev.get("customTitle"), str) and ev["customTitle"].strip(): custom_title = ev["customTitle"].strip()`,
+			`                elif t == "agent-name" and isinstance(ev.get("agentName"), str) and ev["agentName"].strip(): agent_name = ev["agentName"].strip()`,
+			`                elif t == "user" and not raw_user and not ev.get("isMeta"):`,
+			`                    msg = ev.get("message")`,
+			`                    content = msg.get("content") if isinstance(msg, dict) else None`,
+			`                    txt = content if isinstance(content, str) else ("\\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)) if isinstance(content, list) else "")`,
+			`                    ts_s = txt.strip()`,
+			`                    if ts_s and not ts_s.startswith(SKIP_PFX): raw_user = ts_s[:2000]`,
+			`                if head_end > 1048576 and sid and first_cwd and raw_user: break`,
+			`            if head_end < fsize:`,
+			`                tail_start = max(head_end, fsize - 262144)`,
+			`                f.seek(tail_start)`,
+			`                tail_buf = f.read()`,
+			`                t_ct, t_an = (parse_title_lines(tail_buf) if (B_CT in tail_buf or B_AN in tail_buf) else (None, None))`,
+			`                if t_ct or t_an:`,
+			`                    if t_ct: custom_title = t_ct`,
+			`                    if t_an: agent_name = t_an`,
+			`                elif tail_start > head_end:`,
+			`                    f.seek(head_end)`,
+			`                    pos = head_end; rem = b""`,
+			`                    while pos < tail_start:`,
+			`                        chunk = f.read(min(4194304, tail_start - pos))`,
+			`                        if not chunk: break`,
+			`                        pos += len(chunk)`,
+			`                        buf = rem + chunk`,
+			`                        nl = buf.rfind(b"\\n")`,
+			`                        if nl >= 0: body, rem = buf[:nl + 1], buf[nl + 1:]`,
+			`                        else: rem = (b"" if len(buf) > 8388608 else buf); continue`,
+			`                        if B_CT in body or B_AN in body:`,
+			`                            m_ct, m_an = parse_title_lines(body)`,
+			`                            if m_ct: custom_title = m_ct`,
+			`                            if m_an: agent_name = m_an`,
+			`                    if rem and (B_CT in rem or B_AN in rem):`,
+			`                        m_ct, m_an = parse_title_lines(rem)`,
+			`                        if m_ct: custom_title = m_ct`,
+			`                        if m_an: agent_name = m_an`,
+			`    except OSError:`,
+			`        continue`,
+			`    base_id = os.path.splitext(os.path.basename(fp))[0]`,
+			`    eff_id = sid or (base_id if (custom_title or agent_name or raw_user) else None)`,
+			`    eff_cwd = (canonical_cwd if (in_target_slug and canonical_cwd) else first_cwd)`,
+			`    if eff_id and eff_cwd:`,
+			`        print("__AEX_CLAUDE_J__\\t" + json.dumps({"id": eff_id, "cwd": eff_cwd, "title": custom_title or agent_name or "", "rawUser": raw_user or "", "mtime": int(mtime * 1000), "ctime": int(ctime * 1000), "ts": first_ts or "", "file": fp}, ensure_ascii=False))`,
+		].join('\n');
+
+		const slugsJson = JSON.stringify(targetSlugs);
+		const canonicalArg = targetCwds[0] ?? '';
+		const slugShellLoop = targetSlugs.length > 0
+			? `for _slug in ${targetSlugs.map(posixQuote).join(' ')}; do for f in "$cfg/$_slug"/*.jsonl; do [ -f "$f" ] || continue; m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0); printf '%s\\t%s\\n' "$m" "$f"; done; done`
+			: `for f in "$cfg"/*/*.jsonl; do [ -f "$f" ] || continue; m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0); printf '%s\\t%s\\n' "$m" "$f"; done`;
+
 		const posixScript = [
+			`if command -v python3 >/dev/null 2>&1; then`,
+			`  python3 -c ${posixQuote(pyScript)} ${posixQuote(slugsJson)} ${posixQuote(canonicalArg)}`,
+			`  exit $?`,
+			`fi`,
 			`cfg="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"`,
 			`[ -d "$cfg" ] || exit 0`,
-			`for f in "$cfg"/*/*.jsonl; do`,
-			`  [ -f "$f" ] || continue`,
-			`  m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)`,
-			`  printf '%s\\t%s\\n' "$m" "$f"`,
-			`done | sort -rn | head -n 120 | while IFS=$(printf '\\t') read -r m f; do`,
+			`${slugShellLoop} | sort -rn | head -n 120 | while IFS=$(printf '\\t') read -r m f; do`,
 			`  [ -f "$f" ] || continue`,
 			`  printf '__AEX_CLAUDE_F__\\t%s\\t%s\\n' "$m" "$f"`,
 			`  head -n 80 -- "$f" 2>/dev/null || true`,
 			`done`,
 		].join('\n');
+
+		const winSlugFilter = targetSlugs.length > 0
+			? `@(${targetSlugs.map(psSingleQuote).join(', ')}) | ForEach-Object { $sd = Join-Path $cfg $_; if (Test-Path -LiteralPath $sd) { Get-ChildItem -LiteralPath $sd -Filter '*.jsonl' -File -ErrorAction SilentlyContinue } }`
+			: `Get-ChildItem -LiteralPath $cfg -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue }`;
 		const winScript = [
 			`$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }`,
 			`$cfg = Join-Path $base 'projects'`,
 			`if (Test-Path -LiteralPath $cfg) {`,
-			`  Get-ChildItem -LiteralPath $cfg -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 120 | ForEach-Object {`,
+			`  ${winSlugFilter} | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 150 | ForEach-Object {`,
 			`    $ms = [int64]([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeMilliseconds()`,
 			`    Write-Output ("__AEX_CLAUDE_F__" + [char]9 + $ms + [char]9 + $_.FullName)`,
 			`    Get-Content -LiteralPath $_.FullName -TotalCount 80 -Encoding UTF8 -ErrorAction SilentlyContinue`,
+			`    Get-Content -LiteralPath $_.FullName -Tail 30 -Encoding UTF8 -ErrorAction SilentlyContinue`,
 			`  }`,
 			`}`,
 		].join('; ');
+
 		const res = await execRemoteShell(this.remoteTarget, posixScript, winScript, { timeoutMs: 20_000, token }).catch(() => undefined);
 		if (!res || res.code !== 0) {
 			return [];
 		}
 		const sessions: NativeSession[] = [];
+		const seenIds = new Set<string>();
 		let curFile: string | undefined;
 		let curMtime = Date.now();
 		let foundId: string | undefined;
 		let foundCwd: string | undefined;
-		let foundLabel: string | undefined;
-		const flush = () => {
-			if (curFile && foundId && foundCwd) {
+		let foundCustomTitle: string | undefined;
+		let foundAgentName: string | undefined;
+		let foundUserLabel: string | undefined;
+		const flushLegacy = () => {
+			const effCwd = (targetSlugs.length > 0 && canonicalArg) ? canonicalArg : foundCwd;
+			if (curFile && foundId && effCwd && !seenIds.has(foundId)) {
+				seenIds.add(foundId);
 				sessions.push({
 					id: foundId,
-					cwd: foundCwd,
-					label: foundLabel || vscode.l10n.t('Claude Session {0}', foundId.slice(0, 8)),
+					cwd: effCwd,
+					label: foundCustomTitle || foundAgentName || foundUserLabel || vscode.l10n.t('Claude Session {0}', foundId.slice(0, 8)),
 					created: curMtime,
 					updated: curMtime,
 					file: curFile,
@@ -372,81 +546,130 @@ export class ClaudeRuntime implements EngineRuntime {
 			}
 		};
 		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+			if (rawLine.startsWith('__AEX_CLAUDE_J__\t')) {
+				try {
+					const row = JSON.parse(rawLine.slice('__AEX_CLAUDE_J__\t'.length)) as {
+						id?: string; cwd?: string; title?: string; rawUser?: string; mtime?: number; ctime?: number; ts?: string; file?: string;
+					};
+					if (row.id && row.cwd && !seenIds.has(row.id)) {
+						seenIds.add(row.id);
+						const mtime = typeof row.mtime === 'number' && row.mtime > 0 ? row.mtime : Date.now();
+						const parsedTs = row.ts ? Date.parse(row.ts) : NaN;
+						const created = Number.isFinite(parsedTs) ? parsedTs : (typeof row.ctime === 'number' && row.ctime > 0 ? row.ctime : mtime);
+						const userLabel = row.rawUser ? extractClaudeUserLabel(row.rawUser) : undefined;
+						sessions.push({
+							id: row.id,
+							cwd: row.cwd,
+							label: row.title?.trim() || userLabel || vscode.l10n.t('Claude Session {0}', row.id.slice(0, 8)),
+							created,
+							updated: mtime,
+							file: row.file,
+							provisional: false,
+						});
+					}
+				} catch { /* ignore malformed metadata line */ }
+				continue;
+			}
 			if (rawLine.startsWith('__AEX_CLAUDE_F__\t')) {
-				flush();
+				flushLegacy();
 				const parts = rawLine.split('\t');
 				const rawTs = Number(parts[1]) || 0;
 				curMtime = rawTs > 1e11 ? rawTs : (rawTs > 0 ? rawTs * 1000 : Date.now());
 				curFile = parts.slice(2).join('\t').trim() || undefined;
 				foundId = undefined;
 				foundCwd = undefined;
-				foundLabel = undefined;
+				foundCustomTitle = undefined;
+				foundAgentName = undefined;
+				foundUserLabel = undefined;
 				continue;
 			}
-			if (!curFile || foundLabel) {
+			if (!curFile) {
 				continue;
 			}
 			let event: ClaudeEvent;
 			try { event = JSON.parse(rawLine) as ClaudeEvent; } catch { continue; }
-			if (event.cwd && event.sessionId) {
-				foundId ??= event.sessionId;
-				foundCwd ??= event.cwd;
-				if (event.type === 'user') {
-					const cleaned = stripInjectedAdeContextFromUserTurn(messageText(event)).trim();
-					if (cleaned && !cleaned.startsWith(ROLE_INIT_MARKER)) {
-						foundLabel = cleaned.split('\n')[0].slice(0, 100);
-					}
-				}
+			if (event.sessionId) { foundId ??= event.sessionId; }
+			if (event.cwd) { foundCwd ??= event.cwd; }
+			if (event.type === 'custom-title' && typeof event.customTitle === 'string' && event.customTitle.trim()) {
+				foundCustomTitle = event.customTitle.trim();
+			} else if (event.type === 'agent-name' && typeof event.agentName === 'string' && event.agentName.trim()) {
+				foundAgentName = event.agentName.trim();
+			} else if (!foundUserLabel && event.type === 'user' && !event.isMeta) {
+				foundUserLabel = extractClaudeUserLabel(messageText(event));
 			}
 		}
-		flush();
+		flushLegacy();
 		return sessions;
 	}
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	async list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
 		if (this.remoteTarget) {
-			return this.listRemote(token);
+			return this.listRemote(token, projectCwd);
 		}
 		const projects = path.join(this.configDir(), 'projects');
 		let directories: string[];
-		try { directories = await fs.readdir(projects); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; } throw error; }
+		let canonicalProjectCwd: string | undefined;
+		if (projectCwd?.trim()) {
+			canonicalProjectCwd = projectCwd.trim();
+			const realCwd = await fs.realpath(canonicalProjectCwd).catch(() => path.resolve(canonicalProjectCwd!));
+			const slugs = [...new Set([encodeClaudeProjectSlug(canonicalProjectCwd), encodeClaudeProjectSlug(realCwd)].filter(Boolean))];
+			directories = [];
+			for (const slug of slugs) {
+				try {
+					const st = await fs.stat(path.join(projects, slug));
+					if (st.isDirectory()) { directories.push(slug); }
+				} catch { /* ignore absent slug dir */ }
+			}
+		} else {
+			try { directories = await fs.readdir(projects); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; } throw error; }
+		}
 		const candidates = (await Promise.all(directories.map(async directory => {
 			const folder = path.join(projects, directory);
 			try {
 				return await Promise.all((await fs.readdir(folder)).filter(name => name.endsWith('.jsonl')).map(async name => ({ file: path.join(folder, name), stat: await fs.stat(path.join(folder, name)) })));
-			} catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOTDIR') { return []; } throw error; }
+			} catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOTDIR' || (error as NodeJS.ErrnoException).code === 'ENOENT') { return []; } throw error; }
 		}))).flat().sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
 		const sessions: NativeSession[] = [];
-		for (const candidate of candidates) {
+		const seenIds = new Set<string>();
+		for (const candidate of candidates.slice(0, 200)) {
 			if (token.isCancellationRequested) { break; }
 			const input = createReadStream(candidate.file);
 			const lines = readline.createInterface({ input, crlfDelay: Infinity });
 			try {
-				let count = 0;
+				let lineCount = 0;
 				let foundId: string | undefined;
 				let foundCwd: string | undefined;
-				let foundLabel: string | undefined;
+				let foundCustomTitle: string | undefined;
+				let foundAgentName: string | undefined;
+				let foundUserLabel: string | undefined;
 				for await (const line of lines) {
+					lineCount++;
+					const isTitleLine = line.includes('"custom-title"') || line.includes('"agent-name"');
+					const wantParse = isTitleLine || (lineCount <= 120 && (!foundId || !foundCwd || !foundUserLabel));
+					if (!wantParse) {
+						continue;
+					}
 					let event: ClaudeEvent;
 					try { event = JSON.parse(line) as ClaudeEvent; } catch { continue; }
-					if (event.cwd && event.sessionId) {
-						foundId ??= event.sessionId;
-						foundCwd ??= event.cwd;
-						if (event.type === 'user') {
-							const cleaned = stripInjectedAdeContextFromUserTurn(messageText(event)).trim();
-							if (cleaned && !cleaned.startsWith(ROLE_INIT_MARKER)) {
-								foundLabel = cleaned.split('\n')[0].slice(0, 100);
-								break;
-							}
-						}
+					if (event.sessionId) { foundId ??= event.sessionId; }
+					if (event.cwd) { foundCwd ??= event.cwd; }
+					if (event.type === 'custom-title' && typeof event.customTitle === 'string' && event.customTitle.trim()) {
+						foundCustomTitle = event.customTitle.trim();
+					} else if (event.type === 'agent-name' && typeof event.agentName === 'string' && event.agentName.trim()) {
+						foundAgentName = event.agentName.trim();
+					} else if (!foundUserLabel && event.type === 'user' && !event.isMeta) {
+						foundUserLabel = extractClaudeUserLabel(messageText(event));
 					}
-					if (++count >= 120) { break; }
 				}
-				if (foundId && foundCwd) {
+				const baseId = path.basename(candidate.file, '.jsonl');
+				const effId = foundId ?? ((foundCustomTitle || foundAgentName || foundUserLabel) ? baseId : undefined);
+				const effCwd = canonicalProjectCwd ?? foundCwd;
+				if (effId && effCwd && !seenIds.has(effId)) {
+					seenIds.add(effId);
 					sessions.push({
-						id: foundId,
-						cwd: foundCwd,
-						label: foundLabel || vscode.l10n.t('Claude Session {0}', foundId.slice(0, 8)),
+						id: effId,
+						cwd: effCwd,
+						label: foundCustomTitle || foundAgentName || foundUserLabel || vscode.l10n.t('Claude Session {0}', effId.slice(0, 8)),
 						created: candidate.stat.birthtimeMs,
 						updated: candidate.stat.mtimeMs,
 						file: candidate.file,
@@ -498,13 +721,72 @@ export class ClaudeRuntime implements EngineRuntime {
 	async history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]> {
 		if (session.provisional && !session.file) { return []; }
 		if (this.remoteTarget) {
+			const safeId = session.id.replace(/[^A-Za-z0-9._-]/g, '');
+			if (this.remoteTarget.os !== 'windows') {
+				const pyHistory = [
+					`import glob, json, os, sys`,
+					`explicit = sys.argv[1]`,
+					`sid = sys.argv[2]`,
+					`target = explicit if (explicit and os.path.isfile(explicit)) else None`,
+					`if not target and sid:`,
+					`    cfg = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "projects")`,
+					`    hits = glob.glob(os.path.join(cfg, "*", sid + ".jsonl"))`,
+					`    if hits: target = hits[0]`,
+					`if not target: sys.exit(2)`,
+					`print("__AEX_PATH__:" + target)`,
+					`entries = []`,
+					`with open(target, "rb") as f:`,
+					`    for raw in f:`,
+					`        if b'"type":"user"' not in raw and b'"type":"assistant"' not in raw and b'"type": "user"' not in raw and b'"type": "assistant"' not in raw:`,
+					`            continue`,
+					`        try: ev = json.loads(raw.decode("utf-8", "replace"))`,
+					`        except Exception: continue`,
+					`        if not isinstance(ev, dict): continue`,
+					`        role = ev.get("type")`,
+					`        if role not in ("user", "assistant"): continue`,
+					`        msg = ev.get("message")`,
+					`        content = msg.get("content") if isinstance(msg, dict) else None`,
+					`        text = ""`,
+					`        if isinstance(content, str): text = content`,
+					`        elif isinstance(content, list):`,
+					`            text = "\\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str))`,
+					`        if text:`,
+					`            entries.append({"id": ev.get("uuid"), "role": role, "text": text, "isSystemInitiated": bool(ev.get("isMeta"))})`,
+					`for item in entries[-400:]:`,
+					`    print("__AEX_HIST__\\t" + json.dumps(item, ensure_ascii=False))`,
+				].join('\n');
+				const pyRes = await execRemoteShell(
+					this.remoteTarget,
+					`if command -v python3 >/dev/null 2>&1; then python3 -c ${posixQuote(pyHistory)} ${posixQuote(session.file ?? '')} ${posixQuote(safeId)}; else exit 127; fi`,
+					'',
+					{ timeoutMs: 25_000, token },
+				).catch(() => undefined);
+				if (pyRes && pyRes.code === 0) {
+					const out: HistoryEntry[] = [];
+					for (const line of pyRes.stdout.toString('utf8').split(/\r?\n/)) {
+						if (line.startsWith('__AEX_PATH__:')) {
+							session.file = line.slice('__AEX_PATH__:'.length).trim() || session.file;
+						} else if (line.startsWith('__AEX_HIST__\t')) {
+							try {
+								const parsed = JSON.parse(line.slice('__AEX_HIST__\t'.length)) as { id?: string; role?: 'user' | 'assistant'; text?: string; isSystemInitiated?: boolean };
+								if (parsed.text && (parsed.role === 'user' || parsed.role === 'assistant')) {
+									out.push({ id: parsed.id, role: parsed.role, text: parsed.text, isSystemInitiated: parsed.isSystemInitiated || undefined });
+								}
+							} catch { /* ignore */ }
+						}
+					}
+					return out;
+				}
+				if (pyRes && pyRes.code === 2) {
+					return [];
+				}
+			}
 			if (session.file) {
 				const raw = await readRemoteTextFile(this.remoteTarget, session.file, { bypassCache: true, timeoutMs: 20_000, token });
 				if (raw !== undefined) {
 					return this.parseTranscriptLines(raw.split(/\r?\n/));
 				}
 			}
-			const safeId = session.id.replace(/[^A-Za-z0-9._-]/g, '');
 			if (!safeId) { return []; }
 			const posixScript = `cfg="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; for f in "$cfg"/*/${posixQuote(`${safeId}.jsonl`)}; do if [ -f "$f" ]; then printf '__AEX_PATH__:%s\\n' "$f"; cat -- "$f"; exit 0; fi; done; exit 2`;
 			const winScript = `$base = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }; $cfg = Join-Path $base 'projects'; $found = Get-ChildItem -LiteralPath $cfg -Recurse -Filter ${psSingleQuote(`${safeId}.jsonl`)} -File -ErrorAction SilentlyContinue | Select-Object -First 1; if ($found) { Write-Output ('__AEX_PATH__:' + $found.FullName); [Console]::Out.Write([IO.File]::ReadAllText($found.FullName, [Text.Encoding]::UTF8)); exit 0 }; exit 2`;
@@ -593,9 +875,11 @@ export class ClaudeRuntime implements EngineRuntime {
 			case 'auto':
 				return 'auto';
 			case 'bypassPermissions':
+			case 'danger-full-access':
+			case 'never':
 				return 'bypassPermissions';
 			default:
-				// Safe by default for interactive sessions unless autonomousMode is explicitly enabled.
+				// Full Access (bypassPermissions) by default for local & cloud sessions unless Safe Mode is explicitly selected.
 				return isAutonomousModeEnabled() ? 'bypassPermissions' : 'acceptEdits';
 		}
 	}
@@ -746,18 +1030,361 @@ export class ClaudeRuntime implements EngineRuntime {
 			}
 			this.runningBySession.delete(session.id);
 		}
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			const trackedIds = this.activePersistentIdsBySession.get(session.id);
+			this.activePersistentIdsBySession.delete(session.id);
+			const prefix = buildRemotePersistentPrefix(this.id, session.id);
+			const kills: Promise<void>[] = [
+				terminateRemotePersistentSessionsByPrefix(this.remoteTarget, prefix, { killTree: true }),
+			];
+			if (trackedIds) {
+				for (const pid of trackedIds) {
+					if (!pid.startsWith(prefix)) {
+						kills.push(terminateRemotePersistentSession(this.remoteTarget, pid, { killTree: true }));
+					}
+				}
+			}
+			await Promise.all(kills);
+		}
+	}
+
+	private trackPersistentId(sessionId: string, persistentId: string | undefined): void {
+		if (!persistentId) {
+			return;
+		}
+		let set = this.activePersistentIdsBySession.get(sessionId);
+		if (!set) {
+			set = new Set();
+			this.activePersistentIdsBySession.set(sessionId, set);
+		}
+		set.add(persistentId);
+	}
+
+	private untrackPersistentId(sessionId: string, persistentId: string | undefined): void {
+		if (!persistentId) {
+			return;
+		}
+		const set = this.activePersistentIdsBySession.get(sessionId);
+		if (set) {
+			set.delete(persistentId);
+			if (set.size === 0) {
+				this.activePersistentIdsBySession.delete(sessionId);
+			}
+		}
+	}
+
+	async reattachIfRunning(session: NativeSession, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<'reattached' | 'not_running'> {
+		if (!this.remoteTarget || this.remoteTarget.os === 'windows' || token.isCancellationRequested) {
+			return 'not_running';
+		}
+		const prefix = buildRemotePersistentPrefix(this.id, session.id);
+		const candidates = await inspectRemotePersistentSessionsByPrefix(this.remoteTarget, prefix).catch(() => []);
+		const liveOrUnread = candidates.find(c => c.alive || c.exitCode !== undefined);
+		if (!liveOrUnread) {
+			return 'not_running';
+		}
+		const permissionMode = await this.resolvePermissionMode(options);
+		const bypassPermissions = permissionMode === 'bypassPermissions';
+		const isAutoEng = Boolean(options?.automatedEngineering);
+		const customEnv = await prepareRemoteAgentChildEnv(this.remoteTarget, {
+			sessionId: options?.adeSessionId || session.id,
+			callerRole: options?.callerRole,
+			pureWorker: options?.pureWorker,
+			isMissionNode: options?.isMissionNode,
+		});
+		const outcome = await this.streamPersistentClaudeRun(session, {
+			args: [],
+			customEnv,
+			remotePersistentId: liveOrUnread.id,
+			attachOnly: true,
+			bypassPermissions,
+			isAutoEng,
+			stream,
+			token,
+			options,
+		});
+		return outcome.sessionMissing ? 'not_running' : 'reattached';
+	}
+
+	private async streamPersistentClaudeRun(
+		session: NativeSession,
+		params: {
+			readonly args: string[];
+			readonly customEnv: NodeJS.ProcessEnv;
+			readonly remotePersistentId?: string;
+			readonly attachOnly?: boolean;
+			readonly userLinePayload?: string;
+			readonly bypassPermissions: boolean;
+			readonly isAutoEng: boolean;
+			readonly stream: vscode.ChatResponseStream;
+			readonly token: vscode.CancellationToken;
+			readonly options?: EngineSendOptions;
+		},
+	): Promise<{ readonly sawResult: boolean; readonly interimUsage?: UsagePayload; readonly sessionMissing?: boolean }> {
+		const { args, customEnv, remotePersistentId, attachOnly, userLinePayload, bypassPermissions, isAutoEng, stream, token, options } = params;
+		this.trackPersistentId(session.id, remotePersistentId);
+		let errorText = '';
+		let resultError: string | undefined;
+		let wroteText = false;
+		let sawThinkingDelta = false;
+		let sawResult = false;
+		let sessionMissing = false;
+		let interimUsage: UsagePayload | undefined;
+		let lastInterimReportAt = 0;
+		let lastInterimReportedTotal = 0;
+		let stdoutBytesReceived = 0;
+		let activeChild: ReturnType<typeof spawnEngine> | undefined;
+		const seenToolUses = new Set<string>();
+
+		const maxAttachAttempts = remotePersistentId ? REMOTE_REATTACH_BACKOFFS_MS.length + 1 : 1;
+		try {
+			for (let attachAttempt = 0; attachAttempt < maxAttachAttempts; attachAttempt++) {
+				const isReattach = attachAttempt > 0 || Boolean(attachOnly);
+				const child = spawnEngine(
+					this.executable,
+					args,
+					session.cwd,
+					customEnv,
+					this.remoteTarget,
+					remotePersistentId
+						? {
+							persistentSessionId: remotePersistentId,
+							attachByteOffset: stdoutBytesReceived,
+							...(isReattach ? { attachOnly: true } : {}),
+						}
+						: undefined,
+				);
+				activeChild = child;
+				this.running.add(child);
+				let sessionSet = this.runningBySession.get(session.id);
+				if (!sessionSet) {
+					sessionSet = new Set();
+					this.runningBySession.set(session.id, sessionSet);
+				}
+				sessionSet.add(child);
+
+				// Track exact UTF-8 bytes of COMPLETE newline-delimited lines only so reattaching after
+				// a mid-line SSH cut starts cleanly at byte 0 of the interrupted JSON line without losing events.
+				let stdoutByteCarry: Buffer = Buffer.alloc(0);
+				const handleLine = (line: string) => {
+					let event: ClaudeEvent;
+					try { event = JSON.parse(line) as ClaudeEvent; } catch { return; }
+					const fromChild = typeof event.parent_tool_use_id === 'string';
+					if (!fromChild && event.type === 'system' && event.subtype === 'init') {
+						session.provisional = false;
+						this.recordInit(session.id, event);
+					}
+					if (!fromChild && (
+						(event.type === 'system' && (event.subtype === 'compact_boundary' || event.subtype === 'context_compacted'))
+						|| event.type === 'compact_boundary'
+						|| event.type === 'context_compacted'
+					)) {
+						try {
+							options?.onContextCompacted?.();
+						} catch { /* Compaction callback must never break the turn. */ }
+					}
+					if (!fromChild && !token.isCancellationRequested && event.type === 'stream_event') {
+						const delta = event.event?.delta;
+						if (delta?.type === 'text_delta' && delta.text) {
+							wroteText = true;
+							stream.markdown(delta.text);
+						}
+						if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking) {
+							sawThinkingDelta = true;
+							emitThinkingProgress(stream, delta.thinking, 'claude-thinking');
+						}
+						const block = event.event?.content_block;
+						if (block?.type === 'tool_use' && block.name && block.input && typeof block.input === 'object' && Object.keys(block.input).length > 0) {
+							const key = block.id ?? `${block.name}:${seenToolUses.size}`;
+							if (!seenToolUses.has(key)) {
+								seenToolUses.add(key);
+								stream.progress(toolProgressText(block.name, block.input));
+							}
+						}
+					}
+					if (!fromChild && !token.isCancellationRequested && event.type === 'assistant') {
+						const assistantUsage = event.message?.usage;
+						if (assistantUsage) {
+							interimUsage = assistantUsage;
+							const onInterimUsage = options?.onInterimUsage;
+							if (onInterimUsage) {
+								const snapshot = turnUsageFromPayload(assistantUsage);
+								const now = Date.now();
+								if (snapshot.totalTokens > lastInterimReportedTotal && now - lastInterimReportAt >= 1000) {
+									lastInterimReportAt = now;
+									lastInterimReportedTotal = snapshot.totalTokens;
+									try {
+										onInterimUsage(snapshot);
+									} catch { /* Live usage reporting must never break the turn. */ }
+								}
+							}
+						}
+						const content = event.message?.content;
+						if (Array.isArray(content)) {
+							for (const block of content) {
+								if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking && !sawThinkingDelta) {
+									emitThinkingProgress(stream, block.thinking, 'claude-thinking');
+								}
+								if (block.type === 'tool_use' && block.name) {
+									const key = block.id ?? `${block.name}:${JSON.stringify(block.input ?? {})}`;
+									if (!seenToolUses.has(key)) {
+										seenToolUses.add(key);
+										stream.progress(toolProgressText(block.name, block.input));
+									}
+								}
+							}
+						}
+						if (!wroteText) { const msg = messageText(event); if (msg) { stream.markdown(msg); } }
+					}
+					if (event.type === 'control_request' && event.request?.subtype === 'can_use_tool') {
+						const request = event.request;
+						if (bypassPermissions || isAutoEng || isSafeAdeOrchestratorToolCall(options?.callerRole, request.tool_name, request.input)) {
+							if (!child.stdin.destroyed) {
+								child.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: { behavior: 'allow', updatedInput: request.input } } }) + '\n');
+							}
+							return;
+						}
+						const allow = vscode.l10n.t('Allow Once');
+						void vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], { title: vscode.l10n.t('Claude Code requests permission'), placeHolder: `${session.cwd}: ${request.tool_name}: ${JSON.stringify(request.input)}`, ignoreFocusOut: true }, token).then(result => {
+							const targetChild = activeChild;
+							if (targetChild && !targetChild.stdin.destroyed) {
+								targetChild.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: result === allow ? { behavior: 'allow', updatedInput: request.input } : { behavior: 'deny', message: vscode.l10n.t('Denied by the user.') } } }) + '\n');
+							}
+						});
+					}
+					if (!fromChild && event.type === 'result') {
+						sawResult = true;
+						this.recordUsage(session.id, event);
+						this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd)));
+						if (event.is_error) { resultError = event.result || vscode.l10n.t('Claude Code could not complete this request.'); }
+						if (!event.is_error) { session.provisional = false; }
+						child.stdin.end();
+						if (remotePersistentId && this.remoteTarget) {
+							// Graceful turn completion: stop Claude process only so intentionally detached
+							// background jobs (e.g. `token block --watch-pid`) remain alive!
+							void terminateRemotePersistentSession(this.remoteTarget, remotePersistentId, { killTree: false }).catch(() => undefined);
+						}
+					}
+				};
+				child.stdout.on('data', (chunk: Buffer | string) => {
+					const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+					stdoutByteCarry = stdoutByteCarry.length > 0 ? Buffer.concat([stdoutByteCarry, buf]) : buf;
+					let nlIdx: number;
+					while ((nlIdx = stdoutByteCarry.indexOf(0x0a)) >= 0) {
+						const lineBuf = stdoutByteCarry.subarray(0, nlIdx);
+						stdoutByteCarry = stdoutByteCarry.subarray(nlIdx + 1);
+						stdoutBytesReceived += nlIdx + 1;
+						const rawLine = lineBuf.toString('utf8');
+						handleLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
+					}
+				});
+				child.stderr.on('data', data => errorText = (errorText + String(data)).slice(-8000));
+				const stopChild = () => {
+					stopEngineWithFallback(child, 'SIGINT', 1500);
+					if (remotePersistentId && this.remoteTarget) {
+						// Explicit cancellation / recall / stop: obliterate ENTIRE remote process group + descendants!
+						void terminateRemotePersistentSession(this.remoteTarget, remotePersistentId, { killTree: true }).catch(() => undefined);
+					}
+				};
+				const cancellation = token.onCancellationRequested(stopChild);
+				if (token.isCancellationRequested) {
+					stopChild();
+				} else if (!isReattach && userLinePayload) {
+					child.stdin.write(userLinePayload);
+				}
+				let closeCode: number | null = null;
+				try {
+					await raceWithCancellation(
+						new Promise<void>((resolve, reject) => {
+							child.on('error', reject);
+							child.on('close', code => {
+								closeCode = code;
+								if (token.isCancellationRequested || sawResult) {
+									if (resultError && !token.isCancellationRequested) {
+										reject(new Error(resultError));
+									} else {
+										resolve();
+									}
+									return;
+								}
+								if (attachOnly && code === 44) {
+									if (!sawResult) {
+										sessionMissing = true;
+									}
+									resolve();
+									return;
+								}
+								if (remotePersistentId && code === 255 && attachAttempt + 1 < maxAttachAttempts) {
+									resolve();
+									return;
+								}
+								if (resultError || code !== 0) {
+									reject(new Error(resultError || errorText || vscode.l10n.t('Claude Code exited with code {0}.', String(code))));
+								} else {
+									resolve();
+								}
+							});
+						}),
+						token,
+						2500,
+						stopChild,
+					).catch(err => {
+						if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
+							stopEngine(child, 'SIGKILL');
+							return;
+						}
+						throw err;
+					});
+				} finally {
+					cancellation.dispose();
+					if (stdoutByteCarry.length > 0 && closeCode === 0) {
+						const tailLine = stdoutByteCarry.toString('utf8');
+						stdoutBytesReceived += stdoutByteCarry.length;
+						stdoutByteCarry = Buffer.alloc(0);
+						handleLine(tailLine.endsWith('\r') ? tailLine.slice(0, -1) : tailLine);
+					}
+					this.running.delete(child);
+					sessionSet.delete(child);
+					if (sessionSet.size === 0) {
+						this.runningBySession.delete(session.id);
+					}
+				}
+				if (sawResult || token.isCancellationRequested || closeCode === 0 || (attachOnly && closeCode === 44) || !remotePersistentId || closeCode !== 255 || attachAttempt + 1 >= maxAttachAttempts) {
+					break;
+				}
+				const backoffMs = REMOTE_REATTACH_BACKOFFS_MS[attachAttempt] ?? 60_000;
+				stream.progress(vscode.l10n.t('SSH connection interrupted; reattaching to persistent remote Claude session…'));
+				await waitForBackoffOrResume(backoffMs, token);
+				if (token.isCancellationRequested) {
+					break;
+				}
+				await healAllRemoteControlBridges().catch(() => undefined);
+			}
+		} finally {
+			this.untrackPersistentId(session.id, remotePersistentId);
+		}
+		return { sawResult, interimUsage, sessionMissing };
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
+		if (token.isCancellationRequested) {
+			return;
+		}
 		const requestedModel = options?.model?.trim();
 		const resolvedModel = requestedModel && requestedModel !== 'default' ? await this.resolveModelIdentifier(requestedModel) : undefined;
 		const permissionMode = await this.resolvePermissionMode(options);
 		const userMessage = await this.buildUserMessage(text, options?.attachments);
+		if (token.isCancellationRequested) {
+			return;
+		}
 		if (session.provisional && await this.hasPersistedTranscript(session.id)) {
 			session.provisional = false;
 		}
 
 		const runOnce = async (useModelOverride: boolean, forceResume = false): Promise<void> => {
+			if (token.isCancellationRequested) {
+				return;
+			}
 			const useResume = forceResume || !session.provisional;
 			const isAutoEng = Boolean(options?.automatedEngineering);
 			const effortArg = this.mapClaudeEffortArg(options?.thinking);
@@ -795,140 +1422,25 @@ export class ClaudeRuntime implements EngineRuntime {
 				customEnv.CLAUDE_CODE_DISABLE_THINKING = '1';
 			}
 
-			const child = spawnEngine(this.executable, args, session.cwd, customEnv, this.remoteTarget);
-			this.running.add(child);
-			let sessionSet = this.runningBySession.get(session.id);
-			if (!sessionSet) {
-				sessionSet = new Set();
-				this.runningBySession.set(session.id, sessionSet);
-			}
-			sessionSet.add(child);
-
-			const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-			let errorText = '';
-			let resultError: string | undefined;
-			let wroteText = false;
-			let sawThinkingDelta = false;
-			let sawResult = false;
-			let interimUsage: UsagePayload | undefined;
-			let lastInterimReportAt = 0;
-			let lastInterimReportedTotal = 0;
-			const seenToolUses = new Set<string>();
-			child.stderr.on('data', data => errorText = (errorText + String(data)).slice(-8000));
-			lines.on('line', line => {
-				let event: ClaudeEvent;
-				try { event = JSON.parse(line) as ClaudeEvent; } catch { return; }
-				const fromChild = typeof event.parent_tool_use_id === 'string';
-				if (!fromChild && event.type === 'system' && event.subtype === 'init') {
-					session.provisional = false;
-					this.recordInit(session.id, event);
-				}
-				if (!fromChild && (
-					(event.type === 'system' && (event.subtype === 'compact_boundary' || event.subtype === 'context_compacted'))
-					|| event.type === 'compact_boundary'
-					|| event.type === 'context_compacted'
-				)) {
-					try {
-						options?.onContextCompacted?.();
-					} catch { /* Compaction callback must never break the turn. */ }
-				}
-				if (!fromChild && !token.isCancellationRequested && event.type === 'stream_event') {
-					const delta = event.event?.delta;
-					if (delta?.type === 'text_delta' && delta.text) {
-						wroteText = true;
-						stream.markdown(delta.text);
-					}
-					if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking) {
-						sawThinkingDelta = true;
-						emitThinkingProgress(stream, delta.thinking, 'claude-thinking');
-					}
-					const block = event.event?.content_block;
-					if (block?.type === 'tool_use' && block.name && block.input && typeof block.input === 'object' && Object.keys(block.input).length > 0) {
-						const key = block.id ?? `${block.name}:${seenToolUses.size}`;
-						if (!seenToolUses.has(key)) {
-							seenToolUses.add(key);
-							stream.progress(toolProgressText(block.name, block.input));
-						}
-					}
-				}
-				if (!fromChild && !token.isCancellationRequested && event.type === 'assistant') {
-					const assistantUsage = event.message?.usage;
-					if (assistantUsage) {
-						interimUsage = assistantUsage;
-						const onInterimUsage = options?.onInterimUsage;
-						if (onInterimUsage) {
-							const snapshot = turnUsageFromPayload(assistantUsage);
-							const now = Date.now();
-							if (snapshot.totalTokens > lastInterimReportedTotal && now - lastInterimReportAt >= 1000) {
-								lastInterimReportAt = now;
-								lastInterimReportedTotal = snapshot.totalTokens;
-								try {
-									onInterimUsage(snapshot);
-								} catch { /* Live usage reporting must never break the turn. */ }
-							}
-						}
-					}
-					const content = event.message?.content;
-					if (Array.isArray(content)) {
-						for (const block of content) {
-							if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking && !sawThinkingDelta) {
-								emitThinkingProgress(stream, block.thinking, 'claude-thinking');
-							}
-							if (block.type === 'tool_use' && block.name) {
-								const key = block.id ?? `${block.name}:${JSON.stringify(block.input ?? {})}`;
-								if (!seenToolUses.has(key)) {
-									seenToolUses.add(key);
-									stream.progress(toolProgressText(block.name, block.input));
-								}
-							}
-						}
-					}
-					if (!wroteText) { const msg = messageText(event); if (msg) { stream.markdown(msg); } }
-				}
-				if (event.type === 'control_request' && event.request?.subtype === 'can_use_tool') {
-					const request = event.request;
-					if (bypassPermissions || isAutoEng || isSafeAdeOrchestratorToolCall(options?.callerRole, request.tool_name, request.input)) {
-						if (!child.stdin.destroyed) {
-							child.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: { behavior: 'allow', updatedInput: request.input } } }) + '\n');
-						}
-						return;
-					}
-					const allow = vscode.l10n.t('Allow Once');
-					void vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], { title: vscode.l10n.t('Claude Code requests permission'), placeHolder: `${session.cwd}: ${request.tool_name}: ${JSON.stringify(request.input)}`, ignoreFocusOut: true }, token).then(result => {
-						if (!child.stdin.destroyed) {
-							child.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: result === allow ? { behavior: 'allow', updatedInput: request.input } : { behavior: 'deny', message: vscode.l10n.t('Denied by the user.') } } }) + '\n');
-						}
-					});
-				}
-				if (!fromChild && event.type === 'result') {
-					sawResult = true;
-					this.recordUsage(session.id, event);
-					this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd)));
-					if (event.is_error) { resultError = event.result || vscode.l10n.t('Claude Code could not complete this request.'); }
-					if (!event.is_error) { session.provisional = false; }
-					child.stdin.end();
-				}
+			const remotePersistentId = this.remoteTarget && this.remoteTarget.os !== 'windows'
+				? `${buildRemotePersistentPrefix(this.id, session.id)}-${randomUUID().slice(0, 8)}`
+				: undefined;
+			const userLinePayload = JSON.stringify({ type: 'user', session_id: session.id, parent_tool_use_id: null, message: { role: 'user', content: userMessage } }) + '\n';
+			const { sawResult, interimUsage } = await this.streamPersistentClaudeRun(session, {
+				args,
+				customEnv,
+				remotePersistentId,
+				userLinePayload,
+				bypassPermissions,
+				isAutoEng,
+				stream,
+				token,
+				options,
 			});
-			const cancellation = token.onCancellationRequested(() => stopEngine(child, 'SIGINT'));
-			child.stdin.write(JSON.stringify({ type: 'user', session_id: session.id, parent_tool_use_id: null, message: { role: 'user', content: userMessage } }) + '\n');
-			try {
-				await new Promise<void>((resolve, reject) => {
-					child.on('error', reject);
-					child.on('close', code => token.isCancellationRequested ? resolve() : resultError || code !== 0 ? reject(new Error(resultError || errorText || vscode.l10n.t('Claude Code exited with code {0}.', String(code)))) : resolve());
-				});
-				if (!sawResult && interimUsage) {
-					const fallbackUsage = turnUsageFromPayload(interimUsage);
-					if (fallbackUsage.totalTokens > 0) {
-						this.lastTurnUsageBySession.set(session.id, fallbackUsage);
-					}
-				}
-			} finally {
-				cancellation.dispose();
-				lines.close();
-				this.running.delete(child);
-				sessionSet.delete(child);
-				if (sessionSet.size === 0) {
-					this.runningBySession.delete(session.id);
+			if (!sawResult && interimUsage) {
+				const fallbackUsage = turnUsageFromPayload(interimUsage);
+				if (fallbackUsage.totalTokens > 0) {
+					this.lastTurnUsageBySession.set(session.id, fallbackUsage);
 				}
 			}
 		};
@@ -1307,5 +1819,17 @@ export class ClaudeRuntime implements EngineRuntime {
 		await fs.rm(path.join(configDir, 'file-history', session.id), { recursive: true, force: true });
 	}
 
-	dispose(): void { for (const child of this.running) { stopEngine(child); } this.running.clear(); }
+	dispose(): void {
+		for (const child of this.running) { stopEngine(child); }
+		this.running.clear();
+		this.runningBySession.clear();
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			for (const set of this.activePersistentIdsBySession.values()) {
+				for (const pid of set) {
+					void terminateRemotePersistentSession(this.remoteTarget, pid, { killTree: true }).catch(() => undefined);
+				}
+			}
+		}
+		this.activePersistentIdsBySession.clear();
+	}
 }

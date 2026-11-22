@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { execFile } from 'node:child_process';
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -13,7 +14,6 @@ import {
 	parseMissionDocsCommand,
 	parseRankGroupCommand,
 	RANK_SUBCOMMANDS,
-	rewriteEngineeringActionToMission,
 } from './adeCliRankMission.mjs';
 import {
 	parseApiCommand,
@@ -93,11 +93,10 @@ Global Options:
   --window <id>             Target a specific workbench window ID
 
 Organizational Ranks (governor [L1] > manager [L2] > employee [L3] > worker [L4] — IMPORTANT: employee != worker):
-  governor  (L1)  Top executive orchestrator; oversees manager/employee/worker and designs Engineering DAG blueprints.
-  manager   (L2)  Module / segment lead overseeing employee & worker; performs segment-level secondary review.
-  employee  (L3)  Orchestrated supervisory & acceptance-review rank ABOVE worker (Employee IS NOT Worker / Employee != Worker):
-                  holds full aexus-ade subordinate control APIs over leaf workers; in Engineering trees, strictly audits
-                  worker diffs & writes incremental node reports (never writes business code itself).
+  governor  (L1)  Top executive orchestrator; oversees manager/employee/worker and designs Mission Mermaid DAGs.
+  manager   (L2)  Module / segment lead overseeing employee & worker; supervises off-graph Mission jurisdictions.
+  employee  (L3)  Orchestrated supervisory & review rank ABOVE worker (Employee IS NOT Worker / Employee != Worker):
+                  holds aexus-ade subordinate control APIs over leaf workers and reviews outputs without writing business code.
   worker    (L4)  Lowest pure execution leaf rank BELOW employee: cannot have subordinates and runs with 100% clean
                   native Coding Agent context (zero ADE role/API prompt injection) to execute actual coding tasks.
 
@@ -154,12 +153,12 @@ Commands:
   engine list
   engine sessions <engine> [--project <target>] [--limit <n>]
 
-  session list [--project <p>] [--parent <id|root>] [--role <governor|manager|employee|worker>] [--engine <e>] [--status <idle|working|pending|draft>] [--unread] [--archived] [--all]
+  session list [--project <p>] [--parent <id|root>] [--role <L1..LN|rankId>] [--engine <e>] [--status <idle|working|pending|draft>] [--unread] [--archived] [--all]
   session info <id>
   session subordinates [id] [--recursive]
   session tree [id]
-  session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <governor|manager|employee|worker>] [--draft [text]] [--side] [--no-open]
-  session attach --engine <e> --native-id <nativeId> [--project <p>] [--title <t>] [--parent <id>] [--role <governor|manager|employee|worker>] [--side] [--no-open]
+  session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <L1..LN|rankId>] [--draft [text]] [--side] [--no-open]
+  session attach --engine <e> --native-id <nativeId> [--project <p>] [--title <t>] [--parent <id>] [--role <L1..LN|rankId>] [--side] [--no-open]
   session connect <id> --engine <e> [--native-id <nativeId>] [--side] [--no-open]
   session open <id> [--side]
   session select <id>
@@ -167,7 +166,7 @@ Commands:
   session mark-read (<id> | --all)
   session draft <id> [<text> | --clear]
   session rename <id> <title>
-  session role <id> <governor|manager|employee|worker|none>
+  session role <id> <L1..LN|rankId|none>
   session move <id> <parentId|none> [--project <p>]
   session nest <id> <parentId|none> [--project <p>]
   session reorder <id> (--before <targetId> | --after <targetId>)
@@ -193,16 +192,28 @@ Commands:
   mission list [--project <path>]
   mission init [--mission <id> | --owner <id>] [--title "<name>"] [--open] [--side]
   mission open --mission <id> [--side]
-  mission blueprint (get | apply | validate) ...
+  mission blueprint get --mission <id> [--raw]
+  mission blueprint apply --mission <id> (--file <path> | --text <mermaid>)
+  mission blueprint validate (--file <path> | --text <mermaid>)
+  mission prompt list [--mission <id>]
+  mission prompt get [--mission <id>] --node <nodeId>
+  mission prompt set [--mission <id>] --node <nodeId> (--prompt <text> | --file <path> | --clear)
+  mission check list [--mission <id>] [--node <nodeId>]
+  mission check get [--mission <id>] --node <nodeId>
+  mission check set [--mission <id>] --node <nodeId> (--cmd <shell> | --expect-file <path>) [--on-fail bounce|fail|escalate] [--max-retries <n>] [--timeout <duration>] [--match <pattern>] [--cwd <dir>] [--host <local|alias>]
+  mission check remove [--mission <id>] --node <nodeId> [--id <checkId> | --all]
+  mission check run [--mission <id>] --node <nodeId> [--id <checkId>]
   mission start [--mission <id>] [--timeout <minutes>] [--prompt <text>]
+  mission run [--mission <id>]
   mission status [--mission <id>]
   mission pause|resume|stop [--mission <id>]
   mission remove --mission <id>
   mission timeout [--mission <id>] --minutes <n>
   mission boundary get|set [--mission <id>] [--off-graph-max-tier <k>] [--supervisors-json <json>]
   mission recall [--mission <id>] [--nodes <n1,n2>] [--branch <nodeId>] [--reason <text>]
+  mission retry [--mission <id>] (--node <nodeId> | --token <tokenId>) [--guidance <text>]
   mission patch [--mission <id>] (--file <path> | --text <mermaid>) [--reason <text>]
-  mission gate <approve|reject> [--mission <id>] --node <id> [--note <text>] [--rollback <nodeId>]
+  mission gate <approve|reject> [--mission <id>] --node <id> [--token <tokenId>] [--note <text>] [--rollback <nodeId>]
   mission trigger list|set|remove [--mission <id>] ...
   mission host bind [--mission <id>] --node <id> --host <local|alias> [--path <remotePath>]
 
@@ -210,42 +221,14 @@ Commands:
   token trace <tracePtr> [--mission <id>] [--limit <n>]
   token complete <tokenId> --summary <text> [--mission <id>]
   token reject <tokenId> --reason <text> [--target <nodeId>] [--mission <id>]
-  token block <tokenId> --duration <duration> [--reason <text>] [--watch-pid <pid>] [--watch-file <path>] [--host <alias>]
+  token block <tokenId> --duration <duration> [--reason <text>] [--watch-pid <pid> | --wake-on-pid-exit <pid>] [--watch-file <path> | --wake-on-file <path>] [--host <alias>]
   token fail <tokenId> --reason <text> [--mission <id>]
+  token retry (<tokenId> | --node <nodeId>) [--guidance <text>] [--mission <id>]
 
   org subordinates [supervisorId] [--mission <id>]
   org send <nodeOrSessionId> <message> [--mission <id>] [--wait]
   org context <nodeOrSessionId> [--limit <n>] [--mission <id>]
   org escalate --reason <text> [--mission <id>] [--token <tokenId>] [--node <nodeId>]
-  (legacy alias: aexus-ade engineering <subcommand> ...)
-
-  engineering demo [--governor <id>]
-  engineering generate --governor <id> --prompt "<goal>" [--engine <e>] [--max-budget-usd <usd>] [--force-stop-running]
-  engineering init --governor <id> [--tree-type <engineering|research>] [--on-children <relocate|delete> --target <id>] [--open] [--side]
-  engineering list [--project <path>] [--tree-type <engineering|research>]
-  engineering open --governor <id> [--side]
-  engineering blueprint get --governor <id> [--raw]
-  engineering blueprint apply --governor <id> (--file <path> | --text <markdown>) [--force-stop-running]
-  engineering blueprint validate (--file <path> | --text <markdown>)
-  engineering run --governor <id>
-  engineering pause --governor <id>
-  engineering resume --governor <id>
-  engineering stop --governor <id>
-  engineering remove --governor <id>
-  engineering reset --governor <id> [--node <nodeId>] [--keep-completed]
-  engineering configure --governor <id> [--node <nodeId> | --all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>] [--max-budget-usd <usd> | --clear-budget]
-  engineering template list [--tree-type <engineering|research>]
-  engineering template apply --governor <id> --template <id> [--preset <balanced|max-quality|fast-economy>] [--engine <e>] [--secondary-engine <e>] [--isolation <shared|worktree>] [--max-budget-usd <usd>] [--force-stop-running]
-  engineering report --governor <id> [--out <file>]
-  engineering worktrees (merge | cleanup) --governor <id>
-  engineering verify-trust list [--project <path>]
-  engineering verify-trust revoke (<hash> | --all) [--project <path>]
-  engineering diff --governor <id> --node <nodeId>
-  engineering reports --governor <id> [--include-stale]
-  engineering status --governor <id> [--node <nodeId>]
-  engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]
-  engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]
-  engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]
 
   inbox list [--unread-only] [--governor <id>]
   inbox post --from <governorId> --message <text> [--title <title>] [--node <nodeId>]
@@ -318,7 +301,7 @@ async function canonicalizeParamsPaths(params: Record<string, unknown> | undefin
 }
 
 /** Flags whose next token is opaque user text and must never be treated as a global flag. */
-const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedback', '--text', '--draft', '--summary', '--reason', '--mermaid', '--note', '--prompt']);
+const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedback', '--text', '--draft', '--summary', '--reason', '--mermaid', '--note', '--prompt', '--guidance', '--pre-prompt']);
 
 export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): ParsedCliInvocation {
 	let help = false;
@@ -331,7 +314,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	let positionalCount = 0;
 
 	const isGlobalFlag = (arg: string): boolean =>
-		arg === '-h' || arg === '--help' || arg === '-v' || arg === '--version' || arg === '--json' || arg === '--window' || arg.startsWith('--window=');
+		arg === '-h' || arg === '--help' || arg === '-v' || arg === '--version' || arg === '--json'
+		|| arg === '--window' || arg.startsWith('--window=')
+		|| arg === '--window-id' || arg.startsWith('--window-id=');
 
 	const consumeGlobalFlag = (arg: string, index: number): number => {
 		if (arg === '-h' || arg === '--help') {
@@ -340,16 +325,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			version = true;
 		} else if (arg === '--json') {
 			json = true;
-		} else if (arg === '--window') {
+		} else if (arg === '--window' || arg === '--window-id') {
 			const next = argv[++index];
 			if (!next || !/^\d+$/.test(next)) {
-				throw new CliUsageError('Option --window requires a numeric window ID.');
+				throw new CliUsageError(`Option ${arg} requires a numeric window ID.`);
 			}
 			windowId = Number(next);
 		} else {
-			const val = arg.slice('--window='.length);
+			const prefix = arg.startsWith('--window-id=') ? '--window-id=' : '--window=';
+			const val = arg.slice(prefix.length);
 			if (!val || !/^\d+$/.test(val)) {
-				throw new CliUsageError('Option --window requires a numeric window ID.');
+				throw new CliUsageError(`Option ${prefix.slice(0, -1)} requires a numeric window ID.`);
 			}
 			windowId = Number(val);
 		}
@@ -898,6 +884,8 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			let title: string | undefined;
 			let parent: string | undefined;
 			let role: string | undefined;
+			let model: string | undefined;
+			let thinking: string | undefined;
 			let draftOnly = false;
 			let draftText: string | undefined;
 			let noOpen = false;
@@ -945,6 +933,20 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					}
 				} else if (arg.startsWith('--draft=')) {
 					draftText = arg.slice('--draft='.length);
+				} else if (arg === '--model') {
+					const val = args[++i];
+					if (!val) { throw new CliUsageError('Option --model requires a model ID.'); }
+					model = val;
+				} else if (arg.startsWith('--model=')) {
+					model = arg.slice('--model='.length);
+				} else if (arg === '--thinking' || arg === '--effort') {
+					const val = args[++i];
+					if (!val) { throw new CliUsageError(`Option ${arg} requires a thinking level (off|low|medium|high|xhigh|max).`); }
+					thinking = val;
+				} else if (arg.startsWith('--thinking=')) {
+					thinking = arg.slice('--thinking='.length);
+				} else if (arg.startsWith('--effort=')) {
+					thinking = arg.slice('--effort='.length);
 				} else if (arg === '--no-open') {
 					noOpen = true;
 				} else if (arg === '--side') {
@@ -961,9 +963,64 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (title !== undefined) { params.title = title; }
 			if (parent !== undefined) { params.parent = parent; params.parentId = parent; }
 			if (role !== undefined) { params.role = role; }
+			if (model !== undefined) { params.model = model; }
+			if (thinking !== undefined) { params.thinking = thinking; }
 			if (draftOnly) { params.draft = true; }
 			if (draftText !== undefined) { params.draftText = draftText; if (engine === undefined) { params.draft = true; } }
 			return { help: false, json, windowId, action: 'session.create', params };
+		}
+		if (sub === 'configure' || sub === 'prefs') {
+			let id: string | undefined;
+			let engine: string | undefined;
+			let model: string | undefined;
+			let thinking: string | undefined;
+			let role: string | undefined;
+			for (let i = 0; i < args.length; i++) {
+				const arg = args[i];
+				if (arg === '--engine') {
+					engine = args[++i];
+					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
+				} else if (arg.startsWith('--engine=')) {
+					engine = arg.slice('--engine='.length);
+				} else if (arg === '--model') {
+					model = args[++i];
+					if (model === undefined) { throw new CliUsageError('Option --model requires a model ID.'); }
+				} else if (arg.startsWith('--model=')) {
+					model = arg.slice('--model='.length);
+				} else if (arg === '--thinking' || arg === '--effort') {
+					thinking = args[++i];
+					if (!thinking) { throw new CliUsageError(`Option ${arg} requires a thinking level.`); }
+				} else if (arg.startsWith('--thinking=')) {
+					thinking = arg.slice('--thinking='.length);
+				} else if (arg.startsWith('--effort=')) {
+					thinking = arg.slice('--effort='.length);
+				} else if (arg === '--role') {
+					const val = args[++i];
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID.');
+					}
+					role = val.trim().toLowerCase();
+				} else if (arg.startsWith('--role=')) {
+					const val = arg.slice('--role='.length);
+					if (!isValidRoleSlug(val)) {
+						throw new CliUsageError('Option --role requires a valid rank ID.');
+					}
+					role = val.trim().toLowerCase();
+				} else if (!arg.startsWith('-') && id === undefined) {
+					id = arg;
+				} else {
+					throw new CliUsageError(`Unknown option for session configure: ${arg}`);
+				}
+			}
+			if (!id) {
+				throw new CliUsageError('Usage: aexus-ade session configure <id> [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|xhigh|max>] [--role <r>]');
+			}
+			const params: Record<string, unknown> = { id };
+			if (engine !== undefined) { params.engine = engine; }
+			if (model !== undefined) { params.model = model; }
+			if (thinking !== undefined) { params.thinking = thinking; }
+			if (role !== undefined) { params.role = role; }
+			return { help: false, json, windowId, action: 'session.configure', params };
 		}
 		if (sub === 'attach' || sub === 'import') {
 			let project: string | undefined;
@@ -1344,8 +1401,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		return parseRankGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
 	}
 
-	if (group === 'mission' || group === 'engineering') {
-		const isMission = group === 'mission';
+	if (group === 'mission') {
 		const missionDocs = parseMissionDocsCommand(tail, json, windowId);
 		if (missionDocs) {
 			return missionDocs;
@@ -1354,8 +1410,8 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		if (missionRuntimeCmd) {
 			return missionRuntimeCmd;
 		}
-		const parseWorkTree = (): ParsedCliInvocation => {
-			const sub = tail[0] ?? 'list';
+
+		const sub = tail[0] ?? 'list';
 		const args = tail.slice(1);
 
 		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[]): string => {
@@ -1371,196 +1427,121 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			return next;
 		};
 
-		if (sub === 'demo') {
-			let governor: string | undefined;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (!arg.startsWith('-') && !governor) {
-					governor = arg;
-				} else {
-					throw new CliUsageError(`Unknown option for engineering demo: ${arg}`);
-				}
-			}
-			return { help: false, json, windowId, action: 'engineering.demo', params: governor ? { governor } : {} };
-		}
-
-		if (sub === 'generate' || sub === 'gen') {
-			let governor: string | undefined;
-			let prompt: string | undefined;
-			let engine: string | undefined;
-			let maxBudgetUsd: number | undefined;
-			let forceStopRunning = false;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--prompt' || arg.startsWith('--prompt=')) {
-					prompt = takeOptionVal(ref, '--prompt', args);
-				} else if (arg === '--engine' || arg.startsWith('--engine=')) {
-					engine = takeOptionVal(ref, '--engine', args);
-				} else if (arg === '--max-budget-usd' || arg.startsWith('--max-budget-usd=')) {
-					const raw = takeOptionVal(ref, '--max-budget-usd', args).replace(/^\$/, '');
-					const num = Number(raw);
-					if (!Number.isFinite(num) || num <= 0) {
-						throw new CliUsageError('--max-budget-usd must be a positive number.');
-					}
-					maxBudgetUsd = Math.round(num * 100) / 100;
-				} else if (arg === '--force-stop-running') {
-					forceStopRunning = true;
-				} else if (!arg.startsWith('-') && !prompt) {
-					prompt = arg;
-				} else {
-					throw new CliUsageError(`Unknown option for engineering generate: ${arg}`);
-				}
-			}
-			if (!governor || !prompt) {
-				throw new CliUsageError('Usage: aexus-ade engineering generate --governor <id> --prompt "<goal>" [--engine <eng>] [--max-budget-usd <n>]');
-			}
-			const params: Record<string, unknown> = { governor, prompt, forceStopRunning };
-			if (engine) { params.engine = engine; }
-			if (maxBudgetUsd !== undefined) { params.maxBudgetUsd = maxBudgetUsd; }
-			return { help: false, json, windowId, action: 'engineering.generate', params };
-		}
-
 		if (sub === 'init') {
-			let governor: string | undefined;
+			let owner: string | undefined;
 			let title: string | undefined;
-			let onChildren: string | undefined;
-			let targetParentId: string | undefined;
-			let treeType: string | undefined;
+			let project: string | undefined;
 			let open = false;
 			let side = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--owner' || arg.startsWith('--owner=')) {
-					governor = takeOptionVal(ref, '--owner', args);
+					owner = takeOptionVal(ref, '--owner', args);
 				} else if (arg === '--title' || arg.startsWith('--title=')) {
 					title = takeOptionVal(ref, '--title', args);
-				} else if (arg === '--on-children' || arg.startsWith('--on-children=')) {
-					onChildren = takeOptionVal(ref, '--on-children', args).toLowerCase();
-					if (onChildren !== 'relocate' && onChildren !== 'delete') {
-						throw new CliUsageError('Option --on-children must be relocate or delete.');
-					}
-				} else if (arg === '--target' || arg.startsWith('--target=')) {
-					targetParentId = takeOptionVal(ref, '--target', args);
-				} else if (arg === '--tree-type' || arg.startsWith('--tree-type=')) {
-					treeType = takeOptionVal(ref, '--tree-type', args).toLowerCase();
+				} else if (arg === '--project' || arg.startsWith('--project=')) {
+					project = resolvePathIfRelative(takeOptionVal(ref, '--project', args), cwd);
 				} else if (arg === '--open') {
 					open = true;
 				} else if (arg === '--side') {
 					side = true;
-				} else if (!arg.startsWith('-') && !governor) {
-					governor = arg;
+				} else if (!arg.startsWith('-') && !owner) {
+					owner = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} init: ${arg}`);
+					throw new CliUsageError(`Unknown option for mission init: ${arg}`);
 				}
 			}
-			if (!isMission && !governor) {
-				throw new CliUsageError('Usage: aexus-ade engineering init --governor <id> [--tree-type <engineering|research>] [--on-children <relocate|delete> --target <id>] [--open] [--side]');
-			}
 			const params: Record<string, unknown> = {};
-			if (governor) { params.governor = governor; }
+			if (owner) { params.owner = owner; }
 			if (title) { params.title = title; }
-			if (onChildren) { params.onChildren = onChildren; }
-			if (targetParentId) { params.relocateTargetParentId = targetParentId; }
-			if (treeType) { params.treeType = treeType; }
+			if (project) { params.project = project; }
 			if (open) { params.open = true; }
 			if (side) { params.side = true; }
-			return { help: false, json, windowId, action: 'engineering.init', params };
+			return { help: false, json, windowId, action: 'mission.init', params };
 		}
 
 		if (sub === 'list') {
 			let project: string | undefined;
-			let treeType: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--project' || arg.startsWith('--project=')) {
 					project = resolvePathIfRelative(takeOptionVal(ref, '--project', args), cwd);
-				} else if (arg === '--tree-type' || arg.startsWith('--tree-type=')) {
-					treeType = takeOptionVal(ref, '--tree-type', args).toLowerCase();
 				} else {
-					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} list: ${arg}`);
+					throw new CliUsageError(`Unknown option for mission list: ${arg}`);
 				}
 			}
 			const params: Record<string, unknown> = {};
 			if (project) { params.project = project; }
-			if (treeType) { params.treeType = treeType; }
-			return { help: false, json, windowId, action: 'engineering.list', params };
+			return { help: false, json, windowId, action: 'mission.list', params };
 		}
 
 		if (sub === 'open') {
-			let governor: string | undefined;
+			let missionId: string | undefined;
 			let side = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
-					governor = takeOptionVal(ref, '--mission', args);
+					missionId = takeOptionVal(ref, '--mission', args);
 				} else if (arg === '--side') {
 					side = true;
-				} else if (!arg.startsWith('-') && !governor) {
-					governor = arg;
+				} else if (!arg.startsWith('-') && !missionId) {
+					missionId = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} open: ${arg}`);
+					throw new CliUsageError(`Unknown option for mission open: ${arg}`);
 				}
 			}
-			if (!governor) {
-				throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission open --mission <id>' : 'engineering open --governor <id>'} [--side]`);
+			if (!missionId) {
+				throw new CliUsageError('Usage: aexus-ade mission open --mission <id> [--side]');
 			}
-			return { help: false, json, windowId, action: 'engineering.open', params: side ? { governor, side: true } : { governor } };
+			return { help: false, json, windowId, action: 'mission.open', params: side ? { missionId, side: true } : { missionId } };
 		}
 
 		if (sub === 'blueprint') {
 			const bpSub = args[0];
 			const bpArgs = args.slice(1);
 			if (bpSub === 'get') {
-				let governor: string | undefined;
+				let missionId: string | undefined;
 				let raw = false;
 				for (const ref = { i: 0 }; ref.i < bpArgs.length; ref.i++) {
 					const arg = bpArgs[ref.i];
 					if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
-						governor = takeOptionVal(ref, '--mission', bpArgs);
+						missionId = takeOptionVal(ref, '--mission', bpArgs);
 					} else if (arg === '--raw') {
 						raw = true;
-					} else if (!arg.startsWith('-') && !governor) {
-						governor = arg;
+					} else if (!arg.startsWith('-') && !missionId) {
+						missionId = arg;
 					} else {
-						throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} blueprint get: ${arg}`);
+						throw new CliUsageError(`Unknown option for mission blueprint get: ${arg}`);
 					}
 				}
-				if (!governor) {
-					throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission blueprint get --mission <id>' : 'engineering blueprint get --governor <id>'} [--raw]`);
+				if (!missionId) {
+					throw new CliUsageError('Usage: aexus-ade mission blueprint get --mission <id> [--raw]');
 				}
-				return { help: false, json, windowId, action: 'engineering.blueprint.get', params: raw ? { governor, raw: true } : { governor } };
+				return { help: false, json, windowId, action: 'mission.blueprint.get', params: raw ? { missionId, raw: true } : { missionId } };
 			}
 			if (bpSub === 'apply') {
-				let governor: string | undefined;
+				let missionId: string | undefined;
 				let file: string | undefined;
 				let text: string | undefined;
-				let forceStopRunning = false;
 				for (const ref = { i: 0 }; ref.i < bpArgs.length; ref.i++) {
 					const arg = bpArgs[ref.i];
 					if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
-						governor = takeOptionVal(ref, '--mission', bpArgs);
+						missionId = takeOptionVal(ref, '--mission', bpArgs);
 					} else if (arg === '--file' || arg.startsWith('--file=')) {
 						file = resolvePathIfRelative(takeOptionVal(ref, '--file', bpArgs), cwd);
 					} else if (arg === '--text' || arg.startsWith('--text=')) {
 						text = takeOptionVal(ref, '--text', bpArgs);
-					} else if (arg === '--force-stop-running') {
-						forceStopRunning = true;
 					} else {
-						throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} blueprint apply: ${arg}`);
+						throw new CliUsageError(`Unknown option for mission blueprint apply: ${arg}`);
 					}
 				}
-				if (!governor || (!file && text === undefined)) {
-					throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission blueprint apply --mission <id>' : 'engineering blueprint apply --governor <id>'} (--file <path> | --text <markdown>) [--force-stop-running]`);
+				if (!missionId || (!file && text === undefined)) {
+					throw new CliUsageError('Usage: aexus-ade mission blueprint apply --mission <id> (--file <path> | --text <mermaid>)');
 				}
-				const params: Record<string, unknown> = { governor };
+				const params: Record<string, unknown> = { missionId };
 				if (file) { params.file = file; }
 				if (text !== undefined) { params.text = text; }
-				if (forceStopRunning) { params.forceStopRunning = true; }
-				return { help: false, json, windowId, action: 'engineering.blueprint.apply', params };
+				return { help: false, json, windowId, action: 'mission.blueprint.apply', params };
 			}
 			if (bpSub === 'validate') {
 				let file: string | undefined;
@@ -1572,116 +1553,72 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					} else if (arg === '--text' || arg.startsWith('--text=')) {
 						text = takeOptionVal(ref, '--text', bpArgs);
 					} else {
-						throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} blueprint validate: ${arg}`);
+						throw new CliUsageError(`Unknown option for mission blueprint validate: ${arg}`);
 					}
 				}
 				if (!file && text === undefined) {
-					throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission' : 'engineering'} blueprint validate (--file <path> | --text <markdown>)`);
+					throw new CliUsageError('Usage: aexus-ade mission blueprint validate (--file <path> | --text <mermaid>)');
 				}
 				const params: Record<string, unknown> = {};
 				if (file) { params.file = file; }
 				if (text !== undefined) { params.text = text; }
-				return { help: false, json, windowId, action: 'engineering.blueprint.validate', params };
+				return { help: false, json, windowId, action: 'mission.blueprint.validate', params };
 			}
-			throw new CliUsageError(`Usage: aexus-ade ${isMission ? 'mission' : 'engineering'} blueprint <get | apply | validate> ...`);
+			throw new CliUsageError('Usage: aexus-ade mission blueprint <get | apply | validate> ...');
 		}
 
 		if (sub === 'run' || sub === 'pause' || sub === 'resume' || sub === 'stop' || sub === 'remove') {
-			let governor: string | undefined;
+			let missionId: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
-					governor = takeOptionVal(ref, '--mission', args);
-				} else if (!arg.startsWith('-') && !governor) {
-					governor = arg;
+					missionId = takeOptionVal(ref, '--mission', args);
+				} else if (!arg.startsWith('-') && !missionId) {
+					missionId = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} ${sub}: ${arg}`);
+					throw new CliUsageError(`Unknown option for mission ${sub}: ${arg}`);
 				}
 			}
-			if (!governor && (!isMission || sub === 'remove')) {
-				throw new CliUsageError(`Usage: aexus-ade ${isMission ? `mission ${sub} --mission <id>` : `engineering ${sub} --governor <id>`}`);
+			if (!missionId && sub === 'remove') {
+				throw new CliUsageError('Usage: aexus-ade mission remove --mission <id>');
 			}
 			const params: Record<string, unknown> = {};
-			if (governor) { params.governor = governor; }
-			return { help: false, json, windowId, action: `engineering.${sub}`, params };
+			if (missionId) { params.missionId = missionId; }
+			return { help: false, json, windowId, action: `mission.${sub}`, params };
 		}
 
 		if (sub === 'status') {
-			let governor: string | undefined;
-			let node: string | undefined;
+			let missionId: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
-					governor = takeOptionVal(ref, '--mission', args);
-				} else if (arg === '--node' || arg.startsWith('--node=')) {
-					node = takeOptionVal(ref, '--node', args);
-				} else if (!arg.startsWith('-') && !governor) {
-					governor = arg;
+					missionId = takeOptionVal(ref, '--mission', args);
+				} else if (!arg.startsWith('-') && !missionId) {
+					missionId = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} status: ${arg}`);
+					throw new CliUsageError(`Unknown option for mission status: ${arg}`);
 				}
-			}
-			if (!governor && !isMission) {
-				throw new CliUsageError('Usage: aexus-ade engineering status --governor <id> [--node <nodeId>]');
 			}
 			const params: Record<string, unknown> = {};
-			if (governor) { params.governor = governor; }
-			if (node) { params.node = node; }
-			return { help: false, json, windowId, action: 'engineering.status', params };
-		}
-
-		if (sub === 'review') {
-			let governor: string | undefined;
-			let node: string | undefined;
-			let role: string | undefined;
-			let verdict: string | undefined;
-			let report: string | undefined;
-			let feedback: string | undefined;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--node' || arg.startsWith('--node=')) {
-					node = takeOptionVal(ref, '--node', args);
-				} else if (arg === '--role' || arg.startsWith('--role=')) {
-					role = takeOptionVal(ref, '--role', args).toLowerCase();
-					if (role !== 'employee' && role !== 'manager') {
-						throw new CliUsageError('Option --role must be employee or manager.');
-					}
-				} else if (arg === '--verdict' || arg.startsWith('--verdict=')) {
-					verdict = takeOptionVal(ref, '--verdict', args).toLowerCase();
-					if (verdict !== 'pass' && verdict !== 'reject' && verdict !== 'guidance') {
-						throw new CliUsageError('Option --verdict must be pass, reject, or guidance.');
-					}
-				} else if (arg === '--report' || arg.startsWith('--report=')) {
-					report = takeOptionVal(ref, '--report', args);
-				} else if (arg === '--feedback' || arg.startsWith('--feedback=')) {
-					feedback = takeOptionVal(ref, '--feedback', args);
-				} else {
-					throw new CliUsageError(`Unknown option for engineering review: ${arg}`);
-				}
-			}
-			if (!governor || !node || !role || !verdict) {
-				throw new CliUsageError('Usage: aexus-ade engineering review --governor <id> --node <nodeId> --role <employee|manager> --verdict <pass|reject|guidance> [--report <text>] [--feedback <text>]');
-			}
-			const params: Record<string, unknown> = { governor, node, role, verdict };
-			if (report !== undefined) { params.report = report; }
-			if (feedback !== undefined) { params.feedback = feedback; }
-			return { help: false, json, windowId, action: 'engineering.review', params };
+			if (missionId) { params.missionId = missionId; }
+			return { help: false, json, windowId, action: 'mission.status', params };
 		}
 
 		if (sub === 'gate') {
-			let governor: string | undefined;
+			let missionId: string | undefined;
 			let node: string | undefined;
+			let tokenId: string | undefined;
 			let verdict: string | undefined;
 			let targetNode: string | undefined;
 			let feedback: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
-					governor = takeOptionVal(ref, '--mission', args);
+					missionId = takeOptionVal(ref, '--mission', args);
 				} else if (arg === '--node' || arg.startsWith('--node=')) {
 					node = takeOptionVal(ref, '--node', args);
+				} else if (arg === '--token' || arg.startsWith('--token=') || arg === '--token-id' || arg.startsWith('--token-id=')) {
+					tokenId = takeOptionVal(ref, '--token', args);
 				} else if (arg === '--decision' || arg.startsWith('--decision=') || arg === '--verdict' || arg.startsWith('--verdict=')) {
 					verdict = takeOptionVal(ref, '--decision', args).toLowerCase();
 					if (verdict !== 'approve' && verdict !== 'reject' && verdict !== 'pass' && verdict !== 'rollback') {
@@ -1694,360 +1631,22 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (!arg.startsWith('-') && !verdict && (arg.toLowerCase() === 'approve' || arg.toLowerCase() === 'reject' || arg.toLowerCase() === 'pass' || arg.toLowerCase() === 'rollback')) {
 					verdict = arg.toLowerCase();
 				} else {
-					throw new CliUsageError(`Unknown option for ${isMission ? 'mission' : 'engineering'} gate: ${arg}`);
+					throw new CliUsageError(`Unknown option for mission gate: ${arg}`);
 				}
 			}
-			if (isMission) {
-				if (!node || !verdict) {
-					throw new CliUsageError('Usage: aexus-ade mission gate <approve|reject> [--mission <id>] --node <nodeId> [--note "<text>"] [--rollback <upstreamNodeId>]');
-				}
-				const decision = (verdict === 'pass' || verdict === 'approve') ? 'approve' : 'reject';
-				const params: Record<string, unknown> = { node, decision };
-				if (governor) { params.missionId = governor; }
-				if (targetNode) { params.rollback = targetNode; }
-				if (feedback !== undefined) { params.note = feedback; }
-				return { help: false, json, windowId, action: 'engineering.gate', params };
+			if (!node || !verdict) {
+				throw new CliUsageError('Usage: aexus-ade mission gate <approve|reject> [--mission <id>] --node <nodeId> [--token <tokenId>] [--note "<text>"] [--rollback <upstreamNodeId>]');
 			}
-			if (!governor || !node || !verdict) {
-				throw new CliUsageError('Usage: aexus-ade engineering gate --governor <id> --node <nodeId> --verdict <pass|rollback> [--target-node <upstreamNodeId>] [--feedback <text>]');
-			}
-			const params: Record<string, unknown> = { governor, node, verdict };
-			if (targetNode) { params.targetNode = targetNode; }
-			if (feedback !== undefined) { params.feedback = feedback; }
-			return { help: false, json, windowId, action: 'engineering.gate', params };
+			const decision = (verdict === 'pass' || verdict === 'approve') ? 'approve' : 'reject';
+			const params: Record<string, unknown> = { node, decision };
+			if (missionId) { params.missionId = missionId; }
+			if (tokenId) { params.tokenId = tokenId; }
+			if (targetNode) { params.rollback = targetNode; }
+			if (feedback !== undefined) { params.note = feedback; }
+			return { help: false, json, windowId, action: 'mission.gate', params };
 		}
 
-		if (sub === 'watchdog-action') {
-			let governor: string | undefined;
-			let node: string | undefined;
-			let watchdogAction: string | undefined;
-			let message: string | undefined;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--node' || arg.startsWith('--node=')) {
-					node = takeOptionVal(ref, '--node', args);
-				} else if (arg === '--action' || arg.startsWith('--action=')) {
-					watchdogAction = takeOptionVal(ref, '--action', args).toLowerCase();
-					if (watchdogAction !== 'remind' && watchdogAction !== 'kill-restart') {
-						throw new CliUsageError('Option --action must be remind or kill-restart.');
-					}
-				} else if (arg === '--message' || arg.startsWith('--message=')) {
-					message = takeOptionVal(ref, '--message', args);
-				} else {
-					throw new CliUsageError(`Unknown option for engineering watchdog-action: ${arg}`);
-				}
-			}
-			if (!governor || !node || !watchdogAction) {
-				throw new CliUsageError('Usage: aexus-ade engineering watchdog-action --governor <id> --node <nodeId> --action <remind|kill-restart> [--message <text>]');
-			}
-			const params: Record<string, unknown> = { governor, node, watchdogAction };
-			if (message !== undefined) { params.message = message; }
-			return { help: false, json, windowId, action: 'engineering.watchdogAction', params };
-		}
-
-		if (sub === 'reset') {
-			let governor: string | undefined;
-			let node: string | undefined;
-			let keepCompleted = false;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--node' || arg.startsWith('--node=')) {
-					node = takeOptionVal(ref, '--node', args);
-				} else if (arg === '--keep-completed') {
-					keepCompleted = true;
-				} else {
-					throw new CliUsageError(`Unknown option for engineering reset: ${arg}`);
-				}
-			}
-			if (!governor) {
-				throw new CliUsageError('Usage: aexus-ade engineering reset --governor <id> [--node <nodeId>] [--keep-completed]');
-			}
-			const params: Record<string, unknown> = { governor };
-			if (node) { params.node = node; }
-			if (keepCompleted) { params.keepCompleted = true; }
-			return { help: false, json, windowId, action: 'engineering.reset', params };
-		}
-
-		if (sub === 'configure') {
-			let governor: string | undefined;
-			let node: string | undefined;
-			let all = false;
-			let role: string | undefined;
-			let engine: string | undefined;
-			let model: string | undefined;
-			let thinking: string | undefined;
-			let isolation: string | undefined;
-			let maxBudgetUsd: number | undefined;
-			let clearBudget = false;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--node' || arg.startsWith('--node=')) {
-					node = takeOptionVal(ref, '--node', args);
-				} else if (arg === '--all') {
-					all = true;
-				} else if (arg === '--role' || arg.startsWith('--role=')) {
-					role = takeOptionVal(ref, '--role', args).toLowerCase();
-					if (role !== 'worker' && role !== 'employee' && role !== 'manager' && role !== 'all') {
-						throw new CliUsageError('Option --role must be worker, employee, manager, or all.');
-					}
-				} else if (arg === '--engine' || arg.startsWith('--engine=')) {
-					engine = takeOptionVal(ref, '--engine', args);
-				} else if (arg === '--model' || arg.startsWith('--model=')) {
-					model = takeOptionVal(ref, '--model', args);
-				} else if (arg === '--thinking' || arg.startsWith('--thinking=')) {
-					thinking = takeOptionVal(ref, '--thinking', args).toLowerCase();
-					if (thinking !== 'off' && thinking !== 'low' && thinking !== 'medium' && thinking !== 'high' && thinking !== 'max') {
-						throw new CliUsageError('Option --thinking must be off, low, medium, high, or max.');
-					}
-				} else if (arg === '--isolation' || arg.startsWith('--isolation=')) {
-					isolation = takeOptionVal(ref, '--isolation', args).toLowerCase();
-					if (isolation !== 'shared' && isolation !== 'worktree') {
-						throw new CliUsageError('Option --isolation must be shared or worktree.');
-					}
-				} else if (arg === '--max-budget-usd' || arg.startsWith('--max-budget-usd=')) {
-					const raw = takeOptionVal(ref, '--max-budget-usd', args).replace(/^\$/, '');
-					const num = Number(raw);
-					if (!Number.isFinite(num) || num < 0) {
-						throw new CliUsageError('Option --max-budget-usd requires a non-negative number.');
-					}
-					if (num === 0) {
-						clearBudget = true;
-					} else {
-						maxBudgetUsd = Math.round(num * 100) / 100;
-					}
-				} else if (arg === '--clear-budget') {
-					clearBudget = true;
-				} else {
-					throw new CliUsageError(`Unknown option for engineering configure: ${arg}`);
-				}
-			}
-			if (!governor) {
-				throw new CliUsageError('Usage: aexus-ade engineering configure --governor <id> [--node <nodeId> | --all] [--role <worker|employee|manager|all>] [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>] [--isolation <shared|worktree>] [--max-budget-usd <usd> | --clear-budget]');
-			}
-			const params: Record<string, unknown> = { governor };
-			if (node) { params.node = node; }
-			if (all) { params.all = true; }
-			if (role) { params.role = role; }
-			if (engine) { params.engine = engine; }
-			if (model) { params.model = model; }
-			if (thinking) { params.thinking = thinking; }
-			if (isolation) { params.isolation = isolation; }
-			if (maxBudgetUsd !== undefined) { params.maxBudgetUsd = maxBudgetUsd; }
-			if (clearBudget) { params.clearBudget = true; }
-			return { help: false, json, windowId, action: 'engineering.configure', params };
-		}
-
-		if (sub === 'template' || sub === 'templates') {
-			const tplSub = args[0] ?? 'list';
-			const tplArgs = args.slice(1);
-			if (tplSub === 'list') {
-				let treeType: string | undefined;
-				for (const ref = { i: 0 }; ref.i < tplArgs.length; ref.i++) {
-					const arg = tplArgs[ref.i];
-					if (arg === '--tree-type' || arg.startsWith('--tree-type=')) {
-						treeType = takeOptionVal(ref, '--tree-type', tplArgs).toLowerCase();
-						if (treeType !== 'engineering' && treeType !== 'research') {
-							throw new CliUsageError('Option --tree-type must be engineering or research.');
-						}
-					} else {
-						throw new CliUsageError(`Unknown option for engineering template list: ${arg}`);
-					}
-				}
-				return { help: false, json, windowId, action: 'engineering.templates.list', params: treeType ? { treeType } : {} };
-			}
-			if (tplSub === 'apply') {
-				let governor: string | undefined;
-				let template: string | undefined;
-				let preset: string | undefined;
-				let engine: string | undefined;
-				let secondaryEngine: string | undefined;
-				let isolation: string | undefined;
-				let maxBudgetUsd: number | undefined;
-				let forceStopRunning = false;
-				for (const ref = { i: 0 }; ref.i < tplArgs.length; ref.i++) {
-					const arg = tplArgs[ref.i];
-					if (arg === '--governor' || arg.startsWith('--governor=')) {
-						governor = takeOptionVal(ref, '--governor', tplArgs);
-					} else if (arg === '--template' || arg.startsWith('--template=')) {
-						template = takeOptionVal(ref, '--template', tplArgs);
-					} else if (arg === '--preset' || arg.startsWith('--preset=')) {
-						preset = takeOptionVal(ref, '--preset', tplArgs).toLowerCase();
-						if (preset !== 'balanced' && preset !== 'max-quality' && preset !== 'fast-economy') {
-							throw new CliUsageError('Option --preset must be balanced, max-quality, or fast-economy.');
-						}
-					} else if (arg === '--engine' || arg.startsWith('--engine=')) {
-						engine = takeOptionVal(ref, '--engine', tplArgs);
-					} else if (arg === '--secondary-engine' || arg.startsWith('--secondary-engine=')) {
-						secondaryEngine = takeOptionVal(ref, '--secondary-engine', tplArgs);
-					} else if (arg === '--isolation' || arg.startsWith('--isolation=')) {
-						isolation = takeOptionVal(ref, '--isolation', tplArgs).toLowerCase();
-						if (isolation !== 'shared' && isolation !== 'worktree') {
-							throw new CliUsageError('Option --isolation must be shared or worktree.');
-						}
-					} else if (arg === '--worktree') {
-						isolation = 'worktree';
-					} else if (arg === '--max-budget-usd' || arg.startsWith('--max-budget-usd=')) {
-						const num = Number(takeOptionVal(ref, '--max-budget-usd', tplArgs).replace(/^\$/, ''));
-						if (!Number.isFinite(num) || num <= 0) {
-							throw new CliUsageError('Option --max-budget-usd requires a positive number.');
-						}
-						maxBudgetUsd = Math.round(num * 100) / 100;
-					} else if (arg === '--force-stop-running') {
-						forceStopRunning = true;
-					} else if (!arg.startsWith('-') && !template) {
-						template = arg;
-					} else {
-						throw new CliUsageError(`Unknown option for engineering template apply: ${arg}`);
-					}
-				}
-				if (!governor || !template) {
-					throw new CliUsageError('Usage: aexus-ade engineering template apply --governor <id> --template <id> [--preset <balanced|max-quality|fast-economy>] [--engine <e>] [--secondary-engine <e>] [--isolation <shared|worktree>] [--max-budget-usd <usd>] [--force-stop-running]');
-				}
-				const params: Record<string, unknown> = { governor, template };
-				if (preset) { params.preset = preset; }
-				if (engine) { params.engine = engine; }
-				if (secondaryEngine) { params.secondaryEngine = secondaryEngine; }
-				if (isolation) { params.isolation = isolation; }
-				if (maxBudgetUsd !== undefined) { params.maxBudgetUsd = maxBudgetUsd; }
-				if (forceStopRunning) { params.forceStopRunning = true; }
-				return { help: false, json, windowId, action: 'engineering.templates.apply', params };
-			}
-			throw new CliUsageError('Usage: aexus-ade engineering template <list|apply> ...');
-		}
-
-		if (sub === 'report') {
-			let governor: string | undefined;
-			let outFile: string | undefined;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--out' || arg.startsWith('--out=')) {
-					outFile = resolvePathIfRelative(takeOptionVal(ref, '--out', args), cwd);
-				} else {
-					throw new CliUsageError(`Unknown option for engineering report: ${arg}`);
-				}
-			}
-			if (!governor) {
-				throw new CliUsageError('Usage: aexus-ade engineering report --governor <id> [--out <file>]');
-			}
-			const params: Record<string, unknown> = { governor };
-			if (outFile) { params.outFile = outFile; }
-			return { help: false, json, windowId, action: 'engineering.report', params };
-		}
-
-		if (sub === 'worktrees' || sub === 'worktree') {
-			const wtSub = args[0];
-			const wtArgs = args.slice(1);
-			if (wtSub !== 'merge' && wtSub !== 'cleanup') {
-				throw new CliUsageError('Usage: aexus-ade engineering worktrees <merge|cleanup> --governor <id>');
-			}
-			let governor: string | undefined;
-			for (const ref = { i: 0 }; ref.i < wtArgs.length; ref.i++) {
-				const arg = wtArgs[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', wtArgs);
-				} else {
-					throw new CliUsageError(`Unknown option for engineering worktrees ${wtSub}: ${arg}`);
-				}
-			}
-			if (!governor) {
-				throw new CliUsageError(`Usage: aexus-ade engineering worktrees ${wtSub} --governor <id>`);
-			}
-			return { help: false, json, windowId, action: `engineering.worktrees.${wtSub}`, params: { governor } };
-		}
-
-		if (sub === 'verify-trust' || sub === 'verifyTrust') {
-			const vtSub = args[0] ?? 'list';
-			const vtArgs = args.length > 0 ? args.slice(1) : [];
-			if (vtSub === 'list') {
-				let project: string | undefined;
-				for (const ref = { i: 0 }; ref.i < vtArgs.length; ref.i++) {
-					const arg = vtArgs[ref.i];
-					if (arg === '--project' || arg.startsWith('--project=')) {
-						project = resolvePathIfRelative(takeOptionVal(ref, '--project', vtArgs), cwd);
-					} else {
-						throw new CliUsageError(`Unknown option for engineering verify-trust list: ${arg}`);
-					}
-				}
-				return { help: false, json, windowId, action: 'engineering.verifyTrust.list', params: project ? { project } : {} };
-			}
-			if (vtSub === 'revoke') {
-				let hash: string | undefined;
-				let all = false;
-				let project: string | undefined;
-				for (const ref = { i: 0 }; ref.i < vtArgs.length; ref.i++) {
-					const arg = vtArgs[ref.i];
-					if (arg === '--all') {
-						all = true;
-					} else if (arg === '--hash' || arg.startsWith('--hash=')) {
-						hash = takeOptionVal(ref, '--hash', vtArgs);
-					} else if (arg === '--project' || arg.startsWith('--project=')) {
-						project = resolvePathIfRelative(takeOptionVal(ref, '--project', vtArgs), cwd);
-					} else if (!arg.startsWith('-') && !hash) {
-						hash = arg;
-					} else {
-						throw new CliUsageError(`Unknown option for engineering verify-trust revoke: ${arg}`);
-					}
-				}
-				if (!all && !hash) {
-					throw new CliUsageError('Usage: aexus-ade engineering verify-trust revoke (<hash> | --all) [--project <path>]');
-				}
-				const params: Record<string, unknown> = all ? { all: true } : { hash };
-				if (project) { params.project = project; }
-				return { help: false, json, windowId, action: 'engineering.verifyTrust.revoke', params };
-			}
-			throw new CliUsageError('Usage: aexus-ade engineering verify-trust <list | revoke (<hash> | --all)> [--project <path>]');
-		}
-
-		if (sub === 'diff') {
-			let governor: string | undefined;
-			let node: string | undefined;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--node' || arg.startsWith('--node=')) {
-					node = takeOptionVal(ref, '--node', args);
-				} else {
-					throw new CliUsageError(`Unknown option for engineering diff: ${arg}`);
-				}
-			}
-			if (!governor || !node) {
-				throw new CliUsageError('Usage: aexus-ade engineering diff --governor <id> --node <nodeId>');
-			}
-			return { help: false, json, windowId, action: 'engineering.diff', params: { governor, node } };
-		}
-
-		if (sub === 'reports') {
-			let governor: string | undefined;
-			let includeStale = false;
-			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
-				const arg = args[ref.i];
-				if (arg === '--governor' || arg.startsWith('--governor=')) {
-					governor = takeOptionVal(ref, '--governor', args);
-				} else if (arg === '--include-stale') {
-					includeStale = true;
-				} else {
-					throw new CliUsageError(`Unknown option for engineering reports: ${arg}`);
-				}
-			}
-			if (!governor) {
-				throw new CliUsageError('Usage: aexus-ade engineering reports --governor <id> [--include-stale]');
-			}
-			return { help: false, json, windowId, action: 'engineering.reports', params: includeStale ? { governor, includeStale: true } : { governor } };
-		}
-
-			throw new CliUsageError(`Unknown ${isMission ? 'mission' : 'engineering'} subcommand: ${sub}`);
-		};
-		const parsed = parseWorkTree();
-		return isMission ? rewriteEngineeringActionToMission(parsed) : parsed;
+		throw new CliUsageError(`Unknown mission subcommand: ${sub}`);
 	}
 
 	if (group === 'inbox') {
@@ -2338,13 +1937,48 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	throw new CliUsageError(`Unknown command: ${group}`);
 }
 
+function normalizeExplicitSocketPath(raw: string | undefined): string | undefined {
+	if (!raw) {
+		return undefined;
+	}
+	if (process.platform === 'win32' || raw.startsWith('tcp://') || Buffer.byteLength(raw, 'utf8') <= 90) {
+		return raw;
+	}
+	const hash = crypto.createHash('sha256').update(raw, 'utf8').digest('hex').slice(0, 12);
+	return path.join('/tmp', `aexus-ade-${hash}.sock`);
+}
+
+async function readRemoteBridgeFileEndpoint(env: NodeJS.ProcessEnv): Promise<string | undefined> {
+	const bridgeFile = env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim();
+	if (!bridgeFile) {
+		return undefined;
+	}
+	try {
+		const raw = await fs.readFile(bridgeFile, 'utf8');
+		const parsed = JSON.parse(raw) as { socketPath?: unknown; tcpPort?: unknown };
+		if (typeof parsed.socketPath === 'string' && parsed.socketPath.trim()) {
+			return normalizeExplicitSocketPath(parsed.socketPath.trim());
+		}
+		if (typeof parsed.tcpPort === 'number' && Number.isInteger(parsed.tcpPort) && parsed.tcpPort > 0 && parsed.tcpPort <= 65535) {
+			return `tcp://127.0.0.1:${parsed.tcpPort}`;
+		}
+	} catch {
+		// Bridge metadata file may be mid-update or unavailable; fall back to env vars cleanly.
+	}
+	return undefined;
+}
+
 async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: string; token: string; usingSessionToken: boolean }> {
 	const tcpPortRaw = env.AEXUS_ADE_TCP_PORT?.trim();
 	const tcpPort = tcpPortRaw && /^\d+$/.test(tcpPortRaw) ? Number.parseInt(tcpPortRaw, 10) : undefined;
 	const tcpEndpoint = tcpPort && tcpPort > 0 && tcpPort <= 65535 ? `tcp://127.0.0.1:${tcpPort}` : undefined;
-	const socketOverride = tcpEndpoint || env.AEXUS_ADE_SOCKET?.trim();
+	const envSocketOverride = normalizeExplicitSocketPath(env.AEXUS_ADE_SOCKET?.trim()) || tcpEndpoint;
 	const sessionToken = env.AEXUS_ADE_SESSION_TOKEN?.trim();
 	if (sessionToken) {
+		// Prefer the live remote bridge pointer file (~/.aexus-code/ade-remote-bridge.json) over static env
+		// so long-running cloud agents immediately track healed UDS sockets or reallocated TCP ports!
+		const dynamicBridgeEndpoint = await readRemoteBridgeFileEndpoint(env);
+		const socketOverride = dynamicBridgeEndpoint || envSocketOverride;
 		if (socketOverride) {
 			// Per-session capability token + explicit socket or SSH reverse TCP port: never read master token file.
 			return { socketPath: socketOverride, token: sessionToken, usingSessionToken: true };
@@ -2367,6 +2001,7 @@ async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: 
 		// Never substitute meta.token when AEXUS_ADE_SESSION_TOKEN is present.
 		return { socketPath, token: sessionToken, usingSessionToken: true };
 	}
+	const socketOverride = envSocketOverride;
 	const tokenOverride = env.AEXUS_ADE_TOKEN?.trim();
 	if (socketOverride && tokenOverride !== undefined) {
 		return { socketPath: socketOverride, token: tokenOverride, usingSessionToken: false };
@@ -2400,9 +2035,11 @@ function sendSocketRequest(socketPath: string, payload: IAdeControlWireRequest):
 			: net.createConnection(socketPath);
 		let buffer = '';
 		let settled = false;
+		let requestSent = false;
+		const timeoutMs = (payload.action === 'token.complete' || payload.action === 'mission.check.run') ? 315_000 : 125_000;
 		const timer = setTimeout(() => {
-			finish(() => reject(new Error('ADE control request timed out after 125000ms.')));
-		}, 125_000);
+			finish(() => reject(new Error(`ADE control request timed out after ${timeoutMs}ms.`)));
+		}, timeoutMs);
 		const finish = (fn: () => void) => {
 			if (settled) { return; }
 			settled = true;
@@ -2412,6 +2049,7 @@ function sendSocketRequest(socketPath: string, payload: IAdeControlWireRequest):
 		};
 		socket.setEncoding('utf8');
 		socket.on('connect', () => {
+			requestSent = true;
 			socket.write(JSON.stringify(payload) + '\n');
 		});
 		socket.on('data', (chunk: string) => {
@@ -2442,9 +2080,48 @@ function sendSocketRequest(socketPath: string, payload: IAdeControlWireRequest):
 			}
 		});
 		socket.on('error', error => {
-			finish(() => reject(new Error(`Could not connect to ADE control socket (${socketPath}): ${error.message}`)));
+			const wrapped = new Error(`Could not connect to ADE control socket (${socketPath}): ${error.message}`) as Error & { retryableConnectError?: boolean };
+			// Only mark connect-phase failures (before request bytes were transmitted) as safe to retry,
+			// so non-idempotent mutations (token.complete, mission.gate, mission.check.run) can never double-fire.
+			const code = (error as NodeJS.ErrnoException).code;
+			if (!requestSent && (!code || code === 'ECONNREFUSED' || code === 'ENOENT' || code === 'ENOTSOCK' || code === 'ECONNRESET' || code === 'ETIMEDOUT')) {
+				wrapped.retryableConnectError = true;
+			}
+			finish(() => reject(wrapped));
 		});
 	});
+}
+
+function isTransientBridgeConnectError(error: unknown): boolean {
+	return Boolean(error && typeof error === 'object' && (error as { retryableConnectError?: boolean }).retryableConnectError);
+}
+
+async function sendControlRequestWithRetry(
+	env: NodeJS.ProcessEnv,
+	initialSocketPath: string,
+	payload: IAdeControlWireRequest,
+	allowBridgeRetry: boolean,
+): Promise<IAdeControlWireResponse> {
+	const backoffsMs = allowBridgeRetry ? [350, 750, 1_500, 2_500, 4_000] : [];
+	let currentSocketPath = initialSocketPath;
+	let lastError: unknown;
+	for (let attempt = 0; attempt <= backoffsMs.length; attempt++) {
+		try {
+			return await sendSocketRequest(currentSocketPath, payload);
+		} catch (err) {
+			lastError = err;
+			if (attempt >= backoffsMs.length || !isTransientBridgeConnectError(err)) {
+				throw err;
+			}
+			await new Promise<void>(resolve => setTimeout(resolve, backoffsMs[attempt]));
+			// Re-read dynamic remote bridge metadata file on every retry in case the SSH reverse tunnel healed onto a fresh port/socket!
+			const refreshed = await resolveConnection(env).catch(() => undefined);
+			if (refreshed?.socketPath) {
+				currentSocketPath = refreshed.socketPath;
+			}
+		}
+	}
+	throw lastError;
 }
 
 function formatRawBlueprintOutput(result: unknown): string {
@@ -2460,7 +2137,7 @@ function formatRawBlueprintOutput(result: unknown): string {
 			}
 		}
 	}
-	return `${formatHumanOutput('engineering.blueprint.get', result)}\n`;
+	return `${formatHumanOutput('mission.blueprint.get', result)}\n`;
 }
 
 function formatHumanOutput(action: string | undefined, result: unknown): string {
@@ -2471,14 +2148,7 @@ function formatHumanOutput(action: string | undefined, result: unknown): string 
 		return String(result);
 	}
 	const record = result as Record<string, unknown>;
-	if (action === 'engineering.report' && typeof record.markdown === 'string') {
-		return record.markdown.trimEnd();
-	}
-	const diffPayload = typeof record.combinedDiff === 'string' ? record.combinedDiff : record.diff;
-	if (action === 'engineering.diff' && typeof diffPayload === 'string') {
-		return diffPayload || '(No textual diff)';
-	}
-	if (action === 'engineering.blueprint.validate' && typeof record.valid === 'boolean') {
+	if (action === 'mission.blueprint.validate' && typeof record.valid === 'boolean') {
 		if (record.valid) {
 			return 'Blueprint is valid.';
 		}
@@ -2521,44 +2191,7 @@ function formatHumanOutput(action: string | undefined, result: unknown): string 
 		}
 		return lines.join('\n');
 	}
-	const tokenSummary = formatEngineeringTokenSummary(action, result);
-	const json = JSON.stringify(result, null, 2);
-	return tokenSummary ? `${json}\n${tokenSummary}` : json;
-}
-
-function recordTokenTotal(value: unknown): number | undefined {
-	if (!value || typeof value !== 'object') {
-		return undefined;
-	}
-	const tokenUsage = (value as Record<string, unknown>).tokenUsage;
-	if (!tokenUsage || typeof tokenUsage !== 'object') {
-		return undefined;
-	}
-	const usage = tokenUsage as Record<string, unknown>;
-	if (typeof usage.totalTokens === 'number') {
-		return usage.totalTokens;
-	}
-	const total = usage.total;
-	if (total && typeof total === 'object' && typeof (total as Record<string, unknown>).totalTokens === 'number') {
-		return (total as Record<string, unknown>).totalTokens as number;
-	}
-	return undefined;
-}
-
-function formatEngineeringTokenSummary(action: string | undefined, result: unknown): string | undefined {
-	if (action !== 'engineering.list' && action !== 'engineering.status') {
-		return undefined;
-	}
-	if (Array.isArray(result)) {
-		const totals = result.map(recordTokenTotal).filter((value): value is number => typeof value === 'number');
-		if (totals.length === 0) {
-			return undefined;
-		}
-		const total = totals.reduce((sum, value) => sum + value, 0);
-		return `Token usage: ${total} token${total === 1 ? '' : 's'} across ${totals.length} item${totals.length === 1 ? '' : 's'}.`;
-	}
-	const total = recordTokenTotal(result);
-	return total === undefined ? undefined : `Token usage: ${total} token${total === 1 ? '' : 's'}.`;
+	return JSON.stringify(result, null, 2);
 }
 
 export type DoctorCheckStatus = 'ok' | 'warn' | 'fail' | 'error';
@@ -2791,21 +2424,26 @@ function formatDoctorHuman(report: IDoctorReport, color: ICliColorizer): string 
 export { RANK_SUBCOMMANDS };
 
 export const TOP_LEVEL_COMMANDS = [
-	'doctor', 'completion', 'status', 'mode', 'view', 'rank', 'role', 'project', 'host',
-	'engine', 'session', 'secretary', 'mission', 'engineering', 'inbox', 'version',
+	'doctor', 'completion', 'status', 'whoami', 'docs', 'api', 'mode', 'view', 'rank', 'role',
+	'project', 'host', 'engine', 'session', 'secretary', 'mission', 'token', 'org', 'inbox', 'version',
 ] as const;
 
 export const ROLE_SUBCOMMANDS = [
 	'list', 'apis', 'presets', 'preset', 'apply-preset', 'set-tier', 'reset', 'studio',
 ] as const;
 
-export const ENGINEERING_SUBCOMMANDS = [
-	'docs', 'demo', 'generate', 'init', 'list', 'open', 'blueprint', 'run', 'pause', 'resume', 'stop',
-	'remove', 'reset', 'configure', 'template', 'report', 'worktrees', 'verify-trust', 'diff',
-	'reports', 'status', 'review', 'gate', 'watchdog-action',
+export const MISSION_SUBCOMMANDS = [
+	'docs', 'list', 'init', 'open', 'blueprint', 'prompt', 'check', 'start', 'run', 'status', 'pause', 'resume', 'stop',
+	'timeout', 'boundary', 'recall', 'retry', 'patch', 'gate', 'trigger', 'host', 'remove',
 ] as const;
 
-export const VERIFY_TRUST_SUBCOMMANDS = ['list', 'revoke'] as const;
+export const TOKEN_SUBCOMMANDS = [
+	'current', 'trace', 'complete', 'reject', 'block', 'fail', 'retry',
+] as const;
+
+export const ORG_SUBCOMMANDS = [
+	'subordinates', 'send', 'context', 'escalate',
+] as const;
 
 const COMPLETION_SHELLS = ['bash', 'zsh', 'fish', 'powershell'] as const;
 
@@ -2819,8 +2457,9 @@ function buildBashCompletion(): string {
 		`\tlocal top_level="${TOP_LEVEL_COMMANDS.join(' ')}"`,
 		`\tlocal rank_subcommands="${RANK_SUBCOMMANDS.join(' ')}"`,
 		`\tlocal role_subcommands="${ROLE_SUBCOMMANDS.join(' ')}"`,
-		`\tlocal engineering_subcommands="${ENGINEERING_SUBCOMMANDS.join(' ')}"`,
-		`\tlocal verify_trust_subcommands="${VERIFY_TRUST_SUBCOMMANDS.join(' ')}"`,
+		`\tlocal mission_subcommands="${MISSION_SUBCOMMANDS.join(' ')}"`,
+		`\tlocal token_subcommands="${TOKEN_SUBCOMMANDS.join(' ')}"`,
+		`\tlocal org_subcommands="${ORG_SUBCOMMANDS.join(' ')}"`,
 		'',
 		'\tcase "${COMP_WORDS[1]}" in',
 		'\t\tcompletion)',
@@ -2833,17 +2472,27 @@ function buildBashCompletion(): string {
 		'\t\t\tfi',
 		'\t\t\treturn 0',
 		'\t\t\t;;',
-		'\t\trole|roles|org)',
+		'\t\trole|roles)',
 		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
 		'\t\t\t\tCOMPREPLY=( $(compgen -W "$role_subcommands" -- "$cur") )',
 		'\t\t\tfi',
 		'\t\t\treturn 0',
 		'\t\t\t;;',
-		'\t\tmission|engineering)',
+		'\t\torg)',
 		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
-		'\t\t\t\tCOMPREPLY=( $(compgen -W "$engineering_subcommands" -- "$cur") )',
-		'\t\t\telif [ "$COMP_CWORD" -eq 3 ] && [ "${COMP_WORDS[2]}" = "verify-trust" ]; then',
-		'\t\t\t\tCOMPREPLY=( $(compgen -W "$verify_trust_subcommands" -- "$cur") )',
+		'\t\t\t\tCOMPREPLY=( $(compgen -W "$org_subcommands" -- "$cur") )',
+		'\t\t\tfi',
+		'\t\t\treturn 0',
+		'\t\t\t;;',
+		'\t\ttoken)',
+		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
+		'\t\t\t\tCOMPREPLY=( $(compgen -W "$token_subcommands" -- "$cur") )',
+		'\t\t\tfi',
+		'\t\t\treturn 0',
+		'\t\t\t;;',
+		'\t\tmission)',
+		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
+		'\t\t\t\tCOMPREPLY=( $(compgen -W "$mission_subcommands" -- "$cur") )',
 		'\t\t\tfi',
 		'\t\t\treturn 0',
 		'\t\t\t;;',
@@ -2865,11 +2514,14 @@ function buildZshCompletion(): string {
 		'#compdef aexus-ade',
 		'',
 		'_aexus_ade() {',
-		'\tlocal -a top_level rank_subcommands role_subcommands engineering_subcommands verify_trust_subcommands',
+		'\tlocal -a top_level rank_subcommands role_subcommands mission_subcommands token_subcommands org_subcommands',
 		'\ttop_level=(',
 		`\t\t'doctor:Diagnose the ADE environment'`,
 		`\t\t'completion:Emit a shell completion script'`,
 		`\t\t'status:Show workbench status'`,
+		`\t\t'whoami:Inspect caller session identity and tier'`,
+		`\t\t'docs:Read single-copy ADE API documentation'`,
+		`\t\t'api:Query immutable API changelog diff'`,
 		`\t\t'mode:Get or set ADE/IDE mode'`,
 		`\t\t'view:Inspect or change the ADE view'`,
 		`\t\t'rank:Inspect or hot-update rank tiers, aliases, and single-copy docs'`,
@@ -2879,9 +2531,10 @@ function buildZshCompletion(): string {
 		`\t\t'engine:List engines and sessions'`,
 		`\t\t'session:Manage sessions'`,
 		`\t\t'secretary:Control the secretary session'`,
-		`\t\t'mission:Manage Missions and Mission API docs'`,
-		`\t\t'engineering:Manage Missions (legacy alias)'`,
-		`\t\t'inbox:Manage the governor inbox'`,
+		`\t\t'mission:Manage Missions, Mermaid DAGs, prompts, and runtime'`,
+		`\t\t'token:In-graph Mission Token Bus commands'`,
+		`\t\t'org:Off-graph strictly top-down supervision commands'`,
+		`\t\t'inbox:Manage the ADE Inbox'`,
 		`\t\t'version:Print the CLI version'`,
 		'\t)',
 		'\trank_subcommands=(',
@@ -2902,35 +2555,44 @@ function buildZshCompletion(): string {
 		`\t\t'reset:Reset organization roles to default'`,
 		`\t\t'studio:Open Organization and Roles Studio'`,
 		'\t)',
-		'\tengineering_subcommands=(',
+		'\tmission_subcommands=(',
 		`\t\t'docs:Locate sibling MISSION_API.md documentation'`,
-		`\t\t'demo:Create a demo mission'`,
-		`\t\t'generate:Generate an engineering DAG blueprint from a goal prompt'`,
-		`\t\t'init:Initialize an engineering tree'`,
-		`\t\t'list:List engineering trees'`,
-		`\t\t'open:Open an engineering tree'`,
-		`\t\t'blueprint:Get, apply, or validate a blueprint'`,
-		`\t\t'run:Start execution'`,
-		`\t\t'pause:Pause execution'`,
-		`\t\t'resume:Resume execution'`,
-		`\t\t'stop:Stop execution'`,
-		`\t\t'remove:Remove an engineering tree'`,
-		`\t\t'reset:Reset node state'`,
-		`\t\t'configure:Configure engines and budgets'`,
-		`\t\t'template:List or apply recipes'`,
-		`\t\t'report:Write a verification report'`,
-		`\t\t'worktrees:Merge or clean up worktrees'`,
-		`\t\t'verify-trust:Inspect or revoke trusted verify command hashes'`,
-		`\t\t'diff:Show a node diff'`,
-		`\t\t'reports:List node reports'`,
-		`\t\t'status:Show node status'`,
-		`\t\t'review:Submit an acceptance review'`,
-		`\t\t'gate:Submit a quality gate verdict'`,
-		`\t\t'watchdog-action:Send a watchdog action'`,
+		`\t\t'list:List Missions'`,
+		`\t\t'init:Initialize a Mission'`,
+		`\t\t'open:Open a Mission canvas'`,
+		`\t\t'blueprint:Get, apply, or validate a Mermaid DAG blueprint'`,
+		`\t\t'prompt:List, get, set, or clear per-node pre-prompts'`,
+		`\t\t'check:Configure, inspect, remove, or dry-run zero-cost deterministic verification hooks'`,
+		`\t\t'start:Start Mission execution'`,
+		`\t\t'run:Start Mission execution'`,
+		`\t\t'status:Show live Mission runtime status'`,
+		`\t\t'pause:Pause Mission execution'`,
+		`\t\t'resume:Resume Mission execution'`,
+		`\t\t'stop:Stop Mission execution'`,
+		`\t\t'timeout:Set Watchdog silence timeout in minutes'`,
+		`\t\t'boundary:Get or set off-graph tier boundary and supervisors'`,
+		`\t\t'recall:Recall in-flight tokens in jurisdiction'`,
+		`\t\t'retry:Retry a frozen/failed token in place'`,
+		`\t\t'patch:Atomically patch unfinished DAG topology'`,
+		`\t\t'gate:Approve or reject a waiting Human Gate'`,
+		`\t\t'trigger:List, set, or remove zero-token source triggers'`,
+		`\t\t'host:Bind a Mission node to Local or a Cloud Host'`,
+		`\t\t'remove:Remove a Mission and generated employees'`,
 		'\t)',
-		'\tverify_trust_subcommands=(',
-		`\t\t'list:List trusted verify command hashes'`,
-		`\t\t'revoke:Revoke one or all trusted verify command hashes'`,
+		'\ttoken_subcommands=(',
+		`\t\t'current:Inspect active tokens held by this node'`,
+		`\t\t'trace:Expand a token trace pointer'`,
+		`\t\t'complete:Complete a token with a plain-text summary'`,
+		`\t\t'reject:Reject an upstream token back to a prior node'`,
+		`\t\t'block:Declare a long-running blocked token with optional wakeup watch'`,
+		`\t\t'fail:Report failure on a token'`,
+		`\t\t'retry:Retry a failed token'`,
+		'\t)',
+		'\torg_subcommands=(',
+		`\t\t'subordinates:List managed subordinates and Mission jurisdictions'`,
+		`\t\t'send:Send a top-down directive to a managed subordinate'`,
+		`\t\t'context:Pull recent conversation transcript of a managed subordinate'`,
+		`\t\t'escalate:Escalate an unresolved failure upward'`,
 		'\t)',
 		'',
 		'\tif (( CURRENT == 2 )); then',
@@ -2939,12 +2601,14 @@ function buildZshCompletion(): string {
 		`\t\t_values 'shell' ${COMPLETION_SHELLS.join(' ')}`,
 		'\telif [[ ( ${words[2]} == rank || ${words[2]} == ranks ) && CURRENT == 3 ]]; then',
 		`\t\t_describe -t commands 'rank command' rank_subcommands`,
-		'\telif [[ ( ${words[2]} == role || ${words[2]} == roles || ${words[2]} == org ) && CURRENT == 3 ]]; then',
+		'\telif [[ ( ${words[2]} == role || ${words[2]} == roles ) && CURRENT == 3 ]]; then',
 		`\t\t_describe -t commands 'role command' role_subcommands`,
-		'\telif [[ ( ${words[2]} == mission || ${words[2]} == engineering ) && CURRENT == 3 ]]; then',
-		`\t\t_describe -t commands 'mission command' engineering_subcommands`,
-		'\telif [[ ( ${words[2]} == mission || ${words[2]} == engineering ) && ${words[3]} == verify-trust && CURRENT == 4 ]]; then',
-		`\t\t_describe -t commands 'verify-trust command' verify_trust_subcommands`,
+		'\telif [[ ${words[2]} == org && CURRENT == 3 ]]; then',
+		`\t\t_describe -t commands 'org command' org_subcommands`,
+		'\telif [[ ${words[2]} == token && CURRENT == 3 ]]; then',
+		`\t\t_describe -t commands 'token command' token_subcommands`,
+		'\telif [[ ${words[2]} == mission && CURRENT == 3 ]]; then',
+		`\t\t_describe -t commands 'mission command' mission_subcommands`,
 		'\tfi',
 		'}',
 		'',
@@ -2962,6 +2626,9 @@ function buildFishCompletion(): string {
 		doctor: 'Diagnose the ADE environment',
 		completion: 'Emit a shell completion script',
 		status: 'Show workbench status',
+		whoami: 'Inspect caller session identity and tier',
+		docs: 'Read single-copy ADE API documentation',
+		api: 'Query immutable API changelog diff',
 		mode: 'Get or set ADE/IDE mode',
 		view: 'Inspect or change the ADE view',
 		rank: 'Inspect or hot-update rank tiers, aliases, and single-copy docs',
@@ -2971,9 +2638,10 @@ function buildFishCompletion(): string {
 		engine: 'List engines and sessions',
 		session: 'Manage sessions',
 		secretary: 'Control the secretary session',
-		mission: 'Manage Missions and Mission API docs',
-		engineering: 'Manage Missions (legacy alias)',
-		inbox: 'Manage the governor inbox',
+		mission: 'Manage Missions, Mermaid DAGs, prompts, and runtime',
+		token: 'In-graph Mission Token Bus commands',
+		org: 'Off-graph strictly top-down supervision commands',
+		inbox: 'Manage the ADE Inbox',
 		version: 'Print the CLI version',
 	};
 	for (const command of TOP_LEVEL_COMMANDS) {
@@ -3004,41 +2672,53 @@ function buildFishCompletion(): string {
 	for (const command of ROLE_SUBCOMMANDS) {
 		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from role' -a ${command} -d '${roleDescriptions[command]}'`);
 	}
-	const engineeringDescriptions: Record<(typeof ENGINEERING_SUBCOMMANDS)[number], string> = {
+	const missionDescriptions: Record<(typeof MISSION_SUBCOMMANDS)[number], string> = {
 		docs: 'Locate sibling MISSION_API.md documentation',
-		demo: 'Create a demo mission',
-		generate: 'Generate an engineering DAG blueprint from a goal prompt',
-		init: 'Initialize an engineering tree',
-		list: 'List engineering trees',
-		open: 'Open an engineering tree',
-		blueprint: 'Get, apply, or validate a blueprint',
-		run: 'Start execution',
-		pause: 'Pause execution',
-		resume: 'Resume execution',
-		stop: 'Stop execution',
-		remove: 'Remove an engineering tree',
-		reset: 'Reset node state',
-		configure: 'Configure engines and budgets',
-		template: 'List or apply recipes',
-		report: 'Write a verification report',
-		worktrees: 'Merge or clean up worktrees',
-		'verify-trust': 'Inspect or revoke trusted verify command hashes',
-		diff: 'Show a node diff',
-		reports: 'List node reports',
-		status: 'Show node status',
-		review: 'Submit an acceptance review',
-		gate: 'Submit a quality gate verdict',
-		'watchdog-action': 'Send a watchdog action',
+		list: 'List Missions',
+		init: 'Initialize a Mission',
+		open: 'Open a Mission canvas',
+		blueprint: 'Get, apply, or validate a Mermaid DAG blueprint',
+		prompt: 'List, get, set, or clear per-node pre-prompts',
+		check: 'Configure, inspect, remove, or dry-run zero-cost deterministic verification hooks',
+		start: 'Start Mission execution',
+		run: 'Start Mission execution',
+		status: 'Show live Mission runtime status',
+		pause: 'Pause Mission execution',
+		resume: 'Resume Mission execution',
+		stop: 'Stop Mission execution',
+		timeout: 'Set Watchdog silence timeout in minutes',
+		boundary: 'Get or set off-graph tier boundary and supervisors',
+		recall: 'Recall in-flight tokens in jurisdiction',
+		retry: 'Retry a frozen/failed token in place',
+		patch: 'Atomically patch unfinished DAG topology',
+		gate: 'Approve or reject a waiting Human Gate',
+		trigger: 'List, set, or remove zero-token source triggers',
+		host: 'Bind a Mission node to Local or a Cloud Host',
+		remove: 'Remove a Mission and generated employees',
 	};
-	for (const command of ENGINEERING_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from engineering; and not __fish_seen_subcommand_from verify-trust' -a ${command} -d '${engineeringDescriptions[command]}'`);
+	for (const command of MISSION_SUBCOMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from mission' -a ${command} -d '${missionDescriptions[command]}'`);
 	}
-	const verifyTrustDescriptions: Record<(typeof VERIFY_TRUST_SUBCOMMANDS)[number], string> = {
-		list: 'List trusted verify command hashes',
-		revoke: 'Revoke one or all trusted verify command hashes',
+	const tokenDescriptions: Record<(typeof TOKEN_SUBCOMMANDS)[number], string> = {
+		current: 'Inspect active tokens held by this node',
+		trace: 'Expand a token trace pointer',
+		complete: 'Complete a token with a plain-text summary',
+		reject: 'Reject an upstream token back to a prior node',
+		block: 'Declare a long-running blocked token',
+		fail: 'Report failure on a token',
+		retry: 'Retry a failed token',
 	};
-	for (const command of VERIFY_TRUST_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from engineering; and __fish_seen_subcommand_from verify-trust' -a ${command} -d '${verifyTrustDescriptions[command]}'`);
+	for (const command of TOKEN_SUBCOMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from token' -a ${command} -d '${tokenDescriptions[command]}'`);
+	}
+	const orgDescriptions: Record<(typeof ORG_SUBCOMMANDS)[number], string> = {
+		subordinates: 'List managed subordinates and Mission jurisdictions',
+		send: 'Send a top-down directive to a managed subordinate',
+		context: 'Pull recent conversation transcript of a managed subordinate',
+		escalate: 'Escalate an unresolved failure upward',
+	};
+	for (const command of ORG_SUBCOMMANDS) {
+		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from org' -a ${command} -d '${orgDescriptions[command]}'`);
 	}
 	lines.push('');
 	return lines.join('\n');
@@ -3055,8 +2735,9 @@ function buildPowerShellCompletion(): string {
 		`\t$shells = @(${quoteList(COMPLETION_SHELLS)})`,
 		`\t$roleSubcommands = @(${quoteList(ROLE_SUBCOMMANDS)})`,
 		`\t$rankSubcommands = @(${quoteList(RANK_SUBCOMMANDS)})`,
-		`\t$engineeringSubcommands = @(${quoteList(ENGINEERING_SUBCOMMANDS)})`,
-		`\t$verifyTrustSubcommands = @(${quoteList(VERIFY_TRUST_SUBCOMMANDS)})`,
+		`\t$missionSubcommands = @(${quoteList(MISSION_SUBCOMMANDS)})`,
+		`\t$tokenSubcommands = @(${quoteList(TOKEN_SUBCOMMANDS)})`,
+		`\t$orgSubcommands = @(${quoteList(ORG_SUBCOMMANDS)})`,
 		'\t$candidates = @()',
 		'\tif ($tokens.Count -le 2 -and ($tokens.Count -eq 1 -or $wordToComplete)) {',
 		'\t\t$candidates = $topLevel',
@@ -3064,14 +2745,10 @@ function buildPowerShellCompletion(): string {
 		'\t\tswitch ($tokens[1]) {',
 		'\t\t\t\'completion\' { $candidates = $shells }',
 		'\t\t\t{ $_ -in @(\'rank\', \'ranks\') } { $candidates = $rankSubcommands }',
-		'\t\t\t{ $_ -in @(\'role\', \'roles\', \'org\') } { $candidates = $roleSubcommands }',
-		'\t\t\t{ $_ -in @(\'mission\', \'engineering\') } {',
-		'\t\t\t\tif ($tokens.Count -ge 3 -and $tokens[2] -eq \'verify-trust\') {',
-		'\t\t\t\t\t$candidates = $verifyTrustSubcommands',
-		'\t\t\t\t} else {',
-		'\t\t\t\t\t$candidates = $engineeringSubcommands',
-		'\t\t\t\t}',
-		'\t\t\t}',
+		'\t\t\t{ $_ -in @(\'role\', \'roles\') } { $candidates = $roleSubcommands }',
+		'\t\t\t\'org\' { $candidates = $orgSubcommands }',
+		'\t\t\t\'token\' { $candidates = $tokenSubcommands }',
+		'\t\t\t\'mission\' { $candidates = $missionSubcommands }',
 		'\t\t}',
 		'\t}',
 		`\t$candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {`,
@@ -3141,7 +2818,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		const { socketPath, token, usingSessionToken } = await resolveConnection(env);
 		const normalizedParams = await canonicalizeParamsPaths(parsed.params, parsed.action);
 		if (
-			(parsed.action === 'engineering.blueprint.apply' || parsed.action === 'engineering.blueprint.validate' || parsed.action === 'mission.blueprint.apply' || parsed.action === 'mission.blueprint.validate')
+			(parsed.action === 'mission.blueprint.apply' || parsed.action === 'mission.blueprint.validate')
 			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.text === undefined
 		) {
 			normalizedParams.text = await fs.readFile(normalizedParams.file, 'utf8');
@@ -3151,6 +2828,12 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.mermaid === undefined
 		) {
 			normalizedParams.mermaid = await fs.readFile(normalizedParams.file, 'utf8');
+		}
+		if (
+			parsed.action === 'mission.prompt.set'
+			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.prompt === undefined && normalizedParams.clear !== true
+		) {
+			normalizedParams.prompt = await fs.readFile(normalizedParams.file, 'utf8');
 		}
 		let effectiveParams: Record<string, unknown> | undefined = normalizedParams;
 		if (usingSessionToken) {
@@ -3174,15 +2857,21 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 				effectiveParams = { ...(effectiveParams ?? {}), caller };
 			}
 		}
+		const envWindowIdRaw = env.AEXUS_ADE_WINDOW_ID?.trim();
+		const envWindowId = envWindowIdRaw && /^\d+$/.test(envWindowIdRaw) && Number(envWindowIdRaw) > 0
+			? Number(envWindowIdRaw)
+			: undefined;
+		const effectiveWindowId = parsed.windowId ?? envWindowId;
 		const makeRequest = (action: string): IAdeControlWireRequest => ({
 			token,
 			action,
 			params: effectiveParams,
-			...(parsed.windowId !== undefined ? { windowId: parsed.windowId } : {}),
+			...(effectiveWindowId !== undefined ? { windowId: effectiveWindowId } : {}),
 		});
-		let response = await sendSocketRequest(socketPath, makeRequest(parsed.action!));
+		const allowBridgeRetry = Boolean(usingSessionToken && (env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim() || env.AEXUS_ADE_TCP_PORT?.trim() || env.AEXUS_ADE_SOCKET?.trim()));
+		let response = await sendControlRequestWithRetry(env, socketPath, makeRequest(parsed.action!), allowBridgeRetry);
 		if (!response.ok && parsed.fallbackAction && /unknown|unsupported/i.test(response.error ?? '')) {
-			response = await sendSocketRequest(socketPath, makeRequest(parsed.fallbackAction));
+			response = await sendControlRequestWithRetry(env, socketPath, makeRequest(parsed.fallbackAction), allowBridgeRetry);
 		}
 		if (!response.ok) {
 			if (parsed.json) {
@@ -3192,22 +2881,6 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			}
 			return 1;
 		}
-		if (
-			parsed.action === 'engineering.report'
-			&& typeof parsed.params?.outFile === 'string'
-			&& response.result && typeof response.result === 'object'
-			&& typeof (response.result as Record<string, unknown>).markdown === 'string'
-		) {
-			const outPath = parsed.params.outFile;
-			await fs.mkdir(path.dirname(outPath), { recursive: true });
-			await fs.writeFile(outPath, (response.result as Record<string, unknown>).markdown as string, 'utf8');
-			if (parsed.json) {
-				writeOut(JSON.stringify({ ok: true, outFile: outPath, ...(response.result as Record<string, unknown>) }, null, 2) + '\n');
-			} else {
-				writeOut(`Wrote verification report to ${outPath}\n`);
-			}
-			return 0;
-		}
 		const outputPayload = parsed.action === 'status' && response.result && typeof response.result === 'object' && !Array.isArray(response.result)
 			? { schemaVersion: ADE_CLI_SCHEMA_VERSION, ...(response.result as Record<string, unknown>) }
 			: response.result;
@@ -3216,7 +2889,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		} else if (parsed.action === 'docs.read' && outputPayload && typeof outputPayload === 'object' && typeof (outputPayload as Record<string, unknown>).content === 'string') {
 			const content = (outputPayload as Record<string, unknown>).content as string;
 			writeOut(content.endsWith('\n') ? content : `${content}\n`);
-		} else if (parsed.action === 'engineering.blueprint.get' && parsed.params?.raw === true) {
+		} else if (parsed.action === 'mission.blueprint.get' && parsed.params?.raw === true) {
 			writeOut(formatRawBlueprintOutput(outputPayload));
 		} else {
 			writeOut(formatHumanOutput(parsed.action, outputPayload) + '\n');

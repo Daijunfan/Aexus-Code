@@ -77,9 +77,7 @@ import {
 	ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID,
 	ADE_INSPECTOR_CONTAINER_ID,
 	ADE_OPEN_CONFIG_COMMAND_ID,
-	ADE_OPEN_ENGINEERING_COMMAND_ID,
 	ADE_OPEN_MISSION_COMMAND_ID,
-	ADE_OPEN_RESEARCH_COMMAND_ID,
 	ADE_OPEN_ROLE_STUDIO_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
 	ADE_REMOVE_MISSION_COMMAND_ID,
@@ -218,7 +216,6 @@ class AdeEditorContribution extends Disposable implements IWorkbenchContribution
 }
 
 export const ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID = 'workbench.action.ade.toggleAutonomousMode';
-export const ADE_MANAGE_TRUSTED_VERIFY_COMMAND_ID = 'workbench.action.ade.manageTrustedVerifyCommands';
 export const ADE_TOGGLE_PROMPT_TO_DAG_COMMAND_ID = 'workbench.action.ade.togglePromptToDagBar';
 
 export class AdeAutonomousModeStatusContribution extends Disposable implements IWorkbenchContribution {
@@ -244,13 +241,13 @@ export class AdeAutonomousModeStatusContribution extends Disposable implements I
 	}
 
 	private buildEntry(): IStatusbarEntry {
-		const autonomous = readTrustedApplicationConfigValue<boolean>(this.configurationService, 'aexus.ade.autonomousMode') === true;
+		const autonomous = readTrustedApplicationConfigValue<boolean>(this.configurationService, 'aexus.ade.autonomousMode') !== false;
 		if (autonomous) {
 			return {
 				name: localize('adeStatusModeName', "Aexus ADE Permission Mode"),
 				text: `$(flame) ${localize('adeStatusAutonomousText', "ADE: Autonomous")}`,
-				ariaLabel: localize('adeStatusAutonomousAria', "Aexus ADE Permission Mode: Autonomous. Click to toggle back to Safe Mode."),
-				tooltip: localize('adeStatusAutonomousTooltip', "Aexus ADE is in Autonomous Mode (aexus.ade.autonomousMode = true). Click to switch back to Safe Mode."),
+				ariaLabel: localize('adeStatusAutonomousAria', "Aexus ADE Permission Mode: Full Access (Autonomous). Click to switch to Safe Mode."),
+				tooltip: localize('adeStatusAutonomousTooltip', "Aexus ADE is in Full Access / Autonomous Mode (aexus.ade.autonomousMode = true). Click to switch to Safe Mode."),
 				command: ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID,
 				kind: 'warning',
 			};
@@ -258,8 +255,8 @@ export class AdeAutonomousModeStatusContribution extends Disposable implements I
 		return {
 			name: localize('adeStatusModeName', "Aexus ADE Permission Mode"),
 			text: `$(shield) ${localize('adeStatusSafeText', "ADE: Safe Mode")}`,
-			ariaLabel: localize('adeStatusSafeAria', "Aexus ADE Permission Mode: Safe Mode. Click to toggle Autonomous Mode."),
-			tooltip: localize('adeStatusSafeTooltip', "Aexus ADE is in Safe Mode (aexus.ade.autonomousMode = false). Click to switch to Autonomous Mode."),
+			ariaLabel: localize('adeStatusSafeAria', "Aexus ADE Permission Mode: Safe Mode. Click to switch to Full Access (Autonomous)."),
+			tooltip: localize('adeStatusSafeTooltip', "Aexus ADE is in Safe Mode (aexus.ade.autonomousMode = false). Click to switch to Full Access (Autonomous Mode)."),
 			command: ADE_TOGGLE_AUTONOMOUS_MODE_COMMAND_ID,
 			kind: 'standard',
 		};
@@ -375,10 +372,10 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 		},
 		'aexus.ade.autonomousMode': {
 			type: 'boolean',
-			default: false,
+			default: true,
 			scope: ConfigurationScope.APPLICATION,
 			restricted: true,
-			description: localize('adeAutonomousModeDesc', "Application-scoped toggle controlling whether ADE sessions may run with elevated autonomous execution flags. Restricted to prevent repository settings from enabling autonomous mode."),
+			description: localize('adeAutonomousModeDesc', "Application-scoped toggle controlling whether local and cloud ADE agent sessions default to Full Access / autonomous execution flags (enabled by default). Restricted to prevent repository settings from modifying it."),
 		},
 	},
 });
@@ -1294,38 +1291,6 @@ registerAction2(class RemoveAdeMissionAction extends Action2 {
 	}
 });
 
-registerAction2(class OpenAdeEngineeringAction extends Action2 {
-	constructor() {
-		super({
-			id: ADE_OPEN_ENGINEERING_COMMAND_ID,
-			title: localize2('adeOpenEngineeringActionTitle', "Open ADE Mission (Legacy Engineering Alias)"),
-			icon: Codicon.typeHierarchySub,
-			f1: false,
-		});
-	}
-
-	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
-		accessor.get(IWorkbenchModeService).setMode('ade');
-		await openOrCreateMissionCanvas(accessor, target);
-	}
-});
-
-registerAction2(class OpenAdeResearchAction extends Action2 {
-	constructor() {
-		super({
-			id: ADE_OPEN_RESEARCH_COMMAND_ID,
-			title: localize2('adeOpenResearchActionTitle', "Open ADE Mission (Legacy Research Alias)"),
-			icon: Codicon.typeHierarchySub,
-			f1: false,
-		});
-	}
-
-	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
-		accessor.get(IWorkbenchModeService).setMode('ade');
-		await openOrCreateMissionCanvas(accessor, target);
-	}
-});
-
 registerAction2(class OpenAdeInboxAction extends Action2 {
 	constructor() {
 		super({
@@ -1371,7 +1336,7 @@ registerAction2(class NewSubSessionAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(parent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeSubSession', "'{0}' belongs to a locked ADE Engineering tree. Edit its DAG topology on the Engineering canvas.", parent.label));
+			notifications.info(localize('adeLockedByWorkTreeSubSession', "'{0}' belongs to a locked ADE Mission. Edit its DAG topology on the Mission canvas.", parent.label));
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
@@ -1438,7 +1403,7 @@ registerAction2(class RecruitSubordinateAgentAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(parent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeRecruit', "'{0}' belongs to a locked ADE Engineering tree. Edit its DAG topology on the Engineering canvas.", parent.label));
+			notifications.info(localize('adeLockedByWorkTreeRecruit', "'{0}' belongs to a locked ADE Mission. Edit its DAG topology on the Mission canvas.", parent.label));
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
@@ -1512,7 +1477,7 @@ registerAction2(class SetAgentRoleAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(agent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeSetRole', "'{0}' has a fixed organizational rank in an ADE Engineering tree and cannot be changed manually.", agent.label));
+			notifications.info(localize('adeLockedByWorkTreeSetRole', "'{0}' has a fixed organizational rank in an ADE Mission and cannot be changed manually.", agent.label));
 			return;
 		}
 		const subs = projects.getDirectSubordinates(agent.id);
@@ -1571,7 +1536,7 @@ registerAction2(class ReparentAgentAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(agent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeReparent', "'{0}' belongs to a locked ADE Engineering tree and cannot be moved.", agent.label));
+			notifications.info(localize('adeLockedByWorkTreeReparent', "'{0}' belongs to a locked ADE Mission and cannot be moved.", agent.label));
 			return;
 		}
 		interface ISupervisorPickItem extends IQuickPickItem {
@@ -2150,11 +2115,11 @@ registerAction2(class ToggleAdeAutonomousModeAction extends Action2 {
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const configurationService = accessor.get(IConfigurationService);
 		const notifications = accessor.get(INotificationService);
-		const current = readTrustedApplicationConfigValue<boolean>(configurationService, 'aexus.ade.autonomousMode') === true;
+		const current = readTrustedApplicationConfigValue<boolean>(configurationService, 'aexus.ade.autonomousMode') !== false;
 		const next = !current;
 		await configurationService.updateValue('aexus.ade.autonomousMode', next, ConfigurationTarget.USER);
 		notifications.info(next
-			? localize('adeAutonomousModeEnabledNotice', "Aexus ADE switched to Autonomous Mode (aexus.ade.autonomousMode = true).")
+			? localize('adeAutonomousModeEnabledNotice', "Aexus ADE switched to Full Access / Autonomous Mode (aexus.ade.autonomousMode = true).")
 			: localize('adeSafeModeEnabledNotice', "Aexus ADE switched to Safe Mode (aexus.ade.autonomousMode = false)."));
 	}
 });

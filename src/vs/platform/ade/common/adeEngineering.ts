@@ -87,6 +87,28 @@ export interface IAdeApiDocReadResult {
 	readonly error?: string;
 }
 
+function fnv1aHash32Hex(input: string, seed: number): string {
+	let hash = seed >>> 0;
+	for (let i = 0; i < input.length; i++) {
+		hash ^= input.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Deterministic remote persistent session prefix shared identically with `extensions/aexus-agents/src/cloudTransport.ts`.
+ */
+export function buildAdeRemotePersistentPrefix(engineId: string, scopeOrSessionId: string): string {
+	const normEngine = engineId.trim().toLowerCase().replace(/^aexus-/, '').replace(/[^a-z0-9]+/g, '').slice(0, 12) || 'agent';
+	const rawKey = scopeOrSessionId.trim() || 'session';
+	const safeHead = rawKey.replace(/[^A-Za-z0-9]+/g, '').slice(0, 10) || 's';
+	const h1 = fnv1aHash32Hex(rawKey, 0x811c9dc5);
+	const h2 = fnv1aHash32Hex(`${normEngine}:${rawKey}`, 0x9e3779b9);
+	const cleaned = `${normEngine}-${safeHead}-${h1}${h2.slice(0, 4)}`.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '');
+	return (cleaned || 'session').slice(0, 64);
+}
+
 export interface IAdeWatchdogTokenSpec {
 	readonly tokenId: string;
 	readonly nodeId: string;
@@ -94,6 +116,10 @@ export interface IAdeWatchdogTokenSpec {
 	readonly status: MissionTokenStatus;
 	readonly lastActivityAt: number;
 	readonly lastNudgeAt?: number;
+	/** Cloud host alias (`aexus-ssh` authority) when the token holder executes on a remote host. */
+	readonly hostAlias?: string;
+	/** Deterministic persistent session prefix (`buildAdeRemotePersistentPrefix`) for fast dead-session probing. */
+	readonly remoteSessionPrefix?: string;
 	readonly blocked?: {
 		readonly reason: string;
 		readonly startedAt: number;
@@ -101,6 +127,8 @@ export interface IAdeWatchdogTokenSpec {
 		readonly expiresAt: number;
 		readonly watchPid?: number;
 		readonly watchFile?: string;
+		/** File mtime (ms on the target host's own clock) captured when blocked, or `null` if file did not exist yet (eliminates cross-host clock drift). */
+		readonly initialFileMtime?: number | null;
 		readonly hostAlias?: string;
 	};
 }
@@ -111,6 +139,10 @@ export interface IAdeMissionWatchdogSnapshot {
 	readonly silenceTimeoutMinutes: number;
 	readonly tokens: readonly IAdeWatchdogTokenSpec[];
 	readonly triggers: readonly IMissionSourceTrigger[];
+	/** Main-process IPC context (e.g. `window:<id>`) that currently owns watchdog execution for this Mission. */
+	readonly ownerWindowCtx?: string;
+	/** When true (e.g. passive window startup rehydration), keep any existing live owner instead of hijacking it. */
+	readonly preserveExistingOwner?: boolean;
 }
 
 export interface IAdeWatchdogWakeupEvent {
@@ -118,9 +150,10 @@ export interface IAdeWatchdogWakeupEvent {
 	readonly tokenId: string;
 	readonly nodeId: string;
 	readonly holderAgentId?: string;
-	readonly reason: 'silence_timeout' | 'block_expired' | 'pid_exited' | 'file_ready';
+	readonly reason: 'silence_timeout' | 'block_expired' | 'pid_exited' | 'file_ready' | 'agent_exited';
 	readonly detail?: string;
 	readonly timestamp: number;
+	readonly ownerWindowCtx?: string;
 }
 
 export interface IAdeSourceTriggerFireEvent {
@@ -130,7 +163,43 @@ export interface IAdeSourceTriggerFireEvent {
 	readonly kind: IMissionSourceTrigger['kind'];
 	readonly detail?: string;
 	readonly timestamp: number;
+	readonly ownerWindowCtx?: string;
 }
+
+export interface IAdeDeterministicCheckRequest {
+	readonly checkId: string;
+	readonly name?: string;
+	readonly command?: string;
+	readonly expectExitCode?: number;
+	readonly cwd?: string;
+	readonly hostAlias?: string;
+	readonly expectFiles?: readonly string[];
+	readonly expectOutputMatch?: string;
+	readonly timeoutMs?: number;
+}
+
+export interface IAdeDeterministicCheckResponse {
+	readonly checkId: string;
+	readonly name?: string;
+	readonly command?: string;
+	readonly hostAlias: string;
+	readonly cwd?: string;
+	readonly passed: boolean;
+	readonly exitCode: number;
+	readonly expectedExitCode: number;
+	readonly timedOut?: boolean;
+	readonly durationMs: number;
+	readonly missingFiles?: readonly string[];
+	readonly outputMatchFailed?: boolean;
+	readonly outputTail: string;
+	readonly error?: string;
+}
+
+export type IAdeInboxMutation =
+	| { readonly kind: 'upsert'; readonly item: IAdeInboxItem }
+	| { readonly kind: 'markRead'; readonly id?: string }
+	| { readonly kind: 'resolve'; readonly id: string; readonly resolution?: string; readonly resolvedAt: number }
+	| { readonly kind: 'removeGovernor'; readonly governorSessionId: string };
 
 export const IAdeEngineeringBackendService = createDecorator<IAdeEngineeringBackendService>('adeEngineeringBackendService');
 
@@ -139,19 +208,29 @@ export const IAdeEngineeringBackendService = createDecorator<IAdeEngineeringBack
  * 1) Single-copy API docs sync & lazy read (`<adeHome>/docs/`)
  * 2) Lightweight Inbox JSON persistence (`<adeHome>/inbox.json`)
  * 3) Local Mission Watchdog Daemon & zero-token Source Trigger Monitor (local + remote SSH)
+ * 4) Zero-token deterministic verification hooks (local + remote SSH)
  */
 export interface IAdeEngineeringBackendService {
 	readonly _serviceBrand: undefined;
 	readonly onDidWatchdogWakeup?: Event<IAdeWatchdogWakeupEvent>;
 	readonly onDidSourceTriggerFire?: Event<IAdeSourceTriggerFireEvent>;
+	readonly onDidInboxChange?: Event<readonly IAdeInboxItem[]>;
+	/** Fired when the OS resumes from sleep/suspend so renderer & extension host immediately heal SSH tunnels and reattach. */
+	readonly onDidSystemResume?: Event<number>;
 
 	loadInbox(): Promise<IAdeInboxItem[]>;
 	saveInbox(items: readonly IAdeInboxItem[]): Promise<void>;
+	mutateInbox?(mutation: IAdeInboxMutation): Promise<IAdeInboxItem[]>;
 	syncApiDocs?(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths>;
 	getApiDocsPaths?(rankCount: number): Promise<IAdeDocsPaths>;
 	readApiDoc?(target: string, config?: IAdeOrganizationConfig): Promise<IAdeApiDocReadResult>;
 	syncMissionWatchdog?(snapshot: IAdeMissionWatchdogSnapshot): Promise<void>;
 	removeMissionWatchdog?(missionId: string): Promise<void>;
+	/** Returns false only when another currently live window owns this Mission's watchdog, preventing multi-window duplicate auto-recovery. */
+	canRecoverMission?(missionId: string): Promise<boolean>;
+	notifySystemResume?(): Promise<void>;
+	probeFileMtime?(hostAlias: string, filePath: string): Promise<number | null>;
+	runDeterministicCheck?(request: IAdeDeterministicCheckRequest): Promise<IAdeDeterministicCheckResponse>;
 }
 
 export const IAdeInboxService = createDecorator<IAdeInboxService>('adeInboxService');

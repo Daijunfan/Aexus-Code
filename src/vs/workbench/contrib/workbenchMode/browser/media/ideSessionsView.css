@@ -1,0 +1,586 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.monaco-workbench .aexus-ide-sessions-pane {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	overflow: hidden;
+	color: var(--vscode-sideBar-foreground);
+	background: var(--vscode-sideBar-background);
+}
+
+.monaco-workbench .aexus-ide-sessions-list-shell,
+.monaco-workbench .aexus-ide-chat-shell {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: hidden;
+}
+
+.monaco-workbench .aexus-ide-sessions-list-shell[hidden],
+.monaco-workbench .aexus-ide-chat-shell[hidden] {
+	display: none;
+}
+
+/* Header: Active Project + OS Icon + Pure Native isolation badge */
+.monaco-workbench .aexus-ide-sessions-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 10px 6px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .aexus-ide-project-pill {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 5px 8px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 11%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+	color: var(--vscode-foreground);
+	text-align: left;
+	cursor: pointer;
+	transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.monaco-workbench .aexus-ide-project-pill.is-remote {
+	border-color: rgba(56, 189, 248, 0.34);
+	background: rgba(14, 34, 52, 0.42);
+}
+
+.monaco-workbench .aexus-ide-project-pill:hover {
+	border-color: var(--vscode-focusBorder);
+	background: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+}
+
+.monaco-workbench .aexus-ide-project-meta {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.monaco-workbench .aexus-ide-project-name {
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1.25;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-ide-project-path {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-ide-project-chev {
+	flex-shrink: 0;
+	font-size: 11px;
+	opacity: 0.68;
+}
+
+.monaco-workbench .aexus-ide-native-badge {
+	flex-shrink: 0;
+	padding: 2px 7px;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.01em;
+	background: rgba(52, 211, 153, 0.14);
+	border: 1px solid rgba(52, 211, 153, 0.38);
+	color: #6ee7b7;
+	white-space: nowrap;
+}
+
+.monaco-workbench.vs .aexus-ide-native-badge {
+	color: #047857;
+	background: rgba(16, 185, 129, 0.12);
+}
+
+/* OS Icons matching ADE Sidebar */
+.monaco-workbench .aexus-ide-os-icon {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.monaco-workbench .aexus-ide-os-icon > svg {
+	width: 15px;
+	height: 15px;
+	display: block;
+}
+
+.monaco-workbench .aexus-ide-os-icon.ade-os-macos {
+	color: #f5f7fa;
+}
+
+.monaco-workbench.vs .aexus-ide-os-icon.ade-os-macos {
+	color: #1d1d1f;
+}
+
+.monaco-workbench .aexus-ide-os-icon.ade-os-kali {
+	border-radius: 50%;
+	background: linear-gradient(145deg, #38bdf8 0%, #2563eb 52%, #1d4ed8 100%);
+	padding: 1.5px;
+	box-sizing: border-box;
+}
+
+.monaco-workbench .aexus-ide-os-icon.ade-os-kali > svg {
+	width: 13px;
+	height: 13px;
+}
+
+/* Search & Action Toolbar */
+.monaco-workbench .aexus-ide-sessions-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 7px 10px 4px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .aexus-ide-search-wrap {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: 26px;
+	padding: 0 8px;
+	border-radius: 6px;
+	background: var(--vscode-input-background);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .aexus-ide-search-wrap:focus-within {
+	border-color: var(--vscode-focusBorder);
+}
+
+.monaco-workbench .aexus-ide-search-ico {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .aexus-ide-search-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	border: none;
+	outline: none;
+	background: transparent;
+	color: var(--vscode-input-foreground);
+	font-size: 11.5px;
+}
+
+.monaco-workbench .aexus-ide-tool-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
+	height: 26px;
+	padding: 0 8px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	font-weight: 550;
+	cursor: pointer;
+	flex-shrink: 0;
+	transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .aexus-ide-tool-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	border-color: var(--vscode-focusBorder);
+}
+
+.monaco-workbench .aexus-ide-tool-btn.primary {
+	background: color-mix(in srgb, var(--vscode-button-background) 85%, transparent);
+	border-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.monaco-workbench .aexus-ide-tool-btn.primary:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.monaco-workbench .aexus-ide-tool-btn.icon-only {
+	width: 26px;
+	padding: 0;
+}
+
+.monaco-workbench .aexus-ide-sessions-action-bar {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 10px 6px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .aexus-ide-tool-btn.action-half {
+	flex: 1 1 0;
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* Engine Filter Strip */
+.monaco-workbench .aexus-ide-engine-filters {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 10px 6px;
+	overflow-x: auto;
+	flex-shrink: 0;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+}
+
+.monaco-workbench .aexus-ide-filter-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 22px;
+	padding: 0 7px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 11%, transparent);
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	font-weight: 550;
+	white-space: nowrap;
+	cursor: pointer;
+	flex-shrink: 0;
+	transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .aexus-ide-filter-chip:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+}
+
+.monaco-workbench .aexus-ide-filter-chip.active {
+	color: var(--vscode-foreground);
+	border-color: rgba(56, 189, 248, 0.52);
+	background: rgba(56, 189, 248, 0.14);
+}
+
+.monaco-workbench .aexus-ide-filter-count {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	opacity: 0.78;
+}
+
+.monaco-workbench .aexus-ide-engine-glyph {
+	width: 14px;
+	height: 14px;
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 13px;
+}
+
+.monaco-workbench .aexus-ide-engine-glyph.is-svg {
+	background-size: contain;
+	background-repeat: no-repeat;
+	background-position: center;
+}
+
+.monaco-workbench .aexus-ide-engine-glyph.is-row {
+	width: 18px;
+	height: 18px;
+	font-size: 16px;
+}
+
+/* Session List */
+.monaco-workbench .aexus-ide-sessions-scroll {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 6px 8px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .aexus-ide-session-row {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: 8px 9px;
+	border-radius: 8px;
+	border: 1px solid transparent;
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+	cursor: pointer;
+	transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .aexus-ide-session-row:hover,
+.monaco-workbench .aexus-ide-session-row:focus-visible {
+	background: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-focusBorder) 52%, transparent);
+	outline: none;
+}
+
+.monaco-workbench .aexus-ide-session-content {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.monaco-workbench .aexus-ide-session-title {
+	font-size: 12px;
+	font-weight: 550;
+	line-height: 1.3;
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-ide-session-sub {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	min-width: 0;
+}
+
+.monaco-workbench .aexus-ide-session-engine,
+.monaco-workbench .aexus-ide-session-time {
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-ide-session-host-tag {
+	padding: 0 5px;
+	border-radius: 4px;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	background: rgba(56, 189, 248, 0.14);
+	border: 1px solid rgba(56, 189, 248, 0.32);
+	color: #7dd3fc;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 112px;
+}
+
+.monaco-workbench .aexus-ide-row-popout {
+	flex-shrink: 0;
+	width: 24px;
+	height: 24px;
+	border-radius: 5px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0;
+	cursor: pointer;
+	transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .aexus-ide-session-row:hover .aexus-ide-row-popout,
+.monaco-workbench .aexus-ide-row-popout:focus-visible {
+	opacity: 1;
+}
+
+.monaco-workbench .aexus-ide-row-popout:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+/* Empty & Loading States */
+.monaco-workbench .aexus-ide-empty-state {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	padding: 28px 18px;
+	gap: 8px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .aexus-ide-empty-ico {
+	font-size: 24px;
+	opacity: 0.72;
+}
+
+.monaco-workbench .aexus-ide-empty-state.is-error .aexus-ide-empty-ico {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.monaco-workbench .aexus-ide-empty-title {
+	font-size: 12.5px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .aexus-ide-empty-sub {
+	font-size: 11px;
+	line-height: 1.45;
+	max-width: 260px;
+	word-break: break-word;
+}
+
+.monaco-workbench .aexus-ide-empty-actions {
+	display: flex;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+/* Active Embedded Conversation Header & Host */
+.monaco-workbench .aexus-ide-chat-header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	min-height: 36px;
+	padding: 5px 8px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .aexus-ide-back-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 24px;
+	padding: 0 7px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	background: transparent;
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	font-weight: 550;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .aexus-ide-back-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.monaco-workbench .aexus-ide-chat-title-wrap {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.monaco-workbench .aexus-ide-chat-title {
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-ide-chat-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .aexus-ide-icon-btn {
+	width: 24px;
+	height: 24px;
+	border-radius: 5px;
+	border: none;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.monaco-workbench .aexus-ide-icon-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .aexus-ide-chat-error-bar {
+	width: 100%;
+	padding: 4px 8px;
+	border-radius: 5px;
+	font-size: 10.5px;
+	background: rgba(248, 113, 113, 0.14);
+	border: 1px solid rgba(248, 113, 113, 0.36);
+	color: #fca5a5;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .aexus-ide-chat-widget-host {
+	flex: 1 1 auto;
+	min-height: 0;
+	position: relative;
+	overflow: hidden;
+}
+
+/* Titlebar / AuxiliaryBar Cloud Sessions pill */
+.monaco-workbench .aexus-ide-sessions-trigger {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	height: 22px;
+	padding: 0 8px;
+	box-sizing: border-box;
+	border-radius: var(--aexus-radius-pill, 999px);
+	border: var(--aexus-hairline-width, 1px) solid var(--aexus-hairline, var(--vscode-widget-border, transparent));
+	background: var(--aexus-surface-1, color-mix(in srgb, var(--vscode-foreground) 5%, transparent));
+	color: var(--vscode-foreground);
+	font: inherit;
+	font-size: var(--aexus-text-xs, 11px);
+	font-weight: var(--aexus-weight-medium, 500);
+	white-space: nowrap;
+	cursor: pointer;
+	transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .aexus-ide-sessions-trigger[data-remote="true"] {
+	border-color: rgba(56, 189, 248, 0.45);
+	background: rgba(14, 34, 52, 0.45);
+}
+
+.monaco-workbench .aexus-ide-sessions-trigger[data-remote="true"] .codicon {
+	color: #38bdf8;
+}
+
+.monaco-workbench .aexus-ide-sessions-trigger:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	border-color: var(--vscode-focusBorder);
+}

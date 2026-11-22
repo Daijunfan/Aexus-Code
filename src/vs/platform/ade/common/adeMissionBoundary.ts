@@ -173,19 +173,56 @@ export function validateMissionFactoryBoundary(
 		}
 	}
 
-	// Check parentSupervisorId hierarchy (strictly higher tier, no cycles)
+	// Check parentSupervisorId & managedSupervisorIds hierarchy (strictly top-down, known IDs, no cycles)
+	const downAdj = new Map<string, Set<string>>();
+	const addDownEdge = (parentId: string, childId: string) => {
+		let set = downAdj.get(parentId);
+		if (!set) {
+			set = new Set();
+			downAdj.set(parentId, set);
+		}
+		set.add(childId);
+	};
+
 	for (const sup of supervisorById.values()) {
 		if (sup.parentSupervisorId) {
 			const parent = supervisorById.get(sup.parentSupervisorId);
 			if (!parent) {
 				errors.push(`Supervisor "${sup.id}" references unknown parentSupervisorId "${sup.parentSupervisorId}".`);
+			} else if (parent.id === sup.id) {
+				errors.push(`Supervisor "${sup.id}" cannot reference itself as parentSupervisorId.`);
 			} else if (parent.tier >= sup.tier) {
 				errors.push(
 					`Escalation hierarchy violation: parent supervisor "${parent.id}" (${formatTierTag(parent.tier)}) must have strictly higher authority than "${sup.id}" (${formatTierTag(sup.tier)}).`,
 				);
+			} else {
+				addDownEdge(parent.id, sup.id);
 			}
 		}
-		// Detect escalation cycles
+
+		for (const rawSubId of sup.managedSupervisorIds ?? []) {
+			const subId = rawSubId?.trim();
+			if (!subId) {
+				errors.push(`Supervisor "${sup.id}" contains an empty entry in managedSupervisorIds.`);
+				continue;
+			}
+			if (subId === sup.id) {
+				errors.push(`Supervisor "${sup.id}" cannot manage itself in managedSupervisorIds.`);
+				continue;
+			}
+			const sub = supervisorById.get(subId);
+			if (!sub) {
+				errors.push(`Supervisor "${sup.id}" references unknown subordinate supervisor "${subId}" in managedSupervisorIds.`);
+			} else if (sup.tier >= sub.tier) {
+				errors.push(
+					`Supervisor hierarchy violation: "${sup.id}" (${formatTierTag(sup.tier)}) cannot supervise "${sub.id}" (${formatTierTag(sub.tier)}) in managedSupervisorIds — supervision must be strictly top-down.`,
+				);
+			} else {
+				addDownEdge(sup.id, sub.id);
+			}
+		}
+
+		// Detect escalation cycles along parentSupervisorId
 		const visited = new Set<string>([sup.id]);
 		let cursor = sup.parentSupervisorId;
 		while (cursor) {
@@ -195,6 +232,33 @@ export function validateMissionFactoryBoundary(
 			}
 			visited.add(cursor);
 			cursor = supervisorById.get(cursor)?.parentSupervisorId;
+		}
+	}
+
+	// Detect cycles in the combined top-down supervision graph (managedSupervisorIds + parentSupervisorId)
+	const visitColor = new Map<string, 0 | 1 | 2>();
+	let cycleReported = false;
+	const dfsCycle = (nodeId: string) => {
+		if (cycleReported) {
+			return;
+		}
+		visitColor.set(nodeId, 1);
+		for (const nextId of downAdj.get(nodeId) ?? []) {
+			const color = visitColor.get(nextId) ?? 0;
+			if (color === 1) {
+				errors.push(`Cycle detected in off-graph supervisor hierarchy involving "${nodeId}" -> "${nextId}".`);
+				cycleReported = true;
+				return;
+			}
+			if (color === 0) {
+				dfsCycle(nextId);
+			}
+		}
+		visitColor.set(nodeId, 2);
+	};
+	for (const supId of supervisorById.keys()) {
+		if ((visitColor.get(supId) ?? 0) === 0) {
+			dfsCycle(supId);
 		}
 	}
 

@@ -1,97 +1,31 @@
+# Safe Architecture Migration
+
+Zero-downtime refactoring workflow: lock baseline behavior with characterization tests and compatibility shims, migrate core internals and downstream call sites in parallel, verify rollback readiness at Gate `U1`, then clean up legacy code.
+
 ```mermaid
 flowchart LR
-  %% @pos N1 204,260
-  %% @pos N2 598,132
-  %% @pos N3 598,388
-  %% @pos U1 992,260
-  %% @pos N4 1386,260
-  N1["Baseline Tests & Compatibility Shim ★Critical | worker=claude:high"] --> N2["Core Architecture Migration ★Critical | worker=codex:high"]
-  N1 --> N3["Caller Sites & Config Migration | worker=codex:medium"]
+  N1["@Architect: Baseline Tests & Compatibility Shim"] -->|adapter| N2["@CoreDev: Core Architecture Migration"]
+  N1 -->|adapter| N3["@CallerDev: Caller Sites & Config Migration"]
   N2 --> U1{{"Diff & Rollback Verification Gate"}}
   N3 --> U1
-  U1 --> N4["Cutover & Legacy Cleanup ★Critical | worker=codex:high"]
+  U1 --> N4["@Architect: Cutover & Legacy Cleanup"]
 ```
 
-## Tree Metadata
-- tree_type: engineering
-- governor_session_id: <governor-session-id>
-- workspace_isolation: worktree
-- watchdog_timeout_minutes: 10
-- max_budget_usd: 7
-- max_concurrency: 2
-- verify: npm test
+## Node Pre-Prompts
 
-## Auto-Partitioned Managers
-### [Segment: N1]
-- engine: claude-code
-- thinking: medium
+Apply the Mermaid DAG with `aexus-ade mission blueprint apply --mission <id> --file ./examples/blueprints/safe-migration.md`, then bind each node's pre-prompt via the Canvas / Split Drawer or `aexus-ade mission prompt set`:
 
-### [Segment: N2]
-- engine: claude-code
-- thinking: medium
+### N1
+Lock existing behavior with characterization tests (`test/baseline/**`) and introduce clean compatibility adapter shims (`src/compat/**`) enabling incremental cutover. Confirm baseline tests pass before completing the token.
 
-### [Segment: N3]
-- engine: claude-code
-- thinking: medium
+### N2
+Implement the target refactored core behind the `N1` adapter boundary (`src/core/**`) with strict typing and unit test coverage. Ensure zero breaking public API regressions before completing the token.
 
-### [Segment: N4]
-- engine: claude-code
-- thinking: medium
+### N3
+Update downstream call sites, configuration bindings, and documentation (`src/callers/**`, `config/**`) to target the refactored interfaces. Confirm zero deprecated references remain and typecheck passes cleanly.
 
-## Nodes
-### [N1] Baseline Tests & Compatibility Shim
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: src/compat/**, test/baseline/**
-- verify: npm test
-- goal: |
-    Lock existing behavior with characterization tests and introduce clean adapter shims for incremental cutover.
-- acceptance: |
-    1. Baseline tests pass before any refactoring begins;
-    2. Compatibility adapter compiles cleanly.
+### U1
+Human Acceptance Gate: audit migration diffs and confirm the rollback path before deleting legacy compatibility shims.
 
-### [N2] Core Architecture Migration
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=high
-- files: src/core/**
-- verify: npm test
-- goal: |
-    Implement the target refactored core behind the N1 adapter boundary with strict typing and unit tests.
-- acceptance: |
-    1. New implementation passes all baseline + new unit tests;
-    2. Zero breaking public API changes.
-
-### [N3] Caller Sites & Config Migration
-- type: task
-- critical: false
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=medium
-- files: src/callers/**, config/**
-- verify: npm run typecheck
-- goal: |
-    Update downstream call sites, configuration bindings, and documentation to target the refactored interfaces.
-- acceptance: |
-    1. Zero deprecated references remaining in active modules;
-    2. Static typecheck passes cleanly.
-
-### [U1] Diff & Rollback Verification Gate
-- type: user_gate
-- description: |
-    Audit migration diffs and confirm rollback path before removing legacy compatibility shims.
-
-### [N4] Cutover & Legacy Cleanup
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=high
-- files: src/**, test/**
-- verify: npm run lint && npm test
-- goal: |
-    Remove obsolete shims, run full regression/build suite, and confirm zero dead code or orphaned imports.
-- acceptance: |
-    1. Full build and test suite green with zero warnings;
-    2. Legacy code cleanly removed.
+### N4
+Remove obsolete compatibility shims and dead code, run the full lint, typecheck, build, and test suite with zero warnings, and summarize the completed cutover.

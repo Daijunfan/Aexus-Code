@@ -18,21 +18,19 @@ export type AdePrimitiveApiId =
 	| 'host.access'
 	| 'host.manage'
 	| 'inbox.post'
-	| 'engineering.read'
-	| 'engineering.design'
-	| 'engineering.review'
-	| 'engineering.integrate'
-	| 'engineering.destroy'
-	| 'engineering.control';
+	| 'mission.read'
+	| 'mission.design'
+	| 'mission.destroy'
+	| 'mission.control';
 
-/** Structural operational slots used by Engineering & Research DAG work-trees across arbitrary N-tier organizations. */
+/** Structural operational slots used by Mission DAG workflows across arbitrary N-tier organizations. */
 export type AdeWorkTreeSlot = 'orchestrator' | 'segment_owner' | 'reviewer' | 'executor';
 
 export const ADE_WORK_TREE_SLOTS: readonly AdeWorkTreeSlot[] = ['orchestrator', 'segment_owner', 'reviewer', 'executor'];
 
 export type IAdeWorkTreeSlotMap = Readonly<Partial<Record<AdeWorkTreeSlot, string>>>;
 
-export type AdePrimitiveApiCategory = 'messaging' | 'hierarchy' | 'workspace' | 'engineering';
+export type AdePrimitiveApiCategory = 'messaging' | 'hierarchy' | 'workspace' | 'mission';
 
 export type AdeRankColorToken = 'amber' | 'indigo' | 'purple' | 'emerald' | 'cyan' | 'rose' | 'slate';
 
@@ -261,175 +259,107 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 		],
 	},
 	{
-		id: 'engineering.read',
-		category: 'engineering',
-		label: 'Inspect DAG Status, Diffs & Blueprint',
-		description: 'Read Engineering/Research tree status, node diffs, incremental reports, raw blueprint, validation, and starter templates.',
+		id: 'mission.read',
+		category: 'mission',
+		label: 'Inspect Mission DAG, Status, Prompts & Checks',
+		description: 'Read Mission DAG blueprints, live runtime status, factory boundaries, source triggers, per-node pre-prompts, and deterministic verification hooks.',
 		actions: [
-			'engineering.list',
-			'engineering.get',
-			'engineering.status',
-			'engineering.diff',
-			'engineering.reports',
-			'engineering.report',
-			'engineering.blueprint.get',
-			'engineering.blueprint.validate',
-			'engineering.template.list',
-			'engineering.templates.list',
-			'engineering.boundary.get',
-			'engineering.trigger.list',
+			'mission.list',
+			'mission.get',
+			'mission.status',
+			'mission.blueprint.get',
+			'mission.blueprint.validate',
+			'mission.boundary.get',
+			'mission.trigger.list',
+			'mission.prompt.list',
+			'mission.prompt.get',
+			'mission.check.list',
+			'mission.check.get',
+			'mission.check.run',
+		],
+		renderCliLines: ctx => {
+			const missionFlag = ctx.treeGovernorId ? ` --mission ${ctx.treeGovernorId}` : '';
+			return [
+				`  - Inspect Mission: \`aexus-ade mission status${missionFlag} --json\` | \`aexus-ade mission blueprint get${missionFlag} --raw\` | \`aexus-ade mission prompt list${missionFlag} --json\` | \`aexus-ade mission check list${missionFlag} --json\``,
+			];
+		},
+	},
+	{
+		id: 'mission.design',
+		category: 'mission',
+		label: 'Author Mission DAG, Prompts, Checks & Topology',
+		description: 'Initialize Missions, apply or safely patch Mermaid DAGs, edit per-node pre-prompts and deterministic check hooks, configure boundaries, triggers, and Cloud Host bindings.',
+		actions: [
+			'mission.init',
+			'mission.create',
+			'mission.setMermaid',
+			'mission.blueprint.apply',
+			'mission.boundary.set',
+			'mission.patch',
+			'mission.trigger.set',
+			'mission.trigger.remove',
+			'mission.host.bind',
+			'mission.prompt.set',
+			'mission.check.set',
+			'mission.check.remove',
 		],
 		renderCliLines: ctx => {
 			if (!ctx.isWorkTree) {
 				return [];
 			}
-			const govId = ctx.treeGovernorId ?? ctx.agentId;
-			const nodeArg = ctx.treeNodeId ?? '<nodeId>';
-			const isReviewer = ctx.workTreeSlot === 'reviewer' || (!ctx.workTreeSlot && (ctx.rankId === 'employee' || ctx.rankId === 'subordinate'));
-			const isSegmentOwner = ctx.workTreeSlot === 'segment_owner' || (!ctx.workTreeSlot && ctx.rankId === 'manager');
-			if (isReviewer) {
-				return [
-					`  - Inspect: \`aexus-ade engineering diff --governor ${govId} --node ${nodeArg}\` | \`aexus-ade engineering status --governor ${govId} --node ${nodeArg} --json\``,
-				];
-			}
-			if (isSegmentOwner) {
-				return [
-					`  - Inspect: \`aexus-ade engineering status --governor ${govId} --node <nodeId> --json\` | \`diff --governor ${govId} --node <nodeId>\``,
-				];
-			}
+			const missionId = ctx.treeGovernorId ?? ctx.agentId;
 			return [
-				`  - Templates & Blueprint Read: \`aexus-ade engineering template list --json\` | \`aexus-ade engineering blueprint get --governor ${govId} --raw\` | \`validate --file <path>\``,
-				`  - Inspect DAG: \`aexus-ade engineering status --governor ${govId} [--node <id>] --json\` | \`diff --governor ${govId} --node <id>\` | \`reports --governor ${govId} --json\``,
+				`  - Author / Patch DAG: \`aexus-ade mission blueprint apply --mission ${missionId} --file <path>\` | \`aexus-ade mission patch --mission ${missionId} --file <path> --reason "<why>"\` | \`aexus-ade mission prompt set --mission ${missionId} --node <nodeId> --prompt "<text>"\``,
+				`  - Triggers & Hosts: \`aexus-ade mission host bind --mission ${missionId} --node <nodeId> --host <local|alias>\` | \`aexus-ade role list --json\``,
 			];
 		},
 	},
 	{
-		id: 'engineering.design',
-		category: 'engineering',
-		label: 'Author Blueprint & Configure DAG',
-		description: 'Initialize trees, apply blueprints/templates, and configure per-node engines, models, and thinking budgets.',
+		id: 'mission.destroy',
+		category: 'mission',
+		label: 'Remove Missions & Generated Employees',
+		description: 'Permanently remove a Mission canvas and all locked Mermaid-generated employee sessions (High Privilege).',
 		actions: [
-			'engineering.init',
-			'engineering.create',
-			'engineering.setMermaid',
-			'engineering.blueprint.apply',
-			'engineering.blueprint.generate',
-			'engineering.generate',
-			'engineering.template.apply',
-			'engineering.templates.apply',
-			'engineering.configure',
-			'engineering.demo',
-			'engineering.boundary.set',
-			'engineering.patch',
-			'engineering.trigger.set',
-			'engineering.trigger.remove',
-			'engineering.host.bind',
-		],
-		renderCliLines: ctx => {
-			if (!ctx.isWorkTree) {
-				return [];
-			}
-			const govId = ctx.treeGovernorId ?? ctx.agentId;
-			return [
-				`  - Blueprint Generate / Apply: \`aexus-ade engineering generate --governor ${govId} --prompt "<goal>"\` | \`engineering template list --json\` | \`engineering template apply --governor ${govId} --template <id>\` | \`engineering blueprint apply --governor ${govId} --file <path>\``,
-				`  - Configure DAG & Roles: \`aexus-ade engineering configure --governor ${govId} --all [--engine <e>] [--model <m>] [--thinking <off|low|medium|high|max>]\` | \`aexus-ade role list --json\``,
-			];
-		},
-	},
-	{
-		id: 'engineering.review',
-		category: 'engineering',
-		label: 'DAG Review Verdict & Watchdog',
-		description: 'Submit formal Reviewer/Segment-Owner pass/reject/guidance review verdicts and execute Watchdog remind/kill-restart actions.',
-		actions: [
-			'engineering.review',
-			'engineering.watchdogAction',
-		],
-		renderCliLines: ctx => {
-			if (!ctx.isWorkTree) {
-				return [];
-			}
-			const govId = ctx.treeGovernorId ?? ctx.agentId;
-			const nodeArg = ctx.treeNodeId ?? '<nodeId>';
-			const isReviewer = ctx.workTreeSlot === 'reviewer' || (!ctx.workTreeSlot && (ctx.rankId === 'employee' || ctx.rankId === 'subordinate'));
-			if (isReviewer) {
-				return [
-					`  - Pass: \`aexus-ade engineering review --governor ${govId} --node ${nodeArg} --role employee --verdict pass --report "<concise summary>"\``,
-					`  - Reject (reuses Worker): \`aexus-ade engineering review --governor ${govId} --node ${nodeArg} --role employee --verdict reject --feedback "<fix instructions>"\``,
-				];
-			}
-			return [
-				`  - Verdict / Guidance: \`aexus-ade engineering review --governor ${govId} --node <nodeId> --role manager --verdict <pass|reject|guidance> [--feedback "<text>"]\``,
-				`  - Watchdog Action: \`aexus-ade engineering watchdog-action --governor ${govId} --node <nodeId> --action <remind|kill-restart> [--message "<text>"]\``,
-			];
-		},
-	},
-	{
-		id: 'engineering.integrate',
-		category: 'engineering',
-		label: 'Merge & Clean Up Git Worktrees',
-		description: 'Inspect, merge isolated segment branches into the project branch, and prune Git worktrees (High Privilege).',
-		actions: [
-			'engineering.worktrees',
-			'engineering.worktrees.merge',
-			'engineering.worktrees.cleanup',
+			'mission.remove',
+			'mission.delete',
 		],
 		dangerous: true,
 		renderCliLines: ctx => {
 			if (!ctx.isWorkTree) {
 				return [];
 			}
-			const govId = ctx.treeGovernorId ?? ctx.agentId;
+			const missionId = ctx.treeGovernorId ?? ctx.agentId;
 			return [
-				`  - Worktree Integration: \`aexus-ade engineering worktrees merge --governor ${govId}\` | \`worktrees cleanup --governor ${govId}\``,
+				`  - Remove Mission: \`aexus-ade mission remove --mission ${missionId}\``,
 			];
 		},
 	},
 	{
-		id: 'engineering.destroy',
-		category: 'engineering',
-		label: 'Reset & Remove DAG Trees',
-		description: 'Reset DAG execution progress or permanently remove an Engineering/Research Work-Tree (High Privilege).',
+		id: 'mission.control',
+		category: 'mission',
+		label: 'Control Mission Lifecycle, Recall & Retry',
+		description: 'Open, start, pause, resume, stop, recall/retry tokens, set silence timeout, or resolve Human Gates on a Mission (High Privilege).',
 		actions: [
-			'engineering.reset',
-			'engineering.remove',
-			'engineering.delete',
+			'mission.open',
+			'mission.run',
+			'mission.start',
+			'mission.pause',
+			'mission.resume',
+			'mission.stop',
+			'mission.timeout.set',
+			'mission.gate',
+			'mission.recall',
+			'mission.retry',
+			'token.retry',
 		],
 		dangerous: true,
 		renderCliLines: ctx => {
 			if (!ctx.isWorkTree) {
 				return [];
 			}
-			const govId = ctx.treeGovernorId ?? ctx.agentId;
+			const missionId = ctx.treeGovernorId ?? ctx.agentId;
 			return [
-				`  - Reset / Remove Tree: \`aexus-ade engineering reset --governor ${govId} [--node <id>]\` | \`remove --governor ${govId}\``,
-			];
-		},
-	},
-	{
-		id: 'engineering.control',
-		category: 'engineering',
-		label: 'Start / Pause / Gate DAG Execution',
-		description: 'Start, pause, resume, stop, or approve/rollback User Acceptance Gates on a Work-Tree (typically reserved for User/Secretary).',
-		actions: [
-			'engineering.run',
-			'engineering.start',
-			'engineering.pause',
-			'engineering.resume',
-			'engineering.stop',
-			'engineering.timeout.set',
-			'engineering.gate',
-			'engineering.recall',
-			'engineering.open',
-		],
-		dangerous: true,
-		renderCliLines: ctx => {
-			if (!ctx.isWorkTree) {
-				return [];
-			}
-			const govId = ctx.treeGovernorId ?? ctx.agentId;
-			return [
-				`  - Execution Control: \`aexus-ade engineering run --governor ${govId}\` | \`pause --governor ${govId}\` | \`resume --governor ${govId}\``,
+				`  - Mission Control: \`aexus-ade mission start --mission ${missionId}\` | \`aexus-ade mission pause --mission ${missionId}\` | \`aexus-ade mission resume --mission ${missionId}\` | \`aexus-ade mission stop --mission ${missionId}\` | \`aexus-ade mission recall --mission ${missionId} --nodes <N1,N2>\` | \`aexus-ade mission retry --mission ${missionId} --node <nodeId>\``,
 			];
 		},
 	},
@@ -454,14 +384,7 @@ export function getAdePrimitiveApiSpec(id: AdePrimitiveApiId): IAdePrimitiveApiS
 
 /** Resolves the fixed Aexus-Code primitive API governing a given control action (returns undefined for system-only actions like `mode.set` or `role.schema.set`). */
 export function resolveActionPrimitiveApi(action: string): AdePrimitiveApiId | undefined {
-	const direct = ACTION_TO_PRIMITIVE_API.get(action);
-	if (direct) {
-		return direct;
-	}
-	if (action.startsWith('mission.')) {
-		return ACTION_TO_PRIMITIVE_API.get(`engineering.${action.slice('mission.'.length)}`);
-	}
-	return undefined;
+	return ACTION_TO_PRIMITIVE_API.get(action);
 }
 
 export interface IAdeRankDefinition {
@@ -546,10 +469,10 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 1,
 			color: 'amber',
 			icon: 'organization',
-			summary: 'L1 Governor (Project Director): Top-level orchestrator in Aexus Code ADE overseeing Manager (L2), Employee (L3), and Worker (L4) subordinates.',
+			summary: 'L1 Governor: Highest business orchestration tier in Aexus Code ADE; owns architecture, Mission DAGs, off-graph supervision, and Human Inbox escalations.',
 			initPrompt: [
-				'You are {{rank.tier}} **{{rank.name}}** (Project Director), the top-level orchestrator for project **{{project.name}}**.',
-				'Decompose goals cleanly, design parallel work plans, delegate execution to lower-tier subordinates, and escalate major human decisions via Inbox when blocked.',
+				'You are {{rank.tier}} **{{rank.name}}**, the top-level orchestrator for project **{{project.name}}**.',
+				'Decompose goals cleanly, design flat Mission DAGs, direct lower tiers strictly top-down, and escalate human-level decisions to Inbox via `org escalate` / `inbox post` when blocked.',
 			].join('\n'),
 			pureExecution: false,
 			canHaveSubordinates: true,
@@ -560,8 +483,8 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 				'session.manage',
 				'project.read',
 				'inbox.post',
-				'engineering.read',
-				'engineering.design',
+				'mission.read',
+				'mission.design',
 			],
 		},
 		{
@@ -571,10 +494,10 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 2,
 			color: 'indigo',
 			icon: 'briefcase',
-			summary: 'L2 Manager (Module Lead): Mid-level lead coordinating Employee (L3) and Worker (L4) subordinates and reporting to your supervisor (if assigned).',
+			summary: 'L2 Manager: Mid-level orchestration & off-graph supervision tier coordinating managed lower-tier agents and jurisdiction-scoped Mission recovery.',
 			initPrompt: [
-				'You are {{rank.tier}} **{{rank.name}}** (Module Lead), coordinating module/segment delivery under {{supervisor.label}} ({{supervisor.rank}}).',
-				'Oversee lower-tier reviewers and executors, unblock stalled work, conduct secondary architectural/quality reviews, and report concise outcomes upward.',
+				'You are {{rank.tier}} **{{rank.name}}**, coordinating delivery under {{supervisor.label}} ({{supervisor.rank}}).',
+				'Supervise managed lower-tier agents strictly top-down via `org` commands, unblock stalled or failed nodes within your jurisdiction (`mission retry|recall|patch`), and escalate out-of-jurisdiction issues via `org escalate`.',
 			].join('\n'),
 			pureExecution: false,
 			canHaveSubordinates: true,
@@ -585,8 +508,7 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 				'session.manage',
 				'project.read',
 				'inbox.post',
-				'engineering.read',
-				'engineering.review',
+				'mission.read',
 			],
 		},
 		{
@@ -596,10 +518,10 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 3,
 			color: 'purple',
 			icon: 'shield',
-			summary: 'L3 Employee (Supervisory Reviewer · Employee ≠ Worker): Orchestrated supervisor & reviewer positioned strictly ABOVE Worker (L4). You hold `aexus-ade` authority to spawn, dispatch, supervise, and review leaf Worker (L4) sessions rather than acting as a rankless pure executor.',
+			summary: 'L3 Employee: Mid-lower orchestrated tier; executes or reviews assigned Mission DAG nodes via Token Bus when in-graph, or coordinates lower-tier sessions when off-graph.',
 			initPrompt: [
-				'You are {{rank.tier}} **{{rank.name}}** (Supervisory Reviewer · Employee ≠ Worker), positioned strictly ABOVE Worker (L4).',
-				'You hold `aexus-ade` authority to spawn, dispatch, supervise, and review leaf Worker (L4) sessions rather than acting as a rankless pure executor.',
+				'You are {{rank.tier}} **{{rank.name}}** for project **{{project.name}}**.',
+				'Operate strictly within your assigned tier scope: when participating in a Mission DAG, execute or review assigned nodes and report solely via `token` commands; when supervising lower tiers off-graph, direct strictly top-down.',
 			].join('\n'),
 			pureExecution: false,
 			canHaveSubordinates: true,
@@ -609,8 +531,7 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 				'session.message',
 				'session.manage',
 				'project.read',
-				'engineering.read',
-				'engineering.review',
+				'mission.read',
 			],
 		},
 		{
@@ -620,7 +541,7 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 4,
 			color: 'emerald',
 			icon: 'tools',
-			summary: 'L4 Worker (Pure Executor): Lowest pure-execution rank positioned below Employee (L3) with no subordinates.',
+			summary: 'L4 Worker (Pure Executor): Lowest pure-execution tier with zero ADE orchestration prompt injection outside Mission token reporting.',
 			initPrompt: '',
 			pureExecution: true,
 			canHaveSubordinates: false,
@@ -662,7 +583,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'reviewer',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'engineering.read', 'engineering.design', 'engineering.review'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'mission.read', 'mission.design'],
 				},
 				{
 					id: 'reviewer',
@@ -676,7 +597,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'builder',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'engineering.read', 'engineering.review'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'mission.read'],
 				},
 				{
 					id: 'builder',
@@ -720,7 +641,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'manager',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'engineering.read', 'engineering.design'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'mission.read', 'mission.design'],
 				},
 				{
 					id: 'manager',
@@ -734,7 +655,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'employee',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'engineering.read', 'engineering.review'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'mission.read'],
 				},
 				{
 					id: 'employee',
@@ -748,7 +669,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'worker',
-					allowedApis: ['session.read_context', 'session.message', 'project.read', 'engineering.read', 'engineering.review'],
+					allowedApis: ['session.read_context', 'session.message', 'project.read', 'mission.read'],
 				},
 				{
 					id: 'worker',
@@ -792,7 +713,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'manager',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'host.access', 'inbox.post', 'engineering.read', 'engineering.design'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'host.access', 'inbox.post', 'mission.read', 'mission.design'],
 				},
 				{
 					id: 'manager',
@@ -806,7 +727,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'employee',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'host.access', 'inbox.post', 'engineering.read', 'engineering.review'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'host.access', 'inbox.post', 'mission.read'],
 				},
 				{
 					id: 'employee',
@@ -820,7 +741,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'worker',
-					allowedApis: ['session.read_context', 'session.message', 'project.read', 'engineering.read', 'engineering.review'],
+					allowedApis: ['session.read_context', 'session.message', 'project.read', 'mission.read'],
 				},
 				{
 					id: 'worker',
@@ -864,7 +785,7 @@ export const ADE_ORGANIZATION_PRESETS: readonly IAdeOrganizationPreset[] = [
 					pureExecution: false,
 					canHaveSubordinates: true,
 					defaultChildRankId: 'agent',
-					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'engineering.read', 'engineering.design', 'engineering.review'],
+					allowedApis: ['session.read_context', 'session.message', 'session.manage', 'project.read', 'inbox.post', 'mission.read', 'mission.design'],
 				},
 				{
 					id: 'agent',
@@ -897,8 +818,21 @@ function isValidIconToken(raw: unknown): raw is AdeRankIconToken {
 	return typeof raw === 'string' && (ADE_RANK_ICON_TOKENS as readonly string[]).includes(raw);
 }
 
-function isValidPrimitiveApiId(raw: unknown): raw is AdePrimitiveApiId {
-	return typeof raw === 'string' && PRIMITIVE_API_BY_ID.has(raw as AdePrimitiveApiId);
+const LEGACY_PRIMITIVE_API_UPGRADE: Readonly<Record<string, AdePrimitiveApiId>> = {
+	'engineering.read': 'mission.read',
+	'engineering.design': 'mission.design',
+	'engineering.control': 'mission.control',
+	'engineering.destroy': 'mission.destroy',
+};
+
+function normalizePrimitiveApiId(raw: unknown): AdePrimitiveApiId | undefined {
+	if (typeof raw !== 'string') {
+		return undefined;
+	}
+	if (PRIMITIVE_API_BY_ID.has(raw as AdePrimitiveApiId)) {
+		return raw as AdePrimitiveApiId;
+	}
+	return LEGACY_PRIMITIVE_API_UPGRADE[raw];
 }
 
 const RESERVED_RANK_IDS = new Set(['all', 'none', 'secretary', 'user', 'human']);
@@ -963,7 +897,7 @@ export function normalizeAdeOrganizationConfig(raw: unknown): IAdeOrganizationCo
 		const allowedApis = pureExecution
 			? []
 			: Array.isArray(rec.allowedApis)
-				? [...new Set(rec.allowedApis.filter(isValidPrimitiveApiId))]
+				? [...new Set(rec.allowedApis.map(normalizePrimitiveApiId).filter((v): v is AdePrimitiveApiId => Boolean(v)))]
 				: [];
 		const defaultChildRankId = !pureExecution && canHaveSubordinates && typeof rec.defaultChildRankId === 'string' && rec.defaultChildRankId.trim()
 			? sanitizeRankId(rec.defaultChildRankId)
@@ -1230,9 +1164,6 @@ export function canRankSupervise(
 export function formatOrganizationLadder(config: IAdeOrganizationConfig): string {
 	return config.ranks
 		.map(r => {
-			if (r.id === 'employee') {
-				return `\`${r.name}\` (L${r.tier} · supervisor/reviewer, \`Employee ≠ Worker\`)`;
-			}
 			if (r.pureExecution) {
 				return `\`${r.name}\` (L${r.tier} · pure executor, no subordinates)`;
 			}
@@ -1361,6 +1292,8 @@ export interface IAdeRolePromptCompileInput {
 		readonly segmentId?: string;
 		readonly nodeId?: string;
 		readonly slot?: AdeWorkTreeSlot;
+		readonly isMissionOwner?: boolean;
+		readonly managedNodeIds?: readonly string[];
 	};
 	/** Canonical single-copy API doc paths (read by L<tier>, sibling Mission doc read on demand). */
 	readonly docsPaths?: {
@@ -1431,13 +1364,14 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 	const lines: string[] = [
 		'[Aexus Orchestrated Role Context]',
 		`You are an orchestrated agent in **Aexus Code ADE**.`,
-		`- Tier: ${tierTag} (aliases can hot-update; run \`aexus-ade rank names --json\` for live names)`,
-		`- Rank: ${rank.summary}`,
-		`- Role: ${rank.name}`,
+		`- Tier: ${tierTag} (protocol relies on numeric tier; aliases hot-update via \`aexus-ade rank names --json\`)`,
+		`- Role: ${rank.name} — ${rank.summary}`,
 		`- Session: ${input.agentLabel} (id: ${input.agentId}, engine: ${input.engineDisplay} [${input.engineId}])`,
 		`- Project: ${input.projectName} (${input.projectPath})`,
-		`- Hierarchy: L0 (Secretary) > ${formatOrganizationLadder(config)}`,
-		`- API Docs (single copy, read by tier): Tier doc \`${rankDocPath}\` | Mission doc (read only when working on a Mission): \`${missionDocPath}\``,
+		`- Hierarchy: L-1 (User) > L0 (Secretary) > ${formatOrganizationLadder(config)}`,
+		`- Single-Copy Lazy-Read Docs: Tier doc \`${rankDocPath}\` | Mission doc (read on demand): \`${missionDocPath}\``,
+		`- Immutable Entry Commands: \`aexus-ade whoami --json\` | \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read common\` | \`aexus-ade docs read mission\` | \`aexus-ade api update --since 0 --json\``,
+		'- Communication & Factory Boundary: Strictly top-down (`aexus-ade org subordinates|send|context`); never message superiors upward (escalate via `aexus-ade org escalate`). Off-graph supervisors (`<= offGraphMaxTier`) stay outside the DAG; in-graph nodes (`> offGraphMaxTier`) report solely via `aexus-ade token` commands.',
 	];
 
 	if (input.supervisor) {
@@ -1449,22 +1383,21 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 		: '';
 
 	if (input.workTree) {
-		const govId = input.workTree.governorId;
-		const treeKindTitle = 'ADE Mission';
+		const missionId = input.workTree.governorId;
+		const missionLabel = `ADE ${getMissionDisplayName(config)}`;
 		const resolvedSlot: AdeWorkTreeSlot | undefined = input.workTree.slot
 			?? (input.workTree.nodeId ? 'reviewer'
-				: input.workTree.segmentId ? 'segment_owner'
+				: input.workTree.isMissionOwner === false ? 'segment_owner'
 					: resolveRankWorkTreeSlots(config, rank.id)[0]);
-		const reviewerRank = resolveWorkTreeSlotRank(config, 'reviewer');
-		const segmentOwnerRank = resolveWorkTreeSlotRank(config, 'segment_owner');
-		const executorRank = resolveWorkTreeSlotRank(config, 'executor');
+		const managedScope = input.workTree.managedNodeIds && input.workTree.managedNodeIds.length > 0
+			? `, managed nodes: ${input.workTree.managedNodeIds.join(', ')}`
+			: '';
 
 		lines.push(
-			`- Mission: **${treeKindTitle}** (owner: \`${govId}\`${input.workTree.segmentId ? `, segment: \`${input.workTree.segmentId}\`` : ''}${input.workTree.nodeId ? `, node: \`${input.workTree.nodeId}\`` : ''}) — topology locked by \`blueprint.md\`; read sibling \`${missionDocPath}\` on demand and inspect live nodes via \`aexus-ade mission status --governor ${govId} --json\`.`,
-			`- Identity Rule: When asked your role/rank, state tier **${tierTag}** (**${rank.name}**), session \`${input.agentId}\`, project **${input.projectName}**, and Mission \`${govId}\`. NEVER claim that you are "not an employee" or have "no rank".`,
+			`- Mission Binding: **${missionLabel}** (mission: \`${missionId}\`${input.workTree.nodeId ? `, node: \`${input.workTree.nodeId}\`` : ''}${managedScope}) — flat Mermaid DAG + per-node Pre-Prompts; inspect topology via \`aexus-ade mission blueprint get --mission ${missionId} --raw\` and live state via \`aexus-ade mission status --mission ${missionId} --json\`.`,
 		);
 		if (interpolatedCharter) {
-			lines.push('- Role Initialization Charter:');
+			lines.push('- Role Charter:');
 			for (const charterLine of interpolatedCharter.split(/\r?\n/)) {
 				if (charterLine.trim()) {
 					lines.push(`  ${charterLine}`);
@@ -1472,33 +1405,28 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 			}
 		}
 
-		// Preserve strict Mission operational guardrails keyed by structural slot (works across all org presets)
-		if (resolvedSlot === 'orchestrator') {
+		if (resolvedSlot === 'orchestrator' && input.workTree.isMissionOwner !== false) {
 			lines.push(
-				`- Mission ${rank.name} (L${rank.tier}) Operational Rules:`,
-				'  - Design task decomposition & DAG parallel topology in `blueprint.md` (supports optional node `files:` scope and `verify:` check commands, plus `max_concurrency`).',
-				`  - Asleep during normal execution; woken ONLY on 3rd formal ${segmentOwnerRank.name} failure (RED Circuit Breaker). NEVER call \`aexus-ade mission run\` yourself unless explicitly authorized (normally User or L0 Secretary starts execution).`,
+				`- Off-Graph Mission Owner (${tierTag}) Operations:`,
+				`  - Author flat Mermaid DAG topology (\`aexus-ade mission blueprint apply --mission ${missionId} --file <path>\`) and per-node Pre-Prompts (\`aexus-ade mission prompt set --mission ${missionId} --node <nodeId> --prompt "<text>"\`), using fail-edges (\`-->|fail|\`) and Human Gate nodes (\`G1{{"Approve"}}\`).`,
+				`  - Supervise strictly top-down (\`aexus-ade org subordinates|send|context\`), resolve escalations via \`aexus-ade mission retry|recall|patch --mission ${missionId}\`, or escalate to Human Inbox via \`aexus-ade org escalate --mission ${missionId} --reason "<why>"\`.`,
 			);
-		} else if (resolvedSlot === 'segment_owner') {
+		} else if (resolvedSlot === 'segment_owner' || input.workTree.isMissionOwner === false) {
 			lines.push(
-				`- Segment ${rank.name} (L${rank.tier}) Operational Rules (Segment \`${input.workTree.segmentId ?? 'auto'}\`):`,
-				`  - Woken ONLY on: (a) segment tail / ★Critical secondary review, (b) 3x ${reviewerRank.name} internal rejections (grant 4th-chance guidance or formal reject), (c) Git worktree merge conflict, or (d) persistent Watchdog stall.`,
+				`- Off-Graph Supervisor (${tierTag}) Operations:`,
+				`  - Read Mission topology (\`aexus-ade mission blueprint get --mission ${missionId} --raw\`), monitor managed nodes (\`aexus-ade org subordinates --mission ${missionId} --json\` and \`aexus-ade org context <nodeOrAgentId>\`), intervene within your jurisdiction (\`aexus-ade org send\`, \`aexus-ade mission retry|recall|patch --mission ${missionId}\`), and escalate out-of-jurisdiction issues via \`aexus-ade org escalate --mission ${missionId} --reason "<why>"\`.`,
 			);
 		} else if (resolvedSlot === 'reviewer') {
-			const noCodingPair = rank.id === 'employee' && executorRank.id === 'worker'
-				? 'Employee ≠ Worker'
-				: `${rank.name} ≠ ${executorRank.name}`;
 			lines.push(
-				`- Single-Node Reviewer (L${rank.tier}) Operational Rules (Node \`${input.workTree.nodeId ?? 'task'}\`):`,
-				`  - **STRICT PROHIBITION (\`${noCodingPair}\`)**: NEVER write or edit business code yourself — your ${executorRank.name} executes all coding. Audit Acceptance Criteria + Diff and submit your verdict via \`aexus-ade\`.`,
+				`- In-Graph Mission Reviewer (${tierTag}) Operations (Node \`${input.workTree.nodeId ?? 'task'}\`):`,
+				'  - Audit upstream deliverables and advance or bounce tokens strictly via `aexus-ade token complete <tokenId> --summary "..."` | `aexus-ade token reject <tokenId> --reason "..."` | `aexus-ade token fail <tokenId> --reason "..."`.',
 			);
 		}
 
 		const apiLines = renderAllowedPrimitiveApiLines(rank, {
 			agentId: input.agentId,
 			isWorkTree: true,
-			treeGovernorId: govId,
-			treeSegmentId: input.workTree.segmentId,
+			treeGovernorId: missionId,
 			treeNodeId: input.workTree.nodeId,
 			rankId: rank.id,
 			workTreeSlot: resolvedSlot,
@@ -1519,12 +1447,8 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 		lines.push('- Direct Subordinates: None');
 	}
 
-	lines.push(
-		`- Identity Rule: When asked your role/rank, state **${rank.name}**, session \`${input.agentId}\`, project **${input.projectName}**, supervisor (${input.supervisor ? `${input.supervisor.label} [${input.supervisor.rankName}]` : 'None'}), and subordinates. NEVER claim that you are "not an employee" or have "no rank".`,
-	);
-
 	if (interpolatedCharter) {
-		lines.push('- Role Initialization Charter:');
+		lines.push('- Role Charter:');
 		for (const charterLine of interpolatedCharter.split(/\r?\n/)) {
 			if (charterLine.trim()) {
 				lines.push(`  ${charterLine}`);
@@ -1539,9 +1463,9 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 	});
 	if (apiLines.length > 0) {
 		if (rank.allowedApis.includes('session.read_context')) {
-			lines.push(`- Live State: Hierarchy can hot-swap dynamically; run \`aexus-ade session info ${input.agentId} --json\` or \`aexus-ade session tree ${input.agentId} --json\` for live status before delegating.`);
+			lines.push(`- Live State: Hierarchy and Mission bindings can hot-update; run \`aexus-ade whoami --json\`, \`aexus-ade session info ${input.agentId} --json\`, \`aexus-ade session tree ${input.agentId} --json\`, or \`aexus-ade org subordinates --json\` before acting.`);
 		}
-		lines.push(`- Subordinate Control API & Authorized Aexus-Code Primitives (\`aexus-ade\` is on PATH; enforced by kernel — granted: ${rank.allowedApis.join(', ')}):`);
+		lines.push(`- Authorized Aexus-Code Primitive APIs (\`aexus-ade\` is on PATH; enforced by kernel — granted: ${rank.allowedApis.join(', ')}):`);
 		lines.push(...apiLines);
 	} else {
 		lines.push('- Authorized Aexus-Code Primitive APIs: None (you have no `aexus-ade` control permissions granted by this organization schema).');

@@ -76,8 +76,6 @@ export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProject
 export const ADE_RENAME_PROJECT_COMMAND_ID = 'workbench.action.ade.renameProjectFolder';
 export const ADE_OPEN_MISSION_COMMAND_ID = 'workbench.action.ade.openMission';
 export const ADE_REMOVE_MISSION_COMMAND_ID = 'workbench.action.ade.removeMission';
-export const ADE_OPEN_ENGINEERING_COMMAND_ID = 'workbench.action.ade.openEngineering';
-export const ADE_OPEN_RESEARCH_COMMAND_ID = 'workbench.action.ade.openResearch';
 export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHosts.manage';
 export const ADE_ADD_CLOUD_PROJECT_COMMAND_ID = 'workbench.action.aexusCloudHosts.addProject';
 export const ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID = 'workbench.action.aexusCloudHosts.importFromVSCode';
@@ -116,38 +114,6 @@ export interface IAdeAgent {
 	readonly preferredModel?: string;
 	readonly preferredThinking?: AdeThinkingLevel;
 	readonly workingDirectoryOverride?: string;
-}
-
-export interface IAdeWorkTreeTaskSpec {
-	readonly nodeId: string;
-	readonly title: string;
-	readonly employeeEngineId: string;
-	readonly employeeModel?: string;
-	readonly employeeThinking?: AdeThinkingLevel;
-	readonly workerEngineId: string;
-	readonly workerModel?: string;
-	readonly workerThinking?: AdeThinkingLevel;
-	readonly existingEmployeeAgentId?: string;
-	readonly existingWorkerAgentId?: string;
-	readonly workingDirectoryOverride?: string;
-}
-
-export interface IAdeWorkTreeSegmentSpec {
-	readonly segmentId: string;
-	readonly label: string;
-	readonly managerEngineId: string;
-	readonly managerModel?: string;
-	readonly managerThinking?: AdeThinkingLevel;
-	readonly existingManagerAgentId?: string;
-	readonly workingDirectoryOverride?: string;
-	readonly tasks: readonly IAdeWorkTreeTaskSpec[];
-}
-
-export interface IAdeWorkTreeSyncResult {
-	readonly managerAgentsBySegment: Readonly<Record<string, string>>;
-	readonly employeeAgentsByNode: Readonly<Record<string, string>>;
-	readonly workerAgentsByNode: Readonly<Record<string, string>>;
-	readonly removedAgents: readonly IAdeAgent[];
 }
 
 export interface IAdeSecretary {
@@ -212,7 +178,6 @@ export interface IAdeProjectsService {
 		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
 	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] };
 	clearMissionEmployees?(ownerOrMissionId: string): readonly IAdeAgent[];
-	syncWorkTreeHierarchy?(governorId: string, treeType: AdeWorkTreeType, segments: readonly IAdeWorkTreeSegmentSpec[]): IAdeWorkTreeSyncResult;
 	updateAgentEnginePreferences?(id: string, prefs: {
 		readonly preferredEngineId?: string;
 		readonly preferredModel?: string;
@@ -229,7 +194,7 @@ export interface IAdeProjectsService {
 	canReparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean;
 	reparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean;
 	renameAgent(id: string, label: string): void;
-	setAgentRole(id: string, role: AdeAgentRole | undefined): void;
+	setAgentRole(id: string, role: AdeAgentRole | undefined, options?: { readonly allowLockedMissionEmployee?: boolean }): void;
 	setArchived(id: string, archived: boolean): void;
 	markRead(id: string): void;
 	setAgentStatus(id: string, status: AdeAgentStatus, unread?: boolean): void;

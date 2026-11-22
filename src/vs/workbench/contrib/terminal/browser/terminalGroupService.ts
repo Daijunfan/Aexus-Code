@@ -37,6 +37,7 @@ export class TerminalGroupService extends Disposable implements ITerminalGroupSe
 	private _container: HTMLElement | undefined;
 
 	private _isQuickInputOpened: boolean = false;
+	private _syncActiveGroupContextKeys: (() => void) | undefined;
 
 	private readonly _onDidChangeActiveGroup = this._register(new Emitter<ITerminalGroup | undefined>());
 	readonly onDidChangeActiveGroup = this._onDidChangeActiveGroup.event;
@@ -74,10 +75,22 @@ export class TerminalGroupService extends Disposable implements ITerminalGroupSe
 		this._register(Event.runAndSubscribe(this.onDidChangeGroups, () => terminalGroupCountContextKey.set(this.groups.length)));
 
 		const splitTerminalActiveContextKey = TerminalContextKeys.splitTerminalActive.bindTo(this._contextKeyService);
-		this._register(Event.runAndSubscribe(this.onDidFocusInstance, () => {
+		const gridBroadcastActiveContextKey = TerminalContextKeys.gridBroadcastActive.bindTo(this._contextKeyService);
+		const paneMaximizedContextKey = TerminalContextKeys.paneMaximized.bindTo(this._contextKeyService);
+		const syncActiveGroupContextKeys = () => {
+			const activeGroup = this.activeGroup;
 			const activeInstance = this.activeInstance;
 			splitTerminalActiveContextKey.set(activeInstance ? this.instanceIsSplit(activeInstance) : false);
-		}));
+			gridBroadcastActiveContextKey.set(Boolean(activeGroup?.broadcastInput));
+			paneMaximizedContextKey.set(Boolean(activeGroup?.isPaneMaximized?.()));
+		};
+		this._register(Event.runAndSubscribe(Event.any(
+			this.onDidFocusInstance,
+			this.onDidChangeActiveGroup,
+			this.onDidChangeActiveInstance,
+			this.onDidChangeInstances,
+		), syncActiveGroupContextKeys));
+		this._syncActiveGroupContextKeys = syncActiveGroupContextKeys;
 
 		this._register(this.onDidDisposeGroup(group => this._removeGroup(group)));
 		this._register(Event.any(this.onDidChangeActiveGroup, this.onDidChangeInstances)(() => this.updateVisibility()));
@@ -173,6 +186,12 @@ export class TerminalGroupService extends Disposable implements ITerminalGroupSe
 				this._onDidChangeActiveInstance.fire(e);
 			}
 		}));
+		if (group.onDidChangeBroadcastInput) {
+			group.addDisposable(group.onDidChangeBroadcastInput(() => this._syncActiveGroupContextKeys?.()));
+		}
+		if (group.onDidChangePaneMaximized) {
+			group.addDisposable(group.onDidChangePaneMaximized(() => this._syncActiveGroupContextKeys?.()));
+		}
 		if (group.terminalInstances.length > 0) {
 			this._onDidChangeInstances.fire();
 		}

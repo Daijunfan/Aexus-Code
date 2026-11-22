@@ -1357,7 +1357,7 @@ const SECRETARY_COMMANDS: readonly BuiltinCommand[] = commands([
 	['status', 'Show secretary and agent status'],
 	['projects', 'List and switch projects'],
 	['sessions', 'List and resume agent sessions'],
-	['engineering', 'Open the Engineering DAG workflow'],
+	['mission', 'List active ADE Missions and runtime status'],
 	['inbox', 'Open the secretary Inbox'],
 	['focus', 'Focus the active agent session'],
 	['home', 'Return to the secretary home'],

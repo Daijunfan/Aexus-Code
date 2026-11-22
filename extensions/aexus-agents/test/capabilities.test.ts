@@ -31,7 +31,7 @@ const ENGINE_IDS = [
 	'aexus-pi',
 ];
 
-const SECRETARY_MACROS = ['status', 'projects', 'sessions', 'engineering', 'inbox', 'focus', 'home', 'new', 'engine', 'reset'];
+const SECRETARY_MACROS = ['status', 'projects', 'sessions', 'mission', 'inbox', 'focus', 'home', 'new', 'engine', 'reset'];
 
 const ENGINE_SIGNATURE_COMMANDS = {
 	'aexus-claude': ['security-review', 'agents', 'memory'],

@@ -4,9 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from '../../../../base/common/path.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
 import {
 	ADE_DOCS_MISSION_FILE_NAME,
@@ -72,8 +72,8 @@ suite('ADE Rank Resize, Hot Aliases, Mission RBAC & Single-Copy API Docs', () =>
 			L3: 'Reviewer',
 			L4: 'Worker',
 		});
-		assert.strictEqual(dir.tierByAlias['user'], 'L-1');
-		assert.strictEqual(dir.tierByAlias['director'], 'L2');
+		assert.strictEqual(dir.tierByAlias.user, 'L-1');
+		assert.strictEqual(dir.tierByAlias.director, 'L2');
 		assert.strictEqual(dir.ranks[0].tierTag, ADE_USER_TIER_TAG);
 		assert.strictEqual(dir.ranks[0].isSystemUser, true);
 		assert.strictEqual(dir.ranks[1].tierTag, ADE_SECRETARY_TIER_TAG);
@@ -156,9 +156,9 @@ suite('ADE Rank Resize, Hot Aliases, Mission RBAC & Single-Copy API Docs', () =>
 		assert.strictEqual(resolveActionPrimitiveApi('rank.list'), 'session.read_context');
 		assert.strictEqual(resolveActionPrimitiveApi('rank.docs'), 'session.read_context');
 		assert.strictEqual(resolveActionPrimitiveApi('mission.docs'), 'session.read_context');
-		assert.strictEqual(resolveActionPrimitiveApi('mission.status'), 'engineering.read');
-		assert.strictEqual(resolveActionPrimitiveApi('mission.blueprint.apply'), 'engineering.design');
-		assert.strictEqual(resolveActionPrimitiveApi('mission.run'), 'engineering.control');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.status'), 'mission.read');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.blueprint.apply'), 'mission.design');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.run'), 'mission.control');
 		assert.strictEqual(resolveActionPrimitiveApi('rank.rename'), undefined);
 		assert.strictEqual(resolveActionPrimitiveApi('rank.setCount'), undefined);
 

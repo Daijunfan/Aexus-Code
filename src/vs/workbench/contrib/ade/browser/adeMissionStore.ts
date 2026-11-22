@@ -7,7 +7,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
-import { IMissionNodePosition, parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
+import { IMissionNodeCheckHook, IMissionNodePosition, parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
 import type { IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
 import { ADE_SECRETARY_TIER, ADE_USER_TIER } from '../../../../platform/ade/common/adeRankResize.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
@@ -26,6 +26,10 @@ export interface IAdeMissionRecord {
 	readonly id: string;
 	readonly title: string;
 	readonly mermaidText: string;
+	/** Per-node authored Pre-Prompts (nodeId -> prompt text) packaged together with Token info on wakeup. */
+	readonly nodePrompts?: Readonly<Record<string, string>>;
+	/** Per-node zero-cost deterministic verification hooks (nodeId -> hooks) enforced before token completion advances. */
+	readonly nodeChecks?: Readonly<Record<string, readonly IMissionNodeCheckHook[]>>;
 	readonly positions: Readonly<Record<string, IMissionNodePosition>>;
 	/** Exact owner session ID (agent session ID for L1..LN, ADE_SECRETARY_ID for L0, undefined for User L-1 standalone). */
 	readonly ownerSessionId?: string;
@@ -54,9 +58,9 @@ export interface IAdeMissionRemoveResult {
 }
 
 /**
- * Enforces strict Mission ownership authority:
+ * Enforces strict Mission ownership authority for destructive / structural blueprint writes:
  * Whichever session (at any rank L0 or L1..LN) created a Mission is the ONLY agent session
- * permitted to operate its Mission orchestration; Human User (L-1) always retains full authority.
+ * permitted to overwrite/delete its Mission orchestration; Human User (L-1) always retains full authority.
  */
 export function canCallerOperateMission(mission: IAdeMissionRecord, caller: IAdeMissionCaller): boolean {
 	if (caller.isHumanUser) {
@@ -71,15 +75,45 @@ export function canCallerOperateMission(mission: IAdeMissionRecord, caller: IAde
 	return Boolean(caller.callerSessionId && caller.callerSessionId === mission.ownerSessionId);
 }
 
+/**
+ * Authorizes read-only Mission topology inspection (`mission.get`, `mission.blueprint.get`):
+ * Human User (L-1), Secretary (L0), the Mission owner, and any bound off-graph supervisor of the Mission
+ * may inspect its Mermaid DAG so off-graph supervisors can review topology before issuing scoped patches.
+ */
+export function canCallerReadMission(
+	mission: IAdeMissionRecord,
+	caller: IAdeMissionCaller,
+	runtime?: Pick<IMissionRuntimeState, 'boundary'>,
+): boolean {
+	if (caller.isHumanUser || caller.isSecretary || canCallerOperateMission(mission, caller)) {
+		return true;
+	}
+	const callerId = caller.callerSessionId;
+	if (!callerId) {
+		return false;
+	}
+	const effectiveBoundary = runtime?.boundary ?? mission.runtime?.boundary;
+	return Boolean(effectiveBoundary?.supervisors.some(sup => sup.id === callerId));
+}
+
 export const IAdeMissionService = createDecorator<IAdeMissionService>('adeMissionService');
 
 /**
  * Pure frontend Mission catalog backed by `IStorageService`, with strict owner-only orchestration
  * metadata and locked Mermaid-generated employee syncing in the left sidebar.
  */
+export interface IAdeMissionOpenOptions {
+	readonly side?: boolean;
+	readonly focusNodeId?: string;
+	readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
+	readonly openAgentBeside?: boolean;
+}
+
 export interface IAdeMissionService {
 	readonly _serviceBrand: undefined;
 	readonly onDidChange: Event<void>;
+	/** Fires when Mission state is reloaded from another window's storage write (no local re-persist). */
+	readonly onDidChangeExternal?: Event<void>;
 
 	listMissions(): readonly IAdeMissionRecord[];
 	getMission(id: string): IAdeMissionRecord | undefined;
@@ -89,6 +123,7 @@ export interface IAdeMissionService {
 		readonly id?: string;
 		readonly title?: string;
 		readonly mermaidText?: string;
+		readonly nodePrompts?: Readonly<Record<string, string>>;
 		readonly ownerSessionId?: string;
 		readonly ownerTier?: number;
 		readonly ownerRankId?: string;
@@ -104,21 +139,33 @@ export interface IAdeMissionService {
 		readonly projectUri?: string;
 	}): IAdeMissionRecord;
 	updateMermaid(id: string, mermaidText: string): IAdeMissionRecord | undefined;
-	updateRuntime(id: string, runtime: IMissionRuntimeState | undefined): IAdeMissionRecord | undefined;
+	updateNodePrompt(id: string, nodeId: string, prompt: string): IAdeMissionRecord | undefined;
+	updateNodePrompts(id: string, prompts: Readonly<Record<string, string>>): IAdeMissionRecord | undefined;
+	updateNodeChecks(id: string, nodeId: string, checks: readonly IMissionNodeCheckHook[]): IAdeMissionRecord | undefined;
+	upsertNodeCheck(id: string, nodeId: string, check: IMissionNodeCheckHook): IAdeMissionRecord | undefined;
+	removeNodeCheck(id: string, nodeId: string, checkId?: string): IAdeMissionRecord | undefined;
+	updateRuntime(id: string, runtime: IMissionRuntimeState | undefined, options?: { readonly deferPersist?: boolean }): IAdeMissionRecord | undefined;
 	updateNodePositions(id: string, positions: Readonly<Record<string, IMissionNodePosition>>): IAdeMissionRecord | undefined;
 	clearNodePositions(id: string): IAdeMissionRecord | undefined;
 	renameMission(id: string, title: string): IAdeMissionRecord | undefined;
 	deleteMission(id: string): boolean;
 	removeMissionWithEmployees(id: string, options?: { readonly deleteEngineHistory?: boolean }): Promise<IAdeMissionRemoveResult>;
-	openMissionEditor(id: string, options?: { side?: boolean }): Promise<void>;
+	openMissionEditor(id: string, options?: IAdeMissionOpenOptions): Promise<void>;
 }
 
 export class AdeMissionStoreService extends Disposable implements IAdeMissionService {
 	declare readonly _serviceBrand: undefined;
 
 	private readonly records = new Map<string, IAdeMissionRecord>();
+	private readonly serializedRecordCache = new Map<string, string>();
+	private readonly dirtyMissionIds = new Set<string>();
 	private readonly _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange = this._onDidChange.event;
+	private readonly _onDidChangeExternal = this._register(new Emitter<void>());
+	readonly onDidChangeExternal = this._onDidChangeExternal.event;
+	private isPersisting = false;
+	private readonly recentSavedJson = new Set<string>();
+	private deferredPersistTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
@@ -128,6 +175,57 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 	) {
 		super();
 		this.loadFromStorage();
+		this._register({
+			dispose: () => {
+				if (this.deferredPersistTimer !== undefined || this.dirtyMissionIds.size > 0) {
+					if (this.deferredPersistTimer !== undefined) {
+						clearTimeout(this.deferredPersistTimer);
+						this.deferredPersistTimer = undefined;
+					}
+					this.persist();
+				}
+			},
+		});
+		if (typeof this.storageService.onDidChangeValue === 'function') {
+			this._register(this.storageService.onDidChangeValue(StorageScope.APPLICATION, ADE_MISSIONS_STORAGE_KEY, this._store)(() => {
+				if (this.isPersisting) {
+					return;
+				}
+				const raw = this.storageService.get(ADE_MISSIONS_STORAGE_KEY, StorageScope.APPLICATION);
+				if (raw && this.recentSavedJson.has(raw)) {
+					this.recentSavedJson.delete(raw);
+					return;
+				}
+				// Preserve any locally buffered dirty Mission updates (e.g. recent token/cost updates
+				// waiting on deferredPersistTimer) instead of silently clobbering them on external writes!
+				const preservedDirty = new Map<string, IAdeMissionRecord>();
+				for (const dirtyId of this.dirtyMissionIds) {
+					const localRec = this.records.get(dirtyId);
+					if (localRec) {
+						preservedDirty.set(dirtyId, localRec);
+					}
+				}
+				this.records.clear();
+				this.serializedRecordCache.clear();
+				this.loadFromStorage();
+				if (preservedDirty.size > 0) {
+					for (const [dirtyId, localRec] of preservedDirty.entries()) {
+						const extRec = this.records.get(dirtyId);
+						if (!extRec || localRec.updatedAt >= extRec.updatedAt) {
+							this.records.set(dirtyId, localRec);
+							this.serializedRecordCache.delete(dirtyId);
+						} else {
+							this.dirtyMissionIds.delete(dirtyId);
+						}
+					}
+					if (this.dirtyMissionIds.size > 0) {
+						this.scheduleDeferredPersist();
+					}
+				}
+				this._onDidChangeExternal.fire();
+				this._onDidChange.fire();
+			}));
+		}
 	}
 
 	private tryGet<T>(id: ServiceIdentifier<T>): T | undefined {
@@ -213,10 +311,63 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 					const ownerRankId = typeof entry.ownerRankId === 'string' && entry.ownerRankId.trim()
 						? entry.ownerRankId.trim()
 						: (ownerTier <= ADE_USER_TIER ? 'user' : ownerTier === ADE_SECRETARY_TIER ? 'secretary' : undefined);
+					const sanitizedPrompts: Record<string, string> = {};
+					if (entry.nodePrompts && typeof entry.nodePrompts === 'object') {
+						for (const [nid, val] of Object.entries(entry.nodePrompts as Record<string, unknown>)) {
+							if (typeof val === 'string' && val.trim()) {
+								sanitizedPrompts[nid] = val;
+							}
+						}
+					}
+					const sanitizedChecks: Record<string, IMissionNodeCheckHook[]> = {};
+					if (entry.nodeChecks && typeof entry.nodeChecks === 'object') {
+						for (const [nid, list] of Object.entries(entry.nodeChecks as Record<string, unknown>)) {
+							if (!Array.isArray(list)) {
+								continue;
+							}
+							const cleanList: IMissionNodeCheckHook[] = [];
+							for (const rawHook of list) {
+								if (!rawHook || typeof rawHook !== 'object') {
+									continue;
+								}
+								const h = rawHook as Record<string, unknown>;
+								const hookId = typeof h.id === 'string' && h.id.trim() ? h.id.trim() : '';
+								const command = typeof h.command === 'string' && h.command.trim() ? h.command.trim() : undefined;
+								const expectFiles = Array.isArray(h.expectFiles)
+									? h.expectFiles.filter((f): f is string => typeof f === 'string' && f.trim().length > 0).map(f => f.trim())
+									: undefined;
+								if (!hookId || (!command && (!expectFiles || expectFiles.length === 0))) {
+									continue;
+								}
+								const onFailRaw = typeof h.onFail === 'string' ? h.onFail.trim().toLowerCase() : undefined;
+								const onFail = (onFailRaw === 'bounce' || onFailRaw === 'fail' || onFailRaw === 'escalate') ? onFailRaw : undefined;
+								cleanList.push({
+									id: hookId,
+									...(typeof h.name === 'string' && h.name.trim() ? { name: h.name.trim() } : {}),
+									...(command ? { command } : {}),
+									...(typeof h.expectExitCode === 'number' && Number.isInteger(h.expectExitCode) ? { expectExitCode: h.expectExitCode } : {}),
+									...(typeof h.cwd === 'string' && h.cwd.trim() ? { cwd: h.cwd.trim() } : {}),
+									...(typeof h.hostAlias === 'string' && h.hostAlias.trim() ? { hostAlias: h.hostAlias.trim() } : {}),
+									...(expectFiles && expectFiles.length > 0 ? { expectFiles } : {}),
+									...(typeof h.expectOutputMatch === 'string' && h.expectOutputMatch.trim() ? { expectOutputMatch: h.expectOutputMatch.trim() } : {}),
+									...(typeof h.timeoutMs === 'number' && Number.isFinite(h.timeoutMs) ? { timeoutMs: Math.max(1_000, Math.min(300_000, Math.round(h.timeoutMs))) } : {}),
+									...(onFail ? { onFail } : {}),
+									...(typeof h.maxAutoRetries === 'number' && Number.isInteger(h.maxAutoRetries) ? { maxAutoRetries: Math.max(0, Math.min(5, h.maxAutoRetries)) } : {}),
+									...(typeof h.enabled === 'boolean' ? { enabled: h.enabled } : {}),
+									source: 'config',
+								});
+							}
+							if (cleanList.length > 0) {
+								sanitizedChecks[nid] = cleanList;
+							}
+						}
+					}
 					this.records.set(entry.id, {
 						id: entry.id,
 						title: typeof entry.title === 'string' && entry.title.trim() ? entry.title.trim() : 'Untitled',
 						mermaidText: typeof entry.mermaidText === 'string' ? entry.mermaidText : '',
+						...(Object.keys(sanitizedPrompts).length > 0 ? { nodePrompts: sanitizedPrompts } : {}),
+						...(Object.keys(sanitizedChecks).length > 0 ? { nodeChecks: sanitizedChecks } : {}),
 						positions: entry.positions && typeof entry.positions === 'object' ? entry.positions : {},
 						...(ownerSessionId ? { ownerSessionId, linkedSessionId: ownerSessionId } : {}),
 						ownerTier,
@@ -233,9 +384,103 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		}
 	}
 
+	private compactRuntimeForStorage(runtime: IMissionRuntimeState): IMissionRuntimeState {
+		const MAX_SUMMARY_CHARS = 2_000;
+		const MAX_REVISIONS = 30;
+		let changed = false;
+		let nextTokens: Record<string, IMissionRuntimeState['tokens'][string]> | undefined;
+		for (const [id, tok] of Object.entries(runtime.tokens)) {
+			if (tok.lastSummary && tok.lastSummary.length > MAX_SUMMARY_CHARS) {
+				if (!nextTokens) {
+					nextTokens = { ...runtime.tokens };
+				}
+				nextTokens[id] = { ...tok, lastSummary: `${tok.lastSummary.slice(0, MAX_SUMMARY_CHARS - 1)}…` };
+				changed = true;
+			}
+		}
+		let nextTraces: Record<string, IMissionRuntimeState['traces'][string]> | undefined;
+		for (const [ptr, tr] of Object.entries(runtime.traces)) {
+			if (tr.summary && tr.summary.length > MAX_SUMMARY_CHARS) {
+				if (!nextTraces) {
+					nextTraces = { ...runtime.traces };
+				}
+				nextTraces[ptr] = { ...tr, summary: `${tr.summary.slice(0, MAX_SUMMARY_CHARS - 1)}…` };
+				changed = true;
+			}
+		}
+		let nextRevisions = runtime.revisions;
+		if (nextRevisions && nextRevisions.length > MAX_REVISIONS) {
+			nextRevisions = nextRevisions.slice(nextRevisions.length - MAX_REVISIONS);
+			changed = true;
+		}
+		if (!changed) {
+			return runtime;
+		}
+		return {
+			...runtime,
+			tokens: nextTokens ?? runtime.tokens,
+			traces: nextTraces ?? runtime.traces,
+			...(nextRevisions ? { revisions: nextRevisions } : {}),
+		};
+	}
+
+	private markRecordDirty(id: string): void {
+		this.serializedRecordCache.delete(id);
+		this.dirtyMissionIds.add(id);
+	}
+
+	/**
+	 * Incremental per-Mission JSON assembly: only `JSON.stringify`s Missions mutated since the
+	 * last write, reusing cached JSON fragments for all untouched Missions to eliminate main-thread
+	 * serialization pauses on multi-Mission / long-running workspaces.
+	 */
 	private persist(): void {
-		const payload = [...this.records.values()];
-		this.storageService.store(ADE_MISSIONS_STORAGE_KEY, JSON.stringify(payload), StorageScope.APPLICATION, StorageTarget.USER);
+		if (this.deferredPersistTimer !== undefined) {
+			clearTimeout(this.deferredPersistTimer);
+			this.deferredPersistTimer = undefined;
+		}
+		const fragments: string[] = [];
+		for (const [id, record] of this.records.entries()) {
+			let fragment = this.serializedRecordCache.get(id);
+			if (fragment === undefined) {
+				const compactRecord = record.runtime
+					? { ...record, runtime: this.compactRuntimeForStorage(record.runtime) }
+					: record;
+				fragment = JSON.stringify(compactRecord);
+				this.serializedRecordCache.set(id, fragment);
+			}
+			fragments.push(fragment);
+		}
+		for (const cachedId of Array.from(this.serializedRecordCache.keys())) {
+			if (!this.records.has(cachedId)) {
+				this.serializedRecordCache.delete(cachedId);
+			}
+		}
+		this.dirtyMissionIds.clear();
+		const serialized = `[${fragments.join(',')}]`;
+		this.recentSavedJson.add(serialized);
+		if (this.recentSavedJson.size > 24) {
+			const oldest = this.recentSavedJson.values().next().value;
+			if (oldest !== undefined) {
+				this.recentSavedJson.delete(oldest);
+			}
+		}
+		this.isPersisting = true;
+		try {
+			this.storageService.store(ADE_MISSIONS_STORAGE_KEY, serialized, StorageScope.APPLICATION, StorageTarget.USER);
+		} finally {
+			this.isPersisting = false;
+		}
+	}
+
+	private scheduleDeferredPersist(delayMs = 150): void {
+		if (this.deferredPersistTimer !== undefined) {
+			return;
+		}
+		this.deferredPersistTimer = setTimeout(() => {
+			this.deferredPersistTimer = undefined;
+			this.persist();
+		}, delayMs);
 	}
 
 	private getOwnerSyncKey(record: IAdeMissionRecord): string {
@@ -272,7 +517,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		}
 		const syncRes = projects.syncMissionMermaidEmployees?.(ownerKey, employeeSpecs, {
 			projectUri: parsedProjectUri,
-			ownerTier: record.ownerTier,
+			ownerTier: Math.max(record.ownerTier, record.runtime?.boundary.offGraphMaxTier ?? record.ownerTier),
 		});
 		if (syncRes && syncRes.removedAgents.length > 0) {
 			const editors = this.adeEditorsService;
@@ -337,6 +582,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		readonly id?: string;
 		readonly title?: string;
 		readonly mermaidText?: string;
+		readonly nodePrompts?: Readonly<Record<string, string>>;
 		readonly ownerSessionId?: string;
 		readonly ownerTier?: number;
 		readonly ownerRankId?: string;
@@ -352,10 +598,19 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			?? ownerAgent?.projectUri.toString()
 			?? this.projectsService?.selectedProject?.uri.toString()
 			?? this.projectsService?.projects[0]?.uri.toString();
+		const sanitizedPrompts: Record<string, string> = {};
+		if (options?.nodePrompts) {
+			for (const [nid, val] of Object.entries(options.nodePrompts)) {
+				if (typeof val === 'string' && val.trim()) {
+					sanitizedPrompts[nid] = val;
+				}
+			}
+		}
 		const record: IAdeMissionRecord = {
 			id,
 			title: options?.title?.trim() || ownerAgent?.label || `Mission ${num}`,
 			mermaidText: options?.mermaidText ?? '',
+			...(Object.keys(sanitizedPrompts).length > 0 ? { nodePrompts: sanitizedPrompts } : {}),
 			positions: {},
 			...(ownerMeta.ownerSessionId ? { ownerSessionId: ownerMeta.ownerSessionId, linkedSessionId: ownerMeta.ownerSessionId } : {}),
 			ownerTier: ownerMeta.ownerTier,
@@ -365,6 +620,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			updatedAt: now,
 		};
 		this.records.set(id, record);
+		this.markRecordDirty(id);
 		this.persist();
 		this.syncSidebarEmployeesForRecord(record);
 		this._onDidChange.fire();
@@ -409,13 +665,129 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			updatedAt: Date.now(),
 		};
 		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
 		this.persist();
 		this.syncSidebarEmployeesForRecord(updated);
 		this._onDidChange.fire();
 		return updated;
 	}
 
-	updateRuntime(id: string, runtime: IMissionRuntimeState | undefined): IAdeMissionRecord | undefined {
+	updateNodePrompt(id: string, nodeId: string, prompt: string): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		const cleanNodeId = nodeId.trim();
+		if (!existing || !cleanNodeId) {
+			return undefined;
+		}
+		const prev = existing.nodePrompts ?? {};
+		const prevVal = prev[cleanNodeId] ?? '';
+		const isClearing = prompt.trim().length === 0;
+		if (isClearing && !Object.hasOwn(prev, cleanNodeId)) {
+			return existing;
+		}
+		if (!isClearing && prevVal === prompt) {
+			return existing;
+		}
+		const nextPrompts: Record<string, string> = { ...prev };
+		if (isClearing) {
+			delete nextPrompts[cleanNodeId];
+		} else {
+			nextPrompts[cleanNodeId] = prompt;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			nodePrompts: Object.keys(nextPrompts).length > 0 ? nextPrompts : undefined,
+			updatedAt: Date.now(),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateNodePrompts(id: string, prompts: Readonly<Record<string, string>>): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const nextPrompts: Record<string, string> = { ...(existing.nodePrompts ?? {}) };
+		for (const [rawNodeId, rawPrompt] of Object.entries(prompts)) {
+			const cleanNodeId = rawNodeId.trim();
+			if (!cleanNodeId) {
+				continue;
+			}
+			if (typeof rawPrompt !== 'string' || rawPrompt.trim().length === 0) {
+				delete nextPrompts[cleanNodeId];
+			} else {
+				nextPrompts[cleanNodeId] = rawPrompt;
+			}
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			nodePrompts: Object.keys(nextPrompts).length > 0 ? nextPrompts : undefined,
+			updatedAt: Date.now(),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateNodeChecks(id: string, nodeId: string, checks: readonly IMissionNodeCheckHook[]): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		const cleanNodeId = nodeId.trim();
+		if (!existing || !cleanNodeId) {
+			return undefined;
+		}
+		const nextMap: Record<string, readonly IMissionNodeCheckHook[]> = { ...(existing.nodeChecks ?? {}) };
+		if (checks.length === 0) {
+			delete nextMap[cleanNodeId];
+		} else {
+			nextMap[cleanNodeId] = checks.map(c => ({ ...c, source: 'config' }));
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			nodeChecks: Object.keys(nextMap).length > 0 ? nextMap : undefined,
+			updatedAt: Date.now(),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	upsertNodeCheck(id: string, nodeId: string, check: IMissionNodeCheckHook): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		const cleanNodeId = nodeId.trim();
+		if (!existing || !cleanNodeId) {
+			return undefined;
+		}
+		const prevList = existing.nodeChecks?.[cleanNodeId] ?? [];
+		const normalized: IMissionNodeCheckHook = { ...check, source: 'config' };
+		const idx = prevList.findIndex(c => c.id === normalized.id);
+		const nextList = idx >= 0
+			? prevList.map((c, i) => i === idx ? normalized : c)
+			: [...prevList, normalized];
+		return this.updateNodeChecks(existing.id, cleanNodeId, nextList);
+	}
+
+	removeNodeCheck(id: string, nodeId: string, checkId?: string): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		const cleanNodeId = nodeId.trim();
+		if (!existing || !cleanNodeId) {
+			return undefined;
+		}
+		if (!checkId?.trim()) {
+			return this.updateNodeChecks(existing.id, cleanNodeId, []);
+		}
+		const prevList = existing.nodeChecks?.[cleanNodeId] ?? [];
+		const nextList = prevList.filter(c => c.id !== checkId.trim());
+		return this.updateNodeChecks(existing.id, cleanNodeId, nextList);
+	}
+
+	updateRuntime(id: string, runtime: IMissionRuntimeState | undefined, options?: { readonly deferPersist?: boolean }): IAdeMissionRecord | undefined {
 		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
 		if (!existing) {
 			return undefined;
@@ -426,7 +798,12 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			updatedAt: Date.now(),
 		};
 		this.records.set(existing.id, updated);
-		this.persist();
+		this.markRecordDirty(existing.id);
+		if (options?.deferPersist) {
+			this.scheduleDeferredPersist(250);
+		} else {
+			this.persist();
+		}
 		this._onDidChange.fire();
 		return updated;
 	}
@@ -442,7 +819,8 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			updatedAt: Date.now(),
 		};
 		this.records.set(existing.id, updated);
-		this.persist();
+		this.markRecordDirty(existing.id);
+		this.scheduleDeferredPersist(150);
 		return updated;
 	}
 
@@ -457,6 +835,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			updatedAt: Date.now(),
 		};
 		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
 		this.persist();
 		this._onDidChange.fire();
 		return updated;
@@ -474,6 +853,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			updatedAt: Date.now(),
 		};
 		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
 		this.persist();
 		this._onDidChange.fire();
 		return updated;
@@ -487,6 +867,8 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const ownerKey = this.getOwnerSyncKey(existing);
 		const removedAgents = this.projectsService?.clearMissionEmployees?.(ownerKey) ?? [];
 		this.records.delete(existing.id);
+		this.serializedRecordCache.delete(existing.id);
+		this.dirtyMissionIds.delete(existing.id);
 		this.persist();
 		this._onDidChange.fire();
 		if (removedAgents.length > 0) {
@@ -526,7 +908,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 
 		const removed = projects?.clearMissionEmployees?.(ownerKey) ?? [];
 		const deleted = existing ? this.records.delete(existing.id) : false;
-		if (deleted) {
+		if (deleted && existing) {
+			this.serializedRecordCache.delete(existing.id);
+			this.dirtyMissionIds.delete(existing.id);
 			this.persist();
 		}
 		const closeList = removed.length > 0 ? removed : toStop;
@@ -544,10 +928,31 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		};
 	}
 
-	async openMissionEditor(id: string, options?: { side?: boolean }): Promise<void> {
+	async openMissionEditor(id: string, options?: IAdeMissionOpenOptions): Promise<void> {
 		const rec = this.ensureMission(id);
 		this.modeService.setMode('ade');
 		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, rec.id);
-		await this.editorService.openEditor(input, { pinned: true }, options?.side ? SIDE_GROUP : undefined);
+		if (options?.focusNodeId) {
+			input.setPendingFocus({
+				nodeId: options.focusNodeId,
+				inspectorTab: options.inspectorTab,
+				openAgentBeside: options.openAgentBeside,
+			});
+		}
+		const pane = await this.editorService.openEditor(input, { pinned: true }, options?.side ? SIDE_GROUP : undefined);
+		if (options?.focusNodeId) {
+			const unconsumed = input.consumePendingFocus();
+			const maybeCanvasPane = pane as {
+				focusNode?: (nodeId: string, opts?: { readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops'; readonly openAgentBeside?: boolean }) => void;
+			} | undefined;
+			// Only invoke focusNode directly when VS Code reused an already-open AdeEngineeringEditorPane
+			// (so setInput did NOT run and consume pendingFocus), preventing duplicate openAgent/warm-up calls.
+			if (unconsumed && maybeCanvasPane && typeof maybeCanvasPane.focusNode === 'function') {
+				maybeCanvasPane.focusNode(unconsumed.nodeId, {
+					inspectorTab: unconsumed.inspectorTab,
+					openAgentBeside: unconsumed.openAgentBeside,
+				});
+			}
+		}
 	}
 }

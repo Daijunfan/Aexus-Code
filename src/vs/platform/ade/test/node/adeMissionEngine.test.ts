@@ -28,10 +28,15 @@ import {
 	validateMissionFactoryBoundary,
 } from '../../common/adeMissionBoundary.js';
 import {
+	appendMissionDagRevision,
 	applySafeMissionPatch,
 	blockMissionToken,
+	buildTokenDispatchPrompt,
 	completeMissionToken,
+	compressTokenHistory,
+	computeMissionFinOpsSummary,
 	createInitialMissionRuntimeState,
+	distillMissionNodeContext,
 	escalateMissionIssue,
 	expandTracePointer,
 	failMissionToken,
@@ -42,10 +47,14 @@ import {
 	matchesCronExpression,
 	pauseMissionRun,
 	recallMissionTokens,
+	recordMissionNodeTurnUsage,
+	recordTokenCheckResult,
 	recordWatchdogWakeup,
 	rejectMissionToken,
 	resolveMissionGate,
 	resumeMissionRun,
+	retryMissionToken,
+	setMissionBudgetLimit,
 	setMissionSilenceTimeout,
 	startMissionRun,
 	stopMissionRun,
@@ -290,13 +299,21 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 			mission.added.map(entry => entry.id).sort(),
 			[
 				'mission.boundary',
+				'mission.check',
 				'mission.host.bind',
 				'mission.patch',
+				'mission.prompt',
 				'mission.recall',
+				'mission.retry',
 				'mission.trigger',
 			],
 		);
 		assert.strictEqual(mission.modified.length, 0);
+
+		const missionFromRev3 = queryApiUpdateDiff(3, 'mission');
+		assert.deepStrictEqual(missionFromRev3.added.map(entry => entry.id), ['mission.check']);
+		const inGraphFromRev3 = queryApiUpdateDiff(3, 'in_graph');
+		assert.ok(inGraphFromRev3.modified.some(entry => entry.id === 'in_graph.token.complete'));
 
 		const missionFromRev1 = queryApiUpdateDiff(1, 'mission');
 		assert.ok(missionFromRev1.modified.some(entry => entry.id === 'mission.blueprint'), 'modified APIs surface via `modified`');
@@ -1226,8 +1243,8 @@ suite('ADE Mission Engine Regression Guards (wave joins, rework, patches & run-s
 		const waitingJoin = Object.values(barrier.arrivedByFrom)[0];
 		assert.ok(waitingJoin);
 		assert.strictEqual(waitingJoin.status, 'waiting_join');
-		// Rehydrated runtime state persists barrier arrivals as live waiting_join tokens.
-		state = { ...state, tokens: { ...state.tokens, [waitingJoin.id]: waitingJoin } };
+		// deliverTokenToTarget persists waiting_join tokens directly into state.tokens.
+		assert.strictEqual(state.tokens[waitingJoin.id]?.status, 'waiting_join');
 
 		const patched = applySafeMissionPatch(state, graph, {
 			caller: { sessionId: 'sup-1', tier: 1 },
@@ -1462,5 +1479,854 @@ suite('ADE Mission Engine Regression Guards (wave joins, rework, patches & run-s
 		assert.strictEqual(second.ok, false);
 		assert.strictEqual(second.code, 'INVALID_STATE');
 		assert.ok(second.error?.includes('already holds a live in-flight token'));
+	});
+
+	test('recordWatchdogWakeup auto-escalates silent token to Governor after 3 nudges', () => {
+		const graph = parseGraph('flowchart LR\n  A --> B');
+		const boundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'gov-1', tier: 1, managedNodeIds: ['A', 'B'] }],
+			nodeAssignments: { A: { agentId: 'emp-a', tier: 2, roleKind: 'worker', hostAlias: 'local' } },
+		};
+		let state = startMissionRun(createState(graph, boundary), graph, ORG, { now: 1_000 }).state;
+		const aTok = activeTokenOn(state, 'A')!;
+		for (let i = 1; i <= 3; i++) {
+			const res = recordWatchdogWakeup(state, { tokenId: aTok.id, reason: 'silence_timeout', graph, owner: { ownerSessionId: 'gov-1', ownerTier: 1 }, now: 1_000 + i * 300_000 });
+			assert.strictEqual(res.ok, true);
+			state = res.state;
+			assert.strictEqual(state.tokens[aTok.id].status, 'active');
+			assert.strictEqual(state.tokens[aTok.id].nudgeCount, i);
+		}
+		const escalated = recordWatchdogWakeup(state, { tokenId: aTok.id, reason: 'silence_timeout', graph, owner: { ownerSessionId: 'gov-1', ownerTier: 1 }, now: 2_000_000 });
+		assert.strictEqual(escalated.ok, true);
+		assert.strictEqual(escalated.state.tokens[aTok.id].status, 'frozen_failed');
+		assert.ok(escalated.effects.some(e => e.kind === 'escalate_to_supervisor' && e.supervisorId === 'gov-1'));
+	});
+
+	test('retryMissionToken unfreezes frozen_failed branch in-place and releases waiting join barrier', () => {
+		const graph = parseGraph('flowchart LR\n  N1 --> N2\n  N1 --> N3\n  N2 --> N4\n  N3 --> N4');
+		const boundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'gov-1', tier: 1, managedNodeIds: ['N1', 'N2', 'N3', 'N4'] }],
+			nodeAssignments: {
+				N1: { agentId: 'a1', tier: 2, roleKind: 'worker', hostAlias: 'local' },
+				N2: { agentId: 'a2', tier: 3, roleKind: 'worker', hostAlias: 'local' },
+				N3: { agentId: 'a3', tier: 4, roleKind: 'worker', hostAlias: 'local' },
+				N4: { agentId: 'a4', tier: 2, roleKind: 'worker', hostAlias: 'local' },
+			},
+		};
+		let state = startMissionRun(createState(graph, boundary), graph, ORG, { now: 1_000 }).state;
+		state = completeMissionToken(state, graph, { tokenId: activeTokenOn(state, 'N1')!.id, summary: 'N1 ok', now: 2_000 }).state;
+		const n2Tok = activeTokenOn(state, 'N2')!;
+		const n3Tok = activeTokenOn(state, 'N3')!;
+
+		// N2 fails with 502 (frozen_failed), N3 finishes and parks at N4 join barrier
+		state = failMissionToken(state, graph, { tokenId: n2Tok.id, reason: '502 gateway', owner: { ownerSessionId: 'gov-1', ownerTier: 1 }, now: 3_000 }).state;
+		state = completeMissionToken(state, graph, { tokenId: n3Tok.id, summary: 'N3 ok', now: 4_000 }).state;
+		assert.strictEqual(state.nodeStates.N4, 'waiting_join');
+		assert.strictEqual(state.tokens[n2Tok.id].status, 'frozen_failed');
+
+		// In-graph worker cannot retry; off-graph Governor can retry N2 in-place preserving wave-1
+		const forbidden = retryMissionToken(state, graph, { caller: { sessionId: 'a2', tier: 3 }, nodeId: 'N2', now: 5_000 });
+		assert.strictEqual(forbidden.ok, false);
+		assert.strictEqual(forbidden.code, 'FORBIDDEN');
+
+		const retried = retryMissionToken(state, graph, {
+			caller: { sessionId: 'gov-1', tier: 1, ownerSessionId: 'gov-1' },
+			tokenId: n2Tok.id,
+			guidance: 'Gateway recovered; finish ParserDev tests',
+			now: 5_000,
+		});
+		assert.strictEqual(retried.ok, true, retried.error);
+		state = retried.state;
+		const freshN2 = state.tokens[retried.data!.retriedTokenId];
+		assert.strictEqual(freshN2.status, 'active');
+		assert.strictEqual(freshN2.waveId, n2Tok.waveId);
+		assert.ok(freshN2.lastSummary.includes('Gateway recovered'));
+
+		// Completing retried N2 releases N4 join barrier cleanly and completes Mission
+		state = completeMissionToken(state, graph, { tokenId: freshN2.id, summary: 'N2 recovered', now: 6_000 }).state;
+		const n4Tok = activeTokenOn(state, 'N4');
+		assert.ok(n4Tok, 'N4 released from join barrier after in-place retry of N2');
+		state = completeMissionToken(state, graph, { tokenId: n4Tok.id, summary: 'N4 done', now: 7_000 }).state;
+		assert.strictEqual(state.status, 'completed');
+	});
+
+	test('rejectMissionToken restores returnWaveId so parallel downstream join barrier completes cleanly', () => {
+		const graph = parseGraph('flowchart LR\n  S --> A\n  S --> B\n  A --> R\n  R --> J\n  B --> J');
+		let state = startMissionRun(createState(graph), graph, ORG, { now: 1_000 }).state;
+		state = completeMissionToken(state, graph, { tokenId: activeTokenOn(state, 'S')!.id, summary: 'S ok', now: 2_000 }).state;
+		state = completeMissionToken(state, graph, { tokenId: activeTokenOn(state, 'B')!.id, summary: 'B ok', now: 3_000 }).state;
+		assert.strictEqual(state.nodeStates.J, 'waiting_join');
+
+		state = completeMissionToken(state, graph, { tokenId: activeTokenOn(state, 'A')!.id, summary: 'A v1', now: 4_000 }).state;
+		const rTok1 = activeTokenOn(state, 'R')!;
+		state = rejectMissionToken(state, graph, { tokenId: rTok1.id, reason: 'fix edge case', now: 5_000 }).state;
+		const aRework = activeTokenOn(state, 'A')!;
+		assert.strictEqual(aRework.returnToNodeId, 'R');
+		assert.strictEqual(aRework.returnWaveId, rTok1.waveId);
+
+		state = completeMissionToken(state, graph, { tokenId: aRework.id, summary: 'A v2 fixed', now: 6_000 }).state;
+		const rTok2 = activeTokenOn(state, 'R')!;
+		assert.strictEqual(rTok2.waveId, rTok1.waveId, 'Returning to R restores original waveId');
+
+		state = completeMissionToken(state, graph, { tokenId: rTok2.id, summary: 'R approved', now: 7_000 }).state;
+		const jTok = activeTokenOn(state, 'J');
+		assert.ok(jTok, 'J join barrier releases cleanly without orphaned wave-1 barrier');
+		state = completeMissionToken(state, graph, { tokenId: jTok.id, summary: 'J done', now: 8_000 }).state;
+		assert.strictEqual(state.status, 'completed');
+		assert.strictEqual(Object.keys(state.joinBarriers).length, 0);
+	});
+
+	test('recordMissionNodeTurnUsage infers 1M window for 1m/gemini models and avoids cacheRead saturation', () => {
+		const graph = parseGraph('flowchart LR\n  A --> B');
+		let state = startMissionRun(createState(graph), graph, ORG, { now: 1_000 }).state;
+		state = recordMissionNodeTurnUsage(state, 'A', {
+			inputTokens: 30_000,
+			outputTokens: 20_000,
+			cacheReadTokens: 4_000_000,
+			totalTokens: 4_050_000,
+			model: 'deepseek-flash[1m]',
+		});
+		const tel = state.nodeTelemetry?.A;
+		assert.ok(tel);
+		assert.strictEqual(tel.contextWindowMax, 1_000_000);
+		assert.strictEqual(tel.contextSourceTokens, 50_000);
+	});
+
+	test('single-branch recall never deadlocks downstream join barriers (before arrival, after sibling arrival, multi-hop, retry re-arm & jurisdiction guard)', () => {
+		const diamond = parseGraph([
+			'flowchart LR',
+			'  S --> A',
+			'  S --> B',
+			'  A --> J',
+			'  B --> J',
+		].join('\n'));
+
+		// Case 1: B already arrived at J (waiting_join), A is still active -> recalling A immediately releases J with B!
+		let s1 = startMissionRun(createState(diamond), diamond, ORG, { now: 1_000 }).state;
+		s1 = completeMissionToken(s1, diamond, { tokenId: activeTokenOn(s1, 'S')!.id, summary: 'S done', now: 2_000 }).state;
+		s1 = completeMissionToken(s1, diamond, { tokenId: activeTokenOn(s1, 'B')!.id, summary: 'B done', now: 3_000 }).state;
+		assert.strictEqual(s1.nodeStates.J, 'waiting_join');
+		const rec1 = recallMissionTokens(s1, diamond, { caller: { isHumanUser: true }, nodeIds: ['A'], reason: 'cancel A', now: 4_000 });
+		assert.strictEqual(rec1.ok, true, rec1.error);
+		assert.strictEqual(Object.keys(rec1.state.joinBarriers).length, 0, 'join barrier releases immediately when sole missing branch A is recalled');
+		const j1 = activeTokenOn(rec1.state, 'J');
+		assert.ok(j1, 'J receives active token immediately after single-branch recall of A');
+		assert.ok(j1.lastSummary.includes('[B] B done'));
+		assert.ok(rec1.effects.some(e => e.kind === 'dispatch_token' && e.nodeId === 'J'));
+
+		// Case 2: Both A and B still active (barrier not created yet) -> recalling A marks A skipped -> when B completes, J fires cleanly!
+		let s2 = startMissionRun(createState(diamond), diamond, ORG, { now: 1_000 }).state;
+		s2 = completeMissionToken(s2, diamond, { tokenId: activeTokenOn(s2, 'S')!.id, summary: 'S done', now: 2_000 }).state;
+		const rec2 = recallMissionTokens(s2, diamond, { caller: { isHumanUser: true }, nodeIds: ['A'], reason: 'drop A early', now: 3_000 });
+		assert.strictEqual(rec2.ok, true, rec2.error);
+		const afterB2 = completeMissionToken(rec2.state, diamond, { tokenId: activeTokenOn(rec2.state, 'B')!.id, summary: 'B solo', now: 4_000 });
+		assert.strictEqual(afterB2.ok, true, afterB2.error);
+		assert.strictEqual(Object.keys(afterB2.state.joinBarriers).length, 0);
+		assert.ok(activeTokenOn(afterB2.state, 'J'), 'J fires immediately once surviving branch B completes');
+
+		// Case 3: A already arrived at J, B still active -> recalling A purges A & marks skipped -> when B completes, J fires with B only!
+		let s3 = startMissionRun(createState(diamond), diamond, ORG, { now: 1_000 }).state;
+		s3 = completeMissionToken(s3, diamond, { tokenId: activeTokenOn(s3, 'S')!.id, summary: 'S done', now: 2_000 }).state;
+		s3 = completeMissionToken(s3, diamond, { tokenId: activeTokenOn(s3, 'A')!.id, summary: 'A bad', now: 3_000 }).state;
+		assert.strictEqual(s3.nodeStates.J, 'waiting_join');
+		const rec3 = recallMissionTokens(s3, diamond, { caller: { isHumanUser: true }, nodeIds: ['A'], reason: 'purge arrived A', now: 4_000 });
+		assert.strictEqual(rec3.ok, true, rec3.error);
+		assert.strictEqual(rec3.state.nodeStates.J, 'idle');
+		const afterB3 = completeMissionToken(rec3.state, diamond, { tokenId: activeTokenOn(rec3.state, 'B')!.id, summary: 'B clean', now: 5_000 });
+		assert.strictEqual(afterB3.ok, true, afterB3.error);
+		const j3 = activeTokenOn(afterB3.state, 'J');
+		assert.ok(j3);
+		assert.ok(j3.lastSummary.includes('[B] B clean') && !j3.lastSummary.includes('A bad'));
+
+		// Case 4: Multi-hop branch `S -> A1 -> A2 -> J` + `S -> B -> J` -> recalling A1 cascades skip to J!
+		const multiHop = parseGraph('flowchart LR\n  S --> A1\n  A1 --> A2\n  A2 --> J\n  S --> B\n  B --> J');
+		let s4 = startMissionRun(createState(multiHop), multiHop, ORG, { now: 1_000 }).state;
+		s4 = completeMissionToken(s4, multiHop, { tokenId: activeTokenOn(s4, 'S')!.id, summary: 'S', now: 2_000 }).state;
+		s4 = recallMissionTokens(s4, multiHop, { caller: { isHumanUser: true }, nodeIds: ['A1'], now: 3_000 }).state;
+		s4 = completeMissionToken(s4, multiHop, { tokenId: activeTokenOn(s4, 'B')!.id, summary: 'B ok', now: 4_000 }).state;
+		assert.ok(activeTokenOn(s4, 'J'), 'Multi-hop single-branch recall cascades skip to join J');
+
+		// Case 5: Recall A then retry A BEFORE B finishes -> barrier re-arms so J waits for BOTH A and B!
+		let s5 = startMissionRun(createState(diamond), diamond, ORG, { now: 1_000 }).state;
+		s5 = completeMissionToken(s5, diamond, { tokenId: activeTokenOn(s5, 'S')!.id, summary: 'S', now: 2_000 }).state;
+		s5 = recallMissionTokens(s5, diamond, { caller: { isHumanUser: true }, nodeIds: ['A'], now: 3_000 }).state;
+		const retried5 = retryMissionToken(s5, diamond, { caller: { isHumanUser: true }, nodeId: 'A', guidance: 'redo A', now: 3_500 });
+		assert.strictEqual(retried5.ok, true, retried5.error);
+		s5 = completeMissionToken(retried5.state, diamond, { tokenId: activeTokenOn(retried5.state, 'B')!.id, summary: 'B ok', now: 4_000 }).state;
+		assert.strictEqual(s5.nodeStates.J, 'waiting_join', 'J must wait for retried A after retry re-armed the barrier');
+		s5 = completeMissionToken(s5, diamond, { tokenId: activeTokenOn(s5, 'A')!.id, summary: 'A retried ok', now: 5_000 }).state;
+		const j5 = activeTokenOn(s5, 'J');
+		assert.ok(j5 && j5.lastSummary.includes('A retried ok') && j5.lastSummary.includes('B ok'));
+
+		// Case 6: Partial supervisor managing only A (not J) is rejected OUT_OF_JURISDICTION even before J's barrier exists!
+		const scopedBoundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 2,
+			supervisors: [
+				{ id: 'sup-l1', tier: 1, managedNodeIds: ['S', 'B', 'J'] },
+				{ id: 'sup-l2', tier: 2, managedNodeIds: ['A'], parentSupervisorId: 'sup-l1' },
+			],
+			nodeAssignments: {},
+		};
+		let s6 = startMissionRun(createState(diamond, scopedBoundary), diamond, ORG, { now: 1_000 }).state;
+		s6 = completeMissionToken(s6, diamond, { tokenId: activeTokenOn(s6, 'S')!.id, summary: 'S', now: 2_000 }).state;
+		const blockedRecall = recallMissionTokens(s6, diamond, { caller: { sessionId: 'sup-l2', tier: 2 }, nodeIds: ['A'], now: 3_000 });
+		assert.strictEqual(blockedRecall.ok, false);
+		assert.strictEqual(blockedRecall.code, 'OUT_OF_JURISDICTION');
+		assert.ok(blockedRecall.outOfScopeNodeIds?.includes('J'));
+		assert.strictEqual(blockedRecall.parentSupervisorId, 'sup-l1');
+
+		// Case 7: Patching a join node J -> D while B already completed and C is still active replays B into D's barrier so C finishes cleanly!
+		let s7 = startMissionRun(createState(diamond), diamond, ORG, { now: 1_000 }).state;
+		s7 = completeMissionToken(s7, diamond, { tokenId: activeTokenOn(s7, 'S')!.id, summary: 'S', now: 2_000 }).state;
+		s7 = completeMissionToken(s7, diamond, { tokenId: activeTokenOn(s7, 'A')!.id, summary: 'A done before patch', now: 3_000 }).state;
+		const patchedJoin = applySafeMissionPatch(s7, diamond, {
+			caller: { isHumanUser: true },
+			newMermaidText: 'flowchart LR\n  S --> A\n  S --> B\n  A --> J2\n  B --> J2',
+			reason: 'swap join J -> J2',
+			now: 4_000,
+		});
+		assert.strictEqual(patchedJoin.ok, true, patchedJoin.error);
+		assert.strictEqual(patchedJoin.state.nodeStates.J2, 'waiting_join', 'Already-completed A is replayed into new join J2');
+		const newGraph = parseGraph('flowchart LR\n  S --> A\n  S --> B\n  A --> J2\n  B --> J2');
+		const finished7 = completeMissionToken(patchedJoin.state, newGraph, { tokenId: activeTokenOn(patchedJoin.state, 'B')!.id, summary: 'B done after patch', now: 5_000 });
+		assert.strictEqual(finished7.ok, true, finished7.error);
+		const j2Tok = activeTokenOn(finished7.state, 'J2');
+		assert.ok(j2Tok, 'J2 fires immediately once B completes after live join replacement');
+		assert.ok(j2Tok.lastSummary.includes('A done before patch') && j2Tok.lastSummary.includes('B done after patch'));
+	});
+
+	test('hierarchical semantic rolling history preserves cumulative counts, node trail, file artifacts, critical verdicts, and real tracePtr without hard mid-word truncation', () => {
+		// 1. Signal-aware per-hop distillation preserves trailing file path & test verdict instead of hard-slicing at char 240
+		const verboseSummary = [
+			'Spent some time reading existing conventions and exploring unrelated folders across the repository before starting implementation.',
+			'Also checked background notes and formatting preferences in detail so everything aligns with team style guidelines and documentation prose.',
+			'Implemented JWT auth middleware in src/auth/jwtMiddleware.ts and verified 42/42 tests passing with 0 errors.',
+		].join(' ');
+		const singleDistilled = compressTokenHistory('', verboseSummary, 'N1');
+		assert.ok(singleDistilled.includes('src/auth/jwtMiddleware.ts'), `must retain trailing file path, got: ${singleDistilled}`);
+		assert.ok(singleDistilled.includes('42/42 tests passing') || singleDistilled.includes('0 errors'), `must retain trailing verdict metric, got: ${singleDistilled}`);
+
+		// 2. Over 14 hops with rich artifacts & a mid-chain rejection, archivedCount accumulates accurately (never resets to 1!)
+		const hopCount = 14;
+		const lines = ['flowchart LR'];
+		for (let i = 0; i < hopCount; i++) {
+			lines.push(`  S${i} --> S${i + 1}`);
+		}
+		const graph = parseGraph(lines.join('\n'));
+		let state = startMissionRun(createState(graph), graph, ORG, { now: 1_000 }).state;
+		for (let i = 0; i < hopCount; i++) {
+			const tok = activeTokenOn(state, `S${i}`)!;
+			const summary = i === 2
+				? `[Rejected by R1] Fixed race condition in src/core/scheduler.ts; 18/18 tests passing.`
+				: `Completed phase ${i} updating src/mod/part${i}.ts with detailed engineering notes and validation. Result: ${10 + i}/${10 + i} passing.`;
+			const res = completeMissionToken(state, graph, { tokenId: tok.id, summary, now: 2_000 + i });
+			assert.strictEqual(res.ok, true, res.error);
+			state = res.state;
+		}
+		const tailTok = activeTokenOn(state, `S${hopCount}`)!;
+		assert.ok(tailTok.compressedHistory.length <= 1200, `bounded <= 1200 (got ${tailTok.compressedHistory.length})`);
+		assert.ok(!tailTok.compressedHistory.includes('Mission started — begin execution'), 'skips synthetic startup boilerplate');
+		assert.ok(tailTok.historyState, 'attaches structured rolling history state');
+		assert.ok((tailTok.historyState?.archivedCount ?? 0) >= 5, `archivedCount must accumulate accurately (got ${tailTok.historyState?.archivedCount})`);
+		assert.ok(tailTok.compressedHistory.includes(`${tailTok.historyState!.archivedCount} earlier step(s) condensed`), tailTok.compressedHistory);
+		assert.ok(tailTok.historyState!.archivedNodeIds.includes('S0'), 'archived trail preserves earliest real hop S0');
+		assert.ok(
+			tailTok.compressedHistory.includes('src/core/scheduler.ts')
+			|| tailTok.historyState!.archivedArtifacts.includes('src/core/scheduler.ts'),
+			'critical rejection artifact survives across 14 hops',
+		);
+
+		// Prompt rendering substitutes real tracePtr in expand hint
+		const prompt = buildTokenDispatchPrompt(tailTok, 'Final Node');
+		assert.ok(!prompt.includes('aexus-ade token trace <ptr>'), 'dispatch prompt substitutes real tracePtr');
+		assert.ok(prompt.includes(`aexus-ade token trace ${tailTok.tracePtr}`), 'dispatch prompt exposes copy-pasteable tracePtr');
+
+		// 3. Direct string-only 3-arg compressTokenHistory also accumulates archived count across hops
+		let rolling = '';
+		for (let i = 0; i < 12; i++) {
+			rolling = compressTokenHistory(rolling, `Phase ${i} modified src/step${i}.ts and passed ${i + 1} tests. ${'details '.repeat(18)}`, `P${i}`);
+		}
+		const countMatch = /\((\d+)\s+earlier step\(s\) condensed/.exec(rolling);
+		assert.ok(countMatch && Number(countMatch[1]) >= 4, `string-only compressTokenHistory must accumulate archived count (got: ${rolling})`);
+		assert.ok(rolling.length <= 1200);
+
+		// 4. Parallel join merge preserves archived steps & artifacts from BOTH branches
+		const forkJoin = parseGraph('flowchart LR\n  R --> A1\n  A1 --> A2\n  A2 --> J\n  R --> B1\n  B1 --> B2\n  B2 --> J');
+		let fjState = startMissionRun(createState(forkJoin), forkJoin, ORG, { now: 1_000 }).state;
+		fjState = completeMissionToken(fjState, forkJoin, { tokenId: activeTokenOn(fjState, 'R')!.id, summary: 'Init schema in src/schema.ts', now: 2_000 }).state;
+		fjState = completeMissionToken(fjState, forkJoin, { tokenId: activeTokenOn(fjState, 'A1')!.id, summary: 'Backend in src/api.ts passed 12/12 tests', now: 3_000 }).state;
+		fjState = completeMissionToken(fjState, forkJoin, { tokenId: activeTokenOn(fjState, 'A2')!.id, summary: 'Backend integration ok', now: 4_000 }).state;
+		fjState = completeMissionToken(fjState, forkJoin, { tokenId: activeTokenOn(fjState, 'B1')!.id, summary: 'Frontend in src/ui.tsx passed 9/9 tests', now: 5_000 }).state;
+		fjState = completeMissionToken(fjState, forkJoin, { tokenId: activeTokenOn(fjState, 'B2')!.id, summary: 'Frontend polish ok', now: 6_000 }).state;
+		const joinTok = activeTokenOn(fjState, 'J')!;
+		assert.ok(joinTok.compressedHistory.includes('src/api.ts'), 'join history preserves branch A artifact');
+		assert.ok(joinTok.compressedHistory.includes('src/ui.tsx'), 'join history preserves branch B artifact');
+	});
+
+	test('recordTokenCheckResult enforces zero-cost bounce retries, on_fail edge routing, direct escalation, and verified completion trace', () => {
+		const graphWithFallback = parseGraph([
+			'flowchart LR',
+			'  N1["Build"] --> N2["Review"]',
+			'  N1 -->|fail| F1["Fallback Repair"]',
+		].join('\n'));
+		const s = startMissionRun(createState(graphWithFallback), graphWithFallback, ORG, { now: 1_000 }).state;
+		const tok1 = activeTokenOn(s, 'N1')!;
+
+		const failingSuite = {
+			nodeId: 'N1',
+			passed: false,
+			totalDurationMs: 420,
+			results: [{
+				checkId: 'chk-1',
+				name: 'typecheck',
+				command: 'pnpm typecheck',
+				hostAlias: 'local',
+				passed: false,
+				exitCode: 2,
+				expectedExitCode: 0,
+				durationMs: 420,
+				outputTail: 'src/app.ts(12,4): error TS2322',
+				error: 'Exit code 2 (expected 0)',
+			}],
+			summary: '[Check Failed: typecheck — Exit code 2 (expected 0)]',
+		};
+
+		// Attempt 1/2 (bounce): token stays active on N1, zero downstream dispatch, checkFailureCount=1
+		const bounce1 = recordTokenCheckResult(s, graphWithFallback, {
+			tokenId: tok1.id,
+			suiteResult: failingSuite,
+			onFail: 'bounce',
+			maxAutoRetries: 2,
+			now: 2_000,
+		});
+		assert.strictEqual(bounce1.ok, false);
+		assert.strictEqual(bounce1.code, 'CHECK_FAILED');
+		assert.strictEqual(bounce1.data?.action, 'bounced');
+		assert.strictEqual(bounce1.effects.length, 0, 'bounced check must NOT wake downstream LLM reviewer');
+		assert.strictEqual(bounce1.state.tokens[tok1.id].status, 'active');
+		assert.strictEqual(bounce1.state.tokens[tok1.id].checkFailureCount, 1);
+		assert.strictEqual(bounce1.state.nodeTelemetry?.N1?.lastCheckStatus, 'failed');
+
+		// Attempt 2/2 (bounce): still active
+		const bounce2 = recordTokenCheckResult(bounce1.state, graphWithFallback, {
+			tokenId: tok1.id,
+			suiteResult: failingSuite,
+			onFail: 'bounce',
+			maxAutoRetries: 2,
+			now: 3_000,
+		});
+		assert.strictEqual(bounce2.data?.action, 'bounced');
+		assert.strictEqual(bounce2.state.tokens[tok1.id].checkFailureCount, 2);
+
+		// Attempt 3 (> maxAutoRetries 2): automatically routes along `-->|fail|` edge to F1!
+		const exhausted = recordTokenCheckResult(bounce2.state, graphWithFallback, {
+			tokenId: tok1.id,
+			suiteResult: failingSuite,
+			onFail: 'bounce',
+			maxAutoRetries: 2,
+			now: 4_000,
+		});
+		assert.strictEqual(exhausted.ok, false);
+		assert.strictEqual(exhausted.code, 'CHECK_FAILED');
+		assert.strictEqual(exhausted.data?.routedViaFailEdge, true);
+		assert.ok(activeTokenOn(exhausted.state, 'F1'), 'exhausted bounce auto-routes along on_fail edge');
+		assert.strictEqual(activeTokenOn(exhausted.state, 'N2'), undefined, 'Reviewer N2 never woken');
+
+		// `onFail: 'escalate'` bypasses `-->|fail|` edge and escalates directly to supervisor!
+		const supBoundary: IMissionBoundaryConfig = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'sup-l1', tier: 1, managedNodeIds: ['N1', 'N2', 'F1'] }],
+			nodeAssignments: {},
+		};
+		const sEsc = startMissionRun(createState(graphWithFallback, supBoundary), graphWithFallback, ORG, { now: 1_000 }).state;
+		const escTok = activeTokenOn(sEsc, 'N1')!;
+		const escRes = recordTokenCheckResult(sEsc, graphWithFallback, {
+			tokenId: escTok.id,
+			suiteResult: failingSuite,
+			onFail: 'escalate',
+			maxAutoRetries: 0,
+			now: 2_000,
+		});
+		assert.strictEqual(escRes.ok, false);
+		assert.strictEqual(escRes.data?.action, 'escalated');
+		assert.strictEqual(escRes.data?.escalatedToSupervisorId, 'sup-l1');
+		assert.strictEqual(escRes.state.tokens[escTok.id].status, 'frozen_failed');
+		assert.ok(escRes.effects.some(e => e.kind === 'escalate_to_supervisor' && e.supervisorId === 'sup-l1'));
+
+		// Passed check after bounce clears lastCheckFailure, logs `check_passed`, and chains into completeMissionToken
+		const passingSuite = {
+			nodeId: 'N1',
+			passed: true,
+			totalDurationMs: 310,
+			results: [{
+				checkId: 'chk-1',
+				name: 'typecheck',
+				command: 'pnpm typecheck',
+				hostAlias: 'local',
+				passed: true,
+				exitCode: 0,
+				expectedExitCode: 0,
+				durationMs: 310,
+				outputTail: '0 errors',
+			}],
+			summary: '[Verified: typecheck (ok, 310ms)]',
+		};
+		const passCheck = recordTokenCheckResult(bounce1.state, graphWithFallback, {
+			tokenId: tok1.id,
+			suiteResult: passingSuite,
+			now: 2_500,
+		});
+		assert.strictEqual(passCheck.ok, true);
+		assert.strictEqual(passCheck.state.tokens[tok1.id].lastCheckFailure, undefined);
+		assert.strictEqual(passCheck.state.nodeTelemetry?.N1?.lastCheckStatus, 'passed');
+		const done = completeMissionToken(passCheck.state, graphWithFallback, {
+			tokenId: tok1.id,
+			summary: 'Fixed TS2322 in src/app.ts',
+			verificationNote: passingSuite.summary,
+			now: 2_600,
+		});
+		assert.strictEqual(done.ok, true);
+		const n2Tok = activeTokenOn(done.state, 'N2')!;
+		assert.ok(n2Tok.lastSummary.includes('[Verified: typecheck (ok, 310ms)]'));
+		const traceEvents = expandTracePointer(done.state, n2Tok.tracePtr).map(t => t.event);
+		assert.ok(traceEvents.includes('check_failed') && traceEvents.includes('check_passed') && traceEvents.includes('complete'));
+	});
+
+	test('Join Barrier persists waiting_join tokens in ctx.tokens, preserves uncontaminated siblings on branch recall, and unblocks nested joins on direct barrier recall', () => {
+		// Part 1: Diamond A -> B/C -> J
+		const diamond = parseGraph([
+			'flowchart LR',
+			'  A --> B',
+			'  A --> C',
+			'  B --> J',
+			'  C --> J',
+		].join('\n'));
+		let s1 = startMissionRun(createState(diamond), diamond, ORG, { now: 1_000 }).state;
+		s1 = completeMissionToken(s1, diamond, { tokenId: activeTokenOn(s1, 'A')!.id, summary: 'fanout', now: 2_000 }).state;
+		// C finishes first -> creates waiting_join token at J
+		s1 = completeMissionToken(s1, diamond, { tokenId: activeTokenOn(s1, 'C')!.id, summary: 'C done', now: 3_000 }).state;
+		const waitingAtJ = Object.values(s1.tokens).find(t => t.nodeId === 'J' && t.status === 'waiting_join');
+		assert.ok(waitingAtJ, 'deliverTokenToTarget MUST persist waiting_join token in state.tokens');
+		assert.strictEqual(s1.nodeStates.J, 'waiting_join');
+
+		// Recalling branch B must NOT clobber C's waiting_join token, and must release J immediately without deadlock!
+		const recalledB = recallMissionTokens(s1, diamond, {
+			caller: { isHumanUser: true },
+			branchRootNodeId: 'B',
+			reason: 'cancel branch B',
+			now: 4_000,
+		});
+		assert.strictEqual(recalledB.ok, true, recalledB.error);
+		assert.strictEqual(recalledB.state.tokens[waitingAtJ.id].status, 'completed', 'sibling waiting_join token transitions to completed on barrier release');
+		const jActive = activeTokenOn(recalledB.state, 'J');
+		assert.ok(jActive, 'J must release cleanly once branch B is recalled and C already arrived');
+
+		// Part 2: Nested join S -> (A, B) -> J -> K, and S -> C -> K
+		const nested = parseGraph([
+			'flowchart LR',
+			'  S --> A',
+			'  S --> B',
+			'  S --> C',
+			'  A --> J',
+			'  B --> J',
+			'  J --> K',
+			'  C --> K',
+		].join('\n'));
+		let s2 = startMissionRun(createState(nested), nested, ORG, { now: 10_000 }).state;
+		s2 = completeMissionToken(s2, nested, { tokenId: activeTokenOn(s2, 'S')!.id, summary: 'fanout 3', now: 11_000 }).state;
+		// A finishes -> waiting_join at J; B is still running; C is still running.
+		s2 = completeMissionToken(s2, nested, { tokenId: activeTokenOn(s2, 'A')!.id, summary: 'A done', now: 12_000 }).state;
+		const jWaiting = Object.values(s2.tokens).find(t => t.nodeId === 'J' && t.status === 'waiting_join');
+		assert.ok(jWaiting, 'waiting_join token for A->J present in state.tokens');
+
+		// Directly recall node J -> cancels J's barrier AND records J as skipped for downstream join K!
+		const recallJ = recallMissionTokens(s2, nested, {
+			caller: { isHumanUser: true },
+			nodeIds: ['J'],
+			reason: 'skip intermediate join J',
+			now: 13_000,
+		});
+		assert.strictEqual(recallJ.ok, true, recallJ.error);
+		assert.strictEqual(recallJ.state.tokens[jWaiting.id].status, 'recalled');
+		assert.strictEqual(Object.values(recallJ.state.joinBarriers).some(b => b.targetNodeId === 'J'), false);
+
+		// Now C finishes -> K must NOT deadlock waiting for recalled J!
+		const afterC = completeMissionToken(recallJ.state, nested, {
+			tokenId: activeTokenOn(recallJ.state, 'C')!.id,
+			summary: 'C done',
+			now: 14_000,
+		});
+		assert.strictEqual(afterC.ok, true, afterC.error);
+		assert.ok(activeTokenOn(afterC.state, 'K'), 'nested downstream join K must release once C completes after J was recalled');
+
+		// Part 3: Retrying a recalled branch AFTER its downstream join already released is rejected (no orphan barrier),
+		// and retrying a recalled partial waiting_join arrival on J is rejected (cannot bypass unfinished sibling B).
+		const retryReleasedBranch = retryMissionToken(recalledB.state, diamond, {
+			caller: { isHumanUser: true },
+			nodeId: 'B',
+			now: 5_000,
+		});
+		assert.strictEqual(retryReleasedBranch.ok, false);
+		assert.strictEqual(retryReleasedBranch.code, 'INVALID_STATE');
+		assert.match(retryReleasedBranch.error ?? '', /already released/i);
+
+		const retryPartialJoin = retryMissionToken(recallJ.state, nested, {
+			caller: { isHumanUser: true },
+			nodeId: 'J',
+			now: 13_500,
+		});
+		assert.strictEqual(retryPartialJoin.ok, false);
+		assert.strictEqual(retryPartialJoin.code, 'INVALID_STATE');
+
+		// Part 4: ARCHIVED_LINE_RE round-trips rollup lines containing both files: and key: via legacy string API
+		const rollupLine = '... (3 earlier step(s) condensed [N1→N2→N3]: files: src/app.ts, src/api.ts; key: [N2] fixed race | [N3] tests green; expand: aexus-ade token trace tr-3)';
+		const nextHistory = compressTokenHistory(rollupLine, 'Shipped v2', 'N4');
+		assert.ok(nextHistory.includes('3 earlier step(s) condensed') || nextHistory.includes('4 earlier step(s) condensed'), `Expected condensed count preserved across legacy parse, got:\n${nextHistory}`);
+		assert.ok(nextHistory.includes('src/app.ts'), 'archived artifacts preserved across string round-trip');
+	});
+
+	test('validateMissionFactoryBoundary validates managedSupervisorIds against self-reference, unknown IDs, reverse-tier supervision, and cycles', () => {
+		const graph = parseGraph('flowchart LR\n  A --> B');
+
+		// 1. Reverse-tier supervision (L2 supervising L1) rejected
+		const reverseRes = validateMissionFactoryBoundary(ORG, {
+			offGraphMaxTier: 2,
+			supervisors: [
+				{ id: 'sup-l1', tier: 1, managedNodeIds: ['A'] },
+				{ id: 'sup-l2', tier: 2, managedNodeIds: ['B'], managedSupervisorIds: ['sup-l1'] },
+			],
+			nodeAssignments: {},
+		}, graph);
+		assert.strictEqual(reverseRes.valid, false);
+		assert.ok(reverseRes.errors.some(e => /cannot supervise.*strictly top-down/i.test(e)));
+
+		// 2. Self-supervision & unknown supervisor ID rejected
+		const selfAndUnknown = validateMissionFactoryBoundary(ORG, {
+			offGraphMaxTier: 2,
+			supervisors: [
+				{ id: 'sup-l1', tier: 1, managedNodeIds: ['A'], managedSupervisorIds: ['sup-l1', 'ghost-sup'] },
+			],
+			nodeAssignments: {},
+		}, graph);
+		assert.strictEqual(selfAndUnknown.valid, false);
+		assert.ok(selfAndUnknown.errors.some(e => /cannot manage itself/i.test(e)));
+		assert.ok(selfAndUnknown.errors.some(e => /unknown subordinate supervisor/i.test(e)));
+
+		// 3. Valid strict top-down managedSupervisorIds passes
+		const validRes = validateMissionFactoryBoundary(ORG, {
+			offGraphMaxTier: 2,
+			supervisors: [
+				{ id: 'sup-l1', tier: 1, managedNodeIds: ['A'], managedSupervisorIds: ['sup-l2'] },
+				{ id: 'sup-l2', tier: 2, managedNodeIds: ['B'], parentSupervisorId: 'sup-l1' },
+			],
+			nodeAssignments: {},
+		}, graph);
+		assert.strictEqual(validRes.valid, true, validRes.errors.join(' '));
+	});
+
+	test('multi-wave concurrent nodeStates never get clobbered by Wave 1 finishing while Wave 2 is active, and resolveMissionGate supports queued multi-wave gates + tokenId', () => {
+		const graph = parseGraph('flowchart LR\n  S --> G{"Release Gate"}\n  G --> D');
+		let state = createState(graph);
+		state = {
+			...state,
+			triggers: [{ id: 'tr-1', nodeId: 'S', kind: 'interval', intervalMs: 10_000, enabled: true, fireCount: 0, autoStartOnMissionStart: true }],
+		};
+		state = startMissionRun(state, graph, ORG, { now: 1_000 }).state;
+		const sWave1 = activeTokenOn(state, 'S')!;
+		state = completeMissionToken(state, graph, { tokenId: sWave1.id, summary: 'Wave 1 build', now: 2_000 }).state;
+		const gWave1 = Object.values(state.tokens).find(t => t.nodeId === 'G' && t.status === 'waiting_gate')!;
+		assert.ok(gWave1);
+
+		// Fire Wave 2 while Wave 1 is waiting at G -> S completes Wave 2 -> BOTH Wave 1 and Wave 2 are queued at Gate G!
+		state = fireMissionSourceTrigger(state, graph, { triggerId: 'tr-1', payloadSummary: 'Wave 2 start', now: 3_000 }).state;
+		const sWave2 = activeTokenOn(state, 'S')!;
+		state = completeMissionToken(state, graph, { tokenId: sWave2.id, summary: 'Wave 2 build', now: 4_000 }).state;
+		const gWave2 = Object.values(state.tokens).find(t => t.nodeId === 'G' && t.status === 'waiting_gate' && t.id !== gWave1.id)!;
+		assert.ok(gWave2, 'Wave 2 queues a second waiting_gate token on G');
+
+		// Approve explicitly Wave 2 first via tokenId -> Gate G MUST remain waiting_gate for Wave 1 AND re-surface Wave 1 inbox todo!
+		const resW2 = resolveMissionGate(state, graph, { nodeId: 'G', tokenId: gWave2.id, decision: 'approve', note: 'Expedite wave 2', now: 5_000 });
+		assert.strictEqual(resW2.ok, true, resW2.error);
+		assert.strictEqual(resW2.data?.resolvedTokenId, gWave2.id);
+		assert.strictEqual(resW2.data?.remainingQueuedGateCount, 1);
+		assert.strictEqual(resW2.state.nodeStates.G, 'waiting_gate', 'Gate G remains waiting_gate while Wave 1 is still queued');
+		assert.ok(resW2.effects.some(e => e.kind === 'upsert_gate_inbox' && e.tokenId === gWave1.id), 'Re-emits upsert_gate_inbox for next queued wave token');
+
+		// Approve Wave 1 -> both Wave 2 and Wave 1 are now active on D!
+		const resW1 = resolveMissionGate(resW2.state, graph, { nodeId: 'G', decision: 'approve', now: 6_000 });
+		assert.strictEqual(resW1.ok, true, resW1.error);
+		assert.strictEqual(resW1.state.nodeStates.G, 'completed');
+		const activeOnD = Object.values(resW1.state.tokens).filter(t => t.nodeId === 'D' && t.status === 'active');
+		assert.strictEqual(activeOnD.length, 2, 'Two waves concurrently active on node D');
+
+		// Completing first wave on D must NOT overwrite nodeStates.D to completed while second wave is still active!
+		const afterFirstD = completeMissionToken(resW1.state, graph, { tokenId: activeOnD[0].id, summary: 'D wave A done', now: 7_000 });
+		assert.strictEqual(afterFirstD.ok, true);
+		assert.strictEqual(afterFirstD.state.nodeStates.D, 'active', 'nodeStates.D stays active while sibling wave token is still active');
+
+		const afterSecondD = completeMissionToken(afterFirstD.state, graph, { tokenId: activeOnD[1].id, summary: 'D wave B done', now: 8_000 });
+		assert.strictEqual(afterSecondD.ok, true);
+		assert.strictEqual(afterSecondD.state.nodeStates.D, 'completed', 'nodeStates.D becomes completed once all waves finish');
+	});
+
+	test('expandTracePointer retains NEWEST maxEntries hops (including latest rejection) on >100-step chains and prunes history bounds', () => {
+		const graph = parseGraph('flowchart LR\n  A --> R');
+		let state = startMissionRun(createState(graph), graph, ORG, { now: 1_000 }).state;
+		// Drive 60 reject/rework cycles (>120 trace entries)
+		let ts = 2_000;
+		for (let i = 0; i < 60; i++) {
+			const aTok = activeTokenOn(state, 'A')!;
+			state = completeMissionToken(state, graph, { tokenId: aTok.id, summary: `impl-${i}`, now: ts++ }).state;
+			const rTok = activeTokenOn(state, 'R')!;
+			state = rejectMissionToken(state, graph, { tokenId: rTok.id, reason: `reject-${i}`, targetNodeId: 'A', now: ts++ }).state;
+		}
+		const latestA = activeTokenOn(state, 'A')!;
+		const expanded = expandTracePointer(state, latestA.tracePtr, 20);
+		assert.strictEqual(expanded.length, 20);
+		const lastEntry = expanded[expanded.length - 1];
+		assert.strictEqual(lastEntry.ptr, latestA.tracePtr, 'Newest rejection trace entry MUST be preserved');
+		assert.ok((lastEntry.summary ?? '').includes('reject-59'), `Expected latest reject-59, got: ${lastEntry.summary}`);
+		assert.ok(expanded[0].timestamp < expanded[expanded.length - 1].timestamp, 'Returned trace slice stays in chronological order');
+	});
+
+	test('failMissionToken forwards returnToNodeId/returnWaveId across fail edges so rework fallback returns to Reviewer', () => {
+		const graph = parseGraph([
+			'flowchart LR',
+			'  A --> R',
+			'  A -.fail.-> F',
+			'  F --> R',
+			'  R --> Done',
+		].join('\n'));
+		let state = startMissionRun(createState(graph), graph, ORG, { now: 1_000 }).state;
+		state = completeMissionToken(state, graph, { tokenId: activeTokenOn(state, 'A')!.id, summary: 'A v1', now: 2_000 }).state;
+		const rTok1 = activeTokenOn(state, 'R')!;
+		// Reviewer rejects back to A
+		state = rejectMissionToken(state, graph, { tokenId: rTok1.id, reason: 'fix edge case', targetNodeId: 'A', now: 3_000 }).state;
+		const aRework = activeTokenOn(state, 'A')!;
+		assert.strictEqual(aRework.returnToNodeId, 'R');
+		assert.strictEqual(aRework.returnWaveId, rTok1.waveId);
+
+		// A hits failure during rework and routes to fallback node F -> F MUST inherit returnToNodeId='R' & returnWaveId!
+		const failed = failMissionToken(state, graph, { tokenId: aRework.id, reason: 'primary build crashed', now: 4_000 });
+		assert.strictEqual(failed.ok, true, failed.error);
+		assert.strictEqual(failed.data?.routedViaFailEdge, true);
+		const fTok = activeTokenOn(failed.state, 'F')!;
+		assert.ok(fTok);
+		assert.strictEqual(fTok.returnToNodeId, 'R', 'Fallback node F inherits returnToNodeId');
+		assert.strictEqual(fTok.returnWaveId, rTok1.waveId, 'Fallback node F inherits returnWaveId');
+
+		// Completing F restores wave-1 back at Reviewer R!
+		const afterF = completeMissionToken(failed.state, graph, { tokenId: fTok.id, summary: 'F recovered fix', now: 5_000 });
+		assert.strictEqual(afterF.ok, true, afterF.error);
+		const rTok2 = activeTokenOn(afterF.state, 'R')!;
+		assert.ok(rTok2);
+		assert.strictEqual(rTok2.waveId, rTok1.waveId, 'Fallback completion returns to Reviewer R with original waveId');
+	});
+
+	test('applySafeMissionPatch merges ALL completed parallel upstream summaries and histories into newly connected multi-inDegree node', () => {
+		const initial = parseGraph([
+			'flowchart LR',
+			'  S --> A',
+			'  S --> B',
+			'  A --> OldMerge',
+			'  B --> OldMerge',
+		].join('\n'));
+		let state = startMissionRun(createState(initial), initial, ORG, { now: 1_000 }).state;
+		state = completeMissionToken(state, initial, { tokenId: activeTokenOn(state, 'S')!.id, summary: 'S start', now: 2_000 }).state;
+		state = completeMissionToken(state, initial, { tokenId: activeTokenOn(state, 'A')!.id, summary: 'Alpha API schema done', now: 3_000 }).state;
+		state = completeMissionToken(state, initial, { tokenId: activeTokenOn(state, 'B')!.id, summary: 'Beta UI layout done', now: 4_000 }).state;
+		// Both A and B are completed; OldMerge is active. Patch OldMerge -> NewMerge!
+		const patched = applySafeMissionPatch(state, initial, {
+			caller: { isHumanUser: true },
+			newMermaidText: [
+				'flowchart LR',
+				'  S --> A',
+				'  S --> B',
+				'  A --> NewMerge',
+				'  B --> NewMerge',
+			].join('\n'),
+			reason: 'replace merge node',
+			now: 5_000,
+		});
+		assert.strictEqual(patched.ok, true, patched.error);
+		const newMergeTok = activeTokenOn(patched.state, 'NewMerge');
+		assert.ok(newMergeTok, 'NewMerge receives merged active token immediately');
+		assert.ok(newMergeTok.lastSummary.includes('Alpha API schema done'), `Must include branch A summary, got: ${newMergeTok.lastSummary}`);
+		assert.ok(newMergeTok.lastSummary.includes('Beta UI layout done'), `Must include branch B summary, got: ${newMergeTok.lastSummary}`);
+	});
+
+	test('recordMissionNodeTurnUsage honors measured contextInitTokens/contextTierDocTokens without fake ratios or double-counting', () => {
+		const graph = parseGraph('flowchart LR\n  A --> B');
+		let state = startMissionRun(createState(graph), graph, ORG, { now: 1_000 }).state;
+		// Turn 1 with exact measured init + contract tokens
+		state = recordMissionNodeTurnUsage(state, 'A', {
+			inputTokens: 6_000,
+			outputTokens: 800,
+			totalTokens: 6_800,
+			contextInitTokens: 4_000,
+			contextTierDocTokens: 1_200,
+			model: 'claude-sonnet-4-6',
+		});
+		const tel1 = state.nodeTelemetry?.A;
+		assert.ok(tel1);
+		assert.strictEqual(tel1.contextInitTokens, 4_000);
+		assert.strictEqual(tel1.contextTierDocTokens, 1_200);
+		assert.strictEqual(tel1.contextSourceTokens, 1_600, 'Turn 1 workspace tokens exclude init + contract without double-counting');
+
+		// Turn 2 on a pure worker with 0 init / 0 contract (never fabricates 8%/14% ratios!)
+		state = recordMissionNodeTurnUsage(state, 'B', {
+			inputTokens: 900,
+			outputTokens: 300,
+			totalTokens: 1_200,
+			contextInitTokens: 0,
+			contextTierDocTokens: 0,
+		});
+		const telB = state.nodeTelemetry?.B;
+		assert.ok(telB);
+		assert.strictEqual(telB.contextInitTokens, 0);
+		assert.strictEqual(telB.contextTierDocTokens, 0);
+		assert.strictEqual(telB.contextSourceTokens, 1_200);
+	});
+
+	test('FinOps budget circuit-breaker auto-pauses on ceiling, blocks resume with BUDGET_EXCEEDED until raised, and aggregates tier/host ledgers', () => {
+		const graph = parseGraph('flowchart LR\n  A["GPU Train"] --> B["Local Report"]');
+		let state = createState(graph);
+		state = {
+			...state,
+			boundary: {
+				...state.boundary,
+				nodeAssignments: {
+					A: { tier: 2, agentId: 'emp-A', hostAlias: 'ubuntu-h100' },
+					B: { tier: 3, agentId: 'emp-B', hostAlias: 'local' },
+				},
+			},
+		};
+		state = startMissionRun(state, graph, ORG, { now: 1_000 }).state;
+		state = setMissionBudgetLimit(state, 1.50, 1_500);
+		assert.strictEqual(state.budgetLimitUsd, 1.50);
+		assert.strictEqual(state.budgetCircuitTripped, false);
+
+		// Turn 1: $0.90 spent (60% of $1.50) with 80% cache hit ratio
+		state = recordMissionNodeTurnUsage(state, 'A', {
+			inputTokens: 40_000,
+			outputTokens: 10_000,
+			cacheReadTokens: 160_000,
+			totalTokens: 210_000,
+			costUsd: 0.90,
+			timestamp: 2_000,
+		});
+		assert.strictEqual(state.status, 'running');
+		const midSummary = computeMissionFinOpsSummary(state, graph.nodes);
+		assert.strictEqual(midSummary.totalCostUsd, 0.90);
+		assert.strictEqual(midSummary.budgetUsedPct, 60);
+		assert.strictEqual(midSummary.cacheSavingsPct, 80);
+		assert.strictEqual(midSummary.severity, 'normal');
+
+		// Turn 2: +$0.75 pushes total to $1.65 >= $1.50 -> auto-pauses & trips circuit-breaker!
+		state = recordMissionNodeTurnUsage(state, 'B', {
+			inputTokens: 20_000,
+			outputTokens: 5_000,
+			totalTokens: 25_000,
+			costUsd: 0.75,
+			timestamp: 3_000,
+		});
+		assert.strictEqual(state.status, 'paused', 'Exceeding FinOps budget must auto-pause running Mission');
+		assert.strictEqual(state.budgetCircuitTripped, true);
+
+		// Attempting to resume while over budget is refused with BUDGET_EXCEEDED
+		const blockedResume = resumeMissionRun(state, 3_500);
+		assert.strictEqual(blockedResume.ok, false);
+		assert.strictEqual(blockedResume.code, 'BUDGET_EXCEEDED');
+
+		const trippedSummary = computeMissionFinOpsSummary(state, graph.nodes);
+		assert.strictEqual(trippedSummary.totalCostUsd, 1.65);
+		assert.strictEqual(trippedSummary.budgetCircuitTripped, true);
+		assert.strictEqual(trippedSummary.severity, 'tripped');
+		assert.strictEqual(trippedSummary.byTier.length, 2);
+		assert.strictEqual(trippedSummary.byHost.length, 2);
+		assert.strictEqual(trippedSummary.byHost[0].label, '@ubuntu-h100');
+		assert.strictEqual(trippedSummary.byNode[0].nodeId, 'A');
+
+		// Raising budget above cumulative spend clears breaker and unlocks resumeMissionRun
+		state = setMissionBudgetLimit(state, 5.00, 4_000);
+		assert.strictEqual(state.budgetCircuitTripped, false);
+		const resumed = resumeMissionRun(state, 4_500);
+		assert.strictEqual(resumed.ok, true, resumed.error);
+		assert.strictEqual(resumed.state.status, 'running');
+	});
+
+	test('distillMissionNodeContext clears noisy context, preserves cumulative cost & completed tokens, and re-dispatches active node', () => {
+		const graph = parseGraph('flowchart LR\n  A["Step A"] --> B["Step B"]');
+		let state = createState(graph);
+		state = {
+			...state,
+			boundary: {
+				...state.boundary,
+				nodeAssignments: {
+					A: { tier: 2, agentId: 'emp-A' },
+					B: { tier: 2, agentId: 'emp-B' },
+				},
+			},
+		};
+		state = startMissionRun(state, graph, ORG, { now: 1_000 }).state;
+		state = completeMissionToken(state, graph, { tokenId: activeTokenOn(state, 'A')!.id, summary: 'A finished cleanly', now: 2_000 }).state;
+		const aCompletedTokId = Object.values(state.tokens).find(t => t.nodeId === 'A')!.id;
+		state = recordMissionNodeTurnUsage(state, 'B', {
+			inputTokens: 120_000,
+			outputTokens: 12_000,
+			totalTokens: 132_000,
+			costUsd: 0.42,
+			isNoiseTurn: true,
+			timestamp: 2_500,
+		});
+		assert.ok((state.nodeTelemetry?.B?.contextNoiseTokens ?? 0) > 0);
+
+		const distilled = distillMissionNodeContext(state, graph, 'B', {
+			memo: 'Switch to streaming parser',
+			now: 3_000,
+		});
+		assert.strictEqual(distilled.ok, true, distilled.error);
+		assert.strictEqual(distilled.state.nodeTelemetry?.B?.contextNoiseTokens, 0, 'Distill clears noise tokens');
+		assert.strictEqual(distilled.state.nodeTelemetry?.B?.costUsd, 0.42, 'Distill preserves cumulative spend honestly');
+		const bTok = activeTokenOn(distilled.state, 'B')!;
+		assert.ok(bTok.lastSummary.includes('Switch to streaming parser'));
+		const traceChain = expandTracePointer(distilled.state, bTok.tracePtr, 20);
+		assert.ok(traceChain.some(e => e.event === 'distill'), 'Distill records a distill trace entry');
+		assert.ok(distilled.effects.some(e => e.kind === 'stop_agent'), 'Distill stops bloated agent session');
+		assert.ok(distilled.effects.some(e => e.kind === 'dispatch_token'), 'Distill re-dispatches clean prompt to active node');
+
+		// Distilling an already-completed node MUST NOT mutate its historical completed token
+		const aOrigSummary = distilled.state.tokens[aCompletedTokId].lastSummary;
+		const idleDistill = distillMissionNodeContext(distilled.state, graph, 'A', { now: 3_500 });
+		assert.strictEqual(idleDistill.ok, true);
+		assert.strictEqual(idleDistill.state.tokens[aCompletedTokId].status, 'completed');
+		assert.strictEqual(idleDistill.state.tokens[aCompletedTokId].lastSummary, aOrigSummary);
+	});
+
+	test('appendMissionDagRevision tracks versioned Mermaid diffs and skips duplicate or invalid snapshots', () => {
+		const m1 = 'flowchart LR\n  A["Start"] --> B["Build"]';
+		const m2 = 'flowchart LR\n  A["Start"] --> B["Build"]\n  B --> C["Verify"]';
+		const g1 = parseGraph(m1);
+		const g2 = parseGraph(m2);
+		let state = createState(g1);
+		state = appendMissionDagRevision(state, m1, 'Mission started (v1)', undefined, g1, 1_000);
+		assert.strictEqual(state.revisions?.length, 1);
+		assert.strictEqual(state.revisions?.[0].version, 1);
+
+		// Duplicate whitespace-only change is ignored
+		state = appendMissionDagRevision(state, `  ${m1}\n  `, 'No-op', g1, g1, 1_500);
+		assert.strictEqual(state.revisions?.length, 1);
+
+		// Invalid Mermaid is ignored
+		state = appendMissionDagRevision(state, 'not valid mermaid syntax %%%%', 'Broken', g1, undefined, 1_800);
+		assert.strictEqual(state.revisions?.length, 1);
+
+		// Real topology patch records v2 with addedNodeIds=['C']
+		state = appendMissionDagRevision(state, m2, 'Add Verify step', g1, g2, 2_000);
+		assert.strictEqual(state.revisions?.length, 2);
+		assert.strictEqual(state.revisions?.[1].version, 2);
+		assert.deepStrictEqual(state.revisions?.[1].addedNodeIds, ['C']);
 	});
 });

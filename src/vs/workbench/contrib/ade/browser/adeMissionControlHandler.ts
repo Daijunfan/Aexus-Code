@@ -8,7 +8,7 @@ import {
 	IMissionSupervisorBinding,
 	resolveSupervisorJurisdiction,
 } from '../../../../platform/ade/common/adeMissionBoundary.js';
-import { parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
+import { IMissionNodeCheckHook, MissionCheckOnFailAction, parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
 import { IMissionEngineCaller, IMissionSourceTrigger, parseDurationMs } from '../../../../platform/ade/common/adeMissionEngine.js';
 import { IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -39,6 +39,7 @@ const MISSION_RUNTIME_ACTIONS = new Set([
 	'token.reject',
 	'token.block',
 	'token.fail',
+	'token.retry',
 	// Off-graph strictly top-down Org APIs
 	'org.subordinates',
 	'org.send',
@@ -55,37 +56,25 @@ const MISSION_RUNTIME_ACTIONS = new Set([
 	'mission.boundary.get',
 	'mission.boundary.set',
 	'mission.recall',
+	'mission.retry',
 	'mission.patch',
 	'mission.gate',
 	'mission.trigger.list',
 	'mission.trigger.set',
 	'mission.trigger.remove',
 	'mission.host.bind',
-	// Also accept engineering.* mapped equivalents
-	'engineering.start',
-	'engineering.run',
-	'engineering.pause',
-	'engineering.resume',
-	'engineering.stop',
-	'engineering.status',
-	'engineering.timeout.set',
-	'engineering.boundary.get',
-	'engineering.boundary.set',
-	'engineering.recall',
-	'engineering.patch',
-	'engineering.gate',
-	'engineering.trigger.list',
-	'engineering.trigger.set',
-	'engineering.trigger.remove',
-	'engineering.host.bind',
+	'mission.prompt.list',
+	'mission.prompt.get',
+	'mission.prompt.set',
+	'mission.check.list',
+	'mission.check.get',
+	'mission.check.set',
+	'mission.check.remove',
+	'mission.check.run',
 ]);
 
 export function isAdeMissionRuntimeAction(action: string): boolean {
 	return MISSION_RUNTIME_ACTIONS.has(action);
-}
-
-function normalizeAction(action: string): string {
-	return action.startsWith('engineering.') ? `mission.${action.slice('engineering.'.length)}` : action;
 }
 
 function findAssociatedMissionsForSession(
@@ -382,7 +371,7 @@ function findMissionByTokenId(ctx: IAdeMissionControlContext, tokenId: string): 
 }
 
 export async function executeAdeMissionRuntimeAction(
-	rawAction: string,
+	action: string,
 	params: Record<string, unknown>,
 	ctx: IAdeMissionControlContext,
 ): Promise<unknown> {
@@ -390,7 +379,6 @@ export async function executeAdeMissionRuntimeAction(
 	if (!runtime) {
 		throw new Error('ADE Mission runtime service is not available.');
 	}
-	const action = normalizeAction(rawAction);
 
 	switch (action) {
 		// =====================================================================
@@ -436,17 +424,21 @@ export async function executeAdeMissionRuntimeAction(
 		case 'token.complete': {
 			const tokenId = String(params.tokenId ?? params.token ?? params.id ?? '').trim();
 			const summary = String(params.summary ?? params.message ?? '').trim();
+			const skipChecks = params.skipChecks === true;
 			if (!tokenId) {
 				throw new Error('Token ID is required for token.complete.');
 			}
 			if (!summary) {
 				throw new Error('A plain-text factual --summary is required for token.complete.');
 			}
+			if (skipChecks && !ctx.isHumanUser) {
+				throw new Error('FORBIDDEN: only Human User (L-1) may bypass deterministic node verification hooks with --skip-checks.');
+			}
 			const mission = (params.mission || params.missionId)
 				? resolveMissionRecord(params, ctx)
 				: (findMissionByTokenId(ctx, tokenId) ?? resolveMissionRecord(params, ctx));
 			const callerAgentId = assertInGraphTokenCaller(ctx, mission, tokenId);
-			const res = await runtime.completeToken(mission.id, { tokenId, summary, callerAgentId });
+			const res = await runtime.completeToken(mission.id, { tokenId, summary, callerAgentId, ...(skipChecks ? { skipChecks: true } : {}) });
 			if (!res.ok) {
 				throw new Error(res.error ?? `Failed to complete token ${tokenId}`);
 			}
@@ -635,12 +627,18 @@ export async function executeAdeMissionRuntimeAction(
 			const directive = `[Directive from Superior: ${senderTag}]\n${message}`;
 			const targetRank = resolveEffectiveRankDefinition(ctx.roleConfig, targetAgent.role, ctx.projects.hasSubordinates(targetAgent.id));
 
+			const targetMissionBinding = ctx.missionRuntime?.findMissionForAgent(targetAgent.id);
+			const targetIsInGraphNode = Boolean(
+				(targetMissionBinding && !targetMissionBinding.isOffGraphSupervisor && targetMissionBinding.nodeIds.length > 0)
+				|| targetAgent.treeNodeId
+				|| (targetAgent.treeNodeIds && targetAgent.treeNodeIds.length > 0),
+			);
 			const dispatchPromise = ctx.commandService.executeCommand('aexus.agentEngines.dispatchEngineeringTurn', resource, directive, {
 				agentId: targetAgent.id,
 				model: targetAgent.preferredModel,
 				thinking: targetAgent.preferredThinking,
 				pureWorker: false,
-				isMissionNode: Boolean(targetAgent.treeNodeId),
+				isMissionNode: targetIsInGraphNode,
 				callerRole: targetRank.id,
 				autonomousApproved: true,
 			});
@@ -854,6 +852,35 @@ export async function executeAdeMissionRuntimeAction(
 			return { ok: true, missionId: mission.id, ...(res.data as Record<string, unknown> ?? {}) };
 		}
 
+		case 'mission.retry':
+		case 'token.retry': {
+			const tokenId = typeof (params.tokenId ?? params.token) === 'string' && String(params.tokenId ?? params.token).trim()
+				? String(params.tokenId ?? params.token).trim()
+				: undefined;
+			const nodeId = typeof (params.node ?? params.nodeId) === 'string' && String(params.node ?? params.nodeId).trim()
+				? String(params.node ?? params.nodeId).trim()
+				: undefined;
+			if (!tokenId && !nodeId) {
+				throw new Error('Either --token <tokenId> or --node <nodeId> is required for mission.retry.');
+			}
+			const mission = (params.mission || params.missionId)
+				? resolveMissionRecord(params, ctx)
+				: ((tokenId ? findMissionByTokenId(ctx, tokenId) : undefined) ?? resolveMissionRecord(params, ctx));
+			const guidance = typeof (params.guidance ?? params.reason ?? params.message ?? params.note) === 'string'
+				? String(params.guidance ?? params.reason ?? params.message ?? params.note).trim()
+				: undefined;
+			const res = await runtime.retryToken(mission.id, {
+				caller: buildEngineCaller(ctx, mission),
+				tokenId,
+				nodeId,
+				guidance,
+			});
+			if (!res.ok) {
+				throw new Error(res.error ?? 'Retry rejected.');
+			}
+			return { ok: true, missionId: mission.id, status: res.state.status, ...(res.data as Record<string, unknown> ?? {}) };
+		}
+
 		case 'mission.patch': {
 			const mission = resolveMissionRecord(params, ctx);
 			const newMermaidText = String(params.mermaid ?? params.text ?? params.mermaidText ?? '').trim();
@@ -892,6 +919,9 @@ export async function executeAdeMissionRuntimeAction(
 			const res = await runtime.resolveGate(mission.id, {
 				nodeId,
 				decision: normalizedDecision,
+				tokenId: typeof (params.tokenId ?? params.token) === 'string' && String(params.tokenId ?? params.token).trim()
+					? String(params.tokenId ?? params.token).trim()
+					: undefined,
 				note: typeof (params.note ?? params.feedback ?? params.reason) === 'string' ? String(params.note ?? params.feedback ?? params.reason).trim() : undefined,
 				rollbackNodeId: typeof (params.rollback ?? params.rollbackNodeId ?? params.targetNode ?? params.target) === 'string'
 					? String(params.rollback ?? params.rollbackNodeId ?? params.targetNode ?? params.target).trim()
@@ -997,7 +1027,261 @@ export async function executeAdeMissionRuntimeAction(
 			return { ok: true, missionId: mission.id, assignment: res.assignment };
 		}
 
+		case 'mission.prompt.list': {
+			const mission = resolveMissionRecord(params, ctx);
+			assertMissionMemberOrSupervisor(ctx, mission);
+			return { missionId: mission.id, nodePrompts: mission.nodePrompts ?? {} };
+		}
+
+		case 'mission.prompt.get': {
+			const mission = resolveMissionRecord(params, ctx);
+			assertMissionMemberOrSupervisor(ctx, mission);
+			const nodeId = String(params.node ?? params.nodeId ?? '').trim();
+			if (!nodeId) {
+				throw new Error('Node ID (--node) is required for mission.prompt.get.');
+			}
+			return { missionId: mission.id, nodeId, prompt: mission.nodePrompts?.[nodeId] ?? '' };
+		}
+
+		case 'mission.prompt.set': {
+			const mission = resolveMissionRecord(params, ctx);
+			const nodeId = String(params.node ?? params.nodeId ?? '').trim();
+			if (!nodeId) {
+				throw new Error('Node ID (--node) is required for mission.prompt.set.');
+			}
+			const caller = buildEngineCaller(ctx, mission);
+			const rt = runtime.getRuntimeState(mission.id);
+			const graph = parseMissionMermaidDag(mission.mermaidText);
+			if (!graph.nodes.some(n => n.id === nodeId)) {
+				throw new Error(`Node "${nodeId}" not found in Mission "${mission.id}".`);
+			}
+			const jur = resolveSupervisorJurisdiction(
+				rt.boundary,
+				caller.sessionId ?? '',
+				graph.nodes.map(n => n.id),
+				{ isHumanUser: caller.isHumanUser, isSecretary: caller.isSecretary, ownerSessionId: mission.ownerSessionId },
+			);
+			if (!jur.hasFullJurisdiction && !jur.nodeIds.has(nodeId)) {
+				throw new Error(`OUT_OF_JURISDICTION: caller lacks off-graph jurisdiction to set pre-prompt for node "${nodeId}" in Mission "${mission.id}".`);
+			}
+			const promptText = params.clear === true
+				? ''
+				: String(params.prompt ?? params.text ?? params.prePrompt ?? '');
+			const updated = ctx.missionService?.updateNodePrompt(mission.id, nodeId, promptText);
+			return {
+				ok: true,
+				missionId: mission.id,
+				nodeId,
+				prompt: updated?.nodePrompts?.[nodeId] ?? '',
+			};
+		}
+
+		case 'mission.check.list': {
+			const mission = resolveMissionRecord(params, ctx);
+			assertMissionMemberOrSupervisor(ctx, mission);
+			const nodeId = typeof (params.node ?? params.nodeId) === 'string' && String(params.node ?? params.nodeId).trim()
+				? String(params.node ?? params.nodeId).trim()
+				: undefined;
+			const nodeChecks = runtime.getEffectiveNodeChecks(mission.id, nodeId);
+			return { missionId: mission.id, nodeChecks };
+		}
+
+		case 'mission.check.get': {
+			const mission = resolveMissionRecord(params, ctx);
+			assertMissionMemberOrSupervisor(ctx, mission);
+			const nodeId = String(params.node ?? params.nodeId ?? '').trim();
+			if (!nodeId) {
+				throw new Error('Node ID (--node) is required for mission.check.get.');
+			}
+			const checks = runtime.getEffectiveNodeChecks(mission.id, nodeId)[nodeId] ?? [];
+			return { missionId: mission.id, nodeId, checks };
+		}
+
+		case 'mission.check.set': {
+			const mission = resolveMissionRecord(params, ctx);
+			const nodeId = String(params.node ?? params.nodeId ?? '').trim();
+			if (!nodeId) {
+				throw new Error('Node ID (--node) is required for mission.check.set.');
+			}
+			const caller = buildEngineCaller(ctx, mission);
+			const rt = runtime.getRuntimeState(mission.id);
+			const graph = parseMissionMermaidDag(mission.mermaidText);
+			const targetNode = graph.nodes.find(n => n.id === nodeId);
+			if (!targetNode) {
+				throw new Error(`Node "${nodeId}" not found in Mission "${mission.id}".`);
+			}
+			if (targetNode.kind === 'gate') {
+				throw new Error(`Cannot attach deterministic checks to Human Gate node "${nodeId}". Attach checks to task nodes.`);
+			}
+			const isOffGraph = Boolean(
+				caller.isHumanUser
+				|| caller.isSecretary
+				|| (caller.tier !== undefined && caller.tier <= rt.boundary.offGraphMaxTier),
+			);
+			if (!isOffGraph) {
+				throw new Error('FORBIDDEN: in-graph employees cannot configure or modify deterministic verification hooks.');
+			}
+			const jur = resolveSupervisorJurisdiction(
+				rt.boundary,
+				caller.sessionId ?? '',
+				graph.nodes.map(n => n.id),
+				{ isHumanUser: caller.isHumanUser, isSecretary: caller.isSecretary, ownerSessionId: mission.ownerSessionId },
+			);
+			if (!jur.hasFullJurisdiction && !jur.nodeIds.has(nodeId)) {
+				throw new Error(`OUT_OF_JURISDICTION: caller lacks off-graph jurisdiction to configure checks for node "${nodeId}" in Mission "${mission.id}".`);
+			}
+
+			const command = typeof (params.command ?? params.cmd) === 'string' && String(params.command ?? params.cmd).trim()
+				? String(params.command ?? params.cmd).trim()
+				: undefined;
+			const rawExpectFiles = params.expectFiles ?? params.expectFile ?? params.files;
+			const expectFiles = Array.isArray(rawExpectFiles)
+				? rawExpectFiles.map(x => String(x).trim()).filter(Boolean)
+				: (typeof rawExpectFiles === 'string' && rawExpectFiles.trim()
+					? rawExpectFiles.split(',').map(s => s.trim()).filter(Boolean)
+					: undefined);
+			if (!command && (!expectFiles || expectFiles.length === 0)) {
+				throw new Error('At least one of --cmd "<shell command>" or --expect-file "<path>" is required for mission.check.set.');
+			}
+
+			const onFailRaw = typeof (params.onFail ?? params.on_fail) === 'string'
+				? String(params.onFail ?? params.on_fail).trim().toLowerCase()
+				: undefined;
+			let onFail: MissionCheckOnFailAction | undefined;
+			if (onFailRaw !== undefined && onFailRaw !== '') {
+				if (onFailRaw !== 'bounce' && onFailRaw !== 'fail' && onFailRaw !== 'escalate') {
+					throw new Error(`Invalid --on-fail mode "${onFailRaw}". Expected bounce, fail, or escalate.`);
+				}
+				onFail = onFailRaw;
+			}
+
+			const timeoutRaw = params.timeoutMs ?? params.timeout;
+			const parsedTimeout = timeoutRaw !== undefined
+				? (typeof timeoutRaw === 'number' ? timeoutRaw : parseDurationMs(String(timeoutRaw)))
+				: undefined;
+			const timeoutMs = parsedTimeout !== undefined
+				? Math.max(1_000, Math.min(300_000, Math.round(parsedTimeout)))
+				: undefined;
+
+			const maxRetriesRaw = params.maxAutoRetries ?? params.maxRetries ?? params.retries;
+			const maxAutoRetries = maxRetriesRaw !== undefined && Number.isFinite(Number(maxRetriesRaw))
+				? Math.max(0, Math.min(5, Math.floor(Number(maxRetriesRaw))))
+				: undefined;
+
+			const expectExitRaw = params.expectExitCode ?? params.expectExit;
+			const expectExitCode = expectExitRaw !== undefined && Number.isInteger(Number(expectExitRaw))
+				? Number(expectExitRaw)
+				: undefined;
+
+			const existingForNode = mission.nodeChecks?.[nodeId] ?? [];
+			const explicitId = typeof (params.checkId ?? params.id) === 'string' && String(params.checkId ?? params.id).trim()
+				? String(params.checkId ?? params.id).trim()
+				: undefined;
+			const checkId = explicitId || `chk-${nodeId}-${existingForNode.length + 1}`;
+
+			const hook: IMissionNodeCheckHook = {
+				id: checkId,
+				...(typeof params.name === 'string' && params.name.trim() ? { name: params.name.trim() } : {}),
+				...(command ? { command } : {}),
+				...(expectExitCode !== undefined ? { expectExitCode } : {}),
+				...(typeof params.cwd === 'string' && params.cwd.trim() ? { cwd: params.cwd.trim() } : {}),
+				...(typeof (params.host ?? params.hostAlias) === 'string' && String(params.host ?? params.hostAlias).trim()
+					? { hostAlias: String(params.host ?? params.hostAlias).trim() }
+					: {}),
+				...(expectFiles && expectFiles.length > 0 ? { expectFiles } : {}),
+				...(typeof (params.expectOutputMatch ?? params.match) === 'string' && String(params.expectOutputMatch ?? params.match).trim()
+					? { expectOutputMatch: String(params.expectOutputMatch ?? params.match).trim() }
+					: {}),
+				...(timeoutMs !== undefined ? { timeoutMs } : {}),
+				...(onFail ? { onFail } : {}),
+				...(maxAutoRetries !== undefined ? { maxAutoRetries } : {}),
+				enabled: params.disabled === true ? false : true,
+				source: 'config',
+			};
+			ctx.missionService?.upsertNodeCheck(mission.id, nodeId, hook);
+			return {
+				ok: true,
+				missionId: mission.id,
+				nodeId,
+				check: hook,
+				checks: runtime.getEffectiveNodeChecks(mission.id, nodeId)[nodeId] ?? [],
+			};
+		}
+
+		case 'mission.check.remove': {
+			const mission = resolveMissionRecord(params, ctx);
+			const nodeId = String(params.node ?? params.nodeId ?? '').trim();
+			if (!nodeId) {
+				throw new Error('Node ID (--node) is required for mission.check.remove.');
+			}
+			const caller = buildEngineCaller(ctx, mission);
+			const rt = runtime.getRuntimeState(mission.id);
+			const graph = parseMissionMermaidDag(mission.mermaidText);
+			const isOffGraph = Boolean(
+				caller.isHumanUser
+				|| caller.isSecretary
+				|| (caller.tier !== undefined && caller.tier <= rt.boundary.offGraphMaxTier),
+			);
+			if (!isOffGraph) {
+				throw new Error('FORBIDDEN: in-graph employees cannot remove deterministic verification hooks.');
+			}
+			const jur = resolveSupervisorJurisdiction(
+				rt.boundary,
+				caller.sessionId ?? '',
+				graph.nodes.map(n => n.id),
+				{ isHumanUser: caller.isHumanUser, isSecretary: caller.isSecretary, ownerSessionId: mission.ownerSessionId },
+			);
+			if (!jur.hasFullJurisdiction && !jur.nodeIds.has(nodeId)) {
+				throw new Error(`OUT_OF_JURISDICTION: caller lacks off-graph jurisdiction to remove checks for node "${nodeId}" in Mission "${mission.id}".`);
+			}
+			const checkId = params.all === true
+				? undefined
+				: (typeof (params.checkId ?? params.id) === 'string' && String(params.checkId ?? params.id).trim()
+					? String(params.checkId ?? params.id).trim()
+					: undefined);
+			ctx.missionService?.removeNodeCheck(mission.id, nodeId, checkId);
+			return {
+				ok: true,
+				missionId: mission.id,
+				nodeId,
+				removedCheckId: checkId ?? '*',
+				checks: runtime.getEffectiveNodeChecks(mission.id, nodeId)[nodeId] ?? [],
+			};
+		}
+
+		case 'mission.check.run': {
+			const mission = resolveMissionRecord(params, ctx);
+			assertMissionMemberOrSupervisor(ctx, mission);
+			const nodeId = String(params.node ?? params.nodeId ?? '').trim();
+			if (!nodeId) {
+				throw new Error('Node ID (--node) is required for mission.check.run.');
+			}
+			const caller = buildEngineCaller(ctx, mission);
+			const rt = runtime.getRuntimeState(mission.id);
+			const graph = parseMissionMermaidDag(mission.mermaidText);
+			if (!graph.nodes.some(n => n.id === nodeId)) {
+				throw new Error(`Node "${nodeId}" not found in Mission "${mission.id}".`);
+			}
+			if (!caller.isHumanUser && !caller.isSecretary) {
+				const isOwnAssignedNode = Boolean(caller.sessionId && rt.boundary.nodeAssignments[nodeId]?.agentId === caller.sessionId);
+				const jur = resolveSupervisorJurisdiction(
+					rt.boundary,
+					caller.sessionId ?? '',
+					graph.nodes.map(n => n.id),
+					{ ownerSessionId: mission.ownerSessionId },
+				);
+				if (!isOwnAssignedNode && !jur.hasFullJurisdiction && !jur.nodeIds.has(nodeId)) {
+					throw new Error(`FORBIDDEN: caller lacks jurisdiction or node assignment to dry-run checks for node "${nodeId}".`);
+				}
+			}
+			const rawCheckId = typeof (params.checkId ?? params.id) === 'string' && String(params.checkId ?? params.id).trim()
+				? String(params.checkId ?? params.id).trim()
+				: undefined;
+			const suite = await runtime.runNodeChecks(mission.id, nodeId, rawCheckId ? { checkIds: [rawCheckId] } : undefined);
+			return { ok: true, missionId: mission.id, ...suite };
+		}
+
 		default:
-			throw new Error(`Unsupported Mission runtime action: ${rawAction}`);
+			throw new Error(`Unsupported Mission runtime action: ${action}`);
 	}
 }

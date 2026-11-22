@@ -37,7 +37,7 @@ export interface IAdeApiUpdateDiffResult {
 	readonly deprecated: readonly IAdeApiChangeRecord[];
 }
 
-export const ADE_API_LATEST_REVISION = 3;
+export const ADE_API_LATEST_REVISION = 4;
 
 export const ADE_API_SPEC_CATALOG: readonly IAdeApiChangeRecord[] = [
 	// ---- Revision 1: Base ADE Core ----
@@ -83,8 +83,8 @@ export const ADE_API_SPEC_CATALOG: readonly IAdeApiChangeRecord[] = [
 	{
 		id: 'common.docs.read',
 		scope: 'common',
-		command: 'aexus-ade docs read <common|L0|L1..LN|mission> [--json]',
-		summary: 'Lazily fetch the single-source API documentation from the local host (works identically for local and remote SSH cloud agents).',
+		command: 'aexus-ade docs read <common|L0|L1..LN|mission|manifest> [--json]',
+		summary: 'Lazily fetch the single-source API documentation or revision manifest from the local host (works identically for local and remote SSH cloud agents).',
 		addedInRevision: 2,
 	},
 	{
@@ -97,23 +97,25 @@ export const ADE_API_SPEC_CATALOG: readonly IAdeApiChangeRecord[] = [
 	{
 		id: 'in_graph.token.current',
 		scope: 'in_graph',
-		command: 'aexus-ade token current [--mission <id>] --json',
+		command: 'aexus-ade token current [--mission <id>] [--agent <id>] --json',
 		summary: 'Inspect active plain-text token(s) held by this node: last_summary, rolling compressed_history, and lightweight trace_ptr.',
 		addedInRevision: 2,
 	},
 	{
 		id: 'in_graph.token.trace',
 		scope: 'in_graph',
-		command: 'aexus-ade token trace <tracePtr> [--mission <id>] --json',
-		summary: 'Expand a lightweight trace pointer on demand to inspect full step-by-step traversal history (including rejections & merged branch sub-paths).',
+		command: 'aexus-ade token trace <tracePtr> [--limit <n>] [--mission <id>] --json',
+		summary: 'Expand a lightweight trace pointer on demand to inspect the most recent step-by-step traversal history (including rejections & merged branch sub-paths).',
 		addedInRevision: 2,
 	},
 	{
 		id: 'in_graph.token.complete',
 		scope: 'in_graph',
-		command: 'aexus-ade token complete <tokenId> --summary "<plain human summary>" [--mission <id>] --json',
-		summary: 'Submit work completion with a concise, high-SNR human-readable summary; system rolls prior summary into compressed history and advances token(s) through forks/join barriers.',
+		command: 'aexus-ade token complete <tokenId> --summary "<plain human summary>" [--mission <id>] [--skip-checks] --json',
+		summary: 'Submit work completion with a concise, high-SNR human-readable summary; automatically runs any zero-cost deterministic node verification hooks first (--skip-checks is Human L-1 only), rolls prior summary into hierarchical compressed history, and advances token(s) through forks/join barriers.',
 		addedInRevision: 2,
+		modifiedInRevision: 4,
+		changeNote: 'Executes configured deterministic verification hooks (shell/exit-code/files/output match) with zero LLM cost prior to advancing tokens, and replaces hard history slicing with hierarchical semantic rolling compaction.',
 	},
 	{
 		id: 'in_graph.token.reject',
@@ -125,29 +127,31 @@ export const ADE_API_SPEC_CATALOG: readonly IAdeApiChangeRecord[] = [
 	{
 		id: 'in_graph.token.block',
 		scope: 'in_graph',
-		command: 'aexus-ade token block <tokenId> --duration <10h|30m|600s> --reason "<reason>" [--watch-pid <pid>] [--watch-file <path>] [--host <alias>] [--mission <id>] --json',
-		summary: 'Declare a long-running task blocked (pausing routine silence nudges) with optional local/remote PID-exit or file-ready early wakeup conditions.',
+		command: 'aexus-ade token block <tokenId> --duration <10h|30m|600s> --reason "<reason>" [--watch-pid|--wake-on-pid-exit <pid>] [--watch-file|--wake-on-file <path>] [--host <alias>] [--mission <id>] --json',
+		summary: 'Declare a long-running task blocked (pausing routine silence nudges) with optional local/remote PID-exit or clock-drift-safe file-ready early wakeup conditions.',
 		addedInRevision: 2,
+		modifiedInRevision: 4,
+		changeNote: 'Supports --wake-on-pid-exit / --wake-on-file aliases and captures target-host baseline mtime for clock-drift-safe remote file wakeups.',
 	},
 	{
 		id: 'in_graph.token.fail',
 		scope: 'in_graph',
 		command: 'aexus-ade token fail <tokenId> --reason "<reason>" [--mission <id>] --json',
-		summary: 'Declare task failure: automatically routes along configured fail-edge(s) if present, or freezes token and escalates to direct off-graph supervisor.',
+		summary: 'Declare task failure: automatically routes along configured fail-edge(s) if present (preserving rework return routing), or freezes token and escalates to direct off-graph supervisor.',
 		addedInRevision: 2,
 	},
 	{
 		id: 'mission.lifecycle',
 		scope: 'mission',
-		command: 'aexus-ade mission start|pause|resume|stop|status --mission <id> [--timeout <minutes>] --json',
-		summary: 'Start (locking silence timeout), pause, resume, stop, and inspect live Mission topology, token states, barriers, and triggers.',
+		command: 'aexus-ade mission start|run --mission <id> [--timeout <minutes>] [--prompt "<text>"] | mission timeout --mission <id> --minutes <n> | mission pause|resume|stop|status --mission <id> --json',
+		summary: 'Start (locking silence timeout), configure timeout before start, pause, resume, stop, and inspect live Mission topology, token states, barriers, and triggers.',
 		addedInRevision: 2,
 	},
 	{
 		id: 'mission.gate',
 		scope: 'mission',
-		command: 'aexus-ade mission gate <approve|reject> --mission <id> --node <gateId> [--note "<text>"] [--rollback <nodeId>] --json',
-		summary: 'Approve or reject a waiting Human Gate node (Human only).',
+		command: 'aexus-ade mission gate <approve|reject> --mission <id> --node <gateId> [--token <tokenId>] [--note "<text>"] [--rollback <nodeId>] --json',
+		summary: 'Approve or reject a waiting Human Gate token (Human only; supports multi-wave queued gates via optional --token).',
 		addedInRevision: 2,
 	},
 
@@ -183,8 +187,8 @@ export const ADE_API_SPEC_CATALOG: readonly IAdeApiChangeRecord[] = [
 	{
 		id: 'mission.boundary',
 		scope: 'mission',
-		command: 'aexus-ade mission boundary set|get --mission <id> [--off-graph-max-tier <k>] [--supervisors-json <json>] --json',
-		summary: 'Configure and validate strict factory boundary cutoff (Lk) and free jump-node supervisor jurisdiction bindings.',
+		command: 'aexus-ade mission boundary get|set --mission <id> [--off-graph-max-tier <k>] [--supervisors-json <json>] [--assignments-json <json>] --json',
+		summary: 'Configure and validate strict factory boundary cutoff (Lk), strictly top-down supervisor jurisdictions, and node assignments.',
 		addedInRevision: 3,
 	},
 	{
@@ -195,25 +199,48 @@ export const ADE_API_SPEC_CATALOG: readonly IAdeApiChangeRecord[] = [
 		addedInRevision: 3,
 	},
 	{
+		id: 'mission.retry',
+		scope: 'mission',
+		command: 'aexus-ade mission retry --mission <id> (--node <nodeId> | --token <tokenId>) [--guidance "<instructions>"] --json',
+		summary: 'Retry a frozen_failed or recalled node in-place within supervisor jurisdiction (alias: token retry), preserving wave & join-barrier state.',
+		addedInRevision: 3,
+	},
+	{
 		id: 'mission.patch',
 		scope: 'mission',
-		command: 'aexus-ade mission patch --mission <id> (--file <path> | --text "<mermaid>") [--reason "<reason>"] --json',
+		command: 'aexus-ade mission patch --mission <id> (--file <path> | --text|--mermaid "<mermaid>") [--reason "<reason>"] --json',
 		summary: 'Atomically patch unfinished DAG topology within supervisor jurisdiction with hard anti-dangling connectivity validation and automatic join-barrier reconciliation.',
+		addedInRevision: 3,
+	},
+	{
+		id: 'mission.prompt',
+		scope: 'mission',
+		command: 'aexus-ade mission prompt list|get|set --mission <id> [--node <nodeId>] [--prompt "<text>" | --file <path> | --clear] --json',
+		summary: 'Inspect, update, or clear per-node authored Pre-Prompts delivered on token wakeup.',
 		addedInRevision: 3,
 	},
 	{
 		id: 'mission.trigger',
 		scope: 'mission',
-		command: 'aexus-ade mission trigger set|list|remove --mission <id> --node <sourceNodeId> [--kind once|interval|cron|event] ... --json',
-		summary: 'Attach/manage zero-token timed, repeating, cron, or external-event (file/git/gpu-idle) triggers on inDegree=0 source nodes.',
+		command: 'aexus-ade mission trigger list --mission <id> | set --mission <id> --node <sourceNodeId> --kind <once|interval|cron|event> ... | remove --mission <id> --trigger <triggerId> --json',
+		summary: 'Attach/manage zero-token timed, repeating, cron, or external-event (file/git/gpu-idle) triggers on inDegree=0 source nodes (persisted across restarts).',
 		addedInRevision: 3,
 	},
 	{
 		id: 'mission.host.bind',
 		scope: 'mission',
-		command: 'aexus-ade mission host bind --mission <id> --node <nodeId> --host <local|sshAlias> [--path <remoteDir>] --json',
-		summary: 'Bind a Mission node or supervisor to run natively on local machine or a configured remote SSH Cloud Host.',
+		command: 'aexus-ade mission host bind --mission <id> --node <nodeId> --host <local|sshAlias> [--path <remoteDir>] [--agent <id>] [--role-kind worker|reviewer] --json',
+		summary: 'Bind a Mission node or employee to run natively on local machine or a configured remote SSH Cloud Host.',
 		addedInRevision: 3,
+	},
+
+	// ---- Revision 4: Zero-Cost Deterministic Verification Hooks & Hierarchical Semantic Rolling History ----
+	{
+		id: 'mission.check',
+		scope: 'mission',
+		command: 'aexus-ade mission check <list|get|set|remove|run> --mission <id> [--node <nodeId>] [--id <checkId>] [--name <label>] [--cmd "<shell>"] [--expect-file <path>] [--match "<pattern>"] [--expect-exit <code>] [--timeout <duration>] [--cwd <dir>] [--host <local|alias>] [--on-fail bounce|fail|escalate] [--max-retries <n>] [--disabled] [--all] --json',
+		summary: 'Configure, inspect, remove, or dry-run zero-token deterministic verification hooks (build/test/lint/file assertions on local or remote SSH hosts) enforced automatically before token completion advances downstream.',
+		addedInRevision: 4,
 	},
 ];
 

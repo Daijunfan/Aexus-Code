@@ -11,6 +11,7 @@ export const ADE_BIND_NATIVE_SESSION_COMMAND_ID = 'aexus.ade.bindNativeSession';
 export const ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID = 'aexus.ade.syncSessionPreferences';
 export const ADE_SET_SESSION_GOAL_BANNER_COMMAND_ID = 'aexus.ade.setSessionGoalBanner';
 export const ADE_SET_SESSION_INITIALIZING_COMMAND_ID = 'aexus.ade.setSessionInitializing';
+export const ADE_GET_WINDOW_ID_COMMAND_ID = 'aexus.ade.getWindowId';
 
 export const ADE_CONTROL_DIR_NAME = '.aexus-code';
 export const ADE_CONTROL_SOCKET_NAME = 'ade-control.sock';
@@ -25,6 +26,7 @@ export const ADE_CONTROL_ENV_KEYS = [
 	'AEXUS_ADE_TCP_PORT',
 	'AEXUS_ADE_SESSION_TOKEN',
 	'AEXUS_ADE_CALLER',
+	'AEXUS_ADE_WINDOW_ID',
 ] as const;
 
 const ADE_CONTROL_ENV_KEY_SET = new Set<string>(ADE_CONTROL_ENV_KEYS);
@@ -52,6 +54,8 @@ export interface IAdeCapabilityTokenPayload {
 	readonly rank: string;
 	readonly pure?: boolean;
 	readonly missionNode?: boolean;
+	/** Originating workbench window ID pinned into this capability token at mint time. */
+	readonly wid?: number;
 	readonly iat: number;
 }
 

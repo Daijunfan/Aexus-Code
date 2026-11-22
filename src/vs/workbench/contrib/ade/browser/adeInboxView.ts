@@ -138,7 +138,7 @@ export function formatAdeInboxKindLabel(
 	if (/^\[Worktree\b/i.test(title) || /Worktree (?:Merge Conflict|Creation Failed)/i.test(title)) {
 		return localize('adeInboxKindWorktreeAlert', "Worktree Alert");
 	}
-	if (/^\[Persist\b/i.test(title) || /Failed to Save Engineering State/i.test(title)) {
+	if (/^\[Persist\b/i.test(title) || /Failed to Save (?:Mission|Engineering) State/i.test(title)) {
 		return localize('adeInboxKindStorageAlert', "Storage Alert");
 	}
 	if (/^\[Circuit Breaker\]/i.test(title) || /Circuit Breaker/i.test(title)) {
@@ -184,8 +184,15 @@ interface IUnreadReplyEntry {
 	readonly rank: AdeInboxSenderRank;
 }
 
+export interface IAdeInboxMissionOpenOptions {
+	readonly side?: boolean;
+	readonly focusNodeId?: string;
+	readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
+	readonly openAgentBeside?: boolean;
+}
+
 export interface IAdeInboxMissionBridge {
-	openMissionEditor?(id: string): Promise<void>;
+	openMissionEditor?(id: string, options?: IAdeInboxMissionOpenOptions): Promise<void>;
 	listMissions?(): readonly { readonly id: string; readonly updatedAt: number }[];
 	openEngineeringEditor?(id: string): Promise<void>;
 	listTrees?(): readonly { readonly governorSessionId: string; readonly updatedAt: number }[];
@@ -486,9 +493,9 @@ export class AdeInboxPanel extends Disposable {
 		this.listEl.scrollTop = prevScrollTop;
 	}
 
-	private openMissionCanvas(id: string): void {
+	private openMissionCanvas(id: string, options?: IAdeInboxMissionOpenOptions): void {
 		if (this.missionBridge?.openMissionEditor) {
-			void this.missionBridge.openMissionEditor(id);
+			void this.missionBridge.openMissionEditor(id, options);
 		} else if (this.missionBridge?.openEngineeringEditor) {
 			void this.missionBridge.openEngineeringEditor(id);
 		}
@@ -634,7 +641,7 @@ export class AdeInboxPanel extends Disposable {
 			}, localize('adeInboxOpenCanvasBtn', "Canvas ↗")));
 			this.renderDisposables.add(addDisposableListener(canvasBtn, EventType.CLICK, e => {
 				e.stopPropagation();
-				this.openMissionCanvas(govId);
+				this.openMissionCanvas(govId, agent.treeNodeId ? { focusNodeId: agent.treeNodeId, inspectorTab: 'overview' } : undefined);
 			}));
 		}
 
@@ -714,7 +721,10 @@ export class AdeInboxPanel extends Disposable {
 		}
 		this.renderDisposables.add(addDisposableListener(lineage, EventType.CLICK, e => {
 			e.stopPropagation();
-			this.openMissionCanvas(item.governorSessionId);
+			this.openMissionCanvas(
+				item.governorSessionId,
+				item.nodeId ? { focusNodeId: item.nodeId, inspectorTab: 'token' } : undefined,
+			);
 		}));
 
 		const isLong = item.message.length > ADE_INBOX_CLAMP_CHARS || item.message.split('\n').length > 3;
@@ -767,11 +777,14 @@ export class AdeInboxPanel extends Disposable {
 				this.inFlightItemIds.add(item.id);
 				this.errorBannerText = undefined;
 				approveBtn.disabled = true;
-				void (this.missionBridge?.submitGateVerdict?.({
-					governorSessionId: item.governorSessionId,
-					nodeId,
-					verdict: 'pass',
-				}) ?? this.inbox.resolveItem(item.id, 'Approved')).catch(err => {
+				const submitApprove = this.missionBridge?.submitGateVerdict;
+				void (submitApprove
+					? submitApprove({
+						governorSessionId: item.governorSessionId,
+						nodeId,
+						verdict: 'pass',
+					})
+					: Promise.reject(new Error(localize('adeInboxGateRuntimeMissing', "Mission runtime is unavailable — cannot approve Gate.")))).catch(err => {
 					const msg = err instanceof Error ? err.message : String(err);
 					this.errorBannerText = msg;
 					this.onError?.(msg);
@@ -803,7 +816,10 @@ export class AdeInboxPanel extends Disposable {
 			}, localize('adeInboxOpenCanvasBtn', "Canvas ↗")));
 			this.renderDisposables.add(addDisposableListener(openCanvasBtn, EventType.CLICK, e => {
 				e.stopPropagation();
-				this.openMissionCanvas(item.governorSessionId);
+				this.openMissionCanvas(
+					item.governorSessionId,
+					item.nodeId ? { focusNodeId: item.nodeId, inspectorTab: 'overview' } : undefined,
+				);
 			}));
 
 			const dismissGateBtn = append(actionsRow, $('button.ade-inbox-btn.secondary.overflow', {
@@ -858,13 +874,16 @@ export class AdeInboxPanel extends Disposable {
 					confirmRbBtn.disabled = true;
 					const chosenTarget = selectEl.value || undefined;
 					const chosenFeedback = fbArea.value.trim() || undefined;
-					void (this.missionBridge?.submitGateVerdict?.({
-						governorSessionId: item.governorSessionId,
-						nodeId,
-						verdict: 'rollback',
-						targetNodeId: chosenTarget,
-						feedback: chosenFeedback,
-					}) ?? this.inbox.resolveItem(item.id, chosenFeedback ?? 'Rollback requested')).then(() => {
+					const submitRollback = this.missionBridge?.submitGateVerdict;
+					void (submitRollback
+						? submitRollback({
+							governorSessionId: item.governorSessionId,
+							nodeId,
+							verdict: 'rollback',
+							targetNodeId: chosenTarget,
+							feedback: chosenFeedback,
+						})
+						: Promise.reject(new Error(localize('adeInboxGateRollbackRuntimeMissing', "Mission runtime is unavailable — cannot roll back Gate.")))).then(() => {
 						this.expandedRollbackIds.delete(item.id);
 						this.rollbackFeedbackDrafts.delete(item.id);
 						this.rollbackTargetDrafts.delete(item.id);
@@ -881,12 +900,18 @@ export class AdeInboxPanel extends Disposable {
 		} else if (severity === 'critical' && !item.resolved) {
 			const openNodeBtn = append(actionsRow, $('button.ade-inbox-btn.danger', {
 				type: 'button',
+				'data-ade-inbox-open-node': item.nodeId ?? '',
 			}, item.nodeId
 				? localize('adeInboxOpenNodeBtn', "Open Node ↗")
 				: localize('adeInboxOpenCanvasCriticalBtn', "Open Canvas ↗")));
 			this.renderDisposables.add(addDisposableListener(openNodeBtn, EventType.CLICK, e => {
 				e.stopPropagation();
-				this.openMissionCanvas(item.governorSessionId);
+				this.openMissionCanvas(
+					item.governorSessionId,
+					item.nodeId
+						? { focusNodeId: item.nodeId, inspectorTab: 'token', openAgentBeside: true }
+						: undefined,
+				);
 			}));
 			const openGovBtn = append(actionsRow, $('button.ade-inbox-btn.ghost', {
 				type: 'button',
@@ -909,7 +934,10 @@ export class AdeInboxPanel extends Disposable {
 			}, localize('adeInboxJumpMissionBtn', "{0} ↗", missionAlias)));
 			this.renderDisposables.add(addDisposableListener(openEngBtn, EventType.CLICK, e => {
 				e.stopPropagation();
-				this.openMissionCanvas(item.governorSessionId);
+				this.openMissionCanvas(
+					item.governorSessionId,
+					item.nodeId ? { focusNodeId: item.nodeId, inspectorTab: 'token' } : undefined,
+				);
 			}));
 
 			const openGovBtn = append(actionsRow, $('button.ade-inbox-btn.ghost', {

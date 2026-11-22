@@ -8,14 +8,17 @@ import * as fs from 'node:fs/promises';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import * as readline from 'node:readline';
 import * as vscode from 'vscode';
 import {
 	captureRemoteEngine,
 	CloudHostTarget,
 	ensureRemoteControlReverseBridge,
+	healAllRemoteControlBridges,
+	onSystemResume,
+	RemoteExecOptions,
 	spawnRemoteEngine,
 	stageRemoteAdeCliShim,
+	terminateRemotePersistentSession,
 } from './cloudTransport';
 import {
 	ADE_MINT_SESSION_TOKEN_ACTION,
@@ -71,6 +74,11 @@ export interface EngineSendOptions {
 	readonly onInterimUsage?: (cumulativeTurnUsage: EngineTurnTokenUsage) => void;
 	/** Called when the engine auto-compacts conversation context during a turn. */
 	readonly onContextCompacted?: () => void;
+	/**
+	 * When true (e.g. post-window-reload recovery), prefer attaching to an already-running remote
+	 * persistent session for this agent instead of spawning a duplicate overlapping prompt turn.
+	 */
+	readonly preferReattach?: boolean;
 }
 
 export interface EngineRuntimeCapabilities {
@@ -82,29 +90,35 @@ export interface EngineRuntimeCapabilities {
 
 export interface HistoryEntry { id?: string; role: 'user' | 'assistant'; text: string; isSystemInitiated?: boolean }
 
-/** Token usage accounted for a single completed engine turn. */
-export interface EngineTurnTokenUsage {
-	readonly inputTokens: number;
-	readonly outputTokens: number;
-	readonly cacheReadTokens?: number;
-	readonly cacheWriteTokens?: number;
-	readonly totalTokens: number;
-	readonly durationMs?: number;
-	readonly costUsd?: number;
-	readonly estimated?: boolean;
-}
+import {
+	createTurnInterimUsageTracker,
+	EngineTurnTokenUsage,
+	estimateTextTokens,
+	TurnInterimUsageTracker,
+} from './usageTracker';
+export {
+	createTurnInterimUsageTracker,
+	EngineTurnTokenUsage,
+	estimateTextTokens,
+	TurnInterimUsageTracker,
+};
 
 export interface EngineRuntime extends vscode.Disposable {
 	readonly id: string;
 	readonly name: string;
 	readonly remoteTarget?: CloudHostTarget;
 	readonly onDidChangeSessions?: vscode.Event<readonly NativeSession[]>;
-	list(token: vscode.CancellationToken): Promise<NativeSession[]>;
+	list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]>;
 	children?(session: NativeSession, token: vscode.CancellationToken): Promise<NativeSession[]>;
 	create(cwd: string): Promise<NativeSession>;
-	prepareSession?(session: NativeSession, options?: EngineSendOptions): Promise<void>;
+	prepareSession?(session: NativeSession, options?: EngineSendOptions, token?: vscode.CancellationToken): Promise<void>;
 	history(session: NativeSession, token: vscode.CancellationToken): Promise<HistoryEntry[]>;
 	send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void>;
+	/**
+	 * Attempts to reattach to a still-running (or freshly finished) remote persistent session after
+	 * an IDE window reload without sending a duplicate prompt. Returns `'reattached'` when handled.
+	 */
+	reattachIfRunning?(session: NativeSession, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<'reattached' | 'not_running'>;
 	getRuntimeCapabilities?(cwd: string, session?: NativeSession): Promise<EngineRuntimeCapabilities>;
 	executeCommand?(session: NativeSession, command: string, argsText: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<boolean>;
 	killSession?(session: NativeSession): Promise<void>;
@@ -173,10 +187,10 @@ export function isAutonomousModeEnabled(): boolean {
 	try {
 		const cfg = vscode.workspace.getConfiguration('aexus.ade', null);
 		const inspected = cfg.inspect<boolean>('autonomousMode');
-		const effective = inspected?.globalValue ?? inspected?.defaultValue ?? cfg.get<boolean>('autonomousMode', false);
-		return effective === true;
+		const effective = inspected?.globalValue ?? inspected?.defaultValue ?? cfg.get<boolean>('autonomousMode', true);
+		return effective !== false;
 	} catch {
-		return false;
+		return true;
 	}
 }
 
@@ -193,6 +207,47 @@ interface MasterControlConnection {
 }
 
 const mintedCapabilityTokenCache = new Map<string, { readonly token: string; readonly socketPath: string }>();
+let hostWindowId: number | undefined;
+let hostWindowIdPromise: Promise<number | undefined> | undefined;
+
+export function setHostWindowId(windowId: number | undefined): void {
+	if (typeof windowId === 'number' && Number.isInteger(windowId) && windowId > 0) {
+		hostWindowId = windowId;
+	} else {
+		hostWindowId = undefined;
+	}
+}
+
+async function resolveHostWindowId(env: NodeJS.ProcessEnv = process.env): Promise<number | undefined> {
+	const envRaw = env.AEXUS_ADE_WINDOW_ID?.trim();
+	if (envRaw && /^\d+$/.test(envRaw)) {
+		const parsed = Number.parseInt(envRaw, 10);
+		if (Number.isInteger(parsed) && parsed > 0) {
+			return parsed;
+		}
+	}
+	if (typeof hostWindowId === 'number' && Number.isInteger(hostWindowId) && hostWindowId > 0) {
+		return hostWindowId;
+	}
+	if (!hostWindowIdPromise) {
+		hostWindowIdPromise = Promise.resolve()
+			.then(() => typeof vscode.commands?.executeCommand === 'function'
+				? vscode.commands.executeCommand<number>('aexus.ade.getWindowId')
+				: undefined)
+			.then(wid => {
+				if (typeof wid === 'number' && Number.isInteger(wid) && wid > 0) {
+					hostWindowId = wid;
+					return wid;
+				}
+				return undefined;
+			})
+			.catch(() => undefined)
+			.finally(() => {
+				hostWindowIdPromise = undefined;
+			});
+	}
+	return hostWindowIdPromise;
+}
 
 async function resolveMasterControlConnection(env: NodeJS.ProcessEnv = process.env): Promise<MasterControlConnection | undefined> {
 	const envTcpPortRaw = env.AEXUS_ADE_TCP_PORT?.trim();
@@ -280,6 +335,7 @@ export async function mintSessionCapabilityToken(
 	pure = false,
 	env: NodeJS.ProcessEnv = process.env,
 	missionNode = false,
+	explicitWindowId?: number,
 ): Promise<{ readonly token: string; readonly socketPath: string } | undefined> {
 	const conn = await resolveMasterControlConnection(env);
 	if (!conn) {
@@ -287,7 +343,10 @@ export async function mintSessionCapabilityToken(
 	}
 	const normalizedSid = sessionId.trim() || 'session';
 	const normalizedRank = pure ? 'worker' : (rank.trim().toLowerCase() || 'worker');
-	const cacheKey = `${conn.socketPath}|${normalizedSid}|${normalizedRank}|${pure ? '1' : '0'}|${missionNode ? '1' : '0'}`;
+	const resolvedWindowId = typeof explicitWindowId === 'number' && Number.isInteger(explicitWindowId) && explicitWindowId > 0
+		? explicitWindowId
+		: await resolveHostWindowId(env);
+	const cacheKey = `${conn.socketPath}|${normalizedSid}|${normalizedRank}|${pure ? '1' : '0'}|${missionNode ? '1' : '0'}|${resolvedWindowId ?? ''}`;
 	const cached = mintedCapabilityTokenCache.get(cacheKey);
 	if (cached) {
 		return cached;
@@ -301,6 +360,7 @@ export async function mintSessionCapabilityToken(
 				rank: normalizedRank,
 				pure,
 				...(missionNode ? { missionNode: true } : {}),
+				...(resolvedWindowId !== undefined ? { windowId: resolvedWindowId } : {}),
 			},
 		});
 		const mintedToken = response.ok && typeof response.result?.token === 'string' && response.result.token.trim()
@@ -371,7 +431,9 @@ export async function prepareRemoteAgentChildEnv(
 			stageRemoteAdeCliShim(target, path.join(__dirname, 'adeCli.js')).catch(() => undefined),
 		]);
 		return {
-			AEXUS_ADE_REMOTE_BRIDGE_PORT: String(bridge.remotePort),
+			...(bridge.remoteSocketPath ? { AEXUS_ADE_REMOTE_BRIDGE_SOCKET: bridge.remoteSocketPath } : {}),
+			...(bridge.remotePort > 0 ? { AEXUS_ADE_REMOTE_BRIDGE_PORT: String(bridge.remotePort) } : {}),
+			...(bridge.remoteBridgeMetaPath ? { AEXUS_ADE_REMOTE_BRIDGE_FILE: bridge.remoteBridgeMetaPath } : {}),
 			AEXUS_ADE_SESSION_TOKEN: minted.token,
 		};
 	} catch {
@@ -683,9 +745,9 @@ export async function findExecutable(name: string): Promise<string | undefined> 
 	return undefined;
 }
 
-export function spawnEngine(executable: string, args: readonly string[], cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget): cp.ChildProcessWithoutNullStreams {
+export function spawnEngine(executable: string, args: readonly string[], cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget, remoteOptions?: RemoteExecOptions): cp.ChildProcessWithoutNullStreams {
 	if (remoteTarget) {
-		return spawnRemoteEngine(remoteTarget, executable, args, cwd, env);
+		return spawnRemoteEngine(remoteTarget, executable, args, cwd, env, remoteOptions);
 	}
 	const mergedEnv: NodeJS.ProcessEnv = env ? { ...env } : { ...process.env };
 	const isPureEnv = isPureWorkerDenyToken(mergedEnv.AEXUS_ADE_SESSION_TOKEN);
@@ -695,6 +757,7 @@ export function spawnEngine(executable: string, args: readonly string[], cwd?: s
 	if (isPureEnv || !env) {
 		delete mergedEnv.AEXUS_ADE_SOCKET;
 		delete mergedEnv.AEXUS_ADE_CALLER;
+		delete mergedEnv.AEXUS_ADE_WINDOW_ID;
 	}
 	let existingPath: string | undefined;
 	for (const key of Object.keys(mergedEnv)) {
@@ -734,7 +797,96 @@ export function stopEngine(child: cp.ChildProcess, signal: NodeJS.Signals = 'SIG
 	} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') { throw error; } }
 }
 
+const stoppingChildren = new WeakSet<cp.ChildProcess>();
+
+export function stopEngineWithFallback(child: cp.ChildProcess, initialSignal: NodeJS.Signals = 'SIGTERM', escalateMs = 1500): void {
+	try { stopEngine(child, initialSignal); } catch { /* ignore */ }
+	if (child.exitCode !== null || child.signalCode !== null || stoppingChildren.has(child)) {
+		return;
+	}
+	stoppingChildren.add(child);
+	const timers: ReturnType<typeof setTimeout>[] = [];
+	const clearTimers = () => {
+		for (const t of timers) { clearTimeout(t); }
+		timers.length = 0;
+	};
+	child.once('exit', clearTimers);
+	child.once('close', clearTimers);
+	if (initialSignal === 'SIGINT' && escalateMs > 400) {
+		const termTimer = setTimeout(() => {
+			if (child.exitCode === null && child.signalCode === null) {
+				try { stopEngine(child, 'SIGTERM'); } catch { /* ignore */ }
+			}
+		}, Math.floor(escalateMs / 2));
+		termTimer.unref?.();
+		timers.push(termTimer);
+	}
+	const killTimer = setTimeout(() => {
+		if (child.exitCode === null && child.signalCode === null) {
+			try { stopEngine(child, 'SIGKILL'); } catch { /* ignore */ }
+		}
+	}, Math.max(100, escalateMs));
+	killTimer.unref?.();
+	timers.push(killTimer);
+}
+
+export function raceWithCancellation<T>(
+	promise: Promise<T>,
+	token?: vscode.CancellationToken,
+	cancelGraceMs = 0,
+	onCancel?: () => void,
+): Promise<T> {
+	if (!token) {
+		return promise;
+	}
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		let graceTimer: ReturnType<typeof setTimeout> | undefined;
+		let cancelDisposable: vscode.Disposable | undefined;
+		const cleanup = () => {
+			if (graceTimer !== undefined) {
+				clearTimeout(graceTimer);
+				graceTimer = undefined;
+			}
+			cancelDisposable?.dispose();
+			cancelDisposable = undefined;
+		};
+		const finishResolve = (value: T) => {
+			if (settled) { return; }
+			settled = true;
+			cleanup();
+			resolve(value);
+		};
+		const finishReject = (err: unknown) => {
+			if (settled) { return; }
+			settled = true;
+			cleanup();
+			reject(err);
+		};
+		const triggerCancel = () => {
+			try { onCancel?.(); } catch { /* ignore */ }
+			if (cancelGraceMs <= 0) {
+				finishReject(new vscode.CancellationError());
+				return;
+			}
+			if (graceTimer === undefined) {
+				graceTimer = setTimeout(() => finishReject(new vscode.CancellationError()), cancelGraceMs);
+				graceTimer.unref?.();
+			}
+		};
+		promise.then(finishResolve, finishReject);
+		if (token.isCancellationRequested) {
+			triggerCancel();
+		} else {
+			cancelDisposable = token.onCancellationRequested(triggerCancel);
+		}
+	});
+}
+
 export async function capture(executable: string, args: readonly string[], token: vscode.CancellationToken, cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget): Promise<string> {
+	if (token.isCancellationRequested) {
+		throw new vscode.CancellationError();
+	}
 	if (remoteTarget) {
 		return captureRemoteEngine(remoteTarget, executable, args, token, cwd, env);
 	}
@@ -743,7 +895,7 @@ export async function capture(executable: string, args: readonly string[], token
 	let error = '';
 	child.stdout.on('data', data => output += String(data));
 	child.stderr.on('data', data => error = (error + String(data)).slice(-8000));
-	const cancellation = token.onCancellationRequested(() => stopEngine(child));
+	const cancellation = token.onCancellationRequested(() => stopEngineWithFallback(child, 'SIGTERM', 1500));
 	child.stdin.end();
 	try {
 		await new Promise<void>((resolve, reject) => {
@@ -769,62 +921,299 @@ export interface RpcPacket {
 	error?: { code?: number; message: string; data?: unknown };
 }
 
+export interface JsonLineRequestOptions {
+	readonly timeoutMs?: number;
+	readonly token?: vscode.CancellationToken;
+	readonly cancelGraceMs?: number;
+	readonly onCancel?: () => void;
+}
+
+/**
+ * Extended SSH reattach backoff schedule (~5.5 minutes total tolerance) so laptop lid-close sleep
+ * and transient Wi-Fi/VPN drops reattach cleanly to still-running remote persistent sessions.
+ */
+export const REMOTE_REATTACH_BACKOFFS_MS: readonly number[] = [
+	2_000,
+	4_000,
+	8_000,
+	15_000,
+	30_000,
+	30_000,
+	60_000,
+	60_000,
+	60_000,
+	60_000,
+];
+
+/**
+ * Sleeps for `delayMs`, waking immediately if `token` cancels OR if OS power-resume fires.
+ */
+export function waitForBackoffOrResume(delayMs: number, token?: vscode.CancellationToken): Promise<void> {
+	if (delayMs <= 0 || token?.isCancellationRequested) {
+		return Promise.resolve();
+	}
+	return new Promise<void>(resolve => {
+		let settled = false;
+		const finish = () => {
+			if (settled) { return; }
+			settled = true;
+			clearTimeout(timer);
+			cancelSub?.dispose();
+			resumeSub.dispose();
+			resolve();
+		};
+		const timer = setTimeout(finish, delayMs);
+		timer.unref?.();
+		const cancelSub = token?.onCancellationRequested(finish);
+		const resumeSub = onSystemResume(finish);
+	});
+}
+
 /** A dedicated stdio client; it never restarts or terminates another engine process. */
 export class JsonLineClient implements vscode.Disposable {
 	private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 	private readonly listeners = new Set<(packet: RpcPacket) => void>();
-	private readonly child: cp.ChildProcessWithoutNullStreams;
+	private child: cp.ChildProcessWithoutNullStreams;
 	private readonly closedPromise: Promise<void>;
+	private resolveClosed!: () => void;
+	private readonly failConnection: (error: Error) => void;
+	private readonly executable: string;
+	private readonly args: readonly string[];
+	private readonly cwd?: string;
+	private readonly env?: NodeJS.ProcessEnv;
+	private readonly remoteTarget?: CloudHostTarget;
+	private readonly remoteOptions?: RemoteExecOptions;
+	private readonly remotePersistentSessionId?: string;
 	private nextId = 0;
 	private error = '';
 	private closedError: Error | undefined;
+	private disposed = false;
+	private reattaching = false;
+	private reattachAttempt = 0;
+	private stdoutBytesReceived = 0;
+	private stdoutByteCarry: Buffer = Buffer.alloc(0);
+	private readonly queuedWrites: string[] = [];
 	get isClosed(): boolean { return !!this.closedError; }
 
-	constructor(executable: string, args: string[], cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget) {
-		this.child = spawnEngine(executable, args, cwd, env, remoteTarget);
-		this.child.stderr.on('data', data => this.error = (this.error + String(data)).slice(-8000));
-		const lines = readline.createInterface({ input: this.child.stdout });
-		lines.on('line', line => {
-			let packet: RpcPacket;
-			try { packet = JSON.parse(line) as RpcPacket; } catch { return; }
-			if (typeof packet.id === 'number' && !packet.method) {
-				const entry = this.pending.get(packet.id);
-				this.pending.delete(packet.id);
-				if (packet.error) { entry?.reject(new Error(packet.error.message)); } else { entry?.resolve(packet.result); }
-			} else {
-				for (const listener of this.listeners) { listener(packet); }
-			}
+	constructor(executable: string, args: string[], cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget, remoteOptions?: RemoteExecOptions) {
+		this.executable = executable;
+		this.args = [...args];
+		this.cwd = cwd;
+		this.env = env;
+		this.remoteTarget = remoteTarget;
+		this.remoteOptions = remoteOptions;
+		this.remotePersistentSessionId = remoteOptions?.persistentSessionId;
+		this.closedPromise = new Promise<void>(resolve => {
+			this.resolveClosed = resolve;
 		});
 		const fail = (error: Error) => {
 			if (this.closedError) { return; }
 			this.closedError = error;
+			this.queuedWrites.length = 0;
 			for (const entry of this.pending.values()) { entry.reject(error); }
 			this.pending.clear();
 			for (const listener of this.listeners) { listener({ method: 'aexus/connectionClosed', params: { message: error.message } }); }
+			this.resolveClosed();
 		};
-		this.child.on('error', fail);
-		this.child.stdin.on('error', fail);
-		this.closedPromise = new Promise<void>(resolve => {
-			this.child.on('close', code => {
-				lines.close();
-				fail(new Error(this.error || vscode.l10n.t('The engine connection ended ({0}).', String(code))));
-				resolve();
-			});
-		});
+		this.failConnection = fail;
+		this.child = this.spawnAndBind(false);
 	}
 
-	request<T>(method: string, params: object): Promise<T> {
+	private handleLine(line: string): void {
+		if (!line) { return; }
+		let packet: RpcPacket;
+		try { packet = JSON.parse(line) as RpcPacket; } catch { return; }
+		if (typeof packet.id === 'number' && !packet.method) {
+			const entry = this.pending.get(packet.id);
+			this.pending.delete(packet.id);
+			if (packet.error) { entry?.reject(new Error(packet.error.message)); } else { entry?.resolve(packet.result); }
+		} else {
+			for (const listener of this.listeners) { listener(packet); }
+		}
+	}
+
+	private spawnAndBind(isReattach: boolean): cp.ChildProcessWithoutNullStreams {
+		const opts: RemoteExecOptions | undefined = this.remotePersistentSessionId
+			? {
+				...this.remoteOptions,
+				persistentSessionId: this.remotePersistentSessionId,
+				attachByteOffset: this.stdoutBytesReceived,
+				...(isReattach ? { attachOnly: true } : {}),
+			}
+			: this.remoteOptions;
+		const child = spawnEngine(this.executable, [...this.args], this.cwd, this.env, this.remoteTarget, opts);
+		this.stdoutByteCarry = Buffer.alloc(0);
+		child.stderr.on('data', data => this.error = (this.error + String(data)).slice(-8000));
+		child.stdout.on('data', (chunk: Buffer | string) => {
+			const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+			this.stdoutByteCarry = this.stdoutByteCarry.length > 0 ? Buffer.concat([this.stdoutByteCarry, buf]) : buf;
+			let nlIdx: number;
+			while ((nlIdx = this.stdoutByteCarry.indexOf(0x0a)) >= 0) {
+				const lineBuf = this.stdoutByteCarry.subarray(0, nlIdx);
+				this.stdoutByteCarry = this.stdoutByteCarry.subarray(nlIdx + 1);
+				this.stdoutBytesReceived += nlIdx + 1;
+				const rawLine = lineBuf.toString('utf8');
+				this.handleLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
+			}
+			// Reset backoff once real stream traffic resumes after reattach.
+			if (this.reattachAttempt > 0) {
+				this.reattachAttempt = 0;
+			}
+		});
+		child.on('error', err => {
+			if (this.child !== child || this.disposed) { return; }
+			if (!this.tryScheduleReattach(255)) {
+				this.failConnection(err);
+			}
+		});
+		child.stdin.on('error', () => {
+			// Handled cleanly by the child close/reattach lifecycle so transient EPIPE during SSH
+			// disconnects never tears down an active remote persistent session.
+		});
+		child.on('close', code => {
+			if (this.child !== child) { return; }
+			if (this.stdoutByteCarry.length > 0 && code === 0) {
+				const tail = this.stdoutByteCarry.toString('utf8');
+				this.stdoutBytesReceived += this.stdoutByteCarry.length;
+				this.stdoutByteCarry = Buffer.alloc(0);
+				this.handleLine(tail.endsWith('\r') ? tail.slice(0, -1) : tail);
+			}
+			if (this.disposed) {
+				this.resolveClosed();
+				return;
+			}
+			if (code === 255 && this.tryScheduleReattach(code)) {
+				return;
+			}
+			this.failConnection(new Error(this.error || vscode.l10n.t('The engine connection ended ({0}).', String(code))));
+		});
+		return child;
+	}
+
+	private tryScheduleReattach(code: number | null): boolean {
+		if (
+			this.disposed
+			|| this.closedError
+			|| !this.remoteTarget
+			|| this.remoteTarget.os === 'windows'
+			|| !this.remotePersistentSessionId
+			|| code !== 255
+			|| this.reattachAttempt >= REMOTE_REATTACH_BACKOFFS_MS.length
+		) {
+			return false;
+		}
+		if (this.reattaching) {
+			return true;
+		}
+		this.reattaching = true;
+		const delayMs = REMOTE_REATTACH_BACKOFFS_MS[this.reattachAttempt++] ?? 60_000;
+		void (async () => {
+			await waitForBackoffOrResume(delayMs);
+			if (this.disposed || this.closedError) {
+				this.reattaching = false;
+				return;
+			}
+			await healAllRemoteControlBridges().catch(() => undefined);
+			if (this.disposed || this.closedError) {
+				this.reattaching = false;
+				return;
+			}
+			this.reattaching = false;
+			this.child = this.spawnAndBind(true);
+			while (this.queuedWrites.length > 0 && !this.disposed && !this.closedError) {
+				const payload = this.queuedWrites.shift()!;
+				try {
+					this.child.stdin.write(payload);
+				} catch {
+					this.queuedWrites.unshift(payload);
+					break;
+				}
+			}
+		})();
+		return true;
+	}
+
+	request<T>(method: string, params: object, options?: JsonLineRequestOptions): Promise<T> {
 		if (this.closedError) { return Promise.reject(this.closedError); }
+		if (options?.token?.isCancellationRequested) {
+			try { options.onCancel?.(); } catch { /* ignore */ }
+			return Promise.reject(new vscode.CancellationError());
+		}
 		const id = ++this.nextId;
 		return new Promise<T>((resolve, reject) => {
-			this.pending.set(id, { resolve: value => resolve(value as T), reject });
-			this.write({ jsonrpc: '2.0', id, method, params });
+			let settled = false;
+			let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+			let cancelGraceTimer: ReturnType<typeof setTimeout> | undefined;
+			let cancelSub: vscode.Disposable | undefined;
+			const cleanup = () => {
+				this.pending.delete(id);
+				if (timeoutTimer !== undefined) {
+					clearTimeout(timeoutTimer);
+					timeoutTimer = undefined;
+				}
+				if (cancelGraceTimer !== undefined) {
+					clearTimeout(cancelGraceTimer);
+					cancelGraceTimer = undefined;
+				}
+				cancelSub?.dispose();
+				cancelSub = undefined;
+			};
+			const finishResolve = (value: unknown) => {
+				if (settled) { return; }
+				settled = true;
+				cleanup();
+				resolve(value as T);
+			};
+			const finishReject = (err: Error) => {
+				if (settled) { return; }
+				settled = true;
+				cleanup();
+				reject(err);
+			};
+			this.pending.set(id, { resolve: finishResolve, reject: finishReject });
+			if (options?.timeoutMs && options.timeoutMs > 0) {
+				timeoutTimer = setTimeout(() => {
+					finishReject(new Error(`RPC request "${method}" timed out after ${options.timeoutMs}ms`));
+				}, options.timeoutMs);
+				timeoutTimer.unref?.();
+			}
+			if (options?.token) {
+				const onCancelled = () => {
+					try { options.onCancel?.(); } catch { /* ignore */ }
+					const graceMs = options.cancelGraceMs ?? 0;
+					if (graceMs <= 0) {
+						finishReject(new vscode.CancellationError());
+						return;
+					}
+					if (cancelGraceTimer === undefined) {
+						cancelGraceTimer = setTimeout(() => finishReject(new vscode.CancellationError()), graceMs);
+						cancelGraceTimer.unref?.();
+					}
+				};
+				if (options.token.isCancellationRequested) {
+					onCancelled();
+				} else {
+					cancelSub = options.token.onCancellationRequested(onCancelled);
+				}
+			}
+			try {
+				this.write({ jsonrpc: '2.0', id, method, params });
+			} catch (err) {
+				finishReject(err instanceof Error ? err : new Error(String(err)));
+			}
 		});
 	}
 
 	write(packet: object): void {
 		if (this.closedError) { throw this.closedError; }
-		this.child.stdin.write(JSON.stringify(packet) + '\n');
+		const payload = JSON.stringify(packet) + '\n';
+		if (this.reattaching || this.child.stdin.destroyed || !this.child.stdin.writable) {
+			if (this.remotePersistentSessionId && !this.disposed) {
+				this.queuedWrites.push(payload);
+				return;
+			}
+		}
+		this.child.stdin.write(payload);
 	}
 
 	waitForClose(timeoutMs = 1500): Promise<void> {
@@ -835,5 +1224,18 @@ export class JsonLineClient implements vscode.Disposable {
 	}
 
 	onPacket(listener: (packet: RpcPacket) => void): vscode.Disposable { this.listeners.add(listener); return { dispose: () => this.listeners.delete(listener) }; }
-	dispose(): void { this.child.stdin.end(); stopEngine(this.child); }
+
+	async disposeAsync(): Promise<void> {
+		this.disposed = true;
+		this.failConnection(new Error(vscode.l10n.t('The engine connection was closed.')));
+		try { this.child.stdin.end(); } catch { /* ignore */ }
+		stopEngineWithFallback(this.child, 'SIGTERM', 1500);
+		if (this.remoteTarget && this.remotePersistentSessionId) {
+			await terminateRemotePersistentSession(this.remoteTarget, this.remotePersistentSessionId, { killTree: true }).catch(() => undefined);
+		}
+	}
+
+	dispose(): void {
+		void this.disposeAsync();
+	}
 }

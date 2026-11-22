@@ -129,6 +129,98 @@ export function setupTerminalMenus(): void {
 				id: MenuId.TerminalInstanceContext,
 				item: {
 					command: {
+						id: TerminalCommandId.SplitRight,
+						title: localize('workbench.action.terminal.splitRight.ctx', "Split Right")
+					},
+					group: TerminalContextMenuGroup.Create,
+					order: 1
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
+						id: TerminalCommandId.SplitDown,
+						title: localize('workbench.action.terminal.splitDown.ctx', "Split Down")
+					},
+					group: TerminalContextMenuGroup.Create,
+					order: 2
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
+						id: TerminalCommandId.SwitchPaneHost,
+						title: localize('workbench.action.terminal.switchPaneHost.ctx', "Switch Host / Project...")
+					},
+					group: TerminalContextMenuGroup.Create,
+					order: 3
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
+						id: TerminalCommandId.ConfigureGridLayout,
+						title: localize('workbench.action.terminal.configureGridLayout.ctx', "Configure Terminal Grid...")
+					},
+					group: TerminalContextMenuGroup.Create,
+					order: 4
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
+						id: TerminalCommandId.ToggleGridBroadcast,
+						title: localize('workbench.action.terminal.toggleGridBroadcast.ctx', "Toggle Sync Input (Broadcast)")
+					},
+					when: TerminalContextKeys.splitTerminalActive,
+					group: TerminalContextMenuGroup.Config,
+					order: 1
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
+						id: TerminalCommandId.BroadcastCommandToGrid,
+						title: localize('workbench.action.terminal.broadcastCommandToGrid.ctx', "Broadcast Command to Grid...")
+					},
+					when: TerminalContextKeys.splitTerminalActive,
+					group: TerminalContextMenuGroup.Config,
+					order: 2
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
+						id: TerminalCommandId.EqualizeGrid,
+						title: localize('workbench.action.terminal.equalizeGrid.ctx', "Equalize Grid Sizes")
+					},
+					when: TerminalContextKeys.splitTerminalActive,
+					group: TerminalContextMenuGroup.Config,
+					order: 3
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
+						id: TerminalCommandId.ToggleMaximizePane,
+						title: localize('workbench.action.terminal.toggleMaximizePane.ctx', "Maximize / Restore Pane")
+					},
+					when: TerminalContextKeys.splitTerminalActive,
+					group: TerminalContextMenuGroup.Config,
+					order: 4
+				}
+			},
+			{
+				id: MenuId.TerminalInstanceContext,
+				item: {
+					command: {
 						id: TerminalCommandId.KillViewOrEditor,
 						title: terminalStrings.kill.value,
 					},
@@ -377,6 +469,28 @@ export function setupTerminalMenus(): void {
 				id: MenuId.TerminalNewDropdownContext,
 				item: {
 					command: {
+						id: TerminalCommandId.ConfigureGridLayout,
+						title: localize('workbench.action.terminal.configureGridLayout.dropdown', "Configure Terminal Grid...")
+					},
+					group: '2_project',
+					order: 2
+				}
+			},
+			{
+				id: MenuId.TerminalNewDropdownContext,
+				item: {
+					command: {
+						id: TerminalCommandId.OpenCloudHostGrid,
+						title: localize('workbench.action.terminal.openCloudHostGrid.dropdown', "Open All Cloud Hosts in Grid")
+					},
+					group: '2_project',
+					order: 3
+				}
+			},
+			{
+				id: MenuId.TerminalNewDropdownContext,
+				item: {
+					command: {
 						id: TerminalCommandId.SelectDefaultProfile,
 						title: localize2('workbench.action.terminal.selectDefaultProfile', 'Select Default Profile'),
 					},
@@ -488,6 +602,52 @@ export function setupTerminalMenus(): void {
 					group: 'navigation',
 					order: 2,
 					when: TerminalContextKeys.shouldShowViewInlineActions
+				}
+			},
+			{
+				id: MenuId.ViewTitle,
+				item: {
+					command: {
+						id: TerminalCommandId.SplitDown,
+						title: localize('workbench.action.terminal.splitDown.title', "Split Terminal Down"),
+						icon: Codicon.splitVertical
+					},
+					group: 'navigation',
+					order: 2.1,
+					when: TerminalContextKeys.shouldShowViewInlineActions
+				}
+			},
+			{
+				id: MenuId.ViewTitle,
+				item: {
+					command: {
+						id: TerminalCommandId.ConfigureGridLayout,
+						title: localize('workbench.action.terminal.configureGridLayout.title', "Configure Multi-Row / Column Grid"),
+						icon: Codicon.layout
+					},
+					group: 'navigation',
+					order: 2.2,
+					when: ContextKeyExpr.and(
+						ContextKeyExpr.equals('view', TERMINAL_VIEW_ID),
+						ContextKeyExpr.or(TerminalContextKeys.webExtensionContributedProfile, TerminalContextKeys.processSupported)
+					)
+				}
+			},
+			{
+				id: MenuId.ViewTitle,
+				item: {
+					command: {
+						id: TerminalCommandId.ToggleGridBroadcast,
+						title: localize('workbench.action.terminal.toggleGridBroadcast.title', "Toggle Broadcast Input to Grid"),
+						icon: Codicon.broadcast,
+						toggled: TerminalContextKeys.gridBroadcastActive
+					},
+					group: 'navigation',
+					order: 2.3,
+					when: ContextKeyExpr.and(
+						ContextKeyExpr.equals('view', TERMINAL_VIEW_ID),
+						TerminalContextKeys.splitTerminalActive
+					)
 				}
 			},
 			{

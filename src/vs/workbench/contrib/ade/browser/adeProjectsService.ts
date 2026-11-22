@@ -20,7 +20,6 @@ import {
 	isPureExecutionRank,
 	normalizeAdeOrganizationConfig,
 	resolveEffectiveRankDefinition,
-	resolveWorkTreeSlotRank,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -39,8 +38,6 @@ import {
 	IAdeProjectsService,
 	IAdeSecretary,
 	IAdeSession,
-	IAdeWorkTreeSegmentSpec,
-	IAdeWorkTreeSyncResult,
 } from '../common/ade.js';
 import { readTrustedApplicationConfigValue } from '../common/adeRoleSchemaService.js';
 
@@ -90,6 +87,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 	private suppressNavEvents = false;
 	private suppressWorkspaceSyncCount = 0;
 	private isSavingStorage = false;
+	private readonly recentSavedAgentsJson = new Set<string>();
 	private lastWorkspaceKeys: string;
 
 	private readonly changeEmitter = this._register(new Emitter<AdeProjectsChangeKind | void>());
@@ -245,6 +243,13 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
 			if (!e.external || this.isSavingStorage) {
 				return;
+			}
+			if (e.key === 'aexus.ade.agents') {
+				const rawStored = this.storageService.get('aexus.ade.agents', StorageScope.PROFILE, '');
+				if (rawStored && this.recentSavedAgentsJson.has(rawStored)) {
+					// Ignore stale async self-echoes of our own earlier saveAgents() writes.
+					return;
+				}
 			}
 			if (e.key === 'aexus.ade.projects' || e.key === 'aexus.ade.agents') {
 				this.reloadFromExternalStorage();
@@ -934,15 +939,18 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		const schema = this.getRoleSchema();
 		const defaultLeaf = getDefaultPureLeafRank(schema);
 		let employeeRole: AdeAgentRole | undefined;
+		let effectiveCutoffTier = 1;
 		if (ownerAgent) {
 			const ownerDef = resolveEffectiveRankDefinition(schema, ownerAgent.role, true);
-			const nextTier = schema.ranks.find(r => r.tier > ownerDef.tier) ?? ownerDef;
+			effectiveCutoffTier = Math.max(ownerDef.tier, options?.ownerTier ?? ownerDef.tier);
+			const nextTier = schema.ranks.find(r => r.tier > effectiveCutoffTier) ?? schema.ranks[schema.ranks.length - 1] ?? ownerDef;
 			const isDefaultPure = Boolean(nextTier.pureExecution && nextTier.id === defaultLeaf.id);
 			employeeRole = isDefaultPure ? undefined : nextTier.id;
 		} else {
-			// For User (L-1) or Secretary (L0)-owned Missions, default factory cutoff is L1 (when >= 2 ranks exist),
-			// so generated in-graph employees must start strictly on the in-graph side (tier > 1) rather than L1.
-			const inGraphRank = schema.ranks.find(r => r.tier > 1) ?? getTopRankDefinition(schema);
+			// For User (L-1) or Secretary (L0)-owned Missions, default factory cutoff is L1 (or configured offGraphMaxTier),
+			// so generated in-graph employees must start strictly on the in-graph side (tier > cutoff).
+			effectiveCutoffTier = Math.max(1, options?.ownerTier ?? 1);
+			const inGraphRank = schema.ranks.find(r => r.tier > effectiveCutoffTier) ?? getTopRankDefinition(schema);
 			const isDefaultPure = Boolean(inGraphRank.pureExecution && inGraphRank.id === defaultLeaf.id);
 			employeeRole = isDefaultPure ? undefined : inGraphRank.id;
 		}
@@ -964,17 +972,21 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		const employeeAgentsByNode: Record<string, IAdeAgent> = {};
 		const inheritedEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId;
 
+		const ownerCutoffTier = effectiveCutoffTier;
 		for (const emp of employees) {
 			const prev = existingByKey.get(emp.id);
 			const nodeIds = emp.nodeIds && emp.nodeIds.length > 0 ? [...emp.nodeIds] : [emp.id];
 			const defaultLabel = emp.isExplicitEmployee ? emp.title : (emp.title.startsWith(`[${emp.id}] `) ? emp.title : `[${emp.id}] ${emp.title}`);
+			const preservedRole = prev
+				? (resolveEffectiveRankDefinition(schema, prev.role, false).tier > ownerCutoffTier ? prev.role : employeeRole)
+				: employeeRole;
 			const nextAgent: IAdeAgent = prev
 				? {
 					...prev,
 					parentId: ownerAgent?.id,
 					projectUri: targetProjectUri,
 					label: prev.labelIsCustom ? prev.label : defaultLabel,
-					role: employeeRole,
+					role: preservedRole,
 					archived: undefined,
 					treeType: 'mission',
 					treeGovernorId: ownerOrMissionId,
@@ -1103,180 +1115,6 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		} : agent);
 		this.saveAgents();
 		this.changeEmitter.fire();
-	}
-
-	syncWorkTreeHierarchy(
-		governorId: string,
-		treeType: AdeWorkTreeType,
-		segments: readonly IAdeWorkTreeSegmentSpec[],
-	): IAdeWorkTreeSyncResult {
-		const gov = this.getAgent(governorId);
-		if (!gov || gov.parentId) {
-			throw new Error(localize('adeWorkTreeGovernorMissing', "Engineering Governor session '{0}' does not exist or is not a top-level session.", governorId));
-		}
-
-		const schema = this.getRoleSchema();
-		const orchestratorRank = resolveWorkTreeSlotRank(schema, 'orchestrator');
-		const segmentOwnerRank = resolveWorkTreeSlotRank(schema, 'segment_owner');
-		const reviewerRank = resolveWorkTreeSlotRank(schema, 'reviewer');
-		const executorRank = resolveWorkTreeSlotRank(schema, 'executor');
-		const defaultLeaf = getDefaultPureLeafRank(schema);
-		const executorRole: AdeAgentRole | undefined = executorRank.pureExecution && executorRank.id === defaultLeaf.id
-			? undefined
-			: executorRank.id;
-
-		const existingSubtree = this.getSubtree(governorId).slice(1);
-		const existingById = new Map(existingSubtree.map(a => [a.id, a]));
-		const existingManagersBySeg = new Map<string, IAdeAgent>();
-		const existingEmployeesByNode = new Map<string, IAdeAgent>();
-		const existingWorkersByNode = new Map<string, IAdeAgent>();
-
-		for (const item of existingSubtree) {
-			if (item.treeSegmentId && !item.treeNodeId) {
-				existingManagersBySeg.set(item.treeSegmentId, item);
-			} else if (item.treeNodeId) {
-				const parent = item.parentId ? existingById.get(item.parentId) : undefined;
-				const isExecutor = !item.role || (parent !== undefined && parent.treeNodeId === item.treeNodeId);
-				if (isExecutor) {
-					existingWorkersByNode.set(item.treeNodeId, item);
-				} else {
-					existingEmployeesByNode.set(item.treeNodeId, item);
-				}
-			}
-		}
-
-		const keptIds = new Set<string>([governorId]);
-		const newSubtreeEntries: IAdeAgent[] = [];
-		const managerAgentsBySegment: Record<string, string> = {};
-		const employeeAgentsByNode: Record<string, string> = {};
-		const workerAgentsByNode: Record<string, string> = {};
-
-		for (const seg of segments) {
-			const prevMgr = (seg.existingManagerAgentId ? existingById.get(seg.existingManagerAgentId) : undefined)
-				?? existingManagersBySeg.get(seg.segmentId);
-			const mgrId = prevMgr?.id ?? generateUuid();
-			keptIds.add(mgrId);
-			managerAgentsBySegment[seg.segmentId] = mgrId;
-
-			const mgrSessionMatchesEngine = prevMgr?.session?.engineId === seg.managerEngineId;
-			newSubtreeEntries.push({
-				id: mgrId,
-				parentId: governorId,
-				projectUri: gov.projectUri,
-				label: seg.label,
-				labelIsCustom: true,
-				role: segmentOwnerRank.id,
-				archived: undefined,
-				unread: prevMgr?.unread,
-				status: prevMgr?.status ?? 'idle',
-				draft: prevMgr?.draft ?? '',
-				session: mgrSessionMatchesEngine ? prevMgr?.session : undefined,
-				treeType,
-				treeGovernorId: governorId,
-				treeSegmentId: seg.segmentId,
-				preferredEngineId: seg.managerEngineId,
-				preferredModel: seg.managerModel,
-				preferredThinking: seg.managerThinking,
-				workingDirectoryOverride: seg.workingDirectoryOverride,
-			});
-
-			for (const task of seg.tasks) {
-				const prevEmp = (task.existingEmployeeAgentId ? existingById.get(task.existingEmployeeAgentId) : undefined)
-					?? existingEmployeesByNode.get(task.nodeId);
-				const empId = prevEmp?.id ?? generateUuid();
-				keptIds.add(empId);
-				employeeAgentsByNode[task.nodeId] = empId;
-
-				const empSessionMatches = prevEmp?.session?.engineId === task.employeeEngineId;
-				newSubtreeEntries.push({
-					id: empId,
-					parentId: mgrId,
-					projectUri: gov.projectUri,
-					label: `[${task.nodeId}] ${task.title}`,
-					labelIsCustom: true,
-					role: reviewerRank.id,
-					archived: undefined,
-					unread: prevEmp?.unread,
-					status: prevEmp?.status ?? 'idle',
-					draft: prevEmp?.draft ?? '',
-					session: empSessionMatches ? prevEmp?.session : undefined,
-					treeType,
-					treeGovernorId: governorId,
-					treeSegmentId: seg.segmentId,
-					treeNodeId: task.nodeId,
-					preferredEngineId: task.employeeEngineId,
-					preferredModel: task.employeeModel,
-					preferredThinking: task.employeeThinking,
-					workingDirectoryOverride: task.workingDirectoryOverride ?? seg.workingDirectoryOverride,
-				});
-
-				const prevWrk = (task.existingWorkerAgentId ? existingById.get(task.existingWorkerAgentId) : undefined)
-					?? existingWorkersByNode.get(task.nodeId);
-				const wrkId = prevWrk?.id ?? generateUuid();
-				keptIds.add(wrkId);
-				workerAgentsByNode[task.nodeId] = wrkId;
-
-				const wrkSessionMatches = prevWrk?.session?.engineId === task.workerEngineId;
-				newSubtreeEntries.push({
-					id: wrkId,
-					parentId: empId,
-					projectUri: gov.projectUri,
-					label: `${task.title} · ${executorRank.name}`,
-					labelIsCustom: true,
-					role: executorRole,
-					archived: undefined,
-					unread: prevWrk?.unread,
-					status: prevWrk?.status ?? 'idle',
-					draft: prevWrk?.draft ?? '',
-					session: wrkSessionMatches ? prevWrk?.session : undefined,
-					treeType,
-					treeGovernorId: governorId,
-					treeSegmentId: seg.segmentId,
-					treeNodeId: task.nodeId,
-					preferredEngineId: task.workerEngineId,
-					preferredModel: task.workerModel,
-					preferredThinking: task.workerThinking,
-					workingDirectoryOverride: task.workingDirectoryOverride ?? seg.workingDirectoryOverride,
-				});
-			}
-		}
-
-		const oldSubtreeIds = new Set(existingSubtree.map(a => a.id));
-		const removedAgents = existingSubtree.filter(a => !keptIds.has(a.id));
-
-		const nextEntries: IAdeAgent[] = [];
-		for (const entry of this.entries) {
-			if (entry.id === governorId) {
-				nextEntries.push({
-					...entry,
-					role: orchestratorRank.id,
-					treeType,
-					treeGovernorId: governorId,
-				});
-				nextEntries.push(...newSubtreeEntries);
-			} else if (oldSubtreeIds.has(entry.id)) {
-				continue;
-			} else {
-				nextEntries.push(entry);
-			}
-		}
-
-		this.entries = nextEntries;
-		if (this._selectedAgentId && removedAgents.some(a => a.id === this._selectedAgentId)) {
-			this._selectedAgentId = governorId;
-		}
-		this.saveAgents();
-		if (removedAgents.length > 0) {
-			this.removedAgentsEmitter.fire(removedAgents);
-		}
-		this.changeEmitter.fire();
-
-		return {
-			managerAgentsBySegment,
-			employeeAgentsByNode,
-			workerAgentsByNode,
-			removedAgents,
-		};
 	}
 
 	addProject(uri: URI, label = basename(uri)): IAdeAgent {
@@ -1512,9 +1350,12 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		this.changeEmitter.fire();
 	}
 
-	setAgentRole(id: string, role: AdeAgentRole | undefined): void {
+	setAgentRole(id: string, role: AdeAgentRole | undefined, options?: { readonly allowLockedMissionEmployee?: boolean }): void {
 		const current = this.getAgent(id);
-		if (!current || current.role === role || this.isLockedByWorkTree(id)) {
+		if (!current || current.role === role) {
+			return;
+		}
+		if (this.isLockedByWorkTree(id) && !(options?.allowLockedMissionEmployee && current.treeType === 'mission' && Boolean(current.treeNodeId))) {
 			return;
 		}
 		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, role } : agent);
@@ -1744,7 +1585,15 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				...(agent.preferredThinking ? { preferredThinking: agent.preferredThinking } : {}),
 				...(agent.workingDirectoryOverride ? { workingDirectoryOverride: agent.workingDirectoryOverride } : {}),
 			}));
-			this.storageService.store('aexus.ade.agents', JSON.stringify(stored), StorageScope.PROFILE, StorageTarget.MACHINE);
+			const serialized = JSON.stringify(stored);
+			this.recentSavedAgentsJson.add(serialized);
+			if (this.recentSavedAgentsJson.size > 16) {
+				const oldest = this.recentSavedAgentsJson.values().next().value;
+				if (oldest !== undefined) {
+					this.recentSavedAgentsJson.delete(oldest);
+				}
+			}
+			this.storageService.store('aexus.ade.agents', serialized, StorageScope.PROFILE, StorageTarget.MACHINE);
 		} finally {
 			this.isSavingStorage = false;
 		}

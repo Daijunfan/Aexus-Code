@@ -250,6 +250,31 @@ export class TerminalViewPane extends ViewPane {
 
 	override createActionViewItem(action: Action, options: IBaseActionViewItemOptions): IActionViewItem | undefined {
 		switch (action.id) {
+			case TerminalCommandId.ConfigureGridLayout: {
+				const that = this;
+				const store = new DisposableStore();
+				let itemElement: HTMLElement | undefined;
+				const anchoredAction = store.add(new class extends Action {
+					constructor() {
+						super(action.id, action.label, action.class, action.enabled);
+						this.checked = action.checked;
+						this.tooltip = action.tooltip;
+					}
+					override async run() {
+						await that._instantiationService.invokeFunction(accessor =>
+							accessor.get(ICommandService).executeCommand(TerminalCommandId.ConfigureGridLayout, { anchor: itemElement })
+						);
+					}
+				});
+				const item = store.add(new class extends ActionViewItem {
+					override render(container: HTMLElement): void {
+						super.render(container);
+						itemElement = container;
+					}
+				}(action, anchoredAction, { ...options, icon: true, label: false, keybinding: this._getKeybindingLabel(action) }));
+				this._actionDisposables.set(action.id, store);
+				return item;
+			}
 			case TerminalCommandId.Split: {
 				// Split needs to be special cased to force splitting within the panel, not the editor
 				const that = this;

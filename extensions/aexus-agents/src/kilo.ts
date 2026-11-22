@@ -9,14 +9,21 @@ import * as os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import {
+	buildRemotePersistentPrefix,
 	CloudHostTarget,
+	execRemoteShell,
+	normalizeRemoteCwdForCompare,
 	openRemotePortForward,
+	posixQuote,
 	RemotePortForwardHandle,
 	remotePathToFileUrl,
+	resolveRemoteRealpath,
 	spawnRemoteEngine,
+	terminateRemotePersistentSession,
+	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
 import { AgentChildIdentity, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, readJsonOutput, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, spawnEngine, stopEngine, stopEngineWithFallback, withTimeout } from './runtime';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
@@ -225,12 +232,13 @@ function turnUsageFromKiloTokens(tokens: KiloTokens | undefined): EngineTurnToke
 	return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens, estimated: false };
 }
 
-const SHARED_PURE_SERVER_KEY = `${SHARED_PURE_SCOPE_KEY}:ask`;
+const SHARED_PURE_SERVER_KEY = `${SHARED_PURE_SCOPE_KEY}:auto`;
 
 interface SharedServerSlot {
 	child?: ReturnType<typeof spawnEngine>;
 	tunnel?: RemotePortForwardHandle;
 	endpoint?: Promise<string>;
+	remotePersistentId?: string;
 	readonly password: string;
 	readonly identity: AgentChildIdentity;
 	readonly autoApprove: boolean;
@@ -277,9 +285,9 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		const autoApprove = this.shouldAutoApprove(options);
 		if (!sessionId || !options) {
 			return {
-				key: SHARED_PURE_SERVER_KEY,
+				key: `${SHARED_PURE_SCOPE_KEY}:${autoApprove ? 'auto' : 'ask'}`,
 				identity: { sessionId: `${this.id}-pure`, pureWorker: true },
-				autoApprove: false,
+				autoApprove,
 			};
 		}
 		const effectiveSid = options.adeSessionId || sessionId;
@@ -296,6 +304,15 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		};
 	}
 
+	private disposeSlotRemote(slot: SharedServerSlot | undefined): void {
+		if (!slot?.remotePersistentId || !this.remoteTarget || this.remoteTarget.os === 'windows') {
+			return;
+		}
+		const pid = slot.remotePersistentId;
+		slot.remotePersistentId = undefined;
+		void terminateRemotePersistentSession(this.remoteTarget, pid, { killTree: true }).catch(() => undefined);
+	}
+
 	private retireStaleServerSlot(sessionId: string, nextServerKey: string): void {
 		const prevKey = this.sessionServerKeys.get(sessionId);
 		if (!prevKey || prevKey === nextServerKey || prevKey === SHARED_PURE_SERVER_KEY) {
@@ -308,6 +325,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			if (prevSlot.child) {
 				stopEngine(prevSlot.child);
 			}
+			this.disposeSlotRemote(prevSlot);
 			this.servers.delete(prevKey);
 		}
 	}
@@ -637,7 +655,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		}
 	}
 
-	private getEndpoint(serverKey = SHARED_PURE_SERVER_KEY, identity?: AgentChildIdentity, autoApprove = false, cwd?: string): Promise<{ readonly url: string; readonly password: string }> {
+	private getEndpoint(serverKey = SHARED_PURE_SERVER_KEY, identity?: AgentChildIdentity, autoApprove = isAutonomousModeEnabled(), cwd?: string): Promise<{ readonly url: string; readonly password: string }> {
 		const slot = this.ensureServerSlot(
 			serverKey,
 			identity ?? { sessionId: `${this.id}-pure`, pureWorker: true },
@@ -656,9 +674,20 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					[`${this.envPrefix}_PERMISSION`]: slot.autoApprove ? '{"*":"allow"}' : '{"*":"ask"}',
 				};
 				const remoteTarget = this.remoteTarget;
+				const remotePersistentId = remoteTarget && remoteTarget.os !== 'windows'
+					? `${buildRemotePersistentPrefix(this.id, serverKey === SHARED_PURE_SERVER_KEY ? SHARED_PURE_SCOPE_KEY : (slot.identity.sessionId || serverKey))}-${randomUUID().slice(0, 8)}`
+					: undefined;
+				slot.remotePersistentId = remotePersistentId;
 				const boundAddress = await new Promise<string>((resolve, reject) => {
 					const child = slot.child = remoteTarget
-						? spawnRemoteEngine(remoteTarget, this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], slot.cwd, serverEnv, { killOnStdinClose: true })
+						? spawnRemoteEngine(
+							remoteTarget,
+							this.executable,
+							['serve', '--hostname', '127.0.0.1', '--port', '0'],
+							slot.cwd,
+							serverEnv,
+							remotePersistentId ? { persistentSessionId: remotePersistentId } : { killOnStdinClose: true },
+						)
 						: spawnEngine(this.executable, ['serve', '--hostname', '127.0.0.1', '--port', '0'], slot.cwd, serverEnv);
 					let output = '';
 					let settled = false;
@@ -707,7 +736,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		return slot.endpoint.then(url => ({ url, password: slot.password }));
 	}
 
-	protected async request<T>(route: string, cwd: string, method = 'GET', body?: object, signal?: AbortSignal, serverKey = SHARED_PURE_SERVER_KEY, identity?: AgentChildIdentity, autoApprove = false): Promise<T> {
+	protected async request<T>(route: string, cwd: string, method = 'GET', body?: object, signal?: AbortSignal, serverKey = SHARED_PURE_SERVER_KEY, identity?: AgentChildIdentity, autoApprove = isAutonomousModeEnabled()): Promise<T> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
@@ -734,6 +763,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 						stopEngine(slot.child);
 						slot.child = undefined;
 					}
+					this.disposeSlotRemote(slot);
 					slot.endpoint = undefined;
 					continue;
 				}
@@ -764,7 +794,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		return session?.id === parent;
 	}
 
-	abstract list(token: vscode.CancellationToken): Promise<NativeSession[]>;
+	abstract list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]>;
 
 	async create(cwd: string): Promise<NativeSession> {
 		const now = Date.now();
@@ -879,39 +909,73 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			await this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, serverKey, slot.identity, slot.autoApprove).catch(() => { });
 		}
 		this.sessionServerKeys.delete(session.id);
+		const persistentIdToKill = serverKey !== SHARED_PURE_SERVER_KEY ? slot?.remotePersistentId : undefined;
 		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
 			slot.tunnel?.dispose();
 			slot.tunnel = undefined;
-			if (slot.child) { stopEngine(slot.child); }
+			if (slot.child) { stopEngineWithFallback(slot.child, 'SIGTERM', 1500); }
 			this.servers.delete(serverKey);
+		}
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			const kills: Promise<void>[] = [
+				terminateRemotePersistentSessionsByPrefix(this.remoteTarget, buildRemotePersistentPrefix(this.id, session.id), { killTree: true }),
+			];
+			if (persistentIdToKill) {
+				kills.push(terminateRemotePersistentSession(this.remoteTarget, persistentIdToKill, { killTree: true }));
+			}
+			await Promise.all(kills);
 		}
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
+		if (token.isCancellationRequested) {
+			return;
+		}
 		this.knownSessions.set(session.id, session);
 		const desc = this.resolveServerDescriptor(session.id, options, session.cwd);
 		this.retireStaleServerSlot(session.id, desc.key);
 		this.sessionServerKeys.set(session.id, desc.key);
 		const abort = new AbortController();
+		const earlyCancel = token.onCancellationRequested(() => abort.abort());
 		let ep: { url: string; password: string };
+		let response: Response;
 		try {
-			ep = await this.getEndpoint(desc.key, desc.identity, desc.autoApprove, desc.cwd);
-		} catch (error) {
-			const failedSlot = this.servers.get(desc.key);
-			if (failedSlot) {
-				failedSlot.tunnel?.dispose();
-				failedSlot.tunnel = undefined;
-				if (failedSlot.child) {
-					stopEngine(failedSlot.child);
-					failedSlot.child = undefined;
+			try {
+				ep = await raceWithCancellation(
+					withTimeout(this.getEndpoint(desc.key, desc.identity, desc.autoApprove, desc.cwd), 25_000),
+					token,
+				);
+			} catch (error) {
+				if (token.isCancellationRequested || error instanceof vscode.CancellationError) {
+					return;
 				}
-				failedSlot.endpoint = undefined;
+				const failedSlot = this.servers.get(desc.key);
+				if (failedSlot) {
+					failedSlot.tunnel?.dispose();
+					failedSlot.tunnel = undefined;
+					if (failedSlot.child) {
+						stopEngineWithFallback(failedSlot.child, 'SIGTERM', 1500);
+						failedSlot.child = undefined;
+					}
+					this.disposeSlotRemote(failedSlot);
+					failedSlot.endpoint = undefined;
+				}
+				throw error;
+			}
+			if (token.isCancellationRequested) {
+				return;
+			}
+			const url = new URL('/event', ep.url);
+			url.searchParams.set('directory', session.cwd);
+			response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}` }, signal: abort.signal });
+		} catch (error) {
+			if (token.isCancellationRequested || abort.signal.aborted) {
+				return;
 			}
 			throw error;
+		} finally {
+			earlyCancel.dispose();
 		}
-		const url = new URL('/event', ep.url);
-		url.searchParams.set('directory', session.cwd);
-		const response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}` }, signal: abort.signal });
 		if (!response.ok || !response.body) { throw new Error(vscode.l10n.t('{0} could not open its response stream.', this.name)); }
 		let streamed = false;
 		const parts = new Map<string, string>();
@@ -936,6 +1000,9 @@ abstract class SharedServerRuntime implements EngineRuntime {
 				emitThinkingProgress(stream, text, `${this.id}-thinking`);
 			}
 		};
+		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
+			preTurnBaseline: this.lastTurnUsageBySession.get(session.id),
+		});
 		const reader = response.body.getReader();
 		const events = (async () => {
 			const decoder = new TextDecoder();
@@ -961,7 +1028,12 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					if (sessionId && data?.info?.tokens) {
 						const usage = turnUsageFromKiloTokens(data.info.tokens);
 						if (usage) {
-							this.lastTurnUsageBySession.set(sessionId, usage);
+							if (sessionId === session.id) {
+								const normalized = usageTracker.recordRealUsage(usage, { cumulativeAcrossThread: false });
+								this.lastTurnUsageBySession.set(sessionId, normalized);
+							} else {
+								this.lastTurnUsageBySession.set(sessionId, usage);
+							}
 						}
 					}
 					if (data && sessionId && (event.type === 'permission.asked' || event.type === 'question.asked') && this.belongsTo(sessionId, session.id)) {
@@ -983,8 +1055,10 @@ abstract class SharedServerRuntime implements EngineRuntime {
 						if (partType === 'text') {
 							streamed = true;
 							stream.markdown(data.delta);
+							usageTracker.recordStreamDelta(data.delta);
 						} else if (partType === 'reasoning') {
 							emitReasoningDelta(data.partID!, data.delta);
+							usageTracker.recordStreamDelta(data.delta);
 						}
 					}
 				}
@@ -1054,7 +1128,10 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
 			slot.tunnel?.dispose();
 			slot.tunnel = undefined;
-			if (slot.child) { stopEngine(slot.child); }
+			if (slot.child) { stopEngineWithFallback(slot.child, 'SIGTERM', 1500); }
+			if (this.remoteTarget && slot.remotePersistentId) {
+				await terminateRemotePersistentSession(this.remoteTarget, slot.remotePersistentId, { killTree: true }).catch(() => undefined);
+			}
 			this.servers.delete(serverKey);
 		}
 		this.knownSessions.delete(session.id);
@@ -1071,6 +1148,9 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			slot.tunnel?.dispose();
 			slot.tunnel = undefined;
 			if (slot.child) { stopEngine(slot.child); }
+			if (this.remoteTarget && slot.remotePersistentId) {
+				void terminateRemotePersistentSession(this.remoteTarget, slot.remotePersistentId, { killTree: true }).catch(() => undefined);
+			}
 		}
 		this.servers.clear();
 		this.sessionServerKeys.clear();
@@ -1082,7 +1162,7 @@ export class KiloRuntime extends SharedServerRuntime {
 	readonly name = 'Kilo Code';
 	protected readonly envPrefix = 'KILO';
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	async list(token: vscode.CancellationToken, _projectCwd?: string): Promise<NativeSession[]> {
 		const output = await capture(this.executable, ['session', 'list', '--all', '--format', 'json'], token, undefined, undefined, this.remoteTarget);
 		return readJsonOutput<KiloSessionListItem[]>(output).map(item => {
 			const entry: NativeSession = { id: item.id, cwd: item.directory, label: item.title, created: item.created, updated: item.updated };
@@ -1097,10 +1177,67 @@ export class OpenCodeRuntime extends SharedServerRuntime {
 	readonly name = 'OpenCode';
 	protected readonly envPrefix = 'OPENCODE';
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	async list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
 		if (token.isCancellationRequested) { return []; }
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			const targetCwds: string[] = [];
+			if (projectCwd?.trim()) {
+				targetCwds.push(normalizeRemoteCwdForCompare(projectCwd, this.remoteTarget.os));
+				const realCwd = await resolveRemoteRealpath(this.remoteTarget, projectCwd, token).catch(() => undefined);
+				if (realCwd) {
+					const realNorm = normalizeRemoteCwdForCompare(realCwd, this.remoteTarget.os);
+					if (!targetCwds.includes(realNorm)) {
+						targetCwds.push(realNorm);
+					}
+				}
+			}
+			const pyOpenCode = [
+				`import json, os, sqlite3, sys`,
+				`target_cwds = set(json.loads(sys.argv[1]))`,
+				`xdg = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")`,
+				`db = os.path.join(xdg, "opencode", "opencode.db")`,
+				`if not os.path.isfile(db): sys.exit(2)`,
+				`def norm(p):`,
+				`    p = os.path.normpath((p or "").strip())`,
+				`    return p[:-1] if len(p) > 1 and p.endswith("/") else p`,
+				`con = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=3.0)`,
+				`try:`,
+				`    cur = con.cursor()`,
+				`    rows = cur.execute("SELECT id, directory, title, time_created, time_updated FROM session WHERE time_archived IS NULL AND parent_id IS NULL ORDER BY time_updated DESC LIMIT 300").fetchall()`,
+				`    out = []`,
+				`    for sid, directory, title, created, updated in rows:`,
+				`        if not sid or not directory: continue`,
+				`        if target_cwds and norm(str(directory)) not in target_cwds: continue`,
+				`        out.append({"id": str(sid), "directory": str(directory), "title": str(title or ""), "created": int(created or 0), "updated": int(updated or 0)})`,
+				`    print(json.dumps(out, ensure_ascii=False))`,
+				`finally:`,
+				`    con.close()`,
+			].join('\n');
+			const pyRes = await execRemoteShell(
+				this.remoteTarget,
+				`if command -v python3 >/dev/null 2>&1; then python3 -c ${posixQuote(pyOpenCode)} ${posixQuote(JSON.stringify(targetCwds))}; else exit 127; fi`,
+				'',
+				{ timeoutMs: 12_000, token },
+			).catch(() => undefined);
+			if (pyRes && pyRes.code === 0) {
+				try {
+					const items = JSON.parse(pyRes.stdout.toString('utf8').trim() || '[]') as KiloSessionListItem[];
+					return items.map(item => {
+						const entry: NativeSession = {
+							id: item.id,
+							cwd: item.directory,
+							label: item.title || vscode.l10n.t('OpenCode Session {0}', item.id.slice(0, 8)),
+							created: item.created,
+							updated: item.updated,
+						};
+						this.knownSessions.set(entry.id, entry);
+						return entry;
+					});
+				} catch { /* fall through to RPC / CLI */ }
+			}
+		}
 		try {
-			const listCwd = this.remoteTarget ? (this.remoteTarget.remoteHome || (this.remoteTarget.os === 'windows' ? 'C:\\' : '/')) : os.homedir();
+			const listCwd = projectCwd?.trim() || (this.remoteTarget ? (this.remoteTarget.remoteHome || (this.remoteTarget.os === 'windows' ? 'C:\\' : '/')) : os.homedir());
 			const items = await this.request<KiloSession[]>('/experimental/session?roots=true&limit=200', listCwd);
 			return items.map(item => this.session(item));
 		} catch {

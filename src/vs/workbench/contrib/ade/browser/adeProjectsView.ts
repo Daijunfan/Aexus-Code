@@ -54,6 +54,7 @@ import { IProjectNavigationService } from '../../files/browser/projectNavigation
 import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_MISSION_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeInboxPanel } from './adeInboxView.js';
+import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
 import { IAdeMissionService } from './adeMissionStore.js';
 import { resolveAdeRankCodicon } from './adeRoleStudioEditorPane.js';
 import { AdeSessionEditorInput } from './adeSessionEditor.js';
@@ -706,6 +707,7 @@ export class AdeProjectsView extends ViewPane {
 	private inboxPanel: AdeInboxPanel | undefined;
 	private sidebarMode: 'projects' | 'inbox' = 'projects';
 	private readonly missionService: IAdeMissionService | undefined;
+	private readonly missionRuntimeService: IAdeMissionRuntimeService | undefined;
 	private readonly inboxService: IAdeInboxService | undefined;
 	private readonly notificationService: INotificationService | undefined;
 	private readonly workbenchEditorService: IEditorService | undefined;
@@ -762,22 +764,25 @@ export class AdeProjectsView extends ViewPane {
 			this.refreshAgentIcons();
 		}));
 
-		const [missionSvc, inbSvc, notifSvc, editorSvc, cloudSvc, roleSchemaSvc] = instantiationService.invokeFunction(accessor => {
+		const [missionSvc, missionRuntimeSvc, inbSvc, notifSvc, editorSvc, cloudSvc, roleSchemaSvc] = instantiationService.invokeFunction(accessor => {
 			let mission: IAdeMissionService | undefined;
+			let missionRuntime: IAdeMissionRuntimeService | undefined;
 			let inb: IAdeInboxService | undefined;
 			let notif: INotificationService | undefined;
 			let edit: IEditorService | undefined;
 			let cloud: IAdeCloudHostBackendService | undefined;
 			let roleSchema: IAdeRoleSchemaService | undefined;
 			try { mission = accessor.get(IAdeMissionService); } catch { mission = undefined; }
+			try { missionRuntime = accessor.get(IAdeMissionRuntimeService); } catch { missionRuntime = undefined; }
 			try { inb = accessor.get(IAdeInboxService); } catch { inb = undefined; }
 			try { notif = accessor.get(INotificationService); } catch { notif = undefined; }
 			try { edit = accessor.get(IEditorService); } catch { edit = undefined; }
 			try { cloud = accessor.get(IAdeCloudHostBackendService); } catch { cloud = undefined; }
 			try { roleSchema = accessor.get(IAdeRoleSchemaService); } catch { roleSchema = undefined; }
-			return [mission, inb, notif, edit, cloud, roleSchema] as const;
+			return [mission, missionRuntime, inb, notif, edit, cloud, roleSchema] as const;
 		});
 		this.missionService = missionSvc;
+		this.missionRuntimeService = missionRuntimeSvc;
 		this.inboxService = inbSvc;
 		this.notificationService = notifSvc;
 		this.workbenchEditorService = editorSvc;
@@ -842,10 +847,46 @@ export class AdeProjectsView extends ViewPane {
 
 		const contentArea = append(container, $('.ade-projects-content'));
 		if (this.inboxService) {
+			const missionBridge = this.missionService || this.missionRuntimeService
+				? {
+					openMissionEditor: (id: string, options?: {
+						readonly side?: boolean;
+						readonly focusNodeId?: string;
+						readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
+						readonly openAgentBeside?: boolean;
+					}) => this.missionService?.openMissionEditor(id, options) ?? Promise.resolve(),
+					listMissions: () => this.missionService?.listMissions() ?? [],
+					submitGateVerdict: async (params: {
+						readonly governorSessionId: string;
+						readonly nodeId: string;
+						readonly verdict: 'pass' | 'rollback';
+						readonly targetNodeId?: string;
+						readonly feedback?: string;
+					}) => {
+						const runtime = this.missionRuntimeService;
+						if (!runtime) {
+							throw new Error('Mission runtime service is unavailable — cannot submit Gate decision.');
+						}
+						const rec = this.missionService?.getMission(params.governorSessionId)
+							?? this.missionService?.getMissionByLinkedSession(params.governorSessionId);
+						const missionId = rec?.id ?? params.governorSessionId;
+						const res = await runtime.resolveGate(missionId, {
+							nodeId: params.nodeId,
+							decision: params.verdict === 'pass' ? 'approve' : 'reject',
+							note: params.feedback,
+							rollbackNodeId: params.targetNodeId,
+						});
+						if (!res.ok) {
+							throw new Error(res.error ?? `Failed to submit Gate verdict for node "${params.nodeId}".`);
+						}
+						return res;
+					},
+				}
+				: undefined;
 			this.inboxPanel = this._register(new AdeInboxPanel(
 				contentArea,
 				this.inboxService,
-				this.missionService,
+				missionBridge,
 				this.editors,
 				msg => this.notificationService?.error(msg),
 				this.projects,

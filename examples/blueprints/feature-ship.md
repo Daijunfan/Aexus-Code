@@ -1,117 +1,36 @@
+# Feature Ship · Full-Stack Parallel Delivery
+
+Contract-first feature delivery with parallel Backend, UI, and QA tracks, an explicit Human Release Gate (`U1`), and final integration verification reusing the `@Architect` context.
+
 ```mermaid
 flowchart LR
-  %% @pos N1 204,260
-  %% @pos N2 598,4
-  %% @pos N3 598,260
-  %% @pos N4 598,516
-  %% @pos U1 992,260
-  %% @pos N5 1386,260
-  N1["Interface & Data Contract ★Critical | worker=claude:high"] --> N2["Core Backend & Services ★Critical | worker=codex:high"]
-  N1 --> N3["UI & Interactive Surface | worker=codex:medium"]
-  N1 --> N4["Automated Test & Regression Suite | worker=codex:medium"]
+  N1["@Architect: Interface & Data Contract"] -->|contract| N2["@Backend: Core Backend & Services"]
+  N1 -->|contract| N3["@Frontend: UI & Interactive Surface"]
+  N1 -->|contract| N4["@QA: Automated Test & Regression Suite"]
   N2 --> U1{{"Release Readiness Gate"}}
   N3 --> U1
   N4 --> U1
-  U1 --> N5["Integration & Smoke Verification ★Critical | worker=codex:high"]
+  U1 --> N5["@Architect: Integration & Smoke Verification"]
 ```
 
-## Tree Metadata
-- tree_type: engineering
-- governor_session_id: <governor-session-id>
-- workspace_isolation: worktree
-- watchdog_timeout_minutes: 10
-- max_budget_usd: 8
-- max_concurrency: 3
-- verify: npm test
+## Node Pre-Prompts
 
-## Auto-Partitioned Managers
-### [Segment: N1]
-- engine: claude-code
-- thinking: medium
+Apply the Mermaid DAG with `aexus-ade mission blueprint apply --mission <id> --file ./examples/blueprints/feature-ship.md`, then bind each node's pre-prompt via the Canvas / Split Drawer or `aexus-ade mission prompt set`:
 
-### [Segment: N2]
-- engine: claude-code
-- thinking: medium
+### N1
+Define shared TypeScript/API schemas, interface contracts, and explicit file-ownership boundaries (`src/contracts/**`, `src/types/**`) so parallel tracks `N2`, `N3`, and `N4` execute with zero merge conflicts. Run typecheck before calling `aexus-ade token complete`.
 
-### [Segment: N3]
-- engine: claude-code
-- thinking: medium
+### N2
+Implement business logic, persistence, and error handling strictly adhering to the `N1` contract (`src/services/**`, `src/server/**`). Add unit tests covering edge cases and ensure no unintended edits outside backend module boundaries before completing the token.
 
-### [Segment: N4]
-- engine: claude-code
-- thinking: medium
+### N3
+Build responsive Dark / Light / High-Contrast UI components wired to the `N1` interface contract (`src/ui/**`, `src/components/**`) with keyboard accessibility. Verify clean build output and zero layout overflow before completing the token.
 
-### [Segment: N5]
-- engine: claude-code
-- thinking: medium
+### N4
+Author deterministic unit and integration tests covering happy paths, concurrency, and failure recovery (`test/**`, `tests/**`). Verify both positive and negative assertions pass cleanly before completing the token.
 
-## Nodes
-### [N1] Interface & Data Contract
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: src/contracts/**, src/types/**
-- verify: npm run typecheck
-- goal: |
-    Define shared TypeScript/API schemas, interface contracts, and file-ownership boundaries so parallel tracks execute with zero merge conflicts.
-- acceptance: |
-    1. Public types and contracts compile cleanly with zero warnings;
-    2. Downstream file ownership boundaries are explicitly documented.
+### U1
+Human Acceptance Gate: review upstream summaries and diffs from `N2`, `N3`, and `N4`. Approve to trigger `N5`, or reject with `--rollback <nodeId>` and feedback to send targeted work back upstream.
 
-### [N2] Core Backend & Services
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=high
-- files: src/services/**, src/server/**
-- verify: npm test -- services
-- goal: |
-    Implement business logic, persistence, and error handling strictly adhering to the N1 contract.
-- acceptance: |
-    1. Core service unit tests pass with edge-case coverage;
-    2. No unintended edits outside backend module boundaries.
-
-### [N3] UI & Interactive Surface
-- type: task
-- critical: false
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=medium
-- files: src/ui/**, src/components/**
-- verify: npm run build
-- goal: |
-    Build responsive dark/light/high-contrast UI components wired to the N1 interface contract with keyboard accessibility.
-- acceptance: |
-    1. UI renders cleanly without overflow or clipping;
-    2. Keyboard navigation and focus states work end-to-end.
-
-### [N4] Automated Test & Regression Suite
-- type: task
-- critical: false
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=medium
-- files: test/**, tests/**
-- verify: npm test
-- goal: |
-    Author comprehensive unit and integration tests covering happy paths, concurrency, and failure recovery.
-- acceptance: |
-    1. New tests run deterministically with zero flakiness;
-    2. Both positive and failure paths are asserted.
-
-### [U1] Release Readiness Gate
-- type: user_gate
-- description: |
-    Review all 3 upstream Employee acceptance reports & worktree diffs before final integration and merge.
-
-### [N5] Integration & Smoke Verification
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=high
-- files: src/**, test/**
-- verify: npm run lint && npm test
-- goal: |
-    Verify cross-track integration after merge, run full typecheck, lint, and smoke tests, and summarize release readiness.
-- acceptance: |
-    1. Full build, lint, and test suite pass with zero errors;
-    2. Release summary documents verified behavior and metrics.
+### N5
+Verify cross-track integration across `N2`–`N4`, run full typecheck, lint, and test suites end-to-end, and publish a concise release readiness summary before completing the final token.

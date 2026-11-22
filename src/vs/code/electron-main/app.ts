@@ -1542,16 +1542,19 @@ export class CodeApplication extends Disposable {
 			onDidFocusMainWindow: nativeHostMainService.onDidFocusMainWindow,
 			getActiveWindowId: () => nativeHostMainService.getActiveWindowId(-1)
 		}));
-		const resolveAdeTargetWindow = async (windowId?: number): Promise<ICodeWindow> => {
+		const resolveAdeTargetWindow = async (windowId?: number, softWindowPin = false): Promise<ICodeWindow> => {
 			if (typeof windowId === 'number') {
 				const targetWindow = windowsMainService.getWindowById(windowId);
-				if (!targetWindow || targetWindow.win?.isDestroyed()) {
-					throw new Error(`ADE target window ${windowId} not found`);
+				if (targetWindow && !targetWindow.win?.isDestroyed() && !targetWindow.config?.isSessionsWindow) {
+					return targetWindow;
 				}
-				if (targetWindow.config?.isSessionsWindow) {
+				if (!softWindowPin) {
+					if (!targetWindow || targetWindow.win?.isDestroyed()) {
+						throw new Error(`ADE target window ${windowId} not found`);
+					}
 					throw new Error(`Window ${windowId} is a sessions window and does not support ADE control`);
 				}
-				return targetWindow;
+				// Originating pinned window closed/unavailable: fall back cleanly to an eligible open workbench window.
 			}
 
 			const getEligibleWindows = () => windowsMainService.getWindows().filter(w => !w.win?.isDestroyed() && !w.config?.isSessionsWindow);
@@ -1577,7 +1580,7 @@ export class CodeApplication extends Disposable {
 
 			throw new Error('No open Aexus Code workbench window available for ADE control');
 		};
-		const adeControlServer = this._register(new AdeControlServer(async (request, windowId) => {
+		const adeControlServer = this._register(new AdeControlServer(async (request, windowId, options) => {
 			if (request.action === 'host.windowVisibility') {
 				return {
 					dockVisible: Boolean(app.dock?.isVisible?.()),
@@ -1588,7 +1591,7 @@ export class CodeApplication extends Disposable {
 					})),
 				};
 			}
-			const targetWindow = await resolveAdeTargetWindow(windowId);
+			const targetWindow = await resolveAdeTargetWindow(windowId, options?.softWindowPin);
 			const targetClientId = `window:${targetWindow.id}`;
 			const router: IClientRouter<string> = {
 				routeCall: async (hub: IConnectionHub<string>): Promise<IPCClientConnection<string>> => {
@@ -1638,7 +1641,15 @@ export class CodeApplication extends Disposable {
 		const adeDocsBackendService = this._register(new AdeDocsBackendNodeService({
 			remoteProbe: adeCloudHostNodeService,
 		}));
-		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, new AdeEngineeringBackendChannel(adeDocsBackendService));
+		const adeEngineeringBackendChannel = this._register(new AdeEngineeringBackendChannel(adeDocsBackendService));
+		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, adeEngineeringBackendChannel);
+		// Wake ADE Mission Watchdog & heal SSH reverse bridges / persistent remote reattach loops immediately on OS resume.
+		this._register(Event.fromNodeEventEmitter(powerMonitor, 'resume')(() => {
+			void adeDocsBackendService.notifySystemResume();
+		}));
+		this._register(Event.fromNodeEventEmitter(powerMonitor, 'unlock-screen')(() => {
+			void adeDocsBackendService.notifySystemResume();
+		}));
 
 		// Logger
 		const loggerChannel = this._register(new LoggerChannel(accessor.get(ILoggerMainService)));

@@ -14,7 +14,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { IKeyMods } from '../../../../platform/quickinput/common/quickInput.js';
 import { IMarkProperties, ITerminalCapabilityImplMap, ITerminalCapabilityStore, ITerminalCommand, TerminalCapability } from '../../../../platform/terminal/common/capabilities/capabilities.js';
 import { IMergedEnvironmentVariableCollection } from '../../../../platform/terminal/common/environmentVariable.js';
-import { IExtensionTerminalProfile, IReconnectionProperties, IShellIntegration, IShellLaunchConfig, ITerminalBackend, ITerminalDimensions, ITerminalLaunchError, ITerminalProfile, ITerminalTabLayoutInfoById, TerminalExitReason, TerminalIcon, TerminalLocation, TerminalShellType, TerminalType, TitleEventSource, WaitOnExitValue, type IDecorationAddon, type ShellIntegrationInjectionFailureReason } from '../../../../platform/terminal/common/terminal.js';
+import { IExtensionTerminalProfile, IReconnectionProperties, IShellIntegration, IShellLaunchConfig, ITerminalBackend, ITerminalDimensions, ITerminalLaunchError, ITerminalProfile, ITerminalTabLayoutInfoById, TerminalExitReason, TerminalIcon, TerminalLocation, TerminalShellType, TerminalSplitDirection, TerminalType, TitleEventSource, WaitOnExitValue, type IDecorationAddon, type ShellIntegrationInjectionFailureReason } from '../../../../platform/terminal/common/terminal.js';
 import { IColorTheme } from '../../../../platform/theme/common/themeService.js';
 import { IWorkspaceFolder } from '../../../../platform/workspace/common/workspace.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
@@ -402,25 +402,36 @@ export interface ITerminalGroup {
 	terminalInstances: ITerminalInstance[];
 	title: string;
 	readonly hadFocusOnExit: boolean;
+	readonly gridDimensions: { readonly rows: number; readonly cols: number };
+	broadcastInput: boolean;
 
 	readonly onDidDisposeInstance: Event<ITerminalInstance>;
 	readonly onDisposed: Event<ITerminalGroup>;
 	readonly onInstancesChanged: Event<void>;
 	readonly onPanelOrientationChanged: Event<Orientation>;
+	readonly onDidChangeBroadcastInput?: Event<boolean>;
+	readonly onDidChangePaneMaximized?: Event<boolean>;
 
 	focusPreviousPane(): void;
 	focusNextPane(): void;
+	focusPaneInDirection?(direction: Direction): boolean;
 	resizePane(direction: Direction): void;
 	resizePanes(relativeSizes: number[]): void;
 	setActiveInstanceByIndex(index: number, force?: boolean): void;
 	attachToElement(element: HTMLElement): void;
-	addInstance(instance: ITerminalInstance): void;
+	addInstance(instance: ITerminalInstance, parentTerminalId?: number, splitDirection?: TerminalSplitDirection): void;
 	removeInstance(instance: ITerminalInstance): void;
+	replaceInstance?(oldInstance: ITerminalInstance, newInstance: ITerminalInstance): void;
 	moveInstance(instances: SingleOrMany<ITerminalInstance>, index: number, position: 'before' | 'after'): void;
 	setVisible(visible: boolean): void;
 	layout(width: number, height: number): void;
 	addDisposable(disposable: IDisposable): void;
-	split(shellLaunchConfig: IShellLaunchConfig): ITerminalInstance;
+	split(shellLaunchConfig: IShellLaunchConfig, direction?: TerminalSplitDirection): ITerminalInstance;
+	arrangeAsGrid?(rows: number, cols: number): void;
+	equalizeGrid?(): void;
+	toggleMaximizePane?(instance?: ITerminalInstance): boolean;
+	isPaneMaximized?(instance?: ITerminalInstance): boolean;
+	broadcastText?(text: string, shouldExecute?: boolean): Promise<void>;
 	getLayoutInfo(isActive: boolean): ITerminalTabLayoutInfoById;
 }
 
@@ -739,7 +750,7 @@ export interface ISerializedTerminalEditorInput extends ITerminalEditorInputObje
 export interface IDeserializedTerminalEditorInput extends ITerminalEditorInputObject {
 }
 
-export type ITerminalLocationOptions = TerminalLocation | TerminalEditorLocation | { parentTerminal: MaybePromise<ITerminalInstance> } | { splitActiveTerminal: boolean };
+export type ITerminalLocationOptions = TerminalLocation | TerminalEditorLocation | { parentTerminal: MaybePromise<ITerminalInstance>; splitDirection?: TerminalSplitDirection } | { splitActiveTerminal: boolean; splitDirection?: TerminalSplitDirection };
 
 export interface ICreateTerminalOptions {
 	/**

@@ -26,5 +26,3 @@ export declare function parseMissionDocsCommand(
 	json: boolean,
 	windowId: number | undefined,
 ): IRankMissionParsedInvocation | undefined;
-
-export declare function rewriteEngineeringActionToMission<T extends IRankMissionParsedInvocation>(parsed: T): T;

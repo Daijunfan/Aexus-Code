@@ -9,14 +9,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
+	buildRemotePersistentPrefix,
 	CloudHostTarget,
+	encodePiProjectSlug,
 	execRemoteShell,
+	healAllRemoteControlBridges,
+	inspectRemotePersistentSessionsByPrefix,
 	posixQuote,
 	psSingleQuote,
 	readRemoteTextFile,
+	resolveRemoteRealpath,
+	terminateRemotePersistentSession,
+	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
 import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, spawnEngine, stopEngine, withTimeout } from './runtime';
+import { createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, REMOTE_REATTACH_BACKOFFS_MS, spawnEngine, stopEngine, stopEngineWithFallback, waitForBackoffOrResume, withTimeout } from './runtime';
 
 interface PiContentPart {
 	type?: string;
@@ -263,14 +270,18 @@ function piMessageText(content: string | PiContentPart[] | undefined): string {
 	return '';
 }
 
+export { encodePiProjectSlug };
+
 export class PiRuntime implements EngineRuntime {
 	readonly id = 'pi';
 	readonly name = 'Pi';
 	private readonly running = new Map<string, Set<ReturnType<typeof spawnEngine>>>();
+	private readonly activePersistentIdsBySession = new Map<string, Set<string>>();
 	private readonly toolModes = new Map<string, PiToolMode['id']>();
 	private readonly capabilityCache = new Map<string, { expiresAt: number; value: EngineRuntimeCapabilities }>();
 	private readonly capabilityPending = new Map<string, Promise<EngineRuntimeCapabilities>>();
 	private readonly lastTurnUsageBySession = new Map<string, EngineTurnTokenUsage>();
+	private readonly lastRawSessionUsageBySession = new Map<string, EngineTurnTokenUsage>();
 
 	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
 		const usage = this.lastTurnUsageBySession.get(sessionId);
@@ -332,28 +343,111 @@ export class PiRuntime implements EngineRuntime {
 		return history;
 	}
 
-	private async listRemote(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	private async listRemote(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
 		if (!this.remoteTarget || token.isCancellationRequested) {
 			return [];
 		}
+		const targetCwds: string[] = [];
+		const targetSlugs: string[] = [];
+		if (projectCwd?.trim()) {
+			const canonical = projectCwd.trim();
+			targetCwds.push(canonical);
+			const realCwd = await resolveRemoteRealpath(this.remoteTarget, canonical, token).catch(() => undefined);
+			if (realCwd && !targetCwds.includes(realCwd)) {
+				targetCwds.push(realCwd);
+			}
+			for (const candidate of targetCwds) {
+				const slug = encodePiProjectSlug(candidate);
+				if (slug && !targetSlugs.includes(slug)) {
+					targetSlugs.push(slug);
+				}
+			}
+		}
+
+		const pyPi = [
+			`import glob, json, os, sys`,
+			`root = os.path.join(os.environ.get("PI_CODING_AGENT_DIR") or os.path.expanduser("~/.pi/agent"), "sessions")`,
+			`if not os.path.isdir(root): sys.exit(0)`,
+			`target_slugs = json.loads(sys.argv[1])`,
+			`canonical_cwd = sys.argv[2]`,
+			`files = []`,
+			`if target_slugs:`,
+			`    seen = set()`,
+			`    for slug in target_slugs:`,
+			`        d = os.path.join(root, slug)`,
+			`        if not os.path.isdir(d): continue`,
+			`        for name in os.listdir(d):`,
+			`            if not name.endswith(".jsonl"): continue`,
+			`            fp = os.path.join(d, name)`,
+			`            if fp in seen or not os.path.isfile(fp): continue`,
+			`            seen.add(fp)`,
+			`            try: st = os.stat(fp)`,
+			`            except OSError: continue`,
+			`            files.append((st.st_mtime, fp, True))`,
+			`else:`,
+			`    for fp in glob.glob(os.path.join(root, "*", "*.jsonl")):`,
+			`        if not os.path.isfile(fp): continue`,
+			`        try: st = os.stat(fp)`,
+			`        except OSError: continue`,
+			`        files.append((st.st_mtime, fp, False))`,
+			`files.sort(key=lambda x: x[0], reverse=True)`,
+			`for mtime, fp, in_target_slug in files[:150]:`,
+			`    sid = None; cwd = None; created_ts = ""; sname = ""; raw_user = ""`,
+			`    try:`,
+			`        with open(fp, "r", encoding="utf-8", errors="replace") as f:`,
+			`            for line in f:`,
+			`                if not line.strip(): continue`,
+			`                want = ('"session_info"' in line) or (not sid and '"type":"session"' in line) or (not sid and '"type": "session"' in line)`,
+			`                if not want and not raw_user and len(line) < 524288 and ('"role":"user"' in line or '"role": "user"' in line):`,
+			`                    want = True`,
+			`                if not want: continue`,
+			`                try: ev = json.loads(line)`,
+			`                except Exception: continue`,
+			`                if not isinstance(ev, dict): continue`,
+			`                t = ev.get("type")`,
+			`                if t == "session" and ev.get("id"):`,
+			`                    sid = str(ev["id"])`,
+			`                    if ev.get("cwd"): cwd = str(ev["cwd"])`,
+			`                    if isinstance(ev.get("timestamp"), str): created_ts = ev["timestamp"]`,
+			`                elif t == "session_info" and isinstance(ev.get("name"), str) and ev["name"].strip():`,
+			`                    sname = ev["name"].strip()`,
+			`                elif not raw_user and t == "message":`,
+			`                    msg = ev.get("message")`,
+			`                    if isinstance(msg, dict) and msg.get("role") == "user":`,
+			`                        c = msg.get("content")`,
+			`                        txt = c if isinstance(c, str) else ("\\n".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)) if isinstance(c, list) else "")`,
+			`                        if txt.strip(): raw_user = txt.strip()[:2000]`,
+			`    except OSError: continue`,
+			`    eff_cwd = (canonical_cwd if (in_target_slug and canonical_cwd) else cwd)`,
+			`    if sid and eff_cwd:`,
+			`        print("__AEX_PI_J__\\t" + json.dumps({"id": sid, "cwd": eff_cwd, "name": sname, "rawUser": raw_user, "ts": created_ts, "mtime": int(mtime * 1000), "file": fp}, ensure_ascii=False))`,
+		].join('\n');
+
+		const canonicalArg = targetCwds[0] ?? '';
+		const slugShellLoop = targetSlugs.length > 0
+			? `for _slug in ${targetSlugs.map(posixQuote).join(' ')}; do for f in "$root/$_slug"/*.jsonl; do [ -f "$f" ] || continue; m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0); printf '%s\\t%s\\n' "$m" "$f"; done; done`
+			: `for f in "$root"/*/*.jsonl; do [ -f "$f" ] || continue; m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0); printf '%s\\t%s\\n' "$m" "$f"; done`;
 		const posixScript = [
+			`if command -v python3 >/dev/null 2>&1; then`,
+			`  python3 -c ${posixQuote(pyPi)} ${posixQuote(JSON.stringify(targetSlugs))} ${posixQuote(canonicalArg)}`,
+			`  exit $?`,
+			`fi`,
 			`root="\${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/sessions"`,
 			`[ -d "$root" ] || exit 0`,
-			`for f in "$root"/*/*.jsonl; do`,
-			`  [ -f "$f" ] || continue`,
-			`  m=$(stat -c "%Y" "$f" 2>/dev/null || stat -f "%m" "$f" 2>/dev/null || echo 0)`,
-			`  printf '%s\\t%s\\n' "$m" "$f"`,
-			`done | sort -rn | head -n 120 | while IFS=$(printf '\\t') read -r m f; do`,
+			`${slugShellLoop} | sort -rn | head -n 120 | while IFS=$(printf '\\t') read -r m f; do`,
 			`  [ -f "$f" ] || continue`,
 			`  printf '__AEX_PI_F__\\t%s\\t%s\\n' "$m" "$f"`,
 			`  head -n 60 -- "$f" 2>/dev/null || true`,
 			`done`,
 		].join('\n');
+		const winSlugFilter = targetSlugs.length > 0
+			? `@(${targetSlugs.map(psSingleQuote).join(', ')}) | ForEach-Object { $sd = Join-Path $root $_; if (Test-Path -LiteralPath $sd) { Get-ChildItem -LiteralPath $sd -Filter '*.jsonl' -File -ErrorAction SilentlyContinue } }`
+			: `Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue }`;
 		const winScript = [
 			`$base = if ($env:PI_CODING_AGENT_DIR) { $env:PI_CODING_AGENT_DIR } else { Join-Path $env:USERPROFILE '.pi\\agent' }`,
 			`$root = Join-Path $base 'sessions'`,
 			`if (Test-Path -LiteralPath $root) {`,
-			`  Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 120 | ForEach-Object {`,
+			`  ${winSlugFilter} | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 120 | ForEach-Object {`,
 			`    $ms = [int64]([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeMilliseconds()`,
 			`    Write-Output ("__AEX_PI_F__" + [char]9 + $ms + [char]9 + $_.FullName)`,
 			`    Get-Content -LiteralPath $_.FullName -TotalCount 60 -Encoding UTF8 -ErrorAction SilentlyContinue`,
@@ -365,6 +459,7 @@ export class PiRuntime implements EngineRuntime {
 			return [];
 		}
 		const sessions: NativeSession[] = [];
+		const seenIds = new Set<string>();
 		let curFile: string | undefined;
 		let curMtime = Date.now();
 		let id: string | undefined;
@@ -373,10 +468,12 @@ export class PiRuntime implements EngineRuntime {
 		let sessionName: string | undefined;
 		let firstUserText: string | undefined;
 		const flush = () => {
-			if (curFile && id && cwd) {
+			const effCwd = (targetSlugs.length > 0 && canonicalArg) ? canonicalArg : cwd;
+			if (curFile && id && effCwd && !seenIds.has(id)) {
+				seenIds.add(id);
 				sessions.push({
 					id,
-					cwd,
+					cwd: effCwd,
 					label: sessionName || firstUserText || vscode.l10n.t('Pi Session {0}', id.slice(0, 8)),
 					created,
 					updated: curMtime,
@@ -386,6 +483,30 @@ export class PiRuntime implements EngineRuntime {
 			}
 		};
 		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+			if (rawLine.startsWith('__AEX_PI_J__\t')) {
+				try {
+					const row = JSON.parse(rawLine.slice('__AEX_PI_J__\t'.length)) as {
+						id?: string; cwd?: string; name?: string; rawUser?: string; ts?: string; mtime?: number; file?: string;
+					};
+					if (row.id && row.cwd && !seenIds.has(row.id)) {
+						seenIds.add(row.id);
+						const mtime = typeof row.mtime === 'number' && row.mtime > 0 ? row.mtime : Date.now();
+						const parsedTs = row.ts ? Date.parse(row.ts) : NaN;
+						const cleanedMsg = row.rawUser ? stripInjectedAdeContextFromUserTurn(row.rawUser).trim() : '';
+						const userLabel = cleanedMsg && !cleanedMsg.startsWith(ROLE_INIT_MARKER) ? cleanedMsg.split('\n')[0].slice(0, 100) : undefined;
+						sessions.push({
+							id: row.id,
+							cwd: row.cwd,
+							label: row.name?.trim() || userLabel || vscode.l10n.t('Pi Session {0}', row.id.slice(0, 8)),
+							created: Number.isFinite(parsedTs) ? parsedTs : mtime,
+							updated: mtime,
+							file: row.file,
+							provisional: false,
+						});
+					}
+				} catch { /* ignore */ }
+				continue;
+			}
 			if (rawLine.startsWith('__AEX_PI_F__\t')) {
 				flush();
 				const parts = rawLine.split('\t');
@@ -423,17 +544,29 @@ export class PiRuntime implements EngineRuntime {
 		return sessions;
 	}
 
-	async list(token: vscode.CancellationToken): Promise<NativeSession[]> {
+	async list(token: vscode.CancellationToken, projectCwd?: string): Promise<NativeSession[]> {
 		if (this.remoteTarget) {
-			return this.listRemote(token);
+			return this.listRemote(token, projectCwd);
 		}
 		const root = this.sessionsDir();
 		let groups: string[];
-		try {
-			groups = await fs.readdir(root);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
-			throw error;
+		if (projectCwd?.trim()) {
+			const realCwd = await fs.realpath(projectCwd.trim()).catch(() => path.resolve(projectCwd.trim()));
+			const targetSlugs = [...new Set([encodePiProjectSlug(projectCwd.trim()), encodePiProjectSlug(realCwd)].filter(Boolean))];
+			groups = [];
+			for (const slug of targetSlugs) {
+				try {
+					const st = await fs.stat(path.join(root, slug));
+					if (st.isDirectory()) { groups.push(slug); }
+				} catch { /* ignore absent slug dir */ }
+			}
+		} else {
+			try {
+				groups = await fs.readdir(root);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
+				throw error;
+			}
 		}
 
 		const files: { file: string; mtimeMs: number; birthtimeMs: number }[] = [];
@@ -824,6 +957,168 @@ export class PiRuntime implements EngineRuntime {
 			}
 			this.running.delete(session.id);
 		}
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			const trackedIds = this.activePersistentIdsBySession.get(session.id);
+			this.activePersistentIdsBySession.delete(session.id);
+			const prefix = buildRemotePersistentPrefix(this.id, session.id);
+			const kills: Promise<void>[] = [
+				terminateRemotePersistentSessionsByPrefix(this.remoteTarget, prefix, { killTree: true }),
+			];
+			if (trackedIds) {
+				for (const pid of trackedIds) {
+					if (!pid.startsWith(prefix)) {
+						kills.push(terminateRemotePersistentSession(this.remoteTarget, pid, { killTree: true }));
+					}
+				}
+			}
+			await Promise.all(kills);
+		}
+	}
+
+	private trackPersistentId(sessionId: string, persistentId: string | undefined): void {
+		if (!persistentId) { return; }
+		let set = this.activePersistentIdsBySession.get(sessionId);
+		if (!set) {
+			set = new Set();
+			this.activePersistentIdsBySession.set(sessionId, set);
+		}
+		set.add(persistentId);
+	}
+
+	private untrackPersistentId(sessionId: string, persistentId: string | undefined): void {
+		if (!persistentId) { return; }
+		const set = this.activePersistentIdsBySession.get(sessionId);
+		if (set) {
+			set.delete(persistentId);
+			if (set.size === 0) {
+				this.activePersistentIdsBySession.delete(sessionId);
+			}
+		}
+	}
+
+	async reattachIfRunning(session: NativeSession, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<'reattached' | 'not_running'> {
+		if (!this.remoteTarget || this.remoteTarget.os === 'windows' || token.isCancellationRequested) {
+			return 'not_running';
+		}
+		const prefix = buildRemotePersistentPrefix(this.id, session.id);
+		const candidates = await inspectRemotePersistentSessionsByPrefix(this.remoteTarget, prefix).catch(() => []);
+		const liveOrUnread = candidates.find(c => c.alive || c.exitCode !== undefined);
+		if (!liveOrUnread) {
+			return 'not_running';
+		}
+		const customEnv = await prepareRemoteAgentChildEnv(this.remoteTarget, {
+			sessionId: options?.adeSessionId || session.id,
+			callerRole: options?.callerRole,
+			pureWorker: options?.pureWorker,
+			isMissionNode: options?.isMissionNode,
+		});
+		const remotePersistentId = liveOrUnread.id;
+		this.trackPersistentId(session.id, remotePersistentId);
+		let stdoutBytesReceived = 0;
+		let sawAgentEnd = false;
+		let sessionMissing = false;
+		let turnError: string | undefined;
+		let stderrText = '';
+		const maxAttachAttempts = REMOTE_REATTACH_BACKOFFS_MS.length + 1;
+		try {
+			for (let attempt = 0; attempt < maxAttachAttempts; attempt++) {
+				const child = spawnEngine(this.executable, [], session.cwd, customEnv, this.remoteTarget, {
+					persistentSessionId: remotePersistentId,
+					attachByteOffset: stdoutBytesReceived,
+					attachOnly: true,
+				});
+				let sessionProcs = this.running.get(session.id);
+				if (!sessionProcs) {
+					sessionProcs = new Set();
+					this.running.set(session.id, sessionProcs);
+				}
+				sessionProcs.add(child);
+				let carry: Buffer = Buffer.alloc(0);
+				child.stderr.on('data', data => stderrText = (stderrText + String(data)).slice(-8000));
+				child.stdout.on('data', (chunk: Buffer | string) => {
+					const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+					carry = carry.length > 0 ? Buffer.concat([carry, buf]) : buf;
+					let nlIdx: number;
+					while ((nlIdx = carry.indexOf(0x0a)) >= 0) {
+						const lineBuf = carry.subarray(0, nlIdx);
+						carry = carry.subarray(nlIdx + 1);
+						stdoutBytesReceived += nlIdx + 1;
+						const rawLine = lineBuf.toString('utf8');
+						const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+						if (!line) { continue; }
+						let packet: PiRpcPacket;
+						try { packet = JSON.parse(line) as PiRpcPacket; } catch { continue; }
+						if (packet.type === 'message_update' && packet.assistantMessageEvent && !token.isCancellationRequested) {
+							const ev = packet.assistantMessageEvent;
+							if (ev.type === 'text_delta' && typeof ev.delta === 'string' && ev.delta) {
+								stream.markdown(ev.delta);
+							} else if (ev.type === 'thinking_delta' && typeof ev.delta === 'string' && ev.delta) {
+								emitThinkingProgress(stream, ev.delta, 'pi-thinking');
+							}
+						} else if (packet.type === 'agent_end' && Array.isArray(packet.messages)) {
+							const lastMsg = packet.messages.at(-1);
+							if (lastMsg?.stopReason === 'error' && lastMsg.errorMessage) {
+								turnError = lastMsg.errorMessage;
+							}
+						} else if (packet.type === 'agent_settled') {
+							sawAgentEnd = true;
+							void terminateRemotePersistentSession(this.remoteTarget!, remotePersistentId, { killTree: false }).catch(() => undefined);
+						}
+					}
+				});
+				const stopChild = () => {
+					stopEngineWithFallback(child, 'SIGTERM', 1000);
+					void terminateRemotePersistentSession(this.remoteTarget!, remotePersistentId, { killTree: true }).catch(() => undefined);
+				};
+				const cancelSub = token.onCancellationRequested(stopChild);
+				let closeCode: number | null = null;
+				try {
+					await raceWithCancellation(new Promise<void>((resolve, reject) => {
+						child.on('error', reject);
+						child.on('close', code => {
+							closeCode = code;
+							if (code === 44 && !sawAgentEnd) {
+								sessionMissing = true;
+								resolve();
+								return;
+							}
+							if (token.isCancellationRequested || sawAgentEnd || code === 0) {
+								if (turnError && !token.isCancellationRequested) { reject(new Error(turnError)); } else { resolve(); }
+								return;
+							}
+							if (code === 255 && attempt + 1 < maxAttachAttempts) {
+								resolve();
+								return;
+							}
+							reject(new Error(turnError || stderrText || vscode.l10n.t('Pi exited before finishing ({0}).', String(code))));
+						});
+					}), token, 2000, stopChild).catch(err => {
+						if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
+							stopEngine(child, 'SIGKILL');
+							return;
+						}
+						throw err;
+					});
+				} finally {
+					cancelSub.dispose();
+					sessionProcs.delete(child);
+					if (sessionProcs.size === 0) {
+						this.running.delete(session.id);
+					}
+				}
+				if (sawAgentEnd || token.isCancellationRequested || closeCode === 0 || closeCode === 44 || closeCode !== 255 || attempt + 1 >= maxAttachAttempts) {
+					break;
+				}
+				const backoffMs = REMOTE_REATTACH_BACKOFFS_MS[attempt] ?? 60_000;
+				stream.progress(vscode.l10n.t('SSH connection interrupted; reattaching to persistent remote Pi session…'));
+				await waitForBackoffOrResume(backoffMs, token);
+				if (token.isCancellationRequested) { break; }
+				await healAllRemoteControlBridges().catch(() => undefined);
+			}
+		} finally {
+			this.untrackPersistentId(session.id, remotePersistentId);
+		}
+		return sessionMissing ? 'not_running' : 'reattached';
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
@@ -862,7 +1157,18 @@ export class PiRuntime implements EngineRuntime {
 				pureWorker: options?.pureWorker,
 				isMissionNode: options?.isMissionNode,
 			});
-		const child = spawnEngine(this.executable, args, session.cwd, customEnv, this.remoteTarget);
+		const remotePersistentId = this.remoteTarget && this.remoteTarget.os !== 'windows'
+			? `${buildRemotePersistentPrefix(this.id, session.id)}-${randomUUID().slice(0, 8)}`
+			: undefined;
+		this.trackPersistentId(session.id, remotePersistentId);
+		let child = spawnEngine(
+			this.executable,
+			args,
+			session.cwd,
+			customEnv,
+			this.remoteTarget,
+			remotePersistentId ? { persistentSessionId: remotePersistentId } : undefined,
+		);
 		let sessionProcs = this.running.get(session.id);
 		if (!sessionProcs) {
 			sessionProcs = new Set();
@@ -870,15 +1176,35 @@ export class PiRuntime implements EngineRuntime {
 		}
 		sessionProcs.add(child);
 
+		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
+			preTurnBaseline: this.lastRawSessionUsageBySession.get(session.id),
+		});
+		let promptDispatched = false;
+		let completedNormally = false;
+		let stdoutBytesReceived = 0;
+		let reattachAttempt = 0;
+		let activeChild = child;
+
 		let nextReqId = 0;
 		const pending = new Map<string, { resolve: (data: Record<string, unknown> | undefined) => void; reject: (error: Error) => void }>();
-		const sendCommand = <T extends Record<string, unknown> | undefined = Record<string, unknown> | undefined>(command: Record<string, unknown>): Promise<T> => {
+		const sendCommand = <T extends Record<string, unknown> | undefined = Record<string, unknown> | undefined>(command: Record<string, unknown>, timeoutMs = 20_000): Promise<T> => {
 			if (child.stdin.destroyed) {
 				return Promise.reject(new Error(vscode.l10n.t('Pi connection closed unexpectedly.')));
 			}
 			const id = `req-${++nextReqId}`;
 			return new Promise<T>((resolve, reject) => {
-				pending.set(id, { resolve: data => resolve(data as T), reject });
+				let done = false;
+				const timer = setTimeout(() => {
+					if (done) { return; }
+					done = true;
+					pending.delete(id);
+					reject(new Error(`Pi command "${String(command.type ?? '')}" timed out after ${timeoutMs}ms`));
+				}, timeoutMs);
+				timer.unref?.();
+				pending.set(id, {
+					resolve: data => { if (!done) { done = true; clearTimeout(timer); resolve(data as T); } },
+					reject: err => { if (!done) { done = true; clearTimeout(timer); reject(err); } },
+				});
 				child.stdin.write(JSON.stringify({ ...command, id }) + '\n');
 			});
 		};
@@ -895,23 +1221,19 @@ export class PiRuntime implements EngineRuntime {
 
 		child.stderr.on('data', data => stderrText = (stderrText + String(data)).slice(-8000));
 
-		// Strict LF framing (do NOT use readline because U+2028 / U+2029 are valid in JSON strings).
-		let stdoutBuffer = '';
-		child.stdout.setEncoding('utf8');
-		child.stdout.on('data', (chunk: string) => {
-			stdoutBuffer += chunk;
-			let newlineIndex: number;
-			while ((newlineIndex = stdoutBuffer.indexOf('\n')) >= 0) {
-				const rawLine = stdoutBuffer.slice(0, newlineIndex);
-				stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
-				const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-				if (!line) { continue; }
-				let packet: PiRpcPacket;
-				try { packet = JSON.parse(line) as PiRpcPacket; } catch { continue; }
+		// Strict byte-accurate LF framing (supports seamless SSH 255 reattach without losing/replaying events
+		// and preserves U+2028 / U+2029 inside JSON strings).
+		let stdoutByteCarry: Buffer = Buffer.alloc(0);
+		const handlePiLine = (line: string) => {
+			if (!line) { return; }
+			let packet: PiRpcPacket;
+			try { packet = JSON.parse(line) as PiRpcPacket; } catch { return; }
 
-				const packetUsage = extractPiTurnUsage(packet.usage ?? packet.tokens ?? packet.data?.usage);
-				if (packetUsage) {
-					this.lastTurnUsageBySession.set(session.id, packetUsage);
+			const packetUsage = extractPiTurnUsage(packet.usage ?? packet.tokens ?? packet.data?.usage);
+			if (packetUsage && promptDispatched) {
+				const normalized = usageTracker.recordRealUsage(packetUsage, { cumulativeAcrossThread: true });
+				this.lastRawSessionUsageBySession.set(session.id, packetUsage);
+				this.lastTurnUsageBySession.set(session.id, normalized);
 				}
 
 				if (packet.type === 'response' && packet.id) {
@@ -924,15 +1246,17 @@ export class PiRuntime implements EngineRuntime {
 							req.reject(new Error(packet.error || vscode.l10n.t('Pi command {0} failed.', packet.command ?? '')));
 						}
 					}
-					continue;
+					return;
 				}
 
 				if (packet.type === 'message_update' && !token.isCancellationRequested) {
 					const ame = packet.assistantMessageEvent;
 					if (ame?.type === 'text_delta' && typeof ame.delta === 'string' && ame.delta) {
 						stream.markdown(ame.delta);
+						usageTracker.recordStreamDelta(ame.delta);
 					} else if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string' && ame.delta) {
 						emitThinkingProgress(stream, ame.delta, 'pi-thinking');
+						usageTracker.recordStreamDelta(ame.delta);
 					} else if (ame?.type === 'toolcall_start' && typeof ame.toolName === 'string') {
 						stream.progress(ame.toolName);
 					}
@@ -946,7 +1270,7 @@ export class PiRuntime implements EngineRuntime {
 					} catch { /* Compaction callback must never break the turn. */ }
 				} else if (packet.type === 'extension_ui_request') {
 					const requestedPerm = options?.permissionMode?.trim();
-					const explicitBypass = requestedPerm === 'bypassPermissions' || requestedPerm === 'auto' || requestedPerm === 'never';
+					const explicitBypass = requestedPerm === 'bypassPermissions' || requestedPerm === 'auto' || requestedPerm === 'never' || requestedPerm === 'danger-full-access';
 					const autoApprove = Boolean(options?.automatedEngineering)
 						|| (requestedPerm !== 'ask' && requestedPerm !== 'manual' && (explicitBypass || isAutonomousModeEnabled()));
 					void this.handleUiRequest(child, packet, session, token, autoApprove).catch(() => { });
@@ -962,37 +1286,108 @@ export class PiRuntime implements EngineRuntime {
 					if (turnError && !token.isCancellationRequested) {
 						settleReject(new Error(turnError));
 					} else {
+						completedNormally = true;
 						settleResolve();
 					}
 				}
-			}
-		});
+		};
 
 		const failAll = (error: Error) => {
 			for (const req of pending.values()) { req.reject(error); }
 			pending.clear();
 			settleReject(error);
 		};
-		child.on('error', failAll);
-		child.on('close', code => {
-			if (token.isCancellationRequested) {
-				settleResolve();
-			} else {
-				failAll(new Error(turnError || stderrText || vscode.l10n.t('Pi exited before finishing ({0}).', String(code))));
-			}
-		});
 
-		const cancellation = token.onCancellationRequested(() => {
-			void sendCommand({ type: 'clear_queue' }).catch(() => { });
-			void sendCommand({ type: 'abort' }).catch(() => { stopEngine(child); });
-		});
+		const bindChildStreams = (targetChild: ReturnType<typeof spawnEngine>) => {
+			activeChild = targetChild;
+			child = targetChild;
+			stdoutByteCarry = Buffer.alloc(0);
+			targetChild.stderr.on('data', data => stderrText = (stderrText + String(data)).slice(-8000));
+			targetChild.stdout.on('data', (chunk: Buffer | string) => {
+				const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+				stdoutByteCarry = stdoutByteCarry.length > 0 ? Buffer.concat([stdoutByteCarry, buf]) : buf;
+				let nlIdx: number;
+				while ((nlIdx = stdoutByteCarry.indexOf(0x0a)) >= 0) {
+					const lineBuf = stdoutByteCarry.subarray(0, nlIdx);
+					stdoutByteCarry = stdoutByteCarry.subarray(nlIdx + 1);
+					stdoutBytesReceived += nlIdx + 1;
+					const rawLine = lineBuf.toString('utf8');
+					handlePiLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
+				}
+			});
+			targetChild.on('error', err => {
+				if (activeChild !== targetChild) { return; }
+				failAll(err);
+			});
+			targetChild.on('close', code => {
+				if (activeChild !== targetChild) { return; }
+				if (stdoutByteCarry.length > 0 && code === 0) {
+					const tail = stdoutByteCarry.toString('utf8');
+					stdoutBytesReceived += stdoutByteCarry.length;
+					stdoutByteCarry = Buffer.alloc(0);
+					handlePiLine(tail.endsWith('\r') ? tail.slice(0, -1) : tail);
+				}
+				if (token.isCancellationRequested || completedNormally) {
+					settleResolve();
+					return;
+				}
+				if (
+					remotePersistentId
+					&& this.remoteTarget
+					&& promptDispatched
+					&& code === 255
+					&& reattachAttempt < REMOTE_REATTACH_BACKOFFS_MS.length
+				) {
+					const backoffMs = REMOTE_REATTACH_BACKOFFS_MS[reattachAttempt++] ?? 60_000;
+					stream.progress(vscode.l10n.t('SSH connection interrupted; reattaching to persistent remote Pi session…'));
+					void (async () => {
+						await waitForBackoffOrResume(backoffMs, token);
+						if (token.isCancellationRequested || completedNormally) {
+							settleResolve();
+							return;
+						}
+						await healAllRemoteControlBridges().catch(() => undefined);
+						if (token.isCancellationRequested || completedNormally) {
+							settleResolve();
+							return;
+						}
+						sessionProcs.delete(targetChild);
+						const nextChild = spawnEngine(this.executable, args, session.cwd, customEnv, this.remoteTarget, {
+							persistentSessionId: remotePersistentId,
+							attachByteOffset: stdoutBytesReceived,
+							attachOnly: true,
+						});
+						sessionProcs.add(nextChild);
+						bindChildStreams(nextChild);
+					})();
+					return;
+				}
+				failAll(new Error(turnError || stderrText || vscode.l10n.t('Pi exited before finishing ({0}).', String(code))));
+			});
+		};
+		bindChildStreams(child);
+
+		const triggerPiCancel = () => {
+			void sendCommand({ type: 'clear_queue' }, 1500).catch(() => { });
+			void sendCommand({ type: 'abort' }, 1500).catch(() => { stopEngineWithFallback(activeChild, 'SIGTERM', 1000); });
+			if (remotePersistentId && this.remoteTarget) {
+				void terminateRemotePersistentSession(this.remoteTarget, remotePersistentId, { killTree: true }).catch(() => undefined);
+			}
+		};
+		const cancellation = token.onCancellationRequested(triggerPiCancel);
 
 		try {
+			if (token.isCancellationRequested) {
+				return;
+			}
 			if (session.provisional || !session.file) {
-				const state = await sendCommand<{ sessionFile?: string }>({ type: 'get_state' }).catch(() => undefined);
+				const state = await raceWithCancellation(sendCommand<{ sessionFile?: string }>({ type: 'get_state' }, 10_000), token).catch(() => undefined);
 				if (state && typeof state.sessionFile === 'string' && state.sessionFile) {
 					session.file = state.sessionFile;
 				}
+			}
+			if (token.isCancellationRequested) {
+				return;
 			}
 			if (modelOption) {
 				let provider: string | undefined;
@@ -1002,7 +1397,7 @@ export class PiRuntime implements EngineRuntime {
 					provider = modelOption.slice(0, separator);
 					modelId = modelOption.slice(separator + 1);
 				} else {
-					const listing = await sendCommand<Record<string, unknown> | undefined>({ type: 'get_available_models' }).catch(() => undefined);
+					const listing = await raceWithCancellation(sendCommand<Record<string, unknown> | undefined>({ type: 'get_available_models' }, 10_000), token).catch(() => undefined);
 					const match = modelEntries(listing).find(model => model.id === modelOption || model.id.endsWith(`/${modelOption}`) || model.name === modelOption);
 					const matchSeparator = match ? match.id.indexOf('/') : -1;
 					if (match && matchSeparator > 0) {
@@ -1010,32 +1405,50 @@ export class PiRuntime implements EngineRuntime {
 						modelId = match.id.slice(matchSeparator + 1);
 					}
 				}
-				if (provider && modelId) {
-					await sendCommand({ type: 'set_model', provider, modelId }).catch(() => undefined);
+				if (provider && modelId && !token.isCancellationRequested) {
+					await raceWithCancellation(sendCommand({ type: 'set_model', provider, modelId }, 8_000), token).catch(() => undefined);
 				}
 			}
 			const piLevel = piThinkingLevel(options?.thinking);
-			if (piLevel) {
-				await sendCommand({ type: 'set_thinking_level', level: piLevel }).catch(() => undefined);
+			if (piLevel && !token.isCancellationRequested) {
+				await raceWithCancellation(sendCommand({ type: 'set_thinking_level', level: piLevel }, 8_000), token).catch(() => undefined);
+			}
+			if (token.isCancellationRequested) {
+				return;
 			}
 			const images = await this.readImages(options?.attachments);
-			await sendCommand({ type: 'prompt', message: text, ...(images.length > 0 ? { images } : {}) });
 			if (token.isCancellationRequested) {
-				await sendCommand({ type: 'clear_queue' }).catch(() => { });
-				await sendCommand({ type: 'abort' }).catch(() => { });
+				return;
 			}
-			await settled;
-			if (!session.file) {
-				const state = await sendCommand<{ sessionFile?: string }>({ type: 'get_state' }).catch(() => undefined);
+			promptDispatched = true;
+			await raceWithCancellation(sendCommand({ type: 'prompt', message: text, ...(images.length > 0 ? { images } : {}) }, 20_000), token, 1500, triggerPiCancel);
+			if (token.isCancellationRequested) {
+				triggerPiCancel();
+			}
+			await raceWithCancellation(settled, token, 1500, triggerPiCancel).catch(err => {
+				if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
+					stopEngineWithFallback(child, 'SIGTERM', 1000);
+					return;
+				}
+				throw err;
+			});
+			if (!session.file && !token.isCancellationRequested) {
+				const state = await sendCommand<{ sessionFile?: string }>({ type: 'get_state' }, 5_000).catch(() => undefined);
 				if (state && typeof state.sessionFile === 'string' && state.sessionFile) {
 					session.file = state.sessionFile;
 				}
 			}
 		} finally {
 			cancellation.dispose();
-			child.stdin.end();
-			stopEngine(child);
-			sessionProcs.delete(child);
+			try { activeChild.stdin.end(); } catch { /* ignore */ }
+			stopEngineWithFallback(activeChild, 'SIGTERM', 1500);
+			if (remotePersistentId && this.remoteTarget) {
+				// Graceful turn completion preserves intentionally detached `--watch-pid` background jobs;
+				// cancellation / error / recall destroys the full remote process group & child tree!
+				void terminateRemotePersistentSession(this.remoteTarget, remotePersistentId, { killTree: !completedNormally || token.isCancellationRequested }).catch(() => undefined);
+			}
+			this.untrackPersistentId(session.id, remotePersistentId);
+			sessionProcs.delete(activeChild);
 			if (sessionProcs.size === 0) {
 				this.running.delete(session.id);
 			}
@@ -1044,6 +1457,8 @@ export class PiRuntime implements EngineRuntime {
 
 	async delete(session: NativeSession, token: vscode.CancellationToken): Promise<void> {
 		this.toolModes.delete(session.id);
+		this.lastTurnUsageBySession.delete(session.id);
+		this.lastRawSessionUsageBySession.delete(session.id);
 		const active = this.running.get(session.id);
 		if (active) {
 			for (const child of active) { stopEngine(child); }
@@ -1069,5 +1484,15 @@ export class PiRuntime implements EngineRuntime {
 			for (const child of procs) { stopEngine(child); }
 		}
 		this.running.clear();
+		if (this.remoteTarget && this.remoteTarget.os !== 'windows') {
+			for (const set of this.activePersistentIdsBySession.values()) {
+				for (const pid of set) {
+					void terminateRemotePersistentSession(this.remoteTarget, pid, { killTree: true }).catch(() => undefined);
+				}
+			}
+		}
+		this.activePersistentIdsBySession.clear();
+		this.lastTurnUsageBySession.clear();
+		this.lastRawSessionUsageBySession.clear();
 	}
 }

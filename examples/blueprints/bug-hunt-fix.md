@@ -1,97 +1,31 @@
+# Bug Hunt & Surgical Fix
+
+Repro-first root-cause debugging pipeline: isolate a minimal deterministic reproduction, apply a surgical fix in parallel with a comprehensive edge-case regression suite, audit side effects, and sign off at Gate `U1`.
+
 ```mermaid
 flowchart LR
-  %% @pos N1 204,260
-  %% @pos N2 598,132
-  %% @pos N3 598,388
-  %% @pos N4 992,260
-  %% @pos U1 1386,260
-  N1["Root-Cause & Minimal Repro ★Critical | worker=claude:high"] --> N2["Surgical Implementation Fix ★Critical | worker=codex:high"]
-  N1 --> N3["Edge-Case Regression Suite | worker=codex:medium"]
-  N2 --> N4["Side-Effect & Performance Audit ★Critical | worker=claude:high"]
+  N1["@Debugger: Root-Cause & Minimal Repro"] -->|repro| N2["@Debugger: Surgical Implementation Fix"]
+  N1 -->|repro| N3["@QA: Edge-Case Regression Suite"]
+  N2 --> N4["@Auditor: Side-Effect & Performance Audit"]
   N3 --> N4
   N4 --> U1{{"Merge Sign-Off Gate"}}
 ```
 
-## Tree Metadata
-- tree_type: engineering
-- governor_session_id: <governor-session-id>
-- workspace_isolation: shared
-- watchdog_timeout_minutes: 10
-- max_budget_usd: 4
-- max_concurrency: 2
-- verify: npm test
+## Node Pre-Prompts
 
-## Auto-Partitioned Managers
-### [Segment: N1]
-- engine: claude-code
-- thinking: medium
+Apply the Mermaid DAG with `aexus-ade mission blueprint apply --mission <id> --file ./examples/blueprints/bug-hunt-fix.md`, then bind each node's pre-prompt via the Canvas / Split Drawer or `aexus-ade mission prompt set`:
 
-### [Segment: N2]
-- engine: claude-code
-- thinking: medium
+### N1
+Isolate the exact failing code path, prove the root cause with a minimal failing reproduction test (`test/repro/**`), and cite exact file paths and state transitions in your token summary.
 
-### [Segment: N3]
-- engine: claude-code
-- thinking: medium
+### N2
+Apply the cleanest minimal fix for the confirmed `N1` root cause without refactoring unrelated modules (`src/**`). Verify the `N1` reproduction passes cleanly with zero lint or type regressions before completing the token.
 
-### [Segment: N4]
-- engine: claude-code
-- thinking: medium
+### N3
+Add targeted unit and integration regression tests covering boundary conditions and adjacent sibling code paths (`test/regression/**`). Confirm full module tests run deterministically before completing the token.
 
-## Nodes
-### [N1] Root-Cause & Minimal Repro
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: test/repro/**
-- verify: npm run typecheck
-- goal: |
-    Isolate the exact failing code path, prove root cause with a minimal failing reproduction test, and document fix scope.
-- acceptance: |
-    1. Minimal repro deterministically demonstrates the failure;
-    2. Root cause cites exact file paths and state transitions.
+### N4
+Audit the combined diff from `N2` and `N3` for memory leaks, race conditions, error-handling gaps, and performance regressions. Run lint and full test checks end-to-end before completing the token.
 
-### [N2] Surgical Implementation Fix
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=high
-- files: src/**
-- verify: npm test
-- goal: |
-    Apply the cleanest minimal fix for the confirmed root cause without refactoring unrelated modules.
-- acceptance: |
-    1. The N1 reproduction passes cleanly;
-    2. Diff is minimal, idiomatic, and free of lint/type regressions.
-
-### [N3] Edge-Case Regression Suite
-- type: task
-- critical: false
-- employee: engine=claude-code, thinking=medium
-- worker: engine=codex, thinking=medium
-- files: test/regression/**
-- verify: npm test
-- goal: |
-    Add targeted unit/integration tests covering boundary conditions and adjacent sibling paths to prevent regressions.
-- acceptance: |
-    1. Regression tests fail before N2 and pass after N2;
-    2. Full module test suite runs cleanly.
-
-### [N4] Side-Effect & Performance Audit
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: src/**, test/**
-- verify: npm run lint && npm test
-- goal: |
-    Audit the combined diff for memory leaks, race conditions, error handling, and performance impact.
-- acceptance: |
-    1. Zero unhandled rejections, leaks, or performance regressions;
-    2. Build and test checks verified end-to-end.
-
-### [U1] Merge Sign-Off Gate
-- type: user_gate
-- description: |
-    Inspect root-cause evidence, surgical diff, and audit report before shipping.
+### U1
+Human Acceptance Gate: inspect root-cause evidence, surgical diff, and audit summary before merging or rolling back.

@@ -89,7 +89,7 @@ import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { executeAdeRankOrDocsAction, isAdeRankOrDocsAction } from './adeRankApiHandler.js';
 import { executeAdeMissionRuntimeAction, isAdeMissionRuntimeAction } from './adeMissionControlHandler.js';
 import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
-import { canCallerOperateMission, IAdeMissionCaller, IAdeMissionRecord, IAdeMissionService } from './adeMissionStore.js';
+import { canCallerOperateMission, canCallerReadMission, IAdeMissionCaller, IAdeMissionRecord, IAdeMissionService } from './adeMissionStore.js';
 import { findProjectScmRepository, openScmResourceInAde } from './adeInspectorViews.js';
 import { reconcileIdeWorkspaceWithCatalog } from './adeProjectManagement.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput } from './adeSessionEditor.js';
@@ -480,33 +480,49 @@ function buildControlStatus(
 	};
 }
 
+function resolveInGraphMissionBinding(
+	agent: IAdeAgent,
+	missionRuntime?: IAdeMissionRuntimeService,
+): { readonly missionId: string; readonly nodeIds: readonly string[] } | undefined {
+	const live = missionRuntime?.findMissionForAgent(agent.id);
+	if (live) {
+		if (!live.isOffGraphSupervisor && live.nodeIds.length > 0) {
+			return { missionId: live.mission.id, nodeIds: live.nodeIds };
+		}
+		return undefined;
+	}
+	if (agent.treeNodeId && (agent.treeType === 'mission' || !agent.treeType)) {
+		const nodeIds = agent.treeNodeIds && agent.treeNodeIds.length > 0 ? agent.treeNodeIds : [agent.treeNodeId];
+		return { missionId: agent.treeGovernorId ?? 'unknown', nodeIds };
+	}
+	return undefined;
+}
+
 export function buildAdeAgentRoleContext(
 	projects: IAdeProjectsService,
 	sessions: IAdeSessionsService | undefined,
 	agent: IAdeAgent,
 	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
 	docsPaths?: IAdeDocsPaths,
+	missionRuntime?: IAdeMissionRuntimeService,
 ): string | undefined {
 	const subordinates = projects.getDirectSubordinates(agent.id);
 	const rankDef = resolveEffectiveRankDefinition(config, agent.role, subordinates.length > 0);
 	const tierTag = formatTierTag(rankDef.tier);
 
 	// Minimal, clean initialization prompt for in-graph Mission node employees (Principles 1 & 6):
-	// Injects ONLY identity, numeric tier Lk, Mission/node ID, and immutable lazy-read entry commands.
-	if (agent.treeNodeId && (agent.treeType === 'mission' || !agent.treeType)) {
-		const missionId = agent.treeGovernorId ?? 'unknown';
-		const nodeList = agent.treeNodeIds && agent.treeNodeIds.length > 0
-			? agent.treeNodeIds.join(', ')
-			: agent.treeNodeId;
+	// Recognizes BOTH Mermaid-generated employees (`treeNodeId`) AND manually bound pure Workers (`boundary.nodeAssignments`).
+	const inGraphBinding = resolveInGraphMissionBinding(agent, missionRuntime);
+	if (inGraphBinding) {
+		const missionId = inGraphBinding.missionId;
+		const nodeList = inGraphBinding.nodeIds.join(', ');
 		return [
 			'[Aexus ADE · Mission Node Employee]',
 			`- Agent ID: ${agent.id} | Tier: ${tierTag} (in-graph) | Mission: ${missionId} | Node(s): ${nodeList}`,
-			'- Scope: Execute your assigned node in this workspace. Never message supervisors upward; pass plain-text results solely via `token` commands.',
-			'- Immutable Lazy-Read Commands (numeric tier only, never alias):',
-			`  - Self & Token: \`aexus-ade whoami --json\` | \`aexus-ade token current --json\``,
-			`  - Read Single-Copy Docs On Demand: \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read common\``,
-			`  - Check API Updates: \`aexus-ade api update --since 0 --json\``,
-			`  - Hand Off / Block / Fail: \`aexus-ade token complete <tokenId> --summary "<concise factual summary>"\` | \`aexus-ade token block <tokenId> --duration <10h|30m> --reason "<why>" [--watch-pid <pid>] [--watch-file <path>]\` | \`aexus-ade token fail <tokenId> --reason "<why>"\``,
+			'- Scope: Execute or review your assigned node here. Never message supervisors upward; report solely via `token` commands.',
+			'- Lazy-Read Commands (numeric tier only):',
+			`  - Self & Docs: \`aexus-ade whoami --json\` | \`aexus-ade token current --json\` | \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read common\` | \`aexus-ade api update --since 0 --json\``,
+			`  - Token Flow: \`aexus-ade token complete <id> --summary "<facts>"\` | \`token reject <id> --reason "<defects>"\` | \`token block <id> --duration <10h|30m> --reason "<why>" [--watch-pid <pid>] [--watch-file <path>]\` | \`token fail <id> --reason "<why>"\``,
 		].join('\n');
 	}
 
@@ -520,19 +536,22 @@ export function buildAdeAgentRoleContext(
 
 	const supervisor = agent.parentId ? projects.getAgent(agent.parentId) : undefined;
 	const ownEngineName = agent.session ? (sessions?.getEngineName(agent.session.engineId) ?? agent.session.engineId) : 'Draft';
-	const isWorkTree = agent.treeType === 'engineering' || agent.treeType === 'research';
+	const boundMission = missionRuntime?.findMissionForAgent(agent.id);
+	const isOffGraphSupervisorBinding = Boolean(boundMission?.isOffGraphSupervisor);
+	const isWorkTree = Boolean(agent.treeType) || isOffGraphSupervisorBinding;
 	const supervisorRankName = supervisor
 		? formatRoleTitle(resolveAdeAgentRank(supervisor, true, config), config)
 		: undefined;
+	const isMissionOwner = boundMission
+		? boundMission.mission.ownerSessionId === agent.id
+		: Boolean(agent.treeType && !agent.treeNodeId && (!agent.treeGovernorId || agent.treeGovernorId === agent.id));
 	const workTreeSlot = !isWorkTree
 		? undefined
-		: !agent.parentId
-			? 'orchestrator' as const
-			: agent.treeNodeId
-				? 'reviewer' as const
-				: agent.treeSegmentId
-					? 'segment_owner' as const
-					: 'orchestrator' as const;
+		: agent.treeNodeId
+			? 'reviewer' as const
+			: isMissionOwner
+				? 'orchestrator' as const
+				: 'segment_owner' as const;
 
 	return compileAdeRolePrompt({
 		config,
@@ -552,10 +571,11 @@ export function buildAdeAgentRoleContext(
 		workTree: isWorkTree
 			? {
 				treeType: 'mission',
-				governorId: agent.treeGovernorId ?? agent.id,
-				segmentId: agent.treeSegmentId,
+				governorId: boundMission?.mission.id ?? agent.treeGovernorId ?? agent.id,
 				nodeId: agent.treeNodeId,
 				slot: workTreeSlot,
+				isMissionOwner,
+				managedNodeIds: boundMission?.managedNodeIds,
 			}
 			: undefined,
 		docsPaths: docsPaths ? {
@@ -573,13 +593,14 @@ export function buildAdeRoleSyncSnapshot(
 	explicitActiveAgentId?: string,
 	config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG,
 	docsPaths?: IAdeDocsPaths,
+	missionRuntime?: IAdeMissionRuntimeService,
 ): IAdeRoleSyncSnapshot {
 	const rawActiveAgentId = explicitActiveAgentId ?? editors.getAgentIdForEditor?.(editors.activeEditor);
 	const activeAgentId = rawActiveAgentId && projects.getAgent(rawActiveAgentId) ? rawActiveAgentId : undefined;
 	const selectedAgentId = projects.selectedAgentId && projects.getAgent(projects.selectedAgentId) ? projects.selectedAgentId : undefined;
 	const agents: IAdeRoleSyncAgentEntry[] = projects.agents.map(agent => {
 		const hasSubs = projects.hasSubordinates(agent.id);
-		const isMissionNodeEmployee = Boolean(agent.treeNodeId);
+		const isMissionNodeEmployee = Boolean(resolveInGraphMissionBinding(agent, missionRuntime));
 		const isOrchestrated = Boolean(hasSubs || isMissionNodeEmployee || (agent.role && !isPureExecutionRank(config, agent.role)));
 		const rank = resolveAdeAgentRank(agent, hasSubs, config);
 		return {
@@ -592,7 +613,7 @@ export function buildAdeRoleSyncSnapshot(
 			isOrchestrated,
 			isWorkTree: Boolean(agent.treeType),
 			isMissionNode: isMissionNodeEmployee,
-			rolePrompt: isOrchestrated ? buildAdeAgentRoleContext(projects, sessions, agent, config, docsPaths) : undefined,
+			rolePrompt: isOrchestrated ? buildAdeAgentRoleContext(projects, sessions, agent, config, docsPaths, missionRuntime) : undefined,
 			preferredModel: agent.preferredModel,
 			preferredThinking: agent.preferredThinking,
 		};
@@ -630,6 +651,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 	const uriIdentity = accessor.get(IUriIdentityService);
 	const sessions = tryGetService(accessor, IAdeSessionsService);
 	const missionService = tryGetService(accessor, IAdeMissionService);
+	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
 	const inbox = tryGetService(accessor, IAdeInboxService);
 	const roleSchemaService = tryGetService(accessor, IAdeRoleSchemaService);
 	const roleConfig = roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
@@ -650,7 +672,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			: status.activeEditor.kind === 'secretary'
 				? `Secretary (${status.activeEditor.engineId ?? 'draft'})`
 				: status.activeEditor.kind === 'engineering'
-					? `Engineering DAG Canvas (governor=${status.activeEditor.governorSessionId})`
+					? `Mission Canvas (mission=${status.activeEditor.governorSessionId})`
 					: status.activeEditor.kind === 'session'
 						? `Session "${status.activeEditor.label}" (id=${status.activeEditor.agentId}, role=${status.activeEditor.rank ?? status.activeEditor.role ?? 'worker'}, engine=${status.activeEditor.engineId ?? 'draft'})`
 						: `${status.activeEditor.kind}: ${status.activeEditor.label}${status.activeEditor.resource ? ` (${status.activeEditor.resource})` : ''}`;
@@ -679,7 +701,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			const treeBadge = isWorkTreeRoot ? ` [${agent.treeType!.toUpperCase()}]` : '';
 			if (isWorkTreeRoot) {
 				const managedCount = Math.max(0, projects.getSubtree(agent.id).length - 1);
-				const managedSuffix = managedCount > 0 ? `, +${managedCount} managed tree node(s) — see ADE Engineering Trees above` : '';
+				const managedSuffix = managedCount > 0 ? `, +${managedCount} managed Mission employee(s) — see ADE Missions above` : '';
 				sessionLines.push(`${'  '.repeat(depth + 1)}- [${rankTitle}]${treeBadge} "${agent.label}" (id: ${agent.id}, project: ${projects.getProjectName(agent.projectUri)}, engine: ${eng} [${engId ?? 'draft'}], status: ${st}${agent.unread ? ', UNREAD' : ''}${managedSuffix})`);
 				return;
 			}
@@ -718,10 +740,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			].join('\n');
 		}
 
-		const hasDefaultEmpAndWorker = roleConfig.ranks.some(r => r.id === 'employee') && roleConfig.ranks.some(r => r.id === 'worker');
-		const rankHeaderLine = hasDefaultEmpAndWorker
-			? '- Organizational Rank System (CRITICAL DISTINCTION: `Employee` IS NOT `Worker` / `Employee [L3] ≠ Worker [L4]`):'
-			: '- Organizational Rank System (User-Customizable via ADE Organization & Roles Studio):';
+		const rankHeaderLine = '- Organizational Rank System (Numeric Tier Index L-1..LN; aliases hot-update via `aexus-ade rank names --json`):';
 		const rankLines = roleConfig.ranks.map(r => {
 			const apiList = r.pureExecution ? 'none (100% pure native context)' : (r.allowedApis.length > 0 ? r.allowedApis.join(', ') : 'none');
 			return `  - \`${r.id}\` (L${r.tier} · ${r.name}): ${r.summary} [APIs: ${apiList}]`;
@@ -732,9 +751,10 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 
 		return [
 			'[Aexus ADE Live Viewport & Macro Control Context]',
-			'You are the global **Secretary (Tier L0)** in **Aexus Code ADE**, with complete macro-control authority over EVERYTHING inside ADE.',
-			'- Scope & Boundary Rule: Operate STRICTLY inside **ADE** (Agentic Development Environment). Do NOT switch workbench mode to IDE and do NOT manipulate IDE-only views or features.',
-			`- API Docs (single shared copy, read by tier): L0 doc \`${l0DocPath}\` | Mission doc (read on demand): \`${missionDocPath}\``,
+			'You are the global **Secretary (Tier L0)** in **Aexus Code ADE**, positioned strictly beneath User (`L-1`) and above `L1..LN` with macro-control authority inside ADE.',
+			'- Scope & Boundary Rule: Operate STRICTLY inside **ADE** (Agentic Development Environment). Do NOT switch workbench mode to IDE and do NOT manipulate IDE-only views. Communication with `L1..LN` is strictly top-down (`org subordinates|send|context`).',
+			`- Single-Copy Lazy-Read Docs: L0 doc \`${l0DocPath}\` | Mission doc (read on demand): \`${missionDocPath}\``,
+			'- Immutable Lazy-Read Entry Commands: `aexus-ade whoami --json` | `aexus-ade docs read L0` | `aexus-ade docs read common` | `aexus-ade docs read mission` | `aexus-ade api update --since 0 --json`',
 			`- Focus State: ${focusLine}`,
 			`- Selected Project: ${selectedLine}`,
 			`- Sidebar State: showArchived=${status.showArchived}`,
@@ -755,11 +775,10 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			'  - Viewport & Inspector: `aexus-ade status --json` | `aexus-ade view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh] --json`',
 			'  - Live Ranks, Hot-Updated Aliases & Single-Copy Docs: `aexus-ade rank names --json` | `aexus-ade rank list --json` | `aexus-ade rank get <L-1|L0|L1..LN|id> --json` | `aexus-ade rank docs [L0|L1..LN|mission] --json` | `aexus-ade rank rename <L1..LN> "<alias>" [--short <tag>]` | `aexus-ade rank set-count <N>`',
 			'  - Organization, Custom Ranks & Primitive APIs: `aexus-ade role list --json` | `aexus-ade role apis --json` | `aexus-ade role presets --json` | `aexus-ade role apply-preset <presetId>` | `aexus-ade role set-tier <rankId> ...` | `aexus-ade role reset` | `aexus-ade role studio`',
-			'  - Projects & Git/Files Inspector: `aexus-ade project list` | `aexus-ade project add <path...> [--name <label>]` | `aexus-ade project select <target>` | `aexus-ade project remove <target>` | `aexus-ade project delete <target> [--sessions] [--files] [--permanent]` | `aexus-ade project focus <target>` | `aexus-ade project home` | `aexus-ade project forward` | `aexus-ade project move <source> (--before <target> | --after <target>)` | `aexus-ade project changes [target]` | `aexus-ade project files [target] [--path <subpath>] [--depth <n>]` | `aexus-ade project open-file <file> [--project <target>] [--side]` | `aexus-ade project open-diff <file> [--project <target>]`',
-			'  - Coding Agent Engines (claude, codex, kilo, opencode, dsh, agy, cline, pi): `aexus-ade engine list` | `aexus-ade engine sessions <engine> [--project <target>] [--limit <n>]`',
-			'  - Sessions & Ranks: `aexus-ade session list [--project <p>] [--parent <id|root>] [--role <r>] [--engine <e>] [--status <s>] [--unread] [--archived] [--all]` | `aexus-ade session info <id>` | `aexus-ade session subordinates [id] [--recursive]` | `aexus-ade session tree [id]` | `aexus-ade session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <r>] [--draft [text]] [--side] [--no-open]` | `aexus-ade session attach --engine <e> --native-id <nid> [--project <p>] [--title <t>] [--parent <id>] [--role <r>] [--side] [--no-open]` | `aexus-ade session connect <id> --engine <e> [--native-id <nid>] [--side] [--no-open]` | `aexus-ade session open <id> [--side]` | `aexus-ade session select <id>` | `aexus-ade session close <id>` | `aexus-ade session mark-read <id|--all>` | `aexus-ade session draft <id> [text|--clear]` | `aexus-ade session rename <id> <title>` | `aexus-ade session role <id> <L1..LN|rankId|worker|none>` | `aexus-ade session move <id> <parentId|none> [--project <p>]` | `aexus-ade session reorder <id> (--before <targetId> | --after <targetId>)` | `aexus-ade session send <id> <prompt> [--wait]` | `aexus-ade session history <id> [--limit <n>]` | `aexus-ade session stop <id>` | `aexus-ade session archive <id>` | `aexus-ade session unarchive <id>` | `aexus-ade session detach <id>` | `aexus-ade session delete <id> [--force]`',
-			'  - Mission Orchestration (read sibling `MISSION_API.md` on demand via `aexus-ade mission docs --json`; owner-only per Mission): `aexus-ade mission init [--open]` | `aexus-ade mission list` | `aexus-ade mission open --governor <id> [--side]` | `aexus-ade mission blueprint get|validate|apply --governor <id> ...` | `aexus-ade mission remove --governor <id>`',
-			'  - ADE Inbox: `aexus-ade inbox list [--unread-only] [--governor <id>]` | `aexus-ade inbox post --from <governorId> --message <text>` | `aexus-ade inbox mark-read (<id>|--all)` | `aexus-ade inbox resolve --id <msgId>`',
+			'  - Projects & Cloud Hosts: `aexus-ade project list|add|select|remove|delete|focus|home|forward|move` | `aexus-ade project changes [target]` | `aexus-ade project files [target]` | `aexus-ade project open-file|open-diff` | `aexus-ade host list|info|add|update|remove|test|browse|import-vscode`',
+			'  - Top-Down Supervision & Sessions (`org.*` / `session.*` / `engine.*`): `aexus-ade org subordinates|send|context|escalate` | `aexus-ade engine list` | `aexus-ade engine sessions <e>` | `aexus-ade session list|info|subordinates|tree|create` | `aexus-ade session attach` | `aexus-ade session connect` | `aexus-ade session open|select|close|mark-read|draft|rename|role|move|reorder|send|history|stop|archive|unarchive|detach|delete`',
+			'  - Mission Orchestration (read `aexus-ade docs read mission` on demand; `init/blueprint apply/remove` are owner-only or `L-1`, while `L0` and bound off-graph supervisors can inspect topology & run scoped runtime ops; `L-1` resolves Human Gates): `aexus-ade mission list|init|open|status|blueprint get|validate|apply|boundary get|set|start|pause|resume|stop|timeout|recall|retry|patch|prompt list|get|set|trigger list|set|remove|host bind|remove --mission <id>`',
+			'  - ADE Inbox: `aexus-ade inbox list [--unread-only]` | `aexus-ade inbox post --from <sessionId> --message <text>` | `aexus-ade inbox mark-read (<id>|--all)` | `aexus-ade inbox resolve --id <msgId>`',
 			'  - Secretary Self-Management: `aexus-ade secretary [status | open [--side] | engine <e> | reset [--engine <e>] | send <prompt> [--wait] | history [--limit <n>] | stop | draft [text|--clear] | mark-read]`',
 		].join('\n');
 	}
@@ -775,7 +794,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 
 	if (compactDeltaMode) {
 		// Work-tree and Mission node topology is locked, so subsequent turns need zero delta hierarchy overhead.
-		if (agent.treeType === 'engineering' || agent.treeType === 'research' || agent.treeType === 'mission' || Boolean(agent.treeNodeId)) {
+		if (agent.treeType === 'engineering' || agent.treeType === 'research' || agent.treeType === 'mission' || Boolean(agent.treeNodeId) || Boolean(resolveInGraphMissionBinding(agent, missionRuntime))) {
 			return undefined;
 		}
 		const subordinates = projects.getDirectSubordinates(agent.id);
@@ -801,7 +820,7 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 		].join('\n');
 	}
 
-	return buildAdeAgentRoleContext(projects, sessions, agent, roleConfig, docsPaths);
+	return buildAdeAgentRoleContext(projects, sessions, agent, roleConfig, docsPaths, missionRuntime);
 }
 
 function findMatchingProject(projects: IAdeProjectsService, uriIdentity: IUriIdentityService, rawTarget: unknown): IAdeProject | undefined {
@@ -1003,10 +1022,6 @@ export async function executeAdeControlRequest(
 	const roleSchemaService = tryGetService(accessor, IAdeRoleSchemaService);
 	const roleConfig = roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
 
-	const dispatchAction = action.startsWith('mission.')
-		? `engineering.${action.slice('mission.'.length)}`
-		: action;
-
 	const rawCallerStr = typeof params.caller === 'string' ? params.caller.trim().toLowerCase() : '';
 	const isVerifiedSessionCaller = params._verifiedCaller === true;
 	const rawCallerSessionId = typeof params._callerSessionId === 'string' && params._callerSessionId.trim()
@@ -1019,23 +1034,24 @@ export async function executeAdeControlRequest(
 	);
 	const isHumanOrSecretary = isHumanUser || isSecretaryCaller;
 
+	// Structural ownership mutations stay strictly Owner-Only (or User L-1);
+	// read-only topology inspection (`mission.get`, `mission.blueprint.get`) is authorized separately
+	// for User (L-1), Secretary (L0), the Mission owner, and any bound off-graph supervisor.
 	const MISSION_OWNER_SCOPED_ACTIONS = new Set([
-		'engineering.init',
-		'engineering.create',
-		'engineering.open',
-		'engineering.get',
-		'engineering.blueprint.get',
-		'engineering.setMermaid',
-		'engineering.blueprint.apply',
-		'engineering.remove',
-		'engineering.delete',
+		'mission.init',
+		'mission.create',
+		'mission.open',
+		'mission.setMermaid',
+		'mission.blueprint.apply',
+		'mission.remove',
+		'mission.delete',
 	]);
 
 	// Any session (at any rank L1..LN) that creates or owns a Mission is exclusively authorized
-	// to operate THAT Mission's orchestration — independent of L1-only legacy engineering permissions.
+	// to operate THAT Mission's orchestration.
 	let isSelfOwnedMissionAction = false;
-	if (!isHumanUser && MISSION_OWNER_SCOPED_ACTIONS.has(dispatchAction)) {
-		const rawTarget = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? params.sessionId ?? '').trim();
+	if (!isHumanUser && MISSION_OWNER_SCOPED_ACTIONS.has(action)) {
+		const rawTarget = String(params.id ?? params.mission ?? params.missionId ?? params.owner ?? params.governor ?? params.governorSessionId ?? params.sessionId ?? '').trim();
 		const targetMission = rawTarget
 			? (missionService?.getMission(rawTarget) ?? missionService?.getMissionByLinkedSession(rawTarget))
 			: (rawCallerSessionId ? missionService?.getMissionByLinkedSession(rawCallerSessionId) : (isSecretaryCaller ? missionService?.getMissionByLinkedSession(ADE_SECRETARY_ID) : undefined));
@@ -1060,7 +1076,7 @@ export async function executeAdeControlRequest(
 		if (!isHumanOrSecretary && rawCallerSessionId) {
 			const callerCandidate = projects.getAgent(rawCallerSessionId);
 			if (callerCandidate && !projects.isArchived(callerCandidate.id) && !projects.isLockedByWorkTree?.(callerCandidate.id)) {
-				if (dispatchAction === 'engineering.init' || dispatchAction === 'engineering.create') {
+				if (action === 'mission.init' || action === 'mission.create') {
 					isSelfOwnedMissionAction = !rawTarget || rawTarget === callerCandidate.id;
 				} else {
 					isSelfOwnedMissionAction = Boolean(targetMission && targetMission.ownerSessionId === callerCandidate.id);
@@ -1072,27 +1088,39 @@ export async function executeAdeControlRequest(
 	// Partial-jurisdiction bound supervisors may invoke scoped off-graph operations;
 	// whole-Mission lifecycle controls require owner or full-jurisdiction supervisor authority.
 	const PARTIAL_SUPERVISOR_MISSION_ACTIONS = new Set([
-		'engineering.status',
-		'engineering.boundary.get',
-		'engineering.recall',
-		'engineering.patch',
-		'engineering.trigger.list',
-		'engineering.trigger.set',
-		'engineering.trigger.remove',
-		'engineering.host.bind',
+		'mission.get',
+		'mission.blueprint.get',
+		'mission.status',
+		'mission.boundary.get',
+		'mission.recall',
+		'mission.retry',
+		'token.retry',
+		'mission.patch',
+		'mission.trigger.list',
+		'mission.trigger.set',
+		'mission.trigger.remove',
+		'mission.host.bind',
+		'mission.prompt.list',
+		'mission.prompt.get',
+		'mission.prompt.set',
+		'mission.check.list',
+		'mission.check.get',
+		'mission.check.set',
+		'mission.check.remove',
+		'mission.check.run',
 		'org.escalate',
 	]);
 	const FULL_SUPERVISOR_MISSION_ACTIONS = new Set([
-		'engineering.start',
-		'engineering.run',
-		'engineering.pause',
-		'engineering.resume',
-		'engineering.stop',
-		'engineering.timeout.set',
+		'mission.start',
+		'mission.run',
+		'mission.pause',
+		'mission.resume',
+		'mission.stop',
+		'mission.timeout.set',
 	]);
 	let isBoundOffGraphSupervisorAction = false;
-	const needsPartialSup = PARTIAL_SUPERVISOR_MISSION_ACTIONS.has(dispatchAction) || PARTIAL_SUPERVISOR_MISSION_ACTIONS.has(action);
-	const needsFullSup = FULL_SUPERVISOR_MISSION_ACTIONS.has(dispatchAction) || FULL_SUPERVISOR_MISSION_ACTIONS.has(action);
+	const needsPartialSup = PARTIAL_SUPERVISOR_MISSION_ACTIONS.has(action);
+	const needsFullSup = FULL_SUPERVISOR_MISSION_ACTIONS.has(action);
 	if (!isHumanUser && rawCallerSessionId && (needsPartialSup || needsFullSup)) {
 		const rawTarget = String(params.mission ?? params.missionId ?? params.id ?? params.governor ?? '').trim();
 		const targetMission = rawTarget
@@ -1138,6 +1166,9 @@ export async function executeAdeControlRequest(
 		'token.reject',
 		'token.block',
 		'token.fail',
+		'mission.check.list',
+		'mission.check.get',
+		'mission.check.run',
 	]);
 
 	let callerAgent: IAdeAgent | undefined;
@@ -1155,8 +1186,9 @@ export async function executeAdeControlRequest(
 		callerHasSubs = projects.hasSubordinates(foundCaller.id);
 		const liveRank = resolveAdeAgentRank(foundCaller, callerHasSubs, roleConfig);
 		const liveRankDef = resolveEffectiveRankDefinition(roleConfig, foundCaller.role, callerHasSubs);
+		const isInGraphBoundNode = Boolean(resolveInGraphMissionBinding(foundCaller, missionRuntime));
 		const isInGraphAllowedAction = MISSION_UNIVERSAL_OR_TOKEN_ACTIONS.has(action)
-			&& (action === 'whoami' || action === 'docs.read' || action === 'api.update' || Boolean(foundCaller.treeNodeId));
+			&& (action === 'whoami' || action === 'docs.read' || action === 'api.update' || isInGraphBoundNode);
 		if (!isSelfOwnedMissionAction && !isBoundOffGraphSupervisorAction && !isInGraphAllowedAction) {
 			if (liveRankDef.pureExecution || isPureExecutionRank(roleConfig, liveRank)) {
 				throw new Error(localize('adeCallerDemotedToPure', "Permission denied: caller session rank '{0}' is pure execution and cannot invoke ADE control APIs.", liveRankDef.name));
@@ -1192,6 +1224,18 @@ export async function executeAdeControlRequest(
 			mission.title,
 			ownerLabel,
 			ownerTierTag,
+		));
+	};
+
+	const assertCanReadMission = (mission: IAdeMissionRecord): void => {
+		const rt = missionRuntime?.getRuntimeState(mission.id);
+		if (canCallerReadMission(mission, missionCaller, rt)) {
+			return;
+		}
+		throw new Error(localize(
+			'adeMissionReadDenied',
+			"Permission denied: only User (L-1), Secretary (L0), the Mission owner, or a bound off-graph supervisor can read Mission '{0}' topology.",
+			mission.title,
 		));
 	};
 
@@ -1256,13 +1300,13 @@ export async function executeAdeControlRequest(
 		if (!hasTree) {
 			return;
 		}
-		const destroyTokenPerm = checkAdeApiPermission(roleConfig, params.caller, 'engineering.remove');
+		const destroyTokenPerm = checkAdeApiPermission(roleConfig, params.caller, 'mission.remove');
 		if (!destroyTokenPerm.allowed) {
-			throw new Error(destroyTokenPerm.reason ?? localize('adeEngineeringDestroyDenied', "Permission denied: destroying or archiving a Mission-linked session requires 'engineering.destroy'."));
+			throw new Error(destroyTokenPerm.reason ?? localize('adeMissionDestroyDenied', "Permission denied: destroying or archiving a Mission-linked session requires 'mission.destroy'."));
 		}
-		const destroyLivePerm = checkAdeApiPermission(roleConfig, effectiveCallerRank, 'engineering.remove');
+		const destroyLivePerm = checkAdeApiPermission(roleConfig, effectiveCallerRank, 'mission.remove');
 		if (!destroyLivePerm.allowed) {
-			throw new Error(destroyLivePerm.reason ?? localize('adeEngineeringDestroyDenied', "Permission denied: destroying or archiving a Mission-linked session requires 'engineering.destroy'."));
+			throw new Error(destroyLivePerm.reason ?? localize('adeMissionDestroyDenied', "Permission denied: destroying or archiving a Mission-linked session requires 'mission.destroy'."));
 		}
 	};
 
@@ -1327,7 +1371,7 @@ export async function executeAdeControlRequest(
 		});
 	}
 
-	if (isAdeMissionRuntimeAction(action) || isAdeMissionRuntimeAction(dispatchAction)) {
+	if (isAdeMissionRuntimeAction(action)) {
 		return executeAdeMissionRuntimeAction(action, params, {
 			projects,
 			sessions,
@@ -1343,7 +1387,7 @@ export async function executeAdeControlRequest(
 		});
 	}
 
-	switch (dispatchAction) {
+	switch (action) {
 		case 'status':
 			return buildControlStatus(modes, projects, navigation, editors, sessions, roleConfig);
 
@@ -1884,7 +1928,7 @@ export async function executeAdeControlRequest(
 				}
 			}
 			if (parent && projects.isLockedByWorkTree?.(parent.id)) {
-				throw new Error(localize('adeLockedByEngineeringCreate', "Session '{0}' is locked by an Engineering tree. Modify topology via the Engineering canvas or 'aexus-ade engineering blueprint apply'.", parent.label));
+				throw new Error(localize('adeLockedByMissionCreate', "Session '{0}' is locked by a Mission. Modify topology via the Mission canvas or 'aexus-ade mission blueprint apply'.", parent.label));
 			}
 
 			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
@@ -1984,6 +2028,25 @@ export async function executeAdeControlRequest(
 			if (draftText !== undefined) {
 				projects.setDraft(createdAgent.id, draftText);
 			}
+			const rawModel = typeof params.model === 'string' && params.model.trim() ? params.model.trim() : undefined;
+			const rawThinkingCreate = typeof params.thinking === 'string' && params.thinking.trim() ? params.thinking.trim().toLowerCase() : undefined;
+			const mappedCreateThinking: AdeThinkingLevel | undefined = rawThinkingCreate === 'off' || rawThinkingCreate === 'none'
+				? 'off'
+				: rawThinkingCreate === 'low' || rawThinkingCreate === 'minimal'
+					? 'low'
+					: rawThinkingCreate === 'medium'
+						? 'medium'
+						: rawThinkingCreate === 'high'
+							? 'high'
+							: rawThinkingCreate === 'max' || rawThinkingCreate === 'xhigh' || rawThinkingCreate === 'extra-high'
+								? 'max'
+								: undefined;
+			if ((rawModel || mappedCreateThinking) && projects.updateAgentEnginePreferences) {
+				projects.updateAgentEnginePreferences(createdAgent.id, {
+					...(rawModel ? { preferredModel: rawModel } : {}),
+					...(mappedCreateThinking ? { preferredThinking: mappedCreateThinking } : {}),
+				});
+			}
 
 			if (params.open !== false) {
 				modes.setMode('ade');
@@ -2016,7 +2079,7 @@ export async function executeAdeControlRequest(
 				}
 			}
 			if (parent && projects.isLockedByWorkTree?.(parent.id)) {
-				throw new Error(localize('adeLockedByEngineeringCreate', "Session '{0}' is locked by an Engineering tree. Modify topology via the Engineering canvas or 'aexus-ade engineering blueprint apply'.", parent.label));
+				throw new Error(localize('adeLockedByMissionCreate', "Session '{0}' is locked by a Mission. Modify topology via the Mission canvas or 'aexus-ade mission blueprint apply'.", parent.label));
 			}
 			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
 			const fallbackProjectUri = parent?.projectUri
@@ -2099,7 +2162,7 @@ export async function executeAdeControlRequest(
 		case 'session.connect': {
 			const agent = resolveAgentFromParams(projects, params);
 			if (agent.parentId && projects.isLockedByWorkTree?.(agent.id)) {
-				throw new Error(localize('adeLockedByEngineeringConnect', "Subordinate session '{0}' is locked by an Engineering tree. Update its engine via Engineering blueprint or 'aexus-ade engineering configure'.", agent.label));
+				throw new Error(localize('adeLockedByMissionConnect', "Subordinate session '{0}' is locked by a Mission. Update its engine via the Mission canvas or 'aexus-ade session configure'.", agent.label));
 			}
 			const rawEngine = params.engineId ?? params.engine;
 			const engineId = await resolveEngineId(sessions, rawEngine, agent.projectUri);
@@ -2198,12 +2261,88 @@ export async function executeAdeControlRequest(
 			return toSessionSummary(projects, sessions, projects.getAgent(agent.id)!);
 		}
 
+		case 'session.configure':
+		case 'session.prefs': {
+			const agent = resolveAgentFromParams(projects, params);
+			assertCanManageTarget(agent, 'configure');
+			const prefs: {
+				preferredEngineId?: string;
+				preferredModel?: string;
+				preferredThinking?: AdeThinkingLevel;
+			} = {};
+			if (typeof (params.engine ?? params.engineId) === 'string' && String(params.engine ?? params.engineId).trim()) {
+				const requestedEngineRaw = String(params.engine ?? params.engineId).trim();
+				const resolvedEngine = await resolveEngineId(sessions, requestedEngineRaw, agent.projectUri) ?? requestedEngineRaw;
+				const currentEngineId = agent.session?.engineId ?? agent.preferredEngineId;
+				const activeMissionInfo = missionRuntime?.findMissionForAgent(agent.id);
+				const missionLive = activeMissionInfo?.runtime.status === 'running' || activeMissionInfo?.runtime.status === 'paused';
+				if ((agent.session || missionLive) && resolvedEngine !== currentEngineId) {
+					throw new Error(localize('adeSessionEngineLockedRuntime', "Engine cannot be switched while Mission is running or after session has started; switch model/thinking instead."));
+				}
+				if (!agent.session && !missionLive) {
+					prefs.preferredEngineId = resolvedEngine;
+				}
+			}
+			if (typeof params.model === 'string') {
+				const trimmedModel = params.model.trim();
+				prefs.preferredModel = trimmedModel && trimmedModel !== 'default' ? trimmedModel : undefined;
+			}
+			if (typeof params.thinking === 'string') {
+				const rawT = params.thinking.trim().toLowerCase();
+				prefs.preferredThinking = rawT === 'off' || rawT === 'none'
+					? 'off'
+					: rawT === 'low' || rawT === 'minimal'
+						? 'low'
+						: rawT === 'medium'
+							? 'medium'
+							: rawT === 'high'
+								? 'high'
+								: rawT === 'max' || rawT === 'xhigh' || rawT === 'extra-high'
+									? 'max'
+									: undefined;
+			}
+			if (projects.updateAgentEnginePreferences) {
+				projects.updateAgentEnginePreferences(agent.id, prefs);
+			}
+			if (params.role !== undefined) {
+				const activeMissionInfo = missionRuntime?.findMissionForAgent(agent.id);
+				const missionLive = activeMissionInfo?.runtime.status === 'running' || activeMissionInfo?.runtime.status === 'paused';
+				if (missionLive) {
+					throw new Error(localize('adeSessionRoleLockedLive', "Role cannot be changed while Mission is running."));
+				}
+				const nextRole = parseRole(params.role, roleConfig);
+				const agentHasSubs = projects.hasSubordinates(agent.id);
+				if (!isHumanOrSecretary) {
+					const nextRankDef = resolveEffectiveRankDefinition(roleConfig, nextRole, agentHasSubs);
+					assertCanSuperviseRank(nextRankDef.id, agentHasSubs, 'assign role');
+				}
+				const nextIsPure = !nextRole || isPureExecutionRank(roleConfig, nextRole);
+				if (nextIsPure && agentHasSubs) {
+					throw new Error(localize('adeCannotClearRoleWithSubordinates', "Cannot clear role while session has subordinate agents."));
+				}
+				if (activeMissionInfo) {
+					const nextTier = resolveEffectiveRankDefinition(roleConfig, nextRole, false).tier;
+					if (nextTier <= activeMissionInfo.runtime.boundary.offGraphMaxTier) {
+						throw new Error(localize('adeSessionRoleViolatesFactoryWall', "In-graph Mission node role tier (L{0}) must stay strictly below off-graph cutoff (L{1}).", nextTier, activeMissionInfo.runtime.boundary.offGraphMaxTier));
+					}
+				}
+				projects.setAgentRole(agent.id, nextRole, { allowLockedMissionEmployee: Boolean(activeMissionInfo) });
+			}
+			const updated = projects.getAgent(agent.id)!;
+			return {
+				...toSessionSummary(projects, sessions, updated, roleConfig),
+				preferredEngineId: updated.preferredEngineId,
+				preferredModel: updated.preferredModel,
+				preferredThinking: updated.preferredThinking,
+			};
+		}
+
 		case 'session.setRole':
 		case 'session.role': {
 			const agent = resolveAgentFromParams(projects, params);
 			assertCanManageTarget(agent, 'change role of');
 			if (projects.isLockedByWorkTree?.(agent.id)) {
-				throw new Error(localize('adeLockedByEngineeringRole', "Session '{0}' is locked by an Engineering tree and its role cannot be changed manually.", agent.label));
+				throw new Error(localize('adeLockedByMissionRole', "Session '{0}' is locked by a Mission and its role cannot be changed manually.", agent.label));
 			}
 			const nextRole = parseRole(params.role, roleConfig);
 			const agentHasSubs = projects.hasSubordinates(agent.id);
@@ -2225,7 +2364,7 @@ export async function executeAdeControlRequest(
 			const agent = resolveAgentFromParams(projects, params);
 			assertCanManageTarget(agent, 'move');
 			if (projects.isLockedByWorkTree?.(agent.id)) {
-				throw new Error(localize('adeLockedByEngineeringMove', "Session '{0}' belongs to a locked Engineering tree and cannot be reparented manually.", agent.label));
+				throw new Error(localize('adeLockedByMissionMove', "Session '{0}' belongs to a locked Mission and cannot be reparented manually.", agent.label));
 			}
 			const rawParent = params.parentId ?? params.parent;
 			const clearParent = rawParent === undefined || rawParent === null || rawParent === '' || rawParent === 'none' || rawParent === 'root';
@@ -2255,7 +2394,7 @@ export async function executeAdeControlRequest(
 				}
 			}
 			if (parentAgent && projects.isLockedByWorkTree?.(parentAgent.id)) {
-				throw new Error(localize('adeLockedByEngineeringTarget', "Target supervisor '{0}' belongs to a locked Engineering tree.", parentAgent.label));
+				throw new Error(localize('adeLockedByMissionTarget', "Target supervisor '{0}' belongs to a locked Mission.", parentAgent.label));
 			}
 			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
 			const targetProjectUri = rawProject !== undefined
@@ -2600,12 +2739,12 @@ export async function executeAdeControlRequest(
 			projects.markSecretaryRead();
 			return { unread: Boolean(projects.secretary.unread) };
 
-		case 'engineering.init':
-		case 'engineering.create': {
+		case 'mission.init':
+		case 'mission.create': {
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawOwner = params.owner ?? params.ownerSessionId ?? params.governor ?? params.governorSessionId ?? params.sessionId;
+			const rawOwner = params.owner ?? params.ownerSessionId ?? params.mission ?? params.missionId ?? params.governor ?? params.governorSessionId ?? params.sessionId;
 			const rawOwnerStr = typeof rawOwner === 'string' ? rawOwner.trim() : '';
 			const rawOwnerLower = rawOwnerStr.toLowerCase();
 			let ownerSessionId: string | undefined;
@@ -2717,12 +2856,16 @@ export async function executeAdeControlRequest(
 			};
 		}
 
-		case 'engineering.list': {
+		case 'mission.list': {
 			if (!missionService) {
 				return [];
 			}
 			return missionService.listMissions().map(m => {
 				const parsed = parseMissionMermaidDag(m.mermaidText);
+				const rt = missionRuntime?.getRuntimeState(m.id);
+				const activeTokenCount = rt
+					? Object.values(rt.tokens).filter(t => t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_gate').length
+					: 0;
 				return {
 					id: m.id,
 					title: m.title,
@@ -2731,7 +2874,11 @@ export async function executeAdeControlRequest(
 					ownerTierTag: formatTierTag(m.ownerTier),
 					ownerRankId: m.ownerRankId,
 					linkedSessionId: m.linkedSessionId,
+					status: rt?.status ?? 'idle',
+					activeTokenCount,
 					canOperate: canCallerOperateMission(m, missionCaller),
+					canRead: canCallerReadMission(m, missionCaller, rt),
+					isBoundSupervisor: Boolean(missionCaller.callerSessionId && rt?.boundary.supervisors.some(s => s.id === missionCaller.callerSessionId)),
 					nodeCount: parsed.nodes.length,
 					edgeCount: parsed.edges.length,
 					generatedEmployeeCount: missionService.getGeneratedEmployees(m.id).length,
@@ -2740,11 +2887,11 @@ export async function executeAdeControlRequest(
 			});
 		}
 
-		case 'engineering.open': {
+		case 'mission.open': {
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
+			const rawId = String(params.id ?? params.mission ?? params.missionId ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
 			if (!rawId) {
 				throw new Error('Mission ID is required.');
 			}
@@ -2762,17 +2909,30 @@ export async function executeAdeControlRequest(
 			return { opened: rec.id, title: rec.title, ownerSessionId: rec.ownerSessionId, ownerTierTag: formatTierTag(rec.ownerTier) };
 		}
 
-		case 'engineering.blueprint.get':
-		case 'engineering.get': {
+		case 'mission.blueprint.get':
+		case 'mission.get': {
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
-			const rec = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
-			if (!rec) {
-				throw new Error(`Mission not found: ${rawId}`);
+			const explicitRawId = String(params.id ?? params.mission ?? params.missionId ?? params.owner ?? params.governor ?? params.governorSessionId ?? '').trim();
+			let rec = explicitRawId
+				? (missionService.getMission(explicitRawId) ?? missionService.getMissionByLinkedSession(explicitRawId))
+				: (callerAgent
+					? (missionService.getMissionByLinkedSession(callerAgent.id)
+						?? missionService.listMissions().find(m =>
+							missionRuntime?.getRuntimeState(m.id).boundary.supervisors.some(s => s.id === callerAgent.id),
+						))
+					: (isSecretaryCaller ? missionService.getMissionByLinkedSession(ADE_SECRETARY_ID) : undefined));
+			if (!rec && !explicitRawId && isHumanOrSecretary) {
+				const all = missionService.listMissions();
+				if (all.length === 1) {
+					rec = all[0];
+				}
 			}
-			assertCanOperateMission(rec);
+			if (!rec) {
+				throw new Error(`Mission not found: ${explicitRawId || (callerAgent?.id ?? '')}`);
+			}
+			assertCanReadMission(rec);
 			return params.raw === true
 				? rec.mermaidText
 				: {
@@ -2782,13 +2942,14 @@ export async function executeAdeControlRequest(
 					ownerTier: rec.ownerTier,
 					ownerTierTag: formatTierTag(rec.ownerTier),
 					ownerRankId: rec.ownerRankId,
+					canOperate: canCallerOperateMission(rec, missionCaller),
 					mermaidText: rec.mermaidText,
 					parsed: parseMissionMermaidDag(rec.mermaidText),
 					generatedEmployeeIds: missionService.getGeneratedEmployees(rec.id).map(a => a.id),
 				};
 		}
 
-		case 'engineering.blueprint.validate': {
+		case 'mission.blueprint.validate': {
 			const text = typeof (params.text ?? params.mermaid) === 'string' ? String(params.text ?? params.mermaid) : '';
 			const parsed = parseMissionMermaidDag(text);
 			if (parsed.error) {
@@ -2797,12 +2958,12 @@ export async function executeAdeControlRequest(
 			return { valid: true, direction: parsed.direction, nodeCount: parsed.nodes.length, edgeCount: parsed.edges.length };
 		}
 
-		case 'engineering.blueprint.apply':
-		case 'engineering.setMermaid': {
+		case 'mission.blueprint.apply':
+		case 'mission.setMermaid': {
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
+			const rawId = String(params.id ?? params.mission ?? params.missionId ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
 			const existing = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
 			if (!existing) {
 				if (!isHumanUser) {
@@ -2830,12 +2991,12 @@ export async function executeAdeControlRequest(
 			};
 		}
 
-		case 'engineering.remove':
-		case 'engineering.delete': {
+		case 'mission.remove':
+		case 'mission.delete': {
 			if (!missionService) {
 				throw new Error('ADE Mission service is not available.');
 			}
-			const rawId = String(params.id ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
+			const rawId = String(params.id ?? params.mission ?? params.missionId ?? params.owner ?? params.governor ?? params.governorSessionId ?? (callerAgent?.id ?? (isSecretaryCaller ? ADE_SECRETARY_ID : ''))).trim();
 			const existing = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
 			if (!existing) {
 				return { deleted: false, id: rawId, removedEmployeeIds: [] };
@@ -3124,10 +3285,11 @@ CommandsRegistry.registerCommand(ADE_GET_ROLE_SYNC_SNAPSHOT_COMMAND_ID, (accesso
 	const editors = accessor.get(IAdeEditorService);
 	const sessions = tryGetService(accessor, IAdeSessionsService);
 	const roleSchemaService = tryGetService(accessor, IAdeRoleSchemaService);
+	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
 	const roleConfig = roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
 	const docsPaths = roleSchemaService?.getDocsPaths?.();
 	const activeId = typeof explicitActiveAgentId === 'string' && explicitActiveAgentId.trim() ? explicitActiveAgentId.trim() : undefined;
-	return buildAdeRoleSyncSnapshot(modes, projects, editors, sessions, activeId, roleConfig, docsPaths);
+	return buildAdeRoleSyncSnapshot(modes, projects, editors, sessions, activeId, roleConfig, docsPaths, missionRuntime);
 });
 
 CommandsRegistry.registerCommand(ADE_CONTROL_EXECUTE_COMMAND_ID, (accessor: ServicesAccessor, arg1: IAdeControlDispatchRequest | string, arg2?: Record<string, unknown>) => {
@@ -3141,6 +3303,53 @@ CommandsRegistry.registerCommand('aexus.ade.engineering.workerHeartbeat', (acces
 	}
 	const ts = typeof rawTimestamp === 'number' && Number.isFinite(rawTimestamp) ? rawTimestamp : Date.now();
 	missionRuntime.touchAgentActivity(sessionResourceOrId.trim(), ts);
+});
+
+CommandsRegistry.registerCommand('aexus.ade.engineering.recordTurnUsage', (accessor: ServicesAccessor, rawPayload: unknown) => {
+	const missionRuntime = tryGetService(accessor, IAdeMissionRuntimeService);
+	if (!missionRuntime || !rawPayload || typeof rawPayload !== 'object') {
+		return;
+	}
+	const payload = rawPayload as {
+		sessionResource?: unknown;
+		agentId?: unknown;
+		missionId?: unknown;
+		nodeId?: unknown;
+		usage?: {
+			inputTokens?: number;
+			outputTokens?: number;
+			cacheReadTokens?: number;
+			cacheWriteTokens?: number;
+			totalTokens?: number;
+			contextInitTokens?: number;
+			contextTierDocTokens?: number;
+			durationMs?: number;
+			costUsd?: number;
+			turns?: number;
+			model?: string;
+			summary?: string;
+			estimated?: boolean;
+		};
+	};
+	const target = (typeof payload.agentId === 'string' && payload.agentId.trim())
+		? payload.agentId.trim()
+		: (typeof payload.sessionResource === 'string' ? payload.sessionResource.trim() : '');
+	if (!payload.usage || typeof payload.usage !== 'object') {
+		return;
+	}
+	if (target) {
+		missionRuntime.touchAgentActivity(target);
+	}
+	const missionId = typeof payload.missionId === 'string' ? payload.missionId.trim() : '';
+	const nodeId = typeof payload.nodeId === 'string' ? payload.nodeId.trim() : '';
+	if (missionId && nodeId) {
+		missionRuntime.recordNodeTurnUsage(missionId, nodeId, payload.usage);
+		return;
+	}
+	if (!target) {
+		return;
+	}
+	missionRuntime.recordTurnUsageBySessionResource(target, payload.usage);
 });
 
 CommandsRegistry.registerCommand(ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID, (accessor: ServicesAccessor, rawPayload: unknown) => {
@@ -3187,9 +3396,9 @@ CommandsRegistry.registerCommand(ADE_SYNC_SESSION_PREFERENCES_COMMAND_ID, (acces
 				? 'low'
 				: rawThinking === 'medium'
 					? 'medium'
-					: rawThinking === 'max'
+					: rawThinking === 'max' || rawThinking === 'xhigh' || rawThinking === 'extra-high'
 						? 'max'
-						: rawThinking === 'high' || rawThinking === 'xhigh' || rawThinking === 'extra-high'
+						: rawThinking === 'high'
 							? 'high'
 							: undefined;
 		prefs.preferredThinking = mapped;

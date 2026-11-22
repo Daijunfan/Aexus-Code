@@ -20,7 +20,7 @@ import { IContextKey, IContextKeyService } from '../../../../platform/contextkey
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
-import { ICreateContributedTerminalProfileOptions, IExtensionTerminalProfile, IPtyHostAttachTarget, IRawTerminalInstanceLayoutInfo, IRawTerminalTabLayoutInfo, IShellLaunchConfig, ITerminalBackend, ITerminalLaunchError, ITerminalLogService, ITerminalsLayoutInfo, ITerminalsLayoutInfoById, TerminalExitReason, TerminalLocation, TerminalSettingId, TitleEventSource } from '../../../../platform/terminal/common/terminal.js';
+import { ICreateContributedTerminalProfileOptions, IExtensionTerminalProfile, IPtyHostAttachTarget, IRawTerminalInstanceLayoutInfo, IRawTerminalTabLayoutInfo, IShellLaunchConfig, ITerminalBackend, ITerminalLaunchError, ITerminalLogService, ITerminalsLayoutInfo, ITerminalsLayoutInfoById, TerminalExitReason, TerminalLocation, TerminalSettingId, TerminalSplitDirection, TitleEventSource } from '../../../../platform/terminal/common/terminal.js';
 import { formatMessageForTerminal } from '../../../../platform/terminal/common/terminalStrings.js';
 import { iconForeground } from '../../../../platform/theme/common/colorRegistry.js';
 import { getIconRegistry } from '../../../../platform/theme/common/iconRegistry.js';
@@ -986,7 +986,8 @@ export class TerminalService extends Disposable implements ITerminalService {
 				options.skipContributedProfileCheck = true;
 			}
 		}
-		if (parent?.shellLaunchConfig.executable === 'ssh' && parent.shellLaunchConfig.hostLabel && !options.config) {
+		const explicitLocalCwd = URI.isUri(options.cwd) && options.cwd.scheme !== SSH_PROJECT_SCHEME;
+		if (parent && (parent.shellLaunchConfig.isRemotePty || parent.shellLaunchConfig.executable === 'ssh') && parent.shellLaunchConfig.hostLabel && !options.config && !explicitLocalCwd) {
 			const source = parent.shellLaunchConfig;
 			options.config = { executable: source.executable, args: source.args, cwd: source.cwd, name: source.name, env: source.env, hostLabel: source.hostLabel, hostOs: source.hostOs, hostDistribution: source.hostDistribution, icon: source.icon, ignoreConfigurationCwd: true, isRemotePty: true, waitOnExit: source.waitOnExit };
 			options.cwd = source.cwd;
@@ -1124,6 +1125,12 @@ export class TerminalService extends Disposable implements ITerminalService {
 		this._extensionService.activateByEvent('onTerminal:*');
 		let instance;
 		if (parent) {
+			const splitDirection = typeof options?.location === 'object' && hasKey(options.location as Record<string, unknown>, { splitDirection: true })
+				? (options.location as { splitDirection?: TerminalSplitDirection }).splitDirection
+				: shellLaunchConfig.splitDirection;
+			if (splitDirection) {
+				shellLaunchConfig.splitDirection = splitDirection;
+			}
 			instance = await this._splitTerminal(shellLaunchConfig, location, parent);
 		} else {
 			instance = this._createTerminal(shellLaunchConfig, location, options);
@@ -1255,7 +1262,7 @@ export class TerminalService extends Disposable implements ITerminalService {
 				throw new Error(`Cannot split a terminal without a group (instanceId: ${parent.instanceId}, title: ${parent.title})`);
 			}
 			shellLaunchConfig.parentTerminalId = parent.instanceId;
-			instance = group.split(shellLaunchConfig);
+			instance = group.split(shellLaunchConfig, shellLaunchConfig.splitDirection);
 		}
 		return instance;
 	}

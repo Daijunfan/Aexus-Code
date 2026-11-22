@@ -35,7 +35,7 @@
 					{ "name": "status", "description": "%cmdStatus%" },
 					{ "name": "projects", "description": "%cmdProjects%" },
 					{ "name": "sessions", "description": "%cmdSessions%" },
-					{ "name": "engineering", "description": "%cmdEngineering%" },
+					{ "name": "mission", "description": "%cmdMission%" },
 					{ "name": "inbox", "description": "%cmdInbox%" },
 					{ "name": "focus", "description": "%cmdFocus%" },
 					{ "name": "home", "description": "%cmdHome%" },

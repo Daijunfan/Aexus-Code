@@ -1201,6 +1201,7 @@ export const ADE_CONTROL_ENV_KEYS = [
 	'AEXUS_ADE_SOCKET',
 	'AEXUS_ADE_SESSION_TOKEN',
 	'AEXUS_ADE_CALLER',
+	'AEXUS_ADE_WINDOW_ID',
 ] as const;
 
 const ADE_CONTROL_ENV_KEY_SET = new Set<string>(ADE_CONTROL_ENV_KEYS);
@@ -1222,15 +1223,14 @@ export function stripAdeControlEnv<T extends Record<string, string | undefined>>
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 /**
- * Resolves the effective Codex sandbox mode. Both interactive sessions and automated
- * engineering DAG workers default to `'workspace-write'` (scoped to the session cwd /
- * isolated Git worktree) unless `autonomousMode` is explicitly enabled or the caller
- * passes an explicit `sandboxMode`.
+ * Resolves the effective Codex sandbox mode. Local and cloud sessions default to
+ * `'danger-full-access'` when `autonomousMode` is enabled (the default) unless
+ * `autonomousMode` is explicitly set to `false` or the caller passes an explicit `sandboxMode`.
  */
 export function resolveCodexSandboxMode(
 	options?: { readonly automatedEngineering?: boolean; readonly sandboxMode?: string },
 	explicitSandboxMode?: string,
-	autonomousMode = false,
+	autonomousMode = true,
 ): CodexSandboxMode {
 	switch ((explicitSandboxMode ?? options?.sandboxMode)?.trim()) {
 		case 'read-only':
@@ -1326,8 +1326,8 @@ export function isPureWorkerDenyToken(token: string | undefined): boolean {
 	}
 	try {
 		const decoded = Buffer.from(body.slice(0, dotIdx), 'base64url').toString('utf8');
-		const parsed = JSON.parse(decoded) as { pure?: unknown };
-		return parsed?.pure === true;
+		const parsed = JSON.parse(decoded) as { pure?: unknown; missionNode?: unknown };
+		return parsed?.pure === true && parsed?.missionNode !== true;
 	} catch {
 		return false;
 	}
@@ -1387,8 +1387,10 @@ export function buildAgentChildEnv(options: AgentChildEnvOptions): NodeJS.Proces
 	const env: NodeJS.ProcessEnv = { ...(options.baseEnv ?? process.env) };
 
 	// Never expose the master control metadata path or master socket token to spawned agents.
+	// Also strip any inherited AEXUS_ADE_WINDOW_ID so agents route via their freshly signed capability token `wid`.
 	delete env.AEXUS_ADE_CONTROL_FILE;
 	delete env.AEXUS_ADE_TOKEN;
+	delete env.AEXUS_ADE_WINDOW_ID;
 
 	// Normalize case-variant PATH entries into a single canonical key.
 	let existingPath: string | undefined;

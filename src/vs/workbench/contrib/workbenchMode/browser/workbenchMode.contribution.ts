@@ -18,28 +18,38 @@ import { ICommandAction } from '../../../../platform/action/common/action.js';
 import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
-import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { ExtensionIdentifier, ExtensionIdentifierSet } from '../../../../platform/extensions/common/extensions.js';
+import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { TitleBarLeadingActionsGroup } from '../../../browser/parts/titlebar/titlebarActions.js';
 import { IsSessionsWindowContext } from '../../../common/contextkeys.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { Extensions, ICustomViewDescriptor, IViewContainersRegistry, IViewDescriptorService, IViewsRegistry, ViewContainer, ViewContainerLocation } from '../../../common/views.js';
 import { IWorkbenchEnvironmentService } from '../../../services/environment/common/environmentService.js';
-import { isCodingAgentExtension, isKnownCodingAgentId } from '../../../services/extensions/common/codingAgentExtensions.js';
+import { isCodingAgentExtension } from '../../../services/extensions/common/codingAgentExtensions.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import { IWorkbenchLayoutService, Parts } from '../../../services/layout/browser/layoutService.js';
 import { IPaneCompositePartService } from '../../../services/panecomposite/browser/panecomposite.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
-import { IWorkbenchModeService, WorkbenchModeViewContainers } from '../../../services/workbenchMode/common/workbenchMode.js';
+import { IWorkbenchModeService, WorkbenchModeContext, WorkbenchModeViewContainers } from '../../../services/workbenchMode/common/workbenchMode.js';
 import { ADE_INSPECTOR_CONTAINER_ID, IAdeProjectsService } from '../../ade/common/ade.js';
 import { ChatViewId } from '../../chat/browser/chat.js';
 import { ExtensionState, IExtensionsWorkbenchService } from '../../extensions/common/extensions.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
+import { ExplorerRootContext } from '../../files/common/files.js';
+import {
+	IDE_AGENT_ENGINE_ICON,
+	IDE_OPEN_SESSIONS_COMMAND_ID,
+	IDE_SESSIONS_CONTAINER_ID,
+	IDE_SESSIONS_VIEW_ID,
+	IdeSessionsViewPane,
+} from './ideSessionsView.js';
 
 const primaryViews = new Set(['workbench.explorer.fileView', 'workbench.explorer.emptyView', 'workbench.explorer.openEditorsView']);
 const showPluginsCommand = 'workbench.action.aexus.showPlugins';
@@ -153,7 +163,7 @@ class PluginSwitcherViewItem extends BaseActionViewItem {
 	private resolveActivePluginVisual(): { readonly label: string | undefined; readonly icon: ThemeIcon | URI } {
 		const active = this.panes.getActivePaneComposite?.(ViewContainerLocation.AuxiliaryBar);
 		const activeId = active?.getId();
-		if (!activeId || activeId === ADE_INSPECTOR_CONTAINER_ID) {
+		if (!activeId || activeId === ADE_INSPECTOR_CONTAINER_ID || activeId === IDE_SESSIONS_CONTAINER_ID) {
 			return { label: undefined, icon: Codicon.extensions };
 		}
 		const container = this.descriptors.getViewContainerById?.(activeId);
@@ -257,6 +267,59 @@ class PluginProjectBadgeViewItem extends BaseActionViewItem {
 	}
 }
 
+class IdeSessionsTriggerViewItem extends BaseActionViewItem {
+	private btnEl: HTMLButtonElement | undefined;
+	private icoEl: HTMLElement | undefined;
+	private labelEl: HTMLElement | undefined;
+
+	constructor(
+		action: IAction,
+		options: IBaseActionViewItemOptions,
+		@IProjectNavigationService private readonly projects: IProjectNavigationService,
+		@IPaneCompositePartService private readonly panes: IPaneCompositePartService,
+		@IWorkbenchModeService modes: IWorkbenchModeService,
+	) {
+		super(undefined, action, options);
+		this._register(Event.any(
+			projects.onDidChangeSelectedProject ?? Event.None,
+			projects.onDidChangeProject ?? Event.None,
+			projects.onDidChangeProjectOrder ?? Event.None,
+			panes.onDidPaneCompositeOpen ?? Event.None,
+			panes.onDidPaneCompositeClose ?? Event.None,
+			modes.onDidChangeMode ?? Event.None,
+		)(() => this.sync()));
+	}
+
+	override render(container: HTMLElement): void {
+		super.render(container);
+		this.btnEl = append(container, $('button.aexus-ide-sessions-trigger', {
+			type: 'button',
+			tabindex: '-1',
+		})) as HTMLButtonElement;
+		this.icoEl = append(this.btnEl, $('span.codicon', { 'aria-hidden': 'true' }));
+		this.labelEl = append(this.btnEl, $('span'));
+		this.sync();
+	}
+
+	private sync(): void {
+		if (!this.btnEl || !this.icoEl || !this.labelEl) {
+			return;
+		}
+		const folder = this.projects.focusedProject ?? this.projects.selectedProject ?? this.projects.orderedProjects[0];
+		const isRemote = folder?.uri.scheme === AEXUS_SSH_SCHEME;
+		const isOpen = this.panes.getActivePaneComposite?.(ViewContainerLocation.AuxiliaryBar)?.getId() === IDE_SESSIONS_CONTAINER_ID;
+		this.btnEl.dataset.remote = String(isRemote);
+		this.btnEl.dataset.active = String(isOpen);
+		this.icoEl.className = ThemeIcon.asClassName(IDE_AGENT_ENGINE_ICON);
+		const label = localize('ideAgentSessionsBtnLabel', "Agent Sessions");
+		this.labelEl.textContent = label;
+		this.btnEl.setAttribute('aria-label', label);
+		this.btnEl.title = isRemote
+			? localize('ideCloudAgentSessionsBtnTip', "Agent Engines & Sessions on {0} — add existing or start new pure-native sessions", folder!.uri.authority)
+			: localize('ideLocalAgentSessionsBtnTip', "Agent Engines & Sessions — add existing or start new pure-native sessions (local & cloud)");
+	}
+}
+
 /** Shows the current plugin's real project binding alongside the shared plugin switcher. */
 export class PluginSidebarProjectContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.aexusPluginSidebarProject';
@@ -294,6 +357,12 @@ export class PluginSidebarProjectContribution extends Disposable implements IWor
 			MenuId.AuxiliaryBarTitle,
 			selectPluginProjectCommand,
 			(action, options) => instantiationService.createInstance(PluginProjectBadgeViewItem, action, options),
+			registered.event,
+		));
+		this._register(actionViewItemService.register(
+			MenuId.AuxiliaryBarTitle,
+			IDE_OPEN_SESSIONS_COMMAND_ID,
+			(action, options) => instantiationService.createInstance(IdeSessionsTriggerViewItem, action, options),
 			registered.event,
 		));
 		this.hasCustomViewItems = !!actionViewItemService.lookUp(MenuId.AuxiliaryBarTitle, selectPluginProjectCommand);
@@ -340,6 +409,9 @@ export class PluginSidebarProjectContribution extends Disposable implements IWor
 registerWorkbenchContribution2(PluginSidebarProjectContribution.ID, PluginSidebarProjectContribution, WorkbenchPhase.AfterRestored);
 
 function isCodingAgentContainer(container: ViewContainer, descriptors: IViewDescriptorService, codingAgents: ExtensionIdentifierSet): boolean {
+	if (container.id === IDE_SESSIONS_CONTAINER_ID) {
+		return true;
+	}
 	if (container.extensionId && codingAgents.has(container.extensionId)) {
 		return true;
 	}
@@ -386,6 +458,26 @@ export class WorkbenchModeLayoutContribution extends Disposable implements IWork
 		this._register(viewDescriptorService.onDidChangeViewContainers(() => this.routePluginViews()));
 		this._register(Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).onViewsRegistered(() => this.routePluginViews()));
 		this._register(modeService.onDidChangeMode(() => this.showProjectView()));
+		this._register(Event.any(
+			projects.onDidChangeSelectedProject ?? Event.None,
+			projects.onDidChangeProject ?? Event.None,
+		)(folder => {
+			if (this.modeService.mode !== 'ide' || !folder || folder.uri.scheme !== AEXUS_SSH_SCHEME) {
+				return;
+			}
+			// When switching to a Cloud Host folder in IDE while the right sidebar is showing a local-only
+			// third-party coding agent plugin, seamlessly switch to the pure-native Cloud Sessions panel.
+			const activeAux = this.paneCompositeService.getActivePaneComposite(ViewContainerLocation.AuxiliaryBar);
+			const activeId = activeAux?.getId();
+			if (!activeId || activeId === IDE_SESSIONS_CONTAINER_ID || activeId === ADE_INSPECTOR_CONTAINER_ID) {
+				return;
+			}
+			const container = this.viewDescriptorService.getViewContainerById(activeId);
+			const codingAgents = new ExtensionIdentifierSet(this.extensionService.extensions.filter(isCodingAgentExtension).map(extension => extension.identifier));
+			if (container && isCodingAgentContainer(container, this.viewDescriptorService, codingAgents)) {
+				void this.viewsService.openViewContainer(IDE_SESSIONS_CONTAINER_ID, false);
+			}
+		}));
 		this._register(viewsService.onDidChangeViewVisibility(({ id, visible }) => {
 			const owner = (viewDescriptorService.getViewDescriptorById(id) as ICustomViewDescriptor | undefined)?.extensionId;
 			if (!visible || modeService.mode !== 'ide' || !owner || projects.codingAgentProjects.has(ExtensionIdentifier.toKey(owner))) {
@@ -457,11 +549,6 @@ export class WorkbenchModeLayoutContribution extends Disposable implements IWork
 
 registerWorkbenchContribution2(WorkbenchModeLayoutContribution.ID, WorkbenchModeLayoutContribution, WorkbenchPhase.AfterRestored);
 
-const panelLessAgentLaunchCommands = new Map<string, string>([
-	['sst-dev.opencode', 'opencode.openNewTerminal'],
-	['pi0.pi-vscode', 'pi-vscode.open'],
-]);
-
 registerAction2(class ShowPluginsAction extends Action2 {
 	constructor() {
 		super({
@@ -485,7 +572,6 @@ registerAction2(class ShowPluginsAction extends Action2 {
 		const extensionsWorkbenchService = accessor.get(IExtensionsWorkbenchService);
 		const projects = accessor.get(IProjectNavigationService);
 		const adeProjects = accessor.get(IAdeProjectsService);
-		const commandService = accessor.get(ICommandService);
 		const [installed] = await Promise.all([extensionsWorkbenchService.queryLocal(), extensionService.whenInstalledExtensionsRegistered()]);
 		const codingAgents = new ExtensionIdentifierSet(extensionService.extensions.filter(isCodingAgentExtension).map(extension => extension.identifier));
 		const containersRegistry = Registry.as<IViewContainersRegistry>(Extensions.ViewContainersRegistry);
@@ -508,26 +594,18 @@ registerAction2(class ShowPluginsAction extends Action2 {
 					|| Number(containersRegistry.getViewContainerLocation(b) === ViewContainerLocation.AuxiliaryBar) - Number(containersRegistry.getViewContainerLocation(a) === ViewContainerLocation.AuxiliaryBar)
 					|| Number(descriptors.getViewContainerLocation(b) === ViewContainerLocation.AuxiliaryBar) - Number(descriptors.getViewContainerLocation(a) === ViewContainerLocation.AuxiliaryBar));
 				const container = containers[0];
-				const isAgent = codingAgents.has(extension.identifier.id) || isKnownCodingAgentId(extension.identifier.id);
 				const icon = container ? descriptors.getViewContainerModel(container).icon : Codicon.extensions;
 				const iconUri = extension.iconUrl ? URI.parse(extension.iconUrl) : URI.isUri(icon) ? icon : undefined;
 				return {
 					label: extension.displayName || extension.name,
-					description: isAgent
-						? localize('codingAgentPluginDescription', "Coding Agent · {0}", extension.identifier.id)
-						: extension.identifier.id,
+					description: extension.identifier.id,
 					extension,
 					container,
-					isAgent,
 					iconClass: !iconUri && ThemeIcon.isThemeIcon(icon) ? ThemeIcon.asClassName(icon) : undefined,
 					iconPath: iconUri ? { dark: iconUri, light: iconUri } : undefined,
 				};
 			})
-			.sort((a, b) =>
-				Number(b.isAgent) - Number(a.isAgent)
-				|| (a.isAgent ? Number(Boolean(b.container)) - Number(Boolean(a.container)) : 0)
-				|| a.label.localeCompare(b.label)
-			);
+			.sort((a, b) => a.label.localeCompare(b.label));
 		const project = modeService.mode === 'ide' ? projects.selectedProject?.name : adeProjects.selectedProject?.name;
 		const pick = await quickInputService.pick(picks, {
 			placeHolder: project
@@ -537,18 +615,10 @@ registerAction2(class ShowPluginsAction extends Action2 {
 		});
 		if (pick) {
 			if (!pick.container) {
-				const launchCmd = panelLessAgentLaunchCommands.get(pick.extension.identifier.id.toLowerCase());
-				if (launchCmd && (CommandsRegistry.getCommand(launchCmd) || extensionService.extensions.some(ext => ExtensionIdentifier.equals(ext.identifier, pick.extension.identifier.id)))) {
-					if (modeService.mode === 'ide' && pick.isAgent) {
-						projects.bindCodingAgentProject(pick.extension.identifier.id.toLowerCase());
-					}
-					await commandService.executeCommand(launchCmd);
-					return;
-				}
 				await extensionsWorkbenchService.open(pick.extension);
 				return;
 			}
-			if (modeService.mode === 'ide' && pick.isAgent) {
+			if (modeService.mode === 'ide' && codingAgents.has(pick.extension.identifier.id)) {
 				projects.bindCodingAgentProject(pick.extension.identifier.id.toLowerCase());
 			}
 			if (pick.container.extensionId && ExtensionIdentifier.equals(pick.container.extensionId, pick.extension.identifier.id)) {
@@ -601,6 +671,58 @@ registerAction2(class SelectPluginProjectAction extends Action2 {
 		const owner = getActivePluginOwner(descriptors, panes);
 		if (owner && extensions.extensions.some(extension => ExtensionIdentifier.equals(extension.identifier, owner) && isCodingAgentExtension(extension))) {
 			projects.bindCodingAgentProject(ExtensionIdentifier.toKey(owner));
+		}
+	}
+});
+
+// Pure-Native IDE Right Sidebar Agent Engines & Sessions Panel (strictly IDE mode only, compatible with Local & Cloud, 100% separated from ADE)
+const ideSessionsContainer = Registry.as<IViewContainersRegistry>(Extensions.ViewContainersRegistry).registerViewContainer({
+	id: IDE_SESSIONS_CONTAINER_ID,
+	title: localize2('ideAgentEnginesContainerTitle', "Agent Engines"),
+	icon: IDE_AGENT_ENGINE_ICON,
+	ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [IDE_SESSIONS_CONTAINER_ID, { mergeViewWithContainerWhenSingleView: true }]),
+	hideIfEmpty: true,
+	order: 2,
+}, ViewContainerLocation.AuxiliaryBar);
+
+Registry.as<IViewsRegistry>(Extensions.ViewsRegistry).registerViews([{
+	id: IDE_SESSIONS_VIEW_ID,
+	name: localize2('ideAgentSessionsViewTitle', "Agent Sessions"),
+	ctorDescriptor: new SyncDescriptor(IdeSessionsViewPane),
+	when: WorkbenchModeContext.isEqualTo('ide'),
+	canToggleVisibility: false,
+	canMoveView: false,
+}], ideSessionsContainer);
+
+registerAction2(class OpenIdeSessionsAction extends Action2 {
+	constructor() {
+		super({
+			id: IDE_OPEN_SESSIONS_COMMAND_ID,
+			title: localize2('ideOpenAgentEnginesTitle', "Agent Engines & Sessions"),
+			icon: IDE_AGENT_ENGINE_ICON,
+			f1: true,
+			precondition: WorkbenchModeContext.isEqualTo('ide'),
+			menu: [
+				{ id: MenuId.TitleBar, group: TitleBarLeadingActionsGroup, order: 1, when: WorkbenchModeContext.isEqualTo('ide') },
+				{ id: MenuId.AuxiliaryBarTitle, group: 'navigation', order: 1, when: ContextKeyExpr.and(IsSessionsWindowContext.negate(), WorkbenchModeContext.isEqualTo('ide')) },
+				{ id: MenuId.ExplorerContext, group: 'navigation', order: 15, when: ContextKeyExpr.and(WorkbenchModeContext.isEqualTo('ide'), ExplorerRootContext) },
+			],
+		});
+	}
+
+	async run(accessor: ServicesAccessor, resource?: URI): Promise<void> {
+		const viewsService = accessor.get(IViewsService);
+		const layoutService = accessor.get(IWorkbenchLayoutService);
+		const projects = accessor.get(IProjectNavigationService);
+		const targetUri = URI.isUri(resource) ? resource : undefined;
+		if (targetUri) {
+			projects.selectProject(targetUri);
+		}
+		layoutService.setPartHidden(false, Parts.AUXILIARYBAR_PART);
+		await viewsService.openViewContainer(IDE_SESSIONS_CONTAINER_ID, true);
+		const view = viewsService.getActiveViewWithId<IdeSessionsViewPane>(IDE_SESSIONS_VIEW_ID);
+		if (view) {
+			await view.focusProject(targetUri, Boolean(targetUri));
 		}
 	}
 });

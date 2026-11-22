@@ -25,6 +25,7 @@ import {
 } from './capabilities';
 import { ClaudeRuntime } from './claude';
 import {
+	buildRemotePersistentPrefix,
 	clearCloudTransportCaches,
 	CLOUD_PROJECT_SCHEME,
 	CloudHostSshContext,
@@ -35,6 +36,7 @@ import {
 	normalizeCloudAuthority,
 	normalizeCloudProjectUriString,
 	normalizeRemoteCwdForCompare,
+	notifySystemResume,
 	parseCloudProjectUri,
 	posixQuote,
 	probeRemoteEngines,
@@ -42,6 +44,8 @@ import {
 	readRemoteTextFilesBatch,
 	registerCloudTransportBridge,
 	resolveCloudHostTarget,
+	resolveRemoteRealpath,
+	terminateRemotePersistentSessionsByPrefix,
 	toRemoteNativePath,
 } from './cloudTransport';
 import { CodexRuntime } from './codex';
@@ -62,12 +66,15 @@ import {
 	EngineSendOptions,
 	EngineThinkingLevel,
 	EngineTurnTokenUsage,
+	estimateTextTokens,
 	findExecutable,
 	HistoryEntry,
 	isAutonomousModeEnabled,
 	NativeSession,
 	setCliBinDirectory,
+	setHostWindowId,
 } from './runtime';
+import { SessionTurnCoordinator } from './turnCoordinator';
 
 const execFileAsync = promisify(cp.execFile);
 const roleBridge = installNativeRoleBridge({ distDir: __dirname });
@@ -336,7 +343,16 @@ function toSessionOptionsRecord(groups: readonly vscode.ChatSessionProviderOptio
 	return out;
 }
 
-function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?: boolean; callerRole?: string; isMissionNode?: boolean; adeSessionId?: string; automatedEngineering?: boolean; attachments?: readonly EngineAttachment[]; onContextCompacted?: () => void }): EngineSendOptions {
+function toSendOptions(cfg: SessionConfigState | undefined, extra: {
+	pureWorker?: boolean;
+	callerRole?: string;
+	isMissionNode?: boolean;
+	adeSessionId?: string;
+	automatedEngineering?: boolean;
+	attachments?: readonly EngineAttachment[];
+	onInterimUsage?: (cumulativeTurnUsage: EngineTurnTokenUsage) => void;
+	onContextCompacted?: () => void;
+}): EngineSendOptions {
 	return {
 		model: cfg?.model && cfg.model !== 'default' ? cfg.model : undefined,
 		thinking: cfg?.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined,
@@ -350,27 +366,45 @@ function toSendOptions(cfg: SessionConfigState | undefined, extra: { pureWorker?
 		isMissionNode: extra.isMissionNode,
 		adeSessionId: extra.adeSessionId,
 		automatedEngineering: extra.automatedEngineering,
+		onInterimUsage: extra.onInterimUsage,
 		onContextCompacted: extra.onContextCompacted,
 	};
 }
 
-function estimateTextTokens(text: string): number {
-	if (!text) {
-		return 0;
+function extractNodePrePromptText(rawPrompt: string): string {
+	const startMarker = '### Node Pre-Prompt (`pre_prompt`)';
+	const startIdx = rawPrompt.indexOf(startMarker);
+	if (startIdx < 0) {
+		return '';
 	}
-	let cjkChars = 0;
-	for (let i = 0; i < text.length; i++) {
-		const code = text.charCodeAt(i);
-		if (
-			(code >= 0x3000 && code <= 0x9FFF)
-			|| (code >= 0xAC00 && code <= 0xD7AF)
-			|| (code >= 0xF900 && code <= 0xFAFF)
-			|| (code >= 0xFF00 && code <= 0xFFEF)
-		) {
-			cjkChars++;
-		}
+	const rest = rawPrompt.slice(startIdx);
+	const nextHeadingIdx = rest.indexOf('\n### ', startMarker.length);
+	return (nextHeadingIdx > 0 ? rest.slice(0, nextHeadingIdx) : rest).trim();
+}
+
+function computeMeasuredContextSegments(params: {
+	readonly injectedContractText?: string;
+	readonly rawPrompt: string;
+	readonly finalPrompt: string;
+	readonly usage: EngineTurnTokenUsage;
+	readonly isFirstTurn: boolean;
+}): { readonly contextInitTokens?: number; readonly contextTierDocTokens?: number } {
+	const prePromptText = extractNodePrePromptText(params.rawPrompt);
+	const tierDocParts = [params.injectedContractText?.trim() || '', prePromptText].filter(Boolean);
+	const measuredTierDocTokens = tierDocParts.length > 0
+		? estimateTextTokens(tierDocParts.join('\n\n'))
+		: (params.isFirstTurn ? 0 : undefined);
+
+	let measuredInitTokens: number | undefined;
+	if (params.isFirstTurn && !params.usage.estimated) {
+		const reportedPromptIn = params.usage.inputTokens + (params.usage.cacheReadTokens ?? 0) + (params.usage.cacheWriteTokens ?? 0);
+		const sentPromptEst = estimateTextTokens(params.finalPrompt);
+		measuredInitTokens = reportedPromptIn > sentPromptEst ? reportedPromptIn - sentPromptEst : 0;
 	}
-	return Math.max(1, Math.ceil(cjkChars * 1.15 + (text.length - cjkChars) / 4));
+	return {
+		...(measuredInitTokens !== undefined ? { contextInitTokens: measuredInitTokens } : {}),
+		...(measuredTierDocTokens !== undefined ? { contextTierDocTokens: measuredTierDocTokens } : {}),
+	};
 }
 
 function resolveCompletedTurnUsage(engine: EngineRuntime, sessionId: string, promptText: string, replyText: string, startedAt: number): EngineTurnTokenUsage {
@@ -627,8 +661,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const customizationChangedEmitter = new vscode.EventEmitter<void>();
 	context.subscriptions.push(customizationChangedEmitter);
 
-	const busy = new Set<string>();
-	const activeTurns = new Map<string, vscode.CancellationTokenSource>();
+	const turnCoordinator = new SessionTurnCoordinator<vscode.CancellationTokenSource>();
 	const lastTurnReplies = new Map<string, string>();
 	const lastTurnErrors = new Map<string, string>();
 	const opened = new Map<string, { changed: vscode.EventEmitter<vscode.ChatSession['history']>; cancellation: vscode.CancellationTokenSource }>();
@@ -783,6 +816,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	const key = (engine: string, id: string) => `${engine}:${id}`;
 	const identity = (record: RecordEntry) => key(record.engine, record.resourceId ?? record.id);
+	const isRecordBusy = (record: RecordEntry) => turnCoordinator.isBusy(identity(record));
+	const syncRecordStorageKey = (record: RecordEntry, prevId: string) => {
+		if (record.id === prevId) {
+			return;
+		}
+		let oldMapKey: string | undefined;
+		for (const [k, v] of records.entries()) {
+			if (v === record) {
+				oldMapKey = k;
+				break;
+			}
+		}
+		const nextPlainKey = key(record.engine, record.id);
+		const cloudAuth = recordCloudAuthority(record);
+		const nextMapKey = cloudAuth && ((records.has(nextPlainKey) && records.get(nextPlainKey) !== record) || oldMapKey?.startsWith('cloud:'))
+			? `cloud:${cloudAuth}:${nextPlainKey}`
+			: nextPlainKey;
+		if (oldMapKey && oldMapKey !== nextMapKey) {
+			records.delete(oldMapKey);
+		} else {
+			records.delete(key(record.engine, prevId));
+		}
+		records.set(nextMapKey, record);
+		if (secretaryState && (secretaryState.recordKey === oldMapKey || secretaryState.recordKey === key(record.engine, prevId))) {
+			secretaryState.recordKey = nextMapKey;
+		}
+	};
 	const resource = (record: RecordEntry) => vscode.Uri.from({ scheme: `aexus-${record.engine}`, path: `/${record.resourceId ?? record.id}` });
 	const parentResource = (record: RecordEntry) => record.parentId
 		? resource([...records.values()].find(parent => parent.engine === record.engine && parent.id === record.parentId) ?? { ...record, id: record.parentId, resourceId: record.parentId })
@@ -826,7 +886,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const refreshSecretaryItem = () => {
 		if (!secretaryController) { return; }
 		const record = secretaryState ? records.get(secretaryState.recordKey) : undefined;
-		const secBusy = record ? busy.has(identity(record)) : false;
+		const secBusy = record ? isRecordBusy(record) : false;
 		const engineDef = available.find(entry => entry.id === secretaryState?.engine);
 		const secItem = secretaryController.createChatSessionItem(SECRETARY_URI, 'Secretary');
 		secItem.description = engineDef?.name ?? 'Secretary';
@@ -862,7 +922,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			Object.assign(existing, session, { label, provisional: session.provisional ?? existing.provisional });
 			return existing;
 		}
-		const record: RecordEntry = { ...session, engine };
+		const record: RecordEntry = { ...session, engine, resourceId: session.id };
 		records.set(sessionKey, record);
 		return record;
 	};
@@ -878,8 +938,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			aexusParentSessionResource: parentResource(record)?.toString(),
 			aexusSessionReadOnly: record.readOnly ?? false,
 		};
-		result.timing = { created: record.created, lastRequestEnded: busy.has(identity(record)) ? undefined : record.updated };
-		result.status = busy.has(identity(record)) ? vscode.ChatSessionStatus.InProgress : vscode.ChatSessionStatus.Completed;
+		const recordBusy = isRecordBusy(record);
+		result.timing = { created: record.created, lastRequestEnded: recordBusy ? undefined : record.updated };
+		result.status = recordBusy ? vscode.ChatSessionStatus.InProgress : vscode.ChatSessionStatus.Completed;
 		return result;
 	};
 
@@ -921,25 +982,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	};
 
 	const acceptCloud = (engine: string, session: NativeSession, target: CloudHostTarget, fallbackCloudUri?: string): RecordEntry => {
-		const existing = records.get(key(engine, session.id))
-			?? [...records.values()].find(record => record.engine === engine && record.id === session.id);
+		const cloudKey = `cloud:${target.authority}:${key(engine, session.id)}`;
+		const existingCloud = records.get(cloudKey)
+			?? [...records.values()].find(record => record.engine === engine && record.id === session.id && recordCloudAuthority(record) === target.authority);
 		const computedCloudUri = session.cwd?.trim()
 			? remoteNativePathToCloudUri(target.alias, session.cwd, target.os)
 			: fallbackCloudUri;
-		if (existing && (!existing.cloudProjectUri || recordCloudAuthority(existing) === target.authority)) {
-			const label = existing.customLabel ? existing.label : session.label;
-			if (!existing.customLabel && session.label !== existing.initialTitle) { existing.initialTitle = undefined; }
-			Object.assign(existing, session, {
+		if (existingCloud) {
+			const label = existingCloud.customLabel ? existingCloud.label : session.label;
+			if (!existingCloud.customLabel && session.label !== existingCloud.initialTitle) { existingCloud.initialTitle = undefined; }
+			Object.assign(existingCloud, session, {
 				label,
-				provisional: session.provisional ?? existing.provisional,
-				cloudProjectUri: existing.cloudProjectUri ?? computedCloudUri,
+				provisional: session.provisional ?? existingCloud.provisional,
+				cloudProjectUri: computedCloudUri ?? existingCloud.cloudProjectUri,
 			});
-			return existing;
+			return existingCloud;
 		}
-		const sessionKey = existing ? `cloud:${target.authority}:${key(engine, session.id)}` : key(engine, session.id);
+		const localCollision = records.get(key(engine, session.id))
+			?? [...records.values()].find(record => record.engine === engine && (record.resourceId === session.id || record.id === session.id) && !record.cloudProjectUri);
+		const sessionKey = localCollision ? cloudKey : key(engine, session.id);
 		const record: RecordEntry = {
 			...session,
 			engine,
+			...(localCollision ? { resourceId: `cloud-${target.authority}-${session.id}` } : {}),
 			cloudProjectUri: computedCloudUri,
 		};
 		records.set(sessionKey, record);
@@ -1288,8 +1353,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		return record;
 	};
 
-	const list = async (engine: string, token: vscode.CancellationToken): Promise<RecordEntry[]> => {
-		for (const session of await runtime(engine).list(token)) {
+	const list = async (engine: string, token: vscode.CancellationToken, projectCwd?: string): Promise<RecordEntry[]> => {
+		for (const session of await runtime(engine).list(token, projectCwd)) {
 			accept(engine, session);
 		}
 		refresh(engine);
@@ -1591,7 +1656,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	const publishHistory = async (record: RecordEntry): Promise<void> => {
 		const entry = opened.get(identity(record));
-		if (entry && !busy.has(identity(record))) {
+		if (entry && !isRecordBusy(record)) {
 			const resolved = await tryRuntimeForRecord(record);
 			if (resolved) {
 				const turns = await resolved.engine.history(record, entry.cancellation.token);
@@ -1602,7 +1667,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 		if (secretaryState && records.get(secretaryState.recordKey) === record) {
 			const secEntry = opened.get(SECRETARY_TYPE);
-			if (secEntry && !busy.has(identity(record))) {
+			if (secEntry && !isRecordBusy(record)) {
 				const resolved = await tryRuntimeForRecord(record);
 				if (resolved) {
 					const turns = await resolved.engine.history(record, secEntry.cancellation.token);
@@ -1930,14 +1995,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 				return true;
 			}
-			if (cmd === 'engineering') {
-				const trees = await vscode.commands.executeCommand<{ governorSessionId: string; governorLabel: string; projectName: string; runStatus: string; completedNodes: number; totalNodes: number; managerCount: number }[]>('aexus.ade.control.execute', { action: 'engineering.list' });
-				if (!trees?.length) {
-					stream.markdown('No ADE Engineering trees initialized yet.');
+			if (cmd === 'mission' || cmd === 'missions') {
+				const missions = await vscode.commands.executeCommand<{
+					readonly id: string;
+					readonly title: string;
+					readonly ownerSessionId?: string;
+					readonly ownerTierTag?: string;
+					readonly status?: string;
+					readonly nodeCount: number;
+					readonly edgeCount: number;
+					readonly generatedEmployeeCount?: number;
+					readonly activeTokenCount?: number;
+				}[]>('aexus.ade.control.execute', { action: 'mission.list' });
+				if (!missions?.length) {
+					stream.markdown('No ADE Missions initialized yet. Run `aexus-ade mission init --open` or click the Mission button in the ADE sidebar.');
 				} else {
 					stream.markdown([
-						`### ADE Engineering Trees (${trees.length})`,
-						...trees.map(t => `- **${t.governorLabel}** (\`${t.governorSessionId}\`) in **${t.projectName}** — status: \`${t.runStatus}\`, progress: **${t.completedNodes}/${t.totalNodes}** nodes (${t.managerCount} Manager segments)`),
+						`### ADE Missions (${missions.length})`,
+						...missions.map(m => {
+							const ownerPart = m.ownerTierTag ? ` · owner: \`${m.ownerTierTag}\`` : '';
+							const statusPart = m.status ?? 'idle';
+							const empCount = m.generatedEmployeeCount ?? 0;
+							const activeTok = m.activeTokenCount ? `, **${m.activeTokenCount}** active token(s)` : '';
+							return `- **${m.title}** (\`${m.id}\`${ownerPart}) — status: \`${statusPart}\`, **${m.nodeCount}** node(s), **${m.edgeCount}** edge(s), **${empCount}** employee(s)${activeTok}`;
+						}),
 					].join('\n'));
 				}
 				return true;
@@ -2023,8 +2104,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		token: vscode.CancellationToken,
 	): Promise<vscode.ChatResult> => {
 		if (record.readOnly) { throw new Error(vscode.l10n.t('Continue this subagent from its parent conversation.')); }
+		record.resourceId ??= record.id;
 		const recordKey = identity(record);
-		if (busy.has(recordKey)) { throw new Error(vscode.l10n.t('This conversation is already working. Stop or wait for its current response.')); }
 		const cloudTarget = !isSecretary && record.cloudProjectUri
 			? await ensureRecordCloudReady(record)
 			: undefined;
@@ -2069,91 +2150,122 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 		}
 
-		const turnCancellation = new vscode.CancellationTokenSource();
-		const link = token.onCancellationRequested(() => turnCancellation.cancel());
-		busy.add(recordKey);
-		activeTurns.set(recordKey, turnCancellation);
-		controllers.get(record.engine)?.items.add(item(record));
-		if (isSecretary) {
-			refreshSecretaryItem();
-		}
-
-		const engineType = toEngineType(record.engine);
-		const cfg = getSessionConfig(record, isSecretary);
-		const caps = getCachedRuntimeCaps(record.engine, record.cwd, cloudTarget?.authority);
-		const discoveredCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands, cloudTarget);
-
-		let effectiveUserPrompt: string;
-		if (parsedCmd === 'goal') {
-			effectiveUserPrompt = cmdArgText;
-		} else if (parsedCmd) {
-			const matchedTemplateCmd = discoveredCommands.find(c => c.name.toLowerCase() === parsedCmd && c.filePath);
-			const expandedTemplate = matchedTemplateCmd ? await readSkillOrCommandTemplate(matchedTemplateCmd, cmdArgText) : undefined;
-			const expandedBuiltin = !expandedTemplate ? expandBuiltInWorkflowPrompt(parsedCmd, cmdArgText, engineType) : undefined;
-			if (expandedTemplate) {
-				effectiveUserPrompt = expandedTemplate;
-			} else if (expandedBuiltin) {
-				effectiveUserPrompt = expandedBuiltin;
-			} else {
-				effectiveUserPrompt = `/${parsedCmd}${cmdArgText ? ` ${cmdArgText}` : ''}`;
+		const forceKillRecord = async () => {
+			const resolved = await tryRuntimeForRecord(record).catch(() => undefined);
+			if (resolved) {
+				await resolved.engine.killSession?.(record).catch(() => undefined);
 			}
-		} else {
-			effectiveUserPrompt = request.prompt;
+		};
+		const lease = await turnCoordinator.acquire({
+			key: recordKey,
+			source: 'ui',
+			createCts: () => new vscode.CancellationTokenSource(),
+			externalToken: token,
+			forceKill: forceKillRecord,
+			onPreempt: (_prev, reason) => {
+				if (reason === 'headless') {
+					stream.progress(vscode.l10n.t('Switching from background task to your message…'));
+				} else if (reason === 'cancelled' || reason === 'interrupted') {
+					stream.progress(vscode.l10n.t('Stopping previous response…'));
+				}
+			},
+			graceTimeoutMs: 2500,
+		});
+		if (!lease) {
+			return {};
 		}
 
-		const { attachments, fileLines } = extractAttachmentsAndRefs(request.references, cloudTarget);
-		const userPromptWithRefs = fileLines.length
-			? `${effectiveUserPrompt}\n\n${vscode.l10n.t('Attached files:')}\n${fileLines.join('\n')}`
-			: effectiveUserPrompt;
+		const turnCancellation = lease.cts;
+		let link: vscode.Disposable | undefined;
+		try {
+			link = token.onCancellationRequested(() => turnCancellation.cancel());
+			if (token.isCancellationRequested) {
+				turnCancellation.cancel();
+				return {};
+			}
+			controllers.get(record.engine)?.items.add(item(record));
+			if (isSecretary) {
+				refreshSecretaryItem();
+			}
+			const engineType = toEngineType(record.engine);
+			const cfg = getSessionConfig(record, isSecretary);
+			const caps = getCachedRuntimeCaps(record.engine, record.cwd, cloudTarget?.authority);
+			const discoveredCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands, cloudTarget);
 
-		const preambleSections: string[] = [];
-		const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
-		const currentRankForContext = isSecretary ? 'secretary' : (snapForContext?.isOrchestrated ? snapForContext.rank : undefined);
-		const expectedPromptHash = !isSecretary && snapForContext?.rolePrompt?.trim()
-			? hashRolePrompt(snapForContext.rolePrompt)
-			: undefined;
-		const alreadyInitializedForRank = Boolean(
-			currentRankForContext
-			&& record.roleInit
-			&& record.roleInit.engine === record.engine
-			&& record.roleInit.rank === currentRankForContext
-			&& (
-				expectedPromptHash
-					? record.roleInit.promptHash === expectedPromptHash
-					: Boolean(record.roleInit.promptHash)
-			),
-		);
-		const injected = !currentRankForContext
-			? undefined
-			: await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
-				'aexus.ade.resolvePromptContext',
-				alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
-			)).catch(() => undefined);
-		const trimmedInjected = injected?.trim();
-		let pendingDeltaContext: string | undefined;
-		if (trimmedInjected) {
-			if (!alreadyInitializedForRank || trimmedInjected !== record.lastDeltaContext) {
-				preambleSections.push(trimmedInjected);
-				if (alreadyInitializedForRank) {
-					pendingDeltaContext = trimmedInjected;
+			let effectiveUserPrompt: string;
+			if (parsedCmd === 'goal') {
+				effectiveUserPrompt = cmdArgText;
+			} else if (parsedCmd) {
+				const matchedTemplateCmd = discoveredCommands.find(c => c.name.toLowerCase() === parsedCmd && c.filePath);
+				const expandedTemplate = matchedTemplateCmd ? await readSkillOrCommandTemplate(matchedTemplateCmd, cmdArgText) : undefined;
+				const expandedBuiltin = !expandedTemplate ? expandBuiltInWorkflowPrompt(parsedCmd, cmdArgText, engineType) : undefined;
+				if (expandedTemplate) {
+					effectiveUserPrompt = expandedTemplate;
+				} else if (expandedBuiltin) {
+					effectiveUserPrompt = expandedBuiltin;
+				} else {
+					effectiveUserPrompt = `/${parsedCmd}${cmdArgText ? ` ${cmdArgText}` : ''}`;
+				}
+			} else {
+				effectiveUserPrompt = request.prompt;
+			}
+
+			const { attachments, fileLines } = extractAttachmentsAndRefs(request.references, cloudTarget);
+			const userPromptWithRefs = fileLines.length
+				? `${effectiveUserPrompt}\n\n${vscode.l10n.t('Attached files:')}\n${fileLines.join('\n')}`
+				: effectiveUserPrompt;
+
+			const preambleSections: string[] = [];
+			const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+			const currentRankForContext = isSecretary ? 'secretary' : (snapForContext?.isOrchestrated ? snapForContext.rank : undefined);
+			const expectedPromptHash = !isSecretary && snapForContext?.rolePrompt?.trim()
+				? hashRolePrompt(snapForContext.rolePrompt)
+				: undefined;
+			const alreadyInitializedForRank = Boolean(
+				currentRankForContext
+				&& record.roleInit
+				&& record.roleInit.engine === record.engine
+				&& record.roleInit.rank === currentRankForContext
+				&& (
+					expectedPromptHash
+						? record.roleInit.promptHash === expectedPromptHash
+						: Boolean(record.roleInit.promptHash)
+				),
+			);
+			const injected = !currentRankForContext
+				? undefined
+				: await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
+					'aexus.ade.resolvePromptContext',
+					alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
+				)).catch(() => undefined);
+			const trimmedInjected = injected?.trim();
+			let pendingDeltaContext: string | undefined;
+			if (trimmedInjected) {
+				if (!alreadyInitializedForRank || trimmedInjected !== record.lastDeltaContext) {
+					preambleSections.push(trimmedInjected);
+					if (alreadyInitializedForRank) {
+						pendingDeltaContext = trimmedInjected;
+					}
 				}
 			}
-		}
 
-		if (record.activeGoal) {
-			preambleSections.push([
-				`[Autonomous Session Goal Active]`,
-				`Goal Condition: ${record.activeGoal}`,
-				`- Execute thoroughly and verify all requirements end-to-end before stopping.`,
-				`- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker \`${GOAL_COMPLETE_MARKER}\` at the very end of your response.`,
-			].join('\n'));
-		}
+			if (record.activeGoal) {
+				preambleSections.push([
+					`[Autonomous Session Goal Active]`,
+					`Goal Condition: ${record.activeGoal}`,
+					`- Execute thoroughly and verify all requirements end-to-end before stopping.`,
+					`- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker \`${GOAL_COMPLETE_MARKER}\` at the very end of your response.`,
+				].join('\n'));
+			}
 
-		const initialFullPrompt = preambleSections.length > 0
-			? `${preambleSections.join('\n\n')}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${userPromptWithRefs}`
-			: userPromptWithRefs;
+			const initialFullPrompt = preambleSections.length > 0
+				? `${preambleSections.join('\n\n')}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${userPromptWithRefs}`
+				: userPromptWithRefs;
 
-		try {
+			if (turnCancellation.token.isCancellationRequested) {
+				return {};
+			}
+
 			let engine: EngineRuntime;
 			if (cloudTarget) {
 				const remoteInfo = await resolveRemoteEngineInfo(record.engine, cloudTarget);
@@ -2182,12 +2294,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				? 'secretary'
 				: (!snapEntry?.isOrchestrated && !isMissionNode ? undefined : snapEntry?.rank);
 			let contextCompactedDuringTurn = false;
+			const interactiveInjectedContract = (!alreadyInitializedForRank || pendingDeltaContext !== undefined) ? trimmedInjected : undefined;
+			const interactiveReportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+			let lastInteractiveInterimAt = 0;
+			const reportInteractiveInterimUsage = isSecretary ? undefined : (cumulative: EngineTurnTokenUsage) => {
+				const now = Date.now();
+				if (now - lastInteractiveInterimAt < 1200) {
+					return;
+				}
+				const delta = {
+					inputTokens: Math.max(0, cumulative.inputTokens - interactiveReportedSoFar.inputTokens),
+					outputTokens: Math.max(0, cumulative.outputTokens - interactiveReportedSoFar.outputTokens),
+					cacheReadTokens: Math.max(0, (cumulative.cacheReadTokens ?? 0) - interactiveReportedSoFar.cacheReadTokens),
+					cacheWriteTokens: Math.max(0, (cumulative.cacheWriteTokens ?? 0) - interactiveReportedSoFar.cacheWriteTokens),
+					totalTokens: Math.max(0, cumulative.totalTokens - interactiveReportedSoFar.totalTokens),
+				};
+				if (delta.totalTokens === 0 && delta.inputTokens === 0 && delta.outputTokens === 0) {
+					return;
+				}
+				lastInteractiveInterimAt = now;
+				interactiveReportedSoFar.inputTokens += delta.inputTokens;
+				interactiveReportedSoFar.outputTokens += delta.outputTokens;
+				interactiveReportedSoFar.cacheReadTokens += delta.cacheReadTokens;
+				interactiveReportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
+				interactiveReportedSoFar.totalTokens += delta.totalTokens;
+				const segments = computeMeasuredContextSegments({
+					injectedContractText: interactiveInjectedContract,
+					rawPrompt: userPromptWithRefs,
+					finalPrompt: initialFullPrompt,
+					usage: cumulative,
+					isFirstTurn: !alreadyInitializedForRank,
+				});
+				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
+					sessionResource: sessionUri.toString(),
+					usage: { ...delta, ...segments, model: cfg?.model && cfg.model !== 'default' ? cfg.model : undefined, turns: 0 },
+				})).catch(() => undefined);
+			};
 			const sendOptions = toSendOptions(cfg, {
 				attachments,
 				pureWorker: !isSecretary && !snapEntry?.isOrchestrated && !isMissionNode,
 				callerRole,
 				isMissionNode,
 				adeSessionId: isSecretary ? '__secretary__' : snapEntry?.id,
+				onInterimUsage: reportInteractiveInterimUsage,
 				onContextCompacted: () => {
 					contextCompactedDuringTurn = true;
 					record.roleInit = undefined;
@@ -2196,12 +2345,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			});
 			const prevId = record.id;
 			if (engine.prepareSession) {
-				await engine.prepareSession(record, sendOptions);
-				if (record.id !== prevId) {
-					records.delete(key(record.engine, prevId));
-					records.set(key(record.engine, record.id), record);
-				}
+				await engine.prepareSession(record, sendOptions, turnCancellation.token);
+				syncRecordStorageKey(record, prevId);
 				await save();
+			}
+			if (turnCancellation.token.isCancellationRequested) {
+				return {};
 			}
 			let streamedMarkdown = '';
 			let roundMarkdown = '';
@@ -2319,7 +2468,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 
 			const turnStartedAt = Date.now();
+			const preSendId = record.id;
 			await engine.send(record, initialFullPrompt, wrappedStream, turnCancellation.token, sendOptions);
+			syncRecordStorageKey(record, preSendId);
 			flushPendingGoalText(true);
 
 			// Autonomous /goal verification & continuation stop-hook loop
@@ -2344,10 +2495,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					`2. If ANY work, edge case, or verification remains incomplete, complete it right now.`,
 					`3. Once 100% of the Active Goal is verified complete, summarize the final verified state and end with \`${GOAL_COMPLETE_MARKER}\`.`,
 				].join('\n');
+				const preGoalId = record.id;
 				await engine.send(record, continuationPrompt, wrappedStream, turnCancellation.token, {
 					...sendOptions,
 					attachments: undefined,
 				});
+				syncRecordStorageKey(record, preGoalId);
 				flushPendingGoalText(true);
 			}
 
@@ -2358,7 +2511,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			const turnUsage = resolveCompletedTurnUsage(engine, record.id, initialFullPrompt, streamedMarkdown, turnStartedAt);
 			if (!isSecretary && turnUsage.totalTokens > 0) {
-				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', { sessionResource: sessionUri.toString(), usage: turnUsage })).catch(() => undefined);
+				const segments = computeMeasuredContextSegments({
+					injectedContractText: interactiveInjectedContract,
+					rawPrompt: userPromptWithRefs,
+					finalPrompt: initialFullPrompt,
+					usage: turnUsage,
+					isFirstTurn: !alreadyInitializedForRank,
+				});
+				const finalDeltaUsage = {
+					inputTokens: Math.max(0, turnUsage.inputTokens - interactiveReportedSoFar.inputTokens),
+					outputTokens: Math.max(0, turnUsage.outputTokens - interactiveReportedSoFar.outputTokens),
+					cacheReadTokens: Math.max(0, (turnUsage.cacheReadTokens ?? 0) - interactiveReportedSoFar.cacheReadTokens),
+					cacheWriteTokens: Math.max(0, (turnUsage.cacheWriteTokens ?? 0) - interactiveReportedSoFar.cacheWriteTokens),
+					totalTokens: Math.max(0, turnUsage.totalTokens - interactiveReportedSoFar.totalTokens),
+					...segments,
+					durationMs: turnUsage.durationMs,
+					costUsd: turnUsage.costUsd,
+					turns: 1,
+					estimated: turnUsage.estimated,
+				};
+				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', { sessionResource: sessionUri.toString(), usage: finalDeltaUsage })).catch(() => undefined);
 			}
 
 			if (streamedMarkdown.trim()) {
@@ -2396,7 +2568,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			});
 			return {};
 		} catch (error) {
-			if (token.isCancellationRequested || turnCancellation.token.isCancellationRequested) { return {}; }
+			if (token.isCancellationRequested || turnCancellation.token.isCancellationRequested || error instanceof vscode.CancellationError) { return {}; }
 			const errText = error instanceof Error ? error.message : String(error);
 			lastTurnErrors.set(identity(record), errText);
 			if (isSecretary) {
@@ -2404,10 +2576,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 			throw error;
 		} finally {
-			link.dispose();
+			lease.markSettling();
+			link?.dispose();
 			turnCancellation.dispose();
-			activeTurns.delete(recordKey);
-			busy.delete(recordKey);
+			turnCoordinator.release(lease);
 			if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
 				controllers.get(record.engine)?.items.add(item(record));
 			}
@@ -2669,7 +2841,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (deletedKeys.has(recordKey) || recordKey === secretaryState?.recordKey) {
 			return 0;
 		}
-		activeTurns.get(identity(record))?.cancel();
+		await turnCoordinator.forceRelease(identity(record));
 		opened.get(identity(record))?.cancellation.cancel();
 		const rootResolved = await tryRuntimeForRecord(record).catch(() => undefined);
 		if (rootResolved) {
@@ -2696,9 +2868,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (entryKey === secretaryState?.recordKey) { continue; }
 			if (candidate.engine === record.engine && (removedIds.has(candidate.id) || (candidate.resourceId && removedIds.has(candidate.resourceId)))) {
 				deletedKeys.add(entryKey);
-				activeTurns.get(identity(candidate))?.cancel();
-				activeTurns.delete(identity(candidate));
-				busy.delete(identity(candidate));
+				await turnCoordinator.forceRelease(identity(candidate));
 				opened.get(identity(candidate))?.cancellation.cancel();
 				if (candidate !== record) {
 					const childResolved = await tryRuntimeForRecord(candidate).catch(() => undefined);
@@ -2828,8 +2998,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			refresh(engine);
 			return describe(record);
 		}),
-		vscode.commands.registerCommand('aexus.agentEngines.attach', async (engineId: string, nativeId: string, project?: vscode.Uri) => {
+		vscode.commands.registerCommand('aexus.agentEngines.attach', async (engineId: string, nativeId: string, rawProject?: vscode.Uri | string) => {
+			const project = parseOptionalUri(rawProject);
 			const engine = engineId.startsWith('aexus-') ? engineId.slice('aexus-'.length) : (ENGINE_ALIASES[engineId.toLowerCase()] ?? engineId);
+			const query = nativeId.trim();
+			const queryLower = query.toLowerCase();
+			const matchesRecord = (entry: RecordEntry): boolean =>
+				entry.id === query
+				|| entry.resourceId === query
+				|| entry.id.toLowerCase().startsWith(queryLower)
+				|| entry.label.trim().toLowerCase() === queryLower;
 			const token = new vscode.CancellationTokenSource();
 			try {
 				if (isCloudUri(project)) {
@@ -2838,23 +3016,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					const effectiveTarget = info.target;
 					const cloudProjectUri = normalizeCloudProjectUriString(project);
 					const remoteCwd = toRemoteNativePath(project.path || '/', effectiveTarget.os, effectiveTarget.remoteHome);
+					const resolvedRealCwd = await resolveRemoteRealpath(effectiveTarget, remoteCwd, token.token).catch(() => undefined);
+					const acceptedNormCwds = new Set<string>([normalizeRemoteCwdForCompare(remoteCwd, effectiveTarget.os)]);
+					if (resolvedRealCwd) {
+						acceptedNormCwds.add(normalizeRemoteCwdForCompare(resolvedRealCwd, effectiveTarget.os));
+					}
 					if (info.command) {
-						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token).catch(() => [] as NativeSession[]);
+						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token, remoteCwd).catch(err => {
+							console.warn(`[aexus-agents] remote attach scan failed (${engine}@${effectiveTarget.alias}):`, err);
+							return [] as NativeSession[];
+						});
 						for (const s of remoteSessions) {
-							acceptCloud(engine, s, effectiveTarget, cloudProjectUri);
+							const normalizedCwd = s.cwd ? normalizeRemoteCwdForCompare(s.cwd, effectiveTarget.os) : '';
+							const mappedUri = acceptedNormCwds.has(normalizedCwd) ? cloudProjectUri : undefined;
+							acceptCloud(engine, mappedUri ? { ...s, cwd: remoteCwd } : s, effectiveTarget, mappedUri ?? cloudProjectUri);
 						}
 					}
 					let record = [...records.values()].find(entry =>
 						entry.engine === engine
 						&& recordCloudAuthority(entry) === effectiveTarget.authority
-						&& (entry.id === nativeId || entry.resourceId === nativeId || entry.id.startsWith(nativeId)),
+						&& (entry.cloudProjectUri === cloudProjectUri || (entry.cwd && acceptedNormCwds.has(normalizeRemoteCwdForCompare(entry.cwd, effectiveTarget.os))))
+						&& matchesRecord(entry),
+					) ?? [...records.values()].find(entry =>
+						entry.engine === engine
+						&& recordCloudAuthority(entry) === effectiveTarget.authority
+						&& matchesRecord(entry),
 					);
 					if (!record) {
 						const now = Date.now();
 						record = acceptCloud(engine, {
-							id: nativeId,
+							id: query,
 							cwd: remoteCwd,
-							label: vscode.l10n.t('{0} Session {1}', engine, nativeId.slice(0, 8)),
+							label: vscode.l10n.t('{0} Session {1}', engine, query.slice(0, 8)),
 							created: now,
 							updated: now,
 							provisional: false,
@@ -2866,17 +3059,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					refresh(engine);
 					return describe(record);
 				}
-				const sessions = await list(engine, token.token);
-				let record = sessions.find(entry => !entry.cloudProjectUri && (entry.id === nativeId || entry.resourceId === nativeId || entry.id.startsWith(nativeId)));
+				const sessions = await list(engine, token.token, project?.scheme === 'file' ? project.fsPath : undefined);
+				let record = sessions.find(entry => !entry.cloudProjectUri && matchesRecord(entry));
 				if (!record) {
 					if (!project || project.scheme !== 'file') {
-						throw new Error(vscode.l10n.t('Conversation {0} was not found in {1}.', nativeId, engine));
+						throw new Error(vscode.l10n.t('Conversation {0} was not found in {1}.', query, engine));
 					}
 					const now = Date.now();
 					record = accept(engine, {
-						id: nativeId,
+						id: query,
 						cwd: project.fsPath,
-						label: vscode.l10n.t('{0} Session {1}', engine, nativeId.slice(0, 8)),
+						label: vscode.l10n.t('{0} Session {1}', engine, query.slice(0, 8)),
 						created: now,
 						updated: now,
 						provisional: false,
@@ -2890,8 +3083,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				token.dispose();
 			}
 		}),
-		vscode.commands.registerCommand('aexus.agentEngines.sessions', async (engineId: string, project?: vscode.Uri) => {
-			const engine = engineId.slice('aexus-'.length);
+		vscode.commands.registerCommand('aexus.agentEngines.sessions', async (engineId: string, rawProject?: vscode.Uri | string) => {
+			const project = parseOptionalUri(rawProject);
+			const engine = engineId.startsWith('aexus-') ? engineId.slice('aexus-'.length) : (ENGINE_ALIASES[engineId.toLowerCase()] ?? engineId);
 			const token = new vscode.CancellationTokenSource();
 			try {
 				if (isCloudUri(project)) {
@@ -2901,10 +3095,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					const requestedCloud = normalizeCloudProjectUriString(project);
 					const requestedRemoteCwd = toRemoteNativePath(project.path || '/', effectiveTarget.os, effectiveTarget.remoteHome);
 					const requestedNorm = normalizeRemoteCwdForCompare(requestedRemoteCwd, effectiveTarget.os);
+					const resolvedRealCwd = await resolveRemoteRealpath(effectiveTarget, requestedRemoteCwd, token.token).catch(() => undefined);
+					const acceptedNormCwds = new Set<string>([requestedNorm]);
+					if (resolvedRealCwd) {
+						acceptedNormCwds.add(normalizeRemoteCwdForCompare(resolvedRealCwd, effectiveTarget.os));
+					}
 					if (info.command) {
-						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token).catch(() => [] as NativeSession[]);
+						const remoteSessions = await runtimeForCloud(engine, effectiveTarget, info.command).list(token.token, requestedRemoteCwd).catch(err => {
+							console.warn(`[aexus-agents] remote session scan failed (${engine}@${effectiveTarget.alias}):`, err);
+							return [] as NativeSession[];
+						});
 						for (const s of remoteSessions) {
-							acceptCloud(engine, s, effectiveTarget);
+							const normalizedCwd = s.cwd ? normalizeRemoteCwdForCompare(s.cwd, effectiveTarget.os) : '';
+							const belongsToRequested = acceptedNormCwds.has(normalizedCwd);
+							const accepted = acceptCloud(
+								engine,
+								belongsToRequested ? { ...s, cwd: requestedRemoteCwd } : s,
+								effectiveTarget,
+								belongsToRequested ? requestedCloud : undefined,
+							);
+							if (belongsToRequested) {
+								accepted.cloudProjectUri = requestedCloud;
+							}
 						}
 						await save();
 						refresh(engine);
@@ -2914,13 +3126,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						.filter(record => record.engine === engine && !record.parentId && recordCloudAuthority(record) === effectiveTarget.authority)
 						.sort((a, b) => b.updated - a.updated);
 					for (const record of matching) {
-						if (record.cloudProjectUri === requestedCloud || (record.cwd && normalizeRemoteCwdForCompare(record.cwd, effectiveTarget.os) === requestedNorm)) {
+						const recCloudNorm = record.cloudProjectUri ? normalizeCloudProjectUriString(vscode.Uri.parse(record.cloudProjectUri)) : undefined;
+						const recCwdNorm = record.cwd ? normalizeRemoteCwdForCompare(record.cwd, effectiveTarget.os) : undefined;
+						if (recCloudNorm === requestedCloud || (recCwdNorm && acceptedNormCwds.has(recCwdNorm))) {
 							result.push(describe(record));
 						}
 					}
 					return result;
 				}
-				const sessions = await list(engine, token.token);
+				const sessions = await list(engine, token.token, project?.scheme === 'file' ? project.fsPath : undefined);
 				const canonical = async (cwd: string) => fs.realpath(cwd).catch(() => path.resolve(cwd));
 				const requestedCwd = project ? await canonical(project.fsPath) : undefined;
 				const result = [];
@@ -3005,39 +3219,90 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				};
 			} finally { token.dispose(); }
 		}),
-		vscode.commands.registerCommand('aexus.agentEngines.stop', (uri: vscode.Uri) => {
+		vscode.commands.registerCommand('aexus.agentEngines.stop', async (uri: vscode.Uri) => {
 			const record = findCachedRecord(uri);
 			if (!record) {
 				return { stopped: false };
 			}
-			const active = activeTurns.get(identity(record));
-			if (active) {
-				active.cancel();
-				return { stopped: true };
+			const stopped = await turnCoordinator.stop(identity(record), 2000);
+			if (stopped) {
+				controllers.get(record.engine)?.items.add(item(record));
+				if (secretaryState && records.get(secretaryState.recordKey) === record) {
+					refreshSecretaryItem();
+				}
 			}
-			return { stopped: false };
+			return { stopped };
 		}),
-		vscode.commands.registerCommand('aexus.agentEngines.killSession', async (uri: vscode.Uri) => {
+		vscode.commands.registerCommand('aexus.agentEngines.notifySystemResume', async () => {
+			notifySystemResume();
+			return { ok: true };
+		}),
+		vscode.commands.registerCommand('aexus.agentEngines.killSession', async (uri: vscode.Uri, options?: { readonly hostAlias?: string }) => {
 			const record = findCachedRecord(uri);
 			if (!record) {
+				// Even after an Electron window reload (when local `records` has not yet populated this session),
+				// derive engine + sessionId from the URI and terminate any orphaned remote persistent session
+				// tree on the Cloud Host so Recall / Stop NEVER leaves runaway GPU / code-editing zombies!
+				const rawScheme = uri?.scheme || '';
+				const engineName = rawScheme.startsWith('aexus-') ? rawScheme.slice('aexus-'.length) : '';
+				const sessionId = (uri?.path || '').replace(/^\/+/, '');
+				if (engineName && sessionId) {
+					const snapAgent = roleBridge.getSnapshot().agents.find(a => a.resource === uri.toString());
+					const parsedSnapProject = snapAgent?.projectPath ? parseCloudProjectUri(snapAgent.projectPath) : undefined;
+					const hostAlias = options?.hostAlias?.trim() || parsedSnapProject?.authority;
+					if (hostAlias) {
+						const target = await resolveCloudHostTarget(hostAlias).catch(() => undefined);
+						if (target && target.os !== 'windows') {
+							await terminateRemotePersistentSessionsByPrefix(
+								target,
+								buildRemotePersistentPrefix(engineName, sessionId),
+								{ killTree: true },
+							).catch(() => undefined);
+							return { killed: true };
+						}
+					}
+				}
 				return { killed: false };
 			}
-			activeTurns.get(identity(record))?.cancel();
-			activeTurns.delete(identity(record));
-			busy.delete(identity(record));
+			await turnCoordinator.forceRelease(identity(record));
 			const resolved = await tryRuntimeForRecord(record).catch(() => undefined);
 			if (resolved) {
 				await resolved.engine.killSession?.(record).catch(() => undefined);
+				if (resolved.engine.remoteTarget && resolved.engine.remoteTarget.os !== 'windows' && record.resourceId && record.resourceId !== record.id) {
+					await terminateRemotePersistentSessionsByPrefix(
+						resolved.engine.remoteTarget,
+						buildRemotePersistentPrefix(record.engine, record.resourceId),
+						{ killTree: true },
+					).catch(() => undefined);
+				}
+			} else if (options?.hostAlias?.trim()) {
+				const target = await resolveCloudHostTarget(options.hostAlias.trim()).catch(() => undefined);
+				if (target && target.os !== 'windows') {
+					await terminateRemotePersistentSessionsByPrefix(
+						target,
+						buildRemotePersistentPrefix(record.engine, record.id),
+						{ killTree: true },
+					).catch(() => undefined);
+				}
 			}
 			controllers.get(record.engine)?.items.add(item(record));
+			if (secretaryState && records.get(secretaryState.recordKey) === record) {
+				refreshSecretaryItem();
+			}
 			return { killed: true };
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.listConfiguredModels', async (rawProject?: vscode.Uri | string): Promise<Record<string, readonly { readonly id: string; readonly label: string }[]>> => {
 			const out: Record<string, readonly { readonly id: string; readonly label: string }[]> = {};
 			const parsedProject = parseOptionalUri(rawProject);
-			const remoteTarget = isCloudUri(parsedProject)
+			let remoteTarget = isCloudUri(parsedProject)
 				? await resolveCloudHostTarget(parsedProject.authority).catch(() => undefined)
 				: undefined;
+			if (remoteTarget && !remoteTarget.remoteHome) {
+				const probed = await probeRemoteEngines(remoteTarget).catch(() => undefined);
+				if (probed?.target) {
+					remoteTarget = probed.target;
+				}
+			}
 			const cwd = isCloudUri(parsedProject) && remoteTarget
 				? toRemoteNativePath(parsedProject.path || '/', remoteTarget.os, remoteTarget.remoteHome)
 				: (parsedProject?.scheme === 'file' ? parsedProject.fsPath : defaultCwd());
@@ -3051,17 +3316,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				'aexus-cline': ['cline', 'aexus-cline'],
 				'aexus-pi': ['pi', 'aexus-pi'],
 			};
-			for (const def of definitions) {
-				const caps = getCachedRuntimeCaps(def.id, cwd, remoteTarget?.authority);
-				const items = (await discoverEngineModels(def.type, cwd, caps.models, caps.defaultModel, [], remoteTarget))
-					.filter(m => m.id !== 'default')
-					.map(m => ({ id: m.id, label: m.name !== m.id ? `${m.name} (${m.id})` : m.id }));
-				if (items.length > 0) {
-					for (const aliasKey of legacyKeys[def.type]) {
-						out[aliasKey] = items;
+			await Promise.all(definitions.map(async def => {
+				try {
+					const caps = getCachedRuntimeCaps(def.id, cwd, remoteTarget?.authority);
+					const items = (await discoverEngineModels(def.type, cwd, caps.models, caps.defaultModel, [], remoteTarget))
+						.filter(m => m.id !== 'default')
+						.map(m => ({ id: m.id, label: m.name !== m.id ? `${m.name} (${m.id})` : m.id }));
+					if (items.length > 0) {
+						for (const aliasKey of legacyKeys[def.type]) {
+							out[aliasKey] = items;
+						}
 					}
-				}
-			}
+				} catch { /* Non-fatal single-engine model discovery failure */ }
+			}));
 			return out;
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.dispatchEngineeringTurn', async (
@@ -3069,6 +3336,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			rawPrompt: string,
 			rawOptions?: {
 				agentId?: string;
+				missionId?: string;
+				nodeId?: string;
 				model?: string;
 				thinking?: EngineThinkingLevel;
 				pureWorker?: boolean;
@@ -3076,6 +3345,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				isMissionNode?: boolean;
 				autonomousApproved?: boolean;
 				sandboxMode?: string;
+				preferReattach?: boolean;
 			},
 		) => {
 			const lookupToken = new vscode.CancellationTokenSource();
@@ -3086,135 +3356,182 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				lookupToken.dispose();
 			}
 
+			record.resourceId ??= record.id;
 			const recordKey = identity(record);
-			if (busy.has(recordKey)) {
-				activeTurns.get(recordKey)?.cancel();
-				await new Promise(resolve => setTimeout(resolve, 120));
+			const forceKillRecord = async () => {
+				const resolved = await tryRuntimeForRecord(record).catch(() => undefined);
+				if (resolved) {
+					await resolved.engine.killSession?.(record).catch(() => undefined);
+				}
+			};
+			const lease = await turnCoordinator.acquire({
+				key: recordKey,
+				source: 'headless',
+				createCts: () => new vscode.CancellationTokenSource(),
+				forceKill: forceKillRecord,
+				graceTimeoutMs: 2500,
+			});
+			if (!lease) {
+				return {
+					reply: '',
+					nativeId: record.id,
+					stopped: true,
+					usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 0 },
+				};
 			}
 
-			const turnCancellation = new vscode.CancellationTokenSource();
-			busy.add(recordKey);
-			activeTurns.set(recordKey, turnCancellation);
-			controllers.get(record.engine)?.items.add(item(record));
-
-			const snapEntryForDispatch = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
-			const isMissionNodeDispatch = Boolean(rawOptions?.isMissionNode ?? snapEntryForDispatch?.isMissionNode);
-			const isPureWorker = Boolean(rawOptions?.pureWorker) && !isMissionNodeDispatch;
-			let finalPrompt = rawPrompt;
-			let callerRole: string | undefined;
-			let alreadyInit = false;
-			let headlessPromptHash: string | undefined;
-			let headlessTrimmedInjected: string | undefined;
-			let headlessPendingDelta: string | undefined;
-			if (!isPureWorker) {
-				const snapEntry = snapEntryForDispatch;
-				callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
-				headlessPromptHash = snapEntry?.rolePrompt?.trim() ? hashRolePrompt(snapEntry.rolePrompt) : undefined;
-				alreadyInit = Boolean(
-					callerRole
-					&& record.roleInit
-					&& record.roleInit.engine === record.engine
-					&& record.roleInit.rank === callerRole
-					&& (
-						headlessPromptHash
-							? record.roleInit.promptHash === headlessPromptHash
-							: Boolean(record.roleInit.promptHash)
-					),
-				);
-				const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
-					'aexus.ade.resolvePromptContext',
-					alreadyInit
-						? { ...(rawOptions?.agentId ? { agentId: rawOptions.agentId } : {}), resource: uri, mode: 'delta' }
-						: (rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri),
-				)).catch(() => undefined);
-				headlessTrimmedInjected = injected?.trim();
-				if (headlessTrimmedInjected) {
-					if (!alreadyInit || headlessTrimmedInjected !== record.lastDeltaContext) {
-						finalPrompt = `${headlessTrimmedInjected}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${rawPrompt}`;
-						if (alreadyInit) {
-							headlessPendingDelta = headlessTrimmedInjected;
+			const turnCancellation = lease.cts;
+			let streamedMarkdown = '';
+			let activeEngine: EngineRuntime | undefined;
+			let finalizeTurnUsage: ((engine: EngineRuntime, replyText: string) => EngineTurnTokenUsage & { turns: number }) | undefined;
+			try {
+				controllers.get(record.engine)?.items.add(item(record));
+				if (secretaryState && records.get(secretaryState.recordKey) === record) {
+					refreshSecretaryItem();
+				}
+				const snapEntryForDispatch = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
+				const isMissionNodeDispatch = Boolean(rawOptions?.isMissionNode ?? snapEntryForDispatch?.isMissionNode);
+				const isPureWorker = Boolean(rawOptions?.pureWorker) && !isMissionNodeDispatch;
+				let finalPrompt = rawPrompt;
+				let callerRole: string | undefined;
+				let alreadyInit = false;
+				let headlessPromptHash: string | undefined;
+				let headlessTrimmedInjected: string | undefined;
+				let headlessPendingDelta: string | undefined;
+				if (!isPureWorker) {
+					const snapEntry = snapEntryForDispatch;
+					callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
+					headlessPromptHash = snapEntry?.rolePrompt?.trim() ? hashRolePrompt(snapEntry.rolePrompt) : undefined;
+					alreadyInit = Boolean(
+						callerRole
+						&& record.roleInit
+						&& record.roleInit.engine === record.engine
+						&& record.roleInit.rank === callerRole
+						&& (
+							headlessPromptHash
+								? record.roleInit.promptHash === headlessPromptHash
+								: Boolean(record.roleInit.promptHash)
+						),
+					);
+					const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
+						'aexus.ade.resolvePromptContext',
+						alreadyInit
+							? { ...(rawOptions?.agentId ? { agentId: rawOptions.agentId } : {}), resource: uri, mode: 'delta' }
+							: (rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri),
+					)).catch(() => undefined);
+					headlessTrimmedInjected = injected?.trim();
+					if (headlessTrimmedInjected) {
+						if (!alreadyInit || headlessTrimmedInjected !== record.lastDeltaContext) {
+							finalPrompt = `${headlessTrimmedInjected}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${rawPrompt}`;
+							if (alreadyInit) {
+								headlessPendingDelta = headlessTrimmedInjected;
+							}
 						}
 					}
 				}
-			}
 
-			let streamedMarkdown = '';
-			let lastHeartbeatSent = 0;
-			const emitHeartbeat = () => {
-				const now = Date.now();
-				if (now - lastHeartbeatSent >= 1000) {
-					lastHeartbeatSent = now;
-					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', uri.toString(), now)).catch(() => undefined);
-				}
-			};
+				let lastHeartbeatSent = 0;
+				const emitHeartbeat = () => {
+					const now = Date.now();
+					if (now - lastHeartbeatSent >= 1000) {
+						lastHeartbeatSent = now;
+						void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', uri.toString(), now)).catch(() => undefined);
+					}
+				};
 
-			const headlessStreamTarget: vscode.ChatResponseStream = Object.create(null);
-			const headlessStream: vscode.ChatResponseStream = new Proxy(headlessStreamTarget, {
-				get(_dummy, prop) {
-					if (prop === 'markdown') {
-						return (value: string | vscode.MarkdownString) => {
-							const textChunk = typeof value === 'string' ? value : value.value;
-							if (textChunk) {
-								streamedMarkdown += textChunk;
+				const headlessStreamTarget: vscode.ChatResponseStream = Object.create(null);
+				const headlessStream: vscode.ChatResponseStream = new Proxy(headlessStreamTarget, {
+					get(_dummy, prop) {
+						if (prop === 'markdown') {
+							return (value: string | vscode.MarkdownString) => {
+								const textChunk = typeof value === 'string' ? value : value.value;
+								if (textChunk) {
+									streamedMarkdown += textChunk;
+									emitHeartbeat();
+								}
+							};
+						}
+						if (prop === 'progress') {
+							return () => {
 								emitHeartbeat();
-							}
-						};
-					}
-					if (prop === 'progress') {
-						return () => {
-							emitHeartbeat();
-						};
-					}
-					return () => { };
-				},
-			});
+							};
+						}
+						return () => { };
+					},
+				});
 
-			const turnStartedAt = Date.now();
-			const reportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
-			let lastInterimReportAt = 0;
-			const reportInterimUsage = (cumulative: EngineTurnTokenUsage) => {
-				const now = Date.now();
-				if (now - lastInterimReportAt < 1200) {
-					return;
-				}
-				const delta = {
-					inputTokens: Math.max(0, cumulative.inputTokens - reportedSoFar.inputTokens),
-					outputTokens: Math.max(0, cumulative.outputTokens - reportedSoFar.outputTokens),
-					cacheReadTokens: Math.max(0, (cumulative.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
-					cacheWriteTokens: Math.max(0, (cumulative.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
-					totalTokens: Math.max(0, cumulative.totalTokens - reportedSoFar.totalTokens),
+				const turnStartedAt = Date.now();
+				const headlessInjectedContract = (!alreadyInit || headlessPendingDelta !== undefined) ? headlessTrimmedInjected : undefined;
+				const reportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+				let lastInterimReportAt = 0;
+				const reportInterimUsage = (cumulative: EngineTurnTokenUsage) => {
+					const now = Date.now();
+					if (now - lastInterimReportAt < 1200) {
+						return;
+					}
+					const delta = {
+						inputTokens: Math.max(0, cumulative.inputTokens - reportedSoFar.inputTokens),
+						outputTokens: Math.max(0, cumulative.outputTokens - reportedSoFar.outputTokens),
+						cacheReadTokens: Math.max(0, (cumulative.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
+						cacheWriteTokens: Math.max(0, (cumulative.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
+						totalTokens: Math.max(0, cumulative.totalTokens - reportedSoFar.totalTokens),
+					};
+					if (delta.totalTokens === 0 && delta.inputTokens === 0 && delta.outputTokens === 0) {
+						return;
+					}
+					lastInterimReportAt = now;
+					reportedSoFar.inputTokens += delta.inputTokens;
+					reportedSoFar.outputTokens += delta.outputTokens;
+					reportedSoFar.cacheReadTokens += delta.cacheReadTokens;
+					reportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
+					reportedSoFar.totalTokens += delta.totalTokens;
+					const segments = computeMeasuredContextSegments({
+						injectedContractText: headlessInjectedContract,
+						rawPrompt,
+						finalPrompt,
+						usage: cumulative,
+						isFirstTurn: !alreadyInit,
+					});
+					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
+						sessionResource: uri.toString(),
+						agentId: rawOptions?.agentId,
+						missionId: rawOptions?.missionId,
+						nodeId: rawOptions?.nodeId,
+						usage: { ...delta, ...segments, model: rawOptions?.model, turns: 0 },
+					})).catch(() => undefined);
 				};
-				if (delta.totalTokens === 0 && delta.inputTokens === 0 && delta.outputTokens === 0) {
-					return;
-				}
-				lastInterimReportAt = now;
-				reportedSoFar.inputTokens += delta.inputTokens;
-				reportedSoFar.outputTokens += delta.outputTokens;
-				reportedSoFar.cacheReadTokens += delta.cacheReadTokens;
-				reportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
-				reportedSoFar.totalTokens += delta.totalTokens;
-				void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
-					sessionResource: uri.toString(),
-					agentId: rawOptions?.agentId,
-					usage: { ...delta, turns: 0 },
-				})).catch(() => undefined);
-			};
-			const finalizeTurnUsage = (engine: EngineRuntime, replyText: string) => {
-				const finalUsage = resolveCompletedTurnUsage(engine, record.id, finalPrompt, replyText, turnStartedAt);
-				return {
-					inputTokens: Math.max(0, finalUsage.inputTokens - reportedSoFar.inputTokens),
-					outputTokens: Math.max(0, finalUsage.outputTokens - reportedSoFar.outputTokens),
-					cacheReadTokens: Math.max(0, (finalUsage.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
-					cacheWriteTokens: Math.max(0, (finalUsage.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
-					totalTokens: Math.max(0, finalUsage.totalTokens - reportedSoFar.totalTokens),
-					durationMs: finalUsage.durationMs,
-					costUsd: finalUsage.costUsd,
-					turns: 1,
-					estimated: finalUsage.estimated,
+				finalizeTurnUsage = (engine: EngineRuntime, replyText: string) => {
+					const finalUsage = resolveCompletedTurnUsage(engine, record.id, finalPrompt, replyText, turnStartedAt);
+					const segments = computeMeasuredContextSegments({
+						injectedContractText: headlessInjectedContract,
+						rawPrompt,
+						finalPrompt,
+						usage: finalUsage,
+						isFirstTurn: !alreadyInit,
+					});
+					return {
+						inputTokens: Math.max(0, finalUsage.inputTokens - reportedSoFar.inputTokens),
+						outputTokens: Math.max(0, finalUsage.outputTokens - reportedSoFar.outputTokens),
+						cacheReadTokens: Math.max(0, (finalUsage.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
+						cacheWriteTokens: Math.max(0, (finalUsage.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
+						totalTokens: Math.max(0, finalUsage.totalTokens - reportedSoFar.totalTokens),
+						...segments,
+						durationMs: finalUsage.durationMs,
+						costUsd: finalUsage.costUsd,
+						turns: 1,
+						estimated: finalUsage.estimated,
+					};
 				};
-			};
-			let activeEngine: EngineRuntime | undefined;
-			try {
+
+				if (turnCancellation.token.isCancellationRequested) {
+					return {
+						reply: '',
+						nativeId: record.id,
+						stopped: true,
+						usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 0 },
+					};
+				}
+
 				const resolvedEng = await runtimeForRecord(record);
 				const engine = resolvedEng.engine;
 				activeEngine = engine;
@@ -3247,15 +3564,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					},
 				};
 				if (engine.prepareSession) {
-					await engine.prepareSession(record, headlessSendOptions);
-					if (record.id !== prevId) {
-						records.delete(key(record.engine, prevId));
-						records.set(key(record.engine, record.id), record);
-					}
+					await engine.prepareSession(record, headlessSendOptions, turnCancellation.token);
+					syncRecordStorageKey(record, prevId);
 					await save();
 				}
+				if (turnCancellation.token.isCancellationRequested) {
+					return {
+						reply: '',
+						nativeId: record.id,
+						stopped: true,
+						usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 0 },
+					};
+				}
 				lastTurnErrors.delete(recordKey);
-				await engine.send(record, finalPrompt, headlessStream, turnCancellation.token, headlessSendOptions);
+				const preSendId = record.id;
+				let reattached = false;
+				if (rawOptions?.preferReattach && engine.reattachIfRunning) {
+					const reattachOutcome = await engine.reattachIfRunning(record, headlessStream, turnCancellation.token, {
+						...headlessSendOptions,
+						preferReattach: true,
+					}).catch(() => 'not_running' as const);
+					reattached = reattachOutcome === 'reattached';
+				}
+				if (!reattached) {
+					await engine.send(record, finalPrompt, headlessStream, turnCancellation.token, headlessSendOptions);
+				}
+				syncRecordStorageKey(record, preSendId);
 				// Commit roleInit ONLY after engine.send succeeds (and unless auto-compaction reset it during the turn).
 				if (contextCompactedDuringTurn) {
 					record.roleInit = undefined;
@@ -3279,26 +3613,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					reply: streamedMarkdown.trim(),
 					nativeId: record.id,
 					stopped: turnCancellation.token.isCancellationRequested,
+					...(reattached ? { reattached: true } : {}),
 					usage: finalizeTurnUsage(engine, streamedMarkdown),
 				};
 			} catch (error) {
-				if (turnCancellation.token.isCancellationRequested) {
+				if (turnCancellation.token.isCancellationRequested || error instanceof vscode.CancellationError) {
 					return {
 						reply: streamedMarkdown.trim(),
 						nativeId: record.id,
 						stopped: true,
-						usage: activeEngine ? finalizeTurnUsage(activeEngine, streamedMarkdown) : { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 1 },
+						usage: activeEngine && finalizeTurnUsage ? finalizeTurnUsage(activeEngine, streamedMarkdown) : { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 1 },
 					};
 				}
 				const errText = error instanceof Error ? error.message : String(error);
 				lastTurnErrors.set(identity(record), errText);
 				throw error;
 			} finally {
+				lease.markSettling();
 				turnCancellation.dispose();
-				activeTurns.delete(recordKey);
-				busy.delete(recordKey);
+				turnCoordinator.release(lease);
 				if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
 					controllers.get(record.engine)?.items.add(item(record));
+				}
+				if (secretaryState && records.get(secretaryState.recordKey) === record) {
+					refreshSecretaryItem();
 				}
 				notifyCloudProjectMutated(record.cloudProjectUri);
 				await publishHistory(record).catch(() => undefined);
@@ -3395,26 +3733,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		if (!record) { return; }
 		if (record.id === realNativeId && !record.provisional && !record.unmaterialized) { return; }
 
-		const oldKey = key(record.engine, record.id);
-		const nextKey = key(record.engine, realNativeId);
-		const existingReal = records.get(nextKey);
+		const prevId = record.id;
+		const nextPlainKey = key(record.engine, realNativeId);
+		const existingReal = records.get(nextPlainKey);
 		record.resourceId ??= record.id;
-		if (existingReal && existingReal !== record) {
+		if (existingReal && existingReal !== record && recordCloudAuthority(existingReal) === recordCloudAuthority(record)) {
 			record.file ??= existingReal.file;
 			record.created ||= existingReal.created;
 			record.updated = Math.max(record.updated, existingReal.updated);
 		}
-		if (oldKey !== nextKey && records.get(oldKey) === record) {
-			records.delete(oldKey);
-		}
 		record.id = realNativeId;
 		record.provisional = false;
 		record.unmaterialized = false;
-		records.set(nextKey, record);
+		syncRecordStorageKey(record, prevId);
 		controllers.get(record.engine)?.items.add(item(record));
+		if (secretaryState && records.get(secretaryState.recordKey) === record) {
+			refreshSecretaryItem();
+		}
 		void save();
 	};
 
+	const lastSyncedAgentPrefs = new Map<string, { model?: string; thinking?: string }>();
 	const syncPreferencesFromSnapshot = (snapshot: RoleSyncSnapshot) => {
 		let dirty = false;
 		for (const agentEntry of snapshot.agents) {
@@ -3432,18 +3771,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				continue;
 			}
 			const cfg = (rec.sessionConfig ??= {});
+			const prev = lastSyncedAgentPrefs.get(agentEntry.resource) ?? {};
 			let recUpdated = false;
-			if (agentEntry.preferredModel && (!cfg.model || cfg.model === 'default') && cfg.model !== agentEntry.preferredModel) {
-				cfg.model = agentEntry.preferredModel;
-				recUpdated = true;
+			if (agentEntry.preferredModel) {
+				const prefChanged = prev.model !== undefined && prev.model !== agentEntry.preferredModel;
+				if ((prefChanged || !cfg.model || cfg.model === 'default') && cfg.model !== agentEntry.preferredModel) {
+					cfg.model = agentEntry.preferredModel;
+					recUpdated = true;
+				}
+				prev.model = agentEntry.preferredModel;
 			}
-			if (agentEntry.preferredThinking && (!cfg.thinking || cfg.thinking === 'default')) {
+			if (agentEntry.preferredThinking) {
 				const mappedThinking = agentEntry.preferredThinking === 'none' ? 'off' : agentEntry.preferredThinking;
-				if (cfg.thinking !== mappedThinking) {
+				const prefChanged = prev.thinking !== undefined && prev.thinking !== mappedThinking;
+				if ((prefChanged || !cfg.thinking || cfg.thinking === 'default') && cfg.thinking !== mappedThinking) {
 					cfg.thinking = mappedThinking;
 					recUpdated = true;
 				}
+				prev.thinking = mappedThinking;
 			}
+			lastSyncedAgentPrefs.set(agentEntry.resource, prev);
 			if (recUpdated) {
 				dirty = true;
 				void notifySessionOptionsUpdated(`aexus-${rec.engine}`, uri, true);
@@ -3544,6 +3891,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await roleBridge.updateSnapshot(enriched);
 		}),
 	);
+
+	void Promise.resolve(vscode.commands.executeCommand<number>('aexus.ade.getWindowId'))
+		.then(wid => {
+			if (typeof wid === 'number' && Number.isInteger(wid) && wid > 0) {
+				setHostWindowId(wid);
+			}
+		})
+		.catch(() => undefined);
 
 	void Promise.resolve(vscode.commands.executeCommand<RoleSyncSnapshot>('aexus.ade.getRoleSyncSnapshot'))
 		.then(async initialSnapshot => {

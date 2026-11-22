@@ -57,8 +57,11 @@ const ADE_CONTROL_ENV_KEY_SET = new Set<string>([
 	'AEXUS_ADE_SOCKET',
 	'AEXUS_ADE_TCP_PORT',
 	'AEXUS_ADE_REMOTE_BRIDGE_PORT',
+	'AEXUS_ADE_REMOTE_BRIDGE_SOCKET',
+	'AEXUS_ADE_REMOTE_BRIDGE_FILE',
 	'AEXUS_ADE_SESSION_TOKEN',
 	'AEXUS_ADE_CALLER',
+	'AEXUS_ADE_WINDOW_ID',
 ]);
 
 function stripLocalAdeControlEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -144,6 +147,7 @@ const HOST_CONTEXT_TTL_MS = 15_000;
 const ENGINE_PROBE_OK_TTL_MS = 30_000;
 const ENGINE_PROBE_ERR_TTL_MS = 4_000;
 const REMOTE_FILE_CACHE_TTL_MS = 12_000;
+const REMOTE_REALPATH_CACHE_TTL_MS = 30_000;
 
 interface CacheItem<T> {
 	readonly value: T;
@@ -154,6 +158,7 @@ const hostTargetCache = new Map<string, CacheItem<CloudHostTarget>>();
 const remoteProbeCache = new Map<string, CacheItem<RemoteEngineProbeResult>>();
 const remoteProbePending = new Map<string, Promise<RemoteEngineProbeResult>>();
 const remoteFileCache = new Map<string, CacheItem<string | undefined>>();
+const remoteRealpathCache = new Map<string, CacheItem<string | undefined>>();
 let cacheEpoch = 0;
 
 export function normalizeCloudAuthority(authority: string): string {
@@ -266,6 +271,22 @@ export function normalizeRemoteCwdForCompare(cwd: string, hostOs: CloudHostOs): 
 	return posixNorm.length > 1 && posixNorm.endsWith('/') ? posixNorm.slice(0, -1) : posixNorm;
 }
 
+/**
+ * Encodes a project working directory into Claude Code's canonical `~/.claude/projects/<slug>` folder name.
+ */
+export function encodeClaudeProjectSlug(cwd: string): string {
+	const trimmed = cwd.trim().replace(/[\\/]+$/, '') || (cwd.includes('\\') ? cwd.trim() : '/');
+	return trimmed.replace(/[^A-Za-z0-9-]/g, '-');
+}
+
+/**
+ * Encodes a project working directory into Pi's canonical `~/.pi/agent/sessions/--<slug>--` folder name.
+ */
+export function encodePiProjectSlug(cwd: string): string {
+	const stripped = cwd.trim().replace(/[\\/]+$/, '').replace(/^[\\/]+/, '');
+	return `--${stripped.replace(/[\\/:]/g, '-')}--`;
+}
+
 export function joinRemotePath(hostOs: CloudHostOs, ...segments: string[]): string {
 	if (hostOs === 'windows') {
 		return path.win32.join(...segments);
@@ -364,6 +385,7 @@ export function clearCloudTransportCaches(authority?: string): void {
 		remoteProbeCache.clear();
 		remoteProbePending.clear();
 		remoteFileCache.clear();
+		remoteRealpathCache.clear();
 		return;
 	}
 	const norm = normalizeCloudAuthority(authority);
@@ -373,6 +395,11 @@ export function clearCloudTransportCaches(authority?: string): void {
 	for (const cacheKey of [...remoteFileCache.keys()]) {
 		if (cacheKey.startsWith(`${norm}|`)) {
 			remoteFileCache.delete(cacheKey);
+		}
+	}
+	for (const cacheKey of [...remoteRealpathCache.keys()]) {
+		if (cacheKey.startsWith(`${norm}|`)) {
+			remoteRealpathCache.delete(cacheKey);
 		}
 	}
 }
@@ -434,7 +461,7 @@ export function extractForwardableRemoteEnv(env: NodeJS.ProcessEnv | undefined):
  */
 export function buildPosixPathAugmentSnippet(): string {
 	return [
-		`for _aex_d in "$HOME/.aexus-code/remote-bin" "$HOME/.npm-global/bin" "$HOME/.local/bin" "$HOME/.claude/local" "$HOME/.cargo/bin" "$HOME/.gemini/bin" "$HOME/.opencode/bin" "$HOME/.bun/bin" "$HOME/.volta/bin" "$HOME/.asdf/shims" "$HOME/.local/share/mise/shims" "/opt/homebrew/bin" "/usr/local/bin"; do`,
+		`for _aex_d in "$HOME/.aexus-code/remote-bin" "$HOME/.npm-global/bin" "$HOME/.local/bin" "$HOME/bin" "$HOME/.claude/local" "$HOME/.cargo/bin" "$HOME/.gemini/bin" "$HOME/.opencode/bin" "$HOME/.bun/bin" "$HOME/.local/share/pnpm" "$HOME/.yarn/bin" "$HOME/.volta/bin" "$HOME/.asdf/shims" "$HOME/.local/share/mise/shims" "/opt/homebrew/bin" "/usr/local/bin"; do`,
 		`  [ -d "$_aex_d" ] && case ":$PATH:" in *":$_aex_d:"*) ;; *) PATH="$_aex_d:$PATH" ;; esac`,
 		`done`,
 		`if [ -d "$HOME/.nvm/versions/node" ]; then`,
@@ -443,6 +470,209 @@ export function buildPosixPathAugmentSnippet(): string {
 		`fi`,
 		`export PATH`,
 	].join('\n');
+}
+
+export interface RemoteExecOptions {
+	readonly killOnStdinClose?: boolean;
+	/**
+	 * When set on a POSIX Cloud Host, hosts the remote agent inside a SIGHUP-immune persistent
+	 * session (`tmux` when installed, falling back to detached `nohup`) with its own isolated
+	 * POSIX session/process group (`setsid`) under `~/.aexus-code/remote-sessions/<id>` so laptop
+	 * sleep or brief Wi-Fi/SSH drops do NOT terminate the running remote agent. Re-spawning with
+	 * the same ID reattaches to its live output stream without launching a duplicate process.
+	 */
+	readonly persistentSessionId?: string;
+	/**
+	 * When true alongside `persistentSessionId`, only attaches to an already-existing live or
+	 * recently finished persistent session without spawning a new process (exits with code 44 if
+	 * no matching session exists on the remote host).
+	 */
+	readonly attachOnly?: boolean;
+	/**
+	 * 0-based byte offset into `out.log` when reattaching to an existing persistent remote session
+	 * so already-delivered stdout lines are not replayed.
+	 */
+	readonly attachByteOffset?: number;
+	/** Optional SSH ServerAliveInterval override in seconds (defaults to 20 for long-running engines). */
+	readonly sshServerAliveIntervalSec?: number;
+	/** Optional SSH ServerAliveCountMax override (defaults to 6 for long-running engines). */
+	readonly sshServerAliveCountMax?: number;
+}
+
+export interface RemotePersistentSessionInfo {
+	readonly id: string;
+	readonly alive: boolean;
+	readonly pid?: number;
+	readonly pgid?: number;
+	readonly exitCode?: number;
+	readonly outBytes: number;
+	readonly startedAt?: number;
+}
+
+export interface TerminateRemoteSessionOptions {
+	/**
+	 * When true (default — used on Recall / Stop / Cancel / Dispose), kills the ENTIRE remote
+	 * process group (`-PGID`) AND walks all descendant processes recursively (`SIGTERM` -> `SIGKILL`)
+	 * so GPU training / build / subshell child processes NEVER become runaway cloud zombies.
+	 * When false (used on graceful turn completion), only stops the agent process itself so
+	 * intentionally detached background jobs (e.g. `token block --watch-pid`) remain alive.
+	 */
+	readonly killTree?: boolean;
+}
+
+const systemResumeListeners = new Set<() => void>();
+
+/**
+ * Subscribe to OS resume / network recovery notifications forwarded from Electron main `powerMonitor`
+ * so sleeping SSH reattach loops wake immediately instead of waiting out backoff intervals.
+ */
+export function onSystemResume(listener: () => void): { dispose(): void } {
+	systemResumeListeners.add(listener);
+	return {
+		dispose: () => {
+			systemResumeListeners.delete(listener);
+		},
+	};
+}
+
+/**
+ * Wakes all sleeping SSH reattach loops and triggers immediate healing of any dropped
+ * SSH reverse control bridges.
+ */
+export function notifySystemResume(): void {
+	for (const listener of Array.from(systemResumeListeners)) {
+		try {
+			listener();
+		} catch { /* Never let one listener break others. */ }
+	}
+	void healAllRemoteControlBridges();
+}
+
+export function sanitizePersistentSessionId(raw: string): string {
+	const cleaned = raw.trim().replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '');
+	return (cleaned || 'session').slice(0, 64);
+}
+
+function fnv1aHash32Hex(input: string, seed: number): string {
+	let hash = seed >>> 0;
+	for (let i = 0; i < input.length; i++) {
+		hash ^= input.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Computes a collision-resistant, deterministic, POSIX/tmux-safe session prefix shared identically
+ * between the Electron renderer (Watchdog snapshots) and the extension host (SSH persistent sessions),
+ * enabling post-reload reattach AND guaranteed full process-tree kill on Recall / Stop.
+ */
+export function buildRemotePersistentPrefix(engineId: string, scopeOrSessionId: string): string {
+	const normEngine = engineId.trim().toLowerCase().replace(/^aexus-/, '').replace(/[^a-z0-9]+/g, '').slice(0, 12) || 'agent';
+	const rawKey = scopeOrSessionId.trim() || 'session';
+	const safeHead = rawKey.replace(/[^A-Za-z0-9]+/g, '').slice(0, 10) || 's';
+	const h1 = fnv1aHash32Hex(rawKey, 0x811c9dc5);
+	const h2 = fnv1aHash32Hex(`${normEngine}:${rawKey}`, 0x9e3779b9);
+	return sanitizePersistentSessionId(`${normEngine}-${safeHead}-${h1}${h2.slice(0, 4)}`);
+}
+
+/**
+ * Pure POSIX sh helper functions that isolate a spawned command in its own process group (`setsid`
+ * with `python3` / `perl` fallbacks for macOS & minimal Linux) and surgically kill a full process
+ * group + recursive descendant tree without ever signalling the cleanup shell itself.
+ */
+function buildPosixProcessTreeHelpers(): string[] {
+	return [
+		`_aex_my_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' \\t\\r\\n' || true)`,
+		`_aex_collect_tree() {`,
+		`  _queue="$*"`,
+		`  _seen=""`,
+		`  _table=$(ps -eo pid=,ppid= 2>/dev/null || ps -o pid,ppid 2>/dev/null | tail -n +2 || true)`,
+		`  while [ -n "$_queue" ]; do`,
+		`    _next=""`,
+		`    for _p in $_queue; do`,
+		`      case "$_p" in ''|*[!0-9]*) continue ;; esac`,
+		`      [ "$_p" = "$$" ] && continue`,
+		`      case " $_seen " in *" $_p "*) continue ;; esac`,
+		`      _seen="$_seen $_p"`,
+		`      _kids=$(printf '%s\\n' "$_table" | while read -r _cp _cpp; do [ "$_cpp" = "$_p" ] && printf '%s ' "$_cp"; done)`,
+		`      for _k in $_kids; do`,
+		`        case " $_seen $_next " in *" $_k "*) continue ;; esac`,
+		`        _next="$_next $_k"`,
+		`      done`,
+		`    done`,
+		`    _queue="$_next"`,
+		`  done`,
+		`  printf '%s' "$_seen"`,
+		`}`,
+		`_aex_kill_pgid_and_tree() {`,
+		`  _sig="$1"; shift`,
+		`  _pgid="$1"; shift`,
+		`  _roots="$*"`,
+		`  if [ -n "$_pgid" ]; then`,
+		`    case "$_pgid" in ''|*[!0-9]*) ;; *)`,
+		`      if [ "$_pgid" -gt 1 ] 2>/dev/null && [ "$_pgid" != "$_aex_my_pgid" ]; then`,
+		`        kill "-$_sig" -- "-$_pgid" 2>/dev/null || kill "-$_sig" "-$_pgid" 2>/dev/null || true`,
+		`      fi`,
+		`    ;; esac`,
+		`  fi`,
+		`  _tree=$(_aex_collect_tree $_roots)`,
+		`  for _tp in $_tree $_roots; do`,
+		`    case "$_tp" in ''|*[!0-9]*) continue ;; esac`,
+		`    [ "$_tp" = "$$" ] && continue`,
+		`    kill "-$_sig" "$_tp" 2>/dev/null || true`,
+		`  done`,
+		`}`,
+		`_aex_any_alive() {`,
+		`  for _ap in $*; do`,
+		`    case "$_ap" in ''|*[!0-9]*) continue ;; esac`,
+		`    [ "$_ap" = "$$" ] && continue`,
+		`    if kill -0 "$_ap" 2>/dev/null; then return 0; fi`,
+		`  done`,
+		`  return 1`,
+		`}`,
+		`_aex_terminate_session_dir() {`,
+		`  _sd="$1"`,
+		`  _tm="$2"`,
+		`  _kt="$3"`,
+		`  _pid=""`,
+		`  _pgid=""`,
+		`  _rpid=""`,
+		`  [ -f "$_sd/agent.pid" ] && _pid=$(tr -d ' \\t\\r\\n' < "$_sd/agent.pid" 2>/dev/null || true)`,
+		`  [ -f "$_sd/agent.pgid" ] && _pgid=$(tr -d ' \\t\\r\\n' < "$_sd/agent.pgid" 2>/dev/null || true)`,
+		`  [ -f "$_sd/runner.pid" ] && _rpid=$(tr -d ' \\t\\r\\n' < "$_sd/runner.pid" 2>/dev/null || true)`,
+		`  if [ -n "$_pid" ]; then`,
+		`    _live_pgid=$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' \\t\\r\\n' || true)`,
+		`    if [ -n "$_live_pgid" ]; then _pgid="$_live_pgid"; fi`,
+		`  fi`,
+		`  if [ "$_kt" = "1" ]; then`,
+		`    _aex_kill_pgid_and_tree TERM "$_pgid" $_pid $_rpid`,
+		`    command -v tmux >/dev/null 2>&1 && [ -n "$_tm" ] && tmux kill-session -t "$_tm" 2>/dev/null || true`,
+		`    _w=0`,
+		`    while [ "$_w" -lt 4 ]; do`,
+		`      _rem=$(_aex_collect_tree $_pid $_rpid)`,
+		`      if ! _aex_any_alive $_rem $_pid $_rpid; then break; fi`,
+		`      sleep 0.1`,
+		`      _w=$((_w + 1))`,
+		`    done`,
+		`    _aex_kill_pgid_and_tree KILL "$_pgid" $_pid $_rpid`,
+		`  else`,
+		`    if [ -n "$_pid" ]; then`,
+		`      kill -TERM "$_pid" 2>/dev/null || true`,
+		`      _w=0`,
+		`      while [ "$_w" -lt 3 ]; do`,
+		`        kill -0 "$_pid" 2>/dev/null || break`,
+		`        sleep 0.1`,
+		`        _w=$((_w + 1))`,
+		`      done`,
+		`      kill -KILL "$_pid" 2>/dev/null || true`,
+		`    fi`,
+		`    [ -n "$_rpid" ] && kill -TERM "$_rpid" 2>/dev/null || true`,
+		`    command -v tmux >/dev/null 2>&1 && [ -n "$_tm" ] && tmux kill-session -t "$_tm" 2>/dev/null || true`,
+		`  fi`,
+		`  rm -rf "$_sd" 2>/dev/null || true`,
+		`}`,
+	];
 }
 
 /**
@@ -455,7 +685,7 @@ export function buildPosixRemoteExecCommand(
 	args: readonly string[],
 	cwd?: string,
 	extraEnv?: Readonly<Record<string, string>>,
-	options?: { readonly killOnStdinClose?: boolean },
+	options?: RemoteExecOptions,
 ): string {
 	const lines: string[] = [buildPosixPathAugmentSnippet()];
 	if (extraEnv) {
@@ -471,22 +701,206 @@ export function buildPosixRemoteExecCommand(
 	}
 	const cmdTokens = [posixQuote(executable), ...args.map(posixQuote)].join(' ');
 	if (options?.killOnStdinClose) {
-		// Used for long-lived HTTP server engines (kilo/opencode serve) whose own stdin isn't consumed:
-		// when the SSH client disconnects, stdin hits EOF and the watchdog terminates the remote server cleanly.
+		// Isolate the remote child in its own process group (`setsid` with python3/perl fallback) so
+		// when the SSH channel disconnects or stdin hits EOF, the ENTIRE process tree (not just the
+		// top PID) is cleanly terminated with SIGTERM -> SIGKILL, preventing cloud zombie leaks.
 		lines.push(
-			`${cmdTokens} </dev/null &`,
+			...buildPosixProcessTreeHelpers(),
+			`_aex_isolated=0`,
+			`if command -v setsid >/dev/null 2>&1; then`,
+			`  setsid ${cmdTokens} </dev/null &`,
+			`  _aex_isolated=1`,
+			`elif command -v python3 >/dev/null 2>&1; then`,
+			`  python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' ${cmdTokens} </dev/null &`,
+			`  _aex_isolated=1`,
+			`elif command -v perl >/dev/null 2>&1; then`,
+			`  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die $!' -- ${cmdTokens} </dev/null &`,
+			`  _aex_isolated=1`,
+			`else`,
+			`  ${cmdTokens} </dev/null &`,
+			`fi`,
 			`_aex_pid=$!`,
+			`if [ "$_aex_isolated" = "1" ]; then`,
+			`  _aex_pgid="$_aex_pid"`,
+			`else`,
+			`  _aex_pgid=$(ps -o pgid= -p "$_aex_pid" 2>/dev/null | tr -d ' \\t\\r\\n' || true)`,
+			`  [ -n "$_aex_pgid" ] || _aex_pgid="$_aex_pid"`,
+			`fi`,
+			`_aex_cleanup() { _live_pg=$(ps -o pgid= -p "$_aex_pid" 2>/dev/null | tr -d ' \\t\\r\\n' || true); _pg="\${_live_pg:-$_aex_pgid}"; _aex_kill_pgid_and_tree TERM "$_pg" "$_aex_pid"; sleep 0.25; _aex_kill_pgid_and_tree KILL "$_pg" "$_aex_pid"; }`,
 			// POSIX shells redirect a background job's stdin from /dev/null before explicit redirections,
 			// so duplicate the real SSH stdin to fd 3 first; otherwise the watchdog below would see EOF instantly.
 			`exec 3<&0`,
-			`trap 'kill $_aex_pid 2>/dev/null || true' EXIT TERM INT HUP`,
-			`(cat <&3 >/dev/null 2>&1; kill $_aex_pid 2>/dev/null || true) &`,
+			`trap '_aex_cleanup' EXIT TERM INT HUP`,
+			`(cat <&3 >/dev/null 2>&1; _aex_cleanup) &`,
 			`_aex_watch=$!`,
 			`wait $_aex_pid`,
 			`_aex_rc=$?`,
 			`kill $_aex_watch 2>/dev/null || true`,
 			`exit $_aex_rc`,
 		);
+	} else if (options?.persistentSessionId?.trim()) {
+		// Persistent SIGHUP-immune remote session (tmux when available, detached nohup fallback) with
+		// dedicated process-group isolation (`setsid`):
+		// - SSH disconnects / laptop sleep tear down only the attach helpers while the remote agent
+		//   keeps running uninterrupted.
+		// - Re-invoking with the same persistentSessionId reattaches cleanly at `attachByteOffset`.
+		// - Explicit Recall / Stop terminates the ENTIRE process group (`-PGID`) + recursive descendants.
+		const safeId = sanitizePersistentSessionId(options.persistentSessionId);
+		const byteStart = Math.max(0, Math.floor(options.attachByteOffset ?? 0)) + 1;
+		const runnerLines: string[] = [
+			'#!/bin/sh',
+			`trap '' HUP`,
+			`_aex_dir="$1"`,
+			`printf '%s\\n' "$$" > "$_aex_dir/runner.pid"`,
+			`date +%s > "$_aex_dir/started.at" 2>/dev/null || true`,
+			buildPosixPathAugmentSnippet(),
+		];
+		if (extraEnv) {
+			for (const [k, v] of Object.entries(extraEnv)) {
+				if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+					runnerLines.push(`export ${k}=${posixQuote(v)}`);
+				}
+			}
+		}
+		if (cwd?.trim()) {
+			const qCwd = posixQuote(cwd.trim());
+			runnerLines.push(`cd -- ${qCwd} || { printf 'Remote directory not found or inaccessible: %s\\n' ${qCwd} >> "$_aex_dir/err.log"; printf '66\\n' > "$_aex_dir/exit.code.tmp" && mv -f "$_aex_dir/exit.code.tmp" "$_aex_dir/exit.code"; exit 66; }`);
+		}
+		runnerLines.push(
+			`exec 4<>"$_aex_dir/in.fifo"`,
+			`_aex_isolated=0`,
+			`if command -v setsid >/dev/null 2>&1; then`,
+			`  setsid ${cmdTokens} <&4 4>&- >> "$_aex_dir/out.log" 2>> "$_aex_dir/err.log" &`,
+			`  _aex_isolated=1`,
+			`elif command -v python3 >/dev/null 2>&1; then`,
+			`  python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' ${cmdTokens} <&4 4>&- >> "$_aex_dir/out.log" 2>> "$_aex_dir/err.log" &`,
+			`  _aex_isolated=1`,
+			`elif command -v perl >/dev/null 2>&1; then`,
+			`  perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die $!' -- ${cmdTokens} <&4 4>&- >> "$_aex_dir/out.log" 2>> "$_aex_dir/err.log" &`,
+			`  _aex_isolated=1`,
+			`else`,
+			`  ${cmdTokens} <&4 4>&- >> "$_aex_dir/out.log" 2>> "$_aex_dir/err.log" &`,
+			`fi`,
+			`_aex_child=$!`,
+			`printf '%s\\n' "$_aex_child" > "$_aex_dir/agent.pid"`,
+			`if [ "$_aex_isolated" = "1" ]; then`,
+			`  _aex_pgid="$_aex_child"`,
+			`else`,
+			`  _aex_pgid=$(ps -o pgid= -p "$_aex_child" 2>/dev/null | tr -d ' \\t\\r\\n' || true)`,
+			`  [ -n "$_aex_pgid" ] || _aex_pgid="$_aex_child"`,
+			`fi`,
+			`printf '%s\\n' "$_aex_pgid" > "$_aex_dir/agent.pgid"`,
+			`wait "$_aex_child"`,
+			`_aex_rc=$?`,
+			`printf '%s\\n' "$_aex_rc" > "$_aex_dir/exit.code.tmp" && mv -f "$_aex_dir/exit.code.tmp" "$_aex_dir/exit.code"`,
+			`exec 4>&- 2>/dev/null || true`,
+			`exit "$_aex_rc"`,
+		);
+		const runnerScript = runnerLines.join('\n') + '\n';
+		const attachEnvLines: string[] = [];
+		if (extraEnv) {
+			for (const [k, v] of Object.entries(extraEnv)) {
+				if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+					attachEnvLines.push(`export ${k}=${posixQuote(v)}`);
+				}
+			}
+		}
+		const attachLines: string[] = [
+			buildPosixPathAugmentSnippet(),
+			...attachEnvLines,
+			`_aex_base="\${AEXUS_REMOTE_SESSION_DIR:-$HOME/.aexus-code/remote-sessions}"`,
+			`_aex_sdir="$_aex_base/${safeId}"`,
+			`_aex_tmux="aex_${safeId}"`,
+			`_aex_alive=0`,
+			`if [ -f "$_aex_sdir/agent.pid" ]; then`,
+			`  _aex_oldpid=$(tr -d ' \\t\\r\\n' < "$_aex_sdir/agent.pid" 2>/dev/null || true)`,
+			`  if [ -n "$_aex_oldpid" ] && kill -0 "$_aex_oldpid" 2>/dev/null; then _aex_alive=1; fi`,
+			`fi`,
+			...(options.attachOnly
+				? [
+					`if [ "$_aex_alive" -eq 0 ] && [ ! -f "$_aex_sdir/exit.code" ]; then`,
+					`  exit 44`,
+					`fi`,
+				]
+				: [
+					`mkdir -p "$_aex_sdir"`,
+					`if [ "$_aex_alive" -eq 0 ] && [ ! -f "$_aex_sdir/exit.code" ]; then`,
+					`  rm -f "$_aex_sdir/in.fifo" "$_aex_sdir/out.log" "$_aex_sdir/err.log" "$_aex_sdir/exit.code" "$_aex_sdir/exit.code.tmp" "$_aex_sdir/agent.pid" "$_aex_sdir/agent.pgid" "$_aex_sdir/runner.pid" "$_aex_sdir/started.at" "$_aex_sdir/run.sh"`,
+					`  mkfifo "$_aex_sdir/in.fifo"`,
+					`  : > "$_aex_sdir/out.log"`,
+					`  : > "$_aex_sdir/err.log"`,
+					`  printf '%s' ${posixQuote(runnerScript)} > "$_aex_sdir/run.sh"`,
+					`  chmod 700 "$_aex_sdir/run.sh"`,
+					`  command -v tmux >/dev/null 2>&1 && tmux kill-session -t "$_aex_tmux" 2>/dev/null || true`,
+					`  if command -v tmux >/dev/null 2>&1 && tmux new-session -d -s "$_aex_tmux" -- sh "$_aex_sdir/run.sh" "$_aex_sdir" >/dev/null 2>&1; then`,
+					`    :`,
+					`  else`,
+					`    nohup sh "$_aex_sdir/run.sh" "$_aex_sdir" </dev/null >/dev/null 2>&1 &`,
+					`  fi`,
+					`fi`,
+				]),
+			// Fast-path when reattaching to a persistent session that already completed while SSH was disconnected:
+			// flush remaining bytes cleanly without opening in.fifo or spawning tail -f, and only delete $_aex_sdir
+			// if stdout delivery actually succeeded (never lose undelivered output on broken SSH pipe!).
+			`if [ -f "$_aex_sdir/exit.code" ]; then`,
+			`  _aex_flush_ok=1`,
+			`  if [ -f "$_aex_sdir/out.log" ]; then tail -c +${byteStart} "$_aex_sdir/out.log" || _aex_flush_ok=0; fi`,
+			`${byteStart <= 1 ? `  [ -f "$_aex_sdir/err.log" ] && cat "$_aex_sdir/err.log" >&2 2>/dev/null || true` : `  :`}`,
+			`  _aex_rc=$(tr -d ' \\t\\r\\n' < "$_aex_sdir/exit.code" 2>/dev/null || printf '0')`,
+			`  if [ "$_aex_flush_ok" = "1" ]; then rm -rf "$_aex_sdir" 2>/dev/null || true; fi`,
+			`  exit "\${_aex_rc:-0}"`,
+			`fi`,
+			`printf '%s\\n' "$$" > "$_aex_sdir/attach.pid" 2>/dev/null || true`,
+			`[ -p "$_aex_sdir/in.fifo" ] || mkfifo "$_aex_sdir/in.fifo" 2>/dev/null || true`,
+			`[ -f "$_aex_sdir/out.log" ] || : > "$_aex_sdir/out.log"`,
+			`[ -f "$_aex_sdir/err.log" ] || : > "$_aex_sdir/err.log"`,
+			`exec 3<&0`,
+			`_aex_tout=""`,
+			`_aex_terr=""`,
+			`_aex_tin=""`,
+			`trap 'kill $_aex_tout $_aex_terr $_aex_tin 2>/dev/null || true' EXIT TERM INT HUP`,
+			`tail -c +${byteStart} -f "$_aex_sdir/out.log" &`,
+			`_aex_tout=$!`,
+			`${byteStart > 1 ? `tail -n 0 -f "$_aex_sdir/err.log" >&2 &` : `tail -c +1 -f "$_aex_sdir/err.log" >&2 &`}`,
+			`_aex_terr=$!`,
+			`(cat <&3 > "$_aex_sdir/in.fifo" 2>/dev/null) >/dev/null 2>&1 &`,
+			`_aex_tin=$!`,
+			`_aex_wait_ticks=0`,
+			`_aex_boot_ticks=0`,
+			`_aex_detached=0`,
+			`while [ ! -f "$_aex_sdir/exit.code" ]; do`,
+			`  if ! kill -0 "$_aex_tout" 2>/dev/null; then`,
+			`    _aex_detached=1`,
+			`    break`,
+			`  fi`,
+			`  if [ -f "$_aex_sdir/agent.pid" ]; then`,
+			`    _aex_curpid=$(tr -d ' \\t\\r\\n' < "$_aex_sdir/agent.pid" 2>/dev/null || true)`,
+			`    if [ -n "$_aex_curpid" ] && ! kill -0 "$_aex_curpid" 2>/dev/null && [ ! -f "$_aex_sdir/exit.code" ]; then`,
+			`      _aex_wait_ticks=$((_aex_wait_ticks + 1))`,
+			`      [ "$_aex_wait_ticks" -ge 10 ] && break`,
+			`    fi`,
+			`  else`,
+			`    _aex_boot_ticks=$((_aex_boot_ticks + 1))`,
+			`    [ "$_aex_boot_ticks" -ge 100 ] && break`,
+			`  fi`,
+			`  sleep 0.1`,
+			`done`,
+			`sleep 0.15`,
+			`_aex_tout_alive=0`,
+			`kill -0 "$_aex_tout" 2>/dev/null && _aex_tout_alive=1`,
+			`kill $_aex_tout $_aex_terr $_aex_tin 2>/dev/null || true`,
+			`kill -9 $_aex_tin 2>/dev/null || true`,
+			`wait $_aex_tout $_aex_terr 2>/dev/null || true`,
+			`_aex_rc=0`,
+			`[ -f "$_aex_sdir/exit.code" ] && _aex_rc=$(tr -d ' \\t\\r\\n' < "$_aex_sdir/exit.code" 2>/dev/null || printf '0')`,
+			`_aex_cur_attach=$(tr -d ' \\t\\r\\n' < "$_aex_sdir/attach.pid" 2>/dev/null || true)`,
+			// Only remove $_aex_sdir when stdout tail was still alive (no SIGPIPE drop) AND this attach still owns attach.pid!
+			`if [ "$_aex_detached" = "0" ] && [ "$_aex_tout_alive" = "1" ] && [ "$_aex_cur_attach" = "$$" ]; then`,
+			`  rm -rf "$_aex_sdir" 2>/dev/null || true`,
+			`fi`,
+			`exit "\${_aex_rc:-0}"`,
+		];
+		return `sh -c ${posixQuote(attachLines.join('\n'))}`;
 	} else {
 		lines.push(`exec ${cmdTokens}`);
 	}
@@ -624,14 +1038,28 @@ export function spawnRemoteEngine(
 	args: readonly string[],
 	cwd?: string,
 	env?: NodeJS.ProcessEnv,
-	options?: { readonly killOnStdinClose?: boolean },
+	options?: RemoteExecOptions,
 ): cp.ChildProcessWithoutNullStreams {
 	const remoteEnv: Record<string, string> = { ...extractForwardableRemoteEnv(env) };
 	// Explicitly forward reverse-bridge control credentials ONLY when paired with a verified
-	// remote reverse-tunnel port (never inherited from local process.env or pure cloud workers).
-	if (env?.AEXUS_ADE_REMOTE_BRIDGE_PORT && /^\d+$/.test(env.AEXUS_ADE_REMOTE_BRIDGE_PORT.trim()) && env.AEXUS_ADE_SESSION_TOKEN?.trim()) {
-		remoteEnv.AEXUS_ADE_TCP_PORT = env.AEXUS_ADE_REMOTE_BRIDGE_PORT.trim();
-		remoteEnv.AEXUS_ADE_SESSION_TOKEN = env.AEXUS_ADE_SESSION_TOKEN.trim();
+	// remote reverse-tunnel socket/port (never inherited from local process.env or pure cloud workers).
+	if (env?.AEXUS_ADE_SESSION_TOKEN?.trim()) {
+		const bridgeSock = env.AEXUS_ADE_REMOTE_BRIDGE_SOCKET?.trim();
+		const bridgePort = env.AEXUS_ADE_REMOTE_BRIDGE_PORT?.trim();
+		const bridgeFile = env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim();
+		const hasValidPort = Boolean(bridgePort && /^\d+$/.test(bridgePort) && Number.parseInt(bridgePort, 10) > 0);
+		if (bridgeSock || hasValidPort || bridgeFile) {
+			if (bridgeSock) {
+				remoteEnv.AEXUS_ADE_SOCKET = bridgeSock;
+			}
+			if (hasValidPort) {
+				remoteEnv.AEXUS_ADE_TCP_PORT = bridgePort!;
+			}
+			if (bridgeFile) {
+				remoteEnv.AEXUS_ADE_REMOTE_BRIDGE_FILE = bridgeFile;
+			}
+			remoteEnv.AEXUS_ADE_SESSION_TOKEN = env.AEXUS_ADE_SESSION_TOKEN.trim();
+		}
 	}
 	const remoteCmd = target.os === 'windows'
 		? buildWindowsRemoteExecCommand(executable, args, cwd, remoteEnv, options)
@@ -641,19 +1069,21 @@ export function spawnRemoteEngine(
 	if (target.effectiveSshConfigPath) {
 		sshArgs.push('-F', target.effectiveSshConfigPath);
 	}
+	const aliveInterval = Math.max(5, Math.min(120, Math.round(options?.sshServerAliveIntervalSec ?? 20)));
+	const aliveCountMax = Math.max(3, Math.min(60, Math.round(options?.sshServerAliveCountMax ?? 6)));
 	sshArgs.push(
 		'-T',
 		'-o', 'BatchMode=yes',
-		'-o', 'ConnectTimeout=10',
-		'-o', 'ServerAliveInterval=15',
-		'-o', 'ServerAliveCountMax=3',
+		'-o', 'ConnectTimeout=15',
+		'-o', `ServerAliveInterval=${aliveInterval}`,
+		'-o', `ServerAliveCountMax=${aliveCountMax}`,
 		'-o', 'TCPKeepAlive=yes',
 	);
 	if (cachedSecureMuxDir) {
 		sshArgs.push(
 			'-o', 'ControlMaster=auto',
 			'-o', `ControlPath=${cachedSecureMuxDir}/%C`,
-			'-o', 'ControlPersist=120s',
+			'-o', 'ControlPersist=600s',
 		);
 	} else {
 		void ensureSecureMuxDir();
@@ -670,6 +1100,147 @@ export function spawnRemoteEngine(
 		detached: process.platform !== 'win32',
 		stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 	}) as cp.ChildProcessWithoutNullStreams;
+}
+
+/**
+ * Explicitly terminates a persistent remote POSIX session (`tmux` or detached `nohup`)
+ * created via `spawnRemoteEngine(..., { persistentSessionId })` and cleans up its session directory.
+ *
+ * By default (`killTree: true`), kills the ENTIRE remote process group (`-PGID`) AND all recursive
+ * descendants (`SIGTERM` -> `SIGKILL`) so GPU training / build / subshell child processes cannot
+ * survive Recall or Stop as runaway cloud zombies. Pass `{ killTree: false }` on normal turn
+ * completion so intentionally detached background jobs (e.g. `token block --watch-pid`) survive.
+ */
+export async function terminateRemotePersistentSession(
+	target: CloudHostTarget,
+	persistentSessionId: string,
+	options?: TerminateRemoteSessionOptions,
+): Promise<void> {
+	if (target.os === 'windows' || !persistentSessionId.trim()) {
+		return;
+	}
+	const safeId = sanitizePersistentSessionId(persistentSessionId);
+	const killTreeFlag = options?.killTree === false ? '0' : '1';
+	const script = [
+		buildPosixPathAugmentSnippet(),
+		...buildPosixProcessTreeHelpers(),
+		`_aex_base="\${AEXUS_REMOTE_SESSION_DIR:-$HOME/.aexus-code/remote-sessions}"`,
+		`_aex_sdir="$_aex_base/${safeId}"`,
+		`_aex_tmux="aex_${safeId}"`,
+		`_aex_terminate_session_dir "$_aex_sdir" "$_aex_tmux" ${killTreeFlag}`,
+	].join('\n');
+	await runSshCommand(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 12_000 }).catch(() => undefined);
+}
+
+/**
+ * Terminates EVERY persistent remote POSIX session whose ID starts with `idPrefix` (e.g. from
+ * `buildRemotePersistentPrefix(engineId, sessionId)`), including its full process group and
+ * descendant tree. Works cleanly even after an Electron window reload when ephemeral local turn
+ * IDs are no longer in memory!
+ */
+export async function terminateRemotePersistentSessionsByPrefix(
+	target: CloudHostTarget,
+	idPrefix: string,
+	options?: TerminateRemoteSessionOptions,
+): Promise<void> {
+	if (target.os === 'windows' || !idPrefix.trim()) {
+		return;
+	}
+	const safePrefix = sanitizePersistentSessionId(idPrefix);
+	if (safePrefix.length < 4) {
+		return;
+	}
+	const killTreeFlag = options?.killTree === false ? '0' : '1';
+	const script = [
+		buildPosixPathAugmentSnippet(),
+		...buildPosixProcessTreeHelpers(),
+		`_aex_base="\${AEXUS_REMOTE_SESSION_DIR:-$HOME/.aexus-code/remote-sessions}"`,
+		`if [ -d "$_aex_base" ]; then`,
+		`  for _aex_d in "$_aex_base/${safePrefix}" "$_aex_base/${safePrefix}"-*; do`,
+		`    [ -d "$_aex_d" ] || continue`,
+		`    _aex_name=$(basename "$_aex_d")`,
+		`    _aex_terminate_session_dir "$_aex_d" "aex_$_aex_name" ${killTreeFlag}`,
+		`  done`,
+		`fi`,
+		`if command -v tmux >/dev/null 2>&1; then`,
+		`  for _aex_ts in $(tmux list-sessions -F '#{session_name}' 2>/dev/null || true); do`,
+		`    case "$_aex_ts" in`,
+		`      "aex_${safePrefix}"|"aex_${safePrefix}"-*) tmux kill-session -t "$_aex_ts" 2>/dev/null || true ;;`,
+		`    esac`,
+		`  done`,
+		`fi`,
+	].join('\n');
+	await runSshCommand(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 12_000 }).catch(() => undefined);
+}
+
+/**
+ * Probes all remote persistent sessions matching `idPrefix` (`<prefix>` or `<prefix>-*`) on a POSIX
+ * Cloud Host, returning liveness, PID/PGID, exit code (if finished while disconnected), and `out.log`
+ * byte size so window reload recovery can seamlessly reattach instead of spawning duplicate work.
+ */
+export async function inspectRemotePersistentSessionsByPrefix(
+	target: CloudHostTarget,
+	idPrefix: string,
+): Promise<readonly RemotePersistentSessionInfo[]> {
+	if (target.os === 'windows' || !idPrefix.trim()) {
+		return [];
+	}
+	const safePrefix = sanitizePersistentSessionId(idPrefix);
+	if (safePrefix.length < 4) {
+		return [];
+	}
+	const script = [
+		`_aex_base="\${AEXUS_REMOTE_SESSION_DIR:-$HOME/.aexus-code/remote-sessions}"`,
+		`[ -d "$_aex_base" ] || exit 0`,
+		`for _aex_d in "$_aex_base/${safePrefix}" "$_aex_base/${safePrefix}"-*; do`,
+		`  [ -d "$_aex_d" ] || continue`,
+		`  _id=$(basename "$_aex_d")`,
+		`  _pid=""`,
+		`  _pgid=""`,
+		`  _rc=""`,
+		`  _started=""`,
+		`  _alive=0`,
+		`  [ -f "$_aex_d/agent.pid" ] && _pid=$(tr -d ' \\t\\r\\n' < "$_aex_d/agent.pid" 2>/dev/null || true)`,
+		`  [ -f "$_aex_d/agent.pgid" ] && _pgid=$(tr -d ' \\t\\r\\n' < "$_aex_d/agent.pgid" 2>/dev/null || true)`,
+		`  [ -f "$_aex_d/exit.code" ] && _rc=$(tr -d ' \\t\\r\\n' < "$_aex_d/exit.code" 2>/dev/null || true)`,
+		`  [ -f "$_aex_d/started.at" ] && _started=$(tr -d ' \\t\\r\\n' < "$_aex_d/started.at" 2>/dev/null || true)`,
+		`  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then _alive=1; fi`,
+		`  _bytes=0`,
+		`  if [ -f "$_aex_d/out.log" ]; then _bytes=$(wc -c < "$_aex_d/out.log" 2>/dev/null | tr -d ' \\t\\r\\n' || printf '0'); fi`,
+		`  printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$_id" "$_alive" "$_pid" "$_pgid" "$_rc" "\${_bytes:-0}" "$_started"`,
+		`done`,
+	].join('\n');
+	const res = await runSshCommand(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 8_000 }).catch(() => undefined);
+	if (!res || res.code !== 0) {
+		return [];
+	}
+	const out: RemotePersistentSessionInfo[] = [];
+	for (const line of res.stdout.toString('utf8').split(/\r?\n/)) {
+		if (!line.trim()) {
+			continue;
+		}
+		const [id, aliveStr, pidStr, pgidStr, rcStr, bytesStr, startedStr] = line.split('\t');
+		if (!id) {
+			continue;
+		}
+		const pid = pidStr && /^\d+$/.test(pidStr) ? Number.parseInt(pidStr, 10) : undefined;
+		const pgid = pgidStr && /^\d+$/.test(pgidStr) ? Number.parseInt(pgidStr, 10) : undefined;
+		const exitCode = rcStr && /^-?\d+$/.test(rcStr) ? Number.parseInt(rcStr, 10) : undefined;
+		const outBytes = bytesStr && /^\d+$/.test(bytesStr) ? Number.parseInt(bytesStr, 10) : 0;
+		const startedAt = startedStr && /^\d+$/.test(startedStr) ? Number.parseInt(startedStr, 10) * 1000 : undefined;
+		out.push({
+			id,
+			alive: aliveStr === '1',
+			...(pid !== undefined ? { pid } : {}),
+			...(pgid !== undefined ? { pgid } : {}),
+			...(exitCode !== undefined ? { exitCode } : {}),
+			outBytes,
+			...(startedAt !== undefined ? { startedAt } : {}),
+		});
+	}
+	// Prefer alive sessions first, then newest startedAt
+	out.sort((a, b) => Number(b.alive) - Number(a.alive) || (b.startedAt ?? 0) - (a.startedAt ?? 0));
+	return out;
 }
 
 export async function runSshCommand(
@@ -769,10 +1340,24 @@ export async function captureRemoteEngine(
 ): Promise<string> {
 	const remoteEnv: Record<string, string> = { ...extractForwardableRemoteEnv(env) };
 	// Explicitly forward reverse-bridge control credentials ONLY when paired with a verified
-	// remote reverse-tunnel port (never inherited from local process.env or pure cloud workers).
-	if (env?.AEXUS_ADE_REMOTE_BRIDGE_PORT && /^\d+$/.test(env.AEXUS_ADE_REMOTE_BRIDGE_PORT.trim()) && env.AEXUS_ADE_SESSION_TOKEN?.trim()) {
-		remoteEnv.AEXUS_ADE_TCP_PORT = env.AEXUS_ADE_REMOTE_BRIDGE_PORT.trim();
-		remoteEnv.AEXUS_ADE_SESSION_TOKEN = env.AEXUS_ADE_SESSION_TOKEN.trim();
+	// remote reverse-tunnel socket/port (never inherited from local process.env or pure cloud workers).
+	if (env?.AEXUS_ADE_SESSION_TOKEN?.trim()) {
+		const bridgeSock = env.AEXUS_ADE_REMOTE_BRIDGE_SOCKET?.trim();
+		const bridgePort = env.AEXUS_ADE_REMOTE_BRIDGE_PORT?.trim();
+		const bridgeFile = env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim();
+		const hasValidPort = Boolean(bridgePort && /^\d+$/.test(bridgePort) && Number.parseInt(bridgePort, 10) > 0);
+		if (bridgeSock || hasValidPort || bridgeFile) {
+			if (bridgeSock) {
+				remoteEnv.AEXUS_ADE_SOCKET = bridgeSock;
+			}
+			if (hasValidPort) {
+				remoteEnv.AEXUS_ADE_TCP_PORT = bridgePort!;
+			}
+			if (bridgeFile) {
+				remoteEnv.AEXUS_ADE_REMOTE_BRIDGE_FILE = bridgeFile;
+			}
+			remoteEnv.AEXUS_ADE_SESSION_TOKEN = env.AEXUS_ADE_SESSION_TOKEN.trim();
+		}
 	}
 	const remoteCmd = target.os === 'windows'
 		? buildWindowsRemoteExecCommand(executable, args, cwd, remoteEnv)
@@ -977,6 +1562,50 @@ export async function probeRemoteEngines(
 
 	remoteProbePending.set(cacheKey, task);
 	return task;
+}
+
+export async function resolveRemoteRealpath(
+	target: CloudHostTarget,
+	remotePath: string,
+	token?: CancellationTokenLike,
+): Promise<string | undefined> {
+	const cleaned = remotePath.trim();
+	if (!cleaned) {
+		return undefined;
+	}
+	const cacheKey = `${target.authority}|${cleaned}`;
+	const now = Date.now();
+	const cached = remoteRealpathCache.get(cacheKey);
+	if (cached && cached.expiresAt > now) {
+		return cached.value;
+	}
+	const posixScript = [
+		`p=${posixQuote(cleaned)}`,
+		`if command -v python3 >/dev/null 2>&1; then`,
+		`  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null && exit 0`,
+		`fi`,
+		`readlink -f -- "$p" 2>/dev/null && exit 0`,
+		`(cd -- "$p" 2>/dev/null && pwd -P) && exit 0`,
+		`printf '%s\\n' "$p"`,
+	].join('\n');
+	const winScript = [
+		`$p = ${psSingleQuote(cleaned)}`,
+		`try {`,
+		`  $item = Get-Item -LiteralPath $p -ErrorAction Stop`,
+		`  if ($item.LinkType -and $item.Target) { Write-Output ([IO.Path]::GetFullPath(($item.Target | Select-Object -First 1))) } else { Write-Output $item.FullName }`,
+		`} catch { Write-Output $p }`,
+	].join('; ');
+	try {
+		const res = await execRemoteShell(target, posixScript, winScript, { timeoutMs: 8_000, token });
+		const resolved = res.code === 0 ? res.stdout.toString('utf8').trim().split(/\r?\n/).pop()?.trim() || undefined : undefined;
+		if (remoteRealpathCache.size > 500) {
+			remoteRealpathCache.clear();
+		}
+		remoteRealpathCache.set(cacheKey, { value: resolved, expiresAt: Date.now() + REMOTE_REALPATH_CACHE_TTL_MS });
+		return resolved;
+	} catch {
+		return undefined;
+	}
 }
 
 export async function readRemoteTextFile(
@@ -1205,33 +1834,218 @@ export async function openRemotePortForward(
 }
 
 export interface RemoteControlReverseBridgeHandle {
+	/** Allocated remote loopback TCP port (`0` when running over fixed remote Unix Domain Socket). */
 	readonly remotePort: number;
+	/** Fixed remote Unix Domain Socket path (`-R <remoteSocketPath>:127.0.0.1:<localPort>`) when supported by remote sshd. */
+	readonly remoteSocketPath?: string;
+	/** Remote JSON pointer file (`~/.aexus-code/ade-remote-bridge.json`) updated atomically on every connect/heal to prevent port drift. */
+	readonly remoteBridgeMetaPath?: string;
 	readonly localPort: number;
 	readonly isAlive: () => boolean;
 	dispose(): void;
 }
 
+interface ReverseBridgeAutoHealEntry {
+	target: CloudHostTarget;
+	readonly localControlTcpPort: number;
+	lastRemotePort?: number;
+	lastRemoteSocketPath?: string;
+	lastRemoteBridgeMetaPath?: string;
+	preferUnixSocket: boolean;
+	disposed: boolean;
+	healTimer?: ReturnType<typeof setTimeout>;
+	healthyTimer?: ReturnType<typeof setTimeout>;
+	healAttempts: number;
+}
+
 const activeReverseControlBridges = new Map<string, RemoteControlReverseBridgeHandle>();
 const pendingReverseControlBridges = new Map<string, Promise<RemoteControlReverseBridgeHandle>>();
+const reverseBridgeAutoHealRegistry = new Map<string, ReverseBridgeAutoHealEntry>();
 const stagedRemoteCliShims = new Map<string, string>();
+const REVERSE_BRIDGE_HEAL_BACKOFFS_MS = [1_500, 3_000, 6_000, 12_000, 20_000, 30_000, 60_000];
 
 /**
- * Opens an SSH reverse port forward (`127.0.0.1:<remotePort>` on the Cloud Host ->
- * `127.0.0.1:<localControlTcpPort>` on the local machine) so pure cloud-native Coding Agents
- * can invoke `aexus-ade` directly against the single local AdeControlServer & single local doc store.
+ * Resolves the fixed remote Unix Domain Socket path (<= 96 bytes for `sockaddr_un`) and
+ * atomic bridge pointer metadata path (`~/.aexus-code/ade-remote-bridge.json`) on a Cloud Host.
+ */
+async function resolveRemoteBridgePaths(target: CloudHostTarget): Promise<{ readonly remoteSocketPath?: string; readonly remoteBridgeMetaPath?: string }> {
+	if (target.os === 'windows') {
+		const home = target.remoteHome?.trim();
+		if (home) {
+			return { remoteBridgeMetaPath: `${home.replace(/[\\/]+$/, '')}\\.aexus-code\\ade-remote-bridge.json` };
+		}
+		const res = await execRemoteShell(target, '', 'Write-Output $env:USERPROFILE', { timeoutMs: 6_000 }).catch(() => undefined);
+		const detectedHome = res?.code === 0 ? res.stdout.toString('utf8').trim().split(/\r?\n/).pop()?.trim() : undefined;
+		return detectedHome ? { remoteBridgeMetaPath: `${detectedHome.replace(/[\\/]+$/, '')}\\.aexus-code\\ade-remote-bridge.json` } : {};
+	}
+	let home = target.remoteHome?.trim();
+	let uid = '';
+	if (!home) {
+		const res = await runSshCommand(target, `sh -c 'printf "%s|%s\\n" "$HOME" "$(id -u 2>/dev/null || echo u)"'`, { timeoutMs: 6_000 }).catch(() => undefined);
+		const line = res?.code === 0 ? res.stdout.toString('utf8').trim().split(/\r?\n/).pop() : undefined;
+		if (line) {
+			const [h, u] = line.split('|');
+			home = h?.trim() || undefined;
+			uid = u?.trim() || '';
+		}
+	}
+	if (!home) {
+		return {};
+	}
+	const cleanHome = home.replace(/\/+$/, '');
+	const metaPath = `${cleanHome}/.aexus-code/ade-remote-bridge.json`;
+	const homeSock = `${cleanHome}/.aexus-code/ade-bridge.sock`;
+	if (Buffer.byteLength(homeSock, 'utf8') <= 96) {
+		return { remoteSocketPath: homeSock, remoteBridgeMetaPath: metaPath };
+	}
+	// When $HOME is unusually long (>96B sockaddr_un limit), place the socket inside a private
+	// per-user 0700 directory under /tmp (never directly in world-writable /tmp) and verify ownership.
+	const uidTag = uid || crypto.createHash('sha256').update(cleanHome).digest('hex').slice(0, 8);
+	return { remoteSocketPath: `/tmp/aex-u-${uidTag}/ade.sock`, remoteBridgeMetaPath: metaPath };
+}
+
+/**
+ * Atomically updates `~/.aexus-code/ade-remote-bridge.json` on the Cloud Host so already-running
+ * remote agents ALWAYS discover the freshest healed UDS path or TCP port without ECONNREFUSED drift.
+ */
+async function writeRemoteBridgeMetadataFile(
+	target: CloudHostTarget,
+	metaPath: string | undefined,
+	endpoint: { readonly socketPath?: string; readonly tcpPort?: number },
+): Promise<void> {
+	if (!metaPath) {
+		return;
+	}
+	const payload = JSON.stringify({
+		...(endpoint.socketPath ? { socketPath: endpoint.socketPath } : {}),
+		...(endpoint.tcpPort && endpoint.tcpPort > 0 ? { tcpPort: endpoint.tcpPort } : {}),
+		updatedAt: Date.now(),
+	});
+	if (target.os === 'windows') {
+		const b64 = Buffer.from(payload, 'utf8').toString('base64');
+		const ps = [
+			`$ErrorActionPreference='Stop'`,
+			`$p=${psSingleQuote(metaPath)}`,
+			`$d=Split-Path -Parent $p; if ($d) { New-Item -ItemType Directory -Path $d -Force | Out-Null }`,
+			`$tmp="$p.tmp.$PID"`,
+			`[IO.File]::WriteAllBytes($tmp, [Convert]::FromBase64String(${psSingleQuote(b64)}))`,
+			`Move-Item -LiteralPath $tmp -Destination $p -Force`,
+		].join('; ');
+		await execRemoteShell(target, '', ps, { timeoutMs: 8_000 }).catch(() => undefined);
+		return;
+	}
+	const qMeta = posixQuote(metaPath);
+	const script = [
+		`p=${qMeta}`,
+		`d=$(dirname -- "$p")`,
+		`mkdir -p -m 700 -- "$d"`,
+		`tmp="$p.tmp.$$"`,
+		`printf '%s\\n' ${posixQuote(payload)} > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$p"`,
+	].join('\n');
+	await runSshCommand(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 8_000 }).catch(() => undefined);
+}
+
+function scheduleReverseBridgeHeal(key: string): void {
+	const entry = reverseBridgeAutoHealRegistry.get(key);
+	if (!entry || entry.disposed || entry.healTimer) {
+		return;
+	}
+	const delayMs = REVERSE_BRIDGE_HEAL_BACKOFFS_MS[Math.min(entry.healAttempts, REVERSE_BRIDGE_HEAL_BACKOFFS_MS.length - 1)] ?? 60_000;
+	entry.healAttempts++;
+	entry.healTimer = setTimeout(() => {
+		entry.healTimer = undefined;
+		if (entry.disposed) {
+			return;
+		}
+		const existing = activeReverseControlBridges.get(key);
+		if (existing?.isAlive()) {
+			return;
+		}
+		void ensureRemoteControlReverseBridge(entry.target, entry.localControlTcpPort)
+			.catch(() => {
+				scheduleReverseBridgeHeal(key);
+			});
+	}, delayMs);
+	entry.healTimer.unref?.();
+}
+
+/**
+ * Immediately revives any dropped SSH reverse control bridges (e.g. right after macOS wakes from
+ * laptop sleep or Wi-Fi reconnects), resetting retry backoff and re-binding each host's fixed UDS
+ * socket (or updating its remote bridge pointer file) so already-running remote agents seamlessly
+ * regain `aexus-ade` connectivity with zero port drift.
+ */
+export async function healAllRemoteControlBridges(): Promise<void> {
+	const tasks: Promise<void>[] = [];
+	for (const [key, entry] of Array.from(reverseBridgeAutoHealRegistry.entries())) {
+		if (entry.disposed) {
+			continue;
+		}
+		if (entry.healTimer) {
+			clearTimeout(entry.healTimer);
+			entry.healTimer = undefined;
+		}
+		entry.healAttempts = 0;
+		const existing = activeReverseControlBridges.get(key);
+		if (existing?.isAlive()) {
+			continue;
+		}
+		tasks.push(
+			ensureRemoteControlReverseBridge(entry.target, entry.localControlTcpPort)
+				.then(() => undefined)
+				.catch(() => { scheduleReverseBridgeHeal(key); }),
+		);
+	}
+	if (tasks.length > 0) {
+		await Promise.all(tasks);
+	}
+}
+
+/**
+ * Opens an SSH reverse control bridge to `127.0.0.1:<localControlTcpPort>`:
+ * - When `remoteSocketPath` is provided on POSIX, forwards a **fixed remote Unix Domain Socket**
+ *   (`-R <remoteSocketPath>:127.0.0.1:<localControlTcpPort>`) after unlinking any stale socket,
+ *   completely eliminating port drift across disconnects/reconnects.
+ * - Otherwise forwards loopback TCP (`-R 127.0.0.1:<port>:127.0.0.1:<localControlTcpPort>`).
  */
 export async function openRemoteControlReverseBridge(
 	target: CloudHostTarget,
 	localControlTcpPort: number,
-	options?: { readonly preferredRemotePort?: number; readonly timeoutMs?: number },
+	options?: {
+		readonly remoteSocketPath?: string;
+		readonly preferredRemotePort?: number;
+		readonly timeoutMs?: number;
+		readonly onUnexpectedExit?: () => void;
+	},
 ): Promise<RemoteControlReverseBridgeHandle> {
 	const timeoutMs = options?.timeoutMs ?? 8_000;
-	const requestedRemotePort = options?.preferredRemotePort ?? 0;
+	const remoteSocketPath = target.os !== 'windows' ? options?.remoteSocketPath?.trim() || undefined : undefined;
+	const requestedRemotePort = remoteSocketPath ? 0 : (options?.preferredRemotePort ?? 0);
+
+	if (remoteSocketPath) {
+		// Pre-create parent dir (0700), verify non-symlink user ownership (prevents /tmp squatting
+		// on multi-tenant hosts), and unlink any stale socket so stock sshd binds cleanly.
+		const prepScript = [
+			`s=${posixQuote(remoteSocketPath)}`,
+			`d=$(dirname -- "$s")`,
+			`mkdir -p -m 700 -- "$d" && chmod 700 -- "$d" 2>/dev/null || true`,
+			`if [ ! -d "$d" ] || [ -L "$d" ] || [ ! -O "$d" ]; then exit 43; fi`,
+			`rm -f -- "$s"`,
+		].join('\n');
+		const prepRes = await runSshCommand(target, `sh -c ${posixQuote(prepScript)}`, { timeoutMs: 6_000 }).catch(() => undefined);
+		if (prepRes && prepRes.code === 43) {
+			throw new Error(`Remote socket directory ownership check failed for ${remoteSocketPath} (administratively prohibited)`);
+		}
+	}
+
 	const sshExe = target.sshExecutable || resolveDefaultSshExecutable();
+	const forwardSpec = remoteSocketPath
+		? `${remoteSocketPath}:127.0.0.1:${localControlTcpPort}`
+		: `127.0.0.1:${requestedRemotePort}:127.0.0.1:${localControlTcpPort}`;
 	const sshArgs = await buildSshBaseArgs(target, [
 		'-N',
 		'-o', 'ExitOnForwardFailure=yes',
-		'-R', `127.0.0.1:${requestedRemotePort}:127.0.0.1:${localControlTcpPort}`,
+		'-R', forwardSpec,
 	], { useMux: false });
 	sshArgs.push('--', target.alias);
 
@@ -1241,10 +2055,12 @@ export async function openRemoteControlReverseBridge(
 		env: buildLocalSshEnv(),
 	});
 	let exited = false;
+	let disposedByCaller = false;
 	let stderr = '';
-	let allocatedPort: number | undefined = requestedRemotePort > 0 ? requestedRemotePort : undefined;
+	let allocatedPort: number | undefined = !remoteSocketPath && requestedRemotePort > 0 ? requestedRemotePort : undefined;
 
 	const terminateTunnel = () => {
+		disposedByCaller = true;
 		if (exited) {
 			return;
 		}
@@ -1270,8 +2086,8 @@ export async function openRemoteControlReverseBridge(
 			cb();
 		};
 		const timer = setTimeout(() => {
-			if (allocatedPort && !exited) {
-				finish(() => resolve(allocatedPort!));
+			if ((remoteSocketPath || allocatedPort) && !exited) {
+				finish(() => resolve(allocatedPort ?? 0));
 			} else {
 				terminateTunnel();
 				finish(() => reject(new Error(stderr.trim() || `Timed out establishing SSH reverse control bridge (${target.alias})`)));
@@ -1281,27 +2097,35 @@ export async function openRemoteControlReverseBridge(
 		tunnelChild.stderr?.setEncoding('utf8');
 		tunnelChild.stderr?.on('data', (chunk: string) => {
 			stderr = (stderr + chunk).slice(-4000);
-			const allocMatch = /Allocated port (\d+) for remote forward/i.exec(stderr);
-			if (allocMatch) {
-				allocatedPort = Number.parseInt(allocMatch[1], 10);
-				if (allocatedPort > 0 && allocatedPort <= 65535) {
-					finish(() => resolve(allocatedPort!));
+			if (!remoteSocketPath) {
+				const allocMatch = /Allocated port (\d+) for remote forward/i.exec(stderr);
+				if (allocMatch) {
+					allocatedPort = Number.parseInt(allocMatch[1], 10);
+					if (allocatedPort > 0 && allocatedPort <= 65535) {
+						finish(() => resolve(allocatedPort!));
+					}
 				}
 			}
 		});
 		tunnelChild.once('exit', code => {
 			exited = true;
+			if (settled && !disposedByCaller) {
+				options?.onUnexpectedExit?.();
+			}
 			finish(() => reject(new Error(stderr.trim() || `SSH reverse control bridge exited with code ${code ?? 1}`)));
 		});
 		tunnelChild.once('error', err => {
 			exited = true;
+			if (settled && !disposedByCaller) {
+				options?.onUnexpectedExit?.();
+			}
 			finish(() => reject(err));
 		});
-		// When an explicit non-zero port is requested, wait briefly to ensure ExitOnForwardFailure doesn't abort it.
-		if (requestedRemotePort > 0) {
+		// When binding a fixed UDS path or explicit TCP port, wait briefly to confirm ExitOnForwardFailure doesn't abort it.
+		if (remoteSocketPath || requestedRemotePort > 0) {
 			const readyTimer = setTimeout(() => {
 				if (!exited) {
-					finish(() => resolve(requestedRemotePort));
+					finish(() => resolve(remoteSocketPath ? 0 : requestedRemotePort));
 				}
 			}, 450);
 			readyTimer.unref?.();
@@ -1310,6 +2134,7 @@ export async function openRemoteControlReverseBridge(
 
 	return {
 		remotePort,
+		...(remoteSocketPath ? { remoteSocketPath } : {}),
 		localPort: localControlTcpPort,
 		isAlive: () => !exited && tunnelChild.exitCode === null && tunnelChild.signalCode === null,
 		dispose: terminateTunnel,
@@ -1317,20 +2142,38 @@ export async function openRemoteControlReverseBridge(
 }
 
 /**
- * Ensures one shared, live SSH reverse control bridge per `(cloudHost, localControlTcpPort)`.
- * Multiple Mission agents on the same Cloud Host share this single tunnel while each authenticates
- * independently via its own per-session HMAC-signed `AEXUS_ADE_SESSION_TOKEN`.
+ * Ensures one shared, live, auto-healing SSH reverse control bridge per `(cloudHost, localControlTcpPort)`:
+ * 1. On POSIX Cloud Hosts, prefers a **fixed remote Unix Domain Socket** (`~/.aexus-code/ade-bridge.sock`)
+ *    so reconnects NEVER suffer port drift.
+ * 2. On Windows or restricted sshd (`AllowStreamLocalForwarding no`), falls back cleanly to TCP `-R`
+ *    and atomically updates `~/.aexus-code/ade-remote-bridge.json` on EVERY connect & heal so running
+ *    remote `aexus-ade` agents always resolve the live endpoint without `ECONNREFUSED`.
  */
 export async function ensureRemoteControlReverseBridge(
 	target: CloudHostTarget,
 	localControlTcpPort: number,
 ): Promise<RemoteControlReverseBridgeHandle> {
 	const key = `${normalizeCloudAuthority(target.authority)}|${localControlTcpPort}`;
+	let autoHealEntry = reverseBridgeAutoHealRegistry.get(key);
+	if (!autoHealEntry) {
+		autoHealEntry = {
+			target,
+			localControlTcpPort,
+			preferUnixSocket: target.os !== 'windows',
+			disposed: false,
+			healAttempts: 0,
+		};
+		reverseBridgeAutoHealRegistry.set(key, autoHealEntry);
+	} else {
+		autoHealEntry.target = target;
+		autoHealEntry.disposed = false;
+	}
+
 	const existing = activeReverseControlBridges.get(key);
 	if (existing && existing.isAlive()) {
 		return existing;
 	}
-	const previousRemotePort = existing?.remotePort;
+	const previousRemotePort = existing?.remotePort || autoHealEntry.lastRemotePort;
 	activeReverseControlBridges.delete(key);
 
 	const inflight = pendingReverseControlBridges.get(key);
@@ -1338,29 +2181,111 @@ export async function ensureRemoteControlReverseBridge(
 		return inflight;
 	}
 
+	const armHealthyReset = (handle: RemoteControlReverseBridgeHandle) => {
+		if (autoHealEntry!.healthyTimer) {
+			clearTimeout(autoHealEntry!.healthyTimer);
+		}
+		autoHealEntry!.healthyTimer = setTimeout(() => {
+			autoHealEntry!.healthyTimer = undefined;
+			if (!autoHealEntry!.disposed && handle.isAlive()) {
+				autoHealEntry!.healAttempts = 0;
+			}
+		}, 5_000);
+		autoHealEntry!.healthyTimer.unref?.();
+	};
+
+	const onUnexpectedExit = () => {
+		if (autoHealEntry!.healthyTimer) {
+			clearTimeout(autoHealEntry!.healthyTimer);
+			autoHealEntry!.healthyTimer = undefined;
+		}
+		const cur = activeReverseControlBridges.get(key);
+		if (cur && !cur.isAlive()) {
+			activeReverseControlBridges.delete(key);
+		}
+		scheduleReverseBridgeHeal(key);
+	};
+
+	const finalizeHandle = async (
+		rawHandle: RemoteControlReverseBridgeHandle,
+		metaPath: string | undefined,
+	): Promise<RemoteControlReverseBridgeHandle> => {
+		if (autoHealEntry!.disposed) {
+			rawHandle.dispose();
+			throw new Error(`Reverse control bridge for ${target.alias} was disposed during connect`);
+		}
+		const handle: RemoteControlReverseBridgeHandle = metaPath
+			? { ...rawHandle, remoteBridgeMetaPath: metaPath }
+			: rawHandle;
+		autoHealEntry!.lastRemotePort = handle.remotePort > 0 ? handle.remotePort : autoHealEntry!.lastRemotePort;
+		autoHealEntry!.lastRemoteSocketPath = handle.remoteSocketPath ?? autoHealEntry!.lastRemoteSocketPath;
+		autoHealEntry!.lastRemoteBridgeMetaPath = metaPath ?? autoHealEntry!.lastRemoteBridgeMetaPath;
+		activeReverseControlBridges.set(key, handle);
+		armHealthyReset(handle);
+		await writeRemoteBridgeMetadataFile(target, metaPath, {
+			socketPath: handle.remoteSocketPath,
+			tcpPort: handle.remotePort > 0 ? handle.remotePort : undefined,
+		});
+		if (autoHealEntry!.disposed) {
+			activeReverseControlBridges.delete(key);
+			rawHandle.dispose();
+			throw new Error(`Reverse control bridge for ${target.alias} was disposed during metadata sync`);
+		}
+		return handle;
+	};
+
 	const task = (async () => {
-		// When re-establishing after a tunnel drop, re-bind the previous remote port first so
-		// already-running remote agents holding AEXUS_ADE_REMOTE_BRIDGE_PORT stay seamlessly connected.
+		const paths = autoHealEntry!.lastRemoteBridgeMetaPath
+			? { remoteSocketPath: autoHealEntry!.lastRemoteSocketPath, remoteBridgeMetaPath: autoHealEntry!.lastRemoteBridgeMetaPath }
+			: await resolveRemoteBridgePaths(target);
+		const metaPath = paths.remoteBridgeMetaPath;
+
+		// 1. Primary POSIX mode: fixed-path Unix Domain Socket forwarding (immune to port drift forever!)
+		if (target.os !== 'windows' && autoHealEntry!.preferUnixSocket && paths.remoteSocketPath) {
+			try {
+				const udsHandle = await openRemoteControlReverseBridge(target, localControlTcpPort, {
+					remoteSocketPath: paths.remoteSocketPath,
+					timeoutMs: 6_000,
+					onUnexpectedExit,
+				});
+				return await finalizeHandle(udsHandle, metaPath);
+			} catch (udsErr) {
+				// Only disable UDS preference when sshd explicitly rejected streamlocal forwarding;
+				// keep it enabled across transient network/connection errors.
+				const msg = udsErr instanceof Error ? udsErr.message : String(udsErr);
+				if (/administratively prohibited|forwarding failed|unsupported|not permitted|invalid/i.test(msg)) {
+					autoHealEntry!.preferUnixSocket = false;
+				}
+			}
+		}
+
+		// 2. Fallback TCP mode: prefer previous port first, then dynamic allocation, ALWAYS updating
+		// remote `~/.aexus-code/ade-remote-bridge.json` so running agents pick up any new port cleanly!
 		if (previousRemotePort && Number.isInteger(previousRemotePort) && previousRemotePort > 0) {
 			try {
-				const reused = await openRemoteControlReverseBridge(target, localControlTcpPort, { preferredRemotePort: previousRemotePort, timeoutMs: 6_000 });
-				activeReverseControlBridges.set(key, reused);
-				return reused;
+				const reused = await openRemoteControlReverseBridge(target, localControlTcpPort, {
+					preferredRemotePort: previousRemotePort,
+					timeoutMs: 6_000,
+					onUnexpectedExit,
+				});
+				return await finalizeHandle(reused, metaPath);
 			} catch {
-				// Previous port is busy or unavailable; fall back to normal allocation below.
+				// Previous port is busy / TIME_WAIT on remote sshd; allocate fresh port & update remote pointer file.
 			}
 		}
 		try {
-			const handle = await openRemoteControlReverseBridge(target, localControlTcpPort);
-			activeReverseControlBridges.set(key, handle);
-			return handle;
+			const handle = await openRemoteControlReverseBridge(target, localControlTcpPort, { onUnexpectedExit });
+			return await finalizeHandle(handle, metaPath);
 		} catch (firstErr) {
 			// Fallback for older sshd instances that don't print `Allocated port` on `-R 0`: try an explicit high loopback port once.
 			const fallbackPort = 39000 + crypto.randomInt(18000);
 			try {
-				const handle = await openRemoteControlReverseBridge(target, localControlTcpPort, { preferredRemotePort: fallbackPort, timeoutMs: 6_000 });
-				activeReverseControlBridges.set(key, handle);
-				return handle;
+				const handle = await openRemoteControlReverseBridge(target, localControlTcpPort, {
+					preferredRemotePort: fallbackPort,
+					timeoutMs: 6_000,
+					onUnexpectedExit,
+				});
+				return await finalizeHandle(handle, metaPath);
 			} catch {
 				throw firstErr;
 			}
@@ -1439,6 +2364,20 @@ export async function stageRemoteAdeCliShim(
 
 export function disposeAllRemoteControlBridges(authority?: string): void {
 	const norm = authority ? normalizeCloudAuthority(authority) : undefined;
+	for (const [key, entry] of Array.from(reverseBridgeAutoHealRegistry.entries())) {
+		if (!norm || key.startsWith(`${norm}|`)) {
+			entry.disposed = true;
+			if (entry.healTimer) {
+				clearTimeout(entry.healTimer);
+				entry.healTimer = undefined;
+			}
+			if (entry.healthyTimer) {
+				clearTimeout(entry.healthyTimer);
+				entry.healthyTimer = undefined;
+			}
+			reverseBridgeAutoHealRegistry.delete(key);
+		}
+	}
 	for (const [key, handle] of Array.from(activeReverseControlBridges.entries())) {
 		if (!norm || key.startsWith(`${norm}|`)) {
 			try { handle.dispose(); } catch { /* ignore */ }

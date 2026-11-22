@@ -145,6 +145,8 @@ export function parseTokenGroupCommand(tail, json, windowId, usageError) {
 				params.summary = takeOptVal(args, ref, '--summary', usageError);
 			} else if (matchFlag(arg, '--token', '--token-id')) {
 				params.tokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (arg === '--skip-checks') {
+				params.skipChecks = true;
 			} else if (!arg.startsWith('-') && !params.tokenId) {
 				params.tokenId = arg;
 			} else {
@@ -191,13 +193,13 @@ export function parseTokenGroupCommand(tail, json, windowId, usageError) {
 				params.maxDuration = takeOptVal(args, ref, '--duration', usageError);
 			} else if (matchFlag(arg, '--reason', '--message')) {
 				params.reason = takeOptVal(args, ref, '--reason', usageError);
-			} else if (matchFlag(arg, '--watch-pid', '--pid')) {
+			} else if (matchFlag(arg, '--watch-pid', '--wake-on-pid-exit', '--pid')) {
 				const raw = takeOptVal(args, ref, '--watch-pid', usageError);
 				if (!/^\d+$/.test(raw)) {
 					throw usageError(`Invalid PID for --watch-pid: ${raw}`);
 				}
 				params.watchPid = Number.parseInt(raw, 10);
-			} else if (matchFlag(arg, '--watch-file', '--file')) {
+			} else if (matchFlag(arg, '--watch-file', '--wake-on-file', '--file')) {
 				params.watchFile = takeOptVal(args, ref, '--watch-file', usageError);
 			} else if (matchFlag(arg, '--host', '--host-alias')) {
 				params.hostAlias = takeOptVal(args, ref, '--host', usageError);
@@ -235,6 +237,30 @@ export function parseTokenGroupCommand(tail, json, windowId, usageError) {
 			throw usageError('Usage: aexus-ade token fail <tokenId> --reason "<why>" [--mission <id>]');
 		}
 		return { help: false, json, windowId, action: 'token.fail', params };
+	}
+
+	if (sub === 'retry') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--node', '--node-id')) {
+				params.nodeId = takeOptVal(args, ref, '--node', usageError);
+			} else if (matchFlag(arg, '--guidance', '--reason', '--message', '--note')) {
+				params.guidance = takeOptVal(args, ref, '--guidance', usageError);
+			} else if (matchFlag(arg, '--token', '--token-id')) {
+				params.tokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (!arg.startsWith('-') && !params.tokenId) {
+				params.tokenId = arg;
+			} else {
+				throw usageError(`Unknown option for token retry: ${arg}`);
+			}
+		}
+		if (!params.tokenId && !params.nodeId) {
+			throw usageError('Usage: aexus-ade token retry (<tokenId> | --node <nodeId>) [--guidance "<text>"] [--mission <id>]');
+		}
+		return { help: false, json, windowId, action: 'token.retry', params };
 	}
 
 	throw usageError(`Unknown token subcommand: ${sub}`);
@@ -347,7 +373,7 @@ export function parseOrgCommandIfRuntime(tail, json, windowId, usageError) {
 }
 
 /**
- * Parses Mission Runtime subcommands (`start`, `timeout`, `boundary`, `recall`, `patch`, `trigger`, `host`).
+ * Parses Mission Runtime subcommands (`start`, `timeout`, `boundary`, `recall`, `patch`, `trigger`, `host`, `prompt`, `check`).
  * Accepts `--mission` everywhere (with `--governor` kept as a hidden backward-compatible alias).
  */
 export function parseMissionRuntimeSubcommand(tail, json, windowId, usageError) {
@@ -468,6 +494,34 @@ export function parseMissionRuntimeSubcommand(tail, json, windowId, usageError) 
 			}
 		}
 		return { help: false, json, windowId, action: 'mission.recall', params };
+	}
+
+	if (sub === 'retry') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--node', '--node-id')) {
+				params.nodeId = takeOptVal(args, ref, '--node', usageError);
+			} else if (matchFlag(arg, '--token', '--token-id')) {
+				params.tokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (matchFlag(arg, '--guidance', '--reason', '--message', '--note')) {
+				params.guidance = takeOptVal(args, ref, '--guidance', usageError);
+			} else if (!arg.startsWith('-') && !params.nodeId && !params.tokenId) {
+				if (arg.startsWith('tok-')) {
+					params.tokenId = arg;
+				} else {
+					params.nodeId = arg;
+				}
+			} else {
+				throw usageError(`Unknown option for mission retry: ${arg}`);
+			}
+		}
+		if (!params.tokenId && !params.nodeId) {
+			throw usageError('Usage: aexus-ade mission retry [--mission <id>] (--node <nodeId> | --token <tokenId>) [--guidance "<text>"]');
+		}
+		return { help: false, json, windowId, action: 'mission.retry', params };
 	}
 
 	if (sub === 'patch') {
@@ -601,6 +655,220 @@ export function parseMissionRuntimeSubcommand(tail, json, windowId, usageError) 
 			throw usageError('Usage: aexus-ade mission host bind [--mission <id>] --node <id> --host <local|alias> [--path <remotePath>]');
 		}
 		return { help: false, json, windowId, action: 'mission.host.bind', params };
+	}
+
+	if (sub === 'prompt' || sub === 'prompts' || sub === 'preprompt') {
+		const pSub = args[0]?.trim() || 'list';
+		const pArgs = args.slice(1);
+		if (pSub === 'list') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < pArgs.length; ref.i++) {
+				const arg = pArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(pArgs, ref, '--mission', usageError);
+				} else if (!arg.startsWith('-') && !params.missionId) {
+					params.missionId = arg;
+				} else {
+					throw usageError(`Unknown option for mission prompt list: ${arg}`);
+				}
+			}
+			return { help: false, json, windowId, action: 'mission.prompt.list', params };
+		}
+		if (pSub === 'get') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < pArgs.length; ref.i++) {
+				const arg = pArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(pArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(pArgs, ref, '--node', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for mission prompt get: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade mission prompt get [--mission <id>] --node <nodeId>');
+			}
+			return { help: false, json, windowId, action: 'mission.prompt.get', params };
+		}
+		if (pSub === 'set' || pSub === 'clear') {
+			const params = pSub === 'clear' ? { clear: true } : {};
+			for (const ref = { i: 0 }; ref.i < pArgs.length; ref.i++) {
+				const arg = pArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(pArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(pArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--prompt', '--text', '--pre-prompt')) {
+					params.prompt = takeOptVal(pArgs, ref, '--prompt', usageError);
+				} else if (matchFlag(arg, '--file')) {
+					params.file = takeOptVal(pArgs, ref, '--file', usageError);
+				} else if (arg === '--clear') {
+					params.clear = true;
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else if (!arg.startsWith('-') && params.prompt === undefined) {
+					params.prompt = arg;
+				} else {
+					throw usageError(`Unknown option for mission prompt set: ${arg}`);
+				}
+			}
+			if (!params.nodeId || (!params.clear && params.prompt === undefined && !params.file)) {
+				throw usageError('Usage: aexus-ade mission prompt set [--mission <id>] --node <nodeId> (--prompt "<text>" | --file <path> | --clear)');
+			}
+			return { help: false, json, windowId, action: 'mission.prompt.set', params };
+		}
+		throw usageError(`Unknown mission prompt subcommand: ${pSub}`);
+	}
+
+	if (sub === 'check' || sub === 'checks' || sub === 'verify') {
+		const cSub = args[0]?.trim() || 'list';
+		const cArgs = args.slice(1);
+		if (cSub === 'list') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < cArgs.length; ref.i++) {
+				const arg = cArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(cArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(cArgs, ref, '--node', usageError);
+				} else if (!arg.startsWith('-') && !params.missionId) {
+					params.missionId = arg;
+				} else {
+					throw usageError(`Unknown option for mission check list: ${arg}`);
+				}
+			}
+			return { help: false, json, windowId, action: 'mission.check.list', params };
+		}
+		if (cSub === 'get') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < cArgs.length; ref.i++) {
+				const arg = cArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(cArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(cArgs, ref, '--node', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for mission check get: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade mission check get [--mission <id>] --node <nodeId>');
+			}
+			return { help: false, json, windowId, action: 'mission.check.get', params };
+		}
+		if (cSub === 'set' || cSub === 'add') {
+			const params = {};
+			const expectFiles = [];
+			for (const ref = { i: 0 }; ref.i < cArgs.length; ref.i++) {
+				const arg = cArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(cArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(cArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--id', '--check-id', '--check')) {
+					params.checkId = takeOptVal(cArgs, ref, '--id', usageError);
+				} else if (matchFlag(arg, '--name', '--label')) {
+					params.name = takeOptVal(cArgs, ref, '--name', usageError);
+				} else if (matchFlag(arg, '--cmd', '--command')) {
+					params.command = takeOptVal(cArgs, ref, '--cmd', usageError);
+				} else if (matchFlag(arg, '--cwd', '--dir')) {
+					params.cwd = takeOptVal(cArgs, ref, '--cwd', usageError);
+				} else if (matchFlag(arg, '--host', '--host-alias')) {
+					params.hostAlias = takeOptVal(cArgs, ref, '--host', usageError);
+				} else if (matchFlag(arg, '--expect-file', '--expect-files', '--file')) {
+					for (const fp of takeOptVal(cArgs, ref, '--expect-file', usageError).split(',').map(s => s.trim()).filter(Boolean)) {
+						expectFiles.push(fp);
+					}
+				} else if (matchFlag(arg, '--match', '--expect-output', '--expect-match')) {
+					params.expectOutputMatch = takeOptVal(cArgs, ref, '--match', usageError);
+				} else if (matchFlag(arg, '--expect-exit', '--exit-code')) {
+					const val = Number(takeOptVal(cArgs, ref, '--expect-exit', usageError));
+					if (!Number.isInteger(val) || val < 0) {
+						throw usageError('Option --expect-exit requires a non-negative integer.');
+					}
+					params.expectExitCode = val;
+				} else if (matchFlag(arg, '--timeout', '--timeout-ms')) {
+					params.timeout = takeOptVal(cArgs, ref, '--timeout', usageError);
+				} else if (matchFlag(arg, '--on-fail', '--onfail')) {
+					const mode = takeOptVal(cArgs, ref, '--on-fail', usageError).trim().toLowerCase();
+					if (mode !== 'bounce' && mode !== 'fail' && mode !== 'escalate') {
+						throw usageError('Option --on-fail must be bounce, fail, or escalate.');
+					}
+					params.onFail = mode;
+				} else if (matchFlag(arg, '--max-retries', '--retries')) {
+					const val = Number(takeOptVal(cArgs, ref, '--max-retries', usageError));
+					if (!Number.isInteger(val) || val < 0) {
+						throw usageError('Option --max-retries requires a non-negative integer.');
+					}
+					params.maxAutoRetries = val;
+				} else if (arg === '--disabled') {
+					params.disabled = true;
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for mission check set: ${arg}`);
+				}
+			}
+			if (expectFiles.length > 0) {
+				params.expectFiles = expectFiles;
+			}
+			if (!params.nodeId || (!params.command && expectFiles.length === 0)) {
+				throw usageError('Usage: aexus-ade mission check set [--mission <id>] --node <nodeId> (--cmd "<shell>" | --expect-file <path>) [--on-fail bounce|fail|escalate] [--max-retries <n>] [--timeout <duration>]');
+			}
+			return { help: false, json, windowId, action: 'mission.check.set', params };
+		}
+		if (cSub === 'remove' || cSub === 'rm' || cSub === 'delete' || cSub === 'clear') {
+			const params = cSub === 'clear' ? { all: true } : {};
+			for (const ref = { i: 0 }; ref.i < cArgs.length; ref.i++) {
+				const arg = cArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(cArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(cArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--id', '--check-id', '--check')) {
+					params.checkId = takeOptVal(cArgs, ref, '--id', usageError);
+				} else if (arg === '--all') {
+					params.all = true;
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else if (!arg.startsWith('-') && !params.checkId) {
+					params.checkId = arg;
+				} else {
+					throw usageError(`Unknown option for mission check remove: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade mission check remove [--mission <id>] --node <nodeId> [--id <checkId> | --all]');
+			}
+			return { help: false, json, windowId, action: 'mission.check.remove', params };
+		}
+		if (cSub === 'run' || cSub === 'test') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < cArgs.length; ref.i++) {
+				const arg = cArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(cArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(cArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--id', '--check-id', '--check')) {
+					params.checkId = takeOptVal(cArgs, ref, '--id', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for mission check run: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade mission check run [--mission <id>] --node <nodeId> [--id <checkId>]');
+			}
+			return { help: false, json, windowId, action: 'mission.check.run', params };
+		}
+		throw usageError(`Unknown mission check subcommand: ${cSub}`);
 	}
 
 	return undefined;

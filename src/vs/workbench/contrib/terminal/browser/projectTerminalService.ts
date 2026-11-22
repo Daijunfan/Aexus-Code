@@ -12,6 +12,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import {
 	AdeCloudHostOs,
+	buildCloudProjectUri,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
 	toRemoteNativePath,
@@ -31,6 +32,9 @@ export interface IProjectTerminalTarget {
 	readonly uri: URI;
 	readonly name: string;
 	readonly host: string;
+	readonly os?: AdeCloudHostOs;
+	readonly hostName?: string;
+	readonly isCloudHost?: boolean;
 }
 
 interface IStoredSSHProject {
@@ -47,6 +51,8 @@ export interface IProjectTerminalService {
 	readonly currentProject: IProjectTerminalTarget | undefined;
 	readonly projects: readonly IProjectTerminalTarget[];
 	readonly sshProjects: readonly IProjectTerminalTarget[];
+	listCloudHostTargets(): Promise<readonly IProjectTerminalTarget[]>;
+	getCachedCloudHost(authority: string): IAdeCloudHost | undefined;
 	addSSHProject(host: string, path: string, name?: string): IProjectTerminalTarget;
 	findProject(cwd: string | URI | undefined): IProjectTerminalTarget | undefined;
 	getLaunchConfig(target: IProjectTerminalTarget): IShellLaunchConfig;
@@ -111,17 +117,47 @@ export class ProjectTerminalService extends Disposable implements IProjectTermin
 		}
 	}
 
+	getCachedCloudHost(authority: string): IAdeCloudHost | undefined {
+		return this._getCachedCloudHost(authority);
+	}
+
+	async listCloudHostTargets(): Promise<readonly IProjectTerminalTarget[]> {
+		if (!this._cloudHosts) {
+			return [];
+		}
+		await this._refreshCloudHostMetadata();
+		const hosts = await this._cloudHosts.listHosts().catch(() => [] as IAdeCloudHost[]);
+		return hosts.map(host => {
+			const defaultDir = host.defaultDirectory?.trim() || (host.os === 'windows' ? '/C:/' : '/');
+			const uri = buildCloudProjectUri(host.alias, defaultDir, host.os);
+			return {
+				uri,
+				name: host.name?.trim() || host.alias,
+				host: host.alias,
+				os: host.os,
+				hostName: host.hostName,
+				isCloudHost: true,
+			};
+		});
+	}
+
 	private _getCachedCloudHost(authority: string): IAdeCloudHost | undefined {
 		return this._hostMetaCache.get(authority) ?? this._hostMetaCache.get(authority.toLowerCase());
 	}
 
 	private _workspaceTarget(uri: URI, name: string): IProjectTerminalTarget {
+		const cloudMeta = uri.scheme === SSH_PROJECT_SCHEME ? this._getCachedCloudHost(uri.authority) : undefined;
 		const host = uri.scheme === Schemas.file
 			? localize('localHost', "Local")
 			: uri.scheme === SSH_PROJECT_SCHEME
-				? (this._getCachedCloudHost(uri.authority)?.alias ?? uri.authority)
+				? (cloudMeta?.alias ?? uri.authority)
 				: (this._labels.getHostLabel(uri.scheme, uri.authority) || uri.authority);
-		return { uri, name, host };
+		return {
+			uri,
+			name,
+			host,
+			...(cloudMeta ? { os: cloudMeta.os, hostName: cloudMeta.hostName, isCloudHost: true } : {}),
+		};
 	}
 
 	get projects(): readonly IProjectTerminalTarget[] {

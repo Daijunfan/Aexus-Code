@@ -50,6 +50,8 @@ import { TerminalViewPane } from './terminalView.js';
 import { AgentHostTerminalService, IAgentHostTerminalService } from './agentHostTerminalService.js';
 import { IProjectTerminalService, ProjectTerminalService } from './projectTerminalService.js';
 import { registerProjectTerminalActions } from './projectTerminalActions.js';
+import { ITerminalGridLayoutService, TerminalGridLayoutService } from './terminalGridLayoutService.js';
+import { registerTerminalGridActions } from './terminalGridActions.js';
 
 // Register services
 registerSingleton(ITerminalLogService, TerminalLogService, InstantiationType.Delayed);
@@ -62,6 +64,7 @@ registerSingleton(ITerminalInstanceService, TerminalInstanceService, Instantiati
 registerSingleton(ITerminalProfileService, TerminalProfileService, InstantiationType.Delayed);
 registerSingleton(IAgentHostTerminalService, AgentHostTerminalService, InstantiationType.Delayed);
 registerSingleton(IProjectTerminalService, ProjectTerminalService, InstantiationType.Delayed);
+registerSingleton(ITerminalGridLayoutService, TerminalGridLayoutService, InstantiationType.Delayed);
 
 // Register workbench contributions
 // This contribution blocks startup as it's critical to enable the web embedder window.createTerminal API
@@ -139,6 +142,7 @@ Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry).registerViews
 
 registerTerminalActions();
 registerProjectTerminalActions();
+registerTerminalGridActions();
 
 setupTerminalCommands();
 

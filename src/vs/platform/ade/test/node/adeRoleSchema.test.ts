@@ -76,18 +76,19 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 	});
 
 	test('enforces fixed core primitive API permissions at the kernel boundary for built-in and custom ranks', () => {
-		// Default Governor: allowed design & read & inbox, denied engineering.run (engineering.control)
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.blueprint.apply').allowed, true);
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.templates.list').allowed, true);
+		// Default Governor: allowed mission.design & mission.read & inbox, denied mission.run (mission.control)
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.blueprint.apply').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.list').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.prompt.set').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'inbox.post').allowed, true);
-		const govRun = checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.run');
+		const govRun = checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.run');
 		assert.strictEqual(govRun.allowed, false);
-		assert.strictEqual(govRun.requiredApi, 'engineering.control');
+		assert.strictEqual(govRun.requiredApi, 'mission.control');
 		assert.match(govRun.reason ?? '', /Governor/);
 
 		// Human (undefined) and Secretary retain full authority; non-string caller is rejected
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, 'engineering.run').allowed, true);
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'secretary', 'engineering.run').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, 'mission.run').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'secretary', 'mission.run').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 42, 'session.list').allowed, false);
 
 		// Pure Worker denied all control APIs
@@ -112,7 +113,7 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'qa-auditor', 'project.delete').allowed, false);
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'cto', 'session.reparent').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(customOrg, 'cto', 'session.detach').allowed, true);
-		// P1-01: Read-only host.access vs High Privilege host.manage split
+		// Read-only host.access vs High Privilege host.manage split
 		assert.strictEqual(resolveActionPrimitiveApi('host.list'), 'host.access');
 		assert.strictEqual(resolveActionPrimitiveApi('host.get'), 'host.access');
 		assert.strictEqual(resolveActionPrimitiveApi('host.browse'), 'host.access');
@@ -135,12 +136,28 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.delete').allowed, false);
 		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.test').allowed, false);
 		assert.strictEqual(checkAdeApiPermission(readOnlyHostOrg, 'observer', 'host.import').allowed, false);
-		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.merge'), 'engineering.integrate');
-		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.cleanup'), 'engineering.integrate');
-		assert.strictEqual(resolveActionPrimitiveApi('engineering.remove'), 'engineering.destroy');
-		assert.strictEqual(resolveActionPrimitiveApi('engineering.reset'), 'engineering.destroy');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.remove'), 'mission.destroy');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.delete'), 'mission.destroy');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.start'), 'mission.control');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.stop'), 'mission.control');
+		assert.strictEqual(resolveActionPrimitiveApi('mission.patch'), 'mission.design');
+		// Dead legacy engineering.* actions no longer resolve to any primitive API
+		assert.strictEqual(resolveActionPrimitiveApi('engineering.worktrees.merge'), undefined);
+		assert.strictEqual(resolveActionPrimitiveApi('engineering.review'), undefined);
 
-		// P1-06: Governor engineering.design compiled prompt includes engineering generate/template & role CLI docs
+		// Legacy saved user configs with engineering.* APIs auto-migrate cleanly to mission.* and drop dead APIs
+		const migratedLegacy = normalizeAdeOrganizationConfig({
+			version: 1,
+			ranks: [{
+				id: 'lead',
+				name: 'Lead',
+				tier: 1,
+				allowedApis: ['engineering.read', 'engineering.design', 'engineering.review', 'engineering.integrate', 'engineering.destroy', 'engineering.control'],
+			}],
+		});
+		assert.deepStrictEqual(migratedLegacy.ranks[0].allowedApis, ['mission.read', 'mission.design', 'mission.destroy', 'mission.control']);
+
+		// Governor mission.design compiled prompt includes ONLY live mission/role CLI docs and zero dead engineering commands
 		const govPrompt = compileAdeRolePrompt({
 			config: DEFAULT_ADE_ORGANIZATION_CONFIG,
 			rank: DEFAULT_ADE_ORGANIZATION_CONFIG.ranks[0],
@@ -150,20 +167,24 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 			engineId: 'aexus-claude',
 			projectName: 'Demo',
 			projectPath: '/tmp/demo',
-			workTree: { treeType: 'engineering', governorId: 'gov-doc', slot: 'orchestrator' },
+			workTree: { treeType: 'mission', governorId: 'gov-doc', slot: 'orchestrator' },
 		})!;
-		assert.ok(govPrompt.includes('engineering generate'));
-		assert.ok(govPrompt.includes('engineering template list'));
+		assert.ok(govPrompt.includes('aexus-ade mission blueprint apply'));
+		assert.ok(govPrompt.includes('aexus-ade mission prompt set'));
 		assert.ok(govPrompt.includes('aexus-ade role list'));
+		assert.ok(!govPrompt.includes('engineering template'));
+		assert.ok(!govPrompt.includes('engineering generate'));
+		assert.ok(!govPrompt.includes('worktrees merge'));
+		assert.ok(!govPrompt.includes('engineering review'));
 
-		// P1-7: Default governor holds engineering.design only — MUST NOT be authorized for dangerous integrate/destroy actions
-		const integrateSpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'engineering.integrate');
-		const destroySpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'engineering.destroy');
-		assert.strictEqual(integrateSpec?.dangerous, true);
+		// Default governor holds mission.design only — MUST NOT be authorized for dangerous mission.control / mission.destroy actions
+		const controlSpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'mission.control');
+		const destroySpec = ADE_PRIMITIVE_APIS.find(a => a.id === 'mission.destroy');
+		assert.strictEqual(controlSpec?.dangerous, true);
 		assert.strictEqual(destroySpec?.dangerous, true);
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.worktrees.merge').allowed, false);
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.remove').allowed, false);
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'engineering.reset').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.start').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.remove').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.delete').allowed, false);
 	});
 
 	test('computes custom hierarchy levels, next-lower ranks, template interpolation, and scoped CLI compilation', () => {
@@ -242,8 +263,8 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		const customSlotless = normalizeAdeOrganizationConfig({
 			version: 1,
 			ranks: [
-				{ id: 'cto', name: 'CTO', tier: 1, allowedApis: ['engineering.design', 'engineering.review'] },
-				{ id: 'qa', name: 'QA Lead', tier: 2, allowedApis: ['engineering.review'] },
+				{ id: 'cto', name: 'CTO', tier: 1, allowedApis: ['mission.design', 'mission.read'] },
+				{ id: 'qa', name: 'QA Lead', tier: 2, allowedApis: ['mission.read'] },
 				{ id: 'dev', name: 'Dev Bot', tier: 3, pureExecution: true },
 			],
 		});
@@ -252,7 +273,7 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		assert.strictEqual(resolveWorkTreeSlotRank(customSlotless, 'reviewer').id, 'qa');
 		assert.strictEqual(resolveWorkTreeSlotRank(customSlotless, 'executor').id, 'dev');
 
-		// Slot-aware work-tree prompt compilation under startup-3tier & flat-swarm
+		// Slot-aware v2 Mission prompt compilation: numeric-tier lazy-read entry commands, top-down org.*, zero v1 dogma
 		const startupReviewerPrompt = compileAdeRolePrompt({
 			config: startup,
 			rank: resolveWorkTreeSlotRank(startup, 'reviewer'),
@@ -262,27 +283,35 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 			engineId: 'aexus-claude',
 			projectName: 'Demo',
 			projectPath: '/tmp/demo',
-			workTree: { treeType: 'engineering', governorId: 'lead-1', segmentId: 'S1', nodeId: 'N1', slot: 'reviewer' },
+			workTree: { treeType: 'mission', governorId: 'lead-1', nodeId: 'N1', slot: 'reviewer' },
 		})!;
-		assert.ok(startupReviewerPrompt.includes('Reviewer ≠ Builder'), 'Startup 3-tier reviewer prompt uses resolved slot pair');
-		assert.ok(startupReviewerPrompt.includes('--role employee'), 'Review CLI instruction renders cleanly for reviewer slot');
+		assert.ok(startupReviewerPrompt.includes('aexus-ade whoami --json'), 'Includes immutable whoami entrypoint');
+		assert.ok(startupReviewerPrompt.includes('aexus-ade docs read L2'), 'Includes numeric-tier lazy-read docs entrypoint');
+		assert.ok(startupReviewerPrompt.includes('aexus-ade api update --since 0 --json'), 'Includes immutable api update entrypoint');
+		assert.ok(startupReviewerPrompt.includes('aexus-ade token complete'), 'Mission Token Bus instruction renders cleanly for reviewer slot');
+		assert.ok(!startupReviewerPrompt.includes('Employee ≠ Worker'), 'Must not inject legacy v1 Employee ≠ Worker dogma');
+		assert.ok(!startupReviewerPrompt.includes('NEVER claim'), 'Must not inject legacy v1 identity boilerplate');
 		assert.ok(!/没有职级/.test(startupReviewerPrompt), 'English prompt must not embed Chinese text (P2-6)');
 
-		const flatReviewerPrompt = compileAdeRolePrompt({
-			config: flat,
-			rank: resolveWorkTreeSlotRank(flat, 'reviewer'),
-			agentId: 'coord-n1',
-			agentLabel: '[N1] Swarm Task',
+		const offGraphSupPrompt = compileAdeRolePrompt({
+			config: DEFAULT_ADE_ORGANIZATION_CONFIG,
+			rank: DEFAULT_ADE_ORGANIZATION_CONFIG.ranks[1],
+			agentId: 'mgr-sup',
+			agentLabel: 'Off-Graph Mgr',
 			engineDisplay: 'Claude Code',
 			engineId: 'aexus-claude',
 			projectName: 'Demo',
 			projectPath: '/tmp/demo',
-			workTree: { treeType: 'engineering', governorId: 'coord-1', segmentId: 'S1', nodeId: 'N1', slot: 'reviewer' },
+			workTree: { treeType: 'mission', governorId: 'mission-1', isMissionOwner: false, managedNodeIds: ['N1', 'N2'] },
 		})!;
-		assert.ok(flatReviewerPrompt.includes('Coordinator ≠ Agent'));
-		assert.ok(!/没有职级/.test(flatReviewerPrompt));
+		assert.ok(offGraphSupPrompt.includes('Off-Graph Supervisor (L2) Operations'));
+		assert.ok(offGraphSupPrompt.includes('aexus-ade mission blueprint get --mission mission-1 --raw'));
+		assert.ok(offGraphSupPrompt.includes('managed nodes: N1, N2'));
+		assert.ok(!offGraphSupPrompt.includes('module/segment delivery'), 'Must not inject legacy v1 segment dogma');
+		assert.ok(!offGraphSupPrompt.includes('report concise outcomes upward'), 'Must not contradict strictly top-down communication law');
+		assert.ok(!/没有职级/.test(offGraphSupPrompt));
 
-		// Default 4-tier still keeps exact Employee ≠ Worker wording
+		// Default 4-tier L3 Employee prompt is clean of legacy v1 Employee ≠ Worker dogma
 		const defaultEmpPrompt = compileAdeRolePrompt({
 			config: DEFAULT_ADE_ORGANIZATION_CONFIG,
 			rank: resolveWorkTreeSlotRank(DEFAULT_ADE_ORGANIZATION_CONFIG, 'reviewer'),
@@ -292,9 +321,11 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 			engineId: 'aexus-claude',
 			projectName: 'Demo',
 			projectPath: '/tmp/demo',
-			workTree: { treeType: 'engineering', governorId: 'gov-1', segmentId: 'S1', nodeId: 'N1', slot: 'reviewer' },
+			workTree: { treeType: 'mission', governorId: 'gov-1', nodeId: 'N1', slot: 'reviewer' },
 		})!;
-		assert.ok(defaultEmpPrompt.includes('Employee ≠ Worker'));
+		assert.ok(defaultEmpPrompt.includes('In-Graph Mission Reviewer (L3)'));
+		assert.ok(defaultEmpPrompt.includes('aexus-ade token reject'));
+		assert.ok(!defaultEmpPrompt.includes('Employee ≠ Worker'));
 		assert.ok(!/没有职级/.test(defaultEmpPrompt));
 	});
 });

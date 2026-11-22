@@ -22,10 +22,73 @@ import {
 
 export type { IMissionDagEmployeeGroup };
 export { getEmployeeColorIndex, normalizeMissionEmployeeKey, setNodeEmployeeInMermaid };
+export {
+	addEdgeToMermaid,
+	addNodeToMermaid,
+	generateNextMissionNodeId,
+	MISSION_DAG_TEMPLATES,
+	removeEdgeFromMermaid,
+	removeNodeFromMermaid,
+	renameNodeInMermaid,
+	toggleEdgeFailInMermaid,
+} from './adeMissionDagAuthoring.js';
+export type { IMissionDagTemplate } from './adeMissionDagAuthoring.js';
 
 export type MissionDagDirection = 'LR' | 'TD';
 export type MissionDagNodeKind = 'task' | 'gate' | 'cluster';
 export type MissionDagEdgeKind = 'success' | 'fail';
+export type MissionCheckOnFailAction = 'bounce' | 'fail' | 'escalate';
+
+export interface IMissionNodeCheckHook {
+	readonly id: string;
+	readonly name?: string;
+	/** Deterministic shell command executed on local host or node's bound SSH Cloud Host (0 LLM tokens). */
+	readonly command?: string;
+	/** Expected process exit code (defaults to 0). */
+	readonly expectExitCode?: number;
+	/** Optional working directory (absolute or relative to the node's project root). */
+	readonly cwd?: string;
+	/** Optional host override (`'local'` or SSH Cloud Host alias); defaults to node's bound host. */
+	readonly hostAlias?: string;
+	/** Optional required file/directory paths that must exist (non-empty for files) upon completion. */
+	readonly expectFiles?: readonly string[];
+	/** Optional substring or `/regex/flags` pattern that must appear in command output. */
+	readonly expectOutputMatch?: string;
+	/** Command execution timeout in milliseconds (default 120_000, clamped to [1_000, 300_000]). */
+	readonly timeoutMs?: number;
+	/** Behavior on failure: `'bounce'` (default, auto-reject back to same worker up to `maxAutoRetries`), `'fail'`, or `'escalate'`. */
+	readonly onFail?: MissionCheckOnFailAction;
+	/** Max zero-supervisor auto bounce-backs to the same worker before failing/escalating (default 2, range 0..5). */
+	readonly maxAutoRetries?: number;
+	readonly enabled?: boolean;
+	/** Source origin (`'mermaid'` when declared via `%% check` comment, `'config'` when configured via CLI/UI). */
+	readonly source?: 'mermaid' | 'config';
+}
+
+export interface IMissionNodeCheckExecutionResult {
+	readonly checkId: string;
+	readonly name?: string;
+	readonly command?: string;
+	readonly hostAlias: string;
+	readonly cwd?: string;
+	readonly passed: boolean;
+	readonly exitCode: number;
+	readonly expectedExitCode: number;
+	readonly timedOut?: boolean;
+	readonly durationMs: number;
+	readonly missingFiles?: readonly string[];
+	readonly outputMatchFailed?: boolean;
+	readonly outputTail: string;
+	readonly error?: string;
+}
+
+export interface IMissionNodeCheckSuiteResult {
+	readonly nodeId: string;
+	readonly passed: boolean;
+	readonly totalDurationMs: number;
+	readonly results: readonly IMissionNodeCheckExecutionResult[];
+	readonly summary: string;
+}
 
 export interface IMissionNodePosition {
 	readonly x: number;
@@ -46,6 +109,8 @@ export interface IMissionDagNode {
 	readonly employeeOccurrence?: number;
 	/** Total DAG positions occupied by this same employee (`>= 1`). */
 	readonly employeeTotalOccurrences?: number;
+	/** Optional zero-cost deterministic verification hooks declared inline via `%% check <nodeId> ...` Mermaid directives. */
+	readonly checks?: readonly IMissionNodeCheckHook[];
 }
 
 export interface IMissionDagEdge {
@@ -105,7 +170,74 @@ export interface IMissionOrthogonalEdgeOptions {
 	readonly cornerRadius?: number;
 	readonly minStub?: number;
 	readonly wrapClearanceY?: number;
+	readonly orientation?: 'horizontal' | 'vertical';
 	readonly obstacles?: readonly IMissionEdgeObstacle[];
+}
+
+function measureMissionEdgeLabelCharWidth(ch: string): number {
+	const code = ch.codePointAt(0) ?? 0;
+	if (
+		(code >= 0x2E80 && code <= 0x9FFF)
+		|| (code >= 0xAC00 && code <= 0xD7AF)
+		|| (code >= 0xF900 && code <= 0xFAFF)
+		|| (code >= 0xFE30 && code <= 0xFE6F)
+		|| (code >= 0xFF00 && code <= 0xFF60)
+		|| (code >= 0xFFE0 && code <= 0xFFE6)
+		|| code >= 0x1F000
+	) {
+		return 12.4;
+	}
+	if ('il1I.,:;|!`\'" '.includes(ch)) {
+		return 4.2;
+	}
+	if ((code >= 0x41 && code <= 0x5A) || ch === 'm' || ch === 'w' || ch === 'M' || ch === 'W') {
+		return 7.6;
+	}
+	return 6.6;
+}
+
+export function measureMissionEdgeLabelTextWidth(label: string): number {
+	let px = 0;
+	for (const ch of label) {
+		px += measureMissionEdgeLabelCharWidth(ch);
+	}
+	return Math.ceil(px);
+}
+
+export function computeMissionEdgeLabelLayout(
+	label: string,
+	maxPillWidth = 260,
+): { readonly displayText: string; readonly pillWidth: number } {
+	const trimmed = label.trim();
+	const padX = 20;
+	const minPillWidth = 42;
+	if (!trimmed) {
+		return { displayText: '', pillWidth: minPillWidth };
+	}
+	const fullTextWidth = measureMissionEdgeLabelTextWidth(trimmed);
+	if (fullTextWidth + padX <= maxPillWidth) {
+		return {
+			displayText: trimmed,
+			pillWidth: Math.max(minPillWidth, fullTextWidth + padX),
+		};
+	}
+	const ellipsisWidth = measureMissionEdgeLabelCharWidth('…');
+	const budget = Math.max(24, maxPillWidth - padX - ellipsisWidth);
+	let acc = 0;
+	let out = '';
+	for (const ch of trimmed) {
+		const w = measureMissionEdgeLabelCharWidth(ch);
+		if (acc + w > budget) {
+			break;
+		}
+		acc += w;
+		out += ch;
+	}
+	const displayText = `${out.trimEnd()}…`;
+	return {
+		displayText,
+		pillWidth: Math.max(minPillWidth, Math.min(maxPillWidth, measureMissionEdgeLabelTextWidth(displayText) + padX)),
+	};
 }
 
 export interface IMissionOrthogonalEdgeRoute {
@@ -115,10 +247,10 @@ export interface IMissionOrthogonalEdgeRoute {
 	readonly points: readonly { readonly x: number; readonly y: number }[];
 }
 
-export const MISSION_TASK_NODE_WIDTH = 248;
-export const MISSION_TASK_NODE_HEIGHT = 114;
-export const MISSION_GATE_NODE_WIDTH = 216;
-export const MISSION_GATE_NODE_HEIGHT = 86;
+export const MISSION_TASK_NODE_WIDTH = 316;
+export const MISSION_TASK_NODE_HEIGHT = 220;
+export const MISSION_GATE_NODE_WIDTH = 236;
+export const MISSION_GATE_NODE_HEIGHT = 108;
 
 const MIN_WORLD_WIDTH = 4800;
 const MIN_WORLD_HEIGHT = 3600;
@@ -270,6 +402,128 @@ function detectCycle(nodes: readonly IMissionDagNode[], edges: readonly IMission
 	return undefined;
 }
 
+function parseCheckDirectiveDurationMs(raw: string): number | undefined {
+	const t = raw.trim().toLowerCase();
+	if (!t) {
+		return undefined;
+	}
+	if (/^\d+$/.test(t)) {
+		const n = Number.parseInt(t, 10);
+		// Interpret small integers (<= 600) as seconds, larger as milliseconds
+		return n <= 600 ? n * 1000 : n;
+	}
+	const m = /^(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|m|min|mins)$/.exec(t);
+	if (!m) {
+		return undefined;
+	}
+	const val = Number.parseFloat(m[1]);
+	if (!Number.isFinite(val) || val <= 0) {
+		return undefined;
+	}
+	const unit = m[2];
+	if (unit === 'ms') { return Math.round(val); }
+	if (unit === 'm' || unit === 'min' || unit === 'mins') { return Math.round(val * 60_000); }
+	return Math.round(val * 1000);
+}
+
+/**
+ * Parses an optional inline Mermaid comment verification directive:
+ *   `%% check N1: pnpm test`
+ *   `%% verify N1 [name=unit, timeout=90s, on_fail=bounce, max_retries=2, cwd=app, expect_file=dist/out.js]: pnpm test`
+ *   `%% check N1 [expect_file=dist/app.dmg]`
+ * Regular `%%` comments that do not match this form are ignored cleanly.
+ */
+function parseMermaidCheckDirective(rawLine: string, seqByNode: Map<string, number>): { readonly nodeId: string; readonly hook: IMissionNodeCheckHook } | undefined {
+	const idx = rawLine.indexOf('%%');
+	if (idx < 0) {
+		return undefined;
+	}
+	const commentBody = rawLine.slice(idx + 2).trim();
+	const m = /^(?:check|verify)\s+([A-Za-z0-9_-]+)(?:\s*\[([^\]]*)\])?(?:\s*:\s*(.*))?$/i.exec(commentBody);
+	if (!m) {
+		return undefined;
+	}
+	const nodeId = m[1].trim();
+	const optStr = m[2]?.trim() ?? '';
+	const command = m[3]?.trim() || undefined;
+
+	let id: string | undefined;
+	let name: string | undefined;
+	let cwd: string | undefined;
+	let hostAlias: string | undefined;
+	let expectExitCode: number | undefined;
+	let expectOutputMatch: string | undefined;
+	let timeoutMs: number | undefined;
+	let onFail: MissionCheckOnFailAction | undefined;
+	let maxAutoRetries: number | undefined;
+	const expectFiles: string[] = [];
+
+	if (optStr) {
+		for (const part of splitTopLevelByDelimiter(optStr, ',')) {
+			const eq = part.indexOf('=');
+			if (eq <= 0) {
+				continue;
+			}
+			const key = part.slice(0, eq).trim().toLowerCase().replace(/-/g, '_');
+			const val = stripOuterQuotes(part.slice(eq + 1).trim());
+			if (!val) {
+				continue;
+			}
+			if (key === 'id') { id = val; }
+			else if (key === 'name' || key === 'label') { name = val; }
+			else if (key === 'cwd' || key === 'dir') { cwd = val; }
+			else if (key === 'host' || key === 'host_alias') { hostAlias = val; }
+			else if (key === 'expect_exit' || key === 'exit' || key === 'exit_code') {
+				const parsed = Number.parseInt(val, 10);
+				if (Number.isInteger(parsed) && parsed >= 0) { expectExitCode = parsed; }
+			} else if (key === 'expect_file' || key === 'expect_files' || key === 'file' || key === 'files') {
+				for (const fp of val.split('|').map(s => s.trim()).filter(Boolean)) {
+					expectFiles.push(fp);
+				}
+			} else if (key === 'match' || key === 'expect_match' || key === 'expect_output') {
+				expectOutputMatch = val;
+			} else if (key === 'timeout' || key === 'timeout_ms') {
+				const parsedMs = parseCheckDirectiveDurationMs(val);
+				if (parsedMs !== undefined) {
+					timeoutMs = Math.max(1_000, Math.min(300_000, parsedMs));
+				}
+			} else if (key === 'on_fail' || key === 'onfail') {
+				const norm = val.toLowerCase();
+				if (norm === 'bounce' || norm === 'fail' || norm === 'escalate') {
+					onFail = norm;
+				}
+			} else if (key === 'max_retries' || key === 'retries' || key === 'max_auto_retries') {
+				const parsed = Number.parseInt(val, 10);
+				if (Number.isInteger(parsed) && parsed >= 0) {
+					maxAutoRetries = Math.min(5, parsed);
+				}
+			}
+		}
+	}
+
+	if (!command && expectFiles.length === 0) {
+		return undefined;
+	}
+	const nextSeq = (seqByNode.get(nodeId) ?? 0) + 1;
+	seqByNode.set(nodeId, nextSeq);
+	const hook: IMissionNodeCheckHook = {
+		id: id || `mmd-check-${nodeId}-${nextSeq}`,
+		...(name ? { name } : {}),
+		...(command ? { command } : {}),
+		...(expectExitCode !== undefined ? { expectExitCode } : {}),
+		...(cwd ? { cwd } : {}),
+		...(hostAlias ? { hostAlias } : {}),
+		...(expectFiles.length > 0 ? { expectFiles } : {}),
+		...(expectOutputMatch ? { expectOutputMatch } : {}),
+		...(timeoutMs !== undefined ? { timeoutMs } : {}),
+		...(onFail ? { onFail } : {}),
+		...(maxAutoRetries !== undefined ? { maxAutoRetries } : {}),
+		enabled: true,
+		source: 'mermaid',
+	};
+	return { nodeId, hook };
+}
+
 /**
  * Parses pure Mermaid flowchart / graph syntax into a flat (non-nested) DAG.
  * Empty text returns an empty graph with no error so users can create a Mission first and author Mermaid later.
@@ -281,8 +535,10 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 	}
 
 	let direction: MissionDagDirection = 'LR';
-	const nodeMap = new Map<string, { id: string; label: string; kind: MissionDagNodeKind; employeeKey?: string; employeeName?: string }>();
+	const nodeMap = new Map<string, { id: string; label: string; kind: MissionDagNodeKind; employeeKey?: string; employeeName?: string; checks?: IMissionNodeCheckHook[] }>();
 	const classEmployeeByNodeId = new Map<string, string>();
+	const checksByNodeId = new Map<string, IMissionNodeCheckHook[]>();
+	const checkSeqByNodeId = new Map<string, number>();
 	const edges: IMissionDagEdge[] = [];
 	const edgeKeys = new Set<string>();
 
@@ -314,6 +570,12 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 
 	const rawLines = source.split(/\r?\n/);
 	for (const rawLine of rawLines) {
+		const checkDirective = parseMermaidCheckDirective(rawLine, checkSeqByNodeId);
+		if (checkDirective) {
+			const list = checksByNodeId.get(checkDirective.nodeId) ?? [];
+			list.push(checkDirective.hook);
+			checksByNodeId.set(checkDirective.nodeId, list);
+		}
 		const noComment = rawLine.replace(/%%.*$/, '').trim();
 		if (!noComment) {
 			continue;
@@ -415,6 +677,13 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 		if (existing && existing.kind === 'task' && !existing.employeeKey) {
 			existing.employeeKey = normalizeMissionEmployeeKey(empName);
 			existing.employeeName = empName;
+		}
+	}
+
+	for (const [nid, hooks] of checksByNodeId.entries()) {
+		const existing = nodeMap.get(nid);
+		if (existing && existing.kind === 'task' && hooks.length > 0) {
+			existing.checks = hooks;
 		}
 	}
 
@@ -520,10 +789,10 @@ export function computeMissionAutoLayout(
 	}
 
 	const isVertical = graph.direction === 'TD';
-	const hGap = options?.horizontalGap ?? (isVertical ? 310 : 340);
-	const vGap = options?.verticalGap ?? (isVertical ? 176 : 162);
-	const originX = options?.originX ?? 240;
-	const originY = options?.originY ?? 280;
+	const hGap = options?.horizontalGap ?? (isVertical ? 368 : 396);
+	const vGap = options?.verticalGap ?? (isVertical ? 304 : 238);
+	const originX = options?.originX ?? 270;
+	const originY = options?.originY ?? (isVertical ? 210 : 300);
 
 	for (let l = 0; l < layers.length; l++) {
 		const col = layers[l];
@@ -533,7 +802,7 @@ export function computeMissionAutoLayout(
 			if (isVertical) {
 				result.set(col[idx], {
 					x: Math.round(originX + 260 + offset),
-					y: Math.round(140 + l * vGap),
+					y: Math.round(originY + l * vGap),
 				});
 			} else {
 				result.set(col[idx], {
@@ -541,6 +810,27 @@ export function computeMissionAutoLayout(
 					y: Math.round(originY + offset),
 				});
 			}
+		}
+	}
+
+	// Guard wide parallel layers (5+ siblings) against ever drifting into negative world coordinates.
+	const SAFE_MIN_EDGE_X = 100;
+	const SAFE_MIN_EDGE_Y = 100;
+	const nodeById = new Map(graph.nodes.map(n => [n.id, n]));
+	let minLeft = Infinity;
+	let minTop = Infinity;
+	for (const [id, pos] of result.entries()) {
+		const node = nodeById.get(id);
+		const halfW = (node?.kind === 'gate' ? MISSION_GATE_NODE_WIDTH : MISSION_TASK_NODE_WIDTH) / 2;
+		const halfH = (node?.kind === 'gate' ? MISSION_GATE_NODE_HEIGHT : MISSION_TASK_NODE_HEIGHT) / 2;
+		minLeft = Math.min(minLeft, pos.x - halfW);
+		minTop = Math.min(minTop, pos.y - halfH);
+	}
+	const shiftX = Number.isFinite(minLeft) && minLeft < SAFE_MIN_EDGE_X ? Math.ceil(SAFE_MIN_EDGE_X - minLeft) : 0;
+	const shiftY = Number.isFinite(minTop) && minTop < SAFE_MIN_EDGE_Y ? Math.ceil(SAFE_MIN_EDGE_Y - minTop) : 0;
+	if (shiftX > 0 || shiftY > 0) {
+		for (const [id, pos] of result.entries()) {
+			result.set(id, { x: pos.x + shiftX, y: pos.y + shiftY });
 		}
 	}
 
@@ -658,6 +948,30 @@ export function computeOrthogonalRoundedEdgeRoute(
 	y2: number,
 	options?: IMissionOrthogonalEdgeOptions,
 ): IMissionOrthogonalEdgeRoute {
+	if (options?.orientation === 'vertical') {
+		const transposedObstacles: IMissionEdgeObstacle[] | undefined = options.obstacles?.map(o => ({
+			minX: o.minY,
+			maxX: o.maxY,
+			minY: o.minX,
+			maxY: o.maxX,
+		}));
+		const cornerRadius = Math.max(0, options.cornerRadius ?? 14);
+		const horizontal = computeOrthogonalRoundedEdgeRoute(y1, x1, y2, x2, {
+			cornerRadius,
+			minStub: options.minStub,
+			wrapClearanceY: options.wrapClearanceY ?? 120,
+			orientation: 'horizontal',
+			obstacles: transposedObstacles,
+		});
+		const points = horizontal.points.map(p => ({ x: p.y, y: p.x }));
+		return {
+			path: roundedOrthogonalPolylineToSvgPath(points, cornerRadius),
+			midX: horizontal.midY,
+			midY: horizontal.midX,
+			points,
+		};
+	}
+
 	const cornerRadius = Math.max(0, options?.cornerRadius ?? 14);
 	const minStub = Math.max(4, options?.minStub ?? 22);
 	const wrapClearanceY = Math.max(24, options?.wrapClearanceY ?? 84);

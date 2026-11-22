@@ -1778,6 +1778,254 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		throw new Error(`Remote PID probe failed on ${authority} (exit ${res.code}): ${res.stderr.trim() || out || 'empty stdout'}`);
 	}
 
+	async remoteCheckPersistentSessions(
+		authority: string,
+		idPrefix: string,
+	): Promise<{ readonly aliveCount: number; readonly exitedCodes: readonly number[] } | undefined> {
+		const safePrefix = idPrefix.trim().replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
+		if (safePrefix.length < 4) {
+			return undefined;
+		}
+		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		if (hostOs === 'windows') {
+			return undefined;
+		}
+		const script = [
+			`_aex_base="\${AEXUS_REMOTE_SESSION_DIR:-$HOME/.aexus-code/remote-sessions}"`,
+			`[ -d "$_aex_base" ] || { printf 'NONE\\n'; exit 0; }`,
+			`for _d in "$_aex_base/${safePrefix}" "$_aex_base/${safePrefix}"-*; do`,
+			`  [ -d "$_d" ] || continue`,
+			`  _pid=""`,
+			`  _rc=""`,
+			`  [ -f "$_d/agent.pid" ] && _pid=$(tr -d ' \\t\\r\\n' < "$_d/agent.pid" 2>/dev/null || true)`,
+			`  [ -f "$_d/exit.code" ] && _rc=$(tr -d ' \\t\\r\\n' < "$_d/exit.code" 2>/dev/null || true)`,
+			`  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then`,
+			`    printf 'ALIVE\\t%s\\n' "$_pid"`,
+			`  elif [ -n "$_rc" ]; then`,
+			`    printf 'EXITED\\t%s\\n' "$_rc"`,
+			`  else`,
+			`    printf 'DEAD\\t\\n'`,
+			`  fi`,
+			`done`,
+		].join('\n');
+		const res = await this.runSshRaw(target, `sh -c ${posixQuote(script)}`, { timeoutMs: 8_000, host });
+		if (res.code !== 0) {
+			throw new Error(`Remote persistent session probe failed on ${authority} (exit ${res.code}): ${res.stderr.trim()}`);
+		}
+		let aliveCount = 0;
+		const exitedCodes: number[] = [];
+		for (const line of res.stdout.toString('utf8').split(/\r?\n/)) {
+			const trimmed = line.trim();
+			if (!trimmed || trimmed === 'NONE') {
+				continue;
+			}
+			const [kind, val] = trimmed.split('\t');
+			if (kind === 'ALIVE') {
+				aliveCount++;
+			} else if (kind === 'EXITED' && val && /^-?\d+$/.test(val)) {
+				exitedCodes.push(Number.parseInt(val, 10));
+			}
+		}
+		return { aliveCount, exitedCodes };
+	}
+
+	/**
+	 * Executes ALL Watchdog probes targeting a single SSH Cloud Host (`pids`, `filePaths`, `gitPaths`,
+	 * `persistentPrefixes`, `checkGpu`, plus the remote host's own wall-clock `remoteNowMs`) in ONE
+	 * single multiplexed SSH invocation per tick — eliminating per-token/per-trigger SSH storms.
+	 */
+	async remoteBatchProbe(
+		authority: string,
+		spec: {
+			readonly pids?: readonly number[];
+			readonly filePaths?: readonly string[];
+			readonly gitPaths?: readonly string[];
+			readonly persistentPrefixes?: readonly string[];
+			readonly checkGpu?: boolean;
+		},
+	): Promise<{
+		readonly remoteNowMs?: number;
+		readonly pidAlive: Readonly<Record<number, boolean>>;
+		readonly fileMtime: Readonly<Record<string, number | undefined>>;
+		readonly gitHead: Readonly<Record<string, string | undefined>>;
+		readonly persistentSessions: Readonly<Record<string, { readonly aliveCount: number; readonly exitedCodes: readonly number[] }>>;
+		readonly gpuUtilPct?: number;
+	}> {
+		const pids = Array.from(new Set((spec.pids ?? []).filter(p => Number.isInteger(p) && p > 0)));
+		const filePaths = Array.from(new Set((spec.filePaths ?? []).map(p => p.trim()).filter(Boolean)));
+		const gitPaths = Array.from(new Set((spec.gitPaths ?? []).map(p => p.trim()).filter(Boolean)));
+		const persistentPrefixEntries: Array<{ readonly raw: string; readonly safe: string }> = [];
+		const seenPersistentRaw = new Set<string>();
+		for (const raw of spec.persistentPrefixes ?? []) {
+			const trimmed = raw.trim();
+			if (!trimmed || seenPersistentRaw.has(trimmed)) {
+				continue;
+			}
+			const safe = trimmed.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
+			if (safe.length >= 4) {
+				seenPersistentRaw.add(trimmed);
+				persistentPrefixEntries.push({ raw: trimmed, safe });
+			}
+		}
+		const checkGpu = Boolean(spec.checkGpu);
+
+		const pidAlive: Record<number, boolean> = {};
+		const fileMtime: Record<string, number | undefined> = {};
+		const gitHead: Record<string, string | undefined> = {};
+		const persistentSessions: Record<string, { aliveCount: number; exitedCodes: number[] }> = {};
+		let remoteNowMs: number | undefined;
+		let gpuUtilPct: number | undefined;
+
+		if (pids.length === 0 && filePaths.length === 0 && gitPaths.length === 0 && persistentPrefixEntries.length === 0 && !checkGpu) {
+			return { pidAlive, fileMtime, gitHead, persistentSessions };
+		}
+
+		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		if (hostOs === 'windows') {
+			const psLines: string[] = [
+				`$ErrorActionPreference='SilentlyContinue'`,
+				`Write-Output ('NOW' + [char]9 + [int64]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()))`,
+			];
+			for (const pid of pids) {
+				psLines.push(`if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Write-Output ('PID' + [char]9 + '${pid}' + [char]9 + 'ALIVE') } else { Write-Output ('PID' + [char]9 + '${pid}' + [char]9 + 'DEAD') }`);
+			}
+			for (let i = 0; i < filePaths.length; i++) {
+				const winP = toRemoteNativePath(normalizeRemoteProjectPath(filePaths[i], 'windows'), 'windows').replace(/'/g, `''`);
+				psLines.push(`if (Test-Path -LiteralPath '${winP}') { $it=Get-Item -LiteralPath '${winP}' -Force; Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + [int64]([DateTimeOffset]$it.LastWriteTimeUtc).ToUnixTimeMilliseconds()) } else { Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + 'MISSING') }`);
+			}
+			for (let i = 0; i < gitPaths.length; i++) {
+				const winG = toRemoteNativePath(normalizeRemoteProjectPath(gitPaths[i], 'windows'), 'windows').replace(/'/g, `''`);
+				psLines.push(`$sha=(git -C '${winG}' rev-parse HEAD 2>$null | Out-String).Trim(); if ($sha) { Write-Output ('GIT' + [char]9 + '${i}' + [char]9 + $sha) }`);
+			}
+			if (checkGpu) {
+				psLines.push(`$g=(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>$null | Out-String); foreach ($l in ($g -split '\\r?\\n')) { $t=$l.Trim(); if ($t) { Write-Output ('GPU' + [char]9 + $t) } }`);
+			}
+			psLines.push('exit 0');
+			const res = await this.runSshRaw(target, `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(psLines.join('; '))}`, { timeoutMs: 10_000, host });
+			if (res.code !== 0) {
+				throw new Error(`Remote batch probe failed on ${authority} (exit ${res.code}): ${res.stderr.trim()}`);
+			}
+			const gpuVals: number[] = [];
+			for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+				const parts = rawLine.trim().split('\t');
+				if (parts[0] === 'NOW' && /^\d+$/.test(parts[1] ?? '')) {
+					remoteNowMs = Number.parseInt(parts[1], 10);
+				} else if (parts[0] === 'PID' && /^\d+$/.test(parts[1] ?? '')) {
+					pidAlive[Number.parseInt(parts[1], 10)] = parts[2] === 'ALIVE';
+				} else if (parts[0] === 'FILE' && /^\d+$/.test(parts[1] ?? '')) {
+					const idx = Number.parseInt(parts[1], 10);
+					const fp = filePaths[idx];
+					if (fp) {
+						fileMtime[fp] = parts[2] && /^\d+$/.test(parts[2]) ? Number.parseInt(parts[2], 10) : undefined;
+					}
+				} else if (parts[0] === 'GIT' && /^\d+$/.test(parts[1] ?? '')) {
+					const idx = Number.parseInt(parts[1], 10);
+					const gp = gitPaths[idx];
+					if (gp && parts[2] && /^[0-9a-f]{7,64}$/i.test(parts[2])) {
+						gitHead[gp] = parts[2];
+					}
+				} else if (parts[0] === 'GPU' && parts[1]) {
+					const v = Number.parseFloat(parts[1]);
+					if (Number.isFinite(v)) { gpuVals.push(v); }
+				}
+			}
+			if (gpuVals.length > 0) {
+				gpuUtilPct = Math.max(...gpuVals);
+			}
+			return { ...(remoteNowMs !== undefined ? { remoteNowMs } : {}), pidAlive, fileMtime, gitHead, persistentSessions, ...(gpuUtilPct !== undefined ? { gpuUtilPct } : {}) };
+		}
+
+		// POSIX single-SSH batch probe
+		const lines: string[] = [
+			`printf 'NOW\\t%s\\n' "$(date +%s 2>/dev/null || echo 0)"`,
+		];
+		for (const pid of pids) {
+			lines.push(`if kill -0 ${pid} 2>/dev/null; then printf 'PID\\t${pid}\\tALIVE\\n'; else printf 'PID\\t${pid}\\tDEAD\\n'; fi`);
+		}
+		for (let i = 0; i < filePaths.length; i++) {
+			const q = posixQuote(normalizeRemoteProjectPath(filePaths[i], hostOs));
+			lines.push(`_f=${q}; if [ -e "$_f" ] || [ -L "$_f" ]; then _m=$(stat -c "%Y" "$_f" 2>/dev/null || stat -f "%m" "$_f" 2>/dev/null || echo MISSING); printf 'FILE\\t${i}\\t%s\\n' "$_m"; else printf 'FILE\\t${i}\\tMISSING\\n'; fi`);
+		}
+		for (let i = 0; i < gitPaths.length; i++) {
+			const q = posixQuote(normalizeRemoteProjectPath(gitPaths[i], hostOs));
+			lines.push(`_g=$(cd -- ${q} 2>/dev/null && git rev-parse HEAD 2>/dev/null || true); if [ -n "$_g" ]; then printf 'GIT\\t${i}\\t%s\\n' "$_g"; fi`);
+		}
+		if (persistentPrefixEntries.length > 0) {
+			lines.push(`_aex_base="\${AEXUS_REMOTE_SESSION_DIR:-$HOME/.aexus-code/remote-sessions}"`);
+			for (let i = 0; i < persistentPrefixEntries.length; i++) {
+				const { raw, safe } = persistentPrefixEntries[i];
+				persistentSessions[raw] = { aliveCount: 0, exitedCodes: [] };
+				lines.push(
+					`if [ -d "$_aex_base" ]; then`,
+					`  for _d in "$_aex_base/${safe}" "$_aex_base/${safe}"-*; do`,
+					`    [ -d "$_d" ] || continue`,
+					`    _sp=""; _sr=""`,
+					`    [ -f "$_d/agent.pid" ] && _sp=$(tr -d ' \\t\\r\\n' < "$_d/agent.pid" 2>/dev/null || true)`,
+					`    [ -f "$_d/exit.code" ] && _sr=$(tr -d ' \\t\\r\\n' < "$_d/exit.code" 2>/dev/null || true)`,
+					`    if [ -n "$_sp" ] && kill -0 "$_sp" 2>/dev/null; then printf 'SESS\\t${i}\\tALIVE\\n'; elif [ -n "$_sr" ]; then printf 'SESS\\t${i}\\tEXITED\\t%s\\n' "$_sr"; fi`,
+					`  done`,
+					`fi`,
+				);
+			}
+		}
+		if (checkGpu) {
+			lines.push(`for _u in $(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null || true); do printf 'GPU\\t%s\\n' "$_u"; done`);
+		}
+		lines.push('exit 0');
+		const res = await this.runSshRaw(target, `sh -c ${posixQuote(lines.join('\n'))}`, { timeoutMs: 10_000, host });
+		if (res.code !== 0) {
+			throw new Error(`Remote batch probe failed on ${authority} (exit ${res.code}): ${res.stderr.trim()}`);
+		}
+		const gpuVals: number[] = [];
+		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
+			const parts = rawLine.trim().split('\t');
+			if (parts[0] === 'NOW' && /^\d+$/.test(parts[1] ?? '')) {
+				const sec = Number.parseInt(parts[1], 10);
+				if (sec > 0) { remoteNowMs = sec * 1000; }
+			} else if (parts[0] === 'PID' && /^\d+$/.test(parts[1] ?? '')) {
+				pidAlive[Number.parseInt(parts[1], 10)] = parts[2] === 'ALIVE';
+			} else if (parts[0] === 'FILE' && /^\d+$/.test(parts[1] ?? '')) {
+				const idx = Number.parseInt(parts[1], 10);
+				const fp = filePaths[idx];
+				if (fp) {
+					const sec = parts[2] && /^\d+$/.test(parts[2]) ? Number.parseInt(parts[2], 10) : 0;
+					fileMtime[fp] = sec > 0 ? sec * 1000 : undefined;
+				}
+			} else if (parts[0] === 'GIT' && /^\d+$/.test(parts[1] ?? '')) {
+				const idx = Number.parseInt(parts[1], 10);
+				const gp = gitPaths[idx];
+				if (gp && parts[2] && /^[0-9a-f]{7,64}$/i.test(parts[2])) {
+					gitHead[gp] = parts[2];
+				}
+			} else if (parts[0] === 'SESS' && /^\d+$/.test(parts[1] ?? '')) {
+				const idx = Number.parseInt(parts[1], 10);
+				const entry = persistentPrefixEntries[idx];
+				const rec = entry ? persistentSessions[entry.raw] : undefined;
+				if (rec) {
+					if (parts[2] === 'ALIVE') {
+						rec.aliveCount++;
+					} else if (parts[2] === 'EXITED' && parts[3] && /^-?\d+$/.test(parts[3])) {
+						rec.exitedCodes.push(Number.parseInt(parts[3], 10));
+					}
+				}
+			} else if (parts[0] === 'GPU' && parts[1]) {
+				const v = Number.parseFloat(parts[1]);
+				if (Number.isFinite(v)) { gpuVals.push(v); }
+			}
+		}
+		if (gpuVals.length > 0) {
+			gpuUtilPct = Math.max(...gpuVals);
+		}
+		return {
+			...(remoteNowMs !== undefined ? { remoteNowMs } : {}),
+			pidAlive,
+			fileMtime,
+			gitHead,
+			persistentSessions,
+			...(gpuUtilPct !== undefined ? { gpuUtilPct } : {}),
+		};
+	}
+
 	async remoteFileStatMtime(authority: string, remotePath: string): Promise<number | undefined> {
 		try {
 			const stat = await this.remoteStat(authority, remotePath);
@@ -1820,5 +2068,68 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			return undefined;
 		}
 		return Math.max(...values);
+	}
+
+	async remoteExecCommand(
+		authority: string,
+		options: {
+			readonly command: string;
+			readonly cwd?: string;
+			readonly timeoutMs?: number;
+			readonly maxOutputChars?: number;
+		},
+	): Promise<{
+		readonly exitCode: number;
+		readonly outputTail: string;
+		readonly timedOut: boolean;
+		readonly durationMs: number;
+		readonly error?: string;
+	}> {
+		const startedAt = Date.now();
+		const timeoutMs = Math.max(1_000, Math.min(300_000, Math.round(options.timeoutMs ?? 120_000)));
+		const maxOutputChars = Math.max(256, Math.min(16_000, Math.round(options.maxOutputChars ?? 2_400)));
+		const { target, os: hostOs, host } = await this.resolveHostTarget(authority);
+		const trimmedCmd = options.command.trim();
+		const remoteCwd = options.cwd?.trim() ? normalizeRemoteProjectPath(options.cwd.trim(), hostOs) : undefined;
+
+		let remoteScript: string;
+		if (hostOs === 'windows') {
+			const cdPrefix = remoteCwd
+				? `Set-Location -LiteralPath '${toRemoteNativePath(remoteCwd, 'windows').replace(/'/g, `''`)}'; if (-not $?) { exit 1 }; `
+				: '';
+			const ps = `$utf8=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=$utf8; $OutputEncoding=$utf8; ${cdPrefix}${trimmedCmd}`;
+			remoteScript = `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellScript(ps)}`;
+		} else {
+			const script = remoteCwd
+				? `cd -- ${posixQuote(remoteCwd)} && ${trimmedCmd}`
+				: trimmedCmd;
+			remoteScript = `sh -lc ${posixQuote(script)}`;
+		}
+
+		try {
+			const res = await this.runSshRaw(target, remoteScript, { timeoutMs, host });
+			const durationMs = Math.max(0, Date.now() - startedAt);
+			const combined = [res.stdout.toString('utf8').trimEnd(), res.stderr.trimEnd()].filter(Boolean).join('\n');
+			const outputTail = combined.length > maxOutputChars
+				? `…[truncated ${combined.length - maxOutputChars} chars]\n${combined.slice(combined.length - maxOutputChars)}`
+				: combined;
+			return {
+				exitCode: res.code,
+				outputTail,
+				timedOut: false,
+				durationMs,
+			};
+		} catch (err) {
+			const durationMs = Math.max(0, Date.now() - startedAt);
+			const msg = err instanceof Error ? err.message : String(err);
+			const timedOut = /timed out/i.test(msg);
+			return {
+				exitCode: timedOut ? 124 : 1,
+				outputTail: msg.slice(0, maxOutputChars),
+				timedOut,
+				durationMs,
+				error: msg,
+			};
+		}
 	}
 }

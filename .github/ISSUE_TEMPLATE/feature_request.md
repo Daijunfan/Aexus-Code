@@ -12,8 +12,8 @@ Describe the developer workflow bottleneck this feature solves.
 Describe the desired UX, CLI interface (`aexus-ade ...`), or DAG orchestration behavior.
 
 ## Category
-- [ ] ADE Engineering / Research DAG Studio
-- [ ] Blueprint Recipes / FinOps / Guardrails
+- [ ] ADE Mission DAG Canvas & Runtime
+- [ ] Mission Blueprints, Token Bus & Watchdog
 - [ ] Native Coding Agent Engine Bridge
 - [ ] SSH Cloud Host Studio (`aexus-ssh://`)
 - [ ] IDE Mirror Symmetry / Chat UX

@@ -14,14 +14,22 @@ import * as path from 'node:path';
 import {
 	buildPosixPathAugmentSnippet,
 	buildPosixRemoteExecCommand,
+	buildRemotePersistentPrefix,
 	buildWindowsRemoteExecCommand,
 	captureRemoteEngine,
 	clearCloudTransportCaches,
+	disposeAllRemoteControlBridges,
+	encodeClaudeProjectSlug,
+	encodePiProjectSlug,
 	encodePowerShellCommand,
+	ensureRemoteControlReverseBridge,
 	extractForwardableRemoteEnv,
+	inspectRemotePersistentSessionsByPrefix,
 	isLegacyCloudBridgeCwd,
 	normalizeCloudProjectUriString,
 	normalizeRemoteCwdForCompare,
+	notifySystemResume,
+	onSystemResume,
 	openRemoteControlReverseBridge,
 	openRemotePortForward,
 	parseCloudProjectUri,
@@ -33,8 +41,11 @@ import {
 	readRemoteTextFilesBatch,
 	registerCloudTransportBridge,
 	remotePathToFileUrl,
+	resolveRemoteRealpath,
 	stageLocalFileToRemote,
 	stageRemoteAdeCliShim,
+	terminateRemotePersistentSession,
+	terminateRemotePersistentSessionsByPrefix,
 	toRemoteNativePath,
 	type CloudHostTarget,
 } from '../src/cloudTransport.ts';
@@ -63,6 +74,7 @@ if (alias && alias.startsWith('fail-host')) {
 }
 
 const forwardIndex = argv.indexOf('-L');
+const reverseIndex = argv.indexOf('-R');
 if (forwardIndex !== -1 && argv.includes('-N')) {
 	const match = /^127\\.0\\.0\\.1:(\\d+):127\\.0\\.0\\.1:(\\d+)$/.exec(argv[forwardIndex + 1] || '');
 	if (!match) {
@@ -86,6 +98,67 @@ if (forwardIndex !== -1 && argv.includes('-N')) {
 	};
 	process.on('SIGTERM', shutdown);
 	process.on('SIGINT', shutdown);
+} else if (reverseIndex !== -1 && argv.includes('-N')) {
+	const fs = require('node:fs');
+	const spec = argv[reverseIndex + 1] || '';
+	const udsMatch = /^(\\/[^:]+):127\\.0\\.0\\.1:(\\d+)$/.exec(spec);
+	const tcpMatch = /^127\\.0\\.0\\.1:(\\d+):127\\.0\\.0\\.1:(\\d+)$/.exec(spec);
+	if (udsMatch) {
+		if (alias && alias.startsWith('no-uds-host')) {
+			process.stderr.write('Error: remote port forwarding failed for listen path ' + udsMatch[1] + ' (administratively prohibited)\\n');
+			process.exit(255);
+		}
+		try { fs.rmSync(udsMatch[1], { force: true }); } catch {}
+		const server = net.createServer(client => {
+			const upstream = net.createConnection({ host: '127.0.0.1', port: Number(udsMatch[2]) });
+			client.pipe(upstream);
+			upstream.pipe(client);
+			client.on('error', () => upstream.destroy());
+			upstream.on('error', () => client.destroy());
+		});
+		server.listen(udsMatch[1]);
+		let closing = false;
+		const shutdown = () => {
+			if (closing) { return; }
+			closing = true;
+			server.close(() => {
+				try { fs.rmSync(udsMatch[1], { force: true }); } catch {}
+				process.exit(0);
+			});
+			setTimeout(() => process.exit(0), 250).unref();
+		};
+		process.on('SIGTERM', shutdown);
+		process.on('SIGINT', shutdown);
+	} else if (tcpMatch) {
+		const requestedPort = Number(tcpMatch[1]);
+		const server = net.createServer(client => {
+			const upstream = net.createConnection({ host: '127.0.0.1', port: Number(tcpMatch[2]) });
+			client.pipe(upstream);
+			upstream.pipe(client);
+			client.on('error', () => upstream.destroy());
+			upstream.on('error', () => client.destroy());
+		});
+		server.listen(requestedPort, '127.0.0.1', () => {
+			if (requestedPort === 0) {
+				const addr = server.address();
+				if (addr && typeof addr !== 'string') {
+					process.stderr.write('Allocated port ' + addr.port + ' for remote forward to 127.0.0.1:' + tcpMatch[2] + '\\n');
+				}
+			}
+		});
+		let closing = false;
+		const shutdown = () => {
+			if (closing) { return; }
+			closing = true;
+			server.close(() => process.exit(0));
+			setTimeout(() => process.exit(0), 250).unref();
+		};
+		process.on('SIGTERM', shutdown);
+		process.on('SIGINT', shutdown);
+	} else {
+		process.stderr.write('unsupported -R spec: ' + spec + '\\n');
+		process.exit(2);
+	}
 } else {
 	const child = cp.spawn(process.env.AEXUS_MOCK_REMOTE_SHELL || 'sh', ['-c', remoteCommand], { stdio: ['pipe', 'pipe', 'pipe'] });
 	process.stdin.on('error', () => undefined);
@@ -382,8 +455,9 @@ describe('buildPosixRemoteExecCommand', () => {
 		assert.ok(script.includes(`'kilo' 'serve' </dev/null &`));
 		assert.ok(script.includes('_aex_pid=$!'));
 		assert.ok(script.includes('exec 3<&0'));
-		assert.ok(script.includes(`trap 'kill $_aex_pid 2>/dev/null || true' EXIT TERM INT HUP`));
-		assert.ok(script.includes(`(cat <&3 >/dev/null 2>&1; kill $_aex_pid 2>/dev/null || true) &`));
+		assert.ok(script.includes(`trap '_aex_cleanup' EXIT TERM INT HUP`));
+		assert.ok(script.includes(`_aex_kill_pgid_and_tree`));
+		assert.ok(script.includes(`(cat <&3 >/dev/null 2>&1; _aex_cleanup) &`));
 		assert.ok(script.includes('wait $_aex_pid'));
 		assert.ok(!script.includes(`exec 'kilo'`));
 	});
@@ -1047,5 +1121,370 @@ describe('Remote engine stdio transport over mock SSH', { skip: process.platform
 			throw new Error(`${(error as Error).message}\nRemote stderr: ${stderr}`);
 		}
 		await waitForExit(child);
+	});
+
+	test('persistentSessionId survives abrupt SSH client disconnect and supports lossless byte-offset reattach', async () => {
+		const projectDir = path.join(testRoot, 'remote-persist-project');
+		const sessionBaseDir = path.join(testRoot, 'remote-persist-sessions');
+		const engineScript = path.join(testRoot, 'remote-persist-worker.js');
+		const pidFile = path.join(testRoot, 'remote-persist.pid');
+		const doneFile = path.join(testRoot, 'remote-persist.done');
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.mkdirSync(sessionBaseDir, { recursive: true });
+		fs.rmSync(pidFile, { force: true });
+		fs.rmSync(doneFile, { force: true });
+		fs.writeFileSync(engineScript, [
+			`'use strict';`,
+			`const fs = require('node:fs');`,
+			`fs.writeFileSync(process.argv[2], String(process.pid));`,
+			`process.stdout.write(JSON.stringify({ seq: 1, status: 'started' }) + '\\n');`,
+			`setTimeout(() => {`,
+			`  process.stdout.write(JSON.stringify({ seq: 2, status: 'completed' }) + '\\n');`,
+			`  fs.writeFileSync(process.argv[3], 'finished-ok');`,
+			`  process.exit(0);`,
+			`}, 900);`,
+			``,
+		].join('\n'));
+
+		const sessionId = `persist-test-${Date.now()}`;
+		const envOverride = { AEXUS_REMOTE_SESSION_DIR: sessionBaseDir };
+		const initialCmd = buildPosixRemoteExecCommand(
+			process.execPath,
+			[engineScript, pidFile, doneFile],
+			projectDir,
+			envOverride,
+			{ persistentSessionId: sessionId, attachByteOffset: 0 },
+		);
+		const firstSsh = spawnMockRemoteShell('mock-persist-host', initialCmd);
+		let firstStdout = '';
+		firstSsh.stdout.setEncoding('utf8');
+		const firstLineReceived = new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error(`Timed out waiting for seq=1. stdout=${firstStdout}`)), 5000);
+			firstSsh.stdout.on('data', chunk => {
+				firstStdout += chunk;
+				if (firstStdout.includes('"seq":1')) {
+					clearTimeout(timer);
+					resolve();
+				}
+			});
+		});
+
+		await firstLineReceived;
+		const remotePid = await waitForPidFile(pidFile);
+		assert.equal(isProcessAlive(remotePid), true, 'Remote persistent worker PID should be alive');
+
+		// Simulate abrupt laptop sleep / Wi-Fi drop (sshd sends SIGHUP/SIGTERM to the attach shell while the detached tmux/nohup worker stays alive!)
+		firstSsh.kill('SIGHUP');
+		await waitForExit(firstSsh);
+
+		// Wait briefly and verify the remote worker survived SSH disconnect and completed its work!
+		await new Promise(resolve => setTimeout(resolve, 1100));
+		assert.equal(fs.existsSync(doneFile), true, 'Remote persistent worker MUST survive SSH disconnect and finish writing doneFile');
+		assert.equal(fs.readFileSync(doneFile, 'utf8'), 'finished-ok');
+
+		// Reattach using attachByteOffset equal to already-received bytes -> receives ONLY seq:2 with exit code 0!
+		const byteOffset = Buffer.byteLength(firstStdout, 'utf8');
+		const reattachCmd = buildPosixRemoteExecCommand(
+			process.execPath,
+			[engineScript, pidFile, doneFile],
+			projectDir,
+			envOverride,
+			{ persistentSessionId: sessionId, attachByteOffset: byteOffset },
+		);
+		const secondSsh = spawnMockRemoteShell('mock-persist-host', reattachCmd);
+		let reattachStdout = '';
+		let reattachStderr = '';
+		secondSsh.stdout.setEncoding('utf8');
+		secondSsh.stderr.setEncoding('utf8');
+		secondSsh.stdout.on('data', chunk => { reattachStdout += chunk; });
+		secondSsh.stderr.on('data', chunk => { reattachStderr += chunk; });
+
+		const exitCode = await waitForExit(secondSsh);
+		assert.equal(exitCode, 0, `Reattach exited with ${exitCode}. stderr=${reattachStderr}`);
+		assert.equal(reattachStdout.includes('"seq":1'), false, `Reattach must not replay seq:1 (got: ${reattachStdout})`);
+		assert.equal(reattachStdout.includes('"seq":2'), true, `Reattach must deliver seq:2 (got: ${reattachStdout})`);
+	});
+
+	test('terminateRemotePersistentSession (killTree: true) kills parent agent AND nested grandchild GPU-style workers with zero zombies', async () => {
+		const projectDir = path.join(testRoot, 'remote-killtree-project');
+		const sessionBaseDir = path.join(testRoot, 'remote-killtree-sessions');
+		const agentScript = path.join(testRoot, 'mock-tree-agent.cjs');
+		const parentPidFile = path.join(testRoot, 'tree-parent.pid');
+		const childPidFile = path.join(testRoot, 'tree-child.pid');
+		const grandPidFile = path.join(testRoot, 'tree-grand.pid');
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.mkdirSync(sessionBaseDir, { recursive: true });
+		for (const f of [parentPidFile, childPidFile, grandPidFile]) {
+			fs.rmSync(f, { force: true });
+		}
+		// Parent spawns a child, which spawns a grandchild ignoring SIGHUP (simulating a cloud GPU trainer).
+		const childScript = path.join(testRoot, 'mock-tree-child.cjs');
+		const grandScript = path.join(testRoot, 'mock-tree-grand.cjs');
+		fs.writeFileSync(grandScript, [
+			`'use strict';`,
+			`const fs = require('node:fs');`,
+			`process.on('SIGHUP', () => {});`,
+			`fs.writeFileSync(process.argv[2], String(process.pid));`,
+			`setInterval(() => {}, 1000);`,
+		].join('\n'));
+		fs.writeFileSync(childScript, [
+			`'use strict';`,
+			`const cp = require('node:child_process');`,
+			`const fs = require('node:fs');`,
+			`process.on('SIGHUP', () => {});`,
+			`fs.writeFileSync(process.argv[2], String(process.pid));`,
+			`cp.spawn(process.execPath, [process.argv[3], process.argv[4]], { stdio: 'ignore' });`,
+			`setInterval(() => {}, 1000);`,
+		].join('\n'));
+		fs.writeFileSync(agentScript, [
+			`'use strict';`,
+			`const cp = require('node:child_process');`,
+			`const fs = require('node:fs');`,
+			`fs.writeFileSync(process.argv[2], String(process.pid));`,
+			`cp.spawn(process.execPath, [process.argv[3], process.argv[4], process.argv[5], process.argv[6]], { stdio: 'ignore' });`,
+			`setInterval(() => {}, 1000);`,
+		].join('\n'));
+
+		const sessionId = `${buildRemotePersistentPrefix('claude', 'sess-tree-kill-1')}-deadbeef`;
+		const prevSessionDir = process.env.AEXUS_REMOTE_SESSION_DIR;
+		process.env.AEXUS_REMOTE_SESSION_DIR = sessionBaseDir;
+		const cmd = buildPosixRemoteExecCommand(
+			process.execPath,
+			[agentScript, parentPidFile, childScript, childPidFile, grandScript, grandPidFile],
+			projectDir,
+			{ AEXUS_REMOTE_SESSION_DIR: sessionBaseDir },
+			{ persistentSessionId: sessionId, attachByteOffset: 0 },
+		);
+		const sshProc = spawnMockRemoteShell('mock-tree-host', cmd);
+		try {
+			const parentPid = await waitForPidFile(parentPidFile);
+			const childPid = await waitForPidFile(childPidFile);
+			const grandPid = await waitForPidFile(grandPidFile);
+			assert.equal(isProcessAlive(parentPid), true);
+			assert.equal(isProcessAlive(childPid), true);
+			assert.equal(isProcessAlive(grandPid), true);
+
+			// Verify inspect sees the live session by deterministic prefix.
+			const target = makeTarget('mock-tree-host');
+			const inspected = await inspectRemotePersistentSessionsByPrefix(target, buildRemotePersistentPrefix('claude', 'sess-tree-kill-1'));
+			assert.equal(inspected.length, 1);
+			assert.equal(inspected[0].alive, true);
+			assert.equal(inspected[0].id, sessionId);
+
+			// Simulate Recall / Stop: terminate ENTIRE process group + descendants!
+			await terminateRemotePersistentSession(target, sessionId, { killTree: true });
+
+			await waitForProcessDeath(parentPid, 4000);
+			await waitForProcessDeath(childPid, 4000);
+			await waitForProcessDeath(grandPid, 4000);
+			assert.equal(isProcessAlive(parentPid), false, 'parent agent must be dead');
+			assert.equal(isProcessAlive(childPid), false, 'child process must be dead (no zombie)');
+			assert.equal(isProcessAlive(grandPid), false, 'grandchild GPU-style worker must be dead (no zombie)');
+			assert.equal(fs.existsSync(path.join(sessionBaseDir, sessionId)), false, 'session dir must be cleaned up');
+		} finally {
+			sshProc.kill('SIGKILL');
+			await waitForExit(sshProc);
+			if (prevSessionDir === undefined) {
+				delete process.env.AEXUS_REMOTE_SESSION_DIR;
+			} else {
+				process.env.AEXUS_REMOTE_SESSION_DIR = prevSessionDir;
+			}
+		}
+	});
+
+	test('terminateRemotePersistentSessionsByPrefix kills orphaned post-reload remote sessions without knowing random turn suffix', async () => {
+		const projectDir = path.join(testRoot, 'remote-prefix-project');
+		const sessionBaseDir = path.join(testRoot, 'remote-prefix-sessions');
+		const agentScript = path.join(testRoot, 'mock-prefix-agent.cjs');
+		const parentPidFile = path.join(testRoot, 'prefix-parent.pid');
+		const childPidFile = path.join(testRoot, 'prefix-child.pid');
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.mkdirSync(sessionBaseDir, { recursive: true });
+		fs.rmSync(parentPidFile, { force: true });
+		fs.rmSync(childPidFile, { force: true });
+		fs.writeFileSync(agentScript, [
+			`'use strict';`,
+			`const cp = require('node:child_process');`,
+			`const fs = require('node:fs');`,
+			`fs.writeFileSync(process.argv[2], String(process.pid));`,
+			`cp.spawn(process.execPath, ['-e', \`const fs=require('node:fs'); fs.writeFileSync(\${JSON.stringify(process.argv[3])},String(process.pid)); setInterval(()=>{},1000);\`], { stdio: 'ignore' });`,
+			`setInterval(() => {}, 1000);`,
+		].join('\n'));
+
+		const prefix = buildRemotePersistentPrefix('codex', 'session-reloaded-99');
+		const fullId = `${prefix}-9988aabb`;
+		const prevSessionDir = process.env.AEXUS_REMOTE_SESSION_DIR;
+		process.env.AEXUS_REMOTE_SESSION_DIR = sessionBaseDir;
+		const cmd = buildPosixRemoteExecCommand(
+			process.execPath,
+			[agentScript, parentPidFile, childPidFile],
+			projectDir,
+			{ AEXUS_REMOTE_SESSION_DIR: sessionBaseDir },
+			{ persistentSessionId: fullId, attachByteOffset: 0 },
+		);
+		const sshProc = spawnMockRemoteShell('mock-prefix-host', cmd);
+		try {
+			const parentPid = await waitForPidFile(parentPidFile);
+			const childPid = await waitForPidFile(childPidFile);
+			// Drop the original SSH client (simulating window reload)
+			sshProc.kill('SIGKILL');
+			await waitForExit(sshProc);
+			assert.equal(isProcessAlive(parentPid), true, 'remote agent survives window reload');
+			assert.equal(isProcessAlive(childPid), true, 'remote child survives window reload');
+
+			// Reloaded window only knows (engine, sessionId) -> deterministic prefix kills BOTH!
+			const target = makeTarget('mock-prefix-host');
+			await terminateRemotePersistentSessionsByPrefix(target, prefix, { killTree: true });
+
+			await waitForProcessDeath(parentPid, 4000);
+			await waitForProcessDeath(childPid, 4000);
+			assert.equal(isProcessAlive(parentPid), false);
+			assert.equal(isProcessAlive(childPid), false);
+		} finally {
+			if (prevSessionDir === undefined) {
+				delete process.env.AEXUS_REMOTE_SESSION_DIR;
+			} else {
+				process.env.AEXUS_REMOTE_SESSION_DIR = prevSessionDir;
+			}
+		}
+	});
+
+	test('attachOnly exits with code 44 when no remote persistent session exists and notifySystemResume fires listeners', async () => {
+		const sessionBaseDir = path.join(testRoot, 'remote-attachonly-sessions');
+		fs.mkdirSync(sessionBaseDir, { recursive: true });
+		const attachCmd = buildPosixRemoteExecCommand(
+			process.execPath,
+			['-e', 'process.exit(0)'],
+			testRoot,
+			{ AEXUS_REMOTE_SESSION_DIR: sessionBaseDir },
+			{ persistentSessionId: 'nonexistent-attachonly-session', attachOnly: true },
+		);
+		const proc = spawnMockRemoteShell('mock-attachonly-host', attachCmd);
+		const code = await waitForExit(proc);
+		assert.equal(code, 44, 'attachOnly must exit 44 when session does not exist instead of spawning a new process');
+
+		let resumeCount = 0;
+		const sub = onSystemResume(() => { resumeCount++; });
+		notifySystemResume();
+		sub.dispose();
+		notifySystemResume();
+		assert.equal(resumeCount, 1, 'onSystemResume notifies active listeners once and respects dispose');
+	});
+});
+
+describe('project slug encoding & resolveRemoteRealpath', () => {
+	test('encodeClaudeProjectSlug matches Claude Code canonical project directory slugs', () => {
+		assert.equal(encodeClaudeProjectSlug('/home/djf/develop/aexus-ide-cloud-exp'), '-home-djf-develop-aexus-ide-cloud-exp');
+		assert.equal(encodeClaudeProjectSlug('/home/djf/develop/aexus-ide-cloud-exp/'), '-home-djf-develop-aexus-ide-cloud-exp');
+		assert.equal(encodeClaudeProjectSlug('/home/djf/develop/.cloudhosts-agent-qa'), '-home-djf-develop--cloudhosts-agent-qa');
+		assert.equal(encodeClaudeProjectSlug('/home/djf/work_dir/v1.2'), '-home-djf-work-dir-v1-2');
+		assert.equal(encodeClaudeProjectSlug('C:\\Users\\dev\\my_app\\'), 'C--Users-dev-my-app');
+	});
+
+	test('encodePiProjectSlug matches Pi canonical session directory slugs', () => {
+		assert.equal(encodePiProjectSlug('/home/djf/develop/aexus-ide-cloud-exp'), '--home-djf-develop-aexus-ide-cloud-exp--');
+		assert.equal(encodePiProjectSlug('/home/djf/develop/aexus-ide-cloud-exp/'), '--home-djf-develop-aexus-ide-cloud-exp--');
+		assert.equal(encodePiProjectSlug('/home/djf/develop/.cloudhosts-agent-qa'), '--home-djf-develop-.cloudhosts-agent-qa--');
+	});
+
+	test('resolveRemoteRealpath resolves symlinks over SSH and caches result', async () => {
+		const realDir = path.join(testRoot, 'real-cloud-proj');
+		const linkDir = path.join(testRoot, 'link-cloud-proj');
+		fs.mkdirSync(realDir, { recursive: true });
+		fs.rmSync(linkDir, { force: true });
+		fs.symlinkSync(realDir, linkDir);
+
+		const target = makeTarget('mock-realpath-host');
+		const resolved = await resolveRemoteRealpath(target, linkDir);
+		assert.equal(resolved, fs.realpathSync(realDir));
+	});
+});
+
+describe('zero-drift remote control reverse bridge (UDS + atomic metadata fallback)', () => {
+	test('ensureRemoteControlReverseBridge opens fixed-path UDS reverse tunnel and writes remote bridge metadata on POSIX', async () => {
+		const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aex-uds-'));
+		const localServer = net.createServer(socket => {
+			socket.once('data', data => {
+				socket.end(`echo:${data.toString('utf8').trim()}\n`);
+			});
+		});
+		await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
+		const localPort = (localServer.address() as net.AddressInfo).port;
+		try {
+			const target = makeTarget('mock-uds-bridge', { remoteHome: fakeHome });
+			const handle = await ensureRemoteControlReverseBridge(target, localPort);
+			assert.ok(handle.remoteSocketPath, 'POSIX reverse bridge must use fixed remote Unix Domain Socket');
+			assert.ok(handle.remoteBridgeMetaPath, 'Bridge must record atomic remote metadata pointer path');
+			assert.equal(fs.existsSync(handle.remoteBridgeMetaPath!), true, 'ade-remote-bridge.json must exist on remote host');
+
+			const meta = JSON.parse(fs.readFileSync(handle.remoteBridgeMetaPath!, 'utf8')) as {
+				socketPath?: string;
+				tcpPort?: number;
+				updatedAt?: number;
+			};
+			assert.equal(meta.socketPath, handle.remoteSocketPath);
+			assert.equal(meta.tcpPort, undefined);
+			assert.ok(typeof meta.updatedAt === 'number' && meta.updatedAt > 0);
+
+			// Verify end-to-end traffic flows through the fixed UDS socket to localPort!
+			const reply = await new Promise<string>((resolve, reject) => {
+				const client = net.createConnection({ path: handle.remoteSocketPath! }, () => {
+					client.write('hello-uds\n');
+				});
+				let out = '';
+				client.setEncoding('utf8');
+				client.on('data', chunk => { out += chunk; });
+				client.on('end', () => resolve(out.trim()));
+				client.on('error', reject);
+			});
+			assert.equal(reply, 'echo:hello-uds');
+		} finally {
+			disposeAllRemoteControlBridges();
+			await new Promise<void>(resolve => localServer.close(() => resolve()));
+			fs.rmSync(fakeHome, { recursive: true, force: true });
+		}
+	});
+
+	test('ensureRemoteControlReverseBridge falls back to TCP + updates atomic metadata when sshd forbids StreamLocal forwarding', async () => {
+		const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aex-tcp-'));
+		const localServer = net.createServer(socket => {
+			socket.once('data', data => {
+				socket.end(`tcp-echo:${data.toString('utf8').trim()}\n`);
+			});
+		});
+		await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
+		const localPort = (localServer.address() as net.AddressInfo).port;
+		try {
+			const target = makeTarget('no-uds-host-1', { remoteHome: fakeHome });
+			const handle = await ensureRemoteControlReverseBridge(target, localPort);
+			assert.equal(handle.remoteSocketPath, undefined, 'Fallback bridge should use TCP when sshd forbids UDS');
+			assert.ok(handle.remotePort > 0, 'Fallback bridge must bind a valid TCP port');
+			assert.ok(handle.remoteBridgeMetaPath && fs.existsSync(handle.remoteBridgeMetaPath));
+
+			const meta = JSON.parse(fs.readFileSync(handle.remoteBridgeMetaPath!, 'utf8')) as {
+				tcpPort?: number;
+				socketPath?: string;
+				updatedAt?: number;
+			};
+			assert.equal(meta.tcpPort, handle.remotePort);
+			assert.equal(meta.socketPath, undefined);
+			assert.ok(typeof meta.updatedAt === 'number' && meta.updatedAt > 0);
+
+			const reply = await new Promise<string>((resolve, reject) => {
+				const client = net.createConnection({ host: '127.0.0.1', port: handle.remotePort }, () => {
+					client.write('hello-tcp\n');
+				});
+				let out = '';
+				client.setEncoding('utf8');
+				client.on('data', chunk => { out += chunk; });
+				client.on('end', () => resolve(out.trim()));
+				client.on('error', reject);
+			});
+			assert.equal(reply, 'tcp-echo:hello-tcp');
+		} finally {
+			disposeAllRemoteControlBridges();
+			await new Promise<void>(resolve => localServer.close(() => resolve()));
+			fs.rmSync(fakeHome, { recursive: true, force: true });
+		}
 	});
 });

@@ -1194,5 +1194,61 @@ suite('AdeCloudHosts', () => {
 				'SSH transport error must throw instead of falsely reporting PID dead',
 			);
 		});
+
+		test('remoteBatchProbe executes single-SSH POSIX batch (NOW, PIDs, files, non-git dir, persistent sessions) cleanly', async () => {
+			const batchSsh = path.join(tmpDir, 'mock-batch-ssh.sh');
+			const sessionBaseDir = path.join(tmpDir, 'remote-sessions');
+			const liveSessDir = path.join(sessionBaseDir, 'claude-sess1-aaaa');
+			const deadSessDir = path.join(sessionBaseDir, 'claude-sess1-bbbb');
+			const existingFile = path.join(tmpDir, 'ckpt.bin');
+			const missingFile = path.join(tmpDir, 'does-not-exist.bin');
+			const nonGitDir = path.join(tmpDir, 'not-a-git-repo');
+			await fs.mkdir(liveSessDir, { recursive: true });
+			await fs.mkdir(deadSessDir, { recursive: true });
+			await fs.mkdir(nonGitDir, { recursive: true });
+			await fs.writeFile(existingFile, 'weights', 'utf8');
+			await fs.writeFile(path.join(liveSessDir, 'agent.pid'), String(process.pid), 'utf8');
+			await fs.writeFile(path.join(deadSessDir, 'agent.pid'), '999999', 'utf8');
+			await fs.writeFile(path.join(deadSessDir, 'exit.code'), '137', 'utf8');
+
+			await fs.writeFile(batchSsh, [
+				'#!/bin/sh',
+				`export AEXUS_REMOTE_SESSION_DIR="${sessionBaseDir}"`,
+				'while [ "$#" -gt 0 ]; do',
+				'  if [ "$1" = "--" ]; then shift; break; fi',
+				'  shift',
+				'done',
+				'shift', // drop host alias
+				'exec sh -c "$1"',
+				'',
+			].join('\n'), { encoding: 'utf8', mode: 0o755 });
+			await fs.chmod(batchSsh, 0o755);
+
+			const homedir = path.join(tmpDir, 'home-batch');
+			const svc = disposables.add(new AdeCloudHostNodeService({
+				userDataPath: path.join(tmpDir, 'aexus-batch'),
+				homedir,
+				vsCodeUserDataDir: path.join(tmpDir, 'vscode-batch'),
+				sshConfigPath: path.join(homedir, '.ssh', 'config'),
+				autoImportOnFirstLoad: false,
+				sshExecutable: batchSsh,
+			}));
+			await svc.upsertHost({ name: 'Batch Box', alias: 'batch-box', hostName: '10.0.0.16', os: 'linux' });
+
+			const result = await svc.remoteBatchProbe('batch-box', {
+				pids: [process.pid, 999999],
+				filePaths: [existingFile, missingFile],
+				gitPaths: [nonGitDir],
+				persistentPrefixes: ['claude-sess1'],
+			});
+
+			assert.ok(typeof result.remoteNowMs === 'number' && result.remoteNowMs > 1_000_000_000_000, 'remoteNowMs populated');
+			assert.strictEqual(result.pidAlive[process.pid], true, 'current process PID is alive');
+			assert.strictEqual(result.pidAlive[999999], false, 'nonexistent PID is dead');
+			assert.ok(typeof result.fileMtime[existingFile] === 'number' && result.fileMtime[existingFile]! > 0, 'existing file mtime returned');
+			assert.strictEqual(result.fileMtime[missingFile], undefined, 'missing file returns undefined');
+			assert.strictEqual(result.gitHead[nonGitDir], undefined, 'non-git dir returns undefined without failing batch exit code');
+			assert.deepStrictEqual(result.persistentSessions['claude-sess1'], { aliveCount: 1, exitedCodes: [137] });
+		});
 	});
 });

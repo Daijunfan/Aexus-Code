@@ -27,8 +27,13 @@ export interface IAdeEngine {
 	readonly remoteOs?: string;
 }
 
+export interface IAdeEngineAvailability extends IAdeEngine {
+	readonly available: boolean;
+}
+
 export interface IAdeEngineProbeResult {
 	readonly engines: readonly IAdeEngine[];
+	readonly allEngines?: readonly IAdeEngineAvailability[];
 	readonly remoteHost?: string;
 	readonly remoteOs?: string;
 	readonly error?: string;
@@ -55,7 +60,7 @@ export interface IAdeSessionsService {
 	list(engineId: string, projectUri?: URI): Promise<readonly IAdeEngineSession[]>;
 	rename(session: IAdeSession, label: string): Promise<void>;
 	delete(session: IAdeSession): Promise<void>;
-	stop?(session: IAdeSession): Promise<void>;
+	stop?(session: IAdeSession, options?: { readonly hostAlias?: string }): Promise<void>;
 	deleteProjectSessions?(projectUri: URI): Promise<number>;
 	ensureSecretary?(engineId?: string, projectUri?: URI, forceReset?: boolean): Promise<IAdeSession | undefined>;
 	getSessionInfo?(session: IAdeSession): Promise<{ nativeId?: string; provisional?: boolean; unmaterialized?: boolean; engine?: string } | undefined>;
@@ -115,11 +120,11 @@ export class AdeSessionsService implements IAdeSessionsService {
 		const remoteOs = isCloud ? firstCloudMeta?.remoteOs : undefined;
 		const error = isCloud ? firstCloudMeta?.error : undefined;
 
-		const engines = this.sessions.getAllChatSessionContributions()
+		const allContributions = this.sessions.getAllChatSessionContributions()
+			.filter(contribution => contribution.type !== 'local' && contribution.type !== 'aexus-secretary' && contribution.type !== 'openai-codex' && !contribution.isReadOnly);
+
+		const engines = allContributions
 			.filter(contribution => {
-				if (contribution.type === 'local' || contribution.type === 'aexus-secretary' || contribution.type === 'openai-codex' || contribution.isReadOnly) {
-					return false;
-				}
 				const builtinEntry = byId.get(contribution.type);
 				if (isCloud) {
 					// Cloud projects ONLY run cloud-native aexus-* engines actually installed on that Cloud Host
@@ -139,7 +144,34 @@ export class AdeSessionsService implements IAdeSessionsService {
 				...(remoteOs ? { remoteOs } : {}),
 			}));
 
-		return { engines, remoteHost, remoteOs, error };
+		const allEngines: IAdeEngineAvailability[] = [];
+		const seenAll = new Set<string>();
+		for (const entry of builtin ?? []) {
+			if (!entry?.id || seenAll.has(entry.id)) {
+				continue;
+			}
+			seenAll.add(entry.id);
+			const contribution = allContributions.find(c => c.type === entry.id);
+			allEngines.push({
+				id: entry.id,
+				name: contribution?.displayName ?? entry.name,
+				description: isCloud && remoteHost
+					? localize('adeCloudEngineDesc', "Native on {0}{1}", remoteHost, remoteOs ? ` (${remoteOs})` : '')
+					: (contribution?.description ?? entry.name),
+				icon: this.getIcon(entry.id),
+				available: Boolean(entry.available && !error),
+				...(remoteHost ? { remoteHost } : {}),
+				...(remoteOs ? { remoteOs } : {}),
+			});
+		}
+		for (const engine of engines) {
+			if (!seenAll.has(engine.id)) {
+				seenAll.add(engine.id);
+				allEngines.push({ ...engine, available: true });
+			}
+		}
+
+		return { engines, allEngines, remoteHost, remoteOs, error };
 	}
 
 	async getEngines(projectUri?: URI, options?: { readonly forceRefresh?: boolean }): Promise<readonly IAdeEngine[]> {
@@ -222,9 +254,9 @@ export class AdeSessionsService implements IAdeSessionsService {
 		}
 	}
 
-	async stop(session: IAdeSession): Promise<void> {
+	async stop(session: IAdeSession, options?: { readonly hostAlias?: string }): Promise<void> {
 		if (session.engineId.startsWith('aexus-')) {
-			await this.commands.executeCommand('aexus.agentEngines.killSession', session.resource).catch(() => undefined);
+			await this.commands.executeCommand('aexus.agentEngines.killSession', session.resource, options).catch(() => undefined);
 		}
 	}
 

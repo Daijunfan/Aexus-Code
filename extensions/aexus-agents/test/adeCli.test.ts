@@ -41,127 +41,100 @@ describe('parseCliCommand doctor', () => {
 	});
 });
 
-describe('parseCliCommand engineering templates', () => {
-	test('engineering template list filters by tree type', () => {
-		assert.deepStrictEqual(parseCliCommand(['engineering', 'template', 'list', '--tree-type', 'research']), {
+describe('parseCliCommand mission lifecycle, blueprints & pre-prompts', () => {
+	test('parses mission init, list, open, blueprint get/apply/validate, prompt CRUD, and remove', () => {
+		assert.deepStrictEqual(parseCliCommand(['mission', 'init', '--governor', 'gov-1', '--title', 'Release Pipeline', '--open']), {
 			help: false,
 			json: false,
 			windowId: undefined,
-			action: 'engineering.templates.list',
-			params: { treeType: 'research' },
+			action: 'mission.init',
+			params: { owner: 'gov-1', title: 'Release Pipeline', open: true },
 		});
-	});
-
-	test('engineering template apply forwards preset, engines, isolation, budget and force-stop', () => {
-		assert.deepStrictEqual(parseCliCommand([
-			'engineering', 'template', 'apply',
-			'--governor', 'gov-1',
-			'--template', 'feature-ship',
-			'--preset', 'max-quality',
-			'--engine', 'claude-code',
-			'--secondary-engine', 'codex',
-			'--isolation', 'worktree',
-			'--max-budget-usd', '$8.5',
-			'--force-stop-running',
-		]), {
+		assert.deepStrictEqual(parseCliCommand(['mission', 'list', '--project', './repo'], CWD), {
 			help: false,
 			json: false,
 			windowId: undefined,
-			action: 'engineering.templates.apply',
-			params: {
-				governor: 'gov-1',
-				template: 'feature-ship',
-				preset: 'max-quality',
-				engine: 'claude-code',
-				secondaryEngine: 'codex',
-				isolation: 'worktree',
-				maxBudgetUsd: 8.5,
-				forceStopRunning: true,
-			},
+			action: 'mission.list',
+			params: { project: path.join(CWD, 'repo') },
 		});
-	});
-
-	test('engineering template apply requires both governor and template', () => {
-		assert.throws(
-			() => parseCliCommand(['engineering', 'template', 'apply', '--governor', 'gov-1']),
-			/Usage: aexus-ade engineering template apply/,
-		);
-	});
-});
-
-describe('parseCliCommand engineering report and worktrees', () => {
-	test('engineering report resolves the output file against the working directory', () => {
-		assert.deepStrictEqual(parseCliCommand(['engineering', 'report', '--governor', 'gov-1', '--out', './reports/run.md'], CWD), {
+		assert.deepStrictEqual(parseCliCommand(['mission', 'open', '--mission', 'm-1']), {
 			help: false,
 			json: false,
 			windowId: undefined,
-			action: 'engineering.report',
-			params: { governor: 'gov-1', outFile: path.join(CWD, 'reports', 'run.md') },
+			action: 'mission.open',
+			params: { missionId: 'm-1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'blueprint', 'get', '--mission', 'm-1', '--raw']), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.blueprint.get',
+			params: { missionId: 'm-1', raw: true },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'blueprint', 'validate', '--text', 'flowchart LR\n  A --> B']), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.blueprint.validate',
+			params: { text: 'flowchart LR\n  A --> B' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'prompt', 'list', '--mission', 'm-1']), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.prompt.list',
+			params: { missionId: 'm-1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'prompt', 'get', '--mission', 'm-1', '--node', 'N1']), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.prompt.get',
+			params: { missionId: 'm-1', nodeId: 'N1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'prompt', 'set', '--mission', 'm-1', '--node', 'N1', '--text', 'Check edge cases']), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.prompt.set',
+			params: { missionId: 'm-1', nodeId: 'N1', prompt: 'Check edge cases' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'prompt', 'clear', '--mission', 'm-1', '--node', 'N1']), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.prompt.set',
+			params: { missionId: 'm-1', nodeId: 'N1', clear: true },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'remove', '--mission', 'm-1']), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.remove',
+			params: { missionId: 'm-1' },
 		});
 	});
 
-	test('engineering worktrees merge and cleanup map to distinct actions', () => {
-		assert.deepStrictEqual([
-			parseCliCommand(['engineering', 'worktrees', 'merge', '--governor', 'gov-1']),
-			parseCliCommand(['engineering', 'worktrees', 'cleanup', '--governor', 'gov-1']),
-		], [
-			{
-				help: false,
-				json: false,
-				windowId: undefined,
-				action: 'engineering.worktrees.merge',
-				params: { governor: 'gov-1' },
-			},
-			{
-				help: false,
-				json: false,
-				windowId: undefined,
-				action: 'engineering.worktrees.cleanup',
-				params: { governor: 'gov-1' },
-			},
-		]);
-	});
-
-	test('engineering worktrees rejects unknown operations and missing governors', () => {
-		assert.throws(
-			() => parseCliCommand(['engineering', 'worktrees', 'prune']),
-			/Usage: aexus-ade engineering worktrees <merge\|cleanup>/,
-		);
-		assert.throws(
-			() => parseCliCommand(['engineering', 'worktrees', 'merge']),
-			/Usage: aexus-ade engineering worktrees merge --governor/,
-		);
-	});
-});
-
-describe('parseCliCommand engineering configure budget', () => {
-	test('engineering configure --max-budget-usd rounds to cents and strips a dollar prefix', () => {
-		assert.deepStrictEqual(parseCliCommand([
-			'engineering', 'configure',
-			'--governor', 'gov-1',
-			'--max-budget-usd', '$5.004',
-		]).params, {
-			governor: 'gov-1',
-			maxBudgetUsd: 5,
-		});
-	});
-
-	test('engineering configure --max-budget-usd 0 clears the cap', () => {
-		assert.deepStrictEqual(parseCliCommand([
-			'engineering', 'configure',
-			'--governor', 'gov-1',
-			'--max-budget-usd', '0',
-		]).params, {
-			governor: 'gov-1',
-			clearBudget: true,
-		});
-	});
-
-	test('engineering configure rejects negative budgets', () => {
-		assert.throws(
-			() => parseCliCommand(['engineering', 'configure', '--governor', 'gov-1', '--max-budget-usd', '-1']),
-			/Option --max-budget-usd requires a non-negative number\./,
-		);
+	test('rejects removed legacy engineering group and dead engineering subcommands', () => {
+		for (const deadArgv of [
+			['engineering', 'demo'],
+			['engineering', 'list'],
+			['mission', 'demo'],
+			['mission', 'generate', '--prompt', 'ship feature'],
+			['mission', 'template', 'list'],
+			['mission', 'template', 'apply', '--governor', 'gov-1', '--template', 'feature-ship'],
+			['mission', 'worktrees', 'merge', '--governor', 'gov-1'],
+			['mission', 'verify-trust', 'list'],
+			['mission', 'review', '--governor', 'gov-1', '--node', 'N1'],
+			['mission', 'diff', '--governor', 'gov-1'],
+			['mission', 'report', '--governor', 'gov-1'],
+			['mission', 'reports', '--governor', 'gov-1'],
+			['mission', 'reset', '--governor', 'gov-1'],
+			['mission', 'configure', '--governor', 'gov-1'],
+			['mission', 'watchdog-action', '--governor', 'gov-1'],
+		]) {
+			assert.throws(() => parseCliCommand(deadArgv, CWD), /Unknown|Usage:/, `Expected dead command to fail: ${deadArgv.join(' ')}`);
+		}
 	});
 });
 
@@ -200,7 +173,7 @@ describe('runCli version', () => {
 });
 
 describe('runCli completion & HELP_TEXT', () => {
-	test('emits completion scripts for bash, zsh, fish, and powershell covering role, generate, demo, and verify-trust', async () => {
+	test('emits completion scripts for bash, zsh, fish, and powershell covering role, rank, mission, token, and org', async () => {
 		const scripts = await Promise.all((['bash', 'zsh', 'fish', 'powershell'] as const).map(async shell => {
 			let stdout = '';
 			const exitCode = await runCli(['completion', shell], {
@@ -214,13 +187,15 @@ describe('runCli completion & HELP_TEXT', () => {
 			assert.strictEqual(exitCode, 0, shell);
 			assert.match(stdout, /aexus-ade/, shell);
 			for (const token of [
-				'doctor', 'completion', 'status', 'mode', 'view', 'role', 'project', 'host',
-				'engine', 'session', 'secretary', 'engineering', 'inbox',
+				'doctor', 'completion', 'status', 'mode', 'view', 'role', 'rank', 'project', 'host',
+				'engine', 'session', 'secretary', 'mission', 'token', 'org', 'inbox',
 				'apply-preset', 'set-tier', 'presets', 'reset',
-				'demo', 'generate', 'verify-trust', 'revoke', 'watchdog-action',
+				'blueprint', 'prompt', 'boundary', 'recall', 'patch', 'trigger',
 			]) {
 				assert.ok(stdout.includes(token), `${shell} completion is missing ${token}`);
 			}
+			assert.ok(!stdout.includes('verify-trust'), `${shell} completion must not contain removed verify-trust`);
+			assert.ok(!stdout.includes('watchdog-action'), `${shell} completion must not contain removed watchdog-action`);
 		}
 		assert.match(scripts.find(script => script.shell === 'bash')!.stdout, /complete -F _aexus_ade aexus-ade/);
 		assert.match(scripts.find(script => script.shell === 'zsh')!.stdout, /^#compdef aexus-ade/m);
@@ -234,13 +209,16 @@ describe('runCli completion & HELP_TEXT', () => {
 		assert.strictEqual(pwshOut, scripts.find(script => script.shell === 'powershell')!.stdout);
 	});
 
-	test('HELP_TEXT documents engineering generate, verify-trust, role subcommands, and powershell completions', () => {
+	test('HELP_TEXT documents mission, token, org, role subcommands, and powershell completions without dead engineering commands', () => {
 		assert.ok(HELP_TEXT.includes('completion <bash|zsh|fish|powershell>'));
-		assert.ok(HELP_TEXT.includes('engineering generate '));
-		assert.ok(HELP_TEXT.includes('engineering verify-trust list'));
-		assert.ok(HELP_TEXT.includes('engineering verify-trust revoke'));
+		assert.ok(HELP_TEXT.includes('mission blueprint apply'));
+		assert.ok(HELP_TEXT.includes('mission prompt set'));
+		assert.ok(HELP_TEXT.includes('token complete'));
 		assert.ok(HELP_TEXT.includes('role apply-preset'));
 		assert.ok(HELP_TEXT.includes('role set-tier'));
+		assert.ok(!HELP_TEXT.includes('engineering demo'));
+		assert.ok(!HELP_TEXT.includes('verify-trust'));
+		assert.ok(!HELP_TEXT.includes('worktrees merge'));
 	});
 
 	test('rejects an unknown or missing shell', async () => {
@@ -257,38 +235,6 @@ describe('runCli completion & HELP_TEXT', () => {
 				'Error: Usage: aexus-ade completion <bash|zsh|fish|powershell>\n',
 			],
 		});
-	});
-});
-
-describe('parseCliCommand engineering verify-trust', () => {
-	test('routes verify-trust list and revoke with hash, --all, and --project', () => {
-		assert.deepStrictEqual([
-			parseCliCommand(['engineering', 'verify-trust', 'list'], CWD),
-			parseCliCommand(['engineering', 'verify-trust', 'list', '--project', './repo'], CWD),
-			parseCliCommand(['engineering', 'verify-trust', 'revoke', 'sha256-abc'], CWD),
-			parseCliCommand(['engineering', 'verify-trust', 'revoke', '--all', '--project', './repo'], CWD),
-		], [
-			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.list', params: {} },
-			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.list', params: { project: path.join(CWD, 'repo') } },
-			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.revoke', params: { hash: 'sha256-abc' } },
-			{ help: false, json: false, windowId: undefined, action: 'engineering.verifyTrust.revoke', params: { all: true, project: path.join(CWD, 'repo') } },
-		]);
-		assert.throws(
-			() => parseCliCommand(['engineering', 'verify-trust', 'revoke'], CWD),
-			/Usage: aexus-ade engineering verify-trust revoke/,
-		);
-	});
-});
-
-describe('parseCliCommand engineering demo', () => {
-	test('routes to engineering.demo with an optional governor', () => {
-		assert.deepStrictEqual([
-			parseCliCommand(['engineering', 'demo']),
-			parseCliCommand(['engineering', 'demo', '--governor', 'gov-1']),
-		], [
-			{ help: false, json: false, windowId: undefined, action: 'engineering.demo', params: {} },
-			{ help: false, json: false, windowId: undefined, action: 'engineering.demo', params: { governor: 'gov-1' } },
-		]);
 	});
 });
 
@@ -574,7 +520,7 @@ describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
 			const capToken = 'aexus-cap.eyJzaWQiOiJzLTEiLCJyYW5rIjoiZW1wbG95ZWUiLCJpYXQiOjF9.deadbeef';
 			let stdout = '';
 			let stderr = '';
-			const code = await runCli(['--json', 'engineering', 'run', '--governor', 'gov-1'], {
+			const code = await runCli(['--json', 'mission', 'run', '--governor', 'gov-1'], {
 				stdout: s => { stdout += s; },
 				stderr: s => { stderr += s; },
 				env: {
@@ -591,10 +537,51 @@ describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
 			assert.deepStrictEqual(received, [
 				{
 					token: capToken,
-					action: 'engineering.run',
-					params: { governor: 'gov-1' },
+					action: 'mission.run',
+					params: { missionId: 'gov-1' },
 				},
 			]);
+		} finally {
+			await new Promise<void>(resolve => srv.close(() => resolve()));
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test('supports --window-id alias and AEXUS_ADE_WINDOW_ID env fallback with explicit flag precedence', async t => {
+		assert.strictEqual(parseCliCommand(['--window-id', '9', 'status'], CWD).windowId, 9);
+		assert.strictEqual(parseCliCommand(['--window-id=12', 'token', 'current'], CWD).windowId, 12);
+
+		if (process.platform === 'win32') {
+			t.skip('Unix domain socket test');
+			return;
+		}
+		const tmpDir = await fs.mkdtemp(path.join('/tmp', 'ade-wid-'));
+		const sockPath = path.join(tmpDir, 'ade.sock');
+		const received: Array<{ windowId?: number; action?: string }> = [];
+		const srv = net.createServer(sock => {
+			let buf = '';
+			sock.setEncoding('utf8');
+			sock.on('data', chunk => {
+				buf += chunk;
+				const idx = buf.indexOf('\n');
+				if (idx >= 0) {
+					received.push(JSON.parse(buf.slice(0, idx)) as { windowId?: number; action?: string });
+					sock.end(JSON.stringify({ ok: true, result: { ok: true } }) + '\n');
+				}
+			});
+		});
+		await new Promise<void>(resolve => srv.listen(sockPath, resolve));
+		try {
+			const baseEnv = {
+				AEXUS_ADE_SOCKET: sockPath,
+				AEXUS_ADE_TOKEN: 'test-master-token',
+				AEXUS_ADE_WINDOW_ID: '17',
+			};
+			const code1 = await runCli(['--json', 'whoami'], { stdout: () => undefined, stderr: () => undefined, env: baseEnv, cwd: tmpDir });
+			const code2 = await runCli(['--json', '--window-id', '5', 'whoami'], { stdout: () => undefined, stderr: () => undefined, env: baseEnv, cwd: tmpDir });
+			assert.strictEqual(code1, 0);
+			assert.strictEqual(code2, 0);
+			assert.deepStrictEqual(received.map(r => r.windowId), [17, 5]);
 		} finally {
 			await new Promise<void>(resolve => srv.close(() => resolve()));
 			await fs.rm(tmpDir, { recursive: true, force: true });
@@ -809,6 +796,73 @@ describe('Mission Runtime CLI commands & AEXUS_ADE_TCP_PORT transport', () => {
 				roleKind: 'reviewer',
 			},
 		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'check', 'list', '--mission', 'm1', '--node', 'N1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.check.list',
+			params: { missionId: 'm1', nodeId: 'N1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'check', 'get', '--mission', 'm1', '--node', 'N1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.check.get',
+			params: { missionId: 'm1', nodeId: 'N1' },
+		});
+		assert.deepStrictEqual(parseCliCommand([
+			'mission', 'check', 'set',
+			'--mission', 'm1',
+			'--node', 'N1',
+			'--name', 'unit',
+			'--cmd', 'pnpm test',
+			'--expect-file', 'dist/out.js,dist/out.d.ts',
+			'--match', 'passing',
+			'--on-fail', 'bounce',
+			'--max-retries', '3',
+			'--timeout', '90s',
+			'--cwd', 'packages/app',
+			'--host', 'bupt208',
+		], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.check.set',
+			params: {
+				missionId: 'm1',
+				nodeId: 'N1',
+				name: 'unit',
+				command: 'pnpm test',
+				expectFiles: ['dist/out.js', 'dist/out.d.ts'],
+				expectOutputMatch: 'passing',
+				onFail: 'bounce',
+				maxAutoRetries: 3,
+				timeout: '90s',
+				cwd: 'packages/app',
+				hostAlias: 'bupt208',
+			},
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'check', 'remove', '--mission', 'm1', '--node', 'N1', '--id', 'chk-1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.check.remove',
+			params: { missionId: 'm1', nodeId: 'N1', checkId: 'chk-1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['mission', 'check', 'run', '--mission', 'm1', '--node', 'N1'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'mission.check.run',
+			params: { missionId: 'm1', nodeId: 'N1' },
+		});
+		assert.deepStrictEqual(parseCliCommand(['token', 'complete', 'tok-9', '--summary', 'ok', '--skip-checks'], CWD), {
+			help: false,
+			json: false,
+			windowId: undefined,
+			action: 'token.complete',
+			params: { tokenId: 'tok-9', summary: 'ok', skipChecks: true },
+		});
 	});
 
 	test('runCli sends the capability token over a real loopback TCP control socket', async () => {
@@ -890,6 +944,59 @@ describe('Mission Runtime CLI commands & AEXUS_ADE_TCP_PORT transport', () => {
 			await new Promise<void>(resolve => server.close(() => resolve()));
 		}
 	});
+
+	test('runCli re-reads AEXUS_ADE_REMOTE_BRIDGE_FILE and retries transparently across ECONNREFUSED port rollover', async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aexus-cli-rollover-'));
+		const metaPath = path.join(tmpDir, 'ade-remote-bridge.json');
+		// Allocate a guaranteed-closed ephemeral port to simulate a dead pre-reconnect tunnel.
+		const deadServer = net.createServer();
+		await new Promise<void>(resolve => deadServer.listen(0, '127.0.0.1', resolve));
+		const deadPort = (deadServer.address() as net.AddressInfo).port;
+		await new Promise<void>(resolve => deadServer.close(() => resolve()));
+
+		const liveServer = net.createServer(socket => {
+			let buffer = '';
+			socket.setEncoding('utf8');
+			socket.on('data', chunk => {
+				buffer += chunk;
+				const newline = buffer.indexOf('\n');
+				if (newline < 0) {
+					return;
+				}
+				socket.end(JSON.stringify({ ok: true, result: { agentId: 'gpu-worker', rank: 'employee' } }) + '\n');
+			});
+		});
+		await new Promise<void>(resolve => liveServer.listen(0, '127.0.0.1', resolve));
+		const livePort = (liveServer.address() as net.AddressInfo).port;
+
+		try {
+			// Initially pointer file still points at deadPort (mid-reconnect window).
+			await fs.writeFile(metaPath, JSON.stringify({ version: 1, tcpPort: deadPort, updatedAt: Date.now() }));
+			// After 180ms, simulate reverse bridge finishing auto-heal on a new port and atomically updating metaPath!
+			const swapTimer = setTimeout(() => {
+				void fs.writeFile(metaPath, JSON.stringify({ version: 1, tcpPort: livePort, updatedAt: Date.now() }));
+			}, 180);
+
+			let stdout = '';
+			let stderr = '';
+			const code = await runCli(['--json', 'whoami'], {
+				stdout: text => { stdout += text; },
+				stderr: text => { stderr += text; },
+				env: {
+					AEXUS_ADE_TCP_PORT: String(deadPort),
+					AEXUS_ADE_REMOTE_BRIDGE_FILE: metaPath,
+					AEXUS_ADE_SESSION_TOKEN: 'aexus-cap.rollover.sig',
+				},
+				cwd: CWD,
+			});
+			clearTimeout(swapTimer);
+			assert.strictEqual(code, 0, stderr || stdout);
+			assert.deepStrictEqual(JSON.parse(stdout), { agentId: 'gpu-worker', rank: 'employee' });
+		} finally {
+			await new Promise<void>(resolve => liveServer.close(() => resolve()));
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe('parseCliCommand rank & unified mission commands', () => {
@@ -952,14 +1059,14 @@ describe('parseCliCommand rank & unified mission commands', () => {
 			json: true,
 			windowId: undefined,
 			action: 'mission.status',
-			params: { governor: 'gov-1' },
+			params: { missionId: 'gov-1' },
 		});
 		assert.deepStrictEqual(parseCliCommand(['mission', 'init', '--governor', 'gov-1', '--open'], CWD), {
 			help: false,
 			json: false,
 			windowId: undefined,
 			action: 'mission.init',
-			params: { governor: 'gov-1', open: true },
+			params: { owner: 'gov-1', open: true },
 		});
 		assert.ok(HELP_TEXT.includes('rank names'));
 		assert.ok(HELP_TEXT.includes('mission docs'));
@@ -1069,6 +1176,48 @@ describe('parseCliCommand rank & unified mission commands', () => {
 				windowId: undefined,
 				action: 'mission.init',
 				params: { title: 'Nightly Bench', open: true },
+			},
+		);
+
+		// --wake-on-pid-exit / --wake-on-file aliases on token block & --token on mission gate
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'token', 'block', 'tok-9',
+				'--duration', '30m',
+				'--reason', 'long gpu run',
+				'--wake-on-pid-exit', '4242',
+				'--wake-on-file', '/tmp/model.pt',
+				'--host', 'gpu-a100',
+			], CWD),
+			{
+				help: false,
+				json: false,
+				windowId: undefined,
+				action: 'token.block',
+				params: {
+					tokenId: 'tok-9',
+					maxDuration: '30m',
+					reason: 'long gpu run',
+					watchPid: 4242,
+					watchFile: '/tmp/model.pt',
+					hostAlias: 'gpu-a100',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'gate', 'approve', '--mission', 'm-1', '--node', 'G1', '--token', 'tok-wave2', '--note', 'LGTM'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.gate',
+				params: {
+					missionId: 'm-1',
+					node: 'G1',
+					tokenId: 'tok-wave2',
+					decision: 'approve',
+					note: 'LGTM',
+				},
 			},
 		);
 	});

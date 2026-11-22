@@ -1,115 +1,34 @@
+# Security Audit Swarm
+
+Three-track parallel security review covering authentication/secrets, injection/IPC boundaries, and supply-chain/runtime posture — converging into consolidated hardening patches, Security Officer approval (`U1`), and final verification.
+
 ```mermaid
 flowchart LR
-  %% @pos N1 204,4
-  %% @pos N2 204,260
-  %% @pos N3 204,516
-  %% @pos N4 598,260
-  %% @pos U1 992,260
-  %% @pos N5 1386,260
-  N1["Auth, Permissions & Secrets Audit ★Critical | worker=claude:high"] --> N4["Consolidated Hardening & Patches ★Critical | worker=dsh:high"]
-  N2["Injection, Path Traversal & IPC Audit ★Critical | worker=claude:high"] --> N4
-  N3["Supply-Chain & Runtime Surface Audit | worker=claude:medium"] --> N4
+  N1["@AuthAudit: Auth, Permissions & Secrets Audit"] --> N4["@Hardening: Consolidated Hardening & Patches"]
+  N2["@IpcAudit: Injection, Path Traversal & IPC Audit"] --> N4
+  N3["@SupplyAudit: Supply-Chain & Runtime Surface Audit"] --> N4
   N4 --> U1{{"Security Officer Approval Gate"}}
-  U1 --> N5["Final Security Verification & Report ★Critical | worker=dsh:high"]
+  U1 --> N5["@Hardening: Final Security Verification & Report"]
 ```
 
-## Tree Metadata
-- tree_type: engineering
-- governor_session_id: <governor-session-id>
-- workspace_isolation: worktree
-- watchdog_timeout_minutes: 10
-- max_budget_usd: 6
-- max_concurrency: 3
-- verify: npm test
+## Node Pre-Prompts
 
-## Auto-Partitioned Managers
-### [Segment: N1]
-- engine: claude-code
-- thinking: medium
+Apply the Mermaid DAG with `aexus-ade mission blueprint apply --mission <id> --file ./examples/blueprints/security-audit-swarm.md`, then bind each node's pre-prompt via the Canvas / Split Drawer or `aexus-ade mission prompt set`:
 
-### [Segment: N2]
-- engine: claude-code
-- thinking: medium
+### N1
+Audit authentication flows, token storage, file permissions (`0600`), privilege boundaries, and secret leakage vectors. Record every finding with exact `file:line`, severity, and exploit path under `docs/audit/auth/`.
 
-### [Segment: N3]
-- engine: claude-code
-- thinking: medium
+### N2
+Inspect shell spawning, command/SQL injection, path traversal, deserialization, and IPC/socket input sanitization. Trace untrusted inputs from boundary to sink and propose concrete remediation patches under `docs/audit/ipc/`.
 
-### [Segment: N4]
-- engine: claude-code
-- thinking: medium
+### N3
+Review third-party dependencies, sandbox flags, CSP/webview boundaries, and log/error redaction across platforms. Document prioritized risk findings under `docs/audit/supply-chain/`.
 
-### [Segment: N5]
-- engine: claude-code
-- thinking: medium
+### N4
+Synthesize findings from `N1`–`N3`, apply minimal security patches (`src/**`), and add automated security regression tests (`test/security/**`) for every High/Critical issue without regressing existing behavior.
 
-## Nodes
-### [N1] Auth, Permissions & Secrets Audit
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: docs/audit/auth/**
-- verify: git status --short
-- goal: |
-    Audit authentication flows, token storage, file permissions (0600), privilege boundaries, and secret leakage vectors.
-- acceptance: |
-    1. Every finding includes exact file:line, severity, and exploit path;
-    2. Zero hardcoded credentials or unguarded endpoints missed.
+### U1
+Human Acceptance Gate: review consolidated vulnerability findings, patches, and residual risk notes before final verification.
 
-### [N2] Injection, Path Traversal & IPC Audit
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=high
-- files: docs/audit/ipc/**
-- verify: git status --short
-- goal: |
-    Inspect shell spawning, SQL/command injection, path traversal, deserialization, and IPC/socket input sanitization.
-- acceptance: |
-    1. All untrusted inputs traced from boundary to sink;
-    2. Concrete remediation patches proposed for every Medium+ issue.
-
-### [N3] Supply-Chain & Runtime Surface Audit
-- type: task
-- critical: false
-- employee: engine=claude-code, thinking=medium
-- worker: engine=claude-code, thinking=medium
-- files: docs/audit/supply-chain/**
-- verify: git status --short
-- goal: |
-    Review dependencies, sandbox flags, CSP/webview boundaries, and error/log redaction across platforms.
-- acceptance: |
-    1. Dependency and sandbox posture summarized clearly;
-    2. Actionable hardening recommendations prioritized by risk.
-
-### [N4] Consolidated Hardening & Patches
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=dsh, thinking=high
-- files: src/**, test/security/**
-- verify: npm test
-- goal: |
-    Synthesize findings from N1–N3, apply minimal security patches, and add security regression tests for each resolved vulnerability.
-- acceptance: |
-    1. Every High/Critical finding patched and covered by automated tests;
-    2. Zero regressions to existing functionality.
-
-### [U1] Security Officer Approval Gate
-- type: user_gate
-- description: |
-    Review consolidated vulnerability findings, patches, and residual risk notes before final verification.
-
-### [N5] Final Security Verification & Report
-- type: task
-- critical: true
-- employee: engine=claude-code, thinking=medium
-- worker: engine=dsh, thinking=high
-- files: docs/audit/**, test/**
-- verify: npm run lint && npm test
-- goal: |
-    Re-run security checks, static analysis, and full test suite, then publish a clean PR-ready security sign-off report.
-- acceptance: |
-    1. All security and regression checks pass;
-    2. Final report cleanly maps findings to verified fixes.
+### N5
+Re-run security regression tests, static analysis, lint, and full test suite, then publish a clean PR-ready security sign-off report mapping every finding to its verified fix.
