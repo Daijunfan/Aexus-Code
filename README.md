@@ -31,9 +31,9 @@
 > 3. **Inspect Live FinOps & Flip `ADE ⇄ IDE` Instantly**: Open the docked **Node Inspector** for live token traces, Check Hooks, and multi-run FinOps budget ledgers, or press `Alt+Cmd+A` (`Alt+Ctrl+A`) to switch instantly between **`ADE`** and **`IDE`**.
 
 <p align="center">
-  <img src="docs/assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code Multi-Tier Mission DAG Choreography — Parallel Fan-Out, Rework Loop &amp; Release Gate U1" />
+  <img src="docs/promo/aexus-01-full-ade-workbench-hero.png" width="100%" alt="Aexus Code Full ADE Workbench — Multi-Host Multi-Project Sidebar, Radial Orchestration, Circular Mission Task DAG &amp; Simultaneous Multi-Cloud Terminals" />
   <br/>
-  <sub><strong>Visual Multi-Tier Mission DAG Choreography:</strong> Real Multi-Agent Execution — Parallel Fan-Out ➔ Token Bus Handoffs ➔ Human Release Gate <code>U1</code> · <a href="docs/assets/demos/02-live-dag-choreography.mp4">▶ Watch Full HD MP4</a> · <a href="docs/gallery.md">Explore Full Visual Gallery →</a></sub>
+  <sub><strong>Full ADE Workbench:</strong> Curated Multi-OS/Multi-Cloud Sidebar ➔ Dual-View Radial Orchestration &amp; Circular Mission Task DAG ➔ Simultaneous Multi-Cloud SSH Terminals · <a href="docs/gallery.md">Explore Full 8-Shot 2x Retina Visual Gallery →</a></sub>
 </p>
 
 ---
@@ -102,26 +102,11 @@ flowchart TB
 
 Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**, **Kali Linux**, and **Windows** in one unified sidebar — and drive multiple local + cloud terminals side-by-side without juggling windows or installing remote daemons:
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src="docs/assets/02-ade-hierarchy-and-diff.png" width="100%" alt="Unified Multi-Project Multi-OS ADE Command Center — macOS, Ubuntu, Kali and Windows projects with all 8 native coding agent engine icons, full L1 to L4 badges, live Governor chat and Project Inspector" />
-      <p align="center"><sub><strong>One Panel, Multi-OS Projects &amp; 8-Engine ADE Command Center:</strong> Apple + Ubuntu + Kali + Windows projects, all 8 colorful engine icons, L1–L4 full badges, live Governor session &amp; Project Inspector.</sub></p>
-    </td>
-    <td width="50%">
-      <img src="docs/assets/20-ade-agent-chat-and-diff.png" width="100%" alt="Live ADE Agent Chat Session Side-by-Side with Git Working Tree Diff and Smart Calm Multi-OS Sidebar" />
-      <p align="center"><sub><strong>Live ADE Agent Chat + Side-by-Side Git Diff:</strong> Multi-tier orchestration conversation right beside live code diffs and Smart Calm sidebar.</sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <p align="center">
-        <img src="docs/assets/17-multi-host-terminals.png" width="88%" alt="Simultaneous Local and Multi-Cloud OS Integrated Terminals — Split Ubuntu H100 GPU and Kali RedTeam shells alongside macOS, Ubuntu, Kali and Windows OS tab icons" /><br/>
-        <sub><strong>Simultaneous Local &amp; Multi-Cloud OS Terminals in One Window:</strong> Split Ubuntu H100 GPU + Kali RedTeam shells running live alongside Apple, Ubuntu, Kali &amp; Windows terminal tabs.</sub>
-      </p>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/promo/aexus-06-cross-host-fleet-and-terminals.png" width="100%" alt="Zero-Server Multi-OS Cloud Host Studio &amp; 4-Host Simultaneous Cloud SSH Terminal Matrix (Linux H100 GPU, Ubuntu EU Prod, Kali Audit, Windows CI)" />
+  <br/>
+  <sub><strong>One Panel, Multi-OS Cloud Fleet &amp; 4-Host Simultaneous SSH Terminals:</strong> Manage macOS, Linux H100 GPU, Ubuntu, Kali &amp; Windows projects alongside a live 2×2 multi-cloud terminal matrix.</sub>
+</p>
 
 - **Zero Path & OS Friction**: Mix local `file://` projects and zero-server `aexus-ssh://` hosts in the same tree with automatic platform icons (`macOS`, `Ubuntu`, `Kali`, `Windows`), pinned `✦ Secretary`, Smart Calm hover-bloom mode, and a **1-click full-badge toggle**.
 - **All 8 Native Coding Engines Side-by-Side**: Visual brand icons differentiate **Claude Code**, **Codex**, **Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** instantly across every tier and every host.
@@ -133,9 +118,9 @@ Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**
 Define the exact multi-agent organization your team wants instead of being locked into one fixed hierarchy:
 
 <p align="center">
-  <img src="docs/assets/15-org-role-studio-matrix.png" width="100%" alt="Organization &amp; Roles Studio — 5 Starter Presets, 4-Slot Binding Bar, Rank x Fixed Kernel API Permission Matrix, Pure Worker 0-API Lock &amp; Smart Calm Sidebar" />
+  <img src="docs/promo/aexus-02-orchestration-radial-constellation.png" width="100%" alt="Radial Multi-Tier Agent Orchestration Constellation — L1 Gold Chief Architect Center, 4 Department Wings, 4 Shared Whiteboards, 5 Hosts, 5 Agent Engines &amp; 6 Models" />
   <br/>
-  <sub><strong>Organization &amp; Roles Studio ("Everything is Extensible"):</strong> 5 starter presets, dynamic <code>1..N</code> rank tiers, interactive <code>Rank × Fixed Kernel API</code> matrix with <code>High Privilege</code> badges, permanent <code>Pure · 0</code> leaf executor isolation, and Smart Calm sidebar hierarchy.</sub>
+  <sub><strong>Radial Multi-Tier Agent Orchestration Constellation:</strong> L1 Chief Architect centered with 4 jewel-colored department wings, 4 shared whiteboards, 5 hosts, 5 agent engines, 6 models, live baton comets &amp; join barriers.</sub>
 </p>
 
 | Starter Preset | Rank Ladder (Top → Leaf Pure Executor) | Structural Slot Mapping (`orch / seg / rev / exec`) |
@@ -161,12 +146,12 @@ Author pure Mermaid flowcharts visually or via CLI (`aexus-ade mission ...`), as
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/assets/14-living-pods-interactive-demo.png" width="100%" alt="Mission Parallel DAG — Armored Task Pods, Parallel Fan-Out &amp; Human Gate U1" />
-      <p align="center"><sub><strong>Mission Parallel DAG Canvas:</strong> Armored Task Pods, draw.io orthogonal edge routing, context telemetry bars &amp; Human Gate <code>U1</code>.</sub></p>
+      <img src="docs/promo/aexus-03-circular-mission-dag-hero.png" width="100%" alt="Circular Mission Task DAG — Luminous Radial Task Orbs, Live Baton Packets, Assignee Chips &amp; Circular Minimap" />
+      <p align="center"><sub><strong>Circular Mission Task DAG:</strong> Luminous <code>176×176</code> radial task orbs, jewel custom colors, live baton packets, assignee/pointer badges &amp; circular minimap.</sub></p>
     </td>
     <td width="50%">
-      <img src="docs/assets/19-research-mode-dag.png" width="100%" alt="Research Workflow DAG — Multi-Track Hypothesis Probing, Quantitative Benchmark Harness and Methodology Peer Gate U1" />
-      <p align="center"><sub><strong>Research Workflow DAG:</strong> Multi-track hypothesis probing, quantitative benchmarks &amp; peer methodology gates.</sub></p>
+      <img src="docs/promo/aexus-05-dual-view-orch-dag-sync.png" width="100%" alt="Dual-View Live Linkage — Radial Orchestration Synchronized Side-by-Side with Circular Mission Task DAG" />
+      <p align="center"><sub><strong>Dual-View Live Linkage:</strong> Radial Orchestration staff batons synchronized live with circular Mission Task DAG deliverables.</sub></p>
     </td>
   </tr>
 </table>
@@ -177,13 +162,9 @@ Author pure Mermaid flowcharts visually or via CLI (`aexus-ade mission ...`), as
 - **Zero-Token Watchdog, Live Topology Patching & Source Triggers**: Set per-Mission silence timeouts (`mission timeout`), inspect liveness without spending LLM tokens, recall/retry branches (`mission recall`, `mission retry`), atomically patch running DAGs (`mission patch`), and attach cron/interval/file triggers (`mission trigger set`).
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/08-finops-budget-guardrails.png" />
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/12-light-theme-finops.png" />
-    <img src="docs/assets/08-finops-budget-guardrails.png" width="100%" alt="Dark &amp; Light Theme Parity Telemetry Overview" />
-  </picture>
+  <img src="docs/promo/aexus-04-interactive-whiteboard-and-baton.png" width="100%" alt="Interactive Orchestration — Department Shared Whiteboard Live Editor, 12-Color Node Palette &amp; Pointer-Only Baton Token Inspector" />
   <br/>
-  <sub><strong>Adaptive Dark / Light Theme Parity:</strong> Clean contrast across Dark Modern, Light Modern, and High Contrast workbench themes.</sub>
+  <sub><strong>Interactive Whiteboards, Node Palette &amp; Pointer-Only Baton Protocol:</strong> Edit department shared whiteboards, customize per-node jewel colors, and inspect cyclic re-entry deltas, on-demand pointer diffs &amp; hop trails live.</sub>
 </p>
 
 | Curated Blueprint Recipe | Topology | Employee Context Reuse | Ideal Use Case |
@@ -199,18 +180,11 @@ Author pure Mermaid flowcharts visually or via CLI (`aexus-ade mission ...`), as
 
 ### 4. Smart Calm Sidebar & Rank-Filtered Inbox
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src="docs/assets/16-smart-calm-and-inbox-ranks.png" width="100%" alt="Rank-Filtered ADE Inbox (All / Governor / Manager / Employee) alongside Fill-in-the-Blank Rank Identity and Prompt Template Editor" />
-      <p align="center"><sub><strong>Rank-Filtered <code>ADE Inbox</code> &amp; Fill-in-the-Blank Rank Prompt Editor</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="docs/assets/11-worktree-merge-workbench.png" width="100%" alt="Multi-Branch Isolation &amp; Diff Review Surface" />
-      <p align="center"><sub><strong>Multi-Track Diff &amp; Review Surface</strong></sub></p>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/promo/aexus-07-ade-focus-mode-multi-engine.png" width="100%" alt="ADE Project Focus Mode — Sticky Cloud Focus Banner, Cross-Engine Multi-Model Collaboration &amp; Right Files/Git Diff Inspector" />
+  <br/>
+  <sub><strong>Project Focus Mode, Cross-Engine Collaboration &amp; Live Git Changes Inspector:</strong> Scope the multi-project sidebar to a single cloud workspace while collaborating across Claude, Codex, Gemini &amp; DeepSeek with live diff inspection.</sub>
+</p>
 
 - **Smart Calm Sidebar**: Session rows default to compact hover-bloom rank/engine indicators with non-clipping badges, paired with a **1-click full-badge toggle** when you want every rank and status pill visible simultaneously, plus the pinned viewport-aware **`✦ Secretary`** (`/mission`, `/status`, `/sessions`, `/projects`).
 - **Rank-Filtered `ADE Inbox`**: Unified escalation and gate queue with schema-driven **per-rank filter pills** (`All | Governor | Manager | Employee` or `All | Tech Lead | Reviewer` — automatically hiding `0`-API pure executor ranks when empty), synced directly with Mission gates.
@@ -221,30 +195,17 @@ Author pure Mermaid flowcharts visually or via CLI (`aexus-ade mission ...`), as
 
 Aexus Code keeps 100% of native `Code - OSS` IDE ergonomics intact — Explorer, split editors, side-by-side diffs, multi-OS terminals, decoupled **Plugins** & **Agent Engine** header buttons, and live **[Open VSX](https://open-vsx.org/)** compatibility — while adding a Zero-Server SSH Cloud Host Studio:
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src="docs/assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE Mirror Symmetry — Native VS Code Explorer, Side-by-Side Diff and Simultaneous Local + Multi-Cloud OS Integrated Terminals" />
-      <p align="center"><sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry (<code>Alt+Cmd+A</code>):</strong> Full native VS Code Explorer, split diff &amp; live multi-OS terminals.</sub></p>
-    </td>
-    <td width="50%">
-      <img src="docs/assets/18-vscode-extensions-compat.png" width="100%" alt="Native VS Code Extensions Marketplace Compatibility via Open VSX — Python Debugger, Claude Code, Python, Red Hat Java, Ruby LSP" />
-      <p align="center"><sub><strong>Full VS Code Extensions Ecosystem (Open VSX):</strong> Install <code>Python Debugger</code>, <code>Claude Code</code>, <code>Python</code>, <code>Java</code>, <code>Ruby LSP</code> &amp; thousands more.</sub></p>
-    </td>
-  </tr>
-</table>
-
 <p align="center">
-  <img src="docs/assets/05-cloud-host-studio.png" width="88%" alt="Zero-Server SSH Cloud Host Studio — KPI Overview, Multi-OS Host Cards (Kali w/ ProxyJump, macOS, Ubuntu, Windows) and VS Code Config Migration" />
+  <img src="docs/promo/aexus-08-ide-mode-multi-project-terminals.png" width="100%" alt="Instant ADE to IDE Mirror Symmetry — Multi-Root Local and Cloud SSH Explorer, TypeScript Code Editor, Live Circular Mission DAG &amp; Multi-Cloud Terminals" />
   <br/>
-  <sub><strong>Zero-Server SSH Cloud Host Studio:</strong> Manage Kali Linux (with ProxyJump), macOS, Ubuntu GPU &amp; Windows SSH hosts in one console without installing <code>vscode-server</code> or mutating <code>~/.ssh/config</code>.</sub>
+  <sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry (<code>Alt+Cmd+A</code>):</strong> Manage the same local + cloud SSH multi-project workspace in native IDE mode with syntax-highlighted editing, live circular Task DAG preview &amp; split cloud terminals.</sub>
 </p>
 
 - **Zero Remote Daemon**: Edit remote files, view Git `HEAD` diffs, discover & attach remote Claude Code / Codex / OpenCode sessions, bind Mission DAG nodes to cloud hosts (`mission host bind`), and open remote SSH PTY terminals right beside local folders with **no `vscode-server` installed on remote hosts**.
 - **Non-Destructive `~/.ssh/config` Guarantee**: `syncUserSshDir` defaults to **`false`** — Aexus Code passes `-F <userDataDir>/ssh/effective_ssh_config` exclusively to its own SSH sessions/terminals and **never prepends `Include` or modifies your global `~/.ssh/config`**.
 - **OpenSSH Transport**: Uses **OpenSSH `ControlMaster` multiplexing on macOS/Linux** and **direct OpenSSH on Windows**. Background filesystem, Git, and probe operations run with **`BatchMode=yes`**, requiring key-based / `ssh-agent` authentication (private keys are never read or copied).
 - **Non-Destructive VS Code Migration**: Imports `~/.ssh/config` (including recursive `Include` directives) and VS Code remote host/directory history via `aexus-ade host import-vscode` (read-only import).
-- **More Screenshots & Motion Clips**: See [`docs/gallery.md`](docs/gallery.md) for the complete visual tour and 5 HD MP4 clips.
+- **Full Visual Gallery**: See [`docs/gallery.md`](docs/gallery.md) for the complete 8-shot 2x Retina showcase gallery.
 
 ---
 

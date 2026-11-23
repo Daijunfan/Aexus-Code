@@ -31,9 +31,9 @@
 > 3. **原位查看 FinOps 账本并瞬切 `ADE ⇄ IDE`**：点击节点打开右侧 **节点检视器** 查看实时令牌轨迹、校验规则与多轮 FinOps 预算账本；随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
 
 <p align="center">
-  <img src="assets/demos/02-live-dag-choreography.gif" width="100%" alt="Aexus Code 多级 Mission DAG 编排 — 并行扇出、返工流转与人工发布门禁 U1" />
+  <img src="promo/aexus-01-full-ade-workbench-hero.png" width="100%" alt="Aexus Code ADE 全工作台总览 — 多云多系统项目侧栏、放射状 Orchestration 编排、圆形 Mission Task DAG 与多云主机并发终端" />
   <br/>
-  <sub><strong>可视化多级 Mission DAG 编排：</strong>真实多机协同 — 并行扇出 ➔ Token Bus 流转 ➔ 人工发布门禁 <code>U1</code> · <a href="assets/demos/02-live-dag-choreography.mp4">▶ 观看高清 MP4</a> · <a href="gallery.md">浏览完整图库与 5 段视频 →</a></sub>
+  <sub><strong>ADE 全工作台旗舰视图：</strong>本地 + 多云多系统项目同屏管理 ➔ 放射状 Orchestration 与圆形 Mission Task DAG 双视图实时联动 ➔ 多云主机并发 SSH 终端 · <a href="gallery.md">浏览完整 8 张 2x Retina 旗舰图集 →</a></sub>
 </p>
 
 ---
@@ -102,26 +102,11 @@ flowchart TB
 
 在同一左侧栏统一管理 **macOS**、**Ubuntu**、**Kali Linux** 与 **Windows** 上的本地及云端项目，并在同一窗口内分屏直控多台本机 + 云主机集成终端：
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src="assets/02-ade-hierarchy-and-diff.png" width="100%" alt="一个面板管理多端多系统项目与 8 大引擎 ADE 指挥中枢 — macOS、Ubuntu、Kali、Windows 图标、L1–L4 全徽章与实时 Agent 会话" />
-      <p align="center"><sub><strong>一个面板管理多端项目 &amp; 8 大引擎 ADE 指挥中枢：</strong>本机 Apple + 云端 Ubuntu/Kali/Windows 项目同屏管理、官方彩色引擎图标、L1–L4 全徽章与实时 Governor 会话。</sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/20-ade-agent-chat-and-diff.png" width="100%" alt="ADE 实时 Agent 协同对话与分屏 Git Diff 同屏联动" />
-      <p align="center"><sub><strong>ADE 实时 Agent 会话 + 分屏 Git Diff 联动：</strong>多职级编排对话与代码改动左右同屏对照，搭配 Smart Calm 极简侧栏。</sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2">
-      <p align="center">
-        <img src="assets/17-multi-host-terminals.png" width="88%" alt="一个面板同时掌控多个本地与云主机终端 — Ubuntu H100 GPU 与 Kali 分屏运行，右侧终端标签自带全平台彩色图标" /><br/>
-        <sub><strong>一个面板同控多个本地与云主机终端：</strong>Ubuntu H100 GPU 与 Kali 安全终端分屏齐发，右侧列表自带 Apple / Ubuntu / Kali / Windows 专属彩色系统图标。</sub>
-      </p>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="promo/aexus-06-cross-host-fleet-and-terminals.png" width="100%" alt="跨云主机舰队控制台与 4 云主机并发 SSH 终端矩阵 — Linux H100 GPU、Ubuntu 生产环境、Kali 零信任审计、Windows CI" />
+  <br/>
+  <sub><strong>一个面板掌控多系统云主机舰队与 2×2 四云主机并发 SSH 终端：</strong>同时直连 Linux H100 GPU、Ubuntu 控制面、Kali 零信任审计与 Windows CI 终端，免远端装机、绝不改写 <code>~/.ssh/config</code>。</sub>
+</p>
 
 - **彻底无视路径与系统差异**：在同一侧栏混排本地 `file://` 与免装机 `aexus-ssh://` 云端项目，自动识别平台图标（Apple / Ubuntu / Kali / Windows），顶部常驻 **`✦ Secretary`**，支持 Smart Calm 极简模式与**一键完整徽章展开**。
 - **8 大本机原生编码引擎同台协作**：**Claude Code**、**Codex**、**Antigravity**、**Kilo Code**、**OpenCode**、**DeepSeek Harness**、**Cline**、**Pi** 官方辨识度彩色图标一眼区分，覆盖全职级与多端主机。
@@ -133,9 +118,9 @@ flowchart TB
 不再被绑死在单一固定组织结构里，按团队需要自由定制多级组织与权限：
 
 <p align="center">
-  <img src="assets/15-org-role-studio-matrix.png" width="100%" alt="组织与职级工作室 — 5 套内置预设、四槽位绑定栏、职级×固定内核 API 权限矩阵、纯净 Worker 零权限锁定与 Smart Calm 侧栏" />
+  <img src="promo/aexus-02-orchestration-radial-constellation.png" width="100%" alt="放射状多职级 Agent 编排星座拓扑 — L1 鎏金主架构师居中，4 大宝石色部门翼、4 块部门白板、跨 5 主机 5 引擎 6 模型协作" />
   <br/>
-  <sub><strong>组织与职级工作室（"Everything is Extensible"）：</strong>5 套内置预设、动态 <code>1..N</code> 职级调整、实时 <code>职级 × 固定内核 API</code> 权限矩阵（含 <code>High Privilege</code> 高危标记）、叶子执行器永久 <code>Pure · 0</code> 锁定与 Smart Calm 侧栏。</sub>
+  <sub><strong>放射状多职级 Agent 编排星座拓扑：</strong>L1 主架构师居中，4 大宝石色部门翼与 4 块共享白板环绕，跨 5 台主机、5 大 Agent 引擎、6 款模型实时流转接力令牌与汇聚屏障。</sub>
 </p>
 
 | 内置组织预设 | 职级梯队（顶层 → 叶子纯净执行器） | 结构槽位映射（`orch / seg / rev / exec`） |
@@ -161,12 +146,12 @@ flowchart TB
 <table>
   <tr>
     <td width="50%">
-      <img src="assets/14-living-pods-interactive-demo.png" width="100%" alt="Mission 并行 DAG 画布 — 装甲任务舱、并行扇出与人工门禁 U1" />
-      <p align="center"><sub><strong>Mission 并行 DAG 画布：</strong>装甲任务舱、draw.io 平滑正交路由、上下文遥测条与人工发布门禁 <code>U1</code>。</sub></p>
+      <img src="promo/aexus-03-circular-mission-dag-hero.png" width="100%" alt="圆形 Mission Task DAG 旗舰视图 — 176×176 径向光晕任务球、流动令牌彗星、执行人指针徽章与圆形小地图" />
+      <p align="center"><sub><strong>圆形 Mission Task DAG：</strong><code>176×176</code> 径向光晕圆形任务节点、自定义宝石色调色板、流动令牌彗星与圆形小地图。</sub></p>
     </td>
     <td width="50%">
-      <img src="assets/19-research-mode-dag.png" width="100%" alt="科研工作流 DAG — 多轨假设探索、定量基准与同行评审门禁 U1" />
-      <p align="center"><sub><strong>科研工作流 DAG：</strong>多轨假设探索、定量基准验证与同行方法论门禁 <code>U1</code>。</sub></p>
+      <img src="promo/aexus-05-dual-view-orch-dag-sync.png" width="100%" alt="双视图实时联动 — 放射状 Orchestration 编排拓扑与圆形 Mission Task DAG 并排同步" />
+      <p align="center"><sub><strong>双视图实时联动：</strong>左侧 Orchestration 实时接力令牌流与右侧圆形 Mission Task DAG 交付物一一对应。</sub></p>
     </td>
   </tr>
 </table>
@@ -177,13 +162,9 @@ flowchart TB
 - **零 Token Watchdog、运行期热更新与源节点触发器**：支持每任务静默超时（`mission timeout`）、无 Token 消耗的本机/SSH 活性巡检、定向召回/重试（`mission recall` / `mission retry`）、运行期原子拓扑热补丁（`mission patch`）及定时/事件源触发器（`mission trigger set`）。
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/08-finops-budget-guardrails.png" />
-    <source media="(prefers-color-scheme: light)" srcset="assets/12-light-theme-finops.png" />
-    <img src="assets/08-finops-budget-guardrails.png" width="100%" alt="自适应 GitHub 深浅双主题遥测与界面总览" />
-  </picture>
+  <img src="promo/aexus-04-interactive-whiteboard-and-baton.png" width="100%" alt="Orchestration 深度交互视图 — 部门共享白板实时编辑器、12 色节点调色板与接力令牌按需解引用审查器" />
   <br/>
-  <sub><strong>深浅双主题与高对比度适配：</strong>完整兼容 Dark Modern、Light Modern 与 High Contrast 工作台主题。</sub>
+  <sub><strong>共享白板、12 色节点调色板与轻量指针接力令牌协议：</strong>原位编辑部门共享白板与节点配色，按需展开指针差异预览、环路重入增量游标与完整跳数轨迹。</sub>
 </p>
 
 | 内置示例蓝图 | 拓扑结构 | 员工上下文复用 | 适用场景 |
@@ -199,18 +180,11 @@ flowchart TB
 
 ### 4. Smart Calm 侧栏与按职级过滤的 `ADE Inbox`
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src="assets/16-smart-calm-and-inbox-ranks.png" width="100%" alt="按职级过滤的 ADE Inbox 与填空式职级提示词编辑器" />
-      <p align="center"><sub><strong>按职级过滤 <code>ADE Inbox</code> &amp; 职级提示词编辑器</strong></sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/11-worktree-merge-workbench.png" width="100%" alt="多路隔离与 Diff 审阅工作台" />
-      <p align="center"><sub><strong>多路改动与 Diff 审阅视图</strong></sub></p>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="promo/aexus-07-ade-focus-mode-multi-engine.png" width="100%" alt="ADE Focus 聚焦模式 — 吸顶云项目聚焦横幅、跨引擎多模型协作特写与右侧 Git Changes/Diff 实时审查栏" />
+  <br/>
+  <sub><strong>项目 Focus 聚焦模式、跨引擎多模型协作与实时 Git Diff 审查：</strong>一键聚焦单个云端项目团队，放大审视 Claude / Codex / Gemini / DeepSeek 跨机协作与实时改动 Diff。</sub>
+</p>
 
 - **Smart Calm 极简侧栏**：会话行默认展示紧凑悬停绽放徽章且防止徽章裁切，顶部提供**一键切换完整徽章视图**按钮，并在最上方常驻具备视口感知能力的 **`✦ Secretary`**（支持 `/mission`、`/status`、`/sessions`、`/projects`）。
 - **按职级过滤的 `ADE Inbox`**：统一收信箱汇总 Mission 升级告警与人工门禁，并根据当前组织预设动态渲染职级过滤胶囊（如 `All | Governor | Manager | Employee`——当 `0`-API 纯执行职级为空时自动隐藏，减少噪音）。
@@ -221,30 +195,17 @@ flowchart TB
 
 Aexus Code 完整保留原生 `Code - OSS` IDE 的全部生产力——资源管理器、分屏编辑器、实时 Git Diff、多端集成终端、顶栏完全解耦的**插件**与**Agent 引擎**按钮以及 **[Open VSX](https://open-vsx.org/)** 主流 VS Code 扩展兼容，同时提供免远端装机的多系统 SSH 云主机工作室：
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src="assets/07-ide-mirror-symmetry.png" width="100%" alt="IDE 镜像对称模式 — 完整原生 VS Code 资源管理器、左右分屏 Diff 与多系统本地/云主机集成终端" />
-      <p align="center"><sub><strong>瞬切 <code>ADE ⇄ IDE</code> 镜像对称（<code>Alt+Cmd+A</code>）：</strong>完整原生 VS Code 资源管理器、分屏 Diff 与多端云主机终端。</sub></p>
-    </td>
-    <td width="50%">
-      <img src="assets/18-vscode-extensions-compat.png" width="100%" alt="兼容 VS Code 市场绝大多数插件（Open VSX 实时浏览）— Python Debugger、Claude Code、Python、Java、Ruby LSP" />
-      <p align="center"><sub><strong>兼容 VS Code 主流市场插件（Open VSX）：</strong>开箱安装 <code>Python Debugger</code>、<code>Claude Code</code>、<code>Python</code>、<code>Java</code>、<code>Ruby LSP</code> 等海量插件。</sub></p>
-    </td>
-  </tr>
-</table>
-
 <p align="center">
-  <img src="assets/05-cloud-host-studio.png" width="88%" alt="免远端装机多系统 SSH 云主机中心 — Kali（支持 ProxyJump 跳板机）、macOS、Ubuntu GPU、Windows 11 卡片与 VS Code 配置迁移" />
+  <img src="promo/aexus-08-ide-mode-multi-project-terminals.png" width="100%" alt="瞬切 IDE 镜像模式 — 同一面板管理本地与多云 SSH 项目、TypeScript 代码编辑、实时同步圆形 Task DAG 与多云主机并发终端" />
   <br/>
-  <sub><strong>免远端装机多系统 SSH 云主机中心：</strong>统一管理 Kali（含 ProxyJump 跳板机）、macOS、Ubuntu GPU 与 Windows 云主机，无需安装 <code>vscode-server</code>，绝不改写 <code>~/.ssh/config</code>。</sub>
+  <sub><strong>瞬切 <code>ADE ⇄ IDE</code> 镜像对称（<code>Alt+Cmd+A</code>）：</strong>在同一工作区无缝切回原生 IDE 模式，管理本地与多云 SSH 多根项目、编辑代码、右侧联动圆形 Task DAG 并直控多云主机终端。</sub>
 </p>
 
 - **零远端后台**：在同一窗口直接编辑远端文件、查看 `HEAD` Diff、自动发现并导入云端主机项目级会话（如 Claude Code / Codex / OpenCode）、将 Mission 节点绑定到云主机（`mission host bind`）并打开远端 SSH 集成终端，**无需在目标服务器安装或升级 `vscode-server`**。
 - **非破坏性 `~/.ssh/config` 保证**：`syncUserSshDir` 默认为 **`false`**——Aexus Code 仅向自身的 SSH 会话与终端传入 `-F <userDataDir>/ssh/effective_ssh_config`，**绝不修改或向用户全局 `~/.ssh/config` 头部插入 `Include`**。
 - **OpenSSH 传输行为**：macOS / Linux 使用 OpenSSH `ControlMaster` 连接复用，Windows 使用直连 OpenSSH；后台文件、Git 与探针操作使用 `BatchMode=yes`（需密钥或 `ssh-agent` 免交互鉴权，Aexus Code 从不读取或复制私钥内容）。
 - **无损迁移 VS Code 配置**：通过 `aexus-ade host import-vscode` 只读解析 `~/.ssh/config`（含递归 `Include`）及 VS Code 远端目录历史。
-- **更多界面截图与高清短视频**：请前往 [`docs/gallery.md`](gallery.md) 查看全部界面展示与 5 段 HD MP4 演示。
+- **完整 2x Retina 宣传图集**：请前往 [`docs/gallery.md`](gallery.md) 查看全部 8 张旗舰高清界面展示。
 
 ---
 
