@@ -106,9 +106,11 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.ok(world.width >= 4800 && world.height >= 3600);
 	});
 
-	test('hot-renames unified Mission alias and persists Inbox + single-copy API docs via slim AdeDocsBackendNodeService', async () => {
-		assert.strictEqual(getMissionDisplayName(DEFAULT_ADE_ORGANIZATION_CONFIG), 'Mission');
-		const engAlias = renameMissionAlias(DEFAULT_ADE_ORGANIZATION_CONFIG, 'Engineering');
+	test('hot-renames unified Engineering alias and persists Inbox + single-copy API docs via slim AdeDocsBackendNodeService', async () => {
+		assert.strictEqual(getMissionDisplayName(DEFAULT_ADE_ORGANIZATION_CONFIG), 'Engineering');
+		const missionAlias = renameMissionAlias(DEFAULT_ADE_ORGANIZATION_CONFIG, 'Mission');
+		assert.strictEqual(getMissionDisplayName(missionAlias), 'Mission');
+		const engAlias = renameMissionAlias(missionAlias, 'Engineering');
 		assert.strictEqual(getMissionDisplayName(engAlias), 'Engineering');
 		const resAlias = renameMissionAlias(engAlias, 'Research');
 		assert.strictEqual(getMissionDisplayName(resAlias), 'Research');

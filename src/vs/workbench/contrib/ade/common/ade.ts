@@ -75,7 +75,26 @@ export const ADE_REMOVE_PROJECT_COMMAND_ID = 'workbench.action.ade.removeProject
 export const ADE_DELETE_PROJECT_COMMAND_ID = 'workbench.action.ade.deleteProjectFolder';
 export const ADE_RENAME_PROJECT_COMMAND_ID = 'workbench.action.ade.renameProjectFolder';
 export const ADE_OPEN_MISSION_COMMAND_ID = 'workbench.action.ade.openMission';
+export const ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID = 'workbench.action.ade.openEngineeringMission';
+export const ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID = 'workbench.action.ade.openEngineeringOrchestration';
 export const ADE_REMOVE_MISSION_COMMAND_ID = 'workbench.action.ade.removeMission';
+
+export type AdeEngineeringViewMode = 'mission' | 'orchestration';
+
+export function encodeAdeEngineeringInputSpec(engineeringId: string, viewMode: AdeEngineeringViewMode): string {
+	return `${engineeringId}::${viewMode}`;
+}
+
+export function parseAdeEngineeringInputSpec(spec: string): { readonly id: string; readonly viewMode: AdeEngineeringViewMode } {
+	const trimmed = spec.trim();
+	if (trimmed.endsWith('::mission')) {
+		return { id: trimmed.slice(0, -'::mission'.length), viewMode: 'mission' };
+	}
+	if (trimmed.endsWith('::orchestration')) {
+		return { id: trimmed.slice(0, -'::orchestration'.length), viewMode: 'orchestration' };
+	}
+	return { id: trimmed, viewMode: 'mission' };
+}
 export const ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID = 'workbench.action.aexusCloudHosts.manage';
 export const ADE_ADD_CLOUD_PROJECT_COMMAND_ID = 'workbench.action.aexusCloudHosts.addProject';
 export const ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID = 'workbench.action.aexusCloudHosts.importFromVSCode';
@@ -174,7 +193,14 @@ export interface IAdeProjectsService {
 	setAgentWorkTreeTag?(governorId: string, treeType: AdeWorkTreeType | undefined): void;
 	syncMissionMermaidEmployees?(
 		ownerOrMissionId: string,
-		employees: readonly { readonly id: string; readonly title: string; readonly nodeIds?: readonly string[]; readonly isExplicitEmployee?: boolean }[],
+		employees: readonly {
+			readonly id: string;
+			readonly title: string;
+			readonly nodeIds?: readonly string[];
+			readonly isExplicitEmployee?: boolean;
+			readonly parentKey?: string;
+			readonly role?: AdeAgentRole;
+		}[],
 		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
 	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] };
 	clearMissionEmployees?(ownerOrMissionId: string): readonly IAdeAgent[];
@@ -190,6 +216,7 @@ export interface IAdeProjectsService {
 	addAgent(parentId: string, label: string, role?: AdeAgentRole): IAdeAgent;
 	addSession(projectUri: URI, session: IAdeSession, label: string, optionsOrParentId?: string | IAdeAddSessionOptions): IAdeAgent;
 	bindSession(id: string, session: IAdeSession): void;
+	unbindSession?(id: string): void;
 	moveProject(id: string, targetId: string | undefined, after: boolean): void;
 	canReparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean;
 	reparentAgent(id: string, newParentId: string | undefined, targetProjectUri?: URI): boolean;
@@ -219,7 +246,7 @@ export interface IAdeEditorService {
 	getAgentIdForEditor?(editor: EditorInput | undefined): string | undefined;
 	isSessionActive(resource: URI): boolean;
 	openAgent(id: string, options?: { side?: boolean }): Promise<void>;
-	openEngineering?(governorId: string, options?: { side?: boolean }): Promise<void>;
+	openEngineering?(governorId: string, options?: { side?: boolean; viewMode?: AdeEngineeringViewMode; openSiblingViews?: boolean }): Promise<void>;
 	openCloudHosts?(hostIdOrAlias?: string, options?: { side?: boolean }): Promise<void>;
 	openRoleStudio?(focusRankId?: string, options?: { side?: boolean }): Promise<void>;
 	openAdeConfig?(options?: { side?: boolean }): Promise<void>;

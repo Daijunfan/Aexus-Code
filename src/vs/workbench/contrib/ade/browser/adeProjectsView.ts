@@ -51,7 +51,7 @@ import { ADE_OS_ICON_LABELS, AdeOsIconKind, formatProjectDisplayPath, IAdeCloudH
 import { IAdeInboxService, resolveAdeInboxSeverity } from '../../../../platform/ade/common/adeEngineering.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, findRankDefinition, getMissionDisplayName, IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_MISSION_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
+import { ADE_CLOUD_HOSTS_MANAGE_COMMAND_ID, ADE_DELETE_PROJECT_COMMAND_ID, ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, ADE_OPEN_MISSION_COMMAND_ID, ADE_OPEN_ROLE_STUDIO_COMMAND_ID, ADE_REMOVE_MISSION_COMMAND_ID, ADE_REMOVE_PROJECT_COMMAND_ID, ADE_RENAME_PROJECT_COMMAND_ID, ADE_SECRETARY_ID, AdeSessionRank, getAdeRoleRankLevel, getNextLowerAdeRole, IAdeAgent, IAdeEditorService, IAdeProject, IAdeProjectsService, resolveAdeAgentRank } from '../common/ade.js';
 import { adeBi, formatDynamicOrgLadderSummary, onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeInboxPanel } from './adeInboxView.js';
@@ -369,7 +369,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		};
 	}
 
-	private applyItemIcon(iconNode: HTMLElement, icon: ThemeIcon | URI): void {
+	private applyItemIcon(iconNode: HTMLElement, icon: ThemeIcon | URI, extraClasses?: string): void {
 		delete iconNode.dataset.os;
 		iconNode.removeAttribute('aria-label');
 		iconNode.title = '';
@@ -377,10 +377,12 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			iconNode.replaceChildren();
 		}
 		if (URI.isUri(icon)) {
-			iconNode.className = 'ade-tree-item-icon ade-tree-item-icon-svg';
+			iconNode.className = extraClasses ? `ade-tree-item-icon ade-tree-item-icon-svg ${extraClasses}` : 'ade-tree-item-icon ade-tree-item-icon-svg';
 			iconNode.style.backgroundImage = asCSSUrl(icon);
 		} else {
-			iconNode.className = `ade-tree-item-icon ${ThemeIcon.asClassName(icon)}`;
+			iconNode.className = extraClasses
+				? `ade-tree-item-icon ${extraClasses} ${ThemeIcon.asClassName(icon)}`
+				: `ade-tree-item-icon ${ThemeIcon.asClassName(icon)}`;
 			iconNode.style.backgroundImage = '';
 		}
 	}
@@ -560,11 +562,17 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.row.setAttribute('data-child-label', formatChildRankPreview(nextLower.childRank, roleSchema));
 		}
 
-		const icon = effectiveEngineId ? (this.sessions.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
+		const resolvedEngineIcon = effectiveEngineId ? this.sessions.getIcon(effectiveEngineId) : undefined;
+		const icon = resolvedEngineIcon ?? getAdeRankIcon(rank, roleSchema);
+		const isUnboundFallback = !resolvedEngineIcon;
 		const engineTitle = effectiveEngineId ? this.sessions.getEngineName(effectiveEngineId) : localize('adeDraftSession', "Draft");
 		const badgeLabel = formatRoleBadgeLabel(rank, roleSchema);
 
-		this.applyItemIcon(template.iconNode, icon);
+		this.applyItemIcon(
+			template.iconNode,
+			icon,
+			isUnboundFallback ? `ade-tree-item-icon-draft role-color-${rankDef.color}` : undefined,
+		);
 		template.label.setResource({
 			name: agent.label,
 			resource: session?.resource ?? agent.projectUri,
@@ -611,7 +619,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		template.roleBadge.replaceChildren(rankIcon, $('span.ade-badge-label', {}, badgeLabel));
 		template.roleBadge.hidden = false;
 		const roleTooltip = isLocked
-			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Mission Blueprint)", badgeLabel)
+			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel)
 			: rankDef.pureExecution
 				? localize('adeWorkerBadgeTooltip', "Role: {0} (Clean Native Context) — Click to change role", badgeLabel)
 				: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
@@ -1187,9 +1195,19 @@ export class AdeProjectsView extends ViewPane {
 					toAction({
 						id: 'ade.secretary.mission',
 						label: secMission
-							? localize('adeOpenMissionMenu', "Open {0}", missionAlias)
+							? localize('adeOpenMissionMenu', "Open {0} (Mission & Orchestration)", missionAlias)
 							: localize('adeNewMissionMenu', "New {0}", missionAlias),
 						run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, ADE_SECRETARY_ID),
+					}),
+					toAction({
+						id: 'ade.secretary.missionView',
+						label: localize('adeOpenMissionViewMenu', "Open Mission View (Task DAG)"),
+						run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, ADE_SECRETARY_ID),
+					}),
+					toAction({
+						id: 'ade.secretary.orchestrationView',
+						label: localize('adeOpenOrchestrationViewMenu', "Open Orchestration View (Staff Topology)"),
+						run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, ADE_SECRETARY_ID),
 					}),
 					...(secMission ? [toAction({
 						id: 'ade.secretary.removeMission',
@@ -1481,8 +1499,18 @@ export class AdeProjectsView extends ViewPane {
 		actions.push(
 			toAction({
 				id: 'ade.project.newMission',
-				label: localize('adeProjectNewMission', "New {0}", missionAlias),
+				label: localize('adeProjectNewMission', "New {0} (Mission & Orchestration)", missionAlias),
 				run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, project.uri),
+			}),
+			toAction({
+				id: 'ade.project.newMissionView',
+				label: localize('adeProjectNewMissionView', "New {0} · Mission View", missionAlias),
+				run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, project.uri),
+			}),
+			toAction({
+				id: 'ade.project.newOrchestrationView',
+				label: localize('adeProjectNewOrchView', "New {0} · Orchestration View", missionAlias),
+				run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, project.uri),
 			}),
 			new Separator(),
 			toAction({
@@ -1554,9 +1582,19 @@ export class AdeProjectsView extends ViewPane {
 				toAction({
 					id: 'ade.mission',
 					label: hasLinkedMission
-						? localize('adeOpenMissionMenu', "Open {0}", missionAlias)
+						? localize('adeOpenMissionMenu', "Open {0} (Mission & Orchestration)", missionAlias)
 						: localize('adeNewMissionMenu', "New {0}", missionAlias),
 					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, ownedMission?.id ?? agentId),
+				}),
+				toAction({
+					id: 'ade.mission.viewMission',
+					label: localize('adeOpenMissionViewMenu', "Open Mission View (Task DAG)"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, ownedMission?.id ?? agentId),
+				}),
+				toAction({
+					id: 'ade.mission.viewOrchestration',
+					label: localize('adeOpenOrchestrationViewMenu', "Open Orchestration View (Staff Topology)"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, ownedMission?.id ?? agentId),
 				}),
 				...(hasLinkedMission ? [toAction({
 					id: 'ade.removeMission',
@@ -1567,8 +1605,18 @@ export class AdeProjectsView extends ViewPane {
 			] : (owningMissionTargetId ? [
 				toAction({
 					id: 'ade.mission.openParent',
-					label: localize('adeOpenParentMissionMenu', "Open {0} Canvas", missionAlias),
+					label: localize('adeOpenParentMissionMenu', "Open {0} (Mission & Orchestration)", missionAlias),
 					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, owningMissionTargetId),
+				}),
+				toAction({
+					id: 'ade.mission.openParentMission',
+					label: localize('adeOpenMissionViewMenu', "Open Mission View (Task DAG)"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID, owningMissionTargetId),
+				}),
+				toAction({
+					id: 'ade.mission.openParentOrchestration',
+					label: localize('adeOpenOrchestrationViewMenu', "Open Orchestration View (Staff Topology)"),
+					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, owningMissionTargetId),
 				}),
 				new Separator(),
 			] : [])),

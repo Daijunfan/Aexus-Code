@@ -19,6 +19,7 @@ import {
 	setNodeEmployeeInMermaid,
 	stripTrailingMermaidClass,
 } from './adeMissionEmployee.js';
+import { normalizeAdeNodeColor } from './adeNodeColors.js';
 
 export type { IMissionDagEmployeeGroup };
 export { getEmployeeColorIndex, normalizeMissionEmployeeKey, setNodeEmployeeInMermaid };
@@ -34,6 +35,7 @@ export {
 	renameEdgeLabelInMermaid,
 	renameNodeInMermaid,
 	toggleEdgeFailInMermaid,
+	upsertTaskMetadataInMermaid,
 } from './adeMissionDagAuthoring.js';
 export type {
 	IMissionAlignGuide,
@@ -119,6 +121,18 @@ export interface IMissionDagNode {
 	readonly employeeTotalOccurrences?: number;
 	/** Optional zero-cost deterministic verification hooks declared inline via `%% check <nodeId> ...` Mermaid directives. */
 	readonly checks?: readonly IMissionNodeCheckHook[];
+	/** Optional Orchestration staff node ID who owns/verifies this task node (authorized to mark completed). */
+	readonly ownerNodeId?: string;
+	/** Optional default Orchestration staff node ID assigned to execute this task node. */
+	readonly assigneeNodeId?: string;
+	/** Optional owning department name for department-scoped task completion & editing permissions. */
+	readonly department?: string;
+	/** Optional highest numeric tier (lowest authority) allowed to mark this task completed (e.g. `2` allows L1 & L2). */
+	readonly minCompleterTier?: number;
+	/** Optional explicit list of Orchestration staff node IDs authorized to mark this task completed. */
+	readonly allowedCompleterNodeIds?: readonly string[];
+	/** Optional custom visual accent color preset ID (e.g. 'cyan', 'rose') or `#rrggbb` hex. */
+	readonly color?: string;
 }
 
 export interface IMissionDagEdge {
@@ -255,8 +269,9 @@ export interface IMissionOrthogonalEdgeRoute {
 	readonly points: readonly { readonly x: number; readonly y: number }[];
 }
 
-export const MISSION_TASK_NODE_WIDTH = 316;
-export const MISSION_TASK_NODE_HEIGHT = 220;
+export const MISSION_TASK_NODE_DIAMETER = 176;
+export const MISSION_TASK_NODE_WIDTH = MISSION_TASK_NODE_DIAMETER;
+export const MISSION_TASK_NODE_HEIGHT = MISSION_TASK_NODE_DIAMETER;
 export const MISSION_GATE_NODE_WIDTH = 236;
 export const MISSION_GATE_NODE_HEIGHT = 108;
 
@@ -532,6 +547,91 @@ function parseMermaidCheckDirective(rawLine: string, seqByNode: Map<string, numb
 	return { nodeId, hook };
 }
 
+interface IParsedMissionTaskMeta {
+	readonly ownerNodeId?: string;
+	readonly assigneeNodeId?: string;
+	readonly department?: string;
+	readonly minCompleterTier?: number;
+	readonly allowedCompleterNodeIds?: readonly string[];
+	readonly color?: string;
+}
+
+/**
+ * Parses an optional inline Mermaid task permission/ownership/style directive:
+ *   `%% task T1 [owner=BE_Lead, assignee=Dev1, dept=Backend, min_tier=2, completers=CEO|BE_Lead, color=cyan]`
+ */
+function parseMermaidTaskDirective(rawLine: string): { readonly nodeId: string; readonly meta: IParsedMissionTaskMeta } | undefined {
+	const idx = rawLine.indexOf('%%');
+	if (idx < 0) {
+		return undefined;
+	}
+	const commentBody = rawLine.slice(idx + 2).trim();
+	const m = /^task\s+([A-Za-z0-9_-]+)\s*\[([^\]]*)\]$/i.exec(commentBody);
+	if (!m) {
+		return undefined;
+	}
+	const nodeId = m[1].trim();
+	const optStr = m[2]?.trim() ?? '';
+	if (!optStr) {
+		return undefined;
+	}
+	let ownerNodeId: string | undefined;
+	let assigneeNodeId: string | undefined;
+	let department: string | undefined;
+	let minCompleterTier: number | undefined;
+	let allowedCompleterNodeIds: string[] | undefined;
+	let color: string | undefined;
+
+	for (const part of splitTopLevelByDelimiter(optStr, ',')) {
+		const eq = part.indexOf('=');
+		if (eq <= 0) {
+			continue;
+		}
+		const key = part.slice(0, eq).trim().toLowerCase().replace(/-/g, '_');
+		const val = stripOuterQuotes(part.slice(eq + 1).trim());
+		if (!val) {
+			continue;
+		}
+		if (key === 'owner' || key === 'owner_node' || key === 'owner_id') {
+			ownerNodeId = val;
+		} else if (key === 'assignee' || key === 'assignee_node' || key === 'staff') {
+			assigneeNodeId = val;
+		} else if (key === 'dept' || key === 'department') {
+			department = val;
+		} else if (key === 'min_tier' || key === 'mintier' || key === 'completer_tier' || key === 'max_tier' || key === 'min_completer_tier' || key === 'mincompletertier') {
+			const tm = /^L?(\d+)$/i.exec(val);
+			if (tm) {
+				const parsed = Number.parseInt(tm[1], 10);
+				if (Number.isInteger(parsed) && parsed >= 0) {
+					minCompleterTier = parsed;
+				}
+			}
+		} else if (key === 'completers' || key === 'allowed_completers' || key === 'approvers') {
+			const list = val.split(/[|;,]/).map(s => s.trim()).filter(Boolean);
+			if (list.length > 0) {
+				allowedCompleterNodeIds = [...new Set(list)];
+			}
+		} else if (key === 'color' || key === 'accent' || key === 'tint') {
+			color = normalizeAdeNodeColor(val);
+		}
+	}
+
+	if (!ownerNodeId && !assigneeNodeId && !department && minCompleterTier === undefined && !allowedCompleterNodeIds && !color) {
+		return undefined;
+	}
+	return {
+		nodeId,
+		meta: {
+			...(ownerNodeId ? { ownerNodeId } : {}),
+			...(assigneeNodeId ? { assigneeNodeId } : {}),
+			...(department ? { department } : {}),
+			...(minCompleterTier !== undefined ? { minCompleterTier } : {}),
+			...(allowedCompleterNodeIds ? { allowedCompleterNodeIds } : {}),
+			...(color ? { color } : {}),
+		},
+	};
+}
+
 /**
  * Parses pure Mermaid flowchart / graph syntax into a flat (non-nested) DAG.
  * Empty text returns an empty graph with no error so users can create a Mission first and author Mermaid later.
@@ -543,9 +643,23 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 	}
 
 	let direction: MissionDagDirection = 'LR';
-	const nodeMap = new Map<string, { id: string; label: string; kind: MissionDagNodeKind; employeeKey?: string; employeeName?: string; checks?: IMissionNodeCheckHook[] }>();
+	const nodeMap = new Map<string, {
+		id: string;
+		label: string;
+		kind: MissionDagNodeKind;
+		employeeKey?: string;
+		employeeName?: string;
+		checks?: IMissionNodeCheckHook[];
+		ownerNodeId?: string;
+		assigneeNodeId?: string;
+		department?: string;
+		minCompleterTier?: number;
+		allowedCompleterNodeIds?: readonly string[];
+		color?: string;
+	}>();
 	const classEmployeeByNodeId = new Map<string, string>();
 	const checksByNodeId = new Map<string, IMissionNodeCheckHook[]>();
+	const taskMetaByNodeId = new Map<string, IParsedMissionTaskMeta>();
 	const checkSeqByNodeId = new Map<string, number>();
 	const edges: IMissionDagEdge[] = [];
 	const edgeKeys = new Set<string>();
@@ -583,6 +697,13 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 			const list = checksByNodeId.get(checkDirective.nodeId) ?? [];
 			list.push(checkDirective.hook);
 			checksByNodeId.set(checkDirective.nodeId, list);
+		}
+		const taskDirective = parseMermaidTaskDirective(rawLine);
+		if (taskDirective) {
+			taskMetaByNodeId.set(taskDirective.nodeId, {
+				...taskMetaByNodeId.get(taskDirective.nodeId),
+				...taskDirective.meta,
+			});
 		}
 		const noComment = rawLine.replace(/%%.*$/, '').trim();
 		if (!noComment) {
@@ -695,6 +816,20 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 		}
 	}
 
+	for (const [nid, meta] of taskMetaByNodeId.entries()) {
+		const existing = nodeMap.get(nid);
+		if (existing) {
+			if (meta.ownerNodeId) { existing.ownerNodeId = meta.ownerNodeId; }
+			if (meta.assigneeNodeId) { existing.assigneeNodeId = meta.assigneeNodeId; }
+			if (meta.department) { existing.department = meta.department; }
+			if (meta.minCompleterTier !== undefined) { existing.minCompleterTier = meta.minCompleterTier; }
+			if (meta.allowedCompleterNodeIds && meta.allowedCompleterNodeIds.length > 0) {
+				existing.allowedCompleterNodeIds = meta.allowedCompleterNodeIds;
+			}
+			if (meta.color) { existing.color = meta.color; }
+		}
+	}
+
 	const rawNodes = [...nodeMap.values()];
 	if (rawNodes.length === 0) {
 		return {
@@ -797,10 +932,10 @@ export function computeMissionAutoLayout(
 	}
 
 	const isVertical = graph.direction === 'TD';
-	const hGap = options?.horizontalGap ?? (isVertical ? 368 : 396);
-	const vGap = options?.verticalGap ?? (isVertical ? 304 : 238);
-	const originX = options?.originX ?? 270;
-	const originY = options?.originY ?? (isVertical ? 210 : 300);
+	const hGap = options?.horizontalGap ?? (isVertical ? 248 : 276);
+	const vGap = options?.verticalGap ?? (isVertical ? 256 : 228);
+	const originX = options?.originX ?? 220;
+	const originY = options?.originY ?? (isVertical ? 200 : 280);
 
 	for (let l = 0; l < layers.length; l++) {
 		const col = layers[l];

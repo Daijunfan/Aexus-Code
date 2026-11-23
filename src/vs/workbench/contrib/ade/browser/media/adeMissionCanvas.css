@@ -730,7 +730,7 @@
 
 .monaco-workbench .ade-mission-edge-path {
 	fill: none;
-	stroke: color-mix(in srgb, var(--ade-mission-out) 54%, color-mix(in srgb, var(--vscode-foreground) 34%, transparent));
+	stroke: color-mix(in srgb, var(--ade-mission-out, #34d399) 54%, color-mix(in srgb, var(--vscode-foreground, #e6edf3) 34%, transparent));
 	stroke-width: 1.75px;
 	stroke-linecap: round;
 	stroke-linejoin: round;
@@ -5493,6 +5493,11 @@
 	cursor: crosshair;
 	width: 11px;
 	height: 11px;
+	padding: 0;
+	margin: 0;
+	box-sizing: border-box;
+	appearance: none;
+	-webkit-appearance: none;
 	transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
 }
 
@@ -6030,4 +6035,1976 @@ html.ade-page-hidden .monaco-workbench .ade-mission-editor .ade-mission-edge-gro
 	.monaco-workbench .ade-mission-editor .ade-mission-edge-group.is-trace-highlighted .ade-mission-edge-path {
 		animation: none !important;
 	}
+}
+
+/* ============================================================================
+ * Engineering Dual-View Redesign:
+ *  - View 1: Minimalist Mission Task DAG & 2-Pane Drawer (Code + All Task Descs)
+ *  - View 2: All-Staff Cyclic Orchestration, Single-Pane Drawer, 12 Multi-Anchor
+ *            Ports (4-side x 3-slot), Department Region Frames & Shared Whiteboards
+ * ============================================================================ */
+
+/* Single-pane Orchestration Blueprint Drawer (narrower, clean focus on declarative code) */
+.monaco-workbench .ade-mission-file-drawer.mode-orchestration {
+	width: min(560px, calc(100% - 28px));
+}
+
+.monaco-workbench .ade-mission-drawer-split.single-pane {
+	display: flex;
+}
+
+.monaco-workbench .ade-mission-drawer-split.single-pane .ade-mission-drawer-left {
+	flex: 1 1 100%;
+	max-width: 100%;
+	width: 100%;
+	border-right: none;
+}
+
+.monaco-workbench .ade-mission-drawer-split.single-pane .ade-mission-drawer-right,
+.monaco-workbench .ade-mission-drawer-right[hidden] {
+	display: none !important;
+}
+
+/* Mission Drawer Area 2: All Task Nodes' Individual Descriptions List */
+.monaco-workbench .ade-mission-all-tasks-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 10px 12px 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.monaco-workbench .ade-mission-task-desc-card {
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	padding: 10px 11px;
+	border-radius: 10px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	background: color-mix(in srgb, var(--vscode-editor-background, #141821) 88%, var(--vscode-foreground) 3%);
+	transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.monaco-workbench .ade-mission-task-desc-card.is-focused,
+.monaco-workbench .ade-mission-task-desc-card:focus-within {
+	border-color: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 65%, transparent);
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 18%, transparent);
+}
+
+.monaco-workbench .ade-mission-task-desc-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-task-desc-id {
+	flex-shrink: 0;
+	padding: 1px 6px;
+	border-radius: 5px;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 16%, transparent);
+	color: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 92%, #ffffff);
+}
+
+.monaco-workbench .ade-mission-task-desc-title {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-task-desc-status {
+	flex-shrink: 0;
+	padding: 2px 7px;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 1.2;
+}
+
+.monaco-workbench .ade-mission-task-desc-status.status-pending {
+	background: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-task-desc-status.status-in-progress {
+	background: rgba(56, 189, 248, 0.16);
+	color: #38bdf8;
+}
+
+.monaco-workbench .ade-mission-task-desc-status.status-blocked {
+	background: rgba(245, 158, 11, 0.18);
+	color: #fbbf24;
+}
+
+.monaco-workbench .ade-mission-task-desc-status.status-completed {
+	background: rgba(52, 211, 153, 0.18);
+	color: #34d399;
+}
+
+.monaco-workbench .ade-mission-task-desc-input {
+	width: 100%;
+	box-sizing: border-box;
+	min-height: 62px;
+	resize: vertical;
+	padding: 7px 9px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	background: var(--vscode-input-background, rgba(11, 15, 24, 0.72));
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-family: var(--vscode-font-family);
+	font-size: 11.5px;
+	line-height: 1.48;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-task-desc-input:focus {
+	border-color: var(--ade-mission-accent, #38bdf8);
+}
+
+/* Minimalist Empty Canvas Hint (zero cluttered buttons) */
+.monaco-workbench .ade-mission-empty-hint.is-minimal {
+	pointer-events: none;
+	max-width: 420px;
+	padding: 18px 22px;
+	border-radius: 14px;
+	border: 1px dashed color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #181c24) 76%, transparent);
+	backdrop-filter: blur(10px);
+	text-align: center;
+}
+
+/* View 1: Mission Task DAG Circular Orb Node (176x176 Luminous Radial Orb + Concentric Orbital Ring) */
+@keyframes adeMissionOrbPulse {
+	0%, 100% {
+		box-shadow:
+			0 12px 30px rgba(0, 0, 0, 0.44),
+			0 0 0 1px rgba(56, 189, 248, 0.3),
+			0 0 22px rgba(56, 189, 248, 0.22),
+			inset 0 1px 0 rgba(255, 255, 255, 0.16);
+	}
+	50% {
+		box-shadow:
+			0 14px 34px rgba(0, 0, 0, 0.48),
+			0 0 0 2px rgba(56, 189, 248, 0.52),
+			0 0 32px rgba(56, 189, 248, 0.38),
+			inset 0 1px 0 rgba(255, 255, 255, 0.22);
+	}
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task {
+	width: 176px;
+	height: 176px;
+}
+
+.monaco-workbench .ade-mission-node-card.is-task-card {
+	width: 176px;
+	min-height: 176px;
+	height: 176px;
+	padding: 16px 15px 14px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: space-between;
+	gap: 4px;
+	border-radius: 50%;
+	text-align: center;
+	cursor: pointer;
+	background: radial-gradient(
+		circle at 32% 22%,
+		rgba(56, 189, 248, 0.14) 0%,
+		rgba(20, 26, 43, 0.96) 52%,
+		rgba(11, 15, 26, 0.99) 100%
+	);
+	border: 1.75px solid rgba(148, 163, 184, 0.46);
+	box-shadow:
+		0 12px 30px rgba(0, 0, 0, 0.46),
+		0 0 18px rgba(56, 189, 248, 0.08),
+		inset 0 1px 1px rgba(255, 255, 255, 0.14),
+		inset 0 -10px 22px rgba(0, 0, 0, 0.28);
+	transition: border-color 150ms ease, box-shadow 170ms ease, transform 150ms ease, background 180ms ease;
+}
+
+/* Soft circular glass highlight instead of rectangular diagonal armor stripes */
+.monaco-workbench .ade-mission-node-card.is-task-card::before {
+	border-radius: 50%;
+	background: radial-gradient(
+		ellipse 72% 42% at 50% 14%,
+		rgba(255, 255, 255, 0.11) 0%,
+		rgba(255, 255, 255, 0.02) 55%,
+		transparent 100%
+	);
+}
+
+/* Concentric precision orbital inner ring */
+.monaco-workbench .ade-mission-node-card.is-task-card::after {
+	content: '';
+	position: absolute;
+	inset: 6px;
+	border-radius: 50%;
+	border: 1px dashed rgba(148, 163, 184, 0.22);
+	pointer-events: none;
+	z-index: 1;
+	transition: border-color 150ms ease, opacity 150ms ease;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task:hover .ade-mission-node-card.is-task-card {
+	transform: scale(1.03);
+	border-color: rgba(125, 211, 252, 0.78);
+	box-shadow:
+		0 16px 36px rgba(0, 0, 0, 0.54),
+		0 0 26px rgba(56, 189, 248, 0.24),
+		inset 0 1px 1px rgba(255, 255, 255, 0.2);
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-completed .ade-mission-node-card.is-task-card {
+	background: radial-gradient(
+		circle at 32% 22%,
+		rgba(52, 211, 153, 0.24) 0%,
+		rgba(16, 30, 36, 0.96) 54%,
+		rgba(9, 17, 23, 0.99) 100%
+	);
+	border-color: rgba(52, 211, 153, 0.82);
+	box-shadow:
+		0 12px 30px rgba(0, 0, 0, 0.45),
+		0 0 24px rgba(16, 185, 129, 0.22),
+		inset 0 1px 1px rgba(110, 231, 183, 0.26);
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-completed .ade-mission-node-card.is-task-card::after {
+	border-style: solid;
+	border-color: rgba(52, 211, 153, 0.32);
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-in-progress .ade-mission-node-card.is-task-card {
+	background: radial-gradient(
+		circle at 32% 22%,
+		rgba(56, 189, 248, 0.26) 0%,
+		rgba(17, 27, 46, 0.96) 54%,
+		rgba(10, 15, 28, 0.99) 100%
+	);
+	border-color: rgba(56, 189, 248, 0.88);
+	animation: adeMissionOrbPulse 2.8s ease-in-out infinite;
+}
+
+.monaco-workbench .ade-mission-editor.ade-animations-paused .ade-mission-node.kind-mission-task.task-status-in-progress .ade-mission-node-card.is-task-card {
+	animation: none;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-in-progress .ade-mission-node-card.is-task-card::after {
+	border-color: rgba(56, 189, 248, 0.42);
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-blocked .ade-mission-node-card.is-task-card {
+	background: radial-gradient(
+		circle at 32% 22%,
+		rgba(251, 191, 36, 0.22) 0%,
+		rgba(34, 26, 19, 0.96) 54%,
+		rgba(18, 14, 12, 0.99) 100%
+	);
+	border-color: rgba(251, 191, 36, 0.82);
+	box-shadow:
+		0 12px 30px rgba(0, 0, 0, 0.45),
+		0 0 22px rgba(245, 158, 11, 0.2),
+		inset 0 1px 1px rgba(253, 230, 138, 0.22);
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-blocked .ade-mission-node-card.is-task-card::after {
+	border-color: rgba(251, 191, 36, 0.36);
+}
+
+/* Light theme circular Mission Task orbs */
+.monaco-workbench.vs .ade-mission-node-card.is-task-card {
+	background: radial-gradient(
+		circle at 32% 22%,
+		#ffffff 0%,
+		#f4f7fb 68%,
+		#e7eef7 100%
+	);
+	border-color: rgba(100, 116, 139, 0.42);
+	box-shadow:
+		0 8px 22px rgba(15, 23, 42, 0.1),
+		inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+.monaco-workbench.vs .ade-mission-node-card.is-task-card::after {
+	border-color: rgba(100, 116, 139, 0.22);
+}
+
+.monaco-workbench.vs .ade-mission-node.kind-mission-task.task-status-completed .ade-mission-node-card.is-task-card {
+	background: radial-gradient(circle at 32% 22%, #ecfdf5 0%, #f8fffc 62%, #d1fae5 100%);
+	border-color: rgba(16, 185, 129, 0.72);
+}
+
+.monaco-workbench.vs .ade-mission-node.kind-mission-task.task-status-in-progress .ade-mission-node-card.is-task-card {
+	background: radial-gradient(circle at 32% 22%, #f0f9ff 0%, #f8fcff 62%, #dbeafe 100%);
+	border-color: rgba(14, 165, 233, 0.78);
+}
+
+.monaco-workbench.vs .ade-mission-node.kind-mission-task.task-status-blocked .ade-mission-node-card.is-task-card {
+	background: radial-gradient(circle at 32% 22%, #fffbeb 0%, #fffdf5 62%, #fef3c7 100%);
+	border-color: rgba(217, 119, 6, 0.72);
+}
+
+/* Precision cardinal ports for vertical TD layout on circular orbs */
+.monaco-workbench .ade-mission-world.dir-td .ade-mission-node.kind-mission-task .ade-mission-port.port-in {
+	left: 50%;
+	top: 0;
+	transform: translate(-50%, -50%);
+}
+
+.monaco-workbench .ade-mission-world.dir-td .ade-mission-node.kind-mission-task .ade-mission-port.port-out {
+	left: 50%;
+	top: 100%;
+	bottom: auto;
+	transform: translate(-50%, -50%);
+}
+
+.monaco-workbench .ade-mission-node-top.is-task-top {
+	justify-content: center;
+	width: 100%;
+	max-width: 118px;
+	gap: 4px;
+	flex: 0 0 auto;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task .ade-mission-node-id-wrap {
+	justify-content: center;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task .ade-mission-node-id {
+	font-size: 9.5px;
+	padding: 1px 6px;
+	border-radius: 999px;
+}
+
+.monaco-workbench .ade-mission-task-circle-core {
+	flex: 1 1 auto;
+	width: 100%;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
+	padding: 0 4px;
+	box-sizing: border-box;
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-mission-task-status-pill {
+	padding: 2px 8px;
+	border-radius: 999px;
+	font-size: 9.5px;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	flex-shrink: 0;
+	max-width: 108px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-task-status-pill.status-pending {
+	background: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	color: var(--vscode-descriptionForeground);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+}
+
+.monaco-workbench .ade-mission-task-status-pill.status-in-progress {
+	background: rgba(56, 189, 248, 0.16);
+	color: #38bdf8;
+	border: 1px solid rgba(56, 189, 248, 0.44);
+}
+
+.monaco-workbench .ade-mission-task-status-pill.status-blocked {
+	background: rgba(245, 158, 11, 0.16);
+	color: #fbbf24;
+	border: 1px solid rgba(245, 158, 11, 0.44);
+}
+
+.monaco-workbench .ade-mission-task-status-pill.status-completed {
+	background: rgba(52, 211, 153, 0.2);
+	color: #34d399;
+	border: 1px solid rgba(52, 211, 153, 0.52);
+}
+
+.monaco-workbench .ade-mission-task-ico {
+	flex-shrink: 0;
+	font-size: 12px;
+	color: color-mix(in srgb, var(--vscode-foreground) 65%, transparent);
+	opacity: 0.92;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-completed .ade-mission-task-ico {
+	color: #34d399;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-in-progress .ade-mission-task-ico {
+	color: #38bdf8;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.task-status-blocked .ade-mission-task-ico {
+	color: #fbbf24;
+}
+
+.monaco-workbench .ade-mission-node-title.is-task-title {
+	flex: 0 0 auto;
+	width: 100%;
+	max-width: 142px;
+	font-size: 12.5px;
+	font-weight: 700;
+	line-height: 1.24;
+	letter-spacing: -0.01em;
+	color: var(--vscode-foreground);
+	text-align: center;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	white-space: normal;
+	word-break: break-word;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task .ade-mission-inline-rename-input {
+	max-width: 136px;
+	text-align: center;
+	border-radius: 999px;
+	padding: 2px 8px;
+}
+
+.monaco-workbench .ade-mission-task-desc-preview {
+	flex: 0 1 auto;
+	width: 100%;
+	max-width: 132px;
+	font-size: 10px;
+	line-height: 1.3;
+	text-align: center;
+	color: color-mix(in srgb, var(--vscode-foreground) 72%, transparent);
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	white-space: normal;
+}
+
+.monaco-workbench .ade-mission-task-desc-preview.is-compact-sub {
+	-webkit-line-clamp: 1;
+	max-width: 124px;
+}
+
+.monaco-workbench .ade-mission-task-desc-preview.is-empty {
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+	opacity: 0.62;
+	-webkit-line-clamp: 1;
+}
+
+.monaco-workbench .ade-mission-task-desc-preview.is-empty.is-compact-sub {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-task-done-footer {
+	flex: 0 0 auto;
+	max-width: 124px;
+	font-size: 9.5px;
+	font-weight: 600;
+	color: #34d399;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: rgba(52, 211, 153, 0.12);
+	border: 1px solid rgba(52, 211, 153, 0.28);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task .ade-mission-task-live-meta {
+	justify-content: center;
+	max-width: 136px;
+	margin-top: 2px;
+	padding-top: 0;
+	border-top: none;
+	gap: 3px;
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task .ade-mission-task-live-chip {
+	font-size: 9.5px;
+	padding: 1px 5px;
+	max-width: 92px;
+}
+
+/* View 2: Orchestration All-Staff Card (316x220 Full Armored Pod) & Department Shared Whiteboard Card (256x148) */
+.monaco-workbench .ade-mission-node.kind-staff {
+	width: 316px;
+}
+
+.monaco-workbench .ade-mission-node-card.is-staff-card {
+	width: 316px;
+	height: 220px;
+}
+
+.monaco-workbench .ade-orch-dept-pill {
+	display: inline-flex;
+	align-items: center;
+	height: 18px;
+	padding: 0 7px;
+	border-radius: 999px;
+	font-size: 9.5px;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	background: rgba(167, 139, 250, 0.16);
+	border: 1px solid rgba(167, 139, 250, 0.36);
+	color: #c4b5fd;
+	max-width: 90px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench.vs .ade-orch-dept-pill {
+	color: #6d28d9;
+	background: rgba(139, 92, 246, 0.12);
+	border-color: rgba(139, 92, 246, 0.34);
+}
+
+.monaco-workbench .ade-mission-node.kind-whiteboard {
+	width: 256px;
+}
+
+.monaco-workbench .ade-mission-node-card.is-whiteboard-card {
+	width: 256px;
+	min-height: 148px;
+	height: 148px;
+	padding: 9px 12px 8px;
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	gap: 6px;
+	border-radius: 17px;
+	border-color: rgba(167, 139, 250, 0.6);
+	background: linear-gradient(
+		180deg,
+		rgba(167, 139, 250, 0.16) 0%,
+		rgba(24, 21, 42, 0.96) 34%,
+		rgba(15, 16, 29, 0.98) 100%
+	);
+	cursor: pointer;
+	box-shadow:
+		0 12px 28px rgba(0, 0, 0, 0.42),
+		0 0 18px rgba(167, 139, 250, 0.12),
+		inset 0 1px 0 rgba(196, 181, 253, 0.14);
+}
+
+.monaco-workbench .ade-mission-node-card.is-whiteboard-card::before {
+	background: repeating-linear-gradient(
+		135deg,
+		rgba(167, 139, 250, 0.08) 0 2px,
+		transparent 2px 7px
+	);
+}
+
+.monaco-workbench .ade-mission-node.kind-whiteboard .ade-mission-clamp {
+	--clamp-color: #a78bfa;
+}
+
+.monaco-workbench .ade-mission-node.kind-whiteboard .ade-mission-clamp.tl,
+.monaco-workbench .ade-mission-node.kind-whiteboard .ade-mission-clamp.tr {
+	top: 32px;
+}
+
+.monaco-workbench .ade-mission-node.kind-whiteboard .ade-mission-clamp.bl,
+.monaco-workbench .ade-mission-node.kind-whiteboard .ade-mission-clamp.br {
+	bottom: 29px;
+}
+
+.monaco-workbench.vs .ade-mission-node-card.is-whiteboard-card {
+	background: linear-gradient(155deg, rgba(245, 243, 255, 0.96), rgba(255, 255, 255, 0.98));
+	border-color: rgba(124, 58, 237, 0.45);
+	box-shadow: 0 6px 18px rgba(109, 40, 217, 0.08);
+}
+
+.monaco-workbench .ade-mission-node.kind-whiteboard:hover .ade-mission-node-card.is-whiteboard-card {
+	border-color: rgba(196, 181, 253, 0.9);
+	box-shadow: 0 12px 28px rgba(139, 92, 246, 0.24), 0 0 0 1px rgba(167, 139, 250, 0.34);
+}
+
+.monaco-workbench .ade-orch-wb-ico {
+	font-size: 12px;
+	color: #a78bfa;
+}
+
+.monaco-workbench .ade-orch-wb-dept-chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 7px;
+	border-radius: 999px;
+	font-size: 9.5px;
+	font-weight: 700;
+	background: rgba(167, 139, 250, 0.2);
+	border: 1px solid rgba(167, 139, 250, 0.45);
+	color: #ddd6fe;
+	max-width: 112px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench.vs .ade-orch-wb-dept-chip {
+	color: #5b21b6;
+}
+
+.monaco-workbench .ade-mission-core-well.wb-well {
+	justify-content: flex-start;
+	padding: 7px 9px;
+	gap: 4px;
+	border-color: rgba(167, 139, 250, 0.22);
+}
+
+.monaco-workbench .ade-mission-node-title.is-wb-title {
+	flex: 0 0 auto;
+	font-size: 12px;
+	font-weight: 650;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-orch-wb-excerpt {
+	font-size: 10.5px;
+	line-height: 1.38;
+	color: color-mix(in srgb, var(--vscode-foreground) 78%, transparent);
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-orch-wb-excerpt.is-empty {
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+	opacity: 0.8;
+}
+
+.monaco-workbench .ade-orch-wb-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	padding-top: 4px;
+	border-top: 1px solid rgba(167, 139, 250, 0.18);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	color: #c4b5fd;
+}
+
+.monaco-workbench.vs .ade-orch-wb-footer {
+	color: #6d28d9;
+}
+
+.monaco-workbench .ade-orch-wb-ptr-tag {
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: rgba(167, 139, 250, 0.14);
+}
+
+.monaco-workbench .ade-orch-wb-ver-tag {
+	font-weight: 700;
+	opacity: 0.85;
+}
+
+/* 20 Perimeter Multi-Anchor Connection Sockets (4 Sides x 5 Slots) — Always Subtly Visible, Glowing When Occupied */
+.monaco-workbench .ade-orch-anchor {
+	position: absolute !important;
+	width: 6px;
+	height: 6px;
+	padding: 0;
+	margin: 0;
+	box-sizing: border-box;
+	appearance: none;
+	-webkit-appearance: none;
+	border-radius: 999px;
+	border: 1.25px solid color-mix(in srgb, var(--vscode-foreground) 34%, transparent);
+	background: var(--vscode-editor-background, #0c1220);
+	cursor: crosshair;
+	z-index: 6 !important;
+	opacity: 0.46;
+	transform: translate(-50%, -50%) scale(1);
+	transition: opacity 120ms ease, width 120ms ease, height 120ms ease, transform 120ms ease, border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.monaco-workbench .ade-orch-anchor.side-top {
+	top: 0;
+}
+
+.monaco-workbench .ade-orch-anchor.side-bottom {
+	top: 100%;
+}
+
+.monaco-workbench .ade-orch-anchor.side-left {
+	left: 0;
+}
+
+.monaco-workbench .ade-orch-anchor.side-right {
+	left: 100%;
+}
+
+/* Occupied anchors gleam as crisp color-matched terminal pins */
+.monaco-workbench .ade-orch-anchor.is-occupied {
+	opacity: 1;
+	width: 8px;
+	height: 8px;
+	border-width: 1.5px;
+	border-color: #34d399;
+	background: #0b1f1a;
+	box-shadow: 0 0 6px rgba(52, 211, 153, 0.55);
+	transform: translate(-50%, -50%) scale(1);
+}
+
+.monaco-workbench .ade-orch-anchor.is-occupied.is-bidir-anchor {
+	border-color: #38bdf8;
+	background: #0c1f33;
+	box-shadow: 0 0 7px rgba(56, 189, 248, 0.62);
+}
+
+.monaco-workbench .ade-orch-anchor.is-occupied.is-cycle-anchor {
+	border-color: #f59e0b;
+	background: #271a08;
+	box-shadow: 0 0 7px rgba(245, 158, 11, 0.62);
+}
+
+.monaco-workbench .ade-orch-anchor.is-occupied.is-wb-anchor {
+	border-color: #a78bfa;
+	background: #1d1533;
+	box-shadow: 0 0 7px rgba(167, 139, 250, 0.62);
+}
+
+/* Expand all 20 perimeter sockets smoothly when hovering a card or dragging a connection */
+.monaco-workbench .ade-mission-node:hover .ade-orch-anchor,
+.monaco-workbench .ade-mission-world.is-connecting-edge .ade-orch-anchor {
+	opacity: 0.96;
+	width: 9px;
+	height: 9px;
+	transform: translate(-50%, -50%) scale(1);
+}
+
+.monaco-workbench .ade-orch-anchor:hover {
+	opacity: 1 !important;
+	border-color: #38bdf8;
+	background: #38bdf8;
+	box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.3);
+	transform: translate(-50%, -50%) scale(1.28) !important;
+}
+
+/* Department Translucent Region Frames */
+.monaco-workbench .ade-orch-dept-frame {
+	fill: rgba(56, 189, 248, 0.04);
+	stroke: rgba(56, 189, 248, 0.28);
+	stroke-width: 1.4;
+	stroke-dasharray: 6 5;
+}
+
+.monaco-workbench .ade-orch-dept-pill-group {
+	pointer-events: auto;
+	cursor: grab;
+}
+
+.monaco-workbench .ade-orch-dept-pill-group:active {
+	cursor: grabbing;
+}
+
+.monaco-workbench .ade-orch-dept-pill-bg {
+	fill: rgba(15, 23, 42, 0.92);
+	stroke: rgba(56, 189, 248, 0.45);
+	stroke-width: 1;
+	transition: fill 120ms ease, stroke 120ms ease, stroke-width 120ms ease;
+}
+
+.monaco-workbench .ade-orch-dept-pill-group:hover .ade-orch-dept-pill-bg {
+	fill: rgba(15, 23, 42, 0.98);
+	stroke: #38bdf8;
+	stroke-width: 1.5;
+}
+
+.monaco-workbench .ade-orch-dept-grip {
+	fill: rgba(148, 163, 184, 0.72);
+	pointer-events: none;
+}
+
+.monaco-workbench .ade-orch-dept-pill-group:hover .ade-orch-dept-grip {
+	fill: #e0f2fe;
+}
+
+.monaco-workbench .ade-orch-dept-pill-text {
+	fill: #bae6fd;
+	font-size: 10.5px;
+	font-weight: 700;
+	dominant-baseline: middle;
+	user-select: none;
+	pointer-events: none;
+}
+
+.monaco-workbench .ade-orch-dept-empty-hint {
+	fill: rgba(148, 163, 184, 0.7);
+	font-size: 11px;
+	font-weight: 500;
+	text-anchor: middle;
+	dominant-baseline: middle;
+	pointer-events: none;
+}
+
+.monaco-workbench .ade-orch-dept-region.dept-color-1 .ade-orch-dept-frame {
+	fill: rgba(167, 139, 250, 0.045);
+	stroke: rgba(167, 139, 250, 0.32);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-1 .ade-orch-dept-pill-bg {
+	stroke: rgba(167, 139, 250, 0.5);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-1 .ade-orch-dept-pill-text {
+	fill: #ddd6fe;
+}
+
+.monaco-workbench .ade-orch-dept-region.dept-color-2 .ade-orch-dept-frame {
+	fill: rgba(52, 211, 153, 0.04);
+	stroke: rgba(52, 211, 153, 0.3);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-2 .ade-orch-dept-pill-bg {
+	stroke: rgba(52, 211, 153, 0.48);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-2 .ade-orch-dept-pill-text {
+	fill: #a7f3d0;
+}
+
+.monaco-workbench .ade-orch-dept-region.dept-color-3 .ade-orch-dept-frame {
+	fill: rgba(251, 191, 36, 0.04);
+	stroke: rgba(251, 191, 36, 0.3);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-3 .ade-orch-dept-pill-bg {
+	stroke: rgba(251, 191, 36, 0.48);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-3 .ade-orch-dept-pill-text {
+	fill: #fde68a;
+}
+
+.monaco-workbench .ade-orch-dept-region.dept-color-4 .ade-orch-dept-frame {
+	fill: rgba(244, 114, 182, 0.04);
+	stroke: rgba(244, 114, 182, 0.3);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-4 .ade-orch-dept-pill-bg {
+	stroke: rgba(244, 114, 182, 0.48);
+}
+.monaco-workbench .ade-orch-dept-region.dept-color-4 .ade-orch-dept-pill-text {
+	fill: #fbcfe8;
+}
+
+.monaco-workbench.vs .ade-orch-dept-pill-bg {
+	fill: rgba(255, 255, 255, 0.94);
+}
+.monaco-workbench.vs .ade-orch-dept-pill-text {
+	fill: #0f172a;
+}
+
+/* High-Craft Orchestration Edge Visual Hierarchy */
+.monaco-workbench .ade-mission-edge-group.is-orch-edge .ade-mission-edge-path {
+	stroke-width: 1.85px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	transition: stroke-width 130ms ease, opacity 130ms ease, filter 130ms ease;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-bidirectional .ade-mission-edge-path {
+	stroke: rgba(56, 189, 248, 0.78);
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-cycle-back .ade-mission-edge-path {
+	stroke: rgba(245, 158, 11, 0.8);
+	stroke-dasharray: 6 4;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link .ade-mission-edge-path {
+	stroke: rgba(167, 139, 250, 0.65);
+	stroke-dasharray: 3 4;
+	stroke-width: 1.5px;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-dashed .ade-mission-edge-path {
+	stroke-dasharray: 5 4;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge:hover .ade-mission-edge-path,
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-hover-flow .ade-mission-edge-path {
+	stroke-width: 2.6px;
+	filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.45));
+}
+
+/* Mission Task & Whiteboard Popover Form Polish */
+.monaco-workbench .ade-mission-task-pop-head-left {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-task-pop-title-input {
+	width: 100%;
+	box-sizing: border-box;
+	height: 28px;
+	padding: 0 9px;
+	margin-top: 6px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background, #11141a);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 12px;
+	font-weight: 550;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-task-pop-title-input:focus {
+	border-color: var(--ade-mission-accent, #38bdf8);
+}
+
+.monaco-workbench .ade-mission-task-pop-label {
+	margin-top: 8px;
+	margin-bottom: 4px;
+	font-size: 10.5px;
+	font-weight: 650;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-task-pop-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-task-pop-meta {
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	line-height: 1.35;
+}
+
+.monaco-workbench .ade-orch-token-pointers {
+	margin-top: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-orch-ptr-chip {
+	width: 100%;
+	text-align: left;
+	justify-content: flex-start;
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 10.5px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-orch-ptr-preview {
+	margin-top: 8px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 38%, transparent);
+	background: color-mix(in srgb, var(--vscode-editor-background, #0f131a) 92%, var(--ade-mission-accent, #38bdf8) 8%);
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-orch-ptr-preview-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	padding: 5px 8px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-orch-ptr-preview-title {
+	font-size: 10.5px;
+	font-weight: 650;
+	color: var(--ade-mission-accent, #38bdf8);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-orch-ptr-preview-body {
+	margin: 0;
+	padding: 7px 9px;
+	max-height: 156px;
+	overflow: auto;
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 10.5px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-orch-hop-history {
+	margin-top: 8px;
+	padding-top: 7px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-height: 148px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-orch-hop-row {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: baseline;
+	gap: 6px;
+	padding: 3px 6px;
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+	font-size: 10.5px;
+	line-height: 1.35;
+}
+
+.monaco-workbench .ade-orch-hop-route {
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 10px;
+	font-weight: 650;
+	color: var(--ade-mission-accent, #38bdf8);
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-orch-hop-headline {
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-orch-hop-ptr-btn {
+	border: 1px solid color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 40%, transparent);
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 12%, transparent);
+	color: var(--ade-mission-accent, #38bdf8);
+	border-radius: 999px;
+	padding: 0 6px;
+	height: 17px;
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 9.5px;
+	font-weight: 650;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-orch-hop-ptr-btn:hover {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 24%, transparent);
+}
+
+.monaco-workbench .ade-orch-token-delta-bar {
+	margin: 4px 0 6px;
+	padding: 4px 8px;
+	border-radius: 6px;
+	font-size: 10.5px;
+	font-weight: 600;
+	line-height: 1.35;
+	color: #fcd34d;
+	background: rgba(245, 158, 11, 0.14);
+	border: 1px solid rgba(245, 158, 11, 0.36);
+}
+
+.monaco-workbench .ade-orch-ptr-chip.is-delta-new {
+	border-color: rgba(52, 211, 153, 0.48);
+	background: rgba(16, 185, 129, 0.11);
+}
+
+.monaco-workbench .ade-orch-ptr-chip.is-seen,
+.monaco-workbench .ade-orch-hop-row.is-seen {
+	opacity: 0.56;
+}
+
+/* Keep Orchestration live baton puck cleanly elevated above top 5 multi-anchor sockets */
+.monaco-workbench .ade-mission-node.kind-staff > .ade-mission-token-puck {
+	top: -26px;
+	right: 6px;
+	gap: 5px;
+}
+
+.monaco-workbench .ade-orch-puck-ico {
+	font-size: 11px !important;
+	line-height: 1;
+}
+
+.monaco-workbench .ade-orch-puck-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	font-size: 9.5px;
+	font-weight: 700;
+	padding-left: 4px;
+	border-left: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.monaco-workbench .ade-orch-puck-chip .codicon {
+	font-size: 10px !important;
+}
+
+.monaco-workbench .ade-orch-puck-chip.is-nudge {
+	color: #fcd34d;
+}
+
+/* Single Additional Orchestration Top-Left Button: Presentation Layout Switcher */
+.monaco-workbench .ade-orch-layout-btn[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-orch-layout-menu {
+	position: absolute;
+	top: 56px;
+	left: 58px;
+	z-index: 42;
+	width: 280px;
+	padding: 6px;
+	border-radius: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #141923) 95%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	box-shadow: 0 14px 36px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	backdrop-filter: blur(16px);
+}
+
+.monaco-workbench .ade-orch-layout-menu[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-orch-layout-menu-header {
+	padding: 5px 8px 6px;
+	font-size: 10.5px;
+	font-weight: 650;
+	letter-spacing: 0.02em;
+	color: var(--vscode-descriptionForeground);
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	margin-bottom: 2px;
+}
+
+.monaco-workbench .ade-orch-layout-item {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	padding: 7px 9px;
+	border: 1px solid transparent;
+	border-radius: 8px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	text-align: left;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-orch-layout-item:hover {
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.monaco-workbench .ade-orch-layout-item.is-active {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 14%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 42%, transparent);
+}
+
+.monaco-workbench .ade-orch-layout-item-ico {
+	flex-shrink: 0;
+	width: 24px;
+	height: 24px;
+	border-radius: 6px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 14px;
+	background: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+	color: var(--ade-mission-accent, #38bdf8);
+}
+
+.monaco-workbench .ade-orch-layout-item.is-active .ade-orch-layout-item-ico {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 22%, transparent);
+}
+
+.monaco-workbench .ade-orch-layout-item-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.monaco-workbench .ade-orch-layout-item-title {
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 1.3;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-orch-layout-item-desc {
+	font-size: 10.5px;
+	line-height: 1.3;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-orch-layout-item-check {
+	flex-shrink: 0;
+	font-size: 13px;
+	color: var(--ade-mission-accent, #38bdf8);
+	opacity: 0;
+}
+
+.monaco-workbench .ade-orch-layout-item.is-active .ade-orch-layout-item-check {
+	opacity: 1;
+}
+
+/* ============================================================================
+ * Item 8: Top-Center Floating Global Run Console & Dual-View Switcher
+ * Item 5(3): Session-Reset Engine Switch Banner & Live Task DAG Linkage Row
+ * ============================================================================ */
+
+.monaco-workbench .ade-eng-body .ade-mission-minimap {
+	bottom: 14px;
+}
+
+.monaco-workbench .ade-eng-console-bar {
+	position: absolute;
+	top: 12px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 32;
+	height: 36px;
+	max-width: calc(100% - 240px);
+	padding: 0 8px;
+	border-radius: 12px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #161b26) 90%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	box-shadow: 0 10px 28px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	backdrop-filter: blur(14px);
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-eng-console-bar[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-eng-view-switch {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 2px;
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+}
+
+.monaco-workbench .ade-eng-view-btn {
+	height: 24px;
+	padding: 0 8px;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	font-weight: 600;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-eng-view-btn.is-split {
+	padding: 0 6px;
+}
+
+.monaco-workbench .ade-eng-view-btn:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.monaco-workbench .ade-eng-view-btn.is-active {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 46%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-eng-console-sep {
+	width: 1px;
+	height: 16px;
+	background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-eng-console-pill {
+	height: 24px;
+	padding: 0 8px;
+	border-radius: 999px;
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	font-weight: 650;
+	font-variant-numeric: tabular-nums;
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-eng-console-pill[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-eng-console-pill.is-tokens.is-active {
+	background: rgba(56, 189, 248, 0.16);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-eng-console-pill.is-tokens.is-paused {
+	background: rgba(245, 158, 11, 0.18);
+	color: #fcd34d;
+}
+
+.monaco-workbench .ade-eng-console-pill.is-spend {
+	color: #fcd34d;
+}
+
+.monaco-workbench .ade-eng-console-btn {
+	height: 24px;
+	padding: 0 8px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	font-weight: 600;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .ade-eng-console-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .ade-eng-console-btn:disabled {
+	opacity: 0.42;
+	cursor: default;
+}
+
+.monaco-workbench .ade-eng-console-btn.is-minimap {
+	padding: 0 6px;
+}
+
+.monaco-workbench .ade-eng-console-btn.is-minimap.is-active {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 46%, transparent);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-eng-console-btn.is-pause.is-paused {
+	background: rgba(245, 158, 11, 0.22);
+	border-color: rgba(245, 158, 11, 0.65);
+	color: #fde68a;
+}
+
+.monaco-workbench .ade-eng-console-btn.is-danger {
+	color: #fca5a5;
+	border-color: rgba(248, 113, 113, 0.35);
+}
+
+.monaco-workbench .ade-eng-console-btn.is-danger:hover:not(:disabled) {
+	background: rgba(239, 68, 68, 0.2);
+	border-color: rgba(248, 113, 113, 0.65);
+}
+
+.monaco-workbench .ade-eng-console-btn.is-danger.is-confirming {
+	background: rgba(220, 38, 38, 0.86);
+	border-color: rgba(254, 202, 202, 0.85);
+	color: #ffffff;
+}
+
+/* Session-reset notice inside Engine Switcher Popover (Item 5.3) */
+.monaco-workbench .ade-mission-engine-reset-banner {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	margin: 4px 2px 6px;
+	padding: 6px 8px;
+	border-radius: 7px;
+	font-size: 11px;
+	line-height: 1.35;
+	background: rgba(245, 158, 11, 0.14);
+	border: 1px solid rgba(245, 158, 11, 0.42);
+	color: #fde68a;
+}
+
+.monaco-workbench .ade-mission-engine-reset-banner .codicon {
+	flex-shrink: 0;
+	margin-top: 1px;
+	color: #fbbf24;
+}
+
+/* Live Orchestration -> Mission Task DAG binding chips (Item 3) */
+.monaco-workbench .ade-mission-task-live-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	margin-top: 6px;
+	padding-top: 5px;
+	border-top: 1px dashed color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .ade-mission-task-live-chip {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	font-weight: 600;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+	color: var(--vscode-descriptionForeground);
+	max-width: 140px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-task-live-chip.is-assignee {
+	background: rgba(56, 189, 248, 0.14);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-mission-task-live-chip.is-tokens {
+	background: rgba(167, 139, 250, 0.16);
+	color: #ddd6fe;
+}
+
+.monaco-workbench .ade-mission-task-live-chip.is-artifacts {
+	background: rgba(52, 211, 153, 0.15);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-task-live-chip.is-error {
+	background: rgba(248, 113, 113, 0.2);
+	color: #fca5a5;
+}
+
+/* Waiting-join state styling for Orchestration staff cards (Item 1) */
+.monaco-workbench .ade-mission-node.kind-staff.state-waiting-join .ade-mission-node-card {
+	border-color: rgba(251, 191, 36, 0.72);
+	box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.25), 0 10px 26px rgba(0, 0, 0, 0.34);
+}
+
+.monaco-workbench .ade-mission-node.kind-staff.state-waiting-join .ade-mission-state-dot {
+	background: #fbbf24;
+	box-shadow: 0 0 8px rgba(251, 191, 36, 0.8);
+}
+
+/* ============================================================================
+ * Per-Node Custom Accent Color System (Staff, Whiteboard & Mission Task DAG)
+ * ============================================================================ */
+
+.monaco-workbench .ade-mission-node.has-custom-color .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.is-remote-host.has-custom-color .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.is-remote-host.os-ubuntu.has-custom-color .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.is-remote-host.os-kali.has-custom-color .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.is-remote-host.os-windows.has-custom-color .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.is-remote-host.os-debian.has-custom-color .ade-mission-node-card,
+.monaco-workbench .ade-mission-node.kind-whiteboard.has-custom-color .ade-mission-node-card.is-whiteboard-card {
+	background: linear-gradient(
+		175deg,
+		color-mix(in srgb, var(--ade-node-custom-color) 24%, #131826) 0%,
+		color-mix(in srgb, var(--ade-node-custom-color) 7%, #141928) 36%,
+		rgba(11, 15, 25, 0.99) 100%
+	);
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 78%, transparent);
+	box-shadow:
+		0 14px 34px rgba(0, 0, 0, 0.5),
+		0 0 24px color-mix(in srgb, var(--ade-node-custom-color) 19%, transparent),
+		inset 0 1px 0 color-mix(in srgb, var(--ade-node-custom-color) 38%, rgba(255, 255, 255, 0.14));
+}
+
+.monaco-workbench .ade-mission-node.has-custom-color .ade-mission-node-card::before,
+.monaco-workbench .ade-mission-node.is-remote-host.has-custom-color .ade-mission-node-card::before,
+.monaco-workbench .ade-mission-node.kind-whiteboard.has-custom-color .ade-mission-node-card.is-whiteboard-card::before {
+	background: repeating-linear-gradient(
+		135deg,
+		color-mix(in srgb, var(--ade-node-custom-color) 9.5%, transparent) 0 2px,
+		transparent 2px 7px
+	);
+}
+
+/* Circular Mission Task DAG custom accent orb (radial dome + orbital ring) */
+.monaco-workbench .ade-mission-node.kind-mission-task.has-custom-color .ade-mission-node-card.is-task-card {
+	background: radial-gradient(
+		circle at 32% 22%,
+		color-mix(in srgb, var(--ade-node-custom-color) 32%, #13192b) 0%,
+		color-mix(in srgb, var(--ade-node-custom-color) 10%, #121828) 54%,
+		rgba(9, 13, 24, 0.99) 100%
+	);
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 86%, transparent);
+	box-shadow:
+		0 14px 34px rgba(0, 0, 0, 0.52),
+		0 0 28px color-mix(in srgb, var(--ade-node-custom-color) 26%, transparent),
+		inset 0 1px 1px color-mix(in srgb, var(--ade-node-custom-color) 42%, rgba(255, 255, 255, 0.16));
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.has-custom-color .ade-mission-node-card.is-task-card::before {
+	background: radial-gradient(
+		ellipse 72% 42% at 50% 14%,
+		color-mix(in srgb, var(--ade-node-custom-color) 24%, rgba(255, 255, 255, 0.12)) 0%,
+		transparent 100%
+	);
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.has-custom-color .ade-mission-node-card.is-task-card::after {
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 46%, transparent);
+}
+
+.monaco-workbench .ade-mission-node.kind-mission-task.has-custom-color .ade-mission-task-ico {
+	color: color-mix(in srgb, var(--ade-node-custom-color) 82%, #ffffff);
+}
+
+.monaco-workbench.vs .ade-mission-node.kind-mission-task.has-custom-color .ade-mission-node-card.is-task-card {
+	background: radial-gradient(
+		circle at 32% 22%,
+		color-mix(in srgb, var(--ade-node-custom-color) 18%, #ffffff) 0%,
+		#ffffff 62%,
+		color-mix(in srgb, var(--ade-node-custom-color) 12%, #f1f5f9) 100%
+	);
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 74%, transparent);
+}
+
+.monaco-workbench .ade-mission-node.has-custom-color .ade-mission-clamp,
+.monaco-workbench .ade-mission-node.is-remote-host.has-custom-color .ade-mission-clamp,
+.monaco-workbench .ade-mission-node.kind-whiteboard.has-custom-color .ade-mission-clamp,
+.monaco-workbench .ade-mission-node.kind-mission-task.has-custom-color .ade-mission-clamp {
+	--clamp-color: var(--ade-node-custom-color);
+	filter: drop-shadow(0 0 4px color-mix(in srgb, var(--ade-node-custom-color) 70%, transparent));
+}
+
+.monaco-workbench .ade-mission-node.has-custom-color .ade-mission-core-well {
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 28%, rgba(148, 163, 184, 0.14));
+}
+
+.monaco-workbench .ade-mission-node.has-custom-color .ade-mission-core-icon-well {
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 42%, rgba(148, 163, 184, 0.22));
+	background: color-mix(in srgb, var(--ade-node-custom-color) 12%, rgba(12, 17, 30, 0.92));
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 12px color-mix(in srgb, var(--ade-node-custom-color) 18%, transparent);
+}
+
+.monaco-workbench .ade-mission-node.has-custom-color .ade-mission-node-id {
+	color: color-mix(in srgb, var(--ade-node-custom-color) 76%, #ffffff);
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 42%, transparent);
+	background: color-mix(in srgb, var(--ade-node-custom-color) 14%, rgba(15, 23, 42, 0.72));
+}
+
+.monaco-workbench .ade-mission-node.has-custom-color .ade-orch-dept-pill,
+.monaco-workbench .ade-mission-node.kind-whiteboard.has-custom-color .ade-orch-wb-dept-chip {
+	color: color-mix(in srgb, var(--ade-node-custom-color) 78%, #ffffff);
+	background: color-mix(in srgb, var(--ade-node-custom-color) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 46%, transparent);
+}
+
+.monaco-workbench .ade-mission-node.kind-whiteboard.has-custom-color .ade-orch-wb-ico,
+.monaco-workbench .ade-mission-node.kind-whiteboard.has-custom-color .ade-orch-wb-footer {
+	color: color-mix(in srgb, var(--ade-node-custom-color) 78%, #ffffff);
+	border-top-color: color-mix(in srgb, var(--ade-node-custom-color) 24%, transparent);
+}
+
+.monaco-workbench .ade-mission-node.kind-whiteboard.has-custom-color .ade-orch-wb-ptr-tag {
+	background: color-mix(in srgb, var(--ade-node-custom-color) 16%, transparent);
+}
+
+/* Elevated Executive Crown Glow for Central L1 Root Node */
+.monaco-workbench .ade-mission-node.kind-staff[data-node-tier="1"].has-custom-color .ade-mission-node-card {
+	border-width: 1.75px;
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 92%, #ffffff);
+	box-shadow:
+		0 18px 44px rgba(0, 0, 0, 0.62),
+		0 0 0 1px color-mix(in srgb, var(--ade-node-custom-color) 32%, transparent),
+		0 0 38px color-mix(in srgb, var(--ade-node-custom-color) 30%, transparent),
+		inset 0 1px 0 color-mix(in srgb, var(--ade-node-custom-color) 55%, rgba(255, 255, 255, 0.25));
+}
+
+.monaco-workbench .ade-mission-node.has-custom-color:hover .ade-mission-node-card {
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 96%, #ffffff);
+	box-shadow:
+		0 16px 38px rgba(0, 0, 0, 0.56),
+		0 0 28px color-mix(in srgb, var(--ade-node-custom-color) 32%, transparent),
+		inset 0 1px 0 color-mix(in srgb, var(--ade-node-custom-color) 46%, rgba(255, 255, 255, 0.2));
+}
+
+.monaco-workbench.vs .ade-mission-node.has-custom-color .ade-mission-node-card {
+	background: linear-gradient(
+		170deg,
+		color-mix(in srgb, var(--ade-node-custom-color) 14%, #ffffff) 0%,
+		#ffffff 65%
+	);
+	border-color: color-mix(in srgb, var(--ade-node-custom-color) 62%, transparent);
+	box-shadow:
+		0 8px 22px rgba(15, 23, 42, 0.08),
+		0 0 16px color-mix(in srgb, var(--ade-node-custom-color) 14%, transparent);
+}
+
+/* Subtle Hover-Revealed Quick Color Swatch Dot on Cards (Zero Resting Clutter!) */
+.monaco-workbench .ade-node-color-trigger {
+	width: 11px;
+	height: 11px;
+	padding: 0;
+	margin-left: 2px;
+	border-radius: 999px;
+	border: 1.5px solid rgba(255, 255, 255, 0.45);
+	background: conic-gradient(from 0deg, #f59e0b, #22d3ee, #818cf8, #fb7185, #34d399, #f59e0b);
+	cursor: pointer;
+	flex-shrink: 0;
+	opacity: 0;
+	transform: scale(0.82);
+	transition: opacity 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.monaco-workbench .ade-node-color-trigger.has-color {
+	background: var(--trigger-swatch-hex);
+	border-color: rgba(255, 255, 255, 0.72);
+	box-shadow: 0 0 6px var(--trigger-swatch-hex);
+}
+
+.monaco-workbench .ade-mission-node:hover .ade-node-color-trigger,
+.monaco-workbench .ade-node-color-trigger:focus-visible {
+	opacity: 0.94;
+	transform: scale(1);
+}
+
+.monaco-workbench .ade-node-color-trigger:hover {
+	opacity: 1;
+	transform: scale(1.22);
+}
+
+/* Interactive Swatch Picker Strip (Context Menu, Popovers & Standalone Color Popover) */
+.monaco-workbench .ade-node-color-picker {
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	padding: 6px 4px 4px;
+}
+
+.monaco-workbench .ade-node-color-picker.is-compact {
+	padding: 5px 6px 6px;
+}
+
+.monaco-workbench .ade-node-color-picker-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-node-color-picker-label {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-node-color-reset {
+	height: 18px;
+	padding: 0 7px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .ade-node-color-reset:hover,
+.monaco-workbench .ade-node-color-reset.is-active {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 55%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-node-color-swatches {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-node-color-swatch {
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border-radius: 999px;
+	border: 1.5px solid rgba(255, 255, 255, 0.22);
+	background: var(--swatch-hex);
+	box-shadow: 0 0 8px color-mix(in srgb, var(--swatch-hex) 40%, transparent);
+	cursor: pointer;
+	transition: transform 110ms ease, box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-node-color-swatch:hover {
+	transform: scale(1.18);
+	border-color: #ffffff;
+	box-shadow: 0 0 12px color-mix(in srgb, var(--swatch-hex) 78%, transparent);
+}
+
+.monaco-workbench .ade-node-color-swatch.is-active {
+	border: 2px solid #ffffff;
+	transform: scale(1.15);
+	box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.9), 0 0 0 3.5px var(--swatch-hex), 0 0 12px var(--swatch-hex);
+}
+
+.monaco-workbench .ade-node-color-custom-wrap {
+	position: relative;
+	width: 18px;
+	height: 18px;
+	border-radius: 999px;
+	border: 1.5px solid rgba(255, 255, 255, 0.36);
+	background: conic-gradient(from 0deg, #ef4444, #f59e0b, #22c55e, #06b6d4, #6366f1, #ec4899, #ef4444);
+	cursor: pointer;
+	overflow: hidden;
+	transition: transform 110ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-node-color-custom-wrap:hover {
+	transform: scale(1.18);
+	border-color: #ffffff;
+}
+
+.monaco-workbench .ade-node-color-custom-input {
+	position: absolute;
+	inset: -4px;
+	width: 26px;
+	height: 26px;
+	opacity: 0;
+	cursor: pointer;
+}
+
+/* Harmonized Custom-Colored Department Frames */
+.monaco-workbench .ade-orch-dept-region.has-custom-dept-accent .ade-orch-dept-frame {
+	fill: color-mix(in srgb, var(--ade-dept-accent) 4.6%, transparent);
+	stroke: color-mix(in srgb, var(--ade-dept-accent) 36%, transparent);
+	stroke-width: 1.45px;
+}
+
+.monaco-workbench .ade-orch-dept-region.has-custom-dept-accent .ade-orch-dept-pill-bg {
+	fill: rgba(10, 14, 26, 0.94);
+	stroke: color-mix(in srgb, var(--ade-dept-accent) 64%, transparent);
+	stroke-width: 1.25px;
+}
+
+.monaco-workbench .ade-orch-dept-region.has-custom-dept-accent .ade-orch-dept-pill-text {
+	fill: color-mix(in srgb, var(--ade-dept-accent) 76%, #ffffff);
+}
+
+.monaco-workbench .ade-orch-dept-region.has-custom-dept-accent .ade-orch-dept-grip {
+	fill: color-mix(in srgb, var(--ade-dept-accent) 70%, #cbd5e1);
+}
+
+/* ============================================================================
+ * Ultra-Aesthetic Luminous Dual-Layer Edges & Always-Live Baton Token Comets
+ * ============================================================================ */
+
+@keyframes adeOrchFlowStream {
+	from { stroke-dashoffset: 56; }
+	to { stroke-dashoffset: 0; }
+}
+
+@keyframes adeOrchLivePuckGlide {
+	0% {
+		offset-distance: 5%;
+		opacity: 0;
+	}
+	8% {
+		opacity: 1;
+	}
+	92% {
+		opacity: 1;
+	}
+	100% {
+		offset-distance: 95%;
+		opacity: 0;
+	}
+}
+
+.monaco-workbench .ade-orch-edge-halo {
+	fill: none;
+	stroke: var(--edge-accent, #38bdf8);
+	stroke-width: 6.5px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	opacity: 0.14;
+	pointer-events: none;
+	transition: opacity 150ms ease, stroke-width 150ms ease;
+}
+
+.monaco-workbench .ade-orch-edge-halo.is-live,
+.monaco-workbench .ade-mission-edge-group.is-orch-live-flow .ade-orch-edge-halo {
+	stroke-width: 8.5px;
+	opacity: 0.28;
+	filter: blur(1.8px);
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge .ade-mission-edge-path {
+	stroke: color-mix(in srgb, var(--edge-accent, #38bdf8) 84%, #e2e8f0);
+	stroke-width: 2px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link .ade-mission-edge-path {
+	stroke: color-mix(in srgb, var(--edge-accent, #a78bfa) 74%, #e2e8f0);
+	stroke-dasharray: 4 5;
+	stroke-width: 1.65px;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-whiteboard-link .ade-orch-edge-halo {
+	opacity: 0.09;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-cycle-back .ade-mission-edge-path {
+	stroke: #fbbf24;
+	stroke-dasharray: 7 4.5;
+	stroke-width: 2.1px;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge.is-orch-live-flow .ade-mission-edge-path {
+	stroke: color-mix(in srgb, var(--edge-accent, #38bdf8) 88%, #ffffff);
+	stroke-width: 2.4px;
+	filter: drop-shadow(0 0 5px color-mix(in srgb, var(--edge-accent, #38bdf8) 58%, transparent));
+}
+
+.monaco-workbench .ade-orch-edge-flow-stream {
+	fill: none;
+	stroke: color-mix(in srgb, var(--edge-accent, #38bdf8) 34%, #ffffff);
+	stroke-width: 2.15px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-dasharray: 10 18;
+	opacity: 0.92;
+	pointer-events: none;
+	filter: drop-shadow(0 0 4px var(--edge-accent, #38bdf8));
+	animation: adeOrchFlowStream 1.15s linear infinite;
+}
+
+.monaco-workbench .ade-orch-edge-flow-stream.is-return {
+	stroke: #a7f3d0;
+	filter: drop-shadow(0 0 5px #34d399);
+}
+
+/* Harmonized Perimeter Terminal Pins matching Edge Jewel Accent */
+.monaco-workbench .ade-orch-anchor.is-occupied {
+	border-color: var(--pin-accent, #34d399);
+	background: color-mix(in srgb, var(--pin-accent, #34d399) 24%, #080d18);
+	box-shadow: 0 0 8px color-mix(in srgb, var(--pin-accent, #34d399) 70%, transparent);
+}
+
+/* Sleek Frosted Obsidian Edge Label Pills */
+.monaco-workbench .ade-mission-edge-group.is-orch-edge .ade-mission-edge-label-bg,
+.monaco-workbench .ade-mission-edge-group.is-task-edge-live .ade-mission-edge-label-bg,
+.monaco-workbench .ade-mission-edge-group.is-task-edge-completed .ade-mission-edge-label-bg {
+	fill: rgba(9, 13, 24, 0.92);
+	stroke: color-mix(in srgb, var(--edge-accent, #38bdf8) 46%, rgba(148, 163, 184, 0.24));
+	stroke-width: 1px;
+}
+
+.monaco-workbench .ade-mission-edge-group.is-orch-edge .ade-mission-edge-label-text {
+	fill: color-mix(in srgb, var(--edge-accent, #cbd5e1) 52%, #f1f5f9);
+	font-weight: 600;
+	letter-spacing: 0.01em;
+}
+
+/* Mission Task DAG Luminous Status Edges */
+.monaco-workbench .ade-mission-edge-group.is-task-edge-completed .ade-mission-edge-path {
+	stroke: rgba(52, 211, 153, 0.88);
+	stroke-width: 2.2px;
+	filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.4));
+}
+
+.monaco-workbench .ade-mission-edge-group.is-task-edge-live .ade-mission-edge-path {
+	stroke: color-mix(in srgb, var(--edge-accent, #38bdf8) 88%, #ffffff);
+	stroke-width: 2.35px;
+	filter: drop-shadow(0 0 5px color-mix(in srgb, var(--edge-accent, #38bdf8) 55%, transparent));
+}
+
+.monaco-workbench .ade-mission-edge-group.is-task-edge-blocked .ade-mission-edge-path {
+	stroke: rgba(251, 191, 36, 0.84);
+	stroke-dasharray: 6 4;
+	stroke-width: 2px;
+}
+
+/* Always-Live Glowing Baton Token Packet Comets */
+.monaco-workbench .ade-orch-live-puck {
+	--puck-color: #38bdf8;
+	pointer-events: none;
+	animation: adeOrchLivePuckGlide 3.4s linear infinite;
+}
+
+.monaco-workbench .ade-mission-editor.ade-animations-paused .ade-orch-live-puck,
+.monaco-workbench .ade-mission-editor.ade-animations-paused .ade-orch-edge-flow-stream {
+	animation: none;
+}
+
+.monaco-workbench .ade-orch-live-puck-bloom {
+	fill: var(--puck-color);
+	opacity: 0.24;
+	filter: blur(4px);
+}
+
+.monaco-workbench .ade-orch-live-puck-pill {
+	fill: rgba(8, 13, 25, 0.96);
+	stroke: color-mix(in srgb, var(--puck-color) 92%, #ffffff);
+	stroke-width: 1.55px;
+	filter: drop-shadow(0 0 7px color-mix(in srgb, var(--puck-color) 75%, transparent));
+}
+
+.monaco-workbench .ade-orch-live-puck-dot {
+	fill: color-mix(in srgb, var(--puck-color) 80%, #ffffff);
+	filter: drop-shadow(0 0 4px var(--puck-color));
+}
+
+.monaco-workbench .ade-orch-live-puck-text {
+	fill: #f8fafc;
+	font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 9.5px;
+	font-weight: 750;
+	letter-spacing: 0.02em;
+	text-anchor: middle;
+	dominant-baseline: central;
+}
+
+.monaco-workbench .ade-orch-live-puck.is-return .ade-orch-live-puck-pill {
+	fill: rgba(7, 26, 22, 0.96);
+	stroke: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-token-puck.status-waiting-join {
+	border-color: rgba(251, 191, 36, 0.88);
+	background: linear-gradient(135deg, rgba(40, 27, 8, 0.96), rgba(20, 15, 8, 0.98));
+	color: #fde68a;
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45), 0 0 12px rgba(245, 158, 11, 0.34);
 }

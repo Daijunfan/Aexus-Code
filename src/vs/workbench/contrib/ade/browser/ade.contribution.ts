@@ -86,6 +86,8 @@ import {
 	ADE_IMPORT_VSCODE_CLOUD_HOSTS_COMMAND_ID,
 	ADE_INSPECTOR_CONTAINER_ID,
 	ADE_OPEN_CONFIG_COMMAND_ID,
+	ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID,
+	ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID,
 	ADE_OPEN_MISSION_COMMAND_ID,
 	ADE_OPEN_ROLE_STUDIO_COMMAND_ID,
 	ADE_PROJECTS_VIEW_ID,
@@ -94,6 +96,7 @@ import {
 	ADE_RENAME_PROJECT_COMMAND_ID,
 	ADE_SECRETARY_ID,
 	AdeAgentRole,
+	AdeEngineeringViewMode,
 	AdeSessionRank,
 	getAdeRoleRankLevel,
 	getNextLowerAdeRole,
@@ -357,7 +360,7 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeExtensionWebviewEditorInput.ID, AdeExtensionWebviewEditorSerializer);
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
-	EditorPaneDescriptor.create(AdeEngineeringEditorPane, AdeEngineeringEditorPane.ID, localize('adeMissionEditorPaneTitle', "ADE Mission")),
+	EditorPaneDescriptor.create(AdeEngineeringEditorPane, AdeEngineeringEditorPane.ID, localize('adeEngineeringEditorPaneTitle', "ADE Engineering")),
 	[new SyncDescriptor(AdeEngineeringEditorInput)],
 );
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEditorSerializer(AdeEngineeringEditorInput.ID, AdeEngineeringEditorSerializer);
@@ -382,7 +385,7 @@ Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory).registerEdit
 
 Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
 	id: 'aexusAdeEngineering',
-	title: localize('adeMissionConfigurationTitle', "ADE Mission & Organization"),
+	title: localize('adeEngineeringConfigurationTitle', "ADE Engineering & Organization"),
 	type: 'object',
 	properties: {
 		[ADE_ORGANIZATION_CONFIG_KEY]: {
@@ -392,7 +395,7 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			restricted: true,
 			markdownDescription: localize(
 				'adeOrganizationConfigDesc',
-				"Customizable ADE rank hierarchy (L1..LN + L0 Secretary) and Mission display alias. Configure visually in [ADE config](command:workbench.action.ade.openConfig).",
+				"Customizable ADE rank hierarchy (L1..LN + L0 Secretary) and Engineering display alias. Configure visually in [ADE config](command:workbench.action.ade.openConfig).",
 			),
 		},
 		'aexus.ade.autonomousMode': {
@@ -429,12 +432,12 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			enum: ['auto', 'en', 'zh-cn'],
 			enumDescriptions: [
 				localize('adeDisplayLanguageAutoDesc', "Follow VS Code's active display language (pure English for non-Chinese locales, pure Simplified Chinese for Chinese locales)."),
-				localize('adeDisplayLanguageEnDesc', "Render Aexus ADE panels (Mission Canvas, Inspector, Role Studio, Session Header, and Projects View) in pure English."),
-				localize('adeDisplayLanguageZhDesc', "Render Aexus ADE panels (Mission Canvas, Inspector, Role Studio, Session Header, and Projects View) in pure Simplified Chinese."),
+				localize('adeDisplayLanguageEnDesc', "Render Aexus ADE panels (Engineering Mission & Orchestration Canvases, Role Studio, Session Header, and Projects View) in pure English."),
+				localize('adeDisplayLanguageZhDesc', "Render Aexus ADE panels (Engineering Mission & Orchestration Canvases, Role Studio, Session Header, and Projects View) in pure Simplified Chinese."),
 			],
 			default: 'auto',
 			scope: ConfigurationScope.APPLICATION,
-			description: localize('adeDisplayLanguageConfigDesc', "Display language for Aexus ADE surfaces (Mission Canvas, Inspector, Role Studio, Session Header, and Projects View)."),
+			description: localize('adeDisplayLanguageConfigDesc', "Display language for Aexus ADE surfaces (Engineering Mission & Orchestration Canvases, Role Studio, Session Header, and Projects View)."),
 		},
 	},
 });
@@ -1159,11 +1162,15 @@ registerAction2(class AddProjectAgentAction extends Action2 {
 async function openOrCreateMissionCanvas(
 	accessor: ServicesAccessor,
 	targetIdOrProject?: string | URI,
+	openOpts?: { readonly viewMode?: AdeEngineeringViewMode; readonly openSiblingViews?: boolean },
 ): Promise<void> {
 	const missions = accessor.get(IAdeMissionService);
 	const projects = accessor.get(IAdeProjectsService);
 	const roleConfig = getRoleConfig(accessor);
 	const missionAlias = getMissionDisplayName(roleConfig);
+	const editorOpts = openOpts?.viewMode
+		? { viewMode: openOpts.viewMode, openSiblingViews: openOpts.openSiblingViews ?? false }
+		: { openSiblingViews: openOpts?.openSiblingViews ?? true };
 
 	if (URI.isUri(targetIdOrProject)) {
 		const projName = projects.getProjectName(targetIdOrProject);
@@ -1174,7 +1181,7 @@ async function openOrCreateMissionCanvas(
 			projectUri: targetIdOrProject.toString(),
 			mermaidText: '',
 		});
-		await missions.openMissionEditor(created.id);
+		await missions.openMissionEditor(created.id, editorOpts);
 		return;
 	}
 
@@ -1182,7 +1189,7 @@ async function openOrCreateMissionCanvas(
 		const id = targetIdOrProject.trim();
 		const existing = missions.getMission(id) ?? missions.getMissionByLinkedSession(id);
 		if (existing) {
-			await missions.openMissionEditor(existing.id);
+			await missions.openMissionEditor(existing.id, editorOpts);
 			return;
 		}
 		if (id === ADE_SECRETARY_ID) {
@@ -1197,15 +1204,14 @@ async function openOrCreateMissionCanvas(
 				projectUri: selectedProjUri?.toString(),
 				mermaidText: '',
 			});
-			await missions.openMissionEditor(created.id);
+			await missions.openMissionEditor(created.id, editorOpts);
 			return;
 		}
 		const linkedAgent = projects.getAgent(id);
 		if (linkedAgent && projects.isLockedByWorkTree?.(linkedAgent.id)) {
-			// Locked Mermaid-generated employees cannot spawn nested Missions; jump straight to their owning Mission!
 			const owningId = linkedAgent.treeGovernorId ?? projects.getWorkTreeGovernor?.(linkedAgent.id)?.id;
 			if (owningId) {
-				await missions.openMissionEditor(owningId);
+				await missions.openMissionEditor(owningId, editorOpts);
 				return;
 			}
 		}
@@ -1221,7 +1227,7 @@ async function openOrCreateMissionCanvas(
 				projectUri: linkedAgent.projectUri.toString(),
 				mermaidText: '',
 			});
-			await missions.openMissionEditor(created.id);
+			await missions.openMissionEditor(created.id, editorOpts);
 			return;
 		}
 		const created = missions.createMission({
@@ -1231,7 +1237,7 @@ async function openOrCreateMissionCanvas(
 			ownerRankId: 'user',
 			mermaidText: '',
 		});
-		await missions.openMissionEditor(created.id);
+		await missions.openMissionEditor(created.id, editorOpts);
 		return;
 	}
 
@@ -1241,7 +1247,7 @@ async function openOrCreateMissionCanvas(
 		ownerRankId: 'user',
 		mermaidText: '',
 	});
-	await missions.openMissionEditor(created.id);
+	await missions.openMissionEditor(created.id, editorOpts);
 }
 
 registerAction2(class ToggleAdeIdeModeAction extends Action2 {
@@ -1296,7 +1302,7 @@ registerAction2(class OpenAdeMissionAction extends Action2 {
 	constructor() {
 		super({
 			id: ADE_OPEN_MISSION_COMMAND_ID,
-			title: localize2('adeOpenMissionActionTitle', "New / Open ADE Mission"),
+			title: localize2('adeOpenEngineeringActionTitle', "New / Open ADE Engineering (Mission & Orchestration)"),
 			icon: Codicon.typeHierarchySub,
 			f1: true,
 			menu: [
@@ -1305,9 +1311,41 @@ registerAction2(class OpenAdeMissionAction extends Action2 {
 		});
 	}
 
+	async run(accessor: ServicesAccessor, target?: string | URI, options?: { readonly viewMode?: AdeEngineeringViewMode; readonly openSiblingViews?: boolean }): Promise<void> {
+		accessor.get(IWorkbenchModeService).setMode('ade');
+		await openOrCreateMissionCanvas(accessor, target, options);
+	}
+});
+
+registerAction2(class OpenAdeEngineeringMissionAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_OPEN_ENGINEERING_MISSION_COMMAND_ID,
+			title: localize2('adeOpenEngMissionActionTitle', "Open Engineering · Mission View (Task DAG)"),
+			icon: Codicon.typeHierarchySub,
+			f1: true,
+		});
+	}
+
 	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
 		accessor.get(IWorkbenchModeService).setMode('ade');
-		await openOrCreateMissionCanvas(accessor, target);
+		await openOrCreateMissionCanvas(accessor, target, { viewMode: 'mission', openSiblingViews: false });
+	}
+});
+
+registerAction2(class OpenAdeEngineeringOrchestrationAction extends Action2 {
+	constructor() {
+		super({
+			id: ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID,
+			title: localize2('adeOpenEngOrchestrationActionTitle', "Open Engineering · Orchestration View (All-Staff Topology)"),
+			icon: Codicon.organization,
+			f1: true,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, target?: string | URI): Promise<void> {
+		accessor.get(IWorkbenchModeService).setMode('ade');
+		await openOrCreateMissionCanvas(accessor, target, { viewMode: 'orchestration', openSiblingViews: false });
 	}
 });
 
@@ -1315,7 +1353,7 @@ registerAction2(class RemoveAdeMissionAction extends Action2 {
 	constructor() {
 		super({
 			id: ADE_REMOVE_MISSION_COMMAND_ID,
-			title: localize2('adeRemoveMissionActionTitle', "Remove ADE Mission & All Employees..."),
+			title: localize2('adeRemoveEngineeringActionTitle', "Remove ADE Engineering & All Employees..."),
 			icon: Codicon.trash,
 			f1: true,
 			precondition: WorkbenchModeContext.isEqualTo('ade'),
@@ -1395,7 +1433,7 @@ registerAction2(class NewSubSessionAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(parent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeSubSession', "'{0}' belongs to a locked ADE Mission. Edit its DAG topology on the Mission canvas.", parent.label));
+			notifications.info(localize('adeLockedByWorkTreeSubSession', "'{0}' belongs to a locked ADE Engineering workspace. Edit staff topology in the Orchestration view.", parent.label));
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
@@ -1462,7 +1500,7 @@ registerAction2(class RecruitSubordinateAgentAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(parent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeRecruit', "'{0}' belongs to a locked ADE Mission. Edit its DAG topology on the Mission canvas.", parent.label));
+			notifications.info(localize('adeLockedByWorkTreeRecruit', "'{0}' belongs to a locked ADE Engineering workspace. Edit staff topology in the Orchestration view.", parent.label));
 			return;
 		}
 		const hasSubs = projects.hasSubordinates(parent.id);
@@ -1536,7 +1574,7 @@ registerAction2(class SetAgentRoleAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(agent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeSetRole', "'{0}' has a fixed organizational rank in an ADE Mission and cannot be changed manually.", agent.label));
+			notifications.info(localize('adeLockedByWorkTreeSetRole', "'{0}' has a fixed organizational rank in an ADE Engineering workspace and cannot be changed manually.", agent.label));
 			return;
 		}
 		const subs = projects.getDirectSubordinates(agent.id);
@@ -1595,7 +1633,7 @@ registerAction2(class ReparentAgentAction extends Action2 {
 			return;
 		}
 		if (projects.isLockedByWorkTree?.(agent.id)) {
-			notifications.info(localize('adeLockedByWorkTreeReparent', "'{0}' belongs to a locked ADE Mission and cannot be moved.", agent.label));
+			notifications.info(localize('adeLockedByWorkTreeReparent', "'{0}' belongs to a locked ADE Engineering workspace and cannot be moved.", agent.label));
 			return;
 		}
 		interface ISupervisorPickItem extends IQuickPickItem {
@@ -1653,11 +1691,23 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 		const sessions = accessor.get(IAdeSessionsService);
 		const clipboard = accessor.get(IClipboardService);
 		const roleConfig = getRoleConfig(accessor);
+		let docsPaths;
+		try {
+			docsPaths = accessor.get(IAdeRoleSchemaService).getDocsPaths?.();
+		} catch {
+			docsPaths = undefined;
+		}
+		let missionRuntime;
+		try {
+			missionRuntime = accessor.get(IAdeMissionRuntimeService);
+		} catch {
+			missionRuntime = undefined;
+		}
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
 			return;
 		}
-		const compiled = buildAdeAgentRoleContext(projects, sessions, agent, roleConfig);
+		const compiled = buildAdeAgentRoleContext(projects, sessions, agent, roleConfig, docsPaths, missionRuntime);
 		if (!compiled) {
 			const rankDef = resolveEffectiveRankDefinition(roleConfig, agent.role, projects.hasSubordinates(agent.id));
 			await clipboard.writeText([
@@ -2187,7 +2237,7 @@ registerAction2(class ToggleAdeMissionFileAction extends Action2 {
 	constructor() {
 		super({
 			id: ADE_TOGGLE_MISSION_FILE_DRAWER_COMMAND_ID,
-			title: localize2('adeToggleMissionFileTitle', "Toggle Mission Mermaid Source Drawer"),
+			title: localize2('adeToggleEngFileTitle', "Toggle Engineering Blueprint Source Drawer"),
 			category: localize2('adeCategory', "Aexus ADE"),
 			icon: Codicon.fileCode,
 			f1: true,

@@ -101,31 +101,43 @@ export function buildAdeOsIconSvg(doc: Document, kind: AdeOsIconKind): SVGElemen
 		}));
 		return svg;
 	}
+	// Generic Linux: high-contrast Tux penguin on warm Linux gold emblem (crisp from 13px to 64px).
 	const svg = createSvgElement(doc, 'svg', { viewBox: '0 0 32 32', 'aria-hidden': 'true' });
-	svg.appendChild(createSvgElement(doc, 'rect', {
-		x: '2.5',
-		y: '2.5',
-		width: '27',
-		height: '27',
-		rx: '6',
-		fill: '#26354d',
-		stroke: '#64748b',
-		'stroke-width': '1.35',
+	svg.appendChild(createSvgElement(doc, 'circle', { cx: '16', cy: '16', r: '15', fill: '#F5C211' }));
+	// Outer subtle inner ring for crisp separation on both dark & light themes
+	svg.appendChild(createSvgElement(doc, 'circle', {
+		cx: '16',
+		cy: '16',
+		r: '14.2',
+		fill: 'none',
+		stroke: 'rgba(24,24,27,0.18)',
+		'stroke-width': '1',
+	}));
+	// Tux head, torso & outstretched flippers
+	svg.appendChild(createSvgElement(doc, 'path', {
+		d: 'M16 4.6c-3.5 0-5.8 2.4-5.8 6 0 1.4.3 2.5.8 3.4-2.1 2-3.7 4.7-4.1 7.2-.2 1.1.5 1.8 1.5 1.6 1-.2 1.8-1 2.4-1.8.6 2.1 2.4 3.8 5.2 3.8s4.6-1.7 5.2-3.8c.6.8 1.4 1.6 2.4 1.8 1 .2 1.7-.5 1.5-1.6-.4-2.5-2-5.2-4.1-7.2.5-.9.8-2 .8-3.4 0-3.6-2.3-6-5.8-6Z',
+		fill: '#18181B',
+	}));
+	// Bright snow-white Tux belly
+	svg.appendChild(createSvgElement(doc, 'ellipse', { cx: '16', cy: '19.3', rx: '4.4', ry: '5.1', fill: '#FFFFFF' }));
+	// Expressive white eyes + crisp pupils
+	svg.appendChild(createSvgElement(doc, 'ellipse', { cx: '13.9', cy: '9.8', rx: '1.45', ry: '1.85', fill: '#FFFFFF' }));
+	svg.appendChild(createSvgElement(doc, 'ellipse', { cx: '18.1', cy: '9.8', rx: '1.45', ry: '1.85', fill: '#FFFFFF' }));
+	svg.appendChild(createSvgElement(doc, 'circle', { cx: '14.25', cy: '10', r: '0.75', fill: '#18181B' }));
+	svg.appendChild(createSvgElement(doc, 'circle', { cx: '17.75', cy: '10', r: '0.75', fill: '#18181B' }));
+	// Vibrant tangerine beak
+	svg.appendChild(createSvgElement(doc, 'path', {
+		d: 'M13.5 12.1c1.3-.9 3.7-.9 5 0 .4.3.3.9-.1 1.2l-2 1.2c-.3.2-.6.2-.9 0l-2-1.2c-.4-.3-.4-.9 0-1.2Z',
+		fill: '#EA580C',
+	}));
+	// Twin webbed Tux feet
+	svg.appendChild(createSvgElement(doc, 'path', {
+		d: 'M9.1 24.4c0-1.1 1.4-1.8 3.2-1.6 1.5.2 2.4.9 2.4 1.8 0 1-1.3 1.7-3 1.7-1.6 0-2.6-.8-2.6-1.9Z',
+		fill: '#EA580C',
 	}));
 	svg.appendChild(createSvgElement(doc, 'path', {
-		d: 'M10.5 12.5 15.5 17l-5 4.5',
-		fill: 'none',
-		stroke: '#f8fafc',
-		'stroke-width': '2.2',
-		'stroke-linecap': 'round',
-		'stroke-linejoin': 'round',
-	}));
-	svg.appendChild(createSvgElement(doc, 'path', {
-		d: 'M17.5 21.5h4.5',
-		fill: 'none',
-		stroke: '#38bdf8',
-		'stroke-width': '2.2',
-		'stroke-linecap': 'round',
+		d: 'M22.9 24.4c0-1.1-1.4-1.8-3.2-1.6-1.5.2-2.4.9-2.4 1.8 0 1 1.3 1.7 3 1.7 1.6 0 2.6-.8 2.6-1.9Z',
+		fill: '#EA580C',
 	}));
 	return svg;
 }

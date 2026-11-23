@@ -54,7 +54,9 @@ import { installNativeRoleBridge } from './nativeRoleBridge';
 import { PiRuntime } from './pi';
 import {
 	AEXUS_PREAMBLE_END_MARKER,
+	buildUserMessageSystemEnvelope,
 	filterAndCleanHistoryTurns,
+	hasAexusSystemMessageEnvelope,
 	isNativeRoleBridgeDisabledByEnv,
 	RoleSyncSnapshot,
 } from './roleBridgeShared';
@@ -2224,7 +2226,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			const preambleSections: string[] = [];
 			const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
-			const currentRankForContext = isSecretary ? 'secretary' : (snapForContext?.isOrchestrated ? snapForContext.rank : undefined);
+			const currentRankForContext = isSecretary
+				? 'secretary'
+				: ((snapForContext?.isOrchestrated || snapForContext?.isMissionNode) ? snapForContext.rank : undefined);
 			const expectedPromptHash = !isSecretary && snapForContext?.rolePrompt?.trim()
 				? hashRolePrompt(snapForContext.rolePrompt)
 				: undefined;
@@ -2263,6 +2267,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					`- Execute thoroughly and verify all requirements end-to-end before stopping.`,
 					`- Only when EVERY requirement of the goal is 100% complete and verified, output the exact completion marker \`${GOAL_COMPLETE_MARKER}\` at the very end of your response.`,
 				].join('\n'));
+			}
+
+			// Wrap direct interactive Human User (L-1) chat turns to orchestrated roles, Secretary, or Engineering staff
+			// with an explicit system provenance envelope (skipping standalone pure Workers and already-enveloped turns).
+			const shouldWrapAsUserMessage = Boolean(
+				isSecretary
+				|| snapForContext?.isOrchestrated
+				|| snapForContext?.isMissionNode,
+			);
+			if (shouldWrapAsUserMessage && !hasAexusSystemMessageEnvelope(userPromptWithRefs)) {
+				preambleSections.push(buildUserMessageSystemEnvelope());
 			}
 
 			const initialFullPrompt = preambleSections.length > 0

@@ -261,47 +261,83 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 	{
 		id: 'mission.read',
 		category: 'mission',
-		label: 'Inspect Mission DAG, Status, Prompts & Checks',
-		description: 'Read Mission DAG blueprints, live runtime status, factory boundaries, source triggers, per-node pre-prompts, and deterministic verification hooks.',
+		label: 'Inspect Engineering Mission DAG, Orchestration & Whiteboards',
+		description: 'Read Engineering Mission Task DAG blueprints, task descriptions/statuses, cyclic Orchestration staff graphs, department shared whiteboards, and live token states.',
 		actions: [
 			'mission.list',
 			'mission.get',
 			'mission.status',
 			'mission.blueprint.get',
 			'mission.blueprint.validate',
+			'mission.task.list',
+			'mission.task.get',
 			'mission.boundary.get',
 			'mission.trigger.list',
-			'mission.prompt.list',
-			'mission.prompt.get',
 			'mission.check.list',
 			'mission.check.get',
 			'mission.check.run',
+			'mission.export',
+			'orchestration.get',
+			'orchestration.export',
+			'orchestration.validate',
+			'orchestration.status',
+			'orchestration.group.list',
+			'whiteboard.list',
+			'whiteboard.read',
 		],
 		renderCliLines: ctx => {
 			const missionFlag = ctx.treeGovernorId ? ` --mission ${ctx.treeGovernorId}` : '';
 			return [
-				`  - Inspect Mission: \`aexus-ade mission status${missionFlag} --json\` | \`aexus-ade mission blueprint get${missionFlag} --raw\` | \`aexus-ade mission prompt list${missionFlag} --json\` | \`aexus-ade mission check list${missionFlag} --json\``,
+				`  - Inspect Engineering: \`aexus-ade mission task list${missionFlag} --json\` | \`aexus-ade orchestration get${missionFlag} --json\` | \`aexus-ade whiteboard list${missionFlag} --json\``,
 			];
 		},
 	},
 	{
 		id: 'mission.design',
 		category: 'mission',
-		label: 'Author Mission DAG, Prompts, Checks & Topology',
-		description: 'Initialize Missions, apply or safely patch Mermaid DAGs, edit per-node pre-prompts and deterministic check hooks, configure boundaries, triggers, and Cloud Host bindings.',
+		label: 'Author Engineering Mission DAG, Orchestration, Staff & Whiteboards',
+		description: 'Initialize Engineering workspaces, edit Mission Task DAGs & task descriptions, mark completed tasks (within per-node/rank permissions), dynamically recruit/remove subordinates on Orchestration canvas, manage groups/edges/layouts/export/import/load, and manage department shared whiteboards.',
 		actions: [
 			'mission.init',
 			'mission.create',
+			'mission.import',
 			'mission.setMermaid',
 			'mission.blueprint.apply',
+			'mission.task.set',
+			'mission.task.create',
+			'mission.task.update',
+			'mission.task.remove',
+			'mission.task.edge.add',
+			'mission.task.edge.remove',
+			'mission.task.complete',
+			'mission.task.status',
 			'mission.boundary.set',
 			'mission.patch',
 			'mission.trigger.set',
 			'mission.trigger.remove',
 			'mission.host.bind',
-			'mission.prompt.set',
 			'mission.check.set',
 			'mission.check.remove',
+			'orchestration.apply',
+			'orchestration.import',
+			'orchestration.load',
+			'orchestration.layout.set',
+			'orchestration.dispatch',
+			'orchestration.group.create',
+			'orchestration.group.rename',
+			'orchestration.group.assign',
+			'orchestration.group.remove',
+			'orchestration.staff.create',
+			'orchestration.staff.rename',
+			'orchestration.staff.configure',
+			'orchestration.staff.remove',
+			'orchestration.edge.connect',
+			'orchestration.edge.label',
+			'orchestration.edge.remove',
+			'whiteboard.create',
+			'whiteboard.write',
+			'whiteboard.rename',
+			'whiteboard.remove',
 		],
 		renderCliLines: ctx => {
 			if (!ctx.isWorkTree) {
@@ -309,8 +345,8 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			}
 			const missionId = ctx.treeGovernorId ?? ctx.agentId;
 			return [
-				`  - Author / Patch DAG: \`aexus-ade mission blueprint apply --mission ${missionId} --file <path>\` | \`aexus-ade mission patch --mission ${missionId} --file <path> --reason "<why>"\` | \`aexus-ade mission prompt set --mission ${missionId} --node <nodeId> --prompt "<text>"\``,
-				`  - Triggers & Hosts: \`aexus-ade mission host bind --mission ${missionId} --node <nodeId> --host <local|alias>\` | \`aexus-ade role list --json\``,
+				`  - Mission Task DAG: \`aexus-ade mission blueprint apply --mission ${missionId} --file <path>\` | \`aexus-ade mission task create|update|complete --mission ${missionId} --node <taskId> ...\``,
+				`  - Orchestration & Whiteboards: \`aexus-ade orchestration staff create|config|remove --mission ${missionId} ...\` | \`aexus-ade orchestration load|apply --mission ${missionId} --file <path>\` | \`aexus-ade whiteboard create|write --mission ${missionId} ...\` | \`aexus-ade role list --json\``,
 			];
 		},
 	},
@@ -337,8 +373,8 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 	{
 		id: 'mission.control',
 		category: 'mission',
-		label: 'Control Mission Lifecycle, Recall & Retry',
-		description: 'Open, start, pause, resume, stop, recall/retry tokens, set silence timeout, or resolve Human Gates on a Mission (High Privilege).',
+		label: 'Control Engineering Run Lifecycle (Pause / Resume / Abort)',
+		description: 'Open Engineering views and pause, resume, or abort active Orchestration token waves (High Privilege).',
 		actions: [
 			'mission.open',
 			'mission.run',
@@ -351,6 +387,9 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			'mission.recall',
 			'mission.retry',
 			'token.retry',
+			'orchestration.pause',
+			'orchestration.resume',
+			'orchestration.abort',
 		],
 		dangerous: true,
 		renderCliLines: ctx => {
@@ -359,7 +398,7 @@ export const ADE_PRIMITIVE_APIS: readonly IAdePrimitiveApiSpec[] = [
 			}
 			const missionId = ctx.treeGovernorId ?? ctx.agentId;
 			return [
-				`  - Mission Control: \`aexus-ade mission start --mission ${missionId}\` | \`aexus-ade mission pause --mission ${missionId}\` | \`aexus-ade mission resume --mission ${missionId}\` | \`aexus-ade mission stop --mission ${missionId}\` | \`aexus-ade mission recall --mission ${missionId} --nodes <N1,N2>\` | \`aexus-ade mission retry --mission ${missionId} --node <nodeId>\``,
+				`  - Engineering Run Controls: \`aexus-ade orchestration status|pause|resume|abort --mission ${missionId} --json\` | \`aexus-ade mission open --mission ${missionId} --view both\``,
 			];
 		},
 	},
@@ -414,12 +453,12 @@ export interface IAdeRankDefinition {
 	readonly allowedApis: readonly AdePrimitiveApiId[];
 }
 
-export const DEFAULT_ADE_MISSION_NAME = 'Mission';
+export const DEFAULT_ADE_MISSION_NAME = 'Engineering';
 
 export interface IAdeOrganizationConfig {
 	readonly version: 1;
 	readonly presetId?: string;
-	/** User-customizable display alias for the unified Mission mode (defaults to "Mission"; e.g. "Engineering", "Research"). */
+	/** User-customizable display alias for the Engineering module (defaults to "Engineering"). */
 	readonly missionName?: string;
 	readonly slots?: IAdeWorkTreeSlotMap;
 	readonly ranks: readonly IAdeRankDefinition[];
@@ -469,10 +508,10 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 1,
 			color: 'amber',
 			icon: 'organization',
-			summary: 'L1 Governor: Highest business orchestration tier in Aexus Code ADE; owns architecture, Mission DAGs, off-graph supervision, and Human Inbox escalations.',
+			summary: 'L1 Governor: Highest business orchestration tier in Aexus Code ADE; owns architecture, Dual-View Engineering (Orchestration + Mission Task DAG), downward token delegation, and Human Inbox escalations.',
 			initPrompt: [
 				'You are {{rank.tier}} **{{rank.name}}**, the top-level orchestrator for project **{{project.name}}**.',
-				'Decompose goals cleanly, design flat Mission DAGs, direct lower tiers strictly top-down, and escalate human-level decisions to Inbox via `org escalate` / `inbox post` when blocked.',
+				'Decompose goals into Mission Task DAG milestones, mint/split downward baton tokens to subordinates in Engineering (or direct lower tiers top-down via `session.*`/`org.*` outside Engineering), verify returned deliverables before marking Task DAG nodes completed, and escalate human-level decisions to Inbox via `org escalate` / `inbox post` when blocked.',
 			].join('\n'),
 			pureExecution: false,
 			canHaveSubordinates: true,
@@ -494,10 +533,10 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 2,
 			color: 'indigo',
 			icon: 'briefcase',
-			summary: 'L2 Manager: Mid-level orchestration & off-graph supervision tier coordinating managed lower-tier agents and jurisdiction-scoped Mission recovery.',
+			summary: 'L2 Manager: Mid-level orchestration tier coordinating lower-tier staff via downward baton tokens, department whiteboards, and top-down exception supervision.',
 			initPrompt: [
 				'You are {{rank.tier}} **{{rank.name}}**, coordinating delivery under {{supervisor.label}} ({{supervisor.rank}}).',
-				'Supervise managed lower-tier agents strictly top-down via `org` commands, unblock stalled or failed nodes within your jurisdiction (`mission retry|recall|patch`), and escalate out-of-jurisdiction issues via `org escalate`.',
+				'In Engineering, break down received tokens downward via `token mint|split`, dynamically recruit/remove immediate subordinates in your department when needed, return verified results upward via `token return`, and reserve native `org context|send` strictly for exceptional diagnostics.',
 			].join('\n'),
 			pureExecution: false,
 			canHaveSubordinates: true,
@@ -518,10 +557,10 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 3,
 			color: 'purple',
 			icon: 'shield',
-			summary: 'L3 Employee: Mid-lower orchestrated tier; executes or reviews assigned Mission DAG nodes via Token Bus when in-graph, or coordinates lower-tier sessions when off-graph.',
+			summary: 'L3 Employee: Mid-lower orchestrated tier executing/reviewing assigned work via Engineering baton tokens or supervising lower-tier sessions top-down.',
 			initPrompt: [
 				'You are {{rank.tier}} **{{rank.name}}** for project **{{project.name}}**.',
-				'Operate strictly within your assigned tier scope: when participating in a Mission DAG, execute or review assigned nodes and report solely via `token` commands; when supervising lower tiers off-graph, direct strictly top-down.',
+				'Operate within your tier scope: inside Engineering, execute or delegate received baton tokens downward and return verified outcomes via `token return` / `token handoff`; outside Engineering, supervise lower tiers strictly top-down.',
 			].join('\n'),
 			pureExecution: false,
 			canHaveSubordinates: true,
@@ -541,7 +580,7 @@ export const DEFAULT_ADE_ORGANIZATION_CONFIG: IAdeOrganizationConfig = {
 			tier: 4,
 			color: 'emerald',
 			icon: 'tools',
-			summary: 'L4 Worker (Pure Executor): Lowest pure-execution tier with zero ADE orchestration prompt injection outside Mission token reporting.',
+			summary: 'L4 Worker (Pure Executor): Lowest pure-execution tier with 100% clean native context outside Engineering token collaboration.',
 			initPrompt: '',
 			pureExecution: true,
 			canHaveSubordinates: false,
@@ -1160,6 +1199,34 @@ export function canRankSupervise(
 	return supDef.tier < subDef.tier;
 }
 
+const SHORT_ADE_ENGINE_ALIASES: Readonly<Record<string, string>> = {
+	claude: 'aexus-claude',
+	'claude-code': 'aexus-claude',
+	codex: 'aexus-codex',
+	kilo: 'aexus-kilo',
+	'kilo-code': 'aexus-kilo',
+	opencode: 'aexus-opencode',
+	dsh: 'aexus-dsh',
+	deepseek: 'aexus-dsh',
+	agy: 'aexus-antigravity',
+	antigravity: 'aexus-antigravity',
+	'google-antigravity': 'aexus-antigravity',
+	cline: 'aexus-cline',
+	pi: 'aexus-pi',
+};
+
+/** Normalizes short human engine aliases (e.g. `claude` -> `aexus-claude`, `codex` -> `aexus-codex`) into canonical ADE engine IDs. */
+export function normalizeAdeEngineId(rawEngine: string | undefined): string | undefined {
+	if (typeof rawEngine !== 'string') {
+		return undefined;
+	}
+	const trimmed = rawEngine.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	return SHORT_ADE_ENGINE_ALIASES[trimmed.toLowerCase()] ?? trimmed;
+}
+
 /** Formats the configured rank ladder as a single human-readable line (e.g. `Governor (L1) > Manager (L2) > Employee (L3) > Worker (L4 · pure)`). */
 export function formatOrganizationLadder(config: IAdeOrganizationConfig): string {
 	return config.ranks
@@ -1189,10 +1256,45 @@ const ADE_UNIVERSAL_COMMON_ACTIONS = new Set([
 const ADE_IN_GRAPH_TOKEN_ACTIONS = new Set([
 	'token.current',
 	'token.trace',
+	'token.read',
+	'token.history',
+	'token.handoff',
+	'token.return',
 	'token.complete',
 	'token.reject',
 	'token.block',
 	'token.fail',
+	'mission.task.list',
+	'mission.task.get',
+	'orchestration.get',
+	'orchestration.status',
+	'orchestration.validate',
+	'whiteboard.list',
+	'whiteboard.create',
+	'whiteboard.read',
+	'whiteboard.write',
+]);
+
+/**
+ * Actions allowed for non-pure supervisory ranks (`canHaveSubordinates === true` or `mission.design`),
+ * with exact per-node DAG authority, no-rank-skip, no-cross-department, and downward-only mint checks
+ * enforced by `adeOrchestrationEngine` and `adeMissionControlHandler`.
+ */
+const ADE_SUPERVISOR_ORCHESTRATION_ACTIONS = new Set([
+	'token.mint',
+	'token.split',
+	'orchestration.staff.create',
+	'orchestration.staff.remove',
+	'orchestration.staff.configure',
+	'mission.task.create',
+	'mission.task.update',
+	'mission.task.remove',
+	'mission.task.edge.add',
+	'mission.task.edge.remove',
+	'mission.task.complete',
+	'mission.task.status',
+	'whiteboard.rename',
+	'whiteboard.remove',
 ]);
 
 /**
@@ -1200,6 +1302,7 @@ const ADE_IN_GRAPH_TOKEN_ACTIONS = new Set([
  * - Unspecified caller (human user CLI) or `'secretary'` bypasses rank restriction.
  * - Universal self/doc/update actions (`whoami`, `docs.read`, `api.update`) are allowed for all valid ranks `L0..LN`.
  * - In-graph `token.*` actions pass the rank gate for any valid rank and are verified against Mission node assignment in the handler.
+ * - Supervisory orchestration/DAG actions pass for non-pure ranks with `canHaveSubordinates` (or `mission.design`) and are verified strictly in the engine.
  * - Orchestrated/custom rank callers must hold the primitive API governing `action`.
  */
 export function checkAdeApiPermission(
@@ -1228,6 +1331,30 @@ export function checkAdeApiPermission(
 				allowed: false,
 				rankId: caller,
 				reason: `Permission denied: unknown caller rank "${caller}" cannot invoke action "${action}".`,
+			};
+		}
+		return {
+			allowed: true,
+			rankId: knownRank.id,
+			rankName: knownRank.name,
+		};
+	}
+
+	if (ADE_SUPERVISOR_ORCHESTRATION_ACTIONS.has(action)) {
+		const knownRank = findRankDefinition(config, caller);
+		if (!knownRank) {
+			return {
+				allowed: false,
+				rankId: caller,
+				reason: `Permission denied: unknown caller rank "${caller}" cannot invoke action "${action}".`,
+			};
+		}
+		if (knownRank.pureExecution || (!knownRank.canHaveSubordinates && !knownRank.allowedApis.includes('mission.design'))) {
+			return {
+				allowed: false,
+				rankId: knownRank.id,
+				rankName: knownRank.name,
+				reason: `Permission denied: rank "${knownRank.name}" (L${knownRank.tier}) is not permitted to invoke supervisory orchestration action "${action}".`,
 			};
 		}
 		return {
@@ -1291,14 +1418,23 @@ export interface IAdeRolePromptCompileInput {
 		readonly governorId: string;
 		readonly segmentId?: string;
 		readonly nodeId?: string;
+		readonly nodeIds?: readonly string[];
 		readonly slot?: AdeWorkTreeSlot;
 		readonly isMissionOwner?: boolean;
+		readonly isOrchestrationStaff?: boolean;
+		readonly department?: string;
 		readonly managedNodeIds?: readonly string[];
+		readonly rolePrompt?: string;
+		readonly allowedPaths?: readonly string[];
+		readonly checkSummaries?: readonly string[];
 	};
-	/** Canonical single-copy API doc paths (read by L<tier>, sibling Mission doc read on demand). */
+	/** Canonical single-copy API doc paths (sibling `docs/ranks/` vs `docs/engineering/` + `docs/mission/`). */
 	readonly docsPaths?: {
 		readonly rankDoc: string;
 		readonly missionDoc: string;
+		readonly commonDoc?: string;
+		readonly engineeringParadigmDoc?: string;
+		readonly engineeringApiDoc?: string;
 	};
 }
 
@@ -1360,6 +1496,8 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 	const { rank, config } = input;
 	const tierTag = `L${rank.tier}`;
 	const rankDocPath = input.docsPaths?.rankDoc ?? `~/.aexus-code/docs/ranks/${tierTag}.md`;
+	const engineeringParadigmDocPath = input.docsPaths?.engineeringParadigmDoc ?? '~/.aexus-code/docs/engineering/ENGINEERING_PARADIGM.md';
+	const engineeringApiDocPath = input.docsPaths?.engineeringApiDoc ?? '~/.aexus-code/docs/engineering/ENGINEERING_API.md';
 	const missionDocPath = input.docsPaths?.missionDoc ?? '~/.aexus-code/docs/mission/MISSION_API.md';
 	const lines: string[] = [
 		'[Aexus Orchestrated Role Context]',
@@ -1369,10 +1507,22 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 		`- Session: ${input.agentLabel} (id: ${input.agentId}, engine: ${input.engineDisplay} [${input.engineId}])`,
 		`- Project: ${input.projectName} (${input.projectPath})`,
 		`- Hierarchy: L-1 (User) > L0 (Secretary) > ${formatOrganizationLadder(config)}`,
-		`- Single-Copy Lazy-Read Docs: Tier doc \`${rankDocPath}\` | Mission doc (read on demand): \`${missionDocPath}\``,
-		`- Immutable Entry Commands: \`aexus-ade whoami --json\` | \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read common\` | \`aexus-ade docs read mission\` | \`aexus-ade api update --since 0 --json\``,
-		'- Communication & Factory Boundary: Strictly top-down (`aexus-ade org subordinates|send|context`); never message superiors upward (escalate via `aexus-ade org escalate`). Off-graph supervisors (`<= offGraphMaxTier`) stay outside the DAG; in-graph nodes (`> offGraphMaxTier`) report solely via `aexus-ade token` commands.',
 	];
+
+	if (input.workTree) {
+		lines.push(
+			`- Native Rank CLI Doc (docs/ranks/): \`${rankDocPath}\` → \`aexus-ade docs read ${tierTag}\` | Universal base: \`aexus-ade docs read common\``,
+			`- Engineering Paradigm & API Docs (sibling docs/engineering/ & docs/mission/): Paradigm & Token Rules \`${engineeringParadigmDocPath}\` (\`aexus-ade docs read engineering\`) | CLI Cookbook \`${engineeringApiDocPath}\` (\`aexus-ade docs read engineering-api\`) | Unified Reference \`${missionDocPath}\` (\`aexus-ade docs read mission\`)`,
+			`- Immutable Entry Commands: \`aexus-ade whoami --json\` | \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read engineering\` | \`aexus-ade docs read engineering-api\` | \`aexus-ade docs read common\` | \`aexus-ade api update --since 0 --json\``,
+		);
+	} else {
+		lines.push(
+			`- Native Rank CLI Doc (docs/ranks/): \`${rankDocPath}\` → \`aexus-ade docs read ${tierTag}\` | Universal base: \`aexus-ade docs read common\``,
+			`- Sibling Engineering Docs (read on demand only if working with Engineering): \`${engineeringParadigmDocPath}\` (\`aexus-ade docs read engineering\`) | \`${missionDocPath}\` (\`aexus-ade docs read mission\`)`,
+			`- Immutable Entry Commands: \`aexus-ade whoami --json\` | \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read common\` | \`aexus-ade api update --since 0 --json\``,
+			'- System Message Envelopes: `[Aexus System · Message from User (L-1)]` = direct message from the Human User | `[Aexus System · Direct Message from Role]` = direct top-down message from a superior role | `[Aexus System · Baton Token]` = system-validated Engineering baton token.',
+		);
+	}
 
 	if (input.supervisor) {
 		lines.push(`- Supervisor: ${input.supervisor.label} (id: ${input.supervisor.id}, role: ${input.supervisor.rankName})`);
@@ -1385,19 +1535,32 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 	if (input.workTree) {
 		const missionId = input.workTree.governorId;
 		const missionLabel = `ADE ${getMissionDisplayName(config)}`;
+		const isOrchestrationStaff = Boolean(input.workTree.isOrchestrationStaff || input.workTree.treeType === 'engineering');
 		const resolvedSlot: AdeWorkTreeSlot | undefined = input.workTree.slot
 			?? (input.workTree.nodeId ? 'reviewer'
 				: input.workTree.isMissionOwner === false ? 'segment_owner'
 					: resolveRankWorkTreeSlots(config, rank.id)[0]);
+		const staffNodesLabel = input.workTree.nodeIds && input.workTree.nodeIds.length > 0
+			? input.workTree.nodeIds.join(', ')
+			: input.workTree.nodeId;
 		const managedScope = input.workTree.managedNodeIds && input.workTree.managedNodeIds.length > 0
 			? `, managed nodes: ${input.workTree.managedNodeIds.join(', ')}`
 			: '';
+		const deptPart = input.workTree.department ? `, department: ${input.workTree.department}` : '';
 
 		lines.push(
-			`- Mission Binding: **${missionLabel}** (mission: \`${missionId}\`${input.workTree.nodeId ? `, node: \`${input.workTree.nodeId}\`` : ''}${managedScope}) — flat Mermaid DAG + per-node Pre-Prompts; inspect topology via \`aexus-ade mission blueprint get --mission ${missionId} --raw\` and live state via \`aexus-ade mission status --mission ${missionId} --json\`.`,
+			isOrchestrationStaff
+				? `- Engineering Workspace Binding: **${missionLabel}** (mission: \`${missionId}\`${staffNodesLabel ? `, staff node: \`${staffNodesLabel}\`` : ''}${deptPart}) — Dual-View **Orchestration** (cyclic all-staff topology, 1:1 unique employees, NO task pre-prompts) + **Mission** (acyclic Task DAG).`
+				: `- Engineering / Mission Binding: **${missionLabel}** (mission: \`${missionId}\`${staffNodesLabel ? `, node: \`${staffNodesLabel}\`` : ''}${managedScope}) — inspect Task DAG via \`aexus-ade mission blueprint get --mission ${missionId} --raw\` and live state via \`aexus-ade orchestration status --mission ${missionId} --json\` / \`aexus-ade mission status --mission ${missionId} --json\`.`,
+			'- Engineering Dual-View Working Paradigm & Token Rules (full manual: `aexus-ade docs read engineering`):',
+			'  - **Token-Driven, Zero Pre-Prompts**: pass all task instructions, reviews, and deliverables via baton tokens (`--summary` <=160 chars + lightweight pointers `--detail`, `--artifact "Title=Body"`, `--decision "Title=Body"`, `--whiteboard <wbId>`). Read pointers lazily via `aexus-ade token read <ptr1,ptr2>` and flow history via `aexus-ade token history <tokenId>`.',
+			'  - **Strict Directionality & Join Barriers**: superiors mint/split heterogeneous sub-tasks strictly downward (`aexus-ade token mint|split ... [--task <taskId>] [--wait-join]`). Subordinates NEVER mint upward — return completed received batons upward via `aexus-ade token return <tokenId> --summary "..."` (settling join barriers & waking the superior). Peer/review loops use `aexus-ade token handoff`. Active tokens emit a 5-min silence reminder unless `token block` is set.',
+			'  - **Dynamic Staffing & Task DAG Authority**: authorized superiors may recruit/remove ONLY immediate next-tier subordinates in their own department (`aexus-ade orchestration staff create|remove`; removing staff automatically reclaims in-flight tokens). After verifying returned tokens, mark Mission Task DAG nodes completed (`aexus-ade mission task complete`) only within your node authority and after all upstream dependencies complete.',
+			'  - **System Message Envelopes**: `[Aexus System · Baton Token]` = system-validated baton token (MUST advance via `token` CLI) | `[Aexus System · Direct Message from Role]` = direct message from a superior role (`org.send`/`session.send`, NOT User, NOT a token) | `[Aexus System · Message from User (L-1)]` = direct message from the Human User (prioritize & answer User directly).',
+			`  - **Native Rank API Coexistence**: your native rank CLI APIs (\`docs/ranks/${tierTag}.md\`, e.g. \`org context\`, \`org send\`, \`session.*\`) remain fully preserved — keep routine task collaboration strictly on **tokens**, and invoke native direct inspection/messaging sparingly only for diagnostics or exceptions.`,
 		);
 		if (interpolatedCharter) {
-			lines.push('- Role Charter:');
+			lines.push('- Native Rank Charter:');
 			for (const charterLine of interpolatedCharter.split(/\r?\n/)) {
 				if (charterLine.trim()) {
 					lines.push(`  ${charterLine}`);
@@ -1405,21 +1568,43 @@ export function compileAdeRolePrompt(input: IAdeRolePromptCompileInput): string 
 			}
 		}
 
-		if (resolvedSlot === 'orchestrator' && input.workTree.isMissionOwner !== false) {
+		if (isOrchestrationStaff) {
+			if (input.workTree.rolePrompt?.trim() || (input.workTree.allowedPaths && input.workTree.allowedPaths.length > 0) || (input.workTree.checkSummaries && input.workTree.checkSummaries.length > 0)) {
+				lines.push('- Staff Role Boundary & Verification Scope:');
+				if (input.workTree.rolePrompt?.trim()) {
+					lines.push(`  - Role Boundary: ${input.workTree.rolePrompt.trim()}`);
+				}
+				if (input.workTree.allowedPaths && input.workTree.allowedPaths.length > 0) {
+					lines.push(`  - Allowed Read/Write Paths: ${input.workTree.allowedPaths.map(p => `\`${p}\``).join(', ')}`);
+				}
+				if (input.workTree.checkSummaries && input.workTree.checkSummaries.length > 0) {
+					lines.push(`  - Automated Verification Gates (${input.workTree.checkSummaries.length}): ${input.workTree.checkSummaries.join(' | ')}`);
+				}
+			}
+			lines.push(
+				`- Engineering Orchestration Staff (${tierTag}) Operations:`,
+				`  - Inspect Topology & Tasks: \`aexus-ade orchestration get --mission ${missionId} --json\` | \`aexus-ade orchestration status --mission ${missionId} --json\` | \`aexus-ade mission task list --mission ${missionId} --json\``,
+				`  - Token Bus: \`aexus-ade token current --mission ${missionId} --json\` | \`token read <ptrs>\` | \`token history <id>\` | \`token return <id> --summary "..."\` | \`token handoff <id> --to <node> --summary "..."\` | \`token block|fail <id> ...\``,
+				...(rank.canHaveSubordinates ? [
+					`  - Downward Delegation & Staffing: \`aexus-ade token mint|split [parentId] ... --wait-join\` (omit \`parentId\` after a direct User chat message to start a fresh root wave immediately!) | \`aexus-ade orchestration staff create|config|remove --mission ${missionId} ...\` | \`aexus-ade mission task list|create|update|complete --mission ${missionId} ...\``,
+				] : []),
+				`  - Shared Knowledge & Escape Hatches: \`aexus-ade whiteboard list|read|write --mission ${missionId} ...\` (pass ONLY \`--whiteboard <wbId>\` pointers in tokens)${rank.canHaveSubordinates ? ' | native `org subordinates|context|send` only for exceptional inspection' : ''}.`,
+			);
+		} else if (resolvedSlot === 'orchestrator' && input.workTree.isMissionOwner !== false) {
 			lines.push(
 				`- Off-Graph Mission Owner (${tierTag}) Operations:`,
-				`  - Author flat Mermaid DAG topology (\`aexus-ade mission blueprint apply --mission ${missionId} --file <path>\`) and per-node Pre-Prompts (\`aexus-ade mission prompt set --mission ${missionId} --node <nodeId> --prompt "<text>"\`), using fail-edges (\`-->|fail|\`) and Human Gate nodes (\`G1{{"Approve"}}\`).`,
-				`  - Supervise strictly top-down (\`aexus-ade org subordinates|send|context\`), resolve escalations via \`aexus-ade mission retry|recall|patch --mission ${missionId}\`, or escalate to Human Inbox via \`aexus-ade org escalate --mission ${missionId} --reason "<why>"\`.`,
+				`  - Author Task DAG (\`aexus-ade mission blueprint apply --mission ${missionId} --file <path>\` / \`aexus-ade mission task create|update|complete --mission ${missionId}\`) and Orchestration topology (\`aexus-ade orchestration load|apply --mission ${missionId} --file <path>\`), dispatching requirements via \`aexus-ade orchestration dispatch --mission ${missionId} --prompt "<headline>"\`.`,
+				`  - Supervise strictly top-down (preferring tokens; native \`aexus-ade org subordinates|send|context\` for exceptions), manage waves via \`aexus-ade orchestration status|pause|resume|abort --mission ${missionId}\`, or escalate to Human Inbox via \`aexus-ade org escalate --mission ${missionId} --reason "<why>"\`.`,
 			);
 		} else if (resolvedSlot === 'segment_owner' || input.workTree.isMissionOwner === false) {
 			lines.push(
 				`- Off-Graph Supervisor (${tierTag}) Operations:`,
-				`  - Read Mission topology (\`aexus-ade mission blueprint get --mission ${missionId} --raw\`), monitor managed nodes (\`aexus-ade org subordinates --mission ${missionId} --json\` and \`aexus-ade org context <nodeOrAgentId>\`), intervene within your jurisdiction (\`aexus-ade org send\`, \`aexus-ade mission retry|recall|patch --mission ${missionId}\`), and escalate out-of-jurisdiction issues via \`aexus-ade org escalate --mission ${missionId} --reason "<why>"\`.`,
+				`  - Read Task DAG (\`aexus-ade mission blueprint get --mission ${missionId} --raw\`), monitor managed nodes (\`aexus-ade org subordinates --mission ${missionId} --json\` and \`aexus-ade org context <nodeOrAgentId>\`), intervene via tokens or exception \`aexus-ade org send\`, and escalate out-of-jurisdiction issues via \`aexus-ade org escalate --mission ${missionId} --reason "<why>"\`.`,
 			);
 		} else if (resolvedSlot === 'reviewer') {
 			lines.push(
 				`- In-Graph Mission Reviewer (${tierTag}) Operations (Node \`${input.workTree.nodeId ?? 'task'}\`):`,
-				'  - Audit upstream deliverables and advance or bounce tokens strictly via `aexus-ade token complete <tokenId> --summary "..."` | `aexus-ade token reject <tokenId> --reason "..."` | `aexus-ade token fail <tokenId> --reason "..."`.',
+				'  - Audit upstream deliverables and advance, return, or bounce tokens strictly via `aexus-ade token return <tokenId> --summary "..."` | `aexus-ade token complete <tokenId> --summary "..."` | `aexus-ade token reject <tokenId> --reason "..."` | `aexus-ade token fail <tokenId> --reason "..."`.',
 			);
 		}
 

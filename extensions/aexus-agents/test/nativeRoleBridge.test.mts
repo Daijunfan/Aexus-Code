@@ -337,6 +337,28 @@ describe('ADE Native Extension Role Bridge', () => {
 				{ id: 'a-1', role: 'assistant', text: 'The failure is a timeout.' },
 			]);
 		});
+
+		it('strips [Aexus System · Message from User (L-1)] envelope cleanly while keeping [Aexus System · Direct Message from Role] visible', () => {
+			const userWrapped = [
+				sharedModule.buildUserMessageSystemEnvelope(),
+				'',
+				sharedModule.AEXUS_PREAMBLE_END_MARKER,
+				'',
+				'Ship the release notes.',
+			].join('\n');
+			assert.strictEqual(stripPreamble(userWrapped), 'Ship the release notes.');
+			assert.strictEqual(sharedModule.hasAexusSystemMessageEnvelope(userWrapped), true);
+
+			const roleWrapped = [
+				sharedModule.AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER,
+				'- Message Type: Direct message from a higher-rank ADE Role (NOT a direct message from the Human User, and NOT a Baton Token).',
+				'- Sender Role: Platform Lead (Tier L1 · Governor, session: gov-1)',
+				'',
+				'Please audit module X.',
+			].join('\n');
+			assert.strictEqual(sharedModule.hasAexusSystemMessageEnvelope(roleWrapped), true);
+			assert.strictEqual(stripPreamble(roleWrapped), roleWrapped);
+		});
 	});
 
 	it('injects --append-system-prompt for Claude Governor, tracks session_id & hot-swap updates, and keeps pure Worker clean', async () => {

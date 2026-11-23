@@ -880,12 +880,16 @@ suite('AdeDocsBackendNodeService — single-copy API docs', () => {
 		await fs.promises.rm(baseDir, { recursive: true, force: true });
 	});
 
-	test('readApiDoc auto-syncs and returns common, L0, L2, mission and manifest docs', async () => {
+	test('readApiDoc auto-syncs and returns common, L0, L2, engineering, engineering-api, mission and manifest docs', async () => {
 		const docsPaths = buildAdeDocsPaths(baseDir, DEFAULT_ADE_ORGANIZATION_CONFIG.ranks.length);
 		const targets = [
 			{ target: 'common', canonical: 'common', expectedPath: docsPaths.commonDoc! },
 			{ target: 'L0', canonical: 'L0', expectedPath: docsPaths.rankDocs.L0 },
 			{ target: 'L2', canonical: 'L2', expectedPath: docsPaths.rankDocs.L2 },
+			{ target: 'engineering', canonical: 'engineering', expectedPath: docsPaths.engineeringParadigmDoc! },
+			{ target: 'paradigm', canonical: 'engineering', expectedPath: docsPaths.engineeringParadigmDoc! },
+			{ target: 'engineering-api', canonical: 'engineering-api', expectedPath: docsPaths.engineeringApiDoc! },
+			{ target: 'orchestration', canonical: 'engineering-api', expectedPath: docsPaths.engineeringApiDoc! },
 			{ target: 'mission', canonical: 'mission', expectedPath: docsPaths.missionDoc },
 			{ target: 'manifest', canonical: 'manifest', expectedPath: docsPaths.manifestFile! },
 		];
@@ -901,8 +905,10 @@ suite('AdeDocsBackendNodeService — single-copy API docs', () => {
 			assert.strictEqual(await fs.promises.readFile(expectedPath, 'utf8'), result.content);
 		}
 
-		// Lazy sync writes the full bundle, not only the first requested file.
+		// Lazy sync writes the full bundle, including sibling docs/engineering/.
 		assert.ok(fs.existsSync(docsPaths.commonDoc!));
+		assert.ok(fs.existsSync(docsPaths.engineeringParadigmDoc!));
+		assert.ok(fs.existsSync(docsPaths.engineeringApiDoc!));
 		assert.ok(fs.existsSync(docsPaths.missionDoc));
 		assert.ok(fs.existsSync(docsPaths.rankDocs.L1));
 		assert.ok(fs.existsSync(docsPaths.rankDocs.L4));
@@ -1097,7 +1103,8 @@ suite('AdeDocsBackendNodeService — single-copy API docs', () => {
 			const finalDisk = await service.loadInbox();
 			assert.ok(finalDisk.some(i => i.id === 'win-a-alert') && finalDisk.some(i => i.id === 'win-b-alert'));
 		} finally {
-			await fs.promises.rm(baseDir, { recursive: true, force: true });
+			service.dispose();
+			await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 		}
 	});
 
@@ -1380,7 +1387,8 @@ suite('AdeDocsBackendNodeService — single-copy API docs', () => {
 			assert.strictEqual((res.content ?? '').includes('STALE OLD COMMON DOC'), false, 'readApiDoc must resync instead of returning stale cached disk doc');
 			assert.ok((res.content ?? '').length > 100);
 		} finally {
-			await fs.promises.rm(baseDir, { recursive: true, force: true });
+			service.dispose();
+			await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 		}
 	});
 
@@ -1550,7 +1558,345 @@ suite('AdeDocsBackendNodeService — single-copy API docs', () => {
 			assert.strictEqual(resumeTimestamps.length, 1);
 			assert.ok(resumeTimestamps[0] > 0);
 		} finally {
-			await fs.promises.rm(baseDir, { recursive: true, force: true });
+			service.dispose();
+			await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		}
+	});
+
+	test('Item 9: AdeDocsBackendNodeService persists cold orchestration blobs/archive, daemon state, and executes headless controls with 0 windows', async () => {
+		const baseDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ade-daemon-cold-'));
+		try {
+			const service = testDisposables.add(new AdeDocsBackendNodeService({ baseDir }));
+			const missionId = 'm-headless-1';
+
+			// 1. Seed a mission record + cold externalized blob + archived terminal token
+			await service.saveMissionRecord(missionId, JSON.stringify({
+				id: missionId,
+				title: 'Headless Daemon Test',
+				orchestrationText: [
+					'flowchart LR',
+					'  CEO["@Alice · CEO (L1)"]',
+					'  subgraph Backend["Backend Dept"]',
+					'    BE_Lead["@Bob · Backend Lead (L2)"]',
+					'    WB_BE[("Whiteboard: Backend Spec")]',
+					'  end',
+					'  subgraph Frontend["Frontend Dept"]',
+					'    FE_Dev["@Carol · Frontend Dev (L3)"]',
+					'    WB_FE[("Whiteboard: Frontend Spec")]',
+					'  end',
+					'  CEO <--> BE_Lead',
+				].join('\n'),
+				whiteboards: {
+					WB_BE: { id: 'WB_BE', title: 'Backend Spec', department: 'Backend Dept', content: 'BACKEND_SECRET_SPEC_V1', version: 1, createdAt: 1000, updatedAt: 1200 },
+					WB_FE: { id: 'WB_FE', title: 'Frontend Spec', department: 'Frontend Dept', content: 'FRONTEND_SPEC_V1', version: 1, createdAt: 1000, updatedAt: 1200 },
+				},
+				orchestrationRuntime: {
+					missionId,
+					status: 'running',
+					tokenSeq: 2,
+					waveSeq: 1,
+					nodeAgentIds: { CEO: 'ag-ceo', BE_Lead: 'ag-be', FE_Dev: 'ag-fe' },
+					tokens: {
+						'otok-2': {
+							id: 'otok-2',
+							waveId: 'wave-1',
+							nodeId: 'BE_Lead',
+							status: 'active',
+							lastSummary: 'Active headless token',
+							createdAt: 1000,
+							updatedAt: 1500,
+							lastActivityAt: 1500,
+							nudgeCount: 0,
+							hopIndex: 1,
+							hopLog: [
+								{ hop: 0, fromNodeId: 'USER', toNodeId: 'CEO', summary: 'Start', at: 1000 },
+								{ hop: 1, fromNodeId: 'CEO', toNodeId: 'BE_Lead', summary: 'Active headless token', at: 1500 },
+							],
+						},
+					},
+					nodeStates: { CEO: 'idle', BE_Lead: 'active' },
+					payloadStore: {},
+					externalizedBlobIndex: {
+						'art-1': { ptr: 'art-1', kind: 'artifact', title: 'Cold Build Log', bytes: 24, createdAt: 1200 },
+					},
+					archivedTokenCount: 1,
+					traces: {},
+					updatedAt: 1500,
+				},
+			}), 1500);
+
+			await service.saveOrchestrationBlobs(missionId, [{
+				ptr: 'art-1',
+				payloadJson: JSON.stringify({ ptr: 'art-1', kind: 'artifact', title: 'Cold Build Log', content: 'COLD_BLOB_CONTENT_999999', sizeChars: 24, createdAt: 1200 }),
+			}]);
+			const readBlobRaw = await service.readOrchestrationBlob(missionId, 'art-1');
+			assert.ok(readBlobRaw && JSON.parse(readBlobRaw).content === 'COLD_BLOB_CONTENT_999999');
+
+			await service.appendOrchestrationArchive(missionId, [
+				JSON.stringify({ kind: 'token', archivedAt: 1400, token: { id: 'otok-1', waveId: 'wave-1', nodeId: 'CEO', status: 'handed_off', lastSummary: 'Archived CEO hop', hopLog: [{ hop: 0, fromNodeId: 'USER', toNodeId: 'CEO', headline: 'Archived CEO hop', timestamp: 1000 }] } }),
+			]);
+			const archiveLines = await service.readOrchestrationArchive(missionId, { limit: 10 });
+			assert.strictEqual(archiveLines.length, 1);
+
+			// 2. Sync & persist main-process daemon snapshot
+			await service.syncOrchestrationDaemonState({
+				missionId,
+				status: 'running',
+				activeTokenCount: 1,
+				blockedTokenCount: 0,
+				waitingJoinCount: 0,
+				updatedAt: 1500,
+			});
+			const daemonSnaps = await service.getOrchestrationDaemonState();
+			assert.strictEqual(Object.keys(daemonSnaps).length, 1);
+			assert.strictEqual(daemonSnaps[missionId]?.missionId, missionId);
+
+			// 3. Headless CLI actions work with 0 renderer windows open!
+			const stRes = await service.executeHeadlessOrchestrationControl('orchestration.status', { missionId });
+			assert.strictEqual(stRes.handled, true);
+			assert.strictEqual((stRes.result as { readonly headless?: boolean; readonly activeCount?: number }).headless, true);
+			assert.strictEqual((stRes.result as { readonly activeCount?: number }).activeCount, 1);
+
+			const readRes = await service.executeHeadlessOrchestrationControl('token.read', { missionId, ptrs: ['art-1', 'wb:WB_BE'] });
+			assert.strictEqual(readRes.handled, true);
+			const readItems = (readRes.result as { readonly items: readonly { readonly ok: boolean; readonly content?: string }[] }).items;
+			assert.strictEqual(readItems[0].ok, true);
+			assert.strictEqual(readItems[0].content, 'COLD_BLOB_CONTENT_999999');
+			assert.strictEqual(readItems[1].ok, true);
+			assert.strictEqual(readItems[1].content, 'BACKEND_SECRET_SPEC_V1');
+
+			// Headless whiteboard.list (with --department filter) & whiteboard.read + department scoping
+			const wbListBe = await service.executeHeadlessOrchestrationControl('whiteboard.list', { missionId, department: 'Backend Dept' });
+			assert.strictEqual(wbListBe.handled, true);
+			const beWbs = (wbListBe.result as { readonly whiteboards: readonly { readonly whiteboardId: string }[] }).whiteboards;
+			assert.deepStrictEqual(beWbs.map(w => w.whiteboardId), ['WB_BE']);
+
+			const wbReadBe = await service.executeHeadlessOrchestrationControl('whiteboard.read', { missionId, id: 'WB_BE', caller: 'manager', callerSessionId: 'ag-be' });
+			assert.strictEqual(wbReadBe.handled, true);
+			assert.strictEqual((wbReadBe.result as { readonly whiteboard?: { readonly content?: string } }).whiteboard?.content, 'BACKEND_SECRET_SPEC_V1');
+
+			// Cross-department Frontend Dev cannot read Backend whiteboard headlessly via whiteboard.read OR token.read!
+			const wbReadCross = await service.executeHeadlessOrchestrationControl('whiteboard.read', { missionId, id: 'WB_BE', caller: 'employee', callerSessionId: 'ag-fe' });
+			assert.strictEqual(wbReadCross.handled, true);
+			assert.match(wbReadCross.error ?? '', /FORBIDDEN/i);
+
+			const tokReadCross = await service.executeHeadlessOrchestrationControl('token.read', { missionId, ptrs: ['wb:WB_BE'], caller: 'employee', callerSessionId: 'ag-fe' });
+			assert.strictEqual(tokReadCross.handled, true);
+			const crossItems = (tokReadCross.result as { readonly items: readonly { readonly ok: boolean; readonly error?: string }[] }).items;
+			assert.strictEqual(crossItems[0].ok, false);
+			assert.match(crossItems[0].error ?? '', /FORBIDDEN/i);
+
+			const histRes = await service.executeHeadlessOrchestrationControl('token.history', { missionId, tokenId: 'otok-1' });
+			assert.strictEqual(histRes.handled, true);
+			assert.strictEqual((histRes.result as { readonly archived?: boolean }).archived, true);
+
+			// Verified AdeControlServer capability token (`_verifiedCaller: true, _callerSessionId`) is honored and subordinate CANNOT pause/abort headlessly!
+			const wbReadVerified = await service.executeHeadlessOrchestrationControl('whiteboard.read', {
+				missionId,
+				id: 'WB_BE',
+				caller: 'manager',
+				_verifiedCaller: true,
+				_callerSessionId: 'ag-be',
+			});
+			assert.strictEqual(wbReadVerified.handled, true);
+			assert.strictEqual((wbReadVerified.result as { readonly whiteboard?: { readonly content?: string } }).whiteboard?.content, 'BACKEND_SECRET_SPEC_V1');
+
+			const subAbortDenied = await service.executeHeadlessOrchestrationControl('orchestration.abort', {
+				missionId,
+				caller: 'employee',
+				_verifiedCaller: true,
+				_callerSessionId: 'ag-fe',
+				reason: 'Unauthorized worker abort',
+			});
+			assert.strictEqual(subAbortDenied.handled, true);
+			assert.match(subAbortDenied.error ?? '', /FORBIDDEN/i);
+
+			const subPauseDenied = await service.executeHeadlessOrchestrationControl('orchestration.pause', {
+				missionId,
+				caller: 'manager',
+				_verifiedCaller: true,
+				_callerSessionId: 'ag-be',
+			});
+			assert.strictEqual(subPauseDenied.handled, true);
+			assert.match(subPauseDenied.error ?? '', /FORBIDDEN/i);
+
+			const pauseRes = await service.executeHeadlessOrchestrationControl('orchestration.pause', { missionId, reason: 'Headless maintenance' });
+			assert.strictEqual(pauseRes.handled, true);
+			assert.strictEqual((pauseRes.result as { readonly status?: string }).status, 'paused');
+
+			const resumeRes = await service.executeHeadlessOrchestrationControl('orchestration.resume', { missionId });
+			assert.strictEqual(resumeRes.handled, true);
+			assert.strictEqual((resumeRes.result as { readonly status?: string }).status, 'running');
+
+			const abortRes = await service.executeHeadlessOrchestrationControl('orchestration.abort', { missionId, reason: 'Headless emergency stop' });
+			assert.strictEqual(abortRes.handled, true);
+			assert.deepStrictEqual((abortRes.result as { readonly abortedTokenIds?: readonly string[] }).abortedTokenIds, ['otok-2']);
+
+			// 4. deleteMissionRecord cleans up .blobs/, .archive.jsonl, and daemon snapshot entry
+			await service.deleteMissionRecord(missionId);
+			assert.strictEqual(await service.readOrchestrationBlob(missionId, 'art-1'), undefined);
+			assert.deepStrictEqual(await service.getOrchestrationDaemonState(), {});
+		} finally {
+			service.dispose();
+			await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		}
+	});
+
+	test('Headless daemon executes token.current/return (omitted --mission), whiteboard.write, mission.task.complete, queues pendingHeadlessEffects, and re-syncs watchdog on resume', async () => {
+		const baseDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ade-daemon-full-'));
+		try {
+			const service = testDisposables.add(new AdeDocsBackendNodeService({ baseDir }));
+			const missionId = 'm-headless-full';
+			const now0 = 10_000;
+
+			await service.saveMissionRecord(missionId, JSON.stringify({
+				id: missionId,
+				title: 'Headless Continuity Test',
+				mermaidText: [
+					'flowchart LR',
+					'  T_BE["Backend Task"]',
+					'  %% task T_BE [owner=BE_Lead, dept="Backend Dept"]',
+				].join('\n'),
+				orchestrationText: [
+					'flowchart LR',
+					'  CEO["@Alice · CEO (L1)"]',
+					'  subgraph Backend["Backend Dept"]',
+					'    BE_Lead["@Bob · Backend Lead (L2)"]',
+					'    WB_BE[("Whiteboard: Backend Spec")]',
+					'  end',
+					'  CEO <--> BE_Lead',
+					'  %% staff CEO [tier=1, rank=governor]',
+					'  %% staff BE_Lead [tier=2, rank=manager, dept="Backend Dept"]',
+				].join('\n'),
+				whiteboards: {
+					WB_BE: { id: 'WB_BE', title: 'Backend Spec', department: 'Backend Dept', content: 'v1', version: 1, createdAt: now0, updatedAt: now0 },
+				},
+				orchestrationRuntime: {
+					missionId,
+					status: 'running',
+					tokenSeq: 2,
+					waveSeq: 1,
+					traceSeq: 2,
+					payloadSeq: 0,
+					nodeAgentIds: { CEO: 'ag-ceo', BE_Lead: 'ag-be' },
+					tokens: {
+						'otok-1': {
+							id: 'otok-1',
+							waveId: 'wave-1',
+							nodeId: 'CEO',
+							holderAgentId: 'ag-ceo',
+							status: 'waiting_join',
+							lastSummary: 'Split to BE_Lead',
+							compressedHistory: 'Started headless wave',
+							tracePtr: 'otrc-1',
+							arrivedAt: now0,
+							lastActivityAt: now0,
+							nudgeCount: 0,
+							hopIndex: 0,
+							hopLog: [{ hop: 0, tokenId: 'otok-1', event: 'dispatch', fromNodeId: 'User', toNodeId: 'CEO', headline: 'Start', timestamp: now0 }],
+							joinBarrierId: 'jb-1',
+							childTokenIds: ['otok-2'],
+						},
+						'otok-2': {
+							id: 'otok-2',
+							waveId: 'wave-1',
+							parentTokenId: 'otok-1',
+							rootTokenId: 'otok-1',
+							originNodeId: 'CEO',
+							returnToNodeId: 'CEO',
+							parentJoinBarrierId: 'jb-1',
+							nodeId: 'BE_Lead',
+							holderAgentId: 'ag-be',
+							status: 'active',
+							taskNodeId: 'T_BE',
+							taskNodeIds: ['T_BE'],
+							lastSummary: 'Implement Backend Task',
+							compressedHistory: 'Minted from CEO',
+							tracePtr: 'otrc-2',
+							arrivedAt: now0,
+							lastActivityAt: now0,
+							nudgeCount: 0,
+							hopIndex: 1,
+							hopLog: [{ hop: 1, tokenId: 'otok-2', event: 'mint', fromNodeId: 'CEO', toNodeId: 'BE_Lead', headline: 'Implement Backend Task', timestamp: now0 }],
+						},
+					},
+					joinBarriers: {
+						'jb-1': {
+							id: 'jb-1',
+							waveId: 'wave-1',
+							parentTokenId: 'otok-1',
+							ownerNodeId: 'CEO',
+							childTokenIds: ['otok-2'],
+							mode: 'all',
+							status: 'waiting',
+							settledChildren: {},
+							createdAt: now0,
+						},
+					},
+					nodeStates: { CEO: 'waiting', BE_Lead: 'active' },
+					payloadStore: {},
+					traces: {},
+					updatedAt: now0,
+				},
+			}), now0);
+
+			const beCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: 'ag-be' };
+
+			// 1. Omitting --mission resolves missionId from verified _callerSessionId on token.current, whiteboard.write, mission.task.complete, and token.return!
+			const curRes = await service.executeHeadlessOrchestrationControl('token.current', { ...beCaller });
+			assert.strictEqual(curRes.handled, true, curRes.error);
+			assert.strictEqual(curRes.error, undefined);
+			const curTokens = (curRes.result as { readonly tokens: readonly { readonly id: string }[] }).tokens;
+			assert.deepStrictEqual(curTokens.map(t => t.id), ['otok-2']);
+
+			const wbRes = await service.executeHeadlessOrchestrationControl('whiteboard.write', { ...beCaller, id: 'WB_BE', content: 'v2 headless' });
+			assert.strictEqual(wbRes.handled, true, wbRes.error);
+			assert.strictEqual(wbRes.error, undefined);
+			assert.strictEqual((wbRes.result as { readonly whiteboard: { readonly version: number } }).whiteboard.version, 2);
+
+			const taskRes = await service.executeHeadlessOrchestrationControl('mission.task.complete', { ...beCaller, nodeId: 'T_BE', note: 'Verified headlessly' });
+			assert.strictEqual(taskRes.handled, true, taskRes.error);
+			assert.strictEqual(taskRes.error, undefined);
+			assert.strictEqual((taskRes.result as { readonly status: { readonly status: string } }).status.status, 'completed');
+
+			const retRes = await service.executeHeadlessOrchestrationControl('token.return', { ...beCaller, tokenId: 'otok-2', summary: 'Backend ready headlessly' });
+			assert.strictEqual(retRes.handled, true, retRes.error);
+			assert.strictEqual(retRes.error, undefined);
+			assert.strictEqual((retRes.result as { readonly barrierSatisfied?: boolean }).barrierSatisfied, true);
+
+			// 2. Verify cold disk snapshot persisted pendingHeadlessEffects (dispatch_token -> CEO otok-1) and updated whiteboard/task!
+			const savedRaw = await service.loadMissionRecord(missionId);
+			assert.ok(savedRaw);
+			const saved = JSON.parse(savedRaw) as {
+				readonly whiteboards?: Record<string, { readonly content: string; readonly version: number }>;
+				readonly taskStatuses?: Record<string, { readonly status: string }>;
+				readonly orchestrationRuntime?: {
+					readonly tokens?: Record<string, { readonly status: string }>;
+					readonly pendingHeadlessEffects?: readonly { readonly kind: string; readonly nodeId?: string; readonly tokenId?: string }[];
+				};
+			};
+			assert.strictEqual(saved.whiteboards?.WB_BE?.content, 'v2 headless');
+			assert.strictEqual(saved.taskStatuses?.T_BE?.status, 'completed');
+			assert.strictEqual(saved.orchestrationRuntime?.tokens?.['otok-1']?.status, 'active');
+			assert.ok(
+				saved.orchestrationRuntime?.pendingHeadlessEffects?.some(e => e.kind === 'dispatch_token' && e.nodeId === 'CEO' && e.tokenId === 'otok-1'),
+				'Headless token.return must persist pendingHeadlessEffects for renderer recovery',
+			);
+
+			// 3. Pause + Resume headlessly re-registers active token with Watchdog!
+			const pauseRes = await service.executeHeadlessOrchestrationControl('orchestration.pause', { missionId, reason: 'Maintenance' });
+			assert.strictEqual(pauseRes.handled, true);
+			assert.strictEqual((pauseRes.result as { readonly status?: string }).status, 'paused');
+
+			const resumeRes = await service.executeHeadlessOrchestrationControl('orchestration.resume', { missionId });
+			assert.strictEqual(resumeRes.handled, true);
+			assert.strictEqual((resumeRes.result as { readonly status?: string }).status, 'running');
+			const daemonAfterResume = await service.getOrchestrationDaemonState();
+			assert.strictEqual(daemonAfterResume[missionId]?.status, 'running');
+			assert.strictEqual(daemonAfterResume[missionId]?.activeTokenCount, 1);
+		} finally {
+			service.dispose();
+			await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 		}
 	});
 });

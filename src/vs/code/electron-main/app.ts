@@ -1580,6 +1580,7 @@ export class CodeApplication extends Disposable {
 
 			throw new Error('No open Aexus Code workbench window available for ADE control');
 		};
+		let adeDocsBackendServiceRef: AdeDocsBackendNodeService | undefined;
 		const adeControlServer = this._register(new AdeControlServer(async (request, windowId, options) => {
 			if (request.action === 'host.windowVisibility') {
 				return {
@@ -1591,7 +1592,28 @@ export class CodeApplication extends Disposable {
 					})),
 				};
 			}
-			const targetWindow = await resolveAdeTargetWindow(windowId, options?.softWindowPin);
+			let targetWindow: ICodeWindow;
+			try {
+				targetWindow = await resolveAdeTargetWindow(windowId, options?.softWindowPin);
+			} catch (err) {
+				// Headless main-process daemon continuity: when 0 workbench windows are open,
+				// serve eligible Orchestration transitions/inspection/pointer-read actions
+				// directly against cold storage & main-process Watchdog without dropping the CLI
+				// (including authenticated agent sessions whose capability token carries a soft-pinned wid!).
+				if (adeDocsBackendServiceRef && (!windowId || options?.softWindowPin)) {
+					const headless = await adeDocsBackendServiceRef.executeHeadlessOrchestrationControl(
+						request.action,
+						(request.params && typeof request.params === 'object' ? request.params as Readonly<Record<string, unknown>> : {}),
+					);
+					if (headless.handled) {
+						if (headless.error) {
+							throw new Error(headless.error);
+						}
+						return headless.result;
+					}
+				}
+				throw err;
+			}
 			const targetClientId = `window:${targetWindow.id}`;
 			const router: IClientRouter<string> = {
 				routeCall: async (hub: IConnectionHub<string>): Promise<IPCClientConnection<string>> => {
@@ -1641,6 +1663,7 @@ export class CodeApplication extends Disposable {
 		const adeDocsBackendService = this._register(new AdeDocsBackendNodeService({
 			remoteProbe: adeCloudHostNodeService,
 		}));
+		adeDocsBackendServiceRef = adeDocsBackendService;
 		const adeEngineeringBackendChannel = this._register(new AdeEngineeringBackendChannel(adeDocsBackendService));
 		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, adeEngineeringBackendChannel);
 		// Wake ADE Mission Watchdog & heal SSH reverse bridges / persistent remote reattach loops immediately on OS resume.

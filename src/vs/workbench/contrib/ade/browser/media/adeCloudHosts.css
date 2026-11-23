@@ -668,9 +668,12 @@
 	background: color-mix(in srgb, #0078d4 16%, transparent);
 }
 
-.monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-enterprise-linux,
-.monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-linux {
+.monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-enterprise-linux {
 	background: color-mix(in srgb, #38bdf8 14%, transparent);
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-linux {
+	background: color-mix(in srgb, #f5c211 18%, transparent);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-card-titles {

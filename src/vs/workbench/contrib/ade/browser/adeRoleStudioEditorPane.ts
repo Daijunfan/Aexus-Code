@@ -242,7 +242,7 @@ function getApiCategoryList(): readonly { readonly id: AdePrimitiveApiCategory; 
 		{ id: 'messaging', title: adeBi(localize('adeRoleCatMessaging', "Messaging, Context & Human Inbox"), '消息通信、上下文与人工收件箱') },
 		{ id: 'hierarchy', title: adeBi(localize('adeRoleCatHierarchy', "Hierarchy & Session Lifecycle"), '组织层级与会话生命周期') },
 		{ id: 'workspace', title: adeBi(localize('adeRoleCatWorkspace', "Workspace, Files & Cloud Hosts"), '工作区、文件与云主机') },
-		{ id: 'mission', title: adeBi(localize('adeRoleCatMission', "Mission DAG Workflow"), '任务流图（Mission DAG）编排') },
+		{ id: 'mission', title: adeBi(localize('adeRoleCatMission', "Engineering (Mission & Orchestration)"), '工程编排（任务图与员工协作）') },
 	];
 }
 
@@ -255,7 +255,6 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 	private readonly projectsService: IAdeProjectsService | undefined;
 	private draft: IMutableOrgDraft;
 	private selectedRankId: string;
-	private previewOffGraphMaxTier = 0;
 	private viewMode: 'editor' | 'matrix' = 'editor';
 	private dirty = false;
 	private isSaving = false;
@@ -706,9 +705,9 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		append(titleGroup, $('p.ade-rs-subtitle', {}, adeBi(
 			localize(
 				'adeRoleStudioSubtitle',
-				"Design a unified dynamic 1..N agent hierarchy for Projects, Sessions, and Mission v2: define ranks, preview the Off-Graph vs. In-Graph Factory Wall (offGraphMaxTier), author init prompts, and grant fixed kernel APIs.",
+				"Design a unified dynamic 1..N all-staff hierarchy for Projects, Sessions, and Engineering (Mission Task DAG + Orchestration Staff Topology): all ranks collaborate on one canvas with token relay batons, runtime subordinate expansion, and scoped kernel APIs.",
 			),
-			'统一设计项目树、会话与任务图 v2 的 1..N 动态职级体系：自定义任意层级、预览厂外监工与厂内执行边界（offGraphMaxTier）、编写初始化提示词并配置固定内核 API 权限。',
+			'统一设计项目树、会话与工程模块（Mission 任务 DAG + Orchestration 全员自由编排）的 1..N 动态职级体系：全员同场入画、令牌接力驱动、运行时弹性扩编并配置固定内核 API 权限。',
 		)));
 
 		const toolbar = append(headerTop, $('.ade-rs-toolbar', {
@@ -802,81 +801,52 @@ export class AdeRoleStudioEditorPane extends EditorPane {
 		addViewTab('editor', adeBi(localize('adeRoleStudioViewEditor', "Rank Editor"), '职级编辑器'), Codicon.edit);
 		addViewTab('matrix', adeBi(localize('adeRoleStudioViewMatrix', "Permission Matrix"), '权限矩阵'), Codicon.table);
 
-		// Primary Mission v2 Dynamic 1..N Tiers & Factory Wall (offGraphMaxTier) Alignment Bar
+		// Unified Engineering All-Staff Dynamic 1..N Hierarchy Bar (no off-graph wall — all ranks enter Orchestration together!)
 		const normalizedForSlots = draftToConfig(this.draft);
 		const sortedSlotRanks = [...this.draft.ranks].sort((a, b) => a.tier - b.tier);
-		const maxWallCutoff = Math.max(0, sortedSlotRanks.length - 1);
-		if (this.previewOffGraphMaxTier > maxWallCutoff) {
-			this.previewOffGraphMaxTier = maxWallCutoff;
-		}
+		const topRank = sortedSlotRanks[0];
 		const wallBar = append(header, $('.ade-rs-factory-wall-bar', {
 			role: 'group',
-			'aria-label': adeBi(localize('adeRoleStudioWallBarAria', "Mission v2 Dynamic Ranks and Factory Wall Alignment"), '任务图 v2 动态职级与厂内外分界线预览'),
+			'aria-label': adeBi(localize('adeRoleStudioAllStaffBarAria', "Engineering All-Staff Dynamic Hierarchy"), '工程模块全员同场动态职级体系'),
 			'data-ade-rs-factory-wall-bar': 'true',
 			'data-dynamic-rank-count': String(sortedSlotRanks.length),
-			'data-off-graph-max-tier': String(this.previewOffGraphMaxTier),
+			'data-all-staff-on-canvas': 'true',
 		}));
 		const wallHead = append(wallBar, $('.ade-rs-wall-head'));
 		const wallTitleWrap = append(wallHead, $('.ade-rs-wall-title-wrap'));
-		append(wallTitleWrap, $('span.ade-rs-wall-v2-badge', {}, adeBi(localize('adeRoleStudioWallV2Tag', "Mission v2 · 1..{0} Dynamic Tiers", sortedSlotRanks.length), '任务图 v2 · 1..{0} 动态职级', sortedSlotRanks.length)));
-		append(wallTitleWrap, $('span.ade-rs-presets-label', {}, adeBi(
-			localize('adeRoleStudioWallBarTitle', "Factory Wall (offGraphMaxTier) — Off-Graph Supervisors vs. In-Graph Executors"),
-			'厂内外分界线（offGraphMaxTier）— 图外监工层 vs 图内执行层',
+		append(wallTitleWrap, $('span.ade-rs-wall-v2-badge', {}, adeBi(
+			localize('adeRoleStudioEngAllStaffTag', "Engineering · 1..{0} All-Staff On Canvas", sortedSlotRanks.length),
+			'工程编排 · 1..{0} 全员同场入画',
+			sortedSlotRanks.length,
 		)));
-
-		const wallCutoffWrap = append(wallHead, $('label.ade-rs-wall-cutoff-control'));
-		append(wallCutoffWrap, $('span', {}, adeBi(localize('adeRoleStudioWallCutoffLabel', "Preview Cutoff:"), '预览分界线：')));
-		const wallCutoffSelect = append(wallCutoffWrap, $('select.ade-rs-select.ade-rs-wall-cutoff-select', {
-			'data-ade-rs-wall-cutoff': 'true',
-			'aria-label': adeBi(localize('adeRoleStudioWallCutoffAria', "Preview Factory Wall offGraphMaxTier cutoff"), '预览厂外监工职级上限'),
-		})) as HTMLSelectElement;
-		for (let k = 0; k <= maxWallCutoff; k++) {
-			const opt = append(wallCutoffSelect, $('option', { value: String(k) }, k === 0
-				? adeBi(localize('adeRoleStudioWallOptL0', "L0 only (Secretary)"), '仅 L0（秘书监工）')
-				: adeBi(localize('adeRoleStudioWallOptLk', "L0..L{0} off-graph", k), 'L0..L{0} 图外监工', k),
-			)) as HTMLOptionElement;
-			opt.selected = k === this.previewOffGraphMaxTier;
-		}
-		this.renderDisposables.add(addDisposableListener(wallCutoffSelect, EventType.CHANGE, () => {
-			const parsed = Number.parseInt(wallCutoffSelect.value, 10);
-			if (Number.isInteger(parsed) && parsed >= 0) {
-				this.previewOffGraphMaxTier = Math.min(maxWallCutoff, parsed);
-				this.render();
-			}
-		}));
+		append(wallTitleWrap, $('span.ade-rs-presets-label', {}, adeBi(
+			localize(
+				'adeRoleStudioAllStaffDesc',
+				"All ranks collaborate on one cyclic Orchestration canvas · {0} marks Mission tasks Completed · Higher ranks dynamically create subordinates at runtime.",
+				topRank ? `${formatTierTag(topRank.tier)} ${topRank.name}` : 'L1',
+			),
+			'取消场内外隔离墙，全部职级同场协作 · 由 {0} 负责标注任务已完成 · 上级可在运行中动态扩编下级员工。',
+			topRank ? `${formatTierTag(topRank.tier)} ${topRank.name}` : 'L1',
+		)));
 
 		const wallLanes = append(wallBar, $('.ade-rs-wall-lanes'));
-		const offGraphLane = append(wallLanes, $('.ade-rs-wall-lane.off-graph', { 'data-ade-rs-wall-zone': 'off-graph' }));
-		append(offGraphLane, $('.ade-rs-wall-lane-label', {}, adeBi(
-			localize('adeRoleStudioOffGraphLaneLabel', "Off-Graph Supervisors (L0..L{0})", this.previewOffGraphMaxTier),
-			'厂外监工层（L0..L{0} · 不上流程图）',
-			this.previewOffGraphMaxTier,
+		const allStaffLane = append(wallLanes, $('.ade-rs-wall-lane.in-graph', { 'data-ade-rs-wall-zone': 'all-staff' }));
+		append(allStaffLane, $('.ade-rs-wall-lane-label', {}, adeBi(
+			localize('adeRoleStudioAllStaffLaneLabel', "Unified Orchestration Roster (L0 + L1..L{0} · Unique 1:1 Nodes)", sortedSlotRanks.length),
+			'全员编排梯队（L0 + L1..L{0} · 每名员工画布唯一存在）',
+			sortedSlotRanks.length,
 		)));
-		const offGraphChips = append(offGraphLane, $('.ade-rs-wall-chips'));
-		append(offGraphChips, $('span.ade-rs-wall-chip.is-secretary', { 'data-wall-tier': '0' }, adeBi(localize('adeRoleStudioWallL0Chip', "L0 · Secretary"), 'L0 · 秘书')));
-		for (const r of sortedSlotRanks.filter(rank => rank.tier <= this.previewOffGraphMaxTier)) {
-			append(offGraphChips, $('span.ade-rs-wall-chip', { 'data-wall-tier': String(r.tier), 'data-wall-rank-id': r.id }, `${formatTierTag(r.tier)} · ${r.name}`));
-		}
-
-		const inGraphRanks = sortedSlotRanks.filter(rank => rank.tier > this.previewOffGraphMaxTier);
-		const inGraphLane = append(wallLanes, $('.ade-rs-wall-lane.in-graph', { 'data-ade-rs-wall-zone': 'in-graph' }));
-		const minInTier = inGraphRanks[0]?.tier ?? 1;
-		const maxInTier = inGraphRanks[inGraphRanks.length - 1]?.tier ?? minInTier;
-		append(inGraphLane, $('.ade-rs-wall-lane-label', {}, adeBi(
-			localize('adeRoleStudioInGraphLaneLabel', "In-Graph Mission Nodes (L{0}..L{1})", minInTier, maxInTier),
-			'厂内执行节点（L{0}..L{1} · 流程图上运行）',
-			minInTier,
-			maxInTier,
-		)));
-		const inGraphChips = append(inGraphLane, $('.ade-rs-wall-chips'));
-		for (const r of inGraphRanks) {
-			const chipText = r.pureExecution
-				? `${formatTierTag(r.tier)} · ${r.name} · ${adeBi(localize('adeRoleStudioWallPureTag', "Pure"), '纯执行')}`
-				: `${formatTierTag(r.tier)} · ${r.name}`;
-			append(inGraphChips, $(`span.ade-rs-wall-chip${r.pureExecution ? '.is-pure' : ''}`, {
+		const allStaffChips = append(allStaffLane, $('.ade-rs-wall-chips'));
+		append(allStaffChips, $('span.ade-rs-wall-chip.is-secretary', { 'data-wall-tier': '0' }, adeBi(localize('adeRoleStudioWallL0Chip', "L0 · Secretary"), 'L0 · 秘书')));
+		for (const r of sortedSlotRanks) {
+			const isTop = r.tier === (topRank?.tier ?? 1);
+			const suffix = isTop
+				? ` · ${adeBi(localize('adeRoleStudioTopTaskAuth', "Task Sign-Off"), '任务验收')}`
+				: (r.pureExecution ? ` · ${adeBi(localize('adeRoleStudioWallPureTag', "Leaf"), '执行')}` : '');
+			append(allStaffChips, $(`span.ade-rs-wall-chip${r.pureExecution ? '.is-pure' : ''}${isTop ? '.is-top-rank' : ''}`, {
 				'data-wall-tier': String(r.tier),
 				'data-wall-rank-id': r.id,
-			}, chipText));
+			}, `${formatTierTag(r.tier)} · ${r.name}${suffix}`));
 		}
 
 		// Legacy v1 Work-Tree DAG 4-Slot Compatibility Mapping Bar (preserved for backward compatibility)

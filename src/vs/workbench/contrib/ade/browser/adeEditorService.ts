@@ -21,10 +21,12 @@ import { IWorkbenchModeService } from '../../../services/workbenchMode/common/wo
 import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { ChatModeKind } from '../../chat/common/constants.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
+import { ADE_SECRETARY_ID, AdeEngineeringViewMode, encodeAdeEngineeringInputSpec, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
 import { onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
+import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
+import { IAdeMissionService } from './adeMissionStore.js';
 import { AdeCloudHostsEditorInput, AdeCloudHostsEditorPane } from './adeCloudHostsEditorPane.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
 import { AdeConfigEditorInput } from './adeConfigEditorPane.js';
@@ -117,7 +119,32 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 			this.scheduleRoleContextSync();
 		}));
 		this._register(this.editorService.onDidActiveEditorChange(() => this.handleActiveEditorChanged()));
+		queueMicrotask(() => {
+			if (this._store.isDisposed) {
+				return;
+			}
+			const missionService = this.tryGetMissionService();
+			if (missionService) {
+				this._register(missionService.onDidChange(() => this.scheduleRoleContextSync()));
+			}
+		});
 		this.scheduleRoleContextSync();
+	}
+
+	private tryGetMissionService(): IAdeMissionService | undefined {
+		try {
+			return this.instantiationService.invokeFunction(accessor => accessor.get(IAdeMissionService));
+		} catch {
+			return undefined;
+		}
+	}
+
+	private tryGetMissionRuntimeService(): IAdeMissionRuntimeService | undefined {
+		try {
+			return this.instantiationService.invokeFunction(accessor => accessor.get(IAdeMissionRuntimeService));
+		} catch {
+			return undefined;
+		}
 	}
 
 	get activeEditor(): EditorInput | undefined {
@@ -193,7 +220,16 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 			this.roleSyncTimer = undefined;
 		}
 		try {
-			const snapshot = buildAdeRoleSyncSnapshot(this.modeService, this.projects, this, this.sessions, explicitActiveAgentId, this.roleSchemaService?.getConfig());
+			const snapshot = buildAdeRoleSyncSnapshot(
+				this.modeService,
+				this.projects,
+				this,
+				this.sessions,
+				explicitActiveAgentId,
+				this.roleSchemaService?.getConfig(),
+				this.roleSchemaService?.getDocsPaths?.(),
+				this.tryGetMissionRuntimeService(),
+			);
 			const snapshotKey = JSON.stringify(snapshot);
 			if (!explicitActiveAgentId && snapshotKey === this.lastSyncedSnapshotKey) {
 				return;
@@ -380,13 +416,27 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		}
 	}
 
-	async openEngineering(governorId: string, options?: { side?: boolean }): Promise<void> {
+	async openEngineering(governorId: string, options?: { side?: boolean; viewMode?: AdeEngineeringViewMode; openSiblingViews?: boolean }): Promise<void> {
 		const gov = this.projects.getAgent(governorId);
 		if (gov) {
 			this.projects.selectProject(gov.projectUri);
 		}
 		const targetGroup = this.resolveTargetGroup(options?.side);
-		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, governorId);
+		if (options?.openSiblingViews) {
+			const missionInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(governorId, 'mission'));
+			const orchInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(governorId, 'orchestration'));
+			const focusView = options.viewMode ?? 'orchestration';
+			if (focusView === 'mission') {
+				await this.editorService.openEditor(orchInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup.id);
+				await this.editorService.openEditor(missionInput, { pinned: true }, targetGroup.id);
+			} else {
+				await this.editorService.openEditor(missionInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup.id);
+				await this.editorService.openEditor(orchInput, { pinned: true }, targetGroup.id);
+			}
+			return;
+		}
+		const spec = options?.viewMode ? encodeAdeEngineeringInputSpec(governorId, options.viewMode) : encodeAdeEngineeringInputSpec(governorId, 'orchestration');
+		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, spec);
 		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
 	}
 

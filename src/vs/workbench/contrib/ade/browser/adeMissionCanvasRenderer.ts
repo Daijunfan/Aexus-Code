@@ -30,14 +30,36 @@ import {
 import {
 	computeMissionNodeContextBreakdown,
 	formatCompactTokenCount,
-	IMissionJoinBarrier,
 	IMissionRuntimeState,
 	IMissionSourceTrigger,
 	IMissionToken,
 	inferModelContextWindowTokens,
-	MissionTokenStatus,
 } from '../../../../platform/ade/common/adeMissionEngine.js';
 import { formatFinOpsUsd } from '../../../../platform/ade/common/adeModelPricing.js';
+import {
+	IMissionTaskStatusRecord,
+	IOrchestrationRuntimeState,
+	IOrchestrationToken,
+	IOrchestrationWhiteboard,
+} from '../../../../platform/ade/common/adeOrchestrationEngine.js';
+import {
+	ADE_NODE_COLOR_PRESETS,
+	normalizeAdeNodeColor,
+	resolveAdeNodeColorHex,
+} from '../../../../platform/ade/common/adeNodeColors.js';
+import {
+	computeOrchestrationAnchorPoint,
+	computeOrchestrationMultiAnchorRoutes,
+	getOrchestrationAnchorFraction,
+	getOrchestrationNodeSize,
+	IOrchestrationDepartmentGroup,
+	IOrchestrationGraphEdge,
+	IOrchestrationGraphNode,
+	ORCHESTRATION_ANCHOR_SIDES,
+	ORCHESTRATION_SLOTS_PER_SIDE,
+	OrchestrationAnchorSide,
+	OrchestrationLayoutMode,
+} from '../../../../platform/ade/common/adeOrchestrationGraph.js';
 import { IAdeOrganizationConfig, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
 import {
@@ -46,18 +68,17 @@ import {
 	resolveEffectiveAdeLlmProvider,
 } from '../../../browser/adeLlmIcon.js';
 import { renderAdeOsIcon } from '../../../browser/adeOsIcon.js';
-import { IAdeAgent } from '../common/ade.js';
+import { AdeEngineeringViewMode, IAdeAgent } from '../common/ade.js';
 import { adeBi } from '../common/adeLocalization.js';
 import {
 	AdeMissionHostCatalog,
 	applyMissionEngineIcon,
 	MISSION_ENGINE_DEFAULT_MODELS,
-	serializeMissionEngineIconKey,
 } from './adeMissionHostCatalog.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const NODE_DRAG_THRESHOLD_PX = 5;
-const NODE_DRAG_EXCLUSION_SELECTOR = '.ade-mission-inline-rename-input, .ade-mission-port.port-out.is-connectable';
+const NODE_DRAG_EXCLUSION_SELECTOR = '.ade-mission-inline-rename-input, .ade-mission-port.port-out.is-connectable, .ade-orch-anchor.is-connectable';
 const NODE_SUB_INTERACTIVE_SELECTOR = 'button:not(:disabled), .ade-mission-core-model-row.is-editable, input, textarea, select, [contenteditable="true"]';
 export const MISSION_EDGE_TRANSIT_DURATION_MS = 800;
 const EDGE_TRANSIT_MAX_FUTURE_SKEW_MS = 5_000;
@@ -101,12 +122,20 @@ export function getMissionNodeSize(node: IMissionDagNode): { readonly width: num
 }
 
 export interface IMissionCanvasRenderSnapshot {
+	readonly viewMode?: AdeEngineeringViewMode;
 	readonly direction?: 'LR' | 'TD';
 	readonly nodes: readonly IMissionDagNode[];
 	readonly edges: readonly IMissionDagEdge[];
 	readonly positions: ReadonlyMap<string, IMissionNodePosition>;
 	readonly runtimeState: IMissionRuntimeState | undefined;
 	readonly nodePrompts: Readonly<Record<string, string>>;
+	readonly taskStatuses?: Readonly<Record<string, IMissionTaskStatusRecord>>;
+	readonly orchestrationNodes?: readonly IOrchestrationGraphNode[];
+	readonly orchestrationEdges?: readonly IOrchestrationGraphEdge[];
+	readonly orchestrationDepartments?: readonly IOrchestrationDepartmentGroup[];
+	readonly orchestrationLayoutMode?: OrchestrationLayoutMode;
+	readonly whiteboards?: Readonly<Record<string, IOrchestrationWhiteboard>>;
+	readonly orchestrationRuntime?: IOrchestrationRuntimeState;
 	readonly agentByNodeId: ReadonlyMap<string, IAdeAgent>;
 	readonly fallbackOwnerEngineId: string;
 	readonly orgConfig: IAdeOrganizationConfig;
@@ -124,12 +153,28 @@ export interface IMissionCanvasNodeCallbacks {
 	onSelectNode?(node: IMissionDagNode, anchorEl: HTMLElement, options?: { readonly toggleMulti?: boolean }): void;
 	onSelectEdge?(edge: IMissionDagEdge | undefined): void;
 	onDoubleClickNode?(node: IMissionDagNode, agentId: string): void;
+	onOpenMissionTaskPopover?(node: IMissionDagNode, anchorEl: HTMLElement): void;
+	onOpenWhiteboardPopover?(whiteboard: IOrchestrationWhiteboard, anchorEl: HTMLElement): void;
+	onOpenOrchestrationTokenPopover?(staffLabel: string, token: IOrchestrationToken, anchorEl: HTMLElement): void;
 	onOpenEmployeePopover(node: IMissionDagNode, anchorEl: HTMLElement): void;
 	onOpenSupervisorPopover?(node: IMissionDagNode, anchorEl: HTMLElement): void;
-	onOpenModelPopover(nodeId: string, agent: IAdeAgent, engineId: string, anchorEl: HTMLElement): void;
-	onOpenEnginePopover(nodeId: string, agent: IAdeAgent, engineId: string, anchorEl: HTMLElement): void;
+	onOpenModelPopover(
+		nodeId: string,
+		agent: IAdeAgent | undefined,
+		engineId: string,
+		anchorEl: HTMLElement,
+		options?: { readonly currentModel?: string; readonly currentThinking?: AdeThinkingLevel; readonly hostAlias?: string },
+	): void;
+	onOpenEnginePopover(
+		nodeId: string,
+		agent: IAdeAgent | undefined,
+		engineId: string,
+		anchorEl: HTMLElement,
+		options?: { readonly staffLabel?: string; readonly hostAlias?: string },
+	): void;
 	onOpenHostPopover(node: IMissionDagNode, currentHost: string, anchorEl: HTMLElement): void;
 	onOpenNodePromptPopover(node: IMissionDagNode, anchorEl: HTMLElement): void;
+	onOpenNodeColorPopover?(nodeId: string, label: string, currentColor: string | undefined, anchorEl: HTMLElement): void;
 	onOpenNodeTriggersPopover?(node: IMissionDagNode, anchorEl: HTMLElement): void;
 	onOpenGateDecisionPopover(node: IMissionDagNode, anchorEl: HTMLElement, preferredTokenId?: string, options?: { readonly focusReject?: boolean }): void;
 	onQuickGateApprove?(node: IMissionDagNode, token: IMissionToken | undefined, anchorEl: HTMLElement): void;
@@ -139,7 +184,9 @@ export interface IMissionCanvasNodeCallbacks {
 	onQuickRecallNode?(node: IMissionDagNode, token: IMissionToken | undefined): void;
 	onRenameNode?(nodeId: string, nextLabel: string): void;
 	onRenameEdgeLabel?(fromId: string, toId: string, nextLabel: string): void;
-	onConnectNodes?(fromNodeId: string, toNodeId: string, options?: { readonly fail?: boolean }): void;
+	onRenameGroup?(groupId: string, nextName: string): void;
+	onGroupContextMenu?(group: IOrchestrationDepartmentGroup, clientX: number, clientY: number): void;
+	onConnectNodes?(fromNodeId: string, toNodeId: string, options?: { readonly fail?: boolean; readonly bidirectional?: boolean }): void;
 	onNodeContextMenu?(node: IMissionDagNode, clientX: number, clientY: number): void;
 	onEdgeContextMenu?(edge: IMissionDagEdge, clientX: number, clientY: number): void;
 	getEffectiveNodeChecksCount?(nodeId: string): number;
@@ -238,6 +285,7 @@ interface IRenderedNodeHandle {
 	readonly ctxTokensEl?: HTMLElement;
 	readonly ctxCostEl?: HTMLElement;
 	readonly ctxPctEl?: HTMLElement;
+	readonly whiteboard?: IOrchestrationWhiteboard;
 }
 
 export function getMissionSupervisorColorIndex(supervisorId: string): number {
@@ -298,17 +346,6 @@ export function formatMissionTriggerShortLabel(trigger: IMissionSourceTrigger): 
 	return trigger.kind;
 }
 
-const TOKEN_STATUS_PRIORITY: Readonly<Record<MissionTokenStatus, number>> = {
-	active: 7,
-	blocked: 6,
-	waiting_gate: 5,
-	queued: 4,
-	frozen_failed: 3,
-	waiting_join: 2,
-	completed: 1,
-	recalled: 0,
-};
-
 export function formatMissionWaveTag(waveId: string): string {
 	const trimmed = waveId.trim();
 	const numMatch = /(\d+)$/.exec(trimmed);
@@ -342,15 +379,6 @@ export function extractMissionWatchFileBasename(filePath: string): string {
 	const idx = normalized.lastIndexOf('/');
 	const base = idx >= 0 ? normalized.slice(idx + 1) : normalized;
 	return base.length > 24 ? `${base.slice(0, 21)}...` : base;
-}
-
-function isLiveMissionTokenStatus(status: MissionTokenStatus): boolean {
-	return status === 'active'
-		|| status === 'queued'
-		|| status === 'blocked'
-		|| status === 'waiting_gate'
-		|| status === 'waiting_join'
-		|| status === 'frozen_failed';
 }
 
 interface IRenderedEdgeHandle {
@@ -389,6 +417,50 @@ function computeRouteBbox(points: readonly { readonly x: number; readonly y: num
 	return { minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad };
 }
 
+function samplePolylinePointAtFraction(
+	points: readonly { readonly x: number; readonly y: number }[],
+	fraction: number,
+): { readonly x: number; readonly y: number } {
+	if (points.length === 0) {
+		return { x: 0, y: 0 };
+	}
+	if (points.length === 1) {
+		return points[0];
+	}
+	const segLens: number[] = [];
+	let total = 0;
+	for (let i = 0; i < points.length - 1; i++) {
+		const len = Math.hypot(points[i + 1].x - points[i].x, points[i + 1].y - points[i].y);
+		segLens.push(len);
+		total += len;
+	}
+	if (total <= 0.01) {
+		return points[0];
+	}
+	const clamped = Math.max(0.05, Math.min(0.95, fraction));
+	let target = total * clamped;
+	for (let i = 0; i < segLens.length; i++) {
+		const len = segLens[i];
+		if (target <= len || i === segLens.length - 1) {
+			const t = len > 0.001 ? Math.max(0, Math.min(1, target / len)) : 0;
+			return {
+				x: Math.round((points[i].x + (points[i + 1].x - points[i].x) * t) * 10) / 10,
+				y: Math.round((points[i].y + (points[i + 1].y - points[i].y) * t) * 10) / 10,
+			};
+		}
+		target -= len;
+	}
+	return points[points.length - 1];
+}
+
+function resolveArrowMarkerUrlForColor(rawColor: string | undefined, fallbackId: string): string {
+	const norm = normalizeAdeNodeColor(rawColor);
+	if (norm && !norm.startsWith('#')) {
+		return `url(#ade-mission-arrow-preset-${norm})`;
+	}
+	return `url(#${fallbackId})`;
+}
+
 /**
  * High-performance Mission DAG SVG & Armored Pod DOM renderer:
  * - Diff-tracks a structural graph key so live runtime/telemetry ticks patch node states,
@@ -424,19 +496,26 @@ export class AdeMissionCanvasRenderer extends Disposable {
 	private trackedMissionTokenSeq = 0;
 	private animationsPaused = false;
 	private readonly lastNodeObstacleById = new Map<string, IMissionEdgeObstacle>();
-	private lastStructureKey = '';
 	private lastEdgeStructureKey = '';
 	private lastDirection: 'LR' | 'TD' = 'LR';
+	private lastViewMode: AdeEngineeringViewMode = 'mission';
+	private lastOrchNodes: readonly IOrchestrationGraphNode[] = [];
+	private lastOrchEdges: readonly IOrchestrationGraphEdge[] = [];
+	private readonly deptDisposables = this._register(new DisposableStore());
+	private readonly deptPillRectById = new Map<string, { readonly dept: IOrchestrationDepartmentGroup; readonly x: number; readonly y: number; readonly w: number }>();
+	private lastOrchDepartments: readonly IOrchestrationDepartmentGroup[] = [];
+	private lastOrchLayoutMode: OrchestrationLayoutMode | undefined;
+	private lastOrchRuntime: IOrchestrationRuntimeState | undefined;
+	private lastTaskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>> | undefined;
+	private readonly orchAnchorButtons = new Map<string, HTMLButtonElement>();
+	private readonly orchNodeSizeById = new Map<string, { readonly width: number; readonly height: number }>();
 	private hoveredNodeId: string | undefined;
 	private selectedNodeIds = new Set<string>();
 	private selectedEdgeKey: string | undefined;
 	private searchMatchNodeIds: ReadonlySet<string> | undefined;
-	private activeSearchNodeId: string | undefined;
-	private highlightedSupervisorId: string | undefined;
 	private hoveredTraceEdgeKeys: ReadonlySet<string> | undefined;
 	private lastRuntimeState: IMissionRuntimeState | undefined;
 	private showCloudTerritories = true;
-	private tabSpotlightActive = false;
 	private previewAddedNodeIds: ReadonlySet<string> | undefined;
 	private focusPulseNodeId: string | undefined;
 	private focusPulseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -531,13 +610,14 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			const marker = svgEl('marker', {
 				id,
 				viewBox: '0 0 10 10',
-				refX: '8.5',
+				refX: '8.4',
 				refY: '5',
-				markerWidth: '6.5',
-				markerHeight: '6.5',
+				markerWidth: '7',
+				markerHeight: '7',
 				orient: 'auto',
 			});
-			marker.appendChild(svgEl('path', { d: 'M 0 1.4 L 9 5 L 0 8.6 z', fill: color }));
+			// Razor-crisp tapered aerospace dart chevron
+			marker.appendChild(svgEl('path', { d: 'M 0.6 1.3 L 9.2 5 L 0.6 8.7 L 2.5 5 z', fill: color }));
 			defs.appendChild(marker);
 		};
 		createArrow('ade-mission-arrow-default', '#52b788');
@@ -548,11 +628,56 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		createArrow('ade-mission-arrow-ctx', '#a78bfa');
 		createArrow('ade-mission-arrow-active', '#38bdf8');
 		createArrow('ade-mission-arrow-trace', '#fbbf24');
+		createArrow('ade-mission-arrow-bidir', '#38bdf8');
+		createArrow('ade-mission-arrow-cycle', '#f59e0b');
+		createArrow('ade-mission-arrow-whiteboard', '#a78bfa');
+		createArrow('ade-mission-arrow-flow', '#7dd3fc');
+		for (const preset of ADE_NODE_COLOR_PRESETS) {
+			createArrow(`ade-mission-arrow-preset-${preset.id}`, preset.hex);
+		}
 		this.edgesSvgEl.appendChild(defs);
 	}
 
+	private applyCustomNodeColor(nodeEl: HTMLElement, rawColor: string | undefined): void {
+		const norm = normalizeAdeNodeColor(rawColor);
+		const hex = resolveAdeNodeColorHex(norm);
+		if (norm && hex) {
+			nodeEl.classList.add('has-custom-color');
+			nodeEl.setAttribute('data-node-color', norm);
+			nodeEl.style.setProperty('--ade-node-custom-color', hex);
+		} else {
+			nodeEl.classList.remove('has-custom-color');
+			nodeEl.removeAttribute('data-node-color');
+			nodeEl.style.removeProperty('--ade-node-custom-color');
+		}
+	}
+
+	private mountNodeColorTrigger(
+		parentEl: HTMLElement,
+		nodeId: string,
+		label: string,
+		rawColor: string | undefined,
+	): void {
+		if (!this.callbacks.onOpenNodeColorPopover) {
+			return;
+		}
+		const hex = resolveAdeNodeColorHex(rawColor);
+		const btn = append(parentEl, $(`button.ade-node-color-trigger${hex ? '.has-color' : ''}`, {
+			type: 'button',
+			'data-ade-node-color-btn': nodeId,
+			title: adeBi(localize('adeNodeColorBtnTip', "Change node color"), '选择节点颜色'),
+			'aria-label': adeBi(localize('adeNodeColorBtnAria', "Change color for {0}", label), '设置 {0} 的颜色', label),
+		})) as HTMLButtonElement;
+		if (hex) {
+			btn.style.setProperty('--trigger-swatch-hex', hex);
+		}
+		this.graphDisposables.add(addDisposableListener(btn, EventType.CLICK, e => {
+			e.stopPropagation();
+			this.callbacks.onOpenNodeColorPopover?.(nodeId, label, rawColor, btn);
+		}));
+	}
+
 	invalidateStructure(): void {
-		this.lastStructureKey = '';
 		this.lastEdgeStructureKey = '';
 		this.lastNodeObstacleById.clear();
 	}
@@ -575,7 +700,12 @@ export class AdeMissionCanvasRenderer extends Disposable {
 	 * avoiding full DOM teardown during live Mission execution telemetry updates.
 	 */
 	syncGraph(snapshot: IMissionCanvasRenderSnapshot, forceFullRebuild = false): void {
-		const hasNodes = snapshot.nodes.length > 0;
+		const viewMode: AdeEngineeringViewMode = snapshot.viewMode ?? 'mission';
+		const isOrch = viewMode === 'orchestration';
+		const effectiveCount = isOrch
+			? ((snapshot.orchestrationNodes?.length ?? 0) + (snapshot.orchestrationDepartments?.length ?? 0))
+			: snapshot.nodes.length;
+		const hasNodes = effectiveCount > 0;
 		this.emptyHintEl.hidden = hasNodes;
 
 		const worldSize = computeMissionWorldSize([...snapshot.positions.values()]);
@@ -584,7 +714,19 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		this.edgesSvgEl.setAttribute('width', String(worldSize.width));
 		this.edgesSvgEl.setAttribute('height', String(worldSize.height));
 
+		const modeChanged = this.lastViewMode !== viewMode;
+		this.lastViewMode = viewMode;
+		this.worldEl.dataset.viewMode = viewMode;
+		this.worldEl.classList.toggle('mode-mission', !isOrch);
+		this.worldEl.classList.toggle('mode-orchestration', isOrch);
+
 		if (!hasNodes) {
+			this.lastOrchNodes = [];
+			this.lastOrchEdges = [];
+			this.lastOrchDepartments = [];
+			this.lastOrchRuntime = undefined;
+			this.orchAnchorButtons.clear();
+			this.orchNodeSizeById.clear();
 			this.clearAllDom();
 			return;
 		}
@@ -595,14 +737,25 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		this.worldEl.classList.toggle('dir-td', nextDirection === 'TD');
 		this.worldEl.dataset.dagDirection = nextDirection;
 
-		const nextStructureKey = this.computeStructureKey(snapshot);
-		if (!forceFullRebuild && nextStructureKey === this.lastStructureKey && this.nodeHandles.size === snapshot.nodes.length) {
-			this.patchDynamicNodes(snapshot);
+		if (isOrch) {
+			this.lastOrchNodes = snapshot.orchestrationNodes ?? [];
+			this.lastOrchEdges = snapshot.orchestrationEdges ?? [];
+			this.lastOrchDepartments = snapshot.orchestrationDepartments ?? [];
+			this.lastOrchRuntime = snapshot.orchestrationRuntime;
+			this.rebuildOrchestrationGraphDom(snapshot);
 			return;
 		}
 
-		this.lastStructureKey = nextStructureKey;
-		this.rebuildFullGraphDom(snapshot);
+		// Mission Task DAG mode (pure Task nodes, zero employee/runtime clutter)
+		this.lastOrchNodes = [];
+		this.lastOrchEdges = [];
+		this.lastOrchDepartments = [];
+		this.lastOrchRuntime = undefined;
+		this.orchAnchorButtons.clear();
+		this.orchNodeSizeById.clear();
+		void modeChanged;
+		void forceFullRebuild;
+		this.rebuildMissionTaskGraphDom(snapshot);
 	}
 
 	setTraceHighlightEdges(edgeKeys: ReadonlySet<string> | undefined): void {
@@ -651,7 +804,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 
 	setSearchMatches(matchNodeIds: ReadonlySet<string> | undefined, activeMatchNodeId: string | undefined): void {
 		this.searchMatchNodeIds = matchNodeIds && matchNodeIds.size > 0 ? matchNodeIds : undefined;
-		this.activeSearchNodeId = activeMatchNodeId;
 		this.worldEl.classList.toggle('has-search-filter', Boolean(this.searchMatchNodeIds));
 		for (const [id, handle] of this.nodeHandles.entries()) {
 			const isMatch = Boolean(this.searchMatchNodeIds?.has(id));
@@ -770,6 +922,64 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		input.select();
 	}
 
+	startInlineGroupRename(groupId: string): void {
+		if (!this.callbacks.onRenameGroup || this.callbacks.isRevisionPreview?.()) {
+			return;
+		}
+		const rect = this.deptPillRectById.get(groupId);
+		if (!rect) {
+			return;
+		}
+		this.inlineRenameDisposables.clear();
+		this.clearInlineEdgeEditor();
+		const originalName = rect.dept.name.trim();
+		const wrap = append(this.worldEl, $('.ade-mission-inline-edge-editor.is-group-rename', {
+			'data-ade-inline-group-editor': rect.dept.id,
+		}));
+		wrap.style.left = `${Math.round(rect.x + rect.w / 2)}px`;
+		wrap.style.top = `${Math.round(rect.y)}px`;
+		this.inlineEdgeEditorEl = wrap;
+
+		const input = append(wrap, $('input.ade-mission-inline-edge-input.is-group-rename', {
+			type: 'text',
+			value: originalName,
+			placeholder: adeBi(localize('adeOrchInlineGroupRenamePh', "Group / Department name…"), '分组 / 部门名称…'),
+			'data-ade-inline-group-rename': rect.dept.id,
+			'aria-label': adeBi(localize('adeOrchInlineGroupRenameAria', "Rename group {0}", originalName), '重命名分组 {0}', originalName),
+		})) as HTMLInputElement;
+
+		let done = false;
+		const finish = (commit: boolean) => {
+			if (done) {
+				return;
+			}
+			done = true;
+			this.inlineRenameDisposables.clear();
+			const nextVal = input.value.trim();
+			this.clearInlineEdgeEditor();
+			if (commit && nextVal && nextVal !== originalName) {
+				this.callbacks.onRenameGroup?.(rect.dept.id, nextVal);
+			}
+		};
+		this.inlineRenameDisposables.add(addDisposableListener(wrap, EventType.POINTER_DOWN, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.POINTER_DOWN, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.CLICK, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.DBLCLICK, e => e.stopPropagation()));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.KEY_DOWN, (e: KeyboardEvent) => {
+			e.stopPropagation();
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				finish(true);
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				finish(false);
+			}
+		}));
+		this.inlineRenameDisposables.add(addDisposableListener(input, EventType.BLUR, () => finish(true)));
+		input.focus();
+		input.select();
+	}
+
 	pulseFocusNode(nodeId: string, durationMs = 3600): void {
 		if (this.focusPulseTimer !== undefined) {
 			clearTimeout(this.focusPulseTimer);
@@ -850,7 +1060,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 	}
 
 	setHighlightedSupervisorId(supervisorId: string | undefined): void {
-		this.highlightedSupervisorId = supervisorId;
 		this.worldEl.classList.toggle('has-supervisor-highlight', Boolean(supervisorId));
 		for (const handle of this.nodeHandles.values()) {
 			handle.rootEl.classList.toggle('is-supervised-highlight', Boolean(supervisorId && handle.boundSupervisorId === supervisorId));
@@ -890,7 +1099,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		runtimeState: IMissionRuntimeState | undefined,
 		resolveSupervisorDisplay?: IMissionCanvasRenderSnapshot['resolveSupervisorDisplay'],
 	): void {
-		this.tabSpotlightActive = active;
 		while (this.supervisorBeamsLayerEl.firstChild) {
 			this.supervisorBeamsLayerEl.removeChild(this.supervisorBeamsLayerEl.firstChild);
 		}
@@ -1124,16 +1332,12 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		this.edgeHandles.clear();
 		this.tokenGliderHandles.clear();
 		this.lastNodeObstacleById.clear();
-		this.lastStructureKey = '';
 		this.lastEdgeStructureKey = '';
 		this.hoveredNodeId = undefined;
 		this.selectedNodeIds.clear();
 		this.selectedEdgeKey = undefined;
 		this.searchMatchNodeIds = undefined;
-		this.activeSearchNodeId = undefined;
-		this.highlightedSupervisorId = undefined;
 		this.hoveredTraceEdgeKeys = undefined;
-		this.tabSpotlightActive = false;
 		this.worldEl.classList.remove('has-node-hover', 'has-trace-hover', 'has-supervisor-highlight', 'is-tab-spotlight-active', 'has-search-filter');
 		clearNode(this.nodesLayerEl);
 		for (const layer of [this.cloudTerritoriesLayerEl, this.edgesLayerEl, this.contextLinksLayerEl, this.supervisorBeamsLayerEl, this.tokenGliderLayerEl, this.alignGuidesLayerEl]) {
@@ -1141,535 +1345,6 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				layer.removeChild(layer.firstChild);
 			}
 		}
-	}
-
-	private computeStructureKey(snapshot: IMissionCanvasRenderSnapshot): string {
-		const { nodes, edges, runtimeState, agentByNodeId, fallbackOwnerEngineId, orgConfig } = snapshot;
-		const parts: string[] = [
-			snapshot.direction ?? 'LR',
-			snapshot.canSwitchModel ? 'm1' : 'm0',
-			snapshot.canSwitchHost ? 'h1' : 'h0',
-		];
-
-		for (const node of nodes) {
-			const linkedAgent = node.kind !== 'gate' ? agentByNodeId.get(node.id) : undefined;
-			const explicitHost = runtimeState?.boundary.nodeAssignments[node.id]?.hostAlias;
-			const hostInfo = node.kind !== 'gate'
-				? this.hostCatalog.resolveNodeHostAndOs(explicitHost, linkedAgent)
-				: undefined;
-			const engineId = linkedAgent?.session?.engineId ?? linkedAgent?.preferredEngineId ?? fallbackOwnerEngineId;
-			const rankDef = node.kind !== 'gate'
-				? resolveEffectiveRankDefinition(orgConfig, linkedAgent?.role, linkedAgent ? snapshot.hasSubordinates(linkedAgent.id) : false)
-				: undefined;
-			const assignedTier = runtimeState?.boundary.nodeAssignments[node.id]?.tier ?? rankDef?.tier ?? '';
-
-			// Intentionally excludes volatile runtime fields (mission live/idle status,
-			// nodeTelemetry.model, resolvedModel/thinking/llmProvider, canSwitchEngine,
-			// host engine availability) so live execution ticks patch node cards IN PLACE
-			// without clearing DOM nodes or destroying hover/popover anchors.
-			parts.push([
-				node.id,
-				node.kind,
-				node.label,
-				node.employeeKey ?? '',
-				node.employeeName ?? '',
-				node.employeeOccurrence ?? 0,
-				node.employeeTotalOccurrences ?? 0,
-				linkedAgent?.id ?? '',
-				engineId,
-				this.hostCatalog.getEngineDisplayName(engineId),
-				rankDef?.id ?? '',
-				rankDef?.name ?? '',
-				assignedTier,
-				hostInfo?.hostAlias ?? '',
-				hostInfo?.osKind ?? '',
-			].join('\x1f'));
-		}
-
-		for (const edge of edges) {
-			parts.push(`${edge.id}\x1f${edge.from}\x1f${edge.to}\x1f${edge.label ?? ''}\x1f${getMissionEdgeKind(edge)}`);
-		}
-		return parts.join('\x1e');
-	}
-
-	private collectTokensByNode(runtimeState: IMissionRuntimeState | undefined): Map<string, IMissionToken[]> {
-		const map = new Map<string, IMissionToken[]>();
-		if (!runtimeState) {
-			return map;
-		}
-		for (const tok of Object.values(runtimeState.tokens)) {
-			let list = map.get(tok.nodeId);
-			if (!list) {
-				list = [];
-				map.set(tok.nodeId, list);
-			}
-			list.push(tok);
-		}
-		for (const list of map.values()) {
-			list.sort((a, b) => {
-				const prioDiff = TOKEN_STATUS_PRIORITY[b.status] - TOKEN_STATUS_PRIORITY[a.status];
-				if (prioDiff !== 0) {
-					return prioDiff;
-				}
-				const actDiff = (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
-				if (actDiff !== 0) {
-					return actDiff;
-				}
-				return (b.arrivedAt ?? 0) - (a.arrivedAt ?? 0);
-			});
-		}
-		return map;
-	}
-
-	private collectJoinBarriersByNode(runtimeState: IMissionRuntimeState | undefined): Map<string, IMissionJoinBarrier[]> {
-		const map = new Map<string, IMissionJoinBarrier[]>();
-		if (!runtimeState) {
-			return map;
-		}
-		for (const barrier of Object.values(runtimeState.joinBarriers)) {
-			let list = map.get(barrier.targetNodeId);
-			if (!list) {
-				list = [];
-				map.set(barrier.targetNodeId, list);
-			}
-			list.push(barrier);
-		}
-		for (const list of map.values()) {
-			list.sort((a, b) => Object.keys(b.arrivedByFrom).length - Object.keys(a.arrivedByFrom).length);
-		}
-		return map;
-	}
-
-	private collectTriggersByNode(runtimeState: IMissionRuntimeState | undefined): Map<string, IMissionSourceTrigger[]> {
-		const map = new Map<string, IMissionSourceTrigger[]>();
-		if (!runtimeState) {
-			return map;
-		}
-		for (const trig of runtimeState.triggers) {
-			let list = map.get(trig.nodeId);
-			if (!list) {
-				list = [];
-				map.set(trig.nodeId, list);
-			}
-			list.push(trig);
-		}
-		return map;
-	}
-
-	private collectSupervisorByNode(runtimeState: IMissionRuntimeState | undefined): Map<string, { readonly id: string; readonly tier: number }> {
-		const map = new Map<string, { readonly id: string; readonly tier: number }>();
-		if (!runtimeState) {
-			return map;
-		}
-		for (const sup of runtimeState.boundary.supervisors) {
-			for (const nid of sup.managedNodeIds) {
-				if (!map.has(nid)) {
-					map.set(nid, { id: sup.id, tier: sup.tier });
-				}
-			}
-		}
-		return map;
-	}
-
-	private patchNodeRuntimeAccessories(
-		handle: IRenderedNodeHandle,
-		tokens: readonly IMissionToken[],
-		barriers: readonly IMissionJoinBarrier[],
-		triggers: readonly IMissionSourceTrigger[],
-		boundSupervisor: { readonly id: string; readonly tier: number } | undefined,
-		resolveSupervisorDisplay: IMissionCanvasRenderSnapshot['resolveSupervisorDisplay'],
-		now: number,
-		isMissionRunning: boolean,
-	): void {
-		const primary = tokens[0];
-		handle.primaryToken = primary;
-		handle.allTokens = tokens;
-
-		if (handle.pacemakerPortEl) {
-			const hasEnabledTrigger = triggers.some(t => t.enabled);
-			const armed = hasEnabledTrigger || isMissionRunning;
-			handle.pacemakerPortEl.classList.toggle('is-armed', armed);
-			handle.pacemakerPortEl.classList.toggle('has-triggers', triggers.length > 0);
-			handle.pacemakerPortEl.setAttribute('data-pacemaker-armed', String(armed));
-		}
-
-		// 0. Off-Graph Supervisor Badge & Canvas Jurisdiction Color Indicator (always visible, zero opacity:0!)
-		handle.boundSupervisorId = boundSupervisor?.id;
-		if (boundSupervisor) {
-			const colorIdx = getMissionSupervisorColorIndex(boundSupervisor.id);
-			const disp = resolveSupervisorDisplay?.(boundSupervisor.id) ?? { label: boundSupervisor.id, shortLabel: boundSupervisor.id, tier: boundSupervisor.tier };
-			handle.rootEl.setAttribute('data-node-supervisor-id', boundSupervisor.id);
-			handle.rootEl.setAttribute('data-node-supervisor-color', String(colorIdx));
-			if (handle.supBtnEl && handle.supDotEl && handle.supNameEl) {
-				const cls = `ade-mission-sup-pill is-bound sup-color-${colorIdx}`;
-				if (handle.supBtnEl.className !== cls) {
-					handle.supBtnEl.className = cls;
-				}
-				handle.supBtnEl.setAttribute('data-node-supervisor-id', boundSupervisor.id);
-				handle.supDotEl.hidden = false;
-				if (handle.supNameEl.textContent !== disp.shortLabel) {
-					handle.supNameEl.textContent = disp.shortLabel;
-				}
-				handle.supBtnEl.title = localize(
-					'adeMissionSupBoundTooltip',
-					"Off-graph Supervisor: {0} ({1}) — Hover to highlight managed nodes; click to change",
-					disp.label,
-					formatTierTag(boundSupervisor.tier),
-				);
-			}
-		} else {
-			handle.rootEl.removeAttribute('data-node-supervisor-id');
-			handle.rootEl.removeAttribute('data-node-supervisor-color');
-			if (handle.supBtnEl && handle.supDotEl && handle.supNameEl) {
-				const cls = 'ade-mission-sup-pill is-auto';
-				if (handle.supBtnEl.className !== cls) {
-					handle.supBtnEl.className = cls;
-				}
-				handle.supBtnEl.removeAttribute('data-node-supervisor-id');
-				handle.supDotEl.hidden = true;
-				const autoTxt = localize('adeMissionSupAutoShort', "+ Sup");
-				if (handle.supNameEl.textContent !== autoTxt) {
-					handle.supNameEl.textContent = autoTxt;
-				}
-				handle.supBtnEl.title = localize('adeMissionSupUnboundTooltip', "Off-graph Supervisor: Auto (Mission Owner) — Click to bind supervisor");
-			}
-		}
-		handle.rootEl.classList.toggle('is-supervised-highlight', Boolean(this.highlightedSupervisorId && handle.boundSupervisorId === this.highlightedSupervisorId));
-		handle.rootEl.classList.toggle('is-tab-supervised', this.tabSpotlightActive && Boolean(handle.boundSupervisorId));
-
-		// 0b. On-Canvas Source Trigger Badge (top-left rim on entry nodes — never collides with Join Barrier)
-		if (triggers.length === 0) {
-			handle.triggerBadgeEl.hidden = true;
-			handle.triggerBadgeEl.removeAttribute('data-trigger-count');
-		} else {
-			const enabledList = triggers.filter(t => t.enabled);
-			const lead = enabledList[0] ?? triggers[0];
-			const anyEnabled = enabledList.length > 0;
-			const extra = triggers.length > 1 ? ` +${triggers.length - 1}` : '';
-			const labelText = `⚡ ${formatMissionTriggerShortLabel(lead)}${extra}`;
-			handle.triggerBadgeEl.hidden = false;
-			handle.triggerBadgeEl.classList.toggle('is-disabled', !anyEnabled);
-			handle.triggerBadgeEl.setAttribute('data-trigger-count', String(triggers.length));
-			if (handle.triggerBadgeLabelEl.textContent !== labelText) {
-				handle.triggerBadgeLabelEl.textContent = labelText;
-			}
-			const trigTipLines = triggers.map(t => `${t.enabled ? '●' : '○'} ${t.kind}: ${formatMissionTriggerShortLabel(t)}${t.targetPath ? ` (${t.targetPath})` : ''}${t.hostAlias ? ` @${t.hostAlias}` : ''}`);
-			handle.triggerBadgeEl.title = `${localize('adeMissionNodeTriggerBadgeTip', "Source Triggers ({0}) — Click to manage", triggers.length)}\n${trigTipLines.join('\n')}`;
-		}
-
-		// 1. Floating Token Puck (top-right of node, with physical wave-color ring & concurrency queue rank)
-		if (!primary) {
-			handle.tokenPuckEl.hidden = true;
-			handle.tokenPuckEl.removeAttribute('data-token-id');
-			handle.tokenPuckEl.removeAttribute('data-token-status');
-			handle.tokenPuckEl.removeAttribute('data-wave-id');
-			handle.tokenPuckEl.removeAttribute('data-live-token-count');
-			handle.tokenPuckEl.removeAttribute('data-queue-position');
-			handle.rootEl.removeAttribute('data-node-queue-position');
-			handle.rootEl.removeAttribute('data-node-queue-total');
-			handle.rootEl.removeAttribute('data-node-queue-scope');
-			handle.rootEl.removeAttribute('data-node-queue-reason');
-		} else {
-			const liveCount = tokens.filter(t => isLiveMissionTokenStatus(t.status)).length;
-			const statusClass = `status-${primary.status.replace(/_/g, '-')}`;
-			const waveColorClass = `wave-color-${getMissionWaveColorIndex(primary.waveId)}`;
-			const desiredPuckClass = `ade-mission-token-puck ${statusClass} ${waveColorClass}`;
-			if (handle.tokenPuckEl.className !== desiredPuckClass) {
-				handle.tokenPuckEl.className = desiredPuckClass;
-			}
-			handle.tokenPuckEl.hidden = false;
-			handle.tokenPuckEl.setAttribute('data-token-id', primary.id);
-			handle.tokenPuckEl.setAttribute('data-token-status', primary.status);
-			handle.tokenPuckEl.setAttribute('data-wave-id', primary.waveId);
-			handle.tokenPuckEl.setAttribute('data-live-token-count', String(liveCount));
-
-			const waveTag = formatMissionWaveTag(primary.waveId);
-			let iconGlyph = '🪙';
-			let puckLabel = waveTag;
-			if (primary.status === 'blocked' && primary.blocked) {
-				iconGlyph = '⏳';
-				puckLabel = `${waveTag} · ${formatMissionBlockedRemaining(primary.blocked.expiresAt, now).text}`;
-			} else if (primary.status === 'queued' && primary.queued) {
-				iconGlyph = '⏱';
-				puckLabel = `${waveTag} · #${primary.queued.position}/${primary.queued.totalQueued}`;
-			} else if (primary.status === 'waiting_gate') {
-				iconGlyph = '◆';
-				puckLabel = `${waveTag} · Gate`;
-			} else if (primary.status === 'waiting_join') {
-				iconGlyph = '⫴';
-				puckLabel = `${waveTag} · Join`;
-			} else if (primary.status === 'frozen_failed') {
-				iconGlyph = '⚠';
-				puckLabel = `${waveTag} · Failed`;
-			} else if (primary.status === 'completed') {
-				iconGlyph = '✓';
-				puckLabel = waveTag;
-			} else if (primary.status === 'recalled') {
-				iconGlyph = '↩';
-				puckLabel = waveTag;
-			}
-			if (primary.status === 'queued' && primary.queued) {
-				handle.tokenPuckEl.setAttribute('data-queue-position', String(primary.queued.position));
-				handle.rootEl.setAttribute('data-node-queue-position', String(primary.queued.position));
-				handle.rootEl.setAttribute('data-node-queue-total', String(primary.queued.totalQueued));
-				handle.rootEl.setAttribute('data-node-queue-scope', primary.queued.scopeKey);
-				handle.rootEl.setAttribute('data-node-queue-reason', primary.queued.blockedBy);
-			} else {
-				handle.tokenPuckEl.removeAttribute('data-queue-position');
-				handle.rootEl.removeAttribute('data-node-queue-position');
-				handle.rootEl.removeAttribute('data-node-queue-total');
-				handle.rootEl.removeAttribute('data-node-queue-scope');
-				handle.rootEl.removeAttribute('data-node-queue-reason');
-			}
-			if (handle.tokenPuckIconEl.textContent !== iconGlyph) {
-				handle.tokenPuckIconEl.textContent = iconGlyph;
-			}
-			if (handle.tokenPuckLabelEl.textContent !== puckLabel) {
-				handle.tokenPuckLabelEl.textContent = puckLabel;
-			}
-			const extraCount = liveCount > 1 ? liveCount - 1 : 0;
-			if (extraCount > 0) {
-				handle.tokenPuckExtraEl.hidden = false;
-				const extraTxt = `+${extraCount}`;
-				if (handle.tokenPuckExtraEl.textContent !== extraTxt) {
-					handle.tokenPuckExtraEl.textContent = extraTxt;
-				}
-			} else {
-				handle.tokenPuckExtraEl.hidden = true;
-			}
-			const queueScopeLabel = primary.status === 'queued' && primary.queued?.blockedBy === 'employee'
-				? (handle.node.employeeName ? `@${handle.node.employeeName}` : primary.queued.scopeKey)
-				: (primary.queued?.scopeKey ?? '');
-			const queueTip = primary.status === 'queued' && primary.queued
-				? (primary.queued.blockedBy === 'employee'
-					? adeBi(
-						localize(
-							'adeMissionTokenPuckQueuedEmpTip',
-							"Exclusive Queue #{0}/{1} — waiting for {2} to finish its active/blocked step (prevents parallel context contamination)",
-							primary.queued.position,
-							primary.queued.totalQueued,
-							queueScopeLabel,
-						),
-						'员工排他排队第 {0}/{1} 位 — 等待 {2} 完成当前进行/阻塞节点（防止并行上下文串台）',
-						primary.queued.position,
-						primary.queued.totalQueued,
-						queueScopeLabel,
-					)
-					: adeBi(
-						localize(
-							'adeMissionTokenPuckQueuedTip',
-							"Queued #{0}/{1} — waiting for concurrency slot on {2} ({3}/{4} active)",
-							primary.queued.position,
-							primary.queued.totalQueued,
-							primary.queued.scopeKey,
-							primary.queued.activeSlots,
-							primary.queued.maxSlots,
-						),
-						'并发排队第 {0}/{1} 位 — 等待 {2} 槽位（当前 {3}/{4} 占用）',
-						primary.queued.position,
-						primary.queued.totalQueued,
-						primary.queued.scopeKey,
-						primary.queued.activeSlots,
-						primary.queued.maxSlots,
-					))
-				: undefined;
-			const tipParts = [
-				`${primary.id} (${primary.waveId}) · ${primary.status}`,
-				queueTip,
-				primary.lastSummary ? primary.lastSummary : undefined,
-				localize('adeMissionTokenPuckInspectTip', "Click to inspect token summary, history & trace_ptr; hover to trace ancestry"),
-			].filter((v): v is string => Boolean(v));
-			handle.tokenPuckEl.title = tipParts.join('\n');
-		}
-
-		// 2. Join Barrier Progress Capsule (top-left of multi-inDegree node)
-		const primaryBarrier = barriers[0];
-		if (!primaryBarrier || primaryBarrier.expectedFromNodeIds.length === 0) {
-			handle.joinCapsuleEl.hidden = true;
-			handle.lastJoinSignature = '';
-		} else {
-			const arrivedIds = primaryBarrier.expectedFromNodeIds.filter(id => Boolean(primaryBarrier.arrivedByFrom[id]));
-			const skippedSet = new Set(primaryBarrier.skippedFromNodeIds);
-			const pendingIds = primaryBarrier.expectedFromNodeIds.filter(id => !primaryBarrier.arrivedByFrom[id] && !skippedSet.has(id));
-			const activeTotal = Math.max(1, primaryBarrier.expectedFromNodeIds.length - skippedSet.size);
-			const sig = [
-				primaryBarrier.waveId,
-				barriers.length,
-				...primaryBarrier.expectedFromNodeIds.map(id => primaryBarrier.arrivedByFrom[id] ? `a:${id}` : skippedSet.has(id) ? `s:${id}` : `p:${id}`),
-			].join('|');
-
-			handle.joinCapsuleEl.hidden = false;
-			handle.joinCapsuleEl.setAttribute('data-join-arrived', String(arrivedIds.length));
-			handle.joinCapsuleEl.setAttribute('data-join-total', String(activeTotal));
-			handle.joinCapsuleEl.setAttribute('data-join-skipped', String(skippedSet.size));
-			handle.joinCapsuleEl.setAttribute('data-join-wave', primaryBarrier.waveId);
-
-			if (handle.lastJoinSignature !== sig) {
-				handle.lastJoinSignature = sig;
-				clearNode(handle.joinDotsEl);
-				for (const fromId of primaryBarrier.expectedFromNodeIds) {
-					const isArrived = Boolean(primaryBarrier.arrivedByFrom[fromId]);
-					const isSkipped = skippedSet.has(fromId);
-					const stateCls = isArrived ? '.is-arrived' : isSkipped ? '.is-skipped' : '.is-pending';
-					const glyph = isArrived ? '●' : isSkipped ? '⊘' : '○';
-					append(handle.joinDotsEl, $(`span.ade-mission-join-dot${stateCls}`, {
-						'data-join-from': fromId,
-						'data-join-state': isArrived ? 'arrived' : isSkipped ? 'skipped' : 'pending',
-					}, glyph));
-				}
-				const extraWaves = barriers.length > 1 ? ` +${barriers.length - 1}w` : '';
-				handle.joinCountEl.textContent = `${arrivedIds.length}/${activeTotal}${extraWaves}`;
-				const tooltipLines = [
-					localize('adeMissionJoinBarrierTipHead', "Join Barrier ({0}): {1}/{2} branches arrived", primaryBarrier.waveId, arrivedIds.length, activeTotal),
-					arrivedIds.length > 0 ? localize('adeMissionJoinArrived', "Arrived: {0}", arrivedIds.join(', ')) : undefined,
-					pendingIds.length > 0 ? localize('adeMissionJoinPending', "Waiting: {0}", pendingIds.join(', ')) : undefined,
-					skippedSet.size > 0 ? localize('adeMissionJoinSkipped', "Skipped: {0}", [...skippedSet].join(', ')) : undefined,
-				].filter((v): v is string => Boolean(v));
-				handle.joinCapsuleEl.title = tooltipLines.join('\n');
-			}
-		}
-
-		// 3. Gate card inline queued summary subtitle & inline quick Approve / Reject bar
-		const waitingGateTokens = handle.node.kind === 'gate'
-			? tokens.filter(t => t.status === 'waiting_gate').sort((a, b) => a.arrivedAt - b.arrivedAt)
-			: [];
-		if (handle.gateMetaEl) {
-			if (waitingGateTokens.length > 0) {
-				const lead = waitingGateTokens[0];
-				const summarySnippet = lead.lastSummary?.trim();
-				const gateText = waitingGateTokens.length > 1
-					? adeBi(
-						localize('adeMissionGateMetaMulti', "{0} waves waiting · Click to review", waitingGateTokens.length),
-						'{0} 个波次待审批 · 点击详情',
-						waitingGateTokens.length,
-					)
-					: (summarySnippet
-						? summarySnippet
-						: adeBi(localize('adeMissionGateMetaSingle', "Waiting human sign-off · Click to review"), '等待人工审批 · 点击查看详情'));
-				handle.gateMetaEl.hidden = false;
-				if (handle.gateMetaEl.textContent !== gateText) {
-					handle.gateMetaEl.textContent = gateText;
-					handle.gateMetaEl.title = summarySnippet || gateText;
-				}
-			} else {
-				handle.gateMetaEl.hidden = true;
-			}
-		}
-		const showGateInline = Boolean(handle.gateInlineActionsEl && waitingGateTokens.length > 0);
-		if (handle.gateInlineActionsEl) {
-			handle.gateInlineActionsEl.hidden = !showGateInline;
-			if (handle.gateApproveLabelEl) {
-				const approveLabel = adeBi(localize('adeMissionGateCardApprove', "Approve"), '通过');
-				if (handle.gateApproveLabelEl.textContent !== approveLabel) {
-					handle.gateApproveLabelEl.textContent = approveLabel;
-				}
-			}
-			if (handle.gateRejectLabelEl) {
-				const rejectLabel = adeBi(localize('adeMissionGateCardReject', "Reject…"), '打回…');
-				if (handle.gateRejectLabelEl.textContent !== rejectLabel) {
-					handle.gateRejectLabelEl.textContent = rejectLabel;
-				}
-			}
-		}
-
-		// 4. Bottom Dock: Blocked Watch Strip + Failure Summary Strip + Check-Failure Chip + Quick/Guided Retry & Recall Bar
-		const isBlocked = Boolean(primary && primary.status === 'blocked' && primary.blocked);
-		if (isBlocked && primary?.blocked) {
-			const info = primary.blocked;
-			const rem = formatMissionBlockedRemaining(info.expiresAt, now);
-			handle.blockedStripEl.hidden = false;
-			const waveTxt = formatMissionWaveTag(primary.waveId);
-			if (handle.blockedWaveEl.textContent !== waveTxt) {
-				handle.blockedWaveEl.textContent = waveTxt;
-			}
-			const countdownText = `⏳ ${rem.text}`;
-			if (handle.blockedCountdownEl.textContent !== countdownText) {
-				handle.blockedCountdownEl.textContent = countdownText;
-			}
-			handle.blockedCountdownEl.classList.toggle('is-overdue', rem.isOverdue);
-
-			if (info.watchPid !== undefined) {
-				handle.blockedPidEl.hidden = false;
-				const pidText = `PID ${info.watchPid}`;
-				if (handle.blockedPidEl.textContent !== pidText) {
-					handle.blockedPidEl.textContent = pidText;
-				}
-			} else {
-				handle.blockedPidEl.hidden = true;
-			}
-
-			if (info.watchFile) {
-				handle.blockedFileEl.hidden = false;
-				const fileBase = extractMissionWatchFileBasename(info.watchFile);
-				if (handle.blockedFileEl.textContent !== fileBase) {
-					handle.blockedFileEl.textContent = fileBase;
-				}
-				handle.blockedFileEl.title = info.watchFile;
-			} else {
-				handle.blockedFileEl.hidden = true;
-			}
-
-			if (info.hostAlias && info.hostAlias !== 'local') {
-				handle.blockedHostEl.hidden = false;
-				const hostText = `@${info.hostAlias}`;
-				if (handle.blockedHostEl.textContent !== hostText) {
-					handle.blockedHostEl.textContent = hostText;
-				}
-			} else {
-				handle.blockedHostEl.hidden = true;
-			}
-
-			const blockedTip = [
-				`${primary.waveId} · ${localize('adeMissionBlockedReasonTip', "Blocked: {0}", info.reason)}`,
-				info.watchPid !== undefined ? `PID: ${info.watchPid}` : undefined,
-				info.watchFile ? `File: ${info.watchFile}` : undefined,
-				info.hostAlias ? `Host: ${info.hostAlias}` : undefined,
-			].filter((v): v is string => Boolean(v)).join('\n');
-			handle.blockedStripEl.title = blockedTip;
-		} else {
-			handle.blockedStripEl.hidden = true;
-		}
-
-		const failedToken = tokens.find(t => t.status === 'frozen_failed');
-		if (failedToken) {
-			const waveTxt = `⚠ ${formatMissionWaveTag(failedToken.waveId)}`;
-			const reasonTxt = failedToken.failure?.reason?.trim()
-				|| failedToken.lastCheckFailure?.summary?.trim()
-				|| failedToken.lastSummary?.trim()
-				|| localize('adeMissionNodeFailedFallback', "Execution failed — click to inspect or retry");
-			handle.failedStripEl.hidden = false;
-			if (handle.failedWaveEl.textContent !== waveTxt) {
-				handle.failedWaveEl.textContent = waveTxt;
-			}
-			if (handle.failedReasonEl.textContent !== reasonTxt) {
-				handle.failedReasonEl.textContent = reasonTxt;
-			}
-			handle.failedStripEl.title = `${failedToken.waveId} (${failedToken.id})\n${reasonTxt}`;
-		} else {
-			handle.failedStripEl.hidden = true;
-		}
-
-		const isActiveTok = Boolean(primary && primary.status === 'active');
-		const isQueuedTok = Boolean(primary && primary.status === 'queued');
-		const hasActiveCheckFail = Boolean(primary && primary.status === 'active' && primary.lastCheckFailure);
-		const showRetry = Boolean(failedToken);
-		const showRecall = Boolean(failedToken || isBlocked || isActiveTok || isQueuedTok);
-		if (hasActiveCheckFail && primary?.lastCheckFailure) {
-			handle.checkFailChipEl.hidden = false;
-			const chkText = localize('adeMissionCheckFailChip', "Check {0}/{1}", primary.lastCheckFailure.attempt, primary.lastCheckFailure.maxAutoRetries);
-			if (handle.checkFailChipEl.textContent !== chkText) {
-				handle.checkFailChipEl.textContent = chkText;
-			}
-			handle.checkFailChipEl.title = primary.lastCheckFailure.summary;
-		} else {
-			handle.checkFailChipEl.hidden = true;
-		}
-		handle.retryBtnEl.hidden = !showRetry;
-		handle.guidedRetryBtnEl.hidden = !showRetry;
-		handle.recallBtnEl.hidden = !showRecall;
-		const showRecoveryBar = showRetry || showRecall || hasActiveCheckFail;
-		handle.recoveryBarEl.hidden = !showRecoveryBar;
-		handle.bottomDockEl.hidden = !isBlocked && !failedToken && !showRecoveryBar && !showGateInline;
 	}
 
 	private patchEdgeRuntimeStates(runtimeState: IMissionRuntimeState | undefined, now = Date.now()): void {
@@ -2086,1195 +1761,27 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		}
 	}
 
-	private formatContextSummary(
-		node: IMissionDagNode,
-		nodeState: string,
-		telemetrySummary: string | undefined,
-		tokenSummary: string | undefined,
-		failureReason?: string,
-		waveId?: string,
-		queued?: IMissionToken['queued'],
-	): string {
-		if (nodeState === 'failed' && failureReason?.trim()) {
-			const wavePrefix = waveId ? `${formatMissionWaveTag(waveId)} · ` : '';
-			return `⚠ ${wavePrefix}${failureReason.trim()}`;
-		}
-		if (nodeState === 'queued' && queued) {
-			if (queued.blockedBy === 'employee') {
-				const empLabel = node.employeeName ? `@${node.employeeName}` : queued.scopeKey;
-				return adeBi(
-					localize(
-						'adeMissionCtxSummaryQueuedEmp',
-						"Exclusive Queue #{0}/{1} · Waiting for {2}",
-						queued.position,
-						queued.totalQueued,
-						empLabel,
-					),
-					'排他排队 #{0}/{1} · 等待 {2} 释放会话',
-					queued.position,
-					queued.totalQueued,
-					empLabel,
-				);
-			}
-			return adeBi(
-				localize(
-					'adeMissionCtxSummaryQueued',
-					"Queued #{0}/{1} · Waiting for {2} ({3}/{4})",
-					queued.position,
-					queued.totalQueued,
-					queued.scopeKey,
-					queued.activeSlots,
-					queued.maxSlots,
-				),
-				'排队 #{0}/{1} · 等待 {2} 槽位 ({3}/{4})',
-				queued.position,
-				queued.totalQueued,
-				queued.scopeKey,
-				queued.activeSlots,
-				queued.maxSlots,
-			);
-		}
-		const isReused = Boolean((node.employeeTotalOccurrences ?? 0) > 1);
-		return telemetrySummary
-			|| tokenSummary
-			|| (nodeState === 'active'
-				? adeBi(localize('adeMissionCtxSummaryActive', "Running · Live context sync"), '执行中 · 实时上下文同步')
-				: nodeState === 'completed'
-					? adeBi(localize('adeMissionCtxSummaryDone', "✓ Deliverables handed off"), '✓ 阶段产物已交付上游/下游')
-					: isReused && node.employeeOccurrence && node.employeeTotalOccurrences
-						? adeBi(localize('adeMissionCtxSummaryReuse', "Context reuse #{0}/{1} · Ready", node.employeeOccurrence, node.employeeTotalOccurrences), '上下文复用 #{0}/{1} · 准备就绪', node.employeeOccurrence, node.employeeTotalOccurrences)
-						: adeBi(localize('adeMissionCtxSummaryReady', "Context warm · Standby"), '上下文已预热 · 待派发'));
-	}
-
-	/**
-	 * O(N) zero-teardown dynamic patching for runtime ticks:
-	 * updates positions, node states, state dot, summary text, 4-segment context bar, and prompts in place.
-	 */
-	private patchDynamicNodes(snapshot: IMissionCanvasRenderSnapshot): void {
-		const tokensByNode = this.collectTokensByNode(snapshot.runtimeState);
-		const barriersByNode = this.collectJoinBarriersByNode(snapshot.runtimeState);
-		const triggersByNode = this.collectTriggersByNode(snapshot.runtimeState);
-		const supervisorByNode = this.collectSupervisorByNode(snapshot.runtimeState);
-		const now = Date.now();
-		let anyPositionChanged = false;
-
-		for (const node of snapshot.nodes) {
-			const handle = this.nodeHandles.get(node.id);
-			if (!handle) {
-				continue;
-			}
-			const pos = snapshot.positions.get(node.id) ?? { x: 270, y: 300 };
-			const leftCss = `${pos.x}px`;
-			const topCss = `${pos.y}px`;
-			if (handle.rootEl.style.left !== leftCss || handle.rootEl.style.top !== topCss) {
-				handle.rootEl.style.left = leftCss;
-				handle.rootEl.style.top = topCss;
-				anyPositionChanged = true;
-			}
-
-			const nextState = snapshot.runtimeState?.nodeStates[node.id] ?? 'idle';
-			if (handle.nodeState !== nextState) {
-				if (handle.nodeState !== 'idle') {
-					handle.rootEl.classList.remove(`state-${handle.nodeState.replace(/_/g, '-')}`);
-				}
-				if (nextState !== 'idle') {
-					handle.rootEl.classList.add(`state-${nextState.replace(/_/g, '-')}`);
-				}
-				handle.rootEl.setAttribute('data-node-state', nextState);
-				handle.nodeState = nextState;
-
-				if (nextState !== 'idle') {
-					if (!handle.stateDotEl) {
-						handle.stateDotEl = $('span.ade-mission-state-dot', { 'aria-hidden': 'true', title: nextState });
-						handle.idWrapEl.insertBefore(handle.stateDotEl, handle.idWrapEl.firstChild);
-					} else {
-						handle.stateDotEl.title = nextState;
-					}
-				} else if (handle.stateDotEl) {
-					handle.stateDotEl.remove();
-					handle.stateDotEl = undefined;
-				}
-			}
-
-			const nodeTokens = tokensByNode.get(node.id) ?? [];
-			const nodeBarriers = barriersByNode.get(node.id) ?? [];
-			const nodeTriggers = triggersByNode.get(node.id) ?? [];
-			const boundSup = supervisorByNode.get(node.id);
-			const isMissionRunning = snapshot.runtimeState?.status === 'running';
-			this.patchNodeRuntimeAccessories(handle, nodeTokens, nodeBarriers, nodeTriggers, boundSup, snapshot.resolveSupervisorDisplay, now, isMissionRunning);
-
-			if (node.kind === 'gate') {
-				continue;
-			}
-
-			const linkedAgent = snapshot.agentByNodeId.get(node.id);
-			const explicitHost = snapshot.runtimeState?.boundary.nodeAssignments[node.id]?.hostAlias;
-			const engineId = linkedAgent?.session?.engineId ?? linkedAgent?.preferredEngineId ?? snapshot.fallbackOwnerEngineId;
-			const engineName = this.hostCatalog.getEngineDisplayName(engineId);
-			const nodeTelemetry = snapshot.runtimeState?.nodeTelemetry?.[node.id];
-			const resolvedModel = linkedAgent?.preferredModel || nodeTelemetry?.model || MISSION_ENGINE_DEFAULT_MODELS[engineId] || engineName.toLowerCase();
-			const llmProvider = resolveEffectiveAdeLlmProvider(resolvedModel, engineId, this.hostCatalog.getModelCategoryOverrides());
-			const llmProviderLabel = ADE_LLM_PROVIDER_LABELS[llmProvider];
-			const resolvedThinking: AdeThinkingLevel = linkedAgent?.preferredThinking ?? 'medium';
-			const canSwitchModel = Boolean(linkedAgent && snapshot.canSwitchModel);
-			const canSwitchEngine = Boolean(linkedAgent && snapshot.canSwitchEngine(linkedAgent));
-			const isMissionLive = snapshot.runtimeState?.status === 'running' || snapshot.runtimeState?.status === 'paused';
-			const effectiveProbeUri = linkedAgent ? this.hostCatalog.resolveEffectiveNodeProbeUri(explicitHost, linkedAgent) : undefined;
-			const cachedHostProbe = effectiveProbeUri ? this.hostCatalog.getCachedHostEngines(effectiveProbeUri) : undefined;
-			const isAssignedEngineUnavailable = Boolean(cachedHostProbe && !cachedHostProbe.availableIds.has(engineId));
-
-			handle.linkedAgent = linkedAgent;
-			handle.engineId = engineId;
-			handle.canSwitchModel = canSwitchModel;
-			handle.canSwitchEngine = canSwitchEngine;
-
-			if (handle.lastModel !== resolvedModel || handle.lastThinking !== resolvedThinking || handle.lastLlmProvider !== llmProvider) {
-				const providerChanged = handle.lastLlmProvider !== llmProvider;
-				const modelChanged = handle.lastModel !== resolvedModel;
-				handle.lastModel = resolvedModel;
-				handle.lastThinking = resolvedThinking;
-				handle.lastLlmProvider = llmProvider;
-				if (handle.coreIconTileEl) {
-					const tileCls = `ade-mission-core-icon-well llm-${llmProvider}${canSwitchModel ? ' is-editable' : ''}`;
-					if (handle.coreIconTileEl.className !== tileCls) {
-						handle.coreIconTileEl.className = tileCls;
-					}
-					handle.coreIconTileEl.setAttribute('data-llm-provider', llmProvider);
-					handle.coreIconTileEl.disabled = !canSwitchModel;
-					handle.coreIconTileEl.title = canSwitchModel
-						? localize('adeMissionLlmIconSwitchTip', "Driving LLM: {0} ({1}) — Click to switch model & thinking", llmProviderLabel, resolvedModel)
-						: localize('adeMissionLlmIconTip', "Driving LLM: {0} ({1})", llmProviderLabel, resolvedModel);
-				}
-				if (handle.coreLlmGlyphEl && (providerChanged || modelChanged)) {
-					clearNode(handle.coreLlmGlyphEl);
-					renderAdeLlmIcon(handle.coreLlmGlyphEl, llmProvider, {
-						baseClass: 'ade-mission-llm-icon',
-						prefix: 'ade-llm',
-						tooltip: `${llmProviderLabel} · ${resolvedModel}`,
-					});
-				}
-				if (handle.modelRowEl) {
-					const rowCls = `ade-mission-core-model-row${canSwitchModel ? ' is-editable' : ''}`;
-					if (handle.modelRowEl.className !== rowCls) {
-						handle.modelRowEl.className = rowCls;
-					}
-					handle.modelRowEl.setAttribute('data-node-model', resolvedModel);
-					handle.modelRowEl.setAttribute('data-node-thinking', resolvedThinking);
-					handle.modelRowEl.title = canSwitchModel
-						? localize('adeMissionModelThinkingSwitchTip', "Model: {0} · Thinking Effort: {1} — Click to switch", resolvedModel, resolvedThinking)
-						: localize('adeMissionModelThinkingTip', "Model: {0} · Thinking Effort: {1}", resolvedModel, resolvedThinking);
-				}
-				if (handle.modelNameEl && handle.modelNameEl.textContent !== resolvedModel) {
-					handle.modelNameEl.textContent = resolvedModel;
-				}
-				if (handle.thinkingTagEl) {
-					const thinkCls = `ade-mission-thinking-tag level-${resolvedThinking}`;
-					if (handle.thinkingTagEl.className !== thinkCls) {
-						handle.thinkingTagEl.className = thinkCls;
-					}
-					if (handle.thinkingTagEl.textContent !== resolvedThinking) {
-						handle.thinkingTagEl.textContent = resolvedThinking;
-					}
-				}
-			}
-
-			const engineLocked = Boolean(linkedAgent && !canSwitchEngine);
-			const engineIcon = this.hostCatalog.getEngineIcon(engineId);
-			const engineIconKey = serializeMissionEngineIconKey(engineIcon);
-			const nextEngineBadgeKey = `${engineId}|${engineName}|${engineIconKey}|${canSwitchEngine ? 1 : 0}|${engineLocked ? 1 : 0}|${isAssignedEngineUnavailable ? 1 : 0}|${isMissionLive ? 1 : 0}`;
-			if (handle.engineBadgeEl && handle.lastEngineBadgeKey !== nextEngineBadgeKey) {
-				handle.lastEngineBadgeKey = nextEngineBadgeKey;
-				const hostNameForTip = handle.isRemoteHost ? (handle.displayHost ?? handle.hostAlias ?? '') : localize('adeMissionLocalHostShort', "Local");
-				const badgeCls = `ade-mission-engine-pill${canSwitchEngine ? ' is-editable' : ''}${engineLocked ? ' is-locked' : ''}${isAssignedEngineUnavailable ? ' is-engine-unavailable' : ''}`;
-				if (handle.engineBadgeEl.className !== badgeCls) {
-					handle.engineBadgeEl.className = badgeCls;
-				}
-				handle.engineBadgeEl.disabled = !canSwitchEngine;
-				handle.engineBadgeEl.setAttribute('data-node-engine-id', engineId);
-				handle.engineBadgeEl.setAttribute('data-engine-locked', String(engineLocked));
-				handle.engineBadgeEl.setAttribute('data-engine-available', String(!isAssignedEngineUnavailable));
-				if (handle.engineIconEl) {
-					applyMissionEngineIcon(handle.engineIconEl, engineIcon);
-				}
-				if (handle.engineNameEl && handle.engineNameEl.textContent !== engineName) {
-					handle.engineNameEl.textContent = engineName;
-				}
-				handle.engineBadgeEl.title = isAssignedEngineUnavailable
-					? localize('adeMissionEngineUnavailablePillTooltip', "{0} is not installed on {1} — Click to switch to an available Agent engine", engineName, hostNameForTip)
-					: canSwitchEngine
-						? localize('adeMissionEngineSwitchOnlyTooltip', "Agent Engine: {0} — Click to switch Agent engine", engineName)
-						: isMissionLive
-							? localize('adeMissionEngineLockedLiveTooltip', "Agent Engine: {0} (Locked while Mission is running — click the LLM icon above to switch model)", engineName)
-							: localize('adeMissionEngineLockedSessionTooltip', "Agent Engine: {0} (Engine locked once session starts — click the LLM icon above to switch model)", engineName);
-				if (isAssignedEngineUnavailable) {
-					if (!handle.engineWarnDotEl) {
-						handle.engineWarnDotEl = append(handle.engineBadgeEl, $('span.ade-mission-engine-warn-dot', { 'aria-hidden': 'true' }));
-					}
-				} else if (handle.engineWarnDotEl) {
-					handle.engineWarnDotEl.remove();
-					handle.engineWarnDotEl = undefined;
-				}
-			}
-
-			const tokInfo = nodeTokens[0];
-			const roleKind = snapshot.runtimeState?.boundary.nodeAssignments[node.id]?.roleKind ?? 'worker';
-			if (handle.lastRoleKind !== roleKind) {
-				handle.lastRoleKind = roleKind;
-				const isReviewer = roleKind === 'reviewer';
-				handle.rootEl.classList.toggle('is-reviewer-node', isReviewer);
-				handle.rootEl.setAttribute('data-node-role-kind', roleKind);
-				if (handle.roleBadgeEl) {
-					handle.roleBadgeEl.hidden = !isReviewer;
-				}
-			}
-			const checksCount = this.callbacks.getEffectiveNodeChecksCount?.(node.id) ?? (node.checks?.length ?? 0);
-			if (handle.lastChecksCount !== checksCount && handle.checksBadgeEl) {
-				handle.lastChecksCount = checksCount;
-				handle.checksBadgeEl.hidden = checksCount <= 0;
-				handle.checksBadgeEl.setAttribute('data-node-checks-count', String(checksCount));
-				handle.checksBadgeEl.textContent = `✓ ${checksCount}`;
-				handle.checksBadgeEl.title = localize('adeMissionNodeChecksBadgeTip', "{0} deterministic verification check hook(s) active", checksCount);
-			}
-			const nextSummary = this.formatContextSummary(
-				node,
-				nextState,
-				nodeTelemetry?.summary,
-				tokInfo?.lastSummary,
-				tokInfo?.failure?.reason,
-				tokInfo?.waveId,
-				tokInfo?.queued,
-			);
-			if (handle.contextSummaryEl && handle.contextSummaryEl.textContent !== nextSummary) {
-				handle.contextSummaryEl.textContent = nextSummary;
-				handle.contextSummaryEl.title = nextSummary;
-			}
-
-			if (handle.ctxRowEl) {
-				const modelContextFallback = inferModelContextWindowTokens(resolvedModel, { engineId });
-				const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry, modelContextFallback);
-				handle.ctxRowEl.className = `ade-mission-ctx-row severity-${ctxBreakdown.severity}`;
-				handle.ctxRowEl.setAttribute('data-node-context-pct', String(ctxBreakdown.usedPct));
-				handle.ctxRowEl.setAttribute('data-node-context-used', String(ctxBreakdown.usedTokens));
-				handle.ctxRowEl.setAttribute('data-node-context-max', String(ctxBreakdown.maxTokens));
-				handle.ctxRowEl.setAttribute('data-node-context-noise-pct', String(Math.round(ctxBreakdown.noisePct)));
-				const costUsd = nodeTelemetry?.costUsd ?? 0;
-				const costEstimated = Boolean(nodeTelemetry?.costEstimated);
-				const costLocalFree = Boolean(nodeTelemetry?.costLocalFree && costUsd === 0 && ((nodeTelemetry?.totalTokens ?? 0) > 0 || (nodeTelemetry?.turns ?? 0) > 0));
-				const tooltipNoiseSuffix = ctxBreakdown.noisePct > 0
-					? ` · ${adeBi(localize('adeMissionCtxTooltipNoiseTag', "Rework Noise {0}%", Math.round(ctxBreakdown.noisePct)), '返工噪音 {0}%', Math.round(ctxBreakdown.noisePct))}`
-					: '';
-				const tooltipCostSuffix = costUsd > 0
-					? ` · ${formatFinOpsUsd(costUsd, { estimated: costEstimated })}${costEstimated ? localize('adeMissionCtxTooltipEstTag', " (预估)") : ''}`
-					: (costLocalFree ? ` · ${localize('adeMissionCtxTooltipLocalFree', "Local $0.00")}` : '');
-				handle.ctxRowEl.title = localize(
-					'adeMissionCtxTooltip',
-					"Context Window: {0} / {1} ({2}%) · Init {3}% · Contract {4}% · Workspace {5}%{6}",
-					formatCompactTokenCount(ctxBreakdown.usedTokens),
-					formatCompactTokenCount(ctxBreakdown.maxTokens),
-					ctxBreakdown.usedPct,
-					Math.round(ctxBreakdown.initPct),
-					Math.round(ctxBreakdown.tierPct),
-					Math.round(ctxBreakdown.sourcePct),
-					`${tooltipNoiseSuffix}${tooltipCostSuffix}`,
-				);
-				if (handle.ctxSegInitEl) { handle.ctxSegInitEl.style.width = `${ctxBreakdown.initPct.toFixed(1)}%`; }
-				if (handle.ctxSegTierEl) { handle.ctxSegTierEl.style.width = `${ctxBreakdown.tierPct.toFixed(1)}%`; }
-				if (handle.ctxSegSourceEl) { handle.ctxSegSourceEl.style.width = `${ctxBreakdown.sourcePct.toFixed(1)}%`; }
-				if (handle.ctxSegNoiseEl) { handle.ctxSegNoiseEl.style.width = `${ctxBreakdown.noisePct.toFixed(1)}%`; }
-				const tokensLabel = `${formatCompactTokenCount(ctxBreakdown.usedTokens)}/${formatCompactTokenCount(ctxBreakdown.maxTokens)}`;
-				const pctLabel = `${ctxBreakdown.usedPct}%`;
-				if (handle.ctxTokensEl && handle.ctxTokensEl.textContent !== tokensLabel) {
-					handle.ctxTokensEl.textContent = tokensLabel;
-				}
-				if (handle.ctxCostEl) {
-					if (costUsd > 0) {
-						handle.ctxCostEl.hidden = false;
-						handle.ctxCostEl.setAttribute('data-node-cost-usd', costUsd.toFixed(4));
-						if (costEstimated) {
-							handle.ctxCostEl.setAttribute('data-node-cost-estimated', 'true');
-							handle.ctxCostEl.title = localize('adeMissionNodeCostEstTip', "按内置/自定义模型单价预估费用（可在设置 aexus.ade.finOps.modelPricingOverrides 中覆盖）");
-						} else {
-							handle.ctxCostEl.removeAttribute('data-node-cost-estimated');
-							handle.ctxCostEl.title = '';
-						}
-						handle.ctxCostEl.removeAttribute('data-node-cost-local');
-						const costTxt = formatFinOpsUsd(costUsd, { estimated: costEstimated, compact: true });
-						if (handle.ctxCostEl.textContent !== costTxt) {
-							handle.ctxCostEl.textContent = costTxt;
-						}
-					} else if (costLocalFree) {
-						handle.ctxCostEl.hidden = false;
-						handle.ctxCostEl.setAttribute('data-node-cost-usd', '0');
-						handle.ctxCostEl.removeAttribute('data-node-cost-estimated');
-						handle.ctxCostEl.setAttribute('data-node-cost-local', 'true');
-						handle.ctxCostEl.title = localize('adeMissionNodeCostLocalFreeTip', "本地/自托管零成本模型 ($0.00)");
-						const localTxt = 'Local $0';
-						if (handle.ctxCostEl.textContent !== localTxt) {
-							handle.ctxCostEl.textContent = localTxt;
-						}
-					} else {
-						handle.ctxCostEl.hidden = true;
-						handle.ctxCostEl.setAttribute('data-node-cost-usd', '0');
-						handle.ctxCostEl.removeAttribute('data-node-cost-estimated');
-						handle.ctxCostEl.removeAttribute('data-node-cost-local');
-						handle.ctxCostEl.title = '';
-					}
-				}
-				if (handle.ctxPctEl && handle.ctxPctEl.textContent !== pctLabel) {
-					handle.ctxPctEl.textContent = pctLabel;
-				}
-			}
-		}
-
-		this.syncNodePromptPreviews(snapshot.nodePrompts);
-		if (anyPositionChanged) {
-			this.updateEdgesSvg(snapshot.nodes, snapshot.edges, snapshot.positions, { direction: snapshot.direction ?? this.lastDirection });
-		}
-		this.patchEdgeRuntimeStates(snapshot.runtimeState);
-	}
-
 	syncNodePromptPreviews(prompts: Readonly<Record<string, string>>): void {
 		for (const [nodeId, handle] of this.nodeHandles.entries()) {
-			if (!handle.promptBtnEl || !handle.promptPreviewEl || !handle.promptTagEl) {
+			if (!handle.promptPreviewEl) {
 				continue;
 			}
 			const raw = prompts[nodeId] ?? '';
 			const trimmed = raw.trim();
 			const hasPrompt = trimmed.length > 0;
 			const singleLine = hasPrompt ? trimmed.replace(/\s+/g, ' ') : '';
-			handle.promptBtnEl.classList.toggle('has-prompt', hasPrompt);
-			handle.promptBtnEl.setAttribute('data-has-prompt', String(hasPrompt));
-			handle.promptBtnEl.title = hasPrompt
-				? localize('adeMissionNodePromptBtnTip', "节点 {0} 提示词（点击编辑）：\n{1}", nodeId, raw)
-				: localize('adeMissionNodePromptBtnEmptyTip', "点击编写节点 {0} 的任务说明", nodeId);
 			const nextPreview = hasPrompt
 				? singleLine
-				: localize('adeMissionNodePromptEmptyPreview', "点击添加节点任务说明…");
+				: adeBi(localize('adeMissionTaskEmptyDescHint', "Click to view & edit task description…"), '点击查看并编辑任务详细描述…');
 			if (handle.promptPreviewEl.textContent !== nextPreview) {
 				handle.promptPreviewEl.textContent = nextPreview;
 			}
-			const nextTag = hasPrompt
-				? localize('adeMissionNodePromptTagEdit', "提示词")
-				: localize('adeMissionNodePromptTagAdd', "+ 提示词");
-			if (handle.promptTagEl.textContent !== nextTag) {
-				handle.promptTagEl.textContent = nextTag;
+			handle.promptPreviewEl.classList.toggle('is-empty', !hasPrompt);
+			if (handle.promptBtnEl) {
+				handle.promptBtnEl.classList.toggle('has-prompt', hasPrompt);
+				handle.promptBtnEl.setAttribute('data-has-prompt', String(hasPrompt));
 			}
 		}
-	}
-
-	private rebuildFullGraphDom(snapshot: IMissionCanvasRenderSnapshot): void {
-		this.nodeDragDisposables.clear();
-		this.graphDisposables.clear();
-		this.edgeDisposables.clear();
-		this.connectDragDisposables.clear();
-		this.inlineRenameDisposables.clear();
-		this.nodeHandles.clear();
-		this.edgeHandles.clear();
-		this.tokenGliderHandles.clear();
-		this.lastEdgeStructureKey = '';
-		if (this.hoveredNodeId && !snapshot.nodes.some(n => n.id === this.hoveredNodeId)) {
-			this.hoveredNodeId = undefined;
-		}
-		this.hoveredTraceEdgeKeys = undefined;
-		this.worldEl.classList.remove('has-node-hover', 'has-trace-hover');
-		clearNode(this.nodesLayerEl);
-		for (const layer of [this.cloudTerritoriesLayerEl, this.edgesLayerEl, this.contextLinksLayerEl, this.tokenGliderLayerEl]) {
-			while (layer.firstChild) {
-				layer.removeChild(layer.firstChild);
-			}
-		}
-
-		const tokensByNode = this.collectTokensByNode(snapshot.runtimeState);
-		const barriersByNode = this.collectJoinBarriersByNode(snapshot.runtimeState);
-		const triggersByNode = this.collectTriggersByNode(snapshot.runtimeState);
-		const supervisorByNode = this.collectSupervisorByNode(snapshot.runtimeState);
-		const inDegreeByNode = new Map<string, number>();
-		const outDegreeByNode = new Map<string, number>();
-		for (const edge of snapshot.edges) {
-			outDegreeByNode.set(edge.from, (outDegreeByNode.get(edge.from) ?? 0) + 1);
-			inDegreeByNode.set(edge.to, (inDegreeByNode.get(edge.to) ?? 0) + 1);
-		}
-		const now = Date.now();
-		const isMissionLive = snapshot.runtimeState?.status === 'running' || snapshot.runtimeState?.status === 'paused';
-		const isMissionRunning = snapshot.runtimeState?.status === 'running';
-
-		for (const node of snapshot.nodes) {
-			const pos = snapshot.positions.get(node.id) ?? { x: 270, y: 300 };
-			const nodeState = snapshot.runtimeState?.nodeStates[node.id] ?? 'idle';
-			const stateClass = nodeState !== 'idle' ? `.state-${nodeState.replace(/_/g, '-')}` : '';
-			const linkedAgent = node.kind !== 'gate' ? snapshot.agentByNodeId.get(node.id) : undefined;
-			const explicitHost = snapshot.runtimeState?.boundary.nodeAssignments[node.id]?.hostAlias;
-			const hostInfo = node.kind !== 'gate'
-				? this.hostCatalog.resolveNodeHostAndOs(explicitHost, linkedAgent)
-				: undefined;
-			const hostModifiers = hostInfo
-				? `${hostInfo.isRemote ? '.is-remote-host' : '.is-local-host'}.os-${hostInfo.osKind}`
-				: '';
-
-			const rankDef = node.kind !== 'gate'
-				? resolveEffectiveRankDefinition(snapshot.orgConfig, linkedAgent?.role, linkedAgent ? snapshot.hasSubordinates(linkedAgent.id) : false)
-				: undefined;
-			const assignedTier = snapshot.runtimeState?.boundary.nodeAssignments[node.id]?.tier ?? rankDef?.tier;
-			const rankBadgeLabel = rankDef
-				? `${formatTierTag(assignedTier ?? rankDef.tier)} ${rankDef.name}`
-				: (assignedTier !== undefined ? formatTierTag(assignedTier) : undefined);
-
-			const nodeEl = append(this.nodesLayerEl, $(`.ade-mission-node.kind-${node.kind}${stateClass}${hostModifiers}`, {
-				'data-node-id': node.id,
-				'data-node-state': nodeState,
-				...(hostInfo ? { 'data-node-os': hostInfo.osKind, 'data-node-host': hostInfo.hostAlias } : {}),
-				...(rankDef ? { 'data-node-rank': rankDef.id, 'data-node-tier': String(assignedTier ?? rankDef.tier) } : {}),
-				...(node.employeeKey ? { 'data-employee-key': node.employeeKey } : {}),
-			}));
-			nodeEl.style.left = `${pos.x}px`;
-			nodeEl.style.top = `${pos.y}px`;
-
-			const card = append(nodeEl, $('.ade-mission-node-card'));
-			append(card, $('span.ade-mission-clamp.tl', { 'aria-hidden': 'true' }));
-			append(card, $('span.ade-mission-clamp.tr', { 'aria-hidden': 'true' }));
-			append(card, $('span.ade-mission-clamp.bl', { 'aria-hidden': 'true' }));
-			append(card, $('span.ade-mission-clamp.br', { 'aria-hidden': 'true' }));
-
-			const topRow = append(card, $('.ade-mission-node-top'));
-			const idWrap = append(topRow, $('span.ade-mission-node-id-wrap'));
-			let stateDotEl: HTMLElement | undefined;
-			if (nodeState !== 'idle') {
-				stateDotEl = append(idWrap, $('span.ade-mission-state-dot', {
-					'aria-hidden': 'true',
-					title: nodeState,
-				}));
-			}
-			append(idWrap, $('span.ade-mission-node-id', {}, node.id));
-
-			let gateMetaEl: HTMLElement | undefined;
-			let titleEl!: HTMLElement;
-			let roleBadgeEl: HTMLElement | undefined;
-			let checksBadgeEl: HTMLElement | undefined;
-			let handleLastRoleKind: string | undefined;
-			let handleLastChecksCount: number | undefined;
-			let supBtnEl: HTMLButtonElement | undefined;
-			let supDotEl: HTMLElement | undefined;
-			let supNameEl: HTMLElement | undefined;
-			let coreIconTileEl: HTMLButtonElement | undefined;
-			let coreLlmGlyphEl: HTMLElement | undefined;
-			let modelRowEl: HTMLElement | undefined;
-			let modelNameEl: HTMLElement | undefined;
-			let thinkingTagEl: HTMLElement | undefined;
-			let engineBadgeEl: HTMLButtonElement | undefined;
-			let engineIconEl: HTMLElement | undefined;
-			let engineNameEl: HTMLElement | undefined;
-			let engineWarnDotEl: HTMLElement | undefined;
-			let handleEngineId = snapshot.fallbackOwnerEngineId;
-			let handleCanSwitchEngine = false;
-			let handleCanSwitchModel = false;
-			let handleLastModel: string | undefined;
-			let handleLastThinking: AdeThinkingLevel | undefined;
-			let handleLastLlmProvider: string | undefined;
-			let handleLastEngineBadgeKey: string | undefined;
-			let contextSummaryEl: HTMLElement | undefined;
-			let promptBtnEl: HTMLButtonElement | undefined;
-			let promptPreviewEl: HTMLElement | undefined;
-			let promptTagEl: HTMLElement | undefined;
-			let ctxRowEl: HTMLElement | undefined;
-			let ctxSegInitEl: HTMLElement | undefined;
-			let ctxSegTierEl: HTMLElement | undefined;
-			let ctxSegSourceEl: HTMLElement | undefined;
-			let ctxSegNoiseEl: HTMLElement | undefined;
-			let ctxTokensEl: HTMLElement | undefined;
-			let ctxCostEl: HTMLElement | undefined;
-			let ctxPctEl: HTMLElement | undefined;
-
-			if (node.kind === 'gate') {
-				append(topRow, $('span.ade-mission-node-kind-tag', {}, localize('adeMissionGateTag', "Gate")));
-				const gateWell = append(card, $('.ade-mission-core-well.gate-well'));
-				titleEl = append(gateWell, $('.ade-mission-node-title', { title: node.label }, node.label));
-				gateMetaEl = append(gateWell, $('.ade-mission-gate-meta', { 'data-ade-gate-meta': node.id }));
-				gateMetaEl.hidden = true;
-			} else {
-				if (rankBadgeLabel) {
-					const tierNum = Math.max(1, Math.min(4, assignedTier ?? rankDef?.tier ?? 2));
-					append(idWrap, $(`span.ade-mission-rank-pill.tier-${tierNum}`, {
-						title: localize('adeMissionNodeRankTooltip', "Organization Rank: {0}", rankBadgeLabel),
-					}, rankBadgeLabel));
-				}
-				const initRoleKind = snapshot.runtimeState?.boundary.nodeAssignments[node.id]?.roleKind ?? 'worker';
-				const isInitReviewer = initRoleKind === 'reviewer';
-				handleLastRoleKind = initRoleKind;
-				nodeEl.classList.toggle('is-reviewer-node', isInitReviewer);
-				nodeEl.setAttribute('data-node-role-kind', initRoleKind);
-
-				const initChecksCount = this.callbacks.getEffectiveNodeChecksCount?.(node.id) ?? (node.checks?.length ?? 0);
-				handleLastChecksCount = initChecksCount;
-
-				const topPills = append(topRow, $('.ade-mission-top-pills'));
-				supBtnEl = append(topPills, $('button.ade-mission-sup-pill.is-auto', {
-					type: 'button',
-					'data-node-sup-btn': node.id,
-				})) as HTMLButtonElement;
-				supDotEl = append(supBtnEl, $('span.ade-mission-sup-dot', { 'aria-hidden': 'true' }));
-				supDotEl.hidden = true;
-				append(supBtnEl, $('span.codicon.codicon-shield.ade-mission-sup-ico', { 'aria-hidden': 'true' }));
-				supNameEl = append(supBtnEl, $('span.ade-mission-sup-name', {}, localize('adeMissionSupAutoShort', "+ Sup")));
-				this.graphDisposables.add(addDisposableListener(supBtnEl, EventType.CLICK, e => {
-					e.stopPropagation();
-					this.callbacks.onOpenSupervisorPopover?.(node, supBtnEl!);
-				}));
-
-				const isAssigned = Boolean(node.employeeName && node.employeeKey);
-				const isReused = Boolean((node.employeeTotalOccurrences ?? 0) > 1);
-				const colorCls = isAssigned ? `.emp-color-${getEmployeeColorIndex(node.employeeKey!)}` : '.unassigned';
-				const empBtn = append(topPills, $(`button.ade-mission-emp-pill${colorCls}${isReused ? '.is-reused' : ''}`, {
-					type: 'button',
-					'data-node-emp-btn': node.id,
-					title: isAssigned
-						? (isReused
-							? localize('adeMissionEmpReusedTooltip', "Employee {0} (step #{1} of {2}, shared context) — Click to reassign", node.employeeName!, node.employeeOccurrence!, node.employeeTotalOccurrences!)
-							: localize('adeMissionEmpAssignedTooltip', "Employee {0} — Click to reuse across steps or reassign", node.employeeName!))
-						: localize('adeMissionEmpAssignTooltip', "Assign or reuse an employee for this step"),
-				})) as HTMLButtonElement;
-				if (isAssigned) {
-					append(empBtn, $('span.ade-mission-emp-dot', { 'aria-hidden': 'true' }));
-					append(empBtn, $('span.ade-mission-emp-name', {}, node.employeeName!));
-					if (isReused && node.employeeOccurrence && node.employeeTotalOccurrences) {
-						append(empBtn, $('span.ade-mission-emp-seq', {}, `#${node.employeeOccurrence}/${node.employeeTotalOccurrences}`));
-					}
-				} else {
-					append(empBtn, $('span.codicon.codicon-person-add', { 'aria-hidden': 'true' }));
-					append(empBtn, $('span.ade-mission-emp-name', {}, localize('adeMissionEmpAssignShort', "Assign")));
-				}
-				this.graphDisposables.add(addDisposableListener(empBtn, EventType.CLICK, e => {
-					e.stopPropagation();
-					this.callbacks.onOpenEmployeePopover(node, empBtn);
-				}));
-
-				const engineId = linkedAgent?.session?.engineId ?? linkedAgent?.preferredEngineId ?? snapshot.fallbackOwnerEngineId;
-				const engineName = this.hostCatalog.getEngineDisplayName(engineId);
-				const engineIcon = this.hostCatalog.getEngineIcon(engineId);
-				const nodeTelemetry = snapshot.runtimeState?.nodeTelemetry?.[node.id];
-				const resolvedModel = linkedAgent?.preferredModel || nodeTelemetry?.model || MISSION_ENGINE_DEFAULT_MODELS[engineId] || engineName.toLowerCase();
-				const llmProvider = resolveEffectiveAdeLlmProvider(resolvedModel, engineId, this.hostCatalog.getModelCategoryOverrides());
-				const llmProviderLabel = ADE_LLM_PROVIDER_LABELS[llmProvider];
-				const resolvedThinking: AdeThinkingLevel = linkedAgent?.preferredThinking ?? 'medium';
-				const canSwitchModel = Boolean(linkedAgent && snapshot.canSwitchModel);
-				const canSwitchEngine = Boolean(linkedAgent && snapshot.canSwitchEngine(linkedAgent));
-				const modelContextFallback = inferModelContextWindowTokens(resolvedModel, { engineId });
-				const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry, modelContextFallback);
-				const effectiveProbeUri = linkedAgent ? this.hostCatalog.resolveEffectiveNodeProbeUri(explicitHost, linkedAgent) : undefined;
-				const cachedHostProbe = effectiveProbeUri ? this.hostCatalog.getCachedHostEngines(effectiveProbeUri) : undefined;
-				const isAssignedEngineUnavailable = Boolean(cachedHostProbe && !cachedHostProbe.availableIds.has(engineId));
-
-				handleEngineId = engineId;
-				handleCanSwitchEngine = canSwitchEngine;
-				handleCanSwitchModel = canSwitchModel;
-				handleLastModel = resolvedModel;
-				handleLastThinking = resolvedThinking;
-				handleLastLlmProvider = llmProvider;
-
-				const coreWell = append(card, $('.ade-mission-core-well'));
-				const coreHead = append(coreWell, $('.ade-mission-core-head'));
-				const coreIconTile = append(coreHead, $(`button.ade-mission-core-icon-well.llm-${llmProvider}${canSwitchModel ? '.is-editable' : ''}`, {
-					type: 'button',
-					'data-llm-provider': llmProvider,
-					title: canSwitchModel
-						? localize('adeMissionLlmIconSwitchTip', "Driving LLM: {0} ({1}) — Click to switch model & thinking", llmProviderLabel, resolvedModel)
-						: localize('adeMissionLlmIconTip', "Driving LLM: {0} ({1})", llmProviderLabel, resolvedModel),
-				})) as HTMLButtonElement;
-				coreIconTileEl = coreIconTile;
-				const coreLlmGlyph = append(coreIconTile, $('span.ade-mission-llm-icon', { 'aria-hidden': 'true' }));
-				coreLlmGlyphEl = coreLlmGlyph;
-				renderAdeLlmIcon(coreLlmGlyph, llmProvider, {
-					baseClass: 'ade-mission-llm-icon',
-					prefix: 'ade-llm',
-					tooltip: `${llmProviderLabel} · ${resolvedModel}`,
-				});
-				if (!canSwitchModel) {
-					coreIconTile.disabled = true;
-				}
-
-				const coreMeta = append(coreHead, $('.ade-mission-core-meta'));
-				const coreTitleRow = append(coreMeta, $('.ade-mission-core-title-row'));
-				titleEl = append(coreTitleRow, $('.ade-mission-node-title', { title: node.label }, node.label));
-				roleBadgeEl = append(coreTitleRow, $('span.ade-mission-reviewer-pill', {
-					'data-node-role-badge': node.id,
-					title: localize('adeMissionReviewerPillTip', "In-Graph Reviewer Node — audits upstream deliverables and can reject back upstream"),
-				}, localize('adeMissionReviewerPillLabel', "Reviewer")));
-				roleBadgeEl.hidden = !isInitReviewer;
-				checksBadgeEl = append(coreTitleRow, $('span.ade-mission-checks-pill', {
-					'data-node-checks-count': String(initChecksCount),
-					title: localize('adeMissionNodeChecksBadgeTip', "{0} deterministic verification check hook(s) active", initChecksCount),
-				}, `✓ ${initChecksCount}`));
-				checksBadgeEl.hidden = initChecksCount <= 0;
-				const modelRow = append(coreMeta, $(`.ade-mission-core-model-row${canSwitchModel ? '.is-editable' : ''}`, {
-					'data-node-model': resolvedModel,
-					'data-node-thinking': resolvedThinking,
-					title: canSwitchModel
-						? localize('adeMissionModelThinkingSwitchTip', "Model: {0} · Thinking Effort: {1} — Click to switch", resolvedModel, resolvedThinking)
-						: localize('adeMissionModelThinkingTip', "Model: {0} · Thinking Effort: {1}", resolvedModel, resolvedThinking),
-				}));
-				modelRowEl = modelRow;
-				modelNameEl = append(modelRow, $('span.ade-mission-model-name', {}, resolvedModel));
-				append(modelRow, $('span.ade-mission-model-sep', { 'aria-hidden': 'true' }, '·'));
-				thinkingTagEl = append(modelRow, $(`span.ade-mission-thinking-tag.level-${resolvedThinking}`, {}, resolvedThinking));
-
-				const tokInfo = (tokensByNode.get(node.id) ?? [])[0];
-				const contextSummaryText = this.formatContextSummary(
-					node,
-					nodeState,
-					nodeTelemetry?.summary,
-					tokInfo?.lastSummary,
-					tokInfo?.failure?.reason,
-					tokInfo?.waveId,
-					tokInfo?.queued,
-				);
-				contextSummaryEl = append(coreWell, $('.ade-mission-core-context', { title: contextSummaryText }, contextSummaryText));
-
-				// Per-Node Pre-Prompt preview bar & direct edit button
-				const rawNodePrompt = snapshot.nodePrompts[node.id] ?? '';
-				const trimmedNodePrompt = rawNodePrompt.trim();
-				const hasNodePrompt = trimmedNodePrompt.length > 0;
-				promptBtnEl = append(coreWell, $(`button.ade-mission-node-prompt-bar${hasNodePrompt ? '.has-prompt' : ''}`, {
-					type: 'button',
-					'data-ade-node-prompt-btn': node.id,
-					'data-has-prompt': String(hasNodePrompt),
-					title: hasNodePrompt
-						? localize('adeMissionNodePromptBtnTip', "节点 {0} 提示词（点击编辑）：\n{1}", node.id, rawNodePrompt)
-						: localize('adeMissionNodePromptBtnEmptyTip', "点击编写节点 {0} 的任务说明", node.id),
-				})) as HTMLButtonElement;
-				append(promptBtnEl, $('span.codicon.codicon-note.ade-mission-node-prompt-ico', { 'aria-hidden': 'true' }));
-				promptPreviewEl = append(promptBtnEl, $('span.ade-mission-node-prompt-preview', {
-					'data-ade-node-prompt-preview': node.id,
-				}, hasNodePrompt
-					? trimmedNodePrompt.replace(/\s+/g, ' ')
-					: localize('adeMissionNodePromptEmptyPreview', "点击添加节点任务说明…")));
-				promptTagEl = append(promptBtnEl, $('span.ade-mission-node-prompt-tag', {}, hasNodePrompt
-					? localize('adeMissionNodePromptTagEdit', "提示词")
-					: localize('adeMissionNodePromptTagAdd', "+ 提示词")));
-				this.graphDisposables.add(addDisposableListener(promptBtnEl, EventType.CLICK, e => {
-					e.stopPropagation();
-					this.callbacks.onOpenNodePromptPopover(node, promptBtnEl!);
-				}));
-
-				// 4-Segment Context Window Usage Progress Bar
-				const initCostUsd = nodeTelemetry?.costUsd ?? 0;
-				const initCostEstimated = Boolean(nodeTelemetry?.costEstimated);
-				const initCostLocalFree = Boolean(nodeTelemetry?.costLocalFree && initCostUsd === 0 && ((nodeTelemetry?.totalTokens ?? 0) > 0 || (nodeTelemetry?.turns ?? 0) > 0));
-				const initNoiseTooltipSuffix = ctxBreakdown.noisePct > 0
-					? ` · ${adeBi(localize('adeMissionCtxTooltipNoiseTag', "Rework Noise {0}%", Math.round(ctxBreakdown.noisePct)), '返工噪音 {0}%', Math.round(ctxBreakdown.noisePct))}`
-					: '';
-				const initCostTooltipSuffix = initCostUsd > 0
-					? ` · ${formatFinOpsUsd(initCostUsd, { estimated: initCostEstimated })}${initCostEstimated ? localize('adeMissionCtxTooltipEstTag', " (预估)") : ''}`
-					: (initCostLocalFree ? ` · ${localize('adeMissionCtxTooltipLocalFree', "Local $0.00")}` : '');
-				const ctxTooltip = localize(
-					'adeMissionCtxTooltip',
-					"Context Window: {0} / {1} ({2}%) · Init {3}% · Contract {4}% · Workspace {5}%{6}",
-					formatCompactTokenCount(ctxBreakdown.usedTokens),
-					formatCompactTokenCount(ctxBreakdown.maxTokens),
-					ctxBreakdown.usedPct,
-					Math.round(ctxBreakdown.initPct),
-					Math.round(ctxBreakdown.tierPct),
-					Math.round(ctxBreakdown.sourcePct),
-					`${initNoiseTooltipSuffix}${initCostTooltipSuffix}`,
-				);
-				ctxRowEl = append(card, $(`.ade-mission-ctx-row.severity-${ctxBreakdown.severity}`, {
-					title: ctxTooltip,
-					'data-node-context-pct': String(ctxBreakdown.usedPct),
-					'data-node-context-used': String(ctxBreakdown.usedTokens),
-					'data-node-context-max': String(ctxBreakdown.maxTokens),
-					'data-node-context-noise-pct': String(Math.round(ctxBreakdown.noisePct)),
-				}));
-				const ctxTrack = append(ctxRowEl, $('.ade-mission-ctx-track'));
-				ctxSegInitEl = append(ctxTrack, $('.ade-ctx-seg.seg-init'));
-				ctxSegTierEl = append(ctxTrack, $('.ade-ctx-seg.seg-tier'));
-				ctxSegSourceEl = append(ctxTrack, $('.ade-ctx-seg.seg-source'));
-				ctxSegNoiseEl = append(ctxTrack, $('.ade-ctx-seg.seg-noise'));
-				ctxSegInitEl.style.width = `${ctxBreakdown.initPct.toFixed(1)}%`;
-				ctxSegTierEl.style.width = `${ctxBreakdown.tierPct.toFixed(1)}%`;
-				ctxSegSourceEl.style.width = `${ctxBreakdown.sourcePct.toFixed(1)}%`;
-				ctxSegNoiseEl.style.width = `${ctxBreakdown.noisePct.toFixed(1)}%`;
-
-				const ctxStats = append(ctxRowEl, $('.ade-mission-ctx-stats'));
-				ctxTokensEl = append(ctxStats, $('span.ade-mission-ctx-tokens', {}, `${formatCompactTokenCount(ctxBreakdown.usedTokens)}/${formatCompactTokenCount(ctxBreakdown.maxTokens)}`));
-				const initCostAttrs: Record<string, string> = {
-					'data-node-cost-usd': initCostUsd > 0 ? initCostUsd.toFixed(4) : '0',
-				};
-				if (initCostUsd > 0 && initCostEstimated) {
-					initCostAttrs['data-node-cost-estimated'] = 'true';
-					initCostAttrs.title = localize('adeMissionNodeCostEstTip', "按内置/自定义模型单价预估费用（可在设置 aexus.ade.finOps.modelPricingOverrides 中覆盖）");
-				} else if (initCostLocalFree) {
-					initCostAttrs['data-node-cost-local'] = 'true';
-					initCostAttrs.title = localize('adeMissionNodeCostLocalFreeTip', "本地/自托管零成本模型 ($0.00)");
-				}
-				const initCostLabel = initCostUsd > 0
-					? formatFinOpsUsd(initCostUsd, { estimated: initCostEstimated, compact: true })
-					: (initCostLocalFree ? 'Local $0' : '');
-				ctxCostEl = append(ctxStats, $('span.ade-mission-ctx-cost', initCostAttrs, initCostLabel));
-				ctxCostEl.hidden = initCostUsd <= 0 && !initCostLocalFree;
-				ctxPctEl = append(ctxStats, $('span.ade-mission-ctx-pct', {}, `${ctxBreakdown.usedPct}%`));
-
-				// Bottom Telemetry Footer: Agent Engine Pill (left) + Colorful OS & Host Pill (right)
-				const footer = append(card, $('.ade-mission-node-footer'));
-				const engineLocked = Boolean(linkedAgent && !canSwitchEngine);
-				handleLastEngineBadgeKey = `${canSwitchEngine ? 1 : 0}|${engineLocked ? 1 : 0}|${isAssignedEngineUnavailable ? 1 : 0}|${isMissionLive ? 1 : 0}`;
-				const hostNameForTip = hostInfo?.isRemote ? hostInfo.displayHost : localize('adeMissionLocalHostShort', "Local");
-				const engineBadge = append(footer, $(`button.ade-mission-engine-pill${canSwitchEngine ? '.is-editable' : ''}${engineLocked ? '.is-locked' : ''}${isAssignedEngineUnavailable ? '.is-engine-unavailable' : ''}`, {
-					type: 'button',
-					'data-node-engine-id': engineId,
-					'data-engine-locked': String(engineLocked),
-					'data-engine-available': String(!isAssignedEngineUnavailable),
-					title: isAssignedEngineUnavailable
-						? localize('adeMissionEngineUnavailablePillTooltip', "{0} is not installed on {1} — Click to switch to an available Agent engine", engineName, hostNameForTip)
-						: canSwitchEngine
-							? localize('adeMissionEngineSwitchOnlyTooltip', "Agent Engine: {0} — Click to switch Agent engine", engineName)
-							: isMissionLive
-								? localize('adeMissionEngineLockedLiveTooltip', "Agent Engine: {0} (Locked while Mission is running — click the LLM icon above to switch model)", engineName)
-								: localize('adeMissionEngineLockedSessionTooltip', "Agent Engine: {0} (Engine locked once session starts — click the LLM icon above to switch model)", engineName),
-				})) as HTMLButtonElement;
-				engineBadgeEl = engineBadge;
-				const iconEl = append(engineBadge, $('span.ade-mission-engine-icon', { 'aria-hidden': 'true' }));
-				applyMissionEngineIcon(iconEl, engineIcon);
-				engineIconEl = iconEl;
-				engineNameEl = append(engineBadge, $('span.ade-mission-engine-name', {}, engineName));
-				handleLastEngineBadgeKey = `${engineId}|${engineName}|${serializeMissionEngineIconKey(engineIcon)}|${canSwitchEngine ? 1 : 0}|${engineLocked ? 1 : 0}|${isAssignedEngineUnavailable ? 1 : 0}|${isMissionLive ? 1 : 0}`;
-				if (isAssignedEngineUnavailable) {
-					engineWarnDotEl = append(engineBadge, $('span.ade-mission-engine-warn-dot', { 'aria-hidden': 'true' }));
-				}
-				if (!canSwitchEngine) {
-					engineBadge.disabled = true;
-				}
-
-				if (hostInfo) {
-					const hostPill = append(footer, $(`button.ade-mission-host-pill.os-${hostInfo.osKind}${hostInfo.isRemote ? '.is-remote' : '.is-local'}${snapshot.canSwitchHost ? '.is-editable' : ''}`, {
-						type: 'button',
-						title: hostInfo.isRemote
-							? localize('adeMissionRemoteOsHostTip', "{0} · Cloud Host: {1} — Click to switch execution host", hostInfo.osLabel, hostInfo.displayHost)
-							: localize('adeMissionLocalOsHostTip', "{0} · Local Machine — Click to bind a Cloud Host", hostInfo.osLabel),
-						'data-node-host': hostInfo.hostAlias,
-						'data-node-os': hostInfo.osKind,
-					})) as HTMLButtonElement;
-					const osIconEl = append(hostPill, $('span.ade-mission-os-icon', { 'aria-hidden': 'true' }));
-					renderAdeOsIcon(osIconEl, hostInfo.osKind, {
-						baseClass: 'ade-mission-os-icon',
-						prefix: 'ade-os',
-						tooltip: `${hostInfo.osLabel} · ${hostInfo.displayHost}`,
-					});
-					const hostDisplayLabel = hostInfo.isRemote ? hostInfo.displayHost : `Local · ${hostInfo.osLabel}`;
-					append(hostPill, $('span.ade-mission-host-name', {}, hostDisplayLabel));
-					if (snapshot.canSwitchHost) {
-						this.graphDisposables.add(addDisposableListener(hostPill, EventType.CLICK, e => {
-							e.stopPropagation();
-							this.callbacks.onOpenHostPopover(node, hostInfo.hostAlias, hostPill);
-						}));
-					} else {
-						hostPill.disabled = true;
-					}
-				}
-			}
-
-			const inDeg = inDegreeByNode.get(node.id) ?? 0;
-			const outDeg = outDegreeByNode.get(node.id) ?? 0;
-			const nodeTriggers = triggersByNode.get(node.id) ?? [];
-			const isSourcePacemaker = node.kind !== 'gate' && inDeg === 0 && (outDeg >= 1 || nodeTriggers.length > 0);
-			let pacemakerPortEl: HTMLButtonElement | undefined;
-			if (isSourcePacemaker) {
-				pacemakerPortEl = append(card, $('button.ade-mission-port.port-in.is-pacemaker', {
-					type: 'button',
-					'data-ade-pacemaker-port': node.id,
-					title: localize('adeMissionPacemakerPortTip', "Source Generator Pacemaker — Click to configure interval, cron, file, git, or GPU-idle triggers"),
-					'aria-label': localize('adeMissionPacemakerPortAria', "Configure Source Triggers for {0}", node.id),
-				})) as HTMLButtonElement;
-				append(pacemakerPortEl, $('span.ade-mission-pacemaker-ring.ring-1', { 'aria-hidden': 'true' }));
-				append(pacemakerPortEl, $('span.ade-mission-pacemaker-ring.ring-2', { 'aria-hidden': 'true' }));
-				this.graphDisposables.add(addDisposableListener(pacemakerPortEl, EventType.CLICK, e => {
-					e.stopPropagation();
-					this.callbacks.onOpenNodeTriggersPopover?.(node, pacemakerPortEl!);
-				}));
-			} else {
-				append(card, $('.ade-mission-port.port-in', { 'aria-hidden': 'true' }));
-			}
-			const outPortEl = append(card, $('button.ade-mission-port.port-out.is-connectable', {
-				type: 'button',
-				'data-ade-connect-port': node.id,
-				title: localize('adeMissionOutPortConnectTip', "Drag to another node to connect an edge (hold Shift to create an on_fail branch)"),
-				'aria-label': localize('adeMissionOutPortConnectAria', "Drag to connect from {0}", node.id),
-			})) as HTMLButtonElement;
-			this.bindOutPortConnectDrag(node, outPortEl);
-			append(card, $('.ade-mission-port.port-ctx-top', { 'aria-hidden': 'true' }));
-			append(card, $('.ade-mission-port.port-ctx-bottom', { 'aria-hidden': 'true' }));
-
-			// Floating Runtime Accessories (mounted outside fixed-height card to preserve edge port geometry)
-			const joinCapsuleEl = append(nodeEl, $('.ade-mission-join-capsule', {
-				'data-ade-join-progress': node.id,
-			}));
-			joinCapsuleEl.hidden = true;
-			const joinDotsEl = append(joinCapsuleEl, $('span.ade-mission-join-dots', { 'aria-hidden': 'true' }));
-			const joinCountEl = append(joinCapsuleEl, $('span.ade-mission-join-count'));
-
-			const triggerBadgeEl = append(nodeEl, $('button.ade-mission-trigger-badge', {
-				type: 'button',
-				'data-ade-node-trigger-badge': node.id,
-			})) as HTMLButtonElement;
-			triggerBadgeEl.hidden = true;
-			const triggerBadgeLabelEl = append(triggerBadgeEl, $('span.ade-mission-trigger-badge-label'));
-
-			const tokenPuckEl = append(nodeEl, $('button.ade-mission-token-puck', {
-				type: 'button',
-				'data-ade-token-puck': node.id,
-			})) as HTMLButtonElement;
-			tokenPuckEl.hidden = true;
-			const tokenPuckIconEl = append(tokenPuckEl, $('span.ade-mission-token-puck-icon', { 'aria-hidden': 'true' }));
-			const tokenPuckLabelEl = append(tokenPuckEl, $('span.ade-mission-token-puck-label'));
-			const tokenPuckExtraEl = append(tokenPuckEl, $('span.ade-mission-token-puck-extra'));
-			tokenPuckExtraEl.hidden = true;
-
-			const bottomDockEl = append(nodeEl, $('.ade-mission-node-bottom-dock'));
-			bottomDockEl.hidden = true;
-
-			const blockedStripEl = append(bottomDockEl, $('button.ade-mission-blocked-strip', {
-				type: 'button',
-				'data-ade-blocked-strip': node.id,
-			})) as HTMLButtonElement;
-			blockedStripEl.hidden = true;
-			const blockedWaveEl = append(blockedStripEl, $('span.ade-mission-blocked-wave', {
-				'data-ade-blocked-wave': node.id,
-			}));
-			const blockedCountdownEl = append(blockedStripEl, $('span.ade-mission-blocked-countdown', {
-				'data-ade-blocked-countdown': node.id,
-			}));
-			const blockedPidEl = append(blockedStripEl, $('span.ade-mission-blocked-chip.pid', {
-				'data-ade-blocked-pid': node.id,
-			}));
-			blockedPidEl.hidden = true;
-			const blockedFileEl = append(blockedStripEl, $('span.ade-mission-blocked-chip.file', {
-				'data-ade-blocked-file': node.id,
-			}));
-			blockedFileEl.hidden = true;
-			const blockedHostEl = append(blockedStripEl, $('span.ade-mission-blocked-chip.host', {
-				'data-ade-blocked-host': node.id,
-			}));
-			blockedHostEl.hidden = true;
-
-			const failedStripEl = append(bottomDockEl, $('button.ade-mission-failed-strip', {
-				type: 'button',
-				'data-ade-failed-strip': node.id,
-			})) as HTMLButtonElement;
-			failedStripEl.hidden = true;
-			const failedWaveEl = append(failedStripEl, $('span.ade-mission-failed-wave', {
-				'data-ade-failed-wave': node.id,
-			}));
-			const failedReasonEl = append(failedStripEl, $('span.ade-mission-failed-reason', {
-				'data-ade-failed-reason': node.id,
-			}));
-
-			const recoveryBarEl = append(bottomDockEl, $('.ade-mission-node-recovery-bar', {
-				'data-ade-node-recovery': node.id,
-			}));
-			recoveryBarEl.hidden = true;
-			const checkFailChipEl = append(recoveryBarEl, $('button.ade-mission-recovery-btn.check-fail', {
-				type: 'button',
-				'data-ade-node-check-fail': node.id,
-			})) as HTMLButtonElement;
-			checkFailChipEl.hidden = true;
-			const retryBtnEl = append(recoveryBarEl, $('button.ade-mission-recovery-btn.retry', {
-				type: 'button',
-				'data-ade-node-retry': node.id,
-				title: localize('adeMissionNodeRetryBtnTip', "Retry this failed node in place"),
-			})) as HTMLButtonElement;
-			append(retryBtnEl, $('span.codicon.codicon-refresh', { 'aria-hidden': 'true' }));
-			append(retryBtnEl, $('span', {}, localize('adeMissionNodeRetryBtn', "Retry")));
-			retryBtnEl.hidden = true;
-
-			const guidedRetryBtnEl = append(recoveryBarEl, $('button.ade-mission-recovery-btn.guided-retry', {
-				type: 'button',
-				'data-ade-node-retry-guided': node.id,
-				title: localize('adeMissionNodeGuidedRetryBtnTip', "Retry with custom guidance instructions for this node"),
-			})) as HTMLButtonElement;
-			append(guidedRetryBtnEl, $('span.codicon.codicon-comment-discussion', { 'aria-hidden': 'true' }));
-			append(guidedRetryBtnEl, $('span', {}, localize('adeMissionNodeGuidedRetryBtn', "指导重试")));
-			guidedRetryBtnEl.hidden = true;
-
-			const recallBtnEl = append(recoveryBarEl, $('button.ade-mission-recovery-btn.recall', {
-				type: 'button',
-				'data-ade-node-recall': node.id,
-				title: localize('adeMissionNodeRecallBtnTip', "Recall active/stuck token on this node"),
-			})) as HTMLButtonElement;
-			append(recallBtnEl, $('span.codicon.codicon-discard', { 'aria-hidden': 'true' }));
-			append(recallBtnEl, $('span', {}, localize('adeMissionNodeRecallBtn', "Recall")));
-			recallBtnEl.hidden = true;
-
-			let gateInlineActionsEl: HTMLElement | undefined;
-			let gateApproveBtnEl: HTMLButtonElement | undefined;
-			let gateApproveLabelEl: HTMLElement | undefined;
-			let gateRejectBtnEl: HTMLButtonElement | undefined;
-			let gateRejectLabelEl: HTMLElement | undefined;
-			if (node.kind === 'gate') {
-				gateInlineActionsEl = append(bottomDockEl, $('.ade-mission-gate-inline-bar', {
-					'data-ade-gate-inline-actions': node.id,
-				}));
-				gateInlineActionsEl.hidden = true;
-				gateApproveBtnEl = append(gateInlineActionsEl, $('button.ade-mission-gate-inline-btn.approve', {
-					type: 'button',
-					'data-ade-gate-card-approve': node.id,
-					title: adeBi(localize('adeMissionGateCardApproveTip', "Approve waiting token on {0} immediately", node.id), '一键通过 {0} 当前待审批波次', node.id),
-				})) as HTMLButtonElement;
-				append(gateApproveBtnEl, $('span.codicon.codicon-check', { 'aria-hidden': 'true' }));
-				gateApproveLabelEl = append(gateApproveBtnEl, $('span', {}, adeBi(localize('adeMissionGateCardApprove', "Approve"), '通过')));
-
-				gateRejectBtnEl = append(gateInlineActionsEl, $('button.ade-mission-gate-inline-btn.reject', {
-					type: 'button',
-					'data-ade-gate-card-reject': node.id,
-					title: adeBi(localize('adeMissionGateCardRejectTip', "Reject and choose an upstream rollback target node"), '驳回并指定上游打回目标节点'),
-				})) as HTMLButtonElement;
-				append(gateRejectBtnEl, $('span.codicon.codicon-discard', { 'aria-hidden': 'true' }));
-				gateRejectLabelEl = append(gateRejectBtnEl, $('span', {}, adeBi(localize('adeMissionGateCardReject', "Reject…"), '打回…')));
-			}
-
-			const handle: IRenderedNodeHandle = {
-				node,
-				rootEl: nodeEl,
-				idWrapEl: idWrap,
-				titleEl,
-				roleBadgeEl,
-				checksBadgeEl,
-				hostAlias: hostInfo?.hostAlias,
-				displayHost: hostInfo?.displayHost,
-				osKind: hostInfo?.osKind,
-				osLabel: hostInfo?.osLabel,
-				isRemoteHost: hostInfo?.isRemote,
-				linkedAgent,
-				engineId: handleEngineId,
-				canSwitchEngine: handleCanSwitchEngine,
-				canSwitchModel: handleCanSwitchModel,
-				lastRoleKind: handleLastRoleKind,
-				lastChecksCount: handleLastChecksCount,
-				stateDotEl,
-				nodeState,
-				primaryToken: undefined,
-				allTokens: [],
-				boundSupervisorId: undefined,
-				supBtnEl,
-				supDotEl,
-				supNameEl,
-				coreIconTileEl,
-				coreLlmGlyphEl,
-				modelRowEl,
-				modelNameEl,
-				thinkingTagEl,
-				engineBadgeEl,
-				engineIconEl,
-				engineNameEl,
-				engineWarnDotEl,
-				lastModel: handleLastModel,
-				lastThinking: handleLastThinking,
-				lastLlmProvider: handleLastLlmProvider,
-				lastEngineBadgeKey: handleLastEngineBadgeKey,
-				pacemakerPortEl,
-				triggerBadgeEl,
-				triggerBadgeLabelEl,
-				tokenPuckEl,
-				tokenPuckIconEl,
-				tokenPuckLabelEl,
-				tokenPuckExtraEl,
-				joinCapsuleEl,
-				joinDotsEl,
-				joinCountEl,
-				lastJoinSignature: '',
-				bottomDockEl,
-				blockedStripEl,
-				blockedWaveEl,
-				blockedCountdownEl,
-				blockedPidEl,
-				blockedFileEl,
-				blockedHostEl,
-				failedStripEl,
-				failedWaveEl,
-				failedReasonEl,
-				recoveryBarEl,
-				checkFailChipEl,
-				retryBtnEl,
-				guidedRetryBtnEl,
-				recallBtnEl,
-				gateMetaEl,
-				gateInlineActionsEl,
-				gateApproveBtnEl,
-				gateApproveLabelEl,
-				gateRejectBtnEl,
-				gateRejectLabelEl,
-				contextSummaryEl,
-				promptBtnEl,
-				promptPreviewEl,
-				promptTagEl,
-				ctxRowEl,
-				ctxSegInitEl,
-				ctxSegTierEl,
-				ctxSegSourceEl,
-				ctxSegNoiseEl,
-				ctxTokensEl,
-				ctxCostEl,
-				ctxPctEl,
-			};
-			this.patchNodeRuntimeAccessories(
-				handle,
-				tokensByNode.get(node.id) ?? [],
-				barriersByNode.get(node.id) ?? [],
-				nodeTriggers,
-				supervisorByNode.get(node.id),
-				snapshot.resolveSupervisorDisplay,
-				now,
-				isMissionRunning,
-			);
-			if (gateApproveBtnEl) {
-				const approveAnchor = gateApproveBtnEl;
-				this.graphDisposables.add(addDisposableListener(approveAnchor, EventType.CLICK, e => {
-					e.stopPropagation();
-					const waitingTok = handle.allTokens
-						.filter(t => t.status === 'waiting_gate')
-						.sort((a, b) => a.arrivedAt - b.arrivedAt)[0];
-					if (this.callbacks.onQuickGateApprove) {
-						this.callbacks.onQuickGateApprove(node, waitingTok, approveAnchor);
-					} else {
-						this.callbacks.onOpenGateDecisionPopover(node, approveAnchor, waitingTok?.id);
-					}
-				}));
-			}
-			if (gateRejectBtnEl) {
-				const rejectAnchor = gateRejectBtnEl;
-				this.graphDisposables.add(addDisposableListener(rejectAnchor, EventType.CLICK, e => {
-					e.stopPropagation();
-					const waitingTok = handle.allTokens
-						.filter(t => t.status === 'waiting_gate')
-						.sort((a, b) => a.arrivedAt - b.arrivedAt)[0];
-					this.callbacks.onOpenGateDecisionPopover(node, rejectAnchor, waitingTok?.id, { focusReject: true });
-				}));
-			}
-			const isSelectedNode = this.selectedNodeIds.has(node.id);
-			nodeEl.classList.toggle('is-selected', isSelectedNode);
-			nodeEl.classList.toggle('is-multi-selected', isSelectedNode && this.selectedNodeIds.size > 1);
-			if (isSelectedNode) {
-				nodeEl.setAttribute('data-node-selected', 'true');
-			}
-			const isSearchMatch = Boolean(this.searchMatchNodeIds?.has(node.id));
-			const isSearchActive = Boolean(this.activeSearchNodeId && this.activeSearchNodeId === node.id);
-			nodeEl.classList.toggle('is-search-match', isSearchMatch);
-			nodeEl.classList.toggle('is-search-active', isSearchActive);
-			if (isSearchMatch) {
-				nodeEl.setAttribute('data-search-match', 'true');
-			}
-			if (isSearchActive) {
-				nodeEl.setAttribute('data-search-active', 'true');
-			}
-			const isRevAdded = Boolean(this.previewAddedNodeIds?.has(node.id));
-			nodeEl.classList.toggle('is-revision-added', isRevAdded);
-			if (isRevAdded) {
-				nodeEl.setAttribute('data-revision-added', 'true');
-			}
-
-			this.graphDisposables.add(addDisposableListener(titleEl, EventType.DBLCLICK, e => {
-				if (!this.callbacks.onRenameNode || this.callbacks.isRevisionPreview?.()) {
-					return;
-				}
-				e.stopPropagation();
-				this.startInlineNodeRename(node.id);
-			}));
-			this.graphDisposables.add(addDisposableListener(failedStripEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				const failedTok = handle.allTokens.find(t => t.status === 'frozen_failed') ?? handle.primaryToken;
-				if (failedTok) {
-					this.callbacks.onOpenTokenInspectorPopover?.(node, failedTok, handle.allTokens, failedStripEl);
-				}
-			}));
-			this.graphDisposables.add(addDisposableListener(guidedRetryBtnEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				const failedTok = handle.allTokens.find(t => t.status === 'frozen_failed') ?? handle.primaryToken;
-				if (failedTok) {
-					this.callbacks.onOpenGuidedRetryPopover?.(node, failedTok, guidedRetryBtnEl);
-				}
-			}));
-			if (coreIconTileEl) {
-				this.graphDisposables.add(addDisposableListener(coreIconTileEl, EventType.CLICK, e => {
-					if (!handle.canSwitchModel || !handle.linkedAgent) {
-						return;
-					}
-					e.stopPropagation();
-					this.callbacks.onOpenModelPopover(node.id, handle.linkedAgent, handle.engineId, coreIconTileEl!);
-				}));
-			}
-			if (modelRowEl) {
-				this.graphDisposables.add(addDisposableListener(modelRowEl, EventType.CLICK, e => {
-					if (!handle.canSwitchModel || !handle.linkedAgent) {
-						return;
-					}
-					e.stopPropagation();
-					this.callbacks.onOpenModelPopover(node.id, handle.linkedAgent, handle.engineId, modelRowEl!);
-				}));
-			}
-			if (engineBadgeEl) {
-				this.graphDisposables.add(addDisposableListener(engineBadgeEl, EventType.CLICK, e => {
-					if (!handle.canSwitchEngine || !handle.linkedAgent) {
-						return;
-					}
-					e.stopPropagation();
-					this.callbacks.onOpenEnginePopover(node.id, handle.linkedAgent, handle.engineId, engineBadgeEl!);
-				}));
-			}
-			if (supBtnEl) {
-				this.graphDisposables.add(addDisposableListener(supBtnEl, 'pointerenter', () => {
-					if (handle.boundSupervisorId) {
-						this.callbacks.onHoverSupervisor?.(handle.boundSupervisorId);
-					}
-				}));
-				this.graphDisposables.add(addDisposableListener(supBtnEl, 'pointerleave', () => {
-					this.callbacks.onHoverSupervisor?.(undefined);
-				}));
-			}
-			this.graphDisposables.add(addDisposableListener(triggerBadgeEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				this.callbacks.onOpenNodeTriggersPopover?.(node, triggerBadgeEl);
-			}));
-			this.graphDisposables.add(addDisposableListener(tokenPuckEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				if (handle.primaryToken) {
-					this.callbacks.onOpenTokenInspectorPopover?.(node, handle.primaryToken, handle.allTokens, tokenPuckEl);
-				}
-			}));
-			this.graphDisposables.add(addDisposableListener(tokenPuckEl, 'pointerenter', () => {
-				if (handle.primaryToken) {
-					this.callbacks.onHoverToken?.(handle.primaryToken);
-				}
-			}));
-			this.graphDisposables.add(addDisposableListener(tokenPuckEl, 'pointerleave', () => {
-				this.callbacks.onHoverToken?.(undefined);
-			}));
-			this.graphDisposables.add(addDisposableListener(blockedStripEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				if (handle.primaryToken) {
-					this.callbacks.onOpenTokenInspectorPopover?.(node, handle.primaryToken, handle.allTokens, blockedStripEl);
-				}
-			}));
-			this.graphDisposables.add(addDisposableListener(checkFailChipEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				if (handle.primaryToken) {
-					this.callbacks.onOpenTokenInspectorPopover?.(node, handle.primaryToken, handle.allTokens, checkFailChipEl);
-				}
-			}));
-			this.graphDisposables.add(addDisposableListener(retryBtnEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				const failedTok = handle.allTokens.find(t => t.status === 'frozen_failed') ?? handle.primaryToken;
-				if (failedTok) {
-					this.callbacks.onQuickRetryNode?.(node, failedTok);
-				}
-			}));
-			this.graphDisposables.add(addDisposableListener(recallBtnEl, EventType.CLICK, e => {
-				e.stopPropagation();
-				this.callbacks.onQuickRecallNode?.(node, handle.primaryToken);
-			}));
-
-			this.nodeHandles.set(node.id, handle);
-			this.bindNodeInteractions(handle);
-		}
-
-		this.updateEdgesSvg(snapshot.nodes, snapshot.edges, snapshot.positions, { direction: snapshot.direction ?? this.lastDirection });
-		this.patchEdgeRuntimeStates(snapshot.runtimeState);
-		this.renderCloudTerritories(snapshot.nodes, snapshot.positions);
 	}
 
 	private bindOutPortConnectDrag(node: IMissionDagNode, outPortEl: HTMLButtonElement): void {
@@ -3289,7 +1796,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			if (!sourcePos) {
 				return;
 			}
-			const sourceSize = getMissionNodeSize(node);
+			const sourceSize = this.orchNodeSizeById.get(node.id) ?? getMissionNodeSize(node);
 			const isVertical = this.lastDirection === 'TD';
 			const startX = isVertical ? sourcePos.x : (sourcePos.x + sourceSize.width / 2);
 			const startY = isVertical ? (sourcePos.y + sourceSize.height / 2) : sourcePos.y;
@@ -3313,7 +1820,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					if (!pos) {
 						continue;
 					}
-					const sz = getMissionNodeSize(candidateHandle.node);
+					const sz = this.orchNodeSizeById.get(candidateId) ?? getMissionNodeSize(candidateHandle.node);
 					const pad = 16;
 					if (
 						worldPt.x >= pos.x - sz.width / 2 - pad
@@ -3512,7 +2019,17 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					this.callbacks.onSelectNode(node, nodeEl, { toggleMulti: true });
 					return;
 				}
-				// Clean single-click keeps user on the Mission Canvas (opens Gate sign-off or in-canvas Node Command Inspector)
+				if (this.lastViewMode === 'mission' && this.callbacks.onOpenMissionTaskPopover) {
+					this.callbacks.onSelectNode?.(node, nodeEl);
+					this.callbacks.onOpenMissionTaskPopover(node, nodeEl);
+					return;
+				}
+				if (this.lastViewMode === 'orchestration' && handle.whiteboard && this.callbacks.onOpenWhiteboardPopover) {
+					this.callbacks.onSelectNode?.(node, nodeEl);
+					this.callbacks.onOpenWhiteboardPopover(handle.whiteboard, nodeEl);
+					return;
+				}
+				// Clean single-click keeps user on the Canvas
 				if (node.kind === 'gate' && handle.nodeState === 'waiting_gate') {
 					this.callbacks.onOpenGateDecisionPopover(node, nodeEl);
 				} else if (this.callbacks.onSelectNode) {
@@ -3592,7 +2109,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 						const h = this.nodeHandles.get(id);
 						const pos = this.callbacks.getNodePosition(id) ?? { x: 240, y: 240 };
 						dragStartPosById.set(id, { x: pos.x, y: pos.y });
-						dragSizeById.set(id, h ? getMissionNodeSize(h.node) : getMissionNodeSize(node));
+						dragSizeById.set(id, this.orchNodeSizeById.get(id) ?? (h ? getMissionNodeSize(h.node) : getMissionNodeSize(node)));
 						h?.rootEl.classList.add('dragging');
 					}
 					stationaryAlignRects = [];
@@ -3604,7 +2121,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 						if (!otherPos) {
 							continue;
 						}
-						const osz = getMissionNodeSize(otherHandle.node);
+						const osz = this.orchNodeSizeById.get(otherId) ?? getMissionNodeSize(otherHandle.node);
 						stationaryAlignRects.push({
 							id: otherId,
 							minX: otherPos.x - osz.width / 2,
@@ -3732,6 +2249,13 @@ export class AdeMissionCanvasRenderer extends Disposable {
 		positions: ReadonlyMap<string, IMissionNodePosition>,
 		options?: { readonly movedNodeId?: string; readonly direction?: 'LR' | 'TD' },
 	): void {
+		if (this.lastViewMode === 'orchestration') {
+			this.updateOrchestrationEdgesSvg(this.lastOrchNodes, this.lastOrchEdges, this.lastOrchDepartments, positions, {
+				direction: options?.direction ?? this.lastDirection,
+				layoutMode: this.lastOrchLayoutMode,
+			});
+			return;
+		}
 		const direction = options?.direction ?? this.lastDirection;
 		const isVertical = direction === 'TD';
 		if (edges.length === 0) {
@@ -3758,7 +2282,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			if (!pos) {
 				continue;
 			}
-			const size = getMissionNodeSize(node);
+			const size = this.orchNodeSizeById.get(node.id) ?? getMissionNodeSize(node);
 			const pad = 12;
 			const box: IMissionEdgeObstacle = {
 				minX: pos.x - size.width / 2 - pad,
@@ -3775,10 +2299,13 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			const fromHost = this.nodeHandles.get(edge.from)?.rootEl.getAttribute('data-node-host') ?? '';
 			const toHost = this.nodeHandles.get(edge.to)?.rootEl.getAttribute('data-node-host') ?? '';
 			const isCrossHost = Boolean(fromHost && toHost && fromHost.toLowerCase() !== toHost.toLowerCase());
-			return { edge, edgeKind, isCrossHost };
+			const fromSt = this.lastTaskStatuses?.[edge.from]?.status ?? '';
+			const toSt = this.lastTaskStatuses?.[edge.to]?.status ?? '';
+			const toCol = nodeById.get(edge.to)?.color ?? nodeById.get(edge.from)?.color ?? '';
+			return { edge, edgeKind, isCrossHost, fromSt, toSt, toCol };
 		});
 		const nextEdgeStructureKey = `${direction}\x1e` + edgeDescriptors
-			.map(d => `${d.edge.id}\x1f${d.edge.from}\x1f${d.edge.to}\x1f${d.edge.label ?? ''}\x1f${d.edgeKind}\x1f${d.isCrossHost ? '1' : '0'}`)
+			.map(d => `${d.edge.id}\x1f${d.edge.from}\x1f${d.edge.to}\x1f${d.edge.label ?? ''}\x1f${d.edgeKind}\x1f${d.isCrossHost ? '1' : '0'}\x1f${d.fromSt}\x1f${d.toSt}\x1f${d.toCol}`)
 			.join('\x1e');
 
 		const canPatchInPlace = nextEdgeStructureKey === this.lastEdgeStructureKey && this.edgeHandles.size > 0;
@@ -3834,8 +2361,8 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			if (!fromNode || !toNode || !fromPos || !toPos) {
 				continue;
 			}
-			const fromSize = getMissionNodeSize(fromNode);
-			const toSize = getMissionNodeSize(toNode);
+			const fromSize = this.orchNodeSizeById.get(edge.from) ?? getMissionNodeSize(fromNode);
+			const toSize = this.orchNodeSizeById.get(edge.to) ?? getMissionNodeSize(toNode);
 			const x1 = isVertical ? fromPos.x : (fromPos.x + fromSize.width / 2);
 			const y1 = isVertical ? (fromPos.y + fromSize.height / 2) : fromPos.y;
 			const x2 = isVertical ? toPos.x : (toPos.x - toSize.width / 2 - 4);
@@ -3858,7 +2385,7 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			}
 
 			const route = computeOrthogonalRoundedEdgeRoute(x1, y1, x2, y2, {
-				cornerRadius: 14,
+				cornerRadius: this.lastViewMode === 'mission' ? 18 : 14,
 				minStub: 24,
 				orientation: isVertical ? 'vertical' : 'horizontal',
 				obstacles,
@@ -3872,6 +2399,10 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				if (existing.path.getAttribute('d') !== route.path) {
 					existing.path.setAttribute('d', route.path);
 					existing.hitPath.setAttribute('d', route.path);
+					const haloEl = existing.group.querySelector<SVGPathElement>('.ade-orch-edge-halo');
+					if (haloEl) { haloEl.setAttribute('d', route.path); }
+					const flowEl = existing.group.querySelector<SVGPathElement>('.ade-orch-edge-flow-stream');
+					if (flowEl) { flowEl.setAttribute('d', route.path); }
 					const glider = this.tokenGliderHandles.get(edge.id);
 					if (glider) {
 						glider.group.style.offsetPath = `path("${route.path}")`;
@@ -3895,10 +2426,23 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			} else if (isCrossHost) {
 				edgeClasses.push('is-cross-host');
 			}
+			const fromTaskStatus = this.lastTaskStatuses?.[edge.from]?.status;
+			const toTaskStatus = this.lastTaskStatuses?.[edge.to]?.status;
+			const isTaskCompletedFlow = edgeKind !== 'fail' && fromTaskStatus === 'completed' && toTaskStatus === 'completed';
+			const isTaskLiveFlow = edgeKind !== 'fail' && fromTaskStatus === 'completed' && toTaskStatus === 'in_progress';
+			const isTaskBlockedFlow = edgeKind !== 'fail' && (fromTaskStatus === 'blocked' || toTaskStatus === 'blocked');
+			if (isTaskCompletedFlow) {
+				edgeClasses.push('is-task-edge-completed');
+			} else if (isTaskLiveFlow) {
+				edgeClasses.push('is-task-edge-live');
+			} else if (isTaskBlockedFlow) {
+				edgeClasses.push('is-task-edge-blocked');
+			}
 			const edgeKey = `${edge.from}->${edge.to}`;
 			if (this.selectedEdgeKey && this.selectedEdgeKey === edgeKey) {
 				edgeClasses.push('is-selected');
 			}
+			const targetCustomHex = resolveAdeNodeColorHex(toNode.color ?? fromNode.color);
 			const group = svgEl('g', {
 				class: edgeClasses.join(' '),
 				'data-edge-id': edge.id,
@@ -3908,12 +2452,29 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				'data-to': edge.to,
 				...(this.selectedEdgeKey && this.selectedEdgeKey === edgeKey ? { 'data-edge-selected': 'true' } : {}),
 			});
+			const taskEdgeAccent = isTaskLiveFlow
+				? (targetCustomHex ?? '#38bdf8')
+				: isTaskCompletedFlow
+					? '#34d399'
+					: isTaskBlockedFlow
+						? '#fbbf24'
+						: targetCustomHex;
+			if (taskEdgeAccent && edgeKind !== 'fail') {
+				group.style.setProperty('--edge-accent', taskEdgeAccent);
+			}
 
 			const hitPath = svgEl('path', {
 				class: 'ade-mission-edge-hit',
 				d: route.path,
 			});
 			group.appendChild(hitPath);
+
+			if (isTaskCompletedFlow || isTaskLiveFlow || isTaskBlockedFlow || targetCustomHex) {
+				group.appendChild(svgEl('path', {
+					class: `ade-orch-edge-halo${isTaskLiveFlow ? ' is-live' : ''}`,
+					d: route.path,
+				}));
+			}
 
 			const path = svgEl('path', {
 				class: 'ade-mission-edge-path',
@@ -3922,11 +2483,75 @@ export class AdeMissionCanvasRenderer extends Disposable {
 					? 'url(#ade-mission-arrow-active)'
 					: edgeKind === 'fail'
 						? 'url(#ade-mission-arrow-fail)'
-						: isCrossHost
-							? 'url(#ade-mission-arrow-cloud)'
-							: 'url(#ade-mission-arrow-default)',
+						: isTaskLiveFlow
+							? resolveArrowMarkerUrlForColor(toNode.color ?? fromNode.color, 'ade-mission-arrow-active')
+							: isTaskCompletedFlow
+								? 'url(#ade-mission-arrow-out)'
+								: isTaskBlockedFlow
+									? 'url(#ade-mission-arrow-cycle)'
+									: targetCustomHex
+										? resolveArrowMarkerUrlForColor(toNode.color ?? fromNode.color, 'ade-mission-arrow-default')
+										: isCrossHost
+											? 'url(#ade-mission-arrow-cloud)'
+											: 'url(#ade-mission-arrow-default)',
 			});
 			group.appendChild(path);
+			if (isTaskLiveFlow) {
+				group.appendChild(svgEl('path', {
+					class: 'ade-orch-edge-flow-stream',
+					d: route.path,
+				}));
+				// Render crisp luminous live-sync pulse beacon on active Mission DAG handoff edges
+				const toRec = this.lastTaskStatuses?.[edge.to];
+				const tokBadge = toRec?.activeTokenIds?.[0] ? `⚡ ${toRec.activeTokenIds[0]}` : `⚡ ${edge.to}`;
+				const puckW = Math.max(54, Math.min(96, Math.round(tokBadge.length * 6.2 + 20)));
+				const halfW = puckW / 2;
+				const beaconFrac = edge.label ? 0.74 : 0.56;
+				const pt = samplePolylinePointAtFraction(route.points, beaconFrac);
+				const puckColor = taskEdgeAccent ?? '#38bdf8';
+				const puckGroup = svgEl('g', {
+					class: 'ade-orch-live-puck is-task-dag-beacon',
+					'data-ade-task-live-beacon': edge.id,
+				});
+				puckGroup.style.setProperty('--puck-color', puckColor);
+				if (this.animationsPaused) {
+					puckGroup.setAttribute('transform', `translate(${pt.x}, ${pt.y})`);
+				} else {
+					puckGroup.style.offsetPath = `path("${route.path}")`;
+					puckGroup.style.setProperty('offset-rotate', '0deg');
+					puckGroup.style.animationDelay = `${-(beaconFrac * 3.4).toFixed(2)}s`;
+				}
+				puckGroup.appendChild(svgEl('rect', {
+					class: 'ade-orch-live-puck-bloom',
+					x: String(-halfW - 4),
+					y: '-12',
+					width: String(puckW + 8),
+					height: '24',
+					rx: '12',
+				}));
+				puckGroup.appendChild(svgEl('rect', {
+					class: 'ade-orch-live-puck-pill',
+					x: String(-halfW),
+					y: '-9.5',
+					width: String(puckW),
+					height: '19',
+					rx: '9.5',
+				}));
+				puckGroup.appendChild(svgEl('circle', {
+					class: 'ade-orch-live-puck-dot',
+					cx: String(-halfW + 8),
+					cy: '0',
+					r: '2.4',
+				}));
+				const bText = svgEl('text', {
+					class: 'ade-orch-live-puck-text',
+					x: '3.5',
+					y: '0.5',
+				});
+				bText.textContent = tokBadge;
+				puckGroup.appendChild(bText);
+				this.tokenGliderLayerEl.appendChild(puckGroup);
+			}
 			this.edgeDisposables.add(addDisposableListener(group, EventType.POINTER_DOWN, (e: PointerEvent) => {
 				if (e.button === 0) {
 					e.stopPropagation();
@@ -4047,6 +2672,12 @@ export class AdeMissionCanvasRenderer extends Disposable {
 				const key = `${edge.from}->${edge.to}`;
 				if (this.hoveredTraceEdgeKeys?.has(key)) {
 					path.setAttribute('marker-end', 'url(#ade-mission-arrow-trace)');
+				} else if (group.classList.contains('is-whiteboard-link')) {
+					path.setAttribute('marker-end', 'url(#ade-mission-arrow-whiteboard)');
+				} else if (group.classList.contains('is-cycle-back')) {
+					path.setAttribute('marker-end', 'url(#ade-mission-arrow-cycle)');
+				} else if (group.classList.contains('is-bidirectional')) {
+					path.setAttribute('marker-end', 'url(#ade-mission-arrow-bidir)');
 				} else if (group.classList.contains('is-fail-taken') || getMissionEdgeKind(edge) === 'fail') {
 					path.setAttribute('marker-end', 'url(#ade-mission-arrow-fail)');
 				} else if (group.classList.contains('is-token-flowing')) {
@@ -4155,5 +2786,1480 @@ export class AdeMissionCanvasRenderer extends Disposable {
 			handle.rootEl.classList.toggle('has-ctx-port-top', inReuse && !reuseRouteBelow);
 			handle.rootEl.classList.toggle('has-ctx-port-bottom', inReuse && reuseRouteBelow);
 		}
+	}
+
+	// =========================================================================
+	// Engineering View 1: Minimalist Mission Task DAG Renderer
+	// =========================================================================
+
+	private rebuildMissionTaskGraphDom(snapshot: IMissionCanvasRenderSnapshot): void {
+		this.nodeDragDisposables.clear();
+		this.graphDisposables.clear();
+		this.edgeDisposables.clear();
+		this.connectDragDisposables.clear();
+		this.inlineRenameDisposables.clear();
+		this.nodeHandles.clear();
+		this.edgeHandles.clear();
+		this.tokenGliderHandles.clear();
+		this.orchAnchorButtons.clear();
+		this.orchNodeSizeById.clear();
+		this.lastEdgeStructureKey = '';
+		if (this.hoveredNodeId && !snapshot.nodes.some(n => n.id === this.hoveredNodeId)) {
+			this.hoveredNodeId = undefined;
+		}
+		this.hoveredTraceEdgeKeys = undefined;
+		this.worldEl.classList.remove('has-node-hover', 'has-trace-hover');
+		clearNode(this.nodesLayerEl);
+		for (const layer of [this.cloudTerritoriesLayerEl, this.edgesLayerEl, this.contextLinksLayerEl, this.supervisorBeamsLayerEl, this.tokenGliderLayerEl]) {
+			while (layer.firstChild) {
+				layer.removeChild(layer.firstChild);
+			}
+		}
+
+		this.lastTaskStatuses = snapshot.taskStatuses;
+		for (const node of snapshot.nodes) {
+			const pos = snapshot.positions.get(node.id) ?? { x: 270, y: 260 };
+			const statusRec = snapshot.taskStatuses?.[node.id];
+			const taskStatus = statusRec?.status ?? 'pending';
+			const rawDesc = (snapshot.nodePrompts[node.id] ?? '').trim();
+
+			const nodeEl = append(this.nodesLayerEl, $(`.ade-mission-node.kind-mission-task.is-circular-task.task-status-${taskStatus.replace(/_/g, '-')}`, {
+				'data-node-id': node.id,
+				'data-node-kind': 'mission-task',
+				'data-node-shape': 'circle',
+				'data-task-status': taskStatus,
+			}));
+			nodeEl.style.left = `${pos.x}px`;
+			nodeEl.style.top = `${pos.y}px`;
+			this.applyCustomNodeColor(nodeEl, node.color);
+			this.orchNodeSizeById.set(node.id, { width: MISSION_TASK_NODE_WIDTH, height: MISSION_TASK_NODE_HEIGHT });
+
+			const card = append(nodeEl, $('.ade-mission-node-card.is-task-card.is-circular-task'));
+
+			const topRow = append(card, $('.ade-mission-node-top.is-task-top'));
+			const idWrap = append(topRow, $('span.ade-mission-node-id-wrap'));
+			const taskIconCls = taskStatus === 'completed'
+				? 'codicon-pass-filled'
+				: taskStatus === 'in_progress'
+					? 'codicon-sync'
+					: taskStatus === 'blocked'
+						? 'codicon-warning'
+						: 'codicon-circle-outline';
+			append(idWrap, $(`span.codicon.${taskIconCls}.ade-mission-task-ico`, { 'aria-hidden': 'true' }));
+			append(idWrap, $('span.ade-mission-node-id', {}, node.id));
+			this.mountNodeColorTrigger(idWrap, node.id, node.label, node.color);
+
+			const circleCore = append(card, $('.ade-mission-task-circle-core'));
+			const titleEl = append(circleCore, $('.ade-mission-node-title.is-task-title', { title: node.label }, node.label));
+
+			const hasDoneFooter = taskStatus === 'completed' && Boolean(statusRec?.completedByLabel);
+			const hasLiveMeta = !hasDoneFooter && Boolean(
+				statusRec?.assigneeLabel
+				|| statusRec?.assigneeNodeId
+				|| (statusRec?.activeTokenIds?.length ?? 0) > 0
+				|| (statusRec?.artifactPtrs?.length ?? 0) > 0
+				|| statusRec?.lastError
+				|| node.ownerNodeId,
+			);
+			const promptPreviewEl = append(circleCore, $('.ade-mission-task-desc-preview', {
+				'data-ade-node-prompt-preview': node.id,
+				...(rawDesc ? { title: rawDesc } : {}),
+			}, rawDesc
+				? rawDesc.replace(/\s+/g, ' ')
+				: adeBi(localize('adeMissionTaskEmptyDescHint', "Click to edit details…"), '点击编辑任务详情…')));
+			if (!rawDesc) {
+				promptPreviewEl.classList.add('is-empty');
+			}
+			if (hasDoneFooter || hasLiveMeta) {
+				promptPreviewEl.classList.add('is-compact-sub');
+			}
+
+			if (hasDoneFooter && statusRec?.completedByLabel) {
+				append(circleCore, $('.ade-mission-task-done-footer', {
+					title: adeBi(
+						localize('adeMissionTaskDoneBy', "Verified by {0}", statusRec.completedByLabel),
+						'已由 {0} 验收标注完成',
+						statusRec.completedByLabel,
+					),
+				}, `✓ ${statusRec.completedByLabel}`));
+			} else if (hasLiveMeta) {
+				const liveRow = append(circleCore, $('.ade-mission-task-live-meta', {
+					'data-ade-task-live-meta': node.id,
+				}));
+				const execLabel = statusRec?.assigneeLabel || statusRec?.assigneeNodeId || node.ownerNodeId;
+				if (execLabel) {
+					append(liveRow, $('span.ade-mission-task-live-chip.is-assignee', {
+						title: adeBi(localize('adeMissionTaskAssigneeTip', "Bound staff: {0}", execLabel), '当前负责员工：{0}', execLabel),
+					}, `@${execLabel}`));
+				}
+				const activeTokCnt = statusRec?.activeTokenIds?.length ?? 0;
+				if (activeTokCnt > 0) {
+					append(liveRow, $('span.ade-mission-task-live-chip.is-tokens', {}, `${activeTokCnt} tok`));
+				}
+				const artCnt = statusRec?.artifactPtrs?.length ?? 0;
+				if (artCnt > 0) {
+					append(liveRow, $('span.ade-mission-task-live-chip.is-artifacts', {}, `${artCnt} ptr`));
+				}
+				if (statusRec?.durationMs && statusRec.durationMs >= 1000) {
+					const sec = Math.round(statusRec.durationMs / 1000);
+					const durText = sec >= 60 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${sec}s`;
+					append(liveRow, $('span.ade-mission-task-live-chip.is-duration', {}, durText));
+				}
+				if (statusRec?.lastError) {
+					append(liveRow, $('span.ade-mission-task-live-chip.is-error', { title: statusRec.lastError }, 'ERR'));
+				}
+			}
+
+			const statusLabel = taskStatus === 'completed'
+				? adeBi(localize('adeMissionTaskDoneBadge', "Completed ✓"), '已完成 ✓')
+				: taskStatus === 'in_progress'
+					? adeBi(localize('adeMissionTaskInProgBadge', "In Progress"), '进行中')
+					: taskStatus === 'blocked'
+						? adeBi(localize('adeMissionTaskBlockedBadge', "Blocked"), '阻塞中')
+						: adeBi(localize('adeMissionTaskPendingBadge', "Pending"), '待完成');
+			append(card, $(`span.ade-mission-task-status-pill.status-${taskStatus.replace(/_/g, '-')}`, {
+				'data-ade-task-status-pill': node.id,
+			}, statusLabel));
+
+			append(card, $('.ade-mission-port.port-in', { 'aria-hidden': 'true' }));
+			const outPortEl = append(card, $('button.ade-mission-port.port-out.is-connectable', {
+				type: 'button',
+				'data-ade-connect-port': node.id,
+				title: adeBi(localize('adeMissionTaskConnectTip', "Drag to another task node to create a dependency edge"), '拖拽到另一个任务节点建立有向依赖边'),
+			})) as HTMLButtonElement;
+			this.bindOutPortConnectDrag(node, outPortEl);
+
+			const dummy = $('span');
+			const dummyBtn = $('button', { type: 'button' }) as HTMLButtonElement;
+			const handle: IRenderedNodeHandle = {
+				node,
+				rootEl: nodeEl,
+				idWrapEl: idWrap,
+				titleEl,
+				linkedAgent: undefined,
+				engineId: snapshot.fallbackOwnerEngineId,
+				canSwitchEngine: false,
+				canSwitchModel: false,
+				stateDotEl: undefined,
+				nodeState: taskStatus,
+				primaryToken: undefined,
+				allTokens: [],
+				boundSupervisorId: undefined,
+				triggerBadgeEl: dummyBtn,
+				triggerBadgeLabelEl: dummy,
+				tokenPuckEl: dummyBtn,
+				tokenPuckIconEl: dummy,
+				tokenPuckLabelEl: dummy,
+				tokenPuckExtraEl: dummy,
+				joinCapsuleEl: dummy,
+				joinDotsEl: dummy,
+				joinCountEl: dummy,
+				lastJoinSignature: '',
+				bottomDockEl: dummy,
+				blockedStripEl: dummyBtn,
+				blockedWaveEl: dummy,
+				blockedCountdownEl: dummy,
+				blockedPidEl: dummy,
+				blockedFileEl: dummy,
+				blockedHostEl: dummy,
+				failedStripEl: dummyBtn,
+				failedWaveEl: dummy,
+				failedReasonEl: dummy,
+				recoveryBarEl: dummy,
+				checkFailChipEl: dummyBtn,
+				retryBtnEl: dummyBtn,
+				guidedRetryBtnEl: dummyBtn,
+				recallBtnEl: dummyBtn,
+				promptPreviewEl,
+			};
+
+			const isSelectedNode = this.selectedNodeIds.has(node.id);
+			nodeEl.classList.toggle('is-selected', isSelectedNode);
+			if (isSelectedNode) {
+				nodeEl.setAttribute('data-node-selected', 'true');
+			}
+			this.graphDisposables.add(addDisposableListener(titleEl, EventType.DBLCLICK, e => {
+				if (!this.callbacks.onRenameNode) {
+					return;
+				}
+				e.stopPropagation();
+				this.startInlineNodeRename(node.id);
+			}));
+
+			this.nodeHandles.set(node.id, handle);
+			this.bindNodeInteractions(handle);
+		}
+
+		this.updateEdgesSvg(snapshot.nodes, snapshot.edges, snapshot.positions, { direction: snapshot.direction ?? this.lastDirection });
+	}
+
+	// =========================================================================
+	// Engineering View 2: All-Staff Cyclic Orchestration + Multi-Anchor Renderer
+	// =========================================================================
+
+	private rebuildOrchestrationGraphDom(snapshot: IMissionCanvasRenderSnapshot): void {
+		const orchNodes = snapshot.orchestrationNodes ?? [];
+		const orchEdges = snapshot.orchestrationEdges ?? [];
+		const departments = snapshot.orchestrationDepartments ?? [];
+		const whiteboards = snapshot.whiteboards ?? {};
+		const orchRuntime = snapshot.orchestrationRuntime;
+
+		this.nodeDragDisposables.clear();
+		this.graphDisposables.clear();
+		this.edgeDisposables.clear();
+		this.connectDragDisposables.clear();
+		this.inlineRenameDisposables.clear();
+		this.nodeHandles.clear();
+		this.edgeHandles.clear();
+		this.tokenGliderHandles.clear();
+		this.orchAnchorButtons.clear();
+		this.orchNodeSizeById.clear();
+		this.lastEdgeStructureKey = '';
+		if (this.hoveredNodeId && !orchNodes.some(n => n.id === this.hoveredNodeId)) {
+			this.hoveredNodeId = undefined;
+		}
+		this.hoveredTraceEdgeKeys = undefined;
+		this.worldEl.classList.remove('has-node-hover', 'has-trace-hover');
+		clearNode(this.nodesLayerEl);
+		for (const layer of [this.cloudTerritoriesLayerEl, this.edgesLayerEl, this.contextLinksLayerEl, this.supervisorBeamsLayerEl, this.tokenGliderLayerEl]) {
+			while (layer.firstChild) {
+				layer.removeChild(layer.firstChild);
+			}
+		}
+
+		const activeTokensByNode = new Map<string, IOrchestrationToken[]>();
+		if (orchRuntime) {
+			const statusRank = (s: IOrchestrationToken['status']) => s === 'active' ? 0 : s === 'waiting_join' ? 1 : 2;
+			for (const tok of Object.values(orchRuntime.tokens)) {
+				if (tok.status !== 'active' && tok.status !== 'blocked' && tok.status !== 'waiting_join') {
+					continue;
+				}
+				const arr = activeTokensByNode.get(tok.nodeId) ?? [];
+				arr.push(tok);
+				activeTokensByNode.set(tok.nodeId, arr);
+			}
+			for (const arr of activeTokensByNode.values()) {
+				arr.sort((a, b) => statusRank(a.status) - statusRank(b.status) || b.arrivedAt - a.arrivedAt);
+			}
+		}
+
+		for (const oNode of orchNodes) {
+			const pos = snapshot.positions.get(oNode.id) ?? { x: 280, y: 260 };
+			const nodeSz = getOrchestrationNodeSize(oNode);
+			this.orchNodeSizeById.set(oNode.id, nodeSz);
+
+			const compatDagNode: IMissionDagNode = {
+				id: oNode.id,
+				label: oNode.label,
+				kind: 'task',
+				employeeName: oNode.employeeName,
+				employeeKey: oNode.employeeKey,
+			};
+
+			const mountMultiAnchors = (cardEl: HTMLElement) => {
+				for (const side of ORCHESTRATION_ANCHOR_SIDES) {
+					for (let slot = 0; slot < ORCHESTRATION_SLOTS_PER_SIDE; slot++) {
+						const pct = Math.round(getOrchestrationAnchorFraction(slot, ORCHESTRATION_SLOTS_PER_SIDE) * 100);
+						const anchorBtn = append(cardEl, $(`button.ade-orch-anchor.side-${side}.slot-${slot}.is-connectable`, {
+							type: 'button',
+							'data-ade-connect-port': oNode.id,
+							'data-anchor-side': side,
+							'data-anchor-slot': String(slot),
+							title: adeBi(
+								localize('adeOrchAnchorTip', "Drag from this anchor to connect (hold Shift for bidirectional <-->)"),
+								'从此锚点拖拽连线至任意节点（按住 Shift 创建双向连线 <-->）',
+							),
+						})) as HTMLButtonElement;
+						if (side === 'top' || side === 'bottom') {
+							anchorBtn.style.left = `${pct}%`;
+						} else {
+							anchorBtn.style.top = `${pct}%`;
+						}
+						this.orchAnchorButtons.set(`${oNode.id}:${side}:${slot}`, anchorBtn);
+						this.bindMultiAnchorConnectDrag(oNode, anchorBtn, side, slot);
+					}
+				}
+			};
+
+			const dummy = $('span');
+			const dummyBtn = $('button', { type: 'button' }) as HTMLButtonElement;
+
+			if (oNode.kind === 'whiteboard') {
+				const wb: IOrchestrationWhiteboard = whiteboards[oNode.id] ?? {
+					id: oNode.id,
+					title: oNode.label,
+					department: oNode.department || 'General',
+					content: '',
+					version: 0,
+					createdAt: Date.now(),
+					updatedAt: Date.now(),
+				};
+				const nodeEl = append(this.nodesLayerEl, $('.ade-mission-node.kind-whiteboard', {
+					'data-node-id': oNode.id,
+					'data-node-kind': 'whiteboard',
+					'data-whiteboard-id': wb.id,
+					'data-department': wb.department,
+				}));
+				nodeEl.style.left = `${pos.x}px`;
+				nodeEl.style.top = `${pos.y}px`;
+				this.applyCustomNodeColor(nodeEl, oNode.color);
+
+				const card = append(nodeEl, $('.ade-mission-node-card.is-whiteboard-card'));
+				append(card, $('span.ade-mission-clamp.tl', { 'aria-hidden': 'true' }));
+				append(card, $('span.ade-mission-clamp.tr', { 'aria-hidden': 'true' }));
+				append(card, $('span.ade-mission-clamp.bl', { 'aria-hidden': 'true' }));
+				append(card, $('span.ade-mission-clamp.br', { 'aria-hidden': 'true' }));
+				const topRow = append(card, $('.ade-mission-node-top'));
+				const idWrap = append(topRow, $('span.ade-mission-node-id-wrap'));
+				append(idWrap, $('span.codicon.codicon-notebook.ade-orch-wb-ico', { 'aria-hidden': 'true' }));
+				append(idWrap, $('span.ade-mission-node-id', {}, wb.id));
+				this.mountNodeColorTrigger(idWrap, oNode.id, wb.title, oNode.color);
+				append(topRow, $('span.ade-orch-wb-dept-chip', {}, wb.department));
+
+				const wbWell = append(card, $('.ade-mission-core-well.wb-well'));
+				const titleEl = append(wbWell, $('.ade-mission-node-title.is-wb-title', { title: wb.title }, wb.title));
+				const excerpt = wb.content.trim()
+					? wb.content.trim().replace(/\s+/g, ' ').slice(0, 120)
+					: adeBi(localize('adeOrchWbEmptyExcerpt', "Department shared whiteboard — click to read or write…"), '部门共享白板 — 点击查看或编辑共享内容…');
+				const excerptEl = append(wbWell, $('.ade-orch-wb-excerpt', {}, excerpt));
+				if (!wb.content.trim()) {
+					excerptEl.classList.add('is-empty');
+				}
+
+				const foot = append(card, $('.ade-orch-wb-footer'));
+				append(foot, $('span.ade-orch-wb-ptr-tag', {}, `ptr:${wb.id}`));
+				append(foot, $('span.ade-orch-wb-ver-tag', {}, `v${wb.version}`));
+
+				mountMultiAnchors(card);
+
+				const handle: IRenderedNodeHandle = {
+					node: compatDagNode,
+					rootEl: nodeEl,
+					idWrapEl: idWrap,
+					titleEl,
+					linkedAgent: undefined,
+					engineId: snapshot.fallbackOwnerEngineId,
+					canSwitchEngine: false,
+					canSwitchModel: false,
+					stateDotEl: undefined,
+					nodeState: 'idle',
+					primaryToken: undefined,
+					allTokens: [],
+					boundSupervisorId: undefined,
+					triggerBadgeEl: dummyBtn,
+					triggerBadgeLabelEl: dummy,
+					tokenPuckEl: dummyBtn,
+					tokenPuckIconEl: dummy,
+					tokenPuckLabelEl: dummy,
+					tokenPuckExtraEl: dummy,
+					joinCapsuleEl: dummy,
+					joinDotsEl: dummy,
+					joinCountEl: dummy,
+					lastJoinSignature: '',
+					bottomDockEl: dummy,
+					blockedStripEl: dummyBtn,
+					blockedWaveEl: dummy,
+					blockedCountdownEl: dummy,
+					blockedPidEl: dummy,
+					blockedFileEl: dummy,
+					blockedHostEl: dummy,
+					failedStripEl: dummyBtn,
+					failedWaveEl: dummy,
+					failedReasonEl: dummy,
+					recoveryBarEl: dummy,
+					checkFailChipEl: dummyBtn,
+					retryBtnEl: dummyBtn,
+					guidedRetryBtnEl: dummyBtn,
+					recallBtnEl: dummyBtn,
+					whiteboard: wb,
+				};
+
+				this.nodeHandles.set(oNode.id, handle);
+				this.bindNodeInteractions(handle);
+				continue;
+			}
+
+			// All-Staff Employee Card (NO off-graph wall, NO +Sup pill, 12 perimeter multi-anchors!)
+			const linkedAgent = snapshot.agentByNodeId.get(oNode.id);
+			const explicitHostAlias = snapshot.runtimeState?.boundary?.nodeAssignments?.[oNode.id]?.hostAlias ?? oNode.hostAlias;
+			const hostInfo = this.hostCatalog.resolveNodeHostAndOs(explicitHostAlias, linkedAgent);
+			const rankDef = oNode.rankId || oNode.tier !== undefined
+				? (snapshot.orgConfig.ranks.find(r => (oNode.rankId && r.id === oNode.rankId) || (oNode.tier !== undefined && r.tier === oNode.tier))
+					?? resolveEffectiveRankDefinition(snapshot.orgConfig, linkedAgent?.role, linkedAgent ? snapshot.hasSubordinates(linkedAgent.id) : false))
+				: resolveEffectiveRankDefinition(snapshot.orgConfig, linkedAgent?.role, linkedAgent ? snapshot.hasSubordinates(linkedAgent.id) : false);
+			const tierNum = oNode.tier ?? rankDef.tier;
+			const nodeState = orchRuntime?.nodeStates[oNode.id] ?? 'idle';
+			const stateClass = nodeState !== 'idle' ? `.state-${nodeState.replace(/_/g, '-')}` : '';
+			const hostModifiers = `${hostInfo.isRemote ? '.is-remote-host' : '.is-local-host'}.os-${hostInfo.osKind}`;
+			const liveTokens = activeTokensByNode.get(oNode.id) ?? [];
+			const primaryOrchTok = liveTokens[0];
+
+			const nodeEl = append(this.nodesLayerEl, $(`.ade-mission-node.kind-staff${stateClass}${hostModifiers}`, {
+				'data-node-id': oNode.id,
+				'data-node-kind': 'staff',
+				'data-node-state': nodeState,
+				'data-node-tier': String(tierNum),
+				'data-node-rank': rankDef.id,
+				'data-node-os': hostInfo.osKind,
+				'data-node-host': hostInfo.hostAlias,
+				...(oNode.department ? { 'data-department': oNode.department } : {}),
+				...(oNode.employeeKey ? { 'data-employee-key': oNode.employeeKey } : {}),
+			}));
+			nodeEl.style.left = `${pos.x}px`;
+			nodeEl.style.top = `${pos.y}px`;
+			this.applyCustomNodeColor(nodeEl, oNode.color);
+
+			const card = append(nodeEl, $('.ade-mission-node-card.is-staff-card'));
+			append(card, $('span.ade-mission-clamp.tl', { 'aria-hidden': 'true' }));
+			append(card, $('span.ade-mission-clamp.tr', { 'aria-hidden': 'true' }));
+			append(card, $('span.ade-mission-clamp.bl', { 'aria-hidden': 'true' }));
+			append(card, $('span.ade-mission-clamp.br', { 'aria-hidden': 'true' }));
+			const topRow = append(card, $('.ade-mission-node-top'));
+			const idWrap = append(topRow, $('span.ade-mission-node-id-wrap'));
+			let stateDotEl: HTMLElement | undefined;
+			if (nodeState !== 'idle') {
+				stateDotEl = append(idWrap, $('span.ade-mission-state-dot', { 'aria-hidden': 'true', title: nodeState }));
+			}
+			append(idWrap, $('span.ade-mission-node-id', {}, oNode.id));
+			const clampedTier = Math.max(1, Math.min(4, tierNum));
+			append(idWrap, $(`span.ade-mission-rank-pill.tier-${clampedTier}`, {}, `${formatTierTag(tierNum)} ${rankDef.name}`));
+			this.mountNodeColorTrigger(idWrap, oNode.id, oNode.label, oNode.color);
+
+			const topRight = append(topRow, $('.ade-mission-top-pills'));
+			if (oNode.department) {
+				append(topRight, $('span.ade-orch-dept-pill', {}, oNode.department));
+			}
+			const empColorIdx = getEmployeeColorIndex(oNode.employeeKey ?? oNode.id);
+			const empChip = append(topRight, $(`span.ade-mission-emp-pill.emp-color-${empColorIdx}`, {
+				title: adeBi(localize('adeOrchUniqueEmpTip', "Unique Staff Member: {0}", oNode.employeeName ?? oNode.label), '唯一在场员工：{0}', oNode.employeeName ?? oNode.label),
+			}));
+			append(empChip, $('span.ade-mission-emp-dot', { 'aria-hidden': 'true' }));
+			append(empChip, $('span.ade-mission-emp-name', {}, oNode.employeeName ?? oNode.label));
+
+			const engineId = linkedAgent?.session?.engineId ?? linkedAgent?.preferredEngineId ?? oNode.engineId ?? snapshot.fallbackOwnerEngineId;
+			const engineName = this.hostCatalog.getEngineDisplayName(engineId);
+			const engineIcon = this.hostCatalog.getEngineIcon(engineId);
+			const nodeTelemetry = snapshot.runtimeState?.nodeTelemetry?.[oNode.id];
+			const resolvedModel = linkedAgent?.preferredModel || oNode.model || nodeTelemetry?.model || MISSION_ENGINE_DEFAULT_MODELS[engineId] || engineName.toLowerCase();
+			const llmProvider = resolveEffectiveAdeLlmProvider(resolvedModel, engineId, this.hostCatalog.getModelCategoryOverrides());
+			const llmProviderLabel = ADE_LLM_PROVIDER_LABELS[llmProvider];
+			const resolvedThinking: AdeThinkingLevel = (linkedAgent?.preferredThinking ?? (oNode.thinking as AdeThinkingLevel | undefined) ?? 'medium');
+			const canSwitchModel = Boolean(snapshot.canSwitchModel);
+			const canSwitchEngine = Boolean(snapshot.canSwitchModel);
+			const modelContextFallback = inferModelContextWindowTokens(resolvedModel, { engineId });
+			const ctxBreakdown = computeMissionNodeContextBreakdown(nodeTelemetry, modelContextFallback);
+
+			const coreWell = append(card, $('.ade-mission-core-well'));
+			const coreHead = append(coreWell, $('.ade-mission-core-head'));
+			const coreIconTile = append(coreHead, $(`button.ade-mission-core-icon-well.llm-${llmProvider}${canSwitchModel ? '.is-editable' : ''}`, {
+				type: 'button',
+				'data-llm-provider': llmProvider,
+				title: canSwitchModel
+					? localize('adeMissionLlmIconSwitchTip', "Driving LLM: {0} ({1}) — Click to switch model & thinking", llmProviderLabel, resolvedModel)
+					: localize('adeMissionLlmIconTip', "Driving LLM: {0} ({1})", llmProviderLabel, resolvedModel),
+			})) as HTMLButtonElement;
+			const coreLlmGlyph = append(coreIconTile, $('span.ade-mission-llm-icon', { 'aria-hidden': 'true' }));
+			renderAdeLlmIcon(coreLlmGlyph, llmProvider, { baseClass: 'ade-mission-llm-icon', prefix: 'ade-llm', tooltip: `${llmProviderLabel} · ${resolvedModel}` });
+			if (!canSwitchModel) {
+				coreIconTile.disabled = true;
+			}
+
+			const coreMeta = append(coreHead, $('.ade-mission-core-meta'));
+			const coreTitleRow = append(coreMeta, $('.ade-mission-core-title-row'));
+			const titleEl = append(coreTitleRow, $('.ade-mission-node-title', { title: oNode.label }, oNode.label));
+			const modelRow = append(coreMeta, $(`.ade-mission-core-model-row${canSwitchModel ? '.is-editable' : ''}`, {
+				'data-node-model': resolvedModel,
+				'data-node-thinking': resolvedThinking,
+			}));
+			append(modelRow, $('span.ade-mission-model-name', {}, resolvedModel));
+			append(modelRow, $('span.ade-mission-model-sep', { 'aria-hidden': 'true' }, '·'));
+			append(modelRow, $(`span.ade-mission-thinking-tag.level-${resolvedThinking}`, {}, resolvedThinking));
+
+			const summaryText = primaryOrchTok
+				? primaryOrchTok.lastSummary
+				: adeBi(localize('adeOrchStaffStandby', "Context prewarmed · Awaiting baton"), '上下文已预热 · 待接力唤醒');
+			append(coreWell, $('.ade-mission-core-context', { title: summaryText }, summaryText));
+
+			// Recessed Baton / Directive Status Strip inside Core Well (preserves original Armored Pod vertical rhythm!)
+			const hasLiveBaton = Boolean(primaryOrchTok);
+			const staffDirectiveBar = append(coreWell, $(`button.ade-mission-node-prompt-bar${hasLiveBaton ? '.has-prompt' : ''}`, {
+				type: 'button',
+				'data-ade-orch-directive-bar': oNode.id,
+			})) as HTMLButtonElement;
+			append(staffDirectiveBar, $(`span.codicon.${hasLiveBaton ? 'codicon-pass-filled' : 'codicon-note'}.ade-mission-node-prompt-ico`, { 'aria-hidden': 'true' }));
+			const batonRefCount = primaryOrchTok?.contextRefs?.length ?? primaryOrchTok?.whiteboardPointers?.length ?? 0;
+			const batonStripPreview = primaryOrchTok
+				? (primaryOrchTok.lastSummary || primaryOrchTok.id)
+				: adeBi(localize('adeOrchStandbyHint', "Persistent staff · re-wakes on baton arrival"), '持久在场员工 · 收到令牌即唤醒');
+			append(staffDirectiveBar, $('span.ade-mission-node-prompt-preview', {}, batonStripPreview));
+			append(staffDirectiveBar, $('span.ade-mission-node-prompt-tag', {}, primaryOrchTok
+				? (batonRefCount > 0 ? `${primaryOrchTok.id} · ${batonRefCount} ptr` : primaryOrchTok.id)
+				: adeBi(localize('adeOrchIdleTag', "Standby"), '待命')));
+			if (primaryOrchTok) {
+				this.graphDisposables.add(addDisposableListener(staffDirectiveBar, EventType.CLICK, e => {
+					e.stopPropagation();
+					this.callbacks.onOpenOrchestrationTokenPopover?.(oNode.label, primaryOrchTok, staffDirectiveBar);
+				}));
+			} else {
+				staffDirectiveBar.disabled = true;
+			}
+
+			// Original 4-Segment Context Window Usage Progress Bar
+			const staffCostUsd = nodeTelemetry?.costUsd ?? 0;
+			const staffCostEstimated = Boolean(nodeTelemetry?.costEstimated);
+			const staffCostLocalFree = Boolean(nodeTelemetry?.costLocalFree && staffCostUsd === 0 && ((nodeTelemetry?.totalTokens ?? 0) > 0 || (nodeTelemetry?.turns ?? 0) > 0));
+			const ctxRowEl = append(card, $(`.ade-mission-ctx-row.severity-${ctxBreakdown.severity}`, {
+				'data-node-context-pct': String(ctxBreakdown.usedPct),
+				'data-node-context-used': String(ctxBreakdown.usedTokens),
+				'data-node-context-max': String(ctxBreakdown.maxTokens),
+			}));
+			const ctxTrack = append(ctxRowEl, $('.ade-mission-ctx-track'));
+			const ctxSegInitEl = append(ctxTrack, $('.ade-ctx-seg.seg-init'));
+			const ctxSegTierEl = append(ctxTrack, $('.ade-ctx-seg.seg-tier'));
+			const ctxSegSourceEl = append(ctxTrack, $('.ade-ctx-seg.seg-source'));
+			const ctxSegNoiseEl = append(ctxTrack, $('.ade-ctx-seg.seg-noise'));
+			ctxSegInitEl.style.width = `${ctxBreakdown.initPct.toFixed(1)}%`;
+			ctxSegTierEl.style.width = `${ctxBreakdown.tierPct.toFixed(1)}%`;
+			ctxSegSourceEl.style.width = `${ctxBreakdown.sourcePct.toFixed(1)}%`;
+			ctxSegNoiseEl.style.width = `${ctxBreakdown.noisePct.toFixed(1)}%`;
+			const ctxStats = append(ctxRowEl, $('.ade-mission-ctx-stats'));
+			append(ctxStats, $('span.ade-mission-ctx-tokens', {}, `${formatCompactTokenCount(ctxBreakdown.usedTokens)}/${formatCompactTokenCount(ctxBreakdown.maxTokens)}`));
+			const staffCostLabel = staffCostUsd > 0
+				? formatFinOpsUsd(staffCostUsd, { estimated: staffCostEstimated, compact: true })
+				: (staffCostLocalFree ? 'Local $0' : '');
+			if (staffCostLabel) {
+				append(ctxStats, $('span.ade-mission-ctx-cost', {}, staffCostLabel));
+			}
+			append(ctxStats, $('span.ade-mission-ctx-pct', {}, `${ctxBreakdown.usedPct}%`));
+
+			const footer = append(card, $('.ade-mission-node-footer'));
+			const engineBadge = append(footer, $(`button.ade-mission-engine-pill${canSwitchEngine ? '.is-editable' : ''}`, {
+				type: 'button',
+				'data-node-engine-id': engineId,
+			})) as HTMLButtonElement;
+			const engIconEl = append(engineBadge, $('span.ade-mission-engine-icon', { 'aria-hidden': 'true' }));
+			applyMissionEngineIcon(engIconEl, engineIcon);
+			append(engineBadge, $('span.ade-mission-engine-name', {}, engineName));
+			if (!canSwitchEngine) {
+				engineBadge.disabled = true;
+			}
+
+			const hostPill = append(footer, $(`button.ade-mission-host-pill.os-${hostInfo.osKind}${hostInfo.isRemote ? '.is-remote' : '.is-local'}${snapshot.canSwitchHost ? '.is-editable' : ''}`, {
+				type: 'button',
+				'data-node-host': hostInfo.hostAlias,
+				'data-node-os': hostInfo.osKind,
+			})) as HTMLButtonElement;
+			const osIconEl = append(hostPill, $('span.ade-mission-os-icon', { 'aria-hidden': 'true' }));
+			renderAdeOsIcon(osIconEl, hostInfo.osKind, { baseClass: 'ade-mission-os-icon', prefix: 'ade-os' });
+			append(hostPill, $('span.ade-mission-host-name', {}, hostInfo.isRemote ? hostInfo.displayHost : `Local · ${hostInfo.osLabel}`));
+			if (!snapshot.canSwitchHost) {
+				hostPill.disabled = true;
+			}
+
+			// Live Orchestration Baton Token Puck (shows wave, waiting-join barrier, 5m silence reminder count, & pointer count)
+			const puckStatusCls = (primaryOrchTok?.status ?? 'idle').replace(/_/g, '-');
+			const orchTokenBtn = append(nodeEl, $(`button.ade-mission-token-puck.status-${puckStatusCls}${primaryOrchTok ? `.wave-color-${getMissionWaveColorIndex(primaryOrchTok.waveId)}` : ''}`, {
+				type: 'button',
+				'data-ade-orch-token-puck': oNode.id,
+				...(primaryOrchTok ? { 'data-token-id': primaryOrchTok.id, 'data-token-status': primaryOrchTok.status } : {}),
+			})) as HTMLButtonElement;
+			if (primaryOrchTok) {
+				const ptrCount = primaryOrchTok.contextRefs?.length ?? primaryOrchTok.whiteboardPointers?.length ?? 0;
+				const iconCls = primaryOrchTok.status === 'blocked'
+					? 'codicon-watch'
+					: primaryOrchTok.status === 'waiting_join'
+						? 'codicon-git-merge'
+						: 'codicon-pass-filled';
+				append(orchTokenBtn, $(`span.codicon.${iconCls}.ade-orch-puck-ico`, { 'aria-hidden': 'true' }));
+				const barrier = primaryOrchTok.status === 'waiting_join' && primaryOrchTok.joinBarrierId
+					? orchRuntime?.joinBarriers?.[primaryOrchTok.joinBarrierId]
+					: undefined;
+				const joinInfo = barrier
+					? ` · Join ${Object.keys(barrier.settledChildren).length}/${barrier.childTokenIds.length}`
+					: '';
+				append(orchTokenBtn, $('span.ade-mission-token-puck-label', {}, `${formatMissionWaveTag(primaryOrchTok.waveId)}${joinInfo}`));
+				if (primaryOrchTok.nudgeCount > 0) {
+					const nudgeChip = append(orchTokenBtn, $('span.ade-orch-puck-chip.is-nudge'));
+					append(nudgeChip, $('span.codicon.codicon-bell', { 'aria-hidden': 'true' }));
+					append(nudgeChip, $('span', {}, String(primaryOrchTok.nudgeCount)));
+				}
+				if (ptrCount > 0) {
+					const ptrChip = append(orchTokenBtn, $('span.ade-orch-puck-chip.is-ptr'));
+					append(ptrChip, $('span.codicon.codicon-link', { 'aria-hidden': 'true' }));
+					append(ptrChip, $('span', {}, `${ptrCount}`));
+				}
+				if (liveTokens.length > 1) {
+					append(orchTokenBtn, $('span.ade-mission-token-puck-extra', {}, `+${liveTokens.length - 1}`));
+				}
+				this.graphDisposables.add(addDisposableListener(orchTokenBtn, EventType.CLICK, e => {
+					e.stopPropagation();
+					this.callbacks.onOpenOrchestrationTokenPopover?.(oNode.label, primaryOrchTok, orchTokenBtn);
+				}));
+			} else {
+				orchTokenBtn.hidden = true;
+			}
+
+			// Mount 12 Perimeter Multi-Anchor Connection Ports (4 sides × 3 slots)
+			mountMultiAnchors(card);
+
+			if (canSwitchModel) {
+				this.graphDisposables.add(addDisposableListener(coreIconTile, EventType.CLICK, e => {
+					e.stopPropagation();
+					this.callbacks.onOpenModelPopover(oNode.id, linkedAgent, engineId, coreIconTile, {
+						currentModel: resolvedModel,
+						currentThinking: resolvedThinking,
+						hostAlias: hostInfo.hostAlias,
+					});
+				}));
+				this.graphDisposables.add(addDisposableListener(modelRow, EventType.CLICK, e => {
+					e.stopPropagation();
+					this.callbacks.onOpenModelPopover(oNode.id, linkedAgent, engineId, modelRow, {
+						currentModel: resolvedModel,
+						currentThinking: resolvedThinking,
+						hostAlias: hostInfo.hostAlias,
+					});
+				}));
+			}
+			if (canSwitchEngine) {
+				this.graphDisposables.add(addDisposableListener(engineBadge, EventType.CLICK, e => {
+					e.stopPropagation();
+					this.callbacks.onOpenEnginePopover(oNode.id, linkedAgent, engineId, engineBadge, {
+						staffLabel: oNode.label,
+						hostAlias: hostInfo.hostAlias,
+					});
+				}));
+			}
+			if (snapshot.canSwitchHost) {
+				this.graphDisposables.add(addDisposableListener(hostPill, EventType.CLICK, e => {
+					e.stopPropagation();
+					this.callbacks.onOpenHostPopover(compatDagNode, hostInfo.hostAlias, hostPill);
+				}));
+			}
+			this.graphDisposables.add(addDisposableListener(titleEl, EventType.DBLCLICK, e => {
+				if (!this.callbacks.onRenameNode) {
+					return;
+				}
+				e.stopPropagation();
+				this.startInlineNodeRename(oNode.id);
+			}));
+
+			const handle: IRenderedNodeHandle = {
+				node: compatDagNode,
+				rootEl: nodeEl,
+				idWrapEl: idWrap,
+				titleEl,
+				hostAlias: hostInfo.hostAlias,
+				displayHost: hostInfo.displayHost,
+				osKind: hostInfo.osKind,
+				osLabel: hostInfo.osLabel,
+				isRemoteHost: hostInfo.isRemote,
+				linkedAgent,
+				engineId,
+				canSwitchEngine,
+				canSwitchModel,
+				stateDotEl,
+				nodeState,
+				primaryToken: undefined,
+				allTokens: [],
+				boundSupervisorId: undefined,
+				triggerBadgeEl: dummyBtn,
+				triggerBadgeLabelEl: dummy,
+				tokenPuckEl: orchTokenBtn,
+				tokenPuckIconEl: dummy,
+				tokenPuckLabelEl: dummy,
+				tokenPuckExtraEl: dummy,
+				joinCapsuleEl: dummy,
+				joinDotsEl: dummy,
+				joinCountEl: dummy,
+				lastJoinSignature: '',
+				bottomDockEl: dummy,
+				blockedStripEl: dummyBtn,
+				blockedWaveEl: dummy,
+				blockedCountdownEl: dummy,
+				blockedPidEl: dummy,
+				blockedFileEl: dummy,
+				blockedHostEl: dummy,
+				failedStripEl: dummyBtn,
+				failedWaveEl: dummy,
+				failedReasonEl: dummy,
+				recoveryBarEl: dummy,
+				checkFailChipEl: dummyBtn,
+				retryBtnEl: dummyBtn,
+				guidedRetryBtnEl: dummyBtn,
+				recallBtnEl: dummyBtn,
+			};
+
+			const isSelectedNode = this.selectedNodeIds.has(oNode.id);
+			nodeEl.classList.toggle('is-selected', isSelectedNode);
+			if (isSelectedNode) {
+				nodeEl.setAttribute('data-node-selected', 'true');
+			}
+			this.nodeHandles.set(oNode.id, handle);
+			this.bindNodeInteractions(handle);
+		}
+
+		this.lastOrchLayoutMode = snapshot.orchestrationLayoutMode;
+		this.updateOrchestrationEdgesSvg(orchNodes, orchEdges, departments, snapshot.positions, {
+			direction: snapshot.direction ?? this.lastDirection,
+			layoutMode: snapshot.orchestrationLayoutMode,
+		});
+	}
+
+	private renderOrchestrationDepartmentRegions(
+		nodes: readonly IOrchestrationGraphNode[],
+		departments: readonly IOrchestrationDepartmentGroup[],
+		positions: ReadonlyMap<string, IMissionNodePosition>,
+	): void {
+		this.deptDisposables.clear();
+		this.deptPillRectById.clear();
+		while (this.cloudTerritoriesLayerEl.firstChild) {
+			this.cloudTerritoriesLayerEl.removeChild(this.cloudTerritoriesLayerEl.firstChild);
+		}
+		if (departments.length === 0) {
+			return;
+		}
+		const nodeById = new Map(nodes.map(n => [n.id, n]));
+		let globalMaxX = 120;
+		let globalMinY = 140;
+		let hasPlacedNode = false;
+		for (const n of nodes) {
+			const p = positions.get(n.id);
+			if (!p) {
+				continue;
+			}
+			const sz = getOrchestrationNodeSize(n);
+			globalMaxX = Math.max(globalMaxX, p.x + sz.width / 2);
+			globalMinY = hasPlacedNode ? Math.min(globalMinY, p.y - sz.height / 2) : (p.y - sz.height / 2);
+			hasPlacedNode = true;
+		}
+		let emptyIndex = 0;
+
+		for (let idx = 0; idx < departments.length; idx++) {
+			const dept = departments[idx];
+			let minX = Infinity;
+			let maxX = -Infinity;
+			let minY = Infinity;
+			let maxY = -Infinity;
+			let count = 0;
+			const allDeptMemberIds = [...new Set([...dept.nodeIds, ...dept.whiteboardIds])];
+			for (const nid of allDeptMemberIds) {
+				const n = nodeById.get(nid);
+				const p = positions.get(nid);
+				if (!n || !p) {
+					continue;
+				}
+				const sz = getOrchestrationNodeSize(n);
+				minX = Math.min(minX, p.x - sz.width / 2);
+				maxX = Math.max(maxX, p.x + sz.width / 2);
+				minY = Math.min(minY, p.y - sz.height / 2);
+				maxY = Math.max(maxY, p.y + sz.height / 2);
+				count++;
+			}
+
+			const isEmptyGroup = count === 0 || !Number.isFinite(minX);
+			let boxX: number;
+			let boxY: number;
+			let boxW: number;
+			let boxH: number;
+			let emptyCenter: IMissionNodePosition | undefined;
+			if (isEmptyGroup) {
+				const emptyW = 340;
+				const emptyH = 168;
+				const explicitPos = positions.get(dept.id);
+				emptyCenter = explicitPos ?? {
+					x: Math.round((hasPlacedNode ? globalMaxX + 260 : 340)),
+					y: Math.round((hasPlacedNode ? globalMinY + 90 : 220) + emptyIndex * (emptyH + 54)),
+				};
+				emptyIndex++;
+				boxX = Math.round(emptyCenter.x - emptyW / 2);
+				boxY = Math.round(emptyCenter.y - emptyH / 2);
+				boxW = emptyW;
+				boxH = emptyH;
+			} else {
+				const padX = 34;
+				const padTop = 44;
+				const padBottom = 28;
+				boxX = Math.round(minX - padX);
+				boxY = Math.round(minY - padTop);
+				boxW = Math.round(maxX - minX + padX * 2);
+				boxH = Math.round(maxY - minY + padTop + padBottom);
+			}
+			const colorIdx = idx % 5;
+			// Harmonize department region accent with its highest-rank colored member (e.g. L2 department lead!)
+			const deptColoredStaff = dept.nodeIds
+				.map(nid => nodeById.get(nid))
+				.filter((n): n is IOrchestrationGraphNode => Boolean(n && resolveAdeNodeColorHex(n.color)))
+				.sort((a, b) => (a.tier ?? 99) - (b.tier ?? 99));
+			const deptAccentHex = resolveAdeNodeColorHex(deptColoredStaff[0]?.color);
+
+			const g = svgEl('g', {
+				class: `ade-orch-dept-region dept-color-${colorIdx}${deptAccentHex ? ' has-custom-dept-accent' : ''}${isEmptyGroup ? ' is-empty-group' : ''}`,
+				'data-ade-dept-region': dept.name,
+				'data-ade-dept-id': dept.id,
+			});
+			if (deptAccentHex) {
+				g.style.setProperty('--ade-dept-accent', deptAccentHex);
+			}
+			g.appendChild(svgEl('rect', {
+				class: 'ade-orch-dept-frame',
+				x: String(boxX),
+				y: String(boxY),
+				width: String(boxW),
+				height: String(boxH),
+				rx: '20',
+				ry: '20',
+			}));
+			if (isEmptyGroup) {
+				const hintText = svgEl('text', {
+					class: 'ade-orch-dept-empty-hint',
+					x: String(Math.round(boxX + boxW / 2)),
+					y: String(Math.round(boxY + boxH / 2 + 4)),
+				});
+				hintText.textContent = adeBi(localize('adeOrchEmptyGroupHint', "Empty Group · Right-click pill to add staff or whiteboard"), '空分组 · 右键标题可添加员工或白板');
+				g.appendChild(hintText);
+			}
+
+			const staffCount = dept.nodeIds.length;
+			const wbPart = dept.whiteboardIds.length > 0 ? ` · ${dept.whiteboardIds.length} WB` : '';
+			const titleText = `${dept.name} (${staffCount}${wbPart})`;
+			const pillW = Math.max(122, Math.min(284, titleText.length * 7.2 + 38));
+			const pillX = boxX + 16;
+			const pillY = boxY - 12;
+
+			const pillGroup = svgEl('g', {
+				class: 'ade-orch-dept-pill-group',
+				'data-ade-dept-pill': dept.id,
+				'data-ade-dept-name': dept.name,
+			});
+			const titleEl = svgEl('title');
+			titleEl.textContent = adeBi(
+				localize('adeOrchDeptPillTooltip', "Drag to move group · Double-click to rename · Right-click for group options"),
+				'拖拽整体移动分组 · 双击重命名分组 · 右键打开分组菜单',
+			);
+			pillGroup.appendChild(titleEl);
+			pillGroup.appendChild(svgEl('rect', {
+				class: 'ade-orch-dept-pill-bg',
+				x: String(pillX),
+				y: String(pillY),
+				width: String(Math.round(pillW)),
+				height: '24',
+				rx: '12',
+			}));
+			// Subtle 6-dot drag grip handle inside pill
+			for (let r = 0; r < 3; r++) {
+				for (let c = 0; c < 2; c++) {
+					pillGroup.appendChild(svgEl('circle', {
+						class: 'ade-orch-dept-grip',
+						cx: String(pillX + 12 + c * 4),
+						cy: String(pillY + 8 + r * 4),
+						r: '1.05',
+					}));
+				}
+			}
+			const label = svgEl('text', {
+				class: 'ade-orch-dept-pill-text',
+				x: String(pillX + 24),
+				y: String(boxY + 1),
+			});
+			label.textContent = titleText;
+			pillGroup.appendChild(label);
+			g.appendChild(pillGroup);
+			this.cloudTerritoriesLayerEl.appendChild(g);
+			this.deptPillRectById.set(dept.id, { dept, x: pillX, y: boxY, w: pillW });
+
+			this.bindDepartmentPillInteractions(pillGroup, dept, allDeptMemberIds, emptyCenter);
+		}
+	}
+
+	private bindDepartmentPillInteractions(
+		pillGroup: SVGGElement,
+		dept: IOrchestrationDepartmentGroup,
+		memberIds: readonly string[],
+		emptyCenter: IMissionNodePosition | undefined,
+	): void {
+		const win = getWindow(this.worldEl);
+		this.deptDisposables.add(addDisposableListener(pillGroup, EventType.CONTEXT_MENU, (e: MouseEvent) => {
+			if (!this.callbacks.onGroupContextMenu) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation();
+			this.callbacks.onGroupContextMenu(dept, e.clientX, e.clientY);
+		}));
+		this.deptDisposables.add(addDisposableListener(pillGroup, EventType.DBLCLICK, (e: MouseEvent) => {
+			if (!this.callbacks.onRenameGroup || this.callbacks.isRevisionPreview?.()) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation();
+			this.startInlineGroupRename(dept.id);
+		}));
+		this.deptDisposables.add(addDisposableListener(pillGroup, EventType.POINTER_DOWN, (downEv: PointerEvent) => {
+			if (downEv.button !== 0 || this.callbacks.isRevisionPreview?.()) {
+				return;
+			}
+			downEv.stopPropagation();
+			downEv.preventDefault();
+			const dragIds = memberIds.length > 0 ? [...memberIds] : [dept.id];
+			const startClientX = downEv.clientX;
+			const startClientY = downEv.clientY;
+			const startPositions = new Map<string, IMissionNodePosition>();
+			for (const id of dragIds) {
+				const existingPos = this.callbacks.getNodePosition(id);
+				if (existingPos) {
+					startPositions.set(id, { x: existingPos.x, y: existingPos.y });
+				} else if (id === dept.id && emptyCenter) {
+					startPositions.set(id, { x: emptyCenter.x, y: emptyCenter.y });
+				}
+			}
+			if (startPositions.size === 0) {
+				return;
+			}
+			let activeDrag = false;
+			this.nodeDragDisposables.clear();
+			const cleanup = (endEv: PointerEvent | undefined) => {
+				this.nodeDragDisposables.clear();
+				if (!activeDrag) {
+					return;
+				}
+				activeDrag = false;
+				for (const id of dragIds) {
+					this.nodeHandles.get(id)?.rootEl.classList.remove('dragging');
+				}
+				const movedPx = endEv ? Math.max(NODE_DRAG_THRESHOLD_PX, Math.hypot(endEv.clientX - startClientX, endEv.clientY - startClientY)) : NODE_DRAG_THRESHOLD_PX;
+				if (this.callbacks.onEndNodesDrag) {
+					this.callbacks.onEndNodesDrag(dragIds, movedPx);
+				} else if (dragIds.length > 0) {
+					this.callbacks.onEndNodeDrag(dragIds[0], movedPx);
+				}
+			};
+			this.nodeDragDisposables.add(addDisposableListener(win, EventType.POINTER_MOVE, (mv: PointerEvent) => {
+				const dist = Math.hypot(mv.clientX - startClientX, mv.clientY - startClientY);
+				if (!activeDrag) {
+					if (dist < NODE_DRAG_THRESHOLD_PX) {
+						return;
+					}
+					activeDrag = true;
+					this.callbacks.onStartNodeDrag();
+					for (const id of dragIds) {
+						this.nodeHandles.get(id)?.rootEl.classList.add('dragging');
+					}
+				}
+				const zoom = Math.max(0.1, this.callbacks.getZoom());
+				const dx = Math.round((mv.clientX - startClientX) / zoom);
+				const dy = Math.round((mv.clientY - startClientY) / zoom);
+				const moves: Array<{ readonly nodeId: string; readonly pos: IMissionNodePosition }> = [];
+				for (const [id, sp] of startPositions.entries()) {
+					const nextPos = { x: sp.x + dx, y: sp.y + dy };
+					moves.push({ nodeId: id, pos: nextPos });
+					const handle = this.nodeHandles.get(id);
+					if (handle) {
+						handle.rootEl.style.left = `${nextPos.x}px`;
+						handle.rootEl.style.top = `${nextPos.y}px`;
+					}
+				}
+				if (this.callbacks.onDragNodesMove) {
+					this.callbacks.onDragNodesMove(moves);
+				} else {
+					for (const m of moves) {
+						this.callbacks.onDragNodeMove(m.nodeId, m.pos);
+					}
+				}
+			}));
+			this.nodeDragDisposables.add(addDisposableListener(win, EventType.POINTER_UP, upEv => cleanup(upEv)));
+			this.nodeDragDisposables.add(addDisposableListener(win, 'pointercancel', cancelEv => cleanup(cancelEv)));
+			this.nodeDragDisposables.add(addDisposableListener(win, EventType.BLUR, () => cleanup(undefined)));
+		}));
+	}
+
+	private updateOrchestrationEdgesSvg(
+		nodes: readonly IOrchestrationGraphNode[],
+		edges: readonly IOrchestrationGraphEdge[],
+		departments: readonly IOrchestrationDepartmentGroup[],
+		positions: ReadonlyMap<string, IMissionNodePosition>,
+		options?: { readonly direction?: 'LR' | 'TD'; readonly layoutMode?: OrchestrationLayoutMode },
+	): void {
+		this.renderOrchestrationDepartmentRegions(nodes, departments, positions);
+
+		this.edgeDisposables.clear();
+		this.edgeHandles.clear();
+		this.clearGliderDom();
+		while (this.edgesLayerEl.firstChild) {
+			this.edgesLayerEl.removeChild(this.edgesLayerEl.firstChild);
+		}
+		for (const btn of this.orchAnchorButtons.values()) {
+			btn.classList.remove('is-occupied', 'is-bidir-anchor', 'is-cycle-anchor', 'is-wb-anchor');
+		}
+		if (edges.length === 0) {
+			return;
+		}
+
+		const nodeById = new Map(nodes.map(n => [n.id, n]));
+		const routeById = computeOrchestrationMultiAnchorRoutes(nodes, edges, positions, {
+			cornerRadius: 16,
+			direction: options?.direction ?? this.lastDirection,
+			layoutMode: options?.layoutMode ?? this.lastOrchLayoutMode,
+		});
+		const renderedBidirLabelKeys = new Set<string>();
+
+		// Collect ALL live token-passing edges (active dispatches, waiting_join fan-outs, and recent returns)
+		// so every live baton wire glows with luminous animated flow & gliding baton packet capsules!
+		interface ILiveOrchEdgeFlow {
+			readonly tokenId: string;
+			readonly waveId: string;
+			readonly kind: 'dispatch' | 'return';
+			readonly label: string;
+			readonly colorHex?: string;
+		}
+		const liveFlowByEdgeKey = new Map<string, ILiveOrchEdgeFlow>();
+		const edgeKeySet = new Set(edges.map(e => `${e.from}->${e.to}`));
+		if (this.lastOrchRuntime) {
+			const allTokens = Object.values(this.lastOrchRuntime.tokens);
+			const activeParentIds = new Set(
+				allTokens
+					.filter(t => t.status === 'waiting_join' || t.status === 'active')
+					.map(t => t.id),
+			);
+			for (const tok of allTokens) {
+				if ((tok.status === 'active' || tok.status === 'blocked' || tok.status === 'waiting_join') && tok.fromNodeId && tok.fromNodeId !== tok.nodeId) {
+					const fwdKey = `${tok.fromNodeId}->${tok.nodeId}`;
+					const destNode = nodeById.get(tok.nodeId);
+					const srcNode = nodeById.get(tok.fromNodeId);
+					const destHex = resolveAdeNodeColorHex(destNode?.color ?? srcNode?.color);
+					if (edgeKeySet.has(fwdKey)) {
+						liveFlowByEdgeKey.set(fwdKey, {
+							tokenId: tok.id,
+							waveId: tok.waveId,
+							kind: 'dispatch',
+							label: `⚡ ${tok.id}`,
+							colorHex: destHex,
+						});
+					}
+				}
+				// Highlight completed child tokens returning results upstream into a live waiting_join parent!
+				const hopLog = tok.hopLog;
+				if (tok.status === 'completed' && tok.parentTokenId && activeParentIds.has(tok.parentTokenId) && hopLog && hopLog.length > 0) {
+					const lastHop = hopLog[hopLog.length - 1];
+					if (lastHop.event === 'return' && lastHop.fromNodeId && lastHop.toNodeId && lastHop.fromNodeId !== lastHop.toNodeId) {
+						const retKey = `${lastHop.fromNodeId}->${lastHop.toNodeId}`;
+						if (edgeKeySet.has(retKey) && !liveFlowByEdgeKey.has(retKey)) {
+							liveFlowByEdgeKey.set(retKey, {
+								tokenId: tok.id,
+								waveId: tok.waveId,
+								kind: 'return',
+								label: `↩ ${tok.id}`,
+								colorHex: '#34d399',
+							});
+						}
+					}
+				}
+			}
+		}
+
+		let liveGliderIndex = 0;
+
+		for (const edge of edges) {
+			const route = routeById.get(edge.id);
+			if (!route) {
+				continue;
+			}
+			const fromNode = nodeById.get(edge.from);
+			const toNode = nodeById.get(edge.to);
+			const isWhiteboardLink = fromNode?.kind === 'whiteboard' || toNode?.kind === 'whiteboard';
+			// Bidirectional `<-->` partner edges stay cyan/harmonized; true multi-hop feedback cycles stand out in solar amber!
+			const isTrueCycle = route.isCycleBackEdge && !route.isBidirectional;
+			const edgeKey = `${edge.from}->${edge.to}`;
+			const liveFlow = liveFlowByEdgeKey.get(edgeKey);
+
+			// Compute harmonic jewel color for this wire:
+			// - Whiteboard pointer link -> whiteboard custom color or Nebula Violet
+			// - Multi-hop review cycle -> Solar Amber
+			// - Downward tier fan-out (e.g. L1 -> L2 wing lead) -> destination wing jewel color!
+			// - Otherwise -> source custom color -> target custom color -> crisp default cyan
+			const isDownwardTier = fromNode?.kind === 'staff' && toNode?.kind === 'staff'
+				&& (fromNode.tier ?? 99) < (toNode.tier ?? 99);
+			const preferredColorToken = isWhiteboardLink
+				? (toNode?.kind === 'whiteboard' ? (toNode.color ?? fromNode?.color) : (fromNode?.color ?? toNode?.color))
+				: isTrueCycle
+					? 'amber'
+					: isDownwardTier
+						? (toNode?.color ?? fromNode?.color)
+						: (fromNode?.color ?? toNode?.color);
+			const edgeAccentHex = isTrueCycle
+				? '#f59e0b'
+				: resolveAdeNodeColorHex(preferredColorToken) ?? (isWhiteboardLink ? '#a78bfa' : route.isBidirectional ? '#38bdf8' : '#34d399');
+
+			// Mark occupied multi-anchor slots on source & target cards with edge-matched luminous terminal pins
+			const fromPin = this.orchAnchorButtons.get(`${edge.from}:${route.fromAnchor.side}:${route.fromAnchor.slot}`);
+			const toPin = this.orchAnchorButtons.get(`${edge.to}:${route.toAnchor.side}:${route.toAnchor.slot}`);
+			for (const pin of [fromPin, toPin]) {
+				if (!pin) {
+					continue;
+				}
+				pin.classList.add('is-occupied');
+				pin.style.setProperty('--pin-accent', edgeAccentHex);
+				if (isWhiteboardLink) {
+					pin.classList.add('is-wb-anchor');
+				} else if (isTrueCycle) {
+					pin.classList.add('is-cycle-anchor');
+				} else if (route.isBidirectional) {
+					pin.classList.add('is-bidir-anchor');
+				}
+			}
+			const isSelected = Boolean(this.selectedEdgeKey && this.selectedEdgeKey === edgeKey);
+
+			const edgeClasses = ['ade-mission-edge-group', 'is-orch-edge'];
+			if (route.isBidirectional) {
+				edgeClasses.push('is-bidirectional');
+			}
+			if (isTrueCycle) {
+				edgeClasses.push('is-cycle-back');
+			}
+			if (isWhiteboardLink) {
+				edgeClasses.push('is-whiteboard-link');
+			}
+			if (edge.dashed) {
+				edgeClasses.push('is-dashed');
+			}
+			if (isSelected) {
+				edgeClasses.push('is-selected');
+			}
+			if (liveFlow) {
+				edgeClasses.push('is-orch-live-flow', liveFlow.kind === 'return' ? 'is-return-flow' : 'is-dispatch-flow');
+			}
+
+			const group = svgEl('g', {
+				class: edgeClasses.join(' '),
+				'data-edge-id': edge.id,
+				'data-from': edge.from,
+				'data-to': edge.to,
+				'data-from-anchor': `${route.fromAnchor.side}:${route.fromAnchor.slot}`,
+				'data-to-anchor': `${route.toAnchor.side}:${route.toAnchor.slot}`,
+				'data-bidirectional': String(route.isBidirectional),
+				'data-cycle-back': String(route.isCycleBackEdge),
+				...(liveFlow ? { 'data-live-token-id': liveFlow.tokenId, 'data-live-flow-kind': liveFlow.kind } : {}),
+				...(isSelected ? { 'data-edge-selected': 'true' } : {}),
+			});
+			group.style.setProperty('--edge-accent', liveFlow?.colorHex ?? edgeAccentHex);
+
+			const hitPath = svgEl('path', { class: 'ade-mission-edge-hit', d: route.path });
+			group.appendChild(hitPath);
+
+			// Ambient outer glow halo behind every luminous orchestration wire
+			group.appendChild(svgEl('path', {
+				class: `ade-orch-edge-halo${liveFlow ? ' is-live' : ''}`,
+				d: route.path,
+			}));
+
+			const markerEnd = isSelected
+				? 'url(#ade-mission-arrow-active)'
+				: liveFlow?.kind === 'return'
+					? 'url(#ade-mission-arrow-preset-emerald)'
+					: isTrueCycle
+						? 'url(#ade-mission-arrow-cycle)'
+						: isWhiteboardLink
+							? resolveArrowMarkerUrlForColor(preferredColorToken, 'ade-mission-arrow-whiteboard')
+							: resolveArrowMarkerUrlForColor(preferredColorToken, route.isBidirectional ? 'ade-mission-arrow-bidir' : 'ade-mission-arrow-default');
+
+			const path = svgEl('path', {
+				class: 'ade-mission-edge-path',
+				d: route.path,
+				'marker-end': markerEnd,
+			});
+			group.appendChild(path);
+
+			// Animated luminous energy stream overlay for every active token wire!
+			if (liveFlow) {
+				group.appendChild(svgEl('path', {
+					class: `ade-orch-edge-flow-stream${liveFlow.kind === 'return' ? ' is-return' : ''}`,
+					d: route.path,
+				}));
+			}
+
+			const compatEdge: IMissionDagEdge = {
+				id: edge.id,
+				from: edge.from,
+				to: edge.to,
+				...(edge.label ? { label: edge.label } : {}),
+			};
+			this.edgeDisposables.add(addDisposableListener(group, EventType.POINTER_DOWN, (e: PointerEvent) => {
+				if (e.button === 0) {
+					e.stopPropagation();
+				}
+			}));
+			this.edgeDisposables.add(addDisposableListener(group, EventType.CLICK, (e: MouseEvent) => {
+				e.stopPropagation();
+				this.callbacks.onSelectEdge?.(compatEdge);
+			}));
+			this.edgeDisposables.add(addDisposableListener(group, EventType.DBLCLICK, (e: MouseEvent) => {
+				if (!this.callbacks.onRenameEdgeLabel) {
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				this.startInlineEdgeLabelEdit(edge.id);
+			}));
+			this.edgeDisposables.add(addDisposableListener(group, EventType.CONTEXT_MENU, (e: MouseEvent) => {
+				if (!this.callbacks.onEdgeContextMenu) {
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				this.callbacks.onEdgeContextMenu(compatEdge, e.clientX, e.clientY);
+			}));
+
+			let labelBg: SVGRectElement | undefined;
+			let labelText: SVGTextElement | undefined;
+			let pillW = 0;
+			let shouldRenderLabel = Boolean(edge.label);
+			if (shouldRenderLabel && route.isBidirectional && edge.label) {
+				const pairId = edge.from < edge.to ? `${edge.from}<->${edge.to}` : `${edge.to}<->${edge.from}`;
+				const bidirLabelKey = `${pairId}|${edge.label.trim()}`;
+				if (renderedBidirLabelKeys.has(bidirLabelKey)) {
+					shouldRenderLabel = false;
+				} else {
+					renderedBidirLabelKeys.add(bidirLabelKey);
+				}
+			}
+			if (shouldRenderLabel && edge.label) {
+				const labelLayout = computeMissionEdgeLabelLayout(edge.label);
+				pillW = labelLayout.pillWidth;
+				labelBg = svgEl('rect', {
+					class: 'ade-mission-edge-label-bg',
+					x: String(route.midX - pillW / 2),
+					y: String(route.midY - 10),
+					width: String(pillW),
+					height: '20',
+					rx: '6',
+				});
+				labelText = svgEl('text', {
+					class: 'ade-mission-edge-label-text',
+					x: String(route.midX),
+					y: String(route.midY),
+				});
+				labelText.textContent = labelLayout.displayText;
+				group.appendChild(labelBg);
+				group.appendChild(labelText);
+			}
+
+			this.edgesLayerEl.appendChild(group);
+			this.edgeHandles.set(edge.id, {
+				group,
+				path,
+				hitPath,
+				labelBg,
+				labelText,
+				pillW,
+				edge: compatEdge,
+				isCrossHost: false,
+				midX: route.midX,
+				midY: route.midY,
+				bbox: computeRouteBbox(route.points),
+			});
+
+			// Mount sleek persistent glowing Baton Token Packet Comet on live token delivery/return edges!
+			if (liveFlow) {
+				const puckColor = liveFlow.colorHex ?? edgeAccentHex;
+				const puckText = liveFlow.label;
+				const puckW = Math.max(58, Math.min(118, Math.round(puckText.length * 6.4 + 22)));
+				const halfW = puckW / 2;
+				// Choose clean deterministic fraction (avoiding exact 0.50 midpoint when edge has a text label!)
+				const hasTextLabel = Boolean(labelBg);
+				const staticFrac = hasTextLabel
+					? (liveGliderIndex % 2 === 0 ? 0.28 : 0.72)
+					: (0.42 + (liveGliderIndex % 3) * 0.08);
+				const anchorPt = samplePolylinePointAtFraction(route.points, staticFrac);
+
+				const puckGroup = svgEl('g', {
+					class: `ade-orch-live-puck wave-color-${getMissionWaveColorIndex(liveFlow.waveId)}${liveFlow.kind === 'return' ? ' is-return' : ''}`,
+					'data-ade-orch-live-puck': edge.id,
+					'data-token-id': liveFlow.tokenId,
+					'data-wave-id': liveFlow.waveId,
+					'data-flow-kind': liveFlow.kind,
+				});
+				puckGroup.style.setProperty('--puck-color', puckColor);
+				if (this.animationsPaused) {
+					puckGroup.setAttribute('transform', `translate(${anchorPt.x}, ${anchorPt.y})`);
+				} else {
+					puckGroup.style.offsetPath = `path("${route.path}")`;
+					puckGroup.style.setProperty('offset-rotate', '0deg');
+					// Stagger phase along the 3.4s glide cycle so multiple batons travel gracefully across wings
+					const delaySec = -(staticFrac * 3.4);
+					puckGroup.style.animationDelay = `${delaySec.toFixed(2)}s`;
+				}
+				puckGroup.appendChild(svgEl('rect', {
+					class: 'ade-orch-live-puck-bloom',
+					x: String(-halfW - 4),
+					y: '-13',
+					width: String(puckW + 8),
+					height: '26',
+					rx: '13',
+				}));
+				puckGroup.appendChild(svgEl('rect', {
+					class: 'ade-orch-live-puck-pill',
+					x: String(-halfW),
+					y: '-10',
+					width: String(puckW),
+					height: '20',
+					rx: '10',
+				}));
+				puckGroup.appendChild(svgEl('circle', {
+					class: 'ade-orch-live-puck-dot',
+					cx: String(-halfW + 8.5),
+					cy: '0',
+					r: '2.6',
+				}));
+				const textEl = svgEl('text', {
+					class: 'ade-orch-live-puck-text',
+					x: '4',
+					y: '0.5',
+				});
+				textEl.textContent = puckText;
+				puckGroup.appendChild(textEl);
+				this.tokenGliderLayerEl.appendChild(puckGroup);
+				liveGliderIndex++;
+			}
+		}
+
+		// Also trigger one-shot 800ms burst animation on brand-new handoffs when not already covered by a live comet
+		if (this.lastOrchRuntime && !this.animationsPaused) {
+			const now = Date.now();
+			const bursts = new Map<string, IEdgeTransitBurst>();
+			for (const tok of Object.values(this.lastOrchRuntime.tokens)) {
+				if (tok.status !== 'active' || !tok.fromNodeId) {
+					continue;
+				}
+				const key = `${tok.fromNodeId}->${tok.nodeId}`;
+				if (liveFlowByEdgeKey.has(key)) {
+					continue;
+				}
+				const age = now - tok.arrivedAt;
+				if (age >= -EDGE_TRANSIT_MAX_FUTURE_SKEW_MS && age < MISSION_EDGE_TRANSIT_DURATION_MS) {
+					const eh = [...this.edgeHandles.values()].find(h => `${h.edge.from}->${h.edge.to}` === key);
+					if (eh) {
+						eh.group.classList.add('is-token-flowing');
+						bursts.set(key, {
+							edgeKey: key,
+							edgeId: eh.edge.id,
+							tokenId: tok.id,
+							waveId: tok.waveId,
+							isFail: false,
+							hopSignature: `${tok.id}|${key}|${tok.arrivedAt}`,
+							expiresAt: now + Math.max(1, MISSION_EDGE_TRANSIT_DURATION_MS - Math.max(0, age)),
+						});
+					}
+				}
+			}
+			if (bursts.size > 0) {
+				this.patchTokenGliders(bursts, now);
+			}
+		}
+	}
+
+	private bindMultiAnchorConnectDrag(
+		oNode: IOrchestrationGraphNode,
+		anchorEl: HTMLButtonElement,
+		side: OrchestrationAnchorSide,
+		slot: number,
+	): void {
+		this.graphDisposables.add(addDisposableListener(anchorEl, EventType.POINTER_DOWN, (downEv: PointerEvent) => {
+			if (downEv.button !== 0 || !this.callbacks.onConnectNodes) {
+				return;
+			}
+			downEv.preventDefault();
+			downEv.stopPropagation();
+			const win = getWindow(anchorEl);
+			const sourcePos = this.callbacks.getNodePosition(oNode.id);
+			if (!sourcePos) {
+				return;
+			}
+			const sourceSize = getOrchestrationNodeSize(oNode);
+			const startAnchor = computeOrchestrationAnchorPoint(sourcePos, sourceSize, side, slot, ORCHESTRATION_SLOTS_PER_SIDE);
+			let hoveredTargetId: string | undefined;
+
+			const clientToWorld = (clientX: number, clientY: number): { readonly x: number; readonly y: number } => {
+				const rect = this.worldEl.getBoundingClientRect();
+				const zoom = Math.max(0.1, this.callbacks.getZoom());
+				return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
+			};
+
+			const hitTestTarget = (pt: { readonly x: number; readonly y: number }): string | undefined => {
+				for (const candidate of this.lastOrchNodes) {
+					if (candidate.id === oNode.id) {
+						continue;
+					}
+					const pos = this.callbacks.getNodePosition(candidate.id);
+					if (!pos) {
+						continue;
+					}
+					const sz = getOrchestrationNodeSize(candidate);
+					const pad = 16;
+					if (pt.x >= pos.x - sz.width / 2 - pad && pt.x <= pos.x + sz.width / 2 + pad
+						&& pt.y >= pos.y - sz.height / 2 - pad && pt.y <= pos.y + sz.height / 2 + pad) {
+						return candidate.id;
+					}
+				}
+				return undefined;
+			};
+
+			const setTargetHighlight = (nextId: string | undefined) => {
+				if (hoveredTargetId === nextId) {
+					return;
+				}
+				if (hoveredTargetId) {
+					this.nodeHandles.get(hoveredTargetId)?.rootEl.classList.remove('is-connect-target');
+				}
+				hoveredTargetId = nextId;
+				if (hoveredTargetId) {
+					this.nodeHandles.get(hoveredTargetId)?.rootEl.classList.add('is-connect-target');
+				}
+			};
+
+			const updatePreview = (clientX: number, clientY: number, bidir: boolean) => {
+				const pt = clientToWorld(clientX, clientY);
+				const targetId = hitTestTarget(pt);
+				setTargetHighlight(targetId);
+				const route = computeOrthogonalRoundedEdgeRoute(startAnchor.x, startAnchor.y, pt.x, pt.y, {
+					cornerRadius: 12,
+					minStub: 20,
+					orientation: (side === 'top' || side === 'bottom') ? 'vertical' : 'horizontal',
+				});
+				this.connectPreviewPathEl.setAttribute('d', route.path);
+				this.connectPreviewPathEl.classList.toggle('is-fail', false);
+				this.connectPreviewPathEl.setAttribute('marker-end', bidir ? 'url(#ade-mission-arrow-bidir)' : 'url(#ade-mission-arrow-active)');
+				this.connectPreviewPathEl.style.display = '';
+			};
+
+			this.connectDragDisposables.clear();
+			this.worldEl.classList.add('is-connecting-edge');
+			updatePreview(downEv.clientX, downEv.clientY, downEv.shiftKey);
+
+			const cleanup = () => {
+				setTargetHighlight(undefined);
+				this.worldEl.classList.remove('is-connecting-edge');
+				this.connectPreviewPathEl.style.display = 'none';
+				this.connectDragDisposables.clear();
+			};
+			this.connectDragDisposables.add(addDisposableListener(win, EventType.POINTER_MOVE, (mv: PointerEvent) => {
+				updatePreview(mv.clientX, mv.clientY, mv.shiftKey);
+			}));
+			this.connectDragDisposables.add(addDisposableListener(win, EventType.POINTER_UP, (upEv: PointerEvent) => {
+				const pt = clientToWorld(upEv.clientX, upEv.clientY);
+				const finalTarget = hoveredTargetId ?? hitTestTarget(pt);
+				const bidirectional = upEv.shiftKey;
+				cleanup();
+				if (finalTarget && finalTarget !== oNode.id) {
+					this.callbacks.onConnectNodes?.(oNode.id, finalTarget, { bidirectional });
+				}
+			}));
+			this.connectDragDisposables.add(addDisposableListener(win, 'pointercancel', () => cleanup()));
+			this.connectDragDisposables.add(addDisposableListener(win, EventType.BLUR, () => cleanup()));
+			this.connectDragDisposables.add(addDisposableListener(win, EventType.KEY_DOWN, (kev: KeyboardEvent) => {
+				if (kev.key === 'Escape') {
+					kev.preventDefault();
+					cleanup();
+				}
+			}));
+		}));
 	}
 }

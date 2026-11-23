@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { IJSONSchema } from '../../../base/common/jsonSchema.js';
+import { buildTokenSystemEnvelopeLines } from './adeMessageEnvelope.js';
 import {
 	createDefaultMissionBoundary,
 	findDirectSupervisorForNode,
@@ -573,17 +574,19 @@ export function computeMissionNodeContextBreakdown(
 			severity: 'normal',
 		};
 	}
-	const segmentedSum = Math.max(0, telemetry.contextInitTokens)
-		+ Math.max(0, telemetry.contextTierDocTokens)
-		+ Math.max(0, telemetry.contextSourceTokens)
-		+ Math.max(0, telemetry.contextNoiseTokens);
-	const fallbackUsed = Math.max(0, telemetry.inputTokens + telemetry.cacheReadTokens + telemetry.outputTokens);
+	const safePos = (v: number | undefined): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+	const rawInit = safePos(telemetry.contextInitTokens);
+	const rawTier = safePos(telemetry.contextTierDocTokens);
+	const rawSource = safePos(telemetry.contextSourceTokens);
+	const rawNoise = safePos(telemetry.contextNoiseTokens);
+	const segmentedSum = rawInit + rawTier + rawSource + rawNoise;
+	const fallbackUsed = safePos(telemetry.inputTokens) + safePos(telemetry.cacheReadTokens) + safePos(telemetry.outputTokens);
 	const usedTokens = segmentedSum > 0 ? segmentedSum : Math.min(maxTokens, fallbackUsed);
-	const initTokens = segmentedSum > 0 ? Math.max(0, telemetry.contextInitTokens) : Math.round(usedTokens * 0.12);
-	const tierTokens = segmentedSum > 0 ? Math.max(0, telemetry.contextTierDocTokens) : Math.round(usedTokens * 0.22);
-	const noiseTokens = segmentedSum > 0 ? Math.max(0, telemetry.contextNoiseTokens) : 0;
+	const initTokens = segmentedSum > 0 ? rawInit : Math.round(usedTokens * 0.12);
+	const tierTokens = segmentedSum > 0 ? rawTier : Math.round(usedTokens * 0.22);
+	const noiseTokens = segmentedSum > 0 ? rawNoise : 0;
 	const sourceTokens = segmentedSum > 0
-		? Math.max(0, telemetry.contextSourceTokens)
+		? rawSource
 		: Math.max(0, usedTokens - initTokens - tierTokens - noiseTokens);
 
 	const usedPct = Math.min(100, Math.round((usedTokens / maxTokens) * 100));
@@ -2177,6 +2180,14 @@ export function buildTokenDispatchPrompt(
 	nodePrePrompt?: string,
 ): string {
 	const lines: string[] = [
+		...buildTokenSystemEnvelopeLines({
+			tokenId: token.id,
+			nodeId: token.nodeId,
+			nodeLabel,
+			sourceDescription: isRejection
+				? `Mission revision bounce to node \`${token.nodeId}\` (wave \`${token.waveId}\`)`
+				: `Mission baton dispatch to node \`${token.nodeId}\` (wave \`${token.waveId}\`)`,
+		}),
 		`[Mission Token Dispatched — ${isRejection ? 'REVISION REQUESTED' : 'ACTIVE'}]`,
 		`- Mission: \`${token.missionId}\` | Node: \`${token.nodeId}\` (${nodeLabel}) | Token: \`${token.id}\` | Wave: \`${token.waveId}\``,
 		`- Trace Pointer: \`${token.tracePtr}\` (expand only if needed: \`aexus-ade token trace ${token.tracePtr} --json\`)`,

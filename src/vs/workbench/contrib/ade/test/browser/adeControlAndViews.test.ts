@@ -75,7 +75,7 @@ import {
 import { buildAdeAgentRoleContext } from '../../browser/adeControlHandler.js';
 import { AdeConfigEditorPane } from '../../browser/adeConfigEditorPane.js';
 import { AdeEditorService, AdeLineageChatEditorInput } from '../../browser/adeEditorService.js';
-import { AdeEngineeringEditorInput, AdeEngineeringEditorPane, AdePageVisibilityAnimationGuard } from '../../browser/adeEngineeringEditorPane.js';
+import { AdeEngineeringEditorInput, AdeEngineeringEditorPane, AdeEngineeringEditorSerializer, AdePageVisibilityAnimationGuard } from '../../browser/adeEngineeringEditorPane.js';
 import { AdeInboxService } from '../../browser/adeInboxService.js';
 import { AdeInboxPanel, formatAdeInboxKindLabel, IAdeInboxMissionBridge } from '../../browser/adeInboxView.js';
 import { AdeMissionRuntimeService, IAdeMissionRuntimeService } from '../../browser/adeMissionRuntime.js';
@@ -94,7 +94,7 @@ import { AdeRoleStudioEditorInput, AdeRoleStudioEditorPane } from '../../browser
 import { ChatEditorInput } from '../../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { AdeExtensionWebviewEditorInput, AdeExtensionWebviewEditorPane, AdeSessionEditor, AdeSessionEditorInput } from '../../browser/adeSessionEditor.js';
 import { IAdeEngineSession, IAdeSessionsService } from '../../browser/adeSessionsService.js';
-import { ADE_CHANGES_VIEW_ID, ADE_FILES_VIEW_ID, ADE_OPEN_CONFIG_COMMAND_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
+import { ADE_CHANGES_VIEW_ID, ADE_FILES_VIEW_ID, ADE_OPEN_CONFIG_COMMAND_ID, ADE_PROJECTS_VIEW_ID, ADE_SECRETARY_ID, encodeAdeEngineeringInputSpec, IAdeAgent, IAdeEditorService, IAdeProjectsService, IAdeSession } from '../../common/ade.js';
 import { setAdeDisplayLanguageOverride } from '../../common/adeLocalization.js';
 import { AdeRoleSchemaService, IAdeRoleSchemaService } from '../../common/adeRoleSchemaService.js';
 
@@ -2025,6 +2025,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		const emp = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/deck-emp') }, 'Emp Reviewer', { parentId: mgr.id, role: 'employee' });
 		const wrk = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/deck-wrk') }, 'Wrk Leaf', { parentId: emp.id });
 		h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/deck-free') }, 'Unlocked Worker');
+		const unboundGov = h.projects.addProject(alpha, 'Planned Chief');
+		h.projects.setAgentRole(unboundGov.id, 'governor');
+		const inheritedChild = h.projects.addAgent(gov.id, 'Inherited Sub', 'manager');
 		lockedIds.add(mgr.id);
 
 		const host = append(document.body, $('.monaco-workbench.ade-deck-view-test-host'));
@@ -2049,6 +2052,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		const empRow = findRow('Emp Reviewer');
 		const wrkRow = findRow('Wrk Leaf');
 		const freeRow = findRow('Unlocked Worker');
+		const plannedRow = findRow('Planned Chief');
 		const cloudRow = findRow('CloudRepo');
 		const alphaRow = findRow('Alpha');
 		const ubuntuRow = findRow('lab');
@@ -2097,6 +2101,16 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			kaliProjectOs: kaliRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
 			winProjectOs: winRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
 			genericCloudOs: cloudRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
+			genericLinuxUsesTuxNotTerminal: Boolean(
+				cloudRow.querySelector('.ade-tree-item-icon-os svg circle[fill="#F5C211"]')
+				&& !cloudRow.querySelector('.ade-tree-item-icon-os svg rect[fill="#26354d"]'),
+			),
+			plannedChiefUsesRankBadgeNotComment: Boolean(
+				plannedRow.querySelector('.ade-tree-item-icon.ade-tree-item-icon-draft.role-color-amber.codicon-organization')
+				&& !plannedRow.querySelector('.ade-tree-item-icon.codicon-comment')
+				&& !plannedRow.querySelector('.ade-tree-item-icon.codicon-comment-discussion'),
+			),
+			addAgentInheritsParentEngine: inheritedChild.preferredEngineId === 'aexus-claude',
 			agentHasNoOsSvg: !govRow.querySelector('.ade-tree-item-icon')?.hasAttribute('data-os') && !govRow.querySelector('.ade-tree-item-icon svg'),
 			cloudHiddenRoleBadgeDisplay: mainWindow.getComputedStyle(cloudRow.querySelector<HTMLElement>('.ade-role-badge')!).display,
 			cloudHiddenWorktreeBadgeDisplay: mainWindow.getComputedStyle(cloudRow.querySelector<HTMLElement>('.ade-worktree-badge')!).display,
@@ -2174,7 +2188,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			govTier: 'L1',
 			govBadgeText: 'Governor',
 			govBadgeHasOrgIcon: true,
-			govWorktreeText: 'Mission',
+			govWorktreeText: 'Engineering',
 			govChildRank: 'manager',
 			mgrLocked: true,
 			mgrBadgeLocked: true,
@@ -2200,6 +2214,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			kaliProjectOs: 'kali',
 			winProjectOs: 'windows',
 			genericCloudOs: 'linux',
+			genericLinuxUsesTuxNotTerminal: true,
+			plannedChiefUsesRankBadgeNotComment: true,
+			addAgentInheritsParentEngine: true,
 			agentHasNoOsSvg: true,
 			cloudHiddenRoleBadgeDisplay: 'none',
 			cloudHiddenWorktreeBadgeDisplay: 'none',
@@ -3382,10 +3399,12 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L3"]')?.value, 'Employee');
 		assert.strictEqual(configRoot.querySelector<HTMLInputElement>('input[data-tier-alias="L4"]')?.value, 'Worker');
 
-		// Single-copy docs paths display sibling ranks/ and mission/MISSION_API.md
+		// Single-copy docs paths display sibling ranks/, engineering/, and mission/MISSION_API.md
 		const ranksDocEl = configRoot.querySelector<HTMLElement>('[data-ade-docs-ranks]');
+		const engDocEl = configRoot.querySelector<HTMLElement>('[data-ade-docs-engineering]');
 		const missionDocEl = configRoot.querySelector<HTMLElement>('[data-ade-docs-mission]');
 		assert.ok(ranksDocEl?.textContent?.endsWith('/docs/ranks'), 'Docs card displays ranks/ directory');
+		assert.ok(engDocEl?.textContent?.endsWith('/docs/engineering'), 'Docs card displays sibling engineering/ directory');
 		assert.ok(missionDocEl?.textContent?.endsWith('/docs/mission/MISSION_API.md'), 'Docs card displays sibling mission/MISSION_API.md');
 
 		// Hot-edit L2 alias in ADE config and save -> live rank.names reflects update immediately
@@ -3420,9 +3439,18 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(l0Info.alias, 'Secretary');
 		assert.strictEqual(l0Info.isSystemL0, true);
 
-		const missionDocs = await h.control<{ readonly missionDoc: string; readonly ranksDir: string }>('mission.docs', {});
+		const missionDocs = await h.control<{
+			readonly missionDoc: string;
+			readonly ranksDir: string;
+			readonly engineeringDir?: string;
+			readonly engineeringParadigmDoc?: string;
+			readonly engineeringApiDoc?: string;
+		}>('mission.docs', {});
 		assert.ok(missionDocs.missionDoc.endsWith('/docs/mission/MISSION_API.md'));
 		assert.ok(missionDocs.ranksDir.endsWith('/docs/ranks'));
+		assert.ok(missionDocs.engineeringDir?.endsWith('/docs/engineering'));
+		assert.ok(missionDocs.engineeringParadigmDoc?.endsWith('/docs/engineering/ENGINEERING_PARADIGM.md'));
+		assert.ok(missionDocs.engineeringApiDoc?.endsWith('/docs/engineering/ENGINEERING_API.md'));
 
 		await h.control('rank.setCount', { count: 1 });
 		const oneTier = await h.control<{ readonly rankCount: number; readonly namesByTier: Record<string, string> }>('rank.names', {});
@@ -3431,26 +3459,29 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		// Stepper decrement is disabled at min count 1
 		assert.strictEqual(configRoot.querySelector<HTMLButtonElement>('button[data-ade-rank-dec]')?.disabled, true);
 
-		// Test Mission alias customization (Mission -> Engineering -> Research) hot-updating tab titles & rank.names
+		// Test Engineering alias customization (Engineering -> Research -> Engineering) & dual-view tab titles
 		const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
 		h.instantiation.stub(IAdeMissionService, missionStore);
 		const missionAliasInput = configRoot.querySelector<HTMLInputElement>('input[data-ade-mission-alias-input="true"]')!;
-		assert.strictEqual(missionAliasInput.value, 'Mission');
-		missionAliasInput.value = 'Engineering';
+		assert.strictEqual(missionAliasInput.value, 'Engineering');
+		missionAliasInput.value = 'Research';
 		missionAliasInput.dispatchEvent(new missionAliasInput.ownerDocument.defaultView!.Event('input'));
 		configRoot.querySelector<HTMLButtonElement>('button[data-ade-config-save]')!.click();
 		await new Promise(resolve => setTimeout(resolve, 10));
 
 		const renamedMissionNames = await h.control<{ readonly missionName: string }>('rank.names', {});
-		assert.strictEqual(renamedMissionNames.missionName, 'Engineering');
+		assert.strictEqual(renamedMissionNames.missionName, 'Research');
 
 		const createdMission = missionStore.createMission({ title: 'Core Release', mermaidText: '' });
-		const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, createdMission.id));
-		assert.strictEqual(missionInput.getName(), 'Core Release · Engineering');
-
-		// Reset Mission alias back to default Mission
-		await h.control('mission.renameAlias', { alias: 'Mission' });
+		const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(createdMission.id, 'mission')));
+		const orchInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(createdMission.id, 'orchestration')));
 		assert.strictEqual(missionInput.getName(), 'Core Release · Mission');
+		assert.strictEqual(orchInput.getName(), 'Core Release · Orchestration');
+
+		// Reset Engineering alias back to default Engineering
+		await h.control('mission.renameAlias', { alias: 'Engineering' });
+		const resetMissionNames = await h.control<{ readonly missionName: string }>('rank.names', {});
+		assert.strictEqual(resetMissionNames.missionName, 'Engineering');
 
 		// Pure frontend Mission canvas: empty start -> top-left file icon -> Mermaid renders flat non-nested DAG -> hover lights up flowing dashed edges!
 		const engHost = append(document.body, $('.monaco-workbench.ade-eng-pane-test-host'));
@@ -3732,59 +3763,17 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.strictEqual(backendRow.querySelector<HTMLElement>('.ade-reuse-badge')?.hidden, false);
 		assert.strictEqual(backendRow.querySelector<HTMLElement>('.ade-lock-glyph')?.hidden, false);
 
-		// Canvas renders #1/3, #2/3, #3/3 employee pills + hovering N3 illuminates same-employee peers (N1, N4) + orthogonal context ribbons!
+		// Pure Task DAG Mission canvas renders all 5 task/gate nodes cleanly with strictly 1 top-left button
 		const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
 		const canvasHost = append(document.body, $('.monaco-workbench.ade-reuse-canvas-test'));
 		store.add({ dispose: () => canvasHost.remove() });
 		const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
 		pane.create(canvasHost);
-		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+		const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'mission')));
 		await pane.setInput(input, undefined, {}, CancellationToken.None);
 
-		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N1"] .ade-mission-emp-seq')?.textContent, '#1/3');
-		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N3"] .ade-mission-emp-seq')?.textContent, '#2/3');
-		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N4"] .ade-mission-emp-seq')?.textContent, '#3/3');
-
-		// Every task card renders an engine badge naming the linked employee's engine (session.engineId inherited from the owner).
-		const engineBadge = (nodeId: string) => canvasHost.querySelector<HTMLElement>(`.ade-mission-node[data-node-id="${nodeId}"] [data-node-engine-id]`);
-		assert.strictEqual(engineBadge('N1')?.getAttribute('data-node-engine-id'), 'aexus-claude');
-		assert.strictEqual(engineBadge('N1')?.querySelector('.ade-mission-engine-name')?.textContent, 'Claude Code');
-		assert.strictEqual(engineBadge('N2')?.getAttribute('data-node-engine-id'), 'aexus-claude');
-
-		// A per-employee preferredEngineId override is reflected by the reusable employee's badges.
-		h.projects.updateAgentEnginePreferences(backendEmp.id, { preferredEngineId: 'aexus-codex' });
-		assert.strictEqual(engineBadge('N1')?.getAttribute('data-node-engine-id'), 'aexus-codex');
-		assert.strictEqual(engineBadge('N1')?.querySelector('.ade-mission-engine-name')?.textContent, 'Codex');
-		assert.strictEqual(engineBadge('N3')?.getAttribute('data-node-engine-id'), 'aexus-codex');
-		assert.strictEqual(engineBadge('N2')?.getAttribute('data-node-engine-id'), 'aexus-claude', 'Other employees keep their own engine');
-
-		// Hovering N1 must light up the middle reuse node N3 as BOTH a downstream neighbor and a same-employee peer,
-		// attaching exactly one context-port side for the shared ribbon lane.
-		pane.setHoveredNode('N1');
-		const middleNode = canvasHost.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N3"]')!;
-		assert.strictEqual(middleNode.classList.contains('is-downstream'), true, 'N3 is a downstream neighbor of hovered N1');
-		assert.strictEqual(middleNode.classList.contains('is-same-employee'), true, 'N3 is the same Backend employee as N1');
-		const hasTopPort = middleNode.classList.contains('has-ctx-port-top');
-		const hasBottomPort = middleNode.classList.contains('has-ctx-port-bottom');
-		assert.ok(hasTopPort !== hasBottomPort, 'Middle same-employee neighbor must attach exactly one context-port side');
-
-		pane.setHoveredNode('N3');
-		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N1"]')?.classList.contains('is-same-employee'), true);
-		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N4"]')?.classList.contains('is-same-employee'), true);
-		assert.strictEqual(canvasHost.querySelector('.ade-mission-node[data-node-id="N2"]')?.classList.contains('is-same-employee'), false);
-		assert.strictEqual(canvasHost.querySelectorAll('.ade-mission-context-edge').length, 2, 'Two orthogonal context-reuse ribbons link N1->N3->N4 on hover');
-
-		pane.setHoveredNode(undefined);
-		assert.strictEqual(canvasHost.querySelectorAll('.ade-mission-context-edge').length, 0, 'Context ribbons disappear cleanly on mouse leave');
-
-		// 1-click canvas reuse popover: click N2's employee pill -> pick Backend -> merges into single Backend employee (×4)!
-		canvasHost.querySelector<HTMLButtonElement>('[data-node-emp-btn="N2"]')!.click();
-		const popover = canvasHost.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
-		assert.strictEqual(popover.hidden, false);
-		popover.querySelector<HTMLButtonElement>('button[data-ade-emp-option="Backend"]')!.click();
-		assert.strictEqual(missionStore.getGeneratedEmployees(created.id).length, 1, 'Merging N2 onto Backend leaves 1 shared locked employee');
-		assert.deepStrictEqual(missionStore.getGeneratedEmployees(created.id)[0].treeNodeIds, ['N1', 'N2', 'N3', 'N4']);
-		assert.strictEqual(canvasHost.querySelector('[data-node-emp-btn="N2"] .ade-mission-emp-seq')?.textContent, '#2/4');
+		assert.strictEqual(canvasHost.querySelectorAll('.ade-mission-node').length, 5, 'Mission Task DAG renders all 5 task nodes cleanly');
+		assert.strictEqual(canvasHost.querySelectorAll('[data-ade-mission-top-bar="true"] > *').length, 1, 'Minimalist Mission canvas keeps strictly 1 top-left button');
 	});
 
 	suite('ADE Mission Runtime, Token Bus, Strictly Top-Down Org APIs & Safe Patch (mission_plan)', () => {
@@ -3908,14 +3897,14 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(update.latestRevision ?? update.currentRevision, ADE_API_LATEST_REVISION, 'api.update exposes the latest API revision');
 			assert.ok(update.added.length > 0, 'api.update --since 0 reports non-empty additions');
 
-			// 2. docs.read -> single-copy common / L0 / mission documents
-			for (const target of ['common', 'L0', 'mission'] as const) {
+			// 2. docs.read -> single-copy sibling common / L0 / engineering / paradigm / engineering-api / mission documents
+			for (const target of ['common', 'L0', 'engineering', 'paradigm', 'engineering-api', 'mission'] as const) {
 				const doc = await h.control<{ readonly ok: boolean; readonly content: string }>('docs.read', { target });
 				assert.strictEqual(doc.ok, true, `docs.read ${target} succeeds`);
 				assert.ok(doc.content.length > 0, `docs.read ${target} returns non-empty content`);
 			}
 
-			// 3. whoami -> numeric tier / tierTag / factory side / Mission & node identity / lazy docs entry
+			// 3. whoami -> numeric tier / tierTag / factory side / Mission & node identity / sibling lazy docs entry
 			const me = await h.control<{
 				readonly id: string;
 				readonly tier: number;
@@ -3931,7 +3920,16 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(me.factorySide, 'in_graph');
 			assert.strictEqual(me.missionId, created.id);
 			assert.deepStrictEqual(me.nodeIds, ['N1']);
-			assert.ok(me.docsEntry?.common && me.docsEntry?.selfRank && me.docsEntry?.mission && me.docsEntry?.update, 'whoami exposes the on-demand docs entry map');
+			assert.ok(
+				me.docsEntry?.common
+				&& me.docsEntry?.selfRank
+				&& me.docsEntry?.engineeringParadigm
+				&& me.docsEntry?.engineeringApi
+				&& me.docsEntry?.mission
+				&& me.docsEntry?.engineeringDir
+				&& me.docsEntry?.update,
+				'whoami exposes sibling Native Rank + Engineering docs entry map',
+			);
 		});
 
 		test('compiles a clean, minimal in-graph initialization prompt (buildAdeAgentRoleContext)', async () => {
@@ -3945,10 +3943,122 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.ok(prompt!.includes('L3'), 'Prompt identifies the numeric tier L3');
 			assert.ok(prompt!.includes(created.id), 'Prompt includes the owning Mission ID');
 			assert.ok(prompt!.includes('aexus-ade whoami'), 'Prompt points at whoami');
-			assert.ok(prompt!.includes('aexus-ade docs read'), 'Prompt points at docs read');
+			assert.ok(prompt!.includes('aexus-ade docs read L3'), 'Prompt points at native rank doc');
+			assert.ok(prompt!.includes('aexus-ade docs read engineering'), 'Prompt points at sibling Engineering paradigm doc');
 			assert.ok(prompt!.includes('aexus-ade api update'), 'Prompt points at api update');
 			assert.ok(prompt!.length < 900, `In-graph prompt stays concise (was ${prompt!.length} chars)`);
 			assert.ok(!prompt!.includes('N2'), 'Prompt is scoped to the employee node, not the whole DAG');
+		});
+
+		test('compiles Dual-Context Engineering init prompts (Native Rank + Engineering Paradigm) for Orchestration staff across tiers', async () => {
+			const { h, roleSchema, missionRuntime } = createMissionHarness();
+			const govOwner = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/dual-ctx-gov') }, 'VP Gov', { role: 'governor' });
+			const created = await h.control<{ readonly id: string }>('mission.init', {
+				owner: govOwner.id,
+				title: 'Dual Context Engineering',
+				mermaid: 'flowchart LR\n  T1["Build API"] --> T2["Verify"]',
+			});
+
+			const orchMermaid = [
+				'flowchart LR',
+				'  subgraph Backend ["Backend"]',
+				'    G1["VP Gov"]',
+				'    M1["Backend Lead"]',
+				'    W1["Leaf Coder"]',
+				'  end',
+				'  G1 --> M1',
+				'  M1 --> W1',
+				'  %% staff G1 [tier=1, rank=governor, dept=Backend]',
+				'  %% staff M1 [tier=2, rank=manager, dept=Backend]',
+				'  %% staff W1 [tier=4, rank=worker, dept=Backend]',
+			].join('\n');
+			const applied = await h.control<{ readonly ok: boolean; readonly nodeAgentIds: Readonly<Record<string, string>> }>('orchestration.apply', {
+				mission: created.id,
+				text: orchMermaid,
+			});
+			assert.strictEqual(applied.ok, true);
+			const govAgentId = applied.nodeAgentIds.G1;
+			const mgrAgentId = applied.nodeAgentIds.M1;
+			const wrkAgentId = applied.nodeAgentIds.W1;
+			assert.ok(govAgentId && mgrAgentId && wrkAgentId, 'All three Orchestration staff nodes bind real agents');
+
+			const govAgent = h.projects.getAgent(govAgentId)!;
+			const mgrAgent = h.projects.getAgent(mgrAgentId)!;
+			const wrkAgent = h.projects.getAgent(wrkAgentId)!;
+			const standaloneWrk = h.projects.addSession(alpha, { engineId: 'aexus-codex', resource: URI.parse('aexus-codex:/standalone-wrk') }, 'Standalone Worker', { role: 'worker' });
+
+			const docsPaths = roleSchema.getDocsPaths();
+			const mgrPrompt = buildAdeAgentRoleContext(h.projects, undefined, mgrAgent, roleSchema.getConfig(), docsPaths, missionRuntime)!;
+			assert.ok(mgrPrompt.includes('[Aexus Orchestrated Role Context]'), 'Orchestrated staff on Orchestration keeps full Native Rank context (not short-circuited)');
+			assert.ok(mgrPrompt.includes('Tier: L2'), 'L2 manager sees numeric tier');
+			assert.ok(mgrPrompt.includes('docs/ranks/L2.md') && mgrPrompt.includes('aexus-ade docs read L2'), 'L2 manager gets Native Rank CLI doc pointer');
+			assert.ok(mgrPrompt.includes('docs/engineering/ENGINEERING_PARADIGM.md') && mgrPrompt.includes('aexus-ade docs read engineering'), 'L2 manager gets Engineering Paradigm doc pointer');
+			assert.ok(mgrPrompt.includes('docs/engineering/ENGINEERING_API.md') && mgrPrompt.includes('aexus-ade docs read engineering-api'), 'L2 manager gets Engineering CLI Cookbook pointer');
+			assert.ok(mgrPrompt.includes('Engineering Dual-View Working Paradigm & Token Rules'), 'L2 manager gets inline Engineering paradigm summary');
+			assert.ok(mgrPrompt.includes('Native Rank API Coexistence'), 'L2 manager gets coexistence etiquette for native org.*/session.* APIs');
+			assert.ok(mgrPrompt.includes('aexus-ade token mint|split'), 'L2 manager gets downward token mint/split guidance');
+			assert.ok(mgrPrompt.includes('department: Backend'), 'L2 manager sees bound department');
+			assert.ok(!mgrPrompt.includes('per-node Pre-Prompts'), 'Zero legacy pre-prompt boilerplate');
+
+			const govPrompt = buildAdeAgentRoleContext(h.projects, undefined, govAgent, roleSchema.getConfig(), docsPaths, missionRuntime)!;
+			assert.ok(govPrompt.includes('docs/ranks/L1.md') && govPrompt.includes('docs/engineering/ENGINEERING_PARADIGM.md'));
+
+			const wrkPrompt = buildAdeAgentRoleContext(h.projects, undefined, wrkAgent, roleSchema.getConfig(), docsPaths, missionRuntime)!;
+			assert.ok(wrkPrompt.includes('[Aexus ADE · Engineering Staff Context]'), 'Pure leaf worker inside Engineering gets concise Engineering Staff context');
+			assert.ok(wrkPrompt.includes('aexus-ade docs read L4'), 'Leaf worker gets its Native Rank doc pointer');
+			assert.ok(wrkPrompt.includes('aexus-ade docs read engineering'), 'Leaf worker gets Engineering Paradigm doc pointer');
+			assert.ok(wrkPrompt.includes('token return') && wrkPrompt.includes('whiteboard read|write'), 'Leaf worker gets permitted token & whiteboard commands');
+			assert.ok(!wrkPrompt.includes('session subordinates'), 'Leaf worker gets zero management APIs');
+
+			const standaloneWrkPrompt = buildAdeAgentRoleContext(h.projects, undefined, standaloneWrk, roleSchema.getConfig(), docsPaths, missionRuntime);
+			assert.strictEqual(standaloneWrkPrompt, undefined, 'Pure leaf worker outside Engineering stays 100% clean (undefined)');
+
+			const whoamiMgr = await h.control<{ readonly isOrchestrationStaff?: boolean; readonly department?: string; readonly docsEntry?: Record<string, string> }>('whoami', {
+				caller: 'manager',
+				_verifiedCaller: true,
+				_callerSessionId: mgrAgent.id,
+			});
+			assert.strictEqual(whoamiMgr.isOrchestrationStaff, true);
+			assert.strictEqual(whoamiMgr.department, 'Backend');
+			assert.strictEqual(whoamiMgr.docsEntry?.selfRank, 'aexus-ade docs read L2');
+			assert.strictEqual(whoamiMgr.docsEntry?.engineeringParadigm, 'aexus-ade docs read engineering');
+
+			// Verify System Message Provenance Envelopes across all 3 channels:
+			// 1) Human User (L-1) session.send -> [Aexus System · Message from User (L-1)]
+			const sentStart = h.sentChatRequests.length;
+			h.projects.bindSession(mgrAgent.id, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/env-mgr-live') });
+			await h.control('session.send', { id: mgrAgent.id, message: 'User checking status' });
+			const userSentMsg = h.sentChatRequests[sentStart]?.message ?? '';
+			assert.ok(userSentMsg.startsWith('[Aexus System · Message from User (L-1)]'), `Expected User envelope, got: ${userSentMsg}`);
+			assert.ok(userSentMsg.includes('User checking status'));
+
+			// 2) Superior Role (L1 Governor) session.send -> [Aexus System · Direct Message from Role]
+			const subOfGov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/env-sub-mgr') }, 'Direct Sub Mgr', { parentId: govOwner.id, role: 'manager' });
+			const sentRoleIdx = h.sentChatRequests.length;
+			await h.control('session.send', {
+				id: subOfGov.id,
+				message: 'Prioritize auth migration',
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: govOwner.id,
+			});
+			const roleSentMsg = h.sentChatRequests[sentRoleIdx]?.message ?? '';
+			assert.ok(roleSentMsg.startsWith('[Aexus System · Direct Message from Role]'), `Expected Role DM envelope, got: ${roleSentMsg}`);
+			assert.ok(roleSentMsg.includes('Tier L1 · Governor'));
+			assert.ok(roleSentMsg.includes('Prioritize auth migration'));
+
+			// 3) Standalone Pure Worker outside Engineering stays 100% clean (no envelope injection on session.send)
+			const sentPureIdx = h.sentChatRequests.length;
+			await h.control('session.send', { id: standaloneWrk.id, message: 'Run pytest' });
+			assert.strictEqual(h.sentChatRequests[sentPureIdx]?.message, 'Run pytest', 'Standalone pure worker receives clean bare prompt');
+
+			// 4) Engineering Baton Token dispatch -> [Aexus System · Baton Token]
+			const dispatchesBefore = h.executedCommands.filter(c => c.id === 'aexus.agentEngines.dispatchEngineeringTurn').length;
+			await h.control('orchestration.dispatch', { mission: created.id, prompt: 'Implement OAuth2 flow' });
+			const tokenDispatch = h.executedCommands.filter(c => c.id === 'aexus.agentEngines.dispatchEngineeringTurn')[dispatchesBefore];
+			const tokenPrompt = String(tokenDispatch?.args?.[1] ?? '');
+			assert.ok(tokenPrompt.startsWith('[Aexus System · Baton Token]'), `Expected Baton Token envelope, got: ${tokenPrompt.slice(0, 120)}`);
+			assert.ok(tokenPrompt.includes('System-Validated Engineering Baton Token'));
 		});
 
 		test('drives the full Token Bus (join barrier, gate, block/complete/reject/fail escalation) through executeAdeControlRequest', async () => {
@@ -4325,463 +4435,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(missionRuntime.getCurrentTokens(empB.id, created.id)[0]?.status, 'active');
 		});
 
-		test('renders minimal Mission canvas run controls, locked timeout, fail edges, Gate popover, and auto-redraws on patch (Section 6)', async () => {
-			const h = createHarness([URI.file('/workspace/ui-demo')]);
-			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
-			h.instantiation.stub(IAdeMissionService, missionStore);
-			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
-			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
-
-			const mermaid = [
-				'flowchart LR',
-				'  N1["Build"] --> G1{"Release Gate"}',
-				'  N1 -->|fail| F1["Fallback"]',
-				'  F1 --> G1',
-			].join('\n');
-			const created = missionStore.createMission({ title: 'Minimal UI', mermaidText: mermaid });
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-
-			const host = append(document.body, $('.monaco-workbench.ade-mission-runtime-ui-host'));
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			const runBar = host.querySelector<HTMLElement>('[data-ade-mission-run-bar="true"]')!;
-			const primaryBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-run-primary="true"]')!;
-			const stopBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-run-stop="true"]')!;
-			const timeoutInput = host.querySelector<HTMLInputElement>('[data-ade-mission-timeout-input="true"]')!;
-			const failEdge = host.querySelector<SVGGElement>('g[data-edge-kind="fail"]');
-			assert.ok(runBar && primaryBtn && stopBtn && timeoutInput, 'Minimal run bar and drawer config controls exist');
-			assert.ok(failEdge, 'Fail edge renders with data-edge-kind="fail"');
-			assert.strictEqual(timeoutInput.disabled, false, 'Timeout input is editable before Mission starts');
-			assert.strictEqual(stopBtn.hidden, true, 'Stop button is hidden while idle');
-
-			// Start via runtime control -> run bar reflects Running, timeout locks, N1 enters state-active
-			await missionRuntime.start(created.id, { silenceTimeoutMinutes: 7 });
-			assert.strictEqual(runBar.dataset.status, 'running');
-			assert.strictEqual(timeoutInput.value, '7');
-			assert.strictEqual(timeoutInput.disabled, true, 'Silence timeout locks once Mission starts');
-			assert.strictEqual(stopBtn.hidden, false);
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="N1"].state-active'), 'Active node N1 receives state-active highlight');
-
-			// Live DAG editing NEVER auto-commits on blur and NEVER wipes the user's draft on validation failure!
-			// Explicit commit via Apply Patch / Cmd+Enter rejects dangling edits while preserving user draft until edited or explicitly Reverted.
-			const textarea = host.querySelector<HTMLTextAreaElement>('[data-ade-mission-mermaid-input="true"]')!;
-			const applyPatchBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-apply-patch="true"]')!;
-			const revertPatchBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-revert-patch="true"]')!;
-			const validBefore = missionStore.getMission(created.id)!.mermaidText;
-			const danglingDraft = 'flowchart LR\n  N1["Build"]\n  G1{"Release Gate"}';
-			textarea.value = danglingDraft;
-			textarea.dispatchEvent(new (textarea.ownerDocument.defaultView!.Event)('input', { bubbles: true }));
-			assert.strictEqual(missionStore.getMission(created.id)!.mermaidText, validBefore, 'Live keystroke must NOT mutate live Mission Mermaid');
-			assert.strictEqual(textarea.value, danglingDraft, 'Live keystroke must NOT wipe user typing before explicit commit');
-			// Blurring textarea must NOT auto-submit or overwrite user draft
-			textarea.dispatchEvent(new (textarea.ownerDocument.defaultView!.Event)('blur'));
-			await new Promise(resolve => setTimeout(resolve, 30));
-			assert.strictEqual(missionStore.getMission(created.id)!.mermaidText, validBefore, 'Blur must NOT auto-commit live DAG patch');
-			assert.strictEqual(textarea.value, danglingDraft, 'Blur must preserve unsaved live draft');
-			// Explicit Apply Patch triggers patchMermaid -> dangling edit is rejected while preserving user draft for editing!
-			applyPatchBtn.click();
-			await new Promise(resolve => setTimeout(resolve, 30));
-			assert.strictEqual(missionStore.getMission(created.id)!.mermaidText, validBefore, 'Dangling live edit must be rejected on explicit Apply Patch');
-			assert.strictEqual(textarea.value, danglingDraft, 'Rejected live edit MUST preserve user draft in textarea instead of overwriting it');
-			// Explicit Revert button restores the committed Mermaid graph cleanly
-			revertPatchBtn.click();
-			assert.strictEqual(textarea.value, validBefore, 'Explicit Revert restores committed Mermaid graph');
-
-			// P1-12: Clicking node employee pill opens popover containing the compact Off-graph Supervisor selector
-			const empPill = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-emp-pill');
-			assert.ok(empPill, 'Node N1 renders employee pill');
-			empPill.click();
-			const supSelect = host.querySelector<HTMLSelectElement>('select[data-ade-node-supervisor-select="N1"]');
-			assert.ok(supSelect, 'Node popover exposes compact Off-graph Supervisor selector (§6.1)');
-			supSelect.value = ADE_SECRETARY_ID;
-			supSelect.dispatchEvent(new (supSelect.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
-			await new Promise(resolve => setTimeout(resolve, 20));
-			const boundSup = missionRuntime.getRuntimeState(created.id).boundary.supervisors.find(s => s.id === ADE_SECRETARY_ID);
-			assert.ok(boundSup?.managedNodeIds.includes('N1'), 'Selecting a supervisor persists node binding in mission boundary');
-
-			// Complete N1 -> Gate G1 transitions to state-waiting-gate; clicking G1 opens Approve/Reject popover
-			const activeTok = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
-			await missionRuntime.completeToken(created.id, { tokenId: activeTok.id, summary: 'Build artifact verified.' });
-			const gateEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="G1"].state-waiting-gate');
-			assert.ok(gateEl, 'Waiting Gate card receives state-waiting-gate highlight');
-
-			const win = gateEl.ownerDocument.defaultView!;
-			gateEl.dispatchEvent(new win.PointerEvent('pointerdown', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
-			gateEl.dispatchEvent(new win.PointerEvent('pointerup', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
-			const approveBtn = host.querySelector<HTMLButtonElement>('button[data-ade-gate-approve="G1"]');
-			assert.ok(approveBtn, 'Clicking waiting Gate card opens inline Approve/Reject popover');
-			approveBtn.click();
-			await new Promise(resolve => setTimeout(resolve, 15));
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).status, 'completed', 'Approving Gate completes the Mission');
-
-			// Patch Mermaid -> canvas automatically redraws new node N9 without manual refresh
-			const patchedMermaid = `${mermaid}\n  G1 --> N9["Deploy"]`;
-			await missionRuntime.patchMermaid(created.id, { caller: { isHumanUser: true }, newMermaidText: patchedMermaid, reason: 'Add deploy step' });
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="N9"]'), 'Canvas auto-redraws newly patched node N9');
-		});
-
-		test('renders Armored Pod clamps, OS brand icons per host, cross-host edges, and 1-click host picker', async () => {
-			const h = createHarness();
-			const ubuntuHost: IAdeCloudHost = {
-				id: 'h-ubuntu',
-				name: 'ubuntu-target1',
-				alias: 'ubuntu-target1',
-				hostName: '10.0.0.11',
-				port: 22,
-				user: 'lab',
-				os: 'linux',
-				defaultDirectory: '/home/lab',
-				recentDirectories: ['/home/lab'],
-				source: 'user',
-				createdAt: 1,
-				updatedAt: 1,
-				lastTestStatus: { ok: true, remoteUname: 'Linux (ubuntu)', checkedAt: 1, latencyMs: 12 },
-			};
-			const kaliHost: IAdeCloudHost = {
-				id: 'h-kali',
-				name: 'kali-Linux1',
-				alias: 'kali-Linux1',
-				hostName: '10.0.0.12',
-				port: 22,
-				user: 'kali',
-				os: 'linux',
-				defaultDirectory: '/home/kali',
-				recentDirectories: ['/home/kali'],
-				source: 'user',
-				createdAt: 1,
-				updatedAt: 1,
-				lastTestStatus: { ok: true, remoteUname: 'Linux (kali)', checkedAt: 1, latencyMs: 15 },
-			};
-			const winHost: IAdeCloudHost = {
-				id: 'h-win',
-				name: 'BUPT-Windows',
-				alias: 'BUPT-Windows',
-				hostName: '10.0.0.13',
-				port: 22,
-				user: 'djf',
-				os: 'windows',
-				defaultDirectory: '/C:/Users/djf',
-				recentDirectories: ['/C:/Users/djf'],
-				source: 'user',
-				createdAt: 1,
-				updatedAt: 1,
-			};
-			const allHosts: readonly IAdeCloudHost[] = [ubuntuHost, kaliHost, winHost];
-			h.instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
-				listHosts: async () => allHosts,
-				getHost: async (idOrAlias: string) => allHosts.find(x => x.alias === idOrAlias || x.id === idOrAlias),
-			}));
-			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
-			h.instantiation.stub(IAdeMissionService, missionStore);
-			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
-			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
-
-			const mermaid = [
-				'flowchart LR',
-				'  N1["@Architect: Spec"] --> N2["@Backend: API"]',
-				'  N2 --> N3["@RedTeam: Audit"]',
-				'  N2 --> N4["@WinClient: Native Build"]',
-			].join('\n');
-			const created = missionStore.createMission({ title: 'Cross-Cloud Armor', mermaidText: mermaid });
-			await missionRuntime.bindNodeHost(created.id, 'N2', { hostAlias: 'ubuntu-target1' });
-			await missionRuntime.bindNodeHost(created.id, 'N3', { hostAlias: 'kali-Linux1' });
-			await missionRuntime.bindNodeHost(created.id, 'N4', { hostAlias: 'BUPT-Windows' });
-
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-mission-armor-test-host'));
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-			await new Promise(resolve => setTimeout(resolve, 25));
-
-			// Armored Pod anatomy: 4 L-corner clamps + recessed core well + sculpted LLM brand icon tile (distinct from bottom-left Agent Engine pill)
-			const n2El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			assert.ok(n2El, 'Node N2 renders');
-			assert.strictEqual(n2El.querySelectorAll('.ade-mission-clamp').length, 4, 'Armored Pod renders 4 L-corner clamps');
-			assert.ok(n2El.querySelector('.ade-mission-core-well .ade-mission-core-icon-well .ade-mission-llm-icon > svg'), 'Recessed core well renders sculpted driving LLM brand SVG icon');
-			assert.ok(n2El.querySelector('.ade-mission-engine-pill .ade-mission-engine-icon'), 'Bottom-left pill preserves Agent Engine icon');
-			assert.ok(n2El.querySelector('.ade-mission-rank-pill')?.textContent?.includes('L'), 'Armored Pod renders Rank/Tier pill');
-			assert.ok(n2El.querySelector('.ade-mission-core-model-row')?.getAttribute('data-node-model'), 'Armored Pod renders Model ID');
-			assert.ok(n2El.querySelector('.ade-mission-thinking-tag'), 'Armored Pod renders Thinking Effort tag');
-			assert.strictEqual(n2El.querySelectorAll('.ade-mission-ctx-track .ade-ctx-seg').length, 4, 'Armored Pod renders 4-segment context progress bar');
-			assert.strictEqual(n2El.querySelector('.ade-mission-host-name')?.textContent, 'ubuntu-target1', 'Host pill shows exact Cloud Host name');
-
-			// Live turn usage updates the 4-color Context Window Progress Bar, model readout, and driving LLM brand icon in real time
-			const n2AgentId = missionRuntime.getRuntimeState(created.id).boundary.nodeAssignments.N2?.agentId;
-			assert.ok(n2AgentId, 'N2 is linked to a generated employee agent');
-			missionRuntime.recordTurnUsageBySessionResource(n2AgentId, {
-				inputTokens: 42_000,
-				outputTokens: 6_000,
-				totalTokens: 48_000,
-				costUsd: 0.14,
-				model: 'gpt-5.3-codex',
-				summary: '分布式状态机与云端存储接口已就绪',
-			});
-			const n2AfterUsage = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			const ctxRow = n2AfterUsage.querySelector<HTMLElement>('.ade-mission-ctx-row')!;
-			assert.strictEqual(Number(ctxRow.dataset.nodeContextMax), 400_000, 'gpt-5.3-codex uses real 400k context window');
-			assert.strictEqual(Number(ctxRow.dataset.nodeContextPct), 12, `Context bar percentage updates live for 48k/400k (got ${ctxRow.dataset.nodeContextPct}%)`);
-			assert.strictEqual(n2AfterUsage.querySelector('.ade-mission-core-model-row')?.getAttribute('data-node-model'), 'gpt-5.3-codex');
-			assert.strictEqual(n2AfterUsage.querySelector('.ade-mission-core-icon-well')?.getAttribute('data-llm-provider'), 'openai', 'GPT model switches big core icon to OpenAI GPT brand icon');
-			assert.strictEqual(n2AfterUsage.querySelector('.ade-mission-core-context')?.textContent, '分布式状态机与云端存储接口已就绪');
-
-			// Clicking the big LLM core icon tile opens ONLY Model & Thinking popover (NO Agent Engine switcher, NO duplicate sections even on rapid double-click):
-			// 1) For default Claude Code engine, ONLY Claude is lit & selectable; DeepSeek/GPT/Gemini/Qwen/Kimi/GLM/Grok are dimmed & disabled
-			const n2CoreLlmTile = n2AfterUsage.querySelector<HTMLButtonElement>('.ade-mission-core-icon-well')!;
-			n2CoreLlmTile.click();
-			n2CoreLlmTile.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(host.querySelector('[data-ade-mission-emp-popover="true"]')?.getAttribute('data-popover-kind'), 'model', 'Center LLM icon opens model-only popover');
-			assert.strictEqual(host.querySelectorAll('button[data-ade-engine-option]').length, 0, 'Center LLM icon popover MUST NOT include Agent Engine options');
-			assert.strictEqual(host.querySelectorAll('[data-ade-vendor-models-tray="true"]').length, 1, 'Rapid double-click NEVER duplicates popover sections');
-			assert.strictEqual(host.querySelector('input[data-ade-model-input]'), null, 'Model picker has no manual text input');
-			assert.strictEqual(host.querySelector('button[data-ade-model-dropdown]'), null, 'Model picker has no collapsible dropdown bar that causes popover jumping');
-			const modelTray = host.querySelector<HTMLElement>('[data-ade-vendor-models-tray="true"]')!;
-			assert.ok(modelTray && !modelTray.hidden, 'Scrollable concrete model window is visible immediately on open');
-			assert.ok(host.querySelector('button[data-ade-model-option="claude-opus-4-6"]'), 'Scrollable window immediately shows native Claude models on open');
-
-			const dsVendorOnClaude = host.querySelector<HTMLButtonElement>('button[data-ade-vendor="deepseek"]');
-			const claudeVendorOnClaude = host.querySelector<HTMLButtonElement>('button[data-ade-vendor="anthropic"]');
-			assert.ok(dsVendorOnClaude && dsVendorOnClaude.disabled && dsVendorOnClaude.classList.contains('is-unsupported'), 'Unsupported vendor DeepSeek is dimmed & disabled on Claude Code');
-			assert.ok(claudeVendorOnClaude && !claudeVendorOnClaude.disabled && !claudeVendorOnClaude.classList.contains('is-unsupported'), 'Native vendor Claude is lit & selectable on Claude Code');
-
-			// Verify zero icon/label clipping on all 8 vendor chips (especially DeepSeek whale icon + text)
-			for (const vBtn of host.querySelectorAll<HTMLButtonElement>('button[data-ade-vendor]')) {
-				const btnRect = vBtn.getBoundingClientRect();
-				const icoRect = vBtn.querySelector<HTMLElement>('.ade-mission-llm-icon')!.getBoundingClientRect();
-				const lblEl = vBtn.querySelector<HTMLElement>('.ade-mission-vendor-btn-label')!;
-				assert.ok(icoRect.left >= btnRect.left - 0.5 && icoRect.right <= btnRect.right + 0.5, `Vendor ${vBtn.dataset.adeVendor} icon fits completely inside button without clipping`);
-				assert.ok(lblEl.scrollWidth <= lblEl.clientWidth + 1, `Vendor ${vBtn.dataset.adeVendor} label ("${lblEl.textContent}") fits completely without truncation`);
-			}
-
-			// Selecting claude-sonnet-4-6 directly from the scrollable window updates the card live
-			const sonnetOpt = host.querySelector<HTMLButtonElement>('button[data-ade-model-option="claude-sonnet-4-6"]');
-			assert.ok(sonnetOpt && !sonnetOpt.disabled && sonnetOpt.dataset.adeModelSupported === 'true', 'Scrollable window exposes selectable concrete model claude-sonnet-4-6');
-			sonnetOpt.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const n2AfterSonnet = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			assert.strictEqual(n2AfterSonnet.querySelector('.ade-mission-core-model-row')?.getAttribute('data-node-model'), 'claude-sonnet-4-6');
-			assert.strictEqual(n2AfterSonnet.querySelector('.ade-mission-core-icon-well')?.getAttribute('data-llm-provider'), 'anthropic');
-
-			// 2) Switching N2 to Google Antigravity verifies full "Google Antigravity" name displays without ellipsis truncation,
-			//    switching vendor tab inside the fixed-height scrollable window keeps popover top position rock-solid (zero upward jump!),
-			//    and dims unsupported claude-haiku-4-5 inside Claude list
-			h.projects.updateAgentEnginePreferences(n2AgentId, { preferredEngineId: 'aexus-antigravity', preferredModel: 'gemini-2.5-pro' });
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const agyEngineNameEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-engine-name')!;
-			assert.strictEqual(agyEngineNameEl.textContent, 'Google Antigravity');
-			assert.ok(agyEngineNameEl.scrollWidth <= agyEngineNameEl.clientWidth + 1, 'Bottom-left Agent Engine pill displays full "Google Antigravity" without ellipsis truncation');
-			host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-core-icon-well')!.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const popoverEl = host.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
-			const topBeforeSwitch = popoverEl.style.top;
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('button[data-ade-vendor="gemini"]')?.disabled, false, 'Antigravity natively supports Gemini');
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('button[data-ade-vendor="anthropic"]')?.disabled, false, 'Antigravity natively supports Claude');
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('button[data-ade-vendor="deepseek"]')?.disabled, true, 'Antigravity dims unsupported DeepSeek');
-			host.querySelector<HTMLButtonElement>('button[data-ade-vendor="anthropic"]')!.click();
-			assert.strictEqual(popoverEl.style.top, topBeforeSwitch, 'Switching vendor tab inside scrollable model window does NOT shift popover position upward');
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('button[data-ade-model-option="claude-opus-4-6"]')?.disabled, false, 'Antigravity supports claude-opus-4-6 inside Claude list');
-			const haikuOnAgy = host.querySelector<HTMLButtonElement>('button[data-ade-model-option="claude-haiku-4-5"]');
-			assert.ok(haikuOnAgy && haikuOnAgy.disabled && haikuOnAgy.classList.contains('is-unsupported'), 'Antigravity dims unsupported concrete model claude-haiku-4-5 inside Claude list');
-
-			// 3) Switching N2 to multi-provider OpenCode lights up DeepSeek; clicking DeepSeek pops open DeepSeek models & selecting deepseek-r1 swaps big core icon to DeepSeek
-			h.projects.updateAgentEnginePreferences(n2AgentId, { preferredEngineId: 'aexus-opencode', preferredModel: 'qwen3-coder' });
-			await new Promise(resolve => setTimeout(resolve, 25));
-			host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-core-icon-well')!.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const dsVendorOnOpenCode = host.querySelector<HTMLButtonElement>('button[data-ade-vendor="deepseek"]');
-			assert.ok(dsVendorOnOpenCode && !dsVendorOnOpenCode.disabled, 'Multi-provider OpenCode lights up DeepSeek vendor');
-			dsVendorOnOpenCode.click();
-			const dsR1Opt = host.querySelector<HTMLButtonElement>('button[data-ade-model-option="deepseek-r1"]');
-			assert.ok(dsR1Opt && !dsR1Opt.disabled, 'Clicking DeepSeek pops open concrete model deepseek-r1');
-			dsR1Opt.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const n2AfterDeepSeek = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			assert.strictEqual(n2AfterDeepSeek.querySelector('.ade-mission-core-model-row')?.getAttribute('data-node-model'), 'deepseek-r1');
-			assert.strictEqual(n2AfterDeepSeek.querySelector('.ade-mission-core-icon-well')?.getAttribute('data-llm-provider'), 'deepseek', 'Switching model to deepseek-r1 swaps big core icon to DeepSeek');
-
-			// Clicking middle LLM icon updates Thinking Effort live (still model-only popover)
-			n2AfterDeepSeek.querySelector<HTMLButtonElement>('.ade-mission-core-icon-well')!.click();
-			const highThinkingBtn = host.querySelector<HTMLButtonElement>('button[data-ade-thinking-option="high"]');
-			assert.ok(highThinkingBtn, 'Center LLM icon popover exposes Thinking Effort level buttons');
-			assert.strictEqual(host.querySelectorAll('button[data-ade-engine-option]').length, 0, 'Center LLM icon popover never renders Agent Engine options');
-			highThinkingBtn.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(
-				host.querySelector('.ade-mission-node[data-node-id="N2"] .ade-mission-core-model-row')?.getAttribute('data-node-thinking'),
-				'high',
-				'Selecting high thinking updates node card live',
-			);
-
-			// Clicking bottom-left Engine pill when Idle opens ONLY Agent Engine switcher (NO model/thinking options, NO duplicate copies on rapid double-click)
-			const n2EnginePillIdle = host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-engine-pill')!;
-			assert.strictEqual(n2EnginePillIdle.disabled, false, 'Engine pill is editable before Mission starts');
-			n2EnginePillIdle.click();
-			n2EnginePillIdle.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(host.querySelector('[data-ade-mission-emp-popover="true"]')?.getAttribute('data-popover-kind'), 'engine', 'Bottom-left engine pill opens engine-only popover');
-			assert.ok(host.querySelectorAll('button[data-ade-engine-option]').length > 0, 'Engine popover lists Agent Engines');
-			assert.strictEqual(host.querySelectorAll('.ade-mission-emp-popover-title').length, 1, 'Rapid double-click on engine pill NEVER renders duplicate sections');
-			assert.strictEqual(host.querySelectorAll('button[data-ade-model-option]').length, 0, 'Engine popover MUST NOT mix in Model options');
-			assert.strictEqual(host.querySelectorAll('button[data-ade-thinking-option]').length, 0, 'Engine popover MUST NOT mix in Thinking options');
-			host.querySelector<HTMLButtonElement>('button[data-ade-engine-option]')!.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-
-			// OS brand icons & host attributes resolve per machine
-			const n2Latest = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			assert.strictEqual(n2Latest.dataset.nodeHost, 'ubuntu-target1');
-			assert.strictEqual(n2Latest.dataset.nodeOs, 'ubuntu');
-			assert.ok(n2Latest.querySelector('.ade-mission-host-pill .ade-mission-os-icon.ade-os-ubuntu > svg'), 'Ubuntu node renders Ubuntu SVG brand icon');
-
-			const n3El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N3"]')!;
-			assert.strictEqual(n3El.dataset.nodeOs, 'kali');
-			assert.ok(n3El.querySelector('.ade-mission-host-pill .ade-mission-os-icon.ade-os-kali > svg'), 'Kali node renders Kali SVG brand icon');
-
-			const n4El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N4"]')!;
-			assert.strictEqual(n4El.dataset.nodeOs, 'windows');
-			assert.ok(n4El.querySelector('.ade-mission-host-pill .ade-mission-os-icon.ade-os-windows > svg'), 'Windows node renders Windows SVG brand icon');
-
-			const n1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			assert.strictEqual(n1El.dataset.nodeHost, 'local');
-			assert.ok(n1El.querySelector('.ade-mission-host-pill .ade-mission-os-icon > svg'), 'Local node renders local OS SVG brand icon');
-
-			// Cross-host edges glow cyan via data-cross-host="true"
-			const crossEdge = host.querySelector<SVGGElement>('g[data-from="N1"][data-to="N2"]');
-			assert.strictEqual(crossEdge?.getAttribute('data-cross-host'), 'true', 'Edge from Local to Ubuntu is marked cross-host');
-			assert.ok(crossEdge?.classList.contains('is-cross-host'), 'Cross-host edge carries is-cross-host class');
-
-			// Verify Mission Split Drawer: Left = Mermaid Orchestration, Right = Per-Node Pre-Prompts, and wakeup packages Pre-Prompt + Token info together!
-			const dispatchedTurns: Array<{ readonly resource: string; readonly prompt: string }> = [];
-			h.instantiation.stub(ICommandService, {
-				onWillExecuteCommand: Event.None,
-				onDidExecuteCommand: Event.None,
-				executeCommand: async <T>(id: string, ...args: unknown[]): Promise<T> => {
-					if (id === 'aexus.agentEngines.dispatchEngineeringTurn') {
-						dispatchedTurns.push({ resource: String(args[0] ?? ''), prompt: String(args[1] ?? '') });
-					}
-					return undefined as T;
-				},
-			});
-
-			const fileBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!;
-			fileBtn.click();
-			assert.ok(host.querySelector('[data-ade-mission-mermaid-pane="true"]'), 'Split drawer renders Left Mermaid Orchestration pane');
-			assert.ok(host.querySelector('[data-ade-mission-prompts-pane="true"]'), 'Split drawer renders Right Node Pre-Prompts pane');
-			const n1PromptItem = host.querySelector<HTMLButtonElement>('[data-ade-prompt-node-item="N1"]')!;
-			const n2PromptItem = host.querySelector<HTMLButtonElement>('[data-ade-prompt-node-item="N2"]')!;
-			assert.ok(n1PromptItem && n2PromptItem, 'Right pane lists all non-gate DAG nodes');
-
-			// Edit N1 and N2 Pre-Prompts in the right-hand editor
-			const promptInput = host.querySelector<HTMLTextAreaElement>('[data-ade-node-prompt-input="true"]')!;
-			const DomEvent = promptInput.ownerDocument.defaultView!.Event;
-			n1PromptItem.click();
-			promptInput.value = '产出 OpenAPI 3.1 契约并执行 schema lint，完成后提交摘要。';
-			promptInput.dispatchEvent(new DomEvent('input', { bubbles: true }));
-			n2PromptItem.click();
-			promptInput.value = '在 ubuntu-target1 上实现 Go gRPC 接口并通过 go test ./...。';
-			promptInput.dispatchEvent(new DomEvent('input', { bubbles: true }));
-
-			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.N1, '产出 OpenAPI 3.1 契约并执行 schema lint，完成后提交摘要。');
-			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.N2, '在 ubuntu-target1 上实现 Go gRPC 接口并通过 go test ./...。');
-			assert.strictEqual(host.querySelector('[data-ade-prompt-node-item="N2"]')?.getAttribute('data-has-prompt'), 'true');
-			assert.ok(host.querySelector('[data-ade-mission-prompt-count="true"]')?.textContent?.includes('2/4'));
-
-			// Verify every node card displays its live Pre-Prompt preview + clickable Prompt button,
-			// and editing via Node Prompt Popover <-> Top-Left Split Drawer shares the exact same IAdeMissionService database in real time!
-			assert.strictEqual(host.querySelector('[data-ade-node-prompt-btn="N1"]')?.getAttribute('data-has-prompt'), 'true', 'N1 card reflects prompt written in top-left drawer');
-			assert.ok(host.querySelector('[data-ade-node-prompt-preview="N1"]')?.textContent?.includes('产出 OpenAPI 3.1 契约'), 'N1 card displays live Pre-Prompt preview');
-			assert.ok(host.querySelector('[data-ade-node-prompt-preview="N2"]')?.textContent?.includes('在 ubuntu-target1 上实现 Go gRPC'), 'N2 card displays live Pre-Prompt preview');
-
-			// Click N2's node card Prompt button -> opens inline Node Prompt Popover pre-loaded from the same DB
-			const n2PromptBtn = host.querySelector<HTMLButtonElement>('[data-ade-node-prompt-btn="N2"]')!;
-			n2PromptBtn.click();
-			assert.strictEqual(host.querySelector('[data-ade-mission-emp-popover="true"]')?.getAttribute('data-popover-kind'), 'prompt', 'Clicking node Prompt button opens inline Pre-Prompt popover');
-			const n2PopoverTextarea = host.querySelector<HTMLTextAreaElement>('[data-ade-node-prompt-popover-input="N2"]')!;
-			assert.strictEqual(n2PopoverTextarea.value, '在 ubuntu-target1 上实现 Go gRPC 接口并通过 go test ./...。', 'Popover loads exact prompt from shared missionStore');
-
-			// Edit in N2's Node Prompt Popover -> immediately syncs to missionStore DB, N2 node card preview, AND top-left split drawer textarea!
-			n2PopoverTextarea.value = '在 ubuntu-target1 上实现 Go gRPC 接口并通过 go test ./... 与 race 检查。';
-			n2PopoverTextarea.dispatchEvent(new DomEvent('input', { bubbles: true }));
-			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.N2, '在 ubuntu-target1 上实现 Go gRPC 接口并通过 go test ./... 与 race 检查。');
-			assert.ok(host.querySelector('[data-ade-node-prompt-preview="N2"]')?.textContent?.includes('race 检查'), 'Popover edit live-updates N2 node card preview');
-			assert.strictEqual(promptInput.value, '在 ubuntu-target1 上实现 Go gRPC 接口并通过 go test ./... 与 race 检查。', 'Popover edit live-syncs to top-left split drawer textarea');
-
-			// Clicking "Open in Split Drawer" inside popover closes popover and opens top-left drawer focused on N2
-			host.querySelector<HTMLButtonElement>('[data-ade-prompt-pop-open-drawer="N2"]')!.click();
-			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')?.hidden, true);
-			assert.strictEqual(promptInput.dataset.activeNodeId, 'N2');
-
-			// Start Mission & complete N1 -> verify BOTH N1 and N2 wakeups package their Pre-Prompt + live Token info together!
-			const startRes = await missionRuntime.start(created.id);
-			assert.strictEqual(startRes.ok, true, `Mission starts cleanly: ${startRes.error ?? ''}`);
-			// Runtime invariant: while Mission is running, Agent Engine pill is LOCKED, while center LLM icon STILL switches Model & Thinking live!
-			const n2RunningEnginePill = host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-engine-pill')!;
-			assert.strictEqual(n2RunningEnginePill.disabled, true, 'Agent Engine pill MUST be locked & disabled while Mission is running');
-			assert.strictEqual(n2RunningEnginePill.getAttribute('data-engine-locked'), 'true', 'Agent Engine pill exposes data-engine-locked="true" during runtime');
-			const n2RunningModelTile = host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-core-icon-well')!;
-			assert.strictEqual(n2RunningModelTile.disabled, false, 'Center LLM icon MUST remain enabled during runtime for live model switching');
-			n2RunningModelTile.click();
-			assert.strictEqual(host.querySelector('[data-ade-mission-emp-popover="true"]')?.getAttribute('data-popover-kind'), 'model', 'Center LLM icon opens model-only popover during runtime');
-			assert.strictEqual(host.querySelectorAll('button[data-ade-engine-option]').length, 0, 'Model popover during runtime never exposes engine switching');
-			host.querySelector<HTMLButtonElement>('button[data-ade-thinking-option="max"]')!.click();
-			assert.strictEqual(
-				host.querySelector('.ade-mission-node[data-node-id="N2"] .ade-mission-core-model-row')?.getAttribute('data-node-thinking'),
-				'max',
-				'Model/Thinking can be switched live while Mission is running',
-			);
-			const n1Dispatch = dispatchedTurns.find(d => d.prompt.includes('Node: `N1`'));
-			assert.ok(n1Dispatch, 'Starting Mission dispatches wakeup prompt to N1');
-			assert.ok(n1Dispatch.prompt.includes('### Node Pre-Prompt (`pre_prompt`)'), 'N1 wakeup includes Node Pre-Prompt section');
-			assert.ok(n1Dispatch.prompt.includes('产出 OpenAPI 3.1 契约并执行 schema lint'), 'N1 wakeup packages N1 pre-prompt text');
-			assert.ok(n1Dispatch.prompt.includes('aexus-ade token complete '), 'N1 wakeup packages Token completion command alongside pre-prompt');
-
-			const n1Token = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
-			const compRes = await missionRuntime.completeToken(created.id, { tokenId: n1Token.id, summary: 'OpenAPI 契约已定稿' });
-			assert.strictEqual(compRes.ok, true);
-			const n2Dispatch = dispatchedTurns.find(d => d.prompt.includes('Node: `N2`'));
-			assert.ok(n2Dispatch, 'Completing N1 dispatches wakeup prompt to N2');
-			assert.ok(n2Dispatch.prompt.includes('在 ubuntu-target1 上实现 Go gRPC 接口并通过 go test ./...'), 'N2 wakeup packages N2 authored Pre-Prompt');
-			assert.ok(n2Dispatch.prompt.includes('OpenAPI 契约已定稿'), 'N2 wakeup simultaneously packages upstream Token summary');
-			assert.ok(n2Dispatch.prompt.includes('Token: `tok-'), 'N2 wakeup packages live Token ID');
-
-			// Control API roundtrip for mission.prompt.list / get / set
-			const setViaControl = await h.control<{ readonly ok: boolean; readonly prompt: string }>('mission.prompt.set', {
-				mission: created.id,
-				nodeId: 'N3',
-				prompt: '部署至 BUPT-Windows 并检查事件日志',
-			});
-			assert.strictEqual(setViaControl.ok, true);
-			assert.strictEqual(setViaControl.prompt, '部署至 BUPT-Windows 并检查事件日志');
-			assert.ok(host.querySelector('[data-ade-node-prompt-preview="N3"]')?.textContent?.includes('部署至 BUPT-Windows'), 'Control API prompt update live-syncs to N3 node card preview');
-			const gotViaControl = await h.control<{ readonly prompt: string }>('mission.prompt.get', { mission: created.id, nodeId: 'N3' });
-			assert.strictEqual(gotViaControl.prompt, '部署至 BUPT-Windows 并检查事件日志');
-			const listViaControl = await h.control<{ readonly nodePrompts: Record<string, string> }>('mission.prompt.list', { mission: created.id });
-			assert.strictEqual(listViaControl.nodePrompts.N1, '产出 OpenAPI 3.1 契约并执行 schema lint，完成后提交摘要。');
-			assert.strictEqual(listViaControl.nodePrompts.N3, '部署至 BUPT-Windows 并检查事件日志');
-
-			// Close drawer & stop test run cleanly before host-pill assertion
-			fileBtn.click();
-			await missionRuntime.stop(created.id);
-
-			// Clicking host pill opens Host & OS quick picker and switching host updates OS icon live
-			const n1HostPill = host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-host-pill')!;
-			n1HostPill.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const winOpt = host.querySelector<HTMLButtonElement>('button[data-ade-host-option="BUPT-Windows"]');
-			assert.ok(winOpt, 'Clicking host pill opens Host & OS quick picker with saved cloud hosts');
-			winOpt.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const n1Updated = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			assert.strictEqual(n1Updated.dataset.nodeHost, 'BUPT-Windows');
-			assert.strictEqual(n1Updated.dataset.nodeOs, 'windows');
-		});
-
 		test('enforces honest live-tier factory wall, blocks upward bypasses/non-human Gates, supports pure-rank Mission nodes & live safe-patch guard', async () => {
 			const { h, missionStore, missionRuntime } = createMissionHarness();
 			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/sec-gov') }, 'Gov L1', { role: 'governor' });
@@ -4896,7 +4549,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(pureDone.nextTokenIds.length, 1, 'Pure-rank Mission node advances token downstream cleanly');
 		});
 
-		test('auto-detects local & cloud Agent availability (disabling unavailable engines) and supports case-insensitive model classification, Other fallback, and persistent user icon recategorization', async () => {
+		test('supports case-insensitive model classification, proxy-prefix stripping, deduplication, and Other fallback', () => {
 			// 1. Pure catalog unit checks: case-insensitive deduplication, model-tail name recognition, and Other fallback
 			assert.strictEqual(resolveAdePickerVendorByName('group-openai/DeepSeek-V4-Pro'), 'deepseek', 'Model tail name wins over proxy provider prefix');
 			assert.strictEqual(resolveAdePickerVendorByName('CLAUDE-SONNET-4-6'), 'anthropic');
@@ -4922,224 +4575,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(otherBucket.models.length, 1, 'Case variants of unrecognized custom model deduplicate into ONE Other entry');
 			assert.strictEqual(otherBucket.models[0].id, 'my-custom-coder-v2');
 
-			// 2. Mission Canvas live test: Local vs Cloud host engine availability + disabled unavailable engines + user model icon recategorization
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			const buptHost: IAdeCloudHost = {
-				id: 'h-bupt208',
-				name: 'bupt208',
-				alias: 'bupt208',
-				hostName: '10.92.35.208',
-				port: 22,
-				user: 'djf',
-				os: 'linux',
-				defaultDirectory: '/home/djf/develop',
-				recentDirectories: ['/home/djf/develop'],
-				source: 'user',
-				createdAt: 1,
-				updatedAt: 1,
-				lastTestStatus: { ok: true, remoteUname: 'Linux (ubuntu)', checkedAt: 1, latencyMs: 12 },
-			};
-			h.instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
-				listHosts: async () => [buptHost],
-				getHost: async (idOrAlias: string) => idOrAlias.toLowerCase() === 'bupt208' ? buptHost : undefined,
-			}));
-
-			const probedUris: string[] = [];
-			h.instantiation.stub(IAdeSessionsService, upcastPartial<IAdeSessionsService>({
-				onDidChangeEngines: Event.None,
-				getIcon: () => undefined,
-				getEngineName: (id: string) => id,
-				probeEnginesForProject: async (projectUri?: URI) => {
-					const uriStr = projectUri?.toString() ?? 'local';
-					probedUris.push(uriStr);
-					const isBupt = projectUri?.scheme === AEXUS_SSH_SCHEME && projectUri.authority.toLowerCase() === 'bupt208';
-					const availableIds = isBupt
-						? new Set(['aexus-claude', 'aexus-opencode', 'aexus-pi'])
-						: new Set(['aexus-claude', 'aexus-codex']);
-					const allIds: readonly [string, string][] = [
-						['aexus-claude', 'Claude Code'],
-						['aexus-codex', 'Codex'],
-						['aexus-kilo', 'Kilo Code'],
-						['aexus-opencode', 'OpenCode'],
-						['aexus-dsh', 'DeepSeek Harness'],
-						['aexus-antigravity', 'Google Antigravity'],
-						['aexus-cline', 'Cline'],
-						['aexus-pi', 'Pi'],
-					];
-					const allEngines = allIds.map(([id, name]) => ({
-						id,
-						name,
-						description: name,
-						available: availableIds.has(id),
-					}));
-					return {
-						engines: allEngines.filter(e => e.available),
-						allEngines,
-						remoteHost: isBupt ? 'bupt208' : undefined,
-					};
-				},
-				getEngines: async () => [{ id: 'aexus-claude', name: 'Claude Code', description: 'Claude Code' }],
-			}));
-
-			const configuredModelQueries: string[] = [];
-			h.instantiation.stub(ICommandService, {
-				onWillExecuteCommand: Event.None,
-				onDidExecuteCommand: Event.None,
-				executeCommand: async <T>(id: string, ...args: unknown[]): Promise<T> => {
-					if (id === 'aexus.agentEngines.listConfiguredModels') {
-						const uri = args[0] as URI | undefined;
-						configuredModelQueries.push(uri?.toString() ?? 'local');
-						return {
-							'aexus-opencode': [
-								{ id: 'group-openai/GPT-6-Luna', label: 'GPT-6 Luna' },
-								{ id: 'group-openai/gpt-6-luna', label: 'gpt-6-luna' },
-								{ id: 'my-custom-coder-v2', label: 'My Custom Coder V2' },
-								{ id: 'MY-CUSTOM-CODER-V2', label: 'MY-CUSTOM-CODER-V2' },
-							],
-						} as T;
-					}
-					return undefined as T;
-				},
-			});
-
-			const mermaid = 'flowchart LR\n  N1["@LocalDev: Build"] --> N2["@CloudDev: Train"]';
-			const created = missionStore.createMission({ title: 'Host Availability & Model Categorization', mermaidText: mermaid });
-			await missionRuntime.bindNodeHost(created.id, 'N2', { hostAlias: 'bupt208' });
-			const n2AgentId = missionRuntime.getRuntimeState(created.id).boundary.nodeAssignments.N2?.agentId!;
-			// Assign N2 an engine (aexus-kilo) that is NOT installed on bupt208 to verify unavailable warning badge
-			h.projects.updateAgentEnginePreferences(n2AgentId, { preferredEngineId: 'aexus-kilo' });
-
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-mission-avail-test-host'));
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-			await new Promise(resolve => setTimeout(resolve, 40));
-
-			// Opening Mission view automatically pre-probed BOTH local AND bupt208 cloud host!
-			assert.ok(probedUris.some(u => u.startsWith('aexus-ssh://bupt208')), `Opening Mission must auto-probe bound cloud host bupt208 (got ${JSON.stringify(probedUris)})`);
-			assert.ok(probedUris.some(u => !u.startsWith('aexus-ssh://')), `Opening Mission must auto-probe local host (got ${JSON.stringify(probedUris)})`);
-
-			// N2's engine pill reflects that aexus-kilo is unavailable on bupt208
-			const n2EnginePill = host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-engine-pill')!;
-			assert.strictEqual(n2EnginePill.getAttribute('data-engine-available'), 'false', 'Assigned unavailable engine shows unavailable state on card');
-			assert.ok(n2EnginePill.classList.contains('is-engine-unavailable'));
-
-			// Clicking N2's engine pill shows bupt208's available engines clickable & unavailable engines dimmed + disabled!
-			n2EnginePill.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(host.querySelector('[data-ade-mission-emp-popover="true"]')?.getAttribute('data-popover-host'), 'bupt208');
-			const kiloOptOnBupt = host.querySelector<HTMLButtonElement>('button[data-ade-engine-option="aexus-kilo"]')!;
-			const opencodeOptOnBupt = host.querySelector<HTMLButtonElement>('button[data-ade-engine-option="aexus-opencode"]')!;
-			assert.ok(kiloOptOnBupt && kiloOptOnBupt.disabled && kiloOptOnBupt.classList.contains('is-unavailable') && kiloOptOnBupt.dataset.adeEngineAvailable === 'false', 'Unavailable engine Kilo Code is dimmed & unclickable on bupt208');
-			assert.ok(opencodeOptOnBupt && !opencodeOptOnBupt.disabled && opencodeOptOnBupt.dataset.adeEngineAvailable === 'true', 'Available engine OpenCode is enabled & clickable on bupt208');
-
-			// Clicking disabled Kilo does nothing; clicking available OpenCode switches N2 cleanly
-			kiloOptOnBupt.click();
-			assert.strictEqual(h.projects.getAgent(n2AgentId)?.preferredEngineId, 'aexus-kilo', 'Clicking disabled unavailable engine does nothing');
-			opencodeOptOnBupt.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(h.projects.getAgent(n2AgentId)?.preferredEngineId, 'aexus-opencode');
-
-			// Clicking N1's (Local) engine pill reflects LOCAL availability (Codex enabled, OpenCode disabled)
-			host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-engine-pill')!.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('button[data-ade-engine-option="aexus-codex"]')?.disabled, false, 'Codex is enabled on Local');
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('button[data-ade-engine-option="aexus-opencode"]')?.disabled, true, 'OpenCode is disabled on Local');
-
-			// 3. Open N2's Model & Thinking popover (on bupt208 + OpenCode): verify Other category shows my-custom-coder-v2 once,
-			//    then user manually moves it into DeepSeek icon category -> updates tab + card icon + persists across reopen!
-			host.querySelector<HTMLButtonElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-core-icon-well')!.click();
-			await new Promise(resolve => setTimeout(resolve, 35));
-			assert.ok(configuredModelQueries.some(u => u.startsWith('aexus-ssh://bupt208')), 'Model discovery queries node-bound cloud host bupt208');
-
-			const otherVendorBtn = host.querySelector<HTMLButtonElement>('button[data-ade-vendor="generic"]')!;
-			assert.ok(otherVendorBtn && !otherVendorBtn.disabled, 'Other vendor chip lights up for unrecognized models on bupt208');
-			const popoverEl = host.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
-			const topBeforeCat = popoverEl.style.top;
-			otherVendorBtn.click();
-			const customModelBtns = host.querySelectorAll<HTMLButtonElement>('button[data-ade-model-option="my-custom-coder-v2"]');
-			assert.strictEqual(customModelBtns.length, 1, 'Case duplicates collapse to one row in Other');
-
-			// Open inline category picker for my-custom-coder-v2 & move it into DeepSeek icon category!
-			const catBtn = host.querySelector<HTMLButtonElement>('button[data-ade-model-categorize="my-custom-coder-v2"]')!;
-			assert.ok(catBtn, 'Model row renders inline categorize button');
-			catBtn.click();
-			const assignDeepSeekBtn = host.querySelector<HTMLButtonElement>('[data-ade-model-cat-picker="my-custom-coder-v2"] button[data-ade-assign-vendor="deepseek"]')!;
-			assert.ok(assignDeepSeekBtn, 'Inline category picker lists DeepSeek icon option');
-			assignDeepSeekBtn.click();
-			assert.strictEqual(popoverEl.style.top, topBeforeCat, 'Recategorizing model never shifts popover position');
-			assert.strictEqual(host.querySelector('[data-ade-vendor-models-tray="true"]')?.getAttribute('data-vendor'), 'deepseek', 'Popover switches smoothly to DeepSeek tab where the model landed');
-			assert.ok(host.querySelector('button[data-ade-model-option="my-custom-coder-v2"]'), 'my-custom-coder-v2 now lives inside DeepSeek icon group');
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('button[data-ade-vendor="generic"]')?.disabled, true, 'Other tab dims once its last model was moved out');
-
-			// Select my-custom-coder-v2 -> node N2 center LLM icon now displays DeepSeek whale icon!
-			host.querySelector<HTMLButtonElement>('button[data-ade-model-option="my-custom-coder-v2"]')!.click();
-			await new Promise(resolve => setTimeout(resolve, 20));
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N2"] .ade-mission-core-icon-well')?.getAttribute('data-llm-provider'), 'deepseek', 'Node card LLM icon reflects user manual categorization');
-
-			// Verify persistence across a brand-new AdeEngineeringEditorPane instance sharing IStorageService!
-			const host2 = append(document.body, $('.monaco-workbench.ade-mission-avail-test-host-2'));
-			store.add({ dispose: () => host2.remove() });
-			const pane2 = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane2.create(host2);
-			await pane2.setInput(input, undefined, {}, CancellationToken.None);
-			await new Promise(resolve => setTimeout(resolve, 35));
-			assert.strictEqual(host2.querySelector('.ade-mission-node[data-node-id="N2"] .ade-mission-core-icon-well')?.getAttribute('data-llm-provider'), 'deepseek', 'Manual category persists across Mission reopen');
-		});
-
-		test('patches live telemetry/state & SVG edges in place without DOM teardown and preserves live drag origin after Auto Layout', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			const mission = missionStore.createMission({
-				title: 'Perf In-Place Patch Mission',
-				mermaidText: 'flowchart LR\n  N1["Build"] --> N2["Verify"]',
-			});
-
-			const host = append(document.body, $('.monaco-workbench.ade-mission-perf-test-host'));
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-			await missionRuntime.start(mission.id);
-
-			const n1Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			const edgeBefore = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')!;
-			assert.ok(n1Before && edgeBefore, 'Initial node and SVG edge group rendered');
-
-			// 1. Live runtime telemetry update patches DOM in place without recreating node elements
-			missionRuntime.recordNodeTurnUsage(mission.id, 'N1', {
-				inputTokens: 42000,
-				outputTokens: 3000,
-				contextWindowMax: 200000,
-				costUsd: 0.12,
-				summary: 'Compiled 42 modules',
-			});
-			const n1AfterTelemetry = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			assert.strictEqual(n1AfterTelemetry, n1Before, 'Telemetry tick must patch node DOM in place without tearing down the node');
-			assert.strictEqual(n1AfterTelemetry.querySelector('.ade-mission-core-context')?.textContent, 'Compiled 42 modules');
-			assert.ok(Number(n1AfterTelemetry.querySelector('.ade-mission-ctx-row')?.getAttribute('data-node-context-pct')) > 0);
-			await missionRuntime.stop(mission.id);
-
-			// 2. Save custom position, then trigger Auto Layout and verify subsequent drag starts from the live auto-laid-out position
-			missionStore.updateNodePositions(mission.id, { N1: { x: 900, y: 800 } });
-			host.querySelector<HTMLButtonElement>('button[data-ade-mission-file-btn="true"]')!.click();
-			host.querySelector<HTMLButtonElement>('button[data-ade-mission-autolayout="true"]')!.click();
-			const autoLeft = Number.parseFloat(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!.style.left);
-			assert.ok(Number.isFinite(autoLeft) && autoLeft !== 900, 'Auto Layout resets custom node position');
-
-			const n1Live = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			const edgeBeforeDrag = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')!;
-			n1Live.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, clientX: 100, clientY: 100, bubbles: true }));
-			n1Live.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, clientX: 140, clientY: 120, bubbles: true }));
-			n1Live.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, clientX: 140, clientY: 120, bubbles: true }));
-			const draggedLeft = Number.parseFloat(n1Live.style.left);
-			assert.ok(draggedLeft > autoLeft, `Drag after Auto Layout must start from live autoLeft (${autoLeft}), got ${draggedLeft}`);
-			const edgeAfterDrag = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')!;
-			assert.strictEqual(edgeAfterDrag, edgeBeforeDrag, 'Dragging updates SVG edge path in place without recreating <g> elements');
 		});
 
 		test('enforces zero-cost deterministic verification hooks on token.complete (bounce -> fix -> verified advance, worker forbidden from mutating/skipping checks, auto-fallback on retry exhaustion)', async () => {
@@ -5643,604 +5078,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(storageWriteCount, 1, '5 rapid telemetry ticks coalesce into 1 debounced storage write');
 		});
 
-		test('renders live token pucks, blocked countdown/PID/file strip, join barrier dots, token inspector (lastSummary/compressedHistory/lazy tracePtr), fail-route illumination, trace hover, and 1-click Retry/Recall in place', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			const mermaid = [
-				'flowchart LR',
-				'  A["Prep A"] --> J["Join Review"]',
-				'  B["Prep B"] --> J',
-				'  J --> G1{"Release Gate"}',
-				'  A -->|fail| F1["Fallback A"]',
-				'  F1 --> J',
-			].join('\n');
-			const mission = missionStore.createMission({ title: 'Runtime Visibility Canvas', mermaidText: mermaid });
-
-			const host = append(document.body, $('.monaco-workbench.ade-mission-visibility-host'));
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			await missionRuntime.start(mission.id);
-
-			const nodeABefore = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="A"]')!;
-			const nodeJBefore = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="J"]')!;
-			const puckA = host.querySelector<HTMLButtonElement>('button[data-ade-token-puck="A"]')!;
-			assert.ok(puckA && !puckA.hidden, 'Active node A renders visible live token puck');
-			assert.ok(puckA.textContent?.includes('W1'), `Token puck shows wave tag W1, got: ${puckA.textContent}`);
-
-			// 1. Block node A with watchPid + watchFile + hostAlias -> renders blocked strip & countdown in place
-			const tokA = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
-			await missionRuntime.blockToken(mission.id, {
-				tokenId: tokA.id,
-				reason: 'Waiting for distributed training checkpoint',
-				maxDuration: '30m',
-				watchPid: 4242,
-				watchFile: '/data/runs/model.pt',
-				hostAlias: 'gpu-1',
-			});
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="A"]'), nodeABefore, 'Blocked transition patches node A in place without DOM teardown');
-			const blockedStripA = host.querySelector<HTMLElement>('[data-ade-blocked-strip="A"]')!;
-			assert.strictEqual(blockedStripA.hidden, false, 'Blocked node A displays blocked watch strip');
-			assert.ok(host.querySelector('[data-ade-blocked-countdown="A"]')?.textContent?.includes('⏳'), 'Blocked countdown displays hourglass remaining time');
-			assert.strictEqual(host.querySelector('[data-ade-blocked-pid="A"]')?.textContent, 'PID 4242');
-			assert.strictEqual(host.querySelector('[data-ade-blocked-file="A"]')?.textContent, 'model.pt');
-			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-blocked-file="A"]')?.title, '/data/runs/model.pt');
-			assert.strictEqual(host.querySelector('[data-ade-blocked-host="A"]')?.textContent, '@gpu-1');
-
-			// 2. Complete branch B -> Join barrier capsule on J shows ● ○ 1/2 and illuminates B->J edge in place
-			const tokB = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
-			await missionRuntime.completeToken(mission.id, { tokenId: tokB.id, summary: 'Branch B integration tests green.' });
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="J"]'), nodeJBefore, 'Join arrival patches node J in place without DOM teardown');
-			const joinCapsuleJ = host.querySelector<HTMLElement>('[data-ade-join-progress="J"]')!;
-			assert.strictEqual(joinCapsuleJ.hidden, false, 'Multi-branch join node J displays join barrier progress capsule');
-			assert.strictEqual(joinCapsuleJ.getAttribute('data-join-arrived'), '1');
-			assert.strictEqual(joinCapsuleJ.querySelectorAll('.ade-mission-join-dot.is-arrived').length, 1);
-			assert.ok(joinCapsuleJ.querySelectorAll('.ade-mission-join-dot.is-pending').length >= 1);
-			const edgeBJ = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="B"][data-to="J"]')!;
-			assert.ok(edgeBJ.classList.contains('is-join-arrived'), 'Arrived join branch edge B->J highlights as arrived');
-
-			// 3. Click A's token puck -> opens Token Inspector showing blocked info, lastSummary, compressedHistory & lazy tracePtr
-			puckA.click();
-			const popover = host.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"][data-popover-kind="token"]')!;
-			assert.ok(popover && !popover.hidden, 'Clicking token puck opens Token Inspector popover');
-			assert.ok(popover.querySelector('[data-ade-token-blocked-box="true"]')?.textContent?.includes('Waiting for distributed training checkpoint'));
-			assert.strictEqual(popover.querySelector('[data-ade-inspector-pid="4242"]')?.textContent, 'PID 4242');
-			assert.ok(popover.querySelector('[data-ade-token-last-summary="true"]'), 'Token Inspector displays lastSummary');
-			assert.ok(popover.querySelector('[data-ade-token-compressed-history="true"]'), 'Token Inspector displays compressedHistory');
-			const traceList = popover.querySelector<HTMLElement>('[data-ade-trace-list="true"]')!;
-			assert.strictEqual(traceList.hidden, true, 'Trace list stays collapsed lazily until clicked');
-			popover.querySelector<HTMLButtonElement>('[data-ade-expand-trace="true"]')!.click();
-			assert.strictEqual(traceList.hidden, false, 'Clicking Expand Trace lazily expands tracePtr');
-			assert.ok(traceList.querySelectorAll('.ade-mission-token-trace-row').length >= 1, 'Expanded trace renders chronological trace entries');
-
-			// 4. Fail A -> routes over on_fail turnout edge A->F1 (illuminating is-fail-taken) and trace hover highlights ancestry
-			await missionRuntime.failToken(mission.id, { tokenId: tokA.id, reason: 'OOM on primary worker' });
-			const failEdgeAF1 = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="A"][data-to="F1"]')!;
-			assert.ok(failEdgeAF1.classList.contains('is-fail-taken'), 'Taken on_fail edge A->F1 illuminates with is-fail-taken');
-			const puckF1 = host.querySelector<HTMLButtonElement>('button[data-ade-token-puck="F1"]')!;
-			assert.ok(puckF1 && !puckF1.hidden, 'Fallback node F1 receives active token puck');
-			const win = puckF1.ownerDocument.defaultView!;
-			puckF1.dispatchEvent(new win.PointerEvent('pointerenter', { bubbles: false }));
-			assert.ok(failEdgeAF1.classList.contains('is-trace-highlighted'), 'Hovering token puck highlights ancestor trace edge in gold');
-			puckF1.dispatchEvent(new win.PointerEvent('pointerleave', { bubbles: false }));
-			assert.strictEqual(failEdgeAF1.classList.contains('is-trace-highlighted'), false, 'Leaving token puck clears trace edge highlight');
-
-			// 5. Fail F1 (no further fail edge -> frozen_failed) -> 1-click Retry & Recall buttons appear on canvas!
-			const tokF1 = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'F1' && t.status === 'active')!;
-			await missionRuntime.failToken(mission.id, { tokenId: tokF1.id, reason: 'Fallback also failed' });
-			const retryBtnF1 = host.querySelector<HTMLButtonElement>('button[data-ade-node-retry="F1"]')!;
-			const recallBtnF1 = host.querySelector<HTMLButtonElement>('button[data-ade-node-recall="F1"]')!;
-			assert.strictEqual(retryBtnF1.hidden, false, 'Failed node F1 exposes one-click Retry button on canvas');
-			assert.strictEqual(recallBtnF1.hidden, false, 'Failed node F1 exposes one-click Recall button on canvas');
-
-			retryBtnF1.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).nodeStates.F1, 'active', 'Clicking canvas Retry transitions failed node F1 back to active');
-
-			// Open F1 Token Inspector and Recall the active token
-			host.querySelector<HTMLButtonElement>('button[data-ade-token-puck="F1"]')!.click();
-			const activeTokF1 = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'F1' && t.status === 'active')!;
-			const recallPopBtn = host.querySelector<HTMLButtonElement>(`button[data-ade-popover-recall="${activeTokF1.id}"]`)!;
-			assert.ok(recallPopBtn, 'Token Inspector exposes Recall action for active token');
-			recallPopBtn.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).tokens[activeTokF1.id]?.status, 'recalled', 'Clicking Recall transitions active token to recalled');
-		});
-
-		test('surfaces Start errors on floating canvas alert when File Drawer is closed and supports multi-wave Gate selection', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			// Create a valid 2-node DAG whose Start fails on a real Factory Boundary error while File Drawer is closed
-			const badStartMission = missionStore.createMission({
-				title: 'Start Error Alert Mission',
-				mermaidText: 'flowchart LR\n  N1["Alpha"] --> N2["Beta"]',
-			});
-			// Set offGraphMaxTier above in-graph node tiers so validateMissionFactoryBoundary rejects Start
-			const prevRt = missionRuntime.getRuntimeState(badStartMission.id);
-			missionStore.updateRuntime(badStartMission.id, {
-				...prevRt,
-				boundary: {
-					...prevRt.boundary,
-					offGraphMaxTier: 9,
-				},
-			});
-
-			const host = append(document.body, $('.monaco-workbench.ade-mission-alert-host'));
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			const badInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, badStartMission.id));
-			await pane.setInput(badInput, undefined, {}, CancellationToken.None);
-
-			const drawer = host.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
-			assert.strictEqual(drawer.hidden, true, 'File Drawer starts closed');
-			const startBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-run-primary="true"]')!;
-			assert.strictEqual(startBtn.disabled, false, 'Start button is enabled for non-empty valid graph');
-
-			// Click Start while File Drawer is closed -> floating Canvas Alert surfaces error immediately!
-			startBtn.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-			const alertEl = host.querySelector<HTMLElement>('[data-ade-mission-canvas-alert="true"]')!;
-			assert.strictEqual(alertEl.hidden, false, 'Start error must NOT be silent when File Drawer is closed');
-			assert.strictEqual(alertEl.dataset.alertKind, 'error');
-			const alertText = host.querySelector<HTMLElement>('[data-ade-mission-canvas-alert-text="true"]')?.textContent ?? '';
-			assert.ok(alertText.length > 0, `Floating alert displays concrete start failure error, got: ${alertText}`);
-			assert.strictEqual(host.querySelector<HTMLButtonElement>('[data-ade-mission-canvas-alert-open-file="true"]')?.hidden, false, 'Offers quick Open mission.mmd shortcut when drawer is closed');
-
-			// Dismissing alert hides it cleanly
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-canvas-alert-dismiss="true"]')!.click();
-			assert.strictEqual(alertEl.hidden, true, 'Dismiss button closes canvas alert');
-
-			// Loading a cyclic Mermaid DAG while File Drawer is closed also surfaces the parse error on the floating alert
-			const cycleMission = missionStore.createMission({
-				title: 'Cycle Parse Error',
-				mermaidText: 'flowchart LR\n  C1["A"] --> C2["B"]\n  C2 --> C1',
-			});
-			const cycleInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, cycleMission.id));
-			await pane.setInput(cycleInput, undefined, {}, CancellationToken.None);
-			assert.strictEqual(alertEl.hidden, false, 'Parse error surfaces on floating canvas alert when File Drawer is closed');
-			assert.strictEqual(alertEl.dataset.alertKind, 'error');
-
-			// Switch to Gate mission with 2 waiting waves -> Gate popover exposes wave switcher & summary preview
-			const onTriggerFire = store.add(new Emitter<{ readonly missionId: string; readonly triggerId: string; readonly nodeId: string; readonly kind: 'interval'; readonly detail?: string; readonly timestamp: number }>());
-			const gateH = createHarness([alpha]);
-			gateH.modes.setMode('ade');
-			gateH.instantiation.stub(IAdeEngineeringBackendService, upcastPartial<IAdeEngineeringBackendService>({
-				onDidSourceTriggerFire: onTriggerFire.event,
-				loadInbox: async () => [],
-				saveInbox: async () => undefined,
-			}));
-			const gateRoleSchema = store.add(gateH.instantiation.createInstance(AdeRoleSchemaService));
-			gateH.instantiation.stub(IAdeRoleSchemaService, gateRoleSchema);
-			const gateMissionStore = store.add(gateH.instantiation.createInstance(AdeMissionStoreService));
-			gateH.instantiation.stub(IAdeMissionService, gateMissionStore);
-			const gateMissionRuntime = store.add(gateH.instantiation.createInstance(AdeMissionRuntimeService));
-			gateH.instantiation.stub(IAdeMissionRuntimeService, gateMissionRuntime);
-
-			const gateMission = gateMissionStore.createMission({
-				title: 'Multi-Wave Gate',
-				mermaidText: 'flowchart LR\n  N1["Build"] --> G1{"Release Gate"}',
-			});
-			const gateHost = append(document.body, $('.monaco-workbench.ade-mission-multiwave-gate-host'));
-			store.add({ dispose: () => gateHost.remove() });
-			const gatePane = store.add(gateH.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			gatePane.create(gateHost);
-			const gateInput = store.add(gateH.instantiation.createInstance(AdeEngineeringEditorInput, gateMission.id));
-			await gatePane.setInput(gateInput, undefined, {}, CancellationToken.None);
-
-			await gateMissionRuntime.setTrigger(gateMission.id, { nodeId: 'N1', kind: 'interval', intervalMs: 60000, enabled: true, autoStartOnMissionStart: true }, { isHumanUser: true });
-			const triggerId = gateMissionRuntime.listTriggers(gateMission.id)[0].id;
-			await gateMissionRuntime.start(gateMission.id);
-			const w1Tok = Object.values(gateMissionRuntime.getRuntimeState(gateMission.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
-			await gateMissionRuntime.completeToken(gateMission.id, { tokenId: w1Tok.id, summary: 'Wave 1 build artifact ready' });
-
-			// Fire a second wave via source trigger event and complete it to queue a second token on G1
-			onTriggerFire.fire({ missionId: gateMission.id, triggerId, nodeId: 'N1', kind: 'interval', detail: 'Wave 2 trigger', timestamp: Date.now() });
-			await new Promise(resolve => setTimeout(resolve, 20));
-			const w2Tok = Object.values(gateMissionRuntime.getRuntimeState(gateMission.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
-			assert.ok(w2Tok, 'Source trigger fires Wave 2 active token on N1');
-			await gateMissionRuntime.completeToken(gateMission.id, { tokenId: w2Tok.id, summary: 'Wave 2 hotfix artifact ready' });
-
-			// Gate card shows multi-wave token puck (+1) and Gate popover lists both queued waves!
-			const gatePuck = gateHost.querySelector<HTMLButtonElement>('button[data-ade-token-puck="G1"]')!;
-			assert.strictEqual(gatePuck.getAttribute('data-live-token-count'), '2', 'Gate token puck reflects 2 concurrent waiting waves');
-			const gateEl = gateHost.querySelector<HTMLElement>('.ade-mission-node[data-node-id="G1"].state-waiting-gate')!;
-			const win = gateEl.ownerDocument.defaultView!;
-			gateEl.dispatchEvent(new win.PointerEvent('pointerdown', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
-			gateEl.dispatchEvent(new win.PointerEvent('pointerup', { button: 0, clientX: 20, clientY: 20, bubbles: true }));
-			const waveBtns = gateHost.querySelectorAll<HTMLButtonElement>('[data-ade-gate-wave-switcher="true"] button[data-ade-gate-wave-btn]');
-			assert.strictEqual(waveBtns.length, 2, 'Multi-wave Gate popover lists both queued waves');
-			assert.ok(gateHost.querySelector('[data-ade-gate-summary="true"]')?.textContent?.includes('Wave 1 build artifact ready'));
-			waveBtns[1].click();
-			assert.ok(gateHost.querySelector('[data-ade-gate-summary="true"]')?.textContent?.includes('Wave 2 hotfix artifact ready'), 'Switching wave in Gate popover updates preview to Wave 2');
-			const w2GateTokenId = waveBtns[1].getAttribute('data-ade-gate-wave-btn')!;
-			gateHost.querySelector<HTMLButtonElement>('button[data-ade-gate-approve="G1"]')!.click();
-			await new Promise(resolve => setTimeout(resolve, 20));
-			assert.strictEqual(gateMissionRuntime.getRuntimeState(gateMission.id).tokens[w2GateTokenId]?.status, 'completed', 'Approving selected Wave 2 resolves Wave 2 token specifically');
-		});
-
-		test('keeps only top-left File Drawer & Start pills on top bar, exposes Factory Wall cutoff in drawer, always-visible Supervisor pills & spotlight, Source Triggers studio from entry port, docked Node Inspector, and position-preserving Fit-to-View', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			const openedAgents: Array<{ readonly id: string; readonly side?: boolean }> = [];
-			h.instantiation.stub(IAdeEditorService, upcastPartial<IAdeEditorService>({
-				openAgent: async (id: string, opts?: { side?: boolean }) => {
-					openedAgents.push({ id, side: opts?.side });
-				},
-			}));
-
-			const mission = missionStore.createMission({
-				title: 'Command Center UX Mission',
-				mermaidText: 'flowchart LR\n  N1["Data Ingest"] --> N2["Train Model"]',
-			});
-			const host = append(document.body, $('.monaco-workbench.ade-mission-command-ux-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			// 1. Minimalist top bar exposes ONLY File Drawer toggle + Run Control pill; Cutoff lives inside File Drawer
-			const topBar = host.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
-			assert.strictEqual(topBar.children.length, 2, 'Top bar contains ONLY File Drawer toggle and Run Control pill');
-			assert.ok(topBar.querySelector('[data-ade-mission-file-btn="true"]'));
-			assert.ok(topBar.querySelector('[data-ade-mission-run-bar="true"]'));
-			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')?.hidden, true);
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!.click();
-			const drawerCutoff = host.querySelector<HTMLSelectElement>('[data-ade-mission-cutoff-select="true"]')!;
-			drawerCutoff.value = '1';
-			drawerCutoff.dispatchEvent(new (drawerCutoff.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).boundary.offGraphMaxTier, 1);
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!.click();
-
-			// 2. Always-visible Supervisor pill & jurisdiction legend + spotlight (no opacity:0 hunting!)
-			const n1SupBtn = host.querySelector<HTMLButtonElement>('button[data-node-sup-btn="N1"]')!;
-			assert.ok(n1SupBtn, 'Task card renders dedicated always-visible Supervisor pill');
-			n1SupBtn.click();
-			const secOpt = host.querySelector<HTMLButtonElement>(`button[data-ade-sup-option="${ADE_SECRETARY_ID}"]`)!;
-			assert.ok(secOpt, 'Dedicated Supervisor popover lists eligible off-graph supervisors');
-			secOpt.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-
-			const n1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			const n2El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			assert.strictEqual(n1El.getAttribute('data-node-supervisor-id'), ADE_SECRETARY_ID, 'Bound supervisor is visibly tagged on node card');
-			const legend = host.querySelector<HTMLElement>('[data-ade-mission-sup-legend="true"]')!;
-			assert.strictEqual(legend.hidden, false, 'Supervisor Jurisdiction Legend appears once a supervisor is bound');
-			const secLegendChip = legend.querySelector<HTMLButtonElement>(`button[data-ade-sup-legend-id="${ADE_SECRETARY_ID}"]`)!;
-			assert.ok(secLegendChip, 'Legend renders Secretary jurisdiction chip');
-			secLegendChip.click();
-			assert.ok(host.querySelector('.ade-mission-world.has-supervisor-highlight'), 'Clicking legend chip spotlights managed nodes across canvas');
-			assert.strictEqual(n1El.classList.contains('is-supervised-highlight'), true, 'Managed node N1 is spotlighted');
-			assert.strictEqual(n2El.classList.contains('is-supervised-highlight'), false, 'Unmanaged node N2 is not spotlighted');
-			secLegendChip.click();
-			assert.strictEqual(host.querySelector('.ade-mission-world.has-supervisor-highlight'), null, 'Clicking again unpins spotlight');
-
-			// 3. Zero-Token Source Triggers Studio opened directly from entry node Pacemaker port
-			const n1PacemakerBtn = host.querySelector<HTMLButtonElement>('button[data-ade-pacemaker-port="N1"]')!;
-			assert.ok(n1PacemakerBtn, 'Entry node exposes Pacemaker port to open Source Triggers studio');
-			n1PacemakerBtn.click();
-			const nodeSel = host.querySelector<HTMLSelectElement>('select[data-ade-trigger-node-select="true"]')!;
-			assert.strictEqual(nodeSel.options.length, 1, 'Only inDegree===0 && outDegree>=1 entry node N1 is eligible for source triggers');
-			assert.strictEqual(nodeSel.options[0].value, 'N1');
-			const intervalInput = host.querySelector<HTMLInputElement>('input[data-ade-trigger-interval-input="true"]')!;
-			intervalInput.value = '30s';
-			host.querySelector<HTMLButtonElement>('button[data-ade-trigger-submit="true"]')!.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-
-			// Add a second GPU-idle event trigger too!
-			const kindSel = host.querySelector<HTMLSelectElement>('select[data-ade-trigger-kind-select="true"]')!;
-			kindSel.value = 'event';
-			kindSel.dispatchEvent(new (kindSel.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
-			const evtSel = host.querySelector<HTMLSelectElement>('select[data-ade-trigger-event-type="true"]')!;
-			evtSel.value = 'gpu_idle';
-			evtSel.dispatchEvent(new (evtSel.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
-			host.querySelector<HTMLButtonElement>('button[data-ade-trigger-submit="true"]')!.click();
-			await new Promise(resolve => setTimeout(resolve, 25));
-
-			assert.strictEqual(missionRuntime.listTriggers(mission.id).length, 2, 'Both interval and gpu_idle triggers persisted');
-			const n1TrigBadge = host.querySelector<HTMLButtonElement>('button[data-ade-node-trigger-badge="N1"]')!;
-			assert.strictEqual(n1TrigBadge.hidden, false, 'Entry node N1 displays on-canvas Source Trigger badge');
-			assert.strictEqual(n1TrigBadge.getAttribute('data-trigger-count'), '2');
-
-			// Toggle pause and delete first trigger from studio
-			const firstTrigId = missionRuntime.listTriggers(mission.id)[0].id;
-			host.querySelector<HTMLButtonElement>(`button[data-ade-trigger-toggle="${firstTrigId}"]`)!.click();
-			await new Promise(resolve => setTimeout(resolve, 20));
-			assert.strictEqual(missionRuntime.listTriggers(mission.id).find(t => t.id === firstTrigId)?.enabled, false);
-			host.querySelector<HTMLButtonElement>(`button[data-ade-trigger-delete="${firstTrigId}"]`)!.click();
-			await new Promise(resolve => setTimeout(resolve, 20));
-			assert.strictEqual(missionRuntime.listTriggers(mission.id).length, 1);
-
-			// 4. Single-clicking task card stays on canvas & opens docked Node Command Drawer (never switches tab!)
-			const win = n1El.ownerDocument.defaultView!;
-			n1El.dispatchEvent(new win.PointerEvent('pointerdown', { button: 0, clientX: 50, clientY: 50, bubbles: true }));
-			n1El.dispatchEvent(new win.PointerEvent('pointerup', { button: 0, clientX: 50, clientY: 50, bubbles: true }));
-			assert.strictEqual(openedAgents.length, 0, 'Single-clicking task card MUST NOT switch away from Mission canvas into chat tab');
-			assert.strictEqual(n1El.classList.contains('is-selected'), true, 'Clicked node N1 receives selected ring on canvas');
-			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
-			assert.strictEqual(inspector.hidden, false, 'Docked right-side Node Command Drawer opens in-canvas');
-			assert.strictEqual(inspector.dataset.nodeId, 'N1');
-
-			// Explicit Split Chat Beside opens chat in side pane; Open Tab switches directly
-			const splitBtn = inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-open-beside]')!;
-			const tabBtn = inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-open-tab]')!;
-			assert.ok(splitBtn && tabBtn, 'Node Command Drawer exposes explicit Split Chat Beside and Open Tab actions');
-			splitBtn.click();
-			assert.strictEqual(openedAgents.length, 1);
-			assert.strictEqual(openedAgents[0].side, true, 'Split Chat Beside opens Agent chat with { side: true }');
-			tabBtn.click();
-			assert.strictEqual(openedAgents.length, 2);
-			assert.strictEqual(openedAgents[1].side, undefined, 'Open Tab opens Agent chat normally');
-
-			// 5. Dedicated Fit-to-View button fits viewport WITHOUT wiping manual node coordinates!
-			missionStore.updateNodePositions(mission.id, { N1: { x: 888, y: 666 } });
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-			assert.strictEqual(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')?.style.left, '888px');
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-zoom-in="true"]')!.click();
-			const zoomedLabel = host.querySelector('[data-ade-mission-zoom-label="true"]')?.textContent;
-			assert.ok(zoomedLabel && zoomedLabel !== '100%', `Zoom In updates live zoom readout, got: ${zoomedLabel}`);
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-fit-view="true"]')!.click();
-			assert.strictEqual(missionStore.getMission(mission.id)?.positions?.N1?.x, 888, 'Fit-to-View MUST preserve manually arranged node X coordinate');
-			assert.strictEqual(missionStore.getMission(mission.id)?.positions?.N1?.y, 666, 'Fit-to-View MUST preserve manually arranged node Y coordinate');
-			assert.strictEqual(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')?.style.left, '888px', 'Fit-to-View does not reset manual node DOM coordinates');
-		});
-
-		test('routes flowchart TD vertically (bottom-out to top-in), sizes CJK edge labels without clipping, prevents negative coordinates on 7 parallel nodes, and renders Zoom Slider + interactive Minimap', async () => {
-			const { h, missionStore } = createMissionHarness();
-			// 1. Vertical TD graph with a Chinese edge label + 7 parallel sibling nodes in one layer!
-			const tdMermaid = [
-				'flowchart TD',
-				'  ROOT["入口分发"] -->|审批不通过打回重做| P1["分支1"]',
-				'  ROOT --> P2["分支2"]',
-				'  ROOT --> P3["分支3"]',
-				'  ROOT --> P4["分支4"]',
-				'  ROOT --> P5["分支5"]',
-				'  ROOT --> P6["分支6"]',
-				'  ROOT --> P7["分支7"]',
-			].join('\n');
-			const tdMission = missionStore.createMission({ title: 'TD + CJK + Minimap Mission', mermaidText: tdMermaid });
-
-			const host = append(document.body, $('.monaco-workbench.ade-mission-td-minimap-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			const tdInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, tdMission.id));
-			await pane.setInput(tdInput, undefined, {}, CancellationToken.None);
-
-			// World gets dir-td & data-dag-direction="TD"
-			const worldEl = host.querySelector<HTMLElement>('.ade-mission-world')!;
-			assert.strictEqual(worldEl.classList.contains('dir-td'), true, 'flowchart TD marks world with dir-td');
-			assert.strictEqual(worldEl.dataset.dagDirection, 'TD');
-
-			// All 8 nodes (including 7 parallel siblings in one row!) have strictly positive coordinates with safe left/top margins
-			const nodeEls = Array.from(host.querySelectorAll<HTMLElement>('.ade-mission-node'));
-			assert.strictEqual(nodeEls.length, 8);
-			for (const el of nodeEls) {
-				const x = Number.parseFloat(el.style.left);
-				const y = Number.parseFloat(el.style.top);
-				assert.ok(x >= 200, `Node ${el.dataset.nodeId} X (${x}) must never drift into negative/clipped region`);
-				assert.ok(y >= 150, `Node ${el.dataset.nodeId} Y (${y}) must never drift into negative/clipped region`);
-			}
-
-			// Edge ROOT -> P1 starts at ROOT bottom-center (rootX, rootY + 110) and ends at P1 top-center (p1X, p1Y - 114)
-			const rootEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="ROOT"]')!;
-			const p1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="P1"]')!;
-			const rootX = Number.parseFloat(rootEl.style.left);
-			const rootY = Number.parseFloat(rootEl.style.top);
-			const p1X = Number.parseFloat(p1El.style.left);
-			const p1Y = Number.parseFloat(p1El.style.top);
-			const edgePath = host.querySelector<SVGPathElement>('.ade-mission-edge-group[data-from="ROOT"][data-to="P1"] path')!.getAttribute('d')!;
-			assert.ok(edgePath.startsWith(`M ${rootX} ${rootY + 110}`), `TD edge must exit bottom-center (${rootX}, ${rootY + 110}), got: ${edgePath}`);
-			assert.ok(edgePath.endsWith(`L ${p1X} ${p1Y - 114}`), `TD edge must enter top-center (${p1X}, ${p1Y - 114}), got: ${edgePath}`);
-
-			// Chinese edge label ("审批不通过打回重做", 9 CJK chars) receives generous CJK-aware pill width (>= 120px, NOT cramped 79px!)
-			const labelBg = host.querySelector<SVGRectElement>('.ade-mission-edge-group[data-from="ROOT"][data-to="P1"] .ade-mission-edge-label-bg')!;
-			const labelWidth = Number.parseFloat(labelBg.getAttribute('width') ?? '0');
-			assert.ok(labelWidth >= 120, `Chinese edge label pill must be wide enough for CJK glyphs (>=120px), got ${labelWidth}px`);
-
-			// Zoom scale slider updates zoom & readout smoothly
-			const zoomSlider = host.querySelector<HTMLInputElement>('input[data-ade-mission-zoom-slider="true"]')!;
-			assert.ok(zoomSlider, 'Zoom scale slider renders in viewport controls bar');
-			zoomSlider.value = '150';
-			zoomSlider.dispatchEvent(new (zoomSlider.ownerDocument.defaultView!.Event)('input', { bubbles: true }));
-			assert.strictEqual(host.querySelector('[data-ade-mission-zoom-label="true"]')?.textContent, '150%');
-
-			// Interactive bottom-right Minimap renders all 8 nodes, live viewport rect, supports click-to-pan and toggle
-			const minimapEl = host.querySelector<HTMLElement>('[data-ade-mission-minimap="true"]')!;
-			assert.strictEqual(minimapEl.hidden, false, 'Minimap is visible by default for non-empty graph');
-			assert.strictEqual(minimapEl.querySelectorAll('[data-minimap-node]').length, 8, 'Minimap renders miniature rect for every node');
-			const vpRect = minimapEl.querySelector<SVGRectElement>('[data-ade-minimap-viewport="true"]')!;
-			assert.ok(Number.parseFloat(vpRect.getAttribute('width') ?? '0') > 0, 'Minimap tracks live viewport rectangle');
-
-			const toggleBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-minimap-toggle="true"]')!;
-			toggleBtn.click();
-			assert.strictEqual(minimapEl.hidden, true, 'Minimap toggle hides minimap cleanly');
-			toggleBtn.click();
-			assert.strictEqual(minimapEl.hidden, false, 'Minimap toggle restores minimap cleanly');
-		});
-
-		test('renders all 4 flagship capabilities: gliding edge pucks & pacemaker port, FinOps guardrail & budget circuit-breaker, Hold-Tab supervisor X-Ray & cross-cloud territory halos & v1->vN timeline replay, and 4-in-1 Inspector with distill & dblclick chat', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			const openedAgents: Array<{ readonly id: string; readonly side?: boolean }> = [];
-			h.instantiation.stub(IAdeEditorService, upcastPartial<IAdeEditorService>({
-				openAgent: async (id: string, opts?: { side?: boolean }) => {
-					openedAgents.push({ id, side: opts?.side });
-				},
-			}));
-			h.instantiation.stub(IAdeCloudHostBackendService, upcastPartial<IAdeCloudHostBackendService>({
-				listHosts: async () => [{
-					id: 'h-ubuntu',
-					name: 'Ubuntu H100',
-					alias: 'ubuntu-h100',
-					hostName: '10.0.0.88',
-					user: 'root',
-					port: 22,
-					os: 'linux',
-					recentDirectories: [],
-					source: 'user',
-					createdAt: 1,
-					updatedAt: 1,
-				}],
-			}));
-
-			const mission = missionStore.createMission({
-				title: 'Flagship Studio Mission',
-				mermaidText: 'flowchart LR\n  N1["Data Ingest"] --> N2["Train GPU"]',
-			});
-			// Bind N2 to cloud host ubuntu-h100 and bind Secretary as off-graph supervisor of N1
-			await missionRuntime.setBoundary(mission.id, {
-				supervisors: [{ id: ADE_SECRETARY_ID, tier: 0, managedNodeIds: ['N1'] }],
-				nodeAssignments: {
-					...missionRuntime.getRuntimeState(mission.id).boundary.nodeAssignments,
-					N2: {
-						...(missionRuntime.getRuntimeState(mission.id).boundary.nodeAssignments.N2 ?? { tier: 2 }),
-						hostAlias: 'ubuntu-h100',
-					},
-				},
-			});
-
-			const host = append(document.body, $('.monaco-workbench.ade-mission-flagship-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const mockGroup = upcastPartial<IEditorGroup>({ id: 1, index: 0 });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, mockGroup));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-			await new Promise(resolve => setTimeout(resolve, 35));
-
-			// 1. Source Pacemaker Pulse Port on entry node N1 (and NOT on downstream N2)
-			const pacemakerN1 = host.querySelector<HTMLButtonElement>('button[data-ade-pacemaker-port="N1"]')!;
-			assert.ok(pacemakerN1, 'Entry generator node N1 renders interactive Source Pacemaker Pulse Port');
-			assert.strictEqual(host.querySelector('button[data-ade-pacemaker-port="N2"]'), null, 'Downstream node N2 does not render Source Pacemaker Port');
-
-			// Cross-Cloud Compute Territory Contour Halos for @ubuntu-h100 and @local + toggle button
-			assert.ok(host.querySelector('[data-cloud-territory="ubuntu-h100"]'), 'Renders dashed Cross-Cloud Territory halo for @ubuntu-h100');
-			assert.ok(host.querySelector('[data-cloud-territory="local"]'), 'Renders Local Territory halo when mixed with cloud hosts');
-			const haloToggleBtn = host.querySelector<HTMLButtonElement>('button[data-ade-mission-cloud-halo-toggle="true"]')!;
-			haloToggleBtn.click();
-			assert.strictEqual(host.querySelector('[data-cloud-territory="ubuntu-h100"]'), null, 'Cloud halo toggle hides territory contours');
-			haloToggleBtn.click();
-			assert.ok(host.querySelector('[data-cloud-territory="ubuntu-h100"]'), 'Cloud halo toggle restores territory contours');
-
-			// Start Mission & advance token N1 -> N2 to activate physical gliding Token Puck along edge N1->N2
-			const started = await missionRuntime.start(mission.id);
-			assert.strictEqual(started.ok, true, started.error);
-			const n1Tok = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
-			const completedN1 = await missionRuntime.completeToken(mission.id, { tokenId: n1Tok.id, summary: 'Dataset prepared cleanly' });
-			assert.strictEqual(completedN1.ok, true, completedN1.error);
-
-			const edgePuck = host.querySelector<SVGGElement>('[data-ade-edge-puck]')!;
-			assert.ok(edgePuck, 'Active edge N1->N2 spawns physical gliding Token Puck along SVG route');
-			assert.ok(edgePuck.style.offsetPath.includes('path('), `Gliding puck uses GPU offset-path, got: ${edgePuck.style.offsetPath}`);
-			const pacemakerN1Live = host.querySelector<HTMLButtonElement>('button[data-ade-pacemaker-port="N1"]')!;
-			assert.strictEqual(pacemakerN1Live.getAttribute('data-pacemaker-armed'), 'true', 'Pacemaker pulses when Mission is running');
-
-			// 2. FinOps Top-Bar Guardrail Pill + Per-Card $USD (zero DOM teardown!) + Budget Circuit-Breaker + Raise & Resume
-			const n2ElBefore = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			missionRuntime.recordNodeTurnUsage(mission.id, 'N2', {
-				inputTokens: 20_000,
-				outputTokens: 5_000,
-				cacheReadTokens: 80_000,
-				totalTokens: 105_000,
-				costUsd: 1.25,
-				isNoiseTurn: true,
-			});
-			const n2ElAfter = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			assert.strictEqual(n2ElAfter, n2ElBefore, 'Live FinOps/telemetry tick patches per-card $USD in place with zero DOM teardown');
-			const n2CostEl = n2ElAfter.querySelector<HTMLElement>('[data-node-cost-usd]')!;
-			assert.strictEqual(n2CostEl.hidden, false);
-			assert.strictEqual(n2CostEl.textContent, '$1.25');
-
-			// Open 4-in-1 Inspector by clicking N2 and switching to FinOps Ledger tab
-			const win = n2ElAfter.ownerDocument.defaultView!;
-			n2ElAfter.dispatchEvent(new win.PointerEvent('pointerdown', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
-			n2ElAfter.dispatchEvent(new win.PointerEvent('pointerup', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
-			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
-			assert.strictEqual(inspector.hidden, false);
-			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="finops"]')!.click();
-			assert.strictEqual(inspector.dataset.activeTab, 'finops');
-			assert.ok(inspector.querySelector('[data-ade-finops-by-tier="true"]')?.textContent?.includes('L2'));
-			assert.ok(inspector.querySelector('[data-ade-finops-by-host="true"]')?.textContent?.includes('@ubuntu-h100'));
-
-			// Setting budget ceiling below $1.25 trips real engine circuit-breaker and auto-pauses Mission!
-			const budgetInput = inspector.querySelector<HTMLInputElement>('[data-ade-finops-budget-input="true"]')!;
-			budgetInput.value = '1.00';
-			budgetInput.dispatchEvent(new (budgetInput.ownerDocument.defaultView!.Event)('change', { bubbles: true }));
-			await new Promise(resolve => setTimeout(resolve, 25));
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).status, 'paused', 'Budget ceiling auto-pauses Mission');
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).budgetCircuitTripped, true);
-			assert.ok(inspector.querySelector('[data-ade-finops-tripped-banner="true"]'), 'Inspector shows tripped breaker alert');
-
-			// Clicking "Raise & Resume" atomically increases limit and resumes Mission!
-			inspector.querySelector<HTMLButtonElement>('[data-ade-finops-raise-resume="true"]')!.click();
-			await new Promise(resolve => setTimeout(resolve, 35));
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).status, 'running', 'Raise & Resume restores running state');
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).budgetCircuitTripped, false);
-
-			// 3. 4-in-1 Inspector tabs (Token + lazy trace_ptr, Distill one-click context refresh) + dblclick opens full chat tab
-			assert.strictEqual(openedAgents.length, 0, 'Single-click stays on canvas');
-
-			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="token"]')!.click();
-			assert.ok(inspector.querySelector('[data-ade-ni-last-summary="true"]')?.textContent?.includes('Dataset prepared cleanly'));
-			inspector.querySelector<HTMLButtonElement>('[data-ade-ni-expand-trace="true"]')!.click();
-			assert.ok(inspector.querySelectorAll('.ade-mission-token-trace-row').length >= 1, 'Lazy trace_ptr expands trace history inside Inspector');
-
-			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="distill"]')!.click();
-			const memoInput = inspector.querySelector<HTMLInputElement>('[data-ade-ni-distill-memo="true"]')!;
-			memoInput.value = 'Keep epoch checkpoint only';
-			inspector.querySelector<HTMLButtonElement>('[data-ade-ni-distill="N2"]')!.click();
-			await new Promise(resolve => setTimeout(resolve, 35));
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).nodeTelemetry?.N2?.contextNoiseTokens, 0, 'One-click Distill clears noisy context');
-			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).nodeTelemetry?.N2?.costUsd, 1.25, 'Distill keeps cumulative USD honest');
-
-			n2ElAfter.dispatchEvent(new win.MouseEvent('dblclick', { bubbles: true }));
-			assert.strictEqual(openedAgents.length, 1, 'Double-clicking task card opens Agent chat');
-			assert.strictEqual(openedAgents[0].side, undefined, 'Double-click opens full Agent chat tab');
-
-			// 4. Hold-Tab Off-Graph Supervisor X-Ray Spotlight
-			win.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
-			assert.ok(host.querySelector('.ade-mission-world.is-tab-spotlight-active'), 'Holding Tab activates Supervisor X-Ray mode');
-			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-tab-spotlight-banner="true"]')?.hidden, false);
-			assert.ok(host.querySelector(`[data-supervisor-beam="${ADE_SECRETARY_ID}"][data-target-node="N1"]`), 'Draws X-Ray command beam from off-graph Supervisor to managed node N1');
-			win.dispatchEvent(new win.KeyboardEvent('keyup', { key: 'Tab', bubbles: true }));
-			assert.strictEqual(host.querySelector('.ade-mission-world.is-tab-spotlight-active'), null, 'Releasing Tab exits X-Ray cleanly');
-			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-tab-spotlight-banner="true"]')?.hidden, true);
-			assert.strictEqual(host.querySelector('[data-supervisor-beam]'), null);
-
-			// 5. v1 -> vN Dynamic Patch Revision Timeline Replay (non-destructive!)
-			const patched = await missionRuntime.patchMermaid(mission.id, {
-				caller: { isHumanUser: true },
-				newMermaidText: 'flowchart LR\n  N1["Data Ingest"] --> N2["Train GPU"]\n  N2 --> N3["Deploy"]',
-				reason: 'Add Deploy step',
-			});
-			assert.strictEqual(patched.ok, true, patched.error);
-			const revBar = host.querySelector<HTMLElement>('[data-ade-mission-revision-bar="true"]')!;
-			assert.strictEqual(revBar.hidden, false, 'v1->vN Timeline Bar appears once ≥2 revisions exist');
-			assert.strictEqual(host.querySelectorAll('.ade-mission-node').length, 3, 'Live v2 renders 3 nodes');
-
-			revBar.querySelector<HTMLButtonElement>('button[data-ade-revision-btn="1"]')!.click();
-			assert.strictEqual(host.querySelectorAll('.ade-mission-node').length, 2, 'Clicking v1 replays historical 2-node topology non-destructively');
-			assert.ok(missionStore.getMission(mission.id)?.mermaidText.includes('N3'), 'Historical replay NEVER mutates live missionStore Mermaid');
-
-			revBar.querySelector<HTMLButtonElement>('button[data-ade-revision-exit="true"]')!.click();
-			assert.strictEqual(host.querySelectorAll('.ade-mission-node').length, 3, 'Exiting replay restores live 3-node topology');
-		});
-
 		test('Cloud Mission HA: window reload recovery passes preferReattach, Recall passes hostAlias to stop, and system resume wakes SSH bridges', async () => {
 			const cloudProjUri = URI.parse('aexus-ssh://gpu-h100/srv/ml-train');
 			const h = createHarness([cloudProjUri]);
@@ -6418,30 +5255,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			const n2Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
 			assert.ok(n1Before && n2Before, 'Initial canvas renders N1 and N2');
 
-			// 1. Transition idle -> running -> paused -> running: ZERO DOM teardown!
-			const started = await missionRuntime.start(m1.id);
-			assert.strictEqual(started.ok, true);
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N1"]'), n1Before, 'Start (idle->running) must NOT rebuild DOM');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N2"]'), n2Before, 'Start (idle->running) preserves N2 DOM node');
-			assert.strictEqual(n1Before.querySelector<HTMLButtonElement>('.ade-mission-engine-pill')?.disabled, true, 'Engine pill locks in place when live');
-
-			await missionRuntime.pause(m1.id);
-			await missionRuntime.resume(m1.id);
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N1"]'), n1Before, 'Pause/Resume must NOT rebuild DOM');
-
-			// 2. First telemetry model arrival updates LLM icon + model label IN PLACE with zero DOM teardown!
-			missionRuntime.recordNodeTurnUsage(m1.id, 'N1', {
-				inputTokens: 12_000,
-				outputTokens: 3_000,
-				totalTokens: 15_000,
-				costUsd: 0.42,
-				model: 'gpt-5.3-codex',
-			});
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N1"]'), n1Before, 'First telemetry model arrival must NOT rebuild DOM');
-			assert.strictEqual(n1Before.querySelector('.ade-mission-model-name')?.textContent, 'gpt-5.3-codex');
-			assert.strictEqual(n1Before.querySelector('.ade-mission-core-model-row')?.getAttribute('data-node-model'), 'gpt-5.3-codex');
-
-			// 3. Unrelated sidebar chat session mutations leave active Mission canvas DOM completely untouched!
+			// 1. Unrelated sidebar chat session mutations leave active Engineering canvas DOM completely untouched!
 			h.projects.addSession(
 				projUri,
 				{ engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/unrelated-chat-99') },
@@ -6506,659 +5320,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.ok((savedM2.runtime!.tokens![tokId].lastSummary!.length) <= 2005, 'Oversized lastSummary is capped during compaction');
 		});
 
-		test('Visual DAG authoring, supervisor parent hierarchy & guided retry, Reviewer & checks CRUD + Triggers standby, failed/blocked wave card telemetry, and Inbox Open Node deep-jump focus', async () => {
-			const projUri = URI.file('/tmp/mission-ux-all4');
-			const h = createHarness([projUri]);
-			h.modes.setMode('ade');
-			const dispatchedTurns: Array<{ readonly args: readonly unknown[] }> = [];
-			const openedAgentCalls: Array<{ readonly agentId: string; readonly side?: boolean }> = [];
-			const openedMissionCalls: Array<{ readonly id: string; readonly options?: unknown }> = [];
-
-			h.instantiation.stub(IAdeEngineeringBackendService, upcastPartial<IAdeEngineeringBackendService>({
-				loadInbox: async () => [],
-				saveInbox: async () => undefined,
-				syncMissionWatchdog: async () => undefined,
-				removeMissionWatchdog: async () => undefined,
-			}));
-			h.instantiation.stub(IAdeSessionsService, upcastPartial<IAdeSessionsService>({
-				onDidChangeEngines: Event.None,
-				getIcon: () => undefined,
-				getEngineName: id => id === 'aexus-claude' ? 'Claude Code' : id,
-				getEngines: async () => [{ id: 'aexus-claude', name: 'Claude Code', description: '' }],
-				create: async (engineId, projectUri) => ({ engineId, resource: URI.parse(`${engineId}:/sess-ux4-${Date.now()}`), projectUri, label: 'UX4' }),
-				list: async () => [],
-				rename: async () => undefined,
-				delete: async () => undefined,
-				stop: async () => undefined,
-			}));
-			h.instantiation.stub(ICommandService, upcastPartial<ICommandService>({
-				executeCommand: (async (id: string, ...args: unknown[]) => {
-					if (id === 'aexus.agentEngines.dispatchEngineeringTurn') {
-						dispatchedTurns.push({ args });
-					}
-					return { reply: 'ok', stopped: false };
-				}) as ICommandService['executeCommand'],
-			}));
-			h.instantiation.stub(IAdeEditorService, upcastPartial<IAdeEditorService>({
-				openAgent: async (agentId, opts) => {
-					openedAgentCalls.push({ agentId, side: opts?.side });
-				},
-				closeAgents: async () => undefined,
-			}));
-
-			const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
-			h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
-			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
-			h.instantiation.stub(IAdeMissionService, missionStore);
-			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
-			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
-
-			// Add an L1 TechLead supervisor outside the graph (governor = L1 in default 3-tier org)
-			const supLead = h.projects.addSession(
-				projUri,
-				{ engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/sup-lead-1') },
-				'TechLead',
-				{ role: 'governor' },
-			);
-
-			// Start with a BLANK Mission (empty Mermaid) to test clean empty onboarding & visual authoring
-			const mission = missionStore.createMission({
-				id: 'm-ux-all4',
-				title: 'UX Complete Mission',
-				mermaidText: '',
-				projectUri: projUri.toString(),
-			});
-
-			const host = document.createElement('div');
-			host.className = 'monaco-workbench';
-			host.style.width = '1200px';
-			host.style.height = '760px';
-			document.body.appendChild(host);
-			store.add({ dispose: () => host.remove() });
-
-			const pane = store.add(h.instantiation.createInstance(
-				AdeEngineeringEditorPane,
-				upcastPartial<IEditorGroup>({}),
-			));
-			pane.create(host);
-			pane.layout(new Dimension(1200, 760));
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			// ── (1) Clean empty-canvas onboarding (zero templates/sandbox/doctor/prompt-to-dag clutter) + self-healing boundary ──
-			const onboarding = host.querySelector<HTMLElement>('[data-ade-mission-empty-onboarding]');
-			assert.ok(onboarding && !onboarding.hidden, 'Empty canvas shows minimalist authoring onboarding');
-			assert.strictEqual(host.querySelector('[data-ade-template-card]'), null, 'Removed templates gallery is absent');
-			assert.strictEqual(host.querySelector('[data-ade-empty-sandbox-demo]'), null, 'Removed sandbox CTA is absent');
-			assert.strictEqual(host.querySelector('[data-ade-empty-doctor]'), null, 'Removed doctor CTA is absent');
-			assert.strictEqual(host.querySelector('[data-ade-empty-prompt-input]'), null, 'Removed prompt-to-DAG form is absent');
-
-			const researchMermaid = [
-				'flowchart LR',
-				'  R1["@PI: 文献调研与实验方案"] -->|spec| R2["@TrainA: 主实验 GPU 训练"]',
-				'  R1 -->|spec| R3["@TrainB: 消融对比基线"]',
-				'  R1 -->|spec| R4["@Bench: 基准评测与指标审稿"]',
-				'  R2 -->|fail| F1["@Ops: 显存诊断与降参恢复"]',
-				'  R2 --> U1{{"方法学人工审核 Gate"}}',
-				'  R3 --> U1',
-				'  R4 --> U1',
-				'  F1 --> U1',
-				'  U1 --> R5["@PI: 论文结论与实验报告"]',
-				'  %% check R4 [name=metrics-json, expect_file=research/benchmarks/metrics.json, on_fail=bounce, max_retries=2]',
-			].join('\n');
-			missionStore.updateMermaid(mission.id, researchMermaid);
-			missionStore.updateNodePrompts(mission.id, { R1: 'Write detailed research spec in research/spec.md' });
-			await missionRuntime.bindNodeHost(mission.id, 'R4', { roleKind: 'reviewer' });
-			await timeout(20);
-			assert.strictEqual(onboarding.hidden, true, 'Onboarding hides after graph is populated');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Renders R1');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R4"]'), 'Renders R4');
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="U1"]'), 'Renders Gate U1');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R4"]')?.getAttribute('data-node-role-kind'), 'reviewer', 'R4 marked as Reviewer');
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R4"] .ade-mission-checks-pill')?.getAttribute('data-node-checks-count'), '1', 'Check directive shows ✓ 1 badge on R4');
-
-			// Verify ensureSynchronizedState self-heals stale supervisor managedNodeIds when Mermaid nodes are deleted/replaced
-			const bindAll7 = await missionRuntime.setBoundary(mission.id, {
-				offGraphMaxTier: 1,
-				supervisors: [{ id: supLead.id, tier: 1, managedNodeIds: ['R1', 'R2', 'R3', 'R4', 'F1', 'U1', 'R5'] }],
-			});
-			assert.strictEqual(bindAll7.ok, true, `bindAll7 failed: ${bindAll7.error}`);
-			missionStore.updateMermaid(mission.id, 'flowchart LR\n  N1["Fresh A"] --> N2["Fresh B"]');
-			const healedBoundary = missionRuntime.getBoundary(mission.id);
-			assert.strictEqual(healedBoundary.validation.valid, true, 'Removing old DAG nodes must self-heal stale supervisor managedNodeIds without ghost unknown-node errors');
-			assert.deepStrictEqual(healedBoundary.boundary.supervisors.find(s => s.id === supLead.id)?.managedNodeIds, [], 'Stale deleted node IDs are pruned from supervisor managedNodeIds');
-			const explicitBadRes = await missionRuntime.setBoundary(mission.id, {
-				supervisors: [{ id: supLead.id, tier: 1, managedNodeIds: ['NON_EXISTENT_NODE'] }],
-			});
-			assert.strictEqual(explicitBadRes.ok, false, 'Explicit setBoundary with unknown DAG node still rejects cleanly');
-
-			// Restore research DAG so downstream assertions continue exercising R1..R5/F1/U1
-			missionStore.updateMermaid(mission.id, researchMermaid);
-			await missionRuntime.bindNodeHost(mission.id, 'R4', { roleKind: 'reviewer' });
-			await timeout(20);
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="R1"]'), 'Restored research DAG cleanly after self-heal test');
-
-			// Canvas right-click -> Add Task Node here
-			const viewport = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
-			const vpRect = viewport.getBoundingClientRect();
-			viewport.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: vpRect.left + 880, clientY: vpRect.top + 320 }));
-			assert.ok(host.querySelector('[data-ade-canvas-context-menu="true"]'), 'Right-clicking blank canvas opens context menu');
-			host.querySelector<HTMLButtonElement>('[data-ade-ctx-action="add-task"]')!.click();
-			assert.ok(host.querySelector('.ade-mission-node[data-node-id="N1"]'), 'Context menu adds new node N1');
-
-			// Double-click node title -> inline rename (preserving card double-click for chat!)
-			const n1TitleEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-node-title')!;
-			n1TitleEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
-			const renameInput = host.querySelector<HTMLInputElement>('[data-ade-inline-rename="N1"]');
-			assert.ok(renameInput, 'Double-clicking node title opens inline rename input');
-			renameInput!.value = 'Post-Hoc Eval';
-			renameInput!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="N1"] .ade-mission-node-title')?.textContent, 'Post-Hoc Eval', 'Inline rename persists to Mermaid & DOM');
-
-			// Card double-click (outside title) still opens full Agent chat
-			const callsBeforeCardDbl = openedAgentCalls.length;
-			host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="R1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-			assert.strictEqual(openedAgentCalls.length, callsBeforeCardDbl + 1, 'Card double-click still opens bound Agent chat');
-
-			// Drag output port from R5 to N1 -> connects directed edge R5 -> N1
-			pane.fitGraphToViewport();
-			const r5OutPort = host.querySelector<HTMLButtonElement>('[data-ade-connect-port="R5"]')!;
-			const n1Rect = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!.getBoundingClientRect();
-			const r5PortRect = r5OutPort.getBoundingClientRect();
-			r5OutPort.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: r5PortRect.left + 4, clientY: r5PortRect.top + 4 }));
-			mainWindow.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: n1Rect.left + n1Rect.width / 2, clientY: n1Rect.top + n1Rect.height / 2 }));
-			mainWindow.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: n1Rect.left + n1Rect.width / 2, clientY: n1Rect.top + n1Rect.height / 2 }));
-			assert.ok(host.querySelector('.ade-mission-edge-group[data-from="R5"][data-to="N1"]'), 'Dragging output port onto target node creates directed edge R5 -> N1');
-
-			// ── (2) Off-graph parentSupervisorId hierarchy UI + Hold-Tab X-Ray golden beam ──
-			const setSupRes = await missionRuntime.setBoundary(mission.id, {
-				offGraphMaxTier: 1,
-				supervisors: [
-					{ id: supLead.id, tier: 1, managedNodeIds: ['R2'], parentSupervisorId: ADE_SECRETARY_ID },
-					{ id: ADE_SECRETARY_ID, tier: 0, managedNodeIds: [] },
-				],
-			});
-			assert.strictEqual(setSupRes.ok, true, `setBoundary failed: ${setSupRes.error}`);
-			await timeout(20);
-
-			const updatedBoundary = missionRuntime.getBoundary(mission.id);
-			assert.strictEqual(updatedBoundary.validation.valid, true, 'Boundary remains valid after setting parentSupervisorId');
-			assert.strictEqual(updatedBoundary.boundary.supervisors.find(s => s.id === supLead.id)?.parentSupervisorId, ADE_SECRETARY_ID);
-
-			const supLegendChip = host.querySelector<HTMLElement>(`[data-ade-sup-legend-id="${supLead.id}"]`);
-			assert.ok(supLegendChip, 'Supervisor legend displays bound supervisor');
-			assert.strictEqual(supLegendChip!.getAttribute('data-ade-sup-parent-id'), ADE_SECRETARY_ID, 'Supervisor legend surfaces parentSupervisorId');
-			assert.ok(supLegendChip!.textContent?.includes('Secretary'), 'Supervisor legend chip shows ↑ Secretary hierarchy');
-
-			// Hold Tab X-Ray renders golden parent beam between TechLead and Secretary
-			host.querySelector<HTMLElement>('.ade-mission-editor')!.focus();
-			mainWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
-			assert.ok(host.querySelector(`[data-supervisor-parent-beam="${supLead.id}->${ADE_SECRETARY_ID}"]`), 'Hold-Tab X-Ray renders golden hierarchy beam to parentSupervisorId');
-			mainWindow.dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', bubbles: true }));
-
-			// ── (3) Reviewer role toggle, Deterministic Check Hooks CRUD & Triggers Standby UI ──
-			// Select R1 -> Inspector overview -> toggle Reviewer role
-			const r1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="R1"]')!;
-			r1El.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
-			r1El.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
-			const roleToggleBtn = host.querySelector<HTMLButtonElement>('[data-ade-inspector-role-btn="R1"]');
-			assert.ok(roleToggleBtn, 'Inspector overview exposes Worker/Reviewer role toggle');
-			roleToggleBtn!.click();
-			await timeout(20);
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R1"]')?.getAttribute('data-node-role-kind'), 'reviewer', 'Toggling Reviewer updates node card badge in place');
-
-			// Switch to Inspector Distill/Checks tab -> Add + Delete deterministic check hook
-			host.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="distill"]')!.click();
-			const chkName = host.querySelector<HTMLInputElement>('[data-ade-check-name-input="true"]')!;
-			const chkCmd = host.querySelector<HTMLInputElement>('[data-ade-check-cmd-input="true"]')!;
-			chkName.value = 'spec-lint';
-			chkCmd.value = 'pnpm lint';
-			host.querySelector<HTMLButtonElement>('[data-ade-check-submit="R1"]')!.click();
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R1"] .ade-mission-checks-pill')?.getAttribute('data-node-checks-count'), '1', 'Adding check hook updates R1 ✓ 1 card badge');
-			const delChkBtn = host.querySelector<HTMLButtonElement>('[data-ade-check-delete]')!;
-			assert.ok(delChkBtn, 'Added check hook renders delete button');
-			delChkBtn.click();
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="R1"] .ade-mission-checks-pill')?.getAttribute('data-node-checks-count'), '0', 'Deleting check hook clears R1 check badge');
-
-			// Source Triggers Studio opened from entry node R1 pacemaker port: verify Standby -> Paused -> Armed states
-			host.querySelector<HTMLButtonElement>('[data-ade-pacemaker-port="R1"]')!.click();
-			host.querySelector<HTMLInputElement>('[data-ade-trigger-autostart="true"]')!.checked = true;
-			const trigSubmit = host.querySelector<HTMLButtonElement>('[data-ade-trigger-submit="true"]')!;
-			trigSubmit.click();
-			await timeout(20);
-			assert.strictEqual(host.querySelector('[data-ade-trigger-status]')?.getAttribute('data-trigger-state'), 'standby', 'Trigger shows standby status while Mission is idle');
-			host.querySelector<HTMLButtonElement>('[data-ade-trigger-toggle]')!.click();
-			await timeout(20);
-			assert.strictEqual(host.querySelector('[data-ade-trigger-status]')?.getAttribute('data-trigger-state'), 'paused', 'Pausing trigger updates status chip to paused');
-			host.querySelector<HTMLButtonElement>('[data-ade-trigger-toggle]')!.click();
-			await timeout(20);
-			mainWindow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-
-			// ── (4) Failed & Blocked Wave Card Telemetry + Guided Retry + Active Recall + Inbox Deep-Jump Focus ──
-			const startRes = await missionRuntime.start(mission.id);
-			assert.strictEqual(startRes.ok, true);
-			assert.strictEqual(host.querySelector('[data-ade-pacemaker-port="R1"]')?.getAttribute('data-pacemaker-armed'), 'true', 'Entry node pacemaker switches to armed when Mission runs');
-
-			// Complete R1 to spawn parallel active tokens on R2, R3, R4
-			const r1Tok = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'R1' && t.status === 'active')!;
-			await missionRuntime.completeToken(mission.id, { tokenId: r1Tok.id, summary: 'Spec ready', skipChecks: true });
-			const rtRunning = missionRuntime.getRuntimeState(mission.id);
-			const r2Tok = Object.values(rtRunning.tokens).find(t => t.nodeId === 'R2' && t.status === 'active')!;
-			const r3Tok = Object.values(rtRunning.tokens).find(t => t.nodeId === 'R3' && t.status === 'active')!;
-
-			// Active node R2 exposes Recall button directly on card
-			const r2RecallBtn = host.querySelector<HTMLButtonElement>('[data-ade-node-recall="R2"]')!;
-			assert.strictEqual(r2RecallBtn.hidden, false, 'Active node shows Recall button directly on card');
-
-			// Block R3 with PID -> blocked strip shows wave tag + countdown + PID
-			await missionRuntime.blockToken(mission.id, {
-				tokenId: r3Tok.id,
-				reason: 'Training epoch 3/10',
-				maxDuration: '30m',
-				watchPid: 42424,
-			});
-			const blockedStrip = host.querySelector<HTMLElement>('[data-ade-blocked-strip="R3"]')!;
-			assert.strictEqual(blockedStrip.hidden, false, 'Blocked strip visible on R3');
-			assert.strictEqual(host.querySelector('[data-ade-blocked-wave="R3"]')?.textContent, 'W1', 'Blocked strip displays wave_id (W1)');
-			assert.ok(host.querySelector('[data-ade-blocked-pid="R3"]')?.textContent?.includes('42424'), 'Blocked strip displays watched PID');
-
-			// Fail R2 (after removing fail edge or direct fail without fallback -> let's fail F1 or verify R2 failure):
-			// Note: R2 has fail edge to F1, so fail F1 to make F1 frozen_failed (or fail R3/F1):
-			await missionRuntime.failToken(mission.id, { tokenId: r2Tok.id, reason: 'CUDA OOM on rank 0' });
-			const f1Tok = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'F1' && t.status === 'active')!;
-			await missionRuntime.failToken(mission.id, { tokenId: f1Tok.id, reason: 'CUDA OOM even at batch_size=16' });
-
-			const f1FailStrip = host.querySelector<HTMLElement>('[data-ade-failed-strip="F1"]')!;
-			assert.strictEqual(f1FailStrip.hidden, false, 'Failed node F1 renders explicit failure telemetry strip on card');
-			assert.ok(host.querySelector('[data-ade-failed-wave="F1"]')?.textContent?.includes('W1'), 'Failed strip displays wave_id');
-			assert.ok(host.querySelector('[data-ade-failed-reason="F1"]')?.textContent?.includes('CUDA OOM'), 'Failed strip displays failure reason');
-
-			// Guided Retry on F1 opens popover & submits guidance
-			const guidedBtn = host.querySelector<HTMLButtonElement>('[data-ade-node-retry-guided="F1"]')!;
-			assert.strictEqual(guidedBtn.hidden, false, 'Failed node exposes Guided Retry button on card');
-			guidedBtn.click();
-			const guidedInput = host.querySelector<HTMLTextAreaElement>('[data-ade-guided-retry-input="true"]')!;
-			assert.ok(guidedInput, 'Guided Retry popover opens with guidance textarea');
-			guidedInput.value = 'Switch to fp16 and batch_size=8';
-			dispatchedTurns.length = 0;
-			host.querySelector<HTMLButtonElement>(`[data-ade-guided-retry-submit="${f1Tok.id}"]`)!.click();
-			await timeout(25);
-			const f1ActiveRetryTok = Object.values(missionRuntime.getRuntimeState(mission.id).tokens).find(t => t.nodeId === 'F1' && t.status === 'active');
-			assert.ok(f1ActiveRetryTok, 'Guided Retry spawns a fresh active retry token on F1');
-			assert.ok(
-				dispatchedTurns.some(t => String(t.args[1] ?? '').includes('Switch to fp16 and batch_size=8')),
-				'Guided Retry dispatches user guidance into the revived Agent prompt',
-			);
-
-			// Inbox "Open Node ↗" deep-jump focuses node, pulses spotlight, opens Inspector token tab, and opens employee chat beside canvas!
-			const inboxSvc = store.add(h.instantiation.createInstance(AdeInboxService));
-			await inboxSvc.postGovernorMessage({
-				governorSessionId: mission.id,
-				title: 'F1 GPU OOM Escalation',
-				message: 'Needs immediate attention on node F1',
-				nodeId: 'F1',
-				severity: 'critical',
-			});
-			const inboxHost = document.createElement('div');
-			document.body.appendChild(inboxHost);
-			store.add({ dispose: () => inboxHost.remove() });
-			const missionBridge: IAdeInboxMissionBridge = {
-				openMissionEditor: async (id, opts) => {
-					openedMissionCalls.push({ id, options: opts });
-					if (opts?.focusNodeId) {
-						pane.focusNode(opts.focusNodeId, {
-							inspectorTab: opts.inspectorTab,
-							openAgentBeside: opts.openAgentBeside,
-						});
-					}
-				},
-			};
-			const inboxPanel = store.add(new AdeInboxPanel(
-				inboxHost,
-				inboxSvc,
-				missionBridge,
-				h.instantiation.get(IAdeEditorService),
-				undefined,
-				h.projects,
-				undefined,
-				roleSchema,
-			));
-			inboxPanel.render();
-
-			openedAgentCalls.length = 0;
-			const openNodeBtn = inboxHost.querySelector<HTMLButtonElement>('[data-ade-inbox-open-node]')!;
-			assert.ok(openNodeBtn, 'Inbox escalation card renders Open Node ↗ button');
-			openNodeBtn.click();
-			await timeout(20);
-
-			assert.strictEqual(openedMissionCalls.length, 1, 'Open Node ↗ calls openMissionEditor');
-			assert.deepStrictEqual(openedMissionCalls[0], {
-				id: mission.id,
-				options: { focusNodeId: 'F1', inspectorTab: 'token', openAgentBeside: true },
-			});
-			const f1CardEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="F1"]')!;
-			assert.strictEqual(f1CardEl.getAttribute('data-inbox-focused'), 'true', 'Deep-jump highlights & pulses target node F1');
-			assert.ok(f1CardEl.classList.contains('is-selected'), 'Deep-jump selects target node F1');
-			assert.ok(host.querySelector('[data-ade-inspector-tab="token"].active'), 'Deep-jump opens Mission Inspector directly on Token tab');
-			assert.ok(openedAgentCalls.some(c => c.side === true), 'Deep-jump also opens bound employee chat beside the canvas');
-		});
-
-		test('allows dragging a Mission node card from ANY surface (buttons, pills, prompt bar, LLM tile, model row, engine/host pills) without misfiring popovers while keeping clean clicks intact', async () => {
-			const h = createHarness([alpha]);
-			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
-			h.instantiation.stub(IAdeMissionService, missionStore);
-			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
-			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
-
-			const created = missionStore.createMission({
-				title: 'Universal Node Drag',
-				mermaidText: 'flowchart LR\n  N1["@Arch: Design"] --> N2["@Dev: Build"]',
-			});
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-mission-universal-drag-test-host'));
-			host.style.width = '1200px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1200, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			const n1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			const popoverEl = host.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
-			const inspectorEl = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
-
-			// Every inner interactive control on the node card must support drag-to-move (>= 5px)
-			// AND suppress the trailing click so no popover opens on mouseup.
-			const dragSurfaces: Array<{ readonly label: string; readonly selector: string }> = [
-				{ label: 'Supervisor pill', selector: '[data-node-sup-btn="N1"]' },
-				{ label: 'Employee pill', selector: '[data-node-emp-btn="N1"]' },
-				{ label: 'LLM core icon tile', selector: '.ade-mission-core-icon-well' },
-				{ label: 'Model & thinking row', selector: '.ade-mission-core-model-row' },
-				{ label: 'Pre-prompt bar', selector: '[data-ade-node-prompt-btn="N1"]' },
-				{ label: 'Agent Engine pill', selector: '.ade-mission-engine-pill' },
-				{ label: 'Host & OS pill', selector: '.ade-mission-host-pill' },
-				{ label: 'Source Pacemaker port', selector: '[data-ade-pacemaker-port="N1"]' },
-			];
-
-			for (let idx = 0; idx < dragSurfaces.length; idx++) {
-				const { label, selector } = dragSurfaces[idx];
-				const surface = n1El.querySelector<HTMLElement>(selector)!;
-				assert.ok(surface, `${label} exists on N1 card`);
-				const beforeLeft = Number.parseFloat(n1El.style.left);
-				const beforeTop = Number.parseFloat(n1El.style.top);
-				const startX = 120 + idx * 10;
-				const startY = 120 + idx * 10;
-
-				surface.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: idx + 1, clientX: startX, clientY: startY, bubbles: true }));
-				assert.strictEqual(n1El.classList.contains('dragging'), false, `${label}: pointerdown alone does not enter dragging state before threshold`);
-				mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: idx + 1, clientX: startX + 36, clientY: startY + 24, bubbles: true }));
-				assert.strictEqual(n1El.classList.contains('dragging'), true, `${label}: moving past 5px threshold activates node drag`);
-				mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: idx + 1, clientX: startX + 36, clientY: startY + 24, bubbles: true }));
-
-				// Simulate browser's trailing click dispatched synchronously on the button after pointerup
-				surface.dispatchEvent(new mainWindow.MouseEvent('click', { bubbles: true, cancelable: true }));
-
-				const afterLeft = Number.parseFloat(n1El.style.left);
-				const afterTop = Number.parseFloat(n1El.style.top);
-				assert.ok(afterLeft > beforeLeft && afterTop > beforeTop, `${label}: dragging moved N1 from (${beforeLeft},${beforeTop}) to (${afterLeft},${afterTop})`);
-				assert.strictEqual(n1El.classList.contains('dragging'), false, `${label}: pointerup clears dragging class`);
-				assert.strictEqual(popoverEl.hidden, true, `${label}: trailing click after drag must NOT open popover`);
-				assert.strictEqual(inspectorEl.hidden, true, `${label}: drag must NOT open Node Inspector`);
-			}
-
-			// Wait one macrotask so the 0ms post-drag click suppression resets, then verify clean clicks still work!
-			await timeout(5);
-			const promptBtn = n1El.querySelector<HTMLButtonElement>('[data-ade-node-prompt-btn="N1"]')!;
-			promptBtn.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 99, clientX: 200, clientY: 200, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 99, clientX: 201, clientY: 201, bubbles: true }));
-			promptBtn.click();
-			assert.strictEqual(popoverEl.hidden, false, 'Clean click (< 5px) on Pre-prompt bar still opens popover');
-			assert.strictEqual(inspectorEl.hidden, true, 'Clean click on inner button must NOT also open Node Inspector');
-
-			// Clean click (< 5px) on non-interactive node title selects the node & opens Node Inspector
-			const titleEl = n1El.querySelector<HTMLElement>('.ade-mission-node-title')!;
-			titleEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 100, clientX: 210, clientY: 210, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 100, clientX: 211, clientY: 211, bubbles: true }));
-			assert.strictEqual(inspectorEl.hidden, false, 'Clean click on node title selects node and opens Mission Inspector');
-
-			// Disabled inner buttons (e.g. locked engine pill while running) expose pointer-events: none so drags fall through
-			const enginePill = n1El.querySelector<HTMLButtonElement>('.ade-mission-engine-pill')!;
-			enginePill.disabled = true;
-			assert.strictEqual(mainWindow.getComputedStyle(enginePill).pointerEvents, 'none', 'Disabled buttons inside node cards pass pointer events through for dragging');
-
-			// Out-port drag still connects edges instead of moving the node
-			const n2El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			const n2BeforeLeft = Number.parseFloat(n2El.style.left);
-			const n2OutPort = n2El.querySelector<HTMLButtonElement>('[data-ade-connect-port="N2"]')!;
-			n2OutPort.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 101, clientX: 400, clientY: 200, bubbles: true, cancelable: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 101, clientX: 460, clientY: 230, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 101, clientX: 460, clientY: 230, bubbles: true }));
-			assert.strictEqual(Number.parseFloat(n2El.style.left), n2BeforeLeft, 'Dragging from connectable out-port does not drag the node card');
-
-			// Deleting a node clears its prompt & checks so a newly added node reusing the same ID starts clean
-			missionStore.updateNodePrompt(created.id, 'R1', 'Stale prompt from deleted template node');
-			missionStore.updateNodeChecks(created.id, 'R1', [{ id: 'stale-chk', name: 'stale', command: 'echo 1', onFail: 'bounce', maxAutoRetries: 1 }]);
-			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
-			const vpRect = viewportEl.getBoundingClientRect();
-			viewportEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: vpRect.left + 80, clientY: vpRect.top + 80 }));
-			const addReviewerItem = host.querySelector<HTMLButtonElement>('[data-ade-ctx-action="add-reviewer"]')!;
-			addReviewerItem.click();
-			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.R1, undefined, 'Newly added Reviewer node R1 does not ghost-inherit stale prompt');
-			assert.strictEqual(missionStore.getMission(created.id)?.nodeChecks?.R1, undefined, 'Newly added Reviewer node R1 does not ghost-inherit stale checks');
-
-			// Write a prompt on R1, delete R1 via context menu, and verify prompt is removed immediately
-			missionStore.updateNodePrompt(created.id, 'R1', '核对接口返回格式并补充测试');
-			missionStore.updateNodeChecks(created.id, 'R1', [
-				{ id: 'c1', name: 'unit', command: 'pnpm test', onFail: 'bounce', maxAutoRetries: 1 },
-				{ id: 'c2', name: 'lint', command: 'pnpm lint', onFail: 'bounce', maxAutoRetries: 1 },
-			]);
-			const longSup = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/long-sup') }, 'Aexus Governor Role Initialization', { role: 'governor' });
-			await missionRuntime.setBoundary(created.id, {
-				offGraphMaxTier: 1,
-				supervisors: [{ id: longSup.id, tier: 1, managedNodeIds: ['R1'] }],
-			});
-			await missionRuntime.bindNodeHost(created.id, 'R1', { roleKind: 'reviewer', hostAlias: 'ubuntu-gpu-a100-cluster-01' });
-			const r1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="R1"]')!;
-			const r1Card = r1El.querySelector<HTMLElement>('.ade-mission-node-card')!;
-			const cardRect = r1Card.getBoundingClientRect();
-			assert.ok(cardRect.width > 200, 'R1 node card has concrete rendered geometry');
-			const boundedSelectors = [
-				'.ade-mission-node-top',
-				'.ade-mission-node-id-wrap',
-				'.ade-mission-top-pills',
-				'[data-node-sup-btn="R1"]',
-				'[data-node-emp-btn="R1"]',
-				'.ade-mission-core-well',
-				'.ade-mission-core-title-row',
-				'.ade-mission-node-title',
-				'[data-node-role-badge="R1"]',
-				'.ade-mission-checks-pill',
-				'[data-ade-node-prompt-btn="R1"]',
-				'.ade-mission-ctx-row',
-				'.ade-mission-node-footer',
-				'.ade-mission-engine-pill',
-				'.ade-mission-host-pill',
-			];
-			for (const sel of boundedSelectors) {
-				const el = r1Card.querySelector<HTMLElement>(sel);
-				assert.ok(el && !el.hidden, `Expected visible element ${sel} inside R1 card`);
-				const rect = el.getBoundingClientRect();
-				assert.ok(
-					rect.left >= cardRect.left - 0.5 && rect.right <= cardRect.right + 0.5 && rect.top >= cardRect.top - 0.5 && rect.bottom <= cardRect.bottom + 0.5,
-					`${sel} must stay strictly inside .ade-mission-node-card bounds (el=[${rect.left.toFixed(1)},${rect.top.toFixed(1)},${rect.right.toFixed(1)},${rect.bottom.toFixed(1)}], card=[${cardRect.left.toFixed(1)},${cardRect.top.toFixed(1)},${cardRect.right.toFixed(1)},${cardRect.bottom.toFixed(1)}])`,
-				);
-			}
-
-			const r1PromptBtn = host.querySelector<HTMLButtonElement>('[data-ade-node-prompt-btn="R1"]')!;
-			r1PromptBtn.click();
-			const hintText = host.querySelector<HTMLElement>('.ade-mission-prompt-hint-text')?.textContent ?? '';
-			assert.ok(!hintText.includes('令牌') && !hintText.includes('唤醒'), `Prompt popover hint should use plain human copy, got: ${hintText}`);
-			r1El.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 180, clientY: 180 }));
-			host.querySelector<HTMLButtonElement>('[data-ade-ctx-action="delete-node"]')!.click();
-			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.R1, undefined, 'Deleting node R1 clears its stored prompt');
-		});
-
-		test('Mission Inspector patches 1Hz streaming telemetry in place without destroying forms, dropping focus, wiping drafts, interrupting FinOps slider drag, or resetting scroll', async () => {
-			const h = createHarness([alpha]);
-			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
-			h.instantiation.stub(IAdeMissionService, missionStore);
-			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
-			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
-
-			const created = missionStore.createMission({
-				title: 'Inspector Zero-Teardown Telemetry',
-				mermaidText: 'flowchart LR\n  N1["@Arch: Plan"] --> N2["@Dev: Implement"]',
-			});
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-mission-inspector-live-test-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			// Start mission and fail N1 so Token tab shows the Guided Retry input while N2/runtime stream telemetry
-			await missionRuntime.start(created.id);
-			const n1Tok = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'N1' && t.status === 'active')!;
-			await missionRuntime.failToken(created.id, { tokenId: n1Tok.id, reason: 'Compile error on step 1' });
-
-			// Select N1 to open 4-in-1 Inspector
-			const n1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			n1El.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, clientX: 40, clientY: 40, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, clientX: 40, clientY: 40, bubbles: true }));
-
-			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
-			const bodyScroll = inspector.querySelector<HTMLElement>('.ade-mission-ni-body')!;
-			assert.strictEqual(inspector.hidden, false, 'Inspector opens on N1');
-
-			// 1. Overview tab: telemetry line patches in place without rebuilding DOM
-			const overviewSupBtnBefore = inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-sup-btn="N1"]')!;
-			missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
-				inputTokens: 12000,
-				outputTokens: 3000,
-				totalTokens: 15000,
-				costUsd: 0.45,
-			});
-			assert.strictEqual(inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-sup-btn="N1"]'), overviewSupBtnBefore, 'Overview tab DOM is preserved across telemetry tick');
-			assert.strictEqual(inspector.querySelector<HTMLElement>('.ade-mission-ni-body'), bodyScroll, 'Persistent scroll container is never recreated');
-			assert.ok(inspector.querySelector('.ade-mission-ni-telemetry-line')?.textContent?.includes('$0.45'), 'Overview telemetry line patches live cost in place');
-
-			// 2. Token tab: typing into Guided Retry input must survive multiple 1Hz telemetry ticks with focus & scroll intact
-			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="token"]')!.click();
-			const guidanceInput = inspector.querySelector<HTMLInputElement>('[data-ade-ni-retry-guidance="true"]')!;
-			assert.strictEqual(guidanceInput.hidden, false, 'Guided retry input is visible for frozen_failed token');
-			guidanceInput.focus();
-			guidanceInput.value = 'Fix missing import in parser.ts';
-			guidanceInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
-			Object.defineProperty(bodyScroll, 'scrollHeight', { value: 900, configurable: true });
-			bodyScroll.scrollTop = 95;
-
-			for (let tick = 1; tick <= 3; tick++) {
-				missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
-					inputTokens: 5000,
-					outputTokens: 1000,
-					totalTokens: 6000,
-					costUsd: 0.20,
-				});
-			}
-			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-ni-retry-guidance="true"]'), guidanceInput, 'Guided retry input DOM node is never recreated during 1Hz ticks');
-			assert.strictEqual(document.activeElement, guidanceInput, 'Guided retry input retains focus across 1Hz telemetry ticks');
-			assert.strictEqual(guidanceInput.value, 'Fix missing import in parser.ts', 'Guided retry draft text is never wiped');
-			assert.strictEqual(inspector.querySelector<HTMLElement>('.ade-mission-ni-body'), bodyScroll, 'Body scroll container stays mounted on Token tab');
-
-			// 3. Distill tab: typing Distill memo + Check Hook form survives 1Hz ticks while thermal % updates live
-			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="distill"]')!.click();
-			const memoInput = inspector.querySelector<HTMLInputElement>('[data-ade-ni-distill-memo="true"]')!;
-			const chkName = inspector.querySelector<HTMLInputElement>('[data-ade-check-name-input="true"]')!;
-			const chkCmd = inspector.querySelector<HTMLInputElement>('[data-ade-check-cmd-input="true"]')!;
-			const chkFiles = inspector.querySelector<HTMLInputElement>('[data-ade-check-files-input="true"]')!;
-			const chkOnFail = inspector.querySelector<HTMLSelectElement>('[data-ade-check-onfail-select="true"]')!;
-			memoInput.value = 'Keep schema contract only';
-			memoInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
-			chkName.value = 'unit-suite';
-			chkName.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
-			chkFiles.value = 'dist/bundle.js';
-			chkFiles.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
-			chkOnFail.value = 'escalate';
-			chkOnFail.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
-			chkCmd.focus();
-			chkCmd.value = 'pnpm test --run';
-			chkCmd.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
-
-			const pctBefore = inspector.querySelector('.ade-mission-ni-section-head .ade-mission-token-status-badge')?.textContent;
-			missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
-				inputTokens: 60000,
-				outputTokens: 20000,
-				totalTokens: 80000,
-				costUsd: 1.05,
-				isNoiseTurn: true,
-			});
-
-			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-ni-distill-memo="true"]'), memoInput, 'Distill memo input is never recreated on 1Hz telemetry tick');
-			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-check-cmd-input="true"]'), chkCmd, 'Check hook form input is never recreated on 1Hz telemetry tick');
-			assert.strictEqual(document.activeElement, chkCmd, 'Check hook cmd input retains focus across 1Hz telemetry tick');
-			assert.strictEqual(memoInput.value, 'Keep schema contract only', 'Distill memo draft is preserved');
-			assert.strictEqual(chkName.value, 'unit-suite', 'Check hook name draft is preserved');
-			assert.strictEqual(chkCmd.value, 'pnpm test --run', 'Check hook cmd draft is preserved');
-			assert.strictEqual(chkFiles.value, 'dist/bundle.js', 'Check hook files draft is preserved');
-			assert.strictEqual(chkOnFail.value, 'escalate', 'Check hook select value is preserved');
-			const pctAfter = inspector.querySelector('.ade-mission-ni-section-head .ade-mission-token-status-badge')?.textContent;
-			assert.notStrictEqual(pctAfter, pctBefore, `Thermal context % patches live in place (${pctBefore} -> ${pctAfter})`);
-
-			// 4. FinOps tab: dragging budget slider & editing budget USD input survive 1Hz spend ticks while hero spend patches in place
-			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="finops"]')!.click();
-			const slider = inspector.querySelector<HTMLInputElement>('[data-ade-finops-budget-slider="true"]')!;
-			const budgetInput = inspector.querySelector<HTMLInputElement>('[data-ade-finops-budget-input="true"]')!;
-
-			slider.focus();
-			slider.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, bubbles: true }));
-			slider.value = '25';
-			slider.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
-			assert.strictEqual(budgetInput.value, '25', 'Dragging slider mirrors value into USD input');
-
-			// Fire 1Hz spend ticks MID-DRAG (cumulative: 0.45 + 0.60 + 1.05 = 2.10 -> +1.35 +0.80 = $4.25)
-			missionRuntime.recordNodeTurnUsage(created.id, 'N1', {
-				inputTokens: 20000,
-				outputTokens: 5000,
-				totalTokens: 25000,
-				costUsd: 1.35,
-			});
-			missionRuntime.recordNodeTurnUsage(created.id, 'N2', {
-				inputTokens: 20000,
-				outputTokens: 8000,
-				totalTokens: 28000,
-				costUsd: 0.80,
-			});
-
-			assert.strictEqual(inspector.querySelector<HTMLInputElement>('[data-ade-finops-budget-slider="true"]'), slider, 'FinOps slider DOM node is never recreated during drag');
-			assert.strictEqual(document.activeElement, slider, 'FinOps slider retains focus during live spend ticks');
-			assert.strictEqual(slider.value, '25', 'In-progress slider drag value is NOT overwritten by 1Hz spend ticks');
-			assert.strictEqual(budgetInput.value, '25', 'Mirrored USD value is NOT overwritten mid-drag');
-			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '$4.25', 'Hero spend patches live to $4.25 in place while dragging slider');
-
-			// Release drag & test direct number input editing under live telemetry
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, bubbles: true }));
-			slider.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
-			await timeout(20);
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).budgetLimitUsd, 25, 'Releasing slider commits $25 budget limit');
-
-			budgetInput.focus();
-			budgetInput.value = '42';
-			missionRuntime.recordNodeTurnUsage(created.id, 'N2', {
-				inputTokens: 5000,
-				outputTokens: 2000,
-				totalTokens: 7000,
-				costUsd: 0.25,
-			});
-			assert.strictEqual(document.activeElement, budgetInput, 'Focused USD input retains focus across live spend tick');
-			assert.strictEqual(budgetInput.value, '42', 'Focused USD input draft is NOT overwritten by live spend tick');
-			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '$4.50', 'Hero spend updates in place to $4.50 while editing USD input');
-		});
-
-		test('FinOps Ledger & budget breaker work on non-Claude engines via pricing catalog, show estimated (~$) indicators, and honor custom & local zero-cost settings overrides', async () => {
+		test('FinOps pricing catalog & budget breaker work on non-Claude engines and honor custom & local zero-cost settings overrides', async () => {
 			const h = createHarness([alpha]);
 			h.instantiation.stub(IConfigurationService, new TestConfigurationService({
 				[ADE_MODEL_PRICING_OVERRIDES_CONFIG_KEY]: {
@@ -7175,30 +5337,20 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				title: 'Multi-Engine FinOps Breaker',
 				mermaidText: 'flowchart LR\n  N1["@Codex: Build"] --> N2["@Local: Bench"]\n  N1 --> N3["@Custom: Audit"]',
 			});
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-mission-finops-multiengine-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
 
 			await missionRuntime.setBudgetLimit(created.id, 2.00);
 			await missionRuntime.start(created.id);
 
-			// 1. Local zero-cost override (`my-local-vllm/qwen3-32b`) reports huge tokens with $0.00 spend & Local $0 badge
+			// 1. Local zero-cost override (`my-local-vllm/qwen3-32b`) reports huge tokens with $0.00 spend
 			missionRuntime.recordNodeTurnUsage(created.id, 'N2', {
 				inputTokens: 1_500_000,
 				outputTokens: 300_000,
 				model: 'my-local-vllm/qwen3-32b',
 				engineId: 'aexus-opencode',
 			});
-			const n2CostEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"] .ade-mission-ctx-cost')!;
-			assert.strictEqual(n2CostEl.hidden, false, 'Local zero-cost model surfaces Local $0 chip');
-			assert.strictEqual(n2CostEl.getAttribute('data-node-cost-local'), 'true');
-			assert.strictEqual(n2CostEl.textContent, 'Local $0');
+			const n2Tel = missionRuntime.getRuntimeState(created.id).nodeTelemetry?.N2;
+			assert.strictEqual(n2Tel?.costUsd, 0);
+			assert.strictEqual(n2Tel?.costLocalFree, true);
 			assert.strictEqual(missionRuntime.getRuntimeState(created.id).budgetCircuitTripped, false, 'Local zero-cost tokens never trip USD budget');
 
 			// 2. Non-Claude Codex node (`gpt-5.3-codex`) omits costUsd -> auto-estimated ~$1.05 (200k in * 1.75 + 50k out * 14 = $1.05)
@@ -7208,20 +5360,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				model: 'gpt-5.3-codex',
 				engineId: 'aexus-codex',
 			});
-			const n1CostEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-ctx-cost')!;
-			assert.strictEqual(n1CostEl.hidden, false, 'Codex node displays estimated USD badge');
-			assert.strictEqual(n1CostEl.getAttribute('data-node-cost-estimated'), 'true');
-			assert.strictEqual(n1CostEl.textContent, '~$1.05');
-
-			// Open FinOps Ledger Inspector via clicking N1 + FinOps tab and verify estimated badge + ~$ hero spend
-			const n1Card = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
-			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, clientX: 60, clientY: 60, bubbles: true }));
-			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
-			inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="finops"]')!.click();
-			const estBadge = inspector.querySelector<HTMLElement>('[data-ade-finops-estimated-badge="true"]')!;
-			assert.strictEqual(estBadge.hidden, false, 'FinOps hero displays estimated (预估) badge');
-			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '~$1.05');
+			const n1Tel = missionRuntime.getRuntimeState(created.id).nodeTelemetry?.N1;
+			assert.strictEqual(n1Tel?.costEstimated, true);
+			assert.ok(Math.abs((n1Tel?.costUsd ?? 0) - 1.05) < 0.01);
 
 			// 3. Custom pricing override (`custom-coder-xl`: $10/M in, $20/M out -> 50k in $0.50 + 50k out $1.00 = $1.50)
 			//    Pushes total to ~$2.55 >= $2.00 -> trips hard budget circuit-breaker!
@@ -7234,8 +5375,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			const rtAfter = missionRuntime.getRuntimeState(created.id);
 			assert.strictEqual(rtAfter.budgetCircuitTripped, true, 'Estimated non-Claude spend trips hard budget circuit-breaker');
 			assert.strictEqual(rtAfter.status, 'paused', 'Mission pauses when estimated spend breaches ceiling');
-			assert.strictEqual(inspector.querySelector('[data-ade-finops-hero-spend="true"]')?.textContent, '~$2.55');
-			assert.strictEqual(inspector.querySelector<HTMLElement>('[data-ade-finops-tripped-banner="true"]')?.hidden, false, 'Breaker banner renders after non-Claude breach');
 		});
 
 		test('Canvas editing ergonomics: 50-step Undo/Redo, Marquee multi-select & batch drag, snap alignment guides, Delete/Backspace node & edge removal, Cmd/Ctrl+F node search, and double-click edge label rename', async () => {
@@ -7267,13 +5406,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 
 			const rootEl = host.querySelector<HTMLElement>('.ade-mission-editor')!;
 			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
-			const undoBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-undo="true"]')!;
-			const redoBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-redo="true"]')!;
 			rootEl.focus();
-			assert.strictEqual(undoBtn.disabled, true, 'Undo starts disabled');
-			assert.strictEqual(redoBtn.disabled, true, 'Redo starts disabled');
 
-			// 1. Double-click edge on canvas to inline-edit edge label + Undo/Redo
+			// 1. Double-click edge on canvas to inline-edit edge label + Cmd+Z / Cmd+Shift+Z Undo/Redo
 			const edgeN1N2 = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')!;
 			edgeN1N2.dispatchEvent(new mainWindow.MouseEvent('dblclick', { bubbles: true, cancelable: true }));
 			const edgeInput = host.querySelector<HTMLInputElement>('[data-ade-inline-edge-rename="N1->N2"]')!;
@@ -7286,7 +5421,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				'fail',
 				'Inline edge edit updates edge label & switches to fail polarity',
 			);
-			assert.strictEqual(undoBtn.disabled, false, 'Edge edit pushes snapshot onto Undo stack');
 
 			// Cmd+Z undoes edge label edit; Cmd+Shift+Z redoes it
 			rootEl.focus();
@@ -7296,7 +5430,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				'success',
 				'Cmd+Z restores previous edge label & polarity',
 			);
-			assert.strictEqual(redoBtn.disabled, false, 'Redo becomes enabled after Undo');
 			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'z', metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
 			assert.strictEqual(
 				host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="N1"][data-to="N2"]')?.getAttribute('data-edge-kind'),
@@ -7407,188 +5540,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(host.querySelectorAll('.ade-mission-node').length, 3, 'Cmd+Z restores both batch-deleted nodes in one step');
 		});
 
-		test('Minimalist top bar keeps ONLY File Drawer & Start controls, HUD safe zones prevent overlap, wide screens allow dual drawers, opening Inspector auto-pans occluded nodes, and canvas drag-pan preserves Inspector', async () => {
-			const h = createHarness([alpha]);
-			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
-			h.instantiation.stub(IAdeMissionService, missionStore);
-			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
-			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
-
-			const created = missionStore.createMission({
-				title: 'Minimalist Top Bar & HUD Safe Zones',
-				mermaidText: 'flowchart LR\n  N1["@Arch: Plan"] --> N2["@Dev: Implement"]',
-			});
-			// Put N2 near the right edge so opening the 352px right Inspector initially overlaps it
-			missionStore.updateNodePositions(created.id, {
-				N1: { x: 220, y: 240 },
-				N2: { x: 1060, y: 240 },
-			});
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-mission-hud-safezone-test-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			const topBarSlot = host.querySelector<HTMLElement>('[data-ade-mission-top-bar-slot="true"]')!;
-			const topBar = host.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
-			const fileBtn = host.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!;
-			const runBar = host.querySelector<HTMLElement>('[data-ade-mission-run-bar="true"]')!;
-			const fileDrawer = host.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
-			const inspector = host.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
-			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
-			const rootEl = host.querySelector<HTMLElement>('.ade-mission-editor')!;
-
-			// 1. Minimalist top bar contains ONLY the two top-left controls (File Drawer toggle + Run Control pill)
-			assert.strictEqual(topBar.children.length, 2, 'Top bar renders ONLY 2 top-left controls');
-			assert.strictEqual(topBar.children[0], fileBtn);
-			assert.strictEqual(topBar.children[1], runBar);
-			for (const removedSel of [
-				'[data-ade-mission-governance-btn]',
-				'[data-ade-mission-triggers-btn]',
-				'[data-ade-mission-add-node-btn]',
-				'[data-ade-mission-ai-dag-btn]',
-				'[data-ade-mission-templates-btn]',
-				'[data-ade-mission-doctor-btn]',
-				'[data-ade-mission-finops-btn]',
-				'[data-ade-mission-topbar-more]',
-				'[data-ade-prompt-to-dag-bar]',
-				'[data-ade-mission-doctor-backdrop]',
-				'[data-ade-mission-sandbox-banner]',
-			]) {
-				assert.strictEqual(host.querySelector(removedSel), null, `Removed UI ${removedSel} must not exist`);
-			}
-			assert.ok(topBar.scrollWidth <= topBarSlot.clientWidth + 1, `Top bar does not overflow wide container (${topBar.scrollWidth} <= ${topBarSlot.clientWidth})`);
-
-			// 2. Auto-pan avoidance: place N2 into right-side Inspector zone (reset zoom to 100% and pan=0 via click on N2)
-			host.querySelector<HTMLButtonElement>('[data-ade-mission-zoom-label="true"]')!.click();
-			const n2El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			// Force N2 to be occluded on the right side by panning world so N2 sits under right 352px zone
-			const n2BeforeRect = n2El.getBoundingClientRect();
-			const vpRect = viewportEl.getBoundingClientRect();
-			if (n2BeforeRect.right < vpRect.right - 360) {
-				const shiftRight = (vpRect.right - 80) - n2BeforeRect.right;
-				viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 30, clientX: 200, clientY: 200, bubbles: true }));
-				viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 30, clientX: 200 + shiftRight, clientY: 200, bubbles: true }));
-				viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 30, clientX: 200 + shiftRight, clientY: 200, bubbles: true }));
-			}
-			const n2OccludedRect = n2El.getBoundingClientRect();
-			assert.ok(n2OccludedRect.right > vpRect.right - 352, 'Precondition: N2 is positioned inside right 352px Inspector zone');
-
-			// Click N2 -> Inspector opens AND canvas auto-pans leftward so N2 is no longer occluded!
-			n2El.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 31, clientX: 50, clientY: 50, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 31, clientX: 50, clientY: 50, bubbles: true }));
-			assert.strictEqual(inspector.hidden, false, 'Clicking N2 opens right-side Inspector');
-			const n2AfterRect = n2El.getBoundingClientRect();
-			const inspectorRect = inspector.getBoundingClientRect();
-			assert.ok(
-				n2AfterRect.right <= inspectorRect.left + 2,
-				`Opening Inspector auto-pans canvas so N2 (${Math.round(n2AfterRect.right)}) is clear of Inspector (${Math.round(inspectorRect.left)})`,
-			);
-
-			// 3. Drag-pan on empty canvas preserves open Inspector; stationary click on empty canvas closes it!
-			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 32, clientX: 300, clientY: 300, bubbles: true }));
-			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 32, clientX: 380, clientY: 330, bubbles: true }));
-			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 32, clientX: 380, clientY: 330, bubbles: true }));
-			assert.strictEqual(inspector.hidden, false, 'Dragging empty canvas to pan MUST NOT close right-side Inspector');
-			assert.strictEqual(n2El.getAttribute('data-node-selected'), 'true', 'Dragging empty canvas to pan preserves selected node');
-
-			// 4. Wide screen (1280px >= 1120px): opening left File Drawer keeps right Inspector open with zero overlap!
-			fileBtn.click();
-			assert.strictEqual(fileDrawer.hidden, false, 'File Drawer opens on wide screen');
-			assert.strictEqual(inspector.hidden, false, 'Wide screen preserves right Inspector alongside File Drawer');
-			const drawerRect = fileDrawer.getBoundingClientRect();
-			assert.ok(
-				drawerRect.right <= inspectorRect.left - 4,
-				`Left File Drawer (${Math.round(drawerRect.right)}) never overlaps Right Inspector (${Math.round(inspectorRect.left)})`,
-			);
-
-			// Close File Drawer, then verify non-overlapping HUD safe zones (Top Bar vs Sup Legend vs Canvas Alert vs Spotlight vs Search vs Revision Bar vs Viewport Bar)
-			fileBtn.click();
-			assert.strictEqual(fileDrawer.hidden, true);
-			await missionRuntime.setBoundary(created.id, {
-				supervisors: [{ id: ADE_SECRETARY_ID, tier: 0, managedNodeIds: ['N1', 'N2'] }],
-			});
-			await missionRuntime.start(created.id);
-			// Apply a live v2 revision patch so Revision Timeline Bar renders alongside Viewport Bar
-			const patchRes = await missionRuntime.patchMermaid(created.id, {
-				caller: { isHumanUser: true },
-				newMermaidText: 'flowchart LR\n  N1["@Arch: Plan"] --> N2["@Dev: Implement"]\n  N2 --> N3["@QA: Verify"]',
-				reason: 'Add QA stage',
-			});
-			assert.strictEqual(patchRes.ok, true, 'Live revision patch creates v2 timeline bar');
-			rootEl.focus();
-			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true }));
-			// Trigger a live canvas alert toast via blank-canvas context menu add-task during live run
-			viewportEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: vpRect.left + 80, clientY: vpRect.top + 80 }));
-			const addTaskItem = host.querySelector<HTMLButtonElement>('[data-ade-ctx-action="add-task"]');
-			if (addTaskItem) {
-				addTaskItem.click();
-			}
-			const topBarRect = topBarSlot.getBoundingClientRect();
-			const supLegend = host.querySelector<HTMLElement>('[data-ade-mission-sup-legend="true"]')!;
-			const searchBar = host.querySelector<HTMLElement>('[data-ade-canvas-search="true"]')!;
-			const revBar = host.querySelector<HTMLElement>('[data-ade-mission-revision-bar="true"]')!;
-			const vpBar = host.querySelector<HTMLElement>('.ade-mission-viewport-bar')!;
-			const supRect = supLegend.getBoundingClientRect();
-			const searchRect = searchBar.getBoundingClientRect();
-			const revRect = revBar.getBoundingClientRect();
-			const vpBarRect = vpBar.getBoundingClientRect();
-			assert.strictEqual(revBar.hidden, false, 'Revision timeline bar visible after live patch');
-			assert.ok(topBarRect.bottom <= supRect.top + 1, `Top Bar (${Math.round(topBarRect.bottom)}) never overlaps Supervisor Legend (${Math.round(supRect.top)})`);
-			assert.ok(supRect.bottom <= searchRect.top + 1, `Supervisor Legend (${Math.round(supRect.bottom)}) never overlaps Search Bar (${Math.round(searchRect.top)})`);
-			assert.ok(searchRect.right <= inspectorRect.left + 1, `Search Bar (${Math.round(searchRect.right)}) stays clear of Right Inspector (${Math.round(inspectorRect.left)})`);
-			assert.ok(revRect.right <= vpBarRect.left + 1, `Wide Revision Bar (${Math.round(revRect.right)}) never collides with Bottom-Right Viewport Bar (${Math.round(vpBarRect.left)})`);
-			const canvasAlert = host.querySelector<HTMLElement>('[data-ade-mission-canvas-alert="true"]')!;
-			if (!canvasAlert.hidden) {
-				const alertRect = canvasAlert.getBoundingClientRect();
-				assert.ok(topBarRect.bottom <= alertRect.top + 1, `Canvas Alert (${Math.round(alertRect.top)}) sits strictly below Top Bar (${Math.round(topBarRect.bottom)})`);
-				assert.ok(supRect.right <= alertRect.left + 1, `Canvas Alert (${Math.round(alertRect.left)}) never overlaps Supervisor Legend (${Math.round(supRect.right)})`);
-				assert.ok(alertRect.right <= inspectorRect.left + 1, `Canvas Alert (${Math.round(alertRect.right)}) stays clear of Right Inspector (${Math.round(inspectorRect.left)})`);
-			}
-			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-
-			// Hold Tab X-Ray spotlight banner sits cleanly below Top Bar & Supervisor Legend
-			rootEl.focus();
-			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
-			const spotBanner = host.querySelector<HTMLElement>('[data-ade-tab-spotlight-banner="true"]')!;
-			assert.strictEqual(spotBanner.hidden, false);
-			const spotRect = spotBanner.getBoundingClientRect();
-			assert.ok(topBarRect.bottom <= spotRect.top + 1, `Tab Spotlight Banner (${Math.round(spotRect.top)}) sits strictly below Top Bar (${Math.round(topBarRect.bottom)})`);
-			assert.ok(supRect.bottom <= spotRect.top + 1, `Tab Spotlight Banner (${Math.round(spotRect.top)}) sits strictly below Supervisor Legend (${Math.round(supRect.bottom)})`);
-			mainWindow.dispatchEvent(new mainWindow.KeyboardEvent('keyup', { key: 'Tab', bubbles: true }));
-
-			// Stationary click (< 5px) on empty canvas DOES close Inspector cleanly!
-			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 33, clientX: 300, clientY: 300, bubbles: true }));
-			viewportEl.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 33, clientX: 301, clientY: 301, bubbles: true }));
-			assert.strictEqual(inspector.hidden, true, 'Stationary click on empty canvas closes right-side Inspector');
-
-			// 5. Intermediate laptop width (980px) & narrow split-pane width (620px): top bar stays clean, revision bar stacks cleanly above viewport bar, and narrow drawers auto-collapse mutually
-			host.style.width = '980px';
-			pane.layout(new Dimension(980, 760));
-			assert.ok(topBar.scrollWidth <= topBarSlot.clientWidth + 1, `Top bar stays within 980px container without clipping (${topBar.scrollWidth} <= ${topBarSlot.clientWidth})`);
-
-			host.style.width = '620px';
-			pane.layout(new Dimension(620, 760));
-			assert.ok(topBar.scrollWidth <= topBarSlot.clientWidth + 1, `Top bar stays within 620px container without clipping (${topBar.scrollWidth} <= ${topBarSlot.clientWidth})`);
-			const narrowRevRect = revBar.getBoundingClientRect();
-			const narrowVpBarRect = vpBar.getBoundingClientRect();
-			assert.ok(narrowRevRect.bottom <= narrowVpBarRect.top + 1, `Narrow Revision Bar (${Math.round(narrowRevRect.bottom)}) stacks cleanly above Viewport Bar (${Math.round(narrowVpBarRect.top)})`);
-
-			// At narrow width (620px < 1120px), opening File Drawer collapses Inspector
-			const n2NarrowEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N2"]')!;
-			n2NarrowEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 34, clientX: 50, clientY: 50, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 34, clientX: 50, clientY: 50, bubbles: true }));
-			assert.strictEqual(inspector.hidden, false);
-			fileBtn.click();
-			assert.strictEqual(fileDrawer.hidden, false, 'File Drawer opens on narrow screen');
-			assert.strictEqual(inspector.hidden, true, 'Narrow screen auto-closes Inspector when opening File Drawer');
-		});
-
-		test('Audit #8: enforces pure EN / pure ZH-CN localization with zero mixed lines across all 5 surfaces and unifies dynamic 1..N rank schema + Mission v2 Factory Wall', async () => {
+		test('Audit #8: enforces pure EN / pure ZH-CN localization with zero mixed lines across all Engineering dual-view & workbench surfaces and unifies dynamic 1..N all-staff rank schema', async () => {
 			const cjkRe = /[\u4e00-\u9fff]/;
 			try {
 				setAdeDisplayLanguageOverride('en');
@@ -7601,13 +5553,14 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
 				h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
 
-				// --- A. Mission Top Bar, File Drawer & 4-in-1 Node Inspector (EN vs ZH-CN) ---
+				// --- A. Engineering Mission & Orchestration Minimalist Top Bar + Drawers (EN vs ZH-CN) ---
 				const created = missionStore.createMission({
 					projectUri: alpha.toString(),
-					title: 'Audit 8 Localization Mission',
-					mermaidText: 'flowchart LR\n  N1["@Backend: Build API"] --> N2["@Frontend: Ship UI"]',
+					title: 'Audit 8 Localization Engineering',
+					mermaidText: 'flowchart LR\n  T1["Build API"] --> T2["Ship UI"]',
+					orchestrationText: 'flowchart TD\n  CEO["@Alice (L1)"] <--> Lead["@Bob (L2)"]',
 				});
-				const mInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+				const mInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'mission')));
 				const mHost = append(document.body, $('.monaco-workbench.ade-audit8-mission-host'));
 				mHost.style.width = '1280px';
 				mHost.style.height = '760px';
@@ -7617,48 +5570,34 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				mPane.layout(new Dimension(1280, 760));
 				await mPane.setInput(mInput, undefined, {}, CancellationToken.None);
 
-				// Open File Drawer + Node Inspector (wide 1280px screen keeps both open simultaneously!)
+				// Open Mission 2-pane Drawer
 				mHost.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!.click();
-				const n1Title = mHost.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"] .ade-mission-node-title')!;
-				n1Title.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 301, clientX: 220, clientY: 220, bubbles: true }));
-				mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 301, clientX: 221, clientY: 221, bubbles: true }));
-
 				const topBar = mHost.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
 				const drawer = mHost.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
-				const inspector = mHost.querySelector<HTMLElement>('[data-ade-mission-node-inspector="true"]')!;
 				assert.strictEqual(drawer.hidden, false);
-				assert.strictEqual(inspector.hidden, false);
 
-				// 1. Pure EN verification: ZERO CJK anywhere in Top Bar, Split Drawer, and all 4 Inspector Tabs!
-				assert.strictEqual(topBar.children.length, 2, 'Top bar has only File Drawer toggle + Run Control pill');
+				// 1. Pure EN verification: strictly 1 top-left button + ZERO CJK anywhere in Top Bar & 2-pane Mission Drawer!
+				assert.strictEqual(topBar.children.length, 1, 'Minimalist Engineering top bar keeps strictly ONE top-left button');
 				assert.strictEqual(cjkRe.test(topBar.textContent ?? ''), false, `Top bar must have 0 CJK in EN mode (got: "${topBar.textContent}")`);
-				assert.ok((topBar.textContent ?? '').includes('Idle') && (topBar.textContent ?? '').includes('Start'), 'Top bar renders pure EN Idle/Start labels');
-				assert.strictEqual(cjkRe.test(drawer.textContent ?? ''), false, `File drawer must have 0 CJK in EN mode (got: "${drawer.textContent}")`);
-				assert.ok((drawer.textContent ?? '').includes('Orchestration · Mermaid DAG'));
-				assert.ok((drawer.textContent ?? '').includes('Node Prompts'));
+				assert.strictEqual(cjkRe.test(drawer.textContent ?? ''), false, `Mission drawer must have 0 CJK in EN mode (got: "${drawer.textContent}")`);
+				assert.ok((drawer.textContent ?? '').includes('Mermaid Task DAG (Strictly Acyclic)'));
+				assert.ok((drawer.textContent ?? '').includes('Task Descriptions'));
 
-				for (const tabId of ['overview', 'token', 'distill', 'finops'] as const) {
-					inspector.querySelector<HTMLButtonElement>(`[data-ade-inspector-tab="${tabId}"]`)!.click();
-					assert.strictEqual(cjkRe.test(inspector.textContent ?? ''), false, `Inspector tab "${tabId}" must have 0 CJK in EN mode (got: "${inspector.textContent}")`);
-				}
-				inspector.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="overview"]')!.click();
-				assert.ok((inspector.textContent ?? '').includes('Node Role'), 'Inspector overview renders pure EN Node Role row');
-				assert.ok((inspector.textContent ?? '').includes('Worker · Executor'), 'Inspector overview renders pure EN role chip');
-
-				// 2. Switch to pure Simplified Chinese -> immediate live re-render across Top Bar, Drawer, and all 4 Inspector Tabs!
+				// 2. Switch to pure Simplified Chinese -> immediate live re-render across Mission Drawer!
 				setAdeDisplayLanguageOverride('zh-cn');
-				assert.ok((topBar.textContent ?? '').includes('待命') && (topBar.textContent ?? '').includes('启动'), 'Top bar switches live to ZH-CN 待命/启动');
-				assert.ok(!(topBar.textContent ?? '').includes('Start') && !(topBar.textContent ?? '').includes('Idle'), 'Top bar has no leftover mixed English labels in ZH-CN');
+				assert.ok((drawer.textContent ?? '').includes('Mermaid 任务流图（严格无环 DAG）'));
+				assert.ok((drawer.textContent ?? '').includes('全部任务节点描述'));
 
-				assert.ok((drawer.textContent ?? '').includes('统筹编排 · Mermaid 流图'));
-				assert.ok((drawer.textContent ?? '').includes('节点提示词'));
-				assert.ok((drawer.textContent ?? '').includes('催办超时 (分)'));
-				assert.ok((drawer.textContent ?? '').includes('图外监工'));
-
-				const zhOverviewText = inspector.textContent ?? '';
-				assert.ok(zhOverviewText.includes('概览') && zhOverviewText.includes('令牌轨迹') && zhOverviewText.includes('提纯校验') && zhOverviewText.includes('费用账本'), 'Inspector tabs switch cleanly to ZH-CN');
-				assert.ok(zhOverviewText.includes('所属监工') && zhOverviewText.includes('节点角色') && zhOverviewText.includes('执行者 · 任务节点'), 'Inspector overview KV rows switch cleanly to ZH-CN');
-				assert.ok(!zhOverviewText.includes('Supervisor') && !zhOverviewText.includes('Split Chat Beside') && !zhOverviewText.includes('Worker ·'), 'Inspector overview has no mixed English labels in ZH-CN');
+				// 3. Switch to Orchestration view -> strictly 1-pane drawer in pure EN & pure ZH-CN!
+				const oInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'orchestration')));
+				await mPane.setInput(oInput, undefined, {}, CancellationToken.None);
+				mHost.querySelector<HTMLButtonElement>('[data-ade-mission-file-btn="true"]')!.click();
+				assert.strictEqual(drawer.hidden, false);
+				assert.strictEqual(mHost.querySelector<HTMLElement>('[data-ade-mission-tasks-pane="true"]')?.hidden, true, 'Orchestration drawer hides right task descriptions pane');
+				assert.ok((drawer.textContent ?? '').includes('声明式员工编排代码'));
+				setAdeDisplayLanguageOverride('en');
+				assert.strictEqual(cjkRe.test(drawer.textContent ?? ''), false, `Orchestration drawer must have 0 CJK in EN mode (got: "${drawer.textContent}")`);
+				assert.ok((drawer.textContent ?? '').includes('Declarative Staff Topology'));
 
 				// --- B. Dynamic 1..N Rank Schema Unity across Role Studio, Session Editor & Projects View ---
 				setAdeDisplayLanguageOverride('en');
@@ -7674,7 +5613,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				};
 				await roleSchema.updateConfig(custom3TierConfig);
 
-				// B1. Role Studio shows Mission v2 Dynamic 1..3 Tiers & interactive Factory Wall (offGraphMaxTier) bar + preserves Legacy v1 slots
+				// B1. Role Studio shows unified All-Staff 1..3 hierarchy bar (no off-graph Factory Wall cutoff!) + preserves Legacy v1 slots
 				const studioHost = append(document.body, $('.monaco-workbench.ade-audit8-studio-host'));
 				store.add({ dispose: () => studioHost.remove() });
 				const studioPane = store.add(h.instantiation.createInstance(AdeRoleStudioEditorPane, upcastPartial<IEditorGroup>({ id: 2 })));
@@ -7682,25 +5621,19 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				const studioInput = store.add(h.instantiation.createInstance(AdeRoleStudioEditorInput, 'architect'));
 				await studioPane.setInput(studioInput, undefined, {}, CancellationToken.None);
 
-				const wallBar = studioHost.querySelector<HTMLElement>('[data-ade-rs-factory-wall-bar="true"]')!;
-				assert.ok(wallBar, 'Role Studio renders Mission v2 Dynamic Ranks & Factory Wall bar');
-				assert.strictEqual(wallBar.dataset.dynamicRankCount, '3', 'Factory Wall reflects 3 dynamic ranks');
+				const allStaffBar = studioHost.querySelector<HTMLElement>('[data-ade-rs-factory-wall-bar="true"]')!;
+				assert.ok(allStaffBar, 'Role Studio renders unified Engineering All-Staff 1..N hierarchy bar');
+				assert.strictEqual(allStaffBar.dataset.dynamicRankCount, '3', 'Hierarchy bar reflects 3 dynamic ranks');
+				assert.strictEqual(allStaffBar.dataset.allStaffOnCanvas, 'true', 'All ranks enter the same Orchestration canvas');
+				assert.strictEqual(studioHost.querySelector('[data-ade-rs-wall-cutoff="true"]'), null, 'Legacy off-graph Factory Wall cutoff selector is removed');
 				assert.strictEqual(cjkRe.test(studioHost.textContent ?? ''), false, 'Role Studio has 0 CJK in EN mode');
+				assert.ok((allStaffBar.textContent ?? '').includes('L1 · Chief Architect') && (allStaffBar.textContent ?? '').includes('L2 · Code Auditor') && (allStaffBar.textContent ?? '').includes('L3 · Pure Builder'));
 				assert.ok(studioHost.querySelectorAll('.ade-rs-slot-select[data-slot]').length === 4, 'Legacy v1 slot compatibility selects remain intact');
-
-				// Change Factory Wall cutoff preview to L0..L1 -> L1 Chief Architect moves to Off-Graph Supervisors, L2/L3 stay In-Graph!
-				const cutoffSelect = studioHost.querySelector<HTMLSelectElement>('[data-ade-rs-wall-cutoff="true"]')!;
-				cutoffSelect.value = '1';
-				cutoffSelect.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
-				const offGraphZone = studioHost.querySelector<HTMLElement>('[data-ade-rs-wall-zone="off-graph"]')!;
-				const inGraphZone = studioHost.querySelector<HTMLElement>('[data-ade-rs-wall-zone="in-graph"]')!;
-				assert.ok((offGraphZone.textContent ?? '').includes('L1 · Chief Architect'), 'L1 rank moves into Off-Graph Supervisors when offGraphMaxTier=1');
-				assert.ok((inGraphZone.textContent ?? '').includes('L2 · Code Auditor') && (inGraphZone.textContent ?? '').includes('L3 · Pure Builder'), 'L2..L3 stay in In-Graph Mission Nodes');
 
 				// Role Studio live locale switch to ZH-CN
 				setAdeDisplayLanguageOverride('zh-cn');
 				assert.ok((studioHost.textContent ?? '').includes('组织架构与角色工坊'));
-				assert.ok((studioHost.textContent ?? '').includes('厂外监工层') && (studioHost.textContent ?? '').includes('厂内执行节点'));
+				assert.ok((studioHost.textContent ?? '').includes('全员同场入画'));
 
 				// B2. Session Editor & Session EditorInput subscribe to IAdeRoleSchemaService (zero hardcoded 4-tier labels!)
 				setAdeDisplayLanguageOverride('en');
@@ -7769,115 +5702,15 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			}
 		});
 
-		test('Audit #9: Gate card renders inline Approve / Reject quick actions and canvas Gate popover selects any executed upstream rollback target', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
+		test('Audit #11: pauses all infinite CSS animations on Engineering dual-view canvas when page or editor tab is hidden', async () => {
+			const { h, missionStore } = createMissionHarness();
 			const created = missionStore.createMission({
-				title: 'Audit 9 Gate Rollback Mission',
+				title: 'Audit 11 Visibility Engineering',
 				projectUri: alpha.toString(),
-				mermaidText: [
-					'flowchart LR',
-					'  A["Design Spec"] --> B["Implement"]',
-					'  B --> C["Verify"]',
-					'  C --> G1{"Release Gate"}',
-					'  G1 --> D["Deploy"]',
-					'  A --> X["Side Branch"]',
-				].join('\n'),
+				mermaidText: 'flowchart LR\n  A["Fetch"] --> B["Train"]',
+				orchestrationText: 'flowchart TD\n  CEO["@Alice (L1)"] <--> Lead["@Bob (L2)"]',
 			});
-			await missionRuntime.start(created.id);
-			const completeActive = async (nodeId: string, summary: string) => {
-				const tok = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === nodeId && t.status === 'active')!;
-				assert.ok(tok, `Expected active token on ${nodeId}`);
-				const res = await missionRuntime.completeToken(created.id, { tokenId: tok.id, summary });
-				assert.strictEqual(res.ok, true, res.error);
-			};
-
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-audit9-gate-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			// Before Gate is reached, inline quick-approval bar stays hidden
-			const inlineBar = host.querySelector<HTMLElement>('[data-ade-gate-inline-actions="G1"]')!;
-			assert.ok(inlineBar, 'Gate card mounts inline approval bar');
-			assert.strictEqual(inlineBar.hidden, true, 'Inline Gate actions are hidden while Gate is idle');
-
-			// Advance A -> B -> C -> G1
-			await completeActive('A', 'Spec ready');
-			await completeActive('B', 'Implementation ready');
-			await completeActive('C', 'All tests green');
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
-
-			// Inline Approve / Reject buttons become visible directly on the Gate card
-			assert.strictEqual(inlineBar.hidden, false, 'Inline Gate Approve/Reject bar appears when Gate enters waiting_gate');
-			const cardApproveBtn = host.querySelector<HTMLButtonElement>('[data-ade-gate-card-approve="G1"]')!;
-			const cardRejectBtn = host.querySelector<HTMLButtonElement>('[data-ade-gate-card-reject="G1"]')!;
-			assert.ok(cardApproveBtn && cardRejectBtn);
-
-			// Dragging the Gate card starting on its inline Approve button must move the card and NOT accidentally approve!
-			cardApproveBtn.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 401, clientX: 300, clientY: 300, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 401, clientX: 335, clientY: 325, bubbles: true }));
-			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 401, clientX: 335, clientY: 325, bubbles: true }));
-			cardApproveBtn.click();
-			await timeout(20);
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate', 'Dragging from inline Approve button must suppress click and NOT approve Gate');
-
-			// Clean click on inline Reject opens the Gate decision popover with ALL executed upstream reachable targets (A, B, C)
-			cardRejectBtn.click();
-			const rollbackSelect = host.querySelector<HTMLSelectElement>('[data-ade-gate-rollback-select="true"]')!;
-			assert.ok(rollbackSelect, 'Canvas Gate popover renders upstream rollback target dropdown');
-			const optionValues = [...rollbackSelect.options].map(o => o.value);
-			assert.deepStrictEqual(optionValues, ['A', 'B', 'C'], 'Dropdown lists all executed upstream reachable ancestors [A, B, C] and excludes downstream D / side branch X');
-			assert.strictEqual(rollbackSelect.value, 'C', 'Dropdown defaults to direct predecessor C');
-
-			// Choose earliest upstream ancestor A (not direct predecessor C!) + note -> Reject bounces directly to A
-			rollbackSelect.value = 'A';
-			rollbackSelect.dispatchEvent(new mainWindow.Event('change', { bubbles: true }));
-			const noteInput = host.querySelector<HTMLInputElement>('[data-ade-gate-note="true"]')!;
-			noteInput.value = 'Re-specify API contract from A';
-			host.querySelector<HTMLButtonElement>('[data-ade-gate-reject="G1"]')!.click();
-			await timeout(30);
-
-			const rtAfterReject = missionRuntime.getRuntimeState(created.id);
-			assert.notStrictEqual(rtAfterReject.nodeStates.G1, 'waiting_gate', 'Rejecting Gate releases waiting_gate');
-			assert.ok(Object.values(rtAfterReject.tokens).some(t => t.nodeId === 'A' && t.status === 'active'), 'Reject with explicit rollbackNodeId=A bounces token directly to A');
-			assert.ok(!Object.values(rtAfterReject.tokens).some(t => t.nodeId === 'C' && t.status === 'active'), 'Token did not default-bounce to direct predecessor C');
-			assert.strictEqual(inlineBar.hidden, true, 'Inline Gate actions hide once Gate leaves waiting_gate');
-
-			// Complete rework chain A -> B -> C -> returns to G1 waiting_gate (without touching sibling X) -> 1-click inline Approve!
-			await completeActive('A', 'Spec v2 revised');
-			await completeActive('B', 'Implementation v2 revised');
-			await completeActive('C', 'Verification v2 green');
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
-			assert.strictEqual(inlineBar.hidden, false, 'Inline Gate actions reappear when rework returns to G1');
-
-			cardApproveBtn.click();
-			await timeout(30);
-			const rtAfterApprove = missionRuntime.getRuntimeState(created.id);
-			assert.strictEqual(rtAfterApprove.nodeStates.G1, 'completed', '1-click inline Approve on Gate card completes Gate');
-			assert.ok(Object.values(rtAfterApprove.tokens).some(t => t.nodeId === 'D' && t.status === 'active'), 'Inline Approve dispatches downstream node D');
-			assert.strictEqual(inlineBar.hidden, true, 'Inline Gate actions hide after approval');
-		});
-
-		test('Audit #11: edge transit glider plays once for 800ms on cross-node hops (no infinite loop / double shadow) and pauses all infinite CSS animations when page or tab is hidden', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			const created = missionStore.createMission({
-				title: 'Audit 11 Transit & Visibility Mission',
-				projectUri: alpha.toString(),
-				mermaidText: [
-					'flowchart LR',
-					'  A["Fetch"] --> B["Train"]',
-					'  B --> G1{"Release Gate"}',
-					'  A --> C["Audit"]',
-					'  G1 --> J["Merge"]',
-					'  C --> J',
-				].join('\n'),
-			});
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
+			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'orchestration')));
 			const host = append(document.body, $('.monaco-workbench.ade-audit11-host'));
 			host.style.width = '1280px';
 			host.style.height = '760px';
@@ -7887,118 +5720,8 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			pane.layout(new Dimension(1280, 760));
 			await pane.setInput(input, undefined, {}, CancellationToken.None);
 
-			const started = await missionRuntime.start(created.id);
-			assert.strictEqual(started.ok, true, started.error);
-			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, 'Entry node mint spawns no incoming edge puck');
-
-			// 1. Live cross-node hop A -> B & A -> C plays a single-shot 800ms edge glide
-			const tokA = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
-			const compA = await missionRuntime.completeToken(created.id, { tokenId: tokA.id, summary: 'Fetched dataset' });
-			assert.strictEqual(compA.ok, true, compA.error);
-
-			const edgeAB = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="A"][data-to="B"]')!;
-			const edgeAC = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="A"][data-to="C"]')!;
-			assert.ok(edgeAB.classList.contains('is-token-flowing'), 'Incoming edge A->B briefly enters is-token-flowing right after cross-node hop');
-			assert.ok(edgeAC.classList.contains('is-token-flowing'), 'Incoming edge A->C briefly enters is-token-flowing right after cross-node hop');
-
-			const puckAB = host.querySelector<SVGGElement>(`[data-ade-edge-puck="${edgeAB.getAttribute('data-edge-id')}"]`)!;
-			assert.ok(puckAB, 'Cross-node hop A->B spawns one-shot edge transit puck');
-			assert.strictEqual(puckAB.getAttribute('data-transit-once'), 'true');
-			assert.strictEqual(puckAB.getAttribute('data-transit-duration-ms'), '800');
-			const puckStyle = mainWindow.getComputedStyle(puckAB);
-			assert.strictEqual(puckStyle.animationIterationCount, '1', 'Edge puck animation plays once (never infinite)');
-			assert.strictEqual(puckStyle.animationDuration, '0.8s', 'Edge puck animation duration is 800ms');
-			const edgeABPathStyle = mainWindow.getComputedStyle(edgeAB.querySelector('.ade-mission-edge-path')!);
-			assert.strictEqual(edgeABPathStyle.animationIterationCount, '1', 'Incoming edge flow dash plays once (never infinite)');
-
-			// 2. Block B and advance C -> J (waiting_join), then wait past 800ms: all edge gliders & flowing states MUST clear (zero double shadow!)
-			const tokB = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
-			await missionRuntime.blockToken(created.id, {
-				tokenId: tokB.id,
-				reason: 'Waiting GPU checkpoint',
-				maxDuration: '15m',
-				watchPid: 9101,
-			});
-			const tokC = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'C' && t.status === 'active')!;
-			const compC = await missionRuntime.completeToken(created.id, { tokenId: tokC.id, summary: 'Audit green' });
-			assert.strictEqual(compC.ok, true, compC.error);
-			const edgeCJ = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="C"][data-to="J"]')!;
-			assert.ok(edgeCJ.classList.contains('is-token-flowing'), 'Join arrival C->J plays brief transit immediately after hop');
-
-			await timeout(880);
-			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, 'After 800ms, ALL edge pucks are removed even while B is blocked and J is waiting_join');
-			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), false, 'Blocked incoming edge A->B stops flowing after 800ms');
-			assert.strictEqual(edgeCJ.classList.contains('is-token-flowing'), false, 'Waiting-join incoming edge C->J stops flowing after 800ms');
-			assert.strictEqual(edgeCJ.classList.contains('is-join-arrived'), true, 'Static join-arrived highlight persists cleanly without infinite animation');
-			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-token-puck="B"]')?.hidden, false, 'Target node B still displays its own docked blocked token puck');
-
-			// Subsequent 1Hz telemetry updates on blocked B must NOT respawn edge gliders or flowing dashes
-			missionRuntime.recordNodeTurnUsage(created.id, 'B', { inputTokens: 1200, outputTokens: 200, totalTokens: 1400, costUsd: 0.02 });
-			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, '1Hz telemetry tick on blocked node does not respawn edge glider');
-			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), false);
-
-			// 3. Complete B -> G1 (waiting_gate): plays one fresh 800ms glide ONLY on B->G1, then clears while G1 stays waiting_gate
-			const compB = await missionRuntime.completeToken(created.id, { tokenId: tokB.id, summary: 'Model trained' });
-			assert.strictEqual(compB.ok, true, compB.error);
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
-			const edgeBG1 = host.querySelector<SVGGElement>('.ade-mission-edge-group[data-from="B"][data-to="G1"]')!;
-			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 1, 'Only newly crossed edge B->G1 spawns an edge puck');
-			assert.ok(host.querySelector(`[data-ade-edge-puck="${edgeBG1.getAttribute('data-edge-id')}"]`), 'Edge puck belongs to B->G1');
-			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), false, 'Previously settled edge A->B does not replay');
-
-			await timeout(880);
-			assert.strictEqual(host.querySelectorAll('[data-ade-edge-puck]').length, 0, 'After 800ms, waiting_gate edge puck is removed (no infinite loop on Gate)');
-			assert.strictEqual(edgeBG1.classList.contains('is-token-flowing'), false, 'Waiting-gate incoming edge stops flowing after 800ms');
-
-			// 4. Cold-opening a Mission whose waiting_gate / waiting_join tokens are >800ms old spawns ZERO edge pucks
-			const coldHost = append(document.body, $('.monaco-workbench.ade-audit11-cold-host'));
-			coldHost.style.width = '1280px';
-			coldHost.style.height = '760px';
-			store.add({ dispose: () => coldHost.remove() });
-			const coldInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const coldPane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 2, index: 1 })));
-			coldPane.create(coldHost);
-			coldPane.layout(new Dimension(1280, 760));
-			await coldPane.setInput(coldInput, undefined, {}, CancellationToken.None);
-			assert.strictEqual(coldHost.querySelectorAll('[data-ade-edge-puck]').length, 0, 'Cold-opening stalled/waiting Mission spawns zero stale edge pucks');
-			assert.strictEqual(coldHost.querySelectorAll('.ade-mission-edge-group.is-token-flowing').length, 0, 'Cold-opening stalled/waiting Mission leaves zero edges flowing');
-
-			// 4b. Rework rollback G1 -> A -> B crosses the SAME edge A->B a second time and plays a fresh 800ms glide with a new token id
-			const firstTokenIdAB = puckAB.getAttribute('data-token-id');
-			const rejGate = await missionRuntime.resolveGate(created.id, { nodeId: 'G1', decision: 'reject', rollbackNodeId: 'A', note: 'Re-run A->B' });
-			assert.strictEqual(rejGate.ok, true, rejGate.error);
-			const tokA2 = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
-			const compA2 = await missionRuntime.completeToken(created.id, { tokenId: tokA2.id, summary: 'Re-fetched dataset v2' });
-			assert.strictEqual(compA2.ok, true, compA2.error);
-			const puckAB2 = host.querySelector<SVGGElement>(`[data-ade-edge-puck="${edgeAB.getAttribute('data-edge-id')}"]`)!;
-			assert.ok(puckAB2, 'Second hop across the same edge A->B spawns a fresh one-shot puck');
-			assert.notStrictEqual(puckAB2.getAttribute('data-token-id'), firstTokenIdAB, 'Second hop uses new token id and restarts animation');
-			assert.strictEqual(edgeAB.classList.contains('is-token-flowing'), true);
-			const tokB2 = Object.values(missionRuntime.getRuntimeState(created.id).tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
-			const compB2 = await missionRuntime.completeToken(created.id, { tokenId: tokB2.id, summary: 'Re-trained model v2' });
-			assert.strictEqual(compB2.ok, true, compB2.error);
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.G1, 'waiting_gate');
-
-			// 5. Approve G1 -> J becomes active; verify page visibilitychange & setVisible(false) pause ALL infinite CSS animations
-			const resGate = await missionRuntime.resolveGate(created.id, { nodeId: 'G1', decision: 'approve' });
-			assert.strictEqual(resGate.ok, true, resGate.error);
-			assert.strictEqual(missionRuntime.getRuntimeState(created.id).nodeStates.J, 'active');
-
 			const editorRoot = host.querySelector<HTMLElement>('.ade-mission-editor')!;
-			const activeCoreWell = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="J"] .ade-mission-core-well')!;
-			const activeStateDot = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="J"] .ade-mission-state-dot')!;
-			const runDot = host.querySelector<HTMLElement>('.ade-mission-run-bar .ade-mission-run-dot')!;
-			const pacemakerRing = host.querySelector<HTMLElement>('.ade-mission-port.port-in.is-pacemaker.is-armed .ade-mission-pacemaker-ring.ring-1')!;
-			// Also illuminate a trace-highlighted edge (uses !important animation) to confirm pause overrides it!
-			edgeBG1.classList.add('is-trace-highlighted');
-			const traceEdgePath = edgeBG1.querySelector<SVGPathElement>('.ade-mission-edge-path')!;
-
 			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false);
-			assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'running', 'Active node breath runs while visible');
-			assert.strictEqual(mainWindow.getComputedStyle(activeStateDot).animationPlayState, 'running', 'Active state dot pulses while visible');
-			assert.strictEqual(mainWindow.getComputedStyle(runDot).animationPlayState, 'running', 'Run bar dot pulses while visible');
-			assert.strictEqual(mainWindow.getComputedStyle(pacemakerRing).animationPlayState, 'running', 'Pacemaker ring pulses while visible');
-			assert.strictEqual(mainWindow.getComputedStyle(traceEdgePath).animationPlayState, 'running', 'Trace-highlighted edge flows while visible');
 
 			const doc = editorRoot.ownerDocument;
 			const origHiddenDesc = Object.getOwnPropertyDescriptor(doc, 'hidden');
@@ -8008,22 +5731,16 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => 'hidden' });
 				doc.dispatchEvent(new mainWindow.Event('visibilitychange'));
 
-				assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), true, 'visibilitychange(hidden) sets ade-animations-paused on Mission Canvas');
+				assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), true, 'visibilitychange(hidden) sets ade-animations-paused on Engineering Canvas');
 				assert.strictEqual(editorRoot.getAttribute('data-animations-paused'), 'true');
 				assert.strictEqual(doc.documentElement.classList.contains('ade-page-hidden'), true, 'visibilitychange(hidden) sets ade-page-hidden on documentElement');
-				assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'paused', 'Active node breath pauses when page is hidden');
-				assert.strictEqual(mainWindow.getComputedStyle(activeStateDot).animationPlayState, 'paused', 'Active state dot pauses when page is hidden');
-				assert.strictEqual(mainWindow.getComputedStyle(runDot).animationPlayState, 'paused', 'Run bar dot pauses when page is hidden');
-				assert.strictEqual(mainWindow.getComputedStyle(pacemakerRing).animationPlayState, 'paused', 'Pacemaker ring pauses when page is hidden');
-				assert.strictEqual(mainWindow.getComputedStyle(traceEdgePath).animationPlayState, 'paused', 'Trace-highlighted edge (!important) pauses when page is hidden');
 
 				Object.defineProperty(doc, 'hidden', { configurable: true, get: () => false });
 				Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => 'visible' });
 				doc.dispatchEvent(new mainWindow.Event('visibilitychange'));
 
-				assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false, 'visibilitychange(visible) resumes Mission Canvas animations');
+				assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false, 'visibilitychange(visible) resumes Engineering Canvas animations');
 				assert.strictEqual(doc.documentElement.classList.contains('ade-page-hidden'), false);
-				assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'running', 'Active node breath resumes when page returns visible');
 			} finally {
 				if (origHiddenDesc) {
 					Object.defineProperty(doc, 'hidden', origHiddenDesc);
@@ -8038,17 +5755,14 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				doc.dispatchEvent(new mainWindow.Event('visibilitychange'));
 			}
 
-			// 6. Switching away from the Mission editor tab (setVisible(false)) also pauses animations without hiding the OS window
+			// Switching away from the Engineering editor tab (setVisible(false)) also pauses animations without hiding the OS window
 			pane.setVisible(false);
-			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), true, 'Editor tab backgrounded pauses Mission Canvas animations');
-			assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'paused');
+			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), true, 'Editor tab backgrounded pauses Engineering Canvas animations');
 			pane.setVisible(true);
-			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false, 'Editor tab foregrounded resumes Mission Canvas animations');
-			assert.strictEqual(mainWindow.getComputedStyle(activeCoreWell).animationPlayState, 'running');
+			assert.strictEqual(editorRoot.classList.contains('ade-animations-paused'), false, 'Editor tab foregrounded resumes Engineering Canvas animations');
 
-			// 7. Workbench-wide AdePageVisibilityAnimationGuard pauses global ADE animations even with ZERO Mission panes open!
+			// Workbench-wide AdePageVisibilityAnimationGuard pauses global ADE animations even with ZERO Engineering panes open!
 			pane.dispose();
-			coldPane.dispose();
 			const globalGuard = store.add(new AdePageVisibilityAnimationGuard());
 			assert.ok(globalGuard);
 			const gDoc = mainWindow.document;
@@ -8058,7 +5772,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				Object.defineProperty(gDoc, 'hidden', { configurable: true, get: () => true });
 				Object.defineProperty(gDoc, 'visibilityState', { configurable: true, get: () => 'hidden' });
 				gDoc.dispatchEvent(new mainWindow.Event('visibilitychange'));
-				assert.strictEqual(gDoc.documentElement.classList.contains('ade-page-hidden'), true, 'Global visibility guard sets ade-page-hidden even when no Mission pane is open');
+				assert.strictEqual(gDoc.documentElement.classList.contains('ade-page-hidden'), true, 'Global visibility guard sets ade-page-hidden even when no Engineering pane is open');
 
 				Object.defineProperty(gDoc, 'hidden', { configurable: true, get: () => false });
 				Object.defineProperty(gDoc, 'visibilityState', { configurable: true, get: () => 'visible' });
@@ -8079,8 +5793,8 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			}
 		});
 
-		test('Audit #15: wide fan-out obeys multi-level concurrency semaphores, shows live FIFO queue ranks (#1/3..#3/3) on cards, and promotes queued nodes cleanly in place', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
+		test('Audit #15: wide fan-out obeys multi-level concurrency semaphores and promotes queued nodes cleanly', async () => {
+			const { missionStore, missionRuntime } = createMissionHarness();
 			const created = missionStore.createMission({
 				title: 'Audit 15 Wide Fan-Out Concurrency Mission',
 				projectUri: alpha.toString(),
@@ -8093,15 +5807,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 					'  S --> W5["Worker 5"]',
 				].join('\n'),
 			});
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, created.id));
-			const host = append(document.body, $('.monaco-workbench.ade-audit15-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
 
 			// Start with maxLocalHost=2 so a 5-way fan-out admits W1 & W2 immediately and queues W3, W4, W5 as #1/3, #2/3, #3/3!
 			const started = await missionRuntime.start(created.id, {
@@ -8123,32 +5828,14 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(statusView.activeTokenCount, 2);
 			assert.strictEqual(statusView.queuedTokenCount, 3);
 
-			// Verify Mission Canvas node cards display live FIFO queue ranks #1/3, #2/3, #3/3
-			const cardW3Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="W3"]')!;
-			const cardW4Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="W4"]')!;
-			const cardW5Before = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="W5"]')!;
-			assert.strictEqual(cardW3Before.getAttribute('data-node-state'), 'queued');
-			assert.strictEqual(cardW3Before.getAttribute('data-node-queue-position'), '1');
-			assert.strictEqual(cardW3Before.getAttribute('data-node-queue-total'), '3');
-			assert.strictEqual(cardW4Before.getAttribute('data-node-queue-position'), '2');
-			assert.strictEqual(cardW5Before.getAttribute('data-node-queue-position'), '3');
-			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W3"]')?.textContent?.includes('#1/3'), 'W3 puck shows queue rank #1/3');
-			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W4"]')?.textContent?.includes('#2/3'), 'W4 puck shows queue rank #2/3');
-			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W5"]')?.textContent?.includes('#3/3'), 'W5 puck shows queue rank #3/3');
-			assert.ok(cardW3Before.querySelector('.ade-mission-core-context')?.textContent?.includes('#1/3'), 'W3 card summary shows queue rank & saturated scope');
-
-			// Complete W1 -> W3 promotes to active in place, W4 shifts #2/3 -> #1/2, W5 shifts #3/3 -> #2/2 (zero DOM teardown!)
+			// Complete W1 -> W3 promotes to active, W4 shifts #2/3 -> #1/2, W5 shifts #3/3 -> #2/2
 			const tokW1 = Object.values(rtAfterFanout.tokens).find(t => t.nodeId === 'W1' && t.status === 'active')!;
 			const compW1 = await missionRuntime.completeToken(created.id, { tokenId: tokW1.id, summary: 'W1 done' });
 			assert.strictEqual(compW1.ok, true, compW1.error);
-			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="W3"]'), cardW3Before, 'Promotion patches W3 card in place without DOM teardown');
-			assert.strictEqual(cardW3Before.getAttribute('data-node-state'), 'active', 'W3 promoted from queued to active');
-			assert.strictEqual(cardW3Before.getAttribute('data-node-queue-position'), null, 'W3 queue rank cleared upon activation');
-			assert.strictEqual(cardW4Before.getAttribute('data-node-queue-position'), '1', 'W4 shifted up to #1/2');
-			assert.strictEqual(cardW4Before.getAttribute('data-node-queue-total'), '2');
-			assert.strictEqual(cardW5Before.getAttribute('data-node-queue-position'), '2', 'W5 shifted up to #2/2');
-			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W4"]')?.textContent?.includes('#1/2'));
-			assert.ok(host.querySelector<HTMLElement>('[data-ade-token-puck="W5"]')?.textContent?.includes('#2/2'));
+			const rtAfterPromote = missionRuntime.getRuntimeState(created.id);
+			assert.strictEqual(rtAfterPromote.nodeStates.W3, 'active');
+			assert.strictEqual(rtAfterPromote.nodeStates.W4, 'queued');
+			assert.strictEqual(rtAfterPromote.nodeStates.W5, 'queued');
 
 			// Raising concurrency limit dynamically drains W4 & W5 immediately to active!
 			const raised = await missionRuntime.setConcurrencyLimits(created.id, { maxGlobal: 8, maxLocalHost: 4, maxPerCloudHost: 2, maxPerProvider: 8 });
@@ -8157,8 +5844,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(rtAfterRaise.nodeStates.W4, 'active');
 			assert.strictEqual(rtAfterRaise.nodeStates.W5, 'active');
 			assert.strictEqual(missionRuntime.getMissionStatus(created.id).queuedTokenCount, 0);
-			assert.strictEqual(cardW4Before.getAttribute('data-node-state'), 'active');
-			assert.strictEqual(cardW5Before.getAttribute('data-node-state'), 'active');
 		});
 
 		test('Audit #18: separates cold per-Mission files from lightweight hot index, migrates legacy v1 blob, and renders multi-run FinOps comparison ledger', async () => {
@@ -8250,29 +5935,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			const rt2 = missionRuntime.getRuntimeState(m2.id);
 			assert.strictEqual(rt2.runHistory?.length, 1, 'Run #1 archived in runHistory');
 			assert.strictEqual(rt2.runHistory![0].totalCostUsd, 1.0);
-
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, m2.id));
-			const host = append(document.body, $('.monaco-workbench.ade-audit18-host'));
-			host.style.width = '1280px';
-			host.style.height = '760px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1280, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			// Open FinOps Ledger tab via Node Inspector
-			pane.focusNode('A', { inspectorTab: 'finops' });
-			const historySection = host.querySelector<HTMLElement>('[data-ade-finops-run-history="true"]')!;
-			assert.ok(historySection && !historySection.hidden, 'Run History & Multi-Run Comparison section is visible');
-			const deltaBanner = host.querySelector<HTMLElement>('[data-ade-finops-run-delta="true"]')!;
-			assert.ok(deltaBanner && !deltaBanner.hidden);
-			assert.ok(deltaBanner.textContent?.includes('Run #2 vs Run #1'), `Expected Run #2 vs Run #1 delta, got: ${deltaBanner.textContent}`);
-			assert.ok(deltaBanner.textContent?.includes('-$0.60 (-60%)'), `Expected -$0.60 (-60%) savings delta, got: ${deltaBanner.textContent}`);
-			assert.ok(host.querySelector('[data-ade-finops-run-row="1"][data-selected-baseline="true"]'), 'Archived Run #1 selected as comparison baseline');
+			assert.strictEqual(rt2.nodeTelemetry?.A?.costUsd, 0.4, 'Run #2 tracks fresh $0.40 spend alongside archived Run #1');
 		});
 
-		test('renders true per-model context windows on idle/active cards and lights up crimson rework noise segment on tool-error & review rejection turns (Audit #24)', async () => {
+		test('tracks true per-model context windows and marks rework noise tokens on tool-error turns until distilled (Audit #24)', async () => {
 			const { h, missionStore, missionRuntime } = createMissionHarness();
 			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/gov-audit24') }, 'Gov Audit24', { role: 'governor' });
 			const mission = missionStore.createMission({
@@ -8296,27 +5962,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			h.projects.updateAgentEnginePreferences(r1AgentId, { preferredEngineId: 'aexus-antigravity', preferredModel: 'gemini-2.5-pro' });
 			await missionRuntime.bindNodeHost(mission.id, 'R1', { roleKind: 'reviewer' });
 
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
-			const host = append(document.body, $('.monaco-workbench.ade-audit24-host'));
-			host.style.width = '1360px';
-			host.style.height = '820px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1360, 820));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
-			// 1. Idle cards display true per-model windows (64k for deepseek-r1, 1.0M for gemini-2.5-pro — NOT 200k!)
-			const n1Card = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			const r1Card = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="R1"]')!;
-			const n1CtxRow = n1Card.querySelector<HTMLElement>('.ade-mission-ctx-row')!;
-			const r1CtxRow = r1Card.querySelector<HTMLElement>('.ade-mission-ctx-row')!;
-			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-max'), '64000');
-			assert.strictEqual(n1Card.querySelector('.ade-mission-ctx-tokens')?.textContent, '0/64k');
-			assert.strictEqual(r1CtxRow.getAttribute('data-node-context-max'), '1000000');
-			assert.strictEqual(r1Card.querySelector('.ade-mission-ctx-tokens')?.textContent, '0/1.0M');
-
-			// 2. Active 64k model hitting 58k tokens triggers critical severity (91%) instead of being masked at 29%
+			// 1. Active 64k model uses true 64k context window (NOT hardcoded 200k!)
 			await missionRuntime.start(mission.id);
 			missionRuntime.recordNodeTurnUsage(mission.id, 'N1', {
 				inputTokens: 42_000,
@@ -8324,11 +5970,11 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				model: 'deepseek-r1',
 				engineId: 'aexus-dsh',
 			});
-			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-max'), '64000');
-			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-pct'), '75');
-			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-noise-pct'), '0');
+			const tel1 = missionRuntime.getRuntimeState(mission.id).nodeTelemetry?.N1;
+			assert.strictEqual(tel1?.contextWindowMax, 64_000);
+			assert.strictEqual(tel1?.contextNoiseTokens ?? 0, 0);
 
-			// 3. Tool-error turn (WITHOUT passing isNoiseTurn!) lights up the crimson noise segment on card & Inspector!
+			// 2. Tool-error turn (WITHOUT passing isNoiseTurn!) marks rework noise tokens automatically!
 			missionRuntime.recordNodeTurnUsage(mission.id, 'N1', {
 				inputTokens: 8_000,
 				outputTokens: 2_000,
@@ -8337,27 +5983,22 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				model: 'deepseek-r1',
 				engineId: 'aexus-dsh',
 			});
-			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-pct'), '91');
-			assert.ok(n1CtxRow.classList.contains('severity-critical'), '64k model at 58k tokens must render critical severity');
-			const cardNoisePct = Number(n1CtxRow.getAttribute('data-node-context-noise-pct'));
-			assert.ok(cardNoisePct >= 15, `Expected crimson noise segment >=15%, got ${cardNoisePct}%`);
-			const cardNoiseSeg = n1Card.querySelector<HTMLElement>('.ade-ctx-seg.seg-noise')!;
-			assert.ok(Number.parseFloat(cardNoiseSeg.style.width) > 0, `Card crimson noise segment width must be > 0%, got ${cardNoiseSeg.style.width}`);
+			const tel2 = missionRuntime.getRuntimeState(mission.id).nodeTelemetry?.N1;
+			assert.strictEqual(tel2?.contextWindowMax, 64_000);
+			assert.ok((tel2?.contextNoiseTokens ?? 0) >= 10_000, `Expected rework noise >=10000 tokens, got ${tel2?.contextNoiseTokens}`);
 
-			// 4. Open Node Inspector -> Distill tab reflects real 64k window & crimson noise segment
-			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
-			n1Card.dispatchEvent(new mainWindow.PointerEvent('pointerup', { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
-			host.querySelector<HTMLButtonElement>('[data-ade-inspector-tab="distill"]')!.click();
-			const distillBadge = host.querySelector<HTMLElement>('[data-ade-distill-context-max]')!;
-			assert.strictEqual(distillBadge.getAttribute('data-ade-distill-context-max'), '64000');
-			assert.ok(Number(distillBadge.getAttribute('data-ade-distill-noise-pct')) >= 15);
-			const distillNoiseSeg = host.querySelector<HTMLElement>('.ade-mission-ni-thermal-track .ade-ctx-seg.seg-noise')!;
-			assert.ok(Number.parseFloat(distillNoiseSeg.style.width) > 0, 'Inspector Distill tab crimson noise bar must be > 0%');
+			// 3. Gemini 2.5 Pro uses 1M context window
+			missionRuntime.recordNodeTurnUsage(mission.id, 'R1', {
+				inputTokens: 50_000,
+				outputTokens: 5_000,
+				model: 'gemini-2.5-pro',
+				engineId: 'aexus-antigravity',
+			});
+			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).nodeTelemetry?.R1?.contextWindowMax, 1_000_000);
 
-			// 5. Distill & Refresh clears crimson rework noise back to 0%
+			// 4. Distill & Refresh clears rework noise back to 0
 			await missionRuntime.distillNodeContext(mission.id, 'N1', { memo: 'Reset after tool error' });
-			assert.strictEqual(n1CtxRow.getAttribute('data-node-context-noise-pct'), '0');
-			assert.strictEqual(Number.parseFloat(cardNoiseSeg.style.width), 0);
+			assert.strictEqual(missionRuntime.getRuntimeState(mission.id).nodeTelemetry?.N1?.contextNoiseTokens ?? 0, 0);
 		});
 
 		test('Audit #19: attributes delayed turn usage accurately across multi-node @Employee reuse (zero fallback to first node) and isolates parallel & blocked @Employee sessions', async () => {
@@ -8523,16 +6164,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				h.projects.bindSession(emp.id, { engineId: 'aexus-claude', resource: URI.parse(`aexus-claude:/${emp.id}`) });
 			}
 
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, parMission.id));
-			const host = append(document.body, $('.monaco-workbench.ade-audit19-host'));
-			host.style.width = '1360px';
-			host.style.height = '820px';
-			store.add({ dispose: () => host.remove() });
-			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
-			pane.create(host);
-			pane.layout(new Dimension(1360, 820));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
-
 			const dispatchesBeforePar = dispatchedCalls.length;
 			await missionRuntime.start(parMission.id);
 			await timeout(10);
@@ -8541,7 +6172,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			dispatchedCalls[dispatchesBeforePar]?.resolve({ reply: 'Split done' });
 			await timeout(15);
 
-			// Only Branch A is dispatched & active; Branch B is queued with data-node-queue-reason="employee"
+			// Only Branch A is dispatched & active; Branch B is queued with blockedBy="employee"
 			const parRt1 = missionRuntime.getRuntimeState(parMission.id);
 			const tokA = Object.values(parRt1.tokens).find(t => t.nodeId === 'A')!;
 			const tokB = Object.values(parRt1.tokens).find(t => t.nodeId === 'B')!;
@@ -8553,9 +6184,6 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				0,
 				'Branch B must NOT dispatch onto @Alice session while Branch A is active',
 			);
-			const cardB = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="B"]')!;
-			assert.strictEqual(cardB.getAttribute('data-node-queue-reason'), 'employee');
-			assert.ok(cardB.querySelector('.ade-mission-core-context')?.textContent?.includes('@Alice'), 'Queued card explains waiting on @Alice');
 
 			// Block Branch A -> Branch B MUST stay queued & NOT contaminate @Alice's suspended session!
 			// Also verify beginInteractiveTurn binds accurately to blocked Branch A while it is suspended.
@@ -8587,48 +6215,1519 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			}
 		});
 
-		test('patches Mission node bottom-left engine pill SVG icon in place once extensions register (never stuck on Codicon.hubot)', async () => {
-			const { h, missionStore, missionRuntime } = createMissionHarness();
-			const onEnginesChanged = store.add(new Emitter<void>());
-			let agyIcon: URI | undefined = undefined;
-			const darkAgySvg = URI.file('/ext/aexus-agents/resources/antigravity-dark.svg');
-			const lightAgySvg = URI.file('/ext/aexus-agents/resources/antigravity-light.svg');
-			h.instantiation.stub(IAdeSessionsService, upcastPartial<IAdeSessionsService>({
-				onDidChangeEngines: onEnginesChanged.event,
-				getIcon: (engineId: string) => engineId === 'aexus-antigravity' ? agyIcon : undefined,
-				getEngineName: (engineId: string) => engineId === 'aexus-antigravity' ? 'Google Antigravity' : engineId,
-				getEngines: async () => agyIcon
-					? [{ id: 'aexus-antigravity', name: 'Google Antigravity', description: 'Antigravity', icon: agyIcon }]
-					: [],
-			}));
+		test('Engineering Dual-View — View 1 (Mission Task DAG): minimalist 1-button chrome, 2-area drawer, inline task popover, right-click create, and highest-rank-only completion authority', async () => {
+			const { h, missionStore } = createMissionHarness();
+			const govL1 = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/eng-l1') }, 'CEO Alice', { role: 'governor' });
+			const mgrL2 = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/eng-l2') }, 'Lead Bob', { parentId: govL1.id, role: 'manager' });
 
-			const mission = missionStore.createMission({
-				title: 'Engine Icon Hot Patch',
+			const created = missionStore.createMission({
+				title: 'Aexus Engine v2',
+				ownerSessionId: govL1.id,
+				ownerTier: 1,
 				projectUri: alpha.toString(),
-				mermaidText: 'flowchart LR\n  N1["@Lead: Review"]',
+				mermaidText: [
+					'flowchart LR',
+					'  T1["Architecture Spec"] --> T2["Core Runtime"]',
+					'  T2 --> T3["Release Verification"]',
+				].join('\n'),
 			});
-			const n1AgentId = missionRuntime.getRuntimeState(mission.id).boundary.nodeAssignments.N1?.agentId!;
-			h.projects.updateAgentEnginePreferences(n1AgentId, { preferredEngineId: 'aexus-antigravity', preferredModel: 'gemini-2.5-pro' });
 
-			const input = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, mission.id));
-			const host = append(document.body, $('.monaco-workbench.ade-engine-icon-patch-host'));
+			// Sibling inputs & serializer round-trip
+			const serializer = new AdeEngineeringEditorSerializer();
+			const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'mission')));
+			const orchInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'orchestration')));
+			assert.strictEqual(missionInput.getName(), 'Aexus Engine v2 · Mission');
+			assert.strictEqual(orchInput.getName(), 'Aexus Engine v2 · Orchestration');
+			assert.strictEqual(missionInput.matches(orchInput), false, 'Mission and Orchestration sibling tabs stay distinct');
+			const roundTripped = store.add(serializer.deserialize(h.instantiation, serializer.serialize(orchInput)!) as AdeEngineeringEditorInput);
+			assert.strictEqual(roundTripped.viewMode, 'orchestration');
+			assert.strictEqual(roundTripped.governorSessionId, created.id);
+
+			const host = append(document.body, $('.monaco-workbench.ade-eng-mission-dualview-host'));
 			host.style.width = '1280px';
 			host.style.height = '760px';
 			store.add({ dispose: () => host.remove() });
 			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
 			pane.create(host);
 			pane.layout(new Dimension(1280, 760));
-			await pane.setInput(input, undefined, {}, CancellationToken.None);
+			await pane.setInput(missionInput, undefined, {}, CancellationToken.None);
 
-			const n1CardBefore = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			const iconElBefore = n1CardBefore.querySelector<HTMLElement>('.ade-mission-engine-pill .ade-mission-engine-icon')!;
-			assert.ok(iconElBefore.classList.contains('codicon-hubot'), 'Initial pre-registration fallback renders hubot');
+			const rootEl = host.querySelector<HTMLElement>('.ade-mission-editor')!;
+			assert.strictEqual(rootEl.dataset.viewMode, 'mission');
 
-			// Extension finishes registering -> onDidChangeEngines fires -> icon upgrades in place from hubot to antigravity-dark.svg!
-			agyIcon = darkAgySvg;
-			onEnginesChanged.fire();
-			const n1CardAfter = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="N1"]')!;
-			const iconElAfter = n1CardAfter.querySelector<HTMLElement>('.ade-mission-engine-pill .ade-mission-engine-icon')!;
-			assert.strictEqual(n1CardAfter, n1CardBefore, 'Icon upgrade patches in place without rebuilding node DOM');
-			assert.ok(!iconElAfter.classList.contains('codicon-hubot'), 'Hubot fallback must be cleared once brand SVG is registered');
-...[truncated for diff preview]
+			// Minimalist canvas chrome: STRICTLY 1 visible top-left button on Mission view (Layout button hidden on Mission!)
+			const topBar = host.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
+			const visibleMissionTopBtns = [...topBar.children].filter(el => !(el as HTMLElement).hidden);
+			assert.strictEqual(visibleMissionTopBtns.length, 1, 'Mission view top bar keeps strictly ONE visible top-left button');
+			assert.ok(topBar.querySelector('button[data-ade-mission-file-btn="true"]'));
+			assert.strictEqual(host.querySelector('[data-ade-mission-run-bar]'), null);
+			assert.strictEqual(host.querySelector('.ade-mission-viewport-bar'), null);
+			assert.strictEqual(host.querySelector('[data-ade-mission-sup-legend]'), null);
+			assert.strictEqual(host.querySelector('[data-ade-mission-revision-bar]'), null);
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-kind="mission-task"]').length, 3);
+			// Verify circular Mission Task DAG orb UI (176x176 circular orb + centered circle core, zero rectangular corner clamps)
+			const firstTaskNode = host.querySelector<HTMLElement>('.ade-mission-node[data-node-kind="mission-task"]')!;
+			const firstTaskCard = firstTaskNode.querySelector<HTMLElement>('.ade-mission-node-card')!;
+			assert.strictEqual(firstTaskNode.getAttribute('data-node-shape'), 'circle', 'Mission Task node uses circular DAG shape');
+			assert.strictEqual(firstTaskCard.classList.contains('is-circular-task'), true, 'Mission Task card uses circular orb styling');
+			assert.strictEqual(firstTaskCard.querySelectorAll('.ade-mission-clamp').length, 0, 'Circular Mission Task orb omits rectangular corner clamps');
+			assert.ok(firstTaskCard.querySelector('.ade-mission-task-circle-core'), 'Circular Mission Task orb renders centered circle core');
+
+			// Clicking top-left button opens strictly 2-area drawer: (a) Mermaid editor + (b) All task node descriptions
+			host.querySelector<HTMLButtonElement>('button[data-ade-mission-file-btn="true"]')!.click();
+			const drawer = host.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
+			assert.strictEqual(drawer.hidden, false);
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-mission-mermaid-pane="true"]')?.hidden, false);
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-mission-tasks-pane="true"]')?.hidden, false);
+			assert.strictEqual(host.querySelectorAll('[data-ade-mission-task-desc-card]').length, 3, 'All 3 task nodes render individual description cards');
+
+			// Editing task description in the drawer persists live
+			const t1DescInput = host.querySelector<HTMLTextAreaElement>('textarea[data-ade-task-desc-input="T1"]')!;
+			t1DescInput.value = 'Define cyclic orchestration protocol and lightweight whiteboard pointers.';
+			t1DescInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.T1, 'Define cyclic orchestration protocol and lightweight whiteboard pointers.');
+
+			// Entering a cycle into Mission Mermaid editor is rejected (Mission stays strictly acyclic DAG!)
+			const mermaidTa = host.querySelector<HTMLTextAreaElement>('textarea[data-ade-mission-mermaid-input="true"]')!;
+			mermaidTa.value = 'flowchart LR\n  T1["A"] --> T2["B"]\n  T2 --> T1';
+			mermaidTa.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			await timeout(150);
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-kind="mission-task"]').length, 3, 'Cyclic Mermaid is rejected without tearing down valid Task DAG');
+			// Close drawer cleanly
+			host.querySelector<HTMLButtonElement>('button[data-ade-drawer-close="true"]')!.click();
+			assert.strictEqual(drawer.hidden, true);
+
+			// Clicking a task card opens Task Details popover -> edit description & mark completed
+			const t1Card = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T1"]')!;
+			t1Card.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 701, clientX: 200, clientY: 200, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 701, clientX: 200, clientY: 200, bubbles: true }));
+			const taskPopDesc = host.querySelector<HTMLTextAreaElement>('textarea[data-ade-task-pop-desc="T1"]')!;
+			assert.ok(taskPopDesc, 'Clicking task node opens task description editor popover');
+			taskPopDesc.value = 'Updated spec with acceptance checks.';
+			taskPopDesc.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			assert.strictEqual(missionStore.getMission(created.id)?.nodePrompts?.T1, 'Updated spec with acceptance checks.');
+
+			const completeBtn = host.querySelector<HTMLButtonElement>('button[data-ade-task-toggle-complete="T1"]')!;
+			completeBtn.click();
+			assert.strictEqual(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T1"]')?.getAttribute('data-task-status'), 'completed', 'Human User can mark task T1 completed directly');
+
+			// Control-plane highest-rank-only enforcement: L2 Manager MUST be rejected; L1 Governor (highest rank) succeeds on T2!
+			await assert.rejects(
+				() => h.control('mission.task.complete', { mission: created.id, nodeId: 'T2', note: 'L2 attempt', caller: 'manager', _verifiedCaller: true, _callerSessionId: mgrL2.id }),
+				/FORBIDDEN|highest-rank/i,
+				'Non-highest-rank role L2 is forbidden from marking Mission tasks completed',
+			);
+			const l1Done = await h.control<{ readonly ok: boolean }>('mission.task.complete', {
+				mission: created.id,
+				nodeId: 'T2',
+				note: 'Verified by highest rank L1',
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: govL1.id,
+			});
+			assert.strictEqual(l1Done.ok, true);
+			assert.strictEqual(host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T2"]')?.getAttribute('data-task-status'), 'completed', 'L1 highest-rank completion updates task card T2 on canvas');
+
+			// Blank-canvas right-click creates a new Task Node directly on canvas!
+			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
+			viewportEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { clientX: 480, clientY: 320, bubbles: true, cancelable: true }));
+			const addTaskItem = host.querySelector<HTMLButtonElement>('button[data-ade-ctx-action="add-task"]')!;
+			assert.ok(addTaskItem, 'Blank-canvas right-click opens New Task Node action');
+			addTaskItem.click();
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-kind="mission-task"]').length, 4, 'Right-click New Task Node creates 4th task on canvas');
+		});
+
+		test('Engineering Dual-View — View 2 (Orchestration All-Staff Cyclic Topology): single-pane real-time code drawer, 12 perimeter anchors, cyclic & bidirectional edges, Department Whiteboards, baton relay & runtime dynamic staff expansion', async () => {
+			const { h, missionStore } = createMissionHarness();
+			const orgGov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/orch-gov-l1') }, 'Alice', { role: 'governor' });
+			const created = missionStore.createMission({
+				title: 'Aexus Company Org',
+				ownerSessionId: orgGov.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: 'flowchart LR\n  T1["Build Engine"] --> T2["Ship"]',
+				orchestrationText: [
+					'flowchart TD',
+					'  CEO["@Alice · CEO (L1)"] <-->|align| Lead["@Bob · Backend Lead (L2)"]',
+					'  subgraph Backend["Backend Dept"]',
+					'    Lead -->|delegate| Dev["@Carol · Dev (L3)"]',
+					'    Dev -->|review| QA["@Dave · QA (L3)"]',
+					'    QA -->|feedback| Lead',
+					'    WB_BE[("Whiteboard: Architecture")]',
+					'  end',
+				].join('\n'),
+			});
+
+			const orchInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'orchestration')));
+			const host = append(document.body, $('.monaco-workbench.ade-eng-orch-dualview-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 2, index: 1 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(orchInput, undefined, {}, CancellationToken.None);
+
+			const rootEl = host.querySelector<HTMLElement>('.ade-mission-editor')!;
+			assert.strictEqual(rootEl.dataset.viewMode, 'orchestration');
+
+			// 0. Tight 1:1 locked hierarchical sidebar sync: L2 Lead nests under L1 Governor, L3 Dev nests under L2 Lead, all locked!
+			const syncedSubs = missionStore.getGeneratedEmployees(created.id);
+			assert.strictEqual(syncedSubs.length, 3, 'All 3 subordinate staff nodes (Lead, Dev, QA) stay tightly synced in left sidebar under Governor');
+			const leadAgent = syncedSubs.find(a => a.treeNodeIds?.includes('Lead'))!;
+			const devAgent = syncedSubs.find(a => a.treeNodeIds?.includes('Dev'))!;
+			assert.ok(leadAgent && devAgent);
+			assert.strictEqual(leadAgent.parentId, orgGov.id, 'L2 Lead nests directly under L1 Governor in left sidebar');
+			assert.strictEqual(devAgent.parentId, leadAgent.id, 'L3 Dev nests hierarchically under L2 Lead in left sidebar');
+			assert.strictEqual(h.projects.isLockedByWorkTree?.(leadAgent.id), true, 'Sidebar Orchestration staff is strictly locked by Engineering');
+			assert.strictEqual(h.projects.isLockedByWorkTree?.(devAgent.id), true, 'Nested L3 staff is strictly locked by Engineering');
+
+			// 1. Minimalist chrome: ONLY 2 visible top-left buttons on Orchestration (Code Drawer + Presentation Layout Switcher)!
+			const topBar = host.querySelector<HTMLElement>('[data-ade-mission-top-bar="true"]')!;
+			const visibleOrchTopBtns = [...topBar.children].filter(el => !(el as HTMLElement).hidden);
+			assert.strictEqual(visibleOrchTopBtns.length, 2, 'Orchestration view top bar keeps strictly TWO buttons: Code Drawer + Layout Mode Switcher');
+			const layoutBtn = topBar.querySelector<HTMLButtonElement>('button[data-ade-orch-layout-btn="true"]')!;
+			assert.ok(layoutBtn && !layoutBtn.hidden, 'Orchestration view exposes single Layout Mode Switcher button');
+
+			// Verify switching among LR, TD, Core Radial, and Department Matrix changes node positions WITHOUT mutating orchestrationText!
+			const beforeSwitchCode = missionStore.getMission(created.id)?.orchestrationText;
+			const layoutMenu = host.querySelector<HTMLElement>('[data-ade-orch-layout-menu="true"]')!;
+			assert.strictEqual(layoutMenu.hidden, true);
+			layoutBtn.click();
+			assert.strictEqual(layoutMenu.hidden, false, 'Clicking Layout button opens presentation layout picker menu');
+			assert.strictEqual(layoutMenu.querySelectorAll('[data-ade-orch-layout-option]').length, 4, 'Layout menu provides 4 presentation modes (LR, TD, Radial, Grid)');
+			const readCeoPos = () => {
+				const el = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="CEO"]')!;
+				return `${el.style.left},${el.style.top}`;
+			};
+			layoutMenu.querySelector<HTMLButtonElement>('[data-ade-orch-layout-option="lr"]')!.click();
+			const ceoLr = readCeoPos();
+			layoutBtn.click();
+			layoutMenu.querySelector<HTMLButtonElement>('[data-ade-orch-layout-option="radial"]')!.click();
+			const ceoRadial = readCeoPos();
+			layoutBtn.click();
+			layoutMenu.querySelector<HTMLButtonElement>('[data-ade-orch-layout-option="grid"]')!.click();
+			const ceoGrid = readCeoPos();
+			layoutBtn.click();
+			layoutMenu.querySelector<HTMLButtonElement>('[data-ade-orch-layout-option="td"]')!.click();
+			const ceoTd = readCeoPos();
+			assert.notStrictEqual(ceoLr, ceoRadial, 'Switching LR -> Core Radial genuinely re-layouts cards');
+			assert.notStrictEqual(ceoLr, ceoTd, 'Switching LR -> TD genuinely re-layouts cards');
+			assert.notStrictEqual(ceoLr, ceoGrid, 'Switching LR -> Grid genuinely re-layouts cards');
+			assert.strictEqual(missionStore.getMission(created.id)?.orchestrationText, beforeSwitchCode, 'Switching presentation layout NEVER mutates fixed Orchestration code');
+
+			host.querySelector<HTMLButtonElement>('button[data-ade-mission-file-btn="true"]')!.click();
+			const drawer = host.querySelector<HTMLElement>('[data-ade-mission-drawer="true"]')!;
+			assert.strictEqual(drawer.hidden, false);
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-mission-drawer-split="true"]')?.classList.contains('single-pane'), true, 'Orchestration drawer is strictly single-pane');
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-mission-tasks-pane="true"]')?.hidden, true, 'Orchestration drawer hides right descriptions pane');
+			const codeInput = host.querySelector<HTMLTextAreaElement>('textarea[data-ade-orchestration-code-input="true"]')!;
+			assert.ok(codeInput && codeInput.value.includes('CEO["@Alice · CEO (L1)"]'));
+
+			// 2. All ranks (L1 CEO, L2 Lead, L3 Dev, L3 QA) live on the SAME canvas + Whiteboard card + Department frame + 12 anchors per staff card!
+			const staffCards = [...host.querySelectorAll<HTMLElement>('.ade-mission-node[data-node-kind="staff"]')];
+			assert.strictEqual(staffCards.length, 4, 'All 4 staff ranks (L1..L3) enter the same Orchestration canvas');
+			for (const card of staffCards) {
+				assert.strictEqual(card.querySelectorAll('.ade-orch-anchor').length, 20, `Staff node ${card.dataset.nodeId} renders 4x5=20 perimeter anchors`);
+				assert.strictEqual(card.querySelectorAll('.ade-mission-clamp').length, 4, `Staff node ${card.dataset.nodeId} preserves 4 Armored Pod L-corner clamps`);
+				assert.ok(card.querySelector('.ade-mission-core-well'), `Staff node ${card.dataset.nodeId} preserves recessed midnight core well`);
+				assert.ok(card.querySelector('.ade-mission-ctx-row'), `Staff node ${card.dataset.nodeId} preserves 4-color context usage bar`);
+				assert.ok(card.querySelector('.ade-mission-node-footer'), `Staff node ${card.dataset.nodeId} preserves Engine + OS Host footer`);
+			}
+			assert.ok(host.querySelector('.ade-orch-dept-region[data-ade-dept-region="Backend Dept"]'), 'Backend Dept visual region frame renders on canvas');
+			const wbCard = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="WB_BE"][data-node-kind="whiteboard"]')!;
+			assert.ok(wbCard, 'Department Shared Whiteboard card renders on Orchestration canvas');
+			assert.strictEqual(wbCard.querySelectorAll('.ade-mission-clamp').length, 4, 'Whiteboard card preserves 4 Armored Pod L-corner clamps');
+			assert.ok(wbCard.querySelector('.ade-mission-core-well.wb-well'), 'Whiteboard card preserves recessed midnight core well');
+
+			// Bidirectional edges & cycle back-edges render with semantic routing attributes
+			assert.ok(host.querySelector('.ade-mission-edge-group[data-from="CEO"][data-to="Lead"][data-bidirectional="true"]'), 'CEO->Lead marked bidirectional');
+			assert.ok(host.querySelector('.ade-mission-edge-group[data-from="Lead"][data-to="CEO"][data-bidirectional="true"]'), 'Lead->CEO marked bidirectional');
+			assert.ok(host.querySelector('.ade-mission-edge-group[data-from="QA"][data-to="Lead"][data-cycle-back="true"]'), 'QA->Lead feedback edge marked cycle back-edge');
+
+			// Strict 1:1 uniqueness: attempting duplicate @Alice in code editor is rejected cleanly
+			const validOrchCode = codeInput.value;
+			codeInput.value = `${validOrchCode}\n  Lead --> Dup["@Alice · Duplicate (L3)"]`;
+			codeInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			await timeout(150);
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-kind="staff"]').length, 4, 'Duplicate @Alice is rejected while keeping valid 4 staff nodes on canvas');
+			codeInput.value = validOrchCode;
+			codeInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			await timeout(150);
+			host.querySelector<HTMLButtonElement>('button[data-ade-drawer-close="true"]')!.click();
+
+			// 3. Click Whiteboard card -> edit & save content -> creates v1, second edit bumps to v2
+			const wbCardLive = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="WB_BE"][data-node-kind="whiteboard"]')!;
+			assert.strictEqual(wbCardLive.querySelector('.ade-orch-wb-ver-tag')?.textContent, 'v0');
+			wbCardLive.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 711, clientX: 250, clientY: 250, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 711, clientX: 250, clientY: 250, bubbles: true }));
+			const wbInput = host.querySelector<HTMLTextAreaElement>('textarea[data-ade-whiteboard-content-input="WB_BE"]')!;
+			assert.ok(wbInput, 'Clicking Whiteboard card opens shared whiteboard editor popover');
+			wbInput.value = 'API Contract v1: stateless relay tokens with whiteboard pointers only.';
+			host.querySelector<HTMLButtonElement>('button[data-ade-whiteboard-save="WB_BE"]')!.click();
+			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="WB_BE"] .ade-orch-wb-ver-tag')?.textContent, 'v1', 'First whiteboard save creates v1 on card');
+
+			const wbCardV1 = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="WB_BE"][data-node-kind="whiteboard"]')!;
+			wbCardV1.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 712, clientX: 250, clientY: 250, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 712, clientX: 250, clientY: 250, bubbles: true }));
+			const wbInput2 = host.querySelector<HTMLTextAreaElement>('textarea[data-ade-whiteboard-content-input="WB_BE"]')!;
+			wbInput2.value = 'API Contract v2: stateless relay tokens with whiteboard pointers only.';
+			host.querySelector<HTMLButtonElement>('button[data-ade-whiteboard-save="WB_BE"]')!.click();
+			assert.strictEqual(host.querySelector('.ade-mission-node[data-node-id="WB_BE"] .ade-orch-wb-ver-tag')?.textContent, 'v2', 'Second whiteboard save bumps version to v2 on card');
+
+			// 4. Corporate top-down dispatch -> baton token puck on CEO -> handoff to Lead with split pointers (detail + artifact + decision + whiteboard) -> lazy pointer preview & cyclic re-entry!
+			const dispatched = await h.control<{ readonly ok: boolean; readonly tokenId: string; readonly targetNodeId: string }>('orchestration.dispatch', {
+				mission: created.id,
+				prompt: 'Ship dual-view Engineering architecture',
+			});
+			assert.strictEqual(dispatched.ok, true);
+			assert.strictEqual(dispatched.targetNodeId, 'CEO');
+			assert.ok(host.querySelector('[data-ade-orch-token-puck="CEO"]'), 'Live baton token puck mounts on CEO card');
+
+			const handedOff = await h.control<{ readonly ok: boolean; readonly nextTokenIds: readonly string[]; readonly handedOffTo: readonly string[]; readonly payloadPtr?: string }>('token.handoff', {
+				mission: created.id,
+				tokenId: dispatched.tokenId,
+				to: ['Lead'],
+				summary: 'Implement cyclic backend engine',
+				detail: 'HANDOFF_DETAIL_SECRET_PAYLOAD: Ensure O(1) delta cursors and strict directed edge enforcement.',
+				artifacts: [{ title: 'Schema Spec', content: 'ARTIFACT_BODY_SECRET: hopLog + contextRefs manifest.' }],
+				decisions: [{ title: 'Edge Policy', content: 'DECISION_BODY_SECRET: Return edges live in choreography.' }],
+				whiteboardIds: ['WB_BE'],
+			});
+			assert.strictEqual(handedOff.ok, true);
+			assert.deepStrictEqual(handedOff.handedOffTo, ['Lead']);
+			assert.ok(handedOff.payloadPtr?.startsWith('hop-'), 'Handoff detail spills into independent hop-N pointer');
+
+			// Click Lead's live baton puck -> shows pass history & typed pointer chips WITHOUT preloading bodies, and clicking a chip lazily opens [data-ade-ptr-preview]!
+			const leadPuck = host.querySelector<HTMLButtonElement>('[data-ade-orch-token-puck="Lead"]')!;
+			assert.ok(leadPuck, 'Handoff moves live baton puck onto Lead card');
+			leadPuck.click();
+			const popoverEl = host.querySelector<HTMLElement>('[data-ade-mission-emp-popover="true"]')!;
+			const wbPointerBtn = popoverEl.querySelector<HTMLButtonElement>('button[data-ade-wb-pointer="WB_BE"]')!;
+			const decPointerBtn = popoverEl.querySelector<HTMLButtonElement>('button[data-ptr-kind="decision"]')!;
+			assert.ok(wbPointerBtn, 'Baton token popover surfaces lightweight whiteboard pointer WB_BE');
+			assert.ok(decPointerBtn, 'Baton token popover surfaces split decision pointer chip');
+			assert.ok(popoverEl.querySelector('[data-ade-orch-hop-history="true"]'), 'Baton token popover surfaces compact pass history trail');
+			assert.ok(!(popoverEl.textContent ?? '').includes('stateless relay tokens'), 'Token popover displays pointer reference, NOT full whiteboard body text');
+			assert.ok(!(popoverEl.textContent ?? '').includes('DECISION_BODY_SECRET'), 'Token popover does NOT preload decision body until clicked');
+
+			// Click decision pointer chip -> lazily dereferences body inside [data-ade-ptr-preview]!
+			const previewPane = popoverEl.querySelector<HTMLElement>('[data-ade-ptr-preview="true"]')!;
+			assert.strictEqual(previewPane.hidden, true, 'Pointer preview stays collapsed before click');
+			decPointerBtn.click();
+			assert.strictEqual(previewPane.hidden, false, 'Clicking pointer chip lazily reveals preview pane');
+			assert.ok((previewPane.textContent ?? '').includes('DECISION_BODY_SECRET'), 'Preview pane displays dereferenced decision content on demand');
+
+			// Control-plane token.read & token.history work end-to-end
+			const readRes = await h.control<{ readonly items: readonly { readonly ptr: string; readonly ok: boolean; readonly content?: string }[] }>('token.read', {
+				mission: created.id,
+				tokenId: handedOff.nextTokenIds[0],
+				ptrs: [handedOff.payloadPtr!, decPointerBtn.dataset.adeContextPtr!],
+			});
+			assert.strictEqual(readRes.items.length, 2);
+			assert.ok(readRes.items[0].ok && readRes.items[0].content?.includes('HANDOFF_DETAIL_SECRET_PAYLOAD'));
+			assert.ok(readRes.items[1].ok && readRes.items[1].content?.includes('DECISION_BODY_SECRET'));
+
+			// 5. Dynamic runtime subordinate expansion: Lead recruits a new L3 subordinate (Eve) on canvas & updates code editor bidirectionally!
+			const hired = await h.control<{ readonly ok: boolean; readonly nodeId: string }>('orchestration.staff.create', {
+				mission: created.id,
+				callerNodeId: 'Lead',
+				name: 'Eve',
+				role: 'L3',
+				department: 'Backend Dept',
+				bidirectional: true,
+			});
+			assert.strictEqual(hired.ok, true);
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-kind="staff"]').length, 5, 'Runtime subordinate creation adds 5th staff card directly onto canvas');
+			assert.ok(host.querySelector(`.ade-mission-node[data-node-id="${hired.nodeId}"]`), 'Newly recruited subordinate renders on Orchestration canvas');
+			assert.ok(codeInput.value.includes('Eve'), 'Declarative code editor syncs bidirectionally with dynamically created subordinate');
+
+			// Cyclic re-entry: Lead hands baton back up to CEO -> CEO re-wakes with delta-collapsed history!
+			const replyToCeo = await h.control<{ readonly ok: boolean; readonly nextTokenIds: readonly string[]; readonly handedOffTo: readonly string[] }>('token.handoff', {
+				mission: created.id,
+				tokenId: handedOff.nextTokenIds[0],
+				to: ['CEO'],
+				summary: 'Backend & Eve onboarded, ready for sign-off',
+			});
+			assert.strictEqual(replyToCeo.ok, true);
+			assert.deepStrictEqual(replyToCeo.handedOffTo, ['CEO']);
+			assert.ok(host.querySelector('[data-ade-orch-token-puck="CEO"]'), 'CEO re-wakes with baton puck on cyclic re-entry');
+
+			const ceoDeltaHistory = await h.control<{ readonly ok: boolean; readonly delta?: { readonly isReentrantVisit: boolean; readonly earlierHops: readonly unknown[]; readonly newHops: readonly unknown[] } }>('token.history', {
+				mission: created.id,
+				tokenId: replyToCeo.nextTokenIds[0],
+				includeAll: false,
+			});
+			assert.strictEqual(ceoDeltaHistory.ok, true);
+			assert.strictEqual(ceoDeltaHistory.delta?.isReentrantVisit, true, 'CEO cyclic re-entry activates delta cursor');
+			assert.ok((ceoDeltaHistory.delta?.earlierHops.length ?? 0) >= 2, 'CEO already-seen hops collapse into earlierHops');
+			assert.strictEqual(ceoDeltaHistory.delta?.newHops.length, 1, 'CEO sees strictly the 1 new return hop from Lead');
+
+			// Non-blocking authoring-time advisory: editing a one-way downward edge displays a tip in drawer status without blocking render!
+			host.querySelector<HTMLButtonElement>('button[data-ade-mission-file-btn="true"]')!.click();
+			const beforeOneWay = codeInput.value;
+			codeInput.value = 'flowchart TD\n  CEO["@Alice · CEO (L1)"] --> Lead["@Bob · Backend Lead (L2)"]';
+			codeInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			await timeout(150);
+			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-kind="staff"]').length, 2, 'One-way graph still renders cleanly (non-blocking)');
+			const statusText = host.querySelector<HTMLElement>('.ade-mission-drawer-status')?.textContent ?? '';
+			assert.ok(/<-->|one-way|单向/.test(statusText), `Expected non-blocking return-edge choreography tip in drawer status, got: ${statusText}`);
+			codeInput.value = beforeOneWay;
+			codeInput.dispatchEvent(new mainWindow.Event('input', { bubbles: true }));
+			await timeout(150);
+			host.querySelector<HTMLButtonElement>('button[data-ade-drawer-close="true"]')!.click();
+
+			// 6. Blank-canvas right-click exposes Add Group, Add Staff & Add Whiteboard actions
+			const viewportEl = host.querySelector<HTMLElement>('.ade-mission-viewport')!;
+			viewportEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { clientX: 520, clientY: 360, bubbles: true, cancelable: true }));
+			assert.ok(host.querySelector('button[data-ade-ctx-action="add-group"]'), 'Orchestration blank-canvas menu offers New Group / Department');
+			assert.ok(host.querySelector('button[data-ade-ctx-action="add-staff"]'), 'Orchestration blank-canvas menu offers New Staff Node');
+			assert.ok(host.querySelector('button[data-ade-ctx-action="add-whiteboard"]'), 'Orchestration blank-canvas menu offers New Department Whiteboard');
+			host.querySelector<HTMLButtonElement>('button[data-ade-ctx-action="add-group"]')!.click();
+			const grpInput = host.querySelector<HTMLInputElement>('input[data-ade-orch-group-name="true"]')!;
+			assert.ok(grpInput, 'Clicking New Group opens group creation popover');
+			grpInput.value = 'Security Ops';
+			host.querySelector<HTMLButtonElement>('button[data-ade-orch-group-submit="true"]')!.click();
+			assert.ok(host.querySelector('.ade-orch-dept-region[data-ade-dept-region="Security Ops"]'), 'Newly created empty Group renders immediately on canvas');
+			assert.ok((missionStore.getMission(created.id)?.orchestrationText ?? '').includes('subgraph Security_Ops["Security Ops"]'), 'Empty Group persists in Mermaid code');
+
+			// 7. Interactive Group Pill Drag moves ALL member cards of Backend Dept simultaneously!
+			const leadCardBefore = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="Lead"]')!;
+			const wbCardBefore = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="WB_BE"]')!;
+			const leadX0 = Number.parseFloat(leadCardBefore.style.left);
+			const leadY0 = Number.parseFloat(leadCardBefore.style.top);
+			const wbX0 = Number.parseFloat(wbCardBefore.style.left);
+			const wbY0 = Number.parseFloat(wbCardBefore.style.top);
+			const deptPill = host.querySelector<SVGGElement>('.ade-orch-dept-pill-group[data-ade-dept-pill="Backend"]')!;
+			assert.ok(deptPill, 'Backend department exposes interactive draggable & renamable header pill');
+			deptPill.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 801, clientX: 300, clientY: 200, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointermove', { button: 0, pointerId: 801, clientX: 380, clientY: 240, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 801, clientX: 380, clientY: 240, bubbles: true }));
+			const leadCardAfter = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="Lead"]')!;
+			const wbCardAfter = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="WB_BE"]')!;
+			assert.ok(Number.parseFloat(leadCardAfter.style.left) > leadX0, 'Dragging group pill moves Lead staff card right');
+			assert.ok(Number.parseFloat(leadCardAfter.style.top) > leadY0, 'Dragging group pill moves Lead staff card down');
+			assert.ok(Number.parseFloat(wbCardAfter.style.left) > wbX0, 'Dragging group pill moves member Whiteboard card right simultaneously');
+			assert.ok(Number.parseFloat(wbCardAfter.style.top) > wbY0, 'Dragging group pill moves member Whiteboard card down simultaneously');
+
+			// 8. Interactive Double-Click Group Pill Inline Rename updates canvas, Mermaid subgraph, member dept & whiteboard dept!
+			const deptPill2 = host.querySelector<SVGGElement>('.ade-orch-dept-pill-group[data-ade-dept-pill="Backend"]')!;
+			deptPill2.dispatchEvent(new mainWindow.MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+			const inlineGrpInput = host.querySelector<HTMLInputElement>('input[data-ade-inline-group-rename="Backend"]')!;
+			assert.ok(inlineGrpInput, 'Double-clicking group pill opens inline group rename input');
+			inlineGrpInput.value = 'Platform Core Dept';
+			inlineGrpInput.dispatchEvent(new mainWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+			assert.ok(host.querySelector('.ade-orch-dept-region[data-ade-dept-region="Platform Core Dept"]'), 'Renamed group updates immediately on canvas');
+			const renamedCode = missionStore.getMission(created.id)?.orchestrationText ?? '';
+			assert.ok(renamedCode.includes('subgraph Backend["Platform Core Dept"]'), 'Inline group rename updates Mermaid subgraph header');
+			assert.ok(renamedCode.includes('API Contract v2: stateless relay tokens'), 'Lossless whiteboard Markdown body persists directly inside Mermaid code');
+			assert.strictEqual(missionStore.getMission(created.id)?.whiteboards?.WB_BE?.department, 'Platform Core Dept', 'Renaming group syncs member whiteboard department');
+		});
+
+		test('100% lossless export/import migration and autonomous L1 Governor Engineering creation via CLI control plane', async () => {
+			const { h } = createMissionHarness();
+			const projUri = URI.file('/workspace/autonomous-eng');
+			h.projects.addProject(projUri, 'autonomous-eng');
+			const gov1 = h.projects.addSession(projUri, { engineId: 'aexus-claude', resource: URI.parse('ade://gov-auto-1') }, 'Chief Architect', { role: 'governor' });
+			const gov2 = h.projects.addSession(projUri, { engineId: 'aexus-claude', resource: URI.parse('ade://gov-migrated-2') }, 'Migrated Architect', { role: 'governor' });
+
+			// 1. L1 Governor autonomously builds an entire Engineering workspace (Mission DAG + Task Descriptions + Orchestration Groups + Staff + Edges + Multiline Whiteboards + Layout) using its own session caller identity!
+			const govCaller = { caller: 'governor', _verifiedCaller: true, _callerSessionId: gov1.id };
+
+			const initRes = await h.control<{ readonly id: string; readonly ownerSessionId?: string }>('mission.init', {
+				...govCaller,
+				title: 'Autonomous Cloud Platform',
+			});
+			assert.strictEqual(initRes.id, gov1.id);
+			assert.strictEqual(initRes.ownerSessionId, gov1.id);
+
+			await h.control('mission.blueprint.apply', {
+				...govCaller,
+				mission: gov1.id,
+				text: 'flowchart LR\n  T1["Architecture Design"] --> T2["Service Implementation"]\n  T2 --> T3["Release Verification"]',
+			});
+			await h.control('mission.task.set', {
+				...govCaller,
+				mission: gov1.id,
+				node: 'T1',
+				description: 'Define API contracts and storage schema.',
+			});
+			await h.control('mission.task.complete', {
+				...govCaller,
+				mission: gov1.id,
+				node: 'T1',
+				note: 'Spec signed off by Chief Architect',
+			});
+
+			// Build Orchestration step-by-step via Group, Staff, Edge, Whiteboard & Layout CLI actions
+			await h.control('orchestration.apply', {
+				...govCaller,
+				mission: gov1.id,
+				text: [
+					'flowchart LR',
+					'  GOV["Chief Architect"]',
+					'  %% staff GOV [tier=1, rank=governor, name="Chief Architect"]',
+				].join('\n'),
+			});
+			const grpCreated = await h.control<{ readonly ok: boolean; readonly groupId: string }>('orchestration.group.create', {
+				...govCaller,
+				mission: gov1.id,
+				name: 'Backend Team',
+				groupId: 'BackendTeam',
+			});
+			assert.strictEqual(grpCreated.ok, true);
+			assert.strictEqual(grpCreated.groupId, 'BackendTeam');
+
+			const empCreated = await h.control<{ readonly ok: boolean; readonly nodeId: string; readonly agentId?: string }>('orchestration.staff.create', {
+				...govCaller,
+				mission: gov1.id,
+				callerNodeId: 'GOV',
+				id: 'BE_Lead',
+				name: 'Backend Manager',
+				rank: 'L2',
+				department: 'Backend Team',
+				bidirectional: true,
+			});
+			assert.strictEqual(empCreated.ok, true);
+			assert.strictEqual(empCreated.nodeId, 'BE_Lead');
+
+			// Strict no-rank-skip check: L1 Governor cannot skip L2 to directly recruit L3
+			await assert.rejects(
+				() => h.control('orchestration.staff.create', {
+					...govCaller,
+					mission: gov1.id,
+					callerNodeId: 'GOV',
+					id: 'BE_Eng_Skip',
+					name: 'Skipped Engineer',
+					rank: 'L3',
+					department: 'Backend Team',
+				}),
+				/RANK_SKIP_FORBIDDEN/i,
+			);
+
+			// L2 Backend Manager legitimately recruits its own immediate L3 subordinate in the same department
+			const beLeadCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: empCreated.agentId };
+			await h.control('orchestration.staff.create', {
+				...beLeadCaller,
+				mission: gov1.id,
+				callerNodeId: 'BE_Lead',
+				id: 'BE_Eng',
+				name: 'Backend Engineer',
+				rank: 'L3',
+				department: 'Backend Team',
+				bidirectional: true,
+			});
+			await h.control('orchestration.edge.label', {
+				...govCaller,
+				mission: gov1.id,
+				from: 'GOV',
+				to: 'BE_Lead',
+				label: 'architecture',
+			});
+			const multilineWbContent = '# Backend Contract\n\n- Endpoint: `/v1/jobs`\n- Guard: `%% wb-end` literal preserved\n';
+			await h.control('whiteboard.create', {
+				...govCaller,
+				mission: gov1.id,
+				id: 'WB_BE',
+				department: 'Backend Team',
+				title: 'Backend Spec',
+				content: multilineWbContent,
+			});
+			await h.control('whiteboard.rename', {
+				...govCaller,
+				mission: gov1.id,
+				id: 'WB_BE',
+				title: 'Backend Architecture Spec',
+			});
+			await h.control('orchestration.group.rename', {
+				...govCaller,
+				mission: gov1.id,
+				group: 'BackendTeam',
+				name: 'Backend Engineering',
+			});
+			await h.control('orchestration.group.create', {
+				...govCaller,
+				mission: gov1.id,
+				name: 'Empty Future Squad',
+			});
+			await h.control('orchestration.layout.set', {
+				...govCaller,
+				mission: gov1.id,
+				layoutMode: 'radial',
+			});
+
+			// 2. Lossless Export (both Orchestration Mermaid & Full Engineering Bundle)
+			const orchExported = await h.control<{ readonly orchestrationText: string; readonly layoutMode: string; readonly groupCount: number }>('orchestration.export', {
+				...govCaller,
+				mission: gov1.id,
+				withPositions: true,
+			});
+			assert.strictEqual(orchExported.layoutMode, 'radial');
+			assert.strictEqual(orchExported.groupCount, 2);
+			assert.ok(orchExported.orchestrationText.includes('%% layout radial'));
+			assert.ok(orchExported.orchestrationText.includes('subgraph BackendTeam["Backend Engineering"]'));
+			assert.ok(orchExported.orchestrationText.includes('subgraph Empty_Future_Squad["Empty Future Squad"]'));
+			assert.ok(orchExported.orchestrationText.includes('%% wb-body WB_BE'));
+
+			const bundleExported = await h.control<Record<string, unknown>>('mission.export', {
+				...govCaller,
+				mission: gov1.id,
+				withPositions: true,
+			});
+
+			// 3. Migrate 100% losslessly into a brand-new L1 Governor session via `mission.import`!
+			const gov2Caller = { caller: 'governor', _verifiedCaller: true, _callerSessionId: gov2.id };
+			const imported = await h.control<{ readonly ok: boolean; readonly id: string; readonly taskCount: number; readonly groupCount: number; readonly staffCount: number; readonly whiteboardCount: number; readonly layoutMode: string }>('mission.import', {
+				...gov2Caller,
+				text: JSON.stringify(bundleExported),
+			});
+			assert.strictEqual(imported.ok, true);
+			assert.strictEqual(imported.id, gov2.id);
+			assert.strictEqual(imported.taskCount, 3);
+			assert.strictEqual(imported.groupCount, 2, 'Both populated and empty groups migrated losslessly');
+			assert.strictEqual(imported.staffCount, 3);
+			assert.strictEqual(imported.whiteboardCount, 1);
+			assert.strictEqual(imported.layoutMode, 'radial');
+
+			// Verify migrated Mission DAG task status, description, and Whiteboard byte-for-byte fidelity!
+			const migratedTask = await h.control<{ readonly description: string; readonly status: string }>('mission.task.get', {
+				...gov2Caller,
+				mission: gov2.id,
+				node: 'T1',
+			});
+			assert.strictEqual(migratedTask.description, 'Define API contracts and storage schema.');
+			assert.strictEqual(migratedTask.status, 'completed');
+
+			const migratedWb = await h.control<{ readonly ok: boolean; readonly whiteboard: { readonly title: string; readonly department: string; readonly content: string } }>('whiteboard.read', {
+				...gov2Caller,
+				mission: gov2.id,
+				id: 'WB_BE',
+			});
+			assert.strictEqual(migratedWb.ok, true);
+			assert.strictEqual(migratedWb.whiteboard.title, 'Backend Architecture Spec');
+			assert.strictEqual(migratedWb.whiteboard.department, 'Backend Engineering');
+			assert.strictEqual(migratedWb.whiteboard.content, multilineWbContent, 'Whiteboard multiline Markdown body migrated byte-for-byte losslessly');
+
+			// 4. Verify CLI remove/assign/rename operations on the migrated Engineering
+			await h.control('orchestration.group.assign', {
+				...gov2Caller,
+				mission: gov2.id,
+				node: 'BE_Eng',
+				group: 'Empty Future Squad',
+			});
+			await h.control('orchestration.staff.rename', {
+				...gov2Caller,
+				mission: gov2.id,
+				node: 'BE_Eng',
+				label: 'Staff Platform Engineer',
+			});
+			await h.control('orchestration.edge.connect', {
+				...gov2Caller,
+				mission: gov2.id,
+				from: 'GOV',
+				to: 'BE_Eng',
+				label: 'escalate',
+				bidirectional: true,
+			});
+			await h.control('orchestration.edge.remove', {
+				...gov2Caller,
+				mission: gov2.id,
+				from: 'GOV',
+				to: 'BE_Eng',
+				both: true,
+			});
+			await h.control('whiteboard.remove', {
+				...gov2Caller,
+				mission: gov2.id,
+				id: 'WB_BE',
+			});
+			const wbsAfterRemove = await h.control<{ readonly whiteboards: readonly unknown[] }>('whiteboard.list', {
+				...gov2Caller,
+				mission: gov2.id,
+			});
+			assert.strictEqual(wbsAfterRemove.whiteboards.length, 0, 'whiteboard.remove deletes board cleanly from graph and store');
+
+			// L1 Governor cannot rank-skip to remove L3 directly; Human operator (or direct L2 superior) can remove cleanly
+			await assert.rejects(
+				() => h.control('orchestration.staff.remove', {
+					...gov2Caller,
+					mission: gov2.id,
+					node: 'BE_Eng',
+				}),
+				/RANK_SKIP_FORBIDDEN/i,
+			);
+			await h.control('orchestration.staff.remove', {
+				mission: gov2.id,
+				node: 'BE_Eng',
+			});
+			await h.control('orchestration.group.remove', {
+				...gov2Caller,
+				mission: gov2.id,
+				group: 'Empty Future Squad',
+			});
+			const groupsFinal = await h.control<{ readonly groups: readonly { readonly name: string }[] }>('orchestration.group.list', {
+				...gov2Caller,
+				mission: gov2.id,
+			});
+			assert.deepStrictEqual(groupsFinal.groups.map(g => g.name), ['Backend Engineering']);
+		});
+
+		test('Items 5(3) & 8: renders Global Run Console, dual-view switcher, minimap, pre-launch unlocked staff config & session-reset engine switching', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const projUri = URI.file('/workspace/console-ui-test');
+			h.projects.addProject(projUri, 'console-ui-test');
+			const gov = h.projects.addSession(projUri, { engineId: 'aexus-claude', resource: URI.parse('ade://gov-ui-1') }, 'Chief Architect', { role: 'governor' });
+
+			const created = missionStore.createMission({
+				id: gov.id,
+				ownerSessionId: gov.id,
+				title: 'Global Console & Config Verification',
+				projectUri: projUri.toString(),
+				mermaidText: 'flowchart LR\n  T1["API Spec"] --> T2["Build API"]',
+				orchestrationText: [
+					'flowchart LR',
+					'  CEO["Chief Architect @Alice"] <--> Lead["Backend Lead @Bob"]',
+					'  %% staff CEO [tier=1, rank=governor, name="Alice", engine=aexus-claude, model=claude-opus-4-6]',
+					'  %% staff Lead [tier=2, rank=manager, dept="Backend", name="Bob", engine=aexus-codex, model=gpt-5.4, thinking=high]',
+				].join('\n'),
+			});
+
+			const host = append(mainWindow.document.body, $('.ade-eng-console-test-host'));
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			const orchInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'orchestration')));
+			await pane.setInput(orchInput, undefined, {}, CancellationToken.None);
+
+			// 1. Item 8: Global Console Bar, Dual-View Switcher, Split View button & Minimap are mounted and live!
+			const consoleBar = host.querySelector<HTMLElement>('[data-ade-eng-console-bar="true"]')!;
+			assert.ok(consoleBar && !consoleBar.hidden, 'Global console bar is visible');
+			const orchTab = host.querySelector<HTMLButtonElement>('[data-ade-eng-view-btn="orchestration"]')!;
+			const missionTab = host.querySelector<HTMLButtonElement>('[data-ade-eng-view-btn="mission"]')!;
+			const splitBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-view-split="true"]')!;
+			const pauseBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-pause-btn="true"]')!;
+			const abortBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-abort-btn="true"]')!;
+			const minimapBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-minimap-btn="true"]')!;
+			const minimapEl = host.querySelector<HTMLElement>('[data-ade-mission-minimap="true"]')!;
+			assert.ok(orchTab.classList.contains('is-active'), 'Orchestration view tab active');
+			assert.ok(!missionTab.classList.contains('is-active'), 'Mission DAG tab inactive');
+			assert.ok(splitBtn && pauseBtn && abortBtn && minimapBtn, 'All console controls present');
+			assert.ok(minimapEl && !minimapEl.hidden, 'Minimap rendered for non-empty topology');
+
+			// Toggle minimap off and back on
+			minimapBtn.click();
+			assert.strictEqual(minimapEl.hidden, true, 'Minimap hides when toggled off');
+			minimapBtn.click();
+			assert.strictEqual(minimapEl.hidden, false, 'Minimap reappears when toggled back on');
+
+			// Dispatch a live token, verify in-flight counter updates, test Pause/Resume & 2-click Abort All!
+			const disp = await missionRuntime.dispatchOrchestrationRequirement(created.id, { prompt: 'Ship billing v2', targetNodeId: 'CEO' });
+			assert.strictEqual(disp.ok, true);
+			const tokensPill = host.querySelector<HTMLElement>('[data-ade-eng-console-tokens="true"]')!;
+			assert.ok(tokensPill.classList.contains('is-active'), 'Tokens pill reflects active in-flight baton');
+
+			pauseBtn.click();
+			await timeout(20);
+			assert.strictEqual(missionRuntime.getOrchestrationState(created.id).status, 'paused', 'Pause button pauses orchestration');
+			assert.ok(pauseBtn.classList.contains('is-paused'));
+
+			pauseBtn.click();
+			await timeout(20);
+			assert.strictEqual(missionRuntime.getOrchestrationState(created.id).status, 'running', 'Second click resumes orchestration');
+
+			// 2-click emergency Abort All confirmation
+			abortBtn.click();
+			assert.ok(abortBtn.classList.contains('is-confirming'), 'First click arms emergency abort confirmation');
+			abortBtn.click();
+			await timeout(20);
+			const afterAbort = missionRuntime.getOrchestrationState(created.id);
+			assert.strictEqual(afterAbort.tokens[disp.data!.tokenId].status, 'aborted', 'Second click aborts all active tokens');
+
+			// 2. Item 5(3): Pre-launch staff card model & engine buttons are UNLOCKED before session spawn!
+			const leadCard = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="Lead"]')!;
+			const leadEngineBtn = leadCard.querySelector<HTMLButtonElement>('.ade-mission-engine-pill')!;
+			const leadModelRow = leadCard.querySelector<HTMLElement>('.ade-mission-core-model-row')!;
+			assert.strictEqual(leadEngineBtn.disabled, false, 'Pre-launch engine switcher must NOT be locked');
+			assert.ok(leadEngineBtn.classList.contains('is-editable'));
+			assert.ok(leadModelRow.classList.contains('is-editable'));
+			assert.strictEqual(leadModelRow.dataset.nodeModel, 'gpt-5.4');
+			assert.strictEqual(leadModelRow.dataset.nodeThinking, 'high');
+
+			// 3. Session-reset engine switching via orchestration.staff.configure unbinds active session & persists new engine in code!
+			const cfgRes = await h.control<{ readonly ok: boolean; readonly resetSession?: boolean }>('orchestration.staff.configure', {
+				mission: created.id,
+				node: 'CEO',
+				engine: 'aexus-codex',
+				model: 'gpt-5.4',
+				thinking: 'high',
+				resetSession: true,
+			});
+			assert.strictEqual(cfgRes.ok, true);
+			assert.strictEqual(cfgRes.resetSession, true, 'Active session was reset during engine switch');
+			assert.strictEqual(h.projects.getAgent(gov.id)?.session, undefined, 'Agent session cleanly unbound after reset');
+			const updatedOrchText = missionStore.getMission(created.id)?.orchestrationText ?? '';
+			assert.ok(updatedOrchText.includes('engine=aexus-codex'), 'New engine persisted into orchestration code');
+			assert.ok(updatedOrchText.includes('model=gpt-5.4'), 'New model persisted into orchestration code');
+		});
+
+		test('enforces clean legacy retirement, whiteboard lifecycle & optimistic concurrency, anti-forgery staffing, native org.* on Orchestration, waiting_join visibility, and daemon sync', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const syncedDaemonSnapshots: { missionId: string; status: string; activeTokenCount: number; waitingJoinCount: number }[] = [];
+			h.instantiation.stub(IAdeEngineeringBackendService, upcastPartial<IAdeEngineeringBackendService>({
+				syncOrchestrationDaemonState: async snap => {
+					syncedDaemonSnapshots.push({
+						missionId: snap.missionId,
+						status: snap.status,
+						activeTokenCount: snap.activeTokenCount,
+						waitingJoinCount: snap.waitingJoinCount,
+					});
+				},
+			}));
+
+			const projUri = URI.file('/workspace/hardened-eng');
+			h.projects.addProject(projUri, 'hardened-eng');
+			const gov = h.projects.addSession(projUri, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/hardened-gov') }, 'Chief Architect', { role: 'governor' });
+			const govCaller = { caller: 'governor', _verifiedCaller: true, _callerSessionId: gov.id };
+
+			const initRes = await h.control<{ readonly id: string }>('mission.init', {
+				...govCaller,
+				owner: gov.id,
+				title: 'Hardened Engineering Backend',
+				mermaid: 'flowchart LR\n  T1["API Spec"] --> T2["Auth Impl"]',
+			});
+			const missionId = initRes.id;
+
+			await h.control('orchestration.apply', {
+				...govCaller,
+				mission: missionId,
+				text: [
+					'flowchart LR',
+					'  CEO["@Alice · CEO (L1)"]',
+					'  subgraph Backend["Backend Dept"]',
+					'    BE_Lead["@Bob · Backend Lead (L2)"]',
+					'    BE_Dev["@Dave · Backend Dev (L3)"]',
+					'    WB_BE[("Whiteboard: Backend Spec")]',
+					'  end',
+					'  subgraph Frontend["Frontend Dept"]',
+					'    FE_Lead["@Carol · Frontend Lead (L2)"]',
+					'    WB_FE[("Whiteboard: Frontend Spec")]',
+					'  end',
+					'  CEO <--> BE_Lead',
+					'  CEO <--> FE_Lead',
+					'  BE_Lead <--> BE_Dev',
+					'  %% staff CEO [tier=1, rank=governor, name="Alice"]',
+					'  %% staff BE_Lead [tier=2, rank=manager, dept="Backend Dept", name="Bob"]',
+					'  %% staff BE_Dev [tier=3, rank=worker, dept="Backend Dept", name="Dave"]',
+					'  %% staff FE_Lead [tier=2, rank=manager, dept="Frontend Dept", name="Carol"]',
+				].join('\n'),
+			});
+			missionStore.ensureOrchestrationStaffSynced(missionId);
+			const orchInit = missionRuntime.getOrchestrationState(missionId);
+			const beLeadAgentId = orchInit.nodeAgentIds.BE_Lead;
+			const beDevAgentId = orchInit.nodeAgentIds.BE_Dev;
+			assert.ok(beLeadAgentId && beDevAgentId, 'Orchestration staff agents synced');
+
+			const beLeadCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: beLeadAgentId };
+			const beDevCaller = { caller: 'worker', _verifiedCaller: true, _callerSessionId: beDevAgentId };
+
+			// L1: Legacy mission.prompt.* endpoints are retired with LEGACY_API_REMOVED
+			for (const retiredAction of ['mission.prompt.list', 'mission.prompt.get', 'mission.prompt.set']) {
+				await assert.rejects(
+					() => h.control(retiredAction, { mission: missionId, node: 'T1', prompt: 'legacy' }),
+					/LEGACY_API_REMOVED/i,
+					`${retiredAction} must fail cleanly with LEGACY_API_REMOVED`,
+				);
+			}
+
+			// L2: session.configure changing role on Orchestration staff does NOT trigger legacy Factory Wall error
+			const roleUpdated = await h.control<{ readonly role?: string }>('session.configure', {
+				id: beLeadAgentId,
+				role: 'governor',
+			});
+			assert.strictEqual(roleUpdated.role, 'governor', 'Orchestration staff is exempt from legacy off-graph factory wall');
+			await h.control('session.configure', { id: beLeadAgentId, role: 'manager' });
+
+			// L3: Legacy static-Mission control actions are cleanly blocked on Orchestration-backed workspaces
+			await assert.rejects(() => h.control('mission.boundary.set', { mission: missionId, offGraphMaxTier: 1 }), /LEGACY_API_REMOVED/i);
+			await assert.rejects(() => h.control('mission.start', { mission: missionId }), /LEGACY_API_REMOVED/i);
+			await assert.rejects(() => h.control('mission.recall', { mission: missionId }), /LEGACY_API_REMOVED/i);
+			await assert.rejects(() => h.control('mission.retry', { mission: missionId, node: 'T1' }), /LEGACY_API_REMOVED/i);
+			await assert.rejects(() => h.control('mission.patch', { mission: missionId, mermaid: 'flowchart LR\n  T1["A"]' }), /LEGACY_API_REMOVED/i);
+			await assert.rejects(() => h.control('mission.gate', { mission: missionId, node: 'T1', decision: 'approve' }), /LEGACY_API_REMOVED/i);
+
+			// W2/W3/W4: Whiteboards create/write optimistic concurrency, --department filter, dept-lead rename/remove, group.rename sync
+			await h.control('whiteboard.write', { ...beLeadCaller, mission: missionId, id: 'WB_BE', content: 'BE v1' });
+			await h.control('whiteboard.write', { mission: missionId, id: 'WB_FE', content: 'FE v1' });
+
+			await assert.rejects(
+				() => h.control('whiteboard.create', { ...beLeadCaller, mission: missionId, id: 'WB_BE', department: 'Backend Dept', title: 'Dup' }),
+				/ALREADY_EXISTS/i,
+			);
+			await assert.rejects(
+				() => h.control('whiteboard.write', { ...beLeadCaller, mission: missionId, id: 'WB_BE', content: 'stale', expectedVersion: 0 }),
+				/VERSION_CONFLICT/i,
+			);
+			const wbOk = await h.control<{ readonly whiteboard: { readonly version: number } }>('whiteboard.write', {
+				...beLeadCaller,
+				mission: missionId,
+				id: 'WB_BE',
+				content: 'BE v2',
+				expectedVersion: 1,
+			});
+			assert.strictEqual(wbOk.whiteboard.version, 2);
+
+			const wbFiltered = await h.control<{ readonly whiteboards: readonly { readonly whiteboardId: string }[] }>('whiteboard.list', {
+				mission: missionId,
+				department: 'Backend Dept',
+			});
+			assert.deepStrictEqual(wbFiltered.whiteboards.map(w => w.whiteboardId), ['WB_BE']);
+
+			// Department lead can rename its own department whiteboard, but NOT rename or remove a foreign department whiteboard!
+			const beRenamed = await h.control<{ readonly ok: boolean; readonly whiteboard: { readonly title: string } }>('whiteboard.rename', {
+				...beLeadCaller,
+				mission: missionId,
+				id: 'WB_BE',
+				title: 'Backend Core Spec',
+			});
+			assert.strictEqual(beRenamed.ok, true);
+			assert.strictEqual(beRenamed.whiteboard.title, 'Backend Core Spec');
+
+			await assert.rejects(
+				() => h.control('whiteboard.rename', { ...beLeadCaller, mission: missionId, id: 'WB_FE', title: 'Hijack' }),
+				/CROSS_DEPARTMENT_FORBIDDEN/i,
+			);
+			await assert.rejects(
+				() => h.control('whiteboard.remove', { ...beLeadCaller, mission: missionId, id: 'WB_FE' }),
+				/CROSS_DEPARTMENT_FORBIDDEN/i,
+			);
+
+			// orchestration.group.rename syncs record.whiteboards[id].department
+			await h.control('orchestration.group.rename', {
+				...govCaller,
+				mission: missionId,
+				group: 'Backend',
+				name: 'Backend Core',
+			});
+			assert.strictEqual(missionStore.getMission(missionId)?.whiteboards?.WB_BE?.department, 'Backend Core');
+
+			// S1: Non-Human caller cannot forge callerNodeId on orchestration.staff.create or remove
+			await assert.rejects(
+				() => h.control('orchestration.staff.create', {
+					...beLeadCaller,
+					mission: missionId,
+					callerNodeId: 'CEO',
+					name: 'Forged Sub',
+					rank: 'L2',
+				}),
+				/cannot impersonate staff node/i,
+			);
+			await assert.rejects(
+				() => h.control('orchestration.staff.remove', {
+					...beLeadCaller,
+					mission: missionId,
+					callerNodeId: 'CEO',
+					node: 'FE_Lead',
+				}),
+				/cannot impersonate staff node/i,
+			);
+
+			// S3: Native org.subordinates discovers downward Orchestration staff WITHOUT legacy boundary.supervisors!
+			const beSubs = await h.control<{
+				readonly orchestrationSubordinates?: readonly { readonly nodeId: string; readonly agentId?: string }[];
+				readonly missionJurisdictions: readonly { readonly missionId: string; readonly managedNodeIds: readonly string[] }[];
+			}>('org.subordinates', { ...beLeadCaller, mission: missionId });
+			assert.ok(beSubs.orchestrationSubordinates?.some(s => s.nodeId === 'BE_Dev' && s.agentId === beDevAgentId), 'L2 Manager sees BE_Dev via native org.subordinates');
+			assert.ok(!beSubs.orchestrationSubordinates?.some(s => s.nodeId === 'CEO' || s.nodeId === 'FE_Lead'), 'Never exposes superiors or other departments');
+
+			// Dispatch, mint with waitJoin, test S4 (token.current shows waiting_join + barrier), L3 (token.reject rejected on otok-*),
+			// S5 (daemon sync invoked), org.context shows live Orchestration heldTokens, and L3 pure-execution staff can call token.return!
+			const disp = await h.control<{ readonly tokenId: string }>('orchestration.dispatch', {
+				...govCaller,
+				mission: missionId,
+				prompt: 'Ship Auth v2',
+				task: 'T1',
+				whiteboard: 'WB_BE',
+			});
+			assert.ok(syncedDaemonSnapshots.some(s => s.missionId === missionId && s.activeTokenCount === 1), 'commitOrchestrationState synced live daemon snapshot');
+
+			await assert.rejects(
+				() => h.control('token.reject', { ...govCaller, mission: missionId, tokenId: disp.tokenId, reason: 'legacy reject' }),
+				/LEGACY_API_REMOVED/i,
+			);
+
+			const mint1 = await h.control<{ readonly mintedTokenIds: readonly string[]; readonly joinBarrierId?: string }>('token.mint', {
+				...govCaller,
+				mission: missionId,
+				tokenId: disp.tokenId,
+				to: 'BE_Lead',
+				summary: 'Lead backend auth spec',
+				task: 'T1',
+				waitJoin: true,
+			});
+			assert.ok(mint1.joinBarrierId, 'Join barrier created');
+
+			// S4: CEO's token.current surfaces its waiting_join parent token WITH joinBarrier progress!
+			const ceoCur = await h.control<{ readonly tokens: readonly { readonly id: string; readonly status: string; readonly joinBarrier?: { readonly id: string } }[] }>('token.current', {
+				...govCaller,
+				mission: missionId,
+			});
+			const waitingParent = ceoCur.tokens.find(t => t.id === disp.tokenId);
+			assert.strictEqual(waitingParent?.status, 'waiting_join');
+			assert.strictEqual(waitingParent?.joinBarrier?.id, mint1.joinBarrierId);
+
+			// S1: Dynamic recruit + --mint-token keeps BE_Lead's parent token active!
+			const recruited = await h.control<{ readonly ok: boolean; readonly nodeId: string; readonly nextTokenIds?: readonly string[] }>('orchestration.staff.create', {
+				...beLeadCaller,
+				mission: missionId,
+				id: 'BE_QA',
+				name: 'Backend QA',
+				rank: 'L3',
+				department: 'Backend Core',
+				mintTokenId: mint1.mintedTokenIds[0],
+				handoffSummary: 'Write auth integration tests',
+			});
+			assert.strictEqual(recruited.ok, true);
+			assert.strictEqual(recruited.nextTokenIds?.length, 1);
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).tokens[mint1.mintedTokenIds[0]].status, 'active', 'Parent token stays active when using --mint-token');
+
+			// BE_Lead also mints to BE_Dev; org.context sees BE_Dev's live Orchestration token; L3 pure-execution BE_Dev can call token.return!
+			const mintDev = await h.control<{ readonly mintedTokenIds: readonly string[] }>('token.mint', {
+				...beLeadCaller,
+				mission: missionId,
+				tokenId: mint1.mintedTokenIds[0],
+				to: 'BE_Dev',
+				summary: 'Implement JWT verifier',
+				task: 'T1',
+				whiteboard: 'WB_BE',
+			});
+			const devTokId = mintDev.mintedTokenIds[0];
+
+			const devCtx = await h.control<{ readonly heldTokens: readonly { readonly id: string }[] }>('org.context', {
+				...beLeadCaller,
+				mission: missionId,
+				target: 'BE_Dev',
+			});
+			assert.ok(devCtx.heldTokens.some(t => t.id === devTokId), 'Native org.context exposes live Orchestration heldTokens');
+
+			// W4: Department lead removing WB_BE prunes dangling wb:WB_BE pointer from active tokens!
+			const wbRemoved = await h.control<{ readonly ok: boolean; readonly prunedTokenIds?: readonly string[] }>('whiteboard.remove', {
+				...beLeadCaller,
+				mission: missionId,
+				id: 'WB_BE',
+			});
+			assert.strictEqual(wbRemoved.ok, true);
+			assert.ok(wbRemoved.prunedTokenIds?.includes(devTokId), 'Removing WB_BE prunes stale pointer from live dev token');
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).tokens[devTokId].whiteboardPointers, undefined);
+
+			// Pure-execution L3 BE_Dev calls token.return through real control plane (verifying MISSION_UNIVERSAL_OR_TOKEN_ACTIONS fix!)
+			const devRet = await h.control<{ readonly ok: boolean; readonly returnedToNodeId: string }>('token.return', {
+				...beDevCaller,
+				mission: missionId,
+				tokenId: devTokId,
+				summary: 'JWT verifier implemented and unit tested',
+			});
+			assert.strictEqual(devRet.ok, true);
+			assert.strictEqual(devRet.returnedToNodeId, 'BE_Lead');
+		});
+
+		test('Per-node custom color picker (Context Menu -> Code Roundtrip -> Custom Card & Dept Accent) + persistent live baton edge comets', async () => {
+			const { h, missionStore } = createMissionHarness();
+			const orgGov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/color-gov-l1') }, 'Aria', { role: 'governor' });
+			const created = missionStore.createMission({
+				title: 'Hyperion Color Demo',
+				ownerSessionId: orgGov.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: 'flowchart LR\n  T1["Spec"] --> T2["Build"]',
+				orchestrationText: [
+					'flowchart TD',
+					'  %% layout radial',
+					'  CEO["@Aria · Chief (L1)"] <--> AI["@Nova · AI Lead (L2)"]',
+					'  subgraph AI_Dept["AI Kernel"]',
+					'    AI <--> RAG["@Vex · Memory (L3)"]',
+					'    WB_AI[("Whiteboard: AI Spec")]',
+					'    %% whiteboard WB_AI [dept="AI Kernel", title="AI Spec", version=1]',
+					'  end',
+				].join('\n'),
+			});
+
+			const orchInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'orchestration')));
+			const host = append(document.body, $('.monaco-workbench.ade-eng-color-picker-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 9, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			await pane.setInput(orchInput, undefined, {}, CancellationToken.None);
+
+			// 1. Right-click CEO staff card -> inline Color Swatch Picker -> pick 'gold'
+			const ceoEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="CEO"]')!;
+			ceoEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { clientX: 300, clientY: 220, bubbles: true, cancelable: true }));
+			const goldSwatch = host.querySelector<HTMLButtonElement>('[data-ade-node-color-picker="true"] button[data-ade-color-swatch="gold"]')!;
+			assert.ok(goldSwatch, 'Right-click context menu renders inline color swatch picker');
+			goldSwatch.click();
+
+			const updatedCeoEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="CEO"]')!;
+			assert.strictEqual(updatedCeoEl.getAttribute('data-node-color'), 'gold');
+			assert.ok(updatedCeoEl.classList.contains('has-custom-color'));
+			assert.ok((missionStore.getMission(created.id)?.orchestrationText ?? '').includes('color=gold'), 'Node color persists losslessly in Orchestration code');
+
+			// 2. Pick 'cyan' for AI Lead -> department frame harmonizes to cyan!
+			const aiEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="AI"]')!;
+			aiEl.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { clientX: 400, clientY: 220, bubbles: true, cancelable: true }));
+			host.querySelector<HTMLButtonElement>('[data-ade-node-color-picker="true"] button[data-ade-color-swatch="cyan"]')!.click();
+			const deptRegion = host.querySelector<SVGGElement>('[data-ade-dept-region="AI Kernel"]')!;
+			assert.ok(deptRegion.classList.contains('has-custom-dept-accent'), 'Department frame harmonizes accent color with its colored lead');
+
+			// 3. Dispatch & mint a live token -> verify persistent glowing baton packet comet & waiting_join badge on canvas!
+			const disp = await h.control<{ readonly tokenId: string }>('orchestration.dispatch', {
+				mission: created.id,
+				prompt: 'Build AI Kernel',
+				target: 'CEO',
+			});
+			await h.control('token.mint', {
+				mission: created.id,
+				tokenId: disp.tokenId,
+				to: 'AI',
+				summary: 'Own AI Runtime',
+				waitJoin: true,
+			});
+			await timeout(50);
+			const ceoPuck = host.querySelector<HTMLElement>('[data-ade-orch-token-puck="CEO"]')!;
+			assert.strictEqual(ceoPuck.getAttribute('data-token-status'), 'waiting_join', 'CEO displays live waiting_join baton badge');
+			assert.ok(host.querySelector('[data-ade-orch-live-puck="CEO->AI"]'), 'Active token dispatch wire renders persistent glowing baton packet comet');
+
+			// 4. Switch to Mission view & verify circular Task DAG orbs (176x176, 50% radius, circular minimap) + pick 'rose' on Task T1 via context menu
+			const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'mission')));
+			await pane.setInput(missionInput, undefined, {}, CancellationToken.None);
+			const t1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T1"]')!;
+			assert.strictEqual(t1El.getAttribute('data-node-shape'), 'circle', 'Mission Task DAG node renders with circular shape attribute');
+			const t1Card = t1El.querySelector<HTMLElement>('.ade-mission-node-card.is-task-card.is-circular-task')!;
+			assert.ok(t1Card, 'Mission Task DAG card uses circular task orb class');
+			const t1CardStyle = mainWindow.getComputedStyle(t1Card);
+			assert.strictEqual(t1CardStyle.width, '176px');
+			assert.strictEqual(t1CardStyle.height, '176px');
+			assert.strictEqual(t1CardStyle.borderRadius, '50%');
+			assert.strictEqual(t1Card.querySelectorAll('.ade-mission-clamp').length, 0, 'Circular task orb omits rectangular corner clamps');
+			const t1Minimap = host.querySelector<SVGRectElement>('[data-minimap-node="T1"]');
+			assert.strictEqual(t1Minimap?.getAttribute('data-minimap-shape'), 'circle', 'Minimap reflects circular Mission Task DAG node');
+			t1El.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { clientX: 280, clientY: 220, bubbles: true, cancelable: true }));
+			host.querySelector<HTMLButtonElement>('[data-ade-node-color-picker="true"] button[data-ade-color-swatch="rose"]')!.click();
+			const updatedT1 = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T1"]')!;
+			assert.strictEqual(updatedT1.getAttribute('data-node-color'), 'rose');
+			assert.ok((missionStore.getMission(created.id)?.mermaidText ?? '').includes('color=rose'), 'Mission task color persists in Mermaid code');
+		});
+
+		test('Real End-to-End Autonomous Engineering Loop: User Chat -> L1 Root Split -> L2 Dynamic Staff/Config/Task Scope -> AllowedPaths -> Cold Blob Compaction -> Abort Stop -> Final Inbox Delivery', async () => {
+			const storedBlobs = new Map<string, string>();
+			const archivedLines: string[] = [];
+			const stoppedResources: string[] = [];
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const inbox = h.instantiation.get(IAdeInboxService);
+			const backendStub: IAdeEngineeringBackendService = {
+				_serviceBrand: undefined,
+				loadInbox: async () => [],
+				saveInbox: async () => undefined,
+				saveOrchestrationBlobs: async (_mid, blobs) => {
+					for (const b of blobs) {
+						storedBlobs.set(b.ptr, b.payloadJson);
+					}
+				},
+				readOrchestrationBlob: async (_mid, ptr) => storedBlobs.get(ptr),
+				appendOrchestrationArchive: async (_mid, lines) => {
+					archivedLines.push(...lines);
+				},
+				readOrchestrationArchive: async () => archivedLines,
+			};
+			h.instantiation.stub(IAdeEngineeringBackendService, backendStub);
+			const sessionsSvc = h.instantiation.get(IAdeSessionsService);
+			const origStop = sessionsSvc.stop?.bind(sessionsSvc);
+			(sessionsSvc as { stop?: typeof sessionsSvc.stop }).stop = async (session, opts) => {
+				stoppedResources.push(session.resource.toString());
+				if (origStop) {
+					await origStop(session, opts);
+				}
+			};
+
+			const govAgent = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/e2e-gov-l1') }, 'Aria', { role: 'governor' });
+			const created = missionStore.createMission({
+				title: 'Autonomous Shipping E2E',
+				ownerSessionId: govAgent.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  T_SPEC["Architecture Spec"] --> T_BE["Backend API"]',
+					'  T_SPEC --> T_FE["Frontend UI"]',
+					'  T_BE --> T_SHIP["Final Release"]',
+					'  T_FE --> T_SHIP',
+					'  %% task T_SPEC [owner=CEO, dept="Executive"]',
+					'  %% task T_BE [owner=BE_Lead, dept="Backend", min_tier=2]',
+					'  %% task T_FE [owner=FE_Lead, dept="Frontend", min_tier=2]',
+					'  %% task T_SHIP [owner=CEO, dept="Executive"]',
+				].join('\n'),
+				orchestrationText: [
+					'flowchart TD',
+					'  CEO["@Aria · Chief Architect (L1)"] <--> BE_Lead["@Bob · Backend Lead (L2)"]',
+					'  CEO <--> FE_Lead["@Carol · Frontend Lead (L2)"]',
+					'  %% staff CEO [tier=1, dept="Executive", role_prompt="Own global architecture and verify final releases."]',
+					'  subgraph Backend["Backend"]',
+					'    BE_Lead <--> BE_Dev["@Dave · Backend Dev (L4)"]',
+					'    %% staff BE_Dev [tier=4, dept="Backend", role_prompt="Implement backend handlers only.", paths="src/backend|tests/backend"]',
+					'    WB_BE[("Whiteboard: Backend Spec")]',
+					'    %% whiteboard WB_BE [dept="Backend", title="Backend Spec", version=1]',
+					'  end',
+					'  subgraph Frontend["Frontend"]',
+					'    FE_Lead',
+					'    WB_FE[("Whiteboard: Frontend Spec")]',
+					'    %% whiteboard WB_FE [dept="Frontend", title="Frontend Spec", version=1]',
+					'  end',
+				].join('\n'),
+			});
+			const missionId = created.id;
+			const orchState0 = missionRuntime.getOrchestrationState(missionId);
+			const beLeadAgentId = orchState0.nodeAgentIds['BE_Lead']!;
+			const feLeadAgentId = orchState0.nodeAgentIds['FE_Lead']!;
+			const beDevAgentId = orchState0.nodeAgentIds['BE_Dev']!;
+			assert.ok(beLeadAgentId && feLeadAgentId && beDevAgentId, 'All Orchestration staff synced to unique agents');
+
+			// 1. Verify staff node rolePrompt & allowedPaths are injected directly into resolveAdePromptContext (not wakeup-only!)
+			const cmdService = h.instantiation.get(ICommandService);
+			const ceoCtx = (await cmdService.executeCommand<string | undefined>(ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID, { agentId: govAgent.id })) ?? '';
+			assert.ok(ceoCtx.includes('Own global architecture and verify final releases.'), 'L1 role context includes staff rolePrompt');
+			const devCtx = (await cmdService.executeCommand<string | undefined>(ADE_RESOLVE_PROMPT_CONTEXT_COMMAND_ID, { agentId: beDevAgentId })) ?? '';
+			assert.ok(devCtx.includes('Implement backend handlers only.'), 'L4 pure staff role context includes staff rolePrompt');
+			assert.ok(devCtx.includes('src/backend'), 'L4 pure staff role context includes allowedPaths');
+
+			// 2. Human User chats directly with L1 Governor (session.send wraps with User envelope)
+			const userSend = await h.control<{ readonly status: string }>('session.send', { id: govAgent.id, message: 'Ship the auth feature end-to-end.' });
+			assert.strictEqual(userSend.status, 'sent');
+			const lastUserPrompt = h.sentChatRequests[h.sentChatRequests.length - 1]?.message ?? '';
+			assert.ok(lastUserPrompt.includes('[Aexus System · Message from User (L-1)]'));
+
+			// 3. L1 Governor IMMEDIATELY splits work downward WITHOUT any pre-existing parentTokenId!
+			const govCaller = { caller: 'governor', _verifiedCaller: true, _callerSessionId: govAgent.id };
+			const beLeadCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: beLeadAgentId };
+			const beDevCaller = { caller: 'worker', _verifiedCaller: true, _callerSessionId: beDevAgentId };
+			const feLeadCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: feLeadAgentId };
+
+			// Also verify L1 completes T_SPEC before downstream tasks run
+			await h.control('mission.task.complete', { ...govCaller, mission: missionId, node: 'T_SPEC', note: 'Architecture approved' });
+
+			const hugeSpec = 'A'.repeat(1600);
+			const splitRes = await h.control<{
+				readonly ok: boolean;
+				readonly parentTokenId: string;
+				readonly createdRootParent?: boolean;
+				readonly joinBarrierId?: string;
+				readonly branches: readonly { readonly tokenId: string; readonly toNodeId: string; readonly payloadPtr?: string }[];
+			}>('token.split', {
+				...govCaller,
+				mission: missionId,
+				branchesJson: JSON.stringify([
+					{ toNodeId: 'BE_Lead', summary: 'Build auth backend', detail: hugeSpec, taskNodeId: 'T_BE' },
+					{ toNodeId: 'FE_Lead', summary: 'Build auth frontend', taskNodeId: 'T_FE' },
+				]),
+				waitJoin: true,
+			});
+			assert.strictEqual(splitRes.ok, true);
+			assert.strictEqual(splitRes.createdRootParent, true);
+			assert.ok(splitRes.joinBarrierId);
+			const rootTokId = splitRes.parentTokenId;
+			const beLeadTokId = splitRes.branches.find(b => b.toNodeId === 'BE_Lead')!.tokenId;
+			const feLeadTokId = splitRes.branches.find(b => b.toNodeId === 'FE_Lead')!.tokenId;
+			const specPtr = splitRes.branches.find(b => b.toNodeId === 'BE_Lead')!.payloadPtr!;
+
+			// Wait microtasks for automatic disk-first cold compaction of hugeSpec (>1024 chars)!
+			await timeout(30);
+			assert.ok(storedBlobs.has(specPtr), 'automatic compaction externalized >1024-char blob to cold storage');
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).payloadStore?.[specPtr], undefined, 'externalized blob pruned from hot payloadStore');
+			const readCold = await h.control<{ readonly items: readonly { readonly ok: boolean; readonly content?: string }[] }>('token.read', {
+				...beLeadCaller,
+				mission: missionId,
+				tokenId: beLeadTokId,
+				ptrs: [specPtr],
+			});
+			assert.strictEqual(readCold.items[0]?.ok, true);
+			assert.strictEqual(readCold.items[0]?.content, hugeSpec, 'token.read transparently hydrates cold externalized blob');
+
+			// 4. L2 BE_Lead can configure its own direct subordinate, create tasks in Backend, but CANNOT touch Frontend or L1!
+			const cfgSub = await h.control<{ readonly ok: boolean }>('orchestration.staff.configure', {
+				...beLeadCaller,
+				mission: missionId,
+				node: 'BE_Dev',
+				model: 'deepseek-reasoner',
+				color: 'cyan',
+			});
+			assert.strictEqual(cfgSub.ok, true, 'L2 Manager can configure direct subordinate in own department');
+			await assert.rejects(
+				() => h.control('orchestration.staff.configure', { ...beLeadCaller, mission: missionId, node: 'FE_Lead', model: 'gpt-5' }),
+				/FORBIDDEN|CROSS_DEPARTMENT_FORBIDDEN/i,
+			);
+			await assert.rejects(
+				() => h.control('mission.task.update', { ...beLeadCaller, mission: missionId, node: 'T_FE', title: 'Hijacked' }),
+				/CROSS_DEPARTMENT_FORBIDDEN/i,
+			);
+			await assert.rejects(
+				() => h.control('mission.task.set', { ...beDevCaller, mission: missionId, node: 'T_BE', description: 'Worker hijack' }),
+				/FORBIDDEN/i,
+			);
+
+			// 5. Pure-execution L4 worker can call read-only rank.names as documented in ENGINEERING_API.md!
+			const rankNames = await h.control<{ readonly namesByTier?: Record<string, string>; readonly rankCount?: number }>('rank.names', { ...beDevCaller });
+			assert.ok(rankNames.namesByTier && Object.keys(rankNames.namesByTier).length >= 1, 'L4 Engineering staff can inspect live rank names');
+
+			// 6. L2 BE_Lead delegates to L4 BE_Dev -> allowedPaths enforced on return -> L2 returns -> FE_Lead returns -> Join Barrier wakes L1!
+			const devMint = await h.control<{ readonly mintedTokenIds: readonly string[] }>('token.mint', {
+				...beLeadCaller,
+				mission: missionId,
+				parentTokenId: beLeadTokId,
+				to: 'BE_Dev',
+				summary: 'Write auth handler',
+				waitJoin: false,
+			});
+			const devTokId = devMint.mintedTokenIds[0];
+			await assert.rejects(
+				() => h.control('token.return', { ...beDevCaller, mission: missionId, tokenId: devTokId, summary: 'Bad edit', modifiedFiles: ['src/frontend/index.ts'] }),
+				/ALLOWED_PATHS_VIOLATION/i,
+			);
+			const devRet = await h.control<{ readonly ok: boolean }>('token.return', {
+				...beDevCaller,
+				mission: missionId,
+				tokenId: devTokId,
+				summary: 'Auth handler done',
+				modifiedFiles: ['src/backend/auth.ts'],
+			});
+			assert.strictEqual(devRet.ok, true);
+
+			await h.control('mission.task.complete', { ...beLeadCaller, mission: missionId, node: 'T_BE', note: 'Verified BE_Dev output' });
+			await h.control('token.return', { ...beLeadCaller, mission: missionId, tokenId: beLeadTokId, summary: 'Backend API complete' });
+			await h.control('mission.task.complete', { ...feLeadCaller, mission: missionId, node: 'T_FE', note: 'Verified UI' });
+			const feRet = await h.control<{ readonly barrierSatisfied?: boolean }>('token.return', { ...feLeadCaller, mission: missionId, tokenId: feLeadTokId, summary: 'Frontend UI complete' });
+			assert.strictEqual(feRet.barrierSatisfied, true);
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).tokens[rootTokId].status, 'active', 'Join Barrier re-activated L1 root token');
+
+			// 7. L1 completes T_SHIP and concludes root wave -> User receives final completion message in ADE Inbox!
+			await h.control('mission.task.complete', { ...govCaller, mission: missionId, node: 'T_SHIP', note: 'All checks green' });
+			const finished = await h.control<{ readonly finished?: boolean }>('token.complete', {
+				...govCaller,
+				mission: missionId,
+				tokenId: rootTokId,
+				finish: true,
+				summary: 'Auth feature shipped cleanly',
+			});
+			assert.strictEqual(finished.finished, true);
+			const inboxItems = inbox.list({ includeResolved: false });
+			assert.ok(inboxItems.some(i => i.title.includes('Engineering Delivery Completed') && i.message.includes('Auth feature shipped cleanly')), 'Final completion report posted to Human ADE Inbox');
+
+			// 8. Verify orchestration.abort stops live running agent sessions!
+			const beLeadAgent = h.projects.getAgent(beLeadAgentId)!;
+			h.projects.bindSession(beLeadAgent.id, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/e2e-be-lead-live') });
+			const wave2 = await h.control<{ readonly mintedTokenIds: readonly string[] }>('token.mint', {
+				...govCaller,
+				mission: missionId,
+				to: 'BE_Lead',
+				summary: 'Start hotfix wave',
+				waitJoin: false,
+			});
+			assert.strictEqual(wave2.mintedTokenIds.length, 1);
+			await assert.rejects(
+				() => h.control('orchestration.abort', { ...beLeadCaller, mission: missionId, reason: 'Subordinate unauthorized abort' }),
+				/Permission denied/i,
+			);
+			await h.control('orchestration.abort', { ...govCaller, mission: missionId, reason: 'Cancel hotfix' });
+			assert.ok(stoppedResources.includes('aexus-claude:/e2e-be-lead-live'), 'orchestration.abort stops live running engine session for aborted token holder');
+		});
+
+		test('Core Reliability Regressions: omitted --mission --id disambiguation, cold engine/model/thinking/SSH inheritance, L2 escalate/host.bind/staff checks, and headless pendingEffects reload recovery', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+			const govAgent = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/reg-gov-l1') }, 'Aria', { role: 'governor' });
+			const created = missionStore.createMission({
+				title: 'Core Reliability Regression Suite',
+				ownerSessionId: govAgent.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  T_API["Build API"]',
+					'  %% task T_API [owner=BE_Lead, dept="Backend"]',
+				].join('\n'),
+				orchestrationText: [
+					'flowchart TD',
+					'  CEO["@Aria · Governor (L1)"] <--> BE_Lead["@Bob · Backend Lead (L2)"]',
+					'  subgraph Backend["Backend"]',
+					'    BE_Lead',
+					'    WB_BE[("Whiteboard: Backend Spec")]',
+					'    %% staff BE_Lead [tier=2, dept="Backend", engine="codex", model="gpt-5", thinking="medium", host="gpu-cluster"]',
+					'    %% whiteboard WB_BE [dept="Backend", title="Backend Spec", version=1]',
+					'  end',
+				].join('\n'),
+			});
+			const missionId = created.id;
+
+			// 1. Applying orchestration graph binds normalized short engine alias ('codex' -> 'aexus-codex'), model, thinking, and SSH hostAlias to cold subordinate staff!
+			await h.control('orchestration.apply', {
+				mission: missionId,
+				text: created.orchestrationText!,
+			});
+			const orch0 = missionRuntime.getOrchestrationState(missionId);
+			const beLeadAgentId = orch0.nodeAgentIds['BE_Lead']!;
+			const beLeadAgent = h.projects.getAgent(beLeadAgentId)!;
+			assert.strictEqual(beLeadAgent.preferredEngineId, 'aexus-codex', 'Short engine alias normalized to aexus-codex on cold staff');
+			assert.strictEqual(beLeadAgent.preferredModel, 'gpt-5', 'Cold subordinate inherits model from orchestration config');
+			assert.strictEqual(beLeadAgent.preferredThinking, 'medium', 'Cold subordinate inherits thinking from orchestration config');
+			assert.strictEqual(missionRuntime.getRuntimeState(missionId).boundary.nodeAssignments['BE_Lead']?.hostAlias, 'gpu-cluster', 'Non-local hostAlias binds onto mission nodeAssignments');
+
+			const beLeadCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: beLeadAgentId };
+
+			// 2. Omitting --mission with colliding --id works across whiteboard.write/read, mission.task.create, and orchestration.staff.create!
+			const wbWriteNoMission = await h.control<{ readonly ok: boolean; readonly whiteboard: { readonly whiteboardId: string; readonly version: number } }>('whiteboard.write', {
+				...beLeadCaller,
+				id: 'WB_BE',
+				content: 'Backend contract v2',
+			});
+			assert.strictEqual(wbWriteNoMission.ok, true);
+			assert.strictEqual(wbWriteNoMission.whiteboard.whiteboardId, 'WB_BE');
+			assert.strictEqual(wbWriteNoMission.whiteboard.version, 2);
+
+			const wbReadNoMission = await h.control<{ readonly whiteboard: { readonly content: string } }>('whiteboard.read', {
+				...beLeadCaller,
+				id: 'WB_BE',
+			});
+			assert.strictEqual(wbReadNoMission.whiteboard.content, 'Backend contract v2');
+
+			const taskCreateNoMission = await h.control<{ readonly ok: boolean; readonly nodeId?: string }>('mission.task.create', {
+				...beLeadCaller,
+				id: 'T_CACHE',
+				title: 'Cache Layer',
+				ownerNodeId: 'BE_Lead',
+				department: 'Backend',
+			});
+			assert.strictEqual(taskCreateNoMission.ok, true);
+			assert.ok(missionStore.getMission(missionId)?.mermaidText.includes('T_CACHE'));
+
+			const staffCreateNoMission = await h.control<{ readonly ok: boolean; readonly nodeId: string; readonly agentId?: string }>('orchestration.staff.create', {
+				...beLeadCaller,
+				id: 'BE_Sub',
+				name: 'Sub Eng',
+				rank: 'L3',
+				department: 'Backend',
+				engineId: 'claude',
+				model: 'claude-sonnet-4-6',
+				thinking: 'high',
+				hostAlias: 'gpu-sub-1',
+			});
+			assert.strictEqual(staffCreateNoMission.ok, true);
+			assert.strictEqual(staffCreateNoMission.nodeId, 'BE_Sub');
+			const beSubAgent = h.projects.getAgent(staffCreateNoMission.agentId!)!;
+			assert.strictEqual(beSubAgent.preferredEngineId, 'aexus-claude', 'Dynamic recruit normalizes engine alias');
+			assert.strictEqual(beSubAgent.preferredModel, 'claude-sonnet-4-6');
+			assert.strictEqual(beSubAgent.preferredThinking, 'high');
+			assert.strictEqual(missionRuntime.getRuntimeState(missionId).boundary.nodeAssignments['BE_Sub']?.hostAlias, 'gpu-sub-1');
+
+			// 3. Mid-tier L2 supervisor can configure Orchestration staff host & checks and escalate upward via org.escalate!
+			const hostRebind = await h.control<{ readonly ok: boolean; readonly assignment?: { readonly hostAlias?: string } }>('mission.host.bind', {
+				...beLeadCaller,
+				mission: missionId,
+				nodeId: 'BE_Sub',
+				hostAlias: 'gpu-sub-2',
+			});
+			assert.strictEqual(hostRebind.ok, true);
+			assert.strictEqual(hostRebind.assignment?.hostAlias, 'gpu-sub-2');
+
+			const checkSet = await h.control<{ readonly nodeId: string; readonly checks: readonly { readonly id: string }[] }>('mission.check.set', {
+				...beLeadCaller,
+				mission: missionId,
+				nodeId: 'BE_Sub',
+				command: 'echo ok',
+				label: 'Smoke check',
+			});
+			assert.strictEqual(checkSet.nodeId, 'BE_Sub');
+			assert.strictEqual(checkSet.checks.length, 1);
+
+			const escalateRes = await h.control<{ readonly ok: boolean; readonly escalatedTo?: string; readonly escalatedToNodeId?: string }>('org.escalate', {
+				...beLeadCaller,
+				mission: missionId,
+				reason: 'Need executive approval on Redis cluster budget',
+			});
+			assert.strictEqual(escalateRes.ok, true);
+			assert.strictEqual(escalateRes.escalatedToNodeId, 'CEO', 'L2 Orchestration org.escalate routes directly to L1 CEO superior');
+
+			// 4. sanitizeMissionRecord preserves all rich live Task DAG fields across store updates
+			missionStore.updateTaskStatuses(missionId, {
+				T_API: {
+					status: 'in_progress',
+					updatedAt: 12345,
+					assigneeNodeId: 'BE_Lead',
+					assigneeLabel: '@Bob · Backend Lead (L2)',
+					activeTokenIds: ['otok-9'],
+					lastTokenId: 'otok-9',
+					startedAt: 12000,
+					durationMs: 345,
+					artifactPtrs: ['art-1'],
+					blockedReason: 'Waiting on schema',
+					lastError: 'Transient timeout',
+					completedByTier: 2,
+				},
+			});
+			const persistedTask = missionStore.getMission(missionId)?.taskStatuses?.T_API;
+			assert.strictEqual(persistedTask?.assigneeNodeId, 'BE_Lead');
+			assert.strictEqual(persistedTask?.assigneeLabel, '@Bob · Backend Lead (L2)');
+			assert.deepStrictEqual(persistedTask?.activeTokenIds, ['otok-9']);
+			assert.strictEqual(persistedTask?.lastTokenId, 'otok-9');
+			assert.strictEqual(persistedTask?.startedAt, 12000);
+			assert.strictEqual(persistedTask?.durationMs, 345);
+			assert.deepStrictEqual(persistedTask?.artifactPtrs, ['art-1']);
+			assert.strictEqual(persistedTask?.blockedReason, 'Waiting on schema');
+			assert.strictEqual(persistedTask?.lastError, 'Transient timeout');
+			assert.strictEqual(persistedTask?.completedByTier, 2);
+
+			// 5. Headless pendingHeadlessEffects drain & reload recovery dispatches queued CEO wakeup once without duplicate replay
+			const prevDispatches = h.executedCommands.filter(c => c.id === 'aexus.agentEngines.dispatchEngineeringTurn').length;
+			const curOrch = missionRuntime.getOrchestrationState(missionId);
+			missionStore.updateOrchestrationRuntime(missionId, {
+				...curOrch,
+				status: 'running',
+				tokenSeq: curOrch.tokenSeq + 1,
+				tokens: {
+					...curOrch.tokens,
+					'otok-headless-1': {
+						id: 'otok-headless-1',
+						waveId: 'wave-headless',
+						nodeId: 'CEO',
+						holderAgentId: govAgent.id,
+						status: 'active',
+						lastSummary: 'Joined headlessly while window was closed',
+						compressedHistory: 'BE_Lead returned headlessly.',
+						tracePtr: 'otrc-headless-1',
+						arrivedAt: Date.now() - 1000,
+						lastActivityAt: Date.now(),
+						nudgeCount: 0,
+						hopIndex: 1,
+						hopLog: [{ hop: 1, tokenId: 'otok-headless-1', event: 'join_resume', fromNodeId: 'BE_Lead', toNodeId: 'CEO', headline: 'Joined headlessly while window was closed', timestamp: Date.now() }],
+					},
+				},
+				pendingHeadlessEffects: [{
+					kind: 'dispatch_token',
+					missionId,
+					nodeId: 'CEO',
+					tokenId: 'otok-headless-1',
+					holderAgentId: govAgent.id,
+					prompt: 'Headless join resume for CEO',
+				}],
+			});
+			const resumed = await missionRuntime.recoverInterruptedActiveTokens(missionId);
+			const afterDispatches = h.executedCommands.filter(c => c.id === 'aexus.agentEngines.dispatchEngineeringTurn').length;
+			assert.strictEqual(resumed, 1, 'recoverInterruptedActiveTokens returns 1 drained headless wakeup');
+			assert.strictEqual(afterDispatches - prevDispatches, 1, 'Recovery must dispatch pending headless wakeup exactly once without duplicate replay');
+			assert.strictEqual(
+				missionRuntime.getOrchestrationState(missionId).pendingHeadlessEffects,
+				undefined,
+				'pendingHeadlessEffects must be cleared after draining',
+			);
+		});
+
+	});
+});

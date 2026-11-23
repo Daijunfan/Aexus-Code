@@ -15,6 +15,7 @@ import {
 	parseMissionMermaidDag,
 } from './adeMissionDag.js';
 import { extractInlineEmployeeTag, stripTrailingMermaidClass } from './adeMissionEmployee.js';
+import { normalizeAdeNodeColor } from './adeNodeColors.js';
 
 function escapeMermaidQuotedLabel(label: string): string {
 	return label.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ').trim();
@@ -206,7 +207,7 @@ function serializePreservingDirectives(
 		if (!trimmed.startsWith('%%')) {
 			continue;
 		}
-		const checkMatch = /^%%\s*(?:check|verify)\s+([A-Za-z0-9_-]+)/i.exec(trimmed);
+		const checkMatch = /^%%\s*(?:check|verify|task)\s+([A-Za-z0-9_-]+)/i.exec(trimmed);
 		if (checkMatch && !survivingIds.has(checkMatch[1])) {
 			continue;
 		}
@@ -400,6 +401,80 @@ export function renameEdgeLabelInMermaid(
 		return mermaidText;
 	}
 	return serializePreservingDirectives(mermaidText, parsed.direction, parsed.nodes, nextEdges);
+}
+
+/**
+ * Inserts, updates, or clears inline `%% task <nodeId> [owner=..., assignee=..., dept=..., min_tier=..., completers=...]`
+ * metadata comments for a Mission Task DAG node without disrupting existing graph layout or other comments.
+ */
+export function upsertTaskMetadataInMermaid(
+	mermaidText: string,
+	nodeId: string,
+	patch: {
+		readonly ownerNodeId?: string | null;
+		readonly assigneeNodeId?: string | null;
+		readonly department?: string | null;
+		readonly minCompleterTier?: number | null;
+		readonly allowedCompleterNodeIds?: readonly string[] | null;
+		readonly color?: string | null;
+	},
+): string {
+	const cleanId = nodeId.trim();
+	if (!cleanId) {
+		return mermaidText;
+	}
+	const parsed = parseMissionMermaidDag(mermaidText);
+	const existing = parsed.nodes.find(n => n.id === cleanId);
+	if (!existing) {
+		return mermaidText;
+	}
+
+	const nextOwner = patch.ownerNodeId === undefined ? existing.ownerNodeId : (patch.ownerNodeId?.trim() || undefined);
+	const nextAssignee = patch.assigneeNodeId === undefined ? existing.assigneeNodeId : (patch.assigneeNodeId?.trim() || undefined);
+	const nextDept = patch.department === undefined ? existing.department : (patch.department?.trim() || undefined);
+	const nextMinTier = patch.minCompleterTier === undefined
+		? existing.minCompleterTier
+		: (typeof patch.minCompleterTier === 'number' && Number.isInteger(patch.minCompleterTier) && patch.minCompleterTier >= 0 ? patch.minCompleterTier : undefined);
+	const nextCompleters = patch.allowedCompleterNodeIds === undefined
+		? existing.allowedCompleterNodeIds
+		: (patch.allowedCompleterNodeIds && patch.allowedCompleterNodeIds.length > 0
+			? [...new Set(patch.allowedCompleterNodeIds.map(s => s.trim()).filter(Boolean))]
+			: undefined);
+	const nextColor = patch.color === undefined
+		? normalizeAdeNodeColor(existing.color)
+		: normalizeAdeNodeColor(patch.color);
+
+	const formatVal = (v: string): string => /^[A-Za-z0-9_.:|#-]+$/.test(v) ? v : `"${escapeMermaidQuotedLabel(v)}"`;
+	const parts: string[] = [];
+	if (nextOwner) { parts.push(`owner=${formatVal(nextOwner)}`); }
+	if (nextAssignee) { parts.push(`assignee=${formatVal(nextAssignee)}`); }
+	if (nextDept) { parts.push(`dept=${formatVal(nextDept)}`); }
+	if (nextMinTier !== undefined) { parts.push(`min_tier=${nextMinTier}`); }
+	if (nextCompleters && nextCompleters.length > 0) { parts.push(`completers=${formatVal(nextCompleters.join('|'))}`); }
+	if (nextColor) { parts.push(`color=${formatVal(nextColor)}`); }
+
+	const directiveLine = parts.length > 0 ? `  %% task ${cleanId} [${parts.join(', ')}]` : undefined;
+	const directiveRe = new RegExp(`^\\s*%%\\s*task\\s+${escapeRegExp(cleanId)}\\s*\\[[^\\]]*\\]\\s*$`, 'i');
+	const lines = mermaidText.split(/\r?\n/);
+	const kept: string[] = [];
+	let replaced = false;
+	for (const line of lines) {
+		if (directiveRe.test(line)) {
+			if (!replaced && directiveLine) {
+				kept.push(directiveLine);
+				replaced = true;
+			}
+			continue;
+		}
+		kept.push(line);
+	}
+	if (!replaced && directiveLine) {
+		while (kept.length > 1 && kept[kept.length - 1].trim() === '') {
+			kept.pop();
+		}
+		kept.push(directiveLine);
+	}
+	return kept.join('\n');
 }
 
 export interface IMissionAlignRect {

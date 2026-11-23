@@ -8,6 +8,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { getMissionEdgeKind, IMissionDagEdge, IMissionDagNode, IMissionNodePosition } from '../../../../platform/ade/common/adeMissionDag.js';
 import { IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
+import { resolveAdeNodeColorHex } from '../../../../platform/ade/common/adeNodeColors.js';
 import { getMissionNodeSize, svgEl } from './adeMissionCanvasRenderer.js';
 
 const MINIMAP_VB_W = 200;
@@ -146,6 +147,11 @@ export class AdeMissionMinimap extends Disposable {
 		positions: ReadonlyMap<string, IMissionNodePosition>,
 		runtimeState: IMissionRuntimeState | undefined,
 		selectedNodeId: string | undefined,
+		options?: {
+			readonly nodeStates?: Readonly<Record<string, string>>;
+			readonly nodeSizeOverride?: ReadonlyMap<string, { readonly width: number; readonly height: number }>;
+			readonly nodeColors?: Readonly<Record<string, string | undefined>>;
+		},
 	): void {
 		this.hasGraphNodes = nodes.length > 0;
 		this.containerEl.hidden = !this.userVisible || !this.hasGraphNodes;
@@ -170,7 +176,7 @@ export class AdeMissionMinimap extends Disposable {
 			if (!pos) {
 				continue;
 			}
-			const sz = getMissionNodeSize(node);
+			const sz = options?.nodeSizeOverride?.get(node.id) ?? getMissionNodeSize(node);
 			sizeById.set(node.id, sz);
 			minX = Math.min(minX, pos.x - sz.width / 2);
 			maxX = Math.max(maxX, pos.x + sz.width / 2);
@@ -216,24 +222,37 @@ export class AdeMissionMinimap extends Disposable {
 			if (!pos || !sz) {
 				continue;
 			}
-			const st = runtimeState?.nodeStates[node.id] ?? 'idle';
+			const st = options?.nodeStates?.[node.id] ?? runtimeState?.nodeStates[node.id] ?? 'idle';
 			const cls = [
 				'ade-mission-minimap-node',
 				`kind-${node.kind}`,
 				`state-${st.replace(/_/g, '-')}`,
 				selectedNodeId === node.id ? 'is-selected' : '',
 			].filter(Boolean).join(' ');
-			const w = Math.max(5, sz.width * this.boundsScale);
-			const h = Math.max(4, sz.height * this.boundsScale);
-			this.nodesLayerEl.appendChild(svgEl('rect', {
+			const isCircularTask = node.kind === 'task' && Math.abs(sz.width - sz.height) <= 2;
+			const rawW = Math.max(5, sz.width * this.boundsScale);
+			const rawH = Math.max(4, sz.height * this.boundsScale);
+			const w = isCircularTask ? Math.max(6, Math.max(rawW, rawH)) : rawW;
+			const h = isCircularTask ? w : rawH;
+			const customHex = resolveAdeNodeColorHex(options?.nodeColors?.[node.id] ?? node.color);
+			const rxVal = isCircularTask ? (w / 2).toFixed(1) : (node.kind === 'gate' ? '3' : '2');
+			const rect = svgEl('rect', {
 				class: cls,
 				'data-minimap-node': node.id,
+				...(isCircularTask ? { 'data-minimap-shape': 'circle' } : {}),
 				x: (toX(pos.x) - w / 2).toFixed(1),
 				y: (toY(pos.y) - h / 2).toFixed(1),
 				width: w.toFixed(1),
 				height: h.toFixed(1),
-				rx: node.kind === 'gate' ? '3' : '2',
-			}));
+				rx: rxVal,
+				ry: rxVal,
+			});
+			if (customHex) {
+				rect.style.fill = customHex;
+				rect.style.fillOpacity = st === 'active' || st === 'completed' ? '0.92' : '0.68';
+				rect.style.stroke = customHex;
+			}
+			this.nodesLayerEl.appendChild(rect);
 		}
 
 		this.updateViewport(this.lastPanX, this.lastPanY, this.lastZoom, this.lastViewportW, this.lastViewportH);

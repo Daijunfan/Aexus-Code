@@ -604,12 +604,17 @@ export class AdeInboxPanel extends Disposable {
 
 		const titleRow = append(card, $('.ade-inbox-agent-title-row'));
 		const effectiveEngineId = agent.session?.engineId ?? agent.preferredEngineId;
-		const icon = effectiveEngineId ? (this.sessions?.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
+		const resolvedEngineIcon = effectiveEngineId ? this.sessions?.getIcon(effectiveEngineId) : undefined;
+		const rankDef = resolveEffectiveRankDefinition(roleConfig, agent.role, this.projects?.hasSubordinates(agent.id) ?? false);
+		const icon = resolvedEngineIcon ?? getRankIcon(rank, roleConfig);
 		const iconEl = append(titleRow, $('span.ade-inbox-agent-icon', { 'aria-hidden': 'true' }));
 		if (URI.isUri(icon)) {
 			iconEl.classList.add('ade-tree-item-icon-svg');
 			iconEl.style.backgroundImage = asCSSUrl(icon);
 		} else {
+			if (!resolvedEngineIcon) {
+				iconEl.classList.add('ade-tree-item-icon-draft', `role-color-${rankDef.color}`);
+			}
 			iconEl.classList.add(...ThemeIcon.asClassNameArray(icon));
 		}
 		append(titleRow, $('div.ade-inbox-card-title', {}, agent.label));
@@ -784,7 +789,7 @@ export class AdeInboxPanel extends Disposable {
 						nodeId,
 						verdict: 'pass',
 					})
-					: Promise.reject(new Error(localize('adeInboxGateRuntimeMissing', "Mission runtime is unavailable — cannot approve Gate.")))).catch(err => {
+					: Promise.reject(new Error(localize('adeInboxGateRuntimeMissing', "Engineering runtime is unavailable — cannot approve Gate.")))).catch(err => {
 					const msg = err instanceof Error ? err.message : String(err);
 					this.errorBannerText = msg;
 					this.onError?.(msg);
@@ -883,7 +888,7 @@ export class AdeInboxPanel extends Disposable {
 							targetNodeId: chosenTarget,
 							feedback: chosenFeedback,
 						})
-						: Promise.reject(new Error(localize('adeInboxGateRollbackRuntimeMissing', "Mission runtime is unavailable — cannot roll back Gate.")))).then(() => {
+						: Promise.reject(new Error(localize('adeInboxGateRollbackRuntimeMissing', "Engineering runtime is unavailable — cannot roll back Gate.")))).then(() => {
 						this.expandedRollbackIds.delete(item.id);
 						this.rollbackFeedbackDrafts.delete(item.id);
 						this.rollbackTargetDrafts.delete(item.id);

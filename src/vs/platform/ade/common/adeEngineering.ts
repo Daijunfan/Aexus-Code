@@ -229,6 +229,23 @@ export type IAdeInboxMutation =
 	| { readonly kind: 'resolve'; readonly id: string; readonly resolution?: string; readonly resolvedAt: number }
 	| { readonly kind: 'removeGovernor'; readonly governorSessionId: string };
 
+export interface IAdeOrchestrationDaemonMissionSnapshot {
+	readonly missionId: string;
+	readonly status: 'running' | 'paused' | 'aborted';
+	readonly activeTokenCount: number;
+	readonly blockedTokenCount: number;
+	readonly waitingJoinCount: number;
+	readonly updatedAt: number;
+	readonly pausedReason?: string;
+	readonly ownerWindowCtx?: string;
+}
+
+export interface IAdeHeadlessControlResult {
+	readonly handled: boolean;
+	readonly result?: unknown;
+	readonly error?: string;
+}
+
 export const IAdeEngineeringBackendService = createDecorator<IAdeEngineeringBackendService>('adeEngineeringBackendService');
 
 /**
@@ -237,6 +254,7 @@ export const IAdeEngineeringBackendService = createDecorator<IAdeEngineeringBack
  * 2) Lightweight Inbox JSON persistence (`<adeHome>/inbox.json`)
  * 3) Local Mission Watchdog Daemon & zero-token Source Trigger Monitor (local + remote SSH)
  * 4) Zero-token deterministic verification hooks (local + remote SSH)
+ * 5) Cold per-Mission blob/archive storage & main-process headless Orchestration continuity
  */
 export interface IAdeEngineeringBackendService {
 	readonly _serviceBrand: undefined;
@@ -255,6 +273,13 @@ export interface IAdeEngineeringBackendService {
 	loadAllMissionRecords?(): Promise<Readonly<Record<string, string>>>;
 	saveMissionRecord?(missionId: string, payloadJson: string, updatedAt: number, writerId?: string): Promise<void>;
 	deleteMissionRecord?(missionId: string, writerId?: string): Promise<void>;
+	saveOrchestrationBlobs?(missionId: string, blobs: readonly { readonly ptr: string; readonly payloadJson: string }[]): Promise<void>;
+	readOrchestrationBlob?(missionId: string, ptr: string): Promise<string | undefined>;
+	appendOrchestrationArchive?(missionId: string, lines: readonly string[]): Promise<void>;
+	readOrchestrationArchive?(missionId: string, options?: { readonly limit?: number; readonly offset?: number }): Promise<readonly string[]>;
+	syncOrchestrationDaemonState?(snapshot: IAdeOrchestrationDaemonMissionSnapshot): Promise<void>;
+	getOrchestrationDaemonState?(missionId?: string): Promise<Readonly<Record<string, IAdeOrchestrationDaemonMissionSnapshot>>>;
+	executeHeadlessOrchestrationControl?(action: string, params: Readonly<Record<string, unknown>>): Promise<IAdeHeadlessControlResult>;
 	syncApiDocs?(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths>;
 	getApiDocsPaths?(rankCount: number): Promise<IAdeDocsPaths>;
 	readApiDoc?(target: string, config?: IAdeOrganizationConfig): Promise<IAdeApiDocReadResult>;

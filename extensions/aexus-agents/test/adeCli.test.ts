@@ -212,7 +212,10 @@ describe('runCli completion & HELP_TEXT', () => {
 	test('HELP_TEXT documents mission, token, org, role subcommands, and powershell completions without dead engineering commands', () => {
 		assert.ok(HELP_TEXT.includes('completion <bash|zsh|fish|powershell>'));
 		assert.ok(HELP_TEXT.includes('mission blueprint apply'));
-		assert.ok(HELP_TEXT.includes('mission prompt set'));
+		assert.ok(HELP_TEXT.includes('mission task list|get|create|update|set|remove|complete'));
+		assert.ok(!HELP_TEXT.includes('mission prompt set'));
+		assert.ok(!HELP_TEXT.includes('mission boundary get|set'));
+		assert.ok(!HELP_TEXT.includes('Employee IS NOT Worker'));
 		assert.ok(HELP_TEXT.includes('token complete'));
 		assert.ok(HELP_TEXT.includes('role apply-preset'));
 		assert.ok(HELP_TEXT.includes('role set-tier'));
@@ -598,7 +601,7 @@ describe('Mission Runtime CLI commands & AEXUS_ADE_TCP_PORT transport', () => {
 			action: 'whoami',
 			params: {},
 		});
-		for (const target of ['L2', 'common', 'mission']) {
+		for (const target of ['L2', 'common', 'engineering', 'paradigm', 'engineering-api', 'mission', 'manifest']) {
 			assert.deepStrictEqual(parseCliCommand(['docs', 'read', target], CWD), {
 				help: false,
 				json: false,
@@ -614,6 +617,8 @@ describe('Mission Runtime CLI commands & AEXUS_ADE_TCP_PORT transport', () => {
 			action: 'api.update',
 			params: { since: 1, scope: 'mission' },
 		});
+		assert.ok(HELP_TEXT.includes('docs read <common|L0..LN|engineering|paradigm|engineering-api|mission|manifest>'));
+		assert.ok(HELP_TEXT.includes('rank docs [common|L0|L1..LN|engineering|engineering-api|mission]'));
 	});
 
 	test('parses token bus current, trace, complete, reject, block, and fail', () => {
@@ -1220,5 +1225,651 @@ describe('parseCliCommand rank & unified mission commands', () => {
 				},
 			},
 		);
+	});
+
+	test('parses Engineering dual-view mission task, orchestration, token handoff, and whiteboard commands', () => {
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'open', '--mission', 'eng-1', '--view', 'both'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.open',
+				params: { missionId: 'eng-1', view: 'both' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'task', 'complete', '--mission', 'eng-1', '--node', 'T2', '--note', 'verified'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.task.complete',
+				params: { missionId: 'eng-1', nodeId: 'T2', status: 'completed', note: 'verified' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'dispatch', '--mission', 'eng-1', '--prompt', 'Build v2 API', '--whiteboard', 'WB1,WB2'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.dispatch',
+				params: { missionId: 'eng-1', prompt: 'Build v2 API', whiteboardIds: ['WB1', 'WB2'] },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'create', '--mission', 'eng-1', '--name', 'Dave', '--rank', 'L3', '--department', 'Backend', '--handoff-token', 'otok-1', '--summary', 'Build endpoint'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.staff.create',
+				params: {
+					missionId: 'eng-1',
+					name: 'Dave',
+					rank: 'L3',
+					department: 'Backend',
+					handoffTokenId: 'otok-1',
+					handoffSummary: 'Build endpoint',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'handoff', 'otok-1', '--to', 'BE_Lead,FE_Lead', '--summary', 'Decomposed subtasks', '--whiteboard', 'WB_BE', '--mission', 'eng-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.handoff',
+				params: {
+					tokenId: 'otok-1',
+					toNodeIds: ['BE_Lead', 'FE_Lead'],
+					summary: 'Decomposed subtasks',
+					whiteboardIds: ['WB_BE'],
+					missionId: 'eng-1',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'write', 'WB_BE', '--mission', 'eng-1', '--department', 'Backend', '--title', 'API Spec', '--content', '# v2 Spec'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'whiteboard.write',
+				params: {
+					id: 'WB_BE',
+					missionId: 'eng-1',
+					department: 'Backend',
+					title: 'API Spec',
+					content: '# v2 Spec',
+				},
+			},
+		);
+
+		// Pointer-native token read, token history, and split-pointer handoff/dispatch flags
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'read', 'hop-2,art-1,wb:WB_BE', '--mission', 'eng-1', '--token', 'otok-3'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.read',
+				params: {
+					ptrs: ['hop-2', 'art-1', 'wb:WB_BE'],
+					missionId: 'eng-1',
+					tokenId: 'otok-3',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'history', 'otok-3', '--mission', 'eng-1', '--delta'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.history',
+				params: {
+					tokenId: 'otok-3',
+					missionId: 'eng-1',
+					deltaOnly: true,
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'token', 'handoff', 'otok-3',
+				'--to', 'BE_Lead',
+				'--summary', 'Implemented /v2/pay',
+				'--detail', 'Run tests with --json and --help verified',
+				'--artifact', 'Bench=p99=11ms --json ok',
+				'--decision', 'Lock=INSERT ON CONFLICT',
+				'--ref', 'art-1,dec-2',
+				'--whiteboard', 'WB_BE',
+				'--mission', 'eng-1',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.handoff',
+				params: {
+					tokenId: 'otok-3',
+					toNodeIds: ['BE_Lead'],
+					summary: 'Implemented /v2/pay',
+					detail: 'Run tests with --json and --help verified',
+					artifacts: [{ title: 'Bench', content: 'p99=11ms --json ok' }],
+					decisions: [{ title: 'Lock', content: 'INSERT ON CONFLICT' }],
+					refPtrs: ['art-1', 'dec-2'],
+					whiteboardIds: ['WB_BE'],
+					missionId: 'eng-1',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'orchestration', 'dispatch',
+				'--mission', 'eng-1',
+				'--prompt', 'Ship payments v2',
+				'--detail', 'Full rollout plan with zero downtime',
+				'--artifact', 'DDL=CREATE TABLE t(id TEXT)',
+				'--decision', 'TTL=24h',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.dispatch',
+				params: {
+					missionId: 'eng-1',
+					prompt: 'Ship payments v2',
+					detail: 'Full rollout plan with zero downtime',
+					artifacts: [{ title: 'DDL', content: 'CREATE TABLE t(id TEXT)' }],
+					decisions: [{ title: 'TTL', content: '24h' }],
+				},
+			},
+		);
+		assert.ok(HELP_TEXT.includes('token read'));
+		assert.ok(HELP_TEXT.includes('token history'));
+	});
+
+	test('parses lossless migration, group, layout, staff, edge & whiteboard CLI authoring commands', () => {
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'export', '--mission', 'eng-1', '--with-positions', '--file', 'out/eng.json'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.export',
+				params: { missionId: 'eng-1', withPositions: true, outputFile: 'out/eng.json' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'import', '--owner', 'gov-1', '--title', 'Migrated App', '--file', 'out/eng.json', '--open'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.import',
+				params: { owner: 'gov-1', title: 'Migrated App', file: 'out/eng.json', open: true },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'export', '--mission', 'eng-1', '--with-positions', '--raw', '--file', 'out/orch.mmd'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.export',
+				params: { missionId: 'eng-1', withPositions: true, raw: true, outputFile: 'out/orch.mmd' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'import', '--mission', 'eng-1', '--file', 'out/orch.mmd'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.import',
+				params: { missionId: 'eng-1', file: 'out/orch.mmd' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'layout', 'set', 'radial', '--mission', 'eng-1', '--persist-in-code'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.layout.set',
+				params: { layoutMode: 'radial', missionId: 'eng-1', persistInCode: true },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'group', 'create', '--mission', 'eng-1', '--name', 'Platform Core', '--id', 'PlatformCore'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.group.create',
+				params: { missionId: 'eng-1', name: 'Platform Core', groupId: 'PlatformCore' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'group', 'rename', '--mission', 'eng-1', 'PlatformCore', 'Cloud Core'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.group.rename',
+				params: { missionId: 'eng-1', group: 'PlatformCore', name: 'Cloud Core' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'group', 'assign', '--mission', 'eng-1', '--node', 'E1', '--group', 'Cloud Core'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.group.assign',
+				params: { missionId: 'eng-1', nodeId: 'E1', group: 'Cloud Core' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'group', 'remove', '--mission', 'eng-1', 'Cloud Core', '--delete-members'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.group.remove',
+				params: { missionId: 'eng-1', group: 'Cloud Core', deleteMembers: true },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'rename', '--mission', 'eng-1', 'E1', 'Staff Backend Engineer'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.staff.rename',
+				params: { missionId: 'eng-1', nodeId: 'E1', label: 'Staff Backend Engineer' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'remove', '--mission', 'eng-1', 'E1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.staff.remove',
+				params: { missionId: 'eng-1', nodeId: 'E1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'edge', 'connect', '--mission', 'eng-1', 'CEO', 'Lead', '--label', 'plan', '--bidirectional', '--dashed'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.edge.connect',
+				params: { missionId: 'eng-1', from: 'CEO', to: 'Lead', label: 'plan', bidirectional: true, dashed: true },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'edge', 'label', '--mission', 'eng-1', 'CEO', 'Lead', 'review'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.edge.label',
+				params: { missionId: 'eng-1', from: 'CEO', to: 'Lead', label: 'review' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'edge', 'remove', '--mission', 'eng-1', 'CEO', 'Lead', '--both'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.edge.remove',
+				params: { missionId: 'eng-1', from: 'CEO', to: 'Lead', both: true },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'rename', 'WB_BE', 'Platform API Spec', '--department', 'Cloud Core', '--mission', 'eng-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'whiteboard.rename',
+				params: { id: 'WB_BE', title: 'Platform API Spec', department: 'Cloud Core', missionId: 'eng-1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'remove', 'WB_BE', '--mission', 'eng-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'whiteboard.remove',
+				params: { id: 'WB_BE', missionId: 'eng-1' },
+			},
+		);
+		assert.ok(HELP_TEXT.includes('mission export'));
+		assert.ok(HELP_TEXT.includes('orchestration group'));
+		assert.ok(HELP_TEXT.includes('orchestration edge'));
+		assert.ok(HELP_TEXT.includes('whiteboard rename'));
+	});
+
+	test('parses Revision 8 heterogeneous token mint/split/return, dynamic Mission Task DAG CRUD, code-as-config validate/load, staff config/remove, and pause/resume/abort', async () => {
+		// Item 1: token mint / split / return
+		const branchesJson = JSON.stringify([
+			{ toNodeId: 'BE_Lead', summary: 'Build API', detail: 'Schema+REST', taskNodeId: 'T_BE' },
+			{ toNodeId: 'FE_Lead', summary: 'Build UI', detail: 'Checkout drawer', taskNodeId: 'T_FE' },
+		]);
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'token', 'split', 'otok-1',
+				'--branches-json', branchesJson,
+				'--wait-join', '--join-mode', 'all', '--mission', 'eng-1',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.split',
+				params: {
+					parentTokenId: 'otok-1',
+					branchesJson,
+					waitJoin: true,
+					joinMode: 'all',
+					missionId: 'eng-1',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'token', 'mint', 'otok-1',
+				'--to', 'BE_Lead',
+				'--summary', 'Build API',
+				'--detail', 'Schema+REST',
+				'--task', 'T_BE',
+				'--no-wait-join', '--mission', 'eng-1',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.mint',
+				params: {
+					parentTokenId: 'otok-1',
+					toNodeIds: ['BE_Lead'],
+					summary: 'Build API',
+					detail: 'Schema+REST',
+					taskNodeId: 'T_BE',
+					waitJoin: false,
+					noWaitJoin: true,
+					missionId: 'eng-1',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'token', 'return', 'otok-2',
+				'--to', 'CEO',
+				'--summary', 'API done',
+				'--detail', '42 tests pass',
+				'--skip-checks', '--mission', 'eng-1',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.return',
+				params: {
+					tokenId: 'otok-2',
+					toNodeId: 'CEO',
+					summary: 'API done',
+					detail: '42 tests pass',
+					skipChecks: true,
+					missionId: 'eng-1',
+				},
+			},
+		);
+
+		// Item 3: Mission Task DAG CRUD & force complete
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'mission', 'task', 'create',
+				'--mission', 'eng-1', '--id', 'T_API', '--title', 'Build API',
+				'--description', 'REST endpoints', '--after', 'T_SPEC',
+				'--owner', 'BE_Lead', '--department', 'Backend', '--min-tier', '2',
+				'--completers', 'BE_Lead,QA1',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.task.create',
+				params: {
+					missionId: 'eng-1',
+					id: 'T_API',
+					title: 'Build API',
+					description: 'REST endpoints',
+					after: ['T_SPEC'],
+					ownerNodeId: 'BE_Lead',
+					department: 'Backend',
+					minCompleterTier: 2,
+					allowedCompleterNodeIds: ['BE_Lead', 'QA1'],
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'task', 'edge', 'add', 'T_SPEC', 'T_API', '--label', 'blocks', '--mission', 'eng-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.task.edge.add',
+				params: { from: 'T_SPEC', to: 'T_API', label: 'blocks', missionId: 'eng-1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'task', 'complete', 'T_API', '--mission', 'eng-1', '--force', '--note', 'Override'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'mission.task.complete',
+				params: { status: 'completed', nodeId: 'T_API', missionId: 'eng-1', force: true, note: 'Override' },
+			},
+		);
+
+		// Item 2 & 5 & 8: staff config/remove, validate/load, pause/resume/abort
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'orchestration', 'staff', 'config', 'Dev1',
+				'--mission', 'eng-1', '--engine', 'aexus-claude', '--model', 'claude-sonnet-4-6',
+				'--thinking', 'high', '--host', 'gpu-1', '--allowed-path', 'src/api/**', '--reset-session',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.staff.configure',
+				params: {
+					nodeId: 'Dev1',
+					missionId: 'eng-1',
+					engineId: 'aexus-claude',
+					model: 'claude-sonnet-4-6',
+					thinking: 'high',
+					hostAlias: 'gpu-1',
+					allowedPaths: ['src/api/**'],
+					resetSession: true,
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'remove', 'Dev1', '--mission', 'eng-1', '--reason', 'Downsize', '--force'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.staff.remove',
+				params: { nodeId: 'Dev1', missionId: 'eng-1', reason: 'Downsize', force: true },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'pause', '--mission', 'eng-1', '--reason', 'Hold wave'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.pause',
+				params: { missionId: 'eng-1', reason: 'Hold wave' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'resume', '--mission', 'eng-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.resume',
+				params: { missionId: 'eng-1' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'abort', '--mission', 'eng-1', '--reason', 'Stop now'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.abort',
+				params: { missionId: 'eng-1', reason: 'Stop now' },
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'export', '--mission', 'eng-1', '--format', 'json'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'orchestration.export',
+				params: { missionId: 'eng-1', format: 'json' },
+			},
+		);
+
+		// Verify runCli loads both .json and .mjs manifest files for `orchestration validate`
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ade-cli-manifest-'));
+		const sockPath = path.join(tmpDir, 'ctrl.sock');
+		const received: Array<{ action: string; params: Record<string, unknown> }> = [];
+		const srv = net.createServer(sock => {
+			let buf = '';
+			let replied = false;
+			sock.on('data', chunk => {
+				buf += chunk.toString('utf8');
+				const nl = buf.indexOf('\n');
+				if (!replied && nl >= 0) {
+					replied = true;
+					const msg = JSON.parse(buf.slice(0, nl).trim());
+					received.push({ action: msg.action, params: msg.params });
+					sock.end(JSON.stringify({ ok: true, result: { valid: true } }) + '\n');
+				}
+			});
+		});
+		await new Promise<void>(resolve => srv.listen(sockPath, resolve));
+		try {
+			const jsonPath = path.join(tmpDir, 'team.json');
+			await fs.writeFile(jsonPath, JSON.stringify({ schemaVersion: 1, title: 'JSON Team', staff: [{ id: 'CEO', name: 'Alice', tier: 1 }] }), 'utf8');
+			const mjsPath = path.join(tmpDir, 'team.mjs');
+			await fs.writeFile(mjsPath, 'export default { schemaVersion: 1, title: "MJS Team", staff: [{ id: "CEO", name: "Bob", tier: 1 }] };\n', 'utf8');
+
+			const env = { AEXUS_ADE_SOCKET: sockPath, AEXUS_ADE_TOKEN: 'tok-test' };
+			const code1 = await runCli(['--json', 'orchestration', 'validate', '--file', jsonPath], { stdout: () => { }, stderr: () => { }, env });
+			const code2 = await runCli(['--json', 'orchestration', 'load', '--mission', 'eng-1', '--file', mjsPath], { stdout: () => { }, stderr: () => { }, env });
+			assert.strictEqual(code1, 0);
+			assert.strictEqual(code2, 0);
+			assert.strictEqual(received[0].action, 'orchestration.validate');
+			assert.strictEqual((received[0].params.manifest as { title: string }).title, 'JSON Team');
+			assert.strictEqual(received[1].action, 'orchestration.load');
+			assert.strictEqual((received[1].params.manifest as { title: string }).title, 'MJS Team');
+		} finally {
+			srv.close();
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'list', '--mission', 'eng-1', '--department', 'Backend'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'whiteboard.list', params: { missionId: 'eng-1', department: 'Backend' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'write', 'WB_BE', '--mission', 'eng-1', '--content', 'v2 spec', '--expected-version', '1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'whiteboard.write', params: { id: 'WB_BE', missionId: 'eng-1', content: 'v2 spec', expectedVersion: 1 } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'create', '--mission', 'eng-1', '--name', 'Sam', '--mint-token', 'otok-1', '--summary', 'Own cache'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.create', params: { missionId: 'eng-1', name: 'Sam', mintTokenId: 'otok-1', handoffSummary: 'Own cache' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'config', '--mission', 'eng-1', '--node', 'CEO', '--color', 'gold'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.configure', params: { missionId: 'eng-1', nodeId: 'CEO', color: 'gold' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'mission', 'task', 'update', '--mission', 'eng-1', '--node', 'T1', '--color', '#22d3ee'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'mission.task.update', params: { missionId: 'eng-1', nodeId: 'T1', color: '#22d3ee' } },
+		);
+
+		// Root token mint & split WITHOUT pre-existing parentTokenId (L1 directly after User Chat!) + CLI doc flag parity
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'split', '--branches-json', branchesJson, '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.split', params: { branchesJson, missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand([
+				'--json', 'token', 'split', 'otok-1',
+				'--branch', '{"toNodeId":"BE_Lead","summary":"Build API"}',
+				'--branch', '{"toNodeId":"FE_Lead","summary":"Build UI"}',
+				'--wait-join',
+			], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.split',
+				params: {
+					parentTokenId: 'otok-1',
+					branches: [
+						{ toNodeId: 'BE_Lead', summary: 'Build API' },
+						{ toNodeId: 'FE_Lead', summary: 'Build UI' },
+					],
+					waitJoin: true,
+				},
+			},
+		);
+		assert.throws(
+			() => parseCliCommand(['token', 'split', '--branch', '{not-json'], CWD),
+			/Option --branch expects valid JSON/,
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'mint', '--to', 'BE_Lead', '--summary', 'Build auth', '--from', 'CEO', '--wait-join', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.mint', params: { toNodeIds: ['BE_Lead'], summary: 'Build auth', fromNodeId: 'CEO', waitJoin: true, missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'return', 'otok-3', '--summary', 'Done', '--files', 'src/backend/a.ts,tests/backend/a.test.ts', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.return', params: { tokenId: 'otok-3', summary: 'Done', modifiedFiles: ['src/backend/a.ts', 'tests/backend/a.test.ts'], missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'create', '--mission', 'eng-1', '--name', 'Nova', '--role', 'L2', '--allow-path', 'src/ai', '--color', 'cyan', '--bidirectional'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.create', params: { missionId: 'eng-1', name: 'Nova', rank: 'L2', allowedPaths: ['src/ai'], color: 'cyan', bidirectional: true } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'config', '--mission', 'eng-1', '--node', 'Nova', '--allow-path', 'src/ai,tests/ai'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.configure', params: { missionId: 'eng-1', nodeId: 'Nova', allowedPaths: ['src/ai', 'tests/ai'] } },
+		);
+		assert.ok(HELP_TEXT.includes('token mint'));
+		assert.ok(HELP_TEXT.includes('token return'));
+		assert.ok(HELP_TEXT.includes('orchestration validate'));
+		assert.ok(HELP_TEXT.includes('orchestration pause'));
 	});
 });

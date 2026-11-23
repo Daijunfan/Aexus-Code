@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, addDisposableListener, append, clearNode, Dimension, EventType, getWindow, getWindows, onDidRegisterWindow } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, Dimension, EventType, getWindow, getWindows, onDidRegisterWindow } from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
@@ -11,31 +11,58 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { IAdeCloudHostBackendService } from '../../../../platform/ade/common/adeCloudHosts.js';
-import { MissionNodeRoleKind } from '../../../../platform/ade/common/adeMissionBoundary.js';
 import {
 	addEdgeToMermaid,
 	addNodeToMermaid,
 	computeMissionAutoLayout,
-	getMissionEdgeKind,
-	IMissionCanvasHistorySnapshot,
 	IMissionDagEdge,
-	IMissionDagEmployeeGroup,
 	IMissionDagNode,
-	IMissionNodeCheckHook,
 	IMissionNodePosition,
-	MissionCanvasHistoryStack,
 	parseMissionMermaidDag,
 	removeEdgeFromMermaid,
 	removeNodeFromMermaid,
 	removeNodesFromMermaid,
 	renameEdgeLabelInMermaid,
 	renameNodeInMermaid,
-	setNodeEmployeeInMermaid,
-	toggleEdgeFailInMermaid,
+	upsertTaskMetadataInMermaid,
 } from '../../../../platform/ade/common/adeMissionDag.js';
-import { IMissionDagRevision, IMissionRuntimeState, IMissionToken } from '../../../../platform/ade/common/adeMissionEngine.js';
+import { formatCompactTokenCount, IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
+import { formatFinOpsUsd } from '../../../../platform/ade/common/adeModelPricing.js';
+import {
+	buildOrchestrationTokenDeltaView,
+	findHighestRankStaffNode,
+	IMissionTaskStatusRecord,
+	IOrchestrationRuntimeState,
+	IOrchestrationToken,
+	IOrchestrationWhiteboard,
+	MissionTaskStatus,
+	planDynamicSubordinateCreation,
+	updateMissionTaskNodeStatus,
+	upsertDepartmentWhiteboard,
+} from '../../../../platform/ade/common/adeOrchestrationEngine.js';
+import {
+	addOrchestrationGroup,
+	addStaffNodeToOrchestration,
+	addWhiteboardNodeToOrchestration,
+	computeOrchestrationAutoLayout,
+	connectOrchestrationEdge,
+	getOrchestrationNodeSize,
+	IOrchestrationDepartmentGroup,
+	IOrchestrationGraphEdge,
+	IOrchestrationGraphNode,
+	moveOrchestrationNodeToGroup,
+	OrchestrationLayoutMode,
+	parseOrchestrationGraph,
+	removeOrchestrationEdge,
+	removeOrchestrationGroup,
+	removeOrchestrationNode,
+	renameOrchestrationEdgeLabel,
+	renameOrchestrationGroup,
+	renameOrchestrationNode,
+	upsertOrchestrationNodeColorInCode,
+	upsertOrchestrationWhiteboardInCode,
+} from '../../../../platform/ade/common/adeOrchestrationGraph.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, getMissionDisplayName, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
-import { formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
@@ -47,13 +74,23 @@ import { IEditorOpenContext, IEditorSerializer } from '../../../common/editor.js
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
-import { ADE_ENGINEERING_SCHEME, ADE_REMOVE_MISSION_COMMAND_ID, ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
+import {
+	ADE_ENGINEERING_SCHEME,
+	ADE_SECRETARY_ID,
+	AdeEngineeringViewMode,
+	encodeAdeEngineeringInputSpec,
+	IAdeAgent,
+	IAdeEditorService,
+	IAdeProjectsService,
+	parseAdeEngineeringInputSpec,
+} from '../common/ade.js';
+import { adeBi, onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
-import { AdeMissionCanvasRenderer, getMissionNodeSize, getMissionSupervisorColorIndex, IMissionCanvasRenderSnapshot } from './adeMissionCanvasRenderer.js';
+import { AdeMissionCanvasRenderer, getMissionNodeSize, IMissionCanvasRenderSnapshot } from './adeMissionCanvasRenderer.js';
 import { AdeMissionFileDrawer } from './adeMissionFileDrawer.js';
 import { AdeMissionHostCatalog } from './adeMissionHostCatalog.js';
 import { AdeMissionMinimap } from './adeMissionMinimap.js';
-import { AdeMissionNodeInspector, MissionInspectorTab } from './adeMissionNodeInspector.js';
+import { MissionInspectorTab } from './adeMissionNodeInspector.js';
 import { AdeMissionPopovers } from './adeMissionPopovers.js';
 import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
 import { IAdeMissionService } from './adeMissionStore.js';
@@ -62,9 +99,16 @@ import './media/adeMissionCanvas.css';
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 2.5;
-const DUAL_DRAWER_MIN_WIDTH = 1120;
-const INSPECTOR_HUD_SAFE_INSET = 378;
 const CANVAS_PAN_CLICK_THRESHOLD_PX = 5;
+const MAX_UNDO_HISTORY = 50;
+
+interface IEngineeringHistoryEntry {
+	readonly viewMode: AdeEngineeringViewMode;
+	readonly codeText: string;
+	readonly positions: Record<string, IMissionNodePosition>;
+	readonly nodePrompts: Record<string, string>;
+	readonly label: string;
+}
 
 export interface IAdePendingMissionNodeFocus {
 	readonly nodeId: string;
@@ -74,18 +118,23 @@ export interface IAdePendingMissionNodeFocus {
 
 export class AdeEngineeringEditorInput extends EditorInput {
 	static readonly ID = 'workbench.input.adeEngineering';
+	readonly governorSessionId: string;
+	readonly viewMode: AdeEngineeringViewMode;
 	override readonly resource: URI;
 	private readonly missionService: IAdeMissionService | undefined;
 	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
 	private pendingFocus: IAdePendingMissionNodeFocus | undefined;
 
 	constructor(
-		readonly governorSessionId: string,
+		rawSpec: string,
 		@IAdeProjectsService private readonly projects: IAdeProjectsService,
 		@IInstantiationService instantiationService: IInstantiationService,
 	) {
 		super();
-		this.resource = URI.from({ scheme: ADE_ENGINEERING_SCHEME, path: `/${governorSessionId}` });
+		const parsed = parseAdeEngineeringInputSpec(rawSpec);
+		this.governorSessionId = parsed.id;
+		this.viewMode = parsed.viewMode;
+		this.resource = URI.from({ scheme: ADE_ENGINEERING_SCHEME, path: `/${this.governorSessionId}/${this.viewMode}` });
 		const tryGet = <T>(id: ServiceIdentifier<T>): T | undefined => instantiationService.invokeFunction(accessor => {
 			try {
 				return accessor.get(id);
@@ -113,11 +162,13 @@ export class AdeEngineeringEditorInput extends EditorInput {
 		const record = this.missionService?.getMission(this.governorSessionId);
 		const linkedAgent = this.projects.getAgent(this.governorSessionId);
 		const base = record?.title ?? linkedAgent?.label ?? missionAlias;
-		return localize('adeMissionTabTitle', "{0} · {1}", base, missionAlias);
+		return this.viewMode === 'orchestration'
+			? localize('adeEngOrchTabTitle', "{0} · Orchestration", base)
+			: localize('adeEngMissionTabTitle', "{0} · Mission", base);
 	}
 
 	override getIcon(): ThemeIcon {
-		return Codicon.typeHierarchySub;
+		return this.viewMode === 'orchestration' ? Codicon.organization : Codicon.typeHierarchySub;
 	}
 
 	setPendingFocus(focus: IAdePendingMissionNodeFocus | undefined): void {
@@ -131,16 +182,16 @@ export class AdeEngineeringEditorInput extends EditorInput {
 	}
 
 	override matches(other: EditorInput): boolean {
-		return other instanceof AdeEngineeringEditorInput && other.governorSessionId === this.governorSessionId;
+		return other instanceof AdeEngineeringEditorInput
+			&& other.governorSessionId === this.governorSessionId
+			&& other.viewMode === this.viewMode;
 	}
 }
 
 /**
- * Workbench-wide page-visibility animation guardrail for all ADE views
- * (Mission Canvas, Sidebar Secretary Deck, Cloud Hosts Console, Session Warmup).
+ * Workbench-wide page-visibility animation guardrail for all ADE views.
  * Toggles `html.ade-page-hidden` on every registered VS Code window so ALL
- * infinite CSS animations pause when a window is minimized, hidden, or occluded —
- * even when no Mission Canvas editor tab is currently open.
+ * infinite CSS animations pause when a window is minimized, hidden, or occluded.
  */
 export class AdePageVisibilityAnimationGuard extends Disposable {
 	static readonly ID = 'workbench.contrib.adePageVisibilityAnimationGuard';
@@ -183,22 +234,28 @@ export class AdeEngineeringEditorSerializer implements IEditorSerializer {
 	}
 
 	serialize(input: EditorInput): string | undefined {
-		return input instanceof AdeEngineeringEditorInput ? input.governorSessionId : undefined;
+		return input instanceof AdeEngineeringEditorInput
+			? encodeAdeEngineeringInputSpec(input.governorSessionId, input.viewMode)
+			: undefined;
 	}
 
-	deserialize(instantiationService: IInstantiationService, missionId: string): EditorInput | undefined {
-		if (!missionId) {
+	deserialize(instantiationService: IInstantiationService, serialized: string): EditorInput | undefined {
+		if (!serialized) {
 			return undefined;
 		}
-		return instantiationService.createInstance(AdeEngineeringEditorInput, missionId);
+		return instantiationService.createInstance(AdeEngineeringEditorInput, serialized);
 	}
 }
 
 /**
- * Lean, high-performance Mission DAG Canvas EditorPane coordinator.
- * Delegates host probing/model cataloging (`AdeMissionHostCatalog`), split Mermaid/Pre-Prompt drawer
- * & run controls (`AdeMissionFileDrawer`), floating popovers (`AdeMissionPopovers`), and
- * in-place patching SVG/DOM graph rendering (`AdeMissionCanvasRenderer`) to dedicated modules.
+ * Minimalist dual-view ADE Engineering Canvas EditorPane:
+ * - View 1 (`mission`): Strictly acyclic Mermaid Task DAG + 2-pane source drawer
+ *   (Mermaid code editor + All Task Nodes' descriptions) + click-to-edit task popover.
+ * - View 2 (`orchestration`): All-staff cyclic/bidirectional free-topology canvas
+ *   with 4-side x 3-slot multi-anchor routing, department shared whiteboards (lightweight pointers),
+ *   token relay batons, and a single-pane declarative code drawer bidirectionally synced in real time.
+ * - Minimalist Chrome Invariant: ONLY ONE button in the top-left corner of the canvas
+ *   (plus existing blank-canvas right-click menu to create nodes).
  */
 export class AdeEngineeringEditorPane extends EditorPane {
 	static readonly ID = 'workbench.editor.adeEngineering';
@@ -218,64 +275,63 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private viewportEl!: HTMLElement;
 	private worldEl!: HTMLElement;
 	private emptyHintEl!: HTMLElement;
+	private emptyHintTitleEl!: HTMLElement;
+	private emptyHintSubEl!: HTMLElement;
 	private canvasAlertEl!: HTMLElement;
 	private canvasAlertIconEl!: HTMLElement;
 	private canvasAlertTextEl!: HTMLElement;
 	private canvasAlertOpenFileBtn!: HTMLButtonElement;
-	private supLegendEl!: HTMLElement;
-	private readonly supLegendDisposables = this._register(new DisposableStore());
-	private readonly supLegendChips = new Map<string, HTMLButtonElement>();
-	private lastSupLegendSignature = '';
-	private pinnedSupervisorId: string | undefined;
-	private hoveredSupervisorId: string | undefined;
-	private tabSpotlightBannerEl!: HTMLElement;
-	private tabSpotlightActive = false;
-	private revisionBarEl!: HTMLElement;
-	private readonly revisionBarDisposables = this._register(new DisposableStore());
-	private readonly revisionBtnByVersion = new Map<number, HTMLButtonElement>();
-	private revisionSliderEl: HTMLInputElement | undefined;
-	private revisionExitBtnEl: HTMLButtonElement | undefined;
-	private lastRevisionListSignature = '';
-	private previewRevisionVersion: number | undefined;
-	private activeRenderNodes: readonly IMissionDagNode[] = [];
-	private activeRenderPositions: ReadonlyMap<string, IMissionNodePosition> = new Map();
-	private zoomSliderEl!: HTMLInputElement;
-	private zoomReadoutBtnEl!: HTMLButtonElement;
-	private undoBtnEl!: HTMLButtonElement;
-	private redoBtnEl!: HTMLButtonElement;
-	private selectModeBtnEl!: HTMLButtonElement;
-	private cloudHaloToggleBtnEl!: HTMLButtonElement;
-	private minimapToggleBtnEl!: HTMLButtonElement;
 	private marqueeBoxEl!: HTMLElement;
 	private selectionHudEl!: HTMLElement;
 	private selectionHudLabelEl!: HTMLElement;
 	private searchBarEl!: HTMLElement;
 	private searchInputEl!: HTMLInputElement;
 	private searchCountEl!: HTMLElement;
+	private consoleBarEl!: HTMLElement;
+	private viewOrchBtnEl!: HTMLButtonElement;
+	private viewMissionBtnEl!: HTMLButtonElement;
+	private viewSplitBtnEl!: HTMLButtonElement;
+	private consoleTokensEl!: HTMLElement;
+	private consoleSpendEl!: HTMLElement;
+	private consolePauseBtnEl!: HTMLButtonElement;
+	private consoleAbortBtnEl!: HTMLButtonElement;
+	private consoleMinimapBtnEl!: HTMLButtonElement;
 
 	private fileDrawer!: AdeMissionFileDrawer;
 	private popovers!: AdeMissionPopovers;
 	private renderer!: AdeMissionCanvasRenderer;
-	private nodeInspector!: AdeMissionNodeInspector;
 	private minimap!: AdeMissionMinimap;
 
-	private readonly historyStack = new MissionCanvasHistoryStack(50);
-	private preDragHistorySnapshot: IMissionCanvasHistorySnapshot | undefined;
-	private selectedNodeIds = new Set<string>();
-	private selectedEdgeKey: string | undefined;
-	private selectBoxMode = false;
-	private searchMatchIds: string[] = [];
-	private searchActiveIdx = -1;
+	private undoStack: IEngineeringHistoryEntry[] = [];
+	private redoStack: IEngineeringHistoryEntry[] = [];
+	private preDragHistorySnapshot: IEngineeringHistoryEntry | undefined;
+	private lastCoalescedHistoryAt = 0;
 
+	private viewMode: AdeEngineeringViewMode = 'mission';
 	private activeMissionId: string | undefined;
 	private activePromptEditSource: 'drawer' | 'popover' | undefined;
 	private isDraggingNode = false;
+
+	// Mission View (Task DAG) State
 	private mermaidText = '';
 	private direction: 'LR' | 'TD' = 'LR';
 	private nodes: readonly IMissionDagNode[] = [];
 	private edges: readonly IMissionDagEdge[] = [];
-	private employees: readonly IMissionDagEmployeeGroup[] = [];
+
+	// Orchestration View (All-Staff Cyclic Topology) State
+	private orchestrationText = '';
+	private orchDirection: 'LR' | 'TD' = 'LR';
+	private orchLayoutMode: OrchestrationLayoutMode = 'lr';
+	private orchNodes: readonly IOrchestrationGraphNode[] = [];
+	private orchEdges: readonly IOrchestrationGraphEdge[] = [];
+	private orchDepartments: readonly IOrchestrationDepartmentGroup[] = [];
+
+	// Shared Canvas Viewport & Selection State
 	private positions = new Map<string, IMissionNodePosition>();
+	private selectedNodeIds = new Set<string>();
+	private selectedEdgeKey: string | undefined;
+	private searchMatchIds: string[] = [];
+	private searchActiveIdx = -1;
 
 	private panX = 0;
 	private panY = 0;
@@ -284,12 +340,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private edgeRerouteRafId: number | undefined;
 	private pendingDraggedNodeId: string | undefined;
 	private pendingDraggedMultipleNodes = false;
-	private blockedCountdownTimer: number | undefined;
 	private canvasAlertTimer: number | undefined;
+	private abortConfirmUntil = 0;
+	private abortConfirmTimer: number | undefined;
 	private lastProjectsFingerprint = '';
-	private lastNodeChecksFingerprint = '';
+	private lastTaskStatusFingerprint = '';
+	private lastOrchAuxiliaryFingerprint = '';
 	private isEditorTabVisible = true;
-	private animationsPaused = false;
 	private isPaneDisposed = false;
 
 	constructor(
@@ -332,21 +389,38 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				if (!latest) {
 					return;
 				}
-				if (latest.mermaidText !== this.mermaidText) {
-					this.mermaidText = latest.mermaidText;
-					this.fileDrawer?.setMermaidValue(this.mermaidText);
-					this.parseAndRenderGraph(this.mermaidText);
+				if (this.viewMode === 'mission') {
+					if (latest.mermaidText !== this.mermaidText) {
+						this.mermaidText = latest.mermaidText;
+						this.fileDrawer?.setCodeValue(this.mermaidText);
+						this.parseAndRenderMissionGraph(this.mermaidText);
+					} else {
+						this.syncAllNodePromptViews(this.activePromptEditSource);
+						const statusFp = this.computeTaskStatusesFingerprint(latest.taskStatuses);
+						if (statusFp !== this.lastTaskStatusFingerprint) {
+							this.lastTaskStatusFingerprint = statusFp;
+							if (!this.isDraggingNode) {
+								this.syncGraphDom();
+							}
+							this.fileDrawer?.syncTaskDescriptionsPane(true);
+						}
+					}
 				} else {
-					this.syncAllNodePromptViews(this.activePromptEditSource);
-					const checksFp = this.computeNodeChecksFingerprint(latest.nodeChecks);
-					if (checksFp !== this.lastNodeChecksFingerprint) {
-						this.lastNodeChecksFingerprint = checksFp;
-						if (this.nodes.length > 0 && !this.isDraggingNode) {
-							this.syncGraphDom();
+					const latestOrch = latest.orchestrationText ?? '';
+					if (latestOrch !== this.orchestrationText) {
+						this.orchestrationText = latestOrch;
+						this.fileDrawer?.setCodeValue(this.orchestrationText);
+						this.parseAndRenderOrchestrationGraph(this.orchestrationText);
+					} else {
+						const auxFp = this.computeOrchAuxiliaryFingerprint(latest.whiteboards, latest.orchestrationRuntime);
+						if (auxFp !== this.lastOrchAuxiliaryFingerprint) {
+							this.lastOrchAuxiliaryFingerprint = auxFp;
+							if (!this.isDraggingNode) {
+								this.syncGraphDom();
+							}
 						}
 					}
 				}
-				this.syncRuntimeControlsUi();
 			}));
 		}
 
@@ -355,34 +429,33 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				if (!this.activeMissionId || changedMissionId !== this.activeMissionId || !this.renderer) {
 					return;
 				}
-				this.syncRuntimeControlsUi();
-				if (this.nodes.length > 0 && !this.isDraggingNode) {
+				if (!this.isDraggingNode) {
 					this.syncGraphDom();
+				}
+				if (this.viewMode === 'mission') {
+					this.fileDrawer?.syncTaskDescriptionsPane(true);
 				}
 			}));
 		}
 
 		if (this.projectsService) {
 			this._register(this.projectsService.onDidChange(() => {
-				if (!this.activeMissionId || this.nodes.length === 0 || this.isDraggingNode || !this.renderer) {
+				if (!this.activeMissionId || this.viewMode !== 'orchestration' || this.orchNodes.length === 0 || this.isDraggingNode || !this.renderer) {
 					return;
 				}
-				const nextFp = this.computeActiveMissionProjectsFingerprint();
+				const nextFp = this.computeActiveProjectsFingerprint();
 				if (nextFp !== this.lastProjectsFingerprint) {
 					this.lastProjectsFingerprint = nextFp;
 					this.syncGraphDom();
-					if (this.nodeInspector?.isOpen()) {
-						this.nodeInspector.refresh();
-					}
 				}
 			}));
 		}
 
 		if (this.sessionsService) {
 			this._register(this.sessionsService.onDidChangeEngines(() => {
-				if (this.activeMissionId && this.nodes.length > 0 && !this.isDraggingNode && this.renderer) {
+				if (this.activeMissionId && this.viewMode === 'orchestration' && this.orchNodes.length > 0 && !this.isDraggingNode && this.renderer) {
 					this.syncGraphDom();
-					this.prewarmMissionHosts();
+					this.prewarmHosts();
 				}
 			}));
 		}
@@ -390,21 +463,33 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const extensionService = tryGet(IExtensionService);
 		if (extensionService) {
 			void extensionService.whenInstalledExtensionsRegistered().then(() => {
-				if (!this.isPaneDisposed && this.activeMissionId && this.nodes.length > 0 && !this.isDraggingNode && this.renderer) {
+				if (!this.isPaneDisposed && this.activeMissionId && this.getActiveNodeCount() > 0 && !this.isDraggingNode && this.renderer) {
 					this.syncGraphDom();
 				}
 			});
 		}
 
 		this._register(themeService.onDidColorThemeChange(() => {
-			if (this.activeMissionId && this.nodes.length > 0 && !this.isDraggingNode && this.renderer) {
+			if (this.activeMissionId && this.getActiveNodeCount() > 0 && !this.isDraggingNode && this.renderer) {
 				this.syncGraphDom();
 			}
 		}));
 
 		this._register(this.hostCatalog.onDidChangeHosts(() => {
-			if (this.activeMissionId && this.nodes.length > 0 && !this.isDraggingNode && this.renderer) {
+			if (this.activeMissionId && this.viewMode === 'orchestration' && this.orchNodes.length > 0 && !this.isDraggingNode && this.renderer) {
 				this.syncGraphDom();
+			}
+		}));
+
+		this._register(onDidChangeAdeLocale(() => {
+			this.syncEmptyHintCopy();
+			this.updateConsoleBar();
+			if (this.activeMissionId && this.renderer && !this.isDraggingNode) {
+				if (this.viewMode === 'orchestration') {
+					this.parseAndRenderOrchestrationGraph(this.orchestrationText);
+				} else {
+					this.parseAndRenderMissionGraph(this.mermaidText);
+				}
 			}
 		}));
 
@@ -413,8 +498,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.isPaneDisposed = true;
 				this.isDraggingNode = false;
 				this.cancelScheduledFrames();
-				this.stopBlockedCountdownTimer();
 				this.clearCanvasAlertTimer();
+				this.clearAbortConfirmTimer();
 				const doc = this.rootEl ? getWindow(this.rootEl).document : undefined;
 				if (doc && !doc.hidden && doc.visibilityState !== 'hidden') {
 					doc.documentElement.classList.remove('ade-page-hidden');
@@ -423,103 +508,40 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		});
 	}
 
+	getViewMode(): AdeEngineeringViewMode {
+		return this.viewMode;
+	}
+
 	protected createEditor(parent: HTMLElement): void {
 		this.rootEl = append(parent, $('.ade-mission-editor.ade-eng-editor', {
 			tabindex: 0,
 			role: 'region',
-			'aria-label': localize('adeMissionCanvasAria', "Mission Canvas"),
+			'aria-label': adeBi(localize('adeEngCanvasAria', "Engineering Canvas"), '工程编排画布'),
 		}));
 		this.bodyEl = append(this.rootEl, $('.ade-mission-body.ade-eng-body'));
 
+		// ONLY ONE top-left button on the entire canvas + its minimalist dual-mode drawer
 		this.fileDrawer = this._register(new AdeMissionFileDrawer(this.bodyEl, {
 			getActiveMissionId: () => this.activeMissionId,
-			getMermaidText: () => this.mermaidText,
-			isLiveRun: () => this.isLiveRun(),
-			getNodes: () => this.nodes,
-			getNodePrompts: () => this.getActiveNodePrompts(),
-			onMermaidDraftChange: nextText => {
-				if (this.isLiveRun()) {
-					return;
-				}
-				if (nextText !== this.mermaidText) {
-					this.historyStack.push(this.captureHistorySnapshot(localize('adeMissionHistoryEditMermaid', "编辑 Mermaid")), { coalesceMs: 1200 });
-					this.syncHistoryButtons();
-				}
-				this.mermaidText = nextText;
-				if (this.activeMissionId) {
-					this.missionService?.updateMermaid(this.activeMissionId, nextText);
-				}
-				this.parseAndRenderGraph(nextText);
+			getViewMode: () => this.viewMode,
+			getCodeText: () => (this.viewMode === 'orchestration' ? this.orchestrationText : this.mermaidText),
+			getMissionTaskNodes: () => this.nodes,
+			getTaskDescriptions: () => this.getActiveNodePrompts(),
+			getTaskStatuses: () => this.getActiveTaskStatuses(),
+			getOrchestrationLayoutMode: () => this.orchLayoutMode,
+			onChangeOrchestrationLayoutMode: mode => {
+				this.handleChangeOrchestrationLayoutMode(mode);
 			},
-			onCommitLiveMermaidPatch: async nextText => {
-				const missionId = this.activeMissionId;
-				if (!missionId || !this.missionRuntimeService) {
-					return { ok: false, error: localize('adeMissionLivePatchRejected', "Live DAG patch rejected.") };
-				}
-				const res = await this.missionRuntimeService.patchMermaid(missionId, {
-					caller: { isHumanUser: true },
-					newMermaidText: nextText,
-					reason: 'Live canvas Mermaid patch',
-				});
-				if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-					return res;
-				}
-				if (res.ok) {
-					this.mermaidText = nextText;
-					this.hideCanvasAlert();
-					this.parseAndRenderGraph(nextText);
-				} else {
-					const msg = res.error || localize('adeMissionLivePatchRejected', "Live DAG patch rejected.");
-					this.showCanvasAlert(msg, 'error');
-				}
-				return res;
+			onCodeDraftChange: nextText => {
+				this.handleCodeDraftChange(nextText);
 			},
-			onNodePromptEdit: (nodeId, nextVal) => {
+			onTaskDescriptionEdit: (nodeId, nextVal) => {
 				if (!this.activeMissionId) {
 					return;
 				}
 				this.commitNodePromptEdit(this.activeMissionId, nodeId, nextVal, 'drawer');
 			},
-			onPrimaryRunClick: async timeoutMinutes => {
-				await this.handlePrimaryRunButtonClick(timeoutMinutes);
-			},
-			onStopClick: () => {
-				const missionId = this.activeMissionId;
-				if (!missionId || !this.missionRuntimeService) {
-					return;
-				}
-				void this.missionRuntimeService.stop(missionId).then(res => {
-					if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-						return;
-					}
-					if (!res.ok && res.error) {
-						this.reportRuntimeFeedback(res.error, 'error');
-					} else {
-						this.hideCanvasAlert();
-					}
-					this.syncRuntimeControlsUi();
-				}, err => {
-					if (!this.isPaneDisposed && this.activeMissionId === missionId) {
-						this.reportRuntimeFeedback(err instanceof Error ? err.message : String(err), 'error');
-					}
-				});
-			},
-			onTimeoutChange: async minutes => {
-				await this.handleTimeoutChange(minutes);
-			},
-			onCutoffChange: async cutoff => {
-				await this.handleCutoffChange(cutoff);
-			},
-			onAutoLayoutClick: () => this.resetToAutoLayout(),
-			onRemoveMissionClick: () => {
-				if (this.activeMissionId) {
-					void this.commandService?.executeCommand(ADE_REMOVE_MISSION_COMMAND_ID, this.activeMissionId);
-				}
-			},
-			onDrawerOpenChanged: isOpen => {
-				if (isOpen && this.nodeInspector?.isOpen() && this.getPaneWidth() < DUAL_DRAWER_MIN_WIDTH) {
-					this.selectNode(undefined);
-				}
+			onDrawerOpenChanged: () => {
 				this.syncHudLayoutClasses();
 			},
 		}));
@@ -530,10 +552,92 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}));
 		this.marqueeBoxEl.hidden = true;
 
-		// Floating Large-DAG Node Search Bar (Cmd/Ctrl+F)
+		// Top-center floating Global Run Console & Dual-View Switcher (never overlaps top-left drawer button)
+		this.consoleBarEl = append(this.bodyEl, $('.ade-eng-console-bar', {
+			role: 'toolbar',
+			'aria-label': adeBi(localize('adeEngConsoleBarAria', "Engineering Global Console"), '工程编排全局控制台'),
+			'data-ade-eng-console-bar': 'true',
+		}));
+		this._register(addDisposableListener(this.consoleBarEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
+
+		const viewSwitch = append(this.consoleBarEl, $('.ade-eng-view-switch', {
+			role: 'tablist',
+			'aria-label': adeBi(localize('adeEngViewSwitchAria', "Switch Engineering View"), '切换工程视图'),
+		}));
+		this.viewOrchBtnEl = append(viewSwitch, $('button.ade-eng-view-btn', {
+			type: 'button',
+			role: 'tab',
+			'data-ade-eng-view-btn': 'orchestration',
+			title: adeBi(localize('adeEngViewOrchTip', "Orchestration · All-Staff Cyclic Topology"), '员工自由编排拓扑视图'),
+		})) as HTMLButtonElement;
+		append(this.viewOrchBtnEl, $('span.codicon.codicon-organization', { 'aria-hidden': 'true' }));
+		append(this.viewOrchBtnEl, $('span', {}, adeBi(localize('adeEngViewOrchLabel', "Staff"), '员工拓扑')));
+		this._register(addDisposableListener(this.viewOrchBtnEl, EventType.CLICK, () => this.switchViewMode('orchestration', false)));
+
+		this.viewMissionBtnEl = append(viewSwitch, $('button.ade-eng-view-btn', {
+			type: 'button',
+			role: 'tab',
+			'data-ade-eng-view-btn': 'mission',
+			title: adeBi(localize('adeEngViewMissionTip', "Mission · Acyclic Task DAG"), '任务有向无环图 (DAG) 视图'),
+		})) as HTMLButtonElement;
+		append(this.viewMissionBtnEl, $('span.codicon.codicon-type-hierarchy-sub', { 'aria-hidden': 'true' }));
+		append(this.viewMissionBtnEl, $('span', {}, adeBi(localize('adeEngViewMissionLabel', "Task DAG"), '任务 DAG')));
+		this._register(addDisposableListener(this.viewMissionBtnEl, EventType.CLICK, () => this.switchViewMode('mission', false)));
+
+		this.viewSplitBtnEl = append(viewSwitch, $('button.ade-eng-view-btn.is-split', {
+			type: 'button',
+			'data-ade-eng-view-split': 'true',
+			title: adeBi(localize('adeEngViewSplitTip', "Open both views side by side"), '同屏分栏对照查看双视图'),
+		})) as HTMLButtonElement;
+		append(this.viewSplitBtnEl, $('span.codicon.codicon-split-horizontal', { 'aria-hidden': 'true' }));
+		this._register(addDisposableListener(this.viewSplitBtnEl, EventType.CLICK, () => {
+			this.switchViewMode(this.viewMode === 'orchestration' ? 'mission' : 'orchestration', true);
+		}));
+
+		append(this.consoleBarEl, $('span.ade-eng-console-sep', { 'aria-hidden': 'true' }));
+
+		this.consoleTokensEl = append(this.consoleBarEl, $('span.ade-eng-console-pill.is-tokens', {
+			'data-ade-eng-console-tokens': 'true',
+		}));
+		this.consoleSpendEl = append(this.consoleBarEl, $('span.ade-eng-console-pill.is-spend', {
+			'data-ade-eng-console-spend': 'true',
+		}));
+		this.consoleSpendEl.hidden = true;
+
+		append(this.consoleBarEl, $('span.ade-eng-console-sep', { 'aria-hidden': 'true' }));
+
+		this.consolePauseBtnEl = append(this.consoleBarEl, $('button.ade-eng-console-btn.is-pause', {
+			type: 'button',
+			'data-ade-eng-pause-btn': 'true',
+		})) as HTMLButtonElement;
+		this._register(addDisposableListener(this.consolePauseBtnEl, EventType.CLICK, () => void this.handleToggleOrchestrationPause()));
+
+		this.consoleAbortBtnEl = append(this.consoleBarEl, $('button.ade-eng-console-btn.is-danger', {
+			type: 'button',
+			'data-ade-eng-abort-btn': 'true',
+		})) as HTMLButtonElement;
+		this._register(addDisposableListener(this.consoleAbortBtnEl, EventType.CLICK, () => void this.handleAbortAllOrchestrationTokens()));
+
+		this.consoleMinimapBtnEl = append(this.consoleBarEl, $('button.ade-eng-console-btn.is-minimap', {
+			type: 'button',
+			'data-ade-eng-minimap-btn': 'true',
+			title: adeBi(localize('adeEngMinimapToggleTip', "Toggle Minimap Overview"), '显示/隐藏拓扑小地图'),
+		})) as HTMLButtonElement;
+		append(this.consoleMinimapBtnEl, $('span.codicon.codicon-map', { 'aria-hidden': 'true' }));
+		this._register(addDisposableListener(this.consoleMinimapBtnEl, EventType.CLICK, () => {
+			this.minimap?.setUserVisible(!this.minimap.isUserVisible());
+			this.updateConsoleBar();
+		}));
+
+		// Interactive Bottom-Right Minimap Overview for Large Topologies
+		this.minimap = this._register(new AdeMissionMinimap(this.bodyEl, {
+			onNavigateToWorldCenter: (worldX, worldY) => this.centerViewportOnWorldPoint(worldX, worldY),
+		}));
+
+		// Floating Node Search Bar (hidden until Cmd/Ctrl+F)
 		this.searchBarEl = append(this.bodyEl, $('.ade-mission-search-bar', {
 			role: 'search',
-			'aria-label': localize('adeMissionSearchAria', "Search Mission Canvas Nodes"),
+			'aria-label': adeBi(localize('adeMissionSearchAria', "Search Canvas Nodes"), '搜索画布节点'),
 			'data-ade-canvas-search': 'true',
 		}));
 		this.searchBarEl.hidden = true;
@@ -541,7 +645,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		append(this.searchBarEl, $('span.codicon.codicon-search.ade-mission-search-ico', { 'aria-hidden': 'true' }));
 		this.searchInputEl = append(this.searchBarEl, $('input.ade-mission-search-input', {
 			type: 'text',
-			placeholder: localize('adeMissionSearchPlaceholder', "搜索节点 ID / 名称 / 员工 / 模型 / 提示词… (Enter 下一个)"),
+			placeholder: adeBi(localize('adeMissionSearchPlaceholder', "Search nodes… (Enter next)"), '搜索节点 ID / 名称 / 描述… (Enter 下一个)'),
 			'aria-label': localize('adeMissionSearchInputAria', "Filter nodes"),
 			'data-ade-canvas-search-input': 'true',
 		})) as HTMLInputElement;
@@ -550,22 +654,19 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}, ''));
 		const searchPrevBtn = append(this.searchBarEl, $('button.ade-mission-vp-btn', {
 			type: 'button',
-			title: localize('adeMissionSearchPrevTip', "上一个匹配 (Shift+Enter)"),
-			'aria-label': localize('adeMissionSearchPrevTip', "上一个匹配 (Shift+Enter)"),
+			title: adeBi(localize('adeMissionSearchPrevTip', "Previous match (Shift+Enter)"), '上一个匹配 (Shift+Enter)'),
 			'data-ade-canvas-search-prev': 'true',
 		})) as HTMLButtonElement;
 		searchPrevBtn.appendChild($('span.codicon.codicon-arrow-up'));
 		const searchNextBtn = append(this.searchBarEl, $('button.ade-mission-vp-btn', {
 			type: 'button',
-			title: localize('adeMissionSearchNextTip', "下一个匹配 (Enter)"),
-			'aria-label': localize('adeMissionSearchNextTip', "下一个匹配 (Enter)"),
+			title: adeBi(localize('adeMissionSearchNextTip', "Next match (Enter)"), '下一个匹配 (Enter)'),
 			'data-ade-canvas-search-next': 'true',
 		})) as HTMLButtonElement;
 		searchNextBtn.appendChild($('span.codicon.codicon-arrow-down'));
 		const searchCloseBtn = append(this.searchBarEl, $('button.ade-mission-vp-btn', {
 			type: 'button',
-			title: localize('adeMissionSearchCloseTip', "关闭搜索 (Esc)"),
-			'aria-label': localize('adeMissionSearchCloseTip', "关闭搜索 (Esc)"),
+			title: adeBi(localize('adeMissionSearchCloseTip', "Close search (Esc)"), '关闭搜索 (Esc)'),
 			'data-ade-canvas-search-close': 'true',
 		})) as HTMLButtonElement;
 		searchCloseBtn.appendChild($('span.codicon.codicon-close'));
@@ -593,7 +694,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this._register(addDisposableListener(searchNextBtn, EventType.CLICK, () => this.stepCanvasSearchMatch(1)));
 		this._register(addDisposableListener(searchCloseBtn, EventType.CLICK, () => this.closeCanvasSearch(true)));
 
-		// Multi-selection Action HUD Pill (shown when >= 2 nodes are box-selected or Shift-selected)
+		// Multi-selection Action HUD Pill (hidden unless >= 2 nodes selected)
 		this.selectionHudEl = append(this.bodyEl, $('.ade-mission-selection-hud', {
 			role: 'status',
 			'aria-live': 'polite',
@@ -606,23 +707,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}));
 		const batchDelBtn = append(this.selectionHudEl, $('button.ade-mission-selection-hud-btn.danger', {
 			type: 'button',
-			title: localize('adeMissionBatchDeleteTip', "删除全部选中节点 (Delete / Backspace)"),
+			title: adeBi(localize('adeMissionBatchDeleteTip', "Delete selected nodes (Delete / Backspace)"), '删除全部选中节点 (Delete / Backspace)'),
 			'data-ade-selection-batch-delete': 'true',
 		})) as HTMLButtonElement;
 		batchDelBtn.appendChild($('span.codicon.codicon-trash'));
-		append(batchDelBtn, $('span', {}, localize('adeMissionBatchDeleteLabel', "删除")));
-		this._register(addDisposableListener(batchDelBtn, EventType.CLICK, () => {
-			this.deleteSelectedItems();
-		}));
+		append(batchDelBtn, $('span', {}, adeBi(localize('adeMissionBatchDeleteLabel', "Delete"), '删除')));
+		this._register(addDisposableListener(batchDelBtn, EventType.CLICK, () => this.deleteSelectedItems()));
 		const clearSelBtn = append(this.selectionHudEl, $('button.ade-mission-selection-hud-btn', {
 			type: 'button',
-			title: localize('adeMissionClearSelectionTip', "取消多选 (Esc)"),
+			title: adeBi(localize('adeMissionClearSelectionTip', "Clear selection (Esc)"), '取消多选 (Esc)'),
 			'data-ade-selection-clear': 'true',
 		})) as HTMLButtonElement;
 		clearSelBtn.appendChild($('span.codicon.codicon-close'));
-		this._register(addDisposableListener(clearSelBtn, EventType.CLICK, () => {
-			this.selectNode(undefined);
-		}));
+		this._register(addDisposableListener(clearSelBtn, EventType.CLICK, () => this.selectNode(undefined)));
+
+		// Transient Canvas Alert Toast (hidden unless syntax/action feedback fires)
 		this.canvasAlertEl = append(this.bodyEl, $('.ade-mission-canvas-alert', {
 			role: 'alert',
 			'aria-live': 'assertive',
@@ -636,258 +735,27 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.canvasAlertOpenFileBtn = append(this.canvasAlertEl, $('button.ade-mission-canvas-alert-action', {
 			type: 'button',
 			'data-ade-mission-canvas-alert-open-file': 'true',
-		}, localize('adeMissionAlertOpenFile', "Open mission.mmd"))) as HTMLButtonElement;
+		}, adeBi(localize('adeEngAlertOpenSource', "Open Code"), '打开源码'))) as HTMLButtonElement;
 		this.canvasAlertOpenFileBtn.hidden = true;
-		this._register(addDisposableListener(this.canvasAlertOpenFileBtn, EventType.CLICK, () => {
-			this.toggleFileDrawer(true);
-		}));
+		this._register(addDisposableListener(this.canvasAlertOpenFileBtn, EventType.CLICK, () => this.toggleFileDrawer(true)));
 		const alertDismissBtn = append(this.canvasAlertEl, $('button.ade-mission-canvas-alert-close', {
 			type: 'button',
-			title: localize('adeMissionAlertDismiss', "Dismiss"),
-			'aria-label': localize('adeMissionAlertDismiss', "Dismiss"),
+			title: adeBi(localize('adeMissionAlertDismiss', "Dismiss"), '关闭'),
+			'aria-label': adeBi(localize('adeMissionAlertDismiss', "Dismiss"), '关闭'),
 			'data-ade-mission-canvas-alert-dismiss': 'true',
 		})) as HTMLButtonElement;
 		alertDismissBtn.appendChild($('span.codicon.codicon-close'));
-		this._register(addDisposableListener(alertDismissBtn, EventType.CLICK, () => {
-			this.hideCanvasAlert();
-		}));
+		this._register(addDisposableListener(alertDismissBtn, EventType.CLICK, () => this.hideCanvasAlert()));
 
-		// Off-graph Supervisor Jurisdiction Legend Strip (visible whenever ≥1 supervisor is bound)
-		this.supLegendEl = append(this.bodyEl, $('.ade-mission-sup-legend', {
-			role: 'region',
-			'aria-label': localize('adeMissionSupLegendAria', "Off-graph Supervisor Jurisdiction"),
-			'data-ade-mission-sup-legend': 'true',
-		}));
-		this.supLegendEl.hidden = true;
-
-		// Hold-Tab Off-Graph Supervisor X-Ray Spotlight HUD Banner
-		this.tabSpotlightBannerEl = append(this.bodyEl, $('.ade-mission-tab-spotlight-banner', {
-			role: 'status',
-			'aria-live': 'polite',
-			'data-ade-tab-spotlight-banner': 'true',
-		}));
-		append(this.tabSpotlightBannerEl, $('span.ade-mission-tab-spotlight-ico', { 'aria-hidden': 'true' }, '👑'));
-		append(this.tabSpotlightBannerEl, $('span', {}, localize('adeMissionTabSpotlightBanner', "场外监工管辖探照灯 (X-Ray) 已开启 — 松开 Tab 键退出")));
-		this.tabSpotlightBannerEl.hidden = true;
-
-		// v1 -> vN Dynamic DAG Patch Revision Timeline Bar (shown when ≥2 topology versions exist)
-		this.revisionBarEl = append(this.bodyEl, $('.ade-mission-revision-bar', {
-			role: 'toolbar',
-			'aria-label': localize('adeMissionRevisionBarAria', "Dynamic DAG Revision Timeline"),
-			'data-ade-mission-revision-bar': 'true',
-		}));
-		this.revisionBarEl.hidden = true;
-		this._register(addDisposableListener(this.revisionBarEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		// Dedicated Bottom-Right Viewport Controls Bar (Undo/Redo / Box-Select / Search / Zoom − / % / + / Fit / Auto Layout)
-		const viewportBar = append(this.bodyEl, $('.ade-mission-viewport-bar', {
-			role: 'toolbar',
-			'aria-label': localize('adeMissionViewportToolbarAria', "Canvas Viewport Controls"),
-			'data-ade-mission-viewport-controls': 'true',
-		}));
-		this._register(addDisposableListener(viewportBar, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		this.undoBtnEl = append(viewportBar, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: localize('adeMissionUndoTip', "撤销 (Cmd/Ctrl+Z)"),
-			'aria-label': localize('adeMissionUndoAria', "Undo"),
-			'data-ade-mission-undo': 'true',
-		})) as HTMLButtonElement;
-		this.undoBtnEl.disabled = true;
-		this.undoBtnEl.appendChild($('span.codicon.codicon-discard'));
-		this._register(addDisposableListener(this.undoBtnEl, EventType.CLICK, () => this.undoCanvasMutation()));
-
-		this.redoBtnEl = append(viewportBar, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: localize('adeMissionRedoTip', "重做 (Cmd/Ctrl+Shift+Z)"),
-			'aria-label': localize('adeMissionRedoAria', "Redo"),
-			'data-ade-mission-redo': 'true',
-		})) as HTMLButtonElement;
-		this.redoBtnEl.disabled = true;
-		this.redoBtnEl.appendChild($('span.codicon.codicon-redo'));
-		this._register(addDisposableListener(this.redoBtnEl, EventType.CLICK, () => this.redoCanvasMutation()));
-
-		this.selectModeBtnEl = append(viewportBar, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: localize('adeMissionSelectModeTip', "切换框选多选模式（也可按住 Shift 直接框选）"),
-			'aria-label': localize('adeMissionSelectModeAria', "Toggle Box Select Mode"),
-			'aria-pressed': 'false',
-			'data-ade-mission-select-mode': 'true',
-		})) as HTMLButtonElement;
-		this.selectModeBtnEl.appendChild($('span.codicon.codicon-selection'));
-		this._register(addDisposableListener(this.selectModeBtnEl, EventType.CLICK, () => {
-			this.setSelectBoxMode(!this.selectBoxMode);
-		}));
-
-		const searchToggleBtn = append(viewportBar, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: localize('adeMissionSearchBtnTip', "搜索并定位节点 (Cmd/Ctrl+F)"),
-			'aria-label': localize('adeMissionSearchBtnAria', "Search Nodes"),
-			'data-ade-mission-search-btn': 'true',
-		})) as HTMLButtonElement;
-		searchToggleBtn.appendChild($('span.codicon.codicon-search'));
-		this._register(addDisposableListener(searchToggleBtn, EventType.CLICK, () => {
-			if (this.searchBarEl.hidden) {
-				this.openCanvasSearch();
-			} else {
-				this.closeCanvasSearch(true);
-			}
-		}));
-
-		append(viewportBar, $('span.ade-mission-vp-sep', { 'aria-hidden': 'true' }));
-
-		const zoomOutBtn = append(viewportBar, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: localize('adeMissionZoomOutTip', "Zoom Out"),
-			'aria-label': localize('adeMissionZoomOutTip', "Zoom Out"),
-			'data-ade-mission-zoom-out': 'true',
-		})) as HTMLButtonElement;
-		zoomOutBtn.appendChild($('span.codicon.codicon-remove'));
-		this._register(addDisposableListener(zoomOutBtn, EventType.CLICK, () => this.stepZoom(-0.15)));
-
-		this.zoomSliderEl = append(viewportBar, $('input.ade-mission-vp-zoom-slider', {
-			type: 'range',
-			min: String(Math.round(MIN_ZOOM * 100)),
-			max: String(Math.round(MAX_ZOOM * 100)),
-			step: '1',
-			value: '100',
-			title: localize('adeMissionZoomSliderTip', "Canvas Zoom Scale"),
-			'aria-label': localize('adeMissionZoomSliderTip', "Canvas Zoom Scale"),
-			'data-ade-mission-zoom-slider': 'true',
-		})) as HTMLInputElement;
-		this._register(addDisposableListener(this.zoomSliderEl, EventType.INPUT, () => {
-			const pct = Number.parseInt(this.zoomSliderEl.value, 10);
-			if (Number.isFinite(pct)) {
-				this.setZoomCentered(pct / 100);
-			}
-		}));
-
-		this.zoomReadoutBtnEl = append(viewportBar, $('button.ade-mission-vp-zoom-readout', {
-			type: 'button',
-			title: localize('adeMissionZoomResetTip', "Reset zoom to 100%"),
-			'data-ade-mission-zoom-label': 'true',
-		}, '100%')) as HTMLButtonElement;
-		this._register(addDisposableListener(this.zoomReadoutBtnEl, EventType.CLICK, () => this.resetZoomTo100()));
-
-		const zoomInBtn = append(viewportBar, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: localize('adeMissionZoomInTip', "Zoom In"),
-			'aria-label': localize('adeMissionZoomInTip', "Zoom In"),
-			'data-ade-mission-zoom-in': 'true',
-		})) as HTMLButtonElement;
-		zoomInBtn.appendChild($('span.codicon.codicon-add'));
-		this._register(addDisposableListener(zoomInBtn, EventType.CLICK, () => this.stepZoom(0.15)));
-
-		append(viewportBar, $('span.ade-mission-vp-sep', { 'aria-hidden': 'true' }));
-
-		const fitViewBtn = append(viewportBar, $('button.ade-mission-vp-btn.with-label', {
-			type: 'button',
-			title: localize('adeMissionFitViewTip', "Fit graph to viewport without changing manual node positions"),
-			'aria-label': localize('adeMissionFitViewAria', "Fit to View"),
-			'data-ade-mission-fit-view': 'true',
-		})) as HTMLButtonElement;
-		fitViewBtn.appendChild($('span.codicon.codicon-screen-full'));
-		append(fitViewBtn, $('span', {}, localize('adeMissionFitViewLabel', "Fit")));
-		this._register(addDisposableListener(fitViewBtn, EventType.CLICK, () => this.fitGraphToViewport()));
-
-		const autoLayoutVpBtn = append(viewportBar, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: localize('adeMissionCanvasAutoLayoutTip', "Auto Layout (resets manual node positions)"),
-			'aria-label': localize('adeMissionCanvasAutoLayoutAria', "Auto Layout"),
-			'data-ade-mission-canvas-autolayout': 'true',
-		})) as HTMLButtonElement;
-		autoLayoutVpBtn.appendChild($('span.codicon.codicon-layout'));
-		this._register(addDisposableListener(autoLayoutVpBtn, EventType.CLICK, () => this.resetToAutoLayout()));
-
-		this.cloudHaloToggleBtnEl = append(viewportBar, $('button.ade-mission-vp-btn.active', {
-			type: 'button',
-			title: localize('adeMissionCloudHaloToggleTip', "Toggle Cross-Cloud Compute Territory Halos"),
-			'aria-label': localize('adeMissionCloudHaloToggleTip', "Toggle Cross-Cloud Compute Territory Halos"),
-			'aria-pressed': 'true',
-			'data-ade-mission-cloud-halo-toggle': 'true',
-		})) as HTMLButtonElement;
-		this.cloudHaloToggleBtnEl.appendChild($('span.codicon.codicon-cloud'));
-		this._register(addDisposableListener(this.cloudHaloToggleBtnEl, EventType.CLICK, () => {
-			const next = !this.renderer.isCloudTerritoriesVisible();
-			const nodes = this.previewRevisionVersion !== undefined ? this.activeRenderNodes : this.nodes;
-			const pos = this.previewRevisionVersion !== undefined ? this.activeRenderPositions : this.positions;
-			this.renderer.setShowCloudTerritories(next, nodes, pos);
-			this.cloudHaloToggleBtnEl.classList.toggle('active', next);
-			this.cloudHaloToggleBtnEl.setAttribute('aria-pressed', String(next));
-		}));
-
-		this.minimapToggleBtnEl = append(viewportBar, $('button.ade-mission-vp-btn.active', {
-			type: 'button',
-			title: localize('adeMissionMinimapToggleTip', "Toggle Minimap Overview"),
-			'aria-label': localize('adeMissionMinimapToggleTip', "Toggle Minimap Overview"),
-			'aria-pressed': 'true',
-			'data-ade-mission-minimap-toggle': 'true',
-		})) as HTMLButtonElement;
-		this.minimapToggleBtnEl.appendChild($('span.codicon.codicon-map'));
-		this._register(addDisposableListener(this.minimapToggleBtnEl, EventType.CLICK, () => {
-			const next = !this.minimap.isUserVisible();
-			this.minimap.setUserVisible(next);
-			this.minimapToggleBtnEl.classList.toggle('active', next);
-			this.minimapToggleBtnEl.setAttribute('aria-pressed', String(next));
-		}));
-
-		this.minimap = this._register(new AdeMissionMinimap(this.bodyEl, {
-			onNavigateToWorldCenter: (worldX, worldY) => {
-				if (!this.viewportEl) {
-					return;
-				}
-				const rect = this.viewportEl.getBoundingClientRect();
-				if (rect.width <= 0 || rect.height <= 0) {
-					return;
-				}
-				this.panX = rect.width / 2 - worldX * this.zoom;
-				this.panY = rect.height / 2 - worldY * this.zoom;
-				this.scheduleWorldTransform();
-			},
-		}));
-
-		this.emptyHintEl = append(this.viewportEl, $('.ade-mission-empty-hint', {
+		// Minimalist text-only empty hint (strictly ZERO buttons on canvas!)
+		this.emptyHintEl = append(this.viewportEl, $('.ade-mission-empty-hint.is-minimal', {
 			'data-ade-mission-empty-onboarding': 'true',
 		}));
-		this._register(addDisposableListener(this.emptyHintEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
 		const emptyHero = append(this.emptyHintEl, $('.ade-mission-empty-hero'));
-		const hintIcon = append(emptyHero, $('span.codicon.codicon-type-hierarchy-sub', { 'aria-hidden': 'true' }));
-		hintIcon.setAttribute('aria-hidden', 'true');
-		append(emptyHero, $('.ade-mission-empty-hint-title', {}, localize('adeMissionEmptyTitle', "开始编排多 Agent Mission DAG")));
-		append(emptyHero, $('.ade-mission-empty-hint-sub', {}, localize('adeMissionEmptySub', "点击下方按钮、右键画布空白处或打开左上角源码抽屉，快速构建多 Agent 协作流图。")));
-
-		const emptyActions = append(this.emptyHintEl, $('.ade-mission-empty-actions'));
-		const emptyAddTaskBtn = append(emptyActions, $('button.ade-mission-empty-action-btn.primary', {
-			type: 'button',
-			'data-ade-empty-add-task': 'true',
-		})) as HTMLButtonElement;
-		emptyAddTaskBtn.appendChild($('span.codicon.codicon-add'));
-		append(emptyAddTaskBtn, $('span', {}, localize('adeMissionEmptyAddTask', "新建任务节点")));
-		this._register(addDisposableListener(emptyAddTaskBtn, EventType.CLICK, () => this.addVisualNode({ kind: 'task' })));
-
-		const emptyAddRevBtn = append(emptyActions, $('button.ade-mission-empty-action-btn', {
-			type: 'button',
-			'data-ade-empty-add-reviewer': 'true',
-		})) as HTMLButtonElement;
-		emptyAddRevBtn.appendChild($('span.codicon.codicon-shield'));
-		append(emptyAddRevBtn, $('span', {}, localize('adeMissionEmptyAddReviewer', "新建审稿 Reviewer")));
-		this._register(addDisposableListener(emptyAddRevBtn, EventType.CLICK, () => this.addVisualNode({ kind: 'task', roleKind: 'reviewer' })));
-
-		const emptyAddGateBtn = append(emptyActions, $('button.ade-mission-empty-action-btn', {
-			type: 'button',
-			'data-ade-empty-add-gate': 'true',
-		})) as HTMLButtonElement;
-		emptyAddGateBtn.appendChild($('span.codicon.codicon-law'));
-		append(emptyAddGateBtn, $('span', {}, localize('adeMissionEmptyAddGate', "新建人工 Gate")));
-		this._register(addDisposableListener(emptyAddGateBtn, EventType.CLICK, () => this.addVisualNode({ kind: 'gate' })));
-
-		const emptyOpenMermaidBtn = append(emptyActions, $('button.ade-mission-empty-action-btn', {
-			type: 'button',
-			'data-ade-empty-open-mermaid': 'true',
-		})) as HTMLButtonElement;
-		emptyOpenMermaidBtn.appendChild($('span.codicon.codicon-file-code'));
-		append(emptyOpenMermaidBtn, $('span', {}, localize('adeMissionEmptyOpenMermaid', "编辑 Mermaid 源码")));
-		this._register(addDisposableListener(emptyOpenMermaidBtn, EventType.CLICK, () => this.toggleFileDrawer(true)));
+		append(emptyHero, $('span.codicon.codicon-type-hierarchy-sub', { 'aria-hidden': 'true' }));
+		this.emptyHintTitleEl = append(emptyHero, $('.ade-mission-empty-hint-title'));
+		this.emptyHintSubEl = append(emptyHero, $('.ade-mission-empty-hint-sub'));
+		this.syncEmptyHintCopy();
 
 		this.worldEl = append(this.viewportEl, $('.ade-mission-world.ade-eng-world'));
 
@@ -897,8 +765,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.hostCatalog,
 			{
 				onHoverNode: nodeId => this.setHoveredNode(nodeId),
-				onHoverToken: token => this.handleHoverToken(token),
-				onHoverSupervisor: supId => this.setHoveredSupervisor(supId),
 				onSelectNode: (node, _anchorEl, opts) => this.selectNode(node.id, opts),
 				onSelectEdge: edge => this.selectEdge(edge),
 				onDoubleClickNode: (_node, agentId) => {
@@ -906,22 +772,26 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						void this.adeEditorService.openAgent(agentId);
 					}
 				},
+				onOpenMissionTaskPopover: (node, anchorEl) => {
+					this.openMissionTaskPopover(node, anchorEl);
+				},
+				onOpenWhiteboardPopover: (whiteboard, anchorEl) => {
+					this.openWhiteboardPopover(whiteboard, anchorEl);
+				},
+				onOpenOrchestrationTokenPopover: (staffLabel, token, anchorEl) => {
+					this.openOrchestrationTokenPopover(staffLabel, token, anchorEl);
+				},
 				onOpenEmployeePopover: (node, anchorEl) => {
-					this.popovers.openEmployeePopover(this.activeMissionId, node, this.employees, anchorEl);
+					this.popovers.openEmployeePopover(this.activeMissionId, node, [], anchorEl);
 				},
-				onOpenSupervisorPopover: (node, anchorEl) => {
+				onOpenModelPopover: (nodeId, agent, engineId, anchorEl, options) => {
 					if (this.activeMissionId) {
-						this.popovers.openSupervisorPopover(this.activeMissionId, node, anchorEl);
+						this.popovers.openModelPopover(this.activeMissionId, nodeId, agent, engineId, anchorEl, options);
 					}
 				},
-				onOpenModelPopover: (nodeId, agent, engineId, anchorEl) => {
+				onOpenEnginePopover: (nodeId, agent, engineId, anchorEl, options) => {
 					if (this.activeMissionId) {
-						this.popovers.openModelPopover(this.activeMissionId, nodeId, agent, engineId, anchorEl);
-					}
-				},
-				onOpenEnginePopover: (nodeId, agent, engineId, anchorEl) => {
-					if (this.activeMissionId) {
-						void this.popovers.openEnginePopover(this.activeMissionId, nodeId, agent, engineId, anchorEl);
+						void this.popovers.openEnginePopover(this.activeMissionId, nodeId, agent, engineId, anchorEl, options);
 					}
 				},
 				onOpenHostPopover: (node, currentHost, anchorEl) => {
@@ -930,76 +800,29 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					}
 				},
 				onOpenNodePromptPopover: (node, anchorEl) => {
-					if (this.activeMissionId) {
-						this.fileDrawer.setSelectedPromptNodeId(node.id);
-						this.popovers.openNodePromptPopover(this.activeMissionId, node, anchorEl);
-						this.syncAllNodePromptViews('popover');
-					}
+					this.openMissionTaskPopover(node, anchorEl);
 				},
-				onOpenNodeTriggersPopover: (node, anchorEl) => {
-					if (this.activeMissionId) {
-						this.popovers.openTriggersPopover(this.activeMissionId, this.nodes, this.edges, anchorEl, node.id);
-					}
+				onOpenNodeColorPopover: (nodeId, label, currentColor, anchorEl) => {
+					this.popovers.openNodeColorPopover(label, currentColor, anchorEl, nextColor => {
+						this.setNodeColorVisual(nodeId, nextColor);
+					});
 				},
 				onOpenGateDecisionPopover: (node, anchorEl, preferredTokenId, options) => {
 					if (this.activeMissionId) {
 						this.popovers.openGateDecisionPopover(this.activeMissionId, node, anchorEl, preferredTokenId, options);
 					}
 				},
-				onQuickGateApprove: (node, token, anchorEl) => {
-					if (!this.activeMissionId || !this.missionRuntimeService) {
-						return;
-					}
-					const btnEl = anchorEl.tagName === 'BUTTON' ? anchorEl as HTMLButtonElement : undefined;
-					if (btnEl?.disabled) {
-						return;
-					}
-					if (btnEl) {
-						btnEl.disabled = true;
-					}
-					void this.missionRuntimeService.resolveGate(this.activeMissionId, {
-						nodeId: node.id,
-						tokenId: token?.id,
-						decision: 'approve',
-					}).then(res => {
-						if (btnEl) {
-							btnEl.disabled = false;
-						}
-						if (res.ok) {
-							this.popovers.close();
-						} else if (res.error) {
-							this.reportRuntimeFeedback(res.error, 'error');
-						}
-					}, err => {
-						if (btnEl) {
-							btnEl.disabled = false;
-						}
-						const msg = err instanceof Error ? err.message : String(err);
-						this.reportRuntimeFeedback(msg, 'error');
-					});
-				},
-				onOpenTokenInspectorPopover: (node, token, allNodeTokens, anchorEl) => {
-					if (this.activeMissionId) {
-						const linkedAgent = this.buildAgentNodeMap().get(node.id);
-						this.popovers.openTokenInspectorPopover(this.activeMissionId, node, token, allNodeTokens, linkedAgent?.id, anchorEl);
-					}
-				},
-				onQuickRetryNode: (node, token) => {
-					void this.handleQuickRetryNode(node, token);
-				},
-				onOpenGuidedRetryPopover: (node, token, anchorEl) => {
-					if (this.activeMissionId) {
-						this.popovers.openGuidedRetryPopover(this.activeMissionId, node, token, anchorEl);
-					}
-				},
-				onQuickRecallNode: (node, token) => {
-					void this.handleQuickRecallNode(node, token);
-				},
 				onRenameNode: (nodeId, nextLabel) => {
 					this.renameVisualNode(nodeId, nextLabel);
 				},
 				onRenameEdgeLabel: (fromId, toId, nextLabel) => {
 					this.renameVisualEdgeLabel(fromId, toId, nextLabel);
+				},
+				onRenameGroup: (groupId, nextName) => {
+					this.renameOrchestrationGroupVisual(groupId, nextName);
+				},
+				onGroupContextMenu: (group, clientX, clientY) => {
+					this.openGroupContextMenu(group, clientX, clientY);
 				},
 				onConnectNodes: (fromNodeId, toNodeId, opts) => {
 					this.connectVisualEdge(fromNodeId, toNodeId, opts);
@@ -1010,13 +833,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				onEdgeContextMenu: (edge, clientX, clientY) => {
 					this.openEdgeContextMenu(edge, clientX, clientY);
 				},
-				getEffectiveNodeChecksCount: nodeId => {
-					if (!this.activeMissionId || !this.missionRuntimeService) {
-						return 0;
-					}
-					return (this.missionRuntimeService.getEffectiveNodeChecks(this.activeMissionId, nodeId)[nodeId] ?? []).length;
-				},
-				isRevisionPreview: () => this.previewRevisionVersion !== undefined,
 				onOpenAgentSession: agentId => {
 					if (this.adeEditorService) {
 						void this.adeEditorService.openAgent(agentId);
@@ -1029,22 +845,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					return [anchorNodeId];
 				},
 				onStartNodeDrag: () => {
-					if (this.previewRevisionVersion !== undefined) {
-						return;
-					}
 					this.popovers.close();
 					this.isDraggingNode = true;
-					this.preDragHistorySnapshot = this.captureHistorySnapshot(localize('adeMissionHistoryMoveNode', "移动节点"));
+					this.preDragHistorySnapshot = this.captureHistorySnapshot(adeBi(localize('adeMissionHistoryMoveNode', "Move node"), '移动节点'));
 				},
 				onDragNodeMove: (nodeId, nextPos) => {
-					if (this.previewRevisionVersion !== undefined) {
-						return;
-					}
 					this.positions.set(nodeId, nextPos);
 					this.scheduleEdgeReroute(nodeId);
 				},
 				onDragNodesMove: moves => {
-					if (this.previewRevisionVersion !== undefined || moves.length === 0) {
+					if (moves.length === 0) {
 						return;
 					}
 					for (const move of moves) {
@@ -1058,7 +868,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				onEndNodesDrag: (movedNodeIds, movedPx) => {
 					this.handleEndNodesDrag(movedNodeIds, movedPx);
 				},
-				getNodePosition: nodeId => (this.previewRevisionVersion !== undefined ? this.activeRenderPositions.get(nodeId) : this.positions.get(nodeId)),
+				getNodePosition: nodeId => this.positions.get(nodeId),
 				getZoom: () => this.zoom,
 			},
 		));
@@ -1075,9 +885,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				getMissionGraph: () => ({ nodes: this.nodes, edges: this.edges }),
 				getNodePrompt: (missionId, nodeId) => this.missionService?.getMission(missionId)?.nodePrompts?.[nodeId] ?? '',
 				canSwitchAgentEngine: agent => this.canSwitchAgentEngine(agent),
-				getExplicitNodeHost: (missionId, nodeId) => this.missionRuntimeService?.getRuntimeState(missionId).boundary.nodeAssignments[nodeId]?.hostAlias,
-				resolveSupervisorDisplay: supId => this.resolveSupervisorDisplay(supId),
-				onAssignNodeEmployee: (nodeId, empName) => this.assignNodeEmployee(nodeId, empName),
+				getExplicitNodeHost: (missionId, nodeId) =>
+					this.missionRuntimeService?.getRuntimeState(missionId).boundary.nodeAssignments[nodeId]?.hostAlias
+					?? this.orchNodes.find(n => n.id === nodeId)?.hostAlias,
+				resolveSupervisorDisplay: supId => this.resolveStaffDisplay(supId),
+				onAssignNodeEmployee: () => undefined,
 				onNodePromptEdit: (missionId, nodeId, nextVal) => this.commitNodePromptEdit(missionId, nodeId, nextVal, 'popover'),
 				onOpenDrawerForNodePrompt: nodeId => this.toggleFileDrawer(true, nodeId),
 				onOpenAgentSession: agentId => {
@@ -1085,136 +897,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						void this.adeEditorService.openAgent(agentId);
 					}
 				},
-				onHoverSupervisor: supId => this.setHoveredSupervisor(supId),
-				onQuickRetryNode: (node, token, guidance) => this.handleQuickRetryNode(node, token, guidance),
-				onActionFeedback: (message, kind) => this.reportRuntimeFeedback(message, kind),
+				onUpdateOrchestrationStaffConfig: async (missionId, nodeId, patch) => {
+					await this.handleUpdateOrchestrationStaffConfig(missionId, nodeId, patch);
+				},
+				onActionFeedback: (message, kind) => this.reportFeedback(message, kind),
 				onGraphVisualInvalidated: prewarmHosts => {
 					if (this.isPaneDisposed) {
 						return;
 					}
 					this.syncGraphDom();
-					this.nodeInspector?.refresh();
 					if (prewarmHosts) {
-						this.prewarmMissionHosts();
+						this.prewarmHosts();
 					}
 				},
-				onRuntimeControlsInvalidated: () => this.syncRuntimeControlsUi(),
-			},
-		));
-
-		this.nodeInspector = this._register(new AdeMissionNodeInspector(
-			this.bodyEl,
-			this.hostCatalog,
-			this.projectsService,
-			this.missionRuntimeService,
-			this.roleSchemaService,
-			{
-				getActiveMissionId: () => this.activeMissionId,
-				getNodes: () => this.nodes,
-				getEdges: () => this.edges,
-				getAgentForNode: nodeId => this.buildAgentNodeMap().get(nodeId),
-				getHostByNodeIdMap: () => this.buildHostByNodeIdMap(),
-				getFallbackOwnerEngineId: () => {
-					const missionRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
-					const ownerAgent = missionRec?.ownerSessionId ? this.projectsService?.getAgent(missionRec.ownerSessionId) : undefined;
-					return ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId ?? 'aexus-claude';
-				},
-				getNodePrompt: (missionId, nodeId) => this.missionService?.getMission(missionId)?.nodePrompts?.[nodeId] ?? '',
-				resolveSupervisorDisplay: supId => this.resolveSupervisorDisplay(supId),
-				canSwitchAgentEngine: agent => this.canSwitchAgentEngine(agent),
-				onClose: () => {
-					this.selectedNodeIds.clear();
-					this.renderer?.setSelectedNodeIds([]);
-					this.syncSelectionHud();
-					this.syncHudLayoutClasses();
-					this.minimap?.setInspectorOpen(false);
-					this.syncMinimapGraph();
-				},
-				onSelectNodeFromInspector: nodeId => {
-					this.selectNode(nodeId);
-				},
-				onOpenAgentBeside: agentId => {
-					if (this.adeEditorService) {
-						void this.adeEditorService.openAgent(agentId, { side: true });
+				onRuntimeControlsInvalidated: () => {
+					if (!this.isPaneDisposed && !this.isDraggingNode) {
+						this.syncGraphDom();
 					}
-				},
-				onOpenAgentTab: agentId => {
-					if (this.adeEditorService) {
-						void this.adeEditorService.openAgent(agentId);
-					}
-				},
-				onOpenEmployeePopover: (node, anchorEl) => {
-					this.popovers.openEmployeePopover(this.activeMissionId, node, this.employees, anchorEl);
-				},
-				onOpenSupervisorPopover: (node, anchorEl) => {
-					if (this.activeMissionId) {
-						this.popovers.openSupervisorPopover(this.activeMissionId, node, anchorEl);
-					}
-				},
-				onOpenHostPopover: (node, currentHost, anchorEl) => {
-					if (this.activeMissionId) {
-						void this.popovers.openHostPopover(this.activeMissionId, node, currentHost, anchorEl);
-					}
-				},
-				onOpenModelPopover: (nodeId, agent, engineId, anchorEl) => {
-					if (this.activeMissionId) {
-						this.popovers.openModelPopover(this.activeMissionId, nodeId, agent, engineId, anchorEl);
-					}
-				},
-				onOpenEnginePopover: (nodeId, agent, engineId, anchorEl) => {
-					if (this.activeMissionId) {
-						void this.popovers.openEnginePopover(this.activeMissionId, nodeId, agent, engineId, anchorEl);
-					}
-				},
-				onOpenNodePromptPopover: (node, anchorEl) => {
-					if (this.activeMissionId) {
-						this.fileDrawer.setSelectedPromptNodeId(node.id);
-						this.popovers.openNodePromptPopover(this.activeMissionId, node, anchorEl);
-						this.syncAllNodePromptViews('popover');
-					}
-				},
-				onOpenTriggersPopover: (preferredNodeId, anchorEl) => {
-					if (this.activeMissionId) {
-						this.popovers.openTriggersPopover(this.activeMissionId, this.nodes, this.edges, anchorEl, preferredNodeId);
-					}
-				},
-				onOpenTokenInspectorPopover: (node, token, allNodeTokens, anchorEl) => {
-					if (this.activeMissionId) {
-						const linkedAgent = this.buildAgentNodeMap().get(node.id);
-						this.popovers.openTokenInspectorPopover(this.activeMissionId, node, token, allNodeTokens, linkedAgent?.id, anchorEl);
-					}
-				},
-				onOpenGateDecisionPopover: (node, anchorEl) => {
-					if (this.activeMissionId) {
-						this.popovers.openGateDecisionPopover(this.activeMissionId, node, anchorEl);
-					}
-				},
-				onQuickRetryNode: (node, token, guidance) => {
-					void this.handleQuickRetryNode(node, token, guidance);
-				},
-				onQuickRecallNode: (node, token) => {
-					void this.handleQuickRecallNode(node, token);
-				},
-				onDistillNodeContext: (node, memo) => {
-					void this.handleDistillNodeContext(node, memo);
-				},
-				onRunNodeChecks: node => {
-					void this.handleRunNodeChecks(node);
-				},
-				onToggleNodeRoleKind: (node, nextRoleKind) => {
-					void this.handleToggleNodeRoleKind(node, nextRoleKind);
-				},
-				onUpsertNodeCheck: (nodeId, check) => {
-					this.handleUpsertNodeCheck(nodeId, check);
-				},
-				onRemoveNodeCheck: (nodeId, checkId) => {
-					this.handleRemoveNodeCheck(nodeId, checkId);
-				},
-				onSetBudgetLimit: limitUsd => {
-					void this.handleSetBudgetLimit(limitUsd);
-				},
-				onRaiseAndResumeBudget: nextLimitUsd => {
-					void this.handleRaiseAndResumeBudget(nextLimitUsd);
 				},
 			},
 		));
@@ -1223,105 +922,103 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.applyWorldTransformNow();
 	}
 
-	private getPaneWidth(): number {
-		const rectW = this.bodyEl?.getBoundingClientRect().width ?? 0;
-		if (rectW > 0) {
-			return rectW;
+	private syncEmptyHintCopy(): void {
+		if (!this.emptyHintTitleEl || !this.emptyHintSubEl) {
+			return;
 		}
-		return this.rootEl?.offsetWidth || 1280;
+		if (this.viewMode === 'orchestration') {
+			this.emptyHintTitleEl.textContent = adeBi(
+				localize('adeOrchEmptyTitle', "Orchestration · All-Staff Free Topology"),
+				'Orchestration · 全员自由编排画布',
+			);
+			this.emptyHintSubEl.textContent = adeBi(
+				localize('adeOrchEmptySub', "Right-click anywhere to create staff or a department whiteboard, or click the top-left button to edit declarative code."),
+				'右键空白处创建员工节点或部门共享白板，或点击左上角编排按钮编写声明式拓扑代码。',
+			);
+		} else {
+			this.emptyHintTitleEl.textContent = adeBi(
+				localize('adeMissionEmptyTaskTitle', "Mission · Acyclic Task DAG"),
+				'Mission · 任务有向无环图 (DAG)',
+			);
+			this.emptyHintSubEl.textContent = adeBi(
+				localize('adeMissionEmptyTaskSub', "Right-click anywhere to create a task node, or click the top-left button to edit Mermaid code and task descriptions."),
+				'右键空白处创建任务节点，或点击左上角编排按钮编写 Mermaid 代码与任务描述。',
+			);
+		}
+	}
+
+	private getActiveNodeCount(): number {
+		return this.viewMode === 'orchestration' ? this.orchNodes.length : this.nodes.length;
+	}
+
+	private getActiveNodeIds(): readonly string[] {
+		return this.viewMode === 'orchestration'
+			? this.orchNodes.map(n => n.id)
+			: this.nodes.map(n => n.id);
+	}
+
+	private getNodeDimensions(nodeId: string): { readonly width: number; readonly height: number } {
+		if (this.viewMode === 'orchestration') {
+			const oNode = this.orchNodes.find(n => n.id === nodeId);
+			return oNode ? getOrchestrationNodeSize(oNode) : { width: 316, height: 220 };
+		}
+		const mNode = this.nodes.find(n => n.id === nodeId);
+		return mNode ? getMissionNodeSize(mNode) : getMissionNodeSize({ id: nodeId, label: nodeId, kind: 'task' });
 	}
 
 	private getEffectiveRuntimeState(): IMissionRuntimeState | undefined {
 		return this.activeMissionId ? this.missionRuntimeService?.getRuntimeState(this.activeMissionId) : undefined;
 	}
 
+	private getActiveNodePrompts(): Readonly<Record<string, string>> {
+		return (this.activeMissionId ? this.missionService?.getMission(this.activeMissionId)?.nodePrompts : undefined) ?? {};
+	}
+
+	private getActiveTaskStatuses(): Readonly<Record<string, IMissionTaskStatusRecord>> {
+		return (this.activeMissionId ? this.missionService?.getMission(this.activeMissionId)?.taskStatuses : undefined) ?? {};
+	}
+
+	private getActiveWhiteboards(): Readonly<Record<string, IOrchestrationWhiteboard>> {
+		return (this.activeMissionId ? this.missionService?.getMission(this.activeMissionId)?.whiteboards : undefined) ?? {};
+	}
+
+	private getActiveOrchestrationRuntime(): IOrchestrationRuntimeState | undefined {
+		if (!this.activeMissionId) {
+			return undefined;
+		}
+		return this.missionRuntimeService?.getOrchestrationState(this.activeMissionId)
+			?? this.missionService?.getMission(this.activeMissionId)?.orchestrationRuntime;
+	}
+
+	private canSwitchAgentEngine(agent: IAdeAgent): boolean {
+		return Boolean(this.projectsService && this.sessionsService && !agent.session);
+	}
+
+	private resolveStaffDisplay(staffId: string): { readonly label: string; readonly shortLabel: string; readonly tier: number } {
+		if (staffId === ADE_SECRETARY_ID) {
+			return { label: 'Secretary', shortLabel: 'Secretary', tier: 0 };
+		}
+		const agent = this.projectsService?.getAgent(staffId);
+		const label = agent?.label?.trim() || staffId;
+		const shortLabel = label.length > 14 ? `${label.slice(0, 12)}…` : label;
+		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+		const tier = agent
+			? resolveEffectiveRankDefinition(org, agent.role, this.projectsService?.hasSubordinates(agent.id) ?? false).tier
+			: 1;
+		return { label, shortLabel, tier };
+	}
+
 	private syncHudLayoutClasses(): void {
 		if (!this.bodyEl) {
 			return;
 		}
-		this.bodyEl.classList.toggle('has-inspector-open', Boolean(this.nodeInspector?.isOpen()));
 		this.bodyEl.classList.toggle('has-file-drawer-open', Boolean(this.fileDrawer?.isOpen()));
-		this.bodyEl.classList.toggle('has-sup-legend', Boolean(this.supLegendEl && !this.supLegendEl.hidden));
 		this.bodyEl.classList.toggle('has-canvas-alert', Boolean(this.canvasAlertEl && !this.canvasAlertEl.hidden));
 		this.bodyEl.classList.toggle('has-search-open', Boolean(this.searchBarEl && !this.searchBarEl.hidden));
-		this.bodyEl.classList.toggle('has-revision-bar', Boolean(this.revisionBarEl && !this.revisionBarEl.hidden));
-	}
-
-	/**
-	 * Gently pans the canvas when opening the right-side 352px Inspector would occlude
-	 * the selected node (or if the node sits outside the safe visible canvas corridor).
-	 */
-	private ensureNodeVisibleBesideInspector(nodeId: string): void {
-		if (!this.viewportEl || !this.nodeInspector?.isOpen()) {
-			return;
-		}
-		const node = this.nodes.find(n => n.id === nodeId);
-		const pos = this.positions.get(nodeId);
-		if (!node || !pos) {
-			return;
-		}
-		const rect = this.viewportEl.getBoundingClientRect();
-		const vpW = rect.width;
-		const vpH = rect.height;
-		if (vpW < 240 || vpH < 160) {
-			return;
-		}
-		const sz = getMissionNodeSize(node);
-		const halfW = (sz.width / 2) * this.zoom;
-		const halfH = (sz.height / 2) * this.zoom;
-		const screenLeft = this.panX + pos.x * this.zoom - halfW;
-		const screenRight = this.panX + pos.x * this.zoom + halfW;
-		const screenTop = this.panY + pos.y * this.zoom - halfH;
-		const screenBottom = this.panY + pos.y * this.zoom + halfH;
-
-		const safeLeft = 24;
-		const safeRight = vpW - INSPECTOR_HUD_SAFE_INSET;
-		const safeTop = 66;
-		const safeBottom = vpH - 64;
-
-		let nextPanX = this.panX;
-		let nextPanY = this.panY;
-
-		if (safeRight > safeLeft + 40) {
-			if (screenRight > safeRight) {
-				const shift = safeRight - screenRight;
-				if (screenLeft + shift >= safeLeft) {
-					nextPanX += shift;
-				} else {
-					const corridorCenterX = (safeLeft + safeRight) / 2;
-					nextPanX = corridorCenterX - pos.x * this.zoom;
-				}
-			} else if (screenLeft < safeLeft) {
-				const shift = safeLeft - screenLeft;
-				if (screenRight + shift <= safeRight) {
-					nextPanX += shift;
-				} else {
-					const corridorCenterX = (safeLeft + safeRight) / 2;
-					nextPanX = corridorCenterX - pos.x * this.zoom;
-				}
-			}
-		}
-
-		if (safeBottom > safeTop + 40) {
-			if (screenTop < safeTop) {
-				nextPanY += safeTop - screenTop;
-			} else if (screenBottom > safeBottom) {
-				nextPanY -= screenBottom - safeBottom;
-			}
-		}
-
-		if (Math.round(nextPanX) !== Math.round(this.panX) || Math.round(nextPanY) !== Math.round(this.panY)) {
-			this.panX = Math.round(nextPanX);
-			this.panY = Math.round(nextPanY);
-			this.applyWorldTransformNow();
-		}
 	}
 
 	toggleFileDrawer(forceOpen?: boolean, focusNodeId?: string): void {
 		this.fileDrawer?.toggle(forceOpen, focusNodeId);
-		if (this.fileDrawer?.isOpen() && this.nodeInspector?.isOpen() && this.getPaneWidth() < DUAL_DRAWER_MIN_WIDTH) {
-			this.selectNode(undefined);
-		}
 		this.syncHudLayoutClasses();
 	}
 
@@ -1329,13 +1026,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!this.renderer || this.renderer.getHoveredNodeId() === nodeId) {
 			return;
 		}
-		const nodes = this.previewRevisionVersion !== undefined ? this.activeRenderNodes : this.nodes;
-		const positions = this.previewRevisionVersion !== undefined ? this.activeRenderPositions : this.positions;
-		this.renderer.applyHoverHighlight(nodeId, nodes, positions);
+		const compatNodes: readonly IMissionDagNode[] = this.viewMode === 'orchestration'
+			? this.orchNodes.map(n => ({ id: n.id, label: n.label, kind: 'task' as const }))
+			: this.nodes;
+		this.renderer.applyHoverHighlight(nodeId, compatNodes, this.positions);
 	}
 
 	fitGraphToViewport(): void {
-		if (!this.viewportEl || this.nodes.length === 0) {
+		const ids = this.getActiveNodeIds();
+		if (!this.viewportEl || ids.length === 0) {
 			return;
 		}
 		const rect = this.viewportEl.getBoundingClientRect();
@@ -1346,12 +1045,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		let maxX = -Infinity;
 		let minY = Infinity;
 		let maxY = -Infinity;
-		for (const node of this.nodes) {
-			const pos = this.positions.get(node.id);
+		for (const id of ids) {
+			const pos = this.positions.get(id);
 			if (!pos) {
 				continue;
 			}
-			const size = getMissionNodeSize(node);
+			const size = this.getNodeDimensions(id);
 			minX = Math.min(minX, pos.x - size.width / 2);
 			maxX = Math.max(maxX, pos.x + size.width / 2);
 			minY = Math.min(minY, pos.y - size.height / 2);
@@ -1360,32 +1059,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!Number.isFinite(minX)) {
 			return;
 		}
-		const padLeft = 72;
-		const padRight = this.nodeInspector?.isOpen() ? 380 : 72;
-		const padTop = 88;
-		const padBottom = 64;
-		const availW = Math.max(120, rect.width - padLeft - padRight);
+		const padX = 72;
+		const padTop = 80;
+		const padBottom = 60;
+		const availW = Math.max(120, rect.width - padX * 2);
 		const availH = Math.max(120, rect.height - padTop - padBottom);
 		const graphW = Math.max(1, maxX - minX);
 		const graphH = Math.max(1, maxY - minY);
-		const scaleX = availW / graphW;
-		const scaleY = availH / graphH;
-		this.zoom = Math.round(Math.min(1, Math.max(MIN_ZOOM, Math.min(scaleX, scaleY))) * 100) / 100;
+		this.zoom = Math.round(Math.min(1, Math.max(MIN_ZOOM, Math.min(availW / graphW, availH / graphH))) * 100) / 100;
 		const centerX = (minX + maxX) / 2;
 		const centerY = (minY + maxY) / 2;
-		const targetCenterX = padLeft + availW / 2;
-		const targetCenterY = padTop + availH / 2;
-		this.panX = Math.round(targetCenterX - centerX * this.zoom);
-		this.panY = Math.round(targetCenterY - centerY * this.zoom);
+		this.panX = Math.round((padX + availW / 2) - centerX * this.zoom);
+		this.panY = Math.round((padTop + availH / 2) - centerY * this.zoom);
 		this.applyWorldTransformNow();
 	}
 
-	/**
-	 * Deep-jumps the Mission Canvas to a specific node (e.g. from Inbox `Open Node ↗`):
-	 * exits revision preview, closes blocking drawers/popovers, centers the viewport onto the node,
-	 * highlights it with a spotlight pulse, opens the right-side Inspector on the requested tab,
-	 * and optionally opens the bound employee Agent chat beside the canvas.
-	 */
 	focusNode(
 		nodeId: string,
 		options?: { readonly inspectorTab?: MissionInspectorTab; readonly openAgentBeside?: boolean },
@@ -1393,70 +1081,677 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (this.isPaneDisposed || !nodeId) {
 			return;
 		}
-		if (this.previewRevisionVersion !== undefined) {
-			this.exitRevisionPreview();
-		}
 		if (this.fileDrawer?.isOpen()) {
 			this.fileDrawer.toggle(false);
 		}
 		this.popovers?.close();
-
-		const targetNode = this.nodes.find(n => n.id === nodeId);
-		if (!targetNode) {
+		if (!this.getActiveNodeIds().includes(nodeId)) {
 			return;
 		}
-
-		const tab: MissionInspectorTab = options?.inspectorTab ?? 'token';
 		this.selectedEdgeKey = undefined;
 		this.renderer?.setSelectedEdgeKey(undefined);
-		this.selectedNodeIds = new Set([targetNode.id]);
+		this.selectedNodeIds = new Set([nodeId]);
 		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
 		this.syncSelectionHud();
-		this.nodeInspector?.open(targetNode.id, tab);
-		this.minimap?.setInspectorOpen(true);
+		this.centerViewportOnNode(nodeId);
+		this.renderer?.pulseFocusNode(nodeId, 3000);
 
-		const pos = this.positions.get(targetNode.id);
-		if (pos && this.viewportEl) {
-			const rect = this.viewportEl.getBoundingClientRect();
-			const vpW = rect.width > 40 ? rect.width : 1080;
-			const vpH = rect.height > 40 ? rect.height : 720;
-			const inspectorW = this.nodeInspector?.isOpen() ? 336 : 0;
-			const availW = Math.max(160, vpW - inspectorW);
-			this.zoom = Math.round(Math.min(1.15, Math.max(0.85, this.zoom)) * 100) / 100;
-			this.panX = Math.round(availW / 2 - pos.x * this.zoom);
-			this.panY = Math.round(vpH / 2 - pos.y * this.zoom);
-			this.applyWorldTransformNow();
-		}
-
-		this.renderer?.pulseFocusNode(targetNode.id, 3000);
-		this.syncMinimapGraph();
-
-		if (options?.openAgentBeside && this.adeEditorService) {
-			const linkedAgent = this.buildAgentNodeMap().get(targetNode.id);
+		if (options?.openAgentBeside && this.adeEditorService && this.viewMode === 'orchestration') {
+			const linkedAgent = this.buildOrchestrationAgentMap().get(nodeId);
 			if (linkedAgent) {
 				void this.adeEditorService.openAgent(linkedAgent.id, { side: true });
 			}
 		}
 	}
 
-	private isLiveRun(): boolean {
-		if (!this.activeMissionId || !this.missionRuntimeService) {
-			return false;
+	// =========================================================================
+	// Mission View: Task Details Popover & Status Authority
+	// =========================================================================
+
+	private openMissionTaskPopover(node: IMissionDagNode, anchorEl: HTMLElement): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
 		}
-		const status = this.missionRuntimeService.getRuntimeState(this.activeMissionId).status;
-		return status === 'running' || status === 'paused';
+		this.fileDrawer.setSelectedTaskNodeId(node.id);
+		const statusRec = this.getActiveTaskStatuses()[node.id];
+		this.popovers.openMissionTaskEditorPopover(missionId, node, statusRec, anchorEl, {
+			onRenameTask: nextTitle => this.renameVisualNode(node.id, nextTitle),
+			onChangeDescription: nextDesc => this.commitNodePromptEdit(missionId, node.id, nextDesc, 'popover'),
+			onSetTaskStatus: nextStatus => void this.handleSetMissionTaskStatus(node.id, nextStatus),
+			onChangeColor: nextColor => this.setNodeColorVisual(node.id, nextColor),
+		});
 	}
 
-	private canSwitchAgentEngine(agent: IAdeAgent): boolean {
-		if (!this.projectsService || !this.sessionsService || agent.session) {
-			return false;
+	private handleSetMissionTaskStatus(nodeId: string, nextStatus: MissionTaskStatus): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
 		}
-		return !this.isLiveRun();
+		if (this.missionRuntimeService) {
+			const res = this.missionRuntimeService.setMissionTaskStatus(missionId, {
+				nodeId,
+				status: nextStatus,
+				caller: { isHumanUser: true, callerLabel: 'Human' },
+			});
+			if (!res.ok && res.error) {
+				this.reportFeedback(res.error, 'error');
+				return;
+			}
+		} else if (this.missionService) {
+			const rec = this.missionService.getMission(missionId);
+			const orgConfig = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+			const parsedTaskDag = parseMissionMermaidDag(this.mermaidText);
+			const trans = updateMissionTaskNodeStatus(
+				rec?.taskStatuses ?? {},
+				parsedTaskDag,
+				orgConfig,
+				{
+					nodeId,
+					status: nextStatus,
+					caller: { isHumanUser: true, callerLabel: 'Human' },
+				},
+			);
+			if (!trans.ok) {
+				this.reportFeedback(trans.error ?? 'Failed to update task status.', 'error');
+				return;
+			}
+			this.missionService.updateTaskStatuses(missionId, trans.taskStatuses);
+		}
+		this.syncGraphDom();
+		this.fileDrawer.syncTaskDescriptionsPane(true);
 	}
 
-	private getActiveNodePrompts(): Readonly<Record<string, string>> {
-		return (this.activeMissionId ? this.missionService?.getMission(this.activeMissionId)?.nodePrompts : undefined) ?? {};
+	// =========================================================================
+	// Orchestration View: Whiteboards, Staff Creation, Token Baton & Dispatch
+	// =========================================================================
+
+	private openWhiteboardPopover(whiteboard: IOrchestrationWhiteboard, anchorEl: HTMLElement): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
+		}
+		const liveWb = this.getActiveWhiteboards()[whiteboard.id] ?? whiteboard;
+		const wbGraphNode = this.orchNodes.find(n => n.id === liveWb.id);
+		this.popovers.openWhiteboardEditorPopover(liveWb, anchorEl, patch => {
+			let savedVersion = (liveWb.version ?? 0) + 1;
+			if (this.missionRuntimeService) {
+				const res = this.missionRuntimeService.upsertOrchestrationWhiteboard(missionId, {
+					id: liveWb.id,
+					department: patch.department,
+					title: patch.title,
+					content: patch.content,
+					caller: { isHumanUser: true },
+				});
+				if (!res.ok && res.error) {
+					this.reportFeedback(res.error, 'error');
+					return;
+				}
+				if (res.whiteboard) {
+					savedVersion = res.whiteboard.version;
+				}
+				if (res.orchestrationText && res.orchestrationText !== this.orchestrationText) {
+					this.orchestrationText = res.orchestrationText;
+					this.fileDrawer?.setCodeValue(res.orchestrationText);
+				}
+			} else if (this.missionService) {
+				const cur = this.getActiveWhiteboards();
+				const up = upsertDepartmentWhiteboard(cur, {
+					id: liveWb.id,
+					department: patch.department,
+					title: patch.title,
+					content: patch.content,
+					updatedBy: 'human',
+					updatedByLabel: 'Human',
+				});
+				savedVersion = up.whiteboard.version;
+				this.missionService.updateWhiteboards(missionId, up.whiteboards);
+				const nextCode = upsertOrchestrationWhiteboardInCode(this.orchestrationText, {
+					id: liveWb.id,
+					department: patch.department,
+					title: patch.title,
+					content: patch.content,
+					version: savedVersion,
+				});
+				if (nextCode !== this.orchestrationText) {
+					this.orchestrationText = nextCode;
+					this.fileDrawer?.setCodeValue(nextCode);
+					this.missionService.updateOrchestrationText(missionId, nextCode);
+				}
+			}
+			void savedVersion;
+			this.syncGraphDom();
+			this.reportFeedback(adeBi(localize('adeOrchWbSavedOk', "Saved whiteboard '{0}'.", patch.title), '已保存部门白板「{0}」。', patch.title), 'ok');
+		}, {
+			currentColor: wbGraphNode?.color,
+			onChangeColor: nextColor => this.setNodeColorVisual(liveWb.id, nextColor),
+		});
 	}
+
+	private openWhiteboardById(whiteboardId: string): void {
+		const wb = this.getActiveWhiteboards()[whiteboardId];
+		if (!wb) {
+			return;
+		}
+		const anchor = this.worldEl.querySelector<HTMLElement>(`[data-whiteboard-id="${whiteboardId}"]`) ?? this.viewportEl;
+		this.openWhiteboardPopover(wb, anchor);
+	}
+
+	private openOrchestrationTokenPopover(staffLabel: string, token: IOrchestrationToken, anchorEl: HTMLElement): void {
+		const missionId = this.activeMissionId;
+		const orch = this.getActiveOrchestrationRuntime();
+		const delta = (missionId ? this.missionRuntimeService?.getOrchestrationTokenDelta(missionId, token.id) : undefined)
+			?? (orch ? buildOrchestrationTokenDeltaView(orch, token, this.getActiveWhiteboards()) : undefined);
+		this.popovers.openOrchestrationTokenPopover(staffLabel, token, anchorEl, {
+			delta,
+			onOpenWhiteboard: wbId => this.openWhiteboardById(wbId),
+			onReadPointer: ptr => {
+				if (missionId && this.missionRuntimeService) {
+					const res = this.missionRuntimeService.readOrchestrationTokenPointers(missionId, {
+						ptrs: [ptr],
+						tokenId: token.id,
+						caller: { isHumanUser: true },
+					});
+					const item = res.items[0];
+					return item ? { title: item.title, kind: item.kind, content: item.content, error: item.error } : undefined;
+				}
+				const orch = this.getActiveOrchestrationRuntime();
+				const blob = orch?.payloadStore?.[ptr];
+				if (blob) {
+					return { title: blob.title, kind: blob.kind, content: blob.content };
+				}
+				const wbId = ptr.startsWith('wb:') ? ptr.slice(3) : ptr;
+				const wb = this.getActiveWhiteboards()[wbId];
+				if (wb) {
+					return { title: wb.title, kind: 'whiteboard', content: wb.content };
+				}
+				return { error: `Pointer "${ptr}" not found.` };
+			},
+		});
+	}
+
+	private addOrchestrationStaffVisual(payload: {
+		readonly name: string;
+		readonly rankId: string;
+		readonly tier: number;
+		readonly department?: string;
+		readonly worldPos?: IMissionNodePosition;
+	}): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
+		}
+		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+		const rankDef = org.ranks.find(r => r.id === payload.rankId || r.tier === payload.tier);
+		const added = addStaffNodeToOrchestration(this.orchestrationText, {
+			name: payload.name,
+			roleLabel: rankDef?.name,
+			tier: payload.tier,
+			rankId: payload.rankId,
+			department: payload.department,
+			direction: this.orchDirection,
+		});
+		if (!added.ok || !added.orchestrationText || !added.nodeId) {
+			this.reportFeedback(added.error ?? adeBi(localize('adeOrchAddStaffFail', "Failed to add staff node."), '添加员工节点失败。'), 'error');
+			return;
+		}
+		const targetPos = payload.worldPos ?? this.computeDefaultNewNodeWorldPos();
+		this.commitCodeMutation(added.orchestrationText, `Add staff ${payload.name}`, {
+			nodePosition: { nodeId: added.nodeId, pos: targetPos },
+			successMessage: adeBi(
+				localize('adeOrchAddStaffOk', "Added unique staff node '{0}' ({1}).", payload.name, added.nodeId),
+				'已添加唯一员工节点「{0}」({1})。',
+				payload.name,
+				added.nodeId,
+			),
+		});
+	}
+
+	private addOrchestrationSubordinateVisual(
+		parentNode: IOrchestrationGraphNode,
+		payload: {
+			readonly name: string;
+			readonly rankId: string;
+			readonly tier: number;
+			readonly department?: string;
+		},
+	): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
+		}
+		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+		const plan = planDynamicSubordinateCreation(this.orchestrationText, org, {
+			callerNodeId: parentNode.id,
+			callerTier: parentNode.tier,
+			name: payload.name,
+			targetRankIdOrTier: payload.rankId || payload.tier,
+			department: payload.department ?? parentNode.department,
+			bidirectional: true,
+		});
+		if (!plan.ok || !plan.orchestrationText || !plan.newNodeId) {
+			this.reportFeedback(plan.error ?? adeBi(localize('adeOrchAddSubFail', "Failed to create subordinate."), '动态创建下级员工失败。'), 'error');
+			return;
+		}
+		const parentPos = this.positions.get(parentNode.id);
+		const targetPos = parentPos
+			? {
+				x: Math.round(parentPos.x + (this.orchDirection === 'TD' ? 0 : 440)),
+				y: Math.round(parentPos.y + (this.orchDirection === 'TD' ? 300 : 120)),
+			}
+			: this.computeDefaultNewNodeWorldPos();
+		this.commitCodeMutation(plan.orchestrationText, `Create subordinate ${payload.name} under ${parentNode.id}`, {
+			nodePosition: { nodeId: plan.newNodeId, pos: targetPos },
+			successMessage: adeBi(
+				localize('adeOrchAddSubOk', "Created subordinate '{0}' ({1}) with bidirectional link {2} ⇄ {1}.", payload.name, plan.newNodeId, parentNode.id),
+				'已动态扩编下级「{0}」({1})，并自动建立双向连线 {2} ⇄ {1}。',
+				payload.name,
+				plan.newNodeId,
+				parentNode.id,
+			),
+		});
+	}
+
+	private addOrchestrationWhiteboardVisual(payload: {
+		readonly department: string;
+		readonly title: string;
+		readonly worldPos?: IMissionNodePosition;
+	}): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
+		}
+		const added = addWhiteboardNodeToOrchestration(this.orchestrationText, {
+			department: payload.department,
+			title: payload.title,
+			direction: this.orchDirection,
+		});
+		if (!added.ok || !added.orchestrationText || !added.whiteboardId) {
+			this.reportFeedback(added.error ?? adeBi(localize('adeOrchAddWbFail', "Failed to add whiteboard."), '创建部门白板失败。'), 'error');
+			return;
+		}
+		const wbId = added.whiteboardId;
+		const targetPos = payload.worldPos ?? this.computeDefaultNewNodeWorldPos();
+		this.commitCodeMutation(added.orchestrationText, `Add whiteboard ${payload.title}`, {
+			nodePosition: { nodeId: wbId, pos: targetPos },
+			afterApply: () => {
+				if (this.missionRuntimeService) {
+					this.missionRuntimeService.upsertOrchestrationWhiteboard(missionId, {
+						id: wbId,
+						department: payload.department,
+						title: payload.title,
+						content: '',
+						caller: { isHumanUser: true },
+					});
+				} else if (this.missionService) {
+					const up = upsertDepartmentWhiteboard(this.getActiveWhiteboards(), {
+						id: wbId,
+						department: payload.department,
+						title: payload.title,
+						content: '',
+					});
+					this.missionService.updateWhiteboards(missionId, up.whiteboards);
+				}
+			},
+			successMessage: adeBi(
+				localize('adeOrchAddWbOk', "Created department whiteboard '{0}' ({1}).", payload.title, wbId),
+				'已创建部门共享白板「{0}」({1})。',
+				payload.title,
+				wbId,
+			),
+		});
+	}
+
+	private clearAbortConfirmTimer(): void {
+		if (this.abortConfirmTimer !== undefined) {
+			const win = this.rootEl ? getWindow(this.rootEl) : undefined;
+			win?.clearTimeout(this.abortConfirmTimer);
+			this.abortConfirmTimer = undefined;
+		}
+		this.abortConfirmUntil = 0;
+	}
+
+	private switchViewMode(targetMode: AdeEngineeringViewMode, side: boolean): void {
+		const missionId = this.activeMissionId;
+		if (!missionId || !this.adeEditorService?.openEngineering) {
+			return;
+		}
+		if (!side && targetMode === this.viewMode) {
+			return;
+		}
+		void this.adeEditorService.openEngineering(missionId, { viewMode: targetMode, side });
+	}
+
+	private async handleUpdateOrchestrationStaffConfig(
+		missionId: string,
+		nodeId: string,
+		patch: {
+			readonly engineId?: string;
+			readonly model?: string;
+			readonly thinking?: string;
+			readonly resetSession?: boolean;
+		},
+	): Promise<void> {
+		if (!this.missionRuntimeService) {
+			return;
+		}
+		const res = await this.missionRuntimeService.updateOrchestrationStaffConfig(missionId, nodeId, patch);
+		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
+			return;
+		}
+		if (!res.ok) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeOrchStaffCfgFail', "Failed to update staff configuration."), '更新员工配置失败。'), 'error');
+			return;
+		}
+		const latest = this.missionService?.getMission(missionId);
+		if (latest?.orchestrationText !== undefined && latest.orchestrationText !== this.orchestrationText) {
+			this.orchestrationText = latest.orchestrationText;
+			if (this.viewMode === 'orchestration') {
+				this.fileDrawer?.setCodeValue(this.orchestrationText);
+				this.parseAndRenderOrchestrationGraph(this.orchestrationText);
+			}
+		} else {
+			this.syncGraphDom();
+		}
+		if (patch.resetSession) {
+			this.reportFeedback(adeBi(
+				localize('adeOrchStaffCfgResetOk', "Reset session for {0} and switched engine to {1}.", nodeId, patch.engineId ?? ''),
+				'已重置员工 {0} 的会话并切换引擎至 {1}。',
+				nodeId,
+				patch.engineId ?? '',
+			), 'ok');
+		} else {
+			this.reportFeedback(adeBi(
+				localize('adeOrchStaffCfgOk', "Updated configuration for {0}.", nodeId),
+				'已更新员工 {0} 的配置。',
+				nodeId,
+			), 'ok');
+		}
+	}
+
+	private async handleToggleOrchestrationPause(): Promise<void> {
+		const missionId = this.activeMissionId;
+		if (!missionId || !this.missionRuntimeService) {
+			return;
+		}
+		const orch = this.getActiveOrchestrationRuntime();
+		const isPaused = orch?.status === 'paused';
+		const res = isPaused
+			? await this.missionRuntimeService.resumeOrchestration(missionId)
+			: await this.missionRuntimeService.pauseOrchestration(missionId, 'Paused from Engineering global console');
+		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
+			return;
+		}
+		if (!res.ok) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeOrchPauseFail', "Failed to change orchestration state."), '切换编排状态失败。'), 'error');
+			return;
+		}
+		this.syncGraphDom();
+		this.reportFeedback(
+			isPaused
+				? adeBi(localize('adeOrchResumedOk', "Resumed orchestration token dispatch."), '已恢复编排令牌流转。')
+				: adeBi(localize('adeOrchPausedOk', "Paused orchestration token dispatch."), '已暂停编排令牌流转。'),
+			'ok',
+		);
+	}
+
+	private async handleAbortAllOrchestrationTokens(): Promise<void> {
+		const missionId = this.activeMissionId;
+		if (!missionId || !this.missionRuntimeService) {
+			return;
+		}
+		const now = Date.now();
+		if (now > this.abortConfirmUntil) {
+			this.clearAbortConfirmTimer();
+			this.abortConfirmUntil = now + 4000;
+			this.updateConsoleBar();
+			if (this.rootEl) {
+				this.abortConfirmTimer = getWindow(this.rootEl).setTimeout(() => {
+					this.abortConfirmTimer = undefined;
+					this.abortConfirmUntil = 0;
+					this.updateConsoleBar();
+				}, 4000);
+			}
+			return;
+		}
+		this.clearAbortConfirmTimer();
+		const res = await this.missionRuntimeService.abortOrchestrationTokens(missionId, 'Emergency abort from Engineering global console');
+		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
+			return;
+		}
+		if (!res.ok) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeOrchAbortFail', "Failed to abort active tokens."), '终止活跃令牌失败。'), 'error');
+			return;
+		}
+		this.syncGraphDom();
+		const count = res.data?.abortedTokenIds.length ?? 0;
+		this.reportFeedback(adeBi(
+			localize('adeOrchAbortOk', "Aborted {0} active orchestration token(s).", count),
+			'已强制终止 {0} 枚在途编排令牌。',
+			count,
+		), 'info');
+	}
+
+	private updateConsoleBar(): void {
+		if (!this.consoleBarEl) {
+			return;
+		}
+		const hasMission = Boolean(this.activeMissionId);
+		this.consoleBarEl.hidden = !hasMission;
+		if (!hasMission) {
+			return;
+		}
+
+		const isOrch = this.viewMode === 'orchestration';
+		this.viewOrchBtnEl.classList.toggle('is-active', isOrch);
+		this.viewOrchBtnEl.setAttribute('aria-selected', String(isOrch));
+		this.viewMissionBtnEl.classList.toggle('is-active', !isOrch);
+		this.viewMissionBtnEl.setAttribute('aria-selected', String(!isOrch));
+
+		const orch = this.getActiveOrchestrationRuntime();
+		const runtimeState = this.getEffectiveRuntimeState();
+		const isPaused = orch?.status === 'paused';
+
+		let activeCount = 0;
+		let blockedCount = 0;
+		let waitingJoinCount = 0;
+		if (orch) {
+			for (const tok of Object.values(orch.tokens)) {
+				if (tok.status === 'active') {
+					activeCount++;
+				} else if (tok.status === 'blocked') {
+					blockedCount++;
+				} else if (tok.status === 'waiting_join') {
+					waitingJoinCount++;
+				}
+			}
+		}
+		const inFlight = activeCount + blockedCount + waitingJoinCount;
+
+		if (isPaused) {
+			this.consoleTokensEl.textContent = adeBi(
+				localize('adeEngConsolePausedText', "PAUSED · {0} in-flight", inFlight),
+				'已暂停 · {0} 在途',
+				inFlight,
+			);
+		} else if (inFlight > 0) {
+			const detailParts: string[] = [];
+			if (activeCount > 0) { detailParts.push(`${activeCount} active`); }
+			if (blockedCount > 0) { detailParts.push(`${blockedCount} blk`); }
+			if (waitingJoinCount > 0) { detailParts.push(`${waitingJoinCount} join`); }
+			this.consoleTokensEl.textContent = adeBi(
+				localize('adeEngConsoleInFlightText', "{0} tokens ({1})", inFlight, detailParts.join(' · ')),
+				'{0} 在途 ({1})',
+				inFlight,
+				detailParts.join(' · '),
+			);
+		} else {
+			this.consoleTokensEl.textContent = adeBi(localize('adeEngConsoleIdleText', "0 in-flight"), '0 在途令牌');
+		}
+		this.consoleTokensEl.classList.toggle('is-paused', isPaused);
+		this.consoleTokensEl.classList.toggle('is-active', !isPaused && inFlight > 0);
+
+		let totalCostUsd = 0;
+		let totalTokens = 0;
+		let anyEstimated = false;
+		if (runtimeState?.nodeTelemetry) {
+			for (const t of Object.values(runtimeState.nodeTelemetry)) {
+				totalCostUsd += t.costUsd ?? 0;
+				totalTokens += t.totalTokens ?? 0;
+				if (t.costEstimated) {
+					anyEstimated = true;
+				}
+			}
+		}
+		if (totalCostUsd > 0 || totalTokens > 0) {
+			const costText = totalCostUsd > 0 ? formatFinOpsUsd(totalCostUsd, { estimated: anyEstimated, compact: true }) : '$0';
+			const tokText = totalTokens > 0 ? formatCompactTokenCount(totalTokens) : '';
+			this.consoleSpendEl.textContent = tokText ? `${costText} · ${tokText}` : costText;
+			this.consoleSpendEl.hidden = false;
+		} else {
+			this.consoleSpendEl.hidden = true;
+		}
+
+		const hasRuntime = Boolean(this.missionRuntimeService);
+		this.consolePauseBtnEl.disabled = !hasRuntime;
+		this.consolePauseBtnEl.classList.toggle('is-paused', isPaused);
+		this.consolePauseBtnEl.textContent = isPaused
+			? adeBi(localize('adeEngConsoleResumeBtn', "Resume"), '恢复流转')
+			: adeBi(localize('adeEngConsolePauseBtn', "Pause"), '暂停流转');
+		this.consolePauseBtnEl.title = isPaused
+			? adeBi(localize('adeEngConsoleResumeTip', "Resume orchestration token dispatch"), '恢复整波令牌流转')
+			: adeBi(localize('adeEngConsolePauseTip', "Pause orchestration token dispatch"), '一键暂停整波流转');
+
+		const isConfirmingAbort = Date.now() <= this.abortConfirmUntil;
+		this.consoleAbortBtnEl.disabled = !hasRuntime || (inFlight === 0 && !isPaused);
+		this.consoleAbortBtnEl.classList.toggle('is-confirming', isConfirmingAbort);
+		this.consoleAbortBtnEl.textContent = isConfirmingAbort
+			? adeBi(localize('adeEngConsoleAbortConfirmBtn', "Confirm Abort?"), '确认终止全部?')
+			: adeBi(localize('adeEngConsoleAbortBtn', "Abort All"), '终止全部');
+		this.consoleAbortBtnEl.title = adeBi(localize('adeEngConsoleAbortTip', "Force-abort all active orchestration tokens (click twice to confirm)"), '强制终止全部在途令牌（点击两次确认）');
+
+		this.consoleMinimapBtnEl.classList.toggle('is-active', Boolean(this.minimap?.isUserVisible()));
+	}
+
+	private centerViewportOnWorldPoint(worldX: number, worldY: number): void {
+		if (!this.viewportEl) {
+			return;
+		}
+		const rect = this.viewportEl.getBoundingClientRect();
+		const vpW = rect.width > 40 ? rect.width : 1080;
+		const vpH = rect.height > 40 ? rect.height : 720;
+		this.panX = Math.round(vpW / 2 - worldX * this.zoom);
+		this.panY = Math.round(vpH / 2 - worldY * this.zoom);
+		this.applyWorldTransformNow();
+	}
+
+	private syncMinimap(): void {
+		if (!this.minimap) {
+			return;
+		}
+		const firstSelected = this.selectedNodeIds.size > 0 ? [...this.selectedNodeIds][0] : undefined;
+		const runtimeState = this.getEffectiveRuntimeState();
+		if (this.viewMode === 'orchestration') {
+			const compatNodes: IMissionDagNode[] = this.orchNodes.map(n => ({
+				id: n.id,
+				label: n.label,
+				kind: n.kind === 'whiteboard' ? 'gate' : 'task',
+			}));
+			const compatEdges: IMissionDagEdge[] = this.orchEdges.map(e => ({
+				id: e.id,
+				from: e.from,
+				to: e.to,
+				label: e.label,
+			}));
+			const sizeOverride = new Map<string, { readonly width: number; readonly height: number }>();
+			const nodeColors: Record<string, string | undefined> = {};
+			for (const n of this.orchNodes) {
+				sizeOverride.set(n.id, getOrchestrationNodeSize(n));
+				if (n.color) {
+					nodeColors[n.id] = n.color;
+				}
+			}
+			const orchRuntime = this.getActiveOrchestrationRuntime();
+			this.minimap.syncGraph(compatNodes, compatEdges, this.positions, runtimeState, firstSelected, {
+				nodeStates: orchRuntime?.nodeStates,
+				nodeSizeOverride: sizeOverride,
+				nodeColors,
+			});
+		} else {
+			const taskStatuses = this.getActiveTaskStatuses();
+			const mappedStates: Record<string, string> = {};
+			const nodeColors: Record<string, string | undefined> = {};
+			for (const n of this.nodes) {
+				if (n.color) {
+					nodeColors[n.id] = n.color;
+				}
+			}
+			for (const [nid, rec] of Object.entries(taskStatuses)) {
+				mappedStates[nid] = rec.status === 'in_progress'
+					? 'active'
+					: rec.status === 'completed'
+						? 'completed'
+						: rec.status === 'blocked'
+							? 'blocked'
+							: 'idle';
+			}
+			this.minimap.syncGraph(this.nodes, this.edges, this.positions, runtimeState, firstSelected, {
+				nodeStates: mappedStates,
+				nodeColors,
+			});
+		}
+		this.syncMinimapViewport();
+	}
+
+	private syncMinimapViewport(): void {
+		if (!this.minimap || !this.viewportEl) {
+			return;
+		}
+		const rect = this.viewportEl.getBoundingClientRect();
+		if (rect.width > 0 && rect.height > 0) {
+			this.minimap.updateViewport(this.panX, this.panY, this.zoom, rect.width, rect.height);
+		}
+	}
+
+	private handleDispatchRequirement(requirement: string, targetNodeId?: string): void {
+		const missionId = this.activeMissionId;
+		if (!missionId || !this.missionRuntimeService) {
+			this.reportFeedback(adeBi(localize('adeOrchRuntimeUnavailable', "Orchestration runtime is unavailable."), '编排运行时不可用。'), 'error');
+			return;
+		}
+		void this.missionRuntimeService.dispatchOrchestrationRequirement(missionId, {
+			prompt: requirement,
+			targetNodeId,
+		}).then(res => {
+			if (this.isPaneDisposed || this.activeMissionId !== missionId) {
+				return;
+			}
+			if (!res.ok) {
+				this.reportFeedback(res.error ?? adeBi(localize('adeOrchDispatchFail', "Failed to dispatch requirement."), '需求派发失败。'), 'error');
+			} else {
+				this.syncGraphDom();
+				const tokId = res.data?.tokenId ?? '';
+				const tgtId = res.data?.targetNodeId ?? '';
+				this.reportFeedback(
+					adeBi(
+						localize('adeOrchDispatchOk', "Dispatched baton token {0} to {1}.", tokId, tgtId),
+						'已派发接力令牌 {0} 至 {1}。',
+						tokId,
+						tgtId,
+					),
+					'ok',
+				);
+			}
+		}, err => {
+			if (!this.isPaneDisposed && this.activeMissionId === missionId) {
+				this.reportFeedback(err instanceof Error ? err.message : String(err), 'error');
+			}
+		});
+	}
+
+	// =========================================================================
+	// Prompt & Feedback Helpers
+	// =========================================================================
 
 	private commitNodePromptEdit(missionId: string, nodeId: string, nextVal: string, source: 'drawer' | 'popover'): void {
 		this.activePromptEditSource = source;
@@ -1469,9 +1764,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private syncAllNodePromptViews(source?: 'drawer' | 'popover'): void {
+		if (this.viewMode !== 'mission') {
+			return;
+		}
 		const prompts = this.getActiveNodePrompts();
 		this.renderer?.syncNodePromptPreviews(prompts);
-		this.fileDrawer?.syncPromptsPane(source === 'drawer');
+		this.fileDrawer?.syncTaskDescriptionsPane(source === 'drawer');
 		this.popovers?.syncOpenPromptPopover(prompts, source);
 	}
 
@@ -1504,7 +1802,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.canvasAlertTimer = getWindow(this.rootEl).setTimeout(() => {
 				this.canvasAlertTimer = undefined;
 				this.hideCanvasAlert();
-			}, 4000);
+			}, 3600);
 		}
 	}
 
@@ -1516,104 +1814,1219 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.syncHudLayoutClasses();
 	}
 
-	private reportRuntimeFeedback(message: string, kind: 'error' | 'ok' | 'info', options?: { readonly offerOpenFile?: boolean }): void {
+	private reportFeedback(message: string, kind: 'error' | 'ok' | 'info', options?: { readonly offerOpenFile?: boolean }): void {
 		this.fileDrawer?.setStatus(message, kind === 'info' ? undefined : kind);
 		this.showCanvasAlert(message, kind, options);
 	}
 
-	private handleHoverToken(token: IMissionToken | undefined): void {
+	// =========================================================================
+	// Code Draft, History (Undo/Redo) & Graph Mutations
+	// =========================================================================
+
+	private handleCodeDraftChange(nextText: string): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
+		}
+		if (this.viewMode === 'orchestration') {
+			const parsed = parseOrchestrationGraph(nextText);
+			if (parsed.error) {
+				this.fileDrawer.setStatus(parsed.error, 'error');
+				this.showCanvasAlert(parsed.error);
+				return;
+			}
+			this.hideCanvasAlert();
+			if (nextText !== this.orchestrationText) {
+				this.pushHistory(this.captureHistorySnapshot(adeBi(localize('adeOrchHistoryEditCode', "Edit topology"), '编辑编排代码')), 1200);
+			}
+			this.orchestrationText = nextText;
+			this.missionService?.updateOrchestrationText(missionId, nextText);
+			this.parseAndRenderOrchestrationGraph(nextText);
+		} else {
+			const parsed = parseMissionMermaidDag(nextText);
+			if (parsed.error) {
+				this.fileDrawer.setStatus(parsed.error, 'error');
+				this.showCanvasAlert(parsed.error);
+				return;
+			}
+			this.hideCanvasAlert();
+			if (nextText !== this.mermaidText) {
+				this.pushHistory(this.captureHistorySnapshot(adeBi(localize('adeMissionHistoryEditMermaid', "Edit Mermaid"), '编辑 Mermaid')), 1200);
+			}
+			this.mermaidText = nextText;
+			this.missionService?.updateMermaid(missionId, nextText);
+			this.parseAndRenderMissionGraph(nextText);
+		}
+	}
+
+	private captureHistorySnapshot(label: string): IEngineeringHistoryEntry {
+		const rec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
+		const positions: Record<string, IMissionNodePosition> = {};
+		for (const [nid, pos] of this.positions.entries()) {
+			positions[nid] = { x: pos.x, y: pos.y };
+		}
+		const nodePrompts: Record<string, string> = {};
+		if (this.viewMode === 'mission' && rec?.nodePrompts) {
+			for (const [nid, val] of Object.entries(rec.nodePrompts)) {
+				nodePrompts[nid] = val;
+			}
+		}
+		return {
+			viewMode: this.viewMode,
+			codeText: this.viewMode === 'orchestration' ? this.orchestrationText : this.mermaidText,
+			positions,
+			nodePrompts,
+			label,
+		};
+	}
+
+	private pushHistory(entry: IEngineeringHistoryEntry, coalesceMs = 0): void {
+		const now = Date.now();
+		if (coalesceMs > 0 && this.undoStack.length > 0 && (now - this.lastCoalescedHistoryAt) < coalesceMs) {
+			this.lastCoalescedHistoryAt = now;
+			this.redoStack = [];
+			return;
+		}
+		this.lastCoalescedHistoryAt = coalesceMs > 0 ? now : 0;
+		this.undoStack.push(entry);
+		if (this.undoStack.length > MAX_UNDO_HISTORY) {
+			this.undoStack.shift();
+		}
+		this.redoStack = [];
+	}
+
+	private applyHistorySnapshot(snapshot: IEngineeringHistoryEntry, dir: 'undo' | 'redo'): void {
+		const missionId = this.activeMissionId;
+		if (!missionId || snapshot.viewMode !== this.viewMode) {
+			return;
+		}
+		this.positions.clear();
+		for (const [nid, pos] of Object.entries(snapshot.positions)) {
+			this.positions.set(nid, { x: pos.x, y: pos.y });
+		}
+		if (this.viewMode === 'orchestration') {
+			this.missionService?.clearOrchestrationPositions(missionId);
+			if (Object.keys(snapshot.positions).length > 0) {
+				this.missionService?.updateOrchestrationPositions(missionId, snapshot.positions);
+			}
+			this.orchestrationText = snapshot.codeText;
+			this.fileDrawer.setCodeValue(snapshot.codeText);
+			this.missionService?.updateOrchestrationText(missionId, snapshot.codeText);
+			this.parseAndRenderOrchestrationGraph(snapshot.codeText, false);
+		} else {
+			this.missionService?.clearNodePositions(missionId);
+			if (Object.keys(snapshot.positions).length > 0) {
+				this.missionService?.updateNodePositions(missionId, snapshot.positions);
+			}
+			this.mermaidText = snapshot.codeText;
+			this.fileDrawer.setCodeValue(snapshot.codeText);
+			this.missionService?.updateMermaid(missionId, snapshot.codeText);
+			if (this.missionService) {
+				const existingRec = this.missionService.getMission(missionId);
+				const promptPatch: Record<string, string> = {};
+				if (existingRec?.nodePrompts) {
+					for (const oldKey of Object.keys(existingRec.nodePrompts)) {
+						if (!Object.prototype.hasOwnProperty.call(snapshot.nodePrompts, oldKey)) {
+							promptPatch[oldKey] = '';
+						}
+					}
+				}
+				for (const [k, v] of Object.entries(snapshot.nodePrompts)) {
+					promptPatch[k] = v;
+				}
+				if (Object.keys(promptPatch).length > 0) {
+					this.missionService.updateNodePrompts(missionId, promptPatch);
+				}
+			}
+			this.parseAndRenderMissionGraph(snapshot.codeText, false);
+			this.syncAllNodePromptViews();
+		}
+		this.reportFeedback(
+			dir === 'undo'
+				? adeBi(localize('adeMissionUndoFeedback', "Undid: {0}", snapshot.label), '已撤销：{0}', snapshot.label)
+				: adeBi(localize('adeMissionRedoFeedback', "Redid: {0}", snapshot.label), '已重做：{0}', snapshot.label),
+			'info',
+		);
+	}
+
+	private undoCanvasMutation(): void {
+		if (!this.activeMissionId || this.undoStack.length === 0) {
+			return;
+		}
+		const prev = this.undoStack.pop()!;
+		this.redoStack.push(this.captureHistorySnapshot(prev.label));
+		this.applyHistorySnapshot(prev, 'undo');
+	}
+
+	private redoCanvasMutation(): void {
+		if (!this.activeMissionId || this.redoStack.length === 0) {
+			return;
+		}
+		const next = this.redoStack.pop()!;
+		this.undoStack.push(this.captureHistorySnapshot(next.label));
+		this.applyHistorySnapshot(next, 'redo');
+	}
+
+	private commitCodeMutation(
+		nextCode: string,
+		reason: string,
+		options?: {
+			readonly nodePosition?: { readonly nodeId: string; readonly pos: IMissionNodePosition };
+			readonly clearPositions?: boolean;
+			readonly successMessage?: string;
+			readonly afterApply?: () => void;
+		},
+	): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
+		}
+		this.pushHistory(this.captureHistorySnapshot(reason));
+		if (this.viewMode === 'orchestration') {
+			if (options?.clearPositions) {
+				this.missionService?.clearOrchestrationPositions(missionId);
+				this.positions.clear();
+			}
+			if (options?.nodePosition) {
+				this.positions.set(options.nodePosition.nodeId, options.nodePosition.pos);
+				this.missionService?.updateOrchestrationPositions(missionId, { [options.nodePosition.nodeId]: options.nodePosition.pos });
+			}
+			this.orchestrationText = nextCode;
+			this.fileDrawer.setCodeValue(nextCode);
+			this.missionService?.updateOrchestrationText(missionId, nextCode);
+			options?.afterApply?.();
+			this.parseAndRenderOrchestrationGraph(nextCode, Boolean(options?.clearPositions));
+		} else {
+			if (options?.clearPositions) {
+				this.missionService?.clearNodePositions(missionId);
+				this.positions.clear();
+			}
+			if (options?.nodePosition) {
+				this.positions.set(options.nodePosition.nodeId, options.nodePosition.pos);
+				this.missionService?.updateNodePositions(missionId, { [options.nodePosition.nodeId]: options.nodePosition.pos });
+			}
+			this.mermaidText = nextCode;
+			this.fileDrawer.setCodeValue(nextCode);
+			this.missionService?.updateMermaid(missionId, nextCode);
+			options?.afterApply?.();
+			this.parseAndRenderMissionGraph(nextCode, Boolean(options?.clearPositions));
+		}
+		if (options?.successMessage) {
+			this.reportFeedback(options.successMessage, 'ok');
+		}
+	}
+
+	private addMissionTaskVisual(worldPos?: IMissionNodePosition): void {
+		const missionId = this.activeMissionId;
+		if (!missionId) {
+			return;
+		}
+		const targetPos = worldPos ?? this.computeDefaultNewNodeWorldPos();
+		const added = addNodeToMermaid(this.mermaidText, {
+			kind: 'task',
+			direction: this.direction,
+		});
+		this.commitCodeMutation(added.mermaidText, `Add task ${added.nodeId}`, {
+			nodePosition: { nodeId: added.nodeId, pos: targetPos },
+			afterApply: () => {
+				if (this.missionService) {
+					const existingRec = this.missionService.getMission(missionId);
+					if (existingRec?.nodePrompts?.[added.nodeId]) {
+						this.missionService.updateNodePrompt(missionId, added.nodeId, '');
+					}
+					this.syncAllNodePromptViews();
+				}
+			},
+			successMessage: adeBi(
+				localize('adeMissionVisualAddTaskOk', "Added task node {0} (click to edit description, drag port to connect).", added.nodeId),
+				'已添加任务节点 {0}（点击编辑描述，拖拽端口连线）。',
+				added.nodeId,
+			),
+		});
+	}
+
+	private renameVisualNode(nodeId: string, nextLabel: string): void {
+		if (this.viewMode === 'orchestration') {
+			const nextCode = renameOrchestrationNode(this.orchestrationText, nodeId, nextLabel);
+			if (nextCode === this.orchestrationText) {
+				return;
+			}
+			this.commitCodeMutation(nextCode, `Rename ${nodeId}`, {
+				successMessage: adeBi(localize('adeMissionVisualRenameOk', "Renamed {0} to '{1}'.", nodeId, nextLabel), '已将节点 {0} 重命名为「{1}」。', nodeId, nextLabel),
+			});
+			return;
+		}
+		const nextMermaid = renameNodeInMermaid(this.mermaidText, nodeId, nextLabel);
+		if (nextMermaid === this.mermaidText) {
+			return;
+		}
+		this.commitCodeMutation(nextMermaid, `Rename ${nodeId}`, {
+			successMessage: adeBi(localize('adeMissionVisualRenameOk', "Renamed {0} to '{1}'.", nodeId, nextLabel), '已将节点 {0} 重命名为「{1}」。', nodeId, nextLabel),
+		});
+	}
+
+	private deleteVisualNodes(nodeIds: readonly string[]): void {
+		const missionId = this.activeMissionId;
+		const uniqueIds = [...new Set(nodeIds.map(id => id.trim()).filter(Boolean))];
+		if (uniqueIds.length === 0) {
+			return;
+		}
+		if (this.viewMode === 'orchestration') {
+			const staffIds = uniqueIds.filter(id => this.orchNodes.some(n => n.id === id && n.kind === 'staff'));
+			const nonStaffIds = uniqueIds.filter(id => !staffIds.includes(id));
+
+			if (missionId && this.missionRuntimeService && staffIds.length > 0) {
+				void (async () => {
+					let removedCount = 0;
+					let reclaimedTotal = 0;
+					let recoveryTotal = 0;
+					const errors: string[] = [];
+					for (const staffId of staffIds) {
+						const res = await this.missionRuntimeService!.removeOrchestrationSubordinate(missionId, {
+							targetNodeId: staffId,
+							isHumanUser: true,
+							force: true,
+							reason: 'Removed from Engineering canvas',
+						});
+						if (res.ok) {
+							removedCount++;
+							reclaimedTotal += res.reclaimedTokenIds?.length ?? 0;
+							recoveryTotal += res.recoveryTokenIds?.length ?? 0;
+						} else if (res.error) {
+							errors.push(`${staffId}: ${res.error}`);
+						}
+					}
+					if (this.isPaneDisposed || this.activeMissionId !== missionId) {
+						return;
+					}
+					const latestText = this.missionService?.getMission(missionId)?.orchestrationText ?? this.orchestrationText;
+					let nextCode = latestText;
+					for (const id of nonStaffIds) {
+						nextCode = removeOrchestrationNode(nextCode, id);
+					}
+					if (nextCode !== latestText) {
+						this.missionService?.updateOrchestrationText(missionId, nextCode);
+						removedCount += nonStaffIds.length;
+					}
+					this.orchestrationText = nextCode;
+					this.fileDrawer?.setCodeValue(nextCode);
+					for (const nid of uniqueIds) {
+						this.selectedNodeIds.delete(nid);
+					}
+					this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+					this.syncSelectionHud();
+					this.parseAndRenderOrchestrationGraph(nextCode, false);
+					if (errors.length > 0) {
+						this.reportFeedback(errors.join(' | '), 'error');
+					} else if (removedCount > 0) {
+						const reclaimNote = reclaimedTotal > 0
+							? adeBi(
+								localize('adeOrchDeleteReclaimNote', " (reclaimed {0} token(s), bounced {1} recovery baton(s))", reclaimedTotal, recoveryTotal),
+								'（已回收 {0} 枚在途令牌，回弹 {1} 枚恢复令牌给上级）',
+								reclaimedTotal,
+								recoveryTotal,
+							)
+							: '';
+						this.reportFeedback(adeBi(
+							localize('adeOrchDeleteOkWithReclaim', "Removed {0} node(s){1}.", removedCount, reclaimNote),
+							'已删除 {0} 个节点{1}。',
+							removedCount,
+							reclaimNote,
+						), 'ok');
+					}
+				})();
+				return;
+			}
+
+			let nextCode = this.orchestrationText;
+			for (const id of uniqueIds) {
+				nextCode = removeOrchestrationNode(nextCode, id);
+			}
+			if (nextCode === this.orchestrationText) {
+				return;
+			}
+			this.commitCodeMutation(nextCode, `Delete ${uniqueIds.join(', ')}`, {
+				afterApply: () => {
+					for (const nid of uniqueIds) {
+						this.selectedNodeIds.delete(nid);
+					}
+					this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+					this.syncSelectionHud();
+				},
+				successMessage: adeBi(localize('adeOrchDeleteOk', "Removed {0} node(s).", uniqueIds.length), '已删除 {0} 个节点。', uniqueIds.length),
+			});
+			return;
+		}
+
+		const nextMermaid = uniqueIds.length === 1
+			? removeNodeFromMermaid(this.mermaidText, uniqueIds[0])
+			: removeNodesFromMermaid(this.mermaidText, uniqueIds);
+		if (nextMermaid === this.mermaidText) {
+			return;
+		}
+		this.commitCodeMutation(nextMermaid, `Delete ${uniqueIds.join(', ')}`, {
+			afterApply: () => {
+				if (missionId && this.missionService) {
+					for (const nid of uniqueIds) {
+						this.missionService.updateNodePrompt(missionId, nid, '');
+					}
+					this.syncAllNodePromptViews();
+				}
+				for (const nid of uniqueIds) {
+					this.selectedNodeIds.delete(nid);
+				}
+				this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+				this.syncSelectionHud();
+			},
+			successMessage: adeBi(localize('adeMissionDeleteTasksOk', "Removed {0} task node(s).", uniqueIds.length), '已删除 {0} 个任务节点。', uniqueIds.length),
+		});
+	}
+
+	private renameVisualEdgeLabel(fromId: string, toId: string, nextLabel: string): void {
+		if (this.viewMode === 'orchestration') {
+			const nextCode = renameOrchestrationEdgeLabel(this.orchestrationText, fromId, toId, nextLabel);
+			if (nextCode === this.orchestrationText) {
+				return;
+			}
+			this.commitCodeMutation(nextCode, `Edit edge label ${fromId}->${toId}`);
+			return;
+		}
+		const nextMermaid = renameEdgeLabelInMermaid(this.mermaidText, fromId, toId, nextLabel);
+		if (nextMermaid === this.mermaidText) {
+			return;
+		}
+		this.commitCodeMutation(nextMermaid, `Edit edge label ${fromId}->${toId}`);
+	}
+
+	private connectVisualEdge(fromId: string, toId: string, options?: { readonly fail?: boolean; readonly bidirectional?: boolean }): void {
+		if (this.viewMode === 'orchestration') {
+			const res = connectOrchestrationEdge(this.orchestrationText, fromId, toId, {
+				bidirectional: options?.bidirectional,
+			});
+			if (!res.ok || !res.orchestrationText) {
+				this.reportFeedback(res.error ?? adeBi(localize('adeMissionVisualConnectFail', "Cannot create edge."), '无法建立连线。'), 'error');
+				return;
+			}
+			const fromStaff = this.orchNodes.find(n => n.id === fromId && n.kind === 'staff');
+			const toStaff = this.orchNodes.find(n => n.id === toId && n.kind === 'staff');
+			const hasReverse = this.orchEdges.some(e => e.from === toId && e.to === fromId);
+			const isDownwardOneWay = !options?.bidirectional && !hasReverse
+				&& fromStaff?.tier !== undefined && toStaff?.tier !== undefined && fromStaff.tier < toStaff.tier;
+			this.commitCodeMutation(res.orchestrationText, `Connect ${fromId} ${options?.bidirectional ? '<-->' : '-->'} ${toId}`, {
+				successMessage: options?.bidirectional
+					? adeBi(localize('adeOrchConnectBidirOk', "Connected {0} <--> {1}.", fromId, toId), '已建立双向连线 {0} ⇄ {1}。', fromId, toId)
+					: isDownwardOneWay
+						? adeBi(localize('adeOrchConnectOneWayTip', "Connected {0} → {1} (Tip: right-click edge → Make Bidirectional <--> if subordinate must return tokens).", fromId, toId), '已建立单向连线 {0} → {1}（提示：若下级需回传令牌，请右键连线切换为双向 <-->）。', fromId, toId)
+						: adeBi(localize('adeMissionVisualConnectOk', "Connected {0} → {1}.", fromId, toId), '已建立连线 {0} → {1}。', fromId, toId),
+			});
+			return;
+		}
+		const res = addEdgeToMermaid(this.mermaidText, fromId, toId);
+		if (!res.ok || !res.mermaidText) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeMissionVisualConnectFail', "Cannot create edge."), '无法建立连线。'), 'error');
+			return;
+		}
+		this.commitCodeMutation(res.mermaidText, `Connect ${fromId} -> ${toId}`, {
+			successMessage: adeBi(localize('adeMissionVisualConnectOk', "Connected {0} → {1}.", fromId, toId), '已建立任务依赖 {0} → {1}。', fromId, toId),
+		});
+	}
+
+	private deleteVisualEdge(fromId: string, toId: string): void {
+		if (this.viewMode === 'orchestration') {
+			const nextCode = removeOrchestrationEdge(this.orchestrationText, fromId, toId);
+			if (nextCode === this.orchestrationText) {
+				return;
+			}
+			this.commitCodeMutation(nextCode, `Delete edge ${fromId} -> ${toId}`, {
+				successMessage: adeBi(localize('adeMissionVisualDeleteEdgeOk', "Removed edge {0} → {1}.", fromId, toId), '已删除连线 {0} → {1}。', fromId, toId),
+			});
+			return;
+		}
+		const nextMermaid = removeEdgeFromMermaid(this.mermaidText, fromId, toId);
+		if (nextMermaid === this.mermaidText) {
+			return;
+		}
+		this.commitCodeMutation(nextMermaid, `Delete edge ${fromId} -> ${toId}`, {
+			successMessage: adeBi(localize('adeMissionVisualDeleteEdgeOk', "Removed edge {0} → {1}.", fromId, toId), '已删除连线 {0} → {1}。', fromId, toId),
+		});
+	}
+
+	private toggleOrchestrationEdgeBidirectional(fromId: string, toId: string): void {
+		const hasReverse = this.orchEdges.some(e => e.from === toId && e.to === fromId);
+		if (hasReverse) {
+			const nextCode = removeOrchestrationEdge(this.orchestrationText, toId, fromId);
+			if (nextCode !== this.orchestrationText) {
+				this.commitCodeMutation(nextCode, `Unidirectional ${fromId} -> ${toId}`, {
+					successMessage: adeBi(localize('adeOrchEdgeUnidirOk', "Switched {0} → {1} to one-way.", fromId, toId), '已将连线 {0} → {1} 切换为单向。', fromId, toId),
+				});
+			}
+		} else {
+			const res = connectOrchestrationEdge(this.orchestrationText, toId, fromId);
+			if (res.ok && res.orchestrationText) {
+				this.commitCodeMutation(res.orchestrationText, `Bidirectional ${fromId} <--> ${toId}`, {
+					successMessage: adeBi(localize('adeOrchEdgeBidirOk', "Switched {0} ⇄ {1} to bidirectional.", fromId, toId), '已将连线 {0} ⇄ {1} 切换为双向。', fromId, toId),
+				});
+			}
+		}
+	}
+
+	private deleteSelectedItems(): void {
+		if (!this.activeMissionId) {
+			return;
+		}
+		if (this.selectedEdgeKey) {
+			const [from, to] = this.selectedEdgeKey.split('->');
+			this.selectEdge(undefined);
+			if (from && to) {
+				this.deleteVisualEdge(from, to);
+			}
+			return;
+		}
+		if (this.selectedNodeIds.size > 0) {
+			this.deleteVisualNodes([...this.selectedNodeIds]);
+		}
+	}
+
+	private resetToAutoLayout(): void {
+		const missionId = this.activeMissionId;
+		if (!missionId || this.getActiveNodeCount() === 0) {
+			return;
+		}
+		this.pushHistory(this.captureHistorySnapshot(adeBi(localize('adeMissionHistoryAutoLayout', "Auto layout"), '自动排版')));
+		this.positions.clear();
+		if (this.viewMode === 'orchestration') {
+			this.missionService?.clearOrchestrationPositions(missionId);
+			this.parseAndRenderOrchestrationGraph(this.orchestrationText, true);
+		} else {
+			this.missionService?.clearNodePositions(missionId);
+			this.parseAndRenderMissionGraph(this.mermaidText, true);
+		}
+	}
+
+	// =========================================================================
+	// Context Menus (Node, Edge & Blank Canvas)
+	// =========================================================================
+
+	private openNodeContextMenu(node: IMissionDagNode, clientX: number, clientY: number): void {
+		if (!this.activeMissionId) {
+			return;
+		}
+		if (this.viewMode === 'mission') {
+			const st = this.getActiveTaskStatuses()[node.id]?.status ?? 'pending';
+			const isDone = st === 'completed';
+			this.popovers.openCanvasContextMenu(clientX, clientY, [
+				{
+					id: 'edit-task',
+					label: adeBi(localize('adeMissionCtxEditTask', "Edit Task Details"), '编辑任务详情'),
+					icon: 'note',
+					run: () => {
+						const el = this.worldEl.querySelector<HTMLElement>(`[data-node-id="${node.id}"]`) ?? this.viewportEl;
+						this.openMissionTaskPopover(node, el);
+					},
+				},
+				{
+					id: 'rename-node',
+					label: adeBi(localize('adeMissionCtxRenameNode', "Rename"), '重命名'),
+					icon: 'edit',
+					run: () => this.renderer.startInlineNodeRename(node.id),
+				},
+				{
+					id: 'toggle-complete',
+					label: isDone
+						? adeBi(localize('adeMissionCtxReopenTask', "Reopen Task"), '重置为待完成')
+						: adeBi(localize('adeMissionCtxCompleteTask', "Mark Completed ✓"), '标注为已完成 ✓'),
+					icon: isDone ? 'discard' : 'check',
+					run: () => void this.handleSetMissionTaskStatus(node.id, isDone ? 'pending' : 'completed'),
+				},
+				{
+					id: 'delete-node',
+					label: adeBi(localize('adeMissionCtxDeleteNode', "Delete {0}", node.id), '删除 {0}', node.id),
+					icon: 'trash',
+					danger: true,
+					separatorBefore: true,
+					run: () => this.deleteVisualNodes([node.id]),
+				},
+			], {
+				colorPicker: {
+					currentColor: node.color,
+					onSelectColor: nextColor => this.setNodeColorVisual(node.id, nextColor),
+				},
+			});
+			return;
+		}
+
+		const oNode = this.orchNodes.find(n => n.id === node.id);
+		if (oNode?.kind === 'whiteboard') {
+			const wb = this.getActiveWhiteboards()[oNode.id] ?? {
+				id: oNode.id,
+				title: oNode.label,
+				department: oNode.department || 'General',
+				content: '',
+				version: 0,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+			};
+			this.popovers.openCanvasContextMenu(clientX, clientY, [
+				{
+					id: 'edit-whiteboard',
+					label: adeBi(localize('adeOrchCtxEditWb', "Edit Whiteboard"), '编辑共享白板'),
+					icon: 'notebook',
+					run: () => {
+						const el = this.worldEl.querySelector<HTMLElement>(`[data-node-id="${oNode.id}"]`) ?? this.viewportEl;
+						this.openWhiteboardPopover(wb, el);
+					},
+				},
+				{
+					id: 'rename-node',
+					label: adeBi(localize('adeMissionCtxRenameNode', "Rename"), '重命名'),
+					icon: 'edit',
+					run: () => this.renderer.startInlineNodeRename(node.id),
+				},
+				{
+					id: 'move-to-group',
+					label: adeBi(localize('adeOrchCtxMoveToGroup', "Move to Group…"), '移动至分组…'),
+					icon: 'folder',
+					run: () => this.popovers.openMoveToGroupPopover(clientX, clientY, oNode.label, oNode.department, this.orchDepartments, targetGrp => {
+						this.moveOrchestrationNodeToGroupVisual(oNode.id, targetGrp);
+					}),
+				},
+				{
+					id: 'delete-node',
+					label: adeBi(localize('adeMissionCtxDeleteNode', "Delete {0}", node.id), '删除 {0}', node.id),
+					icon: 'trash',
+					danger: true,
+					separatorBefore: true,
+					run: () => this.deleteVisualNodes([node.id]),
+				},
+			], {
+				colorPicker: {
+					currentColor: oNode.color,
+					onSelectColor: nextColor => this.setNodeColorVisual(oNode.id, nextColor),
+				},
+			});
+			return;
+		}
+
+		const linkedAgent = this.buildOrchestrationAgentMap().get(node.id);
+		const items: {
+			readonly id: string;
+			readonly label: string;
+			readonly icon?: string;
+			readonly danger?: boolean;
+			readonly separatorBefore?: boolean;
+			readonly run: () => void;
+		}[] = [];
+		if (linkedAgent && this.adeEditorService) {
+			items.push({
+				id: 'open-agent-chat',
+				label: adeBi(localize('adeOrchCtxOpenChat', "Open Employee Chat"), '打开员工会话'),
+				icon: 'comment-discussion',
+				run: () => void this.adeEditorService?.openAgent(linkedAgent.id),
+			});
+		}
+		if (oNode && linkedAgent?.session && this.activeMissionId) {
+			const curEngineId = linkedAgent.session.engineId ?? linkedAgent.preferredEngineId ?? oNode.engineId ?? 'aexus-claude';
+			items.push({
+				id: 'reset-session-switch-engine',
+				label: adeBi(localize('adeOrchCtxResetSwitchEngine', "Reset Session & Switch Engine…"), '重置会话并切换引擎…'),
+				icon: 'refresh',
+				run: () => {
+					if (!this.activeMissionId) {
+						return;
+					}
+					const anchor = this.worldEl.querySelector<HTMLElement>(`[data-node-id="${oNode.id}"] .ade-mission-engine-pill`)
+						?? this.worldEl.querySelector<HTMLElement>(`[data-node-id="${oNode.id}"]`)
+						?? this.viewportEl;
+					void this.popovers.openEnginePopover(this.activeMissionId, oNode.id, linkedAgent, curEngineId, anchor, {
+						staffLabel: oNode.label,
+						hostAlias: oNode.hostAlias,
+					});
+				},
+			});
+		}
+		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+		const maxTier = org.ranks.reduce((m, r) => Math.max(m, r.tier), 1);
+		const parentTier = oNode?.tier ?? 1;
+		const parentRankDef = org.ranks.find(r => r.tier === parentTier);
+		if (oNode && parentTier < maxTier && (!parentRankDef || parentRankDef.canHaveSubordinates)) {
+			items.push({
+				id: 'create-subordinate',
+				label: adeBi(localize('adeOrchCtxCreateSub', "Create Subordinate…"), '动态创建下级员工…'),
+				icon: 'person-add',
+				run: () => this.popovers.openAddStaffPopover(clientX, clientY, payload => {
+					this.addOrchestrationSubordinateVisual(oNode, payload);
+				}, {
+					title: adeBi(localize('adeOrchSubTitle', "Create Subordinate under {0}", oNode.label), '在「{0}」下动态扩编下级', oNode.label),
+					subtitle: adeBi(localize('adeOrchSubHint', "Auto-wires bidirectional <--> link so tokens can return."), '自动建立双向 <--> 通道，确保下级完成后可回传令牌'),
+					submitLabel: adeBi(localize('adeOrchSubSubmit', "Create & Link <-->"), '创建并双向连线'),
+					minTier: parentTier + 1,
+					defaultDepartment: oNode.department,
+				}),
+			});
+		}
+		items.push(
+			{
+				id: 'dispatch-requirement',
+				label: adeBi(localize('adeOrchCtxDispatch', "Dispatch Requirement…"), '下达任务需求…'),
+				icon: 'send',
+				run: () => this.popovers.openDispatchRequirementPopover(clientX, clientY, node.label, req => {
+					this.handleDispatchRequirement(req, node.id);
+				}),
+			},
+			{
+				id: 'rename-node',
+				label: adeBi(localize('adeMissionCtxRenameNode', "Rename"), '重命名'),
+				icon: 'edit',
+				run: () => this.renderer.startInlineNodeRename(node.id),
+			},
+			...(oNode ? [{
+				id: 'move-to-group',
+				label: adeBi(localize('adeOrchCtxMoveToGroup', "Move to Group…"), '移动至分组…'),
+				icon: 'folder',
+				run: () => this.popovers.openMoveToGroupPopover(clientX, clientY, oNode.label, oNode.department, this.orchDepartments, targetGrp => {
+					this.moveOrchestrationNodeToGroupVisual(oNode.id, targetGrp);
+				}),
+			}] : []),
+			{
+				id: 'delete-node',
+				label: adeBi(localize('adeMissionCtxDeleteNode', "Delete {0}", node.id), '删除 {0}', node.id),
+				icon: 'trash',
+				danger: true,
+				separatorBefore: true,
+				run: () => this.deleteVisualNodes([node.id]),
+			},
+		);
+		this.popovers.openCanvasContextMenu(clientX, clientY, items, {
+			colorPicker: {
+				currentColor: oNode?.color,
+				onSelectColor: nextColor => this.setNodeColorVisual(node.id, nextColor),
+			},
+		});
+	}
+
+	private setNodeColorVisual(nodeId: string, color: string | null): void {
+		if (!this.activeMissionId) {
+			return;
+		}
+		if (this.viewMode === 'mission') {
+			const nextMermaid = upsertTaskMetadataInMermaid(this.mermaidText, nodeId, { color });
+			if (nextMermaid !== this.mermaidText) {
+				this.commitCodeMutation(nextMermaid, `Set node color ${nodeId}`, {
+					successMessage: color
+						? adeBi(localize('adeNodeColorUpdatedOk', "Updated color for {0}.", nodeId), '已更新 {0} 的节点颜色。', nodeId)
+						: adeBi(localize('adeNodeColorResetOk', "Reset color for {0} to default.", nodeId), '已恢复 {0} 为默认配色。', nodeId),
+				});
+			}
+			return;
+		}
+		const res = upsertOrchestrationNodeColorInCode(this.orchestrationText, nodeId, color);
+		if (!res.ok || !res.orchestrationText) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeNodeColorFail', "Failed to update node color."), '更新节点颜色失败。'), 'error');
+			return;
+		}
+		if (res.orchestrationText !== this.orchestrationText) {
+			this.commitCodeMutation(res.orchestrationText, `Set node color ${nodeId}`, {
+				successMessage: color
+					? adeBi(localize('adeNodeColorUpdatedOk', "Updated color for {0}.", nodeId), '已更新 {0} 的节点颜色。', nodeId)
+					: adeBi(localize('adeNodeColorResetOk', "Reset color for {0} to default.", nodeId), '已恢复 {0} 为默认配色。', nodeId),
+			});
+		}
+	}
+
+	private addOrchestrationGroupVisual(name: string, worldPos?: IMissionNodePosition): void {
+		const res = addOrchestrationGroup(this.orchestrationText, {
+			name,
+			direction: this.orchDirection,
+		});
+		if (!res.ok || !res.orchestrationText || !res.groupId) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeOrchAddGroupFail', "Failed to create group."), '创建分组失败。'), 'error');
+			return;
+		}
+		this.commitCodeMutation(res.orchestrationText, `Add group ${name}`, {
+			...(worldPos ? { nodePosition: { nodeId: res.groupId, pos: worldPos } } : {}),
+			successMessage: adeBi(localize('adeOrchAddGroupOk', "Created group '{0}' ({1}).", res.groupName ?? name, res.groupId), '已创建部门分组「{0}」({1})。', res.groupName ?? name, res.groupId),
+		});
+	}
+
+	private renameOrchestrationGroupVisual(groupId: string, nextName: string): void {
+		const res = renameOrchestrationGroup(this.orchestrationText, groupId, nextName);
+		if (!res.ok || !res.orchestrationText) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeOrchRenameGroupFail', "Failed to rename group."), '重命名分组失败。'), 'error');
+			return;
+		}
+		this.commitCodeMutation(res.orchestrationText, `Rename group ${groupId}`, {
+			successMessage: adeBi(localize('adeOrchRenameGroupOk', "Renamed group to '{0}'.", res.newName ?? nextName), '已将分组重命名为「{0}」。', res.newName ?? nextName),
+		});
+	}
+
+	private moveOrchestrationNodeToGroupVisual(nodeId: string, targetGroupIdOrName: string | undefined): void {
+		const res = moveOrchestrationNodeToGroup(this.orchestrationText, nodeId, targetGroupIdOrName);
+		if (!res.ok || !res.orchestrationText) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeOrchMoveGroupFail', "Failed to move node to group."), '移动节点至分组失败。'), 'error');
+			return;
+		}
+		this.commitCodeMutation(res.orchestrationText, `Move ${nodeId} to ${res.groupName ?? 'top-level'}`, {
+			successMessage: res.groupName
+				? adeBi(localize('adeOrchMoveGroupOk', "Moved {0} into group '{1}'.", nodeId, res.groupName), '已将节点 {0} 移入分组「{1}」。', nodeId, res.groupName)
+				: adeBi(localize('adeOrchUngroupNodeOk', "Removed {0} from its group.", nodeId), '已将节点 {0} 移出分组。', nodeId),
+		});
+	}
+
+	private removeOrchestrationGroupVisual(groupId: string, deleteMembers: boolean): void {
+		const res = removeOrchestrationGroup(this.orchestrationText, groupId, { deleteMembers });
+		if (!res.ok || !res.orchestrationText) {
+			this.reportFeedback(res.error ?? adeBi(localize('adeOrchRemoveGroupFail', "Failed to remove group."), '删除分组失败。'), 'error');
+			return;
+		}
+		this.commitCodeMutation(res.orchestrationText, deleteMembers ? `Delete group ${groupId} & members` : `Ungroup ${groupId}`, {
+			successMessage: deleteMembers
+				? adeBi(localize('adeOrchDeleteGroupMembersOk', "Deleted group '{0}' and {1} member(s).", groupId, res.removedNodeIds?.length ?? 0), '已删除分组「{0}」及其 {1} 个成员。', groupId, res.removedNodeIds?.length ?? 0)
+				: adeBi(localize('adeOrchUngroupOk', "Ungrouped '{0}' (all members preserved).", groupId), '已解散分组「{0}」（已保留全部成员）。', groupId),
+		});
+	}
+
+	private openGroupContextMenu(group: IOrchestrationDepartmentGroup, clientX: number, clientY: number): void {
+		if (!this.activeMissionId || this.viewMode !== 'orchestration') {
+			return;
+		}
+		const worldPos = this.clientToWorldPos(clientX, clientY);
+		this.popovers.openCanvasContextMenu(clientX, clientY, [
+			{
+				id: 'rename-group',
+				label: adeBi(localize('adeOrchCtxRenameGroup', "Rename Group"), '重命名分组'),
+				icon: 'edit',
+				run: () => this.renderer.startInlineGroupRename(group.id),
+			},
+			{
+				id: 'add-staff-to-group',
+				label: adeBi(localize('adeOrchCtxAddStaffToGroup', "Add Staff to '{0}'…", group.name), '在「{0}」中新建员工…', group.name),
+				icon: 'person-add',
+				run: () => this.popovers.openAddStaffPopover(clientX, clientY, payload => {
+					this.addOrchestrationStaffVisual({ ...payload, worldPos });
+				}, { defaultDepartment: group.name }),
+			},
+			{
+				id: 'add-wb-to-group',
+				label: adeBi(localize('adeOrchCtxAddWbToGroup', "Add Whiteboard to '{0}'…", group.name), '在「{0}」中新建白板…', group.name),
+				icon: 'notebook',
+				run: () => this.popovers.openAddWhiteboardPopover(clientX, clientY, payload => {
+					this.addOrchestrationWhiteboardVisual({ ...payload, worldPos });
+				}, { defaultDepartment: group.name }),
+			},
+			{
+				id: 'ungroup',
+				label: adeBi(localize('adeOrchCtxUngroup', "Ungroup (Keep Members)"), '解散分组（保留成员）'),
+				icon: 'ungroup-by-ref-type',
+				separatorBefore: true,
+				run: () => this.removeOrchestrationGroupVisual(group.id, false),
+			},
+			{
+				id: 'delete-group-members',
+				label: adeBi(localize('adeOrchCtxDeleteGroup', "Delete Group & Members"), '删除分组及全部成员'),
+				icon: 'trash',
+				danger: true,
+				run: () => this.removeOrchestrationGroupVisual(group.id, true),
+			},
+		]);
+	}
+
+	private openEdgeContextMenu(edge: IMissionDagEdge, clientX: number, clientY: number): void {
+		if (!this.activeMissionId) {
+			return;
+		}
+		if (this.viewMode === 'orchestration') {
+			const hasReverse = this.orchEdges.some(e => e.from === edge.to && e.to === edge.from);
+			this.popovers.openCanvasContextMenu(clientX, clientY, [
+				{
+					id: 'edit-edge-label',
+					label: adeBi(localize('adeMissionCtxEditEdgeLabel', "Edit Label"), '编辑连线标签'),
+					icon: 'edit',
+					run: () => this.renderer.startInlineEdgeLabelEdit(edge.id),
+				},
+				{
+					id: 'toggle-bidir',
+					label: hasReverse
+						? adeBi(localize('adeOrchCtxToUnidir', "Make One-Way (-->)"), '切换为单向 (-->)')
+						: adeBi(localize('adeOrchCtxToBidir', "Make Bidirectional (<-->)"), '切换为双向 (<-->)'),
+					icon: 'arrow-swap',
+					run: () => this.toggleOrchestrationEdgeBidirectional(edge.from, edge.to),
+				},
+				{
+					id: 'delete-edge',
+					label: adeBi(localize('adeMissionCtxDeleteEdge', "Delete Edge"), '删除连线'),
+					icon: 'trash',
+					danger: true,
+					separatorBefore: true,
+					run: () => this.deleteVisualEdge(edge.from, edge.to),
+				},
+			]);
+			return;
+		}
+
+		this.popovers.openCanvasContextMenu(clientX, clientY, [
+			{
+				id: 'edit-edge-label',
+				label: adeBi(localize('adeMissionCtxEditEdgeLabel', "Edit Label"), '编辑连线标签'),
+				icon: 'edit',
+				run: () => this.renderer.startInlineEdgeLabelEdit(edge.id),
+			},
+			{
+				id: 'delete-edge',
+				label: adeBi(localize('adeMissionCtxDeleteEdge', "Delete Edge"), '删除连线'),
+				icon: 'trash',
+				danger: true,
+				separatorBefore: true,
+				run: () => this.deleteVisualEdge(edge.from, edge.to),
+			},
+		]);
+	}
+
+	// =========================================================================
+	// Parsing & Rendering (Mission View vs. Orchestration View)
+	// =========================================================================
+
+	private parseAndRenderMissionGraph(rawText: string, forceAutoLayout = false): void {
+		this.fileDrawer.setFileDotVisible(rawText.trim().length > 0);
+		const parsed = parseMissionMermaidDag(rawText);
+		if (parsed.error) {
+			this.fileDrawer.setStatus(parsed.error, 'error');
+			if (!this.fileDrawer.isOpen()) {
+				this.showCanvasAlert(parsed.error, 'error', { offerOpenFile: true });
+			}
+			return;
+		}
+
+		const hadNodesBefore = this.nodes.length > 0;
+		this.isDraggingNode = false;
+		this.direction = parsed.direction;
+		this.nodes = parsed.nodes;
+		this.edges = parsed.edges;
+		this.popovers.close();
+		if (this.canvasAlertEl?.dataset.alertKind === 'error') {
+			this.hideCanvasAlert();
+		}
+
+		if (parsed.nodes.length === 0) {
+			this.positions.clear();
+			this.fileDrawer.setMeta(adeBi(localize('adeMissionMetaEmpty', "Empty"), '空画布'));
+			this.fileDrawer.setStatus(adeBi(localize('adeMissionStatusEmpty', "Write Mermaid DAG syntax to render task nodes"), '编写 Mermaid DAG 语法以渲染任务节点'));
+			this.syncGraphDom(true);
+			this.fileDrawer.syncTaskDescriptionsPane();
+			return;
+		}
+
+		const autoPos = computeMissionAutoLayout(parsed);
+		const storedPos = !forceAutoLayout && this.activeMissionId
+			? (this.missionService?.getMission(this.activeMissionId)?.positions ?? {})
+			: {};
+		const nextPositions = new Map<string, IMissionNodePosition>();
+		for (const node of parsed.nodes) {
+			const saved = storedPos[node.id] ?? (!forceAutoLayout ? this.positions.get(node.id) : undefined);
+			nextPositions.set(node.id, saved ?? autoPos.get(node.id) ?? { x: 240, y: 240 });
+		}
+		this.positions = nextPositions;
+
+		this.fileDrawer.setMeta(adeBi(
+			localize('adeMissionMetaTasksCounts', "{0} tasks · {1} edges", parsed.nodes.length, parsed.edges.length),
+			'{0} 个任务 · {1} 条依赖',
+			parsed.nodes.length,
+			parsed.edges.length,
+		));
+		this.fileDrawer.setStatus(adeBi(localize('adeMissionStatusValid', "Valid acyclic DAG synced"), '无环任务 DAG 已实时同步'), 'ok');
+
+		this.syncGraphDom();
+		this.reconcileSelectionAndSearch(parsed.nodes.map(n => n.id), parsed.edges.map(e => `${e.from}->${e.to}`));
+		this.fileDrawer.syncTaskDescriptionsPane();
+		if (!hadNodesBefore || forceAutoLayout) {
+			this.fitGraphToViewport();
+		}
+	}
+
+	private parseAndRenderOrchestrationGraph(rawText: string, forceAutoLayout = false): void {
+		this.fileDrawer.setFileDotVisible(rawText.trim().length > 0);
+		const parsed = parseOrchestrationGraph(rawText);
+		if (parsed.error) {
+			this.fileDrawer.setStatus(parsed.error, 'error');
+			if (!this.fileDrawer.isOpen()) {
+				this.showCanvasAlert(parsed.error, 'error', { offerOpenFile: true });
+			}
+			return;
+		}
+
+		const hadNodesBefore = this.orchNodes.length > 0 || this.orchDepartments.length > 0;
+		this.isDraggingNode = false;
+		this.orchDirection = parsed.direction;
+		if (parsed.layoutMode && !forceAutoLayout) {
+			this.orchLayoutMode = parsed.layoutMode;
+			this.fileDrawer?.setLayoutMode(parsed.layoutMode);
+		}
+		this.orchNodes = parsed.nodes;
+		this.orchEdges = parsed.edges;
+		this.orchDepartments = parsed.departments;
+		this.popovers.close();
+		if (this.canvasAlertEl?.dataset.alertKind === 'error') {
+			this.hideCanvasAlert();
+		}
+
+		if (parsed.nodes.length === 0 && parsed.departments.length === 0) {
+			this.positions.clear();
+			this.fileDrawer.setMeta(adeBi(localize('adeMissionMetaEmpty', "Empty"), '空画布'));
+			this.fileDrawer.setStatus(adeBi(localize('adeOrchStatusEmpty', "Write declarative staff topology (cycles & <--> supported)"), '编写声明式员工编排代码（支持回路与双向连线）'));
+			this.syncGraphDom(true);
+			return;
+		}
+
+		const autoPos = computeOrchestrationAutoLayout(parsed, { layoutMode: this.orchLayoutMode });
+		const storedPos = !forceAutoLayout && this.activeMissionId
+			? (this.missionService?.getMission(this.activeMissionId)?.orchestrationPositions ?? {})
+			: {};
+		const codePos = !forceAutoLayout ? (parsed.positions ?? {}) : {};
+		const nextPositions = new Map<string, IMissionNodePosition>();
+		for (const node of parsed.nodes) {
+			const saved = storedPos[node.id] ?? codePos[node.id] ?? (!forceAutoLayout ? this.positions.get(node.id) : undefined);
+			nextPositions.set(node.id, saved ?? autoPos.get(node.id) ?? { x: 260, y: 240 });
+		}
+		for (const dept of parsed.departments) {
+			const savedDept = storedPos[dept.id] ?? codePos[dept.id] ?? (!forceAutoLayout ? this.positions.get(dept.id) : undefined);
+			if (savedDept) {
+				nextPositions.set(dept.id, savedDept);
+			}
+		}
+		this.positions = nextPositions;
+
+		const staffCount = parsed.nodes.filter(n => n.kind === 'staff').length;
+		const wbCount = parsed.nodes.filter(n => n.kind === 'whiteboard').length;
+		this.fileDrawer.setMeta(wbCount > 0
+			? adeBi(localize('adeOrchMetaStaffWb', "{0} staff · {1} WB · {2} links", staffCount, wbCount, parsed.edges.length), '{0} 名员工 · {1} 块白板 · {2} 条连线', staffCount, wbCount, parsed.edges.length)
+			: adeBi(localize('adeOrchMetaStaffOnly', "{0} staff · {1} links", staffCount, parsed.edges.length), '{0} 名员工 · {1} 条连线', staffCount, parsed.edges.length));
+		if (parsed.advisories && parsed.advisories.length > 0) {
+			const firstAdv = parsed.advisories[0];
+			const extraCount = parsed.advisories.length - 1;
+			const extraSuffix = extraCount > 0
+				? adeBi(localize('adeOrchStatusAdvExtra', " (+{0} more)", extraCount), '（另有 {0} 条建议）', extraCount)
+				: '';
+			this.fileDrawer.setStatus(
+				(firstAdv.code === 'ONE_WAY_HIERARCHY_EDGE' && firstAdv.toNodeId
+					? adeBi(
+						localize('adeOrchStatusOneWayTip', "Synced · Tip: {0} --> {1} is one-way (use <--> if {1} must return tokens)", firstAdv.fromNodeId, firstAdv.toNodeId),
+						'已同步 · 提示：{0} --> {1} 为单向连线（若下级需回传令牌，请改为 <--> 回连）',
+						firstAdv.fromNodeId,
+						firstAdv.toNodeId,
+					)
+					: adeBi(
+						localize('adeOrchStatusDeadEndTip', "Synced · Tip: {0} has no outgoing edge to hand off tokens", firstAdv.fromNodeId),
+						'已同步 · 提示：节点 {0} 暂无出边，收到令牌后将无法向其他节点传递',
+						firstAdv.fromNodeId,
+					)) + extraSuffix,
+				'ok',
+			);
+		} else {
+			this.fileDrawer.setStatus(adeBi(localize('adeOrchStatusValid', "Topology synced (cycles & bidirectional enabled)"), '员工自由拓扑已双向实时同步'), 'ok');
+		}
+
+		this.syncGraphDom();
+		this.reconcileSelectionAndSearch(parsed.nodes.map(n => n.id), parsed.edges.map(e => `${e.from}->${e.to}`));
+		this.prewarmHosts();
+		if (!hadNodesBefore || forceAutoLayout) {
+			this.fitGraphToViewport();
+		}
+	}
+
+	private handleChangeOrchestrationLayoutMode(mode: OrchestrationLayoutMode): void {
+		const missionId = this.activeMissionId;
+		this.orchLayoutMode = mode;
+		this.fileDrawer?.setLayoutMode(mode);
+		if (!missionId || this.viewMode !== 'orchestration') {
+			return;
+		}
+		this.missionService?.updateOrchestrationLayoutMode?.(missionId, mode);
+		this.positions.clear();
+		this.missionService?.clearOrchestrationPositions(missionId);
+		this.parseAndRenderOrchestrationGraph(this.orchestrationText, true);
+	}
+
+	private reconcileSelectionAndSearch(liveNodeIds: readonly string[], liveEdgeKeys: readonly string[]): void {
+		const liveNodeSet = new Set(liveNodeIds);
+		let selChanged = false;
+		for (const id of [...this.selectedNodeIds]) {
+			if (!liveNodeSet.has(id)) {
+				this.selectedNodeIds.delete(id);
+				selChanged = true;
+			}
+		}
+		if (selChanged) {
+			this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+			this.syncSelectionHud();
+		}
+		if (this.selectedEdgeKey && !liveEdgeKeys.includes(this.selectedEdgeKey)) {
+			this.selectedEdgeKey = undefined;
+			this.renderer?.setSelectedEdgeKey(undefined);
+		}
+		if (this.searchBarEl && !this.searchBarEl.hidden) {
+			this.updateCanvasSearchResults(false);
+		}
+	}
+
+	private buildOrchestrationAgentMap(): Map<string, IAdeAgent> {
+		const map = new Map<string, IAdeAgent>();
+		if (!this.activeMissionId) {
+			return map;
+		}
+		const generatedEmployees = this.missionService?.getGeneratedEmployees(this.activeMissionId) ?? [];
+		const byTreeKey = new Map<string, IAdeAgent>();
+		for (const emp of generatedEmployees) {
+			if (emp.treeNodeId) {
+				byTreeKey.set(emp.treeNodeId, emp);
+			}
+			for (const nid of emp.treeNodeIds ?? []) {
+				map.set(nid, emp);
+			}
+		}
+		const missionRec = this.missionService?.getMission(this.activeMissionId);
+		const ownerAgent = missionRec?.ownerSessionId && missionRec.ownerSessionId !== ADE_SECRETARY_ID
+			? this.projectsService?.getAgent(missionRec.ownerSessionId)
+			: undefined;
+		if (ownerAgent && this.orchNodes.length > 0) {
+			const rootNode = findHighestRankStaffNode({
+				direction: this.orchDirection,
+				nodes: this.orchNodes,
+				edges: this.orchEdges,
+				departments: this.orchDepartments,
+			});
+			if (rootNode && !map.has(rootNode.id)) {
+				map.set(rootNode.id, ownerAgent);
+			}
+		}
+		for (const oNode of this.orchNodes) {
+			if (oNode.kind !== 'staff' || map.has(oNode.id)) {
+				continue;
+			}
+			if (oNode.agentId) {
+				const direct = this.projectsService?.getAgent(oNode.agentId);
+				if (direct) {
+					map.set(oNode.id, direct);
+					continue;
+				}
+			}
+			const fallback = (oNode.employeeKey ? byTreeKey.get(`emp:${oNode.employeeKey}`) : undefined)
+				?? byTreeKey.get(oNode.id);
+			if (fallback) {
+				map.set(oNode.id, fallback);
+			}
+		}
+		return map;
+	}
+
+	private computeActiveProjectsFingerprint(agentByNodeId?: ReadonlyMap<string, IAdeAgent>): string {
+		if (!this.activeMissionId || !this.projectsService) {
+			return '';
+		}
+		const map = agentByNodeId ?? this.buildOrchestrationAgentMap();
+		const parts: string[] = [this.activeMissionId];
+		for (const oNode of this.orchNodes) {
+			if (oNode.kind !== 'staff') {
+				continue;
+			}
+			const a = map.get(oNode.id);
+			parts.push(a
+				? `${oNode.id}:${a.id}|${a.label}|${a.role ?? ''}|${a.session?.engineId ?? ''}|${a.preferredEngineId ?? ''}|${a.preferredModel ?? ''}|${a.preferredThinking ?? ''}`
+				: `${oNode.id}:`);
+		}
+		return parts.join('\x1e');
+	}
+
+	private computeTaskStatusesFingerprint(statuses: Readonly<Record<string, IMissionTaskStatusRecord>> | undefined): string {
+		if (!statuses) {
+			return '';
+		}
+		return Object.keys(statuses).sort().map(k => {
+			const r = statuses[k];
+			return `${k}:${r.status}:${r.completedAt ?? 0}:${r.assigneeNodeId ?? ''}:${r.activeTokenIds?.length ?? 0}:${r.artifactPtrs?.length ?? 0}:${r.lastError ?? ''}`;
+		}).join('|');
+	}
+
+	private computeOrchAuxiliaryFingerprint(
+		whiteboards: Readonly<Record<string, IOrchestrationWhiteboard>> | undefined,
+		runtime: IOrchestrationRuntimeState | undefined,
+	): string {
+		const wbPart = whiteboards
+			? Object.keys(whiteboards).sort().map(k => `${k}:${whiteboards[k].version}:${whiteboards[k].updatedAt}`).join('|')
+			: '';
+		const rtPart = runtime
+			? `${runtime.status ?? 'running'}:${runtime.tokenSeq}:${Object.values(runtime.tokens).map(t => `${t.id}:${t.status}:${t.nudgeCount}`).join(',')}:${Object.values(runtime.joinBarriers ?? {}).map(b => `${b.id}:${b.status}:${Object.keys(b.settledChildren).length}`).join(',')}`
+			: '';
+		return `${wbPart}#${rtPart}`;
+	}
+
+	private syncGraphDom(forceFullRebuild = false): void {
 		if (!this.renderer) {
 			return;
 		}
-		if (!token || !this.activeMissionId || !this.missionRuntimeService) {
-			this.renderer.setTraceHighlightEdges(undefined);
+		const missionRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
+		const runtimeState = this.getEffectiveRuntimeState();
+		const ownerAgent = missionRec?.ownerSessionId ? this.projectsService?.getAgent(missionRec.ownerSessionId) : undefined;
+		const fallbackOwnerEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId ?? 'aexus-claude';
+		const agentByNodeId = this.viewMode === 'orchestration' ? this.buildOrchestrationAgentMap() : new Map<string, IAdeAgent>();
+		if (this.viewMode === 'orchestration') {
+			this.lastProjectsFingerprint = this.computeActiveProjectsFingerprint(agentByNodeId);
+			this.lastOrchAuxiliaryFingerprint = this.computeOrchAuxiliaryFingerprint(missionRec?.whiteboards, this.getActiveOrchestrationRuntime());
+		} else {
+			this.lastTaskStatusFingerprint = this.computeTaskStatusesFingerprint(missionRec?.taskStatuses);
+		}
+
+		const snapshot: IMissionCanvasRenderSnapshot = {
+			viewMode: this.viewMode,
+			direction: this.viewMode === 'orchestration' ? this.orchDirection : this.direction,
+			nodes: this.nodes,
+			edges: this.edges,
+			positions: this.positions,
+			runtimeState,
+			nodePrompts: missionRec?.nodePrompts ?? {},
+			taskStatuses: missionRec?.taskStatuses ?? {},
+			orchestrationNodes: this.orchNodes,
+			orchestrationEdges: this.orchEdges,
+			orchestrationDepartments: this.orchDepartments,
+			orchestrationLayoutMode: this.orchLayoutMode,
+			whiteboards: missionRec?.whiteboards ?? {},
+			orchestrationRuntime: this.getActiveOrchestrationRuntime(),
+			agentByNodeId,
+			fallbackOwnerEngineId,
+			orgConfig: this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
+			resolveSupervisorDisplay: supId => this.resolveStaffDisplay(supId),
+			hasSubordinates: agentId => this.projectsService?.hasSubordinates(agentId) ?? false,
+			canSwitchEngine: agent => this.canSwitchAgentEngine(agent),
+			canSwitchModel: Boolean(this.projectsService),
+			canSwitchHost: Boolean(this.activeMissionId && this.missionRuntimeService && this.cloudHostService),
+		};
+		this.renderer.syncGraph(snapshot, forceFullRebuild);
+		this.updateConsoleBar();
+		this.syncMinimap();
+	}
+
+	private prewarmHosts(): void {
+		const missionId = this.activeMissionId;
+		if (!missionId || this.viewMode !== 'orchestration') {
 			return;
 		}
-		const rt = this.missionRuntimeService.getRuntimeState(this.activeMissionId);
-		const traceEntries = this.missionRuntimeService.expandTrace(this.activeMissionId, token.tracePtr, 100);
-		const edgeKeys = new Set<string>();
-		if (token.fromNodeId && token.fromNodeId !== token.nodeId) {
-			edgeKeys.add(`${token.fromNodeId}->${token.nodeId}`);
-		}
-		for (const entry of traceEntries) {
-			for (const parentPtr of entry.parentPtrs) {
-				const parent = rt.traces[parentPtr];
-				if (parent && parent.nodeId !== entry.nodeId) {
-					edgeKeys.add(`${parent.nodeId}->${entry.nodeId}`);
+		const agentMap = this.buildOrchestrationAgentMap();
+		const staffNodes: IMissionDagNode[] = this.orchNodes
+			.filter(n => n.kind === 'staff')
+			.map(n => ({ id: n.id, label: n.label, kind: 'task' as const }));
+		this.hostCatalog.prewarmMissionHosts(
+			staffNodes,
+			node => agentMap.get(node.id),
+			() => undefined,
+			() => {
+				if (!this.isPaneDisposed && this.activeMissionId === missionId && !this.isDraggingNode && !this.popovers.isOpen()) {
+					this.syncGraphDom();
 				}
-			}
-		}
-		this.renderer.setTraceHighlightEdges(edgeKeys);
-	}
-
-	private async handleQuickRetryNode(node: IMissionDagNode, token: IMissionToken, guidance?: string): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.retryToken(missionId, {
-			caller: { isHumanUser: true },
-			tokenId: token.id,
-			nodeId: node.id,
-			...(guidance ? { guidance } : {}),
-		}).catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (res.ok) {
-			this.reportRuntimeFeedback(localize('adeMissionQuickRetryOk', "Retried node {0}.", node.id), 'ok');
-		} else {
-			this.reportRuntimeFeedback(res.error ?? localize('adeMissionQuickRetryFail', "Failed to retry node {0}.", node.id), 'error');
-		}
-	}
-
-	private async handleDistillNodeContext(node: IMissionDagNode, memo?: string): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.distillNodeContext(missionId, node.id, memo ? { memo } : undefined)
-			.catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (res.ok) {
-			this.reportRuntimeFeedback(localize('adeMissionDistillOk', "节点 {0} 已完成提纯换血并刷新干净会话。", node.id), 'ok');
-		} else {
-			this.reportRuntimeFeedback(res.error ?? localize('adeMissionDistillFail', "节点 {0} 提纯换血失败。", node.id), 'error');
-		}
-		this.syncRuntimeControlsUi();
-		this.syncGraphDom();
-	}
-
-	private async handleRunNodeChecks(node: IMissionDagNode): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.runNodeChecks(missionId, node.id)
-			.catch(err => ({ passed: false, summary: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		this.reportRuntimeFeedback(
-			res.summary || (res.passed
-				? localize('adeMissionNodeChecksOk', "节点 {0} 确定性验收全部通过。", node.id)
-				: localize('adeMissionNodeChecksFail', "节点 {0} 确定性验收未通过。", node.id)),
-			res.passed ? 'ok' : 'error',
+			},
 		);
-		this.syncRuntimeControlsUi();
 	}
 
-	private computeNodeChecksFingerprint(nodeChecks: Readonly<Record<string, readonly IMissionNodeCheckHook[]>> | undefined): string {
-		if (!nodeChecks) {
-			return '';
-		}
-		return Object.keys(nodeChecks)
-			.sort()
-			.map(nid => `${nid}:${(nodeChecks[nid] ?? []).map(c => `${c.id}|${c.name ?? ''}|${c.command ?? ''}|${(c.expectFiles ?? []).join(',')}|${c.onFail ?? ''}`).join(';')}`)
-			.join('\x1e');
-	}
+	// =========================================================================
+	// Viewport Transform, Dragging, Selection, Search & Keyboard
+	// =========================================================================
 
 	private clientToWorldPos(clientX: number, clientY: number): IMissionNodePosition {
 		const rect = this.viewportEl.getBoundingClientRect();
@@ -1625,14 +3038,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private computeDefaultNewNodeWorldPos(): IMissionNodePosition {
-		if (this.nodes.length === 0) {
+		const ids = this.getActiveNodeIds();
+		if (ids.length === 0) {
 			return { x: 260, y: 200 };
 		}
 		let maxX = -Infinity;
 		let sumY = 0;
 		let count = 0;
-		for (const node of this.nodes) {
-			const pos = this.positions.get(node.id);
+		for (const id of ids) {
+			const pos = this.positions.get(id);
 			if (!pos) {
 				continue;
 			}
@@ -1643,157 +3057,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (count === 0 || !Number.isFinite(maxX)) {
 			return { x: 260, y: 200 };
 		}
-		return { x: Math.round(maxX + 310), y: Math.round(sumY / count) };
-	}
-
-	private captureHistorySnapshot(label: string): IMissionCanvasHistorySnapshot {
-		const rec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
-		const positions: Record<string, IMissionNodePosition> = {};
-		for (const [nid, pos] of this.positions.entries()) {
-			positions[nid] = { x: pos.x, y: pos.y };
-		}
-		if (Object.keys(positions).length === 0 && rec?.positions) {
-			for (const [nid, pos] of Object.entries(rec.positions)) {
-				positions[nid] = { x: pos.x, y: pos.y };
-			}
-		}
-		const nodePrompts: Record<string, string> = {};
-		if (rec?.nodePrompts) {
-			for (const [nid, val] of Object.entries(rec.nodePrompts)) {
-				nodePrompts[nid] = val;
-			}
-		}
-		const nodeChecks: Record<string, readonly IMissionNodeCheckHook[]> = {};
-		if (rec?.nodeChecks) {
-			for (const [nid, list] of Object.entries(rec.nodeChecks)) {
-				nodeChecks[nid] = list.map(c => ({ ...c, ...(c.expectFiles ? { expectFiles: [...c.expectFiles] } : {}) }));
-			}
-		}
-		return {
-			mermaidText: this.mermaidText,
-			positions,
-			nodePrompts,
-			nodeChecks,
-			label,
-		};
-	}
-
-	private syncHistoryButtons(): void {
-		if (this.undoBtnEl) {
-			this.undoBtnEl.disabled = !this.historyStack.canUndo();
-			const undoLabel = this.historyStack.peekUndoLabel();
-			this.undoBtnEl.title = undoLabel
-				? localize('adeMissionUndoSpecificTip', "撤销「{0}」(Cmd/Ctrl+Z)", undoLabel)
-				: localize('adeMissionUndoTip', "撤销 (Cmd/Ctrl+Z)");
-		}
-		if (this.redoBtnEl) {
-			this.redoBtnEl.disabled = !this.historyStack.canRedo();
-			const redoLabel = this.historyStack.peekRedoLabel();
-			this.redoBtnEl.title = redoLabel
-				? localize('adeMissionRedoSpecificTip', "重做「{0}」(Cmd/Ctrl+Shift+Z)", redoLabel)
-				: localize('adeMissionRedoTip', "重做 (Cmd/Ctrl+Shift+Z)");
-		}
-	}
-
-	private applyHistorySnapshot(snapshot: IMissionCanvasHistorySnapshot, direction: 'undo' | 'redo'): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		if (this.previewRevisionVersion !== undefined) {
-			this.exitRevisionPreview();
-		}
-		const existingRec = this.missionService?.getMission(missionId);
-
-		// Restore positions atomically
-		this.missionService?.clearNodePositions(missionId);
-		this.positions.clear();
-		if (Object.keys(snapshot.positions).length > 0) {
-			for (const [nid, pos] of Object.entries(snapshot.positions)) {
-				this.positions.set(nid, { x: pos.x, y: pos.y });
-			}
-			this.missionService?.updateNodePositions(missionId, snapshot.positions);
-		}
-
-		// Restore Mermaid source
-		this.mermaidText = snapshot.mermaidText;
-		this.fileDrawer.setMermaidValue(snapshot.mermaidText);
-		this.missionService?.updateMermaid(missionId, snapshot.mermaidText);
-
-		// Restore node prompts (explicitly clearing keys that did not exist in snapshot)
-		if (this.missionService) {
-			const promptPatch: Record<string, string> = {};
-			if (existingRec?.nodePrompts) {
-				for (const oldKey of Object.keys(existingRec.nodePrompts)) {
-					if (!Object.prototype.hasOwnProperty.call(snapshot.nodePrompts, oldKey)) {
-						promptPatch[oldKey] = '';
-					}
-				}
-			}
-			for (const [k, v] of Object.entries(snapshot.nodePrompts)) {
-				promptPatch[k] = v;
-			}
-			if (Object.keys(promptPatch).length > 0) {
-				this.missionService.updateNodePrompts(missionId, promptPatch);
-			}
-
-			// Restore node checks
-			const allCheckNodeIds = new Set<string>([
-				...Object.keys(existingRec?.nodeChecks ?? {}),
-				...Object.keys(snapshot.nodeChecks),
-			]);
-			for (const nid of allCheckNodeIds) {
-				this.missionService.updateNodeChecks(missionId, nid, snapshot.nodeChecks[nid] ?? []);
-			}
-			this.lastNodeChecksFingerprint = this.computeNodeChecksFingerprint(this.missionService.getMission(missionId)?.nodeChecks);
-		}
-
-		this.parseAndRenderGraph(snapshot.mermaidText, false);
-		this.syncAllNodePromptViews();
-		this.syncHistoryButtons();
-		this.reportRuntimeFeedback(
-			direction === 'undo'
-				? localize('adeMissionUndoFeedback', "已撤销：{0}", snapshot.label)
-				: localize('adeMissionRedoFeedback', "已重做：{0}", snapshot.label),
-			'info',
-		);
-	}
-
-	private undoCanvasMutation(): void {
-		if (!this.activeMissionId || !this.historyStack.canUndo()) {
-			return;
-		}
-		if (this.isLiveRun()) {
-			this.reportRuntimeFeedback(localize('adeMissionUndoBlockedLive', "Mission 运行中暂不支持整图撤销，请先停止当前运行。"), 'error');
-			return;
-		}
-		const prev = this.historyStack.undo(this.captureHistorySnapshot(''));
-		if (prev) {
-			this.applyHistorySnapshot(prev, 'undo');
-		}
-	}
-
-	private redoCanvasMutation(): void {
-		if (!this.activeMissionId || !this.historyStack.canRedo()) {
-			return;
-		}
-		if (this.isLiveRun()) {
-			this.reportRuntimeFeedback(localize('adeMissionRedoBlockedLive', "Mission 运行中暂不支持整图重做，请先停止当前运行。"), 'error');
-			return;
-		}
-		const next = this.historyStack.redo(this.captureHistorySnapshot(''));
-		if (next) {
-			this.applyHistorySnapshot(next, 'redo');
-		}
+		return { x: Math.round(maxX + 320), y: Math.round(sumY / count) };
 	}
 
 	private handleEndNodesDrag(movedNodeIds: readonly string[], movedPx: number): void {
 		const preSnap = this.preDragHistorySnapshot;
 		this.preDragHistorySnapshot = undefined;
-		if (this.previewRevisionVersion !== undefined) {
-			this.isDraggingNode = false;
-			return;
-		}
 		this.isDraggingNode = false;
 		this.flushEdgeReroute();
 		if (movedPx >= 5 && this.activeMissionId && movedNodeIds.length > 0) {
@@ -1811,25 +3080,66 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}
 			}
 			if (anyChanged && preSnap) {
-				const label = movedNodeIds.length > 1
-					? localize('adeMissionHistoryMoveNodesBatch', "批量移动 {0} 个节点", movedNodeIds.length)
-					: localize('adeMissionHistoryMoveNodeSingle', "移动节点 {0}", movedNodeIds[0]);
-				this.historyStack.push({ ...preSnap, label });
-				this.syncHistoryButtons();
+				this.pushHistory({ ...preSnap, label: movedNodeIds.length > 1 ? `Move ${movedNodeIds.length} nodes` : `Move ${movedNodeIds[0]}` });
 			}
 			if (Object.keys(updates).length > 0) {
-				this.missionService?.updateNodePositions(this.activeMissionId, updates);
+				if (this.viewMode === 'orchestration') {
+					this.missionService?.updateOrchestrationPositions(this.activeMissionId, updates);
+				} else {
+					this.missionService?.updateNodePositions(this.activeMissionId, updates);
+				}
 			}
 		}
 	}
 
-	private setSelectBoxMode(enabled: boolean): void {
-		this.selectBoxMode = enabled;
-		this.viewportEl?.classList.toggle('is-select-mode', enabled);
-		if (this.selectModeBtnEl) {
-			this.selectModeBtnEl.classList.toggle('active', enabled);
-			this.selectModeBtnEl.setAttribute('aria-pressed', String(enabled));
+	private selectNode(nodeId: string | undefined, options?: { readonly toggleMulti?: boolean }): void {
+		this.selectedEdgeKey = undefined;
+		this.renderer?.setSelectedEdgeKey(undefined);
+		if (!nodeId) {
+			this.selectedNodeIds.clear();
+			this.renderer?.setSelectedNodeIds([]);
+			this.syncSelectionHud();
+			return;
 		}
+		if (options?.toggleMulti) {
+			this.popovers?.close();
+			if (this.selectedNodeIds.has(nodeId)) {
+				this.selectedNodeIds.delete(nodeId);
+			} else {
+				this.selectedNodeIds.add(nodeId);
+			}
+		} else {
+			this.selectedNodeIds = new Set([nodeId]);
+		}
+		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+		this.syncSelectionHud();
+	}
+
+	private selectNodes(nodeIds: Iterable<string>, options?: { readonly additive?: boolean }): void {
+		this.selectedEdgeKey = undefined;
+		this.renderer?.setSelectedEdgeKey(undefined);
+		const next = options?.additive ? new Set(this.selectedNodeIds) : new Set<string>();
+		for (const id of nodeIds) {
+			next.add(id);
+		}
+		this.selectedNodeIds = next;
+		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+		this.syncSelectionHud();
+	}
+
+	private selectEdge(edge: IMissionDagEdge | undefined): void {
+		if (!edge) {
+			this.selectedEdgeKey = undefined;
+			this.renderer?.setSelectedEdgeKey(undefined);
+			return;
+		}
+		if (this.selectedNodeIds.size > 0) {
+			this.selectedNodeIds.clear();
+			this.renderer?.setSelectedNodeIds([]);
+			this.syncSelectionHud();
+		}
+		this.selectedEdgeKey = `${edge.from}->${edge.to}`;
+		this.renderer?.setSelectedEdgeKey(this.selectedEdgeKey);
 	}
 
 	private syncSelectionHud(): void {
@@ -1838,7 +3148,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		if (this.selectedNodeIds.size > 1) {
 			this.selectionHudEl.hidden = false;
-			const label = localize('adeMissionMultiSelectHudText', "已选 {0} 个节点 · 拖拽批量移动 / Delete 删除", this.selectedNodeIds.size);
+			const label = adeBi(
+				localize('adeMissionMultiSelectHudText', "{0} selected · Drag to move / Delete to remove", this.selectedNodeIds.size),
+				'已选 {0} 个节点 · 拖拽批量移动 / Delete 删除',
+				this.selectedNodeIds.size,
+			);
 			if (this.selectionHudLabelEl.textContent !== label) {
 				this.selectionHudLabelEl.textContent = label;
 			}
@@ -1886,12 +3200,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const rect = this.viewportEl.getBoundingClientRect();
 		const vpW = rect.width > 40 ? rect.width : 1080;
 		const vpH = rect.height > 40 ? rect.height : 720;
-		const inspectorW = this.nodeInspector?.isOpen() ? 336 : 0;
-		const availW = Math.max(160, vpW - inspectorW);
 		if (this.zoom < 0.75) {
 			this.zoom = 0.85;
 		}
-		this.panX = Math.round(availW / 2 - pos.x * this.zoom);
+		this.panX = Math.round(vpW / 2 - pos.x * this.zoom);
 		this.panY = Math.round(vpH / 2 - pos.y * this.zoom);
 		this.applyWorldTransformNow();
 		this.renderer?.pulseFocusNode(nodeId, 1800);
@@ -1908,25 +3220,29 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.renderer?.setSearchMatches(undefined, undefined);
 			return;
 		}
-		const agentMap = this.buildAgentNodeMap();
-		const prompts = this.getActiveNodePrompts();
-		const hostMap = this.buildHostByNodeIdMap();
 		const matches: string[] = [];
-		for (const node of this.nodes) {
-			const agent = agentMap.get(node.id);
-			const haystack = [
-				node.id,
-				node.label,
-				node.employeeName ?? '',
-				agent?.label ?? '',
-				agent?.preferredModel ?? '',
-				agent?.preferredEngineId ?? '',
-				agent?.session?.engineId ?? '',
-				hostMap.get(node.id) ?? '',
-				prompts[node.id] ?? '',
-			].join('\n').toLowerCase();
-			if (haystack.includes(query)) {
-				matches.push(node.id);
+		if (this.viewMode === 'orchestration') {
+			const wbs = this.getActiveWhiteboards();
+			for (const oNode of this.orchNodes) {
+				const haystack = [
+					oNode.id,
+					oNode.label,
+					oNode.employeeName ?? '',
+					oNode.department ?? '',
+					oNode.rankId ?? '',
+					wbs[oNode.id]?.content ?? '',
+				].join('\n').toLowerCase();
+				if (haystack.includes(query)) {
+					matches.push(oNode.id);
+				}
+			}
+		} else {
+			const prompts = this.getActiveNodePrompts();
+			for (const node of this.nodes) {
+				const haystack = [node.id, node.label, prompts[node.id] ?? ''].join('\n').toLowerCase();
+				if (haystack.includes(query)) {
+					matches.push(node.id);
+				}
 			}
 		}
 		this.searchMatchIds = matches;
@@ -1956,1368 +3272,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.searchCountEl.textContent = `${this.searchActiveIdx + 1} / ${len}`;
 		this.renderer?.setSearchMatches(new Set(this.searchMatchIds), activeId);
 		this.centerViewportOnNode(activeId);
-	}
-
-	private commitVisualMermaidMutation(
-		nextMermaid: string,
-		reason: string,
-		options?: {
-			readonly nodePosition?: { readonly nodeId: string; readonly pos: IMissionNodePosition };
-			readonly clearPositions?: boolean;
-			readonly successMessage?: string;
-			readonly afterApply?: () => void;
-			readonly skipHistory?: boolean;
-		},
-	): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		if (this.previewRevisionVersion !== undefined) {
-			this.exitRevisionPreview();
-		}
-		const preSnapshot = !options?.skipHistory ? this.captureHistorySnapshot(reason) : undefined;
-		if (this.isLiveRun() && this.missionRuntimeService) {
-			void this.missionRuntimeService.patchMermaid(missionId, {
-				caller: { isHumanUser: true },
-				newMermaidText: nextMermaid,
-				reason,
-			}).then(res => {
-				if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-					return;
-				}
-				if (res.ok) {
-					if (preSnapshot) {
-						this.historyStack.push(preSnapshot);
-						this.syncHistoryButtons();
-					}
-					if (options?.clearPositions) {
-						this.missionService?.clearNodePositions(missionId);
-						this.positions.clear();
-					}
-					if (options?.nodePosition) {
-						this.positions.set(options.nodePosition.nodeId, options.nodePosition.pos);
-						this.missionService?.updateNodePositions(missionId, { [options.nodePosition.nodeId]: options.nodePosition.pos });
-					}
-					this.mermaidText = nextMermaid;
-					this.fileDrawer.setMermaidValue(nextMermaid);
-					this.parseAndRenderGraph(nextMermaid, Boolean(options?.clearPositions));
-					options?.afterApply?.();
-					if (options?.successMessage) {
-						this.reportRuntimeFeedback(options.successMessage, 'ok');
-					}
-				} else {
-					this.reportRuntimeFeedback(res.error ?? localize('adeMissionLivePatchRejected', "Live DAG patch rejected."), 'error');
-				}
-			}, err => {
-				if (!this.isPaneDisposed && this.activeMissionId === missionId) {
-					this.reportRuntimeFeedback(err instanceof Error ? err.message : String(err), 'error');
-				}
-			});
-			return;
-		}
-
-		if (preSnapshot) {
-			this.historyStack.push(preSnapshot);
-			this.syncHistoryButtons();
-		}
-		if (options?.clearPositions) {
-			this.missionService?.clearNodePositions(missionId);
-			this.positions.clear();
-		}
-		if (options?.nodePosition) {
-			this.positions.set(options.nodePosition.nodeId, options.nodePosition.pos);
-			this.missionService?.updateNodePositions(missionId, { [options.nodePosition.nodeId]: options.nodePosition.pos });
-		}
-		this.mermaidText = nextMermaid;
-		this.fileDrawer.setMermaidValue(nextMermaid);
-		this.missionService?.updateMermaid(missionId, nextMermaid);
-		this.parseAndRenderGraph(nextMermaid, Boolean(options?.clearPositions));
-		options?.afterApply?.();
-		if (options?.successMessage) {
-			this.reportRuntimeFeedback(options.successMessage, 'ok');
-		}
-	}
-
-	private addVisualNode(options: {
-		readonly kind: 'task' | 'gate';
-		readonly roleKind?: MissionNodeRoleKind;
-		readonly worldPos?: IMissionNodePosition;
-	}): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		const targetPos = options.worldPos ?? this.computeDefaultNewNodeWorldPos();
-		const added = addNodeToMermaid(this.mermaidText, {
-			kind: options.kind,
-			roleHint: options.roleKind,
-			direction: this.direction,
-		});
-		this.commitVisualMermaidMutation(added.mermaidText, `Add node ${added.nodeId}`, {
-			nodePosition: { nodeId: added.nodeId, pos: targetPos },
-			successMessage: localize('adeMissionVisualAddNodeOk', "已添加节点 {0}（双击标题可改名，拖拽右端口可连线）。", added.nodeId),
-			afterApply: () => {
-				// Clear any stale prompt/check residue if this node ID was previously deleted.
-				if (this.missionService) {
-					const existingRec = this.missionService.getMission(missionId);
-					if (existingRec?.nodePrompts?.[added.nodeId]) {
-						this.missionService.updateNodePrompt(missionId, added.nodeId, '');
-					}
-					if (existingRec?.nodeChecks?.[added.nodeId]?.length) {
-						this.missionService.updateNodeChecks(missionId, added.nodeId, []);
-						this.lastNodeChecksFingerprint = this.computeNodeChecksFingerprint(this.missionService.getMission(missionId)?.nodeChecks);
-					}
-					this.syncAllNodePromptViews();
-				}
-				if (options.kind === 'task' && options.roleKind === 'reviewer' && this.missionRuntimeService) {
-					void this.missionRuntimeService.bindNodeHost(missionId, added.nodeId, { roleKind: 'reviewer' }).then(() => {
-						if (!this.isPaneDisposed && this.activeMissionId === missionId) {
-							this.syncGraphDom();
-							this.nodeInspector?.refresh();
-						}
-					}, () => undefined);
-				}
-			},
-		});
-	}
-
-	private renameVisualNode(nodeId: string, nextLabel: string): void {
-		const nextMermaid = renameNodeInMermaid(this.mermaidText, nodeId, nextLabel);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		this.commitVisualMermaidMutation(nextMermaid, `Rename node ${nodeId}`, {
-			successMessage: localize('adeMissionVisualRenameOk', "已将节点 {0} 重命名为「{1}」。", nodeId, nextLabel),
-		});
-	}
-
-	private deleteVisualNode(nodeId: string): void {
-		this.deleteVisualNodes([nodeId]);
-	}
-
-	private deleteVisualNodes(nodeIds: readonly string[]): void {
-		const missionId = this.activeMissionId;
-		const uniqueIds = [...new Set(nodeIds.map(id => id.trim()).filter(Boolean))];
-		if (uniqueIds.length === 0) {
-			return;
-		}
-		const nextMermaid = uniqueIds.length === 1
-			? removeNodeFromMermaid(this.mermaidText, uniqueIds[0])
-			: removeNodesFromMermaid(this.mermaidText, uniqueIds);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		const reason = uniqueIds.length === 1
-			? localize('adeMissionHistoryDeleteNode', "删除节点 {0}", uniqueIds[0])
-			: localize('adeMissionHistoryDeleteNodes', "批量删除 {0} 个节点", uniqueIds.length);
-		this.commitVisualMermaidMutation(nextMermaid, reason, {
-			successMessage: uniqueIds.length === 1
-				? localize('adeMissionVisualDeleteNodeOk', "已删除节点 {0}。", uniqueIds[0])
-				: localize('adeMissionVisualDeleteNodesOk', "已批量删除 {0} 个节点。", uniqueIds.length),
-			afterApply: () => {
-				if (missionId && this.missionService) {
-					for (const nid of uniqueIds) {
-						this.missionService.updateNodePrompt(missionId, nid, '');
-						this.missionService.updateNodeChecks(missionId, nid, []);
-					}
-					this.lastNodeChecksFingerprint = this.computeNodeChecksFingerprint(this.missionService.getMission(missionId)?.nodeChecks);
-					this.syncAllNodePromptViews();
-				}
-				const removedSet = new Set(uniqueIds);
-				for (const nid of removedSet) {
-					this.selectedNodeIds.delete(nid);
-				}
-				const curInspectorNode = this.nodeInspector?.getSelectedNodeId();
-				if (curInspectorNode && removedSet.has(curInspectorNode)) {
-					this.nodeInspector.close(false);
-					this.minimap?.setInspectorOpen(false);
-				}
-				this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-				this.syncSelectionHud();
-			},
-		});
-	}
-
-	private renameVisualEdgeLabel(fromId: string, toId: string, nextLabel: string): void {
-		const nextMermaid = renameEdgeLabelInMermaid(this.mermaidText, fromId, toId, nextLabel);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		const clean = nextLabel.trim();
-		this.commitVisualMermaidMutation(nextMermaid, localize('adeMissionHistoryEditEdgeLabel', "修改连线 {0}→{1} 标签", fromId, toId), {
-			successMessage: clean
-				? localize('adeMissionVisualRenameEdgeOk', "已将连线 {0} → {1} 标签更新为「{2}」。", fromId, toId, clean)
-				: localize('adeMissionVisualClearEdgeLabelOk', "已清空连线 {0} → {1} 的标签。", fromId, toId),
-		});
-	}
-
-	private deleteSelectedItems(): void {
-		if (!this.activeMissionId || this.previewRevisionVersion !== undefined) {
-			return;
-		}
-		if (this.selectedEdgeKey) {
-			const edge = this.edges.find(e => `${e.from}->${e.to}` === this.selectedEdgeKey);
-			this.selectEdge(undefined);
-			if (edge) {
-				this.deleteVisualEdge(edge.from, edge.to);
-			}
-			return;
-		}
-		if (this.selectedNodeIds.size > 0) {
-			this.deleteVisualNodes([...this.selectedNodeIds]);
-		}
-	}
-
-	private connectVisualEdge(fromId: string, toId: string, options?: { readonly fail?: boolean }): void {
-		const res = addEdgeToMermaid(
-			this.mermaidText,
-			fromId,
-			toId,
-			options?.fail ? { kind: 'fail', label: 'fail' } : undefined,
-		);
-		if (!res.ok || !res.mermaidText) {
-			this.reportRuntimeFeedback(res.error ?? localize('adeMissionVisualConnectFail', "无法建立连线。"), 'error');
-			return;
-		}
-		this.commitVisualMermaidMutation(res.mermaidText, `Connect ${fromId} -> ${toId}`, {
-			successMessage: options?.fail
-				? localize('adeMissionVisualConnectFailEdgeOk', "已建立异常兜底边 {0} --|fail|--> {1}。", fromId, toId)
-				: localize('adeMissionVisualConnectOk', "已建立连线 {0} → {1}。", fromId, toId),
-		});
-	}
-
-	private deleteVisualEdge(fromId: string, toId: string): void {
-		const nextMermaid = removeEdgeFromMermaid(this.mermaidText, fromId, toId);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		this.commitVisualMermaidMutation(nextMermaid, `Delete edge ${fromId} -> ${toId}`, {
-			successMessage: localize('adeMissionVisualDeleteEdgeOk', "已删除连线 {0} → {1}。", fromId, toId),
-		});
-	}
-
-	private toggleVisualEdgeFail(fromId: string, toId: string): void {
-		const nextMermaid = toggleEdgeFailInMermaid(this.mermaidText, fromId, toId);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		this.commitVisualMermaidMutation(nextMermaid, `Toggle fail edge ${fromId} -> ${toId}`, {
-			successMessage: localize('adeMissionVisualToggleEdgeOk', "已切换连线 {0} → {1} 类型。", fromId, toId),
-		});
-	}
-
-	private openNodeContextMenu(node: IMissionDagNode, clientX: number, clientY: number): void {
-		const missionId = this.activeMissionId;
-		if (!missionId || this.previewRevisionVersion !== undefined) {
-			return;
-		}
-		const rt = this.missionRuntimeService?.getRuntimeState(missionId);
-		const currentRole: MissionNodeRoleKind = rt?.boundary.nodeAssignments[node.id]?.roleKind ?? 'worker';
-		const items: {
-			readonly id: string;
-			readonly label: string;
-			readonly icon?: string;
-			readonly danger?: boolean;
-			readonly separatorBefore?: boolean;
-			readonly run: () => void;
-		}[] = [
-				{
-					id: 'rename-node',
-					label: localize('adeMissionCtxRenameNode', "Rename"),
-					icon: 'edit',
-					run: () => this.renderer.startInlineNodeRename(node.id),
-				},
-				{
-					id: 'inspect-node',
-					label: localize('adeMissionCtxInspectNode', "Inspect"),
-					icon: 'info',
-					run: () => this.openInspectorTab('overview', node.id),
-				},
-			];
-		if (node.kind !== 'gate') {
-			items.push(
-				{
-					id: 'toggle-role',
-					label: currentRole === 'reviewer'
-						? localize('adeMissionCtxSwitchWorker', "Set as Worker")
-						: localize('adeMissionCtxSwitchReviewer', "Set as Reviewer"),
-					icon: 'shield',
-					run: () => void this.handleToggleNodeRoleKind(node, currentRole === 'reviewer' ? 'worker' : 'reviewer'),
-				},
-				{
-					id: 'manage-checks',
-					label: localize('adeMissionCtxManageChecks', "Checks…"),
-					icon: 'checklist',
-					run: () => this.openInspectorTab('distill', node.id),
-				},
-			);
-		}
-		items.push({
-			id: 'delete-node',
-			label: localize('adeMissionCtxDeleteNode', "Delete {0}", node.id),
-			icon: 'trash',
-			danger: true,
-			separatorBefore: true,
-			run: () => this.deleteVisualNode(node.id),
-		});
-		this.popovers.openCanvasContextMenu(clientX, clientY, items);
-	}
-
-	private openEdgeContextMenu(edge: IMissionDagEdge, clientX: number, clientY: number): void {
-		if (!this.activeMissionId || this.previewRevisionVersion !== undefined) {
-			return;
-		}
-		const isFail = getMissionEdgeKind(edge) === 'fail';
-		this.popovers.openCanvasContextMenu(clientX, clientY, [
-			{
-				id: 'edit-edge-label',
-				label: localize('adeMissionCtxEditEdgeLabel', "Edit Label"),
-				icon: 'edit',
-				run: () => this.renderer.startInlineEdgeLabelEdit(edge.id),
-			},
-			{
-				id: 'toggle-edge-fail',
-				label: isFail
-					? localize('adeMissionCtxEdgeToSuccess', "Mark as Normal Edge")
-					: localize('adeMissionCtxEdgeToFail', "Mark as Fail Edge"),
-				icon: 'arrow-swap',
-				run: () => this.toggleVisualEdgeFail(edge.from, edge.to),
-			},
-			{
-				id: 'delete-edge',
-				label: localize('adeMissionCtxDeleteEdge', "Delete Edge"),
-				icon: 'trash',
-				danger: true,
-				separatorBefore: true,
-				run: () => this.deleteVisualEdge(edge.from, edge.to),
-			},
-		]);
-	}
-
-	private async handleToggleNodeRoleKind(node: IMissionDagNode, nextRoleKind: MissionNodeRoleKind): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.bindNodeHost(missionId, node.id, { roleKind: nextRoleKind })
-			.catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (res.ok) {
-			this.reportRuntimeFeedback(
-				nextRoleKind === 'reviewer'
-					? localize('adeMissionRoleReviewerOk', "节点 {0} 已设为图内审稿 Reviewer。", node.id)
-					: localize('adeMissionRoleWorkerOk', "节点 {0} 已切回执行 Worker。", node.id),
-				'ok',
-			);
-		} else if (res.error) {
-			this.reportRuntimeFeedback(res.error, 'error');
-		}
-		this.syncGraphDom();
-		this.nodeInspector?.refresh();
-	}
-
-	private handleUpsertNodeCheck(nodeId: string, check: IMissionNodeCheckHook): void {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionService) {
-			return;
-		}
-		this.missionService.upsertNodeCheck(missionId, nodeId, check);
-		this.lastNodeChecksFingerprint = this.computeNodeChecksFingerprint(this.missionService.getMission(missionId)?.nodeChecks);
-		this.reportRuntimeFeedback(localize('adeMissionCheckSavedOk', "已为节点 {0} 添加确定性验收钩子「{1}」。", nodeId, check.name || check.id), 'ok');
-		this.syncGraphDom();
-		this.nodeInspector?.refresh();
-	}
-
-	private handleRemoveNodeCheck(nodeId: string, checkId: string): void {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionService) {
-			return;
-		}
-		this.missionService.removeNodeCheck(missionId, nodeId, checkId);
-		this.lastNodeChecksFingerprint = this.computeNodeChecksFingerprint(this.missionService.getMission(missionId)?.nodeChecks);
-		this.reportRuntimeFeedback(localize('adeMissionCheckRemovedOk', "已移除节点 {0} 的验收钩子。", nodeId), 'ok');
-		this.syncGraphDom();
-		this.nodeInspector?.refresh();
-	}
-
-	private async handleSetBudgetLimit(budgetLimitUsd: number | undefined): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.setBudgetLimit(missionId, budgetLimitUsd)
-			.catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (!res.ok && res.error) {
-			this.reportRuntimeFeedback(res.error, 'error');
-		} else {
-			this.reportRuntimeFeedback(
-				budgetLimitUsd !== undefined
-					? localize('adeMissionBudgetSetOk', "FinOps 预算熔断上限已设为 ${0}。", budgetLimitUsd.toFixed(2))
-					: localize('adeMissionBudgetUnlimitedOk', "FinOps 预算熔断已切换为不设上限。"),
-				'ok',
-			);
-		}
-		this.syncRuntimeControlsUi();
-	}
-
-	private async handleRaiseAndResumeBudget(nextLimitUsd: number): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const budgetRes = await this.missionRuntimeService.setBudgetLimit(missionId, nextLimitUsd)
-			.catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (!budgetRes.ok && budgetRes.error) {
-			this.reportRuntimeFeedback(budgetRes.error, 'error');
-			this.syncRuntimeControlsUi();
-			return;
-		}
-		const resumeRes = await this.missionRuntimeService.resume(missionId)
-			.catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (resumeRes.ok) {
-			this.reportRuntimeFeedback(localize('adeMissionBudgetResumedOk', "预算已上调至 ${0} 并恢复 Mission 运行。", nextLimitUsd.toFixed(2)), 'ok');
-		} else if (resumeRes.error) {
-			this.reportRuntimeFeedback(resumeRes.error, 'error');
-		}
-		this.syncRuntimeControlsUi();
-	}
-
-	private async handleQuickRecallNode(node: IMissionDagNode, token: IMissionToken | undefined): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.recallTokens(missionId, {
-			caller: { isHumanUser: true },
-			nodeIds: [node.id],
-			reason: token ? `Recalled ${token.id} from Mission canvas` : `Recalled ${node.id} from Mission canvas`,
-		}).catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (res.ok) {
-			this.reportRuntimeFeedback(localize('adeMissionQuickRecallOk', "Recalled node {0}.", node.id), 'ok');
-		} else {
-			this.reportRuntimeFeedback(res.error ?? localize('adeMissionQuickRecallFail', "Failed to recall node {0}.", node.id), 'error');
-		}
-	}
-
-	private stopBlockedCountdownTimer(): void {
-		if (this.blockedCountdownTimer !== undefined) {
-			const win = this.rootEl ? getWindow(this.rootEl) : undefined;
-			win?.clearInterval(this.blockedCountdownTimer);
-			this.blockedCountdownTimer = undefined;
-		}
-	}
-
-	private syncAnimationPauseState(): void {
-		if (this.isPaneDisposed || !this.rootEl) {
-			return;
-		}
-		const win = getWindow(this.rootEl);
-		const doc = win.document;
-		const pageHidden = Boolean(doc.hidden || doc.visibilityState === 'hidden');
-		doc.documentElement.classList.toggle('ade-page-hidden', pageHidden);
-		const paused = pageHidden || !this.isEditorTabVisible;
-		const wasPaused = this.animationsPaused;
-		this.animationsPaused = paused;
-		this.rootEl.classList.toggle('ade-animations-paused', paused);
-		if (paused) {
-			this.rootEl.setAttribute('data-animations-paused', 'true');
-			this.stopBlockedCountdownTimer();
-		} else {
-			this.rootEl.removeAttribute('data-animations-paused');
-		}
-		this.renderer?.setAnimationsPaused(paused);
-		if (!paused && wasPaused && this.activeMissionId) {
-			const latest = this.getEffectiveRuntimeState();
-			if (latest) {
-				const now = Date.now();
-				this.renderer?.patchBlockedCountdowns(latest, now);
-				this.popovers?.patchOpenTokenCountdown(latest, now);
-				this.nodeInspector?.patchBlockedCountdowns(latest, now);
-				this.reconcileBlockedTimer(latest);
-			}
-		}
-	}
-
-	private reconcileBlockedTimer(runtimeState: IMissionRuntimeState | undefined): void {
-		if (this.isPaneDisposed || this.animationsPaused) {
-			this.stopBlockedCountdownTimer();
-			return;
-		}
-		const hasBlocked = Boolean(runtimeState && Object.values(runtimeState.tokens).some(t => t.status === 'blocked' && Boolean(t.blocked)));
-		if (hasBlocked && this.blockedCountdownTimer === undefined && this.rootEl) {
-			this.blockedCountdownTimer = getWindow(this.rootEl).setInterval(() => {
-				if (this.isPaneDisposed || this.animationsPaused || !this.activeMissionId || !this.missionRuntimeService) {
-					this.stopBlockedCountdownTimer();
-					return;
-				}
-				const latest = this.missionRuntimeService.getRuntimeState(this.activeMissionId);
-				const now = Date.now();
-				this.renderer?.patchBlockedCountdowns(latest, now);
-				this.popovers?.patchOpenTokenCountdown(latest, now);
-				this.nodeInspector?.patchBlockedCountdowns(latest, now);
-				if (!Object.values(latest.tokens).some(t => t.status === 'blocked' && Boolean(t.blocked))) {
-					this.stopBlockedCountdownTimer();
-				}
-			}, 1000);
-		} else if (!hasBlocked && this.blockedCountdownTimer !== undefined) {
-			this.stopBlockedCountdownTimer();
-		}
-	}
-
-	private resolveSupervisorDisplay(supervisorId: string): { readonly label: string; readonly shortLabel: string; readonly tier: number } {
-		if (supervisorId === ADE_SECRETARY_ID) {
-			return { label: 'Secretary', shortLabel: 'Secretary', tier: 0 };
-		}
-		const agent = this.projectsService?.getAgent(supervisorId);
-		const label = agent?.label?.trim() || supervisorId;
-		const shortLabel = label.length > 14 ? `${label.slice(0, 12)}…` : label;
-		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const tier = agent
-			? resolveEffectiveRankDefinition(org, agent.role, this.projectsService?.hasSubordinates(agent.id) ?? false).tier
-			: 1;
-		return { label, shortLabel, tier };
-	}
-
-	private openInspectorTab(tab: MissionInspectorTab, nodeId?: string): void {
-		const targetNodeId = nodeId ?? this.nodeInspector?.getSelectedNodeId();
-		if (this.fileDrawer?.isOpen() && this.getPaneWidth() < DUAL_DRAWER_MIN_WIDTH) {
-			this.fileDrawer.toggle(false);
-		}
-		if (targetNodeId) {
-			this.selectedEdgeKey = undefined;
-			this.renderer?.setSelectedEdgeKey(undefined);
-			this.selectedNodeIds = new Set([targetNodeId]);
-			this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-			this.syncSelectionHud();
-		}
-		this.nodeInspector?.open(targetNodeId, tab);
-		this.syncHudLayoutClasses();
-		this.minimap?.setInspectorOpen(true);
-		if (targetNodeId) {
-			this.ensureNodeVisibleBesideInspector(targetNodeId);
-		}
-		this.syncMinimapGraph();
-	}
-
-	private buildHostByNodeIdMap(): Map<string, string> {
-		const map = new Map<string, string>();
-		const runtimeState = this.activeMissionId && this.missionRuntimeService
-			? this.missionRuntimeService.getRuntimeState(this.activeMissionId)
-			: undefined;
-		const agentMap = this.buildAgentNodeMap();
-		for (const node of this.nodes) {
-			if (node.kind === 'gate') {
-				continue;
-			}
-			const explicitHost = runtimeState?.boundary.nodeAssignments[node.id]?.hostAlias;
-			const hostInfo = this.hostCatalog.resolveNodeHostAndOs(explicitHost, agentMap.get(node.id));
-			map.set(node.id, hostInfo.hostAlias || 'local');
-		}
-		return map;
-	}
-
-	private setTabSpotlight(active: boolean): void {
-		if (this.tabSpotlightActive === active) {
-			return;
-		}
-		this.tabSpotlightActive = active;
-		if (this.tabSpotlightBannerEl) {
-			this.tabSpotlightBannerEl.hidden = !active;
-		}
-		const state = this.activeMissionId && this.missionRuntimeService
-			? this.missionRuntimeService.getRuntimeState(this.activeMissionId)
-			: undefined;
-		const nodes = this.previewRevisionVersion !== undefined ? this.activeRenderNodes : this.nodes;
-		const positions = this.previewRevisionVersion !== undefined ? this.activeRenderPositions : this.positions;
-		this.renderer?.setTabSpotlightActive(
-			active,
-			nodes,
-			positions,
-			state,
-			supId => this.resolveSupervisorDisplay(supId),
-		);
-	}
-
-	private syncRevisionTimelineBar(state: IMissionRuntimeState | undefined): void {
-		if (!this.revisionBarEl) {
-			return;
-		}
-		const revisions = state?.revisions ?? [];
-		if (revisions.length < 2) {
-			const wasPreviewing = this.previewRevisionVersion !== undefined;
-			if (wasPreviewing) {
-				this.previewRevisionVersion = undefined;
-				this.renderer?.setPreviewAddedNodeIds(undefined);
-				this.syncGraphDom(true);
-			}
-			this.revisionBarEl.hidden = true;
-			this.lastRevisionListSignature = '';
-			this.revisionBarDisposables.clear();
-			this.revisionBtnByVersion.clear();
-			this.revisionSliderEl = undefined;
-			this.revisionExitBtnEl = undefined;
-			clearNode(this.revisionBarEl);
-			this.syncHudLayoutClasses();
-			return;
-		}
-		const latestVersion = revisions[revisions.length - 1].version;
-		if (this.previewRevisionVersion !== undefined && !revisions.some(r => r.version === this.previewRevisionVersion)) {
-			this.previewRevisionVersion = undefined;
-			this.renderer?.setPreviewAddedNodeIds(undefined);
-		}
-		const activeVersion = this.previewRevisionVersion ?? latestVersion;
-		const isPreviewing = this.previewRevisionVersion !== undefined && this.previewRevisionVersion !== latestVersion;
-		const activeIndex = Math.max(0, revisions.findIndex(r => r.version === activeVersion));
-
-		const listSig = `${this.activeMissionId ?? ''}|${revisions.map(r => `${r.version}:${r.timestamp}:${r.reason}:${r.nodeCount}:${r.edgeCount}:${(r.addedNodeIds ?? []).join(',')}:${(r.removedNodeIds ?? []).join(',')}`).join('|')}`;
-		this.revisionBarEl.hidden = false;
-		this.revisionBarEl.classList.toggle('is-previewing', isPreviewing);
-		this.syncHudLayoutClasses();
-
-		// Patch active selection, slider value, and exit button IN PLACE so continuous slider dragging never tears down DOM or drops focus!
-		if (listSig === this.lastRevisionListSignature && this.revisionSliderEl) {
-			for (const [ver, btn] of this.revisionBtnByVersion.entries()) {
-				const isCurrent = ver === activeVersion;
-				btn.classList.toggle('active', isCurrent);
-				btn.setAttribute('aria-pressed', String(isCurrent));
-			}
-			if (this.revisionSliderEl.value !== String(activeIndex)) {
-				this.revisionSliderEl.value = String(activeIndex);
-			}
-			if (this.revisionExitBtnEl) {
-				this.revisionExitBtnEl.hidden = !isPreviewing;
-			}
-			return;
-		}
-
-		this.lastRevisionListSignature = listSig;
-		this.revisionBarDisposables.clear();
-		this.revisionBtnByVersion.clear();
-		this.revisionSliderEl = undefined;
-		this.revisionExitBtnEl = undefined;
-		clearNode(this.revisionBarEl);
-
-		append(this.revisionBarEl, $('span.ade-mission-rev-title', {}, localize('adeMissionRevTimelineTitle', "DAG 时间轴")));
-		const pillsWrap = append(this.revisionBarEl, $('.ade-mission-rev-pills'));
-		for (let i = 0; i < revisions.length; i++) {
-			const rev = revisions[i];
-			const isLatest = i === revisions.length - 1;
-			const isCurrent = rev.version === activeVersion;
-			if (i > 0) {
-				append(pillsWrap, $('span.ade-mission-rev-arrow', { 'aria-hidden': 'true' }, '▸'));
-			}
-			const tipParts = [
-				`v${rev.version}: ${rev.reason}`,
-				`${rev.nodeCount} nodes · ${rev.edgeCount} edges`,
-				rev.addedNodeIds && rev.addedNodeIds.length > 0 ? `+ ${rev.addedNodeIds.join(', ')}` : undefined,
-				rev.removedNodeIds && rev.removedNodeIds.length > 0 ? `- ${rev.removedNodeIds.join(', ')}` : undefined,
-			].filter((v): v is string => Boolean(v));
-			const revBtn = append(pillsWrap, $(`button.ade-mission-rev-btn${isCurrent ? '.active' : ''}${isLatest ? '.is-live' : ''}`, {
-				type: 'button',
-				'data-ade-revision-btn': String(rev.version),
-				'aria-pressed': String(isCurrent),
-				title: tipParts.join('\n'),
-			}, isLatest ? `v${rev.version} Live` : `v${rev.version}`)) as HTMLButtonElement;
-			this.revisionBtnByVersion.set(rev.version, revBtn);
-			this.revisionBarDisposables.add(addDisposableListener(revBtn, EventType.CLICK, () => {
-				this.enterRevisionPreview(rev, isLatest);
-			}));
-		}
-
-		const slider = append(this.revisionBarEl, $('input.ade-mission-rev-slider', {
-			type: 'range',
-			min: '0',
-			max: String(revisions.length - 1),
-			step: '1',
-			value: String(activeIndex),
-			title: localize('adeMissionRevSliderTip', "Scrub DAG topology revisions (v1 → v{0})", latestVersion),
-			'aria-label': localize('adeMissionRevSliderTip', "Scrub DAG topology revisions (v1 → v{0})", latestVersion),
-			'data-ade-revision-slider': 'true',
-		})) as HTMLInputElement;
-		this.revisionSliderEl = slider;
-		this.revisionBarDisposables.add(addDisposableListener(slider, EventType.INPUT, () => {
-			const idx = Number.parseInt(slider.value, 10);
-			const target = revisions[idx];
-			if (target) {
-				this.enterRevisionPreview(target, idx === revisions.length - 1);
-			}
-		}));
-
-		const exitBtn = append(this.revisionBarEl, $('button.ade-mission-rev-exit-btn', {
-			type: 'button',
-			'data-ade-revision-exit': 'true',
-		}, localize('adeMissionRevBackToLive', "返回实时"))) as HTMLButtonElement;
-		exitBtn.hidden = !isPreviewing;
-		this.revisionExitBtnEl = exitBtn;
-		this.revisionBarDisposables.add(addDisposableListener(exitBtn, EventType.CLICK, () => {
-			this.exitRevisionPreview();
-		}));
-	}
-
-	private enterRevisionPreview(rev: IMissionDagRevision, isLatest: boolean): void {
-		if (isLatest) {
-			this.exitRevisionPreview();
-			return;
-		}
-		this.previewRevisionVersion = rev.version;
-		this.renderer?.setPreviewAddedNodeIds(rev.addedNodeIds && rev.addedNodeIds.length > 0 ? new Set(rev.addedNodeIds) : undefined);
-		this.syncGraphDom(true);
-		const st = this.activeMissionId && this.missionRuntimeService
-			? this.missionRuntimeService.getRuntimeState(this.activeMissionId)
-			: undefined;
-		this.syncRevisionTimelineBar(st);
-	}
-
-	private exitRevisionPreview(): void {
-		if (this.previewRevisionVersion === undefined) {
-			return;
-		}
-		this.previewRevisionVersion = undefined;
-		this.renderer?.setPreviewAddedNodeIds(undefined);
-		this.syncGraphDom(true);
-		const st = this.activeMissionId && this.missionRuntimeService
-			? this.missionRuntimeService.getRuntimeState(this.activeMissionId)
-			: undefined;
-		this.syncRevisionTimelineBar(st);
-	}
-
-	private selectNode(nodeId: string | undefined, options?: { readonly toggleMulti?: boolean }): void {
-		this.selectedEdgeKey = undefined;
-		this.renderer?.setSelectedEdgeKey(undefined);
-		if (!nodeId) {
-			this.selectedNodeIds.clear();
-			this.nodeInspector?.close(false);
-			this.renderer?.setSelectedNodeIds([]);
-			this.syncSelectionHud();
-			this.syncHudLayoutClasses();
-			this.minimap?.setInspectorOpen(false);
-			this.syncMinimapGraph();
-			return;
-		}
-		if (options?.toggleMulti) {
-			if (this.selectedNodeIds.has(nodeId)) {
-				this.selectedNodeIds.delete(nodeId);
-			} else {
-				this.selectedNodeIds.add(nodeId);
-			}
-			this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-			this.syncSelectionHud();
-			if (this.selectedNodeIds.size === 1) {
-				const onlyId = [...this.selectedNodeIds][0];
-				if (this.fileDrawer?.isOpen() && this.getPaneWidth() < DUAL_DRAWER_MIN_WIDTH) {
-					this.fileDrawer.toggle(false);
-				}
-				this.nodeInspector?.open(onlyId);
-				this.syncHudLayoutClasses();
-				this.minimap?.setInspectorOpen(true);
-				this.ensureNodeVisibleBesideInspector(onlyId);
-			} else {
-				this.nodeInspector?.close(false);
-				this.syncHudLayoutClasses();
-				this.minimap?.setInspectorOpen(false);
-			}
-			this.syncMinimapGraph();
-			return;
-		}
-		if (this.fileDrawer?.isOpen() && this.getPaneWidth() < DUAL_DRAWER_MIN_WIDTH) {
-			this.fileDrawer.toggle(false);
-		}
-		this.selectedNodeIds = new Set([nodeId]);
-		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-		this.syncSelectionHud();
-		this.nodeInspector?.open(nodeId);
-		this.syncHudLayoutClasses();
-		this.minimap?.setInspectorOpen(true);
-		this.ensureNodeVisibleBesideInspector(nodeId);
-		this.syncMinimapGraph();
-	}
-
-	private selectNodes(nodeIds: Iterable<string>, options?: { readonly additive?: boolean }): void {
-		this.selectedEdgeKey = undefined;
-		this.renderer?.setSelectedEdgeKey(undefined);
-		const next = options?.additive ? new Set(this.selectedNodeIds) : new Set<string>();
-		for (const id of nodeIds) {
-			next.add(id);
-		}
-		this.selectedNodeIds = next;
-		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-		this.syncSelectionHud();
-		if (this.selectedNodeIds.size === 1) {
-			const onlyId = [...this.selectedNodeIds][0];
-			if (this.fileDrawer?.isOpen() && this.getPaneWidth() < DUAL_DRAWER_MIN_WIDTH) {
-				this.fileDrawer.toggle(false);
-			}
-			this.nodeInspector?.open(onlyId);
-			this.syncHudLayoutClasses();
-			this.minimap?.setInspectorOpen(true);
-			this.ensureNodeVisibleBesideInspector(onlyId);
-		} else {
-			this.nodeInspector?.close(false);
-			this.syncHudLayoutClasses();
-			this.minimap?.setInspectorOpen(false);
-		}
-		this.syncMinimapGraph();
-	}
-
-	private selectEdge(edge: IMissionDagEdge | undefined): void {
-		if (!edge) {
-			this.selectedEdgeKey = undefined;
-			this.renderer?.setSelectedEdgeKey(undefined);
-			return;
-		}
-		if (this.selectedNodeIds.size > 0 || this.nodeInspector?.isOpen()) {
-			this.selectedNodeIds.clear();
-			this.nodeInspector?.close(false);
-			this.renderer?.setSelectedNodeIds([]);
-			this.syncSelectionHud();
-			this.syncHudLayoutClasses();
-			this.minimap?.setInspectorOpen(false);
-			this.syncMinimapGraph();
-		}
-		this.selectedEdgeKey = `${edge.from}->${edge.to}`;
-		this.renderer?.setSelectedEdgeKey(this.selectedEdgeKey);
-	}
-
-	private setHoveredSupervisor(supervisorId: string | undefined): void {
-		this.hoveredSupervisorId = supervisorId;
-		this.renderer?.setHighlightedSupervisorId(this.hoveredSupervisorId ?? this.pinnedSupervisorId);
-	}
-
-	private togglePinnedSupervisor(supervisorId: string): void {
-		this.pinnedSupervisorId = this.pinnedSupervisorId === supervisorId ? undefined : supervisorId;
-		this.renderer?.setHighlightedSupervisorId(this.hoveredSupervisorId ?? this.pinnedSupervisorId);
-		for (const [id, chip] of this.supLegendChips.entries()) {
-			chip.classList.toggle('is-pinned', this.pinnedSupervisorId === id);
-		}
-	}
-
-	private syncSupervisorLegend(state: IMissionRuntimeState | undefined): void {
-		if (!this.supLegendEl) {
-			return;
-		}
-		const allSups = state?.boundary.supervisors ?? [];
-		const referencedParentIds = new Set(allSups.map(s => s.parentSupervisorId).filter((id): id is string => Boolean(id)));
-		const boundSups = allSups.filter(s => s.managedNodeIds.length > 0 || referencedParentIds.has(s.id));
-		if (boundSups.length === 0) {
-			this.supLegendEl.hidden = true;
-			this.syncHudLayoutClasses();
-			if (this.pinnedSupervisorId) {
-				this.pinnedSupervisorId = undefined;
-				this.renderer?.setHighlightedSupervisorId(this.hoveredSupervisorId);
-			}
-			this.lastSupLegendSignature = '';
-			this.supLegendDisposables.clear();
-			this.supLegendChips.clear();
-			clearNode(this.supLegendEl);
-			return;
-		}
-		if (this.pinnedSupervisorId && !boundSups.some(s => s.id === this.pinnedSupervisorId)) {
-			this.pinnedSupervisorId = undefined;
-			this.renderer?.setHighlightedSupervisorId(this.hoveredSupervisorId);
-		}
-		const sig = boundSups.map(s => `${s.id}:${s.tier}:${s.parentSupervisorId ?? ''}:${s.managedNodeIds.join(',')}`).join(';');
-		this.supLegendEl.hidden = false;
-		this.syncHudLayoutClasses();
-		if (sig === this.lastSupLegendSignature) {
-			for (const [id, chip] of this.supLegendChips.entries()) {
-				chip.classList.toggle('is-pinned', this.pinnedSupervisorId === id);
-			}
-			return;
-		}
-		this.lastSupLegendSignature = sig;
-		this.supLegendDisposables.clear();
-		this.supLegendChips.clear();
-		clearNode(this.supLegendEl);
-		append(this.supLegendEl, $('span.ade-mission-sup-legend-title', {}, localize('adeMissionSupLegendLabel', "场外监工")));
-		for (const sup of boundSups) {
-			const disp = this.resolveSupervisorDisplay(sup.id);
-			const parentDisp = sup.parentSupervisorId ? this.resolveSupervisorDisplay(sup.parentSupervisorId) : undefined;
-			const colorIdx = getMissionSupervisorColorIndex(sup.id);
-			const isPinned = this.pinnedSupervisorId === sup.id;
-			const scopeText = sup.managedNodeIds.length > 0
-				? sup.managedNodeIds.join(', ')
-				: localize('adeMissionSupLegendUpperScope', "上级监工");
-			const compactNodesText = sup.managedNodeIds.length === 0
-				? localize('adeMissionSupLegendUpperBadge', "上级")
-				: sup.managedNodeIds.length <= 3
-					? sup.managedNodeIds.join(',')
-					: `${sup.managedNodeIds.slice(0, 3).join(',')} +${sup.managedNodeIds.length - 3}`;
-			const tip = parentDisp
-				? localize(
-					'adeMissionSupLegendChipWithParentTip',
-					"{0} ({1}) ↑ {2} · 管辖节点: {3} — 悬停高亮，点击固定（按住 Tab 开启全局探照灯）",
-					disp.label,
-					formatTierTag(sup.tier),
-					parentDisp.label,
-					scopeText,
-				)
-				: localize(
-					'adeMissionSupLegendChipTip',
-					"{0} ({1}) · 管辖节点: {2} — 悬停高亮，点击固定（按住 Tab 开启全局探照灯）",
-					disp.label,
-					formatTierTag(sup.tier),
-					scopeText,
-				);
-			const chip = append(this.supLegendEl, $(`button.ade-mission-sup-legend-chip.sup-color-${colorIdx}${isPinned ? '.is-pinned' : ''}`, {
-				type: 'button',
-				'data-ade-sup-legend-id': sup.id,
-				...(sup.parentSupervisorId ? { 'data-ade-sup-parent-id': sup.parentSupervisorId } : {}),
-				title: tip,
-			})) as HTMLButtonElement;
-			append(chip, $(`span.ade-mission-sup-dot.sup-color-${colorIdx}`, { 'aria-hidden': 'true' }));
-			append(chip, $('span.ade-mission-sup-legend-name', {}, disp.shortLabel));
-			if (parentDisp) {
-				append(chip, $('span.ade-mission-sup-legend-parent', {}, `↑ ${parentDisp.shortLabel}`));
-			}
-			append(chip, $('span.ade-mission-sup-legend-nodes', {}, compactNodesText));
-			this.supLegendChips.set(sup.id, chip);
-			this.supLegendDisposables.add(addDisposableListener(chip, EventType.POINTER_DOWN, e => e.stopPropagation()));
-			this.supLegendDisposables.add(addDisposableListener(chip, 'pointerenter', () => this.setHoveredSupervisor(sup.id)));
-			this.supLegendDisposables.add(addDisposableListener(chip, 'pointerleave', () => this.setHoveredSupervisor(undefined)));
-			this.supLegendDisposables.add(addDisposableListener(chip, EventType.CLICK, e => {
-				e.stopPropagation();
-				this.togglePinnedSupervisor(sup.id);
-			}));
-		}
-	}
-
-	private async handleTimeoutChange(minutes: number): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.setSilenceTimeout(missionId, minutes).catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (!res.ok && res.error) {
-			this.reportRuntimeFeedback(res.error, 'error');
-		}
-		this.syncRuntimeControlsUi();
-	}
-
-	private async handleCutoffChange(cutoff: number): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			return;
-		}
-		const res = await this.missionRuntimeService.setBoundary(missionId, { offGraphMaxTier: cutoff }).catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (!res.ok && res.error) {
-			this.reportRuntimeFeedback(res.error, 'error');
-		}
-		this.syncRuntimeControlsUi();
-	}
-
-	private setZoomCentered(targetZoom: number): void {
-		if (!this.viewportEl) {
-			return;
-		}
-		const rect = this.viewportEl.getBoundingClientRect();
-		const cx = rect.width / 2;
-		const cy = rect.height / 2;
-		const worldX = (cx - this.panX) / this.zoom;
-		const worldY = (cy - this.panY) / this.zoom;
-		this.zoom = Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, targetZoom)) * 100) / 100;
-		this.panX = cx - worldX * this.zoom;
-		this.panY = cy - worldY * this.zoom;
-		this.applyWorldTransformNow();
-	}
-
-	private stepZoom(delta: number): void {
-		this.setZoomCentered(this.zoom + delta);
-	}
-
-	private resetZoomTo100(): void {
-		this.setZoomCentered(1);
-	}
-
-	private syncMinimapGraph(): void {
-		if (!this.minimap) {
-			return;
-		}
-		const runtimeState = this.activeMissionId && this.missionRuntimeService
-			? this.missionRuntimeService.getRuntimeState(this.activeMissionId)
-			: undefined;
-		this.minimap.syncGraph(this.nodes, this.edges, this.positions, runtimeState, this.nodeInspector?.getSelectedNodeId());
-		this.syncMinimapViewport();
-	}
-
-	private syncMinimapViewport(): void {
-		if (!this.minimap || !this.viewportEl) {
-			return;
-		}
-		const rect = this.viewportEl.getBoundingClientRect();
-		this.minimap.updateViewport(this.panX, this.panY, this.zoom, rect.width, rect.height);
-	}
-
-	private syncRuntimeControlsUi(): void {
-		if (this.isPaneDisposed || !this.fileDrawer || !this.activeMissionId) {
-			return;
-		}
-		const state = this.getEffectiveRuntimeState();
-		const rankCount = (this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG).ranks.length;
-		this.fileDrawer.syncRuntimeControls(state, this.nodes.length, rankCount);
-		this.syncSupervisorLegend(state);
-		this.syncRevisionTimelineBar(state);
-		this.reconcileBlockedTimer(state);
-		if (this.nodeInspector?.isOpen()) {
-			this.nodeInspector.refresh();
-		}
-	}
-
-	private async handlePrimaryRunButtonClick(timeoutMinutes: number): Promise<void> {
-		const missionId = this.activeMissionId;
-		if (!missionId || !this.missionRuntimeService) {
-			this.reportRuntimeFeedback(localize('adeMissionRuntimeUnavailable', "Mission runtime is unavailable."), 'error');
-			return;
-		}
-		const state = this.missionRuntimeService.getRuntimeState(missionId);
-		if (state.status === 'running') {
-			const res = await this.missionRuntimeService.pause(missionId).catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-			if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-				return;
-			}
-			if (!res.ok && res.error) {
-				this.reportRuntimeFeedback(res.error, 'error');
-			} else {
-				this.hideCanvasAlert();
-			}
-			this.syncRuntimeControlsUi();
-			return;
-		}
-		if (state.status === 'paused') {
-			const res = await this.missionRuntimeService.resume(missionId).catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-			if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-				return;
-			}
-			if (!res.ok && res.error) {
-				this.reportRuntimeFeedback(res.error, 'error');
-			} else {
-				this.hideCanvasAlert();
-			}
-			this.syncRuntimeControlsUi();
-			return;
-		}
-		const res = await this.missionRuntimeService.start(missionId, {
-			silenceTimeoutMinutes: Number.isFinite(timeoutMinutes) && timeoutMinutes >= 1 ? timeoutMinutes : state.silenceTimeoutMinutes,
-		}).catch(err => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-			return;
-		}
-		if (!res.ok) {
-			const msg = res.error || localize('adeMissionStartFailedFallback', "Failed to start Mission.");
-			this.reportRuntimeFeedback(msg, 'error', { offerOpenFile: true });
-		} else {
-			this.hideCanvasAlert();
-		}
-		this.syncRuntimeControlsUi();
-	}
-
-	private resetToAutoLayout(): void {
-		if (this.activeMissionId && this.nodes.length > 0) {
-			this.historyStack.push(this.captureHistorySnapshot(localize('adeMissionHistoryAutoLayout', "自动排版")));
-			this.syncHistoryButtons();
-		}
-		if (this.activeMissionId) {
-			this.missionService?.clearNodePositions(this.activeMissionId);
-		}
-		this.positions.clear();
-		this.parseAndRenderGraph(this.mermaidText, true);
-	}
-
-	private assignNodeEmployee(nodeId: string, employeeName: string | undefined): void {
-		const nextMermaid = setNodeEmployeeInMermaid(this.mermaidText, nodeId, employeeName);
-		if (nextMermaid === this.mermaidText) {
-			this.popovers.close();
-			return;
-		}
-		const preSnap = this.captureHistorySnapshot(localize('adeMissionHistoryReassignEmployee', "指派节点 {0} 员工", nodeId));
-		const missionId = this.activeMissionId;
-		if (this.isLiveRun() && missionId && this.missionRuntimeService) {
-			void this.missionRuntimeService.patchMermaid(missionId, {
-				caller: { isHumanUser: true },
-				newMermaidText: nextMermaid,
-				reason: `Reassign employee on ${nodeId}`,
-			}).then(res => {
-				if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-					return;
-				}
-				if (res.ok) {
-					this.historyStack.push(preSnap);
-					this.syncHistoryButtons();
-					this.mermaidText = nextMermaid;
-					this.fileDrawer.setMermaidValue(nextMermaid);
-					this.popovers.close();
-					this.parseAndRenderGraph(nextMermaid);
-				} else {
-					const errMsg = res.error ?? localize('adeMissionAssignRejected', "Cannot reassign employee while Mission is running.");
-					this.reportRuntimeFeedback(errMsg, 'error');
-					this.popovers.showInlineError(errMsg);
-				}
-			}, err => {
-				if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-					return;
-				}
-				const errMsg = err instanceof Error ? err.message : localize('adeMissionAssignRejected', "Cannot reassign employee while Mission is running.");
-				this.reportRuntimeFeedback(errMsg, 'error');
-				this.popovers.showInlineError(errMsg);
-			});
-			return;
-		}
-
-		this.historyStack.push(preSnap);
-		this.syncHistoryButtons();
-		this.mermaidText = nextMermaid;
-		this.fileDrawer.setMermaidValue(nextMermaid);
-		if (missionId) {
-			this.missionService?.updateMermaid(missionId, nextMermaid);
-		}
-		this.popovers.close();
-		this.parseAndRenderGraph(nextMermaid);
-	}
-
-	private parseAndRenderGraph(rawText: string, forceAutoLayout = false): void {
-		this.fileDrawer.setFileDotVisible(rawText.trim().length > 0);
-		const parsed = parseMissionMermaidDag(rawText);
-		if (parsed.error) {
-			this.fileDrawer.setStatus(parsed.error, 'error');
-			if (!this.fileDrawer.isOpen()) {
-				this.showCanvasAlert(parsed.error, 'error', { offerOpenFile: true });
-			}
-			return;
-		}
-
-		const hadNodesBefore = this.nodes.length > 0;
-		this.isDraggingNode = false;
-		this.direction = parsed.direction;
-		this.nodes = parsed.nodes;
-		this.edges = parsed.edges;
-		this.employees = parsed.employees ?? [];
-		this.popovers.close();
-		if (this.canvasAlertEl?.dataset.alertKind === 'error') {
-			this.hideCanvasAlert();
-		}
-
-		const ownerRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
-		const ownerPrefix = ownerRec ? `${formatTierTag(ownerRec.ownerTier)} · ` : '';
-
-		if (parsed.nodes.length === 0) {
-			this.positions.clear();
-			this.fileDrawer.setMeta(`${ownerPrefix}${localize('adeMissionMetaEmpty', "Empty")}`);
-			this.fileDrawer.setStatus(localize('adeMissionStatusEmpty', "Write Mermaid DAG syntax to render nodes"));
-			this.syncGraphDom(true);
-			this.fileDrawer.syncPromptsPane();
-			this.syncRuntimeControlsUi();
-			return;
-		}
-
-		const autoPos = computeMissionAutoLayout(parsed);
-		const storedPos = !forceAutoLayout && this.activeMissionId
-			? (this.missionService?.getMission(this.activeMissionId)?.positions ?? {})
-			: {};
-		const nextPositions = new Map<string, IMissionNodePosition>();
-		for (const node of parsed.nodes) {
-			const saved = storedPos[node.id] ?? (!forceAutoLayout ? this.positions.get(node.id) : undefined);
-			nextPositions.set(node.id, saved ?? autoPos.get(node.id) ?? { x: 240, y: 240 });
-		}
-		this.positions = nextPositions;
-
-		const hasReusedEmployee = this.employees.some(e => e.nodeIds.length > 1);
-		this.fileDrawer.setMeta(hasReusedEmployee
-			? `${ownerPrefix}${localize('adeMissionMetaWithEmployees', "{0} steps · {1} employees", parsed.nodes.length, this.employees.length)}`
-			: `${ownerPrefix}${localize('adeMissionMetaCounts', "{0} nodes · {1} edges", parsed.nodes.length, parsed.edges.length)}`);
-		this.fileDrawer.setStatus(localize('adeMissionStatusValid', "Valid DAG rendered"), 'ok');
-
-		this.syncGraphDom();
-		// Reconcile selection & live search matches against the latest parsed topology
-		const liveNodeIdSet = new Set(parsed.nodes.map(n => n.id));
-		let selChanged = false;
-		for (const id of [...this.selectedNodeIds]) {
-			if (!liveNodeIdSet.has(id)) {
-				this.selectedNodeIds.delete(id);
-				selChanged = true;
-			}
-		}
-		if (selChanged) {
-			this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-			this.syncSelectionHud();
-		}
-		if (this.selectedEdgeKey && !parsed.edges.some(e => `${e.from}->${e.to}` === this.selectedEdgeKey)) {
-			this.selectedEdgeKey = undefined;
-			this.renderer?.setSelectedEdgeKey(undefined);
-		}
-		if (this.searchBarEl && !this.searchBarEl.hidden) {
-			this.updateCanvasSearchResults(false);
-		}
-		this.fileDrawer.syncPromptsPane();
-		this.syncRuntimeControlsUi();
-		this.prewarmMissionHosts();
-		if (!hadNodesBefore || forceAutoLayout) {
-			this.fitGraphToViewport();
-		}
-	}
-
-	private buildAgentNodeMap(): Map<string, IAdeAgent> {
-		const map = new Map<string, IAdeAgent>();
-		if (!this.activeMissionId) {
-			return map;
-		}
-		const generatedEmployees = this.missionService?.getGeneratedEmployees(this.activeMissionId) ?? [];
-		const byTreeKey = new Map<string, IAdeAgent>();
-		for (const emp of generatedEmployees) {
-			if (emp.treeNodeId) {
-				byTreeKey.set(emp.treeNodeId, emp);
-			}
-			for (const nid of emp.treeNodeIds ?? []) {
-				map.set(nid, emp);
-			}
-		}
-		const runtimeAssignments = this.missionRuntimeService?.getRuntimeState(this.activeMissionId).boundary.nodeAssignments;
-		for (const node of this.nodes) {
-			if (node.kind === 'gate' || map.has(node.id)) {
-				continue;
-			}
-			const assignedAgentId = runtimeAssignments?.[node.id]?.agentId;
-			const manualAgent = assignedAgentId ? this.projectsService?.getAgent(assignedAgentId) : undefined;
-			if (manualAgent) {
-				map.set(node.id, manualAgent);
-				continue;
-			}
-			const fallback = (node.employeeKey ? byTreeKey.get(`emp:${node.employeeKey}`) : undefined)
-				?? byTreeKey.get(node.id);
-			if (fallback) {
-				map.set(node.id, fallback);
-			}
-		}
-		return map;
-	}
-
-	private computeActiveMissionProjectsFingerprint(agentByNodeId?: ReadonlyMap<string, IAdeAgent>): string {
-		if (!this.activeMissionId || !this.projectsService) {
-			return '';
-		}
-		const missionRec = this.missionService?.getMission(this.activeMissionId);
-		const ownerAgent = missionRec?.ownerSessionId ? this.projectsService.getAgent(missionRec.ownerSessionId) : undefined;
-		const map = agentByNodeId ?? this.buildAgentNodeMap();
-		const parts: string[] = [
-			this.activeMissionId,
-			ownerAgent
-				? `${ownerAgent.id}|${ownerAgent.label}|${ownerAgent.role ?? ''}|${ownerAgent.session?.engineId ?? ''}|${ownerAgent.preferredEngineId ?? ''}|${ownerAgent.preferredModel ?? ''}|${ownerAgent.preferredThinking ?? ''}|${ownerAgent.projectUri.toString()}`
-				: '',
-		];
-		for (const node of this.nodes) {
-			if (node.kind === 'gate') {
-				continue;
-			}
-			const a = map.get(node.id);
-			parts.push(a
-				? `${node.id}:${a.id}|${a.label}|${a.role ?? ''}|${a.session ? '1' : '0'}|${a.session?.engineId ?? ''}|${a.preferredEngineId ?? ''}|${a.preferredModel ?? ''}|${a.preferredThinking ?? ''}|${a.projectUri.toString()}|${this.projectsService.hasSubordinates(a.id) ? '1' : '0'}`
-				: `${node.id}:`);
-		}
-		const rt = this.missionRuntimeService?.getRuntimeState(this.activeMissionId);
-		if (rt) {
-			for (const sup of rt.boundary.supervisors) {
-				const supAgent = this.projectsService.getAgent(sup.id);
-				parts.push(`sup:${sup.id}|${supAgent?.label ?? ''}|${supAgent?.role ?? ''}`);
-			}
-		}
-		return parts.join('\x1e');
-	}
-
-	private syncGraphDom(forceFullRebuild = false): void {
-		if (!this.renderer) {
-			return;
-		}
-		const missionRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
-		const runtimeState = this.getEffectiveRuntimeState();
-		const ownerAgent = missionRec?.ownerSessionId ? this.projectsService?.getAgent(missionRec.ownerSessionId) : undefined;
-		const fallbackOwnerEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId ?? 'aexus-claude';
-
-		let renderDirection = this.direction;
-		let renderNodes = this.nodes;
-		let renderEdges = this.edges;
-		let renderPositions: ReadonlyMap<string, IMissionNodePosition> = this.positions;
-
-		if (this.previewRevisionVersion !== undefined && runtimeState?.revisions) {
-			const rev = runtimeState.revisions.find(r => r.version === this.previewRevisionVersion);
-			if (rev) {
-				const parsedRev = parseMissionMermaidDag(rev.mermaidText);
-				if (!parsedRev.error && parsedRev.nodes.length > 0) {
-					renderDirection = parsedRev.direction;
-					renderNodes = parsedRev.nodes;
-					renderEdges = parsedRev.edges;
-					const autoPos = computeMissionAutoLayout(parsedRev);
-					const revPos = new Map<string, IMissionNodePosition>();
-					for (const n of parsedRev.nodes) {
-						revPos.set(n.id, this.positions.get(n.id) ?? autoPos.get(n.id) ?? { x: 240, y: 240 });
-					}
-					renderPositions = revPos;
-				}
-			}
-		}
-
-		this.activeRenderNodes = renderNodes;
-		this.activeRenderPositions = renderPositions;
-		const agentByNodeId = this.buildAgentNodeMap();
-		this.lastProjectsFingerprint = this.computeActiveMissionProjectsFingerprint(agentByNodeId);
-		const snapshot: IMissionCanvasRenderSnapshot = {
-			direction: renderDirection,
-			nodes: renderNodes,
-			edges: renderEdges,
-			positions: renderPositions,
-			runtimeState,
-			nodePrompts: missionRec?.nodePrompts ?? {},
-			agentByNodeId,
-			fallbackOwnerEngineId,
-			orgConfig: this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
-			resolveSupervisorDisplay: supId => this.resolveSupervisorDisplay(supId),
-			hasSubordinates: agentId => this.projectsService?.hasSubordinates(agentId) ?? false,
-			canSwitchEngine: agent => this.canSwitchAgentEngine(agent),
-			canSwitchModel: Boolean(this.projectsService),
-			canSwitchHost: Boolean(this.activeMissionId && this.missionRuntimeService && this.cloudHostService),
-		};
-		this.renderer.syncGraph(snapshot, forceFullRebuild);
-		if (this.tabSpotlightActive) {
-			this.renderer.setTabSpotlightActive(true, renderNodes, renderPositions, runtimeState, supId => this.resolveSupervisorDisplay(supId));
-		}
-		this.syncMinimapGraph();
-		this.reconcileBlockedTimer(runtimeState);
-	}
-
-	private prewarmMissionHosts(): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		const agentByNodeId = this.buildAgentNodeMap();
-		this.hostCatalog.prewarmMissionHosts(
-			this.nodes,
-			node => agentByNodeId.get(node.id),
-			nodeId => this.missionRuntimeService?.getRuntimeState(missionId).boundary.nodeAssignments[nodeId]?.hostAlias,
-			() => {
-				if (!this.isPaneDisposed && this.activeMissionId === missionId && !this.isDraggingNode && !this.popovers.isOpen()) {
-					this.syncGraphDom();
-				}
-			},
-		);
 	}
 
 	private cancelScheduledFrames(): void {
@@ -3360,16 +3314,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.viewportEl.style.setProperty('--grid-y', `${ry}px`);
 		this.viewportEl.style.setProperty('--grid-scale', String(this.zoom));
 		this.viewportEl.classList.toggle('zoom-macro', this.zoom < 0.5);
-		const zoomPctNum = Math.round(this.zoom * 100);
-		if (this.zoomReadoutBtnEl) {
-			const pct = `${zoomPctNum}%`;
-			if (this.zoomReadoutBtnEl.textContent !== pct) {
-				this.zoomReadoutBtnEl.textContent = pct;
-			}
-		}
-		if (this.zoomSliderEl && this.zoomSliderEl.value !== String(zoomPctNum)) {
-			this.zoomSliderEl.value = String(zoomPctNum);
-		}
 		this.syncMinimapViewport();
 	}
 
@@ -3391,7 +3335,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const targetNodeId = this.pendingDraggedMultipleNodes ? undefined : this.pendingDraggedNodeId;
 			this.pendingDraggedNodeId = undefined;
 			this.pendingDraggedMultipleNodes = false;
-			this.renderer?.updateEdgesSvg(this.nodes, this.edges, this.positions, targetNodeId ? { movedNodeId: targetNodeId, direction: this.direction } : { direction: this.direction });
+			const dir = this.viewMode === 'orchestration' ? this.orchDirection : this.direction;
+			this.renderer?.updateEdgesSvg(this.nodes, this.edges, this.positions, targetNodeId ? { movedNodeId: targetNodeId, direction: dir } : { direction: dir });
 		});
 	}
 
@@ -3402,8 +3347,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		this.pendingDraggedNodeId = undefined;
 		this.pendingDraggedMultipleNodes = false;
-		this.renderer?.updateEdgesSvg(this.nodes, this.edges, this.positions, { direction: this.direction });
-		this.syncMinimapGraph();
+		const dir = this.viewMode === 'orchestration' ? this.orchDirection : this.direction;
+		this.renderer?.updateEdgesSvg(this.nodes, this.edges, this.positions, { direction: dir });
+	}
+
+	private syncAnimationPauseState(): void {
+		if (this.isPaneDisposed || !this.rootEl) {
+			return;
+		}
+		const doc = getWindow(this.rootEl).document;
+		const pageHidden = Boolean(doc.hidden || doc.visibilityState === 'hidden');
+		doc.documentElement.classList.toggle('ade-page-hidden', pageHidden);
+		const paused = pageHidden || !this.isEditorTabVisible;
+		this.rootEl.classList.toggle('ade-animations-paused', paused);
+		if (paused) {
+			this.rootEl.setAttribute('data-animations-paused', 'true');
+		} else {
+			this.rootEl.removeAttribute('data-animations-paused');
+		}
+		this.renderer?.setAnimationsPaused(paused);
 	}
 
 	private installCanvasInteractions(): void {
@@ -3420,18 +3382,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const w1 = this.clientToWorldPos(Math.min(c1x, c2x), Math.min(c1y, c2y));
 			const w2 = this.clientToWorldPos(Math.max(c1x, c2x), Math.max(c1y, c2y));
 			const hits: string[] = [];
-			for (const node of this.nodes) {
-				const pos = this.positions.get(node.id);
+			for (const id of this.getActiveNodeIds()) {
+				const pos = this.positions.get(id);
 				if (!pos) {
 					continue;
 				}
-				const sz = getMissionNodeSize(node);
-				const nMinX = pos.x - sz.width / 2;
-				const nMaxX = pos.x + sz.width / 2;
-				const nMinY = pos.y - sz.height / 2;
-				const nMaxY = pos.y + sz.height / 2;
-				if (nMinX <= w2.x && nMaxX >= w1.x && nMinY <= w2.y && nMaxY >= w1.y) {
-					hits.push(node.id);
+				const sz = this.getNodeDimensions(id);
+				if (pos.x - sz.width / 2 <= w2.x && pos.x + sz.width / 2 >= w1.x && pos.y - sz.height / 2 <= w2.y && pos.y + sz.height / 2 >= w1.y) {
+					hits.push(id);
 				}
 			}
 			return hits;
@@ -3439,14 +3397,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		const updateMarqueeBoxDom = (curX: number, curY: number): void => {
 			const vpRect = this.viewportEl.getBoundingClientRect();
-			const left = Math.min(startClientX, curX) - vpRect.left;
-			const top = Math.min(startClientY, curY) - vpRect.top;
-			const width = Math.abs(curX - startClientX);
-			const height = Math.abs(curY - startClientY);
-			this.marqueeBoxEl.style.left = `${Math.round(left)}px`;
-			this.marqueeBoxEl.style.top = `${Math.round(top)}px`;
-			this.marqueeBoxEl.style.width = `${Math.round(width)}px`;
-			this.marqueeBoxEl.style.height = `${Math.round(height)}px`;
+			this.marqueeBoxEl.style.left = `${Math.round(Math.min(startClientX, curX) - vpRect.left)}px`;
+			this.marqueeBoxEl.style.top = `${Math.round(Math.min(startClientY, curY) - vpRect.top)}px`;
+			this.marqueeBoxEl.style.width = `${Math.round(Math.abs(curX - startClientX))}px`;
+			this.marqueeBoxEl.style.height = `${Math.round(Math.abs(curY - startClientY))}px`;
 		};
 
 		this._register(addDisposableListener(this.viewportEl, EventType.POINTER_DOWN, (e: PointerEvent) => {
@@ -3455,13 +3409,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			}
 			this.popovers.close();
 
-			// Shift + Left-Drag (or active Select Mode + Left-Drag) draws a Marquee Box Selection
-			const wantsMarquee = e.button === 0 && (e.shiftKey || this.selectBoxMode) && this.previewRevisionVersion === undefined;
-			if (wantsMarquee) {
+			if (e.button === 0 && e.shiftKey) {
 				e.preventDefault();
 				this.selectEdge(undefined);
 				marqueeSelecting = true;
-				marqueeAdditive = Boolean(e.metaKey || e.ctrlKey || (this.selectBoxMode && e.shiftKey));
+				marqueeAdditive = Boolean(e.metaKey || e.ctrlKey);
 				startClientX = e.clientX;
 				startClientY = e.clientY;
 				this.marqueeBoxEl.hidden = false;
@@ -3473,8 +3425,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				return;
 			}
 
-			// Defer clearing selection / closing Inspector until pointerup so drag-panning the canvas never
-			// accidentally slams shut the right-side Inspector or drops active selection!
 			panning = true;
 			panMoved = false;
 			startClientX = e.clientX;
@@ -3519,8 +3469,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				if (!cancelled) {
 					const dist = Math.hypot(e.clientX - startClientX, e.clientY - startClientY);
 					if (dist >= 4) {
-						const hits = computeMarqueeHitIds(startClientX, startClientY, e.clientX, e.clientY);
-						this.selectNodes(hits, { additive: marqueeAdditive });
+						this.selectNodes(computeMarqueeHitIds(startClientX, startClientY, e.clientX, e.clientY), { additive: marqueeAdditive });
 					} else if (!marqueeAdditive) {
 						this.selectNode(undefined);
 					}
@@ -3540,66 +3489,109 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			try {
 				this.viewportEl.releasePointerCapture(e.pointerId);
 			} catch { /* ignore */ }
-
-			// Only a genuine stationary click on empty canvas clears selection & closes Inspector.
 			if (!cancelled && !wasMoved) {
 				this.selectEdge(undefined);
-				if (this.nodeInspector?.isOpen() || this.selectedNodeIds.size > 0) {
+				if (this.selectedNodeIds.size > 0) {
 					this.selectNode(undefined);
-				}
-				if (this.pinnedSupervisorId) {
-					this.pinnedSupervisorId = undefined;
-					this.renderer?.setHighlightedSupervisorId(this.hoveredSupervisorId);
-					const st = this.activeMissionId ? this.missionRuntimeService?.getRuntimeState(this.activeMissionId) : undefined;
-					this.syncSupervisorLegend(st);
 				}
 			}
 		};
 		this._register(addDisposableListener(this.viewportEl, EventType.POINTER_UP, e => stopViewportDrag(e, false)));
 		this._register(addDisposableListener(this.viewportEl, 'pointercancel', e => stopViewportDrag(e, true)));
 
+		// Blank-canvas right-click context menu (preserved interaction to create nodes cleanly!)
 		this._register(addDisposableListener(this.viewportEl, EventType.CONTEXT_MENU, (e: MouseEvent) => {
 			const target = e.target as HTMLElement | null;
-			if (target?.closest('.ade-mission-node, .ade-mission-edge-group, .ade-mission-empty-hint')) {
+			if (target?.closest('.ade-mission-node, .ade-mission-edge-group, .ade-orch-dept-pill-group')) {
 				return;
 			}
-			if (!this.activeMissionId || this.previewRevisionVersion !== undefined) {
+			if (!this.activeMissionId) {
 				return;
 			}
 			e.preventDefault();
 			const worldPos = this.clientToWorldPos(e.clientX, e.clientY);
+			const hasNodes = this.getActiveNodeCount() > 0;
+
+			if (this.viewMode === 'orchestration') {
+				const topStaff = findHighestRankStaffNode({
+					direction: this.orchDirection,
+					nodes: this.orchNodes,
+					edges: this.orchEdges,
+					departments: this.orchDepartments,
+				});
+				this.popovers.openCanvasContextMenu(e.clientX, e.clientY, [
+					{
+						id: 'add-group',
+						label: adeBi(localize('adeOrchCtxAddGroup', "New Group / Department…"), '新建部门分组 (Group)…'),
+						icon: 'folder',
+						run: () => this.popovers.openAddGroupPopover(e.clientX, e.clientY, name => {
+							this.addOrchestrationGroupVisual(name, worldPos);
+						}),
+					},
+					{
+						id: 'add-staff',
+						label: adeBi(localize('adeOrchCtxAddStaff', "New Staff Node…"), '新建员工节点…'),
+						icon: 'person-add',
+						run: () => this.popovers.openAddStaffPopover(e.clientX, e.clientY, payload => {
+							this.addOrchestrationStaffVisual({ ...payload, worldPos });
+						}),
+					},
+					{
+						id: 'add-whiteboard',
+						label: adeBi(localize('adeOrchCtxAddWhiteboard', "New Department Whiteboard…"), '新建部门共享白板…'),
+						icon: 'notebook',
+						run: () => this.popovers.openAddWhiteboardPopover(e.clientX, e.clientY, payload => {
+							this.addOrchestrationWhiteboardVisual({ ...payload, worldPos });
+						}),
+					},
+					...(topStaff ? [{
+						id: 'dispatch-requirement',
+						label: adeBi(localize('adeOrchCtxDispatchTop', "Dispatch Requirement to {0}…", topStaff.label), '向最高职级 {0} 下达需求…', topStaff.label),
+						icon: 'send',
+						separatorBefore: true,
+						run: () => this.popovers.openDispatchRequirementPopover(e.clientX, e.clientY, topStaff.label, req => {
+							this.handleDispatchRequirement(req, topStaff.id);
+						}),
+					}] : []),
+					{
+						id: 'fit-view',
+						label: adeBi(localize('adeMissionCtxFitView', "Fit View"), '适配视口'),
+						icon: 'screen-full',
+						separatorBefore: true,
+						disabled: !hasNodes,
+						run: () => this.fitGraphToViewport(),
+					},
+					{
+						id: 'auto-layout',
+						label: adeBi(localize('adeMissionCtxAutoLayout', "Auto Layout"), '自动排版'),
+						icon: 'layout',
+						disabled: !hasNodes,
+						run: () => this.resetToAutoLayout(),
+					},
+				]);
+				return;
+			}
+
 			this.popovers.openCanvasContextMenu(e.clientX, e.clientY, [
 				{
 					id: 'add-task',
-					label: localize('adeMissionCtxAddTaskHere', "New Node"),
+					label: adeBi(localize('adeMissionCtxAddTaskNode', "New Task Node"), '新建任务节点'),
 					icon: 'add',
-					run: () => this.addVisualNode({ kind: 'task', worldPos }),
-				},
-				{
-					id: 'add-reviewer',
-					label: localize('adeMissionCtxAddReviewerHere', "New Reviewer"),
-					icon: 'shield',
-					run: () => this.addVisualNode({ kind: 'task', roleKind: 'reviewer', worldPos }),
-				},
-				{
-					id: 'add-gate',
-					label: localize('adeMissionCtxAddGateHere', "New Gate"),
-					icon: 'law',
-					run: () => this.addVisualNode({ kind: 'gate', worldPos }),
+					run: () => this.addMissionTaskVisual(worldPos),
 				},
 				{
 					id: 'fit-view',
-					label: localize('adeMissionCtxFitView', "Fit View"),
+					label: adeBi(localize('adeMissionCtxFitView', "Fit View"), '适配视口'),
 					icon: 'screen-full',
 					separatorBefore: true,
-					disabled: this.nodes.length === 0,
+					disabled: !hasNodes,
 					run: () => this.fitGraphToViewport(),
 				},
 				{
 					id: 'auto-layout',
-					label: localize('adeMissionCtxAutoLayout', "Auto Layout"),
+					label: adeBi(localize('adeMissionCtxAutoLayout', "Auto Layout"), '自动排版'),
 					icon: 'layout',
-					disabled: this.nodes.length === 0,
+					disabled: !hasNodes,
 					run: () => this.resetToAutoLayout(),
 				},
 			]);
@@ -3614,8 +3606,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				const worldX = (cursorX - this.panX) / this.zoom;
 				const worldY = (cursorY - this.panY) / this.zoom;
 				const factor = e.deltaY < 0 ? 1.08 : 0.92;
-				const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor));
-				this.zoom = Math.round(nextZoom * 100) / 100;
+				this.zoom = Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor)) * 100) / 100;
 				this.panX = cursorX - worldX * this.zoom;
 				this.panY = cursorY - worldY * this.zoom;
 			} else {
@@ -3638,7 +3629,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const hasPrimaryMod = (e.metaKey || e.ctrlKey) && !e.altKey;
 			const lowerKey = e.key.toLowerCase();
 
-			// Cmd/Ctrl+F: Open / focus floating large-DAG node search
 			if (hasPrimaryMod && !e.shiftKey && lowerKey === 'f' && canvasActive && !this.fileDrawer.isOpen()) {
 				const typingOutsideSearch = isTyping && target !== this.searchInputEl;
 				if (!typingOutsideSearch) {
@@ -3649,7 +3639,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}
 			}
 
-			// Cmd/Ctrl+Z (Undo) & Cmd/Ctrl+Shift+Z / Ctrl+Y (Redo)
 			if (hasPrimaryMod && !isTyping && canvasActive && !this.popovers.isOpen()) {
 				if (lowerKey === 'z') {
 					e.preventDefault();
@@ -3667,17 +3656,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					this.redoCanvasMutation();
 					return;
 				}
-				if (lowerKey === 'a' && !e.shiftKey && !this.fileDrawer.isOpen() && this.nodes.length > 0) {
+				if (lowerKey === 'a' && !e.shiftKey && !this.fileDrawer.isOpen() && this.getActiveNodeCount() > 0) {
 					e.preventDefault();
 					e.stopPropagation();
-					this.selectNodes(this.nodes.map(n => n.id));
+					this.selectNodes(this.getActiveNodeIds());
 					return;
 				}
 			}
 
-			// Delete / Backspace: Remove selected edge or selected node(s)
 			if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
-				if (!isTyping && canvasActive && !this.fileDrawer.isOpen() && !this.popovers.isOpen() && this.previewRevisionVersion === undefined) {
+				if (!isTyping && canvasActive && !this.fileDrawer.isOpen() && !this.popovers.isOpen()) {
 					if (this.selectedEdgeKey || this.selectedNodeIds.size > 0) {
 						e.preventDefault();
 						e.stopPropagation();
@@ -3687,46 +3675,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				}
 			}
 
-			if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
-				if (this.tabSpotlightActive) {
-					e.preventDefault();
-					return;
-				}
-				if (!isTyping && canvasActive && !e.repeat && !this.fileDrawer.isOpen() && !this.popovers.isOpen()) {
-					e.preventDefault();
-					this.setTabSpotlight(true);
-				}
-				return;
-			}
 			if (e.key === 'Escape') {
 				if (this.searchBarEl && !this.searchBarEl.hidden) {
 					this.closeCanvasSearch(true);
-				} else if (this.tabSpotlightActive) {
-					this.setTabSpotlight(false);
-				} else if (this.previewRevisionVersion !== undefined) {
-					this.exitRevisionPreview();
 				} else if (this.popovers.isOpen()) {
 					this.popovers.close();
 				} else if (this.fileDrawer.isOpen()) {
 					this.fileDrawer.toggle(false);
-				} else if (this.nodeInspector?.isOpen() || this.selectedNodeIds.size > 0 || this.selectedEdgeKey) {
+				} else if (this.selectedNodeIds.size > 0 || this.selectedEdgeKey) {
 					this.selectNode(undefined);
-				} else if (this.pinnedSupervisorId) {
-					this.pinnedSupervisorId = undefined;
-					this.renderer?.setHighlightedSupervisorId(this.hoveredSupervisorId);
-					const st = this.activeMissionId ? this.missionRuntimeService?.getRuntimeState(this.activeMissionId) : undefined;
-					this.syncSupervisorLegend(st);
 				}
-			}
-		}));
-		this._register(addDisposableListener(win, EventType.KEY_UP, (e: KeyboardEvent) => {
-			if (e.key === 'Tab' && this.tabSpotlightActive) {
-				this.setTabSpotlight(false);
-			}
-		}));
-		this._register(addDisposableListener(win, EventType.BLUR, () => {
-			if (this.tabSpotlightActive) {
-				this.setTabSpotlight(false);
 			}
 		}));
 		this._register(addDisposableListener(win.document, 'visibilitychange', () => {
@@ -3744,48 +3702,63 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	override async setInput(input: AdeEngineeringEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 		this.cancelScheduledFrames();
-		this.stopBlockedCountdownTimer();
 		this.hideCanvasAlert();
 		this.isDraggingNode = false;
-		this.historyStack.clear();
+		this.undoStack = [];
+		this.redoStack = [];
 		this.preDragHistorySnapshot = undefined;
 		this.selectedNodeIds.clear();
 		this.selectedEdgeKey = undefined;
-		this.syncHistoryButtons();
 		this.syncSelectionHud();
 		this.closeCanvasSearch(false);
-		this.pinnedSupervisorId = undefined;
-		this.hoveredSupervisorId = undefined;
-		this.previewRevisionVersion = undefined;
-		this.setTabSpotlight(false);
 		this.fileDrawer.clearParseTimer();
+		this.fileDrawer.toggle(false);
 		this.popovers.close();
-		this.nodeInspector.close(false);
 		this.setHoveredNode(undefined);
 		this.renderer.setSelectedNodeIds([]);
 		this.renderer.setSelectedEdgeKey(undefined);
-		this.renderer.setHighlightedSupervisorId(undefined);
 		this.renderer.setTraceHighlightEdges(undefined);
-		this.renderer.setPreviewAddedNodeIds(undefined);
 		this.renderer.resetTransitTracking();
+
 		this.activeMissionId = input.governorSessionId;
-		this.fileDrawer.setSelectedPromptNodeId(undefined);
+		this.viewMode = input.viewMode;
+		this.rootEl.dataset.viewMode = this.viewMode;
+		this.fileDrawer.setViewMode(this.viewMode);
+		this.fileDrawer.setSelectedTaskNodeId(undefined);
+		this.syncEmptyHintCopy();
+
 		const record = this.missionService?.ensureMission(input.governorSessionId);
 		this.mermaidText = record?.mermaidText ?? '';
-		this.lastNodeChecksFingerprint = this.computeNodeChecksFingerprint(record?.nodeChecks);
-		this.fileDrawer.setMermaidValue(this.mermaidText);
+		this.orchestrationText = record?.orchestrationText ?? '';
 		this.nodes = [];
 		this.edges = [];
-		this.employees = [];
+		this.orchNodes = [];
+		this.orchEdges = [];
+		this.orchDepartments = [];
 		this.positions.clear();
 		this.renderer.invalidateStructure();
-		this.parseAndRenderGraph(this.mermaidText);
-		if (this.nodes.length === 0) {
-			this.syncGraphDom(true);
+
+		if (this.viewMode === 'orchestration') {
+			const parsedInit = parseOrchestrationGraph(this.orchestrationText);
+			this.orchLayoutMode = record?.orchestrationLayoutMode ?? (parsedInit.direction === 'TD' ? 'td' : 'lr');
+			this.fileDrawer.setLayoutMode(this.orchLayoutMode);
+			this.fileDrawer.setCodeValue(this.orchestrationText);
+			this.parseAndRenderOrchestrationGraph(this.orchestrationText);
+			if (this.orchNodes.length === 0) {
+				this.syncGraphDom(true);
+			}
+		} else {
+			this.fileDrawer.setCodeValue(this.mermaidText);
+			this.parseAndRenderMissionGraph(this.mermaidText);
+			if (this.nodes.length === 0) {
+				this.syncGraphDom(true);
+			}
 		}
-		this.syncRuntimeControlsUi();
+
 		this.syncHudLayoutClasses();
+		this.updateConsoleBar();
 		this.applyWorldTransformNow();
+
 		const pendingFocus = input.consumePendingFocus();
 		if (pendingFocus) {
 			this.focusNode(pendingFocus.nodeId, {
@@ -3797,35 +3770,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	override clearInput(): void {
 		this.cancelScheduledFrames();
-		this.stopBlockedCountdownTimer();
 		this.hideCanvasAlert();
 		this.isDraggingNode = false;
-		this.historyStack.clear();
+		this.undoStack = [];
+		this.redoStack = [];
 		this.preDragHistorySnapshot = undefined;
 		this.selectedNodeIds.clear();
 		this.selectedEdgeKey = undefined;
-		this.syncHistoryButtons();
 		this.syncSelectionHud();
 		this.closeCanvasSearch(false);
-		this.pinnedSupervisorId = undefined;
-		this.hoveredSupervisorId = undefined;
-		this.previewRevisionVersion = undefined;
-		this.setTabSpotlight(false);
 		this.fileDrawer?.clearParseTimer();
 		this.popovers?.close();
-		this.nodeInspector?.close(false);
-		this.minimap?.setInspectorOpen(false);
-		this.minimap?.syncGraph([], [], new Map(), undefined, undefined);
-		this.syncSupervisorLegend(undefined);
-		this.syncRevisionTimelineBar(undefined);
 		this.syncHudLayoutClasses();
 		this.activeMissionId = undefined;
+		this.clearAbortConfirmTimer();
+		this.updateConsoleBar();
 		this.setHoveredNode(undefined);
 		this.renderer?.setSelectedNodeIds([]);
 		this.renderer?.setSelectedEdgeKey(undefined);
-		this.renderer?.setHighlightedSupervisorId(undefined);
 		this.renderer?.setTraceHighlightEdges(undefined);
-		this.renderer?.setPreviewAddedNodeIds(undefined);
 		this.renderer?.resetTransitTracking();
 		super.clearInput();
 	}
@@ -3838,9 +3801,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (this.rootEl) {
 			this.rootEl.style.width = `${dimension.width}px`;
 			this.rootEl.style.height = `${dimension.height}px`;
-			if (dimension.width < DUAL_DRAWER_MIN_WIDTH && this.fileDrawer?.isOpen() && this.nodeInspector?.isOpen()) {
-				this.fileDrawer.toggle(false);
-			}
 			this.syncHudLayoutClasses();
 			this.syncMinimapViewport();
 		}

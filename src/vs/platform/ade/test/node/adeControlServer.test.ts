@@ -885,6 +885,11 @@ suite('AdeControlServer', () => {
 			action: 'token.complete',
 			params: { tokenId: 'tok-1', summary: 'Done' },
 		});
+		const returnRes = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'token.return',
+			params: { tokenId: 'otok-1', summary: 'Returned to superior' },
+		});
 		const whoamiRes = await sendWireRequest(server.socketPath, {
 			token: missionNodePureToken,
 			action: 'whoami',
@@ -895,10 +900,26 @@ suite('AdeControlServer', () => {
 			params: { missionId: 'm1', nodeId: 'N1' },
 		});
 		assert.strictEqual(completeRes.ok, true);
+		assert.strictEqual(returnRes.ok, true);
 		assert.strictEqual(whoamiRes.ok, true);
 		assert.strictEqual(dryRunCheckRes.ok, true);
 
-		// All non-token orchestration actions (including modifying/removing checks) are strictly denied at the server boundary
+		// All non-token orchestration actions (including mint/split, staff mutation, task completion, check mutation) are strictly denied
+		const deniedMint = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'token.mint',
+			params: { tokenId: 'otok-1', branches: [] },
+		});
+		const deniedStaffRemove = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'orchestration.staff.remove',
+			params: { nodeId: 'E1' },
+		});
+		const deniedTaskComplete = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'mission.task.complete',
+			params: { nodeId: 'T1' },
+		});
 		const deniedPatch = await sendWireRequest(server.socketPath, {
 			token: missionNodePureToken,
 			action: 'mission.patch',
@@ -919,19 +940,19 @@ suite('AdeControlServer', () => {
 			action: 'session.delete',
 			params: { id: 'gov-1' },
 		});
-		assert.strictEqual(deniedPatch.ok, false);
-		assert.match(deniedPatch.error ?? '', /pure-execution Mission node sessions/i);
-		assert.strictEqual(deniedCheckSet.ok, false);
-		assert.match(deniedCheckSet.error ?? '', /pure-execution Mission node sessions/i);
-		assert.strictEqual(deniedCheckRemove.ok, false);
-		assert.match(deniedCheckRemove.error ?? '', /pure-execution Mission node sessions/i);
-		assert.strictEqual(deniedDelete.ok, false);
-		assert.match(deniedDelete.error ?? '', /pure-execution Mission node sessions/i);
+		for (const denied of [deniedMint, deniedStaffRemove, deniedTaskComplete, deniedPatch, deniedCheckSet, deniedCheckRemove, deniedDelete]) {
+			assert.strictEqual(denied.ok, false);
+			assert.match(denied.error ?? '', /pure-execution (Mission node|Engineering staff) sessions/i);
+		}
 
 		assert.deepStrictEqual(dispatched, [
 			{
 				action: 'token.complete',
 				params: { tokenId: 'tok-1', summary: 'Done', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
+			},
+			{
+				action: 'token.return',
+				params: { tokenId: 'otok-1', summary: 'Returned to superior', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
 			},
 			{
 				action: 'whoami',

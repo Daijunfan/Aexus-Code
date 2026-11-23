@@ -29,8 +29,10 @@ async function writeIfChanged(filePath: string, content: string): Promise<void> 
 
 /**
  * Synchronizes the single canonical copy of ADE API docs on disk:
- * - `<adeHome>/docs/ranks/L0.md`, `L1.md`, ..., `L<N>.md`
- * - `<adeHome>/docs/mission/MISSION_API.md` (sibling directory alongside `ranks/`)
+ * - `<adeHome>/docs/common/COMMON_API.md`
+ * - `<adeHome>/docs/ranks/L0.md`, `L1.md`, ..., `L<N>.md` (pure Native Rank CLI docs)
+ * - `<adeHome>/docs/engineering/ENGINEERING_PARADIGM.md` & `ENGINEERING_API.md` (sibling Engineering docs)
+ * - `<adeHome>/docs/mission/MISSION_API.md` (sibling unified Engineering/Mission reference)
  *
  * Writes only when content changes and prunes stale `L<k>.md` files when tier count shrinks.
  */
@@ -44,6 +46,7 @@ export async function syncAdeApiDocsToDisk(
 	await Promise.all([
 		...(paths.commonDir ? [fs.promises.mkdir(paths.commonDir, { recursive: true, mode: 0o700 })] : []),
 		fs.promises.mkdir(paths.ranksDir, { recursive: true, mode: 0o700 }),
+		...(paths.engineeringDir ? [fs.promises.mkdir(paths.engineeringDir, { recursive: true, mode: 0o700 })] : []),
 		fs.promises.mkdir(paths.missionDir, { recursive: true, mode: 0o700 }),
 	]);
 
@@ -58,6 +61,11 @@ export async function syncAdeApiDocsToDisk(
 	}
 	for (const [fileName, content] of Object.entries(bundle.rankFiles)) {
 		writes.push(writeIfChanged(path.join(paths.ranksDir, fileName), content));
+	}
+	if (paths.engineeringDir && bundle.engineeringFiles) {
+		for (const [fileName, content] of Object.entries(bundle.engineeringFiles)) {
+			writes.push(writeIfChanged(path.join(paths.engineeringDir, fileName), content));
+		}
 	}
 	writes.push(writeIfChanged(path.join(paths.missionDir, ADE_DOCS_MISSION_FILE_NAME), bundle.missionFile));
 	await Promise.all(writes);

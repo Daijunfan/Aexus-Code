@@ -950,7 +950,14 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 
 	syncMissionMermaidEmployees(
 		ownerOrMissionId: string,
-		employees: readonly { readonly id: string; readonly title: string; readonly nodeIds?: readonly string[]; readonly isExplicitEmployee?: boolean }[],
+		employees: readonly {
+			readonly id: string;
+			readonly title: string;
+			readonly nodeIds?: readonly string[];
+			readonly isExplicitEmployee?: boolean;
+			readonly parentKey?: string;
+			readonly role?: AdeAgentRole;
+		}[],
 		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
 	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] } {
 		const ownerAgent = this.getAgent(ownerOrMissionId);
@@ -997,13 +1004,17 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		const inheritedEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId;
 
 		const ownerCutoffTier = effectiveCutoffTier;
+		const generatedByEmpKey = new Map<string, IAdeAgent>();
+		const parentKeyByAgentId = new Map<string, string>();
 		for (const emp of employees) {
 			const prev = existingByKey.get(emp.id);
 			const nodeIds = emp.nodeIds && emp.nodeIds.length > 0 ? [...emp.nodeIds] : [emp.id];
 			const defaultLabel = emp.isExplicitEmployee ? emp.title : (emp.title.startsWith(`[${emp.id}] `) ? emp.title : `[${emp.id}] ${emp.title}`);
-			const preservedRole = prev
-				? (resolveEffectiveRankDefinition(schema, prev.role, false).tier > ownerCutoffTier ? prev.role : employeeRole)
-				: employeeRole;
+			const preservedRole = emp.role !== undefined
+				? emp.role
+				: (prev
+					? (resolveEffectiveRankDefinition(schema, prev.role, false).tier > ownerCutoffTier ? prev.role : employeeRole)
+					: employeeRole);
 			const nextAgent: IAdeAgent = prev
 				? {
 					...prev,
@@ -1012,6 +1023,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					label: prev.labelIsCustom ? prev.label : defaultLabel,
 					role: preservedRole,
 					archived: undefined,
+					preferredEngineId: prev.preferredEngineId ?? inheritedEngineId,
 					treeType: 'mission',
 					treeGovernorId: ownerOrMissionId,
 					treeNodeId: emp.id,
@@ -1022,7 +1034,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					parentId: ownerAgent?.id,
 					projectUri: targetProjectUri,
 					label: defaultLabel,
-					role: employeeRole,
+					role: preservedRole,
 					status: 'idle',
 					draft: '',
 					preferredEngineId: inheritedEngineId,
@@ -1033,9 +1045,50 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 				};
 			keptIds.add(nextAgent.id);
 			nextGenerated.push(nextAgent);
-			employeeAgentsByNode[emp.id] = nextAgent;
+			generatedByEmpKey.set(emp.id, nextAgent);
 			for (const nid of nodeIds) {
+				generatedByEmpKey.set(nid, nextAgent);
 				employeeAgentsByNode[nid] = nextAgent;
+			}
+			employeeAgentsByNode[emp.id] = nextAgent;
+			if (emp.parentKey) {
+				parentKeyByAgentId.set(nextAgent.id, emp.parentKey);
+			}
+		}
+
+		// Pass 2: wire hierarchical parentId links (e.g. L3 Engineer -> L2 Manager -> L1 Governor) strictly acyclic!
+		if (parentKeyByAgentId.size > 0) {
+			const agentById = new Map(nextGenerated.map(a => [a.id, a]));
+			const wouldCycle = (childId: string, candParentId: string): boolean => {
+				let cursor: string | undefined = candParentId;
+				const visited = new Set<string>([childId]);
+				while (cursor) {
+					if (visited.has(cursor)) {
+						return true;
+					}
+					visited.add(cursor);
+					cursor = agentById.get(cursor)?.parentId;
+				}
+				return false;
+			};
+			for (let i = 0; i < nextGenerated.length; i++) {
+				const ag = nextGenerated[i];
+				const pKey = parentKeyByAgentId.get(ag.id);
+				if (!pKey) {
+					continue;
+				}
+				const parentTarget = generatedByEmpKey.get(pKey);
+				if (parentTarget && parentTarget.id !== ag.id && !wouldCycle(ag.id, parentTarget.id)) {
+					const updated: IAdeAgent = { ...ag, parentId: parentTarget.id };
+					nextGenerated[i] = updated;
+					agentById.set(updated.id, updated);
+					if (updated.treeNodeId) {
+						employeeAgentsByNode[updated.treeNodeId] = updated;
+					}
+					for (const nid of updated.treeNodeIds ?? []) {
+						employeeAgentsByNode[nid] = updated;
+					}
+				}
 			}
 		}
 
@@ -1159,7 +1212,17 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		if (!parent) {
 			throw new Error(localize('agentParentMissing', "The parent Agent no longer exists."));
 		}
-		return this.add({ id: generateUuid(), parentId, projectUri: parent.projectUri, label, role, draft: '', status: 'idle' });
+		const inheritedEngineId = parent.session?.engineId ?? parent.preferredEngineId;
+		return this.add({
+			id: generateUuid(),
+			parentId,
+			projectUri: parent.projectUri,
+			label,
+			role,
+			draft: '',
+			status: 'idle',
+			...(inheritedEngineId ? { preferredEngineId: inheritedEngineId } : {}),
+		});
 	}
 
 	addSession(projectUri: URI, session: IAdeSession, label: string, optionsOrParentId?: string | IAdeAddSessionOptions): IAdeAgent {
@@ -1204,6 +1267,21 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, session: { engineId: session.engineId, resource: session.resource } } : agent);
 		this.saveAgents();
 		this.changeEmitter.fire();
+	}
+
+	unbindSession(id: string): void {
+		let changed = false;
+		this.entries = this.entries.map(agent => {
+			if (agent.id !== id || !agent.session) {
+				return agent;
+			}
+			changed = true;
+			return { ...agent, session: undefined, status: 'idle' as const };
+		});
+		if (changed) {
+			this.saveAgents();
+			this.changeEmitter.fire();
+		}
 	}
 
 	moveProject(id: string, targetId: string | undefined, after: boolean): void {

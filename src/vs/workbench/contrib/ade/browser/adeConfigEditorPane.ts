@@ -67,7 +67,7 @@ interface IMutableConfigDraft {
 	ranks: IMutableRankEntry[];
 }
 
-const MISSION_ALIAS_SUGGESTIONS = ['Mission', 'Engineering', 'Research'] as const;
+const MISSION_ALIAS_SUGGESTIONS = ['Engineering', 'Mission', 'Research'] as const;
 
 function cloneConfigToDraft(config: IAdeOrganizationConfig): IMutableConfigDraft {
 	return {
@@ -324,7 +324,7 @@ export class AdeConfigEditorPane extends EditorPane {
 		this.dirtyPillEl.hidden = !this.dirty;
 		append(titleBlock, $('p.ade-cfg-subtitle', {}, localize(
 			'adeConfigSubtitle',
-			"Customize Mission mode display alias, rank depth (L-1 User → L0 Secretary → L1 highest → LN lowest), and custom tier names.",
+			"Customize Engineering mode display alias, rank depth (L-1 User → L0 Secretary → L1 highest → LN lowest), and custom tier names.",
 		)));
 
 		const actions = append(header, $('.ade-cfg-actions'));
@@ -367,10 +367,10 @@ export class AdeConfigEditorPane extends EditorPane {
 		const card = append(shell, $('.ade-cfg-card'));
 		const header = append(card, $('.ade-cfg-card-header'));
 		const titleGroup = append(header, $('.ade-cfg-card-title-group'));
-		append(titleGroup, $('h2.ade-cfg-card-title', {}, localize('adeConfigMissionAliasTitle', "Mission Mode Display Name")));
+		append(titleGroup, $('h2.ade-cfg-card-title', {}, localize('adeConfigMissionAliasTitle', "Engineering Mode Display Name")));
 		append(titleGroup, $('p.ade-cfg-card-hint', {}, localize(
 			'adeConfigMissionAliasHint',
-			"Unified Mission mode replaces separate Engineering/Research modes. Rename freely — left sidebar badges & Mission tabs hot-update live.",
+			"Engineering encompasses both Mission (Task DAG) and Orchestration (All-Staff Topology) views. Rename freely — left sidebar badges & tabs hot-update live.",
 		)));
 
 		const body = append(card, $('.ade-cfg-mission-row'));
@@ -379,7 +379,7 @@ export class AdeConfigEditorPane extends EditorPane {
 			maxlength: '32',
 			value: this.draft.missionName,
 			placeholder: DEFAULT_ADE_MISSION_NAME,
-			'aria-label': localize('adeConfigMissionAliasInputAria', "Mission mode display alias"),
+			'aria-label': localize('adeConfigMissionAliasInputAria', "Engineering mode display alias"),
 			'data-ade-mission-alias-input': 'true',
 		})) as HTMLInputElement;
 
@@ -503,10 +503,10 @@ export class AdeConfigEditorPane extends EditorPane {
 		const card = append(shell, $('.ade-cfg-card'));
 		const header = append(card, $('.ade-cfg-card-header'));
 		const titleGroup = append(header, $('.ade-cfg-card-title-group'));
-		append(titleGroup, $('h2.ade-cfg-card-title', {}, localize('adeConfigDocsTitle', "Single-Copy API Docs & Mission Reference")));
+		append(titleGroup, $('h2.ade-cfg-card-title', {}, localize('adeConfigDocsTitle', "Single-Copy API Docs & Engineering Reference")));
 		append(titleGroup, $('p.ade-cfg-card-hint', {}, localize(
 			'adeConfigDocsHint',
-			"Stored once in a shared location. Roles read strictly by L<tier>; Mission docs live alongside ranks/ and are read on demand.",
+			"Stored once in a shared location. Roles read strictly by L<tier>; Engineering docs (Mission & Orchestration) live alongside ranks/ and are read on demand.",
 		)));
 
 		const headerBtns = append(header, $('.ade-cfg-actions'));
@@ -532,23 +532,36 @@ export class AdeConfigEditorPane extends EditorPane {
 		const ranksTitle = append(ranksBox, $('.ade-cfg-doc-box-title'));
 		const ranksIcon = append(ranksTitle, $('span'));
 		ranksIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.book));
-		append(ranksTitle, $('span', {}, localize('adeConfigRanksDocsBoxTitle', "Rank Docs (L0 .. L{0})", this.draft.ranks.length)));
+		append(ranksTitle, $('span', {}, localize('adeConfigRanksDocsBoxTitle', "Native Rank Docs (L0 .. L{0})", this.draft.ranks.length)));
 		append(ranksBox, $('.ade-cfg-doc-box-path', { 'data-ade-docs-ranks': docs.ranksDir }, docs.ranksDir));
 		append(ranksBox, $('.ade-cfg-doc-box-desc', {}, localize(
 			'adeConfigRanksDocsBoxDesc',
-			"Contains L0.md through L{0}.md. Indexed strictly by tier so custom alias renames never invalidate role manuals.",
+			"Contains L0.md through L{0}.md (pure Native Rank CLI APIs). Indexed strictly by tier so custom alias renames never invalidate role manuals.",
 			this.draft.ranks.length,
 		)));
+
+		if (docs.engineeringDir) {
+			const engBox = append(grid, $('.ade-cfg-doc-box'));
+			const engTitle = append(engBox, $('.ade-cfg-doc-box-title'));
+			const engIcon = append(engTitle, $('span'));
+			engIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.organization));
+			append(engTitle, $('span', {}, localize('adeConfigEngineeringDocsBoxTitle', "Engineering Paradigm & API (Sibling · On Demand)")));
+			append(engBox, $('.ade-cfg-doc-box-path', { 'data-ade-docs-engineering': docs.engineeringDir }, docs.engineeringDir));
+			append(engBox, $('.ade-cfg-doc-box-desc', {}, localize(
+				'adeConfigEngineeringDocsBoxDesc',
+				"Contains ENGINEERING_PARADIGM.md (token rules, dual-view workflow, staffing & Task DAG) and ENGINEERING_API.md, placed alongside ranks/.",
+			)));
+		}
 
 		const missionBox = append(grid, $('.ade-cfg-doc-box'));
 		const missionTitle = append(missionBox, $('.ade-cfg-doc-box-title'));
 		const missionIcon = append(missionTitle, $('span'));
 		missionIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.typeHierarchySub));
-		append(missionTitle, $('span', {}, localize('adeConfigMissionDocsBoxTitle', "Mission Docs (Sibling · On Demand)")));
+		append(missionTitle, $('span', {}, localize('adeConfigMissionDocsBoxTitle', "Unified Mission Reference (Sibling · On Demand)")));
 		append(missionBox, $('.ade-cfg-doc-box-path', { 'data-ade-docs-mission': docs.missionDoc }, docs.missionDoc));
 		append(missionBox, $('.ade-cfg-doc-box-desc', {}, localize(
 			'adeConfigMissionDocsBoxDesc',
-			"Unified Mission API manual placed alongside ranks/. Read only on demand.",
+			"Unified Engineering/Mission API reference placed alongside ranks/ and engineering/. Read on demand.",
 		)));
 	}
 }

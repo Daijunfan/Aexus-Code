@@ -300,7 +300,7 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 
 		const inGraph = queryApiUpdateDiff(1, 'in_graph');
 		assert.strictEqual(inGraph.scope, 'in_graph');
-		assert.strictEqual(inGraph.added.length, 6);
+		assert.strictEqual(inGraph.added.length, 11);
 		assert.ok(inGraph.added.every(entry => entry.scope === 'in_graph' && entry.addedInRevision >= 2));
 		assert.deepStrictEqual(
 			inGraph.added.map(entry => entry.id).sort(),
@@ -309,7 +309,12 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 				'in_graph.token.complete',
 				'in_graph.token.current',
 				'in_graph.token.fail',
+				'in_graph.token.handoff',
+				'in_graph.token.history',
+				'in_graph.token.mint_split',
+				'in_graph.token.read',
 				'in_graph.token.reject',
+				'in_graph.token.return',
 				'in_graph.token.trace',
 			],
 		);
@@ -322,17 +327,46 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 				'mission.boundary',
 				'mission.check',
 				'mission.host.bind',
+				'mission.migration',
 				'mission.patch',
 				'mission.prompt',
 				'mission.recall',
 				'mission.retry',
+				'mission.task',
+				'mission.task.authoring',
 				'mission.trigger',
+				'orchestration.authoring',
+				'orchestration.manifest_and_control',
+				'orchestration.migration',
+				'orchestration.staff.create',
+				'orchestration.topology',
 			],
 		);
 		assert.strictEqual(mission.modified.length, 0);
 
 		const missionFromRev3 = queryApiUpdateDiff(3, 'mission');
-		assert.deepStrictEqual(missionFromRev3.added.map(entry => entry.id), ['mission.check']);
+		assert.deepStrictEqual(
+			missionFromRev3.added.map(entry => entry.id).sort(),
+			['mission.check', 'mission.migration', 'mission.task', 'mission.task.authoring', 'orchestration.authoring', 'orchestration.manifest_and_control', 'orchestration.migration', 'orchestration.staff.create', 'orchestration.topology'],
+		);
+		const missionFromRev4 = queryApiUpdateDiff(4, 'mission');
+		assert.deepStrictEqual(
+			missionFromRev4.added.map(entry => entry.id).sort(),
+			['mission.migration', 'mission.task', 'mission.task.authoring', 'orchestration.authoring', 'orchestration.manifest_and_control', 'orchestration.migration', 'orchestration.staff.create', 'orchestration.topology'],
+		);
+		const missionFromRev6 = queryApiUpdateDiff(6, 'mission');
+		assert.deepStrictEqual(
+			missionFromRev6.added.map(entry => entry.id).sort(),
+			['mission.migration', 'mission.task.authoring', 'orchestration.authoring', 'orchestration.manifest_and_control', 'orchestration.migration'],
+		);
+		const rev8All = queryApiUpdateDiff(7, 'all');
+		assert.deepStrictEqual(
+			rev8All.added.map(entry => entry.id).sort(),
+			['in_graph.token.mint_split', 'in_graph.token.return', 'mission.task.authoring', 'orchestration.manifest_and_control'],
+		);
+		assert.ok(rev8All.modified.some(entry => entry.id === 'orchestration.authoring'));
+		const commonFromRev4 = queryApiUpdateDiff(4, 'common');
+		assert.deepStrictEqual(commonFromRev4.added.map(entry => entry.id), ['common.whiteboard']);
 		const inGraphFromRev3 = queryApiUpdateDiff(3, 'in_graph');
 		assert.ok(inGraphFromRev3.modified.some(entry => entry.id === 'in_graph.token.complete'));
 
@@ -376,7 +410,7 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 		const commonText = await fs.promises.readFile(commonDoc, 'utf8');
 		assert.ok(commonText.includes(`Current API Revision: **${ADE_API_LATEST_REVISION}**`));
 		const missionText = await fs.promises.readFile(missionDoc, 'utf8');
-		assert.ok(missionText.includes('Unified Mission API Reference'));
+		assert.ok(missionText.includes('Engineering Dual-View API Reference'));
 	});
 });
 

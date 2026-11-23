@@ -41,20 +41,35 @@ function normalizeUnixSocketPath(candidate: string): string {
 	return path.join('/tmp', `aexus-ade-${hash}.sock`);
 }
 const PURE_WORKER_DENIED_ERROR = 'Permission denied: pure execution Worker sessions have no ADE control plane access.';
-const PURE_MISSION_NODE_DENIED_ERROR = 'Permission denied: pure-execution Mission node sessions may only invoke token.*, mission.check.{list,get,run}, whoami, docs.read, or api.update.';
+const PURE_MISSION_NODE_DENIED_ERROR = 'Permission denied: pure-execution Engineering staff sessions may only invoke token.{current,trace,read,history,handoff,return,complete,reject,block,fail}, mission.task.{list,get}, orchestration.{get,status}, whiteboard.{list,create,read,write}, mission.check.{list,get,run}, rank.{names,list,get}, whoami, docs.read, or api.update.';
 const PURE_MISSION_NODE_ALLOWED_ACTIONS = new Set([
 	'whoami',
 	'docs.read',
 	'api.update',
+	'rank.names',
+	'rank.list',
+	'rank.get',
 	'token.current',
 	'token.trace',
+	'token.read',
+	'token.history',
+	'token.handoff',
+	'token.return',
 	'token.complete',
 	'token.reject',
 	'token.block',
 	'token.fail',
+	'mission.task.list',
+	'mission.task.get',
 	'mission.check.list',
 	'mission.check.get',
 	'mission.check.run',
+	'orchestration.get',
+	'orchestration.status',
+	'whiteboard.list',
+	'whiteboard.create',
+	'whiteboard.read',
+	'whiteboard.write',
 ]);
 
 export interface IAdeControlDispatchOptions {

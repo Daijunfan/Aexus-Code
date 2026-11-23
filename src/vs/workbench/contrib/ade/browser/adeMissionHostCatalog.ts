@@ -227,16 +227,19 @@ export class AdeMissionHostCatalog extends Disposable {
 		};
 	}
 
-	resolveEffectiveNodeProbeUri(explicitHostAlias: string | undefined, agent: IAdeAgent): URI {
+	resolveEffectiveNodeProbeUri(explicitHostAlias: string | undefined, agent: IAdeAgent | undefined): URI {
 		const explicitHost = explicitHostAlias?.trim();
 		if (explicitHost && explicitHost.toLowerCase() !== 'local') {
-			if (isCloudProjectUri(agent.projectUri) && agent.projectUri.authority.toLowerCase() === explicitHost.toLowerCase()) {
+			if (agent && isCloudProjectUri(agent.projectUri) && agent.projectUri.authority.toLowerCase() === explicitHost.toLowerCase()) {
 				return agent.projectUri;
 			}
 			const savedHost = this.cloudHostsByAlias.get(explicitHost.toLowerCase());
 			const rawDir = savedHost?.defaultDirectory?.trim() || '/';
 			const uriPath = rawDir.startsWith('/') ? rawDir : `/${rawDir}`;
 			return URI.from({ scheme: AEXUS_SSH_SCHEME, authority: savedHost?.alias || explicitHost, path: uriPath });
+		}
+		if (!agent) {
+			return URI.file('/');
 		}
 		if (explicitHost?.toLowerCase() === 'local' && isCloudProjectUri(agent.projectUri)) {
 			return URI.file('/');

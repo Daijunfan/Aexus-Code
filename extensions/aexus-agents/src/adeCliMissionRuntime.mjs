@@ -44,7 +44,7 @@ export function parseWhoamiCommand(tail, json, windowId, usageError) {
 export function parseDocsCommand(tail, json, windowId, usageError) {
 	const first = tail[0]?.trim();
 	if (!first) {
-		throw usageError('Usage: aexus-ade docs read <common|mission|manifest|L0..LN>');
+		throw usageError('Usage: aexus-ade docs read <common|L0..LN|engineering|paradigm|engineering-api|mission|manifest>');
 	}
 	if (first === 'read' || first === 'get' || first === 'cat') {
 		const target = tail[1]?.trim() || 'common';
@@ -88,6 +88,19 @@ export function parseApiCommand(tail, json, windowId, usageError) {
 			...(scope ? { scope } : {}),
 		},
 	};
+}
+
+function parseKeyValBlobFlag(rawValue, flagName, usageError) {
+	const eqIdx = rawValue.indexOf('=');
+	if (eqIdx <= 0) {
+		throw usageError(`${flagName} expects "Title=Content" (e.g. ${flagName} "API Spec=...").`);
+	}
+	const title = rawValue.slice(0, eqIdx).trim();
+	const content = rawValue.slice(eqIdx + 1).trim();
+	if (!title || !content) {
+		throw usageError(`${flagName} requires both a non-empty Title and Content ("Title=Content").`);
+	}
+	return { title, content };
 }
 
 export function parseTokenGroupCommand(tail, json, windowId, usageError) {
@@ -135,6 +148,53 @@ export function parseTokenGroupCommand(tail, json, windowId, usageError) {
 		return { help: false, json, windowId, action: 'token.trace', params };
 	}
 
+	if (sub === 'read' || sub === 'inspect' || sub === 'deref') {
+		const params = { ptrs: [] };
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--token', '--token-id')) {
+				params.tokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (matchFlag(arg, '--ptr', '--ptrs', '--ref', '--refs')) {
+				const raw = takeOptVal(args, ref, '--ptr', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.ptrs.push(...raw);
+			} else if (!arg.startsWith('-')) {
+				params.ptrs.push(...arg.split(',').map(s => s.trim()).filter(Boolean));
+			} else {
+				throw usageError(`Unknown option for token read: ${arg}`);
+			}
+		}
+		if (params.ptrs.length === 0) {
+			throw usageError('Usage: aexus-ade token read <ptr1[,ptr2...]> [--mission <id>] [--token <tokenId>]');
+		}
+		return { help: false, json, windowId, action: 'token.read', params };
+	}
+
+	if (sub === 'history' || sub === 'log') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--token', '--token-id')) {
+				params.tokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (arg === '--all') {
+				params.all = true;
+			} else if (arg === '--delta' || arg === '--delta-only') {
+				params.deltaOnly = true;
+			} else if (!arg.startsWith('-') && !params.tokenId) {
+				params.tokenId = arg;
+			} else {
+				throw usageError(`Unknown option for token history: ${arg}`);
+			}
+		}
+		if (!params.tokenId) {
+			throw usageError('Usage: aexus-ade token history <tokenId> [--mission <id>] [--all | --delta]');
+		}
+		return { help: false, json, windowId, action: 'token.history', params };
+	}
+
 	if (sub === 'complete' || sub === 'done' || sub === 'submit') {
 		const params = {};
 		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
@@ -143,6 +203,33 @@ export function parseTokenGroupCommand(tail, json, windowId, usageError) {
 				params.missionId = takeOptVal(args, ref, '--mission', usageError);
 			} else if (matchFlag(arg, '--summary', '--message')) {
 				params.summary = takeOptVal(args, ref, '--summary', usageError);
+			} else if (matchFlag(arg, '--detail', '--body')) {
+				params.detail = takeOptVal(args, ref, '--detail', usageError);
+			} else if (matchFlag(arg, '--artifact')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--artifact', usageError), '--artifact', usageError);
+				params.artifacts = [...(params.artifacts ?? []), item];
+			} else if (matchFlag(arg, '--decision')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--decision', usageError), '--decision', usageError);
+				params.decisions = [...(params.decisions ?? []), item];
+			} else if (matchFlag(arg, '--ref', '--refs')) {
+				const rawRefs = takeOptVal(args, ref, '--ref', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.refPtrs = [...(params.refPtrs ?? []), ...rawRefs];
+			} else if (matchFlag(arg, '--to', '--target', '--targets')) {
+				const rawTo = takeOptVal(args, ref, '--to', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.toNodeIds = [...(params.toNodeIds ?? []), ...rawTo];
+			} else if (matchFlag(arg, '--whiteboard', '--whiteboards', '--wb')) {
+				const rawWb = takeOptVal(args, ref, '--whiteboard', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.whiteboardIds = [...(params.whiteboardIds ?? []), ...rawWb];
+			} else if (matchFlag(arg, '--task', '--task-id', '--task-node')) {
+				params.taskNodeId = takeOptVal(args, ref, '--task', usageError);
+			} else if (matchFlag(arg, '--tasks', '--task-ids')) {
+				const rawT = takeOptVal(args, ref, '--tasks', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.taskNodeIds = [...(params.taskNodeIds ?? []), ...rawT];
+			} else if (matchFlag(arg, '--files', '--modified-files', '--changed-files')) {
+				const rawFiles = takeOptVal(args, ref, '--files', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.modifiedFiles = [...(params.modifiedFiles ?? []), ...rawFiles];
+			} else if (arg === '--finish' || arg === '--final') {
+				params.finish = true;
 			} else if (matchFlag(arg, '--token', '--token-id')) {
 				params.tokenId = takeOptVal(args, ref, '--token', usageError);
 			} else if (arg === '--skip-checks') {
@@ -154,9 +241,170 @@ export function parseTokenGroupCommand(tail, json, windowId, usageError) {
 			}
 		}
 		if (!params.tokenId || !params.summary) {
-			throw usageError('Usage: aexus-ade token complete <tokenId> --summary "<concise factual summary>" [--mission <id>]');
+			throw usageError('Usage: aexus-ade token complete <tokenId> --summary "<1-line headline>" [--detail "<full round detail>"] [--artifact "Title=Body"] [--decision "Title=Body"] [--to <nodeId[,...]>] [--whiteboard <wbId[,...]>] [--finish] [--mission <id>]');
 		}
 		return { help: false, json, windowId, action: 'token.complete', params };
+	}
+
+	if (sub === 'handoff' || sub === 'pass' || sub === 'relay') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--to', '--target', '--targets')) {
+				const rawTo = takeOptVal(args, ref, '--to', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.toNodeIds = [...(params.toNodeIds ?? []), ...rawTo];
+			} else if (matchFlag(arg, '--summary', '--message')) {
+				params.summary = takeOptVal(args, ref, '--summary', usageError);
+			} else if (matchFlag(arg, '--detail', '--body')) {
+				params.detail = takeOptVal(args, ref, '--detail', usageError);
+			} else if (matchFlag(arg, '--artifact')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--artifact', usageError), '--artifact', usageError);
+				params.artifacts = [...(params.artifacts ?? []), item];
+			} else if (matchFlag(arg, '--decision')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--decision', usageError), '--decision', usageError);
+				params.decisions = [...(params.decisions ?? []), item];
+			} else if (matchFlag(arg, '--ref', '--refs')) {
+				const rawRefs = takeOptVal(args, ref, '--ref', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.refPtrs = [...(params.refPtrs ?? []), ...rawRefs];
+			} else if (matchFlag(arg, '--whiteboard', '--whiteboards', '--wb')) {
+				const rawWb = takeOptVal(args, ref, '--whiteboard', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.whiteboardIds = [...(params.whiteboardIds ?? []), ...rawWb];
+			} else if (matchFlag(arg, '--task', '--task-id', '--task-node')) {
+				params.taskNodeId = takeOptVal(args, ref, '--task', usageError);
+			} else if (matchFlag(arg, '--tasks', '--task-ids')) {
+				const rawT = takeOptVal(args, ref, '--tasks', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.taskNodeIds = [...(params.taskNodeIds ?? []), ...rawT];
+			} else if (matchFlag(arg, '--files', '--modified-files', '--changed-files')) {
+				const rawFiles = takeOptVal(args, ref, '--files', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.modifiedFiles = [...(params.modifiedFiles ?? []), ...rawFiles];
+			} else if (arg === '--skip-checks') {
+				params.skipChecks = true;
+			} else if (matchFlag(arg, '--token', '--token-id')) {
+				params.tokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (!arg.startsWith('-') && !params.tokenId) {
+				params.tokenId = arg;
+			} else {
+				throw usageError(`Unknown option for token handoff: ${arg}`);
+			}
+		}
+		if (!params.tokenId || !params.toNodeIds?.length || !params.summary) {
+			throw usageError('Usage: aexus-ade token handoff <tokenId> --to <nodeId[,nodeId2]> --summary "<1-line headline>" [--detail "<full round detail>"] [--task <taskId>] [--artifact "Title=Body"] [--decision "Title=Body"] [--whiteboard <wbId[,...]>] [--ref <ptr[,...]>] [--mission <id>]');
+		}
+		return { help: false, json, windowId, action: 'token.handoff', params };
+	}
+
+	if (sub === 'mint' || sub === 'split' || sub === 'fork') {
+		const isSplit = sub === 'split' || sub === 'fork';
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--to', '--target', '--targets')) {
+				const rawTo = takeOptVal(args, ref, '--to', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.toNodeIds = [...(params.toNodeIds ?? []), ...rawTo];
+			} else if (matchFlag(arg, '--summary', '--message')) {
+				params.summary = takeOptVal(args, ref, '--summary', usageError);
+			} else if (matchFlag(arg, '--detail', '--body')) {
+				params.detail = takeOptVal(args, ref, '--detail', usageError);
+			} else if (matchFlag(arg, '--task', '--task-id', '--task-node')) {
+				params.taskNodeId = takeOptVal(args, ref, '--task', usageError);
+			} else if (matchFlag(arg, '--tasks', '--task-ids')) {
+				const rawT = takeOptVal(args, ref, '--tasks', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.taskNodeIds = [...(params.taskNodeIds ?? []), ...rawT];
+			} else if (matchFlag(arg, '--branches-json', '--branches')) {
+				params.branchesJson = takeOptVal(args, ref, '--branches-json', usageError);
+			} else if (matchFlag(arg, '--branch')) {
+				const rawBranch = takeOptVal(args, ref, '--branch', usageError);
+				let parsedBranch;
+				try {
+					parsedBranch = JSON.parse(rawBranch);
+				} catch (err) {
+					throw usageError(`Option --branch expects valid JSON object/array: ${err instanceof Error ? err.message : String(err)}`);
+				}
+				const items = Array.isArray(parsedBranch) ? parsedBranch : [parsedBranch];
+				params.branches = [...(params.branches ?? []), ...items];
+			} else if (matchFlag(arg, '--branches-file', '--file', '-f')) {
+				params.branchesFile = takeOptVal(args, ref, '--branches-file', usageError);
+			} else if (arg === '--wait-join' || arg === '--join') {
+				params.waitJoin = true;
+			} else if (arg === '--no-wait-join' || arg === '--keep-parent') {
+				params.waitJoin = false;
+				params.noWaitJoin = true;
+			} else if (matchFlag(arg, '--join-mode')) {
+				params.joinMode = takeOptVal(args, ref, '--join-mode', usageError).toLowerCase();
+			} else if (matchFlag(arg, '--artifact')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--artifact', usageError), '--artifact', usageError);
+				params.artifacts = [...(params.artifacts ?? []), item];
+			} else if (matchFlag(arg, '--decision')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--decision', usageError), '--decision', usageError);
+				params.decisions = [...(params.decisions ?? []), item];
+			} else if (matchFlag(arg, '--ref', '--refs')) {
+				const rawRefs = takeOptVal(args, ref, '--ref', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.refPtrs = [...(params.refPtrs ?? []), ...rawRefs];
+			} else if (matchFlag(arg, '--whiteboard', '--whiteboards', '--wb')) {
+				const rawWb = takeOptVal(args, ref, '--whiteboard', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.whiteboardIds = [...(params.whiteboardIds ?? []), ...rawWb];
+			} else if (matchFlag(arg, '--from', '--origin', '--node', '--from-node')) {
+				params.fromNodeId = takeOptVal(args, ref, '--from', usageError);
+			} else if (matchFlag(arg, '--parent', '--token', '--token-id')) {
+				params.parentTokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (!arg.startsWith('-') && !params.parentTokenId) {
+				params.parentTokenId = arg;
+			} else {
+				throw usageError(`Unknown option for token ${sub}: ${arg}`);
+			}
+		}
+		const hasBranches = Boolean(params.branchesJson || params.branchesFile || (Array.isArray(params.branches) && params.branches.length > 0) || (params.toNodeIds?.length && params.summary));
+		if (!hasBranches) {
+			throw usageError(`Usage: aexus-ade token ${sub} [parentTokenId] (--to <subNodeId> --summary "<headline>" [--detail "<spec>"] [--task <taskId>] | --branches-json '<json>') [--wait-join | --no-wait-join] [--join-mode all|any] [--from <staffNodeId>] [--mission <id>]`);
+		}
+		return { help: false, json, windowId, action: isSplit ? 'token.split' : 'token.mint', params };
+	}
+
+	if (sub === 'return' || sub === 'reply') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--to', '--target')) {
+				params.toNodeId = takeOptVal(args, ref, '--to', usageError);
+			} else if (matchFlag(arg, '--summary', '--message')) {
+				params.summary = takeOptVal(args, ref, '--summary', usageError);
+			} else if (matchFlag(arg, '--detail', '--body')) {
+				params.detail = takeOptVal(args, ref, '--detail', usageError);
+			} else if (matchFlag(arg, '--artifact')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--artifact', usageError), '--artifact', usageError);
+				params.artifacts = [...(params.artifacts ?? []), item];
+			} else if (matchFlag(arg, '--decision')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--decision', usageError), '--decision', usageError);
+				params.decisions = [...(params.decisions ?? []), item];
+			} else if (matchFlag(arg, '--ref', '--refs')) {
+				const rawRefs = takeOptVal(args, ref, '--ref', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.refPtrs = [...(params.refPtrs ?? []), ...rawRefs];
+			} else if (matchFlag(arg, '--whiteboard', '--whiteboards', '--wb')) {
+				const rawWb = takeOptVal(args, ref, '--whiteboard', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.whiteboardIds = [...(params.whiteboardIds ?? []), ...rawWb];
+			} else if (matchFlag(arg, '--files', '--modified-files', '--changed-files')) {
+				const rawFiles = takeOptVal(args, ref, '--files', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.modifiedFiles = [...(params.modifiedFiles ?? []), ...rawFiles];
+			} else if (arg === '--skip-checks') {
+				params.skipChecks = true;
+			} else if (matchFlag(arg, '--token', '--token-id')) {
+				params.tokenId = takeOptVal(args, ref, '--token', usageError);
+			} else if (!arg.startsWith('-') && !params.tokenId) {
+				params.tokenId = arg;
+			} else {
+				throw usageError(`Unknown option for token return: ${arg}`);
+			}
+		}
+		if (!params.tokenId || !params.summary) {
+			throw usageError('Usage: aexus-ade token return <tokenId> --summary "<1-line delivery>" [--to <superiorNodeId>] [--detail "<report>"] [--artifact "Title=Body"] [--decision "Title=Body"] [--whiteboard <wbId>] [--mission <id>]');
+		}
+		return { help: false, json, windowId, action: 'token.return', params };
 	}
 
 	if (sub === 'reject') {
@@ -871,5 +1119,1010 @@ export function parseMissionRuntimeSubcommand(tail, json, windowId, usageError) 
 		throw usageError(`Unknown mission check subcommand: ${cSub}`);
 	}
 
+	if (sub === 'task' || sub === 'tasks') {
+		const tSub = args[0]?.trim() || 'list';
+		const tArgs = args.slice(1);
+		if (tSub === 'list') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < tArgs.length; ref.i++) {
+				const arg = tArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(tArgs, ref, '--mission', usageError);
+				} else if (!arg.startsWith('-') && !params.missionId) {
+					params.missionId = arg;
+				} else {
+					throw usageError(`Unknown option for mission task list: ${arg}`);
+				}
+			}
+			return { help: false, json, windowId, action: 'mission.task.list', params };
+		}
+		if (tSub === 'get') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < tArgs.length; ref.i++) {
+				const arg = tArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(tArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--task')) {
+					params.nodeId = takeOptVal(tArgs, ref, '--node', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for mission task get: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade mission task get [--mission <id>] --node <taskId>');
+			}
+			return { help: false, json, windowId, action: 'mission.task.get', params };
+		}
+		if (tSub === 'create' || tSub === 'add') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < tArgs.length; ref.i++) {
+				const arg = tArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(tArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--id', '--node', '--node-id')) {
+					params.id = takeOptVal(tArgs, ref, '--id', usageError);
+				} else if (matchFlag(arg, '--title', '--label', '--name')) {
+					params.title = takeOptVal(tArgs, ref, '--title', usageError);
+				} else if (matchFlag(arg, '--description', '--desc', '--prompt')) {
+					params.description = takeOptVal(tArgs, ref, '--description', usageError);
+				} else if (matchFlag(arg, '--kind')) {
+					params.kind = takeOptVal(tArgs, ref, '--kind', usageError).toLowerCase();
+				} else if (matchFlag(arg, '--owner', '--owner-node')) {
+					params.ownerNodeId = takeOptVal(tArgs, ref, '--owner', usageError);
+				} else if (matchFlag(arg, '--assignee', '--assignee-node')) {
+					params.assigneeNodeId = takeOptVal(tArgs, ref, '--assignee', usageError);
+				} else if (matchFlag(arg, '--department', '--dept')) {
+					params.department = takeOptVal(tArgs, ref, '--department', usageError);
+				} else if (matchFlag(arg, '--min-tier', '--completer-tier')) {
+					params.minCompleterTier = Number(takeOptVal(tArgs, ref, '--min-tier', usageError).replace(/^L/i, ''));
+				} else if (matchFlag(arg, '--completers', '--allowed-completers')) {
+					params.allowedCompleterNodeIds = takeOptVal(tArgs, ref, '--completers', usageError).split(/[|,;]/).map(s => s.trim()).filter(Boolean);
+				} else if (matchFlag(arg, '--after', '--depends-on', '--upstream')) {
+					params.after = [...(params.after ?? []), ...takeOptVal(tArgs, ref, '--after', usageError).split(',').map(s => s.trim()).filter(Boolean)];
+				} else if (matchFlag(arg, '--before', '--downstream')) {
+					params.before = [...(params.before ?? []), ...takeOptVal(tArgs, ref, '--before', usageError).split(',').map(s => s.trim()).filter(Boolean)];
+				} else if (!arg.startsWith('-') && !params.title) {
+					params.title = arg;
+				} else {
+					throw usageError(`Unknown option for mission task create: ${arg}`);
+				}
+			}
+			if (!params.title && !params.id) {
+				throw usageError('Usage: aexus-ade mission task create [--mission <id>] [--id <T1>] --title "<Title>" [--description "<desc>"] [--after <T0,...>] [--before <T2,...>] [--owner <staffId>] [--assignee <staffId>] [--department <Dept>] [--min-tier <n>] [--completers <id1,id2>]');
+			}
+			return { help: false, json, windowId, action: 'mission.task.create', params };
+		}
+		if (tSub === 'update' || tSub === 'edit') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < tArgs.length; ref.i++) {
+				const arg = tArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(tArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--task', '--id')) {
+					params.nodeId = takeOptVal(tArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--title', '--label', '--name')) {
+					params.title = takeOptVal(tArgs, ref, '--title', usageError);
+				} else if (matchFlag(arg, '--description', '--desc', '--prompt', '--text')) {
+					params.description = takeOptVal(tArgs, ref, '--description', usageError);
+				} else if (matchFlag(arg, '--owner', '--owner-node')) {
+					params.ownerNodeId = takeOptVal(tArgs, ref, '--owner', usageError);
+				} else if (matchFlag(arg, '--assignee', '--assignee-node')) {
+					params.assigneeNodeId = takeOptVal(tArgs, ref, '--assignee', usageError);
+				} else if (matchFlag(arg, '--department', '--dept')) {
+					params.department = takeOptVal(tArgs, ref, '--department', usageError);
+				} else if (matchFlag(arg, '--min-tier', '--completer-tier')) {
+					const raw = takeOptVal(tArgs, ref, '--min-tier', usageError);
+					params.minCompleterTier = raw === '' || raw === 'none' ? null : Number(raw.replace(/^L/i, ''));
+				} else if (matchFlag(arg, '--completers', '--allowed-completers')) {
+					const raw = takeOptVal(tArgs, ref, '--completers', usageError);
+					params.allowedCompleterNodeIds = raw === '' || raw === 'none' ? null : raw.split(/[|,;]/).map(s => s.trim()).filter(Boolean);
+				} else if (matchFlag(arg, '--color', '--accent')) {
+					const raw = takeOptVal(tArgs, ref, '--color', usageError);
+					params.color = raw === '' || raw === 'default' || raw === 'none' ? null : raw;
+				} else if (matchFlag(arg, '--file')) {
+					params.file = takeOptVal(tArgs, ref, '--file', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for mission task ${tSub}: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade mission task update [--mission <id>] --node <taskId> [--title "<Title>"] [--description "<desc>"] [--owner <staffId>] [--assignee <staffId>] [--department <Dept>] [--min-tier <n>] [--completers <id1,id2>]');
+			}
+			return { help: false, json, windowId, action: 'mission.task.update', params };
+		}
+		if (tSub === 'remove' || tSub === 'rm' || tSub === 'delete') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < tArgs.length; ref.i++) {
+				const arg = tArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(tArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--task', '--id')) {
+					params.nodeId = takeOptVal(tArgs, ref, '--node', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for mission task remove: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade mission task remove [--mission <id>] --node <taskId>');
+			}
+			return { help: false, json, windowId, action: 'mission.task.remove', params };
+		}
+		if (tSub === 'edge' || tSub === 'edges') {
+			const eSub = tArgs[0]?.trim();
+			const eArgs = tArgs.slice(1);
+			if (eSub === 'add' || eSub === 'connect') {
+				const params = {};
+				for (const ref = { i: 0 }; ref.i < eArgs.length; ref.i++) {
+					const arg = eArgs[ref.i];
+					if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+						params.missionId = takeOptVal(eArgs, ref, '--mission', usageError);
+					} else if (matchFlag(arg, '--from')) {
+						params.from = takeOptVal(eArgs, ref, '--from', usageError);
+					} else if (matchFlag(arg, '--to')) {
+						params.to = takeOptVal(eArgs, ref, '--to', usageError);
+					} else if (matchFlag(arg, '--label')) {
+						params.label = takeOptVal(eArgs, ref, '--label', usageError);
+					} else if (matchFlag(arg, '--kind')) {
+						params.kind = takeOptVal(eArgs, ref, '--kind', usageError).toLowerCase();
+					} else if (!arg.startsWith('-') && !params.from) {
+						params.from = arg;
+					} else if (!arg.startsWith('-') && !params.to) {
+						params.to = arg;
+					} else {
+						throw usageError(`Unknown option for mission task edge add: ${arg}`);
+					}
+				}
+				if (!params.from || !params.to) {
+					throw usageError('Usage: aexus-ade mission task edge add [--mission <id>] <fromTaskId> <toTaskId> [--label "<text>"] [--kind success|fail]');
+				}
+				return { help: false, json, windowId, action: 'mission.task.edge.add', params };
+			}
+			if (eSub === 'remove' || eSub === 'rm' || eSub === 'delete') {
+				const params = {};
+				for (const ref = { i: 0 }; ref.i < eArgs.length; ref.i++) {
+					const arg = eArgs[ref.i];
+					if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+						params.missionId = takeOptVal(eArgs, ref, '--mission', usageError);
+					} else if (matchFlag(arg, '--from')) {
+						params.from = takeOptVal(eArgs, ref, '--from', usageError);
+					} else if (matchFlag(arg, '--to')) {
+						params.to = takeOptVal(eArgs, ref, '--to', usageError);
+					} else if (!arg.startsWith('-') && !params.from) {
+						params.from = arg;
+					} else if (!arg.startsWith('-') && !params.to) {
+						params.to = arg;
+					} else {
+						throw usageError(`Unknown option for mission task edge remove: ${arg}`);
+					}
+				}
+				if (!params.from || !params.to) {
+					throw usageError('Usage: aexus-ade mission task edge remove [--mission <id>] <fromTaskId> <toTaskId>');
+				}
+				return { help: false, json, windowId, action: 'mission.task.edge.remove', params };
+			}
+			throw usageError('Usage: aexus-ade mission task edge <add | remove> [--mission <id>] <fromTaskId> <toTaskId>');
+		}
+		if (tSub === 'set') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < tArgs.length; ref.i++) {
+				const arg = tArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(tArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--task')) {
+					params.nodeId = takeOptVal(tArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--description', '--desc', '--prompt', '--text')) {
+					params.description = takeOptVal(tArgs, ref, '--description', usageError);
+				} else if (matchFlag(arg, '--file')) {
+					params.file = takeOptVal(tArgs, ref, '--file', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else if (!arg.startsWith('-') && params.description === undefined) {
+					params.description = arg;
+				} else {
+					throw usageError(`Unknown option for mission task set: ${arg}`);
+				}
+			}
+			if (!params.nodeId || (params.description === undefined && !params.file)) {
+				throw usageError('Usage: aexus-ade mission task set [--mission <id>] --node <taskId> (--description "<text>" | --file <path>)');
+			}
+			return { help: false, json, windowId, action: 'mission.task.set', params };
+		}
+		if (tSub === 'complete' || tSub === 'done' || tSub === 'status') {
+			const params = tSub === 'status' ? {} : { status: 'completed' };
+			for (const ref = { i: 0 }; ref.i < tArgs.length; ref.i++) {
+				const arg = tArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(tArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--task')) {
+					params.nodeId = takeOptVal(tArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--status', '--state')) {
+					params.status = takeOptVal(tArgs, ref, '--status', usageError).trim().toLowerCase();
+				} else if (matchFlag(arg, '--note', '--summary', '--reason')) {
+					params.note = takeOptVal(tArgs, ref, '--note', usageError);
+				} else if (arg === '--force') {
+					params.force = true;
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else if (tSub === 'status' && !arg.startsWith('-') && !params.status) {
+					params.status = arg.trim().toLowerCase();
+				} else {
+					throw usageError(`Unknown option for mission task ${tSub}: ${arg}`);
+				}
+			}
+			if (!params.nodeId || !params.status) {
+				throw usageError(`Usage: aexus-ade mission task ${tSub} [--mission <id>] --node <taskId>${tSub === 'status' ? ' --status <pending|in_progress|completed|blocked>' : ''} [--note "<text>"] [--force]`);
+			}
+			return { help: false, json, windowId, action: tSub === 'status' ? 'mission.task.status' : 'mission.task.complete', params };
+		}
+		throw usageError(`Unknown mission task subcommand: ${tSub}`);
+	}
+
+	if (sub === 'export') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--file', '--out', '-o')) {
+				params.outputFile = takeOptVal(args, ref, '--file', usageError);
+			} else if (matchFlag(arg, '--format')) {
+				params.format = takeOptVal(args, ref, '--format', usageError).toLowerCase();
+			} else if (arg === '--with-positions' || arg === '--positions') {
+				params.withPositions = true;
+			} else if (arg === '--include-agent-ids') {
+				params.includeAgentIds = true;
+			} else if (!arg.startsWith('-') && !params.missionId) {
+				params.missionId = arg;
+			} else {
+				throw usageError(`Unknown option for mission export: ${arg}`);
+			}
+		}
+		return { help: false, json, windowId, action: 'mission.export', params };
+	}
+
+	if (sub === 'import') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--owner', '--mission', '--mission-id', '--governor')) {
+				params.owner = takeOptVal(args, ref, '--owner', usageError);
+			} else if (matchFlag(arg, '--project')) {
+				params.project = takeOptVal(args, ref, '--project', usageError);
+			} else if (matchFlag(arg, '--title')) {
+				params.title = takeOptVal(args, ref, '--title', usageError);
+			} else if (matchFlag(arg, '--file', '-f')) {
+				params.file = takeOptVal(args, ref, '--file', usageError);
+			} else if (matchFlag(arg, '--text', '--json-text')) {
+				params.text = takeOptVal(args, ref, '--text', usageError);
+			} else if (arg === '--open') {
+				params.open = true;
+			} else if (arg === '--side') {
+				params.side = true;
+			} else {
+				throw usageError(`Unknown option for mission import: ${arg}`);
+			}
+		}
+		if (!params.file && params.text === undefined) {
+			throw usageError('Usage: aexus-ade mission import [--owner <id>] [--project <path>] [--title "<t>"] (--file <path> | --text "<bundleJson>") [--open] [--side]');
+		}
+		return { help: false, json, windowId, action: 'mission.import', params };
+	}
+
 	return undefined;
+}
+
+export function parseOrchestrationGroupCommand(tail, json, windowId, usageError) {
+	const sub = tail[0]?.trim() || 'status';
+	const args = tail.slice(1);
+
+	if (sub === 'get' || sub === 'show') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (arg === '--raw') {
+				params.raw = true;
+			} else if (!arg.startsWith('-') && !params.missionId) {
+				params.missionId = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration get: ${arg}`);
+			}
+		}
+		return { help: false, json, windowId, action: 'orchestration.get', params };
+	}
+
+	if (sub === 'apply' || sub === 'set') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--file', '-f')) {
+				params.file = takeOptVal(args, ref, '--file', usageError);
+			} else if (matchFlag(arg, '--text', '--mermaid')) {
+				params.text = takeOptVal(args, ref, '--text', usageError);
+			} else {
+				throw usageError(`Unknown option for orchestration apply: ${arg}`);
+			}
+		}
+		if (!params.file && params.text === undefined) {
+			throw usageError('Usage: aexus-ade orchestration apply [--mission <id>] (--file <path> | --text "<mermaid>")');
+		}
+		return { help: false, json, windowId, action: 'orchestration.apply', params };
+	}
+
+	if (sub === 'validate' || sub === 'check') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--file', '-f')) {
+				params.file = takeOptVal(args, ref, '--file', usageError);
+			} else if (matchFlag(arg, '--text', '--mermaid')) {
+				params.text = takeOptVal(args, ref, '--text', usageError);
+			} else if (matchFlag(arg, '--format')) {
+				params.format = takeOptVal(args, ref, '--format', usageError).toLowerCase();
+			} else if (!arg.startsWith('-') && !params.file) {
+				params.file = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration validate: ${arg}`);
+			}
+		}
+		if (!params.file && params.text === undefined) {
+			throw usageError('Usage: aexus-ade orchestration validate (--file <path.json|path.mjs|path.mmd> | --text "<mermaid>")');
+		}
+		return { help: false, json, windowId, action: 'orchestration.validate', params };
+	}
+
+	if (sub === 'load') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--file', '-f')) {
+				params.file = takeOptVal(args, ref, '--file', usageError);
+			} else if (!arg.startsWith('-') && !params.file) {
+				params.file = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration load: ${arg}`);
+			}
+		}
+		if (!params.file) {
+			throw usageError('Usage: aexus-ade orchestration load [--mission <id>] --file <path.json|path.mjs|path.mmd>');
+		}
+		return { help: false, json, windowId, action: 'orchestration.load', params };
+	}
+
+	if (sub === 'pause' || sub === 'resume' || sub === 'abort') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--reason', '--message')) {
+				params.reason = takeOptVal(args, ref, '--reason', usageError);
+			} else if (!arg.startsWith('-') && !params.missionId) {
+				params.missionId = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration ${sub}: ${arg}`);
+			}
+		}
+		return { help: false, json, windowId, action: `orchestration.${sub}`, params };
+	}
+
+	if (sub === 'status') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (!arg.startsWith('-') && !params.missionId) {
+				params.missionId = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration status: ${arg}`);
+			}
+		}
+		return { help: false, json, windowId, action: 'orchestration.status', params };
+	}
+
+	if (sub === 'dispatch' || sub === 'send' || sub === 'start') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--prompt', '--message', '--text')) {
+				params.prompt = takeOptVal(args, ref, '--prompt', usageError);
+			} else if (matchFlag(arg, '--detail', '--body')) {
+				params.detail = takeOptVal(args, ref, '--detail', usageError);
+			} else if (matchFlag(arg, '--artifact')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--artifact', usageError), '--artifact', usageError);
+				params.artifacts = [...(params.artifacts ?? []), item];
+			} else if (matchFlag(arg, '--decision')) {
+				const item = parseKeyValBlobFlag(takeOptVal(args, ref, '--decision', usageError), '--decision', usageError);
+				params.decisions = [...(params.decisions ?? []), item];
+			} else if (matchFlag(arg, '--to', '--node', '--target')) {
+				params.targetNodeId = takeOptVal(args, ref, '--to', usageError);
+			} else if (matchFlag(arg, '--task', '--task-id', '--task-node')) {
+				params.taskNodeId = takeOptVal(args, ref, '--task', usageError);
+			} else if (matchFlag(arg, '--tasks', '--task-ids')) {
+				const rawT = takeOptVal(args, ref, '--tasks', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.taskNodeIds = [...(params.taskNodeIds ?? []), ...rawT];
+			} else if (matchFlag(arg, '--whiteboard', '--whiteboards', '--wb')) {
+				const rawWb = takeOptVal(args, ref, '--whiteboard', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.whiteboardIds = [...(params.whiteboardIds ?? []), ...rawWb];
+			} else if (!arg.startsWith('-') && !params.prompt) {
+				params.prompt = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration dispatch: ${arg}`);
+			}
+		}
+		if (!params.prompt) {
+			throw usageError('Usage: aexus-ade orchestration dispatch [--mission <id>] --prompt "<requirement>" [--to <staffNodeId>] [--whiteboard <wbId>]');
+		}
+		return { help: false, json, windowId, action: 'orchestration.dispatch', params };
+	}
+
+	if (sub === 'export') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--file', '--out', '-o')) {
+				params.outputFile = takeOptVal(args, ref, '--file', usageError);
+			} else if (matchFlag(arg, '--format')) {
+				params.format = takeOptVal(args, ref, '--format', usageError).toLowerCase();
+			} else if (arg === '--with-positions' || arg === '--positions') {
+				params.withPositions = true;
+			} else if (arg === '--include-agent-ids') {
+				params.includeAgentIds = true;
+			} else if (arg === '--raw') {
+				params.raw = true;
+			} else if (!arg.startsWith('-') && !params.missionId) {
+				params.missionId = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration export: ${arg}`);
+			}
+		}
+		return { help: false, json, windowId, action: 'orchestration.export', params };
+	}
+
+	if (sub === 'import') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor', '--id')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--file', '-f')) {
+				params.file = takeOptVal(args, ref, '--file', usageError);
+			} else if (matchFlag(arg, '--text', '--mermaid')) {
+				params.text = takeOptVal(args, ref, '--text', usageError);
+			} else {
+				throw usageError(`Unknown option for orchestration import: ${arg}`);
+			}
+		}
+		if (!params.file && params.text === undefined) {
+			throw usageError('Usage: aexus-ade orchestration import [--mission <id>] (--file <path> | --text "<mermaid>")');
+		}
+		return { help: false, json, windowId, action: 'orchestration.import', params };
+	}
+
+	if (sub === 'layout') {
+		const lSub = args[0]?.trim();
+		const lArgs = (lSub === 'set' || lSub === 'mode') ? args.slice(1) : args;
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < lArgs.length; ref.i++) {
+			const arg = lArgs[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(lArgs, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--mode', '--layout')) {
+				params.layoutMode = takeOptVal(lArgs, ref, '--mode', usageError).toLowerCase();
+			} else if (arg === '--keep-positions') {
+				params.keepPositions = true;
+			} else if (arg === '--persist-in-code') {
+				params.persistInCode = true;
+			} else if (!arg.startsWith('-') && !params.layoutMode) {
+				params.layoutMode = arg.toLowerCase();
+			} else {
+				throw usageError(`Unknown option for orchestration layout: ${arg}`);
+			}
+		}
+		if (!params.layoutMode || !['lr', 'td', 'radial', 'grid'].includes(params.layoutMode)) {
+			throw usageError('Usage: aexus-ade orchestration layout set <lr|td|radial|grid> [--mission <id>] [--persist-in-code]');
+		}
+		return { help: false, json, windowId, action: 'orchestration.layout.set', params };
+	}
+
+	if (sub === 'group' || sub === 'groups' || sub === 'dept' || sub === 'department') {
+		const gSub = args[0]?.trim() || 'list';
+		const gArgs = args.slice(1);
+		if (gSub === 'list') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < gArgs.length; ref.i++) {
+				const arg = gArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(gArgs, ref, '--mission', usageError);
+				} else if (!arg.startsWith('-') && !params.missionId) {
+					params.missionId = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration group list: ${arg}`);
+				}
+			}
+			return { help: false, json, windowId, action: 'orchestration.group.list', params };
+		}
+		if (gSub === 'create' || gSub === 'add') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < gArgs.length; ref.i++) {
+				const arg = gArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(gArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--name', '--title')) {
+					params.name = takeOptVal(gArgs, ref, '--name', usageError);
+				} else if (matchFlag(arg, '--id', '--group-id')) {
+					params.groupId = takeOptVal(gArgs, ref, '--id', usageError);
+				} else if (!arg.startsWith('-') && !params.name) {
+					params.name = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration group create: ${arg}`);
+				}
+			}
+			if (!params.name) {
+				throw usageError('Usage: aexus-ade orchestration group create [--mission <id>] --name "<Group Name>" [--id <GroupId>]');
+			}
+			return { help: false, json, windowId, action: 'orchestration.group.create', params };
+		}
+		if (gSub === 'rename') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < gArgs.length; ref.i++) {
+				const arg = gArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(gArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--group', '--id', '--from')) {
+					params.group = takeOptVal(gArgs, ref, '--group', usageError);
+				} else if (matchFlag(arg, '--name', '--new-name', '--to', '--title')) {
+					params.name = takeOptVal(gArgs, ref, '--name', usageError);
+				} else if (!arg.startsWith('-') && !params.group) {
+					params.group = arg;
+				} else if (!arg.startsWith('-') && !params.name) {
+					params.name = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration group rename: ${arg}`);
+				}
+			}
+			if (!params.group || !params.name) {
+				throw usageError('Usage: aexus-ade orchestration group rename [--mission <id>] <groupIdOrName> "<New Name>"');
+			}
+			return { help: false, json, windowId, action: 'orchestration.group.rename', params };
+		}
+		if (gSub === 'assign' || gSub === 'move') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < gArgs.length; ref.i++) {
+				const arg = gArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(gArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id')) {
+					params.nodeId = takeOptVal(gArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--group', '--group-id', '--department', '--dept')) {
+					params.group = takeOptVal(gArgs, ref, '--group', usageError);
+				} else if (arg === '--ungroup' || arg === '--none') {
+					params.ungroup = true;
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else if (!arg.startsWith('-') && !params.group) {
+					params.group = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration group assign: ${arg}`);
+				}
+			}
+			if (!params.nodeId || (!params.group && !params.ungroup)) {
+				throw usageError('Usage: aexus-ade orchestration group assign [--mission <id>] --node <nodeId> (--group "<Group>" | --ungroup)');
+			}
+			return { help: false, json, windowId, action: 'orchestration.group.assign', params };
+		}
+		if (gSub === 'remove' || gSub === 'rm' || gSub === 'delete' || gSub === 'ungroup') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < gArgs.length; ref.i++) {
+				const arg = gArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(gArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--group', '--id', '--name')) {
+					params.group = takeOptVal(gArgs, ref, '--group', usageError);
+				} else if (arg === '--delete-members' || arg === '--cascade') {
+					params.deleteMembers = true;
+				} else if (!arg.startsWith('-') && !params.group) {
+					params.group = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration group ${gSub}: ${arg}`);
+				}
+			}
+			if (!params.group) {
+				throw usageError('Usage: aexus-ade orchestration group remove [--mission <id>] <groupIdOrName> [--delete-members]');
+			}
+			return { help: false, json, windowId, action: 'orchestration.group.remove', params };
+		}
+		throw usageError(`Unknown orchestration group subcommand: ${gSub}`);
+	}
+
+	if (sub === 'edge' || sub === 'edges' || sub === 'link') {
+		const eSub = args[0]?.trim();
+		const eArgs = args.slice(1);
+		if (eSub === 'connect' || eSub === 'add') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < eArgs.length; ref.i++) {
+				const arg = eArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(eArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--from')) {
+					params.from = takeOptVal(eArgs, ref, '--from', usageError);
+				} else if (matchFlag(arg, '--to')) {
+					params.to = takeOptVal(eArgs, ref, '--to', usageError);
+				} else if (matchFlag(arg, '--label')) {
+					params.label = takeOptVal(eArgs, ref, '--label', usageError);
+				} else if (arg === '--one-way' || arg === '--directed') {
+					params.bidirectional = false;
+				} else if (arg === '--bidirectional' || arg === '--bidir') {
+					params.bidirectional = true;
+				} else if (arg === '--dashed') {
+					params.dashed = true;
+				} else if (!arg.startsWith('-') && !params.from) {
+					params.from = arg;
+				} else if (!arg.startsWith('-') && !params.to) {
+					params.to = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration edge connect: ${arg}`);
+				}
+			}
+			if (!params.from || !params.to) {
+				throw usageError('Usage: aexus-ade orchestration edge connect [--mission <id>] <fromId> <toId> [--label "<text>"] [--one-way | --bidirectional] [--dashed]');
+			}
+			return { help: false, json, windowId, action: 'orchestration.edge.connect', params };
+		}
+		if (eSub === 'label' || eSub === 'rename') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < eArgs.length; ref.i++) {
+				const arg = eArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(eArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--from')) {
+					params.from = takeOptVal(eArgs, ref, '--from', usageError);
+				} else if (matchFlag(arg, '--to')) {
+					params.to = takeOptVal(eArgs, ref, '--to', usageError);
+				} else if (matchFlag(arg, '--label', '--text')) {
+					params.label = takeOptVal(eArgs, ref, '--label', usageError);
+				} else if (!arg.startsWith('-') && !params.from) {
+					params.from = arg;
+				} else if (!arg.startsWith('-') && !params.to) {
+					params.to = arg;
+				} else if (!arg.startsWith('-') && params.label === undefined) {
+					params.label = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration edge label: ${arg}`);
+				}
+			}
+			if (!params.from || !params.to || params.label === undefined) {
+				throw usageError('Usage: aexus-ade orchestration edge label [--mission <id>] <fromId> <toId> "<label>"');
+			}
+			return { help: false, json, windowId, action: 'orchestration.edge.label', params };
+		}
+		if (eSub === 'remove' || eSub === 'rm' || eSub === 'delete') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < eArgs.length; ref.i++) {
+				const arg = eArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(eArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--from')) {
+					params.from = takeOptVal(eArgs, ref, '--from', usageError);
+				} else if (matchFlag(arg, '--to')) {
+					params.to = takeOptVal(eArgs, ref, '--to', usageError);
+				} else if (arg === '--both') {
+					params.both = true;
+				} else if (!arg.startsWith('-') && !params.from) {
+					params.from = arg;
+				} else if (!arg.startsWith('-') && !params.to) {
+					params.to = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration edge remove: ${arg}`);
+				}
+			}
+			if (!params.from || !params.to) {
+				throw usageError('Usage: aexus-ade orchestration edge remove [--mission <id>] <fromId> <toId> [--both]');
+			}
+			return { help: false, json, windowId, action: 'orchestration.edge.remove', params };
+		}
+		throw usageError('Usage: aexus-ade orchestration edge <connect | label | remove> ...');
+	}
+
+	if (sub === 'staff' || sub === 'employee' || sub === 'recruit') {
+		const sSub = sub === 'recruit' ? 'create' : (args[0]?.trim() || 'create');
+		const sArgs = sub === 'recruit' ? args : args.slice(1);
+		if (sSub === 'rename') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < sArgs.length; ref.i++) {
+				const arg = sArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(sArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--id')) {
+					params.nodeId = takeOptVal(sArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--name', '--label', '--title')) {
+					params.label = takeOptVal(sArgs, ref, '--name', usageError);
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else if (!arg.startsWith('-') && !params.label) {
+					params.label = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration staff rename: ${arg}`);
+				}
+			}
+			if (!params.nodeId || !params.label) {
+				throw usageError('Usage: aexus-ade orchestration staff rename [--mission <id>] <nodeId> "<New Name>"');
+			}
+			return { help: false, json, windowId, action: 'orchestration.staff.rename', params };
+		}
+		if (sSub === 'config' || sSub === 'configure' || sSub === 'set') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < sArgs.length; ref.i++) {
+				const arg = sArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(sArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--id')) {
+					params.nodeId = takeOptVal(sArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--engine', '--engine-id')) {
+					params.engineId = takeOptVal(sArgs, ref, '--engine', usageError);
+				} else if (matchFlag(arg, '--model')) {
+					params.model = takeOptVal(sArgs, ref, '--model', usageError);
+				} else if (matchFlag(arg, '--thinking')) {
+					params.thinking = takeOptVal(sArgs, ref, '--thinking', usageError);
+				} else if (matchFlag(arg, '--host', '--host-alias')) {
+					params.hostAlias = takeOptVal(sArgs, ref, '--host', usageError);
+				} else if (matchFlag(arg, '--role-prompt', '--persona')) {
+					params.rolePrompt = takeOptVal(sArgs, ref, '--role-prompt', usageError);
+				} else if (matchFlag(arg, '--allowed-paths', '--allowed-path', '--allow-path', '--allow-paths', '--paths')) {
+					const raw = takeOptVal(sArgs, ref, '--allowed-paths', usageError);
+					params.allowedPaths = raw === '' || raw === 'none' ? null : raw.split(/[|,;]/).map(s => s.trim()).filter(Boolean);
+				} else if (matchFlag(arg, '--color', '--accent')) {
+					const raw = takeOptVal(sArgs, ref, '--color', usageError);
+					params.color = raw === '' || raw === 'default' || raw === 'none' ? null : raw;
+				} else if (arg === '--reset-session' || arg === '--reset') {
+					params.resetSession = true;
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration staff ${sSub}: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade orchestration staff config [--mission <id>] --node <staffId> [--engine <id>] [--model <m>] [--thinking <lvl>] [--host <alias>] [--role-prompt "<text>"] [--allowed-paths "a,b"] [--reset-session]');
+			}
+			return { help: false, json, windowId, action: 'orchestration.staff.configure', params };
+		}
+		if (sSub === 'remove' || sSub === 'rm' || sSub === 'delete') {
+			const params = {};
+			for (const ref = { i: 0 }; ref.i < sArgs.length; ref.i++) {
+				const arg = sArgs[ref.i];
+				if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+					params.missionId = takeOptVal(sArgs, ref, '--mission', usageError);
+				} else if (matchFlag(arg, '--node', '--node-id', '--id')) {
+					params.nodeId = takeOptVal(sArgs, ref, '--node', usageError);
+				} else if (matchFlag(arg, '--reason', '--message')) {
+					params.reason = takeOptVal(sArgs, ref, '--reason', usageError);
+				} else if (arg === '--force') {
+					params.force = true;
+				} else if (!arg.startsWith('-') && !params.nodeId) {
+					params.nodeId = arg;
+				} else {
+					throw usageError(`Unknown option for orchestration staff remove: ${arg}`);
+				}
+			}
+			if (!params.nodeId) {
+				throw usageError('Usage: aexus-ade orchestration staff remove [--mission <id>] --node <nodeId> [--reason "<why>"] [--force]');
+			}
+			return { help: false, json, windowId, action: 'orchestration.staff.remove', params };
+		}
+		if (sSub !== 'create' && sSub !== 'add') {
+			throw usageError('Usage: aexus-ade orchestration staff <create | rename | config | remove> ...');
+		}
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < sArgs.length; ref.i++) {
+			const arg = sArgs[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(sArgs, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--name', '--employee')) {
+				params.name = takeOptVal(sArgs, ref, '--name', usageError);
+			} else if (matchFlag(arg, '--id', '--node', '--node-id')) {
+				params.id = takeOptVal(sArgs, ref, '--id', usageError);
+			} else if (matchFlag(arg, '--rank', '--tier')) {
+				params.rank = takeOptVal(sArgs, ref, '--rank', usageError);
+			} else if (matchFlag(arg, '--role', '--title', '--label')) {
+				const rawRole = takeOptVal(sArgs, ref, '--role', usageError);
+				if (arg === '--role' && !params.rank && /^(?:L\d+|\d+|governor|manager|employee|worker|director|lead|tech-lead|principal|engineer|specialist|reviewer|auditor|researcher|executor)$/i.test(rawRole.trim())) {
+					params.rank = rawRole.trim();
+				} else {
+					params.roleLabel = rawRole;
+				}
+			} else if (matchFlag(arg, '--department', '--dept')) {
+				params.department = takeOptVal(sArgs, ref, '--department', usageError);
+			} else if (matchFlag(arg, '--engine', '--engine-id')) {
+				params.engineId = takeOptVal(sArgs, ref, '--engine', usageError);
+			} else if (matchFlag(arg, '--model')) {
+				params.model = takeOptVal(sArgs, ref, '--model', usageError);
+			} else if (matchFlag(arg, '--thinking')) {
+				params.thinking = takeOptVal(sArgs, ref, '--thinking', usageError);
+			} else if (matchFlag(arg, '--host', '--host-alias')) {
+				params.hostAlias = takeOptVal(sArgs, ref, '--host', usageError);
+			} else if (matchFlag(arg, '--role-prompt', '--persona')) {
+				params.rolePrompt = takeOptVal(sArgs, ref, '--role-prompt', usageError);
+			} else if (matchFlag(arg, '--allowed-paths', '--allowed-path', '--allow-path', '--allow-paths', '--paths')) {
+				params.allowedPaths = takeOptVal(sArgs, ref, '--allowed-paths', usageError).split(/[|,;]/).map(s => s.trim()).filter(Boolean);
+			} else if (matchFlag(arg, '--color', '--accent')) {
+				params.color = takeOptVal(sArgs, ref, '--color', usageError);
+			} else if (matchFlag(arg, '--from', '--creator', '--parent')) {
+				params.callerNodeId = takeOptVal(sArgs, ref, '--from', usageError);
+			} else if (matchFlag(arg, '--edge-label')) {
+				params.edgeLabel = takeOptVal(sArgs, ref, '--edge-label', usageError);
+			} else if (arg === '--bidirectional' || arg === '--two-way') {
+				params.bidirectional = true;
+			} else if (arg === '--one-way' || arg === '--directed') {
+				params.bidirectional = false;
+			} else if (matchFlag(arg, '--handoff-token', '--token')) {
+				params.handoffTokenId = takeOptVal(sArgs, ref, '--handoff-token', usageError);
+			} else if (matchFlag(arg, '--mint-token')) {
+				params.mintTokenId = takeOptVal(sArgs, ref, '--mint-token', usageError);
+			} else if (matchFlag(arg, '--summary', '--message')) {
+				params.handoffSummary = takeOptVal(sArgs, ref, '--summary', usageError);
+			} else if (matchFlag(arg, '--whiteboard', '--whiteboards', '--wb')) {
+				const rawWb = takeOptVal(sArgs, ref, '--whiteboard', usageError).split(',').map(s => s.trim()).filter(Boolean);
+				params.whiteboardIds = [...(params.whiteboardIds ?? []), ...rawWb];
+			} else if (!arg.startsWith('-') && !params.name) {
+				params.name = arg;
+			} else {
+				throw usageError(`Unknown option for orchestration staff create: ${arg}`);
+			}
+		}
+		if (!params.name) {
+			throw usageError('Usage: aexus-ade orchestration staff create [--mission <id>] --name "<EmployeeName>" [--rank <rankId|L2..LN>] [--department "<Dept>"] [--handoff-token <tokenId> --summary "<subtask>"]');
+		}
+		return { help: false, json, windowId, action: 'orchestration.staff.create', params };
+	}
+
+	throw usageError(`Unknown orchestration subcommand: ${sub}`);
+}
+
+export function parseWhiteboardGroupCommand(tail, json, windowId, usageError) {
+	const sub = tail[0]?.trim() || 'list';
+	const args = tail.slice(1);
+
+	if (sub === 'list') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--department', '--dept')) {
+				params.department = takeOptVal(args, ref, '--department', usageError);
+			} else if (!arg.startsWith('-') && !params.missionId) {
+				params.missionId = arg;
+			} else {
+				throw usageError(`Unknown option for whiteboard list: ${arg}`);
+			}
+		}
+		return { help: false, json, windowId, action: 'whiteboard.list', params };
+	}
+
+	if (sub === 'read' || sub === 'get' || sub === 'cat') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--id', '--whiteboard', '--wb')) {
+				params.id = takeOptVal(args, ref, '--id', usageError);
+			} else if (!arg.startsWith('-') && !params.id) {
+				params.id = arg;
+			} else {
+				throw usageError(`Unknown option for whiteboard read: ${arg}`);
+			}
+		}
+		if (!params.id) {
+			throw usageError('Usage: aexus-ade whiteboard read <whiteboardId> [--mission <id>]');
+		}
+		return { help: false, json, windowId, action: 'whiteboard.read', params };
+	}
+
+	if (sub === 'create' || sub === 'add' || sub === 'write' || sub === 'set' || sub === 'append') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--id', '--whiteboard', '--wb')) {
+				params.id = takeOptVal(args, ref, '--id', usageError);
+			} else if (matchFlag(arg, '--title', '--name')) {
+				params.title = takeOptVal(args, ref, '--title', usageError);
+			} else if (matchFlag(arg, '--department', '--dept')) {
+				params.department = takeOptVal(args, ref, '--department', usageError);
+			} else if (matchFlag(arg, '--content', '--text')) {
+				params.content = takeOptVal(args, ref, '--content', usageError);
+			} else if (matchFlag(arg, '--append')) {
+				params.appendContent = takeOptVal(args, ref, '--append', usageError);
+			} else if (matchFlag(arg, '--expected-version', '--if-version')) {
+				const rawVer = takeOptVal(args, ref, '--expected-version', usageError);
+				if (!/^\d+$/.test(rawVer)) {
+					throw usageError(`Option --expected-version requires a non-negative integer, got: ${rawVer}`);
+				}
+				params.expectedVersion = Number.parseInt(rawVer, 10);
+			} else if (matchFlag(arg, '--file', '-f')) {
+				params.file = takeOptVal(args, ref, '--file', usageError);
+			} else if (!arg.startsWith('-') && !params.id && (sub === 'write' || sub === 'set' || sub === 'append')) {
+				params.id = arg;
+			} else if (!arg.startsWith('-') && !params.title && (sub === 'create' || sub === 'add')) {
+				params.title = arg;
+			} else {
+				throw usageError(`Unknown option for whiteboard ${sub}: ${arg}`);
+			}
+		}
+		const action = (sub === 'create' || sub === 'add') ? 'whiteboard.create' : 'whiteboard.write';
+		if (action === 'whiteboard.write' && !params.id) {
+			throw usageError('Usage: aexus-ade whiteboard write <whiteboardId> (--content "<text>" | --append "<text>" | --file <path>) [--mission <id>]');
+		}
+		if (action === 'whiteboard.create' && !params.title && !params.department && !params.id) {
+			throw usageError('Usage: aexus-ade whiteboard create --department "<Dept>" --title "<Title>" [--id <wbId>] [--content "<text>"] [--mission <id>]');
+		}
+		return { help: false, json, windowId, action, params };
+	}
+
+	if (sub === 'rename') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--id', '--whiteboard', '--wb')) {
+				params.id = takeOptVal(args, ref, '--id', usageError);
+			} else if (matchFlag(arg, '--title', '--name')) {
+				params.title = takeOptVal(args, ref, '--title', usageError);
+			} else if (matchFlag(arg, '--department', '--dept')) {
+				params.department = takeOptVal(args, ref, '--department', usageError);
+			} else if (!arg.startsWith('-') && !params.id) {
+				params.id = arg;
+			} else if (!arg.startsWith('-') && !params.title) {
+				params.title = arg;
+			} else {
+				throw usageError(`Unknown option for whiteboard rename: ${arg}`);
+			}
+		}
+		if (!params.id || !params.title) {
+			throw usageError('Usage: aexus-ade whiteboard rename <wbId> "<New Title>" [--department "<Dept>"] [--mission <id>]');
+		}
+		return { help: false, json, windowId, action: 'whiteboard.rename', params };
+	}
+
+	if (sub === 'remove' || sub === 'rm' || sub === 'delete') {
+		const params = {};
+		for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+			const arg = args[ref.i];
+			if (matchFlag(arg, '--mission', '--mission-id', '--governor')) {
+				params.missionId = takeOptVal(args, ref, '--mission', usageError);
+			} else if (matchFlag(arg, '--id', '--whiteboard', '--wb')) {
+				params.id = takeOptVal(args, ref, '--id', usageError);
+			} else if (!arg.startsWith('-') && !params.id) {
+				params.id = arg;
+			} else {
+				throw usageError(`Unknown option for whiteboard remove: ${arg}`);
+			}
+		}
+		if (!params.id) {
+			throw usageError('Usage: aexus-ade whiteboard remove <wbId> [--mission <id>]');
+		}
+		return { help: false, json, windowId, action: 'whiteboard.remove', params };
+	}
+
+	throw usageError(`Unknown whiteboard subcommand: ${sub}`);
 }

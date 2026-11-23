@@ -12,7 +12,25 @@ export type AdeSessionRank = 'governor' | 'manager' | 'employee' | 'subordinate'
 export const ROLE_CONTEXT_HEADER = '[Aexus Orchestrated Role Context]';
 export const ROLE_INIT_MARKER = '[AEXUS_ADE_ROLE_INITIALIZATION]';
 export const AEXUS_PREAMBLE_END_MARKER = '<!-- /AEXUS_ADE_PREAMBLE -->';
+export const AEXUS_SYSTEM_TOKEN_ENVELOPE_HEADER = '[Aexus System · Baton Token]';
+export const AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER = '[Aexus System · Direct Message from Role]';
+export const AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER = '[Aexus System · Message from User (L-1)]';
 export const ROLE_STATE_ENV_KEY = 'AEXUS_ADE_ROLE_STATE_FILE';
+
+export function hasAexusSystemMessageEnvelope(text: string): boolean {
+	const trimmed = text.trimStart();
+	return trimmed.startsWith(AEXUS_SYSTEM_TOKEN_ENVELOPE_HEADER)
+		|| trimmed.startsWith(AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER)
+		|| trimmed.startsWith(AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER);
+}
+
+export function buildUserMessageSystemEnvelope(): string {
+	return [
+		AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER,
+		'- Message Type: Direct message from the Human User (L-1 · Sovereign Operator — NOT a Baton Token and NOT from another agent role).',
+		'- Channel: chat — prioritize and respond directly to the User.',
+	].join('\n');
+}
 
 export interface RoleSyncAgentEntry {
 	readonly id: string;
@@ -168,8 +186,11 @@ const PREAMBLE_START_PREFIXES = [
 	'[ADE Live Hierarchy State]',
 	'[ADE Live Viewport State]',
 	'[Aexus ADE Live Viewport & Macro Control Context]',
+	'[Aexus ADE · Engineering Staff Context]',
+	'[Aexus ADE · Mission Node Employee]',
 	'[Aexus Cloud Host Project Context]',
 	'[Autonomous Session Goal Active]',
+	AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER,
 	'[Mode: Plan Mode —',
 ] as const;
 
@@ -221,8 +242,12 @@ function stripLeadingPreambleBlock(text: string): string | undefined {
 		}
 	}
 
-	// 4. [ADE Live Hierarchy State] / [ADE Live Viewport State] (header + `- ...` lines)
-	if (normalized.startsWith('[ADE Live Hierarchy State]') || normalized.startsWith('[ADE Live Viewport State]')) {
+	// 4. [ADE Live Hierarchy State] / [ADE Live Viewport State] / [Aexus System · Message from User (L-1)] (header + `- ...` lines)
+	if (
+		normalized.startsWith('[ADE Live Hierarchy State]')
+		|| normalized.startsWith('[ADE Live Viewport State]')
+		|| normalized.startsWith(AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER)
+	) {
 		const lines = normalized.split(/\r?\n/);
 		let idx = 1;
 		while (idx < lines.length && /^-\s/.test(lines[idx])) {

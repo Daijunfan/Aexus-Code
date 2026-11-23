@@ -12,10 +12,12 @@ import {
 	IAdeDeterministicCheckRequest,
 	IAdeDeterministicCheckResponse,
 	IAdeEngineeringBackendService,
+	IAdeHeadlessControlResult,
 	IAdeInboxItem,
 	IAdeInboxMutation,
 	IAdeMissionColdChangeEvent,
 	IAdeMissionWatchdogSnapshot,
+	IAdeOrchestrationDaemonMissionSnapshot,
 	IAdeSourceTriggerFireEvent,
 	IAdeWatchdogWakeupEvent,
 } from './adeEngineering.js';
@@ -192,6 +194,66 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 				}
 				return this.service.deleteMissionRecord(params.missionId, params.writerId) as Promise<T>;
 			}
+			case 'saveOrchestrationBlobs': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; blobs?: readonly { readonly ptr: string; readonly payloadJson: string }[] }
+					: undefined;
+				if (!this.service.saveOrchestrationBlobs || !params?.missionId || !Array.isArray(params.blobs)) {
+					return Promise.resolve() as Promise<T>;
+				}
+				return this.service.saveOrchestrationBlobs(params.missionId, params.blobs) as Promise<T>;
+			}
+			case 'readOrchestrationBlob': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; ptr?: string }
+					: undefined;
+				if (!this.service.readOrchestrationBlob || !params?.missionId || !params.ptr) {
+					return Promise.resolve(undefined) as Promise<T>;
+				}
+				return this.service.readOrchestrationBlob(params.missionId, params.ptr) as Promise<T>;
+			}
+			case 'appendOrchestrationArchive': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; lines?: readonly string[] }
+					: undefined;
+				if (!this.service.appendOrchestrationArchive || !params?.missionId || !Array.isArray(params.lines)) {
+					return Promise.resolve() as Promise<T>;
+				}
+				return this.service.appendOrchestrationArchive(params.missionId, params.lines) as Promise<T>;
+			}
+			case 'readOrchestrationArchive': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; limit?: number; offset?: number }
+					: undefined;
+				if (!this.service.readOrchestrationArchive || !params?.missionId) {
+					return Promise.resolve([]) as Promise<T>;
+				}
+				return this.service.readOrchestrationArchive(params.missionId, { limit: params.limit, offset: params.offset }) as Promise<T>;
+			}
+			case 'syncOrchestrationDaemonState': {
+				if (!this.service.syncOrchestrationDaemonState || !arg || typeof arg !== 'object') {
+					return Promise.resolve() as Promise<T>;
+				}
+				const rawSnap = arg as IAdeOrchestrationDaemonMissionSnapshot;
+				const callerCtx = this.normalizeCtx(ctx);
+				const stamped: IAdeOrchestrationDaemonMissionSnapshot = callerCtx && !rawSnap.ownerWindowCtx
+					? { ...rawSnap, ownerWindowCtx: callerCtx }
+					: rawSnap;
+				return this.service.syncOrchestrationDaemonState(stamped) as Promise<T>;
+			}
+			case 'getOrchestrationDaemonState':
+				return (this.service.getOrchestrationDaemonState
+					? this.service.getOrchestrationDaemonState(typeof arg === 'string' && arg.trim() ? arg.trim() : undefined)
+					: Promise.resolve({})) as Promise<T>;
+			case 'executeHeadlessOrchestrationControl': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { action?: string; params?: Readonly<Record<string, unknown>> }
+					: undefined;
+				if (!this.service.executeHeadlessOrchestrationControl || !params?.action) {
+					return Promise.resolve({ handled: false } satisfies IAdeHeadlessControlResult) as Promise<T>;
+				}
+				return this.service.executeHeadlessOrchestrationControl(params.action, params.params ?? {}) as Promise<T>;
+			}
 			case 'syncApiDocs':
 				return (this.service.syncApiDocs
 					? this.service.syncApiDocs(arg as IAdeOrganizationConfig)
@@ -313,6 +375,34 @@ export class AdeEngineeringBackendChannelClient implements IAdeEngineeringBacken
 
 	deleteMissionRecord(missionId: string, writerId?: string): Promise<void> {
 		return this.channel.call('deleteMissionRecord', { missionId, writerId });
+	}
+
+	saveOrchestrationBlobs(missionId: string, blobs: readonly { readonly ptr: string; readonly payloadJson: string }[]): Promise<void> {
+		return this.channel.call('saveOrchestrationBlobs', { missionId, blobs });
+	}
+
+	readOrchestrationBlob(missionId: string, ptr: string): Promise<string | undefined> {
+		return this.channel.call('readOrchestrationBlob', { missionId, ptr });
+	}
+
+	appendOrchestrationArchive(missionId: string, lines: readonly string[]): Promise<void> {
+		return this.channel.call('appendOrchestrationArchive', { missionId, lines });
+	}
+
+	readOrchestrationArchive(missionId: string, options?: { readonly limit?: number; readonly offset?: number }): Promise<readonly string[]> {
+		return this.channel.call('readOrchestrationArchive', { missionId, ...options });
+	}
+
+	syncOrchestrationDaemonState(snapshot: IAdeOrchestrationDaemonMissionSnapshot): Promise<void> {
+		return this.channel.call('syncOrchestrationDaemonState', snapshot);
+	}
+
+	getOrchestrationDaemonState(missionId?: string): Promise<Readonly<Record<string, IAdeOrchestrationDaemonMissionSnapshot>>> {
+		return this.channel.call('getOrchestrationDaemonState', missionId);
+	}
+
+	executeHeadlessOrchestrationControl(action: string, params: Readonly<Record<string, unknown>>): Promise<IAdeHeadlessControlResult> {
+		return this.channel.call('executeHeadlessOrchestrationControl', { action, params });
 	}
 
 	syncApiDocs(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths> {

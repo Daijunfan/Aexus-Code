@@ -19,8 +19,10 @@ import {
 	parseApiCommand,
 	parseDocsCommand,
 	parseMissionRuntimeSubcommand,
+	parseOrchestrationGroupCommand,
 	parseOrgCommandIfRuntime,
 	parseTokenGroupCommand,
+	parseWhiteboardGroupCommand,
 	parseWhoamiCommand,
 } from './adeCliMissionRuntime.mjs';
 
@@ -92,19 +94,17 @@ Global Options:
   --json                    Print structured JSON output
   --window <id>             Target a specific workbench window ID
 
-Organizational Ranks (governor [L1] > manager [L2] > employee [L3] > worker [L4] — IMPORTANT: employee != worker):
-  governor  (L1)  Top executive orchestrator; oversees manager/employee/worker and designs Mission Mermaid DAGs.
-  manager   (L2)  Module / segment lead overseeing employee & worker; supervises off-graph Mission jurisdictions.
-  employee  (L3)  Orchestrated supervisory & review rank ABOVE worker (Employee IS NOT Worker / Employee != Worker):
-                  holds aexus-ade subordinate control APIs over leaf workers and reviews outputs without writing business code.
-  worker    (L4)  Lowest pure execution leaf rank BELOW employee: cannot have subordinates and runs with 100% clean
-                  native Coding Agent context (zero ADE role/API prompt injection) to execute actual coding tasks.
+Organizational Ranks (numeric tiers L-1 User > L0 Secretary > L1..LN; live aliases via aexus-ade rank names --json):
+  L1 (default: governor)  Top orchestrator; owns architecture, Engineering Orchestration & Mission Task DAGs, and downward token delegation.
+  L2 (default: manager)   Mid-level lead; splits sub-tasks downward via tokens, manages immediate next-tier staff within department, returns verified results.
+  L3 (default: employee)  Mid-lower orchestrated rank; executes/reviews baton tokens in Engineering or supervises lower tiers top-down.
+  L4 (default: worker)    Pure execution leaf rank; 100% clean native Coding Agent context outside Engineering, token/whiteboard bus inside Engineering.
 
 Commands:
   status
   version
   whoami
-  docs read <common|mission|manifest|L0..LN>
+  docs read <common|L0..LN|engineering|paradigm|engineering-api|mission|manifest>
   api update [--since <rev>] [--scope <all|common|in_graph|off_graph|mission>]
   doctor [--project <path>] [--strict]
   completion <bash|zsh|fish|powershell>
@@ -113,8 +113,8 @@ Commands:
 
   rank list
   rank names
-  rank get <L0|L1..LN|rankId|alias>
-  rank docs [L0|L1..LN|mission]
+  rank get <L-1|L0|L1..LN|rankId|alias>
+  rank docs [common|L0|L1..LN|engineering|engineering-api|mission]
   rank rename <L1..LN|rankId> "<alias>" [--short <tag>]
   rank set-count <N>
 
@@ -191,39 +191,50 @@ Commands:
   mission docs
   mission list [--project <path>]
   mission init [--mission <id> | --owner <id>] [--title "<name>"] [--open] [--side]
-  mission open --mission <id> [--side]
+  mission export [--mission <id>] [--with-positions] [--file <outPath>]
+  mission import [--owner <id>] [--project <path>] [--title "<name>"] (--file <path> | --text <bundleJson>) [--open] [--side]
+  mission open --mission <id> [--view <mission|orchestration|both>] [--side]
   mission blueprint get --mission <id> [--raw]
   mission blueprint apply --mission <id> (--file <path> | --text <mermaid>)
   mission blueprint validate (--file <path> | --text <mermaid>)
-  mission prompt list [--mission <id>]
-  mission prompt get [--mission <id>] --node <nodeId>
-  mission prompt set [--mission <id>] --node <nodeId> (--prompt <text> | --file <path> | --clear)
-  mission check list [--mission <id>] [--node <nodeId>]
-  mission check get [--mission <id>] --node <nodeId>
-  mission check set [--mission <id>] --node <nodeId> (--cmd <shell> | --expect-file <path>) [--on-fail bounce|fail|escalate] [--max-retries <n>] [--timeout <duration>] [--match <pattern>] [--cwd <dir>] [--host <local|alias>]
-  mission check remove [--mission <id>] --node <nodeId> [--id <checkId> | --all]
-  mission check run [--mission <id>] --node <nodeId> [--id <checkId>]
-  mission start [--mission <id>] [--timeout <minutes>] [--prompt <text>]
-  mission run [--mission <id>]
-  mission status [--mission <id>]
-  mission pause|resume|stop [--mission <id>]
-  mission remove --mission <id>
-  mission timeout [--mission <id>] --minutes <n>
-  mission boundary get|set [--mission <id>] [--off-graph-max-tier <k>] [--supervisors-json <json>]
-  mission recall [--mission <id>] [--nodes <n1,n2>] [--branch <nodeId>] [--reason <text>]
-  mission retry [--mission <id>] (--node <nodeId> | --token <tokenId>) [--guidance <text>]
-  mission patch [--mission <id>] (--file <path> | --text <mermaid>) [--reason <text>]
-  mission gate <approve|reject> [--mission <id>] --node <id> [--token <tokenId>] [--note <text>] [--rollback <nodeId>]
+  mission task list|get|create|update|set|remove|complete|status|edge [--mission <id>] [--node <taskId>] [--title <title>] [--description <text>] [--owner <staffId>] [--assignee <staffId>] [--min-tier <n>] [--after <upId>] [--force]
+  mission check list|get|set|remove|run [--mission <id>] [--node <nodeId>] ...
   mission trigger list|set|remove [--mission <id>] ...
   mission host bind [--mission <id>] --node <id> --host <local|alias> [--path <remotePath>]
+  mission status [--mission <id>]
+  mission remove --mission <id>
+
+  orchestration get [--mission <id>] [--raw]
+  orchestration validate (--file <path.json|mjs|mmd> | --text <mermaid>)
+  orchestration load [--mission <id>] --file <path.json|mjs|mmd>
+  orchestration apply [--mission <id>] (--file <path> | --text <mermaid>)
+  orchestration export [--mission <id>] [--format mermaid|json] [--with-positions] [--raw] [--file <outPath>]
+  orchestration import [--mission <id>] (--file <path> | --text <mermaid>)
+  orchestration layout set <lr|td|radial|grid> [--mission <id>] [--persist-in-code]
+  orchestration group list|create|rename|assign|remove [--mission <id>] ...
+  orchestration status [--mission <id>]
+  orchestration pause|resume|abort [--mission <id>] [--reason <text>]
+  orchestration dispatch [--mission <id>] --prompt <text> [--detail <text>] [--task <taskId>] [--artifact <title=body>] [--decision <title=body>] [--to <staffNodeId>] [--whiteboard <wbId>]
+  orchestration staff create|rename|config|remove [--mission <id>] ...
+  orchestration edge connect|label|remove [--mission <id>] <fromId> <toId> ...
+
+  whiteboard list [--mission <id>]
+  whiteboard create [--mission <id>] --department <Dept> --title <Title> [--id <wbId>] [--content <text> | --file <path>]
+  whiteboard read <wbId> [--mission <id>]
+  whiteboard write <wbId> [--mission <id>] (--content <text> | --append <text> | --file <path>)
+  whiteboard rename <wbId> "<New Title>" [--department <Dept>] [--mission <id>]
+  whiteboard remove <wbId> [--mission <id>]
 
   token current [--mission <id>] [--agent <id>]
-  token trace <tracePtr> [--mission <id>] [--limit <n>]
-  token complete <tokenId> --summary <text> [--mission <id>]
-  token reject <tokenId> --reason <text> [--target <nodeId>] [--mission <id>]
+  token read <ptr1[,ptr2...]> [--mission <id>] [--token <tokenId>]
+  token history <tokenId> [--mission <id>] [--all | --delta]
+  token mint [parentTokenId] --to <subNodeId> --summary <text> [--detail <text>] [--task <taskId>] [--branches-json <json>] [--wait-join] [--from <staffNodeId>] [--mission <id>]
+  token split [parentTokenId] --branches-json <json> [--no-wait-join] [--join-mode all|any] [--from <staffNodeId>] [--mission <id>]
+  token return <tokenId> --summary <text> [--to <superiorNodeId>] [--detail <text>] [--artifact <title=body>] [--decision <title=body>] [--whiteboard <wbId>] [--mission <id>]
+  token handoff <tokenId> --to <nodeId[,nodeId2]> --summary <text> [--detail <text>] [--task <taskId>] [--artifact <title=body>] [--decision <title=body>] [--ref <ptr[,...]>] [--whiteboard <wbId[,...]>] [--mission <id>]
+  token complete <tokenId> --summary <text> [--detail <text>] [--artifact <title=body>] [--decision <title=body>] [--ref <ptr[,...]>] [--to <nodeId[,...]>] [--whiteboard <wbId[,...]>] [--finish] [--mission <id>]
   token block <tokenId> --duration <duration> [--reason <text>] [--watch-pid <pid> | --wake-on-pid-exit <pid>] [--watch-file <path> | --wake-on-file <path>] [--host <alias>]
   token fail <tokenId> --reason <text> [--mission <id>]
-  token retry (<tokenId> | --node <nodeId>) [--guidance <text>] [--mission <id>]
 
   org subordinates [supervisorId] [--mission <id>]
   org send <nodeOrSessionId> <message> [--mission <id>] [--wait]
@@ -301,7 +312,7 @@ async function canonicalizeParamsPaths(params: Record<string, unknown> | undefin
 }
 
 /** Flags whose next token is opaque user text and must never be treated as a global flag. */
-const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedback', '--text', '--draft', '--summary', '--reason', '--mermaid', '--note', '--prompt', '--guidance', '--pre-prompt']);
+const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedback', '--text', '--draft', '--summary', '--detail', '--artifact', '--decision', '--reason', '--mermaid', '--note', '--prompt', '--guidance', '--pre-prompt', '--description', '--desc', '--content', '--append']);
 
 export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): ParsedCliInvocation {
 	let help = false;
@@ -453,6 +464,14 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 
 	if (group === 'token' || group === 'tokens') {
 		return parseTokenGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
+	}
+
+	if (group === 'orchestration' || group === 'orch') {
+		return parseOrchestrationGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
+	}
+
+	if (group === 'whiteboard' || group === 'whiteboards' || group === 'wb') {
+		return parseWhiteboardGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
 	}
 
 	if (group === 'doctor') {
@@ -1477,11 +1496,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 
 		if (sub === 'open') {
 			let missionId: string | undefined;
+			let view: string | undefined;
 			let side = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
 					missionId = takeOptionVal(ref, '--mission', args);
+				} else if (arg === '--view' || arg.startsWith('--view=')) {
+					view = takeOptionVal(ref, '--view', args).toLowerCase();
+					if (view !== 'mission' && view !== 'orchestration' && view !== 'both') {
+						throw new CliUsageError('Option --view must be mission, orchestration, or both.');
+					}
 				} else if (arg === '--side') {
 					side = true;
 				} else if (!arg.startsWith('-') && !missionId) {
@@ -1491,9 +1516,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				}
 			}
 			if (!missionId) {
-				throw new CliUsageError('Usage: aexus-ade mission open --mission <id> [--side]');
+				throw new CliUsageError('Usage: aexus-ade mission open --mission <id> [--view <mission|orchestration|both>] [--side]');
 			}
-			return { help: false, json, windowId, action: 'mission.open', params: side ? { missionId, side: true } : { missionId } };
+			const params: Record<string, unknown> = { missionId };
+			if (view) { params.view = view; }
+			if (side) { params.side = true; }
+			return { help: false, json, windowId, action: 'mission.open', params };
 		}
 
 		if (sub === 'blueprint') {
@@ -2425,7 +2453,7 @@ export { RANK_SUBCOMMANDS };
 
 export const TOP_LEVEL_COMMANDS = [
 	'doctor', 'completion', 'status', 'whoami', 'docs', 'api', 'mode', 'view', 'rank', 'role',
-	'project', 'host', 'engine', 'session', 'secretary', 'mission', 'token', 'org', 'inbox', 'version',
+	'project', 'host', 'engine', 'session', 'secretary', 'mission', 'orchestration', 'whiteboard', 'token', 'org', 'inbox', 'version',
 ] as const;
 
 export const ROLE_SUBCOMMANDS = [
@@ -2433,12 +2461,12 @@ export const ROLE_SUBCOMMANDS = [
 ] as const;
 
 export const MISSION_SUBCOMMANDS = [
-	'docs', 'list', 'init', 'open', 'blueprint', 'prompt', 'check', 'start', 'run', 'status', 'pause', 'resume', 'stop',
+	'docs', 'list', 'init', 'export', 'import', 'open', 'blueprint', 'task', 'prompt', 'check', 'start', 'run', 'status', 'pause', 'resume', 'stop',
 	'timeout', 'boundary', 'recall', 'retry', 'patch', 'gate', 'trigger', 'host', 'remove',
 ] as const;
 
 export const TOKEN_SUBCOMMANDS = [
-	'current', 'trace', 'complete', 'reject', 'block', 'fail', 'retry',
+	'current', 'read', 'history', 'trace', 'mint', 'split', 'return', 'handoff', 'complete', 'reject', 'block', 'fail', 'retry',
 ] as const;
 
 export const ORG_SUBCOMMANDS = [
@@ -2581,8 +2609,11 @@ function buildZshCompletion(): string {
 		'\t)',
 		'\ttoken_subcommands=(',
 		`\t\t'current:Inspect active tokens held by this node'`,
+		`\t\t'read:Batch-dereference lightweight token pointers (hop-N, art-N, dec-N, wb:<id>)'`,
+		`\t\t'history:Inspect pointer-indexed pass history and cyclic delta view'`,
 		`\t\t'trace:Expand a token trace pointer'`,
-		`\t\t'complete:Complete a token with a plain-text summary'`,
+		`\t\t'handoff:Hand off an Orchestration baton token along a connected edge'`,
+		`\t\t'complete:Complete a token with a 1-line headline and optional split pointers'`,
 		`\t\t'reject:Reject an upstream token back to a prior node'`,
 		`\t\t'block:Declare a long-running blocked token with optional wakeup watch'`,
 		`\t\t'fail:Report failure on a token'`,
@@ -2638,8 +2669,10 @@ function buildFishCompletion(): string {
 		engine: 'List engines and sessions',
 		session: 'Manage sessions',
 		secretary: 'Control the secretary session',
-		mission: 'Manage Missions, Mermaid DAGs, prompts, and runtime',
-		token: 'In-graph Mission Token Bus commands',
+		mission: 'Manage Engineering Missions, Task DAGs, and runtime',
+		orchestration: 'Manage cyclic all-staff Orchestration topology and dynamic expansion',
+		whiteboard: 'Manage Department Shared Whiteboards (lightweight token pointers)',
+		token: 'Token Bus and Orchestration relay handoff commands',
 		org: 'Off-graph strictly top-down supervision commands',
 		inbox: 'Manage the ADE Inbox',
 		version: 'Print the CLI version',
@@ -2676,8 +2709,11 @@ function buildFishCompletion(): string {
 		docs: 'Locate sibling MISSION_API.md documentation',
 		list: 'List Missions',
 		init: 'Initialize a Mission',
+		export: 'Export a lossless Engineering bundle (Mission DAG + Orchestration + Whiteboards)',
+		import: 'Import a lossless Engineering bundle into a project/owner session',
 		open: 'Open a Mission canvas',
 		blueprint: 'Get, apply, or validate a Mermaid DAG blueprint',
+		task: 'List, edit, or mark completed Mission Task DAG nodes',
 		prompt: 'List, get, set, or clear per-node pre-prompts',
 		check: 'Configure, inspect, remove, or dry-run zero-cost deterministic verification hooks',
 		start: 'Start Mission execution',
@@ -2701,7 +2737,13 @@ function buildFishCompletion(): string {
 	}
 	const tokenDescriptions: Record<(typeof TOKEN_SUBCOMMANDS)[number], string> = {
 		current: 'Inspect active tokens held by this node',
+		read: 'Batch-dereference lightweight token pointers (hop-N, art-N, dec-N, wb:<id>)',
+		history: 'Inspect pointer-indexed pass history and cyclic delta view',
 		trace: 'Expand a token trace pointer',
+		mint: 'Actively mint heterogeneous sub-task token(s) downward to subordinate(s)',
+		split: 'Split into multiple heterogeneous subordinate branches with join barrier',
+		return: 'Return a completed downward baton upward to its dispatching superior',
+		handoff: 'Hand off an Orchestration baton token to connected staff node(s)',
 		complete: 'Complete a token with a plain-text summary',
 		reject: 'Reject an upstream token back to a prior node',
 		block: 'Declare a long-running blocked token',
@@ -2817,11 +2859,51 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 	try {
 		const { socketPath, token, usingSessionToken } = await resolveConnection(env);
 		const normalizedParams = await canonicalizeParamsPaths(parsed.params, parsed.action);
+		let exportOutputFile: string | undefined;
 		if (
-			(parsed.action === 'mission.blueprint.apply' || parsed.action === 'mission.blueprint.validate')
+			(parsed.action === 'orchestration.export' || parsed.action === 'mission.export')
+			&& normalizedParams && typeof normalizedParams.outputFile === 'string' && normalizedParams.outputFile.trim()
+		) {
+			exportOutputFile = path.resolve(cwd, normalizedParams.outputFile.trim());
+			delete normalizedParams.outputFile;
+		}
+		if (
+			(parsed.action === 'token.mint' || parsed.action === 'token.split')
+			&& normalizedParams && typeof normalizedParams.branchesFile === 'string' && normalizedParams.branchesJson === undefined
+		) {
+			normalizedParams.branchesJson = await fs.readFile(path.resolve(cwd, normalizedParams.branchesFile), 'utf8');
+			delete normalizedParams.branchesFile;
+		}
+		if (
+			(parsed.action === 'orchestration.validate' || parsed.action === 'orchestration.load')
+			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.manifest === undefined && normalizedParams.text === undefined
+		) {
+			const resolvedFile = path.resolve(cwd, normalizedParams.file);
+			const ext = path.extname(resolvedFile).toLowerCase();
+			if (ext === '.json') {
+				normalizedParams.manifest = JSON.parse(await fs.readFile(resolvedFile, 'utf8'));
+			} else if (ext === '.mjs' || ext === '.js' || ext === '.cjs') {
+				const { pathToFileURL } = await import('url');
+				const mod = await import(pathToFileURL(resolvedFile).href) as { default?: unknown; manifest?: unknown };
+				const candidate = mod.default ?? mod.manifest ?? mod;
+				normalizedParams.manifest = typeof candidate === 'function' ? await (candidate as () => unknown)() : candidate;
+			} else {
+				const rawText = await fs.readFile(resolvedFile, 'utf8');
+				if (rawText.trimStart().startsWith('{')) {
+					normalizedParams.manifest = JSON.parse(rawText);
+				} else {
+					normalizedParams.text = rawText;
+					if (parsed.action === 'orchestration.load') {
+						parsed = { ...parsed, action: 'orchestration.apply' };
+					}
+				}
+			}
+		}
+		if (
+			(parsed.action === 'mission.blueprint.apply' || parsed.action === 'mission.blueprint.validate' || parsed.action === 'orchestration.apply' || parsed.action === 'orchestration.import' || parsed.action === 'mission.import')
 			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.text === undefined
 		) {
-			normalizedParams.text = await fs.readFile(normalizedParams.file, 'utf8');
+			normalizedParams.text = await fs.readFile(path.resolve(cwd, normalizedParams.file), 'utf8');
 		}
 		if (
 			parsed.action === 'mission.patch'
@@ -2834,6 +2916,18 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.prompt === undefined && normalizedParams.clear !== true
 		) {
 			normalizedParams.prompt = await fs.readFile(normalizedParams.file, 'utf8');
+		}
+		if (
+			(parsed.action === 'mission.task.set' || parsed.action === 'mission.task.update')
+			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.description === undefined
+		) {
+			normalizedParams.description = await fs.readFile(path.resolve(cwd, normalizedParams.file), 'utf8');
+		}
+		if (
+			(parsed.action === 'whiteboard.create' || parsed.action === 'whiteboard.write')
+			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.content === undefined && normalizedParams.appendContent === undefined
+		) {
+			normalizedParams.content = await fs.readFile(normalizedParams.file, 'utf8');
 		}
 		let effectiveParams: Record<string, unknown> | undefined = normalizedParams;
 		if (usingSessionToken) {
@@ -2884,12 +2978,47 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		const outputPayload = parsed.action === 'status' && response.result && typeof response.result === 'object' && !Array.isArray(response.result)
 			? { schemaVersion: ADE_CLI_SCHEMA_VERSION, ...(response.result as Record<string, unknown>) }
 			: response.result;
+		if (exportOutputFile) {
+			await fs.mkdir(path.dirname(exportOutputFile), { recursive: true });
+			const payloadObj = outputPayload && typeof outputPayload === 'object' && !Array.isArray(outputPayload)
+				? outputPayload as Record<string, unknown>
+				: undefined;
+			const fileContent = parsed.action === 'orchestration.export'
+				? (typeof outputPayload === 'string'
+					? outputPayload
+					: (payloadObj?.manifest
+						? (JSON.stringify(payloadObj.manifest, null, 2) + '\n')
+						: String(payloadObj?.orchestrationText ?? '')))
+				: (JSON.stringify(outputPayload ?? {}, null, 2) + '\n');
+			await fs.writeFile(exportOutputFile, fileContent.endsWith('\n') ? fileContent : `${fileContent}\n`, 'utf8');
+			const summary = {
+				ok: true,
+				action: parsed.action,
+				file: exportOutputFile,
+				bytes: Buffer.byteLength(fileContent, 'utf8'),
+				...(outputPayload && typeof outputPayload === 'object' && !Array.isArray(outputPayload)
+					? {
+						missionId: (outputPayload as Record<string, unknown>).missionId,
+						title: (outputPayload as Record<string, unknown>).title,
+					}
+					: {}),
+			};
+			if (parsed.json) {
+				writeOut(JSON.stringify(summary, null, 2) + '\n');
+			} else {
+				writeOut(`Exported to ${exportOutputFile} (${summary.bytes} bytes)\n`);
+			}
+			return 0;
+		}
 		if (parsed.json) {
 			writeOut(JSON.stringify(outputPayload ?? { ok: true }, null, 2) + '\n');
 		} else if (parsed.action === 'docs.read' && outputPayload && typeof outputPayload === 'object' && typeof (outputPayload as Record<string, unknown>).content === 'string') {
 			const content = (outputPayload as Record<string, unknown>).content as string;
 			writeOut(content.endsWith('\n') ? content : `${content}\n`);
-		} else if (parsed.action === 'mission.blueprint.get' && parsed.params?.raw === true) {
+		} else if (
+			(parsed.action === 'mission.blueprint.get' || parsed.action === 'orchestration.get' || parsed.action === 'orchestration.export')
+			&& parsed.params?.raw === true
+		) {
 			writeOut(formatRawBlueprintOutput(outputPayload));
 		} else {
 			writeOut(formatHumanOutput(parsed.action, outputPayload) + '\n');

@@ -7,19 +7,28 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
+import { AEXUS_SSH_SCHEME } from '../../../../platform/ade/common/adeCloudHosts.js';
 import {
+	AdeThinkingLevel,
 	computeAdeStorageFingerprint,
 	IAdeEngineeringBackendService,
 } from '../../../../platform/ade/common/adeEngineering.js';
 import { IMissionNodeCheckHook, IMissionNodePosition, parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
 import { computeMissionTotalCostUsd, IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
+import {
+	findHighestRankStaffNode,
+	IMissionTaskStatusRecord,
+	IOrchestrationRuntimeState,
+	IOrchestrationWhiteboard,
+} from '../../../../platform/ade/common/adeOrchestrationEngine.js';
+import { OrchestrationLayoutMode, parseOrchestrationGraph } from '../../../../platform/ade/common/adeOrchestrationGraph.js';
 import { ADE_SECRETARY_TIER, ADE_USER_TIER } from '../../../../platform/ade/common/adeRankResize.js';
-import { DEFAULT_ADE_ORGANIZATION_CONFIG, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
+import { DEFAULT_ADE_ORGANIZATION_CONFIG, normalizeAdeEngineId, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { createDecorator, IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchModeService } from '../../../services/workbenchMode/common/workbenchMode.js';
-import { ADE_SECRETARY_ID, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
+import { ADE_SECRETARY_ID, AdeEngineeringViewMode, encodeAdeEngineeringInputSpec, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
@@ -58,12 +67,26 @@ interface IAdeMissionIndexEnvelope {
 export interface IAdeMissionRecord {
 	readonly id: string;
 	readonly title: string;
+	/** Mission view: strictly acyclic Mermaid Task DAG source. */
 	readonly mermaidText: string;
-	/** Per-node authored Pre-Prompts (nodeId -> prompt text) packaged together with Token info on wakeup. */
+	/** Mission view: per-task detailed descriptions (taskNodeId -> description). */
 	readonly nodePrompts?: Readonly<Record<string, string>>;
-	/** Per-node zero-cost deterministic verification hooks (nodeId -> hooks) enforced before token completion advances. */
+	/** Mission view: per-task completion status records (marked completed by highest-rank role). */
+	readonly taskStatuses?: Readonly<Record<string, IMissionTaskStatusRecord>>;
+	/** Per-node zero-cost deterministic verification hooks (nodeId -> hooks). */
 	readonly nodeChecks?: Readonly<Record<string, readonly IMissionNodeCheckHook[]>>;
+	/** Mission view: manual task node positions on canvas. */
 	readonly positions: Readonly<Record<string, IMissionNodePosition>>;
+	/** Orchestration view: cyclic all-staff declarative topology (Mermaid with cycles, `<-->`, departments, whiteboards). */
+	readonly orchestrationText?: string;
+	/** Orchestration view: visual presentation layout mode (does NOT mutate `orchestrationText`). */
+	readonly orchestrationLayoutMode?: OrchestrationLayoutMode;
+	/** Orchestration view: manual staff & whiteboard positions on canvas. */
+	readonly orchestrationPositions?: Readonly<Record<string, IMissionNodePosition>>;
+	/** Orchestration view: Department Shared Whiteboards (referenced via lightweight pointers in tokens). */
+	readonly whiteboards?: Readonly<Record<string, IOrchestrationWhiteboard>>;
+	/** Orchestration view: all-staff cyclic re-entrant token runtime state. */
+	readonly orchestrationRuntime?: IOrchestrationRuntimeState;
 	/** Exact owner session ID (agent session ID for L1..LN, ADE_SECRETARY_ID for L0, undefined for User L-1 standalone). */
 	readonly ownerSessionId?: string;
 	/** Hierarchy tier of the owner (-1 = User L-1, 0 = Secretary L0, 1..N = L1..LN). */
@@ -137,6 +160,8 @@ export const IAdeMissionService = createDecorator<IAdeMissionService>('adeMissio
  */
 export interface IAdeMissionOpenOptions {
 	readonly side?: boolean;
+	readonly viewMode?: AdeEngineeringViewMode;
+	readonly openSiblingViews?: boolean;
 	readonly focusNodeId?: string;
 	readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
 	readonly openAgentBeside?: boolean;
@@ -158,6 +183,7 @@ export interface IAdeMissionService {
 		readonly id?: string;
 		readonly title?: string;
 		readonly mermaidText?: string;
+		readonly orchestrationText?: string;
 		readonly nodePrompts?: Readonly<Record<string, string>>;
 		readonly ownerSessionId?: string;
 		readonly ownerTier?: number;
@@ -176,6 +202,14 @@ export interface IAdeMissionService {
 	updateMermaid(id: string, mermaidText: string): IAdeMissionRecord | undefined;
 	updateNodePrompt(id: string, nodeId: string, prompt: string): IAdeMissionRecord | undefined;
 	updateNodePrompts(id: string, prompts: Readonly<Record<string, string>>): IAdeMissionRecord | undefined;
+	updateTaskStatuses(id: string, taskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>>): IAdeMissionRecord | undefined;
+	updateOrchestrationText(id: string, orchestrationText: string, options?: { readonly replaceWhiteboards?: boolean; readonly replacePositions?: boolean }): IAdeMissionRecord | undefined;
+	updateOrchestrationLayoutMode?(id: string, layoutMode: OrchestrationLayoutMode): IAdeMissionRecord | undefined;
+	ensureOrchestrationStaffSynced?(id: string): void;
+	updateOrchestrationPositions(id: string, positions: Readonly<Record<string, IMissionNodePosition>>): IAdeMissionRecord | undefined;
+	clearOrchestrationPositions(id: string): IAdeMissionRecord | undefined;
+	updateWhiteboards(id: string, whiteboards: Readonly<Record<string, IOrchestrationWhiteboard>>): IAdeMissionRecord | undefined;
+	updateOrchestrationRuntime(id: string, orchestrationRuntime: IOrchestrationRuntimeState | undefined, options?: { readonly deferPersist?: boolean }): IAdeMissionRecord | undefined;
 	updateNodeChecks(id: string, nodeId: string, checks: readonly IMissionNodeCheckHook[]): IAdeMissionRecord | undefined;
 	upsertNodeCheck(id: string, nodeId: string, check: IMissionNodeCheckHook): IAdeMissionRecord | undefined;
 	removeNodeCheck(id: string, nodeId: string, checkId?: string): IAdeMissionRecord | undefined;
@@ -341,6 +375,11 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 							...(Object.keys(existing.positions).length > 0 ? { positions: { ...record.positions, ...existing.positions } } : {}),
 							...(existing.nodePrompts ? { nodePrompts: { ...record.nodePrompts, ...existing.nodePrompts } } : {}),
 							...(existing.nodeChecks ? { nodeChecks: { ...record.nodeChecks, ...existing.nodeChecks } } : {}),
+							...(existing.taskStatuses ? { taskStatuses: { ...record.taskStatuses, ...existing.taskStatuses } } : {}),
+							...(existing.orchestrationText ? { orchestrationText: existing.orchestrationText } : {}),
+							...(existing.orchestrationPositions ? { orchestrationPositions: { ...record.orchestrationPositions, ...existing.orchestrationPositions } } : {}),
+							...(existing.whiteboards ? { whiteboards: { ...record.whiteboards, ...existing.whiteboards } } : {}),
+							...(existing.orchestrationRuntime ? { orchestrationRuntime: existing.orchestrationRuntime } : {}),
 							...(existing.runtime ? { runtime: existing.runtime } : {}),
 							updatedAt: Math.max(record.updatedAt, existing.updatedAt),
 						}
@@ -400,6 +439,15 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			}
 		}
 		if (changed && !this._store.isDisposed) {
+			this.writeHotIndexOnly([], [], 'file');
+			const projects = this.projectsService;
+			if (projects) {
+				for (const rec of this.records.values()) {
+					if (rec.ownerSessionId && rec.ownerSessionId !== ADE_SECRETARY_ID && rec.orchestrationText?.trim() && projects.getAgent(rec.ownerSessionId)) {
+						this.syncSidebarEmployeesForRecord(rec);
+					}
+				}
+			}
 			this._onDidChange.fire();
 		}
 	}
@@ -777,13 +825,81 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 				}
 			}
 		}
+		const sanitizedTaskStatuses: Record<string, IMissionTaskStatusRecord> = {};
+		if (entry.taskStatuses && typeof entry.taskStatuses === 'object') {
+			for (const [tid, rawRec] of Object.entries(entry.taskStatuses as Record<string, unknown>)) {
+				if (!rawRec || typeof rawRec !== 'object') {
+					continue;
+				}
+				const r = rawRec as Record<string, unknown>;
+				const st = r.status;
+				if (st === 'pending' || st === 'in_progress' || st === 'completed' || st === 'blocked') {
+					const activeTokenIds = Array.isArray(r.activeTokenIds)
+						? r.activeTokenIds.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+						: undefined;
+					const artifactPtrs = Array.isArray(r.artifactPtrs)
+						? r.artifactPtrs.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+						: undefined;
+					sanitizedTaskStatuses[tid] = {
+						status: st,
+						...(typeof r.completedBy === 'string' && r.completedBy ? { completedBy: r.completedBy } : {}),
+						...(typeof r.completedByLabel === 'string' && r.completedByLabel ? { completedByLabel: r.completedByLabel } : {}),
+						...(typeof r.completedByTier === 'number' && Number.isFinite(r.completedByTier) ? { completedByTier: r.completedByTier } : {}),
+						...(typeof r.completedAt === 'number' && Number.isFinite(r.completedAt) ? { completedAt: r.completedAt } : {}),
+						...(typeof r.note === 'string' && r.note.trim() ? { note: r.note.trim() } : {}),
+						...(typeof r.assigneeNodeId === 'string' && r.assigneeNodeId.trim() ? { assigneeNodeId: r.assigneeNodeId.trim() } : {}),
+						...(typeof r.assigneeLabel === 'string' && r.assigneeLabel.trim() ? { assigneeLabel: r.assigneeLabel.trim() } : {}),
+						...(activeTokenIds && activeTokenIds.length > 0 ? { activeTokenIds } : {}),
+						...(typeof r.lastTokenId === 'string' && r.lastTokenId.trim() ? { lastTokenId: r.lastTokenId.trim() } : {}),
+						...(typeof r.startedAt === 'number' && Number.isFinite(r.startedAt) ? { startedAt: r.startedAt } : {}),
+						...(typeof r.durationMs === 'number' && Number.isFinite(r.durationMs) ? { durationMs: r.durationMs } : {}),
+						...(artifactPtrs && artifactPtrs.length > 0 ? { artifactPtrs } : {}),
+						...(typeof r.blockedReason === 'string' && r.blockedReason.trim() ? { blockedReason: r.blockedReason.trim() } : {}),
+						...(typeof r.lastError === 'string' && r.lastError.trim() ? { lastError: r.lastError.trim() } : {}),
+						updatedAt: typeof r.updatedAt === 'number' && Number.isFinite(r.updatedAt) ? r.updatedAt : Date.now(),
+					};
+				}
+			}
+		}
+		const sanitizedWhiteboards: Record<string, IOrchestrationWhiteboard> = {};
+		if (entry.whiteboards && typeof entry.whiteboards === 'object') {
+			for (const [wid, rawWb] of Object.entries(entry.whiteboards as Record<string, unknown>)) {
+				if (!rawWb || typeof rawWb !== 'object') {
+					continue;
+				}
+				const w = rawWb as Record<string, unknown>;
+				const wbId = typeof w.id === 'string' && w.id.trim() ? w.id.trim() : wid.trim();
+				if (!wbId) {
+					continue;
+				}
+				sanitizedWhiteboards[wbId] = {
+					id: wbId,
+					title: typeof w.title === 'string' && w.title.trim() ? w.title.trim() : wbId,
+					department: typeof w.department === 'string' && w.department.trim() ? w.department.trim() : 'General',
+					content: typeof w.content === 'string' ? w.content : '',
+					version: typeof w.version === 'number' && Number.isInteger(w.version) && w.version >= 1 ? w.version : 1,
+					createdAt: typeof w.createdAt === 'number' && Number.isFinite(w.createdAt) ? w.createdAt : Date.now(),
+					updatedAt: typeof w.updatedAt === 'number' && Number.isFinite(w.updatedAt) ? w.updatedAt : Date.now(),
+					...(typeof w.updatedBy === 'string' && w.updatedBy ? { updatedBy: w.updatedBy } : {}),
+					...(typeof w.updatedByLabel === 'string' && w.updatedByLabel ? { updatedByLabel: w.updatedByLabel } : {}),
+				};
+			}
+		}
 		return {
 			id,
 			title: typeof entry.title === 'string' && entry.title.trim() ? entry.title.trim() : 'Untitled',
 			mermaidText: typeof entry.mermaidText === 'string' ? entry.mermaidText : '',
 			...(Object.keys(sanitizedPrompts).length > 0 ? { nodePrompts: sanitizedPrompts } : {}),
+			...(Object.keys(sanitizedTaskStatuses).length > 0 ? { taskStatuses: sanitizedTaskStatuses } : {}),
 			...(Object.keys(sanitizedChecks).length > 0 ? { nodeChecks: sanitizedChecks } : {}),
 			positions: entry.positions && typeof entry.positions === 'object' ? entry.positions as Readonly<Record<string, IMissionNodePosition>> : {},
+			...(typeof entry.orchestrationText === 'string' ? { orchestrationText: entry.orchestrationText } : {}),
+			...(entry.orchestrationLayoutMode === 'lr' || entry.orchestrationLayoutMode === 'td' || entry.orchestrationLayoutMode === 'radial' || entry.orchestrationLayoutMode === 'grid'
+				? { orchestrationLayoutMode: entry.orchestrationLayoutMode }
+				: {}),
+			...(entry.orchestrationPositions && typeof entry.orchestrationPositions === 'object' ? { orchestrationPositions: entry.orchestrationPositions as Readonly<Record<string, IMissionNodePosition>> } : {}),
+			...(Object.keys(sanitizedWhiteboards).length > 0 ? { whiteboards: sanitizedWhiteboards } : {}),
+			...(entry.orchestrationRuntime && typeof entry.orchestrationRuntime === 'object' ? { orchestrationRuntime: entry.orchestrationRuntime as IOrchestrationRuntimeState } : {}),
 			...(ownerSessionId ? { ownerSessionId, linkedSessionId: ownerSessionId } : {}),
 			ownerTier,
 			...(ownerRankId ? { ownerRankId } : {}),
@@ -1055,13 +1171,138 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		return record.ownerSessionId ?? record.id;
 	}
 
+	ensureOrchestrationStaffSynced(id: string): void {
+		const rec = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!rec) {
+			return;
+		}
+		this.syncSidebarEmployeesForRecord(rec);
+	}
+
 	private syncSidebarEmployeesForRecord(record: IAdeMissionRecord): void {
 		const projects = this.projectsService;
 		if (!projects) {
 			return;
 		}
-		if (record.ownerSessionId && record.ownerSessionId !== ADE_SECRETARY_ID && projects.getAgent(record.ownerSessionId)) {
-			projects.setAgentWorkTreeTag?.(record.ownerSessionId, 'mission');
+		const ownerAgent = record.ownerSessionId && record.ownerSessionId !== ADE_SECRETARY_ID
+			? projects.getAgent(record.ownerSessionId)
+			: undefined;
+		if (ownerAgent) {
+			projects.setAgentWorkTreeTag?.(ownerAgent.id, 'mission');
+		}
+		if (record.orchestrationText && record.orchestrationText.trim().length > 0) {
+			const parsedOrch = parseOrchestrationGraph(record.orchestrationText);
+			if (parsedOrch.error) {
+				// Preserve existing staff sessions while editing invalid Orchestration syntax.
+				return;
+			}
+			const ownerKey = this.getOwnerSyncKey(record);
+			const parsedProjectUri = record.projectUri
+				? URI.parse(record.projectUri)
+				: (ownerAgent?.projectUri ?? projects.selectedProject?.uri ?? projects.projects[0]?.uri);
+			if (!ownerAgent && !parsedProjectUri) {
+				return;
+			}
+			const schema = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+			const staffNodes = parsedOrch.nodes.filter(n => n.kind === 'staff');
+			const staffById = new Map(staffNodes.map(n => [n.id, n]));
+			// When owned by a real project Governor agent, that owner session IS the root highest-rank node on canvas!
+			const rootStaffNode = ownerAgent ? findHighestRankStaffNode(parsedOrch) : undefined;
+			const normalizeThinking = (raw: string | undefined): AdeThinkingLevel | undefined => (
+				raw === 'off' || raw === 'low' || raw === 'medium' || raw === 'high' || raw === 'max' ? raw : undefined
+			);
+			const applyStaffEnginePrefs = (agent: IAdeAgent, node: typeof staffNodes[number]) => {
+				const prefPatch: { preferredEngineId?: string; preferredModel?: string; preferredThinking?: AdeThinkingLevel } = {};
+				const normEngine = normalizeAdeEngineId(node.engineId);
+				if (normEngine && !agent.session && agent.preferredEngineId !== normEngine) {
+					prefPatch.preferredEngineId = normEngine;
+				}
+				if (node.model && agent.preferredModel !== node.model) {
+					prefPatch.preferredModel = node.model;
+				}
+				const normThinking = normalizeThinking(node.thinking);
+				if (normThinking && agent.preferredThinking !== normThinking) {
+					prefPatch.preferredThinking = normThinking;
+				}
+				if (Object.keys(prefPatch).length > 0) {
+					projects.updateAgentEnginePreferences?.(agent.id, prefPatch);
+				}
+			};
+			if (ownerAgent && rootStaffNode && (rootStaffNode.engineId || rootStaffNode.model || rootStaffNode.thinking)) {
+				applyStaffEnginePrefs(ownerAgent, rootStaffNode);
+			}
+			const subordinateStaff = rootStaffNode
+				? staffNodes.filter(n => n.id !== rootStaffNode.id)
+				: staffNodes;
+
+			const resolveParentKey = (node: typeof staffNodes[number]): string | undefined => {
+				const nodeTier = node.tier ?? 99;
+				const incomingSuperiors = parsedOrch.edges
+					.filter(e => e.to === node.id)
+					.map(e => staffById.get(e.from))
+					.filter((sup): sup is typeof staffNodes[number] => Boolean(sup && sup.id !== node.id && (sup.tier ?? 0) < nodeTier));
+				if (incomingSuperiors.length === 0) {
+					return undefined;
+				}
+				// Prefer direct superior in the same department, closest higher tier (largest tier < nodeTier)
+				incomingSuperiors.sort((a, b) => {
+					const aSameDept = Boolean(node.department && a.department && a.department.toLowerCase() === node.department.toLowerCase()) ? 1 : 0;
+					const bSameDept = Boolean(node.department && b.department && b.department.toLowerCase() === node.department.toLowerCase()) ? 1 : 0;
+					if (aSameDept !== bSameDept) { return bSameDept - aSameDept; }
+					return (b.tier ?? 0) - (a.tier ?? 0);
+				});
+				const bestSup = incomingSuperiors[0];
+				if (rootStaffNode && bestSup.id === rootStaffNode.id) {
+					// Direct child of the owner Governor session (`parentId = ownerAgent.id`)
+					return undefined;
+				}
+				return bestSup.employeeKey ?? bestSup.id;
+			};
+
+			const staffSpecs = subordinateStaff.map(node => {
+				const targetRank = node.rankId
+					? schema.ranks.find(r => r.id === node.rankId)
+					: (node.tier !== undefined ? schema.ranks.find(r => r.tier === node.tier) : undefined);
+				const parentKey = resolveParentKey(node);
+				return {
+					id: node.employeeKey ?? node.id,
+					title: node.employeeName ?? node.label,
+					nodeIds: [node.id],
+					isExplicitEmployee: true,
+					...(parentKey ? { parentKey } : {}),
+					...(targetRank ? { role: targetRank.id } : {}),
+				};
+			});
+
+			// Tight 1:1 locked hierarchical sync between Orchestration canvas and left sidebar Projects tree!
+			const syncRes = projects.syncMissionMermaidEmployees?.(ownerKey, staffSpecs, {
+				projectUri: parsedProjectUri,
+				ownerTier: ownerAgent ? Math.max(0, record.ownerTier) : 0,
+			});
+			if (syncRes) {
+				for (const node of subordinateStaff) {
+					const agent = syncRes.employeeAgentsByNode[node.id];
+					if (!agent) {
+						continue;
+					}
+					const targetRank = node.rankId
+						? schema.ranks.find(r => r.id === node.rankId)
+						: (node.tier !== undefined ? schema.ranks.find(r => r.tier === node.tier) : undefined);
+					if (targetRank && agent.role !== targetRank.id) {
+						projects.setAgentRole(agent.id, targetRank.id, { allowLockedMissionEmployee: true });
+					}
+					if (node.engineId || node.model || node.thinking) {
+						applyStaffEnginePrefs(agent, node);
+					}
+				}
+				if (syncRes.removedAgents.length > 0) {
+					const editors = this.adeEditorsService;
+					if (editors) {
+						void editors.closeAgents(syncRes.removedAgents).catch(() => undefined);
+					}
+				}
+			}
+			return;
 		}
 		const parsed = parseMissionMermaidDag(record.mermaidText);
 		if (parsed.error) {
@@ -1150,6 +1391,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		readonly id?: string;
 		readonly title?: string;
 		readonly mermaidText?: string;
+		readonly orchestrationText?: string;
 		readonly nodePrompts?: Readonly<Record<string, string>>;
 		readonly ownerSessionId?: string;
 		readonly ownerTier?: number;
@@ -1176,8 +1418,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		}
 		const record: IAdeMissionRecord = {
 			id,
-			title: options?.title?.trim() || ownerAgent?.label || `Mission ${num}`,
+			title: options?.title?.trim() || ownerAgent?.label || `Engineering ${num}`,
 			mermaidText: options?.mermaidText ?? '',
+			...(typeof options?.orchestrationText === 'string' ? { orchestrationText: options.orchestrationText } : {}),
 			...(Object.keys(sanitizedPrompts).length > 0 ? { nodePrompts: sanitizedPrompts } : {}),
 			positions: {},
 			...(ownerMeta.ownerSessionId ? { ownerSessionId: ownerMeta.ownerSessionId, linkedSessionId: ownerMeta.ownerSessionId } : {}),
@@ -1299,6 +1542,207 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
 		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateTaskStatuses(id: string, taskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>>): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			taskStatuses: Object.keys(taskStatuses).length > 0 ? taskStatuses : undefined,
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateOrchestrationText(id: string, orchestrationText: string, options?: { readonly replaceWhiteboards?: boolean; readonly replacePositions?: boolean }): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		if ((existing.orchestrationText ?? '') === orchestrationText && !options?.replaceWhiteboards && !options?.replacePositions) {
+			return existing;
+		}
+		const now = Math.max(Date.now(), existing.updatedAt + 1);
+		const parsed = parseOrchestrationGraph(orchestrationText);
+		let nextWhiteboards = existing.whiteboards;
+		let nextPositions = existing.orchestrationPositions;
+		let nextLayoutMode = existing.orchestrationLayoutMode;
+		if (!parsed.error) {
+			if (parsed.layoutMode && (options?.replacePositions || !nextLayoutMode)) {
+				nextLayoutMode = parsed.layoutMode;
+			}
+			if (options?.replacePositions) {
+				nextPositions = parsed.positions && Object.keys(parsed.positions).length > 0 ? { ...parsed.positions } : undefined;
+			} else if (parsed.positions && Object.keys(parsed.positions).length > 0) {
+				nextPositions = { ...(existing.orchestrationPositions ?? {}), ...parsed.positions };
+			}
+			const wbNodes = parsed.nodes.filter(n => n.kind === 'whiteboard');
+			if (options?.replaceWhiteboards) {
+				const rebuilt: Record<string, IOrchestrationWhiteboard> = {};
+				for (const node of wbNodes) {
+					rebuilt[node.id] = {
+						id: node.id,
+						title: node.label,
+						department: node.department || 'General',
+						content: node.whiteboardContent ?? '',
+						version: node.whiteboardVersion ?? (node.whiteboardContent ? 1 : 0),
+						createdAt: now,
+						updatedAt: now,
+					};
+				}
+				nextWhiteboards = Object.keys(rebuilt).length > 0 ? rebuilt : undefined;
+			} else if (wbNodes.length > 0) {
+				const merged: Record<string, IOrchestrationWhiteboard> = { ...(existing.whiteboards ?? {}) };
+				let wbChanged = false;
+				for (const node of wbNodes) {
+					const prev = merged[node.id];
+					const nextDept = node.department || 'General';
+					const nextTitle = node.label || prev?.title || node.id;
+					if (!prev) {
+						merged[node.id] = {
+							id: node.id,
+							title: nextTitle,
+							department: nextDept,
+							content: node.whiteboardContent ?? '',
+							version: node.whiteboardVersion ?? (node.whiteboardContent ? 1 : 0),
+							createdAt: now,
+							updatedAt: now,
+						};
+						wbChanged = true;
+					} else {
+						const contentChanged = node.whiteboardContent !== undefined && node.whiteboardContent !== prev.content;
+						if (prev.department !== nextDept || prev.title !== nextTitle || contentChanged) {
+							merged[node.id] = {
+								...prev,
+								title: nextTitle,
+								department: nextDept,
+								...(contentChanged ? {
+									content: node.whiteboardContent!,
+									version: Math.max(prev.version + 1, node.whiteboardVersion ?? 1),
+								} : {}),
+								updatedAt: now,
+							};
+							wbChanged = true;
+						}
+					}
+				}
+				if (wbChanged) {
+					nextWhiteboards = merged;
+				}
+			}
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			orchestrationText,
+			...(nextLayoutMode ? { orchestrationLayoutMode: nextLayoutMode } : {}),
+			orchestrationPositions: nextPositions,
+			whiteboards: nextWhiteboards,
+			updatedAt: now,
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this.syncSidebarEmployeesForRecord(updated);
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateOrchestrationLayoutMode(id: string, layoutMode: OrchestrationLayoutMode): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		if (existing.orchestrationLayoutMode === layoutMode) {
+			return existing;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			orchestrationLayoutMode: layoutMode,
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateOrchestrationPositions(id: string, positions: Readonly<Record<string, IMissionNodePosition>>): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			orchestrationPositions: { ...(existing.orchestrationPositions ?? {}), ...positions },
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.scheduleDeferredPersist(150);
+		return updated;
+	}
+
+	clearOrchestrationPositions(id: string): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			orchestrationPositions: {},
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateWhiteboards(id: string, whiteboards: Readonly<Record<string, IOrchestrationWhiteboard>>): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			whiteboards: Object.keys(whiteboards).length > 0 ? whiteboards : undefined,
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateOrchestrationRuntime(id: string, orchestrationRuntime: IOrchestrationRuntimeState | undefined, options?: { readonly deferPersist?: boolean }): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			...(orchestrationRuntime ? { orchestrationRuntime } : { orchestrationRuntime: undefined }),
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		if (options?.deferPersist) {
+			this.scheduleDeferredPersist(250);
+		} else {
+			this.persist();
+		}
 		this._onDidChange.fire();
 		return updated;
 	}
@@ -1469,7 +1913,8 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const toStop = [...generatedWithSubtrees.values()];
 		for (const member of toStop) {
 			if (member.session) {
-				await sessions?.stop?.(member.session).catch(() => undefined);
+				const hostAlias = member.projectUri.scheme === AEXUS_SSH_SCHEME ? member.projectUri.authority : undefined;
+				await sessions?.stop?.(member.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
 				if (options?.deleteEngineHistory) {
 					await sessions?.delete(member.session).catch(() => undefined);
 				}
@@ -1502,7 +1947,24 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 	async openMissionEditor(id: string, options?: IAdeMissionOpenOptions): Promise<void> {
 		const rec = this.ensureMission(id);
 		this.modeService.setMode('ade');
-		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, rec.id);
+		const targetGroup = options?.side ? SIDE_GROUP : undefined;
+		if (options?.openSiblingViews) {
+			const missionInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(rec.id, 'mission'));
+			const orchInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(rec.id, 'orchestration'));
+			const focusView: AdeEngineeringViewMode = options.viewMode ?? 'orchestration';
+			if (focusView === 'mission') {
+				await this.editorService.openEditor(orchInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup);
+				await this.editorService.openEditor(missionInput, { pinned: true }, targetGroup);
+			} else {
+				await this.editorService.openEditor(missionInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup);
+				await this.editorService.openEditor(orchInput, { pinned: true }, targetGroup);
+			}
+			return;
+		}
+		const spec = options?.viewMode
+			? encodeAdeEngineeringInputSpec(rec.id, options.viewMode)
+			: encodeAdeEngineeringInputSpec(rec.id, 'orchestration');
+		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, spec);
 		if (options?.focusNodeId) {
 			input.setPendingFocus({
 				nodeId: options.focusNodeId,
@@ -1510,7 +1972,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 				openAgentBeside: options.openAgentBeside,
 			});
 		}
-		const pane = await this.editorService.openEditor(input, { pinned: true }, options?.side ? SIDE_GROUP : undefined);
+		const pane = await this.editorService.openEditor(input, { pinned: true }, targetGroup);
 		if (options?.focusNodeId) {
 			const unconsumed = input.consumePendingFocus();
 			const maybeCanvasPane = pane as {

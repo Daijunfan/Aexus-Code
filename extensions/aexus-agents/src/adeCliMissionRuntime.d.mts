@@ -46,3 +46,17 @@ export declare function parseMissionRuntimeSubcommand(
 	windowId: number | undefined,
 	usageError: (message: string) => Error,
 ): IRankMissionParsedInvocation | undefined;
+
+export declare function parseOrchestrationGroupCommand(
+	tail: readonly string[],
+	json: boolean,
+	windowId: number | undefined,
+	usageError: (message: string) => Error,
+): IRankMissionParsedInvocation;
+
+export declare function parseWhiteboardGroupCommand(
+	tail: readonly string[],
+	json: boolean,
+	windowId: number | undefined,
+	usageError: (message: string) => Error,
+): IRankMissionParsedInvocation;

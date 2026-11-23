@@ -4,7 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ADE_API_LATEST_REVISION, queryApiUpdateDiff } from '../../../../platform/ade/common/adeApiRegistry.js';
-import { buildAdeDocsBundle, buildAdeDocsPaths, IAdeDocsPaths } from '../../../../platform/ade/common/adeDocsCatalog.js';
+import {
+	ADE_DOCS_ENGINEERING_API_FILE_NAME,
+	ADE_DOCS_ENGINEERING_PARADIGM_FILE_NAME,
+	buildAdeDocsBundle,
+	buildAdeDocsPaths,
+	IAdeDocsPaths,
+	normalizeAdeDocTargetKey,
+} from '../../../../platform/ade/common/adeDocsCatalog.js';
 import { IAdeEngineeringBackendService } from '../../../../platform/ade/common/adeEngineering.js';
 import { classifyTierFactorySide } from '../../../../platform/ade/common/adeMissionBoundary.js';
 import {
@@ -88,8 +95,9 @@ export async function executeAdeRankOrDocsAction(
 
 		case 'docs.read': {
 			const rawTarget = String(params.target ?? params.doc ?? params.tier ?? 'common').trim() || 'common';
-			let canonicalTarget = rawTarget;
-			if (!/^common$/i.test(rawTarget) && !/^mission$/i.test(rawTarget) && !/^manifest$/i.test(rawTarget)) {
+			const parsedKey = normalizeAdeDocTargetKey(rawTarget);
+			let canonicalTarget = parsedKey?.canonicalTarget ?? rawTarget;
+			if (!parsedKey) {
 				const parsedTier = parseTierNumber(rawTarget);
 				if (parsedTier !== undefined && parsedTier >= 0) {
 					canonicalTarget = formatTierTag(parsedTier);
@@ -114,18 +122,37 @@ export async function executeAdeRankOrDocsAction(
 			// Fallback for pure browser/unit-test environments without Node backend IPC.
 			const bundle = buildAdeDocsBundle(config);
 			const paths = await resolveDocsPaths(ctx, false);
-			if (/^common$/i.test(canonicalTarget)) {
+			const normalizedKey = normalizeAdeDocTargetKey(canonicalTarget);
+			if (normalizedKey?.kind === 'common') {
 				return { ok: true, target: 'common', path: paths.commonDoc, revision: ADE_API_LATEST_REVISION, content: bundle.commonFile };
 			}
-			if (/^mission$/i.test(canonicalTarget)) {
+			if (normalizedKey?.kind === 'engineering-paradigm') {
+				return {
+					ok: true,
+					target: 'engineering',
+					path: paths.engineeringParadigmDoc,
+					revision: ADE_API_LATEST_REVISION,
+					content: bundle.engineeringFiles?.[ADE_DOCS_ENGINEERING_PARADIGM_FILE_NAME],
+				};
+			}
+			if (normalizedKey?.kind === 'engineering-api') {
+				return {
+					ok: true,
+					target: 'engineering-api',
+					path: paths.engineeringApiDoc,
+					revision: ADE_API_LATEST_REVISION,
+					content: bundle.engineeringFiles?.[ADE_DOCS_ENGINEERING_API_FILE_NAME],
+				};
+			}
+			if (normalizedKey?.kind === 'mission') {
 				return { ok: true, target: 'mission', path: paths.missionDoc, revision: ADE_API_LATEST_REVISION, content: bundle.missionFile };
 			}
-			if (/^manifest$/i.test(canonicalTarget)) {
+			if (normalizedKey?.kind === 'manifest') {
 				return { ok: true, target: 'manifest', path: paths.manifestFile, revision: ADE_API_LATEST_REVISION, content: bundle.manifestJson };
 			}
 			const rankDoc = bundle.rankFiles[canonicalTarget] ?? bundle.rankFiles[`${canonicalTarget}.md`];
 			if (!rankDoc) {
-				throw new Error(`Unknown API doc target "${rawTarget}". Valid targets: common, mission, manifest, L0..L${config.ranks.length}.`);
+				throw new Error(`Unknown API doc target "${rawTarget}". Valid targets: common, engineering, paradigm, engineering-api, mission, manifest, L0..L${config.ranks.length}.`);
 			}
 			return {
 				ok: true,
@@ -138,6 +165,17 @@ export async function executeAdeRankOrDocsAction(
 
 		case 'whoami': {
 			const docs = await resolveDocsPaths(ctx, false);
+			const buildDocsEntry = (selfTierTag: string) => ({
+				common: 'aexus-ade docs read common',
+				selfRank: `aexus-ade docs read ${selfTierTag}`,
+				engineeringParadigm: 'aexus-ade docs read engineering',
+				engineeringApi: 'aexus-ade docs read engineering-api',
+				mission: 'aexus-ade docs read mission',
+				update: 'aexus-ade api update --since 0 --json',
+				docsRoot: docs.docsRoot,
+				ranksDir: docs.ranksDir,
+				...(docs.engineeringDir ? { engineeringDir: docs.engineeringDir } : {}),
+			});
 			const caller = ctx.caller;
 			if (!caller || caller.isHumanUser) {
 				return {
@@ -147,13 +185,7 @@ export async function executeAdeRankOrDocsAction(
 					rankId: 'user',
 					factorySide: 'off_graph',
 					latestApiRevision: ADE_API_LATEST_REVISION,
-					docsEntry: {
-						common: 'aexus-ade docs read common',
-						selfRank: 'aexus-ade docs read L0',
-						mission: 'aexus-ade docs read mission',
-						update: 'aexus-ade api update --since 0 --json',
-						docsRoot: docs.docsRoot,
-					},
+					docsEntry: buildDocsEntry('L0'),
 				};
 			}
 			if (caller.isSecretary || caller.sessionId === ADE_SECRETARY_ID) {
@@ -164,13 +196,7 @@ export async function executeAdeRankOrDocsAction(
 					rankId: 'secretary',
 					factorySide: 'off_graph',
 					latestApiRevision: ADE_API_LATEST_REVISION,
-					docsEntry: {
-						common: 'aexus-ade docs read common',
-						selfRank: 'aexus-ade docs read L0',
-						mission: 'aexus-ade docs read mission',
-						update: 'aexus-ade api update --since 0 --json',
-						docsRoot: docs.docsRoot,
-					},
+					docsEntry: buildDocsEntry('L0'),
 				};
 			}
 
@@ -193,6 +219,8 @@ export async function executeAdeRankOrDocsAction(
 				tierTag,
 				rankId: rankDef.id,
 				factorySide,
+				...(missionHit?.isOrchestrationStaff ? { isOrchestrationStaff: true } : {}),
+				...(missionHit?.department ? { department: missionHit.department } : {}),
 				...(missionHit ? {
 					missionId: missionHit.mission.id,
 					nodeIds: missionHit.nodeIds,
@@ -207,13 +235,7 @@ export async function executeAdeRankOrDocsAction(
 					status: t.status,
 				})),
 				latestApiRevision: ADE_API_LATEST_REVISION,
-				docsEntry: {
-					common: 'aexus-ade docs read common',
-					selfRank: `aexus-ade docs read ${tierTag}`,
-					mission: 'aexus-ade docs read mission',
-					update: 'aexus-ade api update --since 0 --json',
-					docsRoot: docs.docsRoot,
-				},
+				docsEntry: buildDocsEntry(tierTag),
 			};
 		}
 
@@ -259,10 +281,17 @@ export async function executeAdeRankOrDocsAction(
 			if (!rawTarget) {
 				return docs;
 			}
-			if (rawTarget.toLowerCase() === 'common') {
+			const parsedKey = normalizeAdeDocTargetKey(rawTarget);
+			if (parsedKey?.kind === 'common') {
 				return { target: 'common', docPath: docs.commonDoc, docsRoot: docs.docsRoot, commonDir: docs.commonDir };
 			}
-			if (rawTarget.toLowerCase() === 'mission') {
+			if (parsedKey?.kind === 'engineering-paradigm') {
+				return { target: 'engineering', docPath: docs.engineeringParadigmDoc, docsRoot: docs.docsRoot, engineeringDir: docs.engineeringDir };
+			}
+			if (parsedKey?.kind === 'engineering-api') {
+				return { target: 'engineering-api', docPath: docs.engineeringApiDoc, docsRoot: docs.docsRoot, engineeringDir: docs.engineeringDir };
+			}
+			if (parsedKey?.kind === 'mission') {
 				return { target: 'mission', docPath: docs.missionDoc, docsRoot: docs.docsRoot, missionDir: docs.missionDir };
 			}
 			const tierNum = parseTierNumber(rawTarget);
@@ -282,6 +311,9 @@ export async function executeAdeRankOrDocsAction(
 			return {
 				missionDoc: docs.missionDoc,
 				missionDir: docs.missionDir,
+				engineeringDir: docs.engineeringDir,
+				engineeringParadigmDoc: docs.engineeringParadigmDoc,
+				engineeringApiDoc: docs.engineeringApiDoc,
 				commonDoc: docs.commonDoc,
 				manifestFile: docs.manifestFile,
 				docsRoot: docs.docsRoot,

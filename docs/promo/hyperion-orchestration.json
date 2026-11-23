@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "name": "Aexus Hyperion v3 · Autonomous Engineering Org",
+  "description": "Flagship radial multi-tier Agent Orchestration linked with a live Mission Task DAG, department shared whiteboards, cyclic review loops, remote cloud hosts, and live baton token flow.",
+  "direction": "TD",
+  "layoutMode": "radial",
+  "departments": [
+    { "id": "AI_Kernel", "name": "AI Kernel" },
+    { "id": "Backend_Core", "name": "Backend Core" },
+    { "id": "Visual_Studio", "name": "Visual Studio" },
+    { "id": "Security_SRE", "name": "Security & SRE" }
+  ],
+  "staff": [
+    {
+      "id": "CEO",
+      "name": "Aria",
+      "roleLabel": "Chief Architect",
+      "tier": 1,
+      "rankId": "governor",
+      "engineId": "aexus-claude",
+      "model": "claude-opus-4-6",
+      "thinking": "max",
+      "hostAlias": "local",
+      "color": "gold",
+      "rolePrompt": "Top-tier L1 Chief Architect. Decomposes goals into scoped baton tokens across 4 department leads, tracks join barriers, verifies Mission DAG gates, and signs off releases."
+    },
+    {
+      "id": "AI",
+      "name": "Nova",
+      "roleLabel": "AI Systems Lead",
+      "tier": 2,
+      "rankId": "manager",
+      "department": "AI Kernel",
+      "engineId": "aexus-claude",
+      "model": "claude-sonnet-4-6",
+      "thinking": "high",
+      "hostAlias": "gpu-h100-us",
+      "color": "cyan",
+      "rolePrompt": "Leads AI Kernel & multi-agent token routing on GPU cluster.",
+      "allowedPaths": ["src/runtime/", "src/agents/"]
+    },
+    {
+      "id": "RAG",
+      "name": "Vex",
+      "roleLabel": "Memory & Context",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "AI Kernel",
+      "engineId": "aexus-antigravity",
+      "model": "gemini-2.5-pro",
+      "thinking": "high",
+      "hostAlias": "gpu-h100-us",
+      "color": "teal",
+      "allowedPaths": ["src/runtime/memory/"]
+    },
+    {
+      "id": "EVAL",
+      "name": "Lyra",
+      "roleLabel": "Agent Eval Lab",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "AI Kernel",
+      "engineId": "aexus-dsh",
+      "model": "deepseek-r1",
+      "thinking": "high",
+      "hostAlias": "gpu-h100-us",
+      "color": "sky",
+      "allowedPaths": ["tests/evals/"]
+    },
+    {
+      "id": "BE",
+      "name": "Orion",
+      "roleLabel": "Distributed Lead",
+      "tier": 2,
+      "rankId": "manager",
+      "department": "Backend Core",
+      "engineId": "aexus-codex",
+      "model": "gpt-5.4-codex",
+      "thinking": "high",
+      "hostAlias": "prod-eu-01",
+      "color": "indigo",
+      "rolePrompt": "Owns Control Plane RPC, state ledger persistence, and cross-service reliability.",
+      "allowedPaths": ["src/backend/", "src/ledger/"]
+    },
+    {
+      "id": "API",
+      "name": "Kael",
+      "roleLabel": "Control Plane API",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "Backend Core",
+      "engineId": "aexus-claude",
+      "model": "claude-sonnet-4-6",
+      "thinking": "medium",
+      "hostAlias": "prod-eu-01",
+      "color": "violet",
+      "allowedPaths": ["src/backend/api/"]
+    },
+    {
+      "id": "DB",
+      "name": "Sora",
+      "roleLabel": "Ledger & Storage",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "Backend Core",
+      "engineId": "aexus-opencode",
+      "model": "deepseek-chat",
+      "thinking": "medium",
+      "hostAlias": "prod-eu-01",
+      "color": "sky",
+      "allowedPaths": ["src/ledger/"]
+    },
+    {
+      "id": "FE",
+      "name": "Mina",
+      "roleLabel": "Studio UX Lead",
+      "tier": 2,
+      "rankId": "manager",
+      "department": "Visual Studio",
+      "engineId": "aexus-claude",
+      "model": "claude-opus-4-6",
+      "thinking": "high",
+      "hostAlias": "local",
+      "color": "rose",
+      "rolePrompt": "Owns visual canvas architecture, dual-view DAG sync, and design token craft.",
+      "allowedPaths": ["src/workbench/ui/"]
+    },
+    {
+      "id": "GFX",
+      "name": "Zed",
+      "roleLabel": "SVG & Graph Engine",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "Visual Studio",
+      "engineId": "aexus-antigravity",
+      "model": "gemini-2.5-pro",
+      "thinking": "medium",
+      "hostAlias": "local",
+      "color": "pink",
+      "allowedPaths": ["src/workbench/canvas/"]
+    },
+    {
+      "id": "UX",
+      "name": "Iris",
+      "roleLabel": "Motion & Telemetry",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "Visual Studio",
+      "engineId": "aexus-claude",
+      "model": "claude-sonnet-4-6",
+      "thinking": "medium",
+      "hostAlias": "local",
+      "color": "orange",
+      "allowedPaths": ["src/workbench/telemetry/"]
+    },
+    {
+      "id": "SEC",
+      "name": "Atlas",
+      "roleLabel": "Security & QA Lead",
+      "tier": 2,
+      "rankId": "manager",
+      "department": "Security & SRE",
+      "engineId": "aexus-claude",
+      "model": "claude-sonnet-4-6",
+      "thinking": "max",
+      "hostAlias": "sec-kali-01",
+      "color": "emerald",
+      "rolePrompt": "Owns Zero-Trust rank RBAC enforcement, chaos testing, and release gates.",
+      "allowedPaths": ["src/security/", "tests/e2e/"]
+    },
+    {
+      "id": "AUD",
+      "name": "Nyx",
+      "roleLabel": "RBAC & Sandbox",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "Security & SRE",
+      "engineId": "aexus-codex",
+      "model": "gpt-5.4-codex",
+      "thinking": "high",
+      "hostAlias": "sec-kali-01",
+      "color": "teal",
+      "allowedPaths": ["src/security/"]
+    },
+    {
+      "id": "QA",
+      "name": "Echo",
+      "roleLabel": "Chaos & E2E Lab",
+      "tier": 3,
+      "rankId": "employee",
+      "department": "Security & SRE",
+      "engineId": "aexus-dsh",
+      "model": "deepseek-r1",
+      "thinking": "medium",
+      "hostAlias": "ci-win-runner",
+      "color": "amber",
+      "allowedPaths": ["tests/e2e/"]
+    }
+  ],
+  "whiteboards": [
+    {
+      "id": "WB_AI",
+      "title": "Token Bus & Join Spec",
+      "department": "AI Kernel",
+      "version": 4,
+      "color": "cyan",
+      "content": "# AI Runtime Spec v4\n- Pointer-only baton payloads (`ptr:wb_*`, `ptr:blob_*`)\n- Join barriers auto-wake parent when fan-out children return\n- Eval benchmark threshold: >= 98.5% pass rate"
+    },
+    {
+      "id": "WB_BE",
+      "title": "RPC Schema & Ledger",
+      "department": "Backend Core",
+      "version": 6,
+      "color": "indigo",
+      "content": "# Control Plane Ledger v6\n- Optimistic concurrency (`--expected-version`) on whiteboard writes\n- Main-process daemon mirror sync on every token commit\n- Sub-millisecond SQLite WAL snapshot persistence"
+    },
+    {
+      "id": "WB_FE",
+      "title": "Canvas Design Tokens",
+      "department": "Visual Studio",
+      "version": 5,
+      "color": "rose",
+      "content": "# Visual Studio Spec v5\n- Radial Constellation core-centered layout\n- Per-node jewel accent palette & harmonized wing frames\n- Live animated baton packet comets + dual-view DAG linkage"
+    },
+    {
+      "id": "WB_SEC",
+      "title": "Zero-Trust Release Gates",
+      "department": "Security & SRE",
+      "version": 3,
+      "color": "emerald",
+      "content": "# Security & Release Checklist v3\n- Strict downward token minting & anti-forgery caller identity\n- Department-scoped whiteboard ACLs\n- Chaos fault injection & crash-recovery verification"
+    }
+  ],
+  "edges": [
+    { "from": "CEO", "to": "AI", "bidirectional": true },
+    { "from": "CEO", "to": "BE", "bidirectional": true },
+    { "from": "CEO", "to": "FE", "bidirectional": true },
+    { "from": "CEO", "to": "SEC", "bidirectional": true },
+
+    { "from": "AI", "to": "BE", "label": "Protocol Sync", "bidirectional": true },
+    { "from": "BE", "to": "FE", "label": "Live Events", "bidirectional": true },
+    { "from": "FE", "to": "SEC", "label": "UX Gate", "bidirectional": true },
+    { "from": "SEC", "to": "AI", "label": "Guardrails", "bidirectional": true },
+
+    { "from": "AI", "to": "RAG", "bidirectional": true },
+    { "from": "AI", "to": "EVAL", "bidirectional": true },
+    { "from": "RAG", "to": "EVAL", "label": "Eval Loop", "bidirectional": true },
+    { "from": "RAG", "to": "WB_AI", "dashed": true },
+    { "from": "EVAL", "to": "WB_AI", "dashed": true },
+
+    { "from": "BE", "to": "API", "bidirectional": true },
+    { "from": "BE", "to": "DB", "bidirectional": true },
+    { "from": "API", "to": "DB", "label": "Schema PR", "bidirectional": true },
+    { "from": "API", "to": "WB_BE", "dashed": true },
+    { "from": "DB", "to": "WB_BE", "dashed": true },
+
+    { "from": "FE", "to": "GFX", "bidirectional": true },
+    { "from": "FE", "to": "UX", "bidirectional": true },
+    { "from": "GFX", "to": "UX", "label": "Design QA", "bidirectional": true },
+    { "from": "GFX", "to": "WB_FE", "dashed": true },
+    { "from": "UX", "to": "WB_FE", "dashed": true },
+
+    { "from": "SEC", "to": "AUD", "bidirectional": true },
+    { "from": "SEC", "to": "QA", "bidirectional": true },
+    { "from": "AUD", "to": "QA", "label": "Pentest Cycle", "bidirectional": true },
+    { "from": "AUD", "to": "WB_SEC", "dashed": true },
+    { "from": "QA", "to": "WB_SEC", "dashed": true }
+  ],
+  "tasks": {
+    "direction": "LR",
+    "nodes": [
+      {
+        "id": "T1",
+        "title": "System RFC & Token Protocol",
+        "description": "Finalize pointer-only baton schema, rank ACL boundaries, and 4-wing architecture.",
+        "ownerNodeId": "CEO",
+        "assigneeNodeId": "CEO",
+        "department": "Executive",
+        "minCompleterTier": 1,
+        "color": "gold"
+      },
+      {
+        "id": "T2",
+        "title": "Token Bus & Join Barrier",
+        "description": "Heterogeneous sub-token minting, join wakeups, and context delta synthesis.",
+        "ownerNodeId": "AI",
+        "assigneeNodeId": "RAG",
+        "department": "AI Kernel",
+        "minCompleterTier": 2,
+        "color": "cyan"
+      },
+      {
+        "id": "T3",
+        "title": "Control Plane RPC & Ledger",
+        "description": "Main-process daemon mirror sync, optimistic WB concurrency, and recovery.",
+        "ownerNodeId": "BE",
+        "assigneeNodeId": "API",
+        "department": "Backend Core",
+        "minCompleterTier": 2,
+        "color": "indigo"
+      },
+      {
+        "id": "T4",
+        "title": "Radial Canvas & Baton Comets",
+        "description": "Per-node jewel palette, harmonized wing frames, and luminous live flow.",
+        "ownerNodeId": "FE",
+        "assigneeNodeId": "GFX",
+        "department": "Visual Studio",
+        "minCompleterTier": 2,
+        "color": "rose"
+      },
+      {
+        "id": "T5",
+        "title": "Zero-Trust RBAC & Gates",
+        "description": "Strict downward delegation, anti-forgery identity, and department ACLs.",
+        "ownerNodeId": "SEC",
+        "assigneeNodeId": "AUD",
+        "department": "Security & SRE",
+        "minCompleterTier": 2,
+        "color": "emerald"
+      },
+      {
+        "id": "T6",
+        "title": "Dual-View DAG Sync & Console",
+        "description": "Live tokens, assignees, artifact pointers, and FinOps telemetry across views.",
+        "ownerNodeId": "FE",
+        "assigneeNodeId": "UX",
+        "department": "Visual Studio",
+        "minCompleterTier": 2,
+        "color": "violet"
+      },
+      {
+        "id": "T7",
+        "title": "Chaos Injection & E2E Suite",
+        "description": "Pause/resume, force removal re-parenting, and remote SSH check hooks.",
+        "ownerNodeId": "SEC",
+        "assigneeNodeId": "QA",
+        "department": "Security & SRE",
+        "minCompleterTier": 2,
+        "color": "amber"
+      },
+      {
+        "id": "T8",
+        "title": "Canary Rollout & Telemetry",
+        "description": "Stage multi-host deployment across GPU, EU prod, and local nodes.",
+        "ownerNodeId": "CEO",
+        "assigneeNodeId": "BE",
+        "department": "Backend Core",
+        "minCompleterTier": 1,
+        "color": "teal"
+      },
+      {
+        "id": "T9",
+        "title": "Hyperion v3.0 Sign-Off",
+        "description": "Final L1 verification of all upstream DAG deliverables and release tag.",
+        "ownerNodeId": "CEO",
+        "assigneeNodeId": "CEO",
+        "department": "Executive",
+        "minCompleterTier": 1,
+        "color": "gold"
+      }
+    ],
+    "edges": [
+      { "from": "T1", "to": "T2" },
+      { "from": "T1", "to": "T3" },
+      { "from": "T1", "to": "T4" },
+      { "from": "T1", "to": "T5" },
+      { "from": "T2", "to": "T6" },
+      { "from": "T3", "to": "T6" },
+      { "from": "T4", "to": "T6" },
+      { "from": "T3", "to": "T7" },
+      { "from": "T5", "to": "T7" },
+      { "from": "T6", "to": "T8", "label": "Verified" },
+      { "from": "T7", "to": "T8", "label": "QA Pass" },
+      { "from": "T8", "to": "T9", "label": "Ship" }
+    ]
+  }
+}

@@ -33,6 +33,8 @@ import {
 } from '../../../../platform/ade/common/adeEngineering.js';
 import { resolveSupervisorJurisdiction } from '../../../../platform/ade/common/adeMissionBoundary.js';
 import { parseMissionMermaidDag } from '../../../../platform/ade/common/adeMissionDag.js';
+import { IMissionTaskStatusRecord, IOrchestrationWhiteboard } from '../../../../platform/ade/common/adeOrchestrationEngine.js';
+import { parseOrchestrationGraph } from '../../../../platform/ade/common/adeOrchestrationGraph.js';
 import {
 	ADE_ORGANIZATION_PRESETS,
 	ADE_PRIMITIVE_APIS,
@@ -51,6 +53,10 @@ import {
 	resolveEffectiveRankDefinition,
 } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { IAdeDocsPaths } from '../../../../platform/ade/common/adeDocsCatalog.js';
+import {
+	wrapRoleDirectMessageEnvelope,
+	wrapUserDirectMessageEnvelope,
+} from '../../../../platform/ade/common/adeMessageEnvelope.js';
 import { ADE_SECRETARY_TIER, ADE_SECRETARY_TIER_TAG, ADE_USER_TIER, findRankByTierOrId, formatTierTag } from '../../../../platform/ade/common/adeRankResize.js';
 import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -483,11 +489,42 @@ function buildControlStatus(
 function resolveInGraphMissionBinding(
 	agent: IAdeAgent,
 	missionRuntime?: IAdeMissionRuntimeService,
-): { readonly missionId: string; readonly nodeIds: readonly string[] } | undefined {
+): {
+	readonly missionId: string;
+	readonly nodeIds: readonly string[];
+	readonly isOrchestrationStaff?: boolean;
+	readonly department?: string;
+	readonly rolePrompt?: string;
+	readonly allowedPaths?: readonly string[];
+	readonly checkSummaries?: readonly string[];
+} | undefined {
 	const live = missionRuntime?.findMissionForAgent(agent.id);
 	if (live) {
 		if (!live.isOffGraphSupervisor && live.nodeIds.length > 0) {
-			return { missionId: live.mission.id, nodeIds: live.nodeIds };
+			let rolePrompt: string | undefined;
+			let allowedPaths: readonly string[] | undefined;
+			let checkSummaries: readonly string[] | undefined;
+			if (live.isOrchestrationStaff && live.mission.orchestrationText?.trim()) {
+				const parsed = parseOrchestrationGraph(live.mission.orchestrationText);
+				const staffNode = parsed.nodes.find(n => n.id === live.nodeIds[0] && n.kind === 'staff');
+				if (staffNode) {
+					rolePrompt = staffNode.rolePrompt?.trim() || undefined;
+					allowedPaths = staffNode.allowedPaths && staffNode.allowedPaths.length > 0 ? staffNode.allowedPaths : undefined;
+					const checks = staffNode.checks && staffNode.checks.length > 0 ? staffNode.checks : undefined;
+					if (checks) {
+						checkSummaries = checks.map(c => (c.name && c.command ? `${c.name}: \`${c.command}\`` : (c.command || c.name || c.id)));
+					}
+				}
+			}
+			return {
+				missionId: live.mission.id,
+				nodeIds: live.nodeIds,
+				isOrchestrationStaff: live.isOrchestrationStaff,
+				department: live.department,
+				...(rolePrompt ? { rolePrompt } : {}),
+				...(allowedPaths ? { allowedPaths } : {}),
+				...(checkSummaries ? { checkSummaries } : {}),
+			};
 		}
 		return undefined;
 	}
@@ -509,36 +546,63 @@ export function buildAdeAgentRoleContext(
 	const subordinates = projects.getDirectSubordinates(agent.id);
 	const rankDef = resolveEffectiveRankDefinition(config, agent.role, subordinates.length > 0);
 	const tierTag = formatTierTag(rankDef.tier);
+	const compiledDocsPaths = docsPaths ? {
+		rankDoc: docsPaths.rankDocs[tierTag] ?? `${docsPaths.ranksDir}/${tierTag}.md`,
+		missionDoc: docsPaths.missionDoc,
+		commonDoc: docsPaths.commonDoc,
+		engineeringParadigmDoc: docsPaths.engineeringParadigmDoc,
+		engineeringApiDoc: docsPaths.engineeringApiDoc,
+	} : undefined;
 
-	// Minimal, clean initialization prompt for in-graph Mission node employees (Principles 1 & 6):
-	// Recognizes BOTH Mermaid-generated employees (`treeNodeId`) AND manually bound pure Workers (`boundary.nodeAssignments`).
 	const inGraphBinding = resolveInGraphMissionBinding(agent, missionRuntime);
-	if (inGraphBinding) {
+
+	// 1. Engineering Orchestration leaf staff (pure execution rank on Orchestration canvas):
+	// Concise init block referencing BOTH Native Rank doc (docs/ranks/) AND Engineering Paradigm (docs/engineering/).
+	if (inGraphBinding?.isOrchestrationStaff && rankDef.pureExecution && subordinates.length === 0) {
+		const missionId = inGraphBinding.missionId;
+		const nodeList = inGraphBinding.nodeIds.join(', ');
+		const deptPart = inGraphBinding.department ? ` | Dept: ${inGraphBinding.department}` : '';
+		return [
+			'[Aexus ADE · Engineering Staff Context]',
+			`- Agent ID: ${agent.id} | Tier: ${tierTag} (Engineering Staff) | Mission: ${missionId} | Node(s): ${nodeList}${deptPart}`,
+			...(inGraphBinding.rolePrompt ? [`- Role Boundary: ${inGraphBinding.rolePrompt}`] : []),
+			...(inGraphBinding.allowedPaths && inGraphBinding.allowedPaths.length > 0 ? [`- Allowed Read/Write Paths: ${inGraphBinding.allowedPaths.map(p => `\`${p}\``).join(', ')}`] : []),
+			...(inGraphBinding.checkSummaries && inGraphBinding.checkSummaries.length > 0 ? [`- Automated Verification Gates: ${inGraphBinding.checkSummaries.join(' | ')}`] : []),
+			'- Paradigm: NO task pre-prompts — all directives & deliverables flow via baton tokens and lightweight pointers. Return completed received tokens upward via `token return` (NEVER mint upward). Active tokens remind every 5m unless `token block` is set.',
+			`- Sibling Docs (Read On Demand): Native Rank \`aexus-ade docs read ${tierTag}\` | Engineering Paradigm & Token Rules \`aexus-ade docs read engineering\` | CLI Cookbook \`aexus-ade docs read engineering-api\` | \`aexus-ade whoami --json\` | \`aexus-ade api update --since 0 --json\``,
+			`- Token & Whiteboard Bus: \`aexus-ade token current --mission ${missionId} --json\` | \`token read <ptrs>\` | \`token history <id>\` | \`token return <id> --summary "<facts>"\` | \`token handoff <id> --to <node> --summary "<facts>"\` | \`token complete|block|fail <id> ...\` | \`whiteboard read|write <wbId> --mission ${missionId}\``,
+		].join('\n');
+	}
+
+	// 2. Legacy in-graph Mission DAG node employees (non-Orchestration):
+	// Compact (<900 chars) init prompt pointing to BOTH Native Rank doc and sibling Engineering Paradigm.
+	if (inGraphBinding && !inGraphBinding.isOrchestrationStaff) {
 		const missionId = inGraphBinding.missionId;
 		const nodeList = inGraphBinding.nodeIds.join(', ');
 		return [
 			'[Aexus ADE · Mission Node Employee]',
 			`- Agent ID: ${agent.id} | Tier: ${tierTag} (in-graph) | Mission: ${missionId} | Node(s): ${nodeList}`,
-			'- Scope: Execute or review your assigned node here. Never message supervisors upward; report solely via `token` commands.',
-			'- Lazy-Read Commands (numeric tier only):',
-			`  - Self & Docs: \`aexus-ade whoami --json\` | \`aexus-ade token current --json\` | \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read common\` | \`aexus-ade api update --since 0 --json\``,
-			`  - Token Flow: \`aexus-ade token complete <id> --summary "<facts>"\` | \`token reject <id> --reason "<defects>"\` | \`token block <id> --duration <10h|30m> --reason "<why>" [--watch-pid <pid>] [--watch-file <path>]\` | \`token fail <id> --reason "<why>"\``,
+			'- Scope: Execute or review your assigned node via baton tokens (never mint/message upward; return completed batons via `token return` or advance via `token complete`).',
+			'- Sibling Lazy-Read Docs (Native Rank + Engineering Paradigm):',
+			`  - \`aexus-ade whoami --json\` | \`aexus-ade docs read ${tierTag}\` | \`aexus-ade docs read engineering\` | \`aexus-ade docs read common\` | \`aexus-ade api update --since 0 --json\``,
+			'  - Token Flow: `aexus-ade token current --json` | `token read <ptrs>` | `token return <id> --summary "<facts>"` | `aexus-ade token complete <id> --summary "<facts>"` | `token reject|block|fail <id> ...`',
 		].join('\n');
 	}
 
-	if (!agent.role && subordinates.length === 0) {
+	if (!inGraphBinding?.isOrchestrationStaff && !agent.role && subordinates.length === 0) {
 		return undefined;
 	}
 
-	if (rankDef.pureExecution && subordinates.length === 0) {
+	if (!inGraphBinding?.isOrchestrationStaff && rankDef.pureExecution && subordinates.length === 0) {
 		return undefined;
 	}
 
 	const supervisor = agent.parentId ? projects.getAgent(agent.parentId) : undefined;
 	const ownEngineName = agent.session ? (sessions?.getEngineName(agent.session.engineId) ?? agent.session.engineId) : 'Draft';
 	const boundMission = missionRuntime?.findMissionForAgent(agent.id);
+	const isOrchestrationStaff = Boolean(inGraphBinding?.isOrchestrationStaff || boundMission?.isOrchestrationStaff);
 	const isOffGraphSupervisorBinding = Boolean(boundMission?.isOffGraphSupervisor);
-	const isWorkTree = Boolean(agent.treeType) || isOffGraphSupervisorBinding;
+	const isWorkTree = Boolean(agent.treeType) || isOffGraphSupervisorBinding || isOrchestrationStaff;
 	const supervisorRankName = supervisor
 		? formatRoleTitle(resolveAdeAgentRank(supervisor, true, config), config)
 		: undefined;
@@ -547,11 +611,13 @@ export function buildAdeAgentRoleContext(
 		: Boolean(agent.treeType && !agent.treeNodeId && (!agent.treeGovernorId || agent.treeGovernorId === agent.id));
 	const workTreeSlot = !isWorkTree
 		? undefined
-		: agent.treeNodeId
-			? 'reviewer' as const
-			: isMissionOwner
-				? 'orchestrator' as const
-				: 'segment_owner' as const;
+		: isOrchestrationStaff
+			? (isMissionOwner ? 'orchestrator' as const : (rankDef.canHaveSubordinates ? 'segment_owner' as const : 'reviewer' as const))
+			: agent.treeNodeId
+				? 'reviewer' as const
+				: isMissionOwner
+					? 'orchestrator' as const
+					: 'segment_owner' as const;
 
 	return compileAdeRolePrompt({
 		config,
@@ -570,18 +636,21 @@ export function buildAdeAgentRoleContext(
 			: undefined,
 		workTree: isWorkTree
 			? {
-				treeType: 'mission',
-				governorId: boundMission?.mission.id ?? agent.treeGovernorId ?? agent.id,
-				nodeId: agent.treeNodeId,
+				treeType: isOrchestrationStaff ? 'engineering' : 'mission',
+				governorId: boundMission?.mission.id ?? inGraphBinding?.missionId ?? agent.treeGovernorId ?? agent.id,
+				nodeId: inGraphBinding?.nodeIds[0] ?? agent.treeNodeId,
+				nodeIds: inGraphBinding?.nodeIds,
 				slot: workTreeSlot,
 				isMissionOwner,
+				isOrchestrationStaff,
+				department: inGraphBinding?.department ?? boundMission?.department,
 				managedNodeIds: boundMission?.managedNodeIds,
+				...(inGraphBinding?.rolePrompt ? { rolePrompt: inGraphBinding.rolePrompt } : {}),
+				...(inGraphBinding?.allowedPaths ? { allowedPaths: inGraphBinding.allowedPaths } : {}),
+				...(inGraphBinding?.checkSummaries ? { checkSummaries: inGraphBinding.checkSummaries } : {}),
 			}
 			: undefined,
-		docsPaths: docsPaths ? {
-			rankDoc: docsPaths.rankDocs[tierTag] ?? `${docsPaths.ranksDir}/${tierTag}.md`,
-			missionDoc: docsPaths.missionDoc,
-		} : undefined,
+		docsPaths: compiledDocsPaths,
 	});
 }
 
@@ -747,14 +816,16 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 		});
 
 		const l0DocPath = docsPaths?.rankDocs[ADE_SECRETARY_TIER_TAG] ?? '~/.aexus-code/docs/ranks/L0.md';
+		const engineeringParadigmDocPath = docsPaths?.engineeringParadigmDoc ?? '~/.aexus-code/docs/engineering/ENGINEERING_PARADIGM.md';
+		const engineeringApiDocPath = docsPaths?.engineeringApiDoc ?? '~/.aexus-code/docs/engineering/ENGINEERING_API.md';
 		const missionDocPath = docsPaths?.missionDoc ?? '~/.aexus-code/docs/mission/MISSION_API.md';
 
 		return [
 			'[Aexus ADE Live Viewport & Macro Control Context]',
 			'You are the global **Secretary (Tier L0)** in **Aexus Code ADE**, positioned strictly beneath User (`L-1`) and above `L1..LN` with macro-control authority inside ADE.',
 			'- Scope & Boundary Rule: Operate STRICTLY inside **ADE** (Agentic Development Environment). Do NOT switch workbench mode to IDE and do NOT manipulate IDE-only views. Communication with `L1..LN` is strictly top-down (`org subordinates|send|context`).',
-			`- Single-Copy Lazy-Read Docs: L0 doc \`${l0DocPath}\` | Mission doc (read on demand): \`${missionDocPath}\``,
-			'- Immutable Lazy-Read Entry Commands: `aexus-ade whoami --json` | `aexus-ade docs read L0` | `aexus-ade docs read common` | `aexus-ade docs read mission` | `aexus-ade api update --since 0 --json`',
+			`- Single-Copy Sibling Docs: Native L0 doc \`${l0DocPath}\` (docs/ranks/) | Engineering Paradigm & API (sibling docs/engineering/): \`${engineeringParadigmDocPath}\` & \`${engineeringApiDocPath}\` | Unified Mission doc: \`${missionDocPath}\``,
+			'- Immutable Lazy-Read Entry Commands: `aexus-ade whoami --json` | `aexus-ade docs read L0` | `aexus-ade docs read engineering` | `aexus-ade docs read engineering-api` | `aexus-ade docs read common` | `aexus-ade docs read mission` | `aexus-ade api update --since 0 --json`',
 			`- Focus State: ${focusLine}`,
 			`- Selected Project: ${selectedLine}`,
 			`- Sidebar State: showArchived=${status.showArchived}`,
@@ -773,11 +844,11 @@ export function resolveAdePromptContext(accessor: ServicesAccessor, rawResource:
 			...rankLines,
 			'- Complete ADE Macro Control CLI (`aexus-ade` is directly on your PATH; pass `--json` for structured output):',
 			'  - Viewport & Inspector: `aexus-ade status --json` | `aexus-ade view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh] --json`',
-			'  - Live Ranks, Hot-Updated Aliases & Single-Copy Docs: `aexus-ade rank names --json` | `aexus-ade rank list --json` | `aexus-ade rank get <L-1|L0|L1..LN|id> --json` | `aexus-ade rank docs [L0|L1..LN|mission] --json` | `aexus-ade rank rename <L1..LN> "<alias>" [--short <tag>]` | `aexus-ade rank set-count <N>`',
+			'  - Live Ranks, Hot-Updated Aliases & Single-Copy Docs: `aexus-ade rank names --json` | `aexus-ade rank list --json` | `aexus-ade rank get <L-1|L0|L1..LN|id> --json` | `aexus-ade rank docs [common|L0..LN|engineering|engineering-api|mission] --json` | `aexus-ade rank rename <L1..LN> "<alias>" [--short <tag>]` | `aexus-ade rank set-count <N>`',
 			'  - Organization, Custom Ranks & Primitive APIs: `aexus-ade role list --json` | `aexus-ade role apis --json` | `aexus-ade role presets --json` | `aexus-ade role apply-preset <presetId>` | `aexus-ade role set-tier <rankId> ...` | `aexus-ade role reset` | `aexus-ade role studio`',
 			'  - Projects & Cloud Hosts: `aexus-ade project list|add|select|remove|delete|focus|home|forward|move` | `aexus-ade project changes [target]` | `aexus-ade project files [target]` | `aexus-ade project open-file|open-diff` | `aexus-ade host list|info|add|update|remove|test|browse|import-vscode`',
 			'  - Top-Down Supervision & Sessions (`org.*` / `session.*` / `engine.*`): `aexus-ade org subordinates|send|context|escalate` | `aexus-ade engine list` | `aexus-ade engine sessions <e>` | `aexus-ade session list|info|subordinates|tree|create` | `aexus-ade session attach` | `aexus-ade session connect` | `aexus-ade session open|select|close|mark-read|draft|rename|role|move|reorder|send|history|stop|archive|unarchive|detach|delete`',
-			'  - Mission Orchestration (read `aexus-ade docs read mission` on demand; `init/blueprint apply/remove` are owner-only or `L-1`, while `L0` and bound off-graph supervisors can inspect topology & run scoped runtime ops; `L-1` resolves Human Gates): `aexus-ade mission list|init|open|status|blueprint get|validate|apply|boundary get|set|start|pause|resume|stop|timeout|recall|retry|patch|prompt list|get|set|trigger list|set|remove|host bind|remove --mission <id>`',
+			'  - Engineering Dual-View Orchestration & Mission Task DAG (read `aexus-ade docs read engineering` & `aexus-ade docs read engineering-api` on demand; unified `docs read mission`): `aexus-ade orchestration get|validate|load|apply|export|staff|group|edge|status|pause|resume|abort|dispatch --mission <id>` | `aexus-ade mission list|init|open|status|blueprint|task|trigger|host|export|import|remove --mission <id>` | `aexus-ade whiteboard list|create|read|write --mission <id>`',
 			'  - ADE Inbox: `aexus-ade inbox list [--unread-only]` | `aexus-ade inbox post --from <sessionId> --message <text>` | `aexus-ade inbox mark-read (<id>|--all)` | `aexus-ade inbox resolve --id <msgId>`',
 			'  - Secretary Self-Management: `aexus-ade secretary [status | open [--side] | engine <e> | reset [--engine <e>] | send <prompt> [--wait] | history [--limit <n>] | stop | draft [text|--clear] | mark-read]`',
 		].join('\n');
@@ -1040,6 +1111,7 @@ export async function executeAdeControlRequest(
 	const MISSION_OWNER_SCOPED_ACTIONS = new Set([
 		'mission.init',
 		'mission.create',
+		'mission.import',
 		'mission.open',
 		'mission.setMermaid',
 		'mission.blueprint.apply',
@@ -1076,7 +1148,7 @@ export async function executeAdeControlRequest(
 		if (!isHumanOrSecretary && rawCallerSessionId) {
 			const callerCandidate = projects.getAgent(rawCallerSessionId);
 			if (callerCandidate && !projects.isArchived(callerCandidate.id) && !projects.isLockedByWorkTree?.(callerCandidate.id)) {
-				if (action === 'mission.init' || action === 'mission.create') {
+				if (action === 'mission.init' || action === 'mission.create' || action === 'mission.import') {
 					isSelfOwnedMissionAction = !rawTarget || rawTarget === callerCandidate.id;
 				} else {
 					isSelfOwnedMissionAction = Boolean(targetMission && targetMission.ownerSessionId === callerCandidate.id);
@@ -1100,14 +1172,35 @@ export async function executeAdeControlRequest(
 		'mission.trigger.set',
 		'mission.trigger.remove',
 		'mission.host.bind',
-		'mission.prompt.list',
-		'mission.prompt.get',
-		'mission.prompt.set',
 		'mission.check.list',
 		'mission.check.get',
 		'mission.check.set',
 		'mission.check.remove',
 		'mission.check.run',
+		'mission.task.list',
+		'mission.task.get',
+		'mission.task.set',
+		'mission.task.create',
+		'mission.task.update',
+		'mission.task.remove',
+		'mission.task.edge.add',
+		'mission.task.edge.remove',
+		'mission.task.complete',
+		'mission.task.status',
+		'mission.export',
+		'orchestration.get',
+		'orchestration.export',
+		'orchestration.status',
+		'orchestration.group.list',
+		'orchestration.staff.create',
+		'orchestration.staff.configure',
+		'orchestration.staff.remove',
+		'whiteboard.list',
+		'whiteboard.create',
+		'whiteboard.read',
+		'whiteboard.write',
+		'whiteboard.rename',
+		'whiteboard.remove',
 		'org.escalate',
 	]);
 	const FULL_SUPERVISOR_MISSION_ACTIONS = new Set([
@@ -1117,21 +1210,54 @@ export async function executeAdeControlRequest(
 		'mission.resume',
 		'mission.stop',
 		'mission.timeout.set',
+		'orchestration.apply',
+		'orchestration.import',
+		'orchestration.layout.set',
+		'orchestration.dispatch',
+		'orchestration.pause',
+		'orchestration.resume',
+		'orchestration.abort',
+		'orchestration.group.create',
+		'orchestration.group.rename',
+		'orchestration.group.assign',
+		'orchestration.group.remove',
+		'orchestration.staff.rename',
+		'orchestration.staff.remove',
+		'orchestration.edge.connect',
+		'orchestration.edge.label',
+		'orchestration.edge.remove',
+		'whiteboard.rename',
+		'whiteboard.remove',
 	]);
 	let isBoundOffGraphSupervisorAction = false;
 	const needsPartialSup = PARTIAL_SUPERVISOR_MISSION_ACTIONS.has(action);
 	const needsFullSup = FULL_SUPERVISOR_MISSION_ACTIONS.has(action);
 	if (!isHumanUser && rawCallerSessionId && (needsPartialSup || needsFullSup)) {
-		const rawTarget = String(params.mission ?? params.missionId ?? params.id ?? params.governor ?? '').trim();
-		const targetMission = rawTarget
-			? (missionService?.getMission(rawTarget) ?? missionService?.getMissionByLinkedSession(rawTarget))
-			: (missionService?.getMissionByLinkedSession(rawCallerSessionId) ?? missionService?.listMissions().find(m =>
-				missionRuntime?.getRuntimeState(m.id).boundary.supervisors.some(s => s.id === rawCallerSessionId),
+		const rawExplicitTarget = String(params.mission ?? params.missionId ?? params.governor ?? '').trim();
+		const fallbackParamId = !rawExplicitTarget && typeof params.id === 'string' && params.id.trim()
+			? (missionService?.getMission(params.id.trim()) ?? missionService?.getMissionByLinkedSession(params.id.trim()))
+			: undefined;
+		const targetMission = rawExplicitTarget
+			? (missionService?.getMission(rawExplicitTarget) ?? missionService?.getMissionByLinkedSession(rawExplicitTarget))
+			: (fallbackParamId ?? missionService?.getMissionByLinkedSession(rawCallerSessionId) ?? missionService?.listMissions().find(m =>
+				missionRuntime?.getRuntimeState(m.id).boundary.supervisors.some(s => s.id === rawCallerSessionId)
+				|| (Boolean(m.orchestrationText?.trim()) && Object.values(missionRuntime?.getOrchestrationState(m.id).nodeAgentIds ?? {}).includes(rawCallerSessionId)),
 			));
 		if (targetMission && missionRuntime) {
 			const rt = missionRuntime.getRuntimeState(targetMission.id);
 			const isOwner = targetMission.ownerSessionId === rawCallerSessionId;
-			const isBoundSup = isOwner || rt.boundary.supervisors.some(s => s.id === rawCallerSessionId);
+			const callerObj = projects.getAgent(rawCallerSessionId);
+			const callerRankDef = callerObj
+				? resolveEffectiveRankDefinition(roleConfig, callerObj.role, projects.hasSubordinates(callerObj.id))
+				: undefined;
+			const highestTier = Math.min(...roleConfig.ranks.map(r => r.tier));
+			const isOrchMember = Boolean(
+				targetMission.orchestrationText?.trim()
+				&& Object.values(missionRuntime.getOrchestrationState(targetMission.id).nodeAgentIds).includes(rawCallerSessionId),
+			);
+			const isOrchSup = isOrchMember && Boolean(callerRankDef && !callerRankDef.pureExecution && callerRankDef.canHaveSubordinates);
+			const isOrchTopRank = isOrchMember && Boolean(callerRankDef && callerRankDef.tier <= highestTier);
+			const isBoundSup = isOwner || isOrchSup || rt.boundary.supervisors.some(s => s.id === rawCallerSessionId);
 			if (needsPartialSup && isBoundSup) {
 				isBoundOffGraphSupervisorAction = true;
 			} else if (needsFullSup && isBoundSup) {
@@ -1142,7 +1268,7 @@ export async function executeAdeControlRequest(
 					graph.nodes.map(n => n.id),
 					{ ownerSessionId: targetMission.ownerSessionId },
 				);
-				if (isOwner || jur.hasFullJurisdiction) {
+				if (isOwner || isOrchTopRank || jur.hasFullJurisdiction) {
 					isBoundOffGraphSupervisorAction = true;
 				}
 			}
@@ -1151,8 +1277,17 @@ export async function executeAdeControlRequest(
 
 	// Fixed Aexus-Code Kernel Primitive API Authorization Gate:
 	// User-customizable rank schemas control WHO may call WHICH fixed core primitive API.
+	const isInGraphBoundRankReadAction = Boolean(
+		!isHumanUser
+		&& rawCallerSessionId
+		&& (action === 'rank.names' || action === 'rank.list' || action === 'rank.get')
+		&& (() => {
+			const callerObj = projects.getAgent(rawCallerSessionId);
+			return Boolean(callerObj && !projects.isArchived(callerObj.id) && resolveInGraphMissionBinding(callerObj, missionRuntime));
+		})(),
+	);
 	const permission = checkAdeApiPermission(roleConfig, params.caller, action);
-	if (!permission.allowed && !isSelfOwnedMissionAction && !isBoundOffGraphSupervisorAction) {
+	if (!permission.allowed && !isSelfOwnedMissionAction && !isBoundOffGraphSupervisorAction && !isInGraphBoundRankReadAction) {
 		throw new Error(permission.reason ?? localize('adeApiPermissionDenied', "Permission denied for action '{0}'.", String(action)));
 	}
 
@@ -1160,12 +1295,32 @@ export async function executeAdeControlRequest(
 		'whoami',
 		'docs.read',
 		'api.update',
+		'rank.names',
+		'rank.list',
+		'rank.get',
 		'token.current',
 		'token.trace',
+		'token.read',
+		'token.history',
+		'token.handoff',
+		'token.return',
 		'token.complete',
 		'token.reject',
 		'token.block',
 		'token.fail',
+		'mission.task.list',
+		'mission.task.get',
+		'mission.task.set',
+		'mission.task.complete',
+		'mission.task.status',
+		'orchestration.get',
+		'orchestration.status',
+		'orchestration.validate',
+		'orchestration.staff.create',
+		'whiteboard.list',
+		'whiteboard.create',
+		'whiteboard.read',
+		'whiteboard.write',
 		'mission.check.list',
 		'mission.check.get',
 		'mission.check.run',
@@ -2320,7 +2475,7 @@ export async function executeAdeControlRequest(
 				if (nextIsPure && agentHasSubs) {
 					throw new Error(localize('adeCannotClearRoleWithSubordinates', "Cannot clear role while session has subordinate agents."));
 				}
-				if (activeMissionInfo) {
+				if (activeMissionInfo && !activeMissionInfo.isOrchestrationStaff) {
 					const nextTier = resolveEffectiveRankDefinition(roleConfig, nextRole, false).tier;
 					if (nextTier <= activeMissionInfo.runtime.boundary.offGraphMaxTier) {
 						throw new Error(localize('adeSessionRoleViolatesFactoryWall', "In-graph Mission node role tier (L{0}) must stay strictly below off-graph cutoff (L{1}).", nextTier, activeMissionInfo.runtime.boundary.offGraphMaxTier));
@@ -2426,7 +2581,36 @@ export async function executeAdeControlRequest(
 				return { id: agent.id, label: agent.label, rank, status: 'draft', draft: rawMessage };
 			}
 			const wait = Boolean(params.wait);
-			const dispatchKind = await sendMessageToSessionResource(chatService, agent.session.resource, rawMessage, wait);
+			const targetHasSubs = projects.hasSubordinates(agent.id);
+			const targetRankDef = resolveEffectiveRankDefinition(roleConfig, agent.role, targetHasSubs);
+			const targetInEngineering = Boolean(resolveInGraphMissionBinding(agent, missionRuntime) || missionRuntime?.findMissionForAgent(agent.id) || agent.treeType);
+			const targetIsStandalonePureWorker = Boolean(targetRankDef.pureExecution && !targetHasSubs && !targetInEngineering);
+			let envelopedMessage = rawMessage;
+			if (!targetIsStandalonePureWorker) {
+				if (isHumanUser) {
+					envelopedMessage = wrapUserDirectMessageEnvelope(rawMessage, 'session.send', { usePreambleSentinel: true });
+				} else if (isSecretaryCaller) {
+					envelopedMessage = wrapRoleDirectMessageEnvelope({
+						senderLabel: projects.secretary.label || 'Secretary',
+						senderTierTag: ADE_SECRETARY_TIER_TAG,
+						senderRankName: 'Secretary',
+						senderSessionId: ADE_SECRETARY_ID,
+						channel: 'session.send',
+						message: rawMessage,
+					});
+				} else {
+					const callerRankDef = resolveEffectiveRankDefinition(roleConfig, callerAgent?.role ?? rawCallerStr, true);
+					envelopedMessage = wrapRoleDirectMessageEnvelope({
+						senderLabel: callerAgent?.label ?? rawCallerSessionId ?? callerRankDef.name,
+						senderTierTag: formatTierTag(callerRankDef.tier),
+						senderRankName: callerRankDef.name,
+						senderSessionId: callerAgent?.id ?? rawCallerSessionId,
+						channel: 'session.send',
+						message: rawMessage,
+					});
+				}
+			}
+			const dispatchKind = await sendMessageToSessionResource(chatService, agent.session.resource, envelopedMessage, wait);
 			let reply: string | undefined;
 			if (wait) {
 				projects.setAgentStatus(agent.id, 'idle', true);
@@ -2683,7 +2867,10 @@ export async function executeAdeControlRequest(
 				return { status: 'draft', draft: rawMessage };
 			}
 			const wait = Boolean(params.wait);
-			const dispatchKind = await sendMessageToSessionResource(chatService, projects.secretary.session.resource, rawMessage, wait);
+			const envelopedSecretaryMessage = isHumanUser
+				? wrapUserDirectMessageEnvelope(rawMessage, 'secretary.send', { usePreambleSentinel: true })
+				: rawMessage;
+			const dispatchKind = await sendMessageToSessionResource(chatService, projects.secretary.session.resource, envelopedSecretaryMessage, wait);
 			let reply: string | undefined;
 			if (wait) {
 				const historyRes = await commandService.executeCommand<{ messages?: Array<{ role: string; text: string }> }>(
@@ -2856,6 +3043,244 @@ export async function executeAdeControlRequest(
 			};
 		}
 
+		case 'mission.import': {
+			if (!missionService) {
+				throw new Error('ADE Mission service is not available.');
+			}
+			let bundle: Record<string, unknown> = params;
+			if (typeof params.text === 'string' && params.text.trim()) {
+				try {
+					const decoded = JSON.parse(params.text);
+					if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+						throw new Error('Bundle JSON must be an object.');
+					}
+					bundle = { ...(decoded as Record<string, unknown>), ...params };
+				} catch (err) {
+					throw new Error(`Invalid Engineering bundle JSON: ${err instanceof Error ? err.message : String(err)}`);
+				}
+			} else if (params.bundle && typeof params.bundle === 'object' && !Array.isArray(params.bundle)) {
+				bundle = { ...(params.bundle as Record<string, unknown>), ...params };
+			}
+
+			const mermaidText = typeof bundle.mermaidText === 'string'
+				? bundle.mermaidText
+				: (typeof bundle.mermaid === 'string' ? bundle.mermaid : '');
+			if (mermaidText.trim()) {
+				const validatedDag = parseMissionMermaidDag(mermaidText);
+				if (validatedDag.error) {
+					throw new Error(`Invalid Mission DAG in import bundle: ${validatedDag.error}`);
+				}
+			}
+			const orchestrationText = typeof bundle.orchestrationText === 'string'
+				? bundle.orchestrationText
+				: (typeof bundle.orchestration === 'string' ? bundle.orchestration : '');
+			const parsedOrch = orchestrationText.trim() ? parseOrchestrationGraph(orchestrationText) : undefined;
+			if (parsedOrch?.error) {
+				throw new Error(`Invalid Orchestration Mermaid in import bundle: ${parsedOrch.error}`);
+			}
+
+			// Resolve owner strictly following mission.init authorization rules
+			const rawOwner = params.owner ?? params.ownerSessionId ?? params.mission ?? params.missionId ?? params.governor ?? params.governorSessionId ?? params.sessionId;
+			const rawOwnerStr = typeof rawOwner === 'string' ? rawOwner.trim() : '';
+			const rawOwnerLower = rawOwnerStr.toLowerCase();
+			let ownerSessionId: string | undefined;
+			let ownerTier: number = ADE_USER_TIER;
+			let ownerRankId: string = 'user';
+			let linkedAgent: IAdeAgent | undefined;
+
+			if (isHumanUser) {
+				if (rawOwnerStr && (rawOwnerLower === 'secretary' || rawOwnerLower === 'l0' || rawOwnerStr === ADE_SECRETARY_ID)) {
+					ownerSessionId = ADE_SECRETARY_ID;
+					ownerTier = ADE_SECRETARY_TIER;
+					ownerRankId = 'secretary';
+				} else if (rawOwnerStr) {
+					linkedAgent = resolveAgentFromParams(projects, { id: rawOwnerStr });
+					if (projects.isLockedByWorkTree?.(linkedAgent.id)) {
+						throw new Error(localize('adeMissionCreateOnLockedDenied', "Session '{0}' is a locked Mission-generated employee and cannot host another Mission.", linkedAgent.label));
+					}
+					const ownerRankDef = resolveEffectiveRankDefinition(roleConfig, linkedAgent.role, projects.hasSubordinates(linkedAgent.id));
+					ownerSessionId = linkedAgent.id;
+					ownerTier = ownerRankDef.tier;
+					ownerRankId = ownerRankDef.id;
+				}
+			} else if (isSecretaryCaller) {
+				if (rawOwnerStr && rawOwnerLower !== 'secretary' && rawOwnerLower !== 'l0' && rawOwnerStr !== ADE_SECRETARY_ID) {
+					throw new Error(localize('adeMissionForeignInitDenied', "Permission denied: Secretary (L0) can only create and operate its own L0 Mission; only session '{0}' or User (L-1) may create a Mission on that session.", rawOwnerStr));
+				}
+				ownerSessionId = ADE_SECRETARY_ID;
+				ownerTier = ADE_SECRETARY_TIER;
+				ownerRankId = 'secretary';
+			} else if (callerAgent) {
+				if (projects.isLockedByWorkTree?.(callerAgent.id)) {
+					throw new Error(localize('adeMissionCreateOnLockedDenied', "Session '{0}' is a locked Mission-generated employee and cannot host another Mission.", callerAgent.label));
+				}
+				if (rawOwnerStr && rawOwnerStr !== callerAgent.id) {
+					const targetAgent = resolveAgentFromParams(projects, { id: rawOwnerStr });
+					if (targetAgent.id !== callerAgent.id) {
+						throw new Error(localize('adeMissionForeignAgentInitDenied', "Permission denied: session '{0}' can only create and operate a Mission on itself, not on '{1}'.", callerAgent.label, targetAgent.label));
+					}
+				}
+				linkedAgent = callerAgent;
+				const ownerRankDef = resolveEffectiveRankDefinition(roleConfig, callerAgent.role, projects.hasSubordinates(callerAgent.id));
+				ownerSessionId = callerAgent.id;
+				ownerTier = ownerRankDef.tier;
+				ownerRankId = ownerRankDef.id;
+			} else {
+				throw new Error(localize('adeMissionCallerRequired', "Permission denied: a verified owner session or User (L-1) identity is required to create a Mission."));
+			}
+
+			const bundleTitle = typeof params.title === 'string' && params.title.trim()
+				? params.title.trim()
+				: (typeof bundle.title === 'string' && bundle.title.trim() ? bundle.title.trim() : undefined);
+			const rawProject = params.project ?? params.projectPath ?? params.path ?? params.uri;
+			const resolvedProjectUri = linkedAgent?.projectUri
+				?? (rawProject ? (findMatchingProject(projects, uriIdentity, rawProject)?.uri ?? toUri(rawProject)) : undefined)
+				?? (ownerSessionId === ADE_SECRETARY_ID ? (navigation.focusedProject?.uri ?? projects.selectedProject?.uri ?? projects.projects[0]?.uri) : undefined);
+
+			const existing = ownerSessionId ? missionService.getMissionByLinkedSession(ownerSessionId) : undefined;
+			if (existing) {
+				assertCanOperateMission(existing);
+			}
+			const rec = existing ?? missionService.createMission({
+				id: ownerSessionId ?? (typeof params.id === 'string' && params.id.trim() ? params.id.trim() : undefined),
+				title: bundleTitle ?? linkedAgent?.label,
+				mermaidText,
+				orchestrationText: orchestrationText || undefined,
+				ownerSessionId,
+				ownerTier,
+				ownerRankId,
+				linkedSessionId: ownerSessionId,
+				projectUri: resolvedProjectUri?.toString(),
+			});
+			if (bundleTitle && rec.title !== bundleTitle) {
+				missionService.renameMission(rec.id, bundleTitle);
+			}
+			if (mermaidText !== rec.mermaidText) {
+				missionService.updateMermaid(rec.id, mermaidText);
+			}
+			if (bundle.nodePrompts && typeof bundle.nodePrompts === 'object' && !Array.isArray(bundle.nodePrompts)) {
+				const promptMap: Record<string, string> = {};
+				for (const [k, v] of Object.entries(bundle.nodePrompts as Record<string, unknown>)) {
+					if (typeof v === 'string') {
+						promptMap[k] = v;
+					}
+				}
+				missionService.updateNodePrompts(rec.id, promptMap);
+			}
+			if (bundle.taskStatuses && typeof bundle.taskStatuses === 'object' && !Array.isArray(bundle.taskStatuses)) {
+				const normalizedStatuses: Record<string, IMissionTaskStatusRecord> = {};
+				const now = Date.now();
+				for (const [nid, rawRec] of Object.entries(bundle.taskStatuses as Record<string, unknown>)) {
+					if (rawRec && typeof rawRec === 'object') {
+						const r = rawRec as Record<string, unknown>;
+						const st = r.status;
+						if (st === 'pending' || st === 'in_progress' || st === 'completed' || st === 'blocked') {
+							const activeTokenIds = Array.isArray(r.activeTokenIds)
+								? r.activeTokenIds.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+								: undefined;
+							const artifactPtrs = Array.isArray(r.artifactPtrs)
+								? r.artifactPtrs.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+								: undefined;
+							normalizedStatuses[nid] = {
+								status: st,
+								updatedAt: typeof r.updatedAt === 'number' && Number.isFinite(r.updatedAt) ? r.updatedAt : now,
+								...(typeof r.completedAt === 'number' && Number.isFinite(r.completedAt) ? { completedAt: r.completedAt } : {}),
+								...(typeof r.completedBy === 'string' && r.completedBy ? { completedBy: r.completedBy } : {}),
+								...(typeof r.completedByLabel === 'string' && r.completedByLabel ? { completedByLabel: r.completedByLabel } : {}),
+								...(typeof r.completedByTier === 'number' && Number.isFinite(r.completedByTier) ? { completedByTier: r.completedByTier } : {}),
+								...(typeof r.note === 'string' && r.note ? { note: r.note } : {}),
+								...(typeof r.assigneeNodeId === 'string' && r.assigneeNodeId ? { assigneeNodeId: r.assigneeNodeId } : {}),
+								...(typeof r.assigneeLabel === 'string' && r.assigneeLabel ? { assigneeLabel: r.assigneeLabel } : {}),
+								...(activeTokenIds && activeTokenIds.length > 0 ? { activeTokenIds } : {}),
+								...(typeof r.lastTokenId === 'string' && r.lastTokenId ? { lastTokenId: r.lastTokenId } : {}),
+								...(typeof r.startedAt === 'number' && Number.isFinite(r.startedAt) ? { startedAt: r.startedAt } : {}),
+								...(typeof r.durationMs === 'number' && Number.isFinite(r.durationMs) ? { durationMs: r.durationMs } : {}),
+								...(artifactPtrs && artifactPtrs.length > 0 ? { artifactPtrs } : {}),
+								...(typeof r.blockedReason === 'string' && r.blockedReason ? { blockedReason: r.blockedReason } : {}),
+								...(typeof r.lastError === 'string' && r.lastError ? { lastError: r.lastError } : {}),
+							};
+						}
+					}
+				}
+				missionService.updateTaskStatuses(rec.id, normalizedStatuses);
+			}
+			if (bundle.nodeChecks && typeof bundle.nodeChecks === 'object' && !Array.isArray(bundle.nodeChecks)) {
+				for (const [nid, rawHooks] of Object.entries(bundle.nodeChecks as Record<string, unknown>)) {
+					if (Array.isArray(rawHooks)) {
+						for (const rawHook of rawHooks) {
+							if (rawHook && typeof rawHook === 'object' && typeof (rawHook as { id?: unknown }).id === 'string') {
+								missionService.upsertNodeCheck(rec.id, nid, rawHook as Parameters<typeof missionService.upsertNodeCheck>[2]);
+							}
+						}
+					}
+				}
+			}
+			if (bundle.positions && typeof bundle.positions === 'object' && !Array.isArray(bundle.positions)) {
+				missionService.clearNodePositions(rec.id);
+				missionService.updateNodePositions(rec.id, bundle.positions as Record<string, { readonly x: number; readonly y: number }>);
+			}
+			if (orchestrationText) {
+				missionService.updateOrchestrationText(rec.id, orchestrationText, { replaceWhiteboards: true, replacePositions: true });
+				if (missionRuntime && parsedOrch && !parsedOrch.error) {
+					for (const staffNode of parsedOrch.nodes) {
+						if (staffNode.kind === 'staff' && staffNode.hostAlias && staffNode.hostAlias.trim() && staffNode.hostAlias.trim().toLowerCase() !== 'local') {
+							await missionRuntime.bindNodeHost(rec.id, staffNode.id, { hostAlias: staffNode.hostAlias.trim() }).catch(() => undefined);
+						}
+					}
+				}
+			}
+			const rawLayoutMode = typeof bundle.orchestrationLayoutMode === 'string' ? bundle.orchestrationLayoutMode.trim().toLowerCase() : undefined;
+			if (rawLayoutMode === 'lr' || rawLayoutMode === 'td' || rawLayoutMode === 'radial' || rawLayoutMode === 'grid') {
+				missionService.updateOrchestrationLayoutMode?.(rec.id, rawLayoutMode);
+			}
+			if (bundle.orchestrationPositions && typeof bundle.orchestrationPositions === 'object' && !Array.isArray(bundle.orchestrationPositions)) {
+				missionService.clearOrchestrationPositions(rec.id);
+				missionService.updateOrchestrationPositions(rec.id, bundle.orchestrationPositions as Record<string, { readonly x: number; readonly y: number }>);
+			}
+			if (bundle.whiteboards && typeof bundle.whiteboards === 'object' && !Array.isArray(bundle.whiteboards)) {
+				const latestBeforeWb = missionService.getMission(rec.id);
+				const mergedWbs: Record<string, IOrchestrationWhiteboard> = { ...(latestBeforeWb?.whiteboards ?? {}) };
+				for (const [wbId, rawWb] of Object.entries(bundle.whiteboards as Record<string, unknown>)) {
+					if (rawWb && typeof rawWb === 'object') {
+						const w = rawWb as Record<string, unknown>;
+						const now = Date.now();
+						mergedWbs[wbId] = {
+							id: typeof w.id === 'string' && w.id.trim() ? w.id.trim() : wbId,
+							title: typeof w.title === 'string' && w.title.trim() ? w.title.trim() : wbId,
+							department: typeof w.department === 'string' && w.department.trim() ? w.department.trim() : 'General',
+							content: typeof w.content === 'string' ? w.content : '',
+							version: typeof w.version === 'number' && Number.isFinite(w.version) ? w.version : 1,
+							createdAt: typeof w.createdAt === 'number' ? w.createdAt : now,
+							updatedAt: typeof w.updatedAt === 'number' ? w.updatedAt : now,
+						};
+					}
+				}
+				missionService.updateWhiteboards(rec.id, mergedWbs);
+			}
+			if (params.open === true) {
+				await missionService.openMissionEditor(rec.id, { side: Boolean(params.side) });
+			}
+			const latest = missionService.getMission(rec.id) ?? rec;
+			const finalDag = parseMissionMermaidDag(latest.mermaidText);
+			const finalOrch = parseOrchestrationGraph(latest.orchestrationText ?? '');
+			return {
+				ok: true,
+				id: latest.id,
+				title: latest.title,
+				ownerSessionId: latest.ownerSessionId,
+				ownerTier: latest.ownerTier,
+				ownerTierTag: formatTierTag(latest.ownerTier),
+				taskCount: finalDag.nodes.length,
+				taskEdgeCount: finalDag.edges.length,
+				groupCount: finalOrch.departments.length,
+				staffCount: finalOrch.nodes.filter(n => n.kind === 'staff').length,
+				whiteboardCount: finalOrch.nodes.filter(n => n.kind === 'whiteboard').length,
+				orchestrationEdgeCount: finalOrch.edges.length,
+				layoutMode: latest.orchestrationLayoutMode ?? finalOrch.layoutMode,
+				generatedEmployeeCount: missionService.getGeneratedEmployees(latest.id).length,
+			};
+		}
+
 		case 'mission.list': {
 			if (!missionService) {
 				return [];
@@ -2895,18 +3320,26 @@ export async function executeAdeControlRequest(
 			if (!rawId) {
 				throw new Error('Mission ID is required.');
 			}
+			const rawView = typeof params.view === 'string' ? params.view.trim().toLowerCase() : undefined;
+			const viewMode = rawView === 'mission' ? 'mission' as const : rawView === 'orchestration' ? 'orchestration' as const : undefined;
+			const openSiblingViews = rawView === 'both' || params.allViews === true;
+			const openOpts = {
+				side: Boolean(params.side),
+				...(viewMode ? { viewMode } : {}),
+				...(openSiblingViews ? { openSiblingViews: true } : {}),
+			};
 			const existing = missionService.getMission(rawId) ?? missionService.getMissionByLinkedSession(rawId);
 			if (existing) {
 				assertCanOperateMission(existing);
-				await missionService.openMissionEditor(existing.id, { side: Boolean(params.side) });
-				return { opened: existing.id, title: existing.title, ownerSessionId: existing.ownerSessionId, ownerTierTag: formatTierTag(existing.ownerTier) };
+				await missionService.openMissionEditor(existing.id, openOpts);
+				return { opened: existing.id, title: existing.title, view: rawView ?? 'orchestration', ownerSessionId: existing.ownerSessionId, ownerTierTag: formatTierTag(existing.ownerTier) };
 			}
 			if (!isHumanUser) {
 				throw new Error(`Mission not found: ${rawId}`);
 			}
 			const rec = missionService.ensureMission(rawId);
-			await missionService.openMissionEditor(rec.id, { side: Boolean(params.side) });
-			return { opened: rec.id, title: rec.title, ownerSessionId: rec.ownerSessionId, ownerTierTag: formatTierTag(rec.ownerTier) };
+			await missionService.openMissionEditor(rec.id, openOpts);
+			return { opened: rec.id, title: rec.title, view: rawView ?? 'orchestration', ownerSessionId: rec.ownerSessionId, ownerTierTag: formatTierTag(rec.ownerTier) };
 		}
 
 		case 'mission.blueprint.get':

@@ -678,6 +678,53 @@
 	height: 13px;
 }
 
+/* Unbound / Draft / Planned Agent Seat Icon — sleek rank-tinted rounded micro-badge (never raw comment bubble) */
+.monaco-workbench .ade-tree-item-icon-draft {
+	border-radius: 4px;
+	font-size: 11px !important;
+	line-height: 14px !important;
+	box-sizing: border-box;
+	color: var(--ade-deck-rank-member);
+	background: color-mix(in srgb, var(--ade-deck-rank-member) 14%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-deck-rank-member) 34%, transparent);
+}
+
+.monaco-workbench .ade-tree-item-icon-draft.role-color-amber {
+	color: var(--ade-deck-rank-governor);
+	background: color-mix(in srgb, var(--ade-deck-rank-governor) 15%, transparent);
+	border-color: color-mix(in srgb, var(--ade-deck-rank-governor) 38%, transparent);
+}
+
+.monaco-workbench .ade-tree-item-icon-draft.role-color-indigo {
+	color: var(--ade-deck-rank-manager);
+	background: color-mix(in srgb, var(--ade-deck-rank-manager) 15%, transparent);
+	border-color: color-mix(in srgb, var(--ade-deck-rank-manager) 38%, transparent);
+}
+
+.monaco-workbench .ade-tree-item-icon-draft.role-color-purple {
+	color: var(--ade-deck-rank-employee);
+	background: color-mix(in srgb, var(--ade-deck-rank-employee) 15%, transparent);
+	border-color: color-mix(in srgb, var(--ade-deck-rank-employee) 38%, transparent);
+}
+
+.monaco-workbench .ade-tree-item-icon-draft.role-color-emerald {
+	color: var(--ade-deck-rank-worker);
+	background: color-mix(in srgb, var(--ade-deck-rank-worker) 15%, transparent);
+	border-color: color-mix(in srgb, var(--ade-deck-rank-worker) 38%, transparent);
+}
+
+.monaco-workbench .ade-tree-item-icon-draft.role-color-cyan {
+	color: var(--ade-deck-cloud);
+	background: color-mix(in srgb, var(--ade-deck-cloud) 15%, transparent);
+	border-color: color-mix(in srgb, var(--ade-deck-cloud) 38%, transparent);
+}
+
+.monaco-workbench .ade-tree-item-icon-draft.role-color-rose {
+	color: var(--ade-deck-severity-critical);
+	background: color-mix(in srgb, var(--ade-deck-severity-critical) 15%, transparent);
+	border-color: color-mix(in srgb, var(--ade-deck-severity-critical) 38%, transparent);
+}
+
 /* ============================================================================
  * 4b. Smart Calm Badges — Uniform Micro-Rail at Rest, Full Pill Bloom on Hover/Select
  *     (Click the Tag button in the sidebar toolbar to pin Full Badges on all rows)

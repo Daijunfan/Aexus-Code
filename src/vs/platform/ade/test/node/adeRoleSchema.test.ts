@@ -79,7 +79,7 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 		// Default Governor: allowed mission.design & mission.read & inbox, denied mission.run (mission.control)
 		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.blueprint.apply').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.list').allowed, true);
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.prompt.set').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.task.set').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'inbox.post').allowed, true);
 		const govRun = checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'governor', 'mission.run');
 		assert.strictEqual(govRun.allowed, false);
@@ -170,8 +170,10 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 			workTree: { treeType: 'mission', governorId: 'gov-doc', slot: 'orchestrator' },
 		})!;
 		assert.ok(govPrompt.includes('aexus-ade mission blueprint apply'));
-		assert.ok(govPrompt.includes('aexus-ade mission prompt set'));
+		assert.ok(govPrompt.includes('aexus-ade mission task create|update|complete'));
+		assert.ok(govPrompt.includes('aexus-ade orchestration staff create|config|remove'));
 		assert.ok(govPrompt.includes('aexus-ade role list'));
+		assert.ok(!govPrompt.includes('aexus-ade mission prompt set'), 'Obsolete mission prompt set must not appear in compiled prompts');
 		assert.ok(!govPrompt.includes('engineering template'));
 		assert.ok(!govPrompt.includes('engineering generate'));
 		assert.ok(!govPrompt.includes('worktrees merge'));
