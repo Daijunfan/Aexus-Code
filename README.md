@@ -31,9 +31,9 @@
 > 3. **Inspect Live Batons, Whiteboards & FinOps — Flip `ADE ⇄ IDE` Instantly**: Click any card, chip, or live baton comet to inspect pointer-only baton traces, Department Whiteboards, Completion Contracts, and `maxHops` / FinOps budget circuit-breakers, or press `Alt+Cmd+A` (`Alt+Ctrl+A`) to switch instantly between **`ADE`** and **`IDE`**.
 
 <p align="center">
-  <img src="docs/promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code Flagship ADE Command Center — 6-OS Multi-Project Sidebar, Widescreen Staff Orchestration, Sculpted Mission Task DAG &amp; Simultaneous Multi-Cloud SSH Terminals" />
+  <img src="docs/promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code Flagship ADE Command Center — 4-OS Multi-Project Sidebar, Widescreen Staff Orchestration, Sculpted Mission Task DAG &amp; Simultaneous Multi-Cloud SSH Terminals" />
   <br/>
-  <sub><strong>Flagship ADE Command Center:</strong> 6-OS Multi-Project Sidebar ➔ Dual-View Widescreen Staff Orchestration &amp; Sculpted Mission Task DAG ➔ Simultaneous Multi-Cloud SSH Terminals · <a href="docs/gallery.md">Explore Full 24-Shot 2x Retina Visual Gallery →</a></sub>
+  <sub><strong>Flagship ADE Command Center:</strong> Multi-OS Multi-Project Sidebar (<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>) ➔ Dual-View Widescreen Staff Orchestration &amp; Sculpted Mission Task DAG ➔ Simultaneous Multi-Cloud SSH Terminals · <a href="docs/gallery.md">Explore Full 24-Shot 2x Retina Visual Gallery →</a></sub>
 </p>
 
 ---
@@ -102,9 +102,9 @@ flowchart TB
 Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**, **Kali Linux**, and **Windows** in one unified sidebar — and drive multiple local + cloud terminals side-by-side without juggling windows or installing remote daemons:
 
 <p align="center">
-  <img src="docs/promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="Zero-Server Multi-OS Cloud Host Studio &amp; 4-Host Simultaneous Cloud SSH Terminal Matrix (macOS, Ubuntu, Linux H100 GPU, Debian, Windows 11, Kali)" />
+  <img src="docs/promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="Zero-Server Multi-OS Cloud Host Studio &amp; 4-Host Simultaneous Cloud SSH Terminal Matrix (macOS, Ubuntu, Kali, Windows 11)" />
   <br/>
-  <sub><strong>One Panel, Multi-OS Cloud Fleet &amp; 4-Host Simultaneous SSH Terminals:</strong> Manage macOS, Linux H100 GPU, Ubuntu, Debian, Kali &amp; Windows projects alongside a live 2×2 multi-cloud terminal matrix.</sub>
+  <sub><strong>One Panel, Multi-OS Cloud Fleet &amp; 4-Host Simultaneous SSH Terminals:</strong> Manage macOS, Ubuntu H100 GPU &amp; EU Control Plane, Kali &amp; Windows projects alongside a live 2×2 multi-cloud terminal matrix.</sub>
 </p>
 
 - **Zero Path & OS Friction**: Mix local `file://` projects and zero-server `aexus-ssh://` hosts in the same tree with automatic platform icons (`macOS`, `Ubuntu`, `Kali`, `Windows`), pinned `✦ Secretary`, Smart Calm hover-bloom mode, and a **1-click full-badge toggle**.
@@ -117,9 +117,9 @@ Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**
 Define the exact multi-agent organization your team wants instead of being locked into one fixed hierarchy:
 
 <p align="center">
-  <img src="docs/promo/aexus-03-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="Cross-Cloud Multi-Tier Agent Orchestration Panorama — L1 Sovereign Architect, 3 Cloud Department Subgraphs, Folded Whiteboards, 6 OS Hosts &amp; 6 Native Agent Engines" />
+  <img src="docs/promo/aexus-03-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="Cross-Cloud Multi-Tier Agent Orchestration Panorama — L1 Sovereign Architect, 3 Cloud Department Subgraphs, Folded Whiteboards, Multi-OS Cloud Hosts &amp; 6 Native Agent Engines" />
   <br/>
-  <sub><strong>Cross-Cloud Multi-Tier Agent Orchestration:</strong> L1 Sovereign Architect coordinating 3 cloud department wings, folded shared whiteboards, 6 OS hosts, 6 agent engines, live baton comets &amp; join barriers.</sub>
+  <sub><strong>Cross-Cloud Multi-Tier Agent Orchestration:</strong> L1 Sovereign Architect coordinating 3 cloud department wings, folded shared whiteboards, multi-OS cloud hosts, 6 agent engines, live baton comets &amp; join barriers.</sub>
 </p>
 
 | Starter Preset | Rank Ladder (Top → Leaf Pure Executor) | Structural Slot Mapping (`orch / seg / rev / exec`) |

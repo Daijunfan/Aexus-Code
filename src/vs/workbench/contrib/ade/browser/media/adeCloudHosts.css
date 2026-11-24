@@ -626,24 +626,22 @@
 	box-shadow: inset 0 0 0 1px color-mix(in srgb, #38bdf8 24%, transparent), var(--aexus-highlight-top);
 }
 
-.monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-debian {
-	background: color-mix(in srgb, #d70a53 13%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, #d70a53 24%, transparent), var(--aexus-highlight-top);
+.monaco-workbench .ade-ch-console .ade-ch-os-badge .ade-ch-os-glyph.ade-os-kali {
+	border-radius: 50%;
+	background: linear-gradient(145deg, #38bdf8 0%, #2563eb 52%, #1d4ed8 100%);
+	box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 0.32);
+	padding: 2px;
+	box-sizing: border-box;
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-os-badge .ade-ch-os-glyph.ade-os-kali > svg {
+	width: 16px;
+	height: 16px;
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-windows {
 	background: color-mix(in srgb, #0078d4 13%, transparent);
 	box-shadow: inset 0 0 0 1px color-mix(in srgb, #0078d4 24%, transparent), var(--aexus-highlight-top);
-}
-
-.monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-enterprise-linux {
-	background: color-mix(in srgb, #cc0000 13%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, #cc0000 24%, transparent), var(--aexus-highlight-top);
-}
-
-.monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-linux {
-	background: color-mix(in srgb, #94a3b8 14%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, #94a3b8 24%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-card-titles {

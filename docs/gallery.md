@@ -7,9 +7,9 @@ A curated 2× Retina (`2880×1800`) showcase of **Aexus Code** across Dark and D
 ## 1. Flagship Unified Command Center & Cross-Cloud Orchestration (`01`–`04`)
 
 <p align="center">
-  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Flagship ADE Command Center (Dark) — 6-OS Multi-Project Sidebar, Split Widescreen Staff Orchestration &amp; Sculpted Mission Task DAG, and 3-Host Live SSH Terminal Dock" />
+  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Flagship ADE Command Center (Dark) — 4-OS Multi-Project Sidebar, Split Widescreen Staff Orchestration &amp; Sculpted Mission Task DAG, and 3-Host Live SSH Terminal Dock" />
   <br/>
-  <sub><strong>01. Flagship ADE Command Center (Dark):</strong> 6-OS multi-project sidebar, split dual-view widescreen Staff Orchestration &amp; sculpted Mission Task DAG, and 3-host simultaneous SSH + local terminal dock.</sub>
+  <sub><strong>01. Flagship ADE Command Center (Dark):</strong> Multi-OS multi-project sidebar (<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>), split dual-view widescreen Staff Orchestration &amp; sculpted Mission Task DAG, and 3-host simultaneous SSH + local terminal dock.</sub>
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@ A curated 2× Retina (`2880×1800`) showcase of **Aexus Code** across Dark and D
   <tr>
     <td width="50%">
       <img src="promo/aexus-03-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="Cross-Cloud 6-Host 6-Engine Orchestration Panorama (Dark)" />
-      <p align="center"><sub><strong>03. Cross-Cloud 6-Host × 6-Engine Panorama (Dark):</strong> <code>L1</code> Sovereign Architect coordinating 3 cloud department wings across macOS, Linux H100, Ubuntu, Debian, Kali &amp; Windows 11.</sub></p>
+      <p align="center"><sub><strong>03. Cross-Cloud 6-Host × 6-Engine Panorama (Dark):</strong> <code>L1</code> Sovereign Architect coordinating 3 cloud department wings across macOS, Ubuntu (H100 GPU, EU Gateway &amp; Ledger), Kali &amp; Windows 11.</sub></p>
     </td>
     <td width="50%">
       <img src="promo/aexus-04-cross-cloud-multi-engine-orchestration-light.png" width="100%" alt="Cross-Cloud 6-Host 6-Engine Orchestration Panorama (Light)" />
@@ -55,7 +55,7 @@ A curated 2× Retina (`2880×1800`) showcase of **Aexus Code** across Dark and D
 <p align="center">
   <img src="promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="Cloud Host Studio &amp; 2x2 Simultaneous Multi-OS SSH Terminal Matrix (Dark)" />
   <br/>
-  <sub><strong>07. Multi-OS Cloud Host Studio &amp; 2×2 Live SSH Terminal Matrix (Dark):</strong> Authentic macOS, Ubuntu, Linux Tux, Debian, Windows 11 &amp; Kali vectors on sleek <code>1px</code> hairline host cards above 4 simultaneous SSH terminals.</sub>
+  <sub><strong>07. Multi-OS Cloud Host Studio &amp; 2×2 Live SSH Terminal Matrix (Dark):</strong> Authentic macOS, Ubuntu, Kali &amp; Windows 11 vectors on sleek <code>1px</code> hairline host cards above 4 simultaneous SSH terminals.</sub>
 </p>
 
 <table>
@@ -72,7 +72,7 @@ A curated 2× Retina (`2880×1800`) showcase of **Aexus Code** across Dark and D
   <tr>
     <td width="50%">
       <img src="promo/aexus-10-cloud-host-list-view-and-remote-scm-dark.png" width="100%" alt="Enterprise 8-Host Fleet List View &amp; Remote SSH Git Diff (Dark)" />
-      <p align="center"><sub><strong>10. Compact 8-Host Fleet List &amp; Remote SSH Git Diff:</strong> Dense multi-region host list (including Enterprise Linux) paired with zero-server remote Git Changes &amp; unified diff.</sub></p>
+      <p align="center"><sub><strong>10. Compact 8-Host Fleet List &amp; Remote SSH Git Diff:</strong> Dense multi-region host list across macOS, Ubuntu, Kali &amp; Windows paired with zero-server remote Git Changes &amp; unified diff.</sub></p>
     </td>
     <td width="50%">
       <img src="promo/aexus-11-dual-view-lineage-spotlight-dark.png" width="100%" alt="Dual-View Lineage Cross-Highlight Spotlight (Dark)" />

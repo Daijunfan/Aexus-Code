@@ -97,8 +97,28 @@ export class AdeSessionsService implements IAdeSessionsService {
 		);
 	}
 
+	private normalizeEngineId(engineId: string): string {
+		const trimmed = engineId.trim();
+		const lower = trimmed.toLowerCase();
+		const aliases: Readonly<Record<string, string>> = {
+			claude: 'aexus-claude',
+			'claude-code': 'aexus-claude',
+			codex: 'aexus-codex',
+			antigravity: 'aexus-antigravity',
+			agy: 'aexus-antigravity',
+			dsh: 'aexus-dsh',
+			deepseek: 'aexus-dsh',
+			opencode: 'aexus-opencode',
+			kilo: 'aexus-kilo',
+			cline: 'aexus-cline',
+			pi: 'aexus-pi',
+		};
+		return aliases[lower] ?? trimmed;
+	}
+
 	getIcon(engineId: string): URI | ThemeIcon | undefined {
-		const contribution = this.sessions.getChatSessionContribution(engineId);
+		const resolvedId = this.normalizeEngineId(engineId);
+		const contribution = this.sessions.getChatSessionContribution(resolvedId) ?? this.sessions.getChatSessionContribution(engineId);
 		if (contribution?.icon) {
 			return contribution.icon;
 		}
@@ -108,7 +128,7 @@ export class AdeSessionsService implements IAdeSessionsService {
 		};
 		for (const extension of this.extensions.extensions) {
 			const contributes = extension.contributes as { chatSessions?: readonly ContributedSessionEntry[] } | undefined;
-			const matched = contributes?.chatSessions?.find(session => session.type === engineId);
+			const matched = contributes?.chatSessions?.find(session => session.type === resolvedId || session.type === engineId);
 			if (!matched) {
 				continue;
 			}
@@ -132,7 +152,10 @@ export class AdeSessionsService implements IAdeSessionsService {
 	}
 
 	getEngineName(engineId: string): string {
-		return this.sessions.getChatSessionContribution(engineId)?.displayName ?? engineId;
+		const resolvedId = this.normalizeEngineId(engineId);
+		return this.sessions.getChatSessionContribution(resolvedId)?.displayName
+			?? this.sessions.getChatSessionContribution(engineId)?.displayName
+			?? engineId;
 	}
 
 	async probeEnginesForProject(projectUri?: URI, options?: { readonly forceRefresh?: boolean }): Promise<IAdeEngineProbeResult> {

@@ -66,15 +66,15 @@ suite('TerminalTabsAccessibilityProvider', () => {
 		});
 
 		assert.deepStrictEqual({ kinds, rendered }, {
-			kinds: ['ubuntu', 'kali', 'windows', 'macos', 'debian', 'enterprise-linux', 'linux'],
+			kinds: ['ubuntu', 'kali', 'windows', 'macos', 'ubuntu', 'ubuntu', 'ubuntu'],
 			rendered: [
 				{ os: 'ubuntu', hasClass: true, hasSvg: true },
 				{ os: 'kali', hasClass: true, hasSvg: true },
 				{ os: 'windows', hasClass: true, hasSvg: true },
 				{ os: 'macos', hasClass: true, hasSvg: true },
-				{ os: 'debian', hasClass: true, hasSvg: true },
-				{ os: 'enterprise-linux', hasClass: true, hasSvg: true },
-				{ os: 'linux', hasClass: true, hasSvg: true },
+				{ os: 'ubuntu', hasClass: true, hasSvg: true },
+				{ os: 'ubuntu', hasClass: true, hasSvg: true },
+				{ os: 'ubuntu', hasClass: true, hasSvg: true },
 			],
 		});
 	});

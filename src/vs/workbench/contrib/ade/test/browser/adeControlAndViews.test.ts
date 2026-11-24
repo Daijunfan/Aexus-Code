@@ -2101,14 +2101,14 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			kaliProjectOs: kaliRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
 			winProjectOs: winRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
 			genericCloudOs: cloudRow.querySelector('.ade-tree-item-icon-os')?.getAttribute('data-os'),
-			genericLinuxUsesTuxNotTerminal: Boolean(
-				cloudRow.querySelector('.ade-tree-item-icon-os svg circle[fill="#F5C211"]')
-				&& !cloudRow.querySelector('.ade-tree-item-icon-os svg rect[fill="#26354d"]'),
+			genericLinuxUsesUbuntuNotPenguin: Boolean(
+				cloudRow.querySelector('.ade-tree-item-icon-os svg circle[fill="#E95420"]')
+				&& !cloudRow.querySelector('.ade-tree-item-icon-os svg circle[fill="#F5C211"]'),
 			),
-			plannedChiefUsesRankBadgeNotComment: Boolean(
-				plannedRow.querySelector('.ade-tree-item-icon.ade-tree-item-icon-draft.role-color-amber.codicon-organization')
-				&& !plannedRow.querySelector('.ade-tree-item-icon.codicon-comment')
-				&& !plannedRow.querySelector('.ade-tree-item-icon.codicon-comment-discussion'),
+			plannedChiefUsesCleanCommentIcon: Boolean(
+				plannedRow.querySelector('.ade-tree-item-icon.codicon-comment')
+				&& !plannedRow.querySelector('.ade-tree-item-icon-draft')
+				&& !plannedRow.querySelector('.ade-tree-item-icon.codicon-organization'),
 			),
 			addAgentInheritsParentEngine: inheritedChild.preferredEngineId === 'aexus-claude',
 			agentHasNoOsSvg: !govRow.querySelector('.ade-tree-item-icon')?.hasAttribute('data-os') && !govRow.querySelector('.ade-tree-item-icon svg'),
@@ -2213,9 +2213,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			ubuntuProjectOs: 'ubuntu',
 			kaliProjectOs: 'kali',
 			winProjectOs: 'windows',
-			genericCloudOs: 'linux',
-			genericLinuxUsesTuxNotTerminal: true,
-			plannedChiefUsesRankBadgeNotComment: true,
+			genericCloudOs: 'ubuntu',
+			genericLinuxUsesUbuntuNotPenguin: true,
+			plannedChiefUsesCleanCommentIcon: true,
 			addAgentInheritsParentEngine: true,
 			agentHasNoOsSvg: true,
 			cloudHiddenRoleBadgeDisplay: 'none',

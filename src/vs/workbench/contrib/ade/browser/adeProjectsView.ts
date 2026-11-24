@@ -568,17 +568,11 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			template.row.setAttribute('data-child-label', formatChildRankPreview(nextLower.childRank, roleSchema));
 		}
 
-		const resolvedEngineIcon = effectiveEngineId ? this.sessions.getIcon(effectiveEngineId) : undefined;
-		const icon = resolvedEngineIcon ?? getAdeRankIcon(rank, roleSchema);
-		const isUnboundFallback = !resolvedEngineIcon;
+		const icon = effectiveEngineId ? (this.sessions.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
 		const engineTitle = effectiveEngineId ? this.sessions.getEngineName(effectiveEngineId) : localize('adeDraftSession', "Draft");
 		const badgeLabel = formatRoleBadgeLabel(rank, roleSchema);
 
-		this.applyItemIcon(
-			template.iconNode,
-			icon,
-			isUnboundFallback ? `ade-tree-item-icon-draft role-color-${safeColorSlug}` : undefined,
-		);
+		this.applyItemIcon(template.iconNode, icon);
 		template.label.setResource({
 			name: agent.label,
 			resource: session?.resource ?? agent.projectUri,

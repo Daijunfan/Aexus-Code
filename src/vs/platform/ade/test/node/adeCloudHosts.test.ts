@@ -311,7 +311,7 @@ suite('resolveInitialCloudHostDirectory', () => {
 suite('resolveAdeOsIconKind', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
 
-	test('classifies Windows, macOS, Kali, Ubuntu, Debian, Enterprise Linux, and generic Linux consistently', () => {
+	test('classifies strictly into the 4 OS icons (Windows, macOS, Kali, Ubuntu)', () => {
 		assert.deepStrictEqual({
 			win: resolveAdeOsIconKind({ os: 'windows', hint: 'BUPT-Windows' }),
 			mac: resolveAdeOsIconKind({ os: 'macos', hint: 'Mac-Studio' }),
@@ -327,9 +327,9 @@ suite('resolveAdeOsIconKind', () => {
 			kali: 'kali',
 			ubuntuByAlias: 'ubuntu',
 			ubuntuByDistro: 'ubuntu',
-			debian: 'debian',
-			rhel: 'enterprise-linux',
-			generic: 'linux',
+			debian: 'ubuntu',
+			rhel: 'ubuntu',
+			generic: 'ubuntu',
 		});
 	});
 });

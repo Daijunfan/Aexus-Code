@@ -16,16 +16,13 @@ export const ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME = 'adeCloudHostBackend';
 
 export type AdeCloudHostOs = 'linux' | 'macos' | 'windows';
 export type AdeCloudHostSource = 'user' | 'vscode' | 'ssh-config' | 'aexus-legacy';
-export type AdeOsIconKind = 'windows' | 'macos' | 'kali' | 'ubuntu' | 'debian' | 'enterprise-linux' | 'linux';
+export type AdeOsIconKind = 'windows' | 'macos' | 'kali' | 'ubuntu';
 
 export const ADE_OS_ICON_LABELS: Readonly<Record<AdeOsIconKind, string>> = {
 	windows: 'Windows',
 	macos: 'macOS',
 	kali: 'Kali',
 	ubuntu: 'Ubuntu',
-	debian: 'Debian',
-	'enterprise-linux': 'Enterprise Linux',
-	linux: 'Linux',
 };
 
 export function resolveAdeOsIconKind(input: {
@@ -43,16 +40,7 @@ export function resolveAdeOsIconKind(input: {
 	if (/kali/i.test(source)) {
 		return 'kali';
 	}
-	if (/ubuntu/i.test(source)) {
-		return 'ubuntu';
-	}
-	if (/debian/i.test(source)) {
-		return 'debian';
-	}
-	if (/(?:centos|rocky|alma|rhel|redhat|fedora)/i.test(source)) {
-		return 'enterprise-linux';
-	}
-	return 'linux';
+	return 'ubuntu';
 }
 
 export interface IAdeCloudHostConnectionCheck {

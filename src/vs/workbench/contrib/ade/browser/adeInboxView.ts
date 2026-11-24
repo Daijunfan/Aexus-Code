@@ -727,17 +727,12 @@ export class AdeInboxPanel extends Disposable {
 
 		const titleRow = append(card, $('.ade-inbox-agent-title-row'));
 		const effectiveEngineId = agent.session?.engineId ?? agent.preferredEngineId;
-		const resolvedEngineIcon = effectiveEngineId ? this.sessions?.getIcon(effectiveEngineId) : undefined;
-		const rankDef = resolveEffectiveRankDefinition(roleConfig, agent.role, this.projects?.hasSubordinates(agent.id) ?? false);
-		const icon = resolvedEngineIcon ?? getRankIcon(rank, roleConfig);
+		const icon = effectiveEngineId ? (this.sessions?.getIcon(effectiveEngineId) ?? Codicon.commentDiscussion) : Codicon.comment;
 		const iconEl = append(titleRow, $('span.ade-inbox-agent-icon', { 'aria-hidden': 'true' }));
 		if (URI.isUri(icon)) {
 			iconEl.classList.add('ade-tree-item-icon-svg');
 			iconEl.style.backgroundImage = asCSSUrl(icon);
 		} else {
-			if (!resolvedEngineIcon) {
-				iconEl.classList.add('ade-tree-item-icon-draft', `role-color-${toSafeCssSlug(rankDef.color)}`);
-			}
 			iconEl.classList.add(...ThemeIcon.asClassNameArray(icon));
 		}
 		append(titleRow, $('div.ade-inbox-card-title', {}, agent.label));

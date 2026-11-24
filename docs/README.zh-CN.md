@@ -31,9 +31,9 @@
 > 3. **原位检视接力令牌、共享白板与 FinOps，瞬切 `ADE ⇄ IDE`**：点击任意卡片、胶囊或在途彗星即可原位展开指针接力轨迹、部门白板章节目录、结单契约与多轮 FinOps 预算账本；随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
 
 <p align="center">
-  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code ADE 旗舰指挥中心 — 6 系统多项目侧栏、宽屏 Orchestration 编排、雕琢级 Mission Task DAG 与多云主机并发终端" />
+  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code ADE 旗舰指挥中心 — 多系统多项目侧栏（macOS、Ubuntu、Kali、Windows）、宽屏 Orchestration 编排、雕琢级 Mission Task DAG 与多云主机并发终端" />
   <br/>
-  <sub><strong>ADE 旗舰指挥中心视图：</strong>本地 + 多云 6 系统项目同屏管理 ➔ 宽屏 Orchestration 与雕琢级 Mission Task DAG 双视图实时联动 ➔ 多云主机并发 SSH 终端 · <a href="gallery.md">浏览完整 24 张 2x Retina 旗舰图集 →</a></sub>
+  <sub><strong>ADE 旗舰指挥中心视图：</strong>本地 + 多云 4 大系统（<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>）项目同屏管理 ➔ 宽屏 Orchestration 与雕琢级 Mission Task DAG 双视图实时联动 ➔ 多云主机并发 SSH 终端 · <a href="gallery.md">浏览完整 24 张 2x Retina 旗舰图集 →</a></sub>
 </p>
 
 ---
@@ -102,9 +102,9 @@ flowchart TB
 在同一左侧栏统一管理 **macOS**、**Ubuntu**、**Kali Linux** 与 **Windows** 上的本地及云端项目，并在同一窗口内分屏直控多台本机 + 云主机集成终端：
 
 <p align="center">
-  <img src="promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="跨云主机舰队控制台与 4 云主机并发 SSH 终端矩阵 — macOS、Ubuntu、Linux H100 GPU、Debian、Windows 11、Kali 零信任审计" />
+  <img src="promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="跨云主机舰队控制台与 4 云主机并发 SSH 终端矩阵 — macOS、Ubuntu、Kali 零信任审计、Windows 11" />
   <br/>
-  <sub><strong>一个面板掌控多系统云主机舰队与 2×2 四云主机并发 SSH 终端：</strong>同时直连 macOS、Linux H100 GPU、Ubuntu 控制面、Debian、Kali 零信任审计与 Windows CI 终端，免远端装机、绝不改写 <code>~/.ssh/config</code>。</sub>
+  <sub><strong>一个面板掌控多系统云主机舰队与 2×2 四云主机并发 SSH 终端：</strong>同时直连 macOS、Ubuntu H100 GPU 与控制面、Kali 零信任审计及 Windows CI 终端，免远端装机、绝不改写 <code>~/.ssh/config</code>。</sub>
 </p>
 
 - **彻底无视路径与系统差异**：在同一侧栏混排本地 `file://` 与免装机 `aexus-ssh://` 云端项目，自动识别平台图标（Apple / Ubuntu / Kali / Windows），顶部常驻 **`✦ Secretary`**，支持 Smart Calm 极简模式与**一键完整徽章展开**。

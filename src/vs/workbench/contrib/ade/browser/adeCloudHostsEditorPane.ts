@@ -1555,7 +1555,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		textInput(connection, localize('adeChFieldUser', "SSH Username"), localize('adeChFieldUserHint', "Login user (e.g. ubuntu, root, djf)"), 'user', 'ubuntu');
 		textInput(connection, localize('adeChFieldPort', "SSH Port"), localize('adeChFieldPortHint', "Default 22"), 'port', '22', { type: 'number' });
 		segmented<AdeCloudHostOs>(connection, localize('adeChFieldOs', "Remote OS Platform"), localize('adeChFieldOsHint', "Selects POSIX shell vs Windows PowerShell"), [
-			{ value: 'linux', label: localize('adeChOsLinux', "Linux"), osIcon: 'linux' },
+			{ value: 'linux', label: localize('adeChOsLinux', "Linux"), osIcon: 'ubuntu' },
 			{ value: 'macos', label: localize('adeChOsMac', "macOS"), osIcon: 'macos' },
 			{ value: 'windows', label: localize('adeChOsWindows', "Windows"), osIcon: 'windows' },
 		], () => drawer.draft.os, value => { drawer.draft.os = value; });
