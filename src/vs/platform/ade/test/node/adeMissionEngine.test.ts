@@ -2684,6 +2684,9 @@ suite('ADE Mission Engine Regression Guards (wave joins, rework, patches & run-s
 		assert.strictEqual(inferMissionConcurrencyProvider('gpt-5.3-codex', 'codex'), 'openai');
 		assert.strictEqual(inferMissionConcurrencyProvider('gemini-2.5-pro', 'acp'), 'google');
 		assert.strictEqual(inferMissionConcurrencyProvider('deepseek-r1', 'kilo'), 'deepseek');
+		assert.strictEqual(inferMissionConcurrencyProvider('claude-fable-5-2', 'kilo'), 'anthropic');
+		assert.strictEqual(inferMissionConcurrencyProvider('gpt-6.2-astra', 'kilo'), 'openai');
+		assert.strictEqual(inferMissionConcurrencyProvider('gemini-4-argon', 'kilo'), 'google');
 		assert.strictEqual(inferMissionConcurrencyProvider('ollama/llama3.3', 'kilo'), undefined);
 		assert.strictEqual(inferMissionConcurrencyProvider('vllm/qwen2.5-72b', 'kilo'), undefined);
 		assert.strictEqual(inferMissionConcurrencyProvider('mlx-community/qwen', 'pi'), undefined);
@@ -3017,6 +3020,15 @@ suite('ADE Mission Engine Regression Guards (wave joins, rework, patches & run-s
 		assert.strictEqual(inferModelContextWindowTokens('gemini-2.5-pro'), 1_000_000);
 		assert.strictEqual(inferModelContextWindowTokens('gpt-4.1'), 1_000_000);
 		assert.strictEqual(inferModelContextWindowTokens('claude-sonnet-4-6[1m]'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('claude-fable-5-2'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('claude-opus-5-5'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('gpt-6.2-astra'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('deepseek-v4-pro'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('gemini-4-argon'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('qwen4-max'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('kimi-k3.1-pro'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('grok-4.5'), 1_000_000);
+		assert.strictEqual(inferModelContextWindowTokens('glm-5'), 500_000);
 		assert.strictEqual(parseExplicitModelContextWindowTag('custom-coder-32k'), 32_000);
 		assert.strictEqual(inferModelContextWindowTokens('custom-coder-32k'), 32_000);
 		assert.strictEqual(inferModelContextWindowTokens('ollama/my-custom-7b'), 32_768);

@@ -176,7 +176,22 @@ function r(
  * `gemini-2.5-flash-lite`, `claude-opus-4-6`, `llama-3.3`) always win over broader families (`gpt-5`, `llama-3`).
  */
 const BUILTIN_MODEL_PRICING_RAW: readonly IBuiltInPricingEntry[] = [
-	// Anthropic Claude (200k standard; `[1m]` / `-1m` suffixes resolve to 1M)
+	// Anthropic Claude (5.5 / Fable 5.2 / Mythos 5.2 1M frontier; 4.x 200k standard)
+	{ pattern: 'claude-fable-5-2', rate: r(6.0, 30.0, 0.6, 7.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-fable-5.2', rate: r(6.0, 30.0, 0.6, 7.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-fable', rate: r(6.0, 30.0, 0.6, 7.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-mythos-5-2', rate: r(6.0, 30.0, 0.6, 7.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-mythos-5.2', rate: r(6.0, 30.0, 0.6, 7.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-mythos', rate: r(6.0, 30.0, 0.6, 7.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-opus-5-5', rate: r(5.0, 25.0, 0.5, 6.25), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-opus-5.5', rate: r(5.0, 25.0, 0.5, 6.25), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-opus-5', rate: r(5.0, 25.0, 0.5, 6.25), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-sonnet-5-5', rate: r(3.0, 15.0, 0.3, 3.75), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-sonnet-5.5', rate: r(3.0, 15.0, 0.3, 3.75), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-sonnet-5', rate: r(3.0, 15.0, 0.3, 3.75), contextWindowTokens: 1_000_000 },
+	{ pattern: 'claude-haiku-5-5', rate: r(0.8, 4.0, 0.08, 1.0), contextWindowTokens: 500_000 },
+	{ pattern: 'claude-haiku-5.5', rate: r(0.8, 4.0, 0.08, 1.0), contextWindowTokens: 500_000 },
+	{ pattern: 'claude-haiku-5', rate: r(0.8, 4.0, 0.08, 1.0), contextWindowTokens: 500_000 },
 	{ pattern: 'claude-opus-4-6', rate: r(5.0, 25.0, 0.5, 6.25), contextWindowTokens: 200_000 },
 	{ pattern: 'claude-opus-4.6', rate: r(5.0, 25.0, 0.5, 6.25), contextWindowTokens: 200_000 },
 	{ pattern: 'claude-opus-4-5', rate: r(5.0, 25.0, 0.5, 6.25), contextWindowTokens: 200_000 },
@@ -201,7 +216,17 @@ const BUILTIN_MODEL_PRICING_RAW: readonly IBuiltInPricingEntry[] = [
 	{ pattern: 'claude-sonnet', rate: r(3.0, 15.0, 0.3, 3.75), contextWindowTokens: 200_000 },
 	{ pattern: 'claude-haiku', rate: r(1.0, 5.0, 0.1, 1.25), contextWindowTokens: 200_000 },
 
-	// OpenAI / Codex
+	// OpenAI / Codex (GPT-6 Astra / Sol / Terra / Luna frontier + GPT-5 / o-series)
+	{ pattern: 'gpt-6.2-astra', rate: r(3.0, 15.0, 0.3, 3.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-6-astra', rate: r(3.0, 15.0, 0.3, 3.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-6.1-sol', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-6-sol', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-5.6-sol', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-6.1-terra', rate: r(1.25, 8.0, 0.125, 1.25), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-6-terra', rate: r(1.25, 8.0, 0.125, 1.25), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-6-luna', rate: r(0.6, 3.0, 0.06, 0.6), contextWindowTokens: 500_000 },
+	{ pattern: 'gpt-6', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gpt-5.5', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
 	{ pattern: 'gpt-5.4-pro', rate: r(15.0, 120.0, 1.5, 15.0), contextWindowTokens: 1_000_000 },
 	{ pattern: 'gpt-5-pro', rate: r(15.0, 120.0, 1.5, 15.0), contextWindowTokens: 400_000 },
 	{ pattern: 'gpt-5.4-mini', rate: r(0.75, 4.5, 0.075, 0.75), contextWindowTokens: 400_000 },
@@ -237,7 +262,12 @@ const BUILTIN_MODEL_PRICING_RAW: readonly IBuiltInPricingEntry[] = [
 	{ pattern: 'o1-preview', rate: r(15.0, 60.0, 7.5, 15.0), contextWindowTokens: 128_000 },
 	{ pattern: 'o1', rate: r(15.0, 60.0, 7.5, 15.0), contextWindowTokens: 200_000 },
 
-	// Google Gemini / Antigravity
+	// Google Gemini / Antigravity (Gemini 4 Argon / Neon / Carbon / Hydrogen + Gemini 3 / 2.5)
+	{ pattern: 'gemini-4-argon', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gemini-4-neon', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gemini-4-carbon', rate: r(1.5, 9.0, 0.15, 1.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gemini-4-hydrogen', rate: r(0.5, 2.5, 0.05, 0.5), contextWindowTokens: 1_000_000 },
+	{ pattern: 'gemini-4', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
 	{ pattern: 'gemini-3.1-pro', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
 	{ pattern: 'gemini-3-pro', rate: r(2.0, 12.0, 0.2, 2.0), contextWindowTokens: 1_000_000 },
 	{ pattern: 'gemini-3-flash', rate: r(0.5, 3.0, 0.05, 0.5), contextWindowTokens: 1_000_000 },
@@ -251,7 +281,10 @@ const BUILTIN_MODEL_PRICING_RAW: readonly IBuiltInPricingEntry[] = [
 	{ pattern: 'gemini-pro', rate: r(1.25, 10.0, 0.3125, 1.25), contextWindowTokens: 1_000_000 },
 	{ pattern: 'gemini-flash', rate: r(0.3, 2.5, 0.075, 0.3), contextWindowTokens: 1_000_000 },
 
-	// DeepSeek / DSH (64k/128k real windows; `[1m]` tags override to 1M)
+	// DeepSeek / DSH (DeepSeek V4 / V4.1 1M frontier + R1 / V3 64k/128k windows)
+	{ pattern: 'deepseek-v4.1-flash', rate: r(0.14, 0.56, 0.035, 0.14), contextWindowTokens: 1_000_000 },
+	{ pattern: 'deepseek-v4-pro', rate: r(0.4, 1.6, 0.08, 0.4), contextWindowTokens: 1_000_000 },
+	{ pattern: 'deepseek-v4', rate: r(0.4, 1.6, 0.08, 0.4), contextWindowTokens: 1_000_000 },
 	{ pattern: 'deepseek-reasoner', rate: r(0.55, 2.19, 0.14, 0.55), contextWindowTokens: 64_000 },
 	{ pattern: 'deepseek-r1', rate: r(0.55, 2.19, 0.14, 0.55), contextWindowTokens: 64_000 },
 	{ pattern: 'deepseek-v3.2', rate: r(0.27, 1.1, 0.07, 0.27), contextWindowTokens: 128_000 },
@@ -263,7 +296,11 @@ const BUILTIN_MODEL_PRICING_RAW: readonly IBuiltInPricingEntry[] = [
 	{ pattern: 'deepseek-flash', rate: r(0.14, 0.56, 0.035, 0.14), contextWindowTokens: 128_000 },
 	{ pattern: 'deepseek', rate: r(0.27, 1.1, 0.07, 0.27), contextWindowTokens: 64_000 },
 
-	// Qwen / OpenCode
+	// Qwen / OpenCode (Qwen4 / Qwen3.8 1M frontier + Qwen3 / Qwen2.5)
+	{ pattern: 'qwen4-max', rate: r(0.8, 3.2, 0.16, 0.8), contextWindowTokens: 1_000_000 },
+	{ pattern: 'qwen4-coder', rate: r(0.3, 1.2, 0.06, 0.3), contextWindowTokens: 1_000_000 },
+	{ pattern: 'qwen3.8-max', rate: r(0.8, 3.2, 0.16, 0.8), contextWindowTokens: 1_000_000 },
+	{ pattern: 'qwen4', rate: r(0.5, 2.0, 0.1, 0.5), contextWindowTokens: 1_000_000 },
 	{ pattern: 'qwen-long', rate: r(0.2, 0.8, 0.05, 0.2), contextWindowTokens: 1_000_000 },
 	{ pattern: 'qwen3-coder', rate: r(0.3, 1.2, 0.06, 0.3), contextWindowTokens: 256_000 },
 	{ pattern: 'qwen2.5-coder', rate: r(0.3, 1.2, 0.06, 0.3), contextWindowTokens: 128_000 },
@@ -278,6 +315,8 @@ const BUILTIN_MODEL_PRICING_RAW: readonly IBuiltInPricingEntry[] = [
 	{ pattern: 'qwen', rate: r(0.4, 1.2, 0.08, 0.4), contextWindowTokens: 128_000 },
 
 	// xAI Grok
+	{ pattern: 'grok-4.5-fast', rate: r(0.2, 0.6, 0.05, 0.2), contextWindowTokens: 2_000_000 },
+	{ pattern: 'grok-4.5', rate: r(2.5, 12.0, 0.5, 2.5), contextWindowTokens: 1_000_000 },
 	{ pattern: 'grok-code', rate: r(0.2, 1.5, 0.02, 0.2), contextWindowTokens: 256_000 },
 	{ pattern: 'grok-4-fast', rate: r(0.2, 0.5, 0.05, 0.2), contextWindowTokens: 2_000_000 },
 	{ pattern: 'grok-3-mini', rate: r(0.3, 0.5, 0.075, 0.3), contextWindowTokens: 128_000 },
@@ -286,9 +325,13 @@ const BUILTIN_MODEL_PRICING_RAW: readonly IBuiltInPricingEntry[] = [
 	{ pattern: 'grok', rate: r(3.0, 15.0, 0.75, 3.0), contextWindowTokens: 128_000 },
 
 	// Moonshot Kimi / Zhipu GLM / MiniMax / Mistral / Llama / Gemma / Phi
+	{ pattern: 'kimi-k3.1-pro', rate: r(0.6, 2.4, 0.12, 0.6), contextWindowTokens: 1_000_000 },
+	{ pattern: 'kimi-k3', rate: r(0.6, 2.4, 0.12, 0.6), contextWindowTokens: 1_000_000 },
 	{ pattern: 'kimi-k2.5', rate: r(0.6, 2.5, 0.15, 0.6), contextWindowTokens: 256_000 },
 	{ pattern: 'kimi-k2', rate: r(0.6, 2.5, 0.15, 0.6), contextWindowTokens: 128_000 },
 	{ pattern: 'moonshot', rate: r(0.6, 2.5, 0.15, 0.6), contextWindowTokens: 128_000 },
+	{ pattern: 'glm-5-plus', rate: r(0.5, 2.0, 0.1, 0.5), contextWindowTokens: 500_000 },
+	{ pattern: 'glm-5', rate: r(0.5, 2.0, 0.1, 0.5), contextWindowTokens: 500_000 },
 	{ pattern: 'glm-4.5', rate: r(0.6, 2.2, 0.11, 0.6), contextWindowTokens: 128_000 },
 	{ pattern: 'glm-4', rate: r(0.6, 2.2, 0.11, 0.6), contextWindowTokens: 128_000 },
 	{ pattern: 'glm', rate: r(0.6, 2.2, 0.11, 0.6), contextWindowTokens: 128_000 },

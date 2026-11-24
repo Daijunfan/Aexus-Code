@@ -31,9 +31,9 @@
 > 3. **Inspect Live Batons, Whiteboards & FinOps — Flip `ADE ⇄ IDE` Instantly**: Click any card, chip, or live baton comet to inspect pointer-only baton traces, Department Whiteboards, Completion Contracts, and `maxHops` / FinOps budget circuit-breakers, or press `Alt+Cmd+A` (`Alt+Ctrl+A`) to switch instantly between **`ADE`** and **`IDE`**.
 
 <p align="center">
-  <img src="docs/promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code Flagship ADE Command Center — 4-OS Cross-Cloud Collaboration (macOS, Ubuntu H100, Kali, Windows 11), Frontier Models (Claude Opus 4.6, GPT-5.4, Gemini 3.1 Pro, DeepSeek R1), Highlighted Collaboration Lineage &amp; 4-Host Simultaneous SSH Terminals" />
+  <img src="docs/promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code Flagship ADE Command Center — 4-OS Cross-Cloud Collaboration (macOS, Ubuntu H100, Kali, Windows 11), Frontier Models (Claude Fable 5.2, GPT-6.2 Astra, Gemini 4 Argon, DeepSeek V4 Pro), Highlighted Collaboration Lineage &amp; 4-Host Simultaneous SSH Terminals" />
   <br/>
-  <sub><strong>One Panel Controlling Multi-Cloud Hosts &amp; Frontier Agents:</strong> 4-OS Multi-Project Sidebar (<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>) ➔ Highlighted Cross-Cloud Staff Collaboration (<code>Claude Opus 4.6</code> · <code>GPT-5.4</code> · <code>Gemini 3.1 Pro</code> · <code>DeepSeek R1</code>) ⇄ Synced Mission Task DAG ➔ 4-Host Simultaneous Live SSH Terminals · <a href="docs/gallery.md">Explore Full 30-Shot 2x Retina Visual Gallery →</a></sub>
+  <sub><strong>One Panel Controlling Multi-Cloud Hosts &amp; Frontier Agents:</strong> 4-OS Multi-Project Sidebar (<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>) ➔ Highlighted Cross-Cloud Staff Collaboration (<code>Claude Fable 5.2</code> · <code>GPT-6.2 Astra</code> · <code>Gemini 4 Argon</code> · <code>DeepSeek V4 Pro</code>) ⇄ Synced Mission Task DAG ➔ 4-Host Simultaneous Live SSH Terminals · <a href="docs/gallery.md">Explore Full 25-Shot 2x Retina Visual Gallery →</a></sub>
 </p>
 
 ---
@@ -102,7 +102,7 @@ flowchart TB
 Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**, **Kali Linux**, and **Windows** in one unified sidebar — and drive multiple local + cloud terminals side-by-side without juggling windows or installing remote daemons:
 
 <p align="center">
-  <img src="docs/promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="Zero-Server Multi-OS Cloud Host Studio &amp; 4-Host Simultaneous Cloud SSH Terminal Matrix (macOS, Ubuntu, Kali, Windows 11)" />
+  <img src="docs/promo/aexus-04-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="Zero-Server Multi-OS Cloud Host Studio &amp; 4-Host Simultaneous Cloud SSH Terminal Matrix (macOS, Ubuntu, Kali, Windows 11)" />
   <br/>
   <sub><strong>One Panel, Multi-OS Cloud Fleet &amp; 4-Host Simultaneous SSH Terminals:</strong> Manage macOS, Ubuntu H100 GPU &amp; EU Control Plane, Kali &amp; Windows projects alongside a live 2×2 multi-cloud terminal matrix.</sub>
 </p>
@@ -117,7 +117,7 @@ Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**
 Define the exact multi-agent organization your team wants instead of being locked into one fixed hierarchy:
 
 <p align="center">
-  <img src="docs/promo/aexus-03-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="Cross-Cloud Multi-Tier Agent Orchestration Panorama — L1 Sovereign Architect, 3 Cloud Department Subgraphs, Folded Whiteboards, Multi-OS Cloud Hosts &amp; 6 Native Agent Engines" />
+  <img src="docs/promo/aexus-02-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="Cross-Cloud Multi-Tier Agent Orchestration Panorama — L1 Sovereign Architect, 3 Cloud Department Subgraphs, Folded Whiteboards, Multi-OS Cloud Hosts &amp; 6 Native Agent Engines" />
   <br/>
   <sub><strong>Cross-Cloud Multi-Tier Agent Orchestration:</strong> L1 Sovereign Architect coordinating 3 cloud department wings, folded shared whiteboards, multi-OS cloud hosts, 6 agent engines, live baton comets &amp; join barriers.</sub>
 </p>
@@ -145,11 +145,11 @@ Pair a strictly acyclic sculpted **Mission Task DAG** with a persistent cyclic *
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/promo/aexus-05-mission-task-dag-contracts-dark.png" width="100%" alt="Sculpted Mission Task DAG — 280x154 Contract-Guarded Task Pods, Check Receipts, Sovereign Gate &amp; Semantic Minimap" />
+      <img src="docs/promo/aexus-03-mission-task-dag-contracts-dark.png" width="100%" alt="Sculpted Mission Task DAG — 280x154 Contract-Guarded Task Pods, Check Receipts, Sovereign Gate &amp; Semantic Minimap" />
       <p align="center"><sub><strong>Sculpted Mission Task DAG:</strong> <code>280×154</code> task pods with Completion Contract guardrails, deterministic Check Receipts, Ready Frontier &amp; Sovereign Gate.</sub></p>
     </td>
     <td width="50%">
-      <img src="docs/promo/aexus-11-dual-view-lineage-spotlight-dark.png" width="100%" alt="Dual-View Live Linkage — Widescreen Orchestration Synchronized Side-by-Side with Sculpted Mission Task DAG" />
+      <img src="docs/promo/aexus-07-dual-view-lineage-spotlight-dark.png" width="100%" alt="Dual-View Live Linkage — Widescreen Orchestration Synchronized Side-by-Side with Sculpted Mission Task DAG" />
       <p align="center"><sub><strong>Dual-View Live Linkage:</strong> Widescreen Orchestration staff batons synchronized 1:1 with Mission Task DAG deliverables &amp; hover spotlight.</sub></p>
     </td>
   </tr>
@@ -161,7 +161,7 @@ Pair a strictly acyclic sculpted **Mission Task DAG** with a persistent cyclic *
 - **Zero-Token Watchdog, Main-Process Headless Continuity & Guardrails**: Automatic 5-minute baton silence reminders, zero-token PID/file `token block` wakeups, `maxHops` cycle circuit-breakers, FinOps hard budget breakers (`orchestration limits`), deterministic `%% check` hooks, 429/502 transient retries, and 0-window main-process daemon persistence.
 
 <p align="center">
-  <img src="docs/promo/aexus-14-baton-inspector-join-barrier-conflict-dark.png" width="100%" alt="Pointer-Native Baton Lifecycle, Join Barrier, Scope Conflict Detection &amp; Folded Department Whiteboard" />
+  <img src="docs/promo/aexus-10-baton-inspector-join-barrier-conflict-dark.png" width="100%" alt="Pointer-Native Baton Lifecycle, Join Barrier, Scope Conflict Detection &amp; Folded Department Whiteboard" />
   <br/>
   <sub><strong>Pointer-Native Baton Inspector, Join Barriers &amp; Shared Whiteboards:</strong> Inspect Write Scope globs, DP scope conflict alerts, quorum SLA timers, rework ledgers, and on-demand context pointers.</sub>
 </p>
@@ -182,21 +182,21 @@ From offensive/defensive security swarms and multi-GPU AI research labs to simul
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/promo/aexus-25-cybersec-red-blue-cross-cloud-audit-dark.png" width="100%" alt="Red/Blue Offensive-Defensive Security Swarm Across Kali, Ubuntu, Windows 11 &amp; macOS" />
-      <p align="center"><sub><strong>Red/Blue Cybersec Swarm:</strong> <code>Kali</code> DeepSeek R1 exploit repro ⇄ <code>Ubuntu</code> GPT-5.4 patcher ⇄ <code>Win11</code> Gemini 3.1 Pro AD verifier under <code>macOS</code> Opus 4.6 CISO.</sub></p>
+      <img src="docs/promo/aexus-20-cybersec-red-blue-cross-cloud-audit-dark.png" width="100%" alt="Red/Blue Offensive-Defensive Security Swarm Across Kali, Ubuntu, Windows 11 &amp; macOS" />
+      <p align="center"><sub><strong>Red/Blue Cybersec Swarm:</strong> <code>Kali</code> DeepSeek V4 Pro exploit repro ⇄ <code>Ubuntu</code> GPT-6.2 Astra patcher ⇄ <code>Win11</code> Gemini 4 Argon AD verifier under <code>macOS</code> Claude Mythos 5.2 CISO.</sub></p>
     </td>
     <td width="50%">
-      <img src="docs/promo/aexus-26-ai-research-lab-multi-gpu-cluster-dark.png" width="100%" alt="Distributed Multi-GPU AI Research Lab Across 8xH100, 8xH200 &amp; Win11 DirectML" />
+      <img src="docs/promo/aexus-21-ai-research-lab-multi-gpu-cluster-dark.png" width="100%" alt="Distributed Multi-GPU AI Research Lab Across 8xH100, 8xH200 &amp; Win11 DirectML" />
       <p align="center"><sub><strong>Multi-GPU AI Research Lab:</strong> Parallel <code>8×H100</code> FP8 FlashAttn-3 + <code>8×H200</code> Sparse MoE + <code>Win11</code> DirectML ablation coordinated via quorum join barriers.</sub></p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="docs/promo/aexus-28-three-cloud-simultaneous-agent-streams-dark.png" width="100%" alt="3-Cloud Simultaneous Multi-Engine Live Agent Streams — Claude Opus 4.6, GPT-5.4 &amp; DeepSeek R1" />
-      <p align="center"><sub><strong>3-Cloud Simultaneous Agent Streams:</strong> <code>macOS</code> Claude Opus 4.6 splitting live batons to <code>Ubuntu</code> Codex GPT-5.4 &amp; <code>Kali</code> DeepSeek R1 side by side.</sub></p>
+      <img src="docs/promo/aexus-23-three-cloud-simultaneous-agent-streams-dark.png" width="100%" alt="3-Cloud Simultaneous Multi-Engine Live Agent Streams — Claude Fable 5.2, GPT-6.2 Astra &amp; DeepSeek V4 Pro" />
+      <p align="center"><sub><strong>3-Cloud Simultaneous Agent Streams:</strong> <code>macOS</code> Claude Fable 5.2 splitting live batons to <code>Ubuntu</code> Codex GPT-6.2 Astra &amp; <code>Kali</code> DeepSeek V4 Pro side by side.</sub></p>
     </td>
     <td width="50%">
-      <img src="docs/promo/aexus-30-finops-budget-governance-and-checkpoints-dark.png" width="100%" alt="8-Engine FinOps Budget Breaker, KV-Cache Telemetry &amp; Time-Travel Checkpoints" />
+      <img src="docs/promo/aexus-25-finops-budget-governance-and-checkpoints-dark.png" width="100%" alt="8-Engine FinOps Budget Breaker, KV-Cache Telemetry &amp; Time-Travel Checkpoints" />
       <p align="center"><sub><strong>8-Engine FinOps &amp; Checkpoints:</strong> Unified frontier pricing, 81% KV-cache savings, hard budget circuit-breaker, and SQLite WAL time-travel checkpoints.</sub></p>
     </td>
   </tr>
@@ -207,7 +207,7 @@ From offensive/defensive security swarms and multi-GPU AI research labs to simul
 ### 4. Smart Calm Sidebar & Rank-Filtered Inbox
 
 <p align="center">
-  <img src="docs/promo/aexus-21-project-focus-mode-and-live-diff-dark.png" width="100%" alt="ADE Project Focus Mode — Sticky Cloud Focus Banner, Cross-Engine Collaboration &amp; Remote SSH Git Diff Inspector" />
+  <img src="docs/promo/aexus-16-project-focus-mode-and-live-diff-dark.png" width="100%" alt="ADE Project Focus Mode — Sticky Cloud Focus Banner, Cross-Engine Collaboration &amp; Remote SSH Git Diff Inspector" />
   <br/>
   <sub><strong>Project Focus Mode, Cross-Engine Collaboration &amp; Live Git Changes Inspector:</strong> Scope the multi-project sidebar to a single cloud workspace while collaborating across Claude, Antigravity &amp; DeepSeek with live diff inspection.</sub>
 </p>
@@ -222,7 +222,7 @@ From offensive/defensive security swarms and multi-GPU AI research labs to simul
 Aexus Code keeps 100% of native `Code - OSS` IDE ergonomics intact — Explorer, split editors, side-by-side diffs, multi-OS terminals, decoupled **Plugins** & **Agent Engine** header buttons, and live **[Open VSX](https://open-vsx.org/)** compatibility — while adding a Zero-Server SSH Cloud Host Studio:
 
 <p align="center">
-  <img src="docs/promo/aexus-24-ade-ide-mirror-symmetry-dark.png" width="100%" alt="Instant ADE to IDE Mirror Symmetry — 6 Mirrored Local and Cloud SSH Roots, TypeScript Editor, Live Sculpted Mission Task DAG &amp; Multi-Cloud Terminals" />
+  <img src="docs/promo/aexus-19-ade-ide-mirror-symmetry-dark.png" width="100%" alt="Instant ADE to IDE Mirror Symmetry — 6 Mirrored Local and Cloud SSH Roots, TypeScript Editor, Live Sculpted Mission Task DAG &amp; Multi-Cloud Terminals" />
   <br/>
   <sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry (<code>Alt+Cmd+A</code>):</strong> Manage the same local + cloud SSH multi-project workspace in native IDE mode with syntax-highlighted editing, live sculpted Task DAG sync &amp; split cloud terminals.</sub>
 </p>
@@ -231,7 +231,7 @@ Aexus Code keeps 100% of native `Code - OSS` IDE ergonomics intact — Explorer,
 - **Non-Destructive `~/.ssh/config` Guarantee**: `syncUserSshDir` defaults to **`false`** — Aexus Code passes `-F <userDataDir>/ssh/effective_ssh_config` exclusively to its own SSH sessions/terminals and **never prepends `Include` or modifies your global `~/.ssh/config`**.
 - **OpenSSH Transport**: Uses **OpenSSH `ControlMaster` multiplexing on macOS/Linux** and **direct OpenSSH on Windows**. Background filesystem, Git, and probe operations run with **`BatchMode=yes`**, requiring key-based / `ssh-agent` authentication (private keys are never read or copied).
 - **Non-Destructive VS Code Migration**: Imports `~/.ssh/config` (including recursive `Include` directives) and VS Code remote host/directory history via `aexus-ade host import-vscode` (read-only import).
-- **Full Visual Gallery**: See [`docs/gallery.md`](docs/gallery.md) for the complete 30-shot 2x Retina showcase gallery.
+- **Full Visual Gallery**: See [`docs/gallery.md`](docs/gallery.md) for the complete 25-shot 2x Retina showcase gallery.
 
 ---
 

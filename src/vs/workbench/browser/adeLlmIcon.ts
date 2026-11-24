@@ -78,6 +78,12 @@ export const ADE_LLM_PICKER_VENDORS: readonly { readonly vendor: AdeLlmPickerVen
 
 const VENDOR_CANONICAL_MODELS: Readonly<Partial<Record<AdeLlmProviderKind, readonly { readonly id: string; readonly label: string }[]>>> = {
 	openai: [
+		{ id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra' },
+		{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
+		{ id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
+		{ id: 'gpt-6-luna', label: 'GPT-6 Luna' },
+		{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+		{ id: 'gpt-5.5', label: 'GPT-5.5' },
 		{ id: 'gpt-5.4', label: 'GPT-5.4' },
 		{ id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
 		{ id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex' },
@@ -91,6 +97,13 @@ const VENDOR_CANONICAL_MODELS: Readonly<Partial<Record<AdeLlmProviderKind, reado
 		{ id: 'gpt-4o', label: 'GPT-4o' },
 	],
 	anthropic: [
+		{ id: 'claude-fable-5-2', label: 'Claude Fable 5.2' },
+		{ id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
+		{ id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+		{ id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
+		{ id: 'claude-mythos-5-2', label: 'Claude Mythos 5.2' },
+		{ id: 'claude-opus-5', label: 'Claude Opus 5' },
+		{ id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
 		{ id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
 		{ id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
 		{ id: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
@@ -101,16 +114,22 @@ const VENDOR_CANONICAL_MODELS: Readonly<Partial<Record<AdeLlmProviderKind, reado
 		{ id: 'haiku', label: 'Haiku (CLI Alias)' },
 	],
 	deepseek: [
-		{ id: 'deepseek-flash[1m]', label: 'DeepSeek Flash (1M)' },
+		{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+		{ id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
 		{ id: 'deepseek-v4-pro[1m]', label: 'DeepSeek V4 Pro (1M)' },
+		{ id: 'deepseek-flash[1m]', label: 'DeepSeek Flash (1M)' },
 		{ id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' },
 		{ id: 'deepseek-chat', label: 'DeepSeek Chat' },
 		{ id: 'deepseek-r1', label: 'DeepSeek R1' },
 		{ id: 'deepseek-v3.2', label: 'DeepSeek V3.2' },
 	],
 	gemini: [
+		{ id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
+		{ id: 'gemini-4-neon', label: 'Gemini 4 Neon' },
 		{ id: 'gemini-4-neon-xhigh', label: 'Gemini 4 Neon (XHigh)' },
 		{ id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)' },
+		{ id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
+		{ id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
 		{ id: 'gemini-4-neon-medium', label: 'Gemini 4 Neon (Medium)' },
 		{ id: 'gemini-4-neon-low', label: 'Gemini 4 Neon (Low)' },
 		{ id: 'gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh)' },
@@ -124,6 +143,9 @@ const VENDOR_CANONICAL_MODELS: Readonly<Partial<Record<AdeLlmProviderKind, reado
 		{ id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
 	],
 	qwen: [
+		{ id: 'qwen4-max', label: 'Qwen4-Max' },
+		{ id: 'qwen4-coder', label: 'Qwen4-Coder' },
+		{ id: 'qwen3.8-max', label: 'Qwen3.8-Max' },
 		{ id: 'qwen3-coder-plus', label: 'Qwen3 Coder Plus' },
 		{ id: 'qwen3-coder', label: 'Qwen3 Coder' },
 		{ id: 'qwen3-max', label: 'Qwen3 Max' },
@@ -131,16 +153,22 @@ const VENDOR_CANONICAL_MODELS: Readonly<Partial<Record<AdeLlmProviderKind, reado
 		{ id: 'qwq-32b', label: 'QwQ 32B' },
 	],
 	kimi: [
+		{ id: 'kimi-k3.1-pro', label: 'Kimi K3.1 Pro' },
+		{ id: 'kimi-k3', label: 'Kimi K3' },
 		{ id: 'kimi-k2.5', label: 'Kimi K2.5' },
 		{ id: 'kimi-k2-thinking', label: 'Kimi K2 Thinking' },
 		{ id: 'kimi-k2', label: 'Kimi K2' },
 	],
 	glm: [
+		{ id: 'glm-5', label: 'GLM-5' },
+		{ id: 'glm-5-plus', label: 'GLM-5 Plus' },
 		{ id: 'glm-4.7', label: 'GLM-4.7' },
 		{ id: 'glm-4.6', label: 'GLM-4.6' },
 		{ id: 'glm-4.5', label: 'GLM-4.5' },
 	],
 	grok: [
+		{ id: 'grok-4.5', label: 'Grok 4.5' },
+		{ id: 'grok-4.5-fast', label: 'Grok 4.5 Fast' },
 		{ id: 'grok-4', label: 'Grok 4' },
 		{ id: 'grok-3', label: 'Grok 3' },
 		{ id: 'grok-code-fast-1', label: 'Grok Code Fast 1' },
@@ -154,61 +182,75 @@ const VENDOR_CANONICAL_MODELS: Readonly<Partial<Record<AdeLlmProviderKind, reado
  */
 export const ADE_ENGINE_NATIVE_MODELS: Readonly<Record<string, readonly string[]>> = {
 	'aexus-claude': [
+		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
+		'claude-opus-5', 'claude-sonnet-5',
 		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
 		'opus', 'sonnet', 'haiku',
 	],
 	'aexus-codex': [
+		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
 		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini',
 		'o3', 'o4-mini', 'codex-mini-latest',
 	],
 	'aexus-dsh': [
+		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-v4-pro[1m]', 'deepseek-flash[1m]',
 		'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1',
 	],
 	'aexus-antigravity': [
-		'gemini-4-neon-xhigh', 'gemini-4-neon-high', 'gemini-4-neon-medium', 'gemini-4-neon-low',
+		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-neon-xhigh', 'gemini-4-neon-high', 'gemini-4-carbon', 'gemini-4-hydrogen',
+		'gemini-4-neon-medium', 'gemini-4-neon-low',
 		'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-high', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low',
 		'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
+		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5',
 		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5',
 	],
 	'aexus-kilo': [
+		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
 		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1', 'gpt-4o',
+		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
 		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
-		'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
-		'glm-4.7', 'glm-4.6', 'glm-4.5',
-		'grok-4', 'grok-3', 'grok-code-fast-1',
+		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
+		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
+		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
+		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
+		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6', 'glm-4.5',
+		'grok-4.5', 'grok-4.5-fast', 'grok-4', 'grok-3', 'grok-code-fast-1',
 	],
 	'aexus-opencode': [
+		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
 		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1', 'gpt-4o',
+		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
 		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
-		'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
-		'glm-4.7', 'glm-4.6', 'glm-4.5',
-		'grok-4', 'grok-3', 'grok-code-fast-1',
+		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
+		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
+		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
+		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
+		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6', 'glm-4.5',
+		'grok-4.5', 'grok-4.5-fast', 'grok-4', 'grok-3', 'grok-code-fast-1',
 	],
 	'aexus-cline': [
+		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
 		'gpt-5.4', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1', 'gpt-4o',
+		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5-2',
 		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
-		'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
-		'glm-4.7', 'glm-4.6', 'glm-4.5',
-		'grok-4', 'grok-3', 'grok-code-fast-1',
+		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
+		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
+		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max', 'qwen3-235b-a22b', 'qwq-32b',
+		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2-thinking', 'kimi-k2',
+		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6', 'glm-4.5',
+		'grok-4.5', 'grok-4.5-fast', 'grok-4', 'grok-3', 'grok-code-fast-1',
 	],
 	'aexus-pi': [
+		'gpt-6.2-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.5',
 		'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2', 'gpt-5', 'gpt-5-mini', 'o3', 'o4-mini', 'gpt-4.1',
+		'claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5',
 		'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5',
-		'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
-		'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
-		'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max',
-		'kimi-k2.5', 'kimi-k2',
-		'glm-4.7', 'glm-4.6',
-		'grok-4', 'grok-3',
+		'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-reasoner', 'deepseek-chat', 'deepseek-r1', 'deepseek-v3.2',
+		'gemini-4-argon', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash',
+		'qwen4-max', 'qwen4-coder', 'qwen3.8-max', 'qwen3-coder-plus', 'qwen3-coder', 'qwen3-max',
+		'kimi-k3.1-pro', 'kimi-k3', 'kimi-k2.5', 'kimi-k2',
+		'glm-5', 'glm-5-plus', 'glm-4.7', 'glm-4.6',
+		'grok-4.5', 'grok-4', 'grok-3',
 	],
 };
 
@@ -271,13 +313,13 @@ function classifyModelTokenByName(raw: string): AdeLlmPickerVendor | undefined {
 	if (/(^|[/:\s._-])(deepseek|ds-r1|ds-v3|ds-v4|ds_r1|ds_v3|ds_v4)/.test(normalized) || normalized.includes('deepseek')) {
 		return 'deepseek';
 	}
-	if (/(^|[/:\s._-])(claude|sonnet|opus|haiku|anthropic)/.test(normalized) || normalized.includes('claude')) {
+	if (/(^|[/:\s._-])(claude|sonnet|opus|haiku|fable|mythos|anthropic)/.test(normalized) || normalized.includes('claude')) {
 		return 'anthropic';
 	}
 	if (/(^|[/:\s._-])(gpt|chatgpt|codex|openai|o1|o3|o4)($|[/:\s._-]|[\d])/.test(normalized) || normalized.includes('gpt')) {
 		return 'openai';
 	}
-	if (/(^|[/:\s._-])(gemini|gemma|palm|argon)/.test(normalized) || normalized.includes('gemini')) {
+	if (/(^|[/:\s._-])(gemini|gemma|palm|argon|neon|carbon|hydrogen)($|[/:\s._-]|[\d])/.test(normalized) || normalized.includes('gemini')) {
 		return 'gemini';
 	}
 	if (/(^|[/:\s._-])(qwen|qwq|qvq|dashscope|tongyi)/.test(normalized) || normalized.includes('qwen')) {
@@ -480,16 +522,16 @@ function createSvgElement(doc: Document, tag: string, attrs: Record<string, stri
 export function resolveAdeLlmProvider(model: string | undefined, fallbackEngineId?: string): AdeLlmProviderKind {
 	const normalized = (model ?? '').trim().toLowerCase();
 	if (normalized && normalized !== 'default') {
-		if (/(^|[/:\s._-])(deepseek|ds-r1|ds-v3)/.test(normalized) || normalized.includes('deepseek')) {
+		if (/(^|[/:\s._-])(deepseek|ds-r1|ds-v3|ds-v4|ds_r1|ds_v3|ds_v4)/.test(normalized) || normalized.includes('deepseek')) {
 			return 'deepseek';
 		}
-		if (/(^|[/:\s._-])(claude|sonnet|opus|haiku|anthropic)/.test(normalized) || normalized.includes('claude')) {
+		if (/(^|[/:\s._-])(claude|sonnet|opus|haiku|fable|mythos|anthropic)/.test(normalized) || normalized.includes('claude')) {
 			return 'anthropic';
 		}
 		if (/(^|[/:\s._-])(gpt|chatgpt|codex|openai|o1|o3|o4)($|[/:\s._-]|[\d])/.test(normalized) || normalized.includes('openai') || normalized.includes('gpt')) {
 			return 'openai';
 		}
-		if (/(^|[/:\s._-])(gemini|gemma|google|palm|argon)/.test(normalized) || normalized.includes('gemini')) {
+		if (/(^|[/:\s._-])(gemini|gemma|google|palm|argon|neon|carbon|hydrogen)($|[/:\s._-]|[\d])/.test(normalized) || normalized.includes('gemini')) {
 			return 'gemini';
 		}
 		if (/(^|[/:\s._-])(qwen|qwq|alibaba|dashscope|tongyi)/.test(normalized) || normalized.includes('qwen')) {

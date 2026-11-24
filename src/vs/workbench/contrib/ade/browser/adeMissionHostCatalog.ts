@@ -45,14 +45,14 @@ export const MISSION_ENGINE_FALLBACK_NAMES: Readonly<Record<string, string>> = {
 };
 
 export const MISSION_ENGINE_DEFAULT_MODELS: Readonly<Record<string, string>> = {
-	'aexus-claude': 'claude-opus-4-6',
-	'aexus-codex': 'gpt-5.3-codex',
-	'aexus-kilo': 'claude-sonnet-4-6',
-	'aexus-opencode': 'qwen3-coder',
-	'aexus-dsh': 'deepseek-r1',
-	'aexus-antigravity': 'gemini-2.5-pro',
-	'aexus-cline': 'claude-sonnet-4-6',
-	'aexus-pi': 'gpt-5.2',
+	'aexus-claude': 'claude-opus-5-5',
+	'aexus-codex': 'gpt-6.1-sol',
+	'aexus-kilo': 'grok-4.5',
+	'aexus-opencode': 'qwen4-max',
+	'aexus-dsh': 'deepseek-v4-pro',
+	'aexus-antigravity': 'gemini-4-argon',
+	'aexus-cline': 'kimi-k3.1-pro',
+	'aexus-pi': 'gpt-6.1-sol',
 };
 
 export const MISSION_THINKING_LEVEL_OPTIONS: readonly AdeThinkingLevel[] = ['off', 'low', 'medium', 'high', 'max'];

@@ -4555,6 +4555,16 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(resolveAdePickerVendorByName('group-openai/DeepSeek-V4-Pro'), 'deepseek', 'Model tail name wins over proxy provider prefix');
 			assert.strictEqual(resolveAdePickerVendorByName('CLAUDE-SONNET-4-6'), 'anthropic');
 			assert.strictEqual(resolveAdePickerVendorByName('GPT-6-LUNA'), 'openai');
+			assert.strictEqual(resolveAdePickerVendorByName('claude-fable-5-2'), 'anthropic');
+			assert.strictEqual(resolveAdePickerVendorByName('claude-mythos-5-2'), 'anthropic');
+			assert.strictEqual(resolveAdePickerVendorByName('gpt-6.2-astra'), 'openai');
+			assert.strictEqual(resolveAdePickerVendorByName('gpt-6.1-sol'), 'openai');
+			assert.strictEqual(resolveAdePickerVendorByName('gemini-4-argon'), 'gemini');
+			assert.strictEqual(resolveAdePickerVendorByName('deepseek-v4-pro'), 'deepseek');
+			assert.strictEqual(resolveAdePickerVendorByName('qwen4-max'), 'qwen');
+			assert.strictEqual(resolveAdePickerVendorByName('kimi-k3.1-pro'), 'kimi');
+			assert.strictEqual(resolveAdePickerVendorByName('glm-5'), 'glm');
+			assert.strictEqual(resolveAdePickerVendorByName('grok-4.5'), 'grok');
 			assert.strictEqual(resolveAdePickerVendorByName('my-custom-coder-v2'), 'generic', 'Unrecognized models fall back to Other (generic)');
 			assert.strictEqual(resolveAdePickerVendorByName('Llama-4-Maverick'), 'generic', 'Non-top-8 models fall back to Other (generic)');
 

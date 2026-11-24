@@ -130,13 +130,13 @@ export function inferMissionConcurrencyProvider(model?: string, engineId?: strin
 		if (/(?:^|[:/_-])(ollama|lmstudio|lm-studio|vllm|llama\.?cpp|mlx|local)(?:$|[:/_-])/.test(m)) {
 			return undefined;
 		}
-		if (m.includes('claude') || m.includes('anthropic')) {
+		if (m.includes('claude') || m.includes('anthropic') || /(?:^|[:/_-])(fable|mythos)(?:$|[:/_.\d-])/.test(m)) {
 			return 'anthropic';
 		}
 		if (m.includes('gpt-') || m.includes('codex') || m.includes('openai') || /^o[134](?:$|[-.])/.test(m)) {
 			return 'openai';
 		}
-		if (m.includes('gemini') || m.includes('google')) {
+		if (m.includes('gemini') || m.includes('google') || /(?:^|[:/_-])(argon|neon|carbon|hydrogen)(?:$|[:/_.\d-])/.test(m)) {
 			return 'google';
 		}
 		if (m.includes('deepseek')) {

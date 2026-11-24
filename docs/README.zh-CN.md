@@ -31,9 +31,9 @@
 > 3. **原位检视接力令牌、共享白板与 FinOps，瞬切 `ADE ⇄ IDE`**：点击任意卡片、胶囊或在途彗星即可原位展开指针接力轨迹、部门白板章节目录、结单契约与多轮 FinOps 预算账本；随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
 
 <p align="center">
-  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code ADE 旗舰指挥中心 — 4 大系统跨云协作（macOS、Ubuntu H100、Kali、Windows 11）、旗舰大模型（Claude Opus 4.6、GPT-5.4、Gemini 3.1 Pro、DeepSeek R1）、高亮协作链路与 4 主机并发 SSH 终端" />
+  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code ADE 旗舰指挥中心 — 4 大系统跨云协作（macOS、Ubuntu H100、Kali、Windows 11）、旗舰大模型（Claude Fable 5.2、GPT-6.2 Astra、Gemini 4 Argon、DeepSeek V4 Pro）、高亮协作链路与 4 主机并发 SSH 终端" />
   <br/>
-  <sub><strong>一个面板掌控多云端与多引擎旗舰 Agent 协同作业：</strong>4 大系统侧栏（<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>）➔ 跨云高亮协作拓扑（<code>Claude Opus 4.6</code> · <code>GPT-5.4</code> · <code>Gemini 3.1 Pro</code> · <code>DeepSeek R1</code>）⇄ 实时联动任务 DAG ➔ 4 台跨系统并发 SSH 终端 · <a href="gallery.md">浏览完整 30 张 2x Retina 旗舰图集 →</a></sub>
+  <sub><strong>一个面板掌控多云端与多引擎旗舰 Agent 协同作业：</strong>4 大系统侧栏（<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>）➔ 跨云高亮协作拓扑（<code>Claude Fable 5.2</code> · <code>GPT-6.2 Astra</code> · <code>Gemini 4 Argon</code> · <code>DeepSeek V4 Pro</code>）⇄ 实时联动任务 DAG ➔ 4 台跨系统并发 SSH 终端 · <a href="gallery.md">浏览完整 25 张 2x Retina 旗舰图集 →</a></sub>
 </p>
 
 ---
@@ -102,7 +102,7 @@ flowchart TB
 在同一左侧栏统一管理 **macOS**、**Ubuntu**、**Kali Linux** 与 **Windows** 上的本地及云端项目，并在同一窗口内分屏直控多台本机 + 云主机集成终端：
 
 <p align="center">
-  <img src="promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="跨云主机舰队控制台与 4 云主机并发 SSH 终端矩阵 — macOS、Ubuntu、Kali 零信任审计、Windows 11" />
+  <img src="promo/aexus-04-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="跨云主机舰队控制台与 4 云主机并发 SSH 终端矩阵 — macOS、Ubuntu、Kali 零信任审计、Windows 11" />
   <br/>
   <sub><strong>一个面板掌控多系统云主机舰队与 2×2 四云主机并发 SSH 终端：</strong>同时直连 macOS、Ubuntu H100 GPU 与控制面、Kali 零信任审计及 Windows CI 终端，免远端装机、绝不改写 <code>~/.ssh/config</code>。</sub>
 </p>
@@ -117,7 +117,7 @@ flowchart TB
 不再被绑死在单一固定组织结构里，按团队需要自由定制多级组织与权限：
 
 <p align="center">
-  <img src="promo/aexus-03-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="跨云多引擎多职级 Agent 编排全景拓扑 — L1 主权架构师、3 大云端部门翼、折角共享白板、跨 6 主机 6 引擎协作" />
+  <img src="promo/aexus-02-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="跨云多引擎多职级 Agent 编排全景拓扑 — L1 主权架构师、3 大云端部门翼、折角共享白板、跨 6 主机 6 引擎协作" />
   <br/>
   <sub><strong>跨云多引擎多职级 Agent 编排全景拓扑：</strong>L1 主权架构师统筹 3 大云端部门翼与折角共享白板，跨 6 台多系统主机、6 大原生 Agent 引擎实时流转接力令牌与汇聚屏障。</sub>
 </p>
@@ -145,11 +145,11 @@ flowchart TB
 <table>
   <tr>
     <td width="50%">
-      <img src="promo/aexus-05-mission-task-dag-contracts-dark.png" width="100%" alt="雕琢级 Mission Task DAG 旗舰视图 — 280x154 契约守卫任务卡、Check 验证回执、主权门禁与语义小地图" />
+      <img src="promo/aexus-03-mission-task-dag-contracts-dark.png" width="100%" alt="雕琢级 Mission Task DAG 旗舰视图 — 280x154 契约守卫任务卡、Check 验证回执、主权门禁与语义小地图" />
       <p align="center"><sub><strong>雕琢级 Mission Task DAG：</strong><code>280×154</code> 契约守卫任务节点、确定性校验回执、就绪前沿光晕与鎏金主权门禁。</sub></p>
     </td>
     <td width="50%">
-      <img src="promo/aexus-11-dual-view-lineage-spotlight-dark.png" width="100%" alt="双视图实时联动 — 宽屏 Orchestration 编排拓扑与雕琢级 Mission Task DAG 1:1 联动聚光" />
+      <img src="promo/aexus-07-dual-view-lineage-spotlight-dark.png" width="100%" alt="双视图实时联动 — 宽屏 Orchestration 编排拓扑与雕琢级 Mission Task DAG 1:1 联动聚光" />
       <p align="center"><sub><strong>双视图实时联动：</strong>左侧宽屏 Orchestration 实时接力令牌流与右侧 Mission Task DAG 交付物 1:1 跨视图聚光联动。</sub></p>
     </td>
   </tr>
@@ -161,7 +161,7 @@ flowchart TB
 - **零 Token Watchdog、主进程 0 窗口无头后台与容错护栏**：支持 5 分钟静默提醒、零 Token PID/文件 `token block` 唤醒、`maxHops` 死循环熔断、FinOps 硬预算熔断（`orchestration limits`）、确定性 `%% check` 校验门禁与 429/502 指数退避重试。
 
 <p align="center">
-  <img src="promo/aexus-14-baton-inspector-join-barrier-conflict-dark.png" width="100%" alt="指针接力令牌审查器、汇聚屏障、写作用域冲突检测与折角部门共享白板" />
+  <img src="promo/aexus-10-baton-inspector-join-barrier-conflict-dark.png" width="100%" alt="指针接力令牌审查器、汇聚屏障、写作用域冲突检测与折角部门共享白板" />
   <br/>
   <sub><strong>轻量指针接力令牌审查器、汇聚屏障与共享白板：</strong>原位检视写作用域规则、并发文件冲突告警、Quorum 倒计时、返工记忆账本与按需解引用指针。</sub>
 </p>
@@ -182,21 +182,21 @@ flowchart TB
 <table>
   <tr>
     <td width="50%">
-      <img src="promo/aexus-25-cybersec-red-blue-cross-cloud-audit-dark.png" width="100%" alt="红蓝对抗跨云安全集群 — Kali、Ubuntu、Windows 11 与 macOS 协同攻防" />
-      <p align="center"><sub><strong>红蓝对抗跨云安全集群：</strong><code>Kali</code> DeepSeek R1 漏洞复现 ⇄ <code>Ubuntu</code> GPT-5.4 热修复 ⇄ <code>Win11</code> Gemini 3.1 Pro 域控回归校验。</sub></p>
+      <img src="promo/aexus-20-cybersec-red-blue-cross-cloud-audit-dark.png" width="100%" alt="红蓝对抗跨云安全集群 — Kali、Ubuntu、Windows 11 与 macOS 协同攻防" />
+      <p align="center"><sub><strong>红蓝对抗跨云安全集群：</strong><code>Kali</code> DeepSeek V4 Pro 漏洞复现 ⇄ <code>Ubuntu</code> GPT-6.2 Astra 热修复 ⇄ <code>Win11</code> Gemini 4 Argon 域控回归校验。</sub></p>
     </td>
     <td width="50%">
-      <img src="promo/aexus-26-ai-research-lab-multi-gpu-cluster-dark.png" width="100%" alt="分布式多 GPU AI 科研实验室 — 8xH100 + 8xH200 + Win11 DirectML 并行消融实验" />
+      <img src="promo/aexus-21-ai-research-lab-multi-gpu-cluster-dark.png" width="100%" alt="分布式多 GPU AI 科研实验室 — 8xH100 + 8xH200 + Win11 DirectML 并行消融实验" />
       <p align="center"><sub><strong>多 GPU AI 科研实验室：</strong><code>8×H100</code> FP8 算子、<code>8×H200</code> 稀疏 MoE 与 <code>Win11</code> DirectML 消融实验跨云并行汇聚。</sub></p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="promo/aexus-28-three-cloud-simultaneous-agent-streams-dark.png" width="100%" alt="三云端多引擎实时流式协同 — Claude Opus 4.6、GPT-5.4 与 DeepSeek R1 同屏接力" />
-      <p align="center"><sub><strong>三云端多引擎同屏实时流：</strong>本机 <code>macOS</code> Claude Opus 4.6 拆分令牌，与远端 <code>Ubuntu</code> GPT-5.4 及 <code>Kali</code> DeepSeek R1 同屏实时流转。</sub></p>
+      <img src="promo/aexus-23-three-cloud-simultaneous-agent-streams-dark.png" width="100%" alt="三云端多引擎实时流式协同 — Claude Fable 5.2、GPT-6.2 Astra 与 DeepSeek V4 Pro 同屏接力" />
+      <p align="center"><sub><strong>三云端多引擎同屏实时流：</strong>本机 <code>macOS</code> Claude Fable 5.2 拆分令牌，与远端 <code>Ubuntu</code> GPT-6.2 Astra 及 <code>Kali</code> DeepSeek V4 Pro 同屏实时流转。</sub></p>
     </td>
     <td width="50%">
-      <img src="promo/aexus-30-finops-budget-governance-and-checkpoints-dark.png" width="100%" alt="8 大引擎 FinOps 预算熔断、KV 缓存监控与时光回溯检查点" />
+      <img src="promo/aexus-25-finops-budget-governance-and-checkpoints-dark.png" width="100%" alt="8 大引擎 FinOps 预算熔断、KV 缓存监控与时光回溯检查点" />
       <p align="center"><sub><strong>全引擎 FinOps 与状态检查点：</strong>8 大引擎旗舰模型统一计费、81% 缓存命中省费、硬预算熔断与一键回滚检查点。</sub></p>
     </td>
   </tr>
@@ -207,7 +207,7 @@ flowchart TB
 ### 4. Smart Calm 侧栏与按职级过滤的 `ADE Inbox`
 
 <p align="center">
-  <img src="promo/aexus-21-project-focus-mode-and-live-diff-dark.png" width="100%" alt="ADE Focus 聚焦模式 — 吸顶云项目聚焦横幅、跨引擎协作特写与右侧远端 SSH Git Diff 审查栏" />
+  <img src="promo/aexus-16-project-focus-mode-and-live-diff-dark.png" width="100%" alt="ADE Focus 聚焦模式 — 吸顶云项目聚焦横幅、跨引擎协作特写与右侧远端 SSH Git Diff 审查栏" />
   <br/>
   <sub><strong>项目 Focus 聚焦模式、跨引擎协作与远端 Git Diff 审查：</strong>一键聚焦单个 H100 云端仓库，同时保持其余 5 个项目后台运行，配合实时统一 Diff 审查。</sub>
 </p>
@@ -222,7 +222,7 @@ flowchart TB
 Aexus Code 完整保留原生 `Code - OSS` IDE 的全部生产力——资源管理器、分屏编辑器、实时 Git Diff、多端集成终端、顶栏完全解耦的**插件**与**Agent 引擎**按钮以及 **[Open VSX](https://open-vsx.org/)** 主流 VS Code 扩展兼容，同时提供免远端装机的多系统 SSH 云主机工作室：
 
 <p align="center">
-  <img src="promo/aexus-24-ade-ide-mirror-symmetry-dark.png" width="100%" alt="瞬切 IDE 镜像模式 — 同一面板管理 6 个本地与多云 SSH 项目、TypeScript 代码编辑、实时同步雕琢级 Task DAG 与多云主机并发终端" />
+  <img src="promo/aexus-19-ade-ide-mirror-symmetry-dark.png" width="100%" alt="瞬切 IDE 镜像模式 — 同一面板管理 6 个本地与多云 SSH 项目、TypeScript 代码编辑、实时同步雕琢级 Task DAG 与多云主机并发终端" />
   <br/>
   <sub><strong>瞬切 <code>ADE ⇄ IDE</code> 镜像对称（<code>Alt+Cmd+A</code>）：</strong>在同一工作区无缝切回原生 IDE 模式，管理本地与多云 SSH 多根项目、编辑代码、右侧联动雕琢级 Task DAG 并直控多云主机终端。</sub>
 </p>
@@ -231,7 +231,7 @@ Aexus Code 完整保留原生 `Code - OSS` IDE 的全部生产力——资源管
 - **非破坏性 `~/.ssh/config` 保证**：`syncUserSshDir` 默认为 **`false`**——Aexus Code 仅向自身的 SSH 会话与终端传入 `-F <userDataDir>/ssh/effective_ssh_config`，**绝不修改或向用户全局 `~/.ssh/config` 头部插入 `Include`**。
 - **OpenSSH 传输行为**：macOS / Linux 使用 OpenSSH `ControlMaster` 连接复用，Windows 使用直连 OpenSSH；后台文件、Git 与探针操作使用 `BatchMode=yes`（需密钥或 `ssh-agent` 免交互鉴权，Aexus Code 从不读取或复制私钥内容）。
 - **无损迁移 VS Code 配置**：通过 `aexus-ade host import-vscode` 只读解析 `~/.ssh/config`（含递归 `Include`）及 VS Code 远端目录历史。
-- **完整 2x Retina 宣传图集**：请前往 [`docs/gallery.md`](gallery.md) 查看全部 30 张旗舰高清界面展示。
+- **完整 2x Retina 宣传图集**：请前往 [`docs/gallery.md`](gallery.md) 查看全部 25 张旗舰高清界面展示。
 
 ---
 
