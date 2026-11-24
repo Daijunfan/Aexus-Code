@@ -1877,7 +1877,6 @@ export interface IEngineeringChromeDom {
 	readonly consoleBarEl: HTMLElement;
 	readonly viewOrchBtnEl: HTMLButtonElement;
 	readonly viewMissionBtnEl: HTMLButtonElement;
-	readonly viewSplitBtnEl: HTMLButtonElement;
 	readonly consoleTokensEl: HTMLElement;
 	readonly consoleSpendEl: HTMLElement;
 	readonly consolePauseBtnEl: HTMLButtonElement;
@@ -1900,7 +1899,6 @@ export interface IEngineeringChromeDom {
 export interface IEngineeringChromeHandlers {
 	readonly onChromePointerDown: () => void;
 	readonly onSwitchViewMode: (targetMode: AdeEngineeringViewMode, side: boolean) => void;
-	readonly onToggleSplit: () => void;
 	readonly onTogglePause: () => void;
 	readonly onAbortAll: () => void;
 	readonly onToggleMinimap: () => void;
@@ -1946,7 +1944,7 @@ export function createEngineeringChromeDom(
 	})) as HTMLButtonElement;
 	append(viewOrchBtnEl, $('span.codicon.codicon-organization', { 'aria-hidden': 'true' }));
 	append(viewOrchBtnEl, $('span', {}, adeBi(localize('adeEngViewOrchLabel', "Staff"), '员工拓扑')));
-	disposables.add(addDisposableListener(viewOrchBtnEl, EventType.CLICK, () => handlers.onSwitchViewMode('orchestration', false)));
+	disposables.add(addDisposableListener(viewOrchBtnEl, EventType.CLICK, (e: MouseEvent) => handlers.onSwitchViewMode('orchestration', Boolean(e.altKey || e.metaKey || e.ctrlKey))));
 
 	const viewMissionBtnEl = append(viewSwitch, $('button.ade-eng-view-btn', {
 		type: 'button',
@@ -1956,15 +1954,7 @@ export function createEngineeringChromeDom(
 	})) as HTMLButtonElement;
 	append(viewMissionBtnEl, $('span.codicon.codicon-type-hierarchy-sub', { 'aria-hidden': 'true' }));
 	append(viewMissionBtnEl, $('span', {}, adeBi(localize('adeEngViewMissionLabel', "Task DAG"), '任务 DAG')));
-	disposables.add(addDisposableListener(viewMissionBtnEl, EventType.CLICK, () => handlers.onSwitchViewMode('mission', false)));
-
-	const viewSplitBtnEl = append(viewSwitch, $('button.ade-eng-view-btn.is-split', {
-		type: 'button',
-		'data-ade-eng-view-split': 'true',
-		title: adeBi(localize('adeEngViewSplitTip', "Open both views side by side"), '同屏分栏对照查看双视图'),
-	})) as HTMLButtonElement;
-	append(viewSplitBtnEl, $('span.codicon.codicon-split-horizontal', { 'aria-hidden': 'true' }));
-	disposables.add(addDisposableListener(viewSplitBtnEl, EventType.CLICK, () => handlers.onToggleSplit()));
+	disposables.add(addDisposableListener(viewMissionBtnEl, EventType.CLICK, (e: MouseEvent) => handlers.onSwitchViewMode('mission', Boolean(e.altKey || e.metaKey || e.ctrlKey))));
 
 	append(consoleBarEl, $('span.ade-eng-console-sep', { 'aria-hidden': 'true' }));
 
@@ -2126,7 +2116,6 @@ export function createEngineeringChromeDom(
 		consoleBarEl,
 		viewOrchBtnEl,
 		viewMissionBtnEl,
-		viewSplitBtnEl,
 		consoleTokensEl,
 		consoleSpendEl,
 		consolePauseBtnEl,

@@ -558,7 +558,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const chrome = createEngineeringChromeDom(this.bodyEl, this.viewportEl, this._store, {
 			onChromePointerDown: () => this.popovers?.close(),
 			onSwitchViewMode: (mode, side) => this.switchViewMode(mode, side),
-			onToggleSplit: () => this.switchViewMode(this.viewMode === 'orchestration' ? 'mission' : 'orchestration', true),
 			onTogglePause: () => void this.handleToggleOrchestrationPause(),
 			onAbortAll: () => void this.handleAbortAllOrchestrationTokens(),
 			onToggleMinimap: () => {

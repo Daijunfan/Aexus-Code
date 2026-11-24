@@ -6912,19 +6912,20 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			const orchInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'orchestration')));
 			await pane.setInput(orchInput, undefined, {}, CancellationToken.None);
 
-			// 1. Item 8: Global Console Bar, Dual-View Switcher, Split View button & Minimap are mounted and live!
+			// 1. Item 8: Global Console Bar, Dual-View Switcher & Minimap are mounted and live (no split button)!
 			const consoleBar = host.querySelector<HTMLElement>('[data-ade-eng-console-bar="true"]')!;
 			assert.ok(consoleBar && !consoleBar.hidden, 'Global console bar is visible');
 			const orchTab = host.querySelector<HTMLButtonElement>('[data-ade-eng-view-btn="orchestration"]')!;
 			const missionTab = host.querySelector<HTMLButtonElement>('[data-ade-eng-view-btn="mission"]')!;
-			const splitBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-view-split="true"]')!;
+			const splitBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-view-split="true"]');
 			const pauseBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-pause-btn="true"]')!;
 			const abortBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-abort-btn="true"]')!;
 			const minimapBtn = host.querySelector<HTMLButtonElement>('[data-ade-eng-minimap-btn="true"]')!;
 			const minimapEl = host.querySelector<HTMLElement>('[data-ade-mission-minimap="true"]')!;
 			assert.ok(orchTab.classList.contains('is-active'), 'Orchestration view tab active');
 			assert.ok(!missionTab.classList.contains('is-active'), 'Mission DAG tab inactive');
-			assert.ok(splitBtn && pauseBtn && abortBtn && minimapBtn, 'All console controls present');
+			assert.strictEqual(splitBtn, null, 'Split view button is removed from console bar');
+			assert.ok(pauseBtn && abortBtn && minimapBtn, 'All console controls present');
 			assert.ok(minimapEl && !minimapEl.hidden, 'Minimap rendered for non-empty topology');
 
 			// Toggle minimap off and back on

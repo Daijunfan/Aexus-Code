@@ -2178,10 +2178,6 @@ html.ade-page-hidden .monaco-workbench .ade-mission-editor .ade-mission-edge-gro
 	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
-.monaco-workbench .ade-eng-view-btn.is-split {
-	padding: 0 6px;
-}
-
 .monaco-workbench .ade-eng-view-btn:hover {
 	color: var(--vscode-foreground);
 	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
