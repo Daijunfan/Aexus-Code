@@ -26,12 +26,60 @@ import {
 	AgentChildIdentity,
 	buildAgentChildEnv,
 	computeAgentIdentityScopeKey,
+	getOrEnsureAgentAuthFilePath,
 	isPureWorkerDenyToken,
 	isPureWorkerIdentity,
 	isRawPureRole,
 	SHARED_PURE_SCOPE_KEY,
 	stripDirectoriesFromPath,
+	writeSingleAgentAuthFile,
 } from './roleBridgeShared';
+import { registerSpawnedEngineChildForTracking, stopSpawnedEngineProcess } from './engineAdapterHelpers';
+import { LineByteAccumulator } from './lineByteAccumulator';
+
+export const DEFAULT_ENGINE_TURN_TIMEOUT_MS = Math.max(30_000, Number(process.env.AEXUS_ADE_TURN_TIMEOUT_MS) || 15 * 60 * 1000);
+export const DEFAULT_ENGINE_IDLE_STALL_TIMEOUT_MS = Math.max(15_000, Number(process.env.AEXUS_ADE_IDLE_STALL_TIMEOUT_MS) || 3 * 60 * 1000);
+
+export function getConfiguredEngineTurnTimeoutMs(): number {
+	const envRaw = Number(process.env.AEXUS_ADE_TURN_TIMEOUT_MS);
+	if (Number.isFinite(envRaw) && envRaw >= 30_000) {
+		return Math.floor(envRaw);
+	}
+	try {
+		const configured = vscode.workspace.getConfiguration('aexus.ade', null).get<number>('turnTimeoutMs');
+		if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 30_000) {
+			return Math.floor(configured);
+		}
+	} catch {
+		// Headless/unit test context without workspace configuration.
+	}
+	return DEFAULT_ENGINE_TURN_TIMEOUT_MS;
+}
+
+export function getConfiguredEngineIdleStallTimeoutMs(): number | undefined {
+	const envStr = process.env.AEXUS_ADE_IDLE_STALL_TIMEOUT_MS?.trim();
+	if (envStr !== undefined && envStr !== '') {
+		const envRaw = Number(envStr);
+		if (envRaw === 0) {
+			return undefined;
+		}
+		if (Number.isFinite(envRaw) && envRaw >= 15_000) {
+			return Math.floor(envRaw);
+		}
+	}
+	try {
+		const configured = vscode.workspace.getConfiguration('aexus.ade', null).get<number>('idleStallTimeoutMs');
+		if (configured === 0) {
+			return undefined;
+		}
+		if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 15_000) {
+			return Math.floor(configured);
+		}
+	} catch {
+		// Headless/unit test context without workspace configuration.
+	}
+	return DEFAULT_ENGINE_IDLE_STALL_TIMEOUT_MS;
+}
 
 export interface NativeSession {
 	id: string;
@@ -79,6 +127,17 @@ export interface EngineSendOptions {
 	 * persistent session for this agent instead of spawning a duplicate overlapping prompt turn.
 	 */
 	readonly preferReattach?: boolean;
+	/** Standard `AbortSignal` raised by `TurnCoordinator` on preemption, `stop()`, or hard turn deadline. */
+	readonly abortSignal?: AbortSignal;
+	/** Optional explicit per-turn hard deadline in milliseconds. */
+	readonly timeoutMs?: number;
+	/** Invariant static role charter passed via `--append-system-prompt` on engines that support system-prompt flags (Claude, Pi) for KV-cache prefix stability. */
+	readonly appendSystemPrompt?: string;
+	/** Invoked on any live stdout/SSE/RPC protocol frame from the engine to keep the sliding stall watchdog & worker heartbeat alive. */
+	readonly onStreamActivity?: () => void;
+	/** Pauses sliding `idleStallTimeoutMs` while awaiting a tracked external tool execution or interactive permission/question prompt. */
+	readonly onExternalWaitStart?: () => void;
+	readonly onExternalWaitEnd?: () => void;
 }
 
 export interface EngineRuntimeCapabilities {
@@ -93,13 +152,19 @@ export interface HistoryEntry { id?: string; role: 'user' | 'assistant'; text: s
 import {
 	createTurnInterimUsageTracker,
 	EngineTurnTokenUsage,
+	ensureNonCachedTokenUsage,
 	estimateTextTokens,
+	normalizeProviderTokenUsage,
+	ProviderTokenUsageHints,
 	TurnInterimUsageTracker,
 } from './usageTracker';
 export {
 	createTurnInterimUsageTracker,
 	EngineTurnTokenUsage,
+	ensureNonCachedTokenUsage,
 	estimateTextTokens,
+	normalizeProviderTokenUsage,
+	ProviderTokenUsageHints,
 	TurnInterimUsageTracker,
 };
 
@@ -206,7 +271,8 @@ interface MasterControlConnection {
 	readonly tcpPort?: number;
 }
 
-const mintedCapabilityTokenCache = new Map<string, { readonly token: string; readonly socketPath: string }>();
+const CAPABILITY_TOKEN_CACHE_TTL_MS = 5 * 60 * 1000;
+const mintedCapabilityTokenCache = new Map<string, { readonly specKey: string; readonly token: string; readonly socketPath: string; readonly mintedAt: number }>();
 let hostWindowId: number | undefined;
 let hostWindowIdPromise: Promise<number | undefined> | undefined;
 
@@ -346,10 +412,10 @@ export async function mintSessionCapabilityToken(
 	const resolvedWindowId = typeof explicitWindowId === 'number' && Number.isInteger(explicitWindowId) && explicitWindowId > 0
 		? explicitWindowId
 		: await resolveHostWindowId(env);
-	const cacheKey = `${conn.socketPath}|${normalizedSid}|${normalizedRank}|${pure ? '1' : '0'}|${missionNode ? '1' : '0'}|${resolvedWindowId ?? ''}`;
-	const cached = mintedCapabilityTokenCache.get(cacheKey);
-	if (cached) {
-		return cached;
+	const specKey = `${conn.socketPath}|${normalizedSid}|${normalizedRank}|${pure ? '1' : '0'}|${missionNode ? '1' : '0'}|${resolvedWindowId ?? ''}`;
+	const cached = mintedCapabilityTokenCache.get(normalizedSid);
+	if (cached && cached.specKey === specKey && Date.now() - cached.mintedAt < CAPABILITY_TOKEN_CACHE_TTL_MS) {
+		return { token: cached.token, socketPath: cached.socketPath };
 	}
 	try {
 		const response = await requestControlSocket<{ readonly token?: string }>(conn.socketPath, {
@@ -367,12 +433,12 @@ export async function mintSessionCapabilityToken(
 			? response.result.token.trim()
 			: undefined;
 		if (mintedToken) {
-			const entry = { token: mintedToken, socketPath: conn.socketPath };
+			const entry = { specKey, token: mintedToken, socketPath: conn.socketPath, mintedAt: Date.now() };
 			if (mintedCapabilityTokenCache.size > 512) {
 				mintedCapabilityTokenCache.clear();
 			}
-			mintedCapabilityTokenCache.set(cacheKey, entry);
-			return entry;
+			mintedCapabilityTokenCache.set(normalizedSid, entry);
+			return { token: entry.token, socketPath: entry.socketPath };
 		}
 	} catch {
 		// Fall back cleanly if the control socket is temporarily unavailable.
@@ -389,17 +455,37 @@ export async function prepareAgentChildEnv(
 	const rawPure = isRawPureRole(identity);
 	const sessionId = identity?.sessionId?.trim() || 'session';
 	const rank = rawPure ? 'worker' : (identity?.callerRole?.trim().toLowerCase() || 'worker');
-	const minted = await mintSessionCapabilityToken(sessionId, rank, rawPure, process.env, isMissionNode);
+	const effectiveBaseEnv = baseEnv ?? process.env;
+	const minted = await mintSessionCapabilityToken(sessionId, rank, rawPure, effectiveBaseEnv, isMissionNode);
 	const cliBinDirs = getBundledCliBinDirs();
+	let agentAuthFile: string | undefined;
+	if (!standalonePure && minted?.token) {
+		const adeHome = effectiveBaseEnv.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), '.aexus-code');
+		const scopeId = effectiveBaseEnv.AEXUS_ADE_WINDOW_KEY?.trim() || String(process.pid);
+		const candidatePath = getOrEnsureAgentAuthFilePath(path.join(adeHome, 'role-bridge'), scopeId, sessionId);
+		const wrote = await writeSingleAgentAuthFile(candidatePath, {
+			version: 1,
+			mode: 'ade',
+			agentId: sessionId,
+			isOrchestrated: !rawPure,
+			isMissionNode,
+			sessionToken: minted.token,
+			controlSocketPath: minted.socketPath,
+		}).then(() => true, () => false);
+		if (wrote) {
+			agentAuthFile = candidatePath;
+		}
+	}
 	return buildAgentChildEnv({
 		sessionId,
 		callerRole: standalonePure ? undefined : rank,
 		pureWorker: standalonePure,
 		isMissionNode,
-		baseEnv: baseEnv ?? process.env,
+		baseEnv: effectiveBaseEnv,
 		cliBinDirs,
 		socketPath: standalonePure ? undefined : (minted?.socketPath ?? process.env.AEXUS_ADE_SOCKET),
-		sessionToken: minted?.token ?? (standalonePure ? ADE_PURE_WORKER_FALLBACK_DENY_TOKEN : undefined),
+		sessionToken: minted?.token ?? ADE_PURE_WORKER_FALLBACK_DENY_TOKEN,
+		agentAuthFile,
 	});
 }
 
@@ -786,15 +872,14 @@ export function spawnEngine(executable: string, args: readonly string[], cwd?: s
 		detached: process.platform !== 'win32',
 		stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 	}) as cp.ChildProcessWithoutNullStreams;
+	registerSpawnedEngineChildForTracking(child);
 	return child;
 }
 
+export { registerSpawnedEngineChildForTracking };
+
 export function stopEngine(child: cp.ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
-	try {
-		if (child.pid && process.platform !== 'win32') { process.kill(-child.pid, signal); }
-		else if (child.connected) { child.disconnect(); }
-		else { child.kill(signal); }
-	} catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') { throw error; } }
+	stopSpawnedEngineProcess(child, signal);
 }
 
 const stoppingChildren = new WeakSet<cp.ChildProcess>();
@@ -991,8 +1076,9 @@ export class JsonLineClient implements vscode.Disposable {
 	private reattaching = false;
 	private reattachAttempt = 0;
 	private stdoutBytesReceived = 0;
-	private stdoutByteCarry: Buffer = Buffer.alloc(0);
+	private readonly stdoutLineAcc = new LineByteAccumulator();
 	private readonly queuedWrites: string[] = [];
+	private queuedWriteBytes = 0;
 	get isClosed(): boolean { return !!this.closedError; }
 
 	constructor(executable: string, args: string[], cwd?: string, env?: NodeJS.ProcessEnv, remoteTarget?: CloudHostTarget, remoteOptions?: RemoteExecOptions) {
@@ -1010,6 +1096,7 @@ export class JsonLineClient implements vscode.Disposable {
 			if (this.closedError) { return; }
 			this.closedError = error;
 			this.queuedWrites.length = 0;
+			this.queuedWriteBytes = 0;
 			for (const entry of this.pending.values()) { entry.reject(error); }
 			this.pending.clear();
 			for (const listener of this.listeners) { listener({ method: 'aexus/connectionClosed', params: { message: error.message } }); }
@@ -1042,19 +1129,19 @@ export class JsonLineClient implements vscode.Disposable {
 			}
 			: this.remoteOptions;
 		const child = spawnEngine(this.executable, [...this.args], this.cwd, this.env, this.remoteTarget, opts);
-		this.stdoutByteCarry = Buffer.alloc(0);
+		this.stdoutLineAcc.reset();
 		child.stderr.on('data', data => this.error = (this.error + String(data)).slice(-8000));
 		child.stdout.on('data', (chunk: Buffer | string) => {
-			const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-			this.stdoutByteCarry = this.stdoutByteCarry.length > 0 ? Buffer.concat([this.stdoutByteCarry, buf]) : buf;
-			let nlIdx: number;
-			while ((nlIdx = this.stdoutByteCarry.indexOf(0x0a)) >= 0) {
-				const lineBuf = this.stdoutByteCarry.subarray(0, nlIdx);
-				this.stdoutByteCarry = this.stdoutByteCarry.subarray(nlIdx + 1);
-				this.stdoutBytesReceived += nlIdx + 1;
-				const rawLine = lineBuf.toString('utf8');
-				this.handleLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
-			}
+			this.stdoutLineAcc.push(
+				chunk,
+				(line, rawBytes) => {
+					this.stdoutBytesReceived += rawBytes;
+					this.handleLine(line);
+				},
+				droppedBytes => {
+					this.stdoutBytesReceived += droppedBytes;
+				},
+			);
 			// Reset backoff once real stream traffic resumes after reattach.
 			if (this.reattachAttempt > 0) {
 				this.reattachAttempt = 0;
@@ -1072,11 +1159,16 @@ export class JsonLineClient implements vscode.Disposable {
 		});
 		child.on('close', code => {
 			if (this.child !== child) { return; }
-			if (this.stdoutByteCarry.length > 0 && code === 0) {
-				const tail = this.stdoutByteCarry.toString('utf8');
-				this.stdoutBytesReceived += this.stdoutByteCarry.length;
-				this.stdoutByteCarry = Buffer.alloc(0);
-				this.handleLine(tail.endsWith('\r') ? tail.slice(0, -1) : tail);
+			if (this.stdoutLineAcc.pendingBytes > 0 && code === 0) {
+				this.stdoutLineAcc.flushTail(
+					(tail, rawBytes) => {
+						this.stdoutBytesReceived += rawBytes;
+						this.handleLine(tail);
+					},
+					droppedBytes => {
+						this.stdoutBytesReceived += droppedBytes;
+					},
+				);
 			}
 			if (this.disposed) {
 				this.resolveClosed();
@@ -1122,10 +1214,12 @@ export class JsonLineClient implements vscode.Disposable {
 			this.child = this.spawnAndBind(true);
 			while (this.queuedWrites.length > 0 && !this.disposed && !this.closedError) {
 				const payload = this.queuedWrites.shift()!;
+				this.queuedWriteBytes = Math.max(0, this.queuedWriteBytes - Buffer.byteLength(payload, 'utf8'));
 				try {
 					this.child.stdin.write(payload);
 				} catch {
 					this.queuedWrites.unshift(payload);
+					this.queuedWriteBytes += Buffer.byteLength(payload, 'utf8');
 					break;
 				}
 			}
@@ -1207,13 +1301,30 @@ export class JsonLineClient implements vscode.Disposable {
 	write(packet: object): void {
 		if (this.closedError) { throw this.closedError; }
 		const payload = JSON.stringify(packet) + '\n';
+		const enqueueIfPersistent = (): boolean => {
+			if (!this.remotePersistentSessionId || this.disposed) {
+				return false;
+			}
+			const bytes = Buffer.byteLength(payload, 'utf8');
+			if (this.queuedWrites.length >= 256 || this.queuedWriteBytes + bytes > 8 * 1024 * 1024) {
+				throw new Error('Remote engine write queue overflow while disconnected.');
+			}
+			this.queuedWrites.push(payload);
+			this.queuedWriteBytes += bytes;
+			return true;
+		};
 		if (this.reattaching || this.child.stdin.destroyed || !this.child.stdin.writable) {
-			if (this.remotePersistentSessionId && !this.disposed) {
-				this.queuedWrites.push(payload);
+			if (enqueueIfPersistent()) {
 				return;
 			}
 		}
-		this.child.stdin.write(payload);
+		try {
+			this.child.stdin.write(payload);
+		} catch (err) {
+			if (!enqueueIfPersistent()) {
+				throw err;
+			}
+		}
 	}
 
 	waitForClose(timeoutMs = 1500): Promise<void> {

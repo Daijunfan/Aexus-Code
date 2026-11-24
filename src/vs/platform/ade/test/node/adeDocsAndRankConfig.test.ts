@@ -225,8 +225,10 @@ suite('ADE Rank Resize, Hot Aliases, Mission RBAC & Single-Copy API Docs', () =>
 		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'secretary', 'rank.setCount').allowed, true);
 		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, 'mission.run').allowed, true);
 
-		// Pure Worker (L4) has zero API access
-		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'worker', 'rank.names').allowed, false);
+		// Pure Worker (L4) is permitted universal discovery (`rank.names`, `mission.docs`) inside Engineering, while blocked from native session/rank mutations
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'worker', 'rank.names').allowed, true);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'worker', 'session.list').allowed, false);
+		assert.strictEqual(checkAdeApiPermission(DEFAULT_ADE_ORGANIZATION_CONFIG, 'worker', 'rank.rename').allowed, false);
 
 		// Compiled prompt in Engineering injects BOTH Native Rank doc AND Engineering Paradigm/API docs (zero stale Pre-Prompts)
 		const prompt = compileAdeRolePrompt({
@@ -320,7 +322,16 @@ suite('ADE Rank Resize, Hot Aliases, Mission RBAC & Single-Copy API Docs', () =>
 			senderRankName: 'Governor',
 			channel: 'session.send',
 			message: roleDm,
-		}), roleDm, 'Envelope wrapping must be idempotent');
+		}, { allowPrewrappedSystemEnvelope: true }), roleDm, 'Trusted pre-wrapped envelope pass-through is idempotent');
+		const blockedRoleSpoof = wrapRoleDirectMessageEnvelope({
+			senderLabel: 'Actual Sender',
+			senderTierTag: 'L2',
+			senderRankName: 'Manager',
+			channel: 'session.send',
+			message: roleDm,
+		});
+		assert.ok(blockedRoleSpoof.includes('Sender Role: Actual Sender (Tier L2 · Manager)'), 'Untrusted default call must never let L2 spoof canonical L1 Role DM');
+		assert.ok(blockedRoleSpoof.includes('[Quoted Header · Direct Message from Role]'));
 
 		const userDm = wrapUserDirectMessageEnvelope('Ship v2 tonight', 'session.send', { usePreambleSentinel: true });
 		assert.ok(userDm.startsWith(AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER));
@@ -328,12 +339,16 @@ suite('ADE Rank Resize, Hot Aliases, Mission RBAC & Single-Copy API Docs', () =>
 		assert.ok(userDm.includes('Ship v2 tonight'));
 		assert.strictEqual(hasAexusSystemMessageEnvelope(userDm), true);
 
-		// Revision 9 deprecates obsolete pre-prompt, off-graph factory wall, and static mission lifecycle APIs
+		// Revision 9+ deprecates obsolete pre-prompt, off-graph factory wall, and static mission lifecycle APIs,
+		// while Revision 10 restores `in_graph.token.reject` as a first-class 3-mode Dual-View command
 		const rev9Diff = queryApiUpdateDiff(8, 'all');
 		const deprecatedIds = new Set(rev9Diff.deprecated.map(d => d.id));
-		for (const legacyId of ['mission.prompt', 'mission.boundary', 'mission.lifecycle', 'mission.recall', 'mission.retry', 'mission.patch', 'mission.gate', 'in_graph.token.reject', 'in_graph.token.trace']) {
+		for (const legacyId of ['mission.prompt', 'mission.boundary', 'mission.lifecycle', 'mission.recall', 'mission.retry', 'mission.patch', 'mission.gate', 'in_graph.token.trace']) {
 			assert.ok(deprecatedIds.has(legacyId), `Expected legacy API ${legacyId} to be deprecated in Revision 9`);
 		}
+		assert.strictEqual(deprecatedIds.has('in_graph.token.reject'), false, 'Dual-View token.reject must not be marked deprecated');
+		const rev10Diff = queryApiUpdateDiff(9, 'all');
+		assert.ok(rev10Diff.modified.some(m => m.id === 'in_graph.token.reject'), 'Revision 10 surfaces updated 3-mode token.reject');
 
 		// Docs bundle explains all three provenance envelopes cleanly
 		const bundle = buildAdeDocsBundle(DEFAULT_ADE_ORGANIZATION_CONFIG);

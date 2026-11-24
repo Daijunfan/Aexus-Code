@@ -118,6 +118,16 @@
 	--aexus-severity-info: var(--vscode-ade-severity-info, #60A5FA);
 	--aexus-cloud: var(--vscode-ade-cloud, #38BDF8);
 
+	/* ---- Semantic Studio & Canvas Inks (WCAG AA >= 4.8:1 in Dark & Light) ---- */
+	--aexus-studio-accent: var(--vscode-ade-studio-accent, #38BDF8);
+	--aexus-studio-danger: var(--vscode-ade-studio-danger, #F87171);
+	--aexus-studio-rework: var(--vscode-ade-studio-rework, #C084FC);
+	--aexus-studio-muted-ink: var(--vscode-ade-studio-mutedInk, #CBD5E1);
+	--aexus-studio-warn-ink: #FCD34D;
+	--aexus-studio-ok-ink: #6EE7B7;
+	--aexus-studio-cyan-ink: #7DD3FC;
+	--aexus-studio-violet-ink: #DDD6FE;
+
 	/* ---- Status (dots, rings, edges only — never chips) ---- */
 	--aexus-status-ok: var(--vscode-testing-iconPassed, #3FB950);
 	--aexus-status-warn: var(--vscode-editorWarning-foreground, #D29922);
@@ -130,19 +140,40 @@
 	--aexus-surface-sunken: color-mix(in srgb, var(--vscode-foreground) 4%, var(--vscode-editor-background));
 	--aexus-surface-1: color-mix(in srgb, var(--vscode-foreground) 2.5%, var(--aexus-surface-0));
 	--aexus-surface-2: var(--vscode-editor-background); /* cards go white, separated by shadow + hairline */
-	--aexus-hairline: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	--aexus-glass-bg: color-mix(in srgb, var(--aexus-surface-3) 96%, #ffffff);
+	--aexus-hairline: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
 	--aexus-highlight-top: inset 0 1px 0 rgb(255 255 255 / 0.8);
 	--aexus-shadow-1: 0 1px 2px rgb(15 23 42 / 0.06);
 	--aexus-shadow-2: 0 4px 12px -2px rgb(15 23 42 / 0.10), 0 1px 2px rgb(15 23 42 / 0.06);
 	--aexus-shadow-3: 0 12px 32px -8px rgb(15 23 42 / 0.14), 0 2px 6px rgb(15 23 42 / 0.06);
 	--aexus-shadow-4: 0 24px 64px -12px rgb(15 23 42 / 0.18);
 
-	/* Light rank fallbacks */
-	--aexus-rank-governor: var(--vscode-ade-rank-governor, #9A6700);
-	--aexus-rank-manager: var(--vscode-ade-rank-manager, #4F46E5);
+	/* Light rank fallbacks (WCAG AA >= 4.8:1 on white/slate surfaces) */
+	--aexus-rank-governor: var(--vscode-ade-rank-governor, #854D0E);
+	--aexus-rank-manager: var(--vscode-ade-rank-manager, #4338CA);
 	--aexus-rank-employee: var(--vscode-ade-rank-employee, #6D28D9);
-	--aexus-rank-worker: var(--vscode-ade-rank-worker, #059669);
-	--aexus-rank-member: var(--vscode-ade-rank-member, #566070);
+	--aexus-rank-worker: var(--vscode-ade-rank-worker, #047857);
+	--aexus-rank-member: var(--vscode-ade-rank-member, #475569);
+	--aexus-rank-governor-ink: #FFFFFF;
+
+	/* Light severity, cloud & status fallbacks (WCAG AA >= 4.6:1 on white) */
+	--aexus-severity-critical: var(--vscode-ade-severity-critical, #B91C1C);
+	--aexus-severity-gate: var(--vscode-ade-severity-gate, #9D174D);
+	--aexus-severity-info: var(--vscode-ade-severity-info, #1D4ED8);
+	--aexus-cloud: var(--vscode-ade-cloud, #0369A1);
+	--aexus-status-ok: var(--vscode-testing-iconPassed, #15803D);
+	--aexus-status-warn: var(--vscode-editorWarning-foreground, #B45309);
+	--aexus-status-err: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, #B91C1C));
+
+	/* Light Studio & Canvas Inks (WCAG AA >= 4.8:1 on white/slate surfaces) */
+	--aexus-studio-accent: var(--vscode-ade-studio-accent, #0369A1);
+	--aexus-studio-danger: var(--vscode-ade-studio-danger, #B91C1C);
+	--aexus-studio-rework: var(--vscode-ade-studio-rework, #6D28D9);
+	--aexus-studio-muted-ink: var(--vscode-ade-studio-mutedInk, #334155);
+	--aexus-studio-warn-ink: #92400E;
+	--aexus-studio-ok-ink: #047857;
+	--aexus-studio-cyan-ink: #0369A1;
+	--aexus-studio-violet-ink: #5B21B6;
 }
 
 /* ---- High contrast ---- */
@@ -260,6 +291,10 @@
 	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), 0 0 0 1px var(--aexus-surface-0), 0 0 0 2px var(--aexus-rank-governor);
 	font-weight: var(--aexus-weight-bold);
 	font-variant-numeric: var(--aexus-numeric);
+}
+
+.monaco-workbench.vs .aexus-tier-chip.l1 {
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.25), 0 0 0 1px var(--aexus-surface-0), 0 0 0 1.5px var(--aexus-rank-governor);
 }
 
 .aexus-tier-chip.l2 {

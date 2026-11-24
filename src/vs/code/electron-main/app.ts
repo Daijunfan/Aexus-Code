@@ -150,10 +150,12 @@ import { IMcpGatewayService, McpGatewayChannelName } from '../../platform/mcp/co
 import { McpGatewayService } from '../../platform/mcp/node/mcpGatewayService.js';
 import { McpGatewayChannel } from '../../platform/mcp/node/mcpGatewayChannel.js';
 import { ADE_CONTROL_CHANNEL_NAME } from '../../platform/ade/common/adeControl.js';
+import { isReadOnlyAdeControlAction } from '../../platform/ade/common/adeControlPolicy.js';
 import { ADE_CLOUD_HOST_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/adeCloudHosts.js';
 import { AdeCloudHostBackendChannel } from '../../platform/ade/common/adeCloudHostsIpc.js';
 import { ADE_ENGINEERING_BACKEND_CHANNEL_NAME } from '../../platform/ade/common/adeEngineering.js';
 import { AdeEngineeringBackendChannel } from '../../platform/ade/common/adeEngineeringIpc.js';
+import { checkAdeApiPermission, DEFAULT_ADE_ORGANIZATION_CONFIG } from '../../platform/ade/common/adeRoleSchema.js';
 import { AdeCloudHostNodeService } from '../../platform/ade/node/adeCloudHostService.js';
 import { AdeControlServer } from '../../platform/ade/node/adeControlServer.js';
 import { AdeDocsBackendNodeService } from '../../platform/ade/node/adeDocsBackendService.js';
@@ -1580,9 +1582,32 @@ export class CodeApplication extends Disposable {
 
 			throw new Error('No open Aexus Code workbench window available for ADE control');
 		};
-		let adeDocsBackendServiceRef: AdeDocsBackendNodeService | undefined;
+		const adeDocsBackendRef: { service?: AdeDocsBackendNodeService } = {};
 		const adeControlServer = this._register(new AdeControlServer(async (request, windowId, options) => {
+			const tryHeadlessFallback = async (): Promise<{ readonly handled: boolean; readonly result?: unknown }> => {
+				if (!adeDocsBackendRef.service || (windowId && !options?.softWindowPin)) {
+					return { handled: false };
+				}
+				const headless = await adeDocsBackendRef.service.executeHeadlessOrchestrationControl(
+					request.action,
+					(request.params && typeof request.params === 'object' ? request.params as Readonly<Record<string, unknown>> : {}),
+				);
+				if (!headless.handled) {
+					return { handled: false };
+				}
+				if (headless.error) {
+					throw new Error(headless.error);
+				}
+				return { handled: true, result: headless.result };
+			};
 			if (request.action === 'host.windowVisibility') {
+				if (request.params && request.params._verifiedCaller === true) {
+					const orgConfig = adeDocsBackendRef.service?.getCachedOrgConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+					const perm = checkAdeApiPermission(orgConfig, String(request.params.caller ?? ''), 'host.windowVisibility');
+					if (!perm.allowed) {
+						throw new Error(perm.reason ?? 'Permission denied for action "host.windowVisibility".');
+					}
+				}
 				return {
 					dockVisible: Boolean(app.dock?.isVisible?.()),
 					windows: BrowserWindow.getAllWindows().map(w => ({
@@ -1600,25 +1625,19 @@ export class CodeApplication extends Disposable {
 				// serve eligible Orchestration transitions/inspection/pointer-read actions
 				// directly against cold storage & main-process Watchdog without dropping the CLI
 				// (including authenticated agent sessions whose capability token carries a soft-pinned wid!).
-				if (adeDocsBackendServiceRef && (!windowId || options?.softWindowPin)) {
-					const headless = await adeDocsBackendServiceRef.executeHeadlessOrchestrationControl(
-						request.action,
-						(request.params && typeof request.params === 'object' ? request.params as Readonly<Record<string, unknown>> : {}),
-					);
-					if (headless.handled) {
-						if (headless.error) {
-							throw new Error(headless.error);
-						}
-						return headless.result;
-					}
+				const fallback = await tryHeadlessFallback();
+				if (fallback.handled) {
+					return fallback.result;
 				}
 				throw err;
 			}
 			const targetClientId = `window:${targetWindow.id}`;
+			let ipcDispatched = false;
 			const router: IClientRouter<string> = {
 				routeCall: async (hub: IConnectionHub<string>): Promise<IPCClientConnection<string>> => {
 					const existing = hub.connections.find(c => c.ctx === targetClientId);
 					if (existing) {
+						ipcDispatched = true;
 						return existing;
 					}
 					return new Promise<IPCClientConnection<string>>((resolve, reject) => {
@@ -1626,6 +1645,7 @@ export class CodeApplication extends Disposable {
 						routeDisposables.add(hub.onDidAddConnection(connection => {
 							if (connection.ctx === targetClientId) {
 								routeDisposables.dispose();
+								ipcDispatched = true;
 								resolve(connection);
 							}
 						}));
@@ -1640,7 +1660,22 @@ export class CodeApplication extends Disposable {
 				}
 			};
 			const channel = mainProcessElectronServer.getChannel(ADE_CONTROL_CHANNEL_NAME, router);
-			return await channel.call('execute', request);
+			try {
+				return await channel.call('execute', request);
+			} catch (ipcErr) {
+				const msg = ipcErr instanceof Error ? ipcErr.message : String(ipcErr);
+				const isDisconnectErr = targetWindow.win?.isDestroyed() || /closed before ADE IPC connected|Channel.*disposed/i.test(msg);
+				// C1 double-execution guard: after IPC dispatch, only read-only actions may transparently
+				// fail over to headless fallback; mutating actions must never execute twice inside one ledger call.
+				const canSafeFailover = !ipcDispatched || isReadOnlyAdeControlAction(request.action, request.params);
+				if (isDisconnectErr && canSafeFailover) {
+					const fallback = await tryHeadlessFallback();
+					if (fallback.handled) {
+						return fallback.result;
+					}
+				}
+				throw ipcErr;
+			}
 		}, { logService: this.logService }));
 		process.env.AEXUS_ADE_CONTROL_FILE = adeControlServer.instanceMetaPath;
 		adeControlServer.whenReady().then(() => {
@@ -1662,8 +1697,15 @@ export class CodeApplication extends Disposable {
 
 		const adeDocsBackendService = this._register(new AdeDocsBackendNodeService({
 			remoteProbe: adeCloudHostNodeService,
+			cloudHostService: adeCloudHostNodeService,
+			onRevokeSession: (sessionId, revokedAt) => {
+				adeControlServer.revokeSession(sessionId, revokedAt, { skipNotify: true });
+			},
 		}));
-		adeDocsBackendServiceRef = adeDocsBackendService;
+		adeControlServer.setOnDidRevokeSession((sessionId, revokedAt) => {
+			void adeDocsBackendService.revokeSession(sessionId, revokedAt, { skipNotify: true });
+		});
+		adeDocsBackendRef.service = adeDocsBackendService;
 		const adeEngineeringBackendChannel = this._register(new AdeEngineeringBackendChannel(adeDocsBackendService));
 		mainProcessElectronServer.registerChannel(ADE_ENGINEERING_BACKEND_CHANNEL_NAME, adeEngineeringBackendChannel);
 		// Wake ADE Mission Watchdog & heal SSH reverse bridges / persistent remote reattach loops immediately on OS resume.

@@ -22,6 +22,7 @@ import { AdeEngineeringBackendChannel } from '../../common/adeEngineeringIpc.js'
 import { parseMissionMermaidDag } from '../../common/adeMissionDag.js';
 import { createInitialMissionRuntimeState, IMissionSourceTrigger, recordWatchdogWakeup, startMissionRun } from '../../common/adeMissionEngine.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG } from '../../common/adeRoleSchema.js';
+import { AdeCloudHostNodeService } from '../../node/adeCloudHostService.js';
 import { AdeDocsBackendNodeService } from '../../node/adeDocsBackendService.js';
 import {
 	AdeMissionWatchdogService,
@@ -1897,6 +1898,540 @@ suite('AdeDocsBackendNodeService — single-copy API docs', () => {
 		} finally {
 			service.dispose();
 			await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		}
+	});
+
+	test('Headless 0-window daemon enforces deterministic check gates, maxHops -> instant inbox.json alert, FinOps budget breaker, and 0-window watchdog wakeups', async () => {
+		const baseDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ade-daemon-guardrails-'));
+		const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ade-daemon-workdir-'));
+		const service = testDisposables.add(new AdeDocsBackendNodeService({ baseDir }));
+		try {
+			service.setActiveRendererWindowCount(0);
+			const missionId = 'm-headless-guardrails';
+			const now0 = 20_000;
+
+			await service.saveMissionRecord(missionId, JSON.stringify({
+				id: missionId,
+				title: 'Headless Guardrails Mission',
+				projectUri: workDir,
+				mermaidText: [
+					'flowchart LR',
+					'  T_BE["Backend Delivery"]',
+					'  %% task T_BE [owner=BE_Lead, dept="Backend Dept"]',
+				].join('\n'),
+				nodeChecks: {
+					T_BE: [{ id: 'chk-task-art', name: 'Require artifact.txt', expectFiles: ['artifact.txt'] }],
+				},
+				orchestrationText: [
+					'flowchart LR',
+					'  CEO["@Alice · CEO (L1)"]',
+					'  subgraph Backend["Backend Dept"]',
+					'    BE_Lead["@Bob · Backend Lead (L2)"]',
+					'    Dev1["@Dave · Backend Dev (L3)"]',
+					'    QA1["@Eve · Backend QA (L3)"]',
+					'  end',
+					'  CEO <--> BE_Lead',
+					'  BE_Lead <--> Dev1',
+					'  Dev1 <--> QA1',
+					'  QA1 <--> BE_Lead',
+					'  %% staff CEO [tier=1, rank=governor]',
+					'  %% staff BE_Lead [tier=2, rank=manager, dept="Backend Dept"]',
+					'  %% staff Dev1 [tier=3, rank=employee, dept="Backend Dept"]',
+					'  %% staff QA1 [tier=3, rank=employee, dept="Backend Dept"]',
+				].join('\n'),
+				orchestrationRuntime: {
+					missionId,
+					status: 'running',
+					tokenSeq: 2,
+					waveSeq: 1,
+					traceSeq: 2,
+					payloadSeq: 0,
+					nodeAgentIds: { CEO: 'ag-ceo', BE_Lead: 'ag-be', Dev1: 'ag-dev', QA1: 'ag-qa' },
+					tokens: {
+						'otok-1': {
+							id: 'otok-1',
+							waveId: 'wave-1',
+							nodeId: 'CEO',
+							holderAgentId: 'ag-ceo',
+							status: 'waiting_join',
+							lastSummary: 'Split to BE_Lead',
+							compressedHistory: 'Started',
+							tracePtr: 'otrc-1',
+							arrivedAt: now0,
+							lastActivityAt: now0,
+							nudgeCount: 0,
+							hopIndex: 0,
+							hopLog: [{ hop: 0, tokenId: 'otok-1', event: 'dispatch', fromNodeId: 'User', toNodeId: 'CEO', headline: 'Start', timestamp: now0 }],
+							joinBarrierId: 'jb-1',
+							childTokenIds: ['otok-2'],
+						},
+						'otok-2': {
+							id: 'otok-2',
+							waveId: 'wave-1',
+							parentTokenId: 'otok-1',
+							rootTokenId: 'otok-1',
+							originNodeId: 'CEO',
+							returnToNodeId: 'CEO',
+							parentJoinBarrierId: 'jb-1',
+							nodeId: 'BE_Lead',
+							holderAgentId: 'ag-be',
+							status: 'active',
+							taskNodeId: 'T_BE',
+							taskNodeIds: ['T_BE'],
+							lastSummary: 'Build & verify T_BE',
+							compressedHistory: 'From CEO',
+							tracePtr: 'otrc-2',
+							arrivedAt: now0,
+							lastActivityAt: now0,
+							nudgeCount: 0,
+							hopIndex: 1,
+							hopLog: [{ hop: 1, tokenId: 'otok-2', event: 'mint', fromNodeId: 'CEO', toNodeId: 'BE_Lead', headline: 'Build & verify T_BE', timestamp: now0 }],
+						},
+					},
+					joinBarriers: {
+						'jb-1': {
+							id: 'jb-1',
+							waveId: 'wave-1',
+							parentTokenId: 'otok-1',
+							ownerNodeId: 'CEO',
+							childTokenIds: ['otok-2'],
+							mode: 'all',
+							status: 'waiting',
+							settledChildren: {},
+							createdAt: now0,
+						},
+					},
+					nodeStates: { CEO: 'waiting', BE_Lead: 'active', Dev1: 'idle', QA1: 'idle' },
+					payloadStore: {},
+					traces: {},
+					updatedAt: now0,
+				},
+			}), now0);
+
+			const beCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: 'ag-be' };
+			const devCaller = { caller: 'employee', _verifiedCaller: true, _callerSessionId: 'ag-dev' };
+			const qaCaller = { caller: 'employee', _verifiedCaller: true, _callerSessionId: 'ag-qa' };
+
+			// 1. Headless deterministic check gate on bound Task DAG node T_BE blocks token.return when artifact.txt is missing!
+			const blockedRet = await service.executeHeadlessOrchestrationControl('token.return', {
+				...beCaller,
+				tokenId: 'otok-2',
+				summary: 'Trying to return without artifact',
+			});
+			assert.strictEqual(blockedRet.handled, true);
+			assert.match(blockedRet.error ?? '', /DETERMINISTIC_CHECK_FAILED/);
+
+			// Subordinate cannot bypass check via --skip-checks
+			const skipDenied = await service.executeHeadlessOrchestrationControl('token.return', {
+				...beCaller,
+				tokenId: 'otok-2',
+				summary: 'Try skip',
+				skipChecks: true,
+			});
+			assert.strictEqual(skipDenied.handled, true);
+			assert.match(skipDenied.error ?? '', /FORBIDDEN/i);
+
+			// Once artifact.txt exists, headless token.return passes and wakes CEO!
+			await fs.promises.writeFile(path.join(workDir, 'artifact.txt'), 'verified-ok\n', 'utf8');
+			const okRet = await service.executeHeadlessOrchestrationControl('token.return', {
+				...beCaller,
+				tokenId: 'otok-2',
+				summary: 'Artifact produced and verified',
+			});
+			assert.strictEqual(okRet.handled, true);
+			assert.strictEqual(okRet.error, undefined);
+
+			// 2. Headless maxHops=2 circuit-breaker freezes cyclic Dev1 <-> QA1 bounce and writes critical alert directly to inbox.json!
+			const limRes = await service.executeHeadlessOrchestrationControl('orchestration.limits', { missionId, maxHops: 2 });
+			assert.strictEqual(limRes.handled, true);
+			assert.strictEqual((limRes.result as { readonly maxHops?: number }).maxHops, 2);
+
+			const dispDev = await service.executeHeadlessOrchestrationControl('orchestration.dispatch', {
+				missionId,
+				target: 'Dev1',
+				prompt: 'Cyclic bounce test',
+			});
+			assert.strictEqual(dispDev.handled, true);
+			assert.strictEqual(dispDev.error, undefined);
+			const devTok0 = (dispDev.result as { readonly tokenId: string }).tokenId; // hop 0
+
+			const hop1 = await service.executeHeadlessOrchestrationControl('token.handoff', {
+				...devCaller,
+				tokenId: devTok0,
+				to: 'QA1',
+				summary: 'Bounce 1',
+			});
+			assert.strictEqual(hop1.error, undefined);
+			const qaTok1 = (hop1.result as { readonly nextTokenIds: readonly string[] }).nextTokenIds[0]; // hop 1
+
+			const hop2 = await service.executeHeadlessOrchestrationControl('token.reject', {
+				...qaCaller,
+				tokenId: qaTok1,
+				reason: 'Bounce 2',
+			});
+			assert.strictEqual(hop2.error, undefined);
+			const devTok2 = (hop2.result as { readonly bouncedTokenId: string }).bouncedTokenId; // hop 2
+
+			const hop3Trip = await service.executeHeadlessOrchestrationControl('token.handoff', {
+				...devCaller,
+				tokenId: devTok2,
+				to: 'QA1',
+				summary: 'Bounce 3 exceeds maxHops=2',
+			});
+			assert.strictEqual(hop3Trip.handled, true);
+			assert.match(hop3Trip.error ?? '', /MAX_HOPS_EXCEEDED/);
+			const inboxAfterMaxHops = await service.loadInbox();
+			assert.ok(
+				inboxAfterMaxHops.some(i => i.severity === 'critical' && /Cycle Circuit-Breaker/i.test(i.title)),
+				'Headless MAX_HOPS_EXCEEDED must immediately persist critical alert into inbox.json with 0 windows open',
+			);
+
+			// 3. Headless FinOps budget hard circuit-breaker pauses Orchestration, writes critical Inbox alert, and blocks resume until raised!
+			const budgetTrip = await service.executeHeadlessOrchestrationControl('orchestration.limits', {
+				missionId,
+				budgetLimitUsd: 2.0,
+				totalCostUsd: 2.5,
+			});
+			assert.strictEqual(budgetTrip.handled, true);
+			assert.strictEqual((budgetTrip.result as { readonly budgetCircuitTripped?: boolean }).budgetCircuitTripped, true);
+			assert.strictEqual((budgetTrip.result as { readonly status?: string }).status, 'paused');
+
+			const resumeBlocked = await service.executeHeadlessOrchestrationControl('orchestration.resume', { missionId });
+			assert.strictEqual(resumeBlocked.handled, true);
+			assert.match(resumeBlocked.error ?? '', /BUDGET_EXCEEDED/);
+
+			const budgetRaise = await service.executeHeadlessOrchestrationControl('orchestration.limits', {
+				missionId,
+				budgetLimitUsd: 20.0,
+			});
+			assert.strictEqual((budgetRaise.result as { readonly budgetCircuitTripped?: boolean }).budgetCircuitTripped, false);
+
+			const resumeOk = await service.executeHeadlessOrchestrationControl('orchestration.resume', { missionId });
+			assert.strictEqual(resumeOk.error, undefined);
+			assert.strictEqual((resumeOk.result as { readonly status?: string }).status, 'running');
+			assert.ok(((resumeOk.result as { readonly queuedEffects?: number }).queuedEffects ?? 0) >= 1, 'Headless resume queues dispatch_token for active otok-1');
+
+			// 4. 0-window main-process watchdog wakeup transitions blocked token -> active on disk & queues wakeup_blocked + silence_reminder!
+			const blockRes = await service.executeHeadlessOrchestrationControl('token.block', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: 'ag-ceo',
+				tokenId: 'otok-1',
+				reason: 'Waiting for background build',
+				duration: '30m',
+				watchPid: 99999,
+			});
+			assert.strictEqual(blockRes.error, undefined);
+
+			const woke = await service.processHeadlessWatchdogWakeup({
+				missionId,
+				tokenId: 'otok-1',
+				nodeId: 'CEO',
+				holderAgentId: 'ag-ceo',
+				reason: 'pid_exited',
+				detail: 'PID 99999 exited cleanly',
+				timestamp: now0 + 5_000,
+			});
+			assert.strictEqual(woke, true);
+
+			const nudged = await service.processHeadlessWatchdogWakeup({
+				missionId,
+				tokenId: 'otok-1',
+				nodeId: 'CEO',
+				holderAgentId: 'ag-ceo',
+				reason: 'silence_timeout',
+				detail: 'Idle for 5m',
+				timestamp: now0 + 360_000,
+			});
+			assert.strictEqual(nudged, true);
+
+			const coldAfterWatchdog = JSON.parse((await service.loadMissionRecord(missionId))!) as {
+				readonly orchestrationRuntime: {
+					readonly tokens: Record<string, { readonly status: string; readonly nudgeCount: number }>;
+					readonly pendingHeadlessEffects?: readonly { readonly kind: string; readonly tokenId?: string }[];
+				};
+			};
+			assert.strictEqual(coldAfterWatchdog.orchestrationRuntime.tokens['otok-1'].status, 'active');
+			assert.strictEqual(coldAfterWatchdog.orchestrationRuntime.tokens['otok-1'].nudgeCount, 1);
+			assert.ok(coldAfterWatchdog.orchestrationRuntime.pendingHeadlessEffects?.some(e => e.kind === 'wakeup_blocked' && e.tokenId === 'otok-1'));
+			assert.ok(coldAfterWatchdog.orchestrationRuntime.pendingHeadlessEffects?.some(e => e.kind === 'silence_reminder' && e.tokenId === 'otok-1'));
+		} finally {
+			service.dispose();
+			await fs.promises.rm(baseDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+			await fs.promises.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		}
+	});
+
+	test('blocks post-dispose disk writes, detects same-second file signature overwrites, re-arms once triggers, and deduplicates 0-window IPC wakeups', async () => {
+		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ade-wd-hardening-'));
+		try {
+			// 1. Same-second file overwrite detection via initialFileSignature even when mtimeMs is unchanged
+			const watchFilePath = path.join(tmpDir, 'artifact.out');
+			const fakeMtime = 1_700_000_000_000;
+			let fakeSig = '1700000000.000:10:1001';
+			const wakeups: IAdeWatchdogWakeupEvent[] = [];
+			const wd = new AdeMissionWatchdogService({
+				snapshotStatePath: path.join(tmpDir, 'wd-snap.json'),
+				now: () => 1_700_000_010_000,
+				localProbe: createLocalProbe({
+					fileStatMtime: async () => fakeMtime,
+					fileStatSignature: async () => fakeSig,
+				}),
+			});
+			const subWake = wd.onDidWatchdogWakeup(ev => wakeups.push(ev));
+			wd.syncMission({
+				missionId: 'm-sig',
+				status: 'running',
+				silenceTimeoutMinutes: 30,
+				tokens: [{
+					tokenId: 'otok-sig',
+					nodeId: 'Dev',
+					status: 'blocked',
+					lastActivityAt: 1_700_000_000_000,
+					blocked: {
+						reason: 'waiting for overwrite',
+						startedAt: 1_700_000_000_000,
+						maxDurationMs: 600_000,
+						expiresAt: 1_700_000_600_000,
+						watchFile: watchFilePath,
+						initialFileMtime: fakeMtime,
+						initialFileSignature: fakeSig,
+					},
+				}],
+				triggers: [],
+			});
+			await wd.runTick();
+			assert.strictEqual(wakeups.length, 0, 'Unchanged signature and mtime must not trigger false file_ready');
+
+			// Same mtimeMs, changed size/inode signature -> wakes immediately!
+			fakeSig = '1700000000.000:24:1002';
+			await wd.runTick();
+			assert.strictEqual(wakeups.length, 1);
+			assert.strictEqual(wakeups[0].reason, 'file_ready');
+
+			// 2. Re-arming a once trigger with a new fireAt clears firedOnce and fires again
+			let clockNow = 1_700_000_100_000;
+			const firedTriggers: IAdeSourceTriggerFireEvent[] = [];
+			const wdTrig = new AdeMissionWatchdogService({
+				snapshotStatePath: path.join(tmpDir, 'trig-snap.json'),
+				triggerStatePath: path.join(tmpDir, 'trig-mem.json'),
+				now: () => clockNow,
+				localProbe: createLocalProbe(),
+			});
+			const subTrig = wdTrig.onDidSourceTriggerFire(ev => firedTriggers.push(ev));
+			const trigger1: IMissionSourceTrigger = {
+				id: 'once-1',
+				nodeId: 'N1',
+				kind: 'once',
+				enabled: true,
+				fireAt: clockNow - 1000,
+				fireCount: 0,
+			};
+			wdTrig.syncMission({
+				missionId: 'm-trig',
+				status: 'running',
+				silenceTimeoutMinutes: 30,
+				tokens: [],
+				triggers: [trigger1],
+			});
+			await wdTrig.runTick();
+			assert.strictEqual(firedTriggers.length, 1);
+
+			// Re-arm same trigger ID with a new future fireAt
+			clockNow += 10_000;
+			wdTrig.syncMission({
+				missionId: 'm-trig',
+				status: 'running',
+				silenceTimeoutMinutes: 30,
+				tokens: [],
+				triggers: [{ ...trigger1, fireAt: clockNow - 500, fireCount: 1 }],
+			});
+			await wdTrig.runTick();
+			assert.strictEqual(firedTriggers.length, 2, 'Re-armed once trigger must fire again');
+
+			// 3. Post-dispose guard prevents stray writes after rm
+			subWake.dispose();
+			subTrig.dispose();
+			wd.dispose();
+			wdTrig.dispose();
+			await wd.flushPendingWrites();
+			await wdTrig.flushPendingWrites();
+
+			// 4. AdeEngineeringBackendChannel skips buffering 0-window wakeup when willHandleWatchdogWakeupHeadlessly returns true
+			const svc = new AdeDocsBackendNodeService({ baseDir: path.join(tmpDir, 'ipc-dedupe') });
+			const channel = new AdeEngineeringBackendChannel(svc);
+			try {
+				await svc.syncOrchestrationDaemonState({
+					missionId: 'm-headless-owned',
+					status: 'running',
+					activeTokenCount: 1,
+					blockedTokenCount: 0,
+					waitingJoinCount: 0,
+					updatedAt: Date.now(),
+				});
+				const ev: IAdeWatchdogWakeupEvent = {
+					missionId: 'm-headless-owned',
+					tokenId: 'otok-1',
+					nodeId: 'Dev',
+					reason: 'silence_timeout',
+					detail: 'idle',
+					timestamp: Date.now(),
+				};
+				assert.strictEqual(svc.willHandleWatchdogWakeupHeadlessly(ev), true);
+
+				// Dispatch while 0 windows are connected, then connect window:1 — must NOT receive a duplicate replayed wakeup
+				const received: IAdeWatchdogWakeupEvent[] = [];
+				(svc as unknown as { watchdog: { _onDidWatchdogWakeup: { fire(e: IAdeWatchdogWakeupEvent): void } } }).watchdog._onDidWatchdogWakeup.fire(ev);
+				const sub = channel.listen<IAdeWatchdogWakeupEvent>('window:1', 'onDidWatchdogWakeup')(e => received.push(e));
+				try {
+					assert.strictEqual(received.length, 0, 'Headlessly handled 0-window wakeup must not be replayed to late-joining window');
+				} finally {
+					sub.dispose();
+				}
+			} finally {
+				channel.dispose();
+				svc.dispose();
+			}
+
+			// 5. Real POSIX remoteBatchProbe & remoteFileStatSignature emit identical colon-delimited stat signatures
+			//    and do NOT trigger false file_ready on unchanged remote files (macOS/Linux stat -c/-f regression).
+			if (process.platform !== 'win32') {
+				const sshDir = path.join(tmpDir, 'mock-ssh');
+				await fs.promises.mkdir(sshDir, { recursive: true });
+				const mockSsh = path.join(sshDir, 'ssh-local-exec.sh');
+				await fs.promises.writeFile(mockSsh, [
+					'#!/bin/sh',
+					'while [ "$#" -gt 0 ]; do',
+					'  if [ "$1" = "--" ]; then',
+					'    shift',
+					'    break',
+					'  fi',
+					'  shift',
+					'done',
+					'shift',
+					'exec /bin/sh -c "$1"',
+				].join('\n'), { encoding: 'utf8', mode: 0o755 });
+				await fs.promises.chmod(mockSsh, 0o755);
+				const probeFile = path.join(tmpDir, 'remote-watched.txt');
+				await fs.promises.writeFile(probeFile, 'initial-bytes', 'utf8');
+				const cloudSvc = new AdeCloudHostNodeService({
+					userDataPath: path.join(tmpDir, 'cloud-ud'),
+					homedir: path.join(tmpDir, 'cloud-home'),
+					sshConfigPath: path.join(tmpDir, 'cloud-home', '.ssh', 'config'),
+					sshExecutable: mockSsh,
+					syncUserSshDir: false,
+					autoImportOnFirstLoad: false,
+				});
+				try {
+					await cloudSvc.upsertHost({ name: 'Mock POSIX', alias: 'mock-posix', hostName: '127.0.0.1', os: 'linux' });
+					const initialSig = await cloudSvc.remoteFileStatSignature('mock-posix', probeFile);
+					const batch1 = await cloudSvc.remoteBatchProbe('mock-posix', { filePaths: [probeFile] });
+					assert.ok(initialSig && initialSig.includes(':'), `Expected non-empty colon-delimited signature, got: ${String(initialSig)}`);
+					assert.strictEqual(batch1.fileSignature?.[probeFile], initialSig, 'remoteBatchProbe signature MUST match remoteFileStatSignature on unchanged file');
+					assert.ok(typeof batch1.fileMtime[probeFile] === 'number' && batch1.fileMtime[probeFile]! > 0, 'remoteBatchProbe must parse numeric fileMtime on macOS/Linux');
+
+					// Overwriting file with different byte size changes signature even within the same second
+					await fs.promises.writeFile(probeFile, 'updated-longer-payload-bytes', 'utf8');
+					const batch2 = await cloudSvc.remoteBatchProbe('mock-posix', { filePaths: [probeFile] });
+					assert.notStrictEqual(batch2.fileSignature?.[probeFile], initialSig, 'Modified file must produce a new fileSignature');
+				} finally {
+					cloudSvc.dispose();
+				}
+			}
+		} finally {
+			await fs.promises.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		}
+	});
+
+	test('C6 watchdog barrier_deadline_expired Phase-1 supervision and hung SSH probe slot release', async () => {
+		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ade-watchdog-c6-'));
+		try {
+			let fakeNow = 1_700_000_000_000;
+			let remoteBatchCalls = 0;
+			const fakeCloud = {
+				async remoteIsPidAlive() { return false; },
+				async remoteFileStatMtime() { return undefined; },
+				async remoteGitHeadCommit() { return undefined; },
+				async remoteGpuUtilizationPct() { return undefined; },
+				async remoteBatchProbe() {
+					remoteBatchCalls++;
+					if (remoteBatchCalls === 1) {
+						// First call hangs longer than probe timeout; watchdog must release inFlightProbeKeys cleanly
+						return new Promise<never>(() => { /* intentionally hung */ });
+					}
+					return { pidAlive: { '99999': false }, fileMtime: {}, fileSignature: {}, gitHead: {}, persistentSessions: {} };
+				},
+			};
+			const wd = new AdeMissionWatchdogService({
+				snapshotStatePath: path.join(tmpDir, 'watchdog.json'),
+				remoteProbe: fakeCloud,
+				pollIntervalMs: 3_600_000,
+				now: () => fakeNow,
+				probeTimeoutMs: 40,
+			});
+			const wakeups: IAdeWatchdogWakeupEvent[] = [];
+			const sub = wd.onDidWatchdogWakeup(e => wakeups.push(e));
+			try {
+				wd.syncMission({
+					missionId: 'm-barrier-wd',
+					status: 'running',
+					silenceTimeoutMinutes: 30,
+					tokens: [{
+						tokenId: 'otok-remote-1',
+						nodeId: 'BE',
+						status: 'blocked',
+						lastActivityAt: fakeNow,
+						hostAlias: 'gpu-1',
+						blocked: {
+							reason: 'training',
+							startedAt: fakeNow,
+							maxDurationMs: 3_600_000,
+							expiresAt: fakeNow + 3_600_000,
+							watchPid: 99999,
+							hostAlias: 'gpu-1',
+						},
+					}],
+					triggers: [],
+					barriers: [{
+						barrierId: 'jb-timeout-1',
+						parentTokenId: 'otok-parent-1',
+						ownerNodeId: 'Lead',
+						deadlineAt: fakeNow + 5_000,
+					}],
+				});
+
+				// Before deadline: no barrier wakeup
+				await wd.runTick();
+				assert.strictEqual(wakeups.some(w => w.reason === 'barrier_deadline_expired'), false);
+
+				// Advance past deadline: Phase-1 emits barrier_deadline_expired exactly once (deduped on repeat tick)
+				fakeNow += 6_000;
+				await wd.runTick();
+				const barrierWakeups = wakeups.filter(w => w.reason === 'barrier_deadline_expired');
+				assert.strictEqual(barrierWakeups.length, 1);
+				assert.strictEqual(barrierWakeups[0].barrierId, 'jb-timeout-1');
+				assert.strictEqual(barrierWakeups[0].tokenId, 'otok-parent-1');
+				assert.strictEqual(barrierWakeups[0].nodeId, 'Lead');
+
+				await wd.runTick();
+				assert.strictEqual(
+					wakeups.filter(w => w.reason === 'barrier_deadline_expired').length,
+					1,
+					'Barrier deadline wakeup must not spam on subsequent ticks',
+				);
+
+				// After the first hung SSH probe timed out (40ms), the next tick must be able to probe again and emit pid_exited
+				await new Promise(r => setTimeout(r, 70));
+				fakeNow += 1_000;
+				await wd.runTick();
+				assert.ok(remoteBatchCalls >= 2, `Expected hung probe key to be released so second probe ran, calls=${remoteBatchCalls}`);
+				assert.ok(wakeups.some(w => w.reason === 'pid_exited' && w.tokenId === 'otok-remote-1'), 'Second probe must deliver pid_exited wakeup');
+			} finally {
+				sub.dispose();
+				wd.dispose();
+			}
+		} finally {
+			await fs.promises.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 		}
 	});
 });

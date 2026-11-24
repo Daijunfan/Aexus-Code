@@ -115,8 +115,9 @@ function buildGeneratedRankForTier(tier: number, totalCount: number, usedIds: Se
 	const icon = fallbackMeta?.icon ?? ADE_RANK_ICON_TOKENS[(tier - 1) % ADE_RANK_ICON_TOKENS.length];
 
 	let id = fallbackMeta && !usedIds.has(fallbackMeta.id) ? fallbackMeta.id : `tier-${tier}`;
+	let suffix = 2;
 	while (usedIds.has(id)) {
-		id = `tier-${tier}-${usedIds.size + 1}`;
+		id = `tier-${tier}-${suffix++}`;
 	}
 	usedIds.add(id);
 
@@ -204,10 +205,17 @@ export function resizeOrganizationRanks(
 			usedIds.add(existing.id);
 			const isSingle = count === 1;
 			const isLast = tier === count;
+			const wasPreviousSingleOrBottom = current.length === 1 || i === current.length - 1;
 			nextRanks.push({
 				...existing,
 				tier,
-				canHaveSubordinates: isSingle ? false : (isLast ? false : existing.canHaveSubordinates || true),
+				canHaveSubordinates: isSingle
+					? false
+					: isLast
+						? false
+						: existing.pureExecution
+							? false
+							: (wasPreviousSingleOrBottom ? true : Boolean(existing.canHaveSubordinates)),
 				pureExecution: isSingle ? false : existing.pureExecution,
 			});
 		} else {

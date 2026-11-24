@@ -15,7 +15,7 @@ Aexus Code (`v1.1.0`) is a **local-first, multi-agent workbench** built on open-
 
 ---
 
-## 2. Control Plane Authentication, Factory Wall & Lineage-Scoped RBAC
+## 2. Control Plane Authentication, Dual-View Boundaries & Lineage-Scoped RBAC
 
 Aexus Code exposes a local control plane (`aexus-ade`) strictly on local IPC and a `127.0.0.1` loopback bridge — **never** on an external network interface:
 
@@ -31,12 +31,13 @@ Aexus Code exposes a local control plane (`aexus-ade`) strictly on local IPC and
   - On every non-human request, `AdeControlHandler` resolves `_callerSessionId` against the live session registry and rejects deleted or archived callers immediately (`Permission denied: caller session no longer active.`).
   - If a session's live rank changed (e.g., demoted from `Governor` to `Employee` or `Worker`), permissions are re-evaluated against the **live** rank (and rejected outright if demoted to a `pureExecution` rank outside a Mission).
   - Long-lived engine client pools (`codex`, `acp`, `kilo`) are keyed by `(cwd, sessionId, rank, pure)` so a demoted session never reuses an older higher-privilege client process.
-- **Factory Wall & Top-Down Lineage Enforcement (`canRankSupervise`)**:
-  - `session.create`, `session.role`, `session.move`, `session.send`, `session.stop`, `session.archive`, `session.detach`, `session.delete`, and `org.send` strictly enforce top-down supervision (`canRankSupervise(roleConfig, callerRank, targetRank)`) and subtree lineage ownership:
+- **Top-Down Lineage Enforcement (`canRankSupervise`) & Dual-View Guardrails**:
+  - `session.create`, `session.role`, `session.move`, `session.send`, `session.stop`, `session.archive`, `session.detach`, `session.delete`, and `org.send`/`org.context` strictly enforce top-down supervision (`canRankSupervise(roleConfig, callerRank, targetRank)`) and subtree/department lineage ownership:
     - Agents cannot self-promote (e.g., `Employee → Governor`) or assign any rank equal to or higher than their own.
     - Non-top-tier callers cannot omit `--parent` to spawn a root orchestrator or message peers, superiors, or unrelated session trees.
     - Deleting or archiving a session that owns a Mission additionally requires **`mission.destroy`**, preventing lower tiers from wiping a locked Mission via `session delete --force`.
-  - Inside a Mission, the **Factory Wall** (`offGraphMaxTier`) separates off-graph supervisors (`org.*`, `mission.patch`, `mission.recall`) from in-graph execution nodes (strictly Token Bus `token.*`).
+    - Native `session create|delete` is blocked on locked Engineering canvas sessions — Engineering staff nodes MUST be created/removed exclusively via `orchestration staff create|remove`, which enforces immediate next-tier & same-department scoping plus automatic in-flight token reclamation.
+  - Inside a Dual-View Engineering workspace, downward baton minting (`token mint|split`) is strictly top-down (subordinates can only return received batons via `token return`), Department Shared Whiteboards enforce department/edge scoping, Task DAG completion enforces per-node authority plus upstream dependency checks (`INCOMPLETE_DEPENDENCIES`), and `maxHops` + FinOps budget ceilings hard-stop runaway loops or spend.
 - **High-Privilege API Splits (`dangerous: true`)**:
   - Destructive and host-mutating kernel primitives are split out and flagged `dangerous: true` in Organization & Roles Studio:
     - **`project.manage`** (project creation/deletion).

@@ -18,6 +18,7 @@ import {
 	ADE_CONTROL_META_NAME,
 	ADE_CONTROL_SOCKET_NAME,
 	ADE_MINT_SESSION_TOKEN_ACTION,
+	ADE_REVOKE_SESSION_TOKEN_ACTION,
 	IAdeControlConnectionMetadata,
 	IAdeControlDispatchRequest,
 	IAdeControlWireResponse,
@@ -498,7 +499,7 @@ suite('AdeControlServer', () => {
 			{ action: 'session.reparent', params: { id: 'sub-1', parentId: 'gov-2', project: betaPath } },
 			{ action: 'session.history', params: { id: 'sub-1', limit: 5 } },
 			{ action: 'session.list', params: { parent: 'gov-1', role: 'worker' } },
-			{ action: 'session.delete', params: { id: 'agent-1' } },
+			{ action: 'session.delete', params: { id: 'agent-1', force: true } },
 			{ action: 'project.delete', params: { target: betaPath, deleteSessions: true, deleteFiles: true } },
 			{ action: 'secretary.send', params: { prompt: 'Focus Alpha', wait: true } },
 			{ action: 'view.get', params: {} },
@@ -724,26 +725,35 @@ suite('AdeControlServer', () => {
 			action: 'status',
 		});
 		assert.strictEqual(omittedCallerRes.ok, true);
-		assert.deepStrictEqual(dispatched, [
-			{
-				action: 'token.complete',
-				params: {
-					tokenId: 'tok-1',
-					summary: 'Done',
-					caller: 'employee',
-					_verifiedCaller: true,
-					_callerSessionId: 'emp-42',
+		for (const d of dispatched) {
+			assert.strictEqual(typeof d.params?._callerTokenIat, 'number');
+		}
+		assert.deepStrictEqual(
+			dispatched.map(d => {
+				const { _callerTokenIat: _iat, ...rest } = d.params ?? {};
+				return { action: d.action, params: rest };
+			}),
+			[
+				{
+					action: 'token.complete',
+					params: {
+						tokenId: 'tok-1',
+						summary: 'Done',
+						caller: 'employee',
+						_verifiedCaller: true,
+						_callerSessionId: 'emp-42',
+					},
 				},
-			},
-			{
-				action: 'status',
-				params: {
-					caller: 'employee',
-					_verifiedCaller: true,
-					_callerSessionId: 'emp-42',
+				{
+					action: 'status',
+					params: {
+						caller: 'employee',
+						_verifiedCaller: true,
+						_callerSessionId: 'emp-42',
+					},
 				},
-			},
-		]);
+			],
+		);
 	});
 
 	test('exposes loopback TCP bridge metadata and enforces capability tokens over TCP', async () => {
@@ -764,14 +774,21 @@ suite('AdeControlServer', () => {
 		const employeeToken = server.mintSessionCapabilityToken('emp-9', 'employee', false);
 		const employeeRes = await sendWireRequestOverTcp(tcpPort, { token: employeeToken, action: 'status' });
 		assert.deepStrictEqual(employeeRes, { ok: true, result: { via: 'tcp', action: 'status' } });
-		assert.deepStrictEqual(dispatched, [{
-			action: 'status',
-			params: {
-				caller: 'employee',
-				_verifiedCaller: true,
-				_callerSessionId: 'emp-9',
-			},
-		}]);
+		assert.strictEqual(typeof dispatched[0]?.params?._callerTokenIat, 'number');
+		assert.deepStrictEqual(
+			dispatched.map(d => {
+				const { _callerTokenIat: _iat, ...rest } = d.params ?? {};
+				return { action: d.action, params: rest };
+			}),
+			[{
+				action: 'status',
+				params: {
+					caller: 'employee',
+					_verifiedCaller: true,
+					_callerSessionId: 'emp-9',
+				},
+			}],
+		);
 
 		// 3. Pure Workers and invalid tokens are still rejected over TCP, before reaching the dispatcher.
 		const pureToken = server.mintSessionCapabilityToken('wrk-9', 'worker', true);
@@ -848,18 +865,25 @@ suite('AdeControlServer', () => {
 		assert.strictEqual(workerRun.status, 1);
 		assert.match(workerRun.stdout + workerRun.stderr, /pure execution Worker sessions have no ADE control plane access/i);
 
-		assert.deepStrictEqual(dispatched, [
-			{
-				action: 'mission.retry',
-				params: {
-					missionId: 'm-1',
-					nodeId: 'N1',
-					caller: 'manager',
-					_verifiedCaller: true,
-					_callerSessionId: 'mgr-7',
+		assert.strictEqual(typeof dispatched[0]?.params?._callerTokenIat, 'number');
+		assert.deepStrictEqual(
+			dispatched.map(d => {
+				const { _callerTokenIat: _iat, ...rest } = d.params ?? {};
+				return { action: d.action, params: rest };
+			}),
+			[
+				{
+					action: 'mission.retry',
+					params: {
+						missionId: 'm-1',
+						nodeId: 'N1',
+						caller: 'manager',
+						_verifiedCaller: true,
+						_callerSessionId: 'mgr-7',
+					},
 				},
-			},
-		]);
+			],
+		);
 	});
 
 	test('allows pure-rank Mission node capability tokens strictly for token.*/whoami/docs.read/api.update while blocking all other actions', async () => {
@@ -940,29 +964,43 @@ suite('AdeControlServer', () => {
 			action: 'session.delete',
 			params: { id: 'gov-1' },
 		});
-		for (const denied of [deniedMint, deniedStaffRemove, deniedTaskComplete, deniedPatch, deniedCheckSet, deniedCheckRemove, deniedDelete]) {
+		const deniedWhiteboardCreate = await sendWireRequest(server.socketPath, {
+			token: missionNodePureToken,
+			action: 'whiteboard.create',
+			params: { missionId: 'm1', id: 'wb_rogue', title: 'Rogue', content: 'nope' },
+		});
+		for (const denied of [deniedMint, deniedStaffRemove, deniedTaskComplete, deniedPatch, deniedCheckSet, deniedCheckRemove, deniedDelete, deniedWhiteboardCreate]) {
 			assert.strictEqual(denied.ok, false);
 			assert.match(denied.error ?? '', /pure-execution (Mission node|Engineering staff) sessions/i);
 		}
 
-		assert.deepStrictEqual(dispatched, [
-			{
-				action: 'token.complete',
-				params: { tokenId: 'tok-1', summary: 'Done', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
-			},
-			{
-				action: 'token.return',
-				params: { tokenId: 'otok-1', summary: 'Returned to superior', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
-			},
-			{
-				action: 'whoami',
-				params: { caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
-			},
-			{
-				action: 'mission.check.run',
-				params: { missionId: 'm1', nodeId: 'N1', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
-			},
-		]);
+		for (const d of dispatched) {
+			assert.strictEqual(typeof d.params?._callerTokenIat, 'number');
+		}
+		assert.deepStrictEqual(
+			dispatched.map(d => {
+				const { _callerTokenIat: _iat, ...rest } = d.params ?? {};
+				return { action: d.action, params: rest };
+			}),
+			[
+				{
+					action: 'token.complete',
+					params: { tokenId: 'tok-1', summary: 'Done', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
+				},
+				{
+					action: 'token.return',
+					params: { tokenId: 'otok-1', summary: 'Returned to superior', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
+				},
+				{
+					action: 'whoami',
+					params: { caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
+				},
+				{
+					action: 'mission.check.run',
+					params: { missionId: 'm1', nodeId: 'N1', caller: 'worker', _verifiedCaller: true, _callerSessionId: 'mnode-1' },
+				},
+			],
+		);
 	});
 
 	test('pins originating windowId into signed capability token and routes background requests with softWindowPin fallback', async () => {
@@ -1033,5 +1071,304 @@ suite('AdeControlServer', () => {
 			action: 'status',
 		});
 		assert.deepStrictEqual(healthy, { ok: true, result: { ok: true } });
+	});
+
+	test('enforces capability token TTL expiration and immediate session token revocation', async () => {
+		let fakeNow = 1_700_000_000_000;
+		const server = store.add(new AdeControlServer(async req => ({ action: req.action, caller: req.params?._callerSessionId }), {
+			controlDir: tempDir,
+			capabilityTokenTtlMs: 5_000,
+			now: () => fakeNow,
+		}));
+		await server.whenReady();
+
+		const mint1 = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'emp-ttl', rank: 'employee' },
+		});
+		assert.strictEqual(mint1.ok, true);
+		const tok1 = (mint1.result as { readonly token: string }).token;
+		const parsedPayload = JSON.parse(Buffer.from(tok1.slice(ADE_CAPABILITY_TOKEN_PREFIX.length).split('.')[0], 'base64url').toString('utf8')) as { readonly exp?: number };
+		assert.strictEqual(parsedPayload.exp, fakeNow + 5_000);
+
+		// Valid before TTL
+		const okBefore = await sendWireRequest(server.socketPath, { token: tok1, action: 'whoami' });
+		assert.strictEqual(okBefore.ok, true);
+
+		// Revoke session immediately via wire action
+		fakeNow += 1_000;
+		const revokeRes = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: ADE_REVOKE_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'emp-ttl' },
+		});
+		assert.strictEqual(revokeRes.ok, true);
+
+		const afterRevoke = await sendWireRequest(server.socketPath, { token: tok1, action: 'whoami' });
+		assert.strictEqual(afterRevoke.ok, false);
+		assert.match(afterRevoke.error ?? '', /Unauthorized/i);
+
+		// Re-minting after revocation yields a fresh valid token
+		fakeNow += 500;
+		const mint2 = await sendWireRequest(server.socketPath, {
+			token: server.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'emp-ttl', rank: 'employee' },
+		});
+		assert.strictEqual(mint2.ok, true);
+		const tok2 = (mint2.result as { readonly token: string }).token;
+		const okRemint = await sendWireRequest(server.socketPath, { token: tok2, action: 'whoami' });
+		assert.strictEqual(okRemint.ok, true);
+
+		// Advance past tok2 TTL -> rejected as expired
+		fakeNow += 6_000;
+		const expiredRes = await sendWireRequest(server.socketPath, { token: tok2, action: 'whoami' });
+		assert.strictEqual(expiredRes.ok, false);
+		assert.match(expiredRes.error ?? '', /Unauthorized/i);
+	});
+
+	test('aborts dispatch AbortSignal on timeout and enforces maxConcurrentSockets & headerTimeoutMs', async () => {
+		let abortedOnTimeout = false;
+		const server = store.add(new AdeControlServer(async (req, _windowId, opts) => {
+			if (req.action === 'slow.op') {
+				opts?.signal?.addEventListener('abort', () => {
+					abortedOnTimeout = true;
+				});
+				return new Promise(() => { /* intentionally stalls */ });
+			}
+			return { ok: true };
+		}, {
+			controlDir: tempDir,
+			executionTimeoutMs: 100,
+			headerTimeoutMs: 120,
+			maxConcurrentSockets: 2,
+		}));
+		await server.whenReady();
+
+		// 1. Timeout aborts AbortSignal cleanly
+		const slowRes = await sendWireRequest(server.socketPath, { token: server.token, action: 'slow.op' });
+		assert.strictEqual(slowRes.ok, false);
+		assert.strictEqual(abortedOnTimeout, true, 'AbortSignal must fire when executionTimeoutMs trips');
+
+		// 2. Stalled pre-newline client is terminated by headerTimeoutMs
+		const stalledResult = await new Promise<string>((resolve, reject) => {
+			const sock = net.createConnection({ path: server.socketPath });
+			const chunks: Buffer[] = [];
+			sock.once('error', reject);
+			sock.once('connect', () => {
+				sock.write('{"token":"incomplete"');
+			});
+			sock.on('data', c => chunks.push(c));
+			sock.once('close', () => resolve(Buffer.concat(chunks).toString('utf8')));
+		});
+		assert.match(stalledResult, /header deadline exceeded/i);
+
+		// 3. Excess concurrent sockets beyond maxConcurrentSockets are rejected with busy error
+		const hold1 = net.createConnection({ path: server.socketPath });
+		const hold2 = net.createConnection({ path: server.socketPath });
+		await Promise.all([
+			new Promise<void>(r => hold1.once('connect', r)),
+			new Promise<void>(r => hold2.once('connect', r)),
+		]);
+		try {
+			const overflow = await sendWireRequest(server.socketPath, { token: server.token, action: 'status' });
+			assert.strictEqual(overflow.ok, false);
+			assert.match(overflow.error ?? '', /Too many concurrent/i);
+		} finally {
+			hold1.destroy();
+			hold2.destroy();
+		}
+	});
+
+	test('C1 idempotency ledger: replay, concurrent coalescing, conflict detection, cross-principal isolation, disk persistence, and pure missionNode policy', async () => {
+		let execCount = 0;
+		let releaseSlow!: () => void;
+		const slowGate = new Promise<void>(resolve => { releaseSlow = resolve; });
+
+		const server1 = new AdeControlServer(async req => {
+			execCount++;
+			if (req.action === 'token.mint' && req.params?.slow === true) {
+				await slowGate;
+			}
+			return { seq: execCount, action: req.action, summary: req.params?.summary };
+		}, {
+			controlDir: tempDir,
+		});
+		await server1.whenReady();
+
+		try {
+			// Mint two distinct session principals
+			const mintA = await sendWireRequest(server1.socketPath, {
+				token: server1.token,
+				action: ADE_MINT_SESSION_TOKEN_ACTION,
+				params: { sessionId: 'sess-idem-a', rank: 'manager', isMissionNode: true },
+			});
+			const mintB = await sendWireRequest(server1.socketPath, {
+				token: server1.token,
+				action: ADE_MINT_SESSION_TOKEN_ACTION,
+				params: { sessionId: 'sess-idem-b', rank: 'manager', isMissionNode: true },
+			});
+			const mintPure = await sendWireRequest(server1.socketPath, {
+				token: server1.token,
+				action: ADE_MINT_SESSION_TOKEN_ACTION,
+				params: { sessionId: 'sess-pure-node', rank: 'worker', pure: true, missionNode: true },
+			});
+			const tokA = (mintA.result as { readonly token: string }).token;
+			const tokB = (mintB.result as { readonly token: string }).token;
+			const tokPure = (mintPure.result as { readonly token: string }).token;
+
+			// 1. Replay identical (principal, action, idempotencyKey) executes handler ONCE and marks idempotentReplay: true
+			const first = await sendWireRequest(server1.socketPath, {
+				token: tokA,
+				action: 'token.return',
+				params: { summary: 'done-1', mission: 'm1' },
+				idempotencyKey: 'idem-key-001',
+			});
+			assert.strictEqual(first.ok, true);
+			assert.strictEqual(first.idempotentReplay, undefined);
+			assert.strictEqual((first.result as { readonly seq: number }).seq, 1);
+
+			const replay = await sendWireRequest(server1.socketPath, {
+				token: tokA,
+				action: 'token.return',
+				params: { mission: 'm1', summary: 'done-1' }, // different key order -> canonical hash must match
+				idempotencyKey: 'idem-key-001',
+			});
+			assert.strictEqual(replay.ok, true);
+			assert.strictEqual(replay.idempotentReplay, true);
+			assert.strictEqual((replay.result as { readonly seq: number }).seq, 1);
+			assert.strictEqual(execCount, 1);
+
+			// 2. Same idempotencyKey with different params -> IDEMPOTENCY_CONFLICT
+			const conflict = await sendWireRequest(server1.socketPath, {
+				token: tokA,
+				action: 'token.return',
+				params: { summary: 'mutated-payload', mission: 'm1' },
+				idempotencyKey: 'idem-key-001',
+			});
+			assert.strictEqual(conflict.ok, false);
+			assert.match(conflict.error ?? '', /IDEMPOTENCY_CONFLICT/i);
+			assert.strictEqual(execCount, 1);
+
+			// 3. Cross-principal isolation: principal B using same key executes independently
+			const otherPrincipal = await sendWireRequest(server1.socketPath, {
+				token: tokB,
+				action: 'token.return',
+				params: { summary: 'principal-b-payload', mission: 'm1' },
+				idempotencyKey: 'idem-key-001',
+			});
+			assert.strictEqual(otherPrincipal.ok, true);
+			assert.strictEqual(otherPrincipal.idempotentReplay, undefined);
+			assert.strictEqual((otherPrincipal.result as { readonly seq: number }).seq, 2);
+			assert.strictEqual(execCount, 2);
+
+			// 4. Concurrent in-flight coalescing
+			const p1 = sendWireRequest(server1.socketPath, {
+				token: tokA,
+				action: 'token.mint',
+				params: { slow: true, summary: 'parallel-wave' },
+				idempotencyKey: 'idem-coalesce-01',
+			});
+			const p2 = sendWireRequest(server1.socketPath, {
+				token: tokA,
+				action: 'token.mint',
+				params: { summary: 'parallel-wave', slow: true },
+				idempotencyKey: 'idem-coalesce-01',
+			});
+			await new Promise(r => setTimeout(r, 30));
+			releaseSlow();
+			const [r1, r2] = await Promise.all([p1, p2]);
+			assert.strictEqual(r1.ok, true);
+			assert.strictEqual(r2.ok, true);
+			assert.strictEqual((r1.result as { readonly seq: number }).seq, (r2.result as { readonly seq: number }).seq);
+			assert.strictEqual(execCount, 3);
+
+			// 5. Pure missionNode policy: read-only diagnostics/checkpoint.list/orchestration.validate allowed; checkpoint.restore denied
+			const pureDiag = await sendWireRequest(server1.socketPath, {
+				token: tokPure,
+				action: 'mission.diagnostics',
+				params: { mission: 'm1' },
+			});
+			assert.strictEqual(pureDiag.ok, true);
+			const pureVal = await sendWireRequest(server1.socketPath, {
+				token: tokPure,
+				action: 'orchestration.validate',
+				params: { mission: 'm1' },
+			});
+			assert.strictEqual(pureVal.ok, true);
+			const pureRestore = await sendWireRequest(server1.socketPath, {
+				token: tokPure,
+				action: 'mission.checkpoint.restore',
+				params: { mission: 'm1', id: 'ckpt-1' },
+			});
+			assert.strictEqual(pureRestore.ok, false);
+			assert.match(pureRestore.error ?? '', /Permission denied|Forbidden/i);
+		} finally {
+			server1.dispose();
+		}
+
+		// 6. Disk persistence across server restart (0o600 file survived dispose sync flush)
+		let server2ExecCount = 0;
+		const server2 = store.add(new AdeControlServer(async req => {
+			server2ExecCount++;
+			return { seq: 999, action: req.action };
+		}, {
+			controlDir: tempDir,
+		}));
+		await server2.whenReady();
+
+		const ledgerPath = path.join(tempDir, 'idempotency-ledger.json');
+		const ledgerStat = await fs.promises.stat(ledgerPath);
+		if (process.platform !== 'win32') {
+			assert.strictEqual(ledgerStat.mode & 0o777, 0o600, 'idempotency-ledger.json must have 0o600 permissions');
+		}
+
+		// Mint token with same sessionId 'sess-idem-a' (same principalId 'session:sess-idem-a')
+		const mintA2 = await sendWireRequest(server2.socketPath, {
+			token: server2.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'sess-idem-a', rank: 'manager', isMissionNode: true },
+		});
+		const tokA2 = (mintA2.result as { readonly token: string }).token;
+		const postRestartReplay = await sendWireRequest(server2.socketPath, {
+			token: tokA2,
+			action: 'token.return',
+			params: { summary: 'done-1', mission: 'm1' },
+			idempotencyKey: 'idem-key-001',
+		});
+		assert.strictEqual(postRestartReplay.ok, true);
+		assert.strictEqual(postRestartReplay.idempotentReplay, true);
+		assert.strictEqual((postRestartReplay.result as { readonly seq: number }).seq, 1);
+		assert.strictEqual(server2ExecCount, 0, 'Handler must NOT re-execute on post-restart idempotent replay');
+
+		// 7. Stage 3 C1 hardening: soft-pin wid + live rank resize token rotation do NOT trigger false IDEMPOTENCY_CONFLICT
+		const mintRotated = await sendWireRequest(server2.socketPath, {
+			token: server2.token,
+			action: ADE_MINT_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'sess-idem-a', rank: 'governor', isMissionNode: true, windowId: 42 },
+		});
+		const tokRotated = (mintRotated.result as { readonly token: string }).token;
+		const rotatedReplay = await sendWireRequest(server2.socketPath, {
+			token: tokRotated,
+			action: 'token.return',
+			params: { summary: 'done-1', mission: 'm1' },
+			idempotencyKey: 'idem-key-001',
+		});
+		assert.strictEqual(rotatedReplay.ok, true);
+		assert.strictEqual(rotatedReplay.idempotentReplay, true);
+		assert.strictEqual(server2ExecCount, 0);
+
+		// 8. Stage 3: bidirectional onDidRevokeSession callback fires on master auth.revokeSessionToken
+		const revokedEvents: Array<{ sid: string; ts: number }> = [];
+		server2.setOnDidRevokeSession((sid, ts) => revokedEvents.push({ sid, ts }));
+		const revRes = await sendWireRequest(server2.socketPath, {
+			token: server2.token,
+			action: ADE_REVOKE_SESSION_TOKEN_ACTION,
+			params: { sessionId: 'sess-idem-a' },
+		});
+		assert.strictEqual(revRes.ok, true);
+		assert.strictEqual(revokedEvents.length, 1);
+		assert.strictEqual(revokedEvents[0].sid, 'sess-idem-a');
 	});
 });

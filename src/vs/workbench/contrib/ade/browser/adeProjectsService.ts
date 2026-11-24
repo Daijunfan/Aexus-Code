@@ -925,7 +925,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		if (!agent || !agent.treeGovernorId || agent.treeGovernorId === agent.id) {
 			return false;
 		}
-		if (agent.treeType === 'mission' && agent.treeNodeId) {
+		if ((agent.treeType === 'mission' || agent.treeType === 'engineering') && agent.treeNodeId) {
 			return true;
 		}
 		const owner = this.getAgent(agent.treeGovernorId);
@@ -958,7 +958,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			readonly parentKey?: string;
 			readonly role?: AdeAgentRole;
 		}[],
-		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
+		options?: { readonly projectUri?: URI; readonly ownerTier?: number; readonly treeType?: AdeWorkTreeType },
 	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] } {
 		const ownerAgent = this.getAgent(ownerOrMissionId);
 		const targetProjectUri = ownerAgent?.projectUri
@@ -967,6 +967,8 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			return { employeeAgentsByNode: {}, removedAgents: [] };
 		}
 
+		const resolvedTreeType: AdeWorkTreeType = options?.treeType ?? 'mission';
+		const isEngineeringOrch = resolvedTreeType === 'engineering';
 		const schema = this.getRoleSchema();
 		const defaultLeaf = getDefaultPureLeafRank(schema);
 		let employeeRole: AdeAgentRole | undefined;
@@ -977,6 +979,11 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 			const nextTier = schema.ranks.find(r => r.tier > effectiveCutoffTier) ?? schema.ranks[schema.ranks.length - 1] ?? ownerDef;
 			const isDefaultPure = Boolean(nextTier.pureExecution && nextTier.id === defaultLeaf.id);
 			employeeRole = isDefaultPure ? undefined : nextTier.id;
+		} else if (isEngineeringOrch) {
+			// Standalone User-created Engineering Orchestration: staff nodes carry their own explicit ranks (including L1 on canvas).
+			effectiveCutoffTier = 0;
+			const topRank = getTopRankDefinition(schema);
+			employeeRole = topRank.pureExecution ? undefined : topRank.id;
 		} else {
 			// For User (L-1) or Secretary (L0)-owned Missions, default factory cutoff is L1 (or configured offGraphMaxTier),
 			// so generated in-graph employees must start strictly on the in-graph side (tier > cutoff).
@@ -1024,7 +1031,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					role: preservedRole,
 					archived: undefined,
 					preferredEngineId: prev.preferredEngineId ?? inheritedEngineId,
-					treeType: 'mission',
+					treeType: resolvedTreeType,
 					treeGovernorId: ownerOrMissionId,
 					treeNodeId: emp.id,
 					treeNodeIds: nodeIds,
@@ -1038,7 +1045,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 					status: 'idle',
 					draft: '',
 					preferredEngineId: inheritedEngineId,
-					treeType: 'mission',
+					treeType: resolvedTreeType,
 					treeGovernorId: ownerOrMissionId,
 					treeNodeId: emp.id,
 					treeNodeIds: nodeIds,
@@ -1457,7 +1464,7 @@ export class AdeProjectsService extends Disposable implements IAdeProjectsServic
 		if (!current || current.role === role) {
 			return;
 		}
-		if (this.isLockedByWorkTree(id) && !(options?.allowLockedMissionEmployee && current.treeType === 'mission' && Boolean(current.treeNodeId))) {
+		if (this.isLockedByWorkTree(id) && !(options?.allowLockedMissionEmployee && (current.treeType === 'mission' || current.treeType === 'engineering') && Boolean(current.treeNodeId))) {
 			return;
 		}
 		this.entries = this.entries.map(agent => agent.id === id ? { ...agent, role } : agent);

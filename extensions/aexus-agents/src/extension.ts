@@ -3,34 +3,23 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as cp from 'node:child_process';
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { promisify } from 'node:util';
 import * as vscode from 'vscode';
-import { AntigravityRuntime, ClineRuntime, DshRuntime } from './acp';
 import {
 	buildOptionGroupsForSession,
-	DiscoveredOptionGroup,
-	DiscoveredSlashCommand,
 	discoverCustomizationFiles,
-	discoverEngineModels,
 	discoverSlashCommands,
-	EngineId,
 	readSkillOrCommandTemplate,
 	registerRemoteCapabilitiesReader,
 	SessionConfigState,
 } from './capabilities';
-import { ClaudeRuntime } from './claude';
 import {
 	buildRemotePersistentPrefix,
 	clearCloudTransportCaches,
-	CLOUD_PROJECT_SCHEME,
 	CloudHostSshContext,
 	CloudHostTarget,
-	execRemoteShell,
 	isCloudUri,
 	isLegacyCloudBridgeCwd,
 	normalizeCloudAuthority,
@@ -38,9 +27,7 @@ import {
 	normalizeRemoteCwdForCompare,
 	notifySystemResume,
 	parseCloudProjectUri,
-	posixQuote,
 	probeRemoteEngines,
-	psSingleQuote,
 	readRemoteTextFilesBatch,
 	registerCloudTransportBridge,
 	resolveCloudHostTarget,
@@ -48,529 +35,75 @@ import {
 	terminateRemotePersistentSessionsByPrefix,
 	toRemoteNativePath,
 } from './cloudTransport';
-import { CodexRuntime } from './codex';
-import { KiloRuntime, OpenCodeRuntime } from './kilo';
+import { registerEngineeringAndRoleBridge } from './extensionEngineeringDispatch';
+import {
+	buildMissingEngineMarkdown,
+	buildMissingRemoteEngineMarkdown,
+	computeMeasuredContextSegments,
+	definitions,
+	ENGINE_ALIASES,
+	EngineDefinition,
+	expandBuiltInWorkflowPrompt,
+	extractAttachmentsAndRefs,
+	formatMissingEngineMessage,
+	formatMissingRemoteEngineMessage,
+	formatRecordProjectLabel,
+	GOAL_COMPLETE_MARKER,
+	hashRolePrompt,
+	MAX_GOAL_ROUNDS,
+	parseOptionalUri,
+	readNativeRoleBridgeEnabled,
+	recordCloudAuthority,
+	RecordEntry,
+	recordProjectUri,
+	remoteNativePathToCloudUri,
+	resolveCliBinDir,
+	resolveCompletedTurnUsage,
+	resolveDefaultModeForEngine,
+	resolveDefaultPermissionsForEngine,
+	resolveDefaultSandboxForEngine,
+	SECRETARY_TYPE,
+	SECRETARY_URI,
+	SecretaryState,
+	toEngineType,
+	toSendOptions,
+	toSessionOptionsRecord,
+	toVsCodeOptionGroups,
+	withSafeDefaultConfig,
+} from './extensionSessionHelpers';
+import { createSlashCommandHandlers } from './extensionSlashCommands';
 import { installNativeRoleBridge } from './nativeRoleBridge';
-import { PiRuntime } from './pi';
 import {
 	AEXUS_PREAMBLE_END_MARKER,
 	buildUserMessageSystemEnvelope,
+	computeStaticRolePromptHash,
+	extractDynamicRoleBindingsTail,
+	extractStaticRoleCharter,
 	filterAndCleanHistoryTurns,
 	hasAexusSystemMessageEnvelope,
-	isNativeRoleBridgeDisabledByEnv,
 	RoleSyncSnapshot,
 } from './roleBridgeShared';
 import {
-	ENGINE_INSTALL_GUIDES,
-	EngineAttachment,
 	EngineRuntime,
 	EngineRuntimeCapabilities,
-	EngineSendOptions,
-	EngineThinkingLevel,
 	EngineTurnTokenUsage,
-	estimateTextTokens,
 	findExecutable,
+	getConfiguredEngineIdleStallTimeoutMs,
+	getConfiguredEngineTurnTimeoutMs,
 	HistoryEntry,
 	isAutonomousModeEnabled,
 	NativeSession,
 	setCliBinDirectory,
-	setHostWindowId,
 } from './runtime';
 import { SessionTurnCoordinator } from './turnCoordinator';
 import { createStreamToolErrorScanner, detectToolErrorInProgressText, detectToolErrorInStreamPart } from './usageTracker';
 
-const execFileAsync = promisify(cp.execFile);
 const roleBridge = installNativeRoleBridge({ distDir: __dirname });
+let refreshRoleSnapshotFromWorkbench: () => Promise<RoleSyncSnapshot | undefined> = async () => undefined;
+let flushPendingExtensionSaves: (() => Promise<void>) | undefined;
 
-interface RoleInitState {
-	rank: string;
-	engine: string;
-	promptHash?: string;
-	initializedAt: number;
-}
-
-function hashRolePrompt(prompt: string | undefined): string {
-	return crypto.createHash('sha256').update((prompt ?? '').trim(), 'utf8').digest('hex');
-}
-
-function resolveDefaultModeForEngine(engineType: EngineId, autonomous: boolean): string | undefined {
-	if (engineType === 'aexus-cline') {
-		return autonomous ? 'yolo' : 'ask';
-	}
-	if (engineType === 'aexus-antigravity') {
-		return autonomous ? 'auto' : 'ask';
-	}
-	if (engineType === 'aexus-pi') {
-		return 'full';
-	}
-	return undefined;
-}
-
-function resolveDefaultPermissionsForEngine(engineType: EngineId, autonomous: boolean): string {
-	if (engineType === 'aexus-codex') {
-		return autonomous ? 'never' : 'on-request';
-	}
-	if (engineType === 'aexus-claude') {
-		return autonomous ? 'bypassPermissions' : 'acceptEdits';
-	}
-	if (engineType === 'aexus-dsh') {
-		return autonomous ? 'danger-full-access' : 'ask';
-	}
-	return autonomous ? 'bypassPermissions' : 'ask';
-}
-
-function resolveDefaultSandboxForEngine(autonomous: boolean): string {
-	return autonomous ? 'danger-full-access' : 'workspace-write';
-}
-
-function withSafeDefaultConfig(engineType: EngineId, cfg: SessionConfigState): SessionConfigState {
-	const autonomous = isAutonomousModeEnabled();
-	if (autonomous) {
-		return cfg;
-	}
-	const defaultMode = resolveDefaultModeForEngine(engineType, false);
-	const defaultPerm = resolveDefaultPermissionsForEngine(engineType, false);
-	const defaultSandbox = resolveDefaultSandboxForEngine(false);
-	return {
-		...cfg,
-		...(defaultMode && (!cfg.mode || cfg.mode === 'default') ? { mode: defaultMode } : {}),
-		...((!cfg.permissionMode || cfg.permissionMode === 'default') ? { permissionMode: defaultPerm } : {}),
-		...(engineType === 'aexus-codex' && (!cfg.sandboxMode || cfg.sandboxMode === 'default') ? { sandboxMode: defaultSandbox } : {}),
-	};
-}
-
-function readNativeRoleBridgeEnabled(): boolean {
-	if (isNativeRoleBridgeDisabledByEnv()) {
-		return false;
-	}
-	try {
-		const cfg = vscode.workspace.getConfiguration('aexus.ade', null);
-		const inspected = cfg.inspect<boolean>('nativeExtensionRoleBridge.enabled');
-		const effective = inspected?.globalValue ?? inspected?.defaultValue ?? cfg.get<boolean>('nativeExtensionRoleBridge.enabled', true);
-		return effective !== false;
-	} catch {
-		return true;
-	}
-}
-
-interface RecordEntry extends NativeSession {
-	engine: string;
-	initialTitle?: string;
-	customLabel?: boolean;
-	resourceId?: string;
-	sessionConfig?: SessionConfigState;
-	activeGoal?: string;
-	roleInit?: RoleInitState;
-	lastDeltaContext?: string;
-	cloudProjectUri?: string;
-}
-
-function recordProjectUri(record: RecordEntry): vscode.Uri {
-	return record.cloudProjectUri ? vscode.Uri.parse(record.cloudProjectUri) : vscode.Uri.file(record.cwd);
-}
-
-function recordCloudAuthority(record: Pick<RecordEntry, 'cloudProjectUri'> | undefined): string | undefined {
-	const parsed = parseCloudProjectUri(record?.cloudProjectUri);
-	return parsed ? normalizeCloudAuthority(parsed.authority) : undefined;
-}
-
-function remoteNativePathToCloudUri(alias: string, remotePath: string, hostOs: CloudHostTarget['os']): string {
-	const cleaned = (remotePath || '/').trim();
-	let uriPath: string;
-	if (hostOs === 'windows') {
-		const fwd = cleaned.replace(/\\/g, '/');
-		uriPath = fwd.startsWith('/') ? fwd : `/${fwd}`;
-	} else {
-		uriPath = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
-	}
-	return normalizeCloudProjectUriString(vscode.Uri.from({ scheme: CLOUD_PROJECT_SCHEME, authority: alias, path: uriPath }));
-}
-
-function parseOptionalUri(raw: vscode.Uri | string | undefined): vscode.Uri | undefined {
-	if (!raw) {
-		return undefined;
-	}
-	if (raw instanceof vscode.Uri) {
-		return raw;
-	}
-	if (typeof raw === 'string' && raw.trim()) {
-		try {
-			return vscode.Uri.parse(raw);
-		} catch {
-			return undefined;
-		}
-	}
-	return undefined;
-}
-
-function formatRecordProjectLabel(record: RecordEntry): string {
-	if (record.cloudProjectUri) {
-		const parsed = vscode.Uri.parse(record.cloudProjectUri);
-		return `${parsed.authority}:${parsed.path || '/'}`;
-	}
-	return record.cwd;
-}
-
-interface SecretaryState {
-	engine: string;
-	recordKey: string;
-	perEngineConfig?: Record<string, SessionConfigState>;
-}
-
-interface EngineDefinition {
-	readonly id: string;
-	readonly executable: string;
-	readonly name: string;
-	readonly type: EngineId;
-	readonly themeIcon?: string;
-	readonly svgIcon?: string;
-	readonly create: (command: string, remoteTarget?: CloudHostTarget) => EngineRuntime;
-}
-
-const SECRETARY_TYPE = 'aexus-secretary';
-const SECRETARY_URI = vscode.Uri.from({ scheme: SECRETARY_TYPE, path: '/main' });
-const GOAL_COMPLETE_MARKER = '<!-- GOAL_COMPLETE -->';
-const MAX_GOAL_ROUNDS = 6;
-
-const ENGINE_ALIASES: Record<string, string> = {
-	codex: 'codex',
-	'aexus-codex': 'codex',
-	claude: 'claude',
-	'claude-code': 'claude',
-	'aexus-claude': 'claude',
-	kilo: 'kilo',
-	kilocode: 'kilo',
-	'kilo-code': 'kilo',
-	'aexus-kilo': 'kilo',
-	opencode: 'opencode',
-	'aexus-opencode': 'opencode',
-	dsh: 'dsh',
-	deepseek: 'dsh',
-	'deepseek-harness': 'dsh',
-	'aexus-dsh': 'dsh',
-	agy: 'antigravity',
-	antigravity: 'antigravity',
-	'google-antigravity': 'antigravity',
-	'aexus-antigravity': 'antigravity',
-	cline: 'cline',
-	'aexus-cline': 'cline',
-	pi: 'pi',
-	'aexus-pi': 'pi',
-};
-
-const definitions: readonly EngineDefinition[] = [
-	{ id: 'claude', executable: 'claude', name: 'Claude Code', type: 'aexus-claude', themeIcon: 'claude', svgIcon: 'claude', create: (command, remoteTarget) => new ClaudeRuntime(command, remoteTarget) },
-	{ id: 'codex', executable: 'codex', name: 'Codex', type: 'aexus-codex', themeIcon: 'openai', svgIcon: 'codex', create: (command, remoteTarget) => new CodexRuntime(command, remoteTarget) },
-	{ id: 'kilo', executable: 'kilo', name: 'Kilo Code', type: 'aexus-kilo', svgIcon: 'kilo', create: (command, remoteTarget) => new KiloRuntime(command, remoteTarget) },
-	{ id: 'opencode', executable: 'opencode', name: 'OpenCode', type: 'aexus-opencode', svgIcon: 'opencode', create: (command, remoteTarget) => new OpenCodeRuntime(command, remoteTarget) },
-	{ id: 'dsh', executable: 'dsh', name: 'DeepSeek Harness', type: 'aexus-dsh', svgIcon: 'dsh', create: (command, remoteTarget) => new DshRuntime(command, remoteTarget) },
-	{ id: 'antigravity', executable: 'agy', name: 'Google Antigravity', type: 'aexus-antigravity', svgIcon: 'antigravity', create: (command, remoteTarget) => new AntigravityRuntime(command, remoteTarget) },
-	{ id: 'cline', executable: 'cline', name: 'Cline', type: 'aexus-cline', svgIcon: 'cline', create: (command, remoteTarget) => new ClineRuntime(command, remoteTarget) },
-	{ id: 'pi', executable: 'pi', name: 'Pi', type: 'aexus-pi', svgIcon: 'pi', create: (command, remoteTarget) => new PiRuntime(command, remoteTarget) },
-];
-
-const OPTION_GROUP_ICONS: Record<string, string> = {
-	engine: 'server-process',
-	model: 'sparkle',
-	thinking: 'lightbulb',
-	mode: 'layers',
-	permissions: 'shield',
-	sandbox: 'lock',
-	webSearch: 'globe',
-};
-
-const IMAGE_MIME_BY_EXT: Record<string, string> = {
-	'.png': 'image/png',
-	'.jpg': 'image/jpeg',
-	'.jpeg': 'image/jpeg',
-	'.webp': 'image/webp',
-	'.gif': 'image/gif',
-};
-
-async function resolveCliBinDir(extensionPath: string): Promise<string> {
-	const binName = process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade';
-	const appBinDir = path.join(vscode.env.appRoot, 'bin');
-	try {
-		await fs.access(path.join(appBinDir, binName));
-		return appBinDir;
-	} catch {
-		return path.join(extensionPath, 'bin');
-	}
-}
-
-function toEngineType(shortOrFull: string): EngineId {
-	const normalized = shortOrFull.startsWith('aexus-') ? shortOrFull : `aexus-${shortOrFull}`;
-	const found = definitions.find(d => d.type === normalized);
-	return found ? found.type : 'aexus-claude';
-}
-
-function toVsCodeOptionGroups(discovered: readonly DiscoveredOptionGroup[], sessionType: string): vscode.ChatSessionProviderOptionGroup[] {
-	return discovered.map(group => {
-		const iconId = OPTION_GROUP_ICONS[group.id];
-		const items: vscode.ChatSessionProviderOptionItem[] = group.items.map(opt => ({
-			id: opt.id,
-			name: opt.name,
-			description: opt.description,
-			slashCommand: opt.slashCommand,
-			tooltip: opt.tooltip ?? opt.description,
-			...(iconId ? { icon: new vscode.ThemeIcon(iconId) } : {}),
-		}));
-		const selected = items.find(i => i.id === group.selectedId) ?? items[0];
-		return {
-			id: group.id,
-			name: group.name,
-			description: group.description,
-			icon: iconId ? new vscode.ThemeIcon(iconId) : undefined,
-			items,
-			selected,
-			...(group.id === 'model' ? {
-				commands: [{
-					command: 'aexus.agents.selectCustomModel',
-					title: vscode.l10n.t('Enter Custom Model ID…'),
-					tooltip: vscode.l10n.t('Enter any custom model identifier supported by the active engine'),
-					arguments: [sessionType],
-				}],
-			} : {}),
-		};
-	});
-}
-
-function toSessionOptionsRecord(groups: readonly vscode.ChatSessionProviderOptionGroup[]): Record<string, vscode.ChatSessionProviderOptionItem> {
-	const out: Record<string, vscode.ChatSessionProviderOptionItem> = {};
-	for (const group of groups) {
-		const selected = group.selected ?? group.items[0];
-		if (selected) {
-			out[group.id] = selected;
-		}
-	}
-	return out;
-}
-
-function toSendOptions(cfg: SessionConfigState | undefined, extra: {
-	pureWorker?: boolean;
-	callerRole?: string;
-	isMissionNode?: boolean;
-	adeSessionId?: string;
-	automatedEngineering?: boolean;
-	attachments?: readonly EngineAttachment[];
-	onInterimUsage?: (cumulativeTurnUsage: EngineTurnTokenUsage) => void;
-	onContextCompacted?: () => void;
-}): EngineSendOptions {
-	return {
-		model: cfg?.model && cfg.model !== 'default' ? cfg.model : undefined,
-		thinking: cfg?.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined,
-		mode: cfg?.mode && cfg.mode !== 'default' ? cfg.mode : undefined,
-		permissionMode: cfg?.permissionMode && cfg.permissionMode !== 'default' ? cfg.permissionMode : undefined,
-		sandboxMode: cfg?.sandboxMode && cfg.sandboxMode !== 'default' ? cfg.sandboxMode : undefined,
-		webSearch: cfg?.webSearch,
-		attachments: extra.attachments,
-		pureWorker: extra.pureWorker,
-		callerRole: extra.callerRole,
-		isMissionNode: extra.isMissionNode,
-		adeSessionId: extra.adeSessionId,
-		automatedEngineering: extra.automatedEngineering,
-		onInterimUsage: extra.onInterimUsage,
-		onContextCompacted: extra.onContextCompacted,
-	};
-}
-
-function extractNodePrePromptText(rawPrompt: string): string {
-	const startMarker = '### Node Pre-Prompt (`pre_prompt`)';
-	const startIdx = rawPrompt.indexOf(startMarker);
-	if (startIdx < 0) {
-		return '';
-	}
-	const rest = rawPrompt.slice(startIdx);
-	const nextHeadingIdx = rest.indexOf('\n### ', startMarker.length);
-	return (nextHeadingIdx > 0 ? rest.slice(0, nextHeadingIdx) : rest).trim();
-}
-
-function computeMeasuredContextSegments(params: {
-	readonly injectedContractText?: string;
-	readonly rawPrompt: string;
-	readonly finalPrompt: string;
-	readonly usage: EngineTurnTokenUsage;
-	readonly isFirstTurn: boolean;
-}): { readonly contextInitTokens?: number; readonly contextTierDocTokens?: number } {
-	const prePromptText = extractNodePrePromptText(params.rawPrompt);
-	const tierDocParts = [params.injectedContractText?.trim() || '', prePromptText].filter(Boolean);
-	const measuredTierDocTokens = tierDocParts.length > 0
-		? estimateTextTokens(tierDocParts.join('\n\n'))
-		: (params.isFirstTurn ? 0 : undefined);
-
-	let measuredInitTokens: number | undefined;
-	if (params.isFirstTurn && !params.usage.estimated) {
-		const reportedPromptIn = params.usage.inputTokens + (params.usage.cacheReadTokens ?? 0) + (params.usage.cacheWriteTokens ?? 0);
-		const sentPromptEst = estimateTextTokens(params.finalPrompt);
-		measuredInitTokens = reportedPromptIn > sentPromptEst ? reportedPromptIn - sentPromptEst : 0;
-	}
-	return {
-		...(measuredInitTokens !== undefined ? { contextInitTokens: measuredInitTokens } : {}),
-		...(measuredTierDocTokens !== undefined ? { contextTierDocTokens: measuredTierDocTokens } : {}),
-	};
-}
-
-function resolveCompletedTurnUsage(engine: EngineRuntime, sessionId: string, promptText: string, replyText: string, startedAt: number): EngineTurnTokenUsage {
-	const reported = engine.consumeLastTurnUsage?.(sessionId);
-	if (reported && reported.totalTokens > 0) {
-		return reported;
-	}
-	const inputTokens = estimateTextTokens(promptText);
-	const outputTokens = estimateTextTokens(replyText);
-	return {
-		inputTokens,
-		outputTokens,
-		cacheReadTokens: 0,
-		cacheWriteTokens: 0,
-		totalTokens: inputTokens + outputTokens,
-		durationMs: Math.max(0, Date.now() - startedAt),
-		estimated: true,
-	};
-}
-
-function extractAttachmentsAndRefs(
-	references: readonly vscode.ChatPromptReference[],
-	cloudTarget?: CloudHostTarget,
-): { attachments: EngineAttachment[]; fileLines: string[] } {
-	const attachments: EngineAttachment[] = [];
-	const fileLines: string[] = [];
-	const seenPaths = new Set<string>();
-	for (const ref of references) {
-		if (ref.value instanceof vscode.Uri) {
-			if (ref.value.scheme === CLOUD_PROJECT_SCHEME && cloudTarget && normalizeCloudAuthority(ref.value.authority) === cloudTarget.authority) {
-				const remotePath = toRemoteNativePath(ref.value.path || '/', cloudTarget.os, cloudTarget.remoteHome);
-				if (seenPaths.has(remotePath)) {
-					continue;
-				}
-				seenPaths.add(remotePath);
-				const ext = path.posix.extname(ref.value.path || '').toLowerCase();
-				const imageMime = IMAGE_MIME_BY_EXT[ext];
-				attachments.push({ kind: imageMime ? 'image' : 'file', filePath: remotePath, mimeType: imageMime, remote: true });
-				fileLines.push(remotePath);
-			} else if (ref.value.scheme === 'file') {
-				const fsPath = ref.value.fsPath;
-				if (seenPaths.has(fsPath)) {
-					continue;
-				}
-				seenPaths.add(fsPath);
-				const ext = path.extname(fsPath).toLowerCase();
-				const imageMime = IMAGE_MIME_BY_EXT[ext];
-				if (imageMime) {
-					attachments.push({ kind: 'image', filePath: fsPath, mimeType: imageMime, remote: false });
-					if (!cloudTarget) {
-						fileLines.push(fsPath);
-					}
-				} else if (!cloudTarget) {
-					attachments.push({ kind: 'file', filePath: fsPath, remote: false });
-					fileLines.push(fsPath);
-				}
-			}
-		} else if (ref.value instanceof vscode.Location) {
-			if (ref.value.uri.scheme === CLOUD_PROJECT_SCHEME && cloudTarget && normalizeCloudAuthority(ref.value.uri.authority) === cloudTarget.authority) {
-				const remotePath = toRemoteNativePath(ref.value.uri.path || '/', cloudTarget.os, cloudTarget.remoteHome);
-				const locText = `${remotePath}:${ref.value.range.start.line + 1}`;
-				attachments.push({ kind: 'file', filePath: remotePath, rangeText: locText, remote: true });
-				fileLines.push(locText);
-			} else if (ref.value.uri.scheme === 'file' && !cloudTarget) {
-				const locText = `${ref.value.uri.fsPath}:${ref.value.range.start.line + 1}`;
-				attachments.push({ kind: 'file', filePath: ref.value.uri.fsPath, rangeText: locText, remote: false });
-				fileLines.push(locText);
-			}
-		}
-	}
-	return { attachments, fileLines };
-}
-
-function buildSlashHelpMarkdown(
-	isSecretary: boolean,
-	engineName: string,
-	cfg: SessionConfigState | undefined,
-	activeGoal: string | undefined,
-	commandsList: readonly DiscoveredSlashCommand[],
-): string {
-	const lines: string[] = [
-		`### ${isSecretary ? `Secretary · ${engineName}` : engineName} — Unified Capabilities & Slash Commands`,
-		'',
-		`- **Model**: \`${cfg?.model || 'default'}\` · **Thinking**: \`${cfg?.thinking || 'default'}\`${cfg?.mode ? ` · **Mode**: \`${cfg.mode}\`` : ''}${cfg?.permissionMode ? ` · **Permissions**: \`${cfg.permissionMode}\`` : ''}${cfg?.sandboxMode ? ` · **Sandbox**: \`${cfg.sandboxMode}\`` : ''}`,
-		...(activeGoal ? [`- **Active Goal**: ${activeGoal}`] : []),
-		'',
-	];
-
-	const macros = commandsList.filter(c => c.kind === 'macro');
-	if (macros.length > 0) {
-		lines.push('#### Secretary ADE Macro Commands');
-		for (const c of macros) {
-			lines.push(`- \`/${c.name}\` — ${c.description}`);
-		}
-		lines.push('');
-	}
-
-	const builtins = commandsList.filter(c => c.kind === 'command' && !c.filePath);
-	if (builtins.length > 0) {
-		lines.push(`#### ${engineName} Slash Commands (${builtins.length})`);
-		for (const c of builtins) {
-			lines.push(`- \`/${c.name}\` — ${c.description}`);
-		}
-		lines.push('');
-	}
-
-	const customs = commandsList.filter(c => Boolean(c.filePath) || c.kind === 'skill' || c.kind === 'workflow' || c.kind === 'prompt');
-	if (customs.length > 0) {
-		lines.push(`#### Discovered Skills, Workflows & Custom Commands (${customs.length})`);
-		for (const c of customs) {
-			lines.push(`- \`/${c.name}\` — ${c.description} *(${c.source})*`);
-		}
-	}
-	return lines.join('\n');
-}
-
-function expandBuiltInWorkflowPrompt(cmd: string, argsText: string, engineId: EngineId): string | undefined {
-	const task = argsText.trim();
-	switch (cmd) {
-		case 'compact':
-		case 'smol':
-		case 'summarize':
-			return task
-				? `Compact and summarize our conversation context so far with special focus on: ${task}\nPreserve all critical architectural decisions, file paths, unresolved issues, and next steps concisely.`
-				: 'Compact and summarize our conversation context so far concisely, preserving all key decisions, modified files, constraints, and next steps.';
-		case 'plan':
-		case 'deep-planning':
-			return task
-				? `[Planning Mode] Analyze the codebase thoroughly and produce a clear, step-by-step implementation plan before making destructive edits.\n\nTask: ${task}`
-				: '[Planning Mode] Analyze the current task and workspace, then outline a concrete step-by-step implementation plan with files, risks, and verification steps.';
-		case 'review':
-			return task
-				? `Perform a rigorous code review focused on bugs, regressions, security, edge cases, and maintainability: ${task}`
-				: 'Inspect uncommitted Git changes (`git status` and `git diff`) in this workspace and perform a thorough code review covering correctness, regressions, edge cases, and code quality.';
-		case 'security-review':
-			return task
-				? `Perform a thorough security audit (injection, auth, secrets exposure, path traversal, privilege boundaries) focused on: ${task}`
-				: 'Perform a security review of uncommitted changes in this workspace, checking for secrets, injection risks, auth/permission flaws, and unsafe inputs.';
-		case 'init':
-			return engineId === 'aexus-claude'
-				? `Analyze this repository's structure, build/test commands, and conventions, then initialize or update \`CLAUDE.md\` concisely.${task ? `\n\nAdditional instructions: ${task}` : ''}`
-				: `Analyze this repository's structure, build/test commands, and conventions, then initialize or update \`AGENTS.md\` concisely.${task ? `\n\nAdditional instructions: ${task}` : ''}`;
-		case 'grill-me':
-			return `Interview me interactively with sharp, high-leverage design questions to resolve ambiguities and stress-test our plan${task ? ` for: ${task}` : '.'}`;
-		case 'boost':
-			return `[Deep Strategic Analysis & Verification] Reason deeply from multiple perspectives, verify assumptions against actual code, and execute rigorously${task ? `:\n\n${task}` : '.'}`;
-		case 'teamwork':
-			return `Coordinate parallel workstreams cleanly across modules/subagents and synthesize verified results${task ? ` for:\n\n${task}` : '.'}`;
-		case 'learn':
-			return `Distill the key lessons, setup fixes, or conventions from our recent work so they can be persisted cleanly into project instructions/skills${task ? `:\n\n${task}` : '.'}`;
-		case 'verify':
-			return `Run end-to-end verification (build, lint, tests, and runtime checks) to prove the implementation works cleanly${task ? `:\n\n${task}` : '.'}`;
-		case 'debug':
-			return `Systematically reproduce, isolate root cause, and fix the issue${task ? `:\n\n${task}` : '.'}`;
-		case 'simplify':
-			return `Review recent changes for opportunities to simplify logic, remove duplication, and improve clarity without changing behavior${task ? `:\n\n${task}` : '.'}`;
-		case 'recap':
-			return `Provide a concise recap of what has been accomplished in this session, current workspace state, and remaining next steps${task ? ` (${task})` : '.'}`;
-		case 'deep-research':
-			return `Conduct a thorough, evidence-backed technical investigation across the codebase and available tools${task ? ` on:\n\n${task}` : '.'}`;
-		default:
-			return undefined;
-	}
+export async function deactivate(): Promise<void> {
+	await flushPendingExtensionSaves?.();
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -744,79 +277,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		});
 	};
 
-	const formatMissingEngineMessage = (shortEngine: string): string => {
-		const def = available.find(entry => entry.id === shortEngine);
-		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
-		const displayName = def?.name ?? shortEngine;
-		const installCmd = guide?.installCommand ?? `Install ${displayName} CLI`;
-		const cliKey = guide?.cliKey ?? def?.executable ?? shortEngine;
-		return vscode.l10n.t('{0} CLI is not installed ({1}). Configure "aexus.ade.cliPaths.{2}" in Settings or install the CLI first.', displayName, installCmd, cliKey);
-	};
-
-	const formatMissingRemoteEngineMessage = (shortEngine: string, hostAlias: string, probeError?: string): string => {
-		if (probeError) {
-			return vscode.l10n.t('Cannot connect to Cloud Host "{0}" via SSH: {1}', hostAlias, probeError);
-		}
-		const def = available.find(entry => entry.id === shortEngine);
-		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
-		const displayName = def?.name ?? shortEngine;
-		const installCmd = guide?.installCommand ?? `Install ${displayName} CLI`;
-		return vscode.l10n.t('{0} CLI is not installed on Cloud Host "{1}" ({2}). Install it on the remote host or configure "aexus.ade.remoteCliPaths".', displayName, hostAlias, installCmd);
-	};
-
-	const buildMissingEngineMarkdown = (shortEngine: string): string => {
-		const def = available.find(entry => entry.id === shortEngine);
-		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
-		const displayName = def?.name ?? shortEngine;
-		const cliKey = guide?.cliKey ?? def?.executable ?? shortEngine;
-		const settingsCmdUri = `command:workbench.action.openSettings?${encodeURIComponent(JSON.stringify(['aexus.ade.cliPaths']))}`;
-		return [
-			`### ${displayName} CLI Not Found`,
-			'',
-			`**Aexus Code** could not locate the \`${def?.executable ?? shortEngine}\` executable on your \`PATH\` or in \`aexus.ade.cliPaths.${cliKey}\`.`,
-			'',
-			...(guide ? [`1. **Install CLI**: \`${guide.installCommand}\` ([Documentation](${guide.docsUrl}))`] : []),
-			`2. **Or Configure Custom Binary Path**: [Open \`aexus.ade.cliPaths\` in Settings](${settingsCmdUri})`,
-			'',
-			`_Once installed or configured, send your message again — no restart required._`,
-		].join('\n');
-	};
-
-	const buildMissingRemoteEngineMarkdown = (shortEngine: string, hostAlias: string, probeError?: string): string => {
-		const def = available.find(entry => entry.id === shortEngine);
-		const guide = ENGINE_INSTALL_GUIDES[shortEngine];
-		const displayName = def?.name ?? shortEngine;
-		const manageHostsUri = `command:workbench.action.aexusCloudHosts.manage?${encodeURIComponent(JSON.stringify([hostAlias]))}`;
-		const remoteCliSettingsUri = `command:workbench.action.openSettings?${encodeURIComponent(JSON.stringify(['aexus.ade.remoteCliPaths']))}`;
-		if (probeError) {
-			return [
-				`### Cannot Connect to Cloud Host \`${hostAlias}\``,
-				'',
-				`**Aexus Code** failed to reach \`${hostAlias}\` over SSH to launch **${displayName}** natively on the cloud host:`,
-				'',
-				'```text',
-				probeError,
-				'```',
-				'',
-				`- [Check SSH Settings in Cloud Hosts Manager](${manageHostsUri})`,
-				`- Verify passwordless SSH key authentication works non-interactively (\`ssh -o BatchMode=yes ${hostAlias} echo ok\`).`,
-				'',
-				`_Once SSH connectivity is restored, send your message again._`,
-			].join('\n');
-		}
-		return [
-			`### ${displayName} CLI Not Installed on Cloud Host \`${hostAlias}\``,
-			'',
-			`**Aexus Code** runs Cloud Agents natively on the Cloud Host, but could not find \`${def?.executable ?? shortEngine}\` on \`${hostAlias}\`.`,
-			'',
-			...(guide ? [`1. **Install on \`${hostAlias}\`**: \`${guide.installCommand}\` ([Documentation](${guide.docsUrl}))`] : []),
-			`2. **Or Specify Remote Binary Path**: [Open \`aexus.ade.remoteCliPaths\` in Settings](${remoteCliSettingsUri}) and set \`"${hostAlias}": { "${shortEngine}": "/path/to/${def?.executable ?? shortEngine}" }\``,
-			`3. **Manage Cloud Host**: [Open Cloud Hosts Manager](${manageHostsUri})`,
-			'',
-			`_Once installed or configured on \`${hostAlias}\`, send your message again — no restart required._`,
-		].join('\n');
-	};
-
 	const key = (engine: string, id: string) => `${engine}:${id}`;
 	const identity = (record: RecordEntry) => key(record.engine, record.resourceId ?? record.id);
 	const isRecordBusy = (record: RecordEntry) => turnCoordinator.isBusy(identity(record));
@@ -860,10 +320,106 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		nativeId: record.id,
 		provisional: Boolean(record.provisional),
 	});
-	const save = async () => {
-		await context.globalState.update('nativeSessions', Object.fromEntries(records));
-		await context.globalState.update('secretaryState', secretaryState);
+
+	// Coalesce bursty session & capability globalState writes behind trailing timers with serialized in-flight chains and shutdown flush.
+	const SAVE_DEBOUNCE_MS = 80;
+	let saveTimer: ReturnType<typeof setTimeout> | undefined;
+	let saveWaiters: Array<() => void> = [];
+	let inFlightStateWrite: Promise<void> = Promise.resolve();
+	let capsSaveTimer: ReturnType<typeof setTimeout> | undefined;
+	let inFlightCapsWrite: Promise<void> = Promise.resolve();
+
+	const writeStateNow = async (): Promise<void> => {
+		await Promise.all([
+			context.globalState.update('nativeSessions', Object.fromEntries(records)),
+			context.globalState.update('secretaryState', secretaryState),
+		]);
 	};
+
+	const enqueueStateWrite = (): Promise<void> => {
+		const next = inFlightStateWrite.then(() => writeStateNow(), () => writeStateNow());
+		inFlightStateWrite = next.catch(() => undefined);
+		return next;
+	};
+
+	const save = (): Promise<void> => new Promise<void>(resolve => {
+		saveWaiters.push(resolve);
+		if (saveTimer !== undefined) {
+			return;
+		}
+		saveTimer = setTimeout(() => {
+			saveTimer = undefined;
+			const waiters = saveWaiters;
+			saveWaiters = [];
+			void enqueueStateWrite().finally(() => {
+				for (const w of waiters) {
+					w();
+				}
+			});
+		}, SAVE_DEBOUNCE_MS);
+	});
+
+	const writeRuntimeCapsNow = async (): Promise<void> => {
+		const toSave: Record<string, EngineRuntimeCapabilities & { updatedAt: number }> = {};
+		const nowMs = Date.now();
+		for (const [cacheKey, val] of runtimeCapsCache.entries()) {
+			if (!cacheKey.endsWith(':*')) {
+				continue;
+			}
+			const persistedKey = cacheKey.startsWith('cloud:') ? cacheKey : cacheKey.slice(0, -2);
+			if ((val.models && val.models.length > 0) || val.defaultModel || (val.modes && val.modes.length > 0)) {
+				toSave[persistedKey] = {
+					defaultModel: val.defaultModel,
+					models: val.models?.map(m => ({ ...m })),
+					modes: val.modes?.map(m => ({ ...m })),
+					updatedAt: nowMs,
+				};
+			}
+		}
+		await context.globalState.update('runtimeCapsCache', toSave);
+	};
+
+	const enqueueCapsWrite = (): Promise<void> => {
+		const next = inFlightCapsWrite.then(() => writeRuntimeCapsNow(), () => writeRuntimeCapsNow());
+		inFlightCapsWrite = next.catch(() => undefined);
+		return next;
+	};
+
+	const persistRuntimeCaps = (): void => {
+		if (capsSaveTimer !== undefined) {
+			return;
+		}
+		capsSaveTimer = setTimeout(() => {
+			capsSaveTimer = undefined;
+			void enqueueCapsWrite();
+		}, 150);
+	};
+
+	const flushAllPendingSaves = async (): Promise<void> => {
+		if (saveTimer !== undefined) {
+			clearTimeout(saveTimer);
+			saveTimer = undefined;
+			const waiters = saveWaiters;
+			saveWaiters = [];
+			void enqueueStateWrite().finally(() => {
+				for (const w of waiters) {
+					w();
+				}
+			});
+		}
+		if (capsSaveTimer !== undefined) {
+			clearTimeout(capsSaveTimer);
+			capsSaveTimer = undefined;
+			void enqueueCapsWrite();
+		}
+		await Promise.allSettled([inFlightStateWrite, inFlightCapsWrite]);
+	};
+	flushPendingExtensionSaves = flushAllPendingSaves;
+	context.subscriptions.push({
+		dispose: () => {
+			void flushAllPendingSaves();
+		},
+	});
 
 	const getSessionConfig = (record: RecordEntry, isSecretary: boolean): SessionConfigState => {
 		if (isSecretary) {
@@ -960,7 +516,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const runtime = (engine: string): EngineRuntime => {
 		const definition = available.find(entry => entry.id === engine);
 		if (!definition?.command) {
-			const msg = formatMissingEngineMessage(engine);
+			const msg = formatMissingEngineMessage(engine, available);
 			promptConfigureCliPaths(msg);
 			throw new Error(msg);
 		}
@@ -1026,7 +582,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const expectedRemoteCwd = toRemoteNativePath(parsed.path || '/', target.os, target.remoteHome);
 		let mutated = false;
 		if (isLegacyCloudBridgeCwd(record.cwd)) {
-			// Seamless migration from legacy pseudo-remote Mac staging folder to real native remote cwd
 			record.cwd = expectedRemoteCwd;
 			record.provisional = true;
 			if (record.engine === 'codex' || record.engine === 'cline' || record.engine === 'dsh' || record.engine === 'antigravity' || record.engine === 'kilo' || record.engine === 'opencode') {
@@ -1118,7 +673,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const info = await resolveRemoteEngineInfo(record.engine, target, Boolean(options?.forceProbe));
 		syncRecordCwdWithTarget(record, info.target);
 		if (!info.command) {
-			const msg = formatMissingRemoteEngineMessage(record.engine, info.target.alias, info.probeError);
+			const msg = formatMissingRemoteEngineMessage(record.engine, info.target.alias, available, info.probeError);
 			promptConfigureCloudHost(msg, info.target.alias, Boolean(info.probeError));
 			throw new Error(msg);
 		}
@@ -1176,26 +731,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	const getCachedRuntimeCaps = (shortEng: string, cwd: string, authority?: string): EngineRuntimeCapabilities =>
 		mergeRuntimeCaps(runtimeCapsCache.get(capsWildcardKeyFor(shortEng, authority)), runtimeCapsCache.get(capsKeyFor(shortEng, cwd, authority)));
-
-	const persistRuntimeCaps = (): void => {
-		const toSave: Record<string, EngineRuntimeCapabilities & { updatedAt: number }> = {};
-		const nowMs = Date.now();
-		for (const [cacheKey, val] of runtimeCapsCache.entries()) {
-			if (!cacheKey.endsWith(':*')) {
-				continue;
-			}
-			const persistedKey = cacheKey.startsWith('cloud:') ? cacheKey : cacheKey.slice(0, -2);
-			if ((val.models && val.models.length > 0) || val.defaultModel || (val.modes && val.modes.length > 0)) {
-				toSave[persistedKey] = {
-					defaultModel: val.defaultModel,
-					models: val.models?.map(m => ({ ...m })),
-					modes: val.modes?.map(m => ({ ...m })),
-					updatedAt: nowMs,
-				};
-			}
-		}
-		void context.globalState.update('runtimeCapsCache', toSave);
-	};
 
 	const commitRuntimeCaps = (shortEngine: string, cwd: string, incoming: EngineRuntimeCapabilities | undefined, authority?: string): { caps: EngineRuntimeCapabilities; changed: boolean } => {
 		const cacheKey = capsKeyFor(shortEngine, cwd, authority);
@@ -1295,7 +830,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (preferredEngine) {
 				const normalized = preferredEngine.trim().toLowerCase();
 				const aliased = ENGINE_ALIASES[normalized] ?? (normalized.startsWith('aexus-') ? normalized.slice('aexus-'.length) : normalized);
-				const msg = formatMissingEngineMessage(aliased);
+				const msg = formatMissingEngineMessage(aliased, available);
 				promptConfigureCliPaths(msg);
 				throw new Error(msg);
 			}
@@ -1516,7 +1051,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const applyOptionUpdates = async (
 		sessionType: string,
 		sessionUri: vscode.Uri,
-		updates: ReadonlyArray<{ optionId: string; value: string | undefined }>,
+		updates: ReadonlyArray<{ optionId: string; value: string | vscode.ChatSessionProviderOptionItem | undefined }>,
 		syncToAde = true,
 		fromUiPicker = false,
 	): Promise<void> => {
@@ -1532,7 +1067,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		let anyChanged = false;
 		let engineSwitched = false;
 
-		for (const { optionId, value } of updates) {
+		for (const { optionId, value: rawValue } of updates) {
+			const value = typeof rawValue === 'string' ? rawValue : rawValue?.id;
 			if (isSecretary && optionId === 'engine' && value) {
 				const nextShort = resolveShortEngine(value);
 				if (nextShort && nextShort !== record.engine) {
@@ -1635,7 +1171,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await notifySessionOptionsUpdated(sessionType, sessionUri, true);
 		} else {
 			providerOptionsChangeEmitters.get(sessionType)?.fire();
-			// Record current signature so subsequent checks don't re-emit stale diff
 			const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
 			lastNotifiedOptionsSig.set(
 				sessionUri.toString(),
@@ -1682,421 +1217,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 	};
 
-	const selectOrPromptOption = async (
-		sessionType: string,
-		sessionUri: vscode.Uri,
-		groupId: string,
-		groupTitle: string,
-		argText: string,
-		stream: vscode.ChatResponseStream,
-	): Promise<boolean> => {
-		const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
-		const group = groups.find(g => g.id === groupId);
-		if (!group || group.items.length === 0) {
-			return false;
-		}
-		const trimmed = argText.trim();
-		if (trimmed) {
-			const lower = trimmed.toLowerCase();
-			const matched = group.items.find(i => i.id.toLowerCase() === lower || i.name.toLowerCase() === lower)
-				?? group.items.find(i => i.id.toLowerCase().includes(lower) || i.name.toLowerCase().includes(lower));
-			const chosenId = matched ? matched.id : (groupId === 'model' ? trimmed : undefined);
-			if (!chosenId) {
-				stream.markdown([
-					`Unknown ${groupTitle.toLowerCase()} \`${trimmed}\`. Available options:`,
-					...group.items.map(i => `- \`${i.id}\` — ${i.name}${i.description ? ` *(${i.description})*` : ''}`),
-				].join('\n'));
-				return true;
-			}
-			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: groupId, value: chosenId }]);
-			stream.markdown(`Updated **${groupTitle}** to **${matched?.name ?? chosenId}** (\`${chosenId}\`).`);
-			return true;
-		}
-
-		const currentId = group.selected?.id;
-		const picked = await vscode.window.showQuickPick(
-			group.items.map(i => ({
-				label: i.id === currentId ? `$(check) ${i.name}` : i.name,
-				description: i.id,
-				detail: i.description,
-				itemId: i.id,
-				itemName: i.name,
-			})),
-			{
-				title: `Select ${groupTitle}`,
-				placeHolder: `Current: ${group.selected?.name ?? 'Default'}`,
-			},
-		);
-		if (picked) {
-			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: groupId, value: picked.itemId }]);
-			stream.markdown(`Updated **${groupTitle}** to **${picked.itemName}** (\`${picked.itemId}\`).`);
-		} else {
-			stream.markdown([
-				`### ${groupTitle} (Current: **${group.selected?.name ?? 'Default'}**)`,
-				...group.items.map(i => `- \`${i.id}\` — ${i.name}${i.id === currentId ? ' *(active)*' : ''}${i.description ? ` · ${i.description}` : ''}`),
-			].join('\n'));
-		}
-		return true;
-	};
-
-	const handleDirectSlashCommand = async (
-		cmd: string,
-		argText: string,
-		record: RecordEntry,
-		sessionUri: vscode.Uri,
-		isSecretary: boolean,
-		stream: vscode.ChatResponseStream,
-		token: vscode.CancellationToken,
-		cloudTarget?: CloudHostTarget,
-	): Promise<boolean> => {
-		const sessionType = isSecretary ? SECRETARY_TYPE : `aexus-${record.engine}`;
-		const engineType = toEngineType(record.engine);
-		const engineDef = available.find(entry => entry.id === record.engine);
-		const engineName = engineDef?.name ?? record.engine;
-		const cfg = getSessionConfig(record, isSecretary);
-		const { caps } = await fetchRuntimeCaps(record.engine, record.cwd, record);
-		const allCommands = await discoverSlashCommands(isSecretary ? 'secretary' : engineType, engineType, record.cwd, caps.commands, cloudTarget);
-
-		if (cmd === 'help') {
-			stream.markdown(buildSlashHelpMarkdown(isSecretary, engineName, cfg, record.activeGoal, allCommands));
-			return true;
-		}
-
-		if (cmd === 'skills') {
-			const skillsAndWorkflows = allCommands.filter(c => c.kind === 'skill' || c.kind === 'workflow' || c.kind === 'prompt' || Boolean(c.filePath));
-			if (skillsAndWorkflows.length === 0) {
-				stream.markdown(`No custom skills, prompts, or workflows found in \`${record.cwd}\` or user agent directories.`);
-			} else {
-				stream.markdown([
-					`### Discovered Skills, Prompts & Workflows (${skillsAndWorkflows.length})`,
-					...skillsAndWorkflows.map(s => `- \`/${s.name}\` — ${s.description} *(${s.source})*`),
-				].join('\n'));
-			}
-			return true;
-		}
-
-		if (cmd === 'clear' || cmd === 'newtask' || (!isSecretary && cmd === 'new') || (isSecretary && cmd === 'reset')) {
-			record.activeGoal = undefined;
-			setGoalBannerInUi(sessionUri, undefined);
-			if (isSecretary) {
-				const rotated = await ensureSecretaryRecord(record.engine, vscode.Uri.file(record.cwd), true);
-				await Promise.resolve(vscode.commands.executeCommand('aexus.ade.control.execute', {
-					action: 'secretary.configure',
-					params: { engine: `aexus-${rotated.engine}`, resource: SECRETARY_URI.toString(), open: false },
-				})).catch(() => undefined);
-				stream.markdown(`Secretary conversation context has been reset (**${engineName}**).`);
-			} else {
-				const preservedConfig = record.sessionConfig;
-				const preservedCloudUri = record.cloudProjectUri;
-				const { engine: activeEngine } = await runtimeForRecord(record);
-				const fresh = await activeEngine.create(record.cwd);
-				Object.assign(record, fresh, {
-					label: record.label,
-					customLabel: record.customLabel,
-					resourceId: record.resourceId ?? record.id,
-					sessionConfig: preservedConfig,
-					cloudProjectUri: preservedCloudUri,
-					activeGoal: undefined,
-					roleInit: undefined,
-					lastDeltaContext: undefined,
-				});
-				await save();
-				const openEntry = opened.get(identity(record));
-				openEntry?.changed.fire([]);
-				stream.markdown(`Conversation context cleared (**${engineName}**).`);
-			}
-			return true;
-		}
-
-		if (cmd === 'diff' && !argText.trim()) {
-			try {
-				let statusText = '';
-				let statText = '';
-				let rawPatch = '';
-				if (cloudTarget) {
-					const qCwd = posixQuote(record.cwd);
-					const pCwd = psSingleQuote(record.cwd);
-					const posixScript = [
-						`cd -- ${qCwd} || exit 1`,
-						`git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 2`,
-						`printf '__AEX_STATUS__\\n'`,
-						`git status --short --branch`,
-						`printf '\\n__AEX_STAT__\\n'`,
-						`git diff --stat`,
-						`printf '\\n__AEX_PATCH__\\n'`,
-						`git diff --no-color | head -c 65536`,
-					].join('\n');
-					const winScript = [
-						`Set-Location -LiteralPath ${pCwd}`,
-						`git rev-parse --is-inside-work-tree 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { exit 2 }`,
-						`Write-Output '__AEX_STATUS__'`,
-						`git status --short --branch`,
-						`Write-Output '__AEX_STAT__'`,
-						`git diff --stat`,
-						`Write-Output '__AEX_PATCH__'`,
-						`$d = (git diff --no-color) -join "\`n"; if ($d.Length -gt 65536) { $d = $d.Substring(0, 65536) }; Write-Output $d`,
-					].join('; ');
-					const res = await execRemoteShell(cloudTarget, posixScript, winScript, { timeoutMs: 12_000, token });
-					if (res.code !== 0) {
-						throw new Error(res.stderr || 'git diff failed on cloud host');
-					}
-					const out = res.stdout.toString('utf8');
-					const statMarker = out.indexOf('__AEX_STAT__');
-					const patchMarker = out.indexOf('__AEX_PATCH__');
-					if (statMarker >= 0 && patchMarker > statMarker) {
-						statusText = out.slice(out.indexOf('__AEX_STATUS__') + '__AEX_STATUS__'.length, statMarker).trim() || '(clean working tree)';
-						statText = out.slice(statMarker + '__AEX_STAT__'.length, patchMarker).trim();
-						rawPatch = out.slice(patchMarker + '__AEX_PATCH__'.length).trim();
-					} else {
-						statusText = out.trim() || '(clean working tree)';
-					}
-				} else {
-					const [statusRes, statRes, diffRes] = await Promise.all([
-						execFileAsync('git', ['status', '--short', '--branch'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
-						execFileAsync('git', ['diff', '--stat'], { cwd: record.cwd, timeout: 6000, windowsHide: true }),
-						execFileAsync('git', ['diff', '--no-color'], { cwd: record.cwd, timeout: 6000, maxBuffer: 2 * 1024 * 1024, windowsHide: true }),
-					]);
-					statusText = statusRes.stdout.trim() || '(clean working tree)';
-					statText = statRes.stdout.trim();
-					rawPatch = diffRes.stdout.trim();
-				}
-				const patchPreview = rawPatch.length > 6000 ? `${rawPatch.slice(0, 6000)}\n... (diff truncated)` : rawPatch;
-				stream.markdown([
-					`### Git Working Tree Diff (\`${cloudTarget ? `${cloudTarget.alias}:${record.cwd}` : record.cwd}\`)`,
-					'```text',
-					statusText,
-					...(statText ? ['', statText] : []),
-					'```',
-					...(patchPreview ? ['```diff', patchPreview, '```'] : ['*(No unstaged line diffs)*']),
-				].join('\n'));
-				return true;
-			} catch {
-				// Fall through to let the engine inspect the workspace if git is unavailable.
-			}
-		}
-
-		if (cmd === 'model' || cmd === 'models') {
-			return selectOrPromptOption(sessionType, sessionUri, 'model', 'Model', argText, stream);
-		}
-		if (cmd === 'effort' || cmd === 'thinking') {
-			return selectOrPromptOption(sessionType, sessionUri, 'thinking', 'Thinking Effort', argText, stream);
-		}
-		if (cmd === 'permissions') {
-			return selectOrPromptOption(sessionType, sessionUri, 'permissions', 'Permissions', argText, stream);
-		}
-		if (cmd === 'bypass') {
-			if (engineType === 'aexus-codex') {
-				await applyOptionUpdates(sessionType, sessionUri, [
-					{ optionId: 'permissions', value: 'never' },
-					{ optionId: 'sandbox', value: 'danger-full-access' },
-				]);
-				stream.markdown('Updated **Approval** to **Never Ask** (`never`) and **Sandbox** to **Full Access** (`danger-full-access`).');
-			} else if (engineType === 'aexus-dsh') {
-				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'danger-full-access' }]);
-				stream.markdown('Updated **Permissions** to **Full Access** (`danger-full-access`).');
-			} else if (engineType === 'aexus-cline') {
-				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'yolo' }]);
-				stream.markdown('Updated **Mode** to **Auto-Approve YOLO** (`yolo`).');
-			} else if (engineType === 'aexus-antigravity') {
-				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'auto' }]);
-				stream.markdown('Updated **Mode** to **Auto** (`auto`).');
-			} else {
-				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'bypassPermissions' }]);
-				stream.markdown('Updated **Permissions** to **Bypass All** (`bypassPermissions`).');
-			}
-			return true;
-		}
-		if (cmd === 'sandbox') {
-			return selectOrPromptOption(sessionType, sessionUri, 'sandbox', 'Sandbox Policy', argText, stream);
-		}
-		if (cmd === 'search' && (engineType === 'aexus-codex' && (!argText.trim() || ['on', 'off', 'enabled', 'disabled', 'true', 'false'].includes(argText.trim().toLowerCase())))) {
-			const norm = argText.trim().toLowerCase();
-			const mapped = norm === 'on' || norm === 'true' ? 'enabled' : norm === 'off' || norm === 'false' ? 'disabled' : norm;
-			return selectOrPromptOption(sessionType, sessionUri, 'webSearch', 'Web Search', mapped, stream);
-		}
-		if (cmd === 'mode' || (cmd === 'agent' && engineType === 'aexus-opencode')) {
-			return selectOrPromptOption(sessionType, sessionUri, 'mode', engineType === 'aexus-opencode' ? 'Agent' : 'Mode', argText, stream);
-		}
-		if (cmd === 'act' && engineType === 'aexus-cline' && !argText.trim()) {
-			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'act' }]);
-			stream.markdown('Switched Cline to **Act Mode** (`act`).');
-			return true;
-		}
-		if (cmd === 'yolo' && engineType === 'aexus-cline' && !argText.trim()) {
-			await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: 'yolo' }]);
-			stream.markdown('Switched Cline to **Auto-Approve YOLO Mode** (`yolo`).');
-			return true;
-		}
-		if (cmd === 'plan' && !argText.trim()) {
-			const groups = await computeOptionGroupsForResource(sessionType, sessionUri);
-			const modeGroup = groups.find(g => g.id === 'mode');
-			const permGroup = groups.find(g => g.id === 'permissions');
-			const planModeItem = modeGroup?.items.find(i => i.id === 'plan' || i.id === 'architect');
-			if (planModeItem) {
-				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'mode', value: planModeItem.id }]);
-				stream.markdown(`Switched **Mode** to **${planModeItem.name}** (\`${planModeItem.id}\`). Send your task to generate a plan.`);
-				return true;
-			}
-			const planPermItem = permGroup?.items.find(i => i.id === 'plan');
-			if (planPermItem) {
-				await applyOptionUpdates(sessionType, sessionUri, [{ optionId: 'permissions', value: 'plan' }]);
-				stream.markdown('Switched **Permissions** to **Plan Mode** (`plan`). Send your task to generate a plan.');
-				return true;
-			}
-		}
-
-		//Secretary-exclusive ADE macro commands
-		if (isSecretary) {
-			if (cmd === 'status') {
-				const status = await vscode.commands.executeCommand<Record<string, unknown>>('aexus.ade.control.execute', { action: 'status' });
-				stream.markdown(`### ADE Live Status\n\`\`\`json\n${JSON.stringify(status, null, 2)}\n\`\`\``);
-				return true;
-			}
-			if (cmd === 'focus') {
-				if (!argText) {
-					const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean }[]>('aexus.ade.control.execute', { action: 'project.list' });
-					stream.markdown([
-						'Usage: `/focus <project-name-or-path>`',
-						'',
-						...(listRes ?? []).map(p => `- **${p.name}** (\`${p.path}\`)${p.focused ? ' *(Focused)*' : ''}`),
-					].join('\n'));
-					return true;
-				}
-				const nav = await vscode.commands.executeCommand<{ focusedProject?: { name: string; path: string } }>('aexus.ade.control.execute', {
-					action: 'project.focus',
-					params: { target: argText },
-				});
-				stream.markdown(`Focused project: **${nav?.focusedProject?.name ?? argText}** (\`${nav?.focusedProject?.path ?? ''}\`).`);
-				return true;
-			}
-			if (cmd === 'home') {
-				await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'project.home' });
-				stream.markdown('Returned to **ADE Home** (all projects overview).');
-				return true;
-			}
-			if (cmd === 'projects') {
-				const listRes = await vscode.commands.executeCommand<{ name: string; path: string; focused: boolean; selected: boolean; activeSessionCount: number }[]>('aexus.ade.control.execute', { action: 'project.list' });
-				if (!listRes?.length) {
-					stream.markdown('No ADE projects registered.');
-				} else {
-					stream.markdown([
-						`### ADE Projects (${listRes.length})`,
-						...listRes.map(p => `- **${p.name}** (\`${p.path}\`) — ${p.activeSessionCount} active session(s)${p.focused ? ' *(Focused)*' : p.selected ? ' *(Selected)*' : ''}`),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'sessions') {
-				const sessionsRes = await vscode.commands.executeCommand<{ id: string; label: string; rank: string; engineName?: string; projectName: string; status: string; parentId?: string }[]>('aexus.ade.control.execute', { action: 'session.list' });
-				if (!sessionsRes?.length) {
-					stream.markdown('No active ADE sessions.');
-				} else {
-					stream.markdown([
-						`### Active ADE Sessions (${sessionsRes.length})`,
-						...sessionsRes.map(s => `- **[${s.rank.toUpperCase()}]** **${s.label}** (\`${s.id}\`) — ${s.engineName ?? 'Draft'} in **${s.projectName}** *(status: ${s.status}${s.parentId ? `, supervisor: ${s.parentId}` : ''})*`),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'mission' || cmd === 'missions') {
-				const missions = await vscode.commands.executeCommand<{
-					readonly id: string;
-					readonly title: string;
-					readonly ownerSessionId?: string;
-					readonly ownerTierTag?: string;
-					readonly status?: string;
-					readonly nodeCount: number;
-					readonly edgeCount: number;
-					readonly generatedEmployeeCount?: number;
-					readonly activeTokenCount?: number;
-				}[]>('aexus.ade.control.execute', { action: 'mission.list' });
-				if (!missions?.length) {
-					stream.markdown('No ADE Missions initialized yet. Run `aexus-ade mission init --open` or click the Mission button in the ADE sidebar.');
-				} else {
-					stream.markdown([
-						`### ADE Missions (${missions.length})`,
-						...missions.map(m => {
-							const ownerPart = m.ownerTierTag ? ` · owner: \`${m.ownerTierTag}\`` : '';
-							const statusPart = m.status ?? 'idle';
-							const empCount = m.generatedEmployeeCount ?? 0;
-							const activeTok = m.activeTokenCount ? `, **${m.activeTokenCount}** active token(s)` : '';
-							return `- **${m.title}** (\`${m.id}\`${ownerPart}) — status: \`${statusPart}\`, **${m.nodeCount}** node(s), **${m.edgeCount}** edge(s), **${empCount}** employee(s)${activeTok}`;
-						}),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'inbox') {
-				const items = await vscode.commands.executeCommand<{ id: string; kind: string; title: string; message: string; unread: boolean; resolved: boolean }[]>('aexus.ade.control.execute', { action: 'inbox.list', params: { includeResolved: false } });
-				if (!items?.length) {
-					stream.markdown('ADE Inbox has no pending items.');
-				} else {
-					stream.markdown([
-						`### Pending ADE Inbox Items (${items.length})`,
-						...items.map(it => `- **[${it.kind.toUpperCase()}]** **${it.title}** (\`${it.id}\`${it.unread ? ' · *UNREAD*' : ''})\n  ${it.message.split('\n')[0]}`),
-					].join('\n'));
-				}
-				return true;
-			}
-			if (cmd === 'ide') {
-				stream.markdown('Secretary operates strictly within **ADE** and does not switch to or manipulate **IDE** mode.');
-				return true;
-			}
-			if (cmd === 'ade') {
-				await vscode.commands.executeCommand('aexus.ade.control.execute', { action: 'mode.set', params: { mode: 'ade' } });
-				stream.markdown('Active in **ADE** mode.');
-				return true;
-			}
-			if (cmd === 'engine') {
-				if (!argText) {
-					return selectOrPromptOption(SECRETARY_TYPE, SECRETARY_URI, 'engine', 'Secretary Engine', '', stream);
-				}
-				const nextShort = resolveShortEngine(argText);
-				const nextDef = available.find(entry => entry.id === nextShort && entry.command);
-				if (!nextDef || !nextShort || nextDef.id !== (ENGINE_ALIASES[argText.trim().toLowerCase()] ?? argText.trim().toLowerCase())) {
-					stream.markdown(`Unknown or uninstalled engine \`${argText}\`. Try \`/engine\` to list installed engines.`);
-					return true;
-				}
-				await applyOptionUpdates(SECRETARY_TYPE, SECRETARY_URI, [{ optionId: 'engine', value: nextDef.type }]);
-				stream.markdown(`Switched Secretary engine to **${nextDef.name}** (\`${nextDef.id}\`).`);
-				return true;
-			}
-			if (cmd === 'new') {
-				const tokens = argText.split(/\s+/).filter(Boolean);
-				const maybeEngine = tokens[0] ? ENGINE_ALIASES[tokens[0].toLowerCase()] : undefined;
-				const title = (maybeEngine ? tokens.slice(1) : tokens).join(' ') || undefined;
-				const created = await vscode.commands.executeCommand<{ id: string; label: string; projectName: string; engineId?: string }>('aexus.ade.control.execute', {
-					action: 'session.create',
-					params: {
-						...(maybeEngine ? { engine: maybeEngine } : {}),
-						...(title ? { title } : {}),
-						open: true,
-					},
-				});
-				stream.markdown(`Created session **${created?.label ?? 'New Session'}** in project **${created?.projectName ?? ''}**.`);
-				return true;
-			}
-		}
-
-		// Delegate native RPC/HTTP/CLI inspection & session commands directly to the active runtime
-		const resolvedEng = await tryRuntimeForRecord(record);
-		const eng = resolvedEng?.engine;
-		if (eng?.executeCommand) {
-			const normalizedRuntimeCmd = cmd === 'smol' ? 'compact' : cmd;
-			const handledByRuntime = await eng.executeCommand(record, normalizedRuntimeCmd, argText, stream, token, toSendOptions(cfg, {}));
-			if (handledByRuntime) {
-				if (normalizedRuntimeCmd === 'compact') {
-					// Compaction may drop Turn-1 role context from conversation history; re-establish on the next turn.
-					record.roleInit = undefined;
-					record.lastDeltaContext = undefined;
-				}
-				await save();
-				return true;
-			}
-		}
-
-		return false;
-	};
+	const { handleDirectSlashCommand } = createSlashCommandHandlers({
+		available,
+		opened,
+		identity,
+		getSessionConfig,
+		fetchRuntimeCaps,
+		computeOptionGroupsForResource,
+		applyOptionUpdates: (sessionType, sessionUri, updates) => applyOptionUpdates(sessionType, sessionUri, updates),
+		ensureSecretaryRecord,
+		runtimeForRecord,
+		tryRuntimeForRecord,
+		resolveShortEngine: raw => resolveShortEngine(raw) ?? '',
+		setGoalBannerInUi,
+		save,
+	});
 
 	const send = async (
 		record: RecordEntry,
@@ -2122,7 +1257,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			cmdArgText = spaceIdx === -1 ? '' : trimmedPrompt.slice(spaceIdx + 1).trim();
 		}
 
-		// Handle /goal status & /goal clear immediately before starting a turn
 		if (parsedCmd === 'goal') {
 			const goalArg = cmdArgText.trim();
 			if (!goalArg) {
@@ -2173,6 +1307,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 			},
 			graceTimeoutMs: 2500,
+			turnTimeoutMs: getConfiguredEngineTurnTimeoutMs(),
+			idleStallTimeoutMs: getConfiguredEngineIdleStallTimeoutMs(),
 		});
 		if (!lease) {
 			return {};
@@ -2185,6 +1321,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			readonly missionId?: string;
 			readonly nodeId?: string;
 			readonly tokenId?: string;
+			readonly autoMintedRootToken?: boolean;
 		} | undefined;
 		try {
 			link = token.onCancellationRequested(() => turnCancellation.cancel());
@@ -2225,12 +1362,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				: effectiveUserPrompt;
 
 			const preambleSections: string[] = [];
-			const snapForContext = isSecretary ? undefined : roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+			const liveSnap = isSecretary ? undefined : await refreshRoleSnapshotFromWorkbench();
+			const snapForContext = isSecretary ? undefined : (liveSnap ?? roleBridge.getSnapshot()).agents.find(a => a.resource === sessionUri.toString());
 			const currentRankForContext = isSecretary
 				? 'secretary'
 				: ((snapForContext?.isOrchestrated || snapForContext?.isMissionNode) ? snapForContext.rank : undefined);
-			const expectedPromptHash = !isSecretary && snapForContext?.rolePrompt?.trim()
-				? hashRolePrompt(snapForContext.rolePrompt)
+			let expectedPromptHash = !isSecretary
+				? computeStaticRolePromptHash(snapForContext)
 				: undefined;
 			const alreadyInitializedForRank = Boolean(
 				currentRankForContext
@@ -2250,12 +1388,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					alreadyInitializedForRank ? { resource: sessionUri, mode: 'delta' } : sessionUri,
 				)).catch(() => undefined);
 			const trimmedInjected = injected?.trim();
+			const supportsSystemCharterFlag = record.engine === 'claude' || record.engine === 'pi';
+			let interactiveStaticSystemCharter: string | undefined;
+			if (currentRankForContext && supportsSystemCharterFlag) {
+				const candidateCharter = isSecretary
+					? (extractStaticRoleCharter(!alreadyInitializedForRank ? trimmedInjected : undefined) || record.roleInit?.staticSystemCharter)
+					: (extractStaticRoleCharter(snapForContext?.rolePrompt ?? (!alreadyInitializedForRank ? trimmedInjected : undefined), snapForContext?.staticRoleCharter) || record.roleInit?.staticSystemCharter);
+				if (candidateCharter) {
+					interactiveStaticSystemCharter = candidateCharter;
+					expectedPromptHash ??= hashRolePrompt(candidateCharter);
+				}
+			} else if (!alreadyInitializedForRank && !expectedPromptHash && trimmedInjected) {
+				const extractedStatic = extractStaticRoleCharter(trimmedInjected);
+				if (extractedStatic) {
+					expectedPromptHash = hashRolePrompt(extractedStatic);
+				}
+			}
 			let pendingDeltaContext: string | undefined;
 			if (trimmedInjected) {
-				if (!alreadyInitializedForRank || trimmedInjected !== record.lastDeltaContext) {
-					preambleSections.push(trimmedInjected);
+				const userTurnPreamble = (!alreadyInitializedForRank && interactiveStaticSystemCharter)
+					? extractDynamicRoleBindingsTail(trimmedInjected, interactiveStaticSystemCharter)
+					: trimmedInjected;
+				if (userTurnPreamble && (!alreadyInitializedForRank || userTurnPreamble !== record.lastDeltaContext)) {
+					preambleSections.push(userTurnPreamble);
 					if (alreadyInitializedForRank) {
-						pendingDeltaContext = trimmedInjected;
+						pendingDeltaContext = userTurnPreamble;
 					}
 				}
 			}
@@ -2269,15 +1426,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				].join('\n'));
 			}
 
-			// Wrap direct interactive Human User (L-1) chat turns to orchestrated roles, Secretary, or Engineering staff
-			// with an explicit system provenance envelope (skipping standalone pure Workers and already-enveloped turns).
+			// Never wrap non-human Role DMs / Baton envelopes / agent-originated directives as `[Aexus System · Message from User (L-1)]`.
+			const alreadyEnvelopedOrAgentDirective = hasAexusSystemMessageEnvelope(userPromptWithRefs)
+				|| (isSecretary && /^\s*\[(?:Directive|Escalation|Handoff|Baton)\s+from\b/i.test(userPromptWithRefs));
 			const shouldWrapAsUserMessage = Boolean(
 				isSecretary
 				|| snapForContext?.isOrchestrated
 				|| snapForContext?.isMissionNode,
 			);
-			if (shouldWrapAsUserMessage && !hasAexusSystemMessageEnvelope(userPromptWithRefs)) {
-				preambleSections.push(buildUserMessageSystemEnvelope());
+			const isDirectUserChat = !isSecretary && !alreadyEnvelopedOrAgentDirective;
+			interactiveTurnBinding = !isSecretary && (Boolean(snapForContext?.isMissionNode) || Boolean(snapForContext?.isOrchestrated))
+				? await Promise.resolve(vscode.commands.executeCommand<{
+					readonly turnId?: string;
+					readonly missionId?: string;
+					readonly nodeId?: string;
+					readonly tokenId?: string;
+					readonly autoMintedRootToken?: boolean;
+				} | undefined>('aexus.ade.engineering.beginInteractiveTurn', {
+					sessionResource: sessionUri.toString(),
+					agentId: snapForContext?.id,
+					...(isDirectUserChat ? { userPrompt: effectiveUserPrompt, isDirectUserChat: true } : {}),
+				})).catch(() => undefined)
+				: undefined;
+			if (shouldWrapAsUserMessage && !alreadyEnvelopedOrAgentDirective) {
+				const rootBaton = interactiveTurnBinding?.autoMintedRootToken
+					&& interactiveTurnBinding.tokenId
+					&& interactiveTurnBinding.missionId
+					&& interactiveTurnBinding.nodeId
+					? {
+						tokenId: interactiveTurnBinding.tokenId,
+						missionId: interactiveTurnBinding.missionId,
+						nodeId: interactiveTurnBinding.nodeId,
+					}
+					: undefined;
+				preambleSections.push(buildUserMessageSystemEnvelope(rootBaton));
 			}
 
 			const initialFullPrompt = preambleSections.length > 0
@@ -2293,9 +1475,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const remoteInfo = await resolveRemoteEngineInfo(record.engine, cloudTarget);
 				syncRecordCwdWithTarget(record, remoteInfo.target);
 				if (!remoteInfo.command) {
-					stream.markdown(buildMissingRemoteEngineMarkdown(record.engine, remoteInfo.target.alias, remoteInfo.probeError));
+					stream.markdown(buildMissingRemoteEngineMarkdown(record.engine, remoteInfo.target.alias, available, remoteInfo.probeError));
 					promptConfigureCloudHost(
-						formatMissingRemoteEngineMessage(record.engine, remoteInfo.target.alias, remoteInfo.probeError),
+						formatMissingRemoteEngineMessage(record.engine, remoteInfo.target.alias, available, remoteInfo.probeError),
 						remoteInfo.target.alias,
 						Boolean(remoteInfo.probeError),
 					);
@@ -2304,30 +1486,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				engine = runtimeForCloud(record.engine, remoteInfo.target, remoteInfo.command);
 			} else {
 				if (!await ensureEngineCommand(record.engine)) {
-					stream.markdown(buildMissingEngineMarkdown(record.engine));
-					promptConfigureCliPaths(formatMissingEngineMessage(record.engine));
+					stream.markdown(buildMissingEngineMarkdown(record.engine, available));
+					promptConfigureCliPaths(formatMissingEngineMessage(record.engine, available));
 					return {};
 				}
 				engine = runtime(record.engine);
 			}
-			const snapEntry = roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString());
+			const snapEntry = roleBridge.getSnapshot().agents.find(a => a.resource === sessionUri.toString()) ?? snapForContext;
 			const isMissionNode = !isSecretary && Boolean(snapEntry?.isMissionNode);
 			const callerRole = isSecretary
 				? 'secretary'
 				: (!snapEntry?.isOrchestrated && !isMissionNode ? undefined : snapEntry?.rank);
-			// Snapshot the active Mission node & mint an immutable turnId BEFORE engine.send(...) starts so that
-			// if the employee runs `token complete` mid-turn, delayed interim/final usage still bills the exact node.
-			interactiveTurnBinding = !isSecretary && isMissionNode
-				? await Promise.resolve(vscode.commands.executeCommand<{
-					readonly turnId?: string;
-					readonly missionId?: string;
-					readonly nodeId?: string;
-					readonly tokenId?: string;
-				} | undefined>('aexus.ade.engineering.beginInteractiveTurn', {
-					sessionResource: sessionUri.toString(),
-					agentId: snapEntry?.id,
-				})).catch(() => undefined)
-				: undefined;
 			let contextCompactedDuringTurn = false;
 			const interactiveInjectedContract = (!alreadyInitializedForRank || pendingDeltaContext !== undefined) ? trimmedInjected : undefined;
 			const interactiveReportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, costUsd: 0 };
@@ -2363,6 +1532,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					injectedContractText: interactiveInjectedContract,
 					rawPrompt: userPromptWithRefs,
 					finalPrompt: initialFullPrompt,
+					appendSystemPrompt: interactiveStaticSystemCharter,
 					usage: cumulative,
 					isFirstTurn: !alreadyInitializedForRank,
 				});
@@ -2383,8 +1553,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						model: effectiveModel,
 						engineId: record.engine,
 						turns: 0,
+						...(cumulative.estimated !== undefined ? { estimated: cumulative.estimated } : {}),
 					},
 				})).catch(() => undefined);
+			};
+			let lastHeartbeatSent = 0;
+			const emitHeartbeat = () => {
+				lease.touchActivity();
+				const now = Date.now();
+				if (now - lastHeartbeatSent >= 1500) {
+					lastHeartbeatSent = now;
+					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', sessionUri.toString(), now)).catch(() => undefined);
+				}
 			};
 			const sendOptions = toSendOptions(cfg, {
 				attachments,
@@ -2398,6 +1578,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					record.roleInit = undefined;
 					record.lastDeltaContext = undefined;
 				},
+				abortSignal: lease.abortSignal,
+				timeoutMs: getConfiguredEngineTurnTimeoutMs(),
+				appendSystemPrompt: interactiveStaticSystemCharter,
+				onStreamActivity: emitHeartbeat,
+				onExternalWaitStart: () => lease.beginExternalWait(),
+				onExternalWaitEnd: () => lease.endExternalWait(),
 			});
 			const prevId = record.id;
 			if (engine.prepareSession) {
@@ -2411,15 +1597,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			let streamedMarkdown = '';
 			let roundMarkdown = '';
 			let pendingGoalText = '';
-			let lastHeartbeatSent = 0;
 			let lastCloudRefreshSent = 0;
-			const emitHeartbeat = () => {
-				const now = Date.now();
-				if (now - lastHeartbeatSent >= 1500) {
-					lastHeartbeatSent = now;
-					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', sessionUri.toString(), now)).catch(() => undefined);
-				}
-			};
 			const emitThrottledCloudRefresh = () => {
 				if (!record.cloudProjectUri) {
 					return;
@@ -2458,7 +1636,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					return;
 				}
 				const holdLen = findMarkerPrefixTailLength(pendingGoalText);
-				// Also hold up to 2 preceding newlines right before a partial marker prefix so trailing blank lines strip cleanly
 				let totalHold = holdLen;
 				if (holdLen > 0) {
 					while (totalHold < pendingGoalText.length && totalHold - holdLen < 2 && pendingGoalText[pendingGoalText.length - totalHold - 1] === '\n') {
@@ -2545,7 +1722,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			syncRecordStorageKey(record, preSendId);
 			flushPendingGoalText(true);
 
-			// Autonomous /goal verification & continuation stop-hook loop
+			let accumulatedGoalUsage: EngineTurnTokenUsage | undefined;
+			const mergeGoalRoundUsage = (prev: EngineTurnTokenUsage | undefined, next: EngineTurnTokenUsage): EngineTurnTokenUsage => !prev ? next : {
+				inputTokens: prev.inputTokens + next.inputTokens,
+				outputTokens: prev.outputTokens + next.outputTokens,
+				cacheReadTokens: (prev.cacheReadTokens ?? 0) + (next.cacheReadTokens ?? 0),
+				cacheWriteTokens: (prev.cacheWriteTokens ?? 0) + (next.cacheWriteTokens ?? 0),
+				totalTokens: prev.totalTokens + next.totalTokens,
+				durationMs: (prev.durationMs ?? 0) + (next.durationMs ?? 0),
+				...(prev.costUsd !== undefined || next.costUsd !== undefined ? { costUsd: (prev.costUsd ?? 0) + (next.costUsd ?? 0) } : {}),
+				...(prev.hadToolError || next.hadToolError ? { hadToolError: true, toolErrorCount: (prev.toolErrorCount ?? 0) + (next.toolErrorCount ?? 0) } : {}),
+				model: next.model ?? prev.model,
+				estimated: Boolean(prev.estimated && next.estimated),
+			};
+
 			let goalRound = 1;
 			while (
 				record.activeGoal
@@ -2553,13 +1743,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				&& !roundMarkdown.includes(GOAL_COMPLETE_MARKER)
 				&& goalRound < MAX_GOAL_ROUNDS
 			) {
+				if (goalRound === 1) {
+					accumulatedGoalUsage = resolveCompletedTurnUsage(engine, record.id, initialFullPrompt, roundMarkdown, turnStartedAt);
+				}
 				goalRound++;
 				const currentGoal = record.activeGoal;
 				stream.progress(`Verifying autonomous goal completion (Round ${goalRound}/${MAX_GOAL_ROUNDS})…`);
 				stream.markdown(`\n\n---\n*Goal Check (Round ${goalRound}/${MAX_GOAL_ROUNDS})*\n\n`);
 				roundMarkdown = '';
+				const goalContextDelta = interactiveStaticSystemCharter ? pendingDeltaContext : injected?.trim();
 				const continuationPrompt = [
-					...(injected?.trim() ? [injected.trim(), ''] : []),
+					...(goalContextDelta ? [goalContextDelta, ''] : []),
 					`[Autonomous Goal Stop-Check — Round ${goalRound}/${MAX_GOAL_ROUNDS}]`,
 					`Active Goal: ${currentGoal}`,
 					`You stopped without emitting \`${GOAL_COMPLETE_MARKER}\`.`,
@@ -2567,6 +1761,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					`2. If ANY work, edge case, or verification remains incomplete, complete it right now.`,
 					`3. Once 100% of the Active Goal is verified complete, summarize the final verified state and end with \`${GOAL_COMPLETE_MARKER}\`.`,
 				].join('\n');
+				const roundStartedAt = Date.now();
 				const preGoalId = record.id;
 				await engine.send(record, continuationPrompt, wrappedStream, turnCancellation.token, {
 					...sendOptions,
@@ -2574,6 +1769,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				});
 				syncRecordStorageKey(record, preGoalId);
 				flushPendingGoalText(true);
+				accumulatedGoalUsage = mergeGoalRoundUsage(
+					accumulatedGoalUsage,
+					resolveCompletedTurnUsage(engine, record.id, continuationPrompt, roundMarkdown, roundStartedAt),
+				);
 			}
 
 			if (record.activeGoal && roundMarkdown.includes(GOAL_COMPLETE_MARKER)) {
@@ -2581,12 +1780,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				setGoalBannerInUi(sessionUri, undefined);
 			}
 
-			const turnUsage = resolveCompletedTurnUsage(engine, record.id, initialFullPrompt, streamedMarkdown, turnStartedAt);
+			const turnUsage = accumulatedGoalUsage ?? resolveCompletedTurnUsage(engine, record.id, initialFullPrompt, streamedMarkdown, turnStartedAt);
 			if (!isSecretary && turnUsage.totalTokens > 0) {
 				const segments = computeMeasuredContextSegments({
 					injectedContractText: interactiveInjectedContract,
 					rawPrompt: userPromptWithRefs,
 					finalPrompt: initialFullPrompt,
+					appendSystemPrompt: interactiveStaticSystemCharter,
 					usage: turnUsage,
 					isFirstTurn: !alreadyInitializedForRank,
 				});
@@ -2627,7 +1827,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				}
 			}
 			if (parsedCmd === 'compact' || parsedCmd === 'smol' || contextCompactedDuringTurn) {
-				// Prompt-expanded or engine auto-compaction may drop the Turn-1 role charter; re-inject cleanly on the next turn.
 				record.roleInit = undefined;
 				record.lastDeltaContext = undefined;
 			} else if (!alreadyInitializedForRank && currentRankForContext && !turnCancellation.token.isCancellationRequested) {
@@ -2635,6 +1834,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					rank: currentRankForContext,
 					engine: record.engine,
 					promptHash: expectedPromptHash ?? hashRolePrompt(trimmedInjected),
+					...(interactiveStaticSystemCharter ? { staticSystemCharter: interactiveStaticSystemCharter } : {}),
 					initializedAt: Date.now(),
 				};
 				record.lastDeltaContext = undefined;
@@ -2646,7 +1846,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const titleSource = parsedCmd === 'goal' ? `/goal ${cmdArgText}` : effectiveUserPrompt;
 				record.label = titleSource.split('\n')[0].slice(0, 100) || record.label;
 			}
-			// Refresh runtime capabilities asynchronously after turn (captures newly discovered init commands/models)
 			void fetchRuntimeCaps(record.engine, record.cwd, record).then(({ changed }) => {
 				if (changed) {
 					void notifySessionOptionsUpdated(isSecretary ? SECRETARY_TYPE : engineType, sessionUri, true);
@@ -2740,7 +1939,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		));
 	};
 
-	// Register unified Secretary participant, customization provider & session provider with Aexus App Icon
 	const aexusAppIconUri = vscode.Uri.joinPath(context.extensionUri, 'resources/aexus-icon.svg');
 	const secretaryOptEmitter = new vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>();
 	const secretaryProviderOptEmitter = new vscode.EventEmitter<void>();
@@ -2814,7 +2012,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 	refreshSecretaryItem();
 
-	// Register all 8 Coding Agent engine participants, customization providers & session providers
 	for (const definition of available) {
 		const participantId = definition.type;
 		const optEmitter = new vscode.EventEmitter<vscode.ChatSessionOptionChangeEvent>();
@@ -2926,6 +2123,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		await applyOptionUpdates(sessionType, targetUri, [{ optionId: 'model', value: normalized }], true, false);
 	}));
 
+	const engineeringBridge = registerEngineeringAndRoleBridge({
+		context,
+		roleBridge,
+		records,
+		controllers,
+		turnCoordinator,
+		lastTurnReplies,
+		lastTurnErrors,
+		getSecretaryState: () => secretaryState,
+		defaultCwd,
+		key,
+		identity,
+		item,
+		syncRecordStorageKey,
+		refreshSecretaryItem,
+		findCachedRecord,
+		getRecord,
+		runtimeForRecord,
+		tryRuntimeForRecord,
+		getCachedRuntimeCaps,
+		notifySessionOptionsUpdated,
+		notifyCloudProjectMutated,
+		publishHistory,
+		save,
+	});
+	refreshRoleSnapshotFromWorkbench = engineeringBridge.refreshRoleSnapshotFromWorkbench;
+
 	const deleteRecordAndDescendants = async (record: RecordEntry, token: vscode.CancellationToken, deletedKeys: Set<string>): Promise<number> => {
 		const recordKey = key(record.engine, record.id);
 		if (deletedKeys.has(recordKey) || recordKey === secretaryState?.recordKey) {
@@ -2958,8 +2182,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			if (entryKey === secretaryState?.recordKey) { continue; }
 			if (candidate.engine === record.engine && (removedIds.has(candidate.id) || (candidate.resourceId && removedIds.has(candidate.resourceId)))) {
 				deletedKeys.add(entryKey);
-				await turnCoordinator.forceRelease(identity(candidate));
-				opened.get(identity(candidate))?.cancellation.cancel();
+				const candIdKey = identity(candidate);
+				await turnCoordinator.forceRelease(candIdKey);
+				opened.get(candIdKey)?.cancellation.cancel();
+				lastTurnReplies.delete(candIdKey);
+				lastTurnErrors.delete(candIdKey);
+				lastTurnReplies.delete(key(candidate.engine, candidate.id));
+				lastTurnErrors.delete(key(candidate.engine, candidate.id));
+				const candUriStr = resource(candidate).toString();
+				engineeringBridge.evictSyncedAgentPrefs(candUriStr);
+				lastNotifiedOptionsSig.delete(candUriStr);
 				if (candidate !== record) {
 					const childResolved = await tryRuntimeForRecord(candidate).catch(() => undefined);
 					if (childResolved) {
@@ -3053,7 +2285,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const target = await resolveCloudHostTarget(project.authority);
 				const info = await resolveRemoteEngineInfo(engine, target);
 				if (!info.command) {
-					const msg = formatMissingRemoteEngineMessage(engine, info.target.alias, info.probeError);
+					const msg = formatMissingRemoteEngineMessage(engine, info.target.alias, available, info.probeError);
 					promptConfigureCloudHost(msg, info.target.alias, Boolean(info.probeError));
 					throw new Error(msg);
 				}
@@ -3294,7 +2526,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const cachedLast = uri.scheme === SECRETARY_TYPE
 					? (lastTurnReplies.get(SECRETARY_TYPE) ?? lastTurnReplies.get(identity(record)))
 					: lastTurnReplies.get(identity(record));
-				if (cachedLast && !messages.some(m => m.role === 'assistant' && m.text === cachedLast)) {
+				const cachedNorm = cachedLast ? cachedLast.replace(/\s+/g, '') : '';
+				let cachedAlreadyPresent = false;
+				if (cachedNorm) {
+					const norm = (s: string) => s.replace(/\s+/g, '');
+					if (messages.some(m => m.role === 'assistant' && norm(m.text) === cachedNorm)) {
+						cachedAlreadyPresent = true;
+					} else {
+						let lastUserIdx = -1;
+						for (let i = messages.length - 1; i >= 0; i--) {
+							if (messages[i].role === 'user') {
+								lastUserIdx = i;
+								break;
+							}
+						}
+						const trailingAssistant = messages.slice(lastUserIdx + 1).filter(m => m.role === 'assistant');
+						const trailingJoined = norm(trailingAssistant.map(m => m.text).join(''));
+						if (
+							trailingJoined.length > 0
+							&& (
+								trailingJoined === cachedNorm
+								|| (trailingJoined.length >= cachedNorm.length * 0.85 && (trailingJoined.includes(cachedNorm) || cachedNorm.includes(trailingJoined)))
+							)
+						) {
+							cachedAlreadyPresent = true;
+						}
+					}
+				}
+				if (cachedLast && !cachedAlreadyPresent) {
 					messages.push({ role: 'assistant', text: cachedLast });
 				}
 				const cachedError = uri.scheme === SECRETARY_TYPE
@@ -3330,9 +2589,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand('aexus.agentEngines.killSession', async (uri: vscode.Uri, options?: { readonly hostAlias?: string }) => {
 			const record = findCachedRecord(uri);
 			if (!record) {
-				// Even after an Electron window reload (when local `records` has not yet populated this session),
-				// derive engine + sessionId from the URI and terminate any orphaned remote persistent session
-				// tree on the Cloud Host so Recall / Stop NEVER leaves runaway GPU / code-editing zombies!
 				const rawScheme = uri?.scheme || '';
 				const engineName = rawScheme.startsWith('aexus-') ? rawScheme.slice('aexus-'.length) : '';
 				const sessionId = (uri?.path || '').replace(/^\/+/, '');
@@ -3380,400 +2636,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				refreshSecretaryItem();
 			}
 			return { killed: true };
-		}),
-		vscode.commands.registerCommand('aexus.agentEngines.listConfiguredModels', async (rawProject?: vscode.Uri | string): Promise<Record<string, readonly { readonly id: string; readonly label: string }[]>> => {
-			const out: Record<string, readonly { readonly id: string; readonly label: string }[]> = {};
-			const parsedProject = parseOptionalUri(rawProject);
-			let remoteTarget = isCloudUri(parsedProject)
-				? await resolveCloudHostTarget(parsedProject.authority).catch(() => undefined)
-				: undefined;
-			if (remoteTarget && !remoteTarget.remoteHome) {
-				const probed = await probeRemoteEngines(remoteTarget).catch(() => undefined);
-				if (probed?.target) {
-					remoteTarget = probed.target;
-				}
-			}
-			const cwd = isCloudUri(parsedProject) && remoteTarget
-				? toRemoteNativePath(parsedProject.path || '/', remoteTarget.os, remoteTarget.remoteHome)
-				: (parsedProject?.scheme === 'file' ? parsedProject.fsPath : defaultCwd());
-			const legacyKeys: Record<EngineId, string[]> = {
-				'aexus-claude': ['claude-code', 'aexus-claude'],
-				'aexus-codex': ['codex', 'aexus-codex'],
-				'aexus-kilo': ['kilo', 'aexus-kilo'],
-				'aexus-opencode': ['opencode', 'aexus-opencode'],
-				'aexus-dsh': ['dsh', 'aexus-dsh'],
-				'aexus-antigravity': ['antigravity', 'aexus-antigravity'],
-				'aexus-cline': ['cline', 'aexus-cline'],
-				'aexus-pi': ['pi', 'aexus-pi'],
-			};
-			await Promise.all(definitions.map(async def => {
-				try {
-					const caps = getCachedRuntimeCaps(def.id, cwd, remoteTarget?.authority);
-					const items = (await discoverEngineModels(def.type, cwd, caps.models, caps.defaultModel, [], remoteTarget))
-						.filter(m => m.id !== 'default')
-						.map(m => ({ id: m.id, label: m.name !== m.id ? `${m.name} (${m.id})` : m.id }));
-					if (items.length > 0) {
-						for (const aliasKey of legacyKeys[def.type]) {
-							out[aliasKey] = items;
-						}
-					}
-				} catch { /* Non-fatal single-engine model discovery failure */ }
-			}));
-			return out;
-		}),
-		vscode.commands.registerCommand('aexus.agentEngines.dispatchEngineeringTurn', async (
-			uri: vscode.Uri,
-			rawPrompt: string,
-			rawOptions?: {
-				agentId?: string;
-				missionId?: string;
-				nodeId?: string;
-				tokenId?: string;
-				turnId?: string;
-				model?: string;
-				thinking?: EngineThinkingLevel;
-				pureWorker?: boolean;
-				callerRole?: string;
-				isMissionNode?: boolean;
-				autonomousApproved?: boolean;
-				sandboxMode?: string;
-				preferReattach?: boolean;
-			},
-		) => {
-			const lookupToken = new vscode.CancellationTokenSource();
-			let record: RecordEntry;
-			try {
-				record = await getRecord(uri, lookupToken.token);
-			} finally {
-				lookupToken.dispose();
-			}
-
-			record.resourceId ??= record.id;
-			const recordKey = identity(record);
-			const forceKillRecord = async () => {
-				const resolved = await tryRuntimeForRecord(record).catch(() => undefined);
-				if (resolved) {
-					await resolved.engine.killSession?.(record).catch(() => undefined);
-				}
-			};
-			const lease = await turnCoordinator.acquire({
-				key: recordKey,
-				source: 'headless',
-				createCts: () => new vscode.CancellationTokenSource(),
-				forceKill: forceKillRecord,
-				graceTimeoutMs: 2500,
-			});
-			if (!lease) {
-				return {
-					reply: '',
-					nativeId: record.id,
-					stopped: true,
-					usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 0 },
-				};
-			}
-
-			const turnCancellation = lease.cts;
-			let streamedMarkdown = '';
-			let activeEngine: EngineRuntime | undefined;
-			let finalizeTurnUsage: ((engine: EngineRuntime, replyText: string) => EngineTurnTokenUsage & { turns: number }) | undefined;
-			try {
-				controllers.get(record.engine)?.items.add(item(record));
-				if (secretaryState && records.get(secretaryState.recordKey) === record) {
-					refreshSecretaryItem();
-				}
-				const snapEntryForDispatch = roleBridge.getSnapshot().agents.find(a => a.id === rawOptions?.agentId || a.resource === uri.toString());
-				const isMissionNodeDispatch = Boolean(rawOptions?.isMissionNode ?? snapEntryForDispatch?.isMissionNode);
-				const isPureWorker = Boolean(rawOptions?.pureWorker) && !isMissionNodeDispatch;
-				let finalPrompt = rawPrompt;
-				let callerRole: string | undefined;
-				let alreadyInit = false;
-				let headlessPromptHash: string | undefined;
-				let headlessTrimmedInjected: string | undefined;
-				let headlessPendingDelta: string | undefined;
-				if (!isPureWorker) {
-					const snapEntry = snapEntryForDispatch;
-					callerRole = rawOptions?.callerRole ?? snapEntry?.rank;
-					headlessPromptHash = snapEntry?.rolePrompt?.trim() ? hashRolePrompt(snapEntry.rolePrompt) : undefined;
-					alreadyInit = Boolean(
-						callerRole
-						&& record.roleInit
-						&& record.roleInit.engine === record.engine
-						&& record.roleInit.rank === callerRole
-						&& (
-							headlessPromptHash
-								? record.roleInit.promptHash === headlessPromptHash
-								: Boolean(record.roleInit.promptHash)
-						),
-					);
-					const injected = await Promise.resolve(vscode.commands.executeCommand<string | undefined>(
-						'aexus.ade.resolvePromptContext',
-						alreadyInit
-							? { ...(rawOptions?.agentId ? { agentId: rawOptions.agentId } : {}), resource: uri, mode: 'delta' }
-							: (rawOptions?.agentId ? { agentId: rawOptions.agentId, resource: uri } : uri),
-					)).catch(() => undefined);
-					headlessTrimmedInjected = injected?.trim();
-					if (headlessTrimmedInjected) {
-						if (!alreadyInit || headlessTrimmedInjected !== record.lastDeltaContext) {
-							finalPrompt = `${headlessTrimmedInjected}\n\n${AEXUS_PREAMBLE_END_MARKER}\n\n${rawPrompt}`;
-							if (alreadyInit) {
-								headlessPendingDelta = headlessTrimmedInjected;
-							}
-						}
-					}
-				}
-
-				let lastHeartbeatSent = 0;
-				const emitHeartbeat = () => {
-					const now = Date.now();
-					if (now - lastHeartbeatSent >= 1000) {
-						lastHeartbeatSent = now;
-						void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.workerHeartbeat', uri.toString(), now)).catch(() => undefined);
-					}
-				};
-
-				let headlessToolErrorCount = 0;
-				const headlessErrorScanner = createStreamToolErrorScanner();
-				const headlessStreamTarget: vscode.ChatResponseStream = Object.create(null);
-				const headlessStream: vscode.ChatResponseStream = new Proxy(headlessStreamTarget, {
-					get(_dummy, prop) {
-						if (prop === 'markdown') {
-							return (value: string | vscode.MarkdownString) => {
-								const textChunk = typeof value === 'string' ? value : value.value;
-								if (textChunk) {
-									if (headlessErrorScanner.scan(textChunk)) {
-										headlessToolErrorCount += 1;
-									}
-									streamedMarkdown += textChunk;
-									emitHeartbeat();
-								}
-							};
-						}
-						if (prop === 'progress') {
-							return (value?: string) => {
-								if (typeof value === 'string' && detectToolErrorInProgressText(value)) {
-									headlessToolErrorCount += 1;
-								}
-								emitHeartbeat();
-							};
-						}
-						if (prop === 'push') {
-							return (part: unknown) => {
-								if (detectToolErrorInStreamPart(part)) {
-									headlessToolErrorCount += 1;
-								}
-								emitHeartbeat();
-							};
-						}
-						return () => { };
-					},
-				});
-
-				const turnStartedAt = Date.now();
-				const headlessInjectedContract = (!alreadyInit || headlessPendingDelta !== undefined) ? headlessTrimmedInjected : undefined;
-				const reportedSoFar = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, costUsd: 0 };
-				let lastInterimReportAt = 0;
-				const reportInterimUsage = (cumulative: EngineTurnTokenUsage) => {
-					const now = Date.now();
-					if (now - lastInterimReportAt < 1200) {
-						return;
-					}
-					const delta = {
-						inputTokens: Math.max(0, cumulative.inputTokens - reportedSoFar.inputTokens),
-						outputTokens: Math.max(0, cumulative.outputTokens - reportedSoFar.outputTokens),
-						cacheReadTokens: Math.max(0, (cumulative.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
-						cacheWriteTokens: Math.max(0, (cumulative.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
-						totalTokens: Math.max(0, cumulative.totalTokens - reportedSoFar.totalTokens),
-					};
-					if (delta.totalTokens === 0 && delta.inputTokens === 0 && delta.outputTokens === 0) {
-						return;
-					}
-					lastInterimReportAt = now;
-					reportedSoFar.inputTokens += delta.inputTokens;
-					reportedSoFar.outputTokens += delta.outputTokens;
-					reportedSoFar.cacheReadTokens += delta.cacheReadTokens;
-					reportedSoFar.cacheWriteTokens += delta.cacheWriteTokens;
-					reportedSoFar.totalTokens += delta.totalTokens;
-					let deltaCostUsd: number | undefined;
-					if (typeof cumulative.costUsd === 'number' && Number.isFinite(cumulative.costUsd) && cumulative.costUsd > reportedSoFar.costUsd) {
-						deltaCostUsd = Math.round((cumulative.costUsd - reportedSoFar.costUsd) * 1_000_000) / 1_000_000;
-						reportedSoFar.costUsd = cumulative.costUsd;
-					}
-					const segments = computeMeasuredContextSegments({
-						injectedContractText: headlessInjectedContract,
-						rawPrompt,
-						finalPrompt,
-						usage: cumulative,
-						isFirstTurn: !alreadyInit,
-					});
-					const effectiveHeadlessToolErrors = Math.max(headlessToolErrorCount, cumulative.toolErrorCount ?? 0);
-					const effectiveModel = cumulative.model || (rawOptions?.model && rawOptions.model !== 'default' ? rawOptions.model : undefined);
-					void Promise.resolve(vscode.commands.executeCommand('aexus.ade.engineering.recordTurnUsage', {
-						sessionResource: uri.toString(),
-						agentId: rawOptions?.agentId,
-						missionId: rawOptions?.missionId,
-						nodeId: rawOptions?.nodeId,
-						tokenId: rawOptions?.tokenId,
-						turnId: rawOptions?.turnId,
-						usage: {
-							...delta,
-							...segments,
-							...(deltaCostUsd !== undefined ? { costUsd: deltaCostUsd } : {}),
-							...(effectiveHeadlessToolErrors > 0 || cumulative.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, effectiveHeadlessToolErrors) } : {}),
-							model: effectiveModel,
-							engineId: record.engine,
-							turns: 0,
-						},
-					})).catch(() => undefined);
-				};
-				finalizeTurnUsage = (engine: EngineRuntime, replyText: string) => {
-					const finalUsage = resolveCompletedTurnUsage(engine, record.id, finalPrompt, replyText, turnStartedAt);
-					const segments = computeMeasuredContextSegments({
-						injectedContractText: headlessInjectedContract,
-						rawPrompt,
-						finalPrompt,
-						usage: finalUsage,
-						isFirstTurn: !alreadyInit,
-					});
-					const finalCostUsd = typeof finalUsage.costUsd === 'number' && Number.isFinite(finalUsage.costUsd)
-						? Math.max(0, Math.round((finalUsage.costUsd - reportedSoFar.costUsd) * 1_000_000) / 1_000_000)
-						: undefined;
-					const finalToolErrors = Math.max(headlessToolErrorCount, finalUsage.toolErrorCount ?? 0);
-					return {
-						inputTokens: Math.max(0, finalUsage.inputTokens - reportedSoFar.inputTokens),
-						outputTokens: Math.max(0, finalUsage.outputTokens - reportedSoFar.outputTokens),
-						cacheReadTokens: Math.max(0, (finalUsage.cacheReadTokens ?? 0) - reportedSoFar.cacheReadTokens),
-						cacheWriteTokens: Math.max(0, (finalUsage.cacheWriteTokens ?? 0) - reportedSoFar.cacheWriteTokens),
-						totalTokens: Math.max(0, finalUsage.totalTokens - reportedSoFar.totalTokens),
-						...segments,
-						durationMs: finalUsage.durationMs,
-						...(finalCostUsd !== undefined ? { costUsd: finalCostUsd } : {}),
-						...(finalToolErrors > 0 || finalUsage.hadToolError ? { hadToolError: true, toolErrorCount: Math.max(1, finalToolErrors) } : {}),
-						model: finalUsage.model || (rawOptions?.model && rawOptions.model !== 'default' ? rawOptions.model : undefined),
-						engineId: record.engine,
-						turns: 1,
-						estimated: finalUsage.estimated,
-					};
-				};
-
-				if (turnCancellation.token.isCancellationRequested) {
-					return {
-						reply: '',
-						nativeId: record.id,
-						stopped: true,
-						usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 0 },
-					};
-				}
-
-				const resolvedEng = await runtimeForRecord(record);
-				const engine = resolvedEng.engine;
-				activeEngine = engine;
-				const prevId = record.id;
-				let contextCompactedDuringTurn = false;
-				const cfg = record.sessionConfig ?? {};
-				const effectiveAutomatedEngineering = rawOptions?.autonomousApproved !== undefined
-					? (rawOptions.autonomousApproved || isAutonomousModeEnabled())
-					: true;
-				const effectiveSandboxMode = rawOptions?.sandboxMode && rawOptions.sandboxMode !== 'default'
-					? rawOptions.sandboxMode
-					: (cfg.sandboxMode && cfg.sandboxMode !== 'default' ? cfg.sandboxMode : undefined);
-				const headlessSendOptions: EngineSendOptions = {
-					model: rawOptions?.model ?? (cfg.model && cfg.model !== 'default' ? cfg.model : undefined),
-					thinking: rawOptions?.thinking ?? (cfg.thinking && cfg.thinking !== 'default' ? cfg.thinking : undefined),
-					mode: cfg.mode && cfg.mode !== 'default' ? cfg.mode : undefined,
-					permissionMode: cfg.permissionMode && cfg.permissionMode !== 'default' ? cfg.permissionMode : undefined,
-					sandboxMode: effectiveSandboxMode,
-					webSearch: cfg.webSearch,
-					pureWorker: isPureWorker,
-					callerRole,
-					isMissionNode: isMissionNodeDispatch,
-					adeSessionId: rawOptions?.agentId ?? snapEntryForDispatch?.id,
-					automatedEngineering: effectiveAutomatedEngineering,
-					onInterimUsage: reportInterimUsage,
-					onContextCompacted: () => {
-						contextCompactedDuringTurn = true;
-						record.roleInit = undefined;
-						record.lastDeltaContext = undefined;
-					},
-				};
-				if (engine.prepareSession) {
-					await engine.prepareSession(record, headlessSendOptions, turnCancellation.token);
-					syncRecordStorageKey(record, prevId);
-					await save();
-				}
-				if (turnCancellation.token.isCancellationRequested) {
-					return {
-						reply: '',
-						nativeId: record.id,
-						stopped: true,
-						usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 0 },
-					};
-				}
-				lastTurnErrors.delete(recordKey);
-				const preSendId = record.id;
-				let reattached = false;
-				if (rawOptions?.preferReattach && engine.reattachIfRunning) {
-					const reattachOutcome = await engine.reattachIfRunning(record, headlessStream, turnCancellation.token, {
-						...headlessSendOptions,
-						preferReattach: true,
-					}).catch(() => 'not_running' as const);
-					reattached = reattachOutcome === 'reattached';
-				}
-				if (!reattached) {
-					await engine.send(record, finalPrompt, headlessStream, turnCancellation.token, headlessSendOptions);
-				}
-				syncRecordStorageKey(record, preSendId);
-				// Commit roleInit ONLY after engine.send succeeds (and unless auto-compaction reset it during the turn).
-				if (contextCompactedDuringTurn) {
-					record.roleInit = undefined;
-					record.lastDeltaContext = undefined;
-				} else if (!isPureWorker && !alreadyInit && callerRole && !turnCancellation.token.isCancellationRequested) {
-					record.roleInit = {
-						rank: callerRole,
-						engine: record.engine,
-						promptHash: headlessPromptHash ?? hashRolePrompt(headlessTrimmedInjected),
-						initializedAt: Date.now(),
-					};
-					record.lastDeltaContext = undefined;
-				} else if (!isPureWorker && headlessPendingDelta !== undefined && !turnCancellation.token.isCancellationRequested) {
-					record.lastDeltaContext = headlessPendingDelta;
-				}
-				if (streamedMarkdown.trim()) {
-					lastTurnReplies.set(identity(record), streamedMarkdown.trim());
-				}
-				record.updated = Date.now();
-				return {
-					reply: streamedMarkdown.trim(),
-					nativeId: record.id,
-					stopped: turnCancellation.token.isCancellationRequested,
-					...(reattached ? { reattached: true } : {}),
-					usage: finalizeTurnUsage(engine, streamedMarkdown),
-				};
-			} catch (error) {
-				if (turnCancellation.token.isCancellationRequested || error instanceof vscode.CancellationError) {
-					return {
-						reply: streamedMarkdown.trim(),
-						nativeId: record.id,
-						stopped: true,
-						usage: activeEngine && finalizeTurnUsage ? finalizeTurnUsage(activeEngine, streamedMarkdown) : { inputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 1 },
-					};
-				}
-				const errText = error instanceof Error ? error.message : String(error);
-				lastTurnErrors.set(identity(record), errText);
-				throw error;
-			} finally {
-				lease.markSettling();
-				turnCancellation.dispose();
-				turnCoordinator.release(lease);
-				if (records.has(key(record.engine, record.id)) || [...records.values()].includes(record)) {
-					controllers.get(record.engine)?.items.add(item(record));
-				}
-				if (secretaryState && records.get(secretaryState.recordKey) === record) {
-					refreshSecretaryItem();
-				}
-				notifyCloudProjectMutated(record.cloudProjectUri);
-				await publishHistory(record).catch(() => undefined);
-				await save();
-			}
 		}),
 		vscode.commands.registerCommand('aexus.agentEngines.delete', async (uri: vscode.Uri) => {
 			const token = new vscode.CancellationTokenSource();
@@ -3852,205 +2714,4 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await save();
 		}),
 	);
-
-	const bindNativeRecord = (agentResource: string | undefined, realNativeId: string) => {
-		if (!agentResource || !realNativeId) { return; }
-		let uri: vscode.Uri;
-		try {
-			uri = vscode.Uri.parse(agentResource);
-		} catch {
-			return;
-		}
-		const record = findCachedRecord(uri);
-		if (!record) { return; }
-		if (record.id === realNativeId && !record.provisional && !record.unmaterialized) { return; }
-
-		const prevId = record.id;
-		const nextPlainKey = key(record.engine, realNativeId);
-		const existingReal = records.get(nextPlainKey);
-		record.resourceId ??= record.id;
-		if (existingReal && existingReal !== record && recordCloudAuthority(existingReal) === recordCloudAuthority(record)) {
-			record.file ??= existingReal.file;
-			record.created ||= existingReal.created;
-			record.updated = Math.max(record.updated, existingReal.updated);
-		}
-		record.id = realNativeId;
-		record.provisional = false;
-		record.unmaterialized = false;
-		syncRecordStorageKey(record, prevId);
-		controllers.get(record.engine)?.items.add(item(record));
-		if (secretaryState && records.get(secretaryState.recordKey) === record) {
-			refreshSecretaryItem();
-		}
-		void save();
-	};
-
-	const lastSyncedAgentPrefs = new Map<string, { model?: string; thinking?: string }>();
-	const syncPreferencesFromSnapshot = (snapshot: RoleSyncSnapshot) => {
-		let dirty = false;
-		for (const agentEntry of snapshot.agents) {
-			if (!agentEntry.resource) {
-				continue;
-			}
-			let uri: vscode.Uri;
-			try {
-				uri = vscode.Uri.parse(agentEntry.resource);
-			} catch {
-				continue;
-			}
-			const rec = findCachedRecord(uri);
-			if (!rec) {
-				continue;
-			}
-			const cfg = (rec.sessionConfig ??= {});
-			const prev = lastSyncedAgentPrefs.get(agentEntry.resource) ?? {};
-			let recUpdated = false;
-			if (agentEntry.preferredModel) {
-				const prefChanged = prev.model !== undefined && prev.model !== agentEntry.preferredModel;
-				if ((prefChanged || !cfg.model || cfg.model === 'default') && cfg.model !== agentEntry.preferredModel) {
-					cfg.model = agentEntry.preferredModel;
-					recUpdated = true;
-				}
-				prev.model = agentEntry.preferredModel;
-			}
-			if (agentEntry.preferredThinking) {
-				const mappedThinking = agentEntry.preferredThinking === 'none' ? 'off' : agentEntry.preferredThinking;
-				const prefChanged = prev.thinking !== undefined && prev.thinking !== mappedThinking;
-				if ((prefChanged || !cfg.thinking || cfg.thinking === 'default') && cfg.thinking !== mappedThinking) {
-					cfg.thinking = mappedThinking;
-					recUpdated = true;
-				}
-				prev.thinking = mappedThinking;
-			}
-			lastSyncedAgentPrefs.set(agentEntry.resource, prev);
-			if (recUpdated) {
-				dirty = true;
-				void notifySessionOptionsUpdated(`aexus-${rec.engine}`, uri, true);
-			}
-		}
-		if (dirty) {
-			void save();
-		}
-	};
-
-	const enrichRoleSnapshot = async (raw: RoleSyncSnapshot): Promise<RoleSyncSnapshot> => {
-		syncPreferencesFromSnapshot(raw);
-		const [agyBindings, externalBindings] = await Promise.all([
-			roleBridge.readAgyBindings(),
-			roleBridge.readExternalNativeBindings(),
-		]);
-		const agyAgentToConv = new Map<string, string>();
-		for (const [conversationId, agentId] of Object.entries(agyBindings)) {
-			agyAgentToConv.set(agentId, conversationId);
-		}
-		const externalByKey = new Map<string, string>();
-		for (const binding of externalBindings) {
-			externalByKey.set(`${binding.shortEngine}:${binding.agentId}`, binding.nativeSessionId);
-		}
-		return {
-			...raw,
-			agents: raw.agents.map(entry => {
-				let nativeSessionId = entry.nativeSessionId;
-				if (!nativeSessionId && entry.resource) {
-					try {
-						const record = findCachedRecord(vscode.Uri.parse(entry.resource));
-						if (record && !record.provisional && !record.unmaterialized) {
-							nativeSessionId = record.id;
-						}
-					} catch { /* Ignore invalid resource URI. */ }
-				}
-				if (entry.engineId?.startsWith('aexus-')) {
-					const shortEngine = entry.engineId.slice('aexus-'.length);
-					const extNativeId = externalByKey.get(`${shortEngine}:${entry.id}`);
-					if (extNativeId) {
-						nativeSessionId ??= extNativeId;
-						if (entry.resource) {
-							bindNativeRecord(entry.resource, extNativeId);
-						}
-					}
-				}
-				if (entry.engineId === 'aexus-antigravity') {
-					const agyConvId = agyAgentToConv.get(entry.id);
-					if (agyConvId) {
-						nativeSessionId ??= agyConvId;
-						if (entry.resource) {
-							bindNativeRecord(entry.resource, agyConvId);
-						}
-					}
-				}
-				return nativeSessionId ? { ...entry, nativeSessionId } : entry;
-			}),
-		};
-	};
-
-	roleBridge.setOnNativeSessionBound((_shortEngine, agentId, realNativeId) => {
-		const agent = roleBridge.getSnapshot().agents.find(entry => entry.id === agentId);
-		if (agent?.resource) {
-			bindNativeRecord(agent.resource, realNativeId);
-		}
-	});
-
-	let bindingSyncInFlight = false;
-	let bindingSyncPending = false;
-	const syncExternalBindingsIntoSnapshot = async () => {
-		if (bindingSyncInFlight) {
-			bindingSyncPending = true;
-			return;
-		}
-		bindingSyncInFlight = true;
-		try {
-			do {
-				bindingSyncPending = false;
-				const current = roleBridge.getSnapshot();
-				if (!current.agents.length) {
-					continue;
-				}
-				const enriched = await enrichRoleSnapshot(current);
-				const changed = enriched.agents.some((entry, idx) => entry.nativeSessionId !== current.agents[idx]?.nativeSessionId);
-				if (changed) {
-					await roleBridge.updateSnapshot(enriched);
-				}
-			} while (bindingSyncPending);
-		} finally {
-			bindingSyncInFlight = false;
-		}
-	};
-
-	// Event-driven fs.watch on role-bridge binding files (replaces legacy 1Hz idle disk polling timer).
-	const stopBindingWatcher = roleBridge.watchExternalBindings(() => {
-		void syncExternalBindingsIntoSnapshot();
-	});
-
-	context.subscriptions.push(
-		{
-			dispose: () => {
-				stopBindingWatcher();
-				roleBridge.dispose();
-				clearCloudTransportCaches();
-			},
-		},
-		vscode.commands.registerCommand('aexus.agentEngines.syncRoleContext', async (rawSnapshot?: RoleSyncSnapshot) => {
-			if (!rawSnapshot || typeof rawSnapshot !== 'object' || !Array.isArray(rawSnapshot.agents)) {
-				return;
-			}
-			const enriched = await enrichRoleSnapshot(rawSnapshot);
-			await roleBridge.updateSnapshot(enriched);
-		}),
-	);
-
-	void Promise.resolve(vscode.commands.executeCommand<number>('aexus.ade.getWindowId'))
-		.then(wid => {
-			if (typeof wid === 'number' && Number.isInteger(wid) && wid > 0) {
-				setHostWindowId(wid);
-			}
-		})
-		.catch(() => undefined);
-
-	void Promise.resolve(vscode.commands.executeCommand<RoleSyncSnapshot>('aexus.ade.getRoleSyncSnapshot'))
-		.then(async initialSnapshot => {
-			if (initialSnapshot && typeof initialSnapshot === 'object' && Array.isArray(initialSnapshot.agents)) {
-				await roleBridge.updateSnapshot(await enrichRoleSnapshot(initialSnapshot));
-			}
-		})
-		.catch(() => undefined);
 }

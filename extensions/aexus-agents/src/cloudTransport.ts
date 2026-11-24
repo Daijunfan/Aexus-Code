@@ -1271,6 +1271,8 @@ export async function runSshCommand(
 		child.stdin.on('error', () => { /* Ignore EPIPE if SSH exits early. */ });
 
 		const outChunks: Buffer[] = [];
+		let outBytes = 0;
+		const maxOutputBytes = 32 * 1024 * 1024;
 		let stderr = '';
 		let settled = false;
 
@@ -1297,7 +1299,14 @@ export async function runSshCommand(
 			}
 		});
 
-		child.stdout.on('data', (chunk: Buffer) => outChunks.push(chunk));
+		child.stdout.on('data', (chunk: Buffer) => {
+			if (outBytes < maxOutputBytes) {
+				const remaining = maxOutputBytes - outBytes;
+				const slice = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+				outChunks.push(slice);
+				outBytes += slice.length;
+			}
+		});
 		child.stderr.setEncoding('utf8');
 		child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-8000); });
 
@@ -1863,6 +1872,8 @@ const pendingReverseControlBridges = new Map<string, Promise<RemoteControlRevers
 const reverseBridgeAutoHealRegistry = new Map<string, ReverseBridgeAutoHealEntry>();
 const stagedRemoteCliShims = new Map<string, string>();
 const REVERSE_BRIDGE_HEAL_BACKOFFS_MS = [1_500, 3_000, 6_000, 12_000, 20_000, 30_000, 60_000];
+const MAX_REVERSE_BRIDGE_HEAL_ATTEMPTS = 20;
+const REMOTE_BRIDGE_READY_SENTINEL = '__AEX_BRIDGE_READY__';
 
 /**
  * Resolves the fixed remote Unix Domain Socket path (<= 96 bytes for `sockaddr_un`) and
@@ -1947,7 +1958,7 @@ async function writeRemoteBridgeMetadataFile(
 
 function scheduleReverseBridgeHeal(key: string): void {
 	const entry = reverseBridgeAutoHealRegistry.get(key);
-	if (!entry || entry.disposed || entry.healTimer) {
+	if (!entry || entry.disposed || entry.healTimer || entry.healAttempts >= MAX_REVERSE_BRIDGE_HEAL_ATTEMPTS) {
 		return;
 	}
 	const delayMs = REVERSE_BRIDGE_HEAL_BACKOFFS_MS[Math.min(entry.healAttempts, REVERSE_BRIDGE_HEAL_BACKOFFS_MS.length - 1)] ?? 60_000;
@@ -2086,8 +2097,8 @@ export async function openRemoteControlReverseBridge(
 			cb();
 		};
 		const timer = setTimeout(() => {
-			if ((remoteSocketPath || allocatedPort) && !exited) {
-				finish(() => resolve(allocatedPort ?? 0));
+			if (allocatedPort && !exited) {
+				finish(() => resolve(allocatedPort!));
 			} else {
 				terminateTunnel();
 				finish(() => reject(new Error(stderr.trim() || `Timed out establishing SSH reverse control bridge (${target.alias})`)));
@@ -2121,14 +2132,55 @@ export async function openRemoteControlReverseBridge(
 			}
 			finish(() => reject(err));
 		});
-		// When binding a fixed UDS path or explicit TCP port, wait briefly to confirm ExitOnForwardFailure doesn't abort it.
-		if (remoteSocketPath || requestedRemotePort > 0) {
-			const readyTimer = setTimeout(() => {
-				if (!exited) {
-					finish(() => resolve(remoteSocketPath ? 0 : requestedRemotePort));
+		// Verify remote endpoint bind via explicit sentinel (`__AEX_BRIDGE_READY__`) rather than a blind 450ms sleep,
+		// so WAN / ProxyJump handshakes (>450ms) with `AllowStreamLocalForwarding no` never falsely resolve UDS.
+		if (remoteSocketPath) {
+			void (async () => {
+				const probeScript = `s=${posixQuote(remoteSocketPath)}; for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if [ -S "$s" ]; then printf '${REMOTE_BRIDGE_READY_SENTINEL}\\n'; exit 0; fi; sleep 0.08 2>/dev/null || sleep 1; done; exit 1`;
+				const deadline = Date.now() + timeoutMs;
+				while (!settled && !exited && Date.now() < deadline) {
+					const rem = Math.max(400, Math.min(2_500, deadline - Date.now()));
+					const res = await runSshCommand(target, `sh -c ${posixQuote(probeScript)}`, { timeoutMs: rem }).catch(() => undefined);
+					if (settled || exited) {
+						return;
+					}
+					if (res && res.code === 0 && res.stdout.toString('utf8').includes(REMOTE_BRIDGE_READY_SENTINEL)) {
+						finish(() => resolve(0));
+						return;
+					}
+					await new Promise<void>(r => {
+						const t = setTimeout(r, 80);
+						t.unref?.();
+					});
 				}
-			}, 450);
-			readyTimer.unref?.();
+			})();
+		} else if (requestedRemotePort > 0) {
+			void (async () => {
+				const posixPortProbe = `if command -v python3 >/dev/null 2>&1; then python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.4); sys.exit(0 if s.connect_ex(('127.0.0.1', ${requestedRemotePort}))==0 else 1)"; elif command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 ${requestedRemotePort} >/dev/null 2>&1; else exit 2; fi && printf '${REMOTE_BRIDGE_READY_SENTINEL}\\n'`;
+				const winPortProbe = `$c=New-Object Net.Sockets.TcpClient; try { $ar=$c.BeginConnect('127.0.0.1',${requestedRemotePort},$null,$null); if ($ar.AsyncWaitHandle.WaitOne(400) -and $c.Connected) { Write-Output '${REMOTE_BRIDGE_READY_SENTINEL}'; exit 0 } } finally { $c.Close() }; exit 1`;
+				const deadline = Date.now() + timeoutMs;
+				let attempts = 0;
+				while (!settled && !exited && Date.now() < deadline) {
+					attempts++;
+					const rem = Math.max(500, Math.min(2_500, deadline - Date.now()));
+					const res = await execRemoteShell(target, posixPortProbe, winPortProbe, { timeoutMs: rem }).catch(() => undefined);
+					if (settled || exited) {
+						return;
+					}
+					if (res && res.code === 0 && res.stdout.toString('utf8').includes(REMOTE_BRIDGE_READY_SENTINEL)) {
+						finish(() => resolve(requestedRemotePort));
+						return;
+					}
+					if (res?.code === 2 && attempts >= 2 && !exited) {
+						finish(() => resolve(requestedRemotePort));
+						return;
+					}
+					await new Promise<void>(r => {
+						const t = setTimeout(r, 100);
+						t.unref?.();
+					});
+				}
+			})();
 		}
 	});
 

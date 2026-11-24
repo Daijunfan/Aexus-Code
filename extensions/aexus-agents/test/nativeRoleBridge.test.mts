@@ -349,6 +349,17 @@ describe('ADE Native Extension Role Bridge', () => {
 			assert.strictEqual(stripPreamble(userWrapped), 'Ship the release notes.');
 			assert.strictEqual(sharedModule.hasAexusSystemMessageEnvelope(userWrapped), true);
 
+			const userWrappedWithRootBaton = [
+				sharedModule.buildUserMessageSystemEnvelope({ tokenId: 'otok-root-1', missionId: 'mis-42', nodeId: 'CEO' }),
+				'',
+				sharedModule.AEXUS_PREAMBLE_END_MARKER,
+				'',
+				'Design and ship billing.',
+			].join('\n');
+			assert.ok(userWrappedWithRootBaton.includes('Root Baton Issued: `otok-root-1` (Mission: `mis-42`, Node: `CEO`)'));
+			assert.strictEqual(stripPreamble(userWrappedWithRootBaton), 'Design and ship billing.');
+			assert.strictEqual(sharedModule.hasAexusSystemMessageEnvelope(userWrappedWithRootBaton), true);
+
 			const roleWrapped = [
 				sharedModule.AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER,
 				'- Message Type: Direct message from a higher-rank ADE Role (NOT a direct message from the Human User, and NOT a Baton Token).',
@@ -1523,7 +1534,7 @@ describe('ADE Native Extension Role Bridge', () => {
 				);
 				const turn = JSON.parse(sentToCodex.at(-1)!) as { params: { input: Array<{ type: string; text: string }> } };
 				assert.deepStrictEqual(turn.params.input, [
-					{ type: 'text', text: '[Aexus Orchestrated Role Context]\n[Aexus Orchestrated Role Context]\n- Role: Governor (Fallback)' },
+					{ type: 'text', text: '[Aexus Orchestrated Role Context]\n- Role: Governor (Fallback)' },
 					{ type: 'text', text: '你的身份?' },
 				]);
 			} finally {
@@ -1673,7 +1684,7 @@ describe('ADE Native Extension Role Bridge', () => {
 			const govSpawn = spawnClaude();
 			assert.ok(govSpawn.args.includes('--append-system-prompt'));
 
-			// 1. SDK initialize preset (`systemPrompt.append`) and adapter `appendSystemPrompt` both receive the role prompt.
+			// 1. SDK initialize preset (`systemPrompt.append`) receives the role prompt ONCE without duplicating into `appendSystemPrompt`.
 			govSpawn.child.stdin.write(JSON.stringify({
 				type: 'control_request',
 				request_id: 'init-gov-1',
@@ -1690,12 +1701,12 @@ describe('ADE Native Extension Role Bridge', () => {
 				request: {
 					subtype: 'initialize',
 					systemPrompt: { type: 'preset', preset: 'claude_code', append: `CLI preset append\n\n${govRole}` },
-					appendSystemPrompt: `SDK adapter append\n\n${govRole}`,
+					appendSystemPrompt: 'SDK adapter append',
 					hooks: { SessionStart: [] },
 				},
 			});
 
-			// 2. Array-shaped `systemPrompt` gets the role prompt appended as an extra block, plus a synthesized `appendSystemPrompt`.
+			// 2. Array-shaped `systemPrompt` gets the role prompt appended ONCE as an extra block without synthesizing a duplicate `appendSystemPrompt`.
 			govSpawn.child.stdin.write(JSON.stringify({
 				type: 'control_request',
 				request_id: 'init-gov-2',
@@ -1710,7 +1721,24 @@ describe('ADE Native Extension Role Bridge', () => {
 				request: {
 					subtype: 'initialize',
 					systemPrompt: [{ type: 'text', text: 'preset block' }, govRole],
-					appendSystemPrompt: govRole,
+				},
+			});
+
+			// 2b. When `systemPrompt` is absent, `appendSystemPrompt` receives the merged role prompt cleanly.
+			govSpawn.child.stdin.write(JSON.stringify({
+				type: 'control_request',
+				request_id: 'init-gov-2b',
+				request: {
+					subtype: 'initialize',
+					appendSystemPrompt: 'SDK adapter append',
+				},
+			}) + '\n');
+			assert.deepStrictEqual(JSON.parse(govSpawn.stdinChunks.at(-1)!.trim()), {
+				type: 'control_request',
+				request_id: 'init-gov-2b',
+				request: {
+					subtype: 'initialize',
+					appendSystemPrompt: `SDK adapter append\n\n${govRole}`,
 				},
 			});
 
@@ -2297,6 +2325,258 @@ describe('ADE Native Extension Role Bridge', () => {
 		} finally {
 			stopWatch();
 			controller.dispose();
+		}
+	});
+
+	it('bypasses wrappedFetch on AEXUS_INTERNAL_RUNTIME_HEADER, includes --finish on Root Baton hint, recognizes all ADE preamble headers, and writes race-free per-conversation AGY bindings', async () => {
+		// 1. Root Baton hint includes --finish so L1/L2 multi-edge nodes never fail with AMBIGUOUS_TARGET
+		const rootEnv = sharedModule.buildUserMessageSystemEnvelope({ tokenId: 'otok-9', missionId: 'm-1', nodeId: 'CEO' });
+		assert.ok(rootEnv.includes('aexus-ade token complete otok-9 --finish --summary "<facts>"'));
+
+		// 2. hasAnyAdeRolePreamble recognizes Engineering Staff, Mission Node Employee & Secretary Viewport headers (even inside <!-- /AEXUS_ADE_PREAMBLE -->)
+		assert.strictEqual(sharedModule.hasAnyAdeRolePreamble('[Aexus ADE · Engineering Staff Context]\n- Role: Lead\n\n<!-- /AEXUS_ADE_PREAMBLE -->\n\nhi'), true);
+		assert.strictEqual(sharedModule.hasAnyAdeRolePreamble('[Aexus ADE · Mission Node Employee]\n- Role: Dev\n\nhi'), true);
+		assert.strictEqual(sharedModule.hasAnyAdeRolePreamble('Normal user message'), false);
+
+		// 3. hasAexusSystemMessageEnvelope detects Role DM / Baton / User envelopes both inside AND immediately after <!-- /AEXUS_ADE_PREAMBLE --> (#65 item 2)
+		const stackedRoleDm = `[Aexus ADE · Engineering Staff Context]\n- Role: Secretary\n\n${sharedModule.AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER}\n- Sender Role: CEO\n\n${sharedModule.AEXUS_PREAMBLE_END_MARKER}\n\nEscalating issue`;
+		assert.strictEqual(sharedModule.hasAexusSystemMessageEnvelope(stackedRoleDm), true);
+		const postMarkerRoleDm = `[Aexus ADE Live Viewport & Macro Control Context]\nYou are the global **Secretary (Tier L0)** in **Aexus Code ADE**.\n\n${sharedModule.AEXUS_PREAMBLE_END_MARKER}\n\n${sharedModule.AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER}\n- Sender Role: CEO\n\nPlease inspect build`;
+		assert.strictEqual(sharedModule.hasAexusSystemMessageEnvelope(postMarkerRoleDm), true);
+
+		// 3b. stripInjectedAdeContextFromUserTurn strips Secretary `(Tier L0)` full viewport context & standalone 2-space `Role Charter:` prose without sentinel (#65 item 1)
+		const legacySecretaryTurn = [
+			'[Aexus ADE Live Viewport & Macro Control Context]',
+			'You are the global **Secretary (Tier L0)** in **Aexus Code ADE** — the user\'s executive chief of staff.',
+			'- Active Mode: ADE',
+			'- Active Projects (1):',
+			'  1. Alpha (/projects/Alpha)',
+			'',
+			'Summarize all active sessions',
+		].join('\n');
+		assert.strictEqual(sharedModule.stripInjectedAdeContextFromUserTurn(legacySecretaryTurn), 'Summarize all active sessions');
+
+		const legacyCharterTurn = [
+			'[Aexus Orchestrated Role Context]',
+			'You ARE an official orchestrated organizational agent session running inside **Aexus Code (ADE)**.',
+			'- Agent Identity: "Demo" (id: s-1)',
+			'- Role Charter:',
+			'  Lead **Demo** at L1 **Governor**: Coordinate architecture and review subordinate deliverables.',
+			'- Authorized Aexus-Code Primitive APIs: `session.manage`, `mission.manage`',
+			'',
+			'Kick off phase 1',
+		].join('\n');
+		assert.strictEqual(sharedModule.stripInjectedAdeContextFromUserTurn(legacyCharterTurn), 'Kick off phase 1');
+
+		// 3c. injectLlmPayloadSystemPrompt deduplicates `[Aexus ADE · Engineering Staff Context]` across Anthropic array `system`, Gemini `systemInstruction`, and Dify `query` (#59 P1-5)
+		const staffRoleV1 = '[Aexus ADE · Engineering Staff Context]\n- Node: Lead (v1)';
+		const staffRoleV2 = '[Aexus ADE · Engineering Staff Context]\n- Node: Lead (v2)';
+		const anthropicBody: Record<string, unknown> = { system: [{ type: 'text', text: staffRoleV1 }], messages: [{ role: 'user', content: 'hi' }] };
+		assert.strictEqual(sharedModule.injectLlmPayloadSystemPrompt('https://api.anthropic.com/v1/messages', anthropicBody, staffRoleV2), true);
+		assert.strictEqual((anthropicBody.system as Array<{ text: string }>).length, 1);
+		assert.ok((anthropicBody.system as Array<{ text: string }>)[0].text.includes('(v2)'));
+
+		const geminiBody: Record<string, unknown> = { systemInstruction: { role: 'user', parts: [{ text: staffRoleV1 }] }, contents: [{}] };
+		assert.strictEqual(sharedModule.injectLlmPayloadSystemPrompt('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent', geminiBody, staffRoleV2), true);
+		assert.strictEqual(((geminiBody.systemInstruction as { parts: Array<{ text: string }> }).parts).length, 1);
+
+		const difyBody: Record<string, unknown> = { query: `${staffRoleV1}\n\nHello` };
+		assert.strictEqual(sharedModule.injectLlmPayloadSystemPrompt('https://api.dify.ai/v1/chat-messages', difyBody, staffRoleV1), false);
+
+		// 4. wrappedFetch strips x-aexus-internal-runtime and bypasses Kilo/OpenCode system prompt injection so internal KiloRuntime requests are never double-injected or cross-bound
+		const bridgeDir = path.join(tempDir, 'internal-bypass-bridge');
+		const seenFetch: Array<{ headers: Record<string, string>; body?: string }> = [];
+		const fetchHost = {
+			fetch: (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+				const hdrs = new Headers(init?.headers);
+				const outHdrs: Record<string, string> = {};
+				hdrs.forEach((v, k) => { outHdrs[k] = v; });
+				seenFetch.push({ headers: outHdrs, body: typeof init?.body === 'string' ? init.body : undefined });
+				return new Response('{}', { status: 200 });
+			}) as typeof globalThis.fetch,
+		};
+		const bound: string[] = [];
+		const controller = bridgeModule.createNativeRoleBridgeController({
+			distDir,
+			bridgeDir,
+			scopeId: 'bypass-test',
+			childProcessModule: { spawn: (() => createMockChild()) as unknown as typeof cp.spawn },
+			fetchHost,
+			onNativeSessionBound: (_e, agentId) => bound.push(agentId),
+		});
+		try {
+			await controller.updateSnapshot({
+				mode: 'ade',
+				activeAgentId: 'kilo-gov',
+				selectedAgentId: 'kilo-gov',
+				agents: [
+					{
+						id: 'kilo-gov',
+						label: 'Kilo Gov',
+						projectPath: '/projects/Alpha',
+						engineId: 'aexus-kilo',
+						rank: 'governor',
+						isOrchestrated: true,
+						rolePrompt: '[Aexus Orchestrated Role Context]\n- Role: Governor',
+					},
+					{
+						id: 'agy-a',
+						label: 'Agy A',
+						projectPath: '/projects/Alpha',
+						engineId: 'aexus-antigravity',
+						rank: 'governor',
+						isOrchestrated: true,
+						rolePrompt: '[Aexus Orchestrated Role Context]\n- Role: Gov A',
+					},
+					{
+						id: 'agy-b',
+						label: 'Agy B',
+						projectPath: '/projects/Beta',
+						engineId: 'aexus-antigravity',
+						rank: 'manager',
+						isOrchestrated: true,
+						rolePrompt: '[Aexus Orchestrated Role Context]\n- Role: Mgr B',
+					},
+				],
+			});
+
+			await fetchHost.fetch('http://127.0.0.1:41990/session/ses_internal_1/message', {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					[sharedModule.AEXUS_INTERNAL_RUNTIME_HEADER]: '1',
+				},
+				body: JSON.stringify({ parts: [{ type: 'text', text: 'internal runtime call' }] }),
+			});
+			assert.strictEqual(seenFetch.length, 1);
+			assert.strictEqual(seenFetch[0].headers[sharedModule.AEXUS_INTERNAL_RUNTIME_HEADER], undefined, 'Internal header must be stripped before hitting upstream server');
+			assert.strictEqual(JSON.parse(seenFetch[0].body!).system, undefined, 'Internal runtime fetch must NOT be double-injected by wrappedFetch');
+			assert.deepStrictEqual(bound, [], 'Internal runtime fetch must NOT bind native session to active UI agent');
+
+			// 5. Parallel / multi-cwd evaluateAgyPreInvocationHook writes atomic per-conversation files with zero lost-update RMW races
+			const [hookA, hookB] = await Promise.all([
+				sharedModule.evaluateAgyPreInvocationHook(JSON.stringify({ conversationId: 'conv-alpha', cwd: '/projects/Alpha' }), controller.stateFilePath),
+				sharedModule.evaluateAgyPreInvocationHook(JSON.stringify({ conversationId: 'conv-beta', cwd: '/projects/Beta' }), controller.stateFilePath),
+			]);
+			assert.ok((hookA.injectSteps as Array<{ systemMessage?: { systemMessage?: string } }> | undefined)?.[0]?.systemMessage?.systemMessage?.includes('Gov A'));
+			assert.ok((hookB.injectSteps as Array<{ systemMessage?: { systemMessage?: string } }> | undefined)?.[0]?.systemMessage?.systemMessage?.includes('Mgr B'));
+			const mergedBindings = await controller.readAgyBindings();
+			assert.strictEqual(mergedBindings['conv-alpha'], 'agy-a');
+			assert.strictEqual(mergedBindings['conv-beta'], 'agy-b');
+		} finally {
+			controller.dispose();
+		}
+	});
+
+	it('isolates 3rd-party extension spawns from L-1 master-token fallback (#67 P0-1): injects deny token + strips PATH in IDE/pure mode and injects scoped sessionToken + socket in orchestrated ADE mode', async () => {
+		const isoRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'aexus-3p-iso-'));
+		const fakeDist = path.join(isoRoot, 'dist');
+		const fakeBin = path.join(isoRoot, 'bin');
+		const fakeBridge = path.join(isoRoot, 'bridge');
+		await fs.promises.mkdir(fakeDist, { recursive: true });
+		await fs.promises.mkdir(fakeBin, { recursive: true });
+		await fs.promises.mkdir(fakeBridge, { recursive: true });
+		await fs.promises.writeFile(path.join(fakeBin, process.platform === 'win32' ? 'aexus-ade.cmd' : 'aexus-ade'), '#!/bin/sh\n', { mode: 0o755 });
+
+		let lastSpawnEnv: NodeJS.ProcessEnv | undefined;
+		const mockCp = {
+			spawn: ((_cmd: string, _args: readonly string[], opts?: cp.SpawnOptions) => {
+				lastSpawnEnv = opts?.env;
+				return createMockChild();
+			}) as unknown as typeof cp.spawn,
+		};
+		const ctrl = bridgeModule.createNativeRoleBridgeController({
+			distDir: fakeDist,
+			bridgeDir: fakeBridge,
+			scopeId: 'iso-3p',
+			env: {},
+			childProcessModule: mockCp,
+			fetchHost: { fetch: (async () => new Response('{}', { status: 200 })) as typeof globalThis.fetch },
+		});
+		try {
+			// 1. IDE / unorchestrated 3rd-party Claude spawn: master AEXUS_ADE_TOKEN stripped, fakeBin stripped from PATH, deny token injected
+			mockCp.spawn('claude', ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json'], {
+				cwd: '/projects/IdeProj',
+				env: {
+					PATH: `/usr/local/bin${path.delimiter}${fakeBin}`,
+					AEXUS_ADE_TOKEN: 'master-l1-secret',
+					AEXUS_ADE_CONTROL_FILE: '/tmp/ade-control.json',
+				},
+			});
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_TOKEN, undefined);
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_CONTROL_FILE, undefined);
+			assert.strictEqual(sharedModule.isPureWorkerDenyToken(lastSpawnEnv?.AEXUS_ADE_SESSION_TOKEN), true);
+			const idePathSegs = (lastSpawnEnv?.PATH ?? '').split(path.delimiter);
+			assert.strictEqual(idePathSegs.includes(fakeBin), false);
+
+			// 2. Orchestrated L3 Employee 3rd-party Claude spawn with pre-minted sessionToken: receives scoped sessionToken + socket + CLI on PATH (never master token)
+			await ctrl.updateSnapshot({
+				mode: 'ade',
+				activeAgentId: 'emp-claude',
+				selectedAgentId: 'emp-claude',
+				agents: [
+					{
+						id: 'emp-claude',
+						label: 'Emp Claude',
+						projectPath: '/projects/AdeProj',
+						engineId: 'aexus-claude',
+						rank: 'employee',
+						isOrchestrated: true,
+						rolePrompt: '[Aexus Orchestrated Role Context]\n- Role: Employee',
+						sessionToken: 'aexus-cap.eyJzZXNzaW9uSWQiOiJlbXAtY2xhdWRlIiwicmFuayI6ImVtcGxveWVlIn0.sig',
+						controlSocketPath: '/tmp/aexus-ade-scoped.sock',
+					},
+				],
+			});
+			mockCp.spawn('claude', ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json'], {
+				cwd: '/projects/AdeProj',
+				env: {
+					PATH: '/usr/local/bin',
+					AEXUS_ADE_TOKEN: 'master-l1-secret',
+					AEXUS_ADE_CONTROL_FILE: '/tmp/ade-control.json',
+				},
+			});
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_TOKEN, undefined);
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_CONTROL_FILE, undefined);
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_SESSION_TOKEN, 'aexus-cap.eyJzZXNzaW9uSWQiOiJlbXAtY2xhdWRlIiwicmFuayI6ImVtcGxveWVlIn0.sig');
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_SOCKET, '/tmp/aexus-ade-scoped.sock');
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_AGENT_ID, 'emp-claude');
+			assert.ok((lastSpawnEnv?.PATH ?? '').split(path.delimiter).includes(fakeBin));
+
+			// 3. Pure-execution Mission Node (`rank: 'worker'`, `pure: true`, `missionNode: true`) retains scoped token + socket + CLI on PATH (#78 item 1)
+			const pureMissionPayload = Buffer.from(JSON.stringify({ sessionId: 'mnode-claude', rank: 'worker', pure: true, missionNode: true }), 'utf8').toString('base64url');
+			const pureMissionToken = `aexus-cap.${pureMissionPayload}.sig`;
+			assert.strictEqual(sharedModule.isPureWorkerDenyToken(pureMissionToken), false);
+			await ctrl.updateSnapshot({
+				mode: 'ade',
+				activeAgentId: 'mnode-claude',
+				selectedAgentId: 'mnode-claude',
+				agents: [
+					{
+						id: 'mnode-claude',
+						label: 'Leaf Worker Node',
+						projectPath: '/projects/MissionProj',
+						engineId: 'aexus-claude',
+						rank: 'worker',
+						isOrchestrated: true,
+						isMissionNode: true,
+						rolePrompt: '[Aexus ADE · Engineering Staff Context]\n- Role: Worker',
+						sessionToken: pureMissionToken,
+						controlSocketPath: '/tmp/aexus-ade-scoped.sock',
+					},
+				],
+			});
+			mockCp.spawn('claude', ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json'], {
+				cwd: '/projects/MissionProj',
+				env: { PATH: '/usr/local/bin', AEXUS_ADE_TOKEN: 'master-l1-secret' },
+			});
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_TOKEN, undefined);
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_SESSION_TOKEN, pureMissionToken);
+			assert.strictEqual(lastSpawnEnv?.AEXUS_ADE_SOCKET, '/tmp/aexus-ade-scoped.sock');
+			assert.ok((lastSpawnEnv?.PATH ?? '').split(path.delimiter).includes(fakeBin));
+		} finally {
+			ctrl.dispose();
+			await fs.promises.rm(isoRoot, { recursive: true, force: true });
 		}
 	});
 });

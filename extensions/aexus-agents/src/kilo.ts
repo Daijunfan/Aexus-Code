@@ -22,8 +22,9 @@ import {
 	terminateRemotePersistentSession,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
-import { AgentChildIdentity, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, spawnEngine, stopEngine, stopEngineWithFallback, withTimeout } from './runtime';
+import { AEXUS_INTERNAL_RUNTIME_HEADER, AgentChildIdentity, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
+import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, getConfiguredEngineTurnTimeoutMs, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, spawnEngine, stopEngine, stopEngineWithFallback, withTimeout } from './runtime';
+import { createMultiStepTurnUsageAccumulator, normalizeProviderTokenUsage } from './usageTracker';
 
 interface KiloSession { id: string; parentID?: string; directory: string; title: string; time?: { created: number; updated: number }; created?: number; updated?: number; share?: { url?: string } }
 interface KiloSessionListItem { id: string; directory: string; title: string; created: number; updated: number }
@@ -201,7 +202,7 @@ function extractMcpServers(value: unknown): Array<{ name: string; status: string
 	}
 	return servers;
 }
-interface KiloTokens { input?: number; output?: number; cache?: { read?: number; write?: number } }
+interface KiloTokens { input?: number; output?: number; total?: number; cache?: { read?: number; write?: number } }
 interface KiloEventData {
 	id?: string;
 	sessionID?: string;
@@ -230,29 +231,19 @@ function turnUsageFromKiloTokens(tokens: KiloTokens | undefined, costUsd?: numbe
 	if (!tokens) {
 		return undefined;
 	}
-	const inputTokens = tokens.input ?? 0;
-	const outputTokens = tokens.output ?? 0;
-	const cacheReadTokens = tokens.cache?.read ?? 0;
-	const cacheWriteTokens = tokens.cache?.write ?? 0;
-	const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-	if (totalTokens <= 0) {
-		return undefined;
-	}
 	const validCostUsd = typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd > 0 ? costUsd : undefined;
 	const validModel = model?.trim() && model.trim().toLowerCase() !== 'default' ? model.trim() : undefined;
-	return {
-		inputTokens,
-		outputTokens,
-		cacheReadTokens,
-		cacheWriteTokens,
-		totalTokens,
-		...(validCostUsd !== undefined ? { costUsd: validCostUsd } : {}),
-		...(validModel !== undefined ? { model: validModel } : {}),
-		estimated: false,
-	};
+	return normalizeProviderTokenUsage(tokens, {
+		costUsd: validCostUsd,
+		model: validModel,
+	});
 }
 
 const SHARED_PURE_SERVER_KEY = `${SHARED_PURE_SCOPE_KEY}:auto`;
+
+function isSharedPureServerKey(key: string): boolean {
+	return key === SHARED_PURE_SCOPE_KEY || key.startsWith(`${SHARED_PURE_SCOPE_KEY}:`);
+}
 
 interface SharedServerSlot {
 	child?: ReturnType<typeof spawnEngine>;
@@ -335,7 +326,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 
 	private retireStaleServerSlot(sessionId: string, nextServerKey: string): void {
 		const prevKey = this.sessionServerKeys.get(sessionId);
-		if (!prevKey || prevKey === nextServerKey || prevKey === SHARED_PURE_SERVER_KEY) {
+		if (!prevKey || prevKey === nextServerKey || isSharedPureServerKey(prevKey)) {
 			return;
 		}
 		const prevSlot = this.servers.get(prevKey);
@@ -694,8 +685,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					[`${this.envPrefix}_PERMISSION`]: slot.autoApprove ? '{"*":"allow"}' : '{"*":"ask"}',
 				};
 				const remoteTarget = this.remoteTarget;
-				const remotePersistentId = remoteTarget && remoteTarget.os !== 'windows'
-					? `${buildRemotePersistentPrefix(this.id, serverKey === SHARED_PURE_SERVER_KEY ? SHARED_PURE_SCOPE_KEY : (slot.identity.sessionId || serverKey))}-${randomUUID().slice(0, 8)}`
+				const remotePersistentId = remoteTarget && remoteTarget.os !== 'windows' && serverKey !== SHARED_PURE_SERVER_KEY
+					? `${buildRemotePersistentPrefix(this.id, slot.identity.sessionId || serverKey)}-${randomUUID().slice(0, 8)}`
 					: undefined;
 				slot.remotePersistentId = remotePersistentId;
 				const boundAddress = await new Promise<string>((resolve, reject) => {
@@ -742,7 +733,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 						throw new Error(`Could not determine remote port for ${this.name} on ${remoteTarget.alias}: ${boundAddress}`);
 					}
 					const tunnel = await openRemotePortForward(remoteTarget, remotePort);
-					if (!slot.child || slot.child.killed || slot.child.exitCode !== null) {
+					if (this.servers.get(serverKey) !== slot || !slot.child || slot.child.killed || slot.child.exitCode !== null) {
 						tunnel.dispose();
 						throw new Error(vscode.l10n.t('{0} on {1} exited while opening port forward.', this.name, remoteTarget.alias));
 					}
@@ -759,32 +750,43 @@ abstract class SharedServerRuntime implements EngineRuntime {
 	protected async request<T>(route: string, cwd: string, method = 'GET', body?: object, signal?: AbortSignal, serverKey = SHARED_PURE_SERVER_KEY, identity?: AgentChildIdentity, autoApprove = isAutonomousModeEnabled()): Promise<T> {
 		let lastError: unknown;
 		for (let attempt = 0; attempt < 2; attempt++) {
+			let receivedHttpResponse = false;
 			try {
 				const ep = await this.getEndpoint(serverKey, identity, autoApprove, serverKey === SHARED_PURE_SERVER_KEY ? undefined : cwd);
 				const url = new URL(route, ep.url);
 				url.searchParams.set('directory', cwd);
 				const response = await fetch(url, {
 					method,
-					headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}`, 'Content-Type': 'application/json' },
+					headers: {
+						Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}`,
+						'Content-Type': 'application/json',
+						[AEXUS_INTERNAL_RUNTIME_HEADER]: '1',
+					},
 					body: body ? JSON.stringify(body) : undefined,
 					signal,
 				});
+				receivedHttpResponse = true;
 				if (!response.ok) {
-					throw new Error(vscode.l10n.t('{0} returned {1}: {2}', this.name, String(response.status), (await response.text()).slice(0, 2000)));
+					const httpErr = new Error(vscode.l10n.t('{0} returned {1}: {2}', this.name, String(response.status), (await response.text()).slice(0, 2000))) as Error & { httpStatus?: number };
+					httpErr.httpStatus = response.status;
+					throw httpErr;
 				}
 				return response.status === 204 ? undefined as T : await response.json() as T;
 			} catch (error) {
 				lastError = error;
+				// Never tear down a live server (especially shared pure auto/ask pools) on an application-level HTTP 4xx/5xx status!
 				const slot = this.servers.get(serverKey);
-				if (attempt === 0 && !signal?.aborted && slot) {
-					slot.tunnel?.dispose();
-					slot.tunnel = undefined;
-					if (slot.child) {
-						stopEngine(slot.child);
-						slot.child = undefined;
+				if (attempt === 0 && !receivedHttpResponse && !signal?.aborted && slot) {
+					if (!isSharedPureServerKey(serverKey) || !slot.child || slot.child.exitCode !== null || slot.child.killed) {
+						slot.tunnel?.dispose();
+						slot.tunnel = undefined;
+						if (slot.child) {
+							stopEngineWithFallback(slot.child, 'SIGTERM', 1500);
+							slot.child = undefined;
+						}
+						this.disposeSlotRemote(slot);
+						slot.endpoint = undefined;
 					}
-					this.disposeSlotRemote(slot);
-					slot.endpoint = undefined;
 					continue;
 				}
 				throw error;
@@ -900,6 +902,11 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			await this.request(`/permission/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { reply: picked === allow ? 'once' : 'reject' }, undefined, serverKey, identity, autoApprove);
 		}
 		if (event.type === 'question.asked') {
+			if (autoApprove) {
+				const autoAnswers = (data.questions ?? []).map(q => q.options?.[0]?.label ? [q.options[0].label] : []);
+				await this.request(`/question/${encodeURIComponent(data.id!)}/reply`, session.cwd, 'POST', { answers: autoAnswers }, undefined, serverKey, identity, autoApprove);
+				return;
+			}
 			const answers: string[][] = [];
 			for (const question of data.questions ?? []) {
 				if (question.multiple) {
@@ -929,8 +936,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			await this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, serverKey, slot.identity, slot.autoApprove).catch(() => { });
 		}
 		this.sessionServerKeys.delete(session.id);
-		const persistentIdToKill = serverKey !== SHARED_PURE_SERVER_KEY ? slot?.remotePersistentId : undefined;
-		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
+		const persistentIdToKill = !isSharedPureServerKey(serverKey) ? slot?.remotePersistentId : undefined;
+		if (!isSharedPureServerKey(serverKey) && slot) {
 			slot.tunnel?.dispose();
 			slot.tunnel = undefined;
 			if (slot.child) { stopEngineWithFallback(slot.child, 'SIGTERM', 1500); }
@@ -957,6 +964,15 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		this.sessionServerKeys.set(session.id, desc.key);
 		const abort = new AbortController();
 		const earlyCancel = token.onCancellationRequested(() => abort.abort());
+		const onCoordinatorAbort = () => {
+			void this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, desc.key, desc.identity, desc.autoApprove).catch(() => { });
+			abort.abort(options?.abortSignal?.reason);
+		};
+		if (options?.abortSignal?.aborted) {
+			abort.abort(options.abortSignal.reason);
+		} else {
+			options?.abortSignal?.addEventListener('abort', onCoordinatorAbort, { once: true });
+		}
 		let ep: { url: string; password: string };
 		let response: Response;
 		try {
@@ -970,7 +986,8 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					return;
 				}
 				const failedSlot = this.servers.get(desc.key);
-				if (failedSlot) {
+				if (failedSlot && (!isSharedPureServerKey(desc.key) || !failedSlot.child || failedSlot.child.exitCode !== null)) {
+					this.servers.delete(desc.key);
 					failedSlot.tunnel?.dispose();
 					failedSlot.tunnel = undefined;
 					if (failedSlot.child) {
@@ -987,8 +1004,15 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			}
 			const url = new URL('/event', ep.url);
 			url.searchParams.set('directory', session.cwd);
-			response = await fetch(url, { headers: { Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}` }, signal: abort.signal });
+			response = await fetch(url, {
+				headers: {
+					Authorization: `Basic ${Buffer.from(`aexus:${ep.password}`).toString('base64')}`,
+					[AEXUS_INTERNAL_RUNTIME_HEADER]: '1',
+				},
+				signal: abort.signal,
+			});
 		} catch (error) {
+			options?.abortSignal?.removeEventListener('abort', onCoordinatorAbort);
 			if (token.isCancellationRequested || abort.signal.aborted) {
 				return;
 			}
@@ -1022,9 +1046,18 @@ abstract class SharedServerRuntime implements EngineRuntime {
 		};
 		const requestedModelStr = options?.model && options.model !== 'default' ? options.model.trim() : undefined;
 		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
-			preTurnBaseline: this.lastTurnUsageBySession.get(session.id),
 			model: requestedModelStr,
 		});
+		const stepUsageAccumulator = createMultiStepTurnUsageAccumulator();
+		const seenFailedPartIds = new Set<string>();
+		const effectiveTimeoutMs = options?.timeoutMs ?? getConfiguredEngineTurnTimeoutMs();
+		const turnDeadlineTimer = setTimeout(() => {
+			if (!abort.signal.aborted) {
+				void this.request(`/session/${encodeURIComponent(session.id)}/abort`, session.cwd, 'POST', undefined, undefined, desc.key, desc.identity, desc.autoApprove).catch(() => { });
+				abort.abort(new Error(`${this.name} turn timed out after ${effectiveTimeoutMs}ms`));
+			}
+		}, effectiveTimeoutMs);
+		turnDeadlineTimer.unref?.();
 		const reader = response.body.getReader();
 		const events = (async () => {
 			const decoder = new TextDecoder();
@@ -1032,10 +1065,17 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			while (!abort.signal.aborted) {
 				const chunk = await reader.read();
 				if (chunk.done) { break; }
-				buffer += decoder.decode(chunk.value, { stream: true }).replace(/\r\n/g, '\n');
+				const decoded = decoder.decode(chunk.value, { stream: true });
+				buffer += decoded.includes('\r') ? decoded.replace(/\r\n/g, '\n') : decoded;
+				if (buffer.length > 32 * 1024 * 1024 && !buffer.includes('\n\n')) {
+					buffer = '';
+					continue;
+				}
+				let scanStart = 0;
 				let end: number;
-				while ((end = buffer.indexOf('\n\n')) >= 0) {
-					const packet = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+				while ((end = buffer.indexOf('\n\n', scanStart)) >= 0) {
+					const packet = buffer.slice(scanStart, end);
+					scanStart = end + 2;
 					const raw = packet.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
 					if (!raw) { continue; }
 					let event: KiloEvent;
@@ -1047,12 +1087,16 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					const data = event.properties ?? event.data;
 					if (event.type === 'session.created' && data?.info?.parentID) { this.changed.fire([this.session(data.info as KiloSession)]); }
 					const sessionId = data?.sessionID ?? data?.part?.sessionID ?? data?.info?.sessionID;
-					if (sessionId && data?.info?.tokens) {
+					if (sessionId && this.belongsTo(sessionId, session.id)) {
+						try { options?.onStreamActivity?.(); } catch { /* ignore */ }
+					}
+					if (sessionId && data?.info?.tokens && data.info.role !== 'user') {
 						const infoModel = formatKiloModelId(data.info.providerID, data.info.modelID) ?? requestedModelStr;
 						const usage = turnUsageFromKiloTokens(data.info.tokens, data.info.cost, infoModel);
 						if (usage) {
 							if (sessionId === session.id) {
-								const normalized = usageTracker.recordRealUsage(usage, { cumulativeAcrossThread: false });
+								const aggregated = stepUsageAccumulator.recordStep(data.info.id || '__kilo_step', usage);
+								const normalized = usageTracker.recordRealUsage(aggregated, { cumulativeAcrossThread: false });
 								this.lastTurnUsageBySession.set(sessionId, normalized);
 							} else {
 								this.lastTurnUsageBySession.set(sessionId, usage);
@@ -1061,13 +1105,39 @@ abstract class SharedServerRuntime implements EngineRuntime {
 					}
 					if (data && sessionId && (event.type === 'permission.asked' || event.type === 'question.asked') && this.belongsTo(sessionId, session.id)) {
 						const targetSession = this.knownSessions.get(sessionId) ?? session;
-						void this.answer(event, data, targetSession, token, desc.autoApprove, desc.key, desc.identity).catch(() => { });
+						if (!desc.autoApprove) {
+							try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
+						}
+						void this.answer(event, data, targetSession, token, desc.autoApprove, desc.key, desc.identity)
+							.catch(() => { })
+							.finally(() => {
+								if (!desc.autoApprove) {
+									try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+								}
+							});
 					}
 					if (!data || sessionId !== session.id) { continue; }
 					if (event.type === 'message.updated' && data.info?.role) { roles.set(data.info.id, data.info.role); }
 					if (event.type === 'message.part.updated' && data.part) {
 						parts.set(data.part.id, data.part.type);
 						if (data.part.type === 'tool') {
+							if (data.part.state?.status === 'error' || data.part.state?.status === 'failed') {
+								const partKey = data.part.id || undefined;
+								if (!partKey || !seenFailedPartIds.has(partKey)) {
+									if (partKey) {
+										seenFailedPartIds.add(partKey);
+									}
+									usageTracker.recordToolError();
+									const currentUsage = this.lastTurnUsageBySession.get(session.id);
+									if (currentUsage) {
+										this.lastTurnUsageBySession.set(session.id, {
+											...currentUsage,
+											hadToolError: true,
+											toolErrorCount: Math.max(currentUsage.toolErrorCount ?? 0, usageTracker.getToolErrorCount()),
+										});
+									}
+								}
+							}
 							this.reportToolProgress(stream, data.part, reportedTools);
 						} else if (data.part.type === 'reasoning' && data.part.text) {
 							emitReasoningSnapshot(data.part.id, data.part.text);
@@ -1081,9 +1151,12 @@ abstract class SharedServerRuntime implements EngineRuntime {
 							usageTracker.recordStreamDelta(data.delta);
 						} else if (partType === 'reasoning') {
 							emitReasoningDelta(data.partID!, data.delta);
-							usageTracker.recordStreamDelta(data.delta);
+							usageTracker.recordStreamDelta(data.delta, { skipToolErrorScan: true });
 						}
 					}
+				}
+				if (scanStart > 0) {
+					buffer = buffer.slice(scanStart);
 				}
 			}
 		})();
@@ -1112,24 +1185,54 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			try {
 				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', payloadBase, abort.signal, desc.key, desc.identity, desc.autoApprove);
 			} catch (err) {
-				const hasOptionalFields = payloadBase.model !== undefined || payloadBase.agent !== undefined || payloadBase.variant !== undefined;
-				if (!hasOptionalFields || abort.signal.aborted) {
+				const status = (err as { httpStatus?: number } | undefined)?.httpStatus;
+				const canDropModelOrVariant = payloadBase.model !== undefined || payloadBase.variant !== undefined;
+				const isValidationRejection = status === 400 || status === 422;
+				if (!canDropModelOrVariant || !isValidationRejection || streamed || abort.signal.aborted || token.isCancellationRequested) {
 					throw err;
 				}
-				// Retry once without optional routing fields (older servers reject unknown fields), keeping the prompt and attachments.
-				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', { parts: messageParts }, abort.signal, desc.key, desc.identity, desc.autoApprove);
+				// Retry once on pre-stream HTTP 400/422 validation rejection by dropping unsupported `variant`/`model`
+				// while strictly preserving `agent` (never silently downgrading read-only `plan`/`architect` mode!).
+				const fallbackPayload: Record<string, unknown> = {
+					parts: messageParts,
+					...(payloadBase.agent !== undefined ? { agent: payloadBase.agent } : {}),
+				};
+				result = await this.request<KiloMessage>(`/session/${encodeURIComponent(session.id)}/message`, session.cwd, 'POST', fallbackPayload, abort.signal, desc.key, desc.identity, desc.autoApprove);
 			}
 			if (result.info.error) { throw new Error(result.info.error.data?.message || vscode.l10n.t('{0} could not complete this request.', this.name)); }
+			for (const part of result.parts ?? []) {
+				if (part.type === 'tool' && (part.state?.status === 'error' || part.state?.status === 'failed')) {
+					const partKey = part.id || undefined;
+					if (!partKey || !seenFailedPartIds.has(partKey)) {
+						if (partKey) {
+							seenFailedPartIds.add(partKey);
+						}
+						usageTracker.recordToolError();
+					}
+				}
+			}
 			if (result.info.tokens) {
 				const resolvedModelStr = formatKiloModelId(result.info.providerID ?? model?.providerID, result.info.modelID ?? model?.modelID) ?? requestedModelStr;
 				const resultUsage = turnUsageFromKiloTokens(result.info.tokens, result.info.cost, resolvedModelStr);
 				if (resultUsage) {
-					const normalized = usageTracker.recordRealUsage(resultUsage, { cumulativeAcrossThread: false });
+					const aggregated = stepUsageAccumulator.recordStep(result.info.id || '__kilo_final', resultUsage);
+					const normalized = usageTracker.recordRealUsage(aggregated, { cumulativeAcrossThread: false });
 					this.lastTurnUsageBySession.set(session.id, normalized);
+				}
+			} else if (usageTracker.getToolErrorCount() > 0) {
+				const prevUsage = this.lastTurnUsageBySession.get(session.id);
+				if (prevUsage) {
+					this.lastTurnUsageBySession.set(session.id, {
+						...prevUsage,
+						hadToolError: true,
+						toolErrorCount: Math.max(prevUsage.toolErrorCount ?? 0, usageTracker.getToolErrorCount()),
+					});
 				}
 			}
 			if (!streamed) { for (const part of result.parts) { if (part.type === 'text' && part.text) { stream.markdown(part.text); } } }
 		} finally {
+			clearTimeout(turnDeadlineTimer);
+			options?.abortSignal?.removeEventListener('abort', onCoordinatorAbort);
 			cancellation.dispose();
 			abort.abort();
 			await reader.cancel().catch(() => { });
@@ -1156,7 +1259,7 @@ abstract class SharedServerRuntime implements EngineRuntime {
 			}
 		}
 		this.sessionServerKeys.delete(session.id);
-		if (serverKey !== SHARED_PURE_SERVER_KEY && slot) {
+		if (!isSharedPureServerKey(serverKey) && slot) {
 			slot.tunnel?.dispose();
 			slot.tunnel = undefined;
 			if (slot.child) { stopEngineWithFallback(slot.child, 'SIGTERM', 1500); }

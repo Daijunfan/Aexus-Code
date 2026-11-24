@@ -4,6 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 
 .ade-config-editor {
+	--ade-cfg-amber: #F5B942;
+	--ade-cfg-blue: #38BDF8;
+	--ade-cfg-border: color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-panel-border, transparent));
+	--ade-cfg-border-subtle: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+	--ade-cfg-card-bg: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 54%, var(--vscode-editor-background));
+	--ade-cfg-card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 6px 20px -8px rgba(0, 0, 0, 0.24);
+
 	position: relative;
 	width: 100%;
 	height: 100%;
@@ -13,6 +20,25 @@
 	font-family: var(--vscode-font-family);
 	box-sizing: border-box;
 	outline: none;
+}
+
+.monaco-workbench.vs .ade-config-editor {
+	--ade-cfg-amber: #B45309;
+	--ade-cfg-blue: #0284C7;
+	--ade-cfg-border: rgba(15, 23, 42, 0.1);
+	--ade-cfg-border-subtle: rgba(15, 23, 42, 0.06);
+	--ade-cfg-card-bg: var(--vscode-editor-background);
+	--ade-cfg-card-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+}
+
+.monaco-workbench.hc-black .ade-config-editor,
+.monaco-workbench.hc-light .ade-config-editor {
+	--ade-cfg-amber: var(--vscode-foreground);
+	--ade-cfg-blue: var(--vscode-foreground);
+	--ade-cfg-border: var(--vscode-contrastBorder);
+	--ade-cfg-border-subtle: var(--vscode-contrastBorder);
+	--ade-cfg-card-bg: var(--vscode-editor-background);
+	--ade-cfg-card-shadow: none;
 }
 
 .ade-config-editor:focus {
@@ -36,7 +62,7 @@
 	gap: 16px;
 	flex-wrap: wrap;
 	padding-bottom: 16px;
-	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+	border-bottom: 1px solid var(--ade-cfg-border);
 }
 
 .ade-cfg-title-block {
@@ -53,20 +79,20 @@
 
 .ade-cfg-title {
 	margin: 0;
-	font-size: 20px;
+	font-size: 19px;
 	font-weight: 600;
-	letter-spacing: -0.01em;
+	letter-spacing: -0.015em;
 	color: var(--vscode-foreground);
 }
 
 .ade-cfg-dirty-pill {
 	font-size: 11px;
-	font-weight: 500;
+	font-weight: 600;
 	padding: 2px 8px;
 	border-radius: 999px;
-	background: rgba(245, 158, 11, 0.16);
-	color: #f59e0b;
-	border: 1px solid rgba(245, 158, 11, 0.35);
+	background: color-mix(in srgb, var(--ade-cfg-amber) 14%, transparent);
+	color: var(--ade-cfg-amber);
+	border: 1px solid color-mix(in srgb, var(--ade-cfg-amber) 36%, transparent);
 }
 
 .ade-cfg-dirty-pill[hidden] {
@@ -134,9 +160,10 @@
 
 /* Cards */
 .ade-cfg-card {
-	border-radius: 10px;
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
-	background: var(--vscode-sideBar-background, rgba(128, 128, 128, 0.05));
+	border-radius: 12px;
+	border: 1px solid var(--ade-cfg-border);
+	background: var(--ade-cfg-card-bg);
+	box-shadow: var(--ade-cfg-card-shadow);
 	overflow: hidden;
 }
 
@@ -146,8 +173,8 @@
 	justify-content: space-between;
 	gap: 12px;
 	flex-wrap: wrap;
-	padding: 14px 18px;
-	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+	padding: 15px 20px;
+	border-bottom: 1px solid var(--ade-cfg-border-subtle);
 }
 
 .ade-cfg-card-title-group {
@@ -297,21 +324,21 @@
 	text-transform: uppercase;
 	letter-spacing: 0.04em;
 	color: var(--vscode-descriptionForeground);
-	background: rgba(128, 128, 128, 0.04);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
 }
 
 .ade-cfg-rank-row.system-user {
-	background: rgba(245, 158, 11, 0.05);
+	background: color-mix(in srgb, var(--ade-cfg-amber) 5%, transparent);
 }
 
 .ade-cfg-rank-row.system-l0 {
-	background: rgba(128, 128, 128, 0.06);
+	background: color-mix(in srgb, var(--ade-cfg-blue) 4%, transparent);
 }
 
 .ade-cfg-tier-pill.tier-user {
-	background: rgba(245, 158, 11, 0.16);
-	border-color: rgba(245, 158, 11, 0.42);
-	color: #f59e0b;
+	background: color-mix(in srgb, var(--ade-cfg-amber) 14%, transparent);
+	border-color: color-mix(in srgb, var(--ade-cfg-amber) 36%, transparent);
+	color: var(--ade-cfg-amber);
 }
 
 .ade-cfg-tier-cell {
@@ -331,21 +358,21 @@
 	font-family: var(--vscode-editor-font-family);
 	font-size: 11.5px;
 	font-weight: 600;
-	background: rgba(128, 128, 128, 0.16);
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
 	color: var(--vscode-foreground);
-	border: 1px solid rgba(128, 128, 128, 0.24);
+	border: 1px solid var(--ade-cfg-border);
 }
 
 .ade-cfg-tier-pill.tier-l0 {
-	background: rgba(59, 130, 246, 0.14);
-	color: #60a5fa;
-	border-color: rgba(59, 130, 246, 0.34);
+	background: color-mix(in srgb, var(--ade-cfg-blue) 14%, transparent);
+	color: var(--ade-cfg-blue);
+	border-color: color-mix(in srgb, var(--ade-cfg-blue) 34%, transparent);
 }
 
 .ade-cfg-tier-pill.tier-top {
-	background: rgba(245, 158, 11, 0.14);
-	color: #f59e0b;
-	border-color: rgba(245, 158, 11, 0.34);
+	background: color-mix(in srgb, var(--ade-cfg-amber) 14%, transparent);
+	color: var(--ade-cfg-amber);
+	border-color: color-mix(in srgb, var(--ade-cfg-amber) 34%, transparent);
 }
 
 .ade-cfg-tier-note {
@@ -435,9 +462,9 @@
 }
 
 .ade-cfg-doc-box {
-	padding: 12px 14px;
-	border-radius: 8px;
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.18));
+	padding: 13px 15px;
+	border-radius: 9px;
+	border: 1px solid var(--ade-cfg-border);
 	background: var(--vscode-editor-background);
 	display: flex;
 	flex-direction: column;
@@ -472,9 +499,10 @@
 	justify-content: space-between;
 	gap: 12px;
 	flex-wrap: wrap;
-	padding: 10px 12px;
-	border-radius: 7px;
-	background: rgba(128, 128, 128, 0.08);
+	padding: 10px 14px;
+	border-radius: 8px;
+	border: 1px solid var(--ade-cfg-border-subtle);
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
 	font-size: 11.5px;
 	color: var(--vscode-descriptionForeground);
 }
@@ -483,4 +511,20 @@
 	font-family: var(--vscode-editor-font-family);
 	font-size: 11.5px;
 	color: var(--vscode-foreground);
+}
+
+.ade-cfg-btn:focus-visible,
+.ade-cfg-preset-select:focus-visible,
+.ade-cfg-step-btn:focus-visible,
+.ade-cfg-chip:focus-visible,
+.ade-cfg-input:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.ade-cfg-btn,
+	.ade-cfg-chip {
+		transition: none !important;
+	}
 }

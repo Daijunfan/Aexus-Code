@@ -4,9 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as readline from 'node:readline';
 import * as vscode from 'vscode';
 import {
 	buildRemotePersistentPrefix,
@@ -22,8 +24,10 @@ import {
 	terminateRemotePersistentSession,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
+import { LineByteAccumulator } from './lineByteAccumulator';
 import { ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, REMOTE_REATTACH_BACKOFFS_MS, spawnEngine, stopEngine, stopEngineWithFallback, waitForBackoffOrResume, withTimeout } from './runtime';
+import { createTurnInterimUsageTracker, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, emitThinkingProgress, getConfiguredEngineTurnTimeoutMs, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, REMOTE_REATTACH_BACKOFFS_MS, spawnEngine, stopEngine, stopEngineWithFallback, waitForBackoffOrResume, withTimeout } from './runtime';
+import { createMultiStepTurnUsageAccumulator, normalizeProviderTokenUsage } from './usageTracker';
 
 interface PiContentPart {
 	type?: string;
@@ -51,6 +55,10 @@ interface PiRpcPacket {
 	command?: string;
 	success?: boolean;
 	error?: string;
+	isError?: boolean;
+	is_error?: boolean;
+	exitCode?: number;
+	toolCallId?: string;
 	data?: Record<string, unknown>;
 	name?: string;
 	toolName?: string;
@@ -72,90 +80,8 @@ interface PiRpcPacket {
 	tokens?: unknown;
 }
 
-function readTokenCount(record: Record<string, unknown>, ...keys: string[]): number {
-	for (const key of keys) {
-		const value = record[key];
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			return value;
-		}
-	}
-	return 0;
-}
-
-function readPiPositiveCostUsd(record: Record<string, unknown>): number | undefined {
-	for (const key of ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd', 'totalCost', 'cost']) {
-		const val = record[key];
-		if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
-			return val;
-		}
-		if (val && typeof val === 'object') {
-			const total = (val as Record<string, unknown>).total;
-			if (typeof total === 'number' && Number.isFinite(total) && total > 0) {
-				return total;
-			}
-		}
-	}
-	return undefined;
-}
-
-function readPiModelString(record: Record<string, unknown>): string | undefined {
-	const provider = typeof record.provider === 'string' && record.provider.trim() ? record.provider.trim() : undefined;
-	for (const key of ['model', 'modelId', 'model_id']) {
-		const val = record[key];
-		if (typeof val === 'string' && val.trim() && val.trim().toLowerCase() !== 'default') {
-			const m = val.trim();
-			return provider && !m.startsWith(`${provider}/`) ? `${provider}/${m}` : m;
-		}
-		if (val && typeof val === 'object') {
-			const obj = val as Record<string, unknown>;
-			const id = typeof obj.id === 'string' && obj.id.trim() ? obj.id.trim() : undefined;
-			const p = typeof obj.provider === 'string' && obj.provider.trim() ? obj.provider.trim() : provider;
-			if (id) {
-				return p && !id.startsWith(`${p}/`) ? `${p}/${id}` : id;
-			}
-		}
-	}
-	return undefined;
-}
-
-function extractPiTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
-	if (!value || typeof value !== 'object' || depth > 3) {
-		return undefined;
-	}
-	const record = value as Record<string, unknown>;
-	const outerCostUsd = readPiPositiveCostUsd(record);
-	const outerModel = readPiModelString(record);
-	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
-		const nested = record[key];
-		if (nested && typeof nested === 'object') {
-			const usage = extractPiTurnUsage(nested, depth + 1);
-			if (usage) {
-				return {
-					...usage,
-					...(usage.costUsd === undefined && outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
-					...(usage.model === undefined && outerModel !== undefined ? { model: outerModel } : {}),
-				};
-			}
-		}
-	}
-	const inputTokens = readTokenCount(record, 'inputTokens', 'input_tokens', 'input');
-	const outputTokens = readTokenCount(record, 'outputTokens', 'output_tokens', 'output');
-	const cacheReadTokens = readTokenCount(record, 'cacheReadTokens', 'cache_read_input_tokens', 'cachedInputTokens', 'cacheRead');
-	const cacheWriteTokens = readTokenCount(record, 'cacheWriteTokens', 'cache_creation_input_tokens', 'cacheWrite');
-	const totalTokens = readTokenCount(record, 'totalTokens', 'total_tokens', 'total') || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-	if (totalTokens <= 0) {
-		return undefined;
-	}
-	return {
-		inputTokens,
-		outputTokens,
-		cacheReadTokens,
-		cacheWriteTokens,
-		totalTokens,
-		...(outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
-		...(outerModel !== undefined ? { model: outerModel } : {}),
-		estimated: false,
-	};
+function extractPiTurnUsage(value: unknown): EngineTurnTokenUsage | undefined {
+	return normalizeProviderTokenUsage(value);
 }
 
 interface PiModelInfo { id: string; name: string; description?: string }
@@ -367,7 +293,7 @@ export class PiRuntime implements EngineRuntime {
 		if (ordered.some(entry => Boolean(entry.parentId))) {
 			branch = [];
 			const visited = new Set<string>();
-			let current: PiEntry | undefined = ordered.at(-1);
+			let current: PiEntry | undefined = [...ordered].reverse().find(entry => entry.type === 'message' || Boolean(entry.parentId)) ?? ordered.at(-1);
 			while (current) {
 				if (current.id) {
 					if (visited.has(current.id)) { break; }
@@ -645,38 +571,45 @@ export class PiRuntime implements EngineRuntime {
 		const sessions: NativeSession[] = [];
 		for (const candidate of files.slice(0, 250)) {
 			if (token.isCancellationRequested) { break; }
-			let content: string;
-			try {
-				content = await fs.readFile(candidate.file, 'utf8');
-			} catch {
-				continue;
-			}
 			let id: string | undefined;
 			let cwd: string | undefined;
 			let created = candidate.birthtimeMs;
 			let sessionName: string | undefined;
 			let firstUserText: string | undefined;
-			for (const rawLine of content.split('\n')) {
-				const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-				if (!line) { continue; }
-				let entry: PiEntry;
-				try { entry = JSON.parse(line) as PiEntry; } catch { continue; }
-				if (entry.type === 'session' && entry.id && entry.cwd) {
-					id = entry.id;
-					cwd = entry.cwd;
-					if (entry.timestamp) {
-						const parsed = Date.parse(entry.timestamp);
-						if (Number.isFinite(parsed)) { created = parsed; }
-					}
-				} else if (entry.type === 'session_info' && typeof entry.name === 'string' && entry.name.trim()) {
-					sessionName = entry.name.trim();
-				} else if (!firstUserText && entry.type === 'message' && entry.message?.role === 'user') {
-					const rawMsg = piMessageText(entry.message.content).trim();
-					const cleanedMsg = stripInjectedAdeContextFromUserTurn(rawMsg).trim();
-					if (cleanedMsg && !cleanedMsg.startsWith(ROLE_INIT_MARKER)) {
-						firstUserText = cleanedMsg.split('\n')[0].slice(0, 100);
+			const input = createReadStream(candidate.file, { encoding: 'utf8', highWaterMark: 32 * 1024 });
+			const rl = readline.createInterface({ input, crlfDelay: Infinity });
+			let scannedLines = 0;
+			try {
+				for await (const rawLine of rl) {
+					if (token.isCancellationRequested) { break; }
+					if ((id && cwd && (sessionName || firstUserText)) || ++scannedLines > 120) { break; }
+					const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+					if (!line) { continue; }
+					if (!line.includes('"session') && (firstUserText || !line.includes('"user"'))) { continue; }
+					let entry: PiEntry;
+					try { entry = JSON.parse(line) as PiEntry; } catch { continue; }
+					if (entry.type === 'session' && entry.id && entry.cwd) {
+						id = entry.id;
+						cwd = entry.cwd;
+						if (entry.timestamp) {
+							const parsed = Date.parse(entry.timestamp);
+							if (Number.isFinite(parsed)) { created = parsed; }
+						}
+					} else if (entry.type === 'session_info' && typeof entry.name === 'string' && entry.name.trim()) {
+						sessionName = entry.name.trim();
+					} else if (!firstUserText && entry.type === 'message' && entry.message?.role === 'user') {
+						const rawMsg = piMessageText(entry.message.content).trim();
+						const cleanedMsg = stripInjectedAdeContextFromUserTurn(rawMsg).trim();
+						if (cleanedMsg && !cleanedMsg.startsWith(ROLE_INIT_MARKER)) {
+							firstUserText = cleanedMsg.split('\n')[0].slice(0, 100);
+						}
 					}
 				}
+			} catch {
+				continue;
+			} finally {
+				rl.close();
+				input.destroy();
 			}
 			if (id && cwd) {
 				sessions.push({
@@ -969,6 +902,16 @@ export class PiRuntime implements EngineRuntime {
 				child.stdin.write(JSON.stringify({ type: 'extension_ui_response', id: packet.id, ...payload }) + '\n');
 			}
 		};
+		if (autoApprove) {
+			if (packet.method === 'confirm') {
+				respond({ confirmed: true });
+			} else if (packet.method === 'select') {
+				respond(packet.options && packet.options.length > 0 ? { value: packet.options[0] } : { cancelled: true });
+			} else if (packet.method === 'input' || packet.method === 'editor') {
+				respond(packet.prefill !== undefined ? { value: packet.prefill } : { cancelled: true });
+			}
+			return;
+		}
 		const title = packet.title ? vscode.l10n.t('Pi — {0}', packet.title) : 'Pi';
 		if (packet.method === 'select') {
 			const picked = await vscode.window.showQuickPick(packet.options ?? [], {
@@ -978,10 +921,6 @@ export class PiRuntime implements EngineRuntime {
 			}, token);
 			respond(picked !== undefined ? { value: picked } : { cancelled: true });
 		} else if (packet.method === 'confirm') {
-			if (autoApprove) {
-				respond({ confirmed: true });
-				return;
-			}
 			const confirmLabel = vscode.l10n.t('Allow Once');
 			const picked = await vscode.window.showQuickPick([confirmLabel, vscode.l10n.t('Deny')], {
 				title,
@@ -1084,21 +1023,14 @@ export class PiRuntime implements EngineRuntime {
 					this.running.set(session.id, sessionProcs);
 				}
 				sessionProcs.add(child);
-				let carry: Buffer = Buffer.alloc(0);
+				const lineAcc = new LineByteAccumulator();
 				child.stderr.on('data', data => stderrText = (stderrText + String(data)).slice(-8000));
 				child.stdout.on('data', (chunk: Buffer | string) => {
-					const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-					carry = carry.length > 0 ? Buffer.concat([carry, buf]) : buf;
-					let nlIdx: number;
-					while ((nlIdx = carry.indexOf(0x0a)) >= 0) {
-						const lineBuf = carry.subarray(0, nlIdx);
-						carry = carry.subarray(nlIdx + 1);
-						stdoutBytesReceived += nlIdx + 1;
-						const rawLine = lineBuf.toString('utf8');
-						const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-						if (!line) { continue; }
+					lineAcc.push(chunk, (line, rawBytes) => {
+						stdoutBytesReceived += rawBytes;
+						if (!line) { return; }
 						let packet: PiRpcPacket;
-						try { packet = JSON.parse(line) as PiRpcPacket; } catch { continue; }
+						try { packet = JSON.parse(line) as PiRpcPacket; } catch { return; }
 						if (packet.type === 'message_update' && packet.assistantMessageEvent && !token.isCancellationRequested) {
 							const ev = packet.assistantMessageEvent;
 							if (ev.type === 'text_delta' && typeof ev.delta === 'string' && ev.delta) {
@@ -1115,10 +1047,12 @@ export class PiRuntime implements EngineRuntime {
 							sawAgentEnd = true;
 							void terminateRemotePersistentSession(this.remoteTarget!, remotePersistentId, { killTree: false }).catch(() => undefined);
 						}
-					}
+					}, droppedBytes => {
+						stdoutBytesReceived += droppedBytes;
+					});
 				});
 				const stopChild = () => {
-					stopEngineWithFallback(child, 'SIGTERM', 1000);
+					stopEngineWithFallback(child, 'SIGTERM', 1500);
 					void terminateRemotePersistentSession(this.remoteTarget!, remotePersistentId, { killTree: true }).catch(() => undefined);
 				};
 				const cancelSub = token.onCancellationRequested(stopChild);
@@ -1173,6 +1107,24 @@ export class PiRuntime implements EngineRuntime {
 	}
 
 	async send(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options?: EngineSendOptions): Promise<void> {
+		const rawSysPrompt = options?.appendSystemPrompt?.trim();
+		if (rawSysPrompt) {
+			try {
+				await this.sendInternal(session, text, stream, token, options, true);
+				return;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				if (!token.isCancellationRequested && /(?:unknown|invalid|unsupported|unrecognized)[ _-]*(?:option|argument|flag)?[^\n]*--append-system-prompt/i.test(msg)) {
+					await this.sendInternal(session, `${rawSysPrompt}\n\n<!-- /AEXUS_ADE_PREAMBLE -->\n\n${text}`, stream, token, options, false);
+					return;
+				}
+				throw err;
+			}
+		}
+		await this.sendInternal(session, text, stream, token, options, false);
+	}
+
+	private async sendInternal(session: NativeSession, text: string, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, options: EngineSendOptions | undefined, includeSystemPromptFlag: boolean): Promise<void> {
 		if (!session.provisional && !session.file) {
 			session.file = (await this.list(token)).find(item => item.id === session.id)?.file;
 		}
@@ -1189,8 +1141,20 @@ export class PiRuntime implements EngineRuntime {
 			}
 		}
 		const modelOption = options?.model && options.model !== 'default' ? options.model : undefined;
+		const rawSysPrompt = includeSystemPromptFlag ? options?.appendSystemPrompt?.trim() : undefined;
+		let tempSysPromptFile: string | undefined;
+		let sysPromptArgValue = rawSysPrompt;
+		if (rawSysPrompt && !this.remoteTarget && (process.platform === 'win32' || rawSysPrompt.length > 7_000)) {
+			const candidate = path.join(os.tmpdir(), `aexus-pi-sys-${process.pid}-${randomUUID().slice(0, 8)}.md`);
+			const wrote = await fs.writeFile(candidate, rawSysPrompt, { encoding: 'utf8', mode: 0o600 }).then(() => true, () => false);
+			if (wrote) {
+				tempSysPromptFile = candidate;
+				sysPromptArgValue = candidate;
+			}
+		}
 		const args = [
 			'--mode', 'rpc',
+			...(sysPromptArgValue ? ['--append-system-prompt', sysPromptArgValue] : []),
 			...(modelOption ? ['--model', modelOption] : []),
 			...(toolMode === 'readonly' ? ['--tools', 'read,grep,find,ls'] : toolMode === 'chat' ? ['--no-tools'] : []),
 			...this.sessionArgs(session),
@@ -1228,14 +1192,16 @@ export class PiRuntime implements EngineRuntime {
 		sessionProcs.add(child);
 
 		const usageTracker = createTurnInterimUsageTracker(text, options?.onInterimUsage, {
-			preTurnBaseline: this.lastRawSessionUsageBySession.get(session.id),
 			model: modelOption,
 		});
+		const stepUsageAccumulator = createMultiStepTurnUsageAccumulator();
+		let currentStepSeq = 0;
 		let promptDispatched = false;
 		let completedNormally = false;
 		let stdoutBytesReceived = 0;
 		let reattachAttempt = 0;
 		let activeChild = child;
+		let activePiToolsCount = 0;
 
 		let nextReqId = 0;
 		const pending = new Map<string, { resolve: (data: Record<string, unknown> | undefined) => void; reject: (error: Error) => void }>();
@@ -1275,17 +1241,53 @@ export class PiRuntime implements EngineRuntime {
 
 		// Strict byte-accurate LF framing (supports seamless SSH 255 reattach without losing/replaying events
 		// and preserves U+2028 / U+2029 inside JSON strings).
-		let stdoutByteCarry: Buffer = Buffer.alloc(0);
+		const stdoutLineAcc = new LineByteAccumulator();
 		const handlePiLine = (line: string) => {
 			if (!line) { return; }
 			let packet: PiRpcPacket;
 			try { packet = JSON.parse(line) as PiRpcPacket; } catch { return; }
+			try { options?.onStreamActivity?.(); } catch { /* ignore */ }
+
+			if (packet.type === 'tool_execution_end') {
+				if (activePiToolsCount > 0) {
+					activePiToolsCount -= 1;
+					try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+				}
+				const toolFailed = packet.isError === true
+					|| packet.is_error === true
+					|| packet.data?.isError === true
+					|| packet.data?.is_error === true
+					|| Boolean(packet.error)
+					|| (typeof packet.exitCode === 'number' && packet.exitCode !== 0)
+					|| (typeof packet.data?.exitCode === 'number' && packet.data.exitCode !== 0);
+				if (toolFailed) {
+					usageTracker.recordToolError();
+					const currentUsage = this.lastTurnUsageBySession.get(session.id);
+					if (currentUsage) {
+						this.lastTurnUsageBySession.set(session.id, {
+							...currentUsage,
+							hadToolError: true,
+							toolErrorCount: Math.max(currentUsage.toolErrorCount ?? 0, usageTracker.getToolErrorCount()),
+						});
+					}
+				}
+			}
+
+			if (packet.type === 'message_start' || packet.type === 'tool_execution_end') {
+				currentStepSeq++;
+			}
 
 			const messageObj = asRecord(packet.message);
 			const packetUsage = extractPiTurnUsage(packet.usage ?? packet.tokens ?? packet.data?.usage ?? messageObj ?? packet.data);
-			if (packetUsage && promptDispatched) {
-				const normalized = usageTracker.recordRealUsage(packetUsage, { cumulativeAcrossThread: true });
-				this.lastRawSessionUsageBySession.set(session.id, packetUsage);
+			if (packetUsage && promptDispatched && packet.type !== 'agent_end') {
+				const stepId = typeof messageObj?.id === 'string' && messageObj.id
+					? messageObj.id
+					: typeof messageObj?.timestamp === 'number' || typeof messageObj?.timestamp === 'string'
+						? `ts:${String(messageObj.timestamp)}`
+						: `step:${currentStepSeq}`;
+				const aggregated = stepUsageAccumulator.recordStep(stepId, packetUsage);
+				const normalized = usageTracker.recordRealUsage(aggregated, { cumulativeAcrossThread: false });
+				this.lastRawSessionUsageBySession.set(session.id, aggregated);
 				this.lastTurnUsageBySession.set(session.id, normalized);
 			}
 
@@ -1309,11 +1311,13 @@ export class PiRuntime implements EngineRuntime {
 						usageTracker.recordStreamDelta(ame.delta);
 					} else if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string' && ame.delta) {
 						emitThinkingProgress(stream, ame.delta, 'pi-thinking');
-						usageTracker.recordStreamDelta(ame.delta);
+						usageTracker.recordStreamDelta(ame.delta, { skipToolErrorScan: true });
 					} else if (ame?.type === 'toolcall_start' && typeof ame.toolName === 'string') {
 						stream.progress(ame.toolName);
 					}
 				} else if (packet.type === 'tool_execution_start' && !token.isCancellationRequested) {
+					activePiToolsCount += 1;
+					try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
 					stream.progress(this.describeToolCall(packet));
 				} else if (packet.type === 'session_info_changed' && typeof packet.name === 'string' && packet.name.trim()) {
 					session.label = packet.name.trim();
@@ -1326,9 +1330,18 @@ export class PiRuntime implements EngineRuntime {
 					const explicitBypass = requestedPerm === 'bypassPermissions' || requestedPerm === 'auto' || requestedPerm === 'never' || requestedPerm === 'danger-full-access';
 					const autoApprove = Boolean(options?.automatedEngineering)
 						|| (requestedPerm !== 'ask' && requestedPerm !== 'manual' && (explicitBypass || isAutonomousModeEnabled()));
-					void this.handleUiRequest(child, packet, session, token, autoApprove).catch(() => { });
+					if (!autoApprove) {
+						try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
+					}
+					void this.handleUiRequest(child, packet, session, token, autoApprove)
+						.catch(() => { })
+						.finally(() => {
+							if (!autoApprove) {
+								try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+							}
+						});
 				} else if (packet.type === 'agent_end' && Array.isArray(packet.messages)) {
-					if (promptDispatched && !usageTracker.getLatestRealUsage()) {
+					if (promptDispatched) {
 						let sumIn = 0;
 						let sumOut = 0;
 						let sumCacheRead = 0;
@@ -1369,6 +1382,7 @@ export class PiRuntime implements EngineRuntime {
 								estimated: false,
 							};
 							const normalized = usageTracker.recordRealUsage(agg, { cumulativeAcrossThread: false });
+							this.lastRawSessionUsageBySession.set(session.id, agg);
 							this.lastTurnUsageBySession.set(session.id, normalized);
 						}
 					}
@@ -1398,19 +1412,19 @@ export class PiRuntime implements EngineRuntime {
 		const bindChildStreams = (targetChild: ReturnType<typeof spawnEngine>) => {
 			activeChild = targetChild;
 			child = targetChild;
-			stdoutByteCarry = Buffer.alloc(0);
+			stdoutLineAcc.reset();
 			targetChild.stderr.on('data', data => stderrText = (stderrText + String(data)).slice(-8000));
 			targetChild.stdout.on('data', (chunk: Buffer | string) => {
-				const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-				stdoutByteCarry = stdoutByteCarry.length > 0 ? Buffer.concat([stdoutByteCarry, buf]) : buf;
-				let nlIdx: number;
-				while ((nlIdx = stdoutByteCarry.indexOf(0x0a)) >= 0) {
-					const lineBuf = stdoutByteCarry.subarray(0, nlIdx);
-					stdoutByteCarry = stdoutByteCarry.subarray(nlIdx + 1);
-					stdoutBytesReceived += nlIdx + 1;
-					const rawLine = lineBuf.toString('utf8');
-					handlePiLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
-				}
+				stdoutLineAcc.push(
+					chunk,
+					(line, rawBytes) => {
+						stdoutBytesReceived += rawBytes;
+						handlePiLine(line);
+					},
+					droppedBytes => {
+						stdoutBytesReceived += droppedBytes;
+					},
+				);
 			});
 			targetChild.on('error', err => {
 				if (activeChild !== targetChild) { return; }
@@ -1418,11 +1432,16 @@ export class PiRuntime implements EngineRuntime {
 			});
 			targetChild.on('close', code => {
 				if (activeChild !== targetChild) { return; }
-				if (stdoutByteCarry.length > 0 && code === 0) {
-					const tail = stdoutByteCarry.toString('utf8');
-					stdoutBytesReceived += stdoutByteCarry.length;
-					stdoutByteCarry = Buffer.alloc(0);
-					handlePiLine(tail.endsWith('\r') ? tail.slice(0, -1) : tail);
+				if (stdoutLineAcc.pendingBytes > 0 && code === 0) {
+					stdoutLineAcc.flushTail(
+						(tail, rawBytes) => {
+							stdoutBytesReceived += rawBytes;
+							handlePiLine(tail);
+						},
+						droppedBytes => {
+							stdoutBytesReceived += droppedBytes;
+						},
+					);
 				}
 				if (token.isCancellationRequested || completedNormally) {
 					settleResolve();
@@ -1472,6 +1491,7 @@ export class PiRuntime implements EngineRuntime {
 			}
 		};
 		const cancellation = token.onCancellationRequested(triggerPiCancel);
+		options?.abortSignal?.addEventListener('abort', triggerPiCancel, { once: true });
 
 		try {
 			if (token.isCancellationRequested) {
@@ -1522,9 +1542,10 @@ export class PiRuntime implements EngineRuntime {
 			if (token.isCancellationRequested) {
 				triggerPiCancel();
 			}
-			await raceWithCancellation(settled, token, 1500, triggerPiCancel).catch(err => {
-				if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
-					stopEngineWithFallback(child, 'SIGTERM', 1000);
+			const effectiveTimeoutMs = options?.timeoutMs ?? getConfiguredEngineTurnTimeoutMs();
+			await raceWithCancellation(withTimeout(settled, effectiveTimeoutMs), token, 1500, triggerPiCancel).catch(err => {
+				if (token.isCancellationRequested || options?.abortSignal?.aborted || err instanceof vscode.CancellationError) {
+					stopEngineWithFallback(child, 'SIGTERM', 1500);
 					return;
 				}
 				throw err;
@@ -1536,6 +1557,14 @@ export class PiRuntime implements EngineRuntime {
 				}
 			}
 		} finally {
+			while (activePiToolsCount > 0) {
+				activePiToolsCount -= 1;
+				try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+			}
+			if (tempSysPromptFile) {
+				await fs.rm(tempSysPromptFile, { force: true }).catch(() => { });
+			}
+			options?.abortSignal?.removeEventListener('abort', triggerPiCancel);
 			cancellation.dispose();
 			try { activeChild.stdin.end(); } catch { /* ignore */ }
 			stopEngineWithFallback(activeChild, 'SIGTERM', 1500);

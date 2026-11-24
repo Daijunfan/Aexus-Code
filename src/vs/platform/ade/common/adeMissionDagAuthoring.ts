@@ -25,6 +25,51 @@ function escapeRegExp(str: string): string {
 	return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function findUnquotedCommentIndex(rawLine: string): number {
+	let inQuote: '"' | '\'' | undefined;
+	for (let i = 0; i < rawLine.length; i++) {
+		const ch = rawLine[i];
+		if (inQuote) {
+			if (ch === inQuote) {
+				let bs = 0;
+				for (let j = i - 1; j >= 0 && rawLine[j] === '\\'; j--) { bs++; }
+				if ((bs % 2) === 0) {
+					inQuote = undefined;
+				}
+			}
+			continue;
+		}
+		if (ch === '"' || ch === '\'') {
+			inQuote = ch;
+			continue;
+		}
+		if (ch === '%' && rawLine[i + 1] === '%') {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/**
+ * Strictly parses a `--min-tier` / `minCompleterTier` value (accepts non-negative integer or `'L<N>'` / `'<N>'`).
+ * Returns `undefined` when invalid (never coerces NaN, negative, or partial strings like `'2abc'`).
+ */
+export function parseStrictMinCompleterTier(raw: string | number | null | undefined): number | undefined {
+	if (raw === null || raw === undefined) {
+		return undefined;
+	}
+	if (typeof raw === 'number') {
+		return Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+	}
+	const trimmed = raw.trim();
+	const m = /^L?(\d+)$/i.exec(trimmed);
+	if (!m) {
+		return undefined;
+	}
+	const parsed = Number.parseInt(m[1], 10);
+	return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 function formatNodeDeclaration(node: {
 	readonly id: string;
 	readonly label: string;
@@ -136,7 +181,7 @@ export function renameNodeInMermaid(mermaidText: string, nodeId: string, newLabe
 
 	for (let i = 0; i < lines.length; i++) {
 		const rawLine = lines[i];
-		const commentIdx = rawLine.indexOf('%%');
+		const commentIdx = findUnquotedCommentIndex(rawLine);
 		const codePart = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
 		const commentPart = commentIdx >= 0 ? rawLine.slice(commentIdx) : '';
 		if (!codePart.trim() || /^\s*(?:class|classDef|style|linkStyle|subgraph|end|direction)\b/i.test(codePart)) {
@@ -416,6 +461,18 @@ export function upsertTaskMetadataInMermaid(
 		readonly department?: string | null;
 		readonly minCompleterTier?: number | null;
 		readonly allowedCompleterNodeIds?: readonly string[] | null;
+		readonly requireChecksPassed?: boolean | null;
+		readonly requireArtifact?: boolean | null;
+		readonly requireFiles?: boolean | null;
+		readonly requiredWhiteboardIds?: readonly string[] | null;
+		readonly minSummaryChars?: number | null;
+		readonly completionContract?: {
+			readonly requireChecksPassed?: boolean;
+			readonly requireArtifact?: boolean;
+			readonly requireFiles?: boolean;
+			readonly requiredWhiteboardIds?: readonly string[];
+			readonly minSummaryChars?: number;
+		} | null;
 		readonly color?: string | null;
 	},
 ): string {
@@ -434,12 +491,33 @@ export function upsertTaskMetadataInMermaid(
 	const nextDept = patch.department === undefined ? existing.department : (patch.department?.trim() || undefined);
 	const nextMinTier = patch.minCompleterTier === undefined
 		? existing.minCompleterTier
-		: (typeof patch.minCompleterTier === 'number' && Number.isInteger(patch.minCompleterTier) && patch.minCompleterTier >= 0 ? patch.minCompleterTier : undefined);
+		: parseStrictMinCompleterTier(patch.minCompleterTier);
 	const nextCompleters = patch.allowedCompleterNodeIds === undefined
 		? existing.allowedCompleterNodeIds
 		: (patch.allowedCompleterNodeIds && patch.allowedCompleterNodeIds.length > 0
 			? [...new Set(patch.allowedCompleterNodeIds.map(s => s.trim()).filter(Boolean))]
 			: undefined);
+	const baseContract = patch.completionContract === null ? undefined : (patch.completionContract ?? existing.completionContract);
+	const nextRequireChecks = patch.requireChecksPassed === null
+		? undefined
+		: (patch.requireChecksPassed !== undefined ? patch.requireChecksPassed : baseContract?.requireChecksPassed);
+	const nextRequireArtifact = patch.requireArtifact === null
+		? undefined
+		: (patch.requireArtifact !== undefined ? patch.requireArtifact : baseContract?.requireArtifact);
+	const nextRequireFiles = patch.requireFiles === null
+		? undefined
+		: (patch.requireFiles !== undefined ? patch.requireFiles : baseContract?.requireFiles);
+	const nextRequiredWbs = patch.requiredWhiteboardIds === null
+		? undefined
+		: (patch.requiredWhiteboardIds !== undefined
+			? [...new Set(patch.requiredWhiteboardIds.map(s => s.trim().replace(/^wb:/i, '')).filter(Boolean))]
+			: baseContract?.requiredWhiteboardIds);
+	const rawMinSummary = patch.minSummaryChars === null
+		? undefined
+		: (patch.minSummaryChars !== undefined ? patch.minSummaryChars : baseContract?.minSummaryChars);
+	const nextMinSummary = typeof rawMinSummary === 'number' && Number.isInteger(rawMinSummary) && rawMinSummary >= 1
+		? Math.min(2_000, rawMinSummary)
+		: undefined;
 	const nextColor = patch.color === undefined
 		? normalizeAdeNodeColor(existing.color)
 		: normalizeAdeNodeColor(patch.color);
@@ -451,10 +529,15 @@ export function upsertTaskMetadataInMermaid(
 	if (nextDept) { parts.push(`dept=${formatVal(nextDept)}`); }
 	if (nextMinTier !== undefined) { parts.push(`min_tier=${nextMinTier}`); }
 	if (nextCompleters && nextCompleters.length > 0) { parts.push(`completers=${formatVal(nextCompleters.join('|'))}`); }
+	if (nextRequireChecks !== undefined) { parts.push(`require_checks=${nextRequireChecks ? 'true' : 'false'}`); }
+	if (nextRequireArtifact !== undefined) { parts.push(`require_artifact=${nextRequireArtifact ? 'true' : 'false'}`); }
+	if (nextRequireFiles !== undefined) { parts.push(`require_files=${nextRequireFiles ? 'true' : 'false'}`); }
+	if (nextRequiredWbs && nextRequiredWbs.length > 0) { parts.push(`require_wb=${formatVal(nextRequiredWbs.join('|'))}`); }
+	if (nextMinSummary !== undefined) { parts.push(`min_summary=${nextMinSummary}`); }
 	if (nextColor) { parts.push(`color=${formatVal(nextColor)}`); }
 
 	const directiveLine = parts.length > 0 ? `  %% task ${cleanId} [${parts.join(', ')}]` : undefined;
-	const directiveRe = new RegExp(`^\\s*%%\\s*task\\s+${escapeRegExp(cleanId)}\\s*\\[[^\\]]*\\]\\s*$`, 'i');
+	const directiveRe = new RegExp(`^\\s*%%\\s*task\\s+${escapeRegExp(cleanId)}\\s*\\[.*\\]\\s*$`, 'i');
 	const lines = mermaidText.split(/\r?\n/);
 	const kept: string[] = [];
 	let replaced = false;

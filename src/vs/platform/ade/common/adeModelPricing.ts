@@ -436,6 +436,24 @@ const EXACT_MODEL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
 	'haiku': 'claude-haiku-4-5',
 });
 
+function catalogPatternMatchesCandidate(candidate: string, pattern: string): boolean {
+	if (candidate === pattern) {
+		return true;
+	}
+	if (pattern.length <= 3) {
+		// Short identifiers like `o1`, `o3` must match on token boundaries on both sides (avoids `foo1-bar` or `studio3`).
+		const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+		return new RegExp(`(?:^|[/:_.-])${escaped}(?:$|[/:_.-])`, 'i').test(candidate);
+	}
+	if (pattern.length <= 5) {
+		// Family prefixes like `glm`, `qwen`, `grok`, `gpt-4`, `phi-3` require a leading token boundary
+		// while permitting trailing version suffixes (e.g. `glm4`, `qwen2.5`, `grok3`).
+		const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+		return new RegExp(`(?:^|[/:_.-])${escaped}`, 'i').test(candidate);
+	}
+	return candidate.includes(pattern);
+}
+
 function matchBuiltInCatalog(model: string | undefined): IBuiltInPricingEntry | undefined {
 	const { raw, stripped } = normalizePricingModelCandidates(model);
 	if (!raw) {
@@ -449,7 +467,7 @@ function matchBuiltInCatalog(model: string | undefined): IBuiltInPricingEntry | 
 	const candidates = [aliased ?? '', normalizedStripped, stripped, raw].filter(Boolean);
 	for (const entry of BUILTIN_MODEL_PRICING_SORTED) {
 		for (const candidate of candidates) {
-			if (candidate === entry.pattern || candidate.includes(entry.pattern)) {
+			if (catalogPatternMatchesCandidate(candidate, entry.pattern)) {
 				return entry;
 			}
 		}
@@ -533,10 +551,11 @@ export function resolveModelTokenPricingRate(
 		const outRate = finiteNonNegative(entry.outputPerMillion);
 		const crRate = finiteNonNegative(entry.cacheReadPerMillion);
 		const cwRate = finiteNonNegative(entry.cacheWritePerMillion);
+		const hasExplicitRate = inRate !== undefined || outRate !== undefined || crRate !== undefined || cwRate !== undefined;
 		const allExplicitZero = entry.local === true
 			|| (
 				entry.local !== false
-				&& (inRate !== undefined || outRate !== undefined || crRate !== undefined || cwRate !== undefined)
+				&& hasExplicitRate
 				&& (inRate ?? 0) === 0
 				&& (outRate ?? 0) === 0
 				&& (crRate ?? 0) === 0
@@ -548,6 +567,16 @@ export function resolveModelTokenPricingRate(
 				isLocalFree: true,
 				source: 'override_local',
 				matchedPattern: userMatch.pattern,
+			};
+		}
+		if (!hasExplicitRate && entry.local !== false && isBuiltInLocalZeroCostModel(model)) {
+			// Context-window-only overrides (e.g. `{ "ollama/*": { contextWindowTokens: 65536 } }`)
+			// must preserve built-in local zero-cost detection instead of falling back to cloud pricing.
+			return {
+				rate: ZERO_LOCAL_RATE,
+				isLocalFree: true,
+				source: 'local_free',
+				matchedPattern: model?.trim() || userMatch.pattern,
 			};
 		}
 		const baseCatalog = matchBuiltInCatalog(model)?.rate ?? DEFAULT_FALLBACK_CLOUD_RATE;
@@ -604,6 +633,61 @@ export function resolveModelTokenPricingRate(
 }
 
 /**
+ * Canonicalizes provider token usage into non-cached `inputTokens` + `cacheReadTokens` + `cacheWriteTokens` + `outputTokens`:
+ * - OpenAI/Codex/Gemini/DeepSeek payloads frequently report `inputTokens` INCLUSIVE of `cacheReadTokens`.
+ * - Detects inclusive payloads when `(input + output + cacheWrite) <= totalTokens < (input + output + cacheRead + cacheWrite)`
+ *   OR when `totalTokens === 0` on OpenAI/Codex/Gemini/DeepSeek families with `inputTokens >= cacheReadTokens`.
+ */
+export function normalizeNonCachedInputTokens(params: {
+	readonly inputTokens: number;
+	readonly outputTokens: number;
+	readonly cacheReadTokens?: number;
+	readonly cacheWriteTokens?: number;
+	readonly totalTokens?: number;
+	readonly model?: string;
+	readonly engineId?: string;
+}): {
+	readonly inputTokens: number;
+	readonly outputTokens: number;
+	readonly cacheReadTokens: number;
+	readonly cacheWriteTokens: number;
+	readonly totalTokens: number;
+	readonly inputIncludedCacheRead: boolean;
+} {
+	const rawInput = Math.max(0, Number.isFinite(params.inputTokens) ? params.inputTokens : 0);
+	const outputTokens = Math.max(0, Number.isFinite(params.outputTokens) ? params.outputTokens : 0);
+	const cacheReadTokens = Math.max(0, Number.isFinite(params.cacheReadTokens ?? 0) ? (params.cacheReadTokens ?? 0) : 0);
+	const cacheWriteTokens = Math.max(0, Number.isFinite(params.cacheWriteTokens ?? 0) ? (params.cacheWriteTokens ?? 0) : 0);
+	const reportedTotal = Math.max(0, Number.isFinite(params.totalTokens ?? 0) ? (params.totalTokens ?? 0) : 0);
+
+	const normalizedEngine = (params.engineId ?? '').trim().toLowerCase();
+	const normalizedModel = (params.model ?? '').trim().toLowerCase();
+	const isOpenAiInclusiveFamily = /^(?:aexus-)?(?:codex|openai)$/.test(normalizedEngine)
+		|| /(?:^|[/:_.-])(?:gpt-|codex|o[134](?:$|[/:_.-]))/.test(normalizedModel);
+	const inputIncludedCacheRead = cacheReadTokens > 0
+		&& rawInput >= cacheReadTokens
+		&& (
+			(reportedTotal > 0
+				&& (rawInput + outputTokens + cacheWriteTokens) <= reportedTotal
+				&& (rawInput + outputTokens + cacheReadTokens + cacheWriteTokens) > reportedTotal)
+			|| (reportedTotal === 0 && isOpenAiInclusiveFamily)
+		);
+	const inputTokens = inputIncludedCacheRead
+		? Math.max(0, rawInput - cacheReadTokens)
+		: rawInput;
+	const canonicalSum = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+	const totalTokens = reportedTotal > 0 ? Math.max(reportedTotal, canonicalSum) : canonicalSum;
+	return {
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens,
+		inputIncludedCacheRead,
+	};
+}
+
+/**
  * Computes estimated USD cost for a token usage delta / turn using the unified pricing catalog
  * and optional user overrides. Automatically avoids double-billing cached input tokens when a
  * provider reports OpenAI-style inclusive `inputTokens` (where `inputTokens` already includes `cacheReadTokens`).
@@ -624,16 +708,16 @@ export function estimateTokenCostUsd(params: ITokenCostEstimateInput): ITokenCos
 		};
 	}
 
-	// OpenAI/Codex-style payloads often set `input_tokens` inclusive of `cached_input_tokens`,
-	// so `input + output + cacheWrite <= totalTokens < input + output + cacheRead + cacheWrite`.
-	const inputIncludesCacheRead = totalTokens > 0
-		&& cacheReadTokens > 0
-		&& inputTokens >= cacheReadTokens
-		&& (inputTokens + outputTokens + cacheWriteTokens) <= totalTokens
-		&& (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens) > totalTokens;
-	const billableNonCachedInput = inputIncludesCacheRead
-		? Math.max(0, inputTokens - cacheReadTokens)
-		: inputTokens;
+	const normalized = normalizeNonCachedInputTokens({
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+		totalTokens,
+		model: params.model,
+		engineId: params.engineId,
+	});
+	const billableNonCachedInput = normalized.inputTokens;
 
 	const rawCost = (
 		billableNonCachedInput * resolved.rate.inputPerMillion

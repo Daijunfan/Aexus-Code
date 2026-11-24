@@ -46,11 +46,11 @@
 
 .ade-rs-header {
 	flex: 0 0 auto;
-	padding: 16px 22px 12px;
-	border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+	padding: 18px 24px 14px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-panel-border, transparent));
 	background: linear-gradient(
 		180deg,
-		color-mix(in srgb, var(--ade-rs-amber) 5%, var(--vscode-editor-background)) 0%,
+		color-mix(in srgb, var(--ade-rs-amber) 4%, var(--vscode-editor-background)) 0%,
 		var(--vscode-editor-background) 100%
 	);
 	display: flex;
@@ -82,9 +82,9 @@
 
 .ade-rs-title {
 	margin: 0;
-	font-size: 17px;
-	font-weight: 700;
-	letter-spacing: -0.01em;
+	font-size: 18px;
+	font-weight: 600;
+	letter-spacing: -0.015em;
 	color: var(--vscode-foreground);
 }
 
@@ -295,24 +295,34 @@
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
-	padding: 10px 11px;
-	border-radius: 8px;
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.24));
+	padding: 10px 12px 10px 13px;
+	border-radius: 9px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-panel-border, transparent));
 	background: var(--vscode-editor-background);
+	box-shadow: inset 2px 0 0 var(--ade-rs-rank-accent, var(--ade-rs-slate)), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 	cursor: pointer;
 	transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
-	border-left: 3px solid var(--ade-rs-rank-accent, var(--ade-rs-slate));
 }
 
 .ade-rs-rank-card:hover {
-	border-color: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-focusBorder)) 60%, transparent);
+	border-color: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-focusBorder)) 46%, transparent);
 	background: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-focusBorder)) 5%, var(--vscode-editor-background));
 }
 
 .ade-rs-rank-card.selected {
-	border-color: var(--ade-rs-rank-accent, var(--vscode-focusBorder));
-	background: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-focusBorder)) 10%, var(--vscode-editor-background));
-	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+	border-color: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-focusBorder)) 68%, transparent);
+	background: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-focusBorder)) 9%, var(--vscode-editor-background));
+	box-shadow: inset 2px 0 0 var(--ade-rs-rank-accent, var(--vscode-focusBorder)), inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 6px 18px -6px rgba(0, 0, 0, 0.28);
+}
+
+.monaco-workbench.vs .ade-rs-rank-card {
+	border-color: rgba(15, 23, 42, 0.1);
+	box-shadow: inset 2px 0 0 var(--ade-rs-rank-accent, var(--ade-rs-slate)), 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.monaco-workbench.vs .ade-rs-rank-card.selected {
+	border-color: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-focusBorder)) 56%, transparent);
+	box-shadow: inset 2px 0 0 var(--ade-rs-rank-accent, var(--vscode-focusBorder)), 0 4px 12px -3px rgba(15, 23, 42, 0.08);
 }
 
 .ade-rs-rank-card.color-amber { --ade-rs-rank-accent: var(--ade-rs-amber); }
@@ -337,11 +347,13 @@
 	min-width: 24px;
 	height: 18px;
 	padding: 0 5px;
-	border-radius: 4px;
+	border-radius: 4.5px;
 	font-size: 10.5px;
 	font-weight: 700;
 	color: var(--ade-rs-rank-accent, var(--vscode-foreground));
-	background: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-foreground)) 16%, transparent);
+	background: color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-foreground)) 14%, transparent);
+	border: 1px solid color-mix(in srgb, var(--ade-rs-rank-accent, var(--vscode-foreground)) 30%, transparent);
+	box-sizing: border-box;
 	flex-shrink: 0;
 }
 
@@ -435,13 +447,20 @@
 }
 
 .ade-rs-card {
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.24));
-	border-radius: 10px;
-	background: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 55%, var(--vscode-editor-background));
-	padding: 16px 18px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-panel-border, transparent));
+	border-radius: 12px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, var(--vscode-editor-background)) 52%, var(--vscode-editor-background));
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 6px 20px -8px rgba(0, 0, 0, 0.24);
+	padding: 18px 20px;
 	display: flex;
 	flex-direction: column;
-	gap: 12px;
+	gap: 13px;
+}
+
+.monaco-workbench.vs .ade-rs-card {
+	border-color: rgba(15, 23, 42, 0.1);
+	background: var(--vscode-editor-background);
+	box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
 }
 
 .ade-rs-card-head {
@@ -675,21 +694,22 @@
 	display: flex;
 	align-items: flex-start;
 	gap: 9px;
-	padding: 10px 11px;
-	border-radius: 8px;
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.24));
+	padding: 11px 12px;
+	border-radius: 9px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-panel-border, transparent));
 	background: var(--vscode-editor-background);
 	cursor: pointer;
-	transition: border-color 120ms ease, background 120ms ease;
+	transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
 
 .ade-rs-api-item:hover {
-	border-color: color-mix(in srgb, var(--vscode-focusBorder) 55%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-focusBorder) 48%, transparent);
 }
 
 .ade-rs-api-item.checked {
-	border-color: color-mix(in srgb, var(--ade-rs-emerald) 65%, transparent);
-	background: color-mix(in srgb, var(--ade-rs-emerald) 7%, var(--vscode-editor-background));
+	border-color: color-mix(in srgb, var(--ade-rs-emerald) 52%, transparent);
+	background: color-mix(in srgb, var(--ade-rs-emerald) 6%, var(--vscode-editor-background));
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .ade-rs-api-item.disabled {
@@ -922,18 +942,18 @@
 	display: flex;
 	flex-direction: column;
 	gap: 5px;
-	padding: 7px 9px;
-	border-radius: 6px;
-	border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.22));
+	padding: 8px 10px 8px 12px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, var(--vscode-panel-border, transparent));
 	background: var(--vscode-editor-background);
 }
 
 .ade-rs-wall-lane.off-graph {
-	border-left: 3px solid var(--ade-rs-amber);
+	box-shadow: inset 2px 0 0 var(--ade-rs-amber);
 }
 
 .ade-rs-wall-lane.in-graph {
-	border-left: 3px solid var(--ade-rs-emerald);
+	box-shadow: inset 2px 0 0 var(--ade-rs-emerald);
 }
 
 .ade-rs-wall-lane-label {
@@ -1127,7 +1147,7 @@
 }
 
 .ade-rs-matrix-row.dangerous .ade-rs-matrix-api-cell {
-	border-left: 3px solid var(--ade-rs-rose);
+	box-shadow: inset 2px 0 0 var(--ade-rs-rose);
 }
 
 .ade-rs-matrix-cell {
@@ -1146,6 +1166,7 @@
 	width: 15px;
 	height: 15px;
 	cursor: pointer;
+	accent-color: var(--ade-rs-emerald, #10b981);
 }
 
 .ade-rs-matrix-cb:disabled {

@@ -15,6 +15,7 @@ import {
 	IAdeHeadlessControlResult,
 	IAdeInboxItem,
 	IAdeInboxMutation,
+	IAdeMissionCheckpointMeta,
 	IAdeMissionColdChangeEvent,
 	IAdeMissionWatchdogSnapshot,
 	IAdeOrchestrationDaemonMissionSnapshot,
@@ -40,7 +41,7 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 		this.wakeupRouter = {
 			subscribers: new Map(),
 			pending: new Map(),
-			dedupeKey: ev => `${ev.missionId}:${ev.tokenId}:${ev.reason}`,
+			dedupeKey: ev => `${ev.missionId}:${ev.barrierId ?? ev.tokenId}:${ev.reason}`,
 		};
 		this.triggerRouter = {
 			subscribers: new Map(),
@@ -74,6 +75,12 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 		ev: E,
 	): void {
 		if (router.subscribers.size === 0) {
+			if (
+				router === (this.wakeupRouter as unknown as IWindowScopedRouter<E>)
+				&& this.service.willHandleWatchdogWakeupHeadlessly?.(ev as unknown as IAdeWatchdogWakeupEvent)
+			) {
+				return;
+			}
 			const key = router.dedupeKey(ev);
 			if (router.pending.has(key)) {
 				router.pending.delete(key);
@@ -116,6 +123,7 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 		source: Event<E> | undefined,
 		ctx: unknown,
 		router: IWindowScopedRouter<E>,
+		trackRendererCount = false,
 	): Event<E> {
 		if (!source) {
 			return Event.None;
@@ -127,6 +135,10 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 		const emitter = new Emitter<E>({
 			onWillAddFirstListener: () => {
 				router.subscribers.set(ctxKey, emitter);
+				if (trackRendererCount) {
+					this.service.registerLiveRendererContext?.(ctxKey);
+					this.service.setActiveRendererWindowCount?.(router.subscribers.size);
+				}
 				if (router.pending.size > 0) {
 					// Defer flush one microtask so the newly attached IPC listener is fully wired.
 					queueMicrotask(() => this.flushPendingFor(router));
@@ -135,6 +147,10 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 			onDidRemoveLastListener: () => {
 				if (router.subscribers.get(ctxKey) === emitter) {
 					router.subscribers.delete(ctxKey);
+					if (trackRendererCount) {
+						this.service.unregisterLiveRendererContext?.(ctxKey);
+						this.service.setActiveRendererWindowCount?.(router.subscribers.size);
+					}
 				}
 			},
 		});
@@ -144,7 +160,7 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 	listen<T>(ctx: unknown, event: string): Event<T> {
 		switch (event) {
 			case 'onDidWatchdogWakeup':
-				return this.createWindowScopedEvent(this.service.onDidWatchdogWakeup, ctx, this.wakeupRouter) as Event<T>;
+				return this.createWindowScopedEvent(this.service.onDidWatchdogWakeup, ctx, this.wakeupRouter, true) as Event<T>;
 			case 'onDidSourceTriggerFire':
 				return this.createWindowScopedEvent(this.service.onDidSourceTriggerFire, ctx, this.triggerRouter) as Event<T>;
 			case 'onDidInboxChange':
@@ -178,12 +194,12 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 					: Promise.resolve({})) as Promise<T>;
 			case 'saveMissionRecord': {
 				const params = (arg && typeof arg === 'object')
-					? arg as { missionId?: string; payloadJson?: string; updatedAt?: number; writerId?: string }
+					? arg as { missionId?: string; payloadJson?: string; updatedAt?: number; writerId?: string; expectedRevision?: number }
 					: undefined;
 				if (!this.service.saveMissionRecord || !params?.missionId || typeof params.payloadJson !== 'string') {
 					return Promise.resolve() as Promise<T>;
 				}
-				return this.service.saveMissionRecord(params.missionId, params.payloadJson, params.updatedAt ?? Date.now(), params.writerId) as Promise<T>;
+				return this.service.saveMissionRecord(params.missionId, params.payloadJson, params.updatedAt ?? Date.now(), params.writerId, params.expectedRevision) as Promise<T>;
 			}
 			case 'deleteMissionRecord': {
 				const params = (arg && typeof arg === 'object')
@@ -193,6 +209,37 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 					return Promise.resolve() as Promise<T>;
 				}
 				return this.service.deleteMissionRecord(params.missionId, params.writerId) as Promise<T>;
+			}
+			case 'saveMissionCheckpoint': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; checkpointId?: string; payloadJson?: string; meta?: IAdeMissionCheckpointMeta }
+					: undefined;
+				if (!this.service.saveMissionCheckpoint || !params?.missionId || !params.checkpointId || typeof params.payloadJson !== 'string' || !params.meta) {
+					return Promise.resolve() as Promise<T>;
+				}
+				return this.service.saveMissionCheckpoint(params.missionId, params.checkpointId, params.payloadJson, params.meta) as Promise<T>;
+			}
+			case 'listMissionCheckpoints':
+				return (this.service.listMissionCheckpoints
+					? this.service.listMissionCheckpoints(String(arg ?? ''))
+					: Promise.resolve([])) as Promise<T>;
+			case 'loadMissionCheckpoint': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; checkpointId?: string }
+					: undefined;
+				if (!this.service.loadMissionCheckpoint || !params?.missionId || !params.checkpointId) {
+					return Promise.resolve(undefined) as Promise<T>;
+				}
+				return this.service.loadMissionCheckpoint(params.missionId, params.checkpointId) as Promise<T>;
+			}
+			case 'deleteMissionCheckpoint': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { missionId?: string; checkpointId?: string }
+					: undefined;
+				if (!this.service.deleteMissionCheckpoint || !params?.missionId || !params.checkpointId) {
+					return Promise.resolve() as Promise<T>;
+				}
+				return this.service.deleteMissionCheckpoint(params.missionId, params.checkpointId) as Promise<T>;
 			}
 			case 'saveOrchestrationBlobs': {
 				const params = (arg && typeof arg === 'object')
@@ -307,6 +354,20 @@ export class AdeEngineeringBackendChannel implements IServerChannel {
 					? this.service.probeFileMtime(params.hostAlias ?? 'local', params.filePath ?? '')
 					: Promise.resolve(null)) as Promise<T>;
 			}
+			case 'probeFileSignature': {
+				const params = (arg && typeof arg === 'object')
+					? arg as { hostAlias?: string; filePath?: string }
+					: { hostAlias: 'local', filePath: '' };
+				return (this.service.probeFileSignature
+					? this.service.probeFileSignature(params.hostAlias ?? 'local', params.filePath ?? '')
+					: Promise.resolve(null)) as Promise<T>;
+			}
+			case 'revokeSession': {
+				const sessionId = typeof arg === 'string' ? arg.trim() : '';
+				return (this.service.revokeSession && sessionId
+					? this.service.revokeSession(sessionId)
+					: Promise.resolve()) as Promise<T>;
+			}
 			case 'runDeterministicCheck': {
 				const req = arg as IAdeDeterministicCheckRequest;
 				if (!this.service.runDeterministicCheck) {
@@ -369,12 +430,28 @@ export class AdeEngineeringBackendChannelClient implements IAdeEngineeringBacken
 		return this.channel.call('loadAllMissionRecords');
 	}
 
-	saveMissionRecord(missionId: string, payloadJson: string, updatedAt: number, writerId?: string): Promise<void> {
-		return this.channel.call('saveMissionRecord', { missionId, payloadJson, updatedAt, writerId });
+	saveMissionRecord(missionId: string, payloadJson: string, updatedAt: number, writerId?: string, expectedRevision?: number): Promise<void> {
+		return this.channel.call('saveMissionRecord', { missionId, payloadJson, updatedAt, writerId, ...(expectedRevision !== undefined ? { expectedRevision } : {}) });
 	}
 
 	deleteMissionRecord(missionId: string, writerId?: string): Promise<void> {
 		return this.channel.call('deleteMissionRecord', { missionId, writerId });
+	}
+
+	saveMissionCheckpoint(missionId: string, checkpointId: string, payloadJson: string, meta: IAdeMissionCheckpointMeta): Promise<void> {
+		return this.channel.call('saveMissionCheckpoint', { missionId, checkpointId, payloadJson, meta });
+	}
+
+	listMissionCheckpoints(missionId: string): Promise<readonly IAdeMissionCheckpointMeta[]> {
+		return this.channel.call('listMissionCheckpoints', missionId);
+	}
+
+	loadMissionCheckpoint(missionId: string, checkpointId: string): Promise<string | undefined> {
+		return this.channel.call('loadMissionCheckpoint', { missionId, checkpointId });
+	}
+
+	deleteMissionCheckpoint(missionId: string, checkpointId: string): Promise<void> {
+		return this.channel.call('deleteMissionCheckpoint', { missionId, checkpointId });
 	}
 
 	saveOrchestrationBlobs(missionId: string, blobs: readonly { readonly ptr: string; readonly payloadJson: string }[]): Promise<void> {
@@ -435,6 +512,14 @@ export class AdeEngineeringBackendChannelClient implements IAdeEngineeringBacken
 
 	probeFileMtime(hostAlias: string, filePath: string): Promise<number | null> {
 		return this.channel.call('probeFileMtime', { hostAlias, filePath });
+	}
+
+	probeFileSignature(hostAlias: string, filePath: string): Promise<string | null> {
+		return this.channel.call('probeFileSignature', { hostAlias, filePath });
+	}
+
+	revokeSession(sessionId: string): Promise<void> {
+		return this.channel.call('revokeSession', sessionId);
 	}
 
 	runDeterministicCheck(request: IAdeDeterministicCheckRequest): Promise<IAdeDeterministicCheckResponse> {

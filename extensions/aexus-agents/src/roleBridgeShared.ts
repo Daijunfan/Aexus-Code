@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
@@ -12,23 +13,103 @@ export type AdeSessionRank = 'governor' | 'manager' | 'employee' | 'subordinate'
 export const ROLE_CONTEXT_HEADER = '[Aexus Orchestrated Role Context]';
 export const ROLE_INIT_MARKER = '[AEXUS_ADE_ROLE_INITIALIZATION]';
 export const AEXUS_PREAMBLE_END_MARKER = '<!-- /AEXUS_ADE_PREAMBLE -->';
+export const ADE_LIVE_ROLE_BINDINGS_HEADING = '### Live Role Bindings';
 export const AEXUS_SYSTEM_TOKEN_ENVELOPE_HEADER = '[Aexus System · Baton Token]';
 export const AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER = '[Aexus System · Direct Message from Role]';
 export const AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER = '[Aexus System · Message from User (L-1)]';
 export const ROLE_STATE_ENV_KEY = 'AEXUS_ADE_ROLE_STATE_FILE';
+export const AGENT_AUTH_ENV_KEY = 'AEXUS_ADE_AGENT_AUTH_FILE';
+export const AEXUS_AGENT_ID_ENV_KEY = 'AEXUS_ADE_AGENT_ID';
+export const AEXUS_INTERNAL_RUNTIME_HEADER = 'x-aexus-internal-runtime';
+
+export const ADE_ROLE_PREAMBLE_HEADERS = [
+	'[Aexus Orchestrated Role Context]',
+	'[Aexus Orchestrated Role Context Updated]',
+	'[Aexus ADE · Engineering Staff Context]',
+	'[Aexus ADE · Mission Node Employee]',
+	'[Aexus ADE Live Viewport & Macro Control Context]',
+] as const;
 
 export function hasAexusSystemMessageEnvelope(text: string): boolean {
+	const startsWithAnySystemEnvelope = (candidate: string): boolean =>
+		candidate.startsWith(AEXUS_SYSTEM_TOKEN_ENVELOPE_HEADER)
+		|| candidate.startsWith(AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER)
+		|| candidate.startsWith(AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER);
+
 	const trimmed = text.trimStart();
-	return trimmed.startsWith(AEXUS_SYSTEM_TOKEN_ENVELOPE_HEADER)
-		|| trimmed.startsWith(AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER)
-		|| trimmed.startsWith(AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER);
+	if (startsWithAnySystemEnvelope(trimmed)) {
+		return true;
+	}
+	const preambleIdx = text.indexOf(AEXUS_PREAMBLE_END_MARKER);
+	if (preambleIdx >= 0) {
+		const preamble = text.slice(0, preambleIdx);
+		if (
+			preamble.includes(AEXUS_SYSTEM_TOKEN_ENVELOPE_HEADER)
+			|| preamble.includes(AEXUS_SYSTEM_ROLE_DM_ENVELOPE_HEADER)
+			|| preamble.includes(AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER)
+		) {
+			return true;
+		}
+		const postMarker = text.slice(preambleIdx + AEXUS_PREAMBLE_END_MARKER.length).trimStart();
+		return startsWithAnySystemEnvelope(postMarker);
+	}
+	return false;
 }
 
-export function buildUserMessageSystemEnvelope(): string {
+/**
+ * Returns true if `text` already contains any injected ADE role/staff/employee/viewport charter
+ * (either at the start of the turn or inside a `<!-- /AEXUS_ADE_PREAMBLE -->` block), preventing
+ * `nativeRoleBridge` from injecting a duplicate copy of `rolePrompt`.
+ */
+export function hasAnyAdeRolePreamble(text: string): boolean {
+	if (!text) {
+		return false;
+	}
+	const trimmed = text.trimStart();
+	if (ADE_ROLE_PREAMBLE_HEADERS.some(header => trimmed.startsWith(header))) {
+		return true;
+	}
+	const markerIdx = text.indexOf(AEXUS_PREAMBLE_END_MARKER);
+	const searchWindow = markerIdx >= 0 ? text.slice(0, markerIdx) : text.slice(0, 4096);
+	return ADE_ROLE_PREAMBLE_HEADERS.some(header => searchWindow.includes(header));
+}
+
+/**
+ * Formats `rolePrompt` for turn-input injection without stacking duplicate `[Aexus ...]` headers
+ * when `rolePrompt` already begins with a compiled role/staff/viewport header.
+ */
+export function formatRoleContextBlock(rolePrompt: string, updated = false): string {
+	const trimmed = rolePrompt.trim();
+	if (!trimmed) {
+		return '';
+	}
+	const alreadyBracketed = ADE_ROLE_PREAMBLE_HEADERS.some(header => trimmed.startsWith(header));
+	if (!updated) {
+		return alreadyBracketed ? trimmed : `${ROLE_CONTEXT_HEADER}\n${trimmed}`;
+	}
+	if (trimmed.startsWith(`${ROLE_CONTEXT_HEADER}\n`)) {
+		return `[Aexus Orchestrated Role Context Updated]\n${trimmed.slice(ROLE_CONTEXT_HEADER.length + 1)}`;
+	}
+	if (trimmed.startsWith('[Aexus Orchestrated Role Context Updated]')) {
+		return trimmed;
+	}
+	return `[Aexus Orchestrated Role Context Updated]\n${trimmed}`;
+}
+
+export interface UserMessageRootBatonInfo {
+	readonly tokenId: string;
+	readonly missionId: string;
+	readonly nodeId: string;
+}
+
+export function buildUserMessageSystemEnvelope(rootBaton?: UserMessageRootBatonInfo): string {
 	return [
 		AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER,
-		'- Message Type: Direct message from the Human User (L-1 · Sovereign Operator — NOT a Baton Token and NOT from another agent role).',
+		'- Message Type: Direct message from the Human User (L-1 · Sovereign Operator — NOT from another agent role).',
 		'- Channel: chat — prioritize and respond directly to the User.',
+		...(rootBaton ? [
+			`- Root Baton Issued: \`${rootBaton.tokenId}\` (Mission: \`${rootBaton.missionId}\`, Node: \`${rootBaton.nodeId}\`) — delegate downward via \`aexus-ade token mint|split ${rootBaton.tokenId} ... --wait-join\` or finish via \`aexus-ade token complete ${rootBaton.tokenId} --finish --summary "<facts>"\`.`,
+		] : []),
 	].join('\n');
 }
 
@@ -44,8 +125,100 @@ export interface RoleSyncAgentEntry {
 	readonly isWorkTree?: boolean;
 	readonly isMissionNode?: boolean;
 	readonly rolePrompt?: string;
+	readonly staticRoleCharter?: string;
+	readonly staticRoleHash?: string;
 	readonly preferredModel?: string;
+	readonly sessionToken?: string;
+	readonly controlSocketPath?: string;
 	readonly preferredThinking?: string;
+}
+
+const LIVE_VIEWPORT_SNAPSHOT_MARKER = '- Live Viewport Snapshot:';
+const LIVE_WORKSPACE_SNAPSHOT_HEADING = '### Live Workspace Snapshot';
+const LIVE_VIEWPORT_SNAPSHOT_HEADING = '### Live Viewport Snapshot';
+
+function findEarliestDynamicTailIndex(text: string): number {
+	let best = -1;
+	// Use the LAST match of `### Live Role Bindings` (#106 §2.3) so custom initPrompts mentioning the heading never truncate early.
+	const bindingsGlobal = /\r?\n### Live Role Bindings(?:\r?\n|$)/g;
+	let lastBindingsIdx = -1;
+	let bm: RegExpExecArray | null;
+	while ((bm = bindingsGlobal.exec(text)) !== null) {
+		lastBindingsIdx = bm.index;
+	}
+	if (lastBindingsIdx >= 0) {
+		best = lastBindingsIdx;
+	}
+	const otherPatterns = [
+		/\r?\n### Live Workspace Snapshot(?:\r?\n|$)/,
+		/\r?\n### Live Viewport Snapshot(?:\r?\n|$)/,
+		/\r?\n- Live Viewport Snapshot:/,
+	];
+	for (const rx of otherPatterns) {
+		const m = rx.exec(text);
+		if (m && m.index >= 0 && (best < 0 || m.index < best)) {
+			best = m.index;
+		}
+	}
+	return best;
+}
+
+/**
+ * Extracts the 100% invariant static role charter prefix (excluding `### Live Role Bindings`,
+ * `- Live Viewport Snapshot:`, `### Live Workspace Snapshot`, and legacy `- Session:` lines)
+ * for KV-cache prefix stability (C2).
+ */
+export function extractStaticRoleCharter(rolePrompt: string | undefined, explicitStaticCharter?: string): string {
+	const normalizeStaticLines = (raw: string): string =>
+		raw
+			.split(/\r?\n/)
+			.filter(line => !line.startsWith('- Session: ') || !line.includes('(id: '))
+			.join('\n')
+			.trim();
+	const explicit = explicitStaticCharter?.trim();
+	if (explicit) {
+		return normalizeStaticLines(explicit);
+	}
+	const trimmed = (rolePrompt ?? '').trim();
+	if (!trimmed) {
+		return '';
+	}
+	const cutIdx = findEarliestDynamicTailIndex(trimmed);
+	return normalizeStaticLines(cutIdx >= 0 ? trimmed.slice(0, cutIdx) : trimmed);
+}
+
+/**
+ * Extracts only the dynamic tail (`### Live Role Bindings` or `- Live Viewport Snapshot:`) when the
+ * static charter was already placed into `--append-system-prompt` or initialized on Turn 1.
+ */
+export function extractDynamicRoleBindingsTail(rolePrompt: string | undefined, explicitStaticCharter?: string): string {
+	const trimmed = (rolePrompt ?? '').trim();
+	if (!trimmed) {
+		return '';
+	}
+	const cutIdx = findEarliestDynamicTailIndex(trimmed);
+	if (cutIdx >= 0) {
+		const tail = trimmed.slice(cutIdx).replace(/\r\n/g, '\n').trim();
+		return tail.startsWith(LIVE_VIEWPORT_SNAPSHOT_MARKER)
+			? `[ADE Live Viewport State]\n${tail}`
+			: tail;
+	}
+	const staticCharter = explicitStaticCharter?.trim();
+	if (staticCharter && trimmed.startsWith(staticCharter)) {
+		return trimmed.slice(staticCharter.length).replace(/\r\n/g, '\n').trim();
+	}
+	return '';
+}
+
+export function computeStaticRolePromptHash(
+	entry: { readonly rolePrompt?: string; readonly staticRoleCharter?: string; readonly staticRoleHash?: string } | undefined,
+): string | undefined {
+	const staticCharter = extractStaticRoleCharter(entry?.rolePrompt, entry?.staticRoleCharter);
+	if (staticCharter) {
+		return crypto.createHash('sha256').update(staticCharter, 'utf8').digest('hex');
+	}
+	const explicitHash = entry?.staticRoleHash?.trim();
+	return explicitHash || undefined;
 }
 
 export interface RoleSyncSnapshot {
@@ -53,6 +226,8 @@ export interface RoleSyncSnapshot {
 	readonly activeAgentId?: string;
 	readonly selectedAgentId?: string;
 	readonly agents: readonly RoleSyncAgentEntry[];
+	readonly secretarySessionToken?: string;
+	readonly secretaryControlSocketPath?: string;
 }
 
 export interface DshDirectSpawnSpec {
@@ -85,14 +260,18 @@ export async function readRoleSyncSnapshot(stateFilePath: string | undefined): P
 /* eslint-disable local/code-no-sync-fs -- child_process.spawn and stream write hooks run synchronously across extension hosts */
 export function readRoleSyncSnapshotSync(
 	stateFilePath: string | undefined,
-	previousMtimeMs = -1,
-): { readonly snapshot: RoleSyncSnapshot; readonly mtimeMs: number } | undefined {
+	previousSignatureOrMtime: string | number = -1,
+): { readonly snapshot: RoleSyncSnapshot; readonly mtimeMs: number; readonly statSignature: string } | undefined {
 	if (!stateFilePath) {
 		return undefined;
 	}
 	try {
 		const stat = fs.statSync(stateFilePath);
-		if (stat.mtimeMs === previousMtimeMs) {
+		const statSignature = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+		if (
+			(typeof previousSignatureOrMtime === 'string' && statSignature === previousSignatureOrMtime)
+			|| (typeof previousSignatureOrMtime === 'number' && stat.mtimeMs === previousSignatureOrMtime)
+		) {
 			return undefined;
 		}
 		const raw = fs.readFileSync(stateFilePath, 'utf8');
@@ -102,6 +281,7 @@ export function readRoleSyncSnapshotSync(
 		}
 		return {
 			mtimeMs: stat.mtimeMs,
+			statSignature,
 			snapshot: {
 				mode: parsed.mode === 'ade' ? 'ade' : 'ide',
 				activeAgentId: typeof parsed.activeAgentId === 'string' ? parsed.activeAgentId : undefined,
@@ -147,26 +327,51 @@ export function resolveActiveEngineAgent(
 	snapshot: RoleSyncSnapshot | undefined,
 	shortEngine: string,
 	cwd?: string,
+	preferredAgentId?: string,
 ): RoleSyncAgentEntry | undefined {
 	if (!snapshot || snapshot.mode !== 'ade') {
 		return undefined;
 	}
 	const expectedEngineId = `aexus-${shortEngine}`;
+	const sameEngine = snapshot.agents.filter(entry => entry.engineId === expectedEngineId);
+	if (sameEngine.length === 0) {
+		return undefined;
+	}
+	if (preferredAgentId) {
+		const pinned = sameEngine.find(entry => entry.id === preferredAgentId);
+		if (pinned) {
+			return pinned;
+		}
+	}
+
+	const matchesCwd = (entry: RoleSyncAgentEntry): boolean =>
+		!cwd || !entry.projectPath || isPathWithinOrEqual(cwd, entry.projectPath) || isPathWithinOrEqual(entry.projectPath, cwd);
+
+	if (cwd && sameEngine.length > 1) {
+		const cwdMatches = sameEngine.filter(entry => entry.projectPath && isPathWithinOrEqual(cwd, entry.projectPath));
+		if (cwdMatches.length === 1) {
+			const onlyMatch = cwdMatches[0];
+			const activeEntry = snapshot.activeAgentId ? sameEngine.find(e => e.id === snapshot.activeAgentId) : undefined;
+			if (!activeEntry || !matchesCwd(activeEntry)) {
+				return onlyMatch;
+			}
+		}
+	}
+
 	const active = snapshot.activeAgentId
-		? snapshot.agents.find(entry => entry.id === snapshot.activeAgentId)
+		? sameEngine.find(entry => entry.id === snapshot.activeAgentId)
 		: undefined;
-	if (active?.engineId === expectedEngineId) {
+	if (active && matchesCwd(active)) {
 		return active;
 	}
 
 	const selected = snapshot.selectedAgentId
-		? snapshot.agents.find(entry => entry.id === snapshot.selectedAgentId)
+		? sameEngine.find(entry => entry.id === snapshot.selectedAgentId)
 		: undefined;
-	if (selected?.engineId === expectedEngineId) {
+	if (selected && matchesCwd(selected)) {
 		return selected;
 	}
 
-	const sameEngine = snapshot.agents.filter(entry => entry.engineId === expectedEngineId);
 	if (sameEngine.length === 1) {
 		return sameEngine[0];
 	}
@@ -176,7 +381,7 @@ export function resolveActiveEngineAgent(
 			return cwdMatches[0];
 		}
 	}
-	return undefined;
+	return active ?? selected;
 }
 
 const PREAMBLE_START_PREFIXES = [
@@ -185,6 +390,9 @@ const PREAMBLE_START_PREFIXES = [
 	'[Aexus Role Cleared:',
 	'[ADE Live Hierarchy State]',
 	'[ADE Live Viewport State]',
+	ADE_LIVE_ROLE_BINDINGS_HEADING,
+	LIVE_WORKSPACE_SNAPSHOT_HEADING,
+	LIVE_VIEWPORT_SNAPSHOT_HEADING,
 	'[Aexus ADE Live Viewport & Macro Control Context]',
 	'[Aexus ADE · Engineering Staff Context]',
 	'[Aexus ADE · Mission Node Employee]',
@@ -242,15 +450,18 @@ function stripLeadingPreambleBlock(text: string): string | undefined {
 		}
 	}
 
-	// 4. [ADE Live Hierarchy State] / [ADE Live Viewport State] / [Aexus System · Message from User (L-1)] (header + `- ...` lines)
+	// 4. [ADE Live Hierarchy State] / [ADE Live Viewport State] / ### Live Role Bindings / ### Live Workspace Snapshot / [Aexus System · Message from User (L-1)] (header + `- ...` lines)
 	if (
 		normalized.startsWith('[ADE Live Hierarchy State]')
 		|| normalized.startsWith('[ADE Live Viewport State]')
+		|| normalized.startsWith(ADE_LIVE_ROLE_BINDINGS_HEADING)
+		|| normalized.startsWith(LIVE_WORKSPACE_SNAPSHOT_HEADING)
+		|| normalized.startsWith(LIVE_VIEWPORT_SNAPSHOT_HEADING)
 		|| normalized.startsWith(AEXUS_SYSTEM_USER_DM_ENVELOPE_HEADER)
 	) {
 		const lines = normalized.split(/\r?\n/);
 		let idx = 1;
-		while (idx < lines.length && /^-\s/.test(lines[idx])) {
+		while (idx < lines.length && (/^-\s/.test(lines[idx]) || /^ {2,}\S/.test(lines[idx]))) {
 			idx++;
 		}
 		if (idx > 1) {
@@ -261,17 +472,17 @@ function stripLeadingPreambleBlock(text: string): string | undefined {
 		}
 	}
 
-	// 5. [Aexus Orchestrated Role Context] / [Aexus Orchestrated Role Context Updated] / [Aexus ADE Live Viewport & Macro Control Context]
-	if (
-		normalized.startsWith('[Aexus Orchestrated Role Context Updated]')
-		|| normalized.startsWith('[Aexus Orchestrated Role Context]')
-		|| normalized.startsWith('[Aexus ADE Live Viewport & Macro Control Context]')
-	) {
+	// 5. [Aexus Orchestrated Role Context] / [Aexus ADE · Engineering Staff Context] / [Aexus ADE · Mission Node Employee] / [Aexus ADE Live Viewport & Macro Control Context]
+	if (ADE_ROLE_PREAMBLE_HEADERS.some(header => normalized.startsWith(header))) {
+		const isDynamicRoleTailHeading = (candidate: string): boolean =>
+			candidate.startsWith(ADE_LIVE_ROLE_BINDINGS_HEADING)
+			|| candidate.startsWith(LIVE_WORKSPACE_SNAPSHOT_HEADING)
+			|| candidate.startsWith(LIVE_VIEWPORT_SNAPSHOT_HEADING);
 		const lines = normalized.split(/\r?\n/);
 		let idx = 1;
 		while (
 			idx < lines.length
-			&& (lines[idx] === '[Aexus Orchestrated Role Context]' || lines[idx] === '[Aexus Orchestrated Role Context Updated]')
+			&& ADE_ROLE_PREAMBLE_HEADERS.some(header => lines[idx] === header)
 		) {
 			idx++;
 		}
@@ -279,10 +490,17 @@ function stripLeadingPreambleBlock(text: string): string | undefined {
 			const line = lines[idx];
 			if (
 				line.startsWith('You ARE an official orchestrated organizational agent session')
-				|| line.startsWith('You are the global **Secretary** in **Aexus Code ADE**')
+				|| /^You are the global \*\*Secretary(?:\s*\([^)]*\))?\*\* in \*\*Aexus Code ADE\*\*/.test(line)
+				|| line.startsWith('You are an orchestrated ')
+				|| isDynamicRoleTailHeading(line)
 				|| line.startsWith('- ')
-				|| /^ {2,}(?:-\s|\()/.test(line)
+				|| /^ {2,}\S/.test(line)
 			) {
+				idx++;
+				continue;
+			}
+			// Allow a single blank line directly before dynamic tail headings inside compiled role prompts (#97 / #100).
+			if (line.trim() === '' && idx + 1 < lines.length && isDynamicRoleTailHeading(lines[idx + 1])) {
 				idx++;
 				continue;
 			}
@@ -316,8 +534,9 @@ export function stripInjectedAdeContextFromUserTurn(rawText: string): string {
 	}
 
 	let working = rawText;
-	// Fast path for sentinel-delimited preambles (strips everything up to the last sentinel, then checks any outer/inner residual blocks)
-	const markerIdx = working.lastIndexOf(AEXUS_PREAMBLE_END_MARKER);
+	// Fast path for sentinel-delimited preambles: use `indexOf` (never `lastIndexOf`) so a user message
+	// or baton quoting `<!-- /AEXUS_ADE_PREAMBLE -->` is never truncated (#125 #3a).
+	const markerIdx = working.indexOf(AEXUS_PREAMBLE_END_MARKER);
 	if (markerIdx >= 0 && PREAMBLE_START_PREFIXES.some(prefix => working.trimStart().startsWith(prefix))) {
 		working = working.slice(markerIdx + AEXUS_PREAMBLE_END_MARKER.length).replace(/^\r?\n+/, '');
 	}
@@ -393,7 +612,13 @@ export function mergeRolePromptIntoText(existing: string | undefined, rolePrompt
 	if (!existing || !existing.trim()) {
 		return { changed: true, text: trimmedPrompt };
 	}
-	const headerIndex = existing.indexOf(ROLE_CONTEXT_HEADER);
+	let headerIndex = -1;
+	for (const header of ADE_ROLE_PREAMBLE_HEADERS) {
+		const idx = existing.indexOf(header);
+		if (idx >= 0 && (headerIndex < 0 || idx < headerIndex)) {
+			headerIndex = idx;
+		}
+	}
 	const base = (headerIndex >= 0 ? existing.slice(0, headerIndex) : existing).trimEnd();
 	const next = base ? `${base}\n\n${trimmedPrompt}` : trimmedPrompt;
 	return { changed: next !== existing, text: next };
@@ -412,6 +637,10 @@ export function injectSessionServerSystemField(body: Record<string, unknown>, ro
 	return true;
 }
 
+function textHasAnyAdeRoleHeader(text: string): boolean {
+	return ADE_ROLE_PREAMBLE_HEADERS.some(header => text.includes(header));
+}
+
 function updateTextPartsArray(parts: unknown[], rolePrompt: string): boolean {
 	const trimmed = rolePrompt.trim();
 	if (!trimmed) {
@@ -420,7 +649,7 @@ function updateTextPartsArray(parts: unknown[], rolePrompt: string): boolean {
 	for (const part of parts) {
 		if (part && typeof part === 'object') {
 			const record = part as Record<string, unknown>;
-			if (typeof record.text === 'string' && record.text.includes(ROLE_CONTEXT_HEADER)) {
+			if (typeof record.text === 'string' && textHasAnyAdeRoleHeader(record.text)) {
 				const merged = mergeRolePromptIntoText(record.text, trimmed);
 				if (merged.changed) {
 					record.text = merged.text;
@@ -461,7 +690,7 @@ export function injectLlmPayloadSystemPrompt(url: string, body: Record<string, u
 		for (const part of parts) {
 			if (part && typeof part === 'object') {
 				const record = part as Record<string, unknown>;
-				if (typeof record.text === 'string' && record.text.includes(ROLE_CONTEXT_HEADER)) {
+				if (typeof record.text === 'string' && textHasAnyAdeRoleHeader(record.text)) {
 					const merged = mergeRolePromptIntoText(record.text, trimmed);
 					if (!merged.changed) {
 						return false;
@@ -535,7 +764,7 @@ export function injectLlmPayloadSystemPrompt(url: string, body: Record<string, u
 	// 5. Dify / query-shaped chat endpoints (/chat-messages)
 	if (/\/chat-messages\b/i.test(url) && typeof body.query === 'string') {
 		const merged = mergeRolePromptIntoText(undefined, trimmed);
-		if (!merged.changed || body.query.includes(ROLE_CONTEXT_HEADER)) {
+		if (!merged.changed || textHasAnyAdeRoleHeader(body.query)) {
 			return false;
 		}
 		body.query = `${merged.text}\n\n${body.query}`;
@@ -699,32 +928,84 @@ async function readJsonStringMap(filePath: string): Promise<Record<string, strin
 	}
 }
 
-async function writeJsonStringMapAtomic(filePath: string, data: Record<string, string>): Promise<void> {
+function deriveRoleStateSuffix(stateFilePath: string): string {
+	const match = path.basename(stateFilePath).match(/^role-state-(.+)\.json$/);
+	return match?.[1] || 'default';
+}
+
+interface AgyPerConvState {
+	readonly conversationId: string;
+	readonly agentId?: string;
+	readonly injectedPrompt?: string;
+}
+
+function sanitizeAgyConvFileToken(id: string): string {
+	return id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96) || 'default';
+}
+
+export function buildAgyPerConvFilePrefix(suffix: string): string {
+	return `agy-conv-${suffix}-`;
+}
+
+async function readAgyPerConvState(filePath: string): Promise<AgyPerConvState | undefined> {
+	try {
+		const raw = await fsPromises.readFile(filePath, 'utf8');
+		const parsed = JSON.parse(raw) as Partial<AgyPerConvState>;
+		if (!parsed || typeof parsed !== 'object' || typeof parsed.conversationId !== 'string') {
+			return undefined;
+		}
+		return {
+			conversationId: parsed.conversationId,
+			agentId: typeof parsed.agentId === 'string' && parsed.agentId ? parsed.agentId : undefined,
+			injectedPrompt: typeof parsed.injectedPrompt === 'string' ? parsed.injectedPrompt : undefined,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+let sharedAtomicTmpSeq = 0;
+
+async function writeAgyPerConvStateAtomic(filePath: string, state: AgyPerConvState): Promise<void> {
 	try {
 		await fsPromises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-		const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-		await fsPromises.writeFile(tempPath, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 });
+		const tempPath = `${filePath}.${process.pid}.${Date.now()}.${++sharedAtomicTmpSeq}.tmp`;
+		await fsPromises.writeFile(tempPath, JSON.stringify(state), { encoding: 'utf8', mode: 0o600 });
 		await fsPromises.rename(tempPath, filePath);
 	} catch {
 		// Best-effort persistence only.
 	}
 }
 
-function deriveRoleStateSuffix(stateFilePath: string): string {
-	const match = path.basename(stateFilePath).match(/^role-state-(.+)\.json$/);
-	return match?.[1] || 'default';
+export async function readAgyConversationBindings(stateDir: string, suffix: string): Promise<Record<string, string>> {
+	const bindingsPath = path.join(stateDir, `agy-bindings-${suffix}.json`);
+	const merged = await readJsonStringMap(bindingsPath);
+	const prefix = buildAgyPerConvFilePrefix(suffix);
+	try {
+		const entries = await fsPromises.readdir(stateDir);
+		const convFiles = entries.filter(name => name.startsWith(prefix) && name.endsWith('.json'));
+		const states = await Promise.all(convFiles.map(name => readAgyPerConvState(path.join(stateDir, name))));
+		for (const st of states) {
+			if (st?.conversationId && st.agentId) {
+				merged[st.conversationId] = st.agentId;
+			}
+		}
+	} catch {
+		// Directory may not exist yet.
+	}
+	return merged;
 }
 
 function resolveAgyAgentForHook(
 	snapshot: RoleSyncSnapshot,
 	conversationId: string | undefined,
-	bindings: Record<string, string>,
+	boundAgentId: string | undefined,
+	cwd: string | undefined,
 ): RoleSyncAgentEntry | undefined {
 	const agyAgents = snapshot.agents.filter(entry => entry.engineId === 'aexus-antigravity');
 	if (conversationId) {
-		const boundId = bindings[conversationId];
-		if (boundId) {
-			const bound = agyAgents.find(entry => entry.id === boundId);
+		if (boundAgentId) {
+			const bound = agyAgents.find(entry => entry.id === boundAgentId);
 			if (bound) {
 				return bound;
 			}
@@ -734,7 +1015,7 @@ function resolveAgyAgentForHook(
 			return byNative;
 		}
 	}
-	return resolveActiveEngineAgent(snapshot, 'antigravity');
+	return resolveActiveEngineAgent(snapshot, 'antigravity', cwd, process.env[AEXUS_AGENT_ID_ENV_KEY]);
 }
 
 export async function evaluateAgyPreInvocationHook(
@@ -758,37 +1039,68 @@ export async function evaluateAgyPreInvocationHook(
 	const conversationId = typeof hookInput.conversationId === 'string' && hookInput.conversationId.trim()
 		? hookInput.conversationId.trim()
 		: undefined;
+	const cwd = typeof hookInput.cwd === 'string' && hookInput.cwd.trim()
+		? hookInput.cwd.trim()
+		: undefined;
 	const stateDir = path.dirname(stateFilePath);
 	const suffix = deriveRoleStateSuffix(stateFilePath);
 	const bindingsPath = path.join(stateDir, `agy-bindings-${suffix}.json`);
-	const injectedPath = path.join(stateDir, `agy-injected-${suffix}.json`);
 
-	const [bindings, injected] = await Promise.all([
-		readJsonStringMap(bindingsPath),
-		readJsonStringMap(injectedPath),
-	]);
-	const agent = resolveAgyAgentForHook(snapshot, conversationId, bindings);
+	// Per-conversation atomic state eliminates lost-update RMW races across parallel `token.split` Antigravity invocations.
+	if (conversationId) {
+		const convFilePath = path.join(stateDir, `${buildAgyPerConvFilePrefix(suffix)}${sanitizeAgyConvFileToken(conversationId)}.json`);
+		const [convState, legacyBindings] = await Promise.all([
+			readAgyPerConvState(convFilePath),
+			readJsonStringMap(bindingsPath),
+		]);
+		const priorAgentId = convState?.agentId ?? legacyBindings[conversationId];
+		const agent = resolveAgyAgentForHook(snapshot, conversationId, priorAgentId, cwd);
 
-	if (conversationId && agent && bindings[conversationId] !== agent.id) {
-		bindings[conversationId] = agent.id;
-		await writeJsonStringMapAtomic(bindingsPath, bindings);
-	}
-
-	if (!agent || !agent.isOrchestrated || !agent.rolePrompt) {
-		if (conversationId && Object.hasOwn(injected, conversationId)) {
-			delete injected[conversationId];
-			await writeJsonStringMapAtomic(injectedPath, injected);
+		if (!agent || !agent.isOrchestrated || !agent.rolePrompt) {
+			if (convState?.injectedPrompt !== undefined || (agent && convState?.agentId !== agent.id)) {
+				await writeAgyPerConvStateAtomic(convFilePath, {
+					conversationId,
+					agentId: agent?.id ?? priorAgentId,
+				});
+			}
+			return {};
 		}
-		return {};
+
+		if (convState?.agentId === agent.id && convState?.injectedPrompt === agent.rolePrompt) {
+			return {};
+		}
+
+		await writeAgyPerConvStateAtomic(convFilePath, {
+			conversationId,
+			agentId: agent.id,
+			injectedPrompt: agent.rolePrompt,
+		});
+		return {
+			injectSteps: [
+				{
+					systemMessage: {
+						systemMessage: agent.rolePrompt,
+					},
+				},
+			],
+		};
 	}
 
-	const injectKey = conversationId ?? agent.id;
-	if (injected[injectKey] === agent.rolePrompt) {
+	// Fallback when Antigravity omits conversationId: isolate per-agent atomic state file.
+	const agent = resolveAgyAgentForHook(snapshot, undefined, undefined, cwd);
+	if (!agent || !agent.isOrchestrated || !agent.rolePrompt) {
 		return {};
 	}
-
-	injected[injectKey] = agent.rolePrompt;
-	await writeJsonStringMapAtomic(injectedPath, injected);
+	const agentFilePath = path.join(stateDir, `agy-agent-inj-${suffix}-${sanitizeAgyConvFileToken(agent.id)}.json`);
+	const priorState = await readAgyPerConvState(agentFilePath);
+	if (priorState?.injectedPrompt === agent.rolePrompt) {
+		return {};
+	}
+	await writeAgyPerConvStateAtomic(agentFilePath, {
+		conversationId: agent.id,
+		agentId: agent.id,
+		injectedPrompt: agent.rolePrompt,
+	});
 
 	return {
 		injectSteps: [
@@ -1312,11 +1624,87 @@ export interface AgentChildIdentity {
 	readonly isMissionNode?: boolean;
 }
 
+export interface SingleAgentAuthRecord {
+	readonly version: 1;
+	readonly mode: 'ade' | 'ide';
+	readonly agentId: string;
+	readonly isOrchestrated: boolean;
+	readonly isMissionNode?: boolean;
+	readonly sessionToken: string;
+	readonly controlSocketPath?: string;
+}
+
+const AGENT_AUTH_FILE_NONCES_SYMBOL = Symbol.for('aexus.ade.agentAuthFileNonces');
+
+function getSharedAgentAuthFileNonces(): Map<string, string> {
+	const host = globalThis as Record<PropertyKey, unknown>;
+	let map = host[AGENT_AUTH_FILE_NONCES_SYMBOL] as Map<string, string> | undefined;
+	if (!(map instanceof Map)) {
+		map = new Map<string, string>();
+		host[AGENT_AUTH_FILE_NONCES_SYMBOL] = map;
+	}
+	return map;
+}
+
+export function getExistingAgentAuthFilePath(bridgeDir: string, scopeId: string, agentId: string): string | undefined {
+	const nonces = getSharedAgentAuthFileNonces();
+	const safeScope = scopeId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 48) || '0';
+	const compositeKey = `${path.resolve(bridgeDir)}::${safeScope}::${agentId}`;
+	const nonce = nonces.get(compositeKey);
+	if (!nonce) {
+		return undefined;
+	}
+	const agentHash = crypto.createHash('sha256').update(agentId, 'utf8').digest('hex').slice(0, 12);
+	return path.join(bridgeDir, `agent-auth-${safeScope}-${agentHash}-${nonce}.json`);
+}
+
+export function getOrEnsureAgentAuthFilePath(bridgeDir: string, scopeId: string, agentId: string): string {
+	const nonces = getSharedAgentAuthFileNonces();
+	const safeScope = scopeId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 48) || '0';
+	const compositeKey = `${path.resolve(bridgeDir)}::${safeScope}::${agentId}`;
+	let nonce = nonces.get(compositeKey);
+	if (!nonce) {
+		nonce = crypto.randomBytes(12).toString('hex');
+		nonces.set(compositeKey, nonce);
+	}
+	const agentHash = crypto.createHash('sha256').update(agentId, 'utf8').digest('hex').slice(0, 12);
+	return path.join(bridgeDir, `agent-auth-${safeScope}-${agentHash}-${nonce}.json`);
+}
+
+export async function writeSingleAgentAuthFile(filePath: string, payload: SingleAgentAuthRecord): Promise<void> {
+	const dir = path.dirname(filePath);
+	await fsPromises.mkdir(dir, { recursive: true, mode: 0o700 });
+	const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+	await fsPromises.writeFile(tmp, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
+	if (process.platform !== 'win32') {
+		await fsPromises.chmod(tmp, 0o600).catch(() => { });
+	}
+	await fsPromises.rename(tmp, filePath);
+}
+
+/* eslint-disable local/code-no-sync-fs -- child_process.spawn hook writes single-agent 0o600 auth file synchronously before exec */
+export function writeSingleAgentAuthFileSync(filePath: string, payload: SingleAgentAuthRecord): void {
+	try {
+		const dir = path.dirname(filePath);
+		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+		fs.writeFileSync(tmp, JSON.stringify(payload), { encoding: 'utf8', mode: 0o600 });
+		if (process.platform !== 'win32') {
+			try { fs.chmodSync(tmp, 0o600); } catch { }
+		}
+		fs.renameSync(tmp, filePath);
+	} catch {
+		// Best-effort sync auth materialization; spawn-time env token remains present as fallback.
+	}
+}
+/* eslint-enable local/code-no-sync-fs */
+
 export interface AgentChildEnvOptions extends AgentChildIdentity {
 	readonly baseEnv?: NodeJS.ProcessEnv;
 	readonly cliBinDirs?: readonly string[];
 	readonly socketPath?: string;
 	readonly sessionToken?: string;
+	readonly agentAuthFile?: string;
 	readonly platform?: NodeJS.Platform;
 }
 
@@ -1416,6 +1804,9 @@ export function buildAgentChildEnv(options: AgentChildEnvOptions): NodeJS.Proces
 	delete env.AEXUS_ADE_CONTROL_FILE;
 	delete env.AEXUS_ADE_TOKEN;
 	delete env.AEXUS_ADE_WINDOW_ID;
+	delete env.AEXUS_ADE_ROLE_STATE_FILE;
+	delete env.AEXUS_ADE_AGENT_AUTH_FILE;
+	delete env.AEXUS_ADE_AGENT_ID;
 
 	// Normalize case-variant PATH entries into a single canonical key.
 	let existingPath: string | undefined;
@@ -1452,6 +1843,10 @@ export function buildAgentChildEnv(options: AgentChildEnvOptions): NodeJS.Proces
 		env.AEXUS_ADE_SESSION_TOKEN = options.sessionToken.trim();
 	} else {
 		delete env.AEXUS_ADE_SESSION_TOKEN;
+	}
+	if (options.agentAuthFile?.trim() && options.sessionId?.trim()) {
+		env.AEXUS_ADE_AGENT_AUTH_FILE = options.agentAuthFile.trim();
+		env.AEXUS_ADE_AGENT_ID = options.sessionId.trim();
 	}
 
 	const primaryBinDir = cliBinDirs[0];

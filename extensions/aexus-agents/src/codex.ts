@@ -23,10 +23,25 @@ import {
 	stageLocalFileToRemote,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
+import { mapCodexReasoningEffort, planCodexTurnFallbacks } from './engineAdapterHelpers';
 import { AgentChildIdentity, CodexSandboxMode, resolveCodexSandboxMode, SHARED_PURE_SCOPE_KEY } from './roleBridgeShared';
-import { agentIdentityScopeKey, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, RpcPacket, withTimeout } from './runtime';
+import { agentIdentityScopeKey, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, normalizeProviderTokenUsage, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, RpcPacket, withTimeout } from './runtime';
 
-interface ThreadItem { type: string; text?: string; command?: string; server?: string; tool?: string; query?: string; content?: { type: string; text?: string }[] }
+interface ThreadItem {
+	id?: string;
+	type: string;
+	status?: string;
+	exitCode?: number | null;
+	exit_code?: number | null;
+	error?: unknown;
+	isError?: boolean;
+	text?: string;
+	command?: string;
+	server?: string;
+	tool?: string;
+	query?: string;
+	content?: { type: string; text?: string }[];
+}
 interface Turn { id: string; status: string; error?: { message: string }; items: ThreadItem[]; usage?: unknown }
 interface Thread { id: string; parentThreadId?: string; agentNickname?: string; cwd: string; name?: string; preview: string; path?: string; createdAt: number; updatedAt: number; turns: Turn[] }
 interface RolloutEntry { type: string; payload?: { type?: string; id?: string; session_id?: string; role?: string; content?: { type: string; text?: string }[]; cwd?: string; parent_thread_id?: string; multi_agent_version?: string; agent_nickname?: string; source?: { subagent?: { thread_spawn?: { parent_thread_id: string; agent_nickname?: string } } }; timestamp?: string; message?: string; item?: { type: string; id: string; content?: { type: string; text?: string }[] } } }
@@ -43,80 +58,8 @@ function shorten(value: string, max = 140): string {
 	return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function readTokenCount(record: Record<string, unknown>, ...keys: string[]): number {
-	for (const key of keys) {
-		const value = record[key];
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			return value;
-		}
-	}
-	return 0;
-}
-
-function readPositiveCostUsd(record: Record<string, unknown>): number | undefined {
-	for (const key of ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd', 'totalCost', 'cost']) {
-		const val = record[key];
-		if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
-			return val;
-		}
-		if (val && typeof val === 'object') {
-			const total = (val as Record<string, unknown>).total;
-			if (typeof total === 'number' && Number.isFinite(total) && total > 0) {
-				return total;
-			}
-		}
-	}
-	return undefined;
-}
-
-function readOptionalModelString(record: Record<string, unknown>): string | undefined {
-	for (const key of ['model', 'modelId', 'model_id']) {
-		const val = record[key];
-		if (typeof val === 'string' && val.trim() && val.trim().toLowerCase() !== 'default') {
-			return val.trim();
-		}
-	}
-	return undefined;
-}
-
-function extractTurnTokenUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
-	if (!value || typeof value !== 'object' || depth > 3) {
-		return undefined;
-	}
-	const record = value as Record<string, unknown>;
-	const outerCostUsd = readPositiveCostUsd(record);
-	const outerModel = readOptionalModelString(record);
-	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
-		const nested = record[key];
-		if (nested && typeof nested === 'object') {
-			const usage = extractTurnTokenUsage(nested, depth + 1);
-			if (usage) {
-				return {
-					...usage,
-					...(usage.costUsd === undefined && outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
-					...(usage.model === undefined && outerModel !== undefined ? { model: outerModel } : {}),
-				};
-			}
-		}
-	}
-	const inputTokens = readTokenCount(record, 'inputTokens', 'input_tokens', 'input');
-	const outputTokens = readTokenCount(record, 'outputTokens', 'output_tokens', 'output');
-	const cacheReadTokens = readTokenCount(record, 'cachedInputTokens', 'cache_read_input_tokens', 'cacheReadTokens', 'cacheRead');
-	const cacheWriteTokens = readTokenCount(record, 'cacheWriteTokens', 'cache_creation_input_tokens', 'cacheWrite');
-	const totalTokens = readTokenCount(record, 'totalTokens', 'total_tokens', 'total') || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-	if (totalTokens <= 0) {
-		return undefined;
-	}
-	return {
-		inputTokens,
-		outputTokens,
-		cacheReadTokens,
-		cacheWriteTokens,
-		totalTokens,
-		...(outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
-		...(outerModel !== undefined ? { model: outerModel } : {}),
-		estimated: false,
-	};
+function extractTurnTokenUsage(value: unknown): EngineTurnTokenUsage | undefined {
+	return normalizeProviderTokenUsage(value, { inputIncludesCacheRead: true });
 }
 
 function extractSkillEntries(value: unknown, depth = 0): SkillEntry[] {
@@ -178,32 +121,14 @@ function escapeTableCell(value: string): string {
 }
 
 function mapReasoningEffort(thinking?: EngineThinkingLevel): string | undefined {
-	switch (thinking) {
-		case 'minimal':
-			return 'minimal';
-		case 'low':
-			return 'low';
-		case 'medium':
-			return 'medium';
-		case 'high':
-			return 'high';
-		case 'xhigh':
-		case 'extra-high':
-			return 'xhigh';
-		case 'max':
-			return 'high';
-		case 'off':
-		case 'none':
-			return 'minimal';
-		default:
-			return undefined;
-	}
+	return mapCodexReasoningEffort(thinking);
 }
 
 interface CodexClientSlot {
 	client?: JsonLineClient;
 	ready: Promise<JsonLineClient>;
 	readonly loaded: Set<string>;
+	readonly handledRequestIds: Set<string | number>;
 	sessionListener?: vscode.Disposable;
 }
 
@@ -212,6 +137,7 @@ export class CodexRuntime implements EngineRuntime {
 	readonly name = 'Codex';
 	private readonly clientSlots = new Map<string, CodexClientSlot>();
 	private readonly sessionScopeKeys = new Map<string, string>();
+	private readonly scopeIdentities = new Map<string, { readonly identity: AgentChildIdentity; readonly cwd?: string; readonly persistentOwnerId?: string }>();
 	private codexHome!: string;
 	private readonly changed = new vscode.EventEmitter<readonly NativeSession[]>();
 	readonly onDidChangeSessions = this.changed.event;
@@ -302,36 +228,46 @@ export class CodexRuntime implements EngineRuntime {
 		}
 	}
 
-	private async ensureSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string, persistentOwnerId?: string): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string> }> {
+	private async ensureSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string, persistentOwnerId?: string): Promise<{ readonly client: JsonLineClient; readonly loaded: Set<string>; readonly handledRequestIds: Set<string | number> }> {
+		if (scopeKey !== SHARED_PURE_SCOPE_KEY && identity) {
+			this.scopeIdentities.set(scopeKey, { identity, cwd, persistentOwnerId });
+		}
+		const storedMeta = scopeKey !== SHARED_PURE_SCOPE_KEY ? this.scopeIdentities.get(scopeKey) : undefined;
+		const effectiveIdentity = identity ?? storedMeta?.identity;
+		const effectiveCwd = cwd ?? storedMeta?.cwd;
+		const effectiveOwnerId = persistentOwnerId ?? storedMeta?.persistentOwnerId;
+
 		const existing = this.clientSlots.get(scopeKey);
 		if (existing && (!existing.client || !existing.client.isClosed)) {
 			const client = await existing.ready;
 			if (!client.isClosed) {
-				return { client, loaded: existing.loaded };
+				return { client, loaded: existing.loaded, handledRequestIds: existing.handledRequestIds };
 			}
 		}
 		this.disposeSlot(scopeKey);
 
 		const loaded = new Set<string>();
+		const handledRequestIds = new Set<string | number>();
 		const slot: CodexClientSlot = {
 			loaded,
+			handledRequestIds,
 			ready: Promise.resolve(undefined as unknown as JsonLineClient),
 		};
 		slot.ready = (async () => {
 			const childEnv = this.remoteTarget
-				? await prepareRemoteAgentChildEnv(this.remoteTarget, identity ?? { sessionId: 'codex-pure', pureWorker: true })
-				: await prepareAgentChildEnv(identity ?? { sessionId: 'codex-pure', pureWorker: true });
-			const persistentKey = scopeKey === SHARED_PURE_SCOPE_KEY
-				? `${buildRemotePersistentPrefix('codex', SHARED_PURE_SCOPE_KEY)}-${randomUUID().slice(0, 8)}`
-				: `${buildRemotePersistentPrefix('codex', persistentOwnerId || scopeKey)}-${randomUUID().slice(0, 8)}`;
+				? await prepareRemoteAgentChildEnv(this.remoteTarget, effectiveIdentity ?? { sessionId: 'codex-pure', pureWorker: true })
+				: await prepareAgentChildEnv(effectiveIdentity ?? { sessionId: 'codex-pure', pureWorker: true });
+			const persistentKey = scopeKey !== SHARED_PURE_SCOPE_KEY
+				? `${buildRemotePersistentPrefix('codex', effectiveOwnerId || scopeKey)}-${randomUUID().slice(0, 8)}`
+				: undefined;
 			const client = new JsonLineClient(
 				this.executable,
 				['app-server'],
-				cwd,
+				effectiveCwd,
 				childEnv,
 				this.remoteTarget,
 				this.remoteTarget && this.remoteTarget.os !== 'windows'
-					? { persistentSessionId: persistentKey }
+					? (persistentKey ? { persistentSessionId: persistentKey } : { killOnStdinClose: true })
 					: undefined,
 			);
 			slot.client = client;
@@ -362,7 +298,7 @@ export class CodexRuntime implements EngineRuntime {
 			}
 		});
 		const client = await slot.ready;
-		return { client, loaded };
+		return { client, loaded, handledRequestIds };
 	}
 
 	consumeLastTurnUsage(sessionId: string): EngineTurnTokenUsage | undefined {
@@ -426,7 +362,7 @@ export class CodexRuntime implements EngineRuntime {
 		const existingKey = this.sessionScopeKeys.get(sessionId);
 		if (existingKey) {
 			const slot = this.clientSlots.get(existingKey);
-			if (slot && (!slot.client || !slot.client.isClosed)) {
+			if ((slot && (!slot.client || !slot.client.isClosed)) || this.scopeIdentities.has(existingKey)) {
 				return existingKey;
 			}
 		}
@@ -828,6 +764,10 @@ export class CodexRuntime implements EngineRuntime {
 		try {
 			for await (const line of lines) {
 				if (token.isCancellationRequested) { break; }
+				// Fast pre-parse skip over tool_call, reasoning, and token_count rollout lines.
+				if (!line.includes('"event_msg"') && !line.includes('"session_meta"')) {
+					continue;
+				}
 				let event: RolloutEntry;
 				try { event = JSON.parse(line) as RolloutEntry; } catch { continue; }
 				const metaId = event.payload?.id || event.payload?.session_id;
@@ -967,6 +907,10 @@ export class CodexRuntime implements EngineRuntime {
 		try {
 			for await (const line of lines) {
 				if (token.isCancellationRequested) { break; }
+				// Fast pre-parse skip over tool_call, reasoning, and token_count rollout lines.
+				if (!line.includes('"event_msg"') && !line.includes('"session_meta"') && (!session.parentId || !line.includes('"response_item"'))) {
+					continue;
+				}
 				let event: RolloutEntry;
 				try { event = JSON.parse(line) as RolloutEntry; } catch { continue; }
 				if (event.type === 'session_meta' && event.payload?.id === session.id) { session.readOnly = !!session.parentId && event.payload.multi_agent_version === 'v2'; }
@@ -1004,8 +948,17 @@ export class CodexRuntime implements EngineRuntime {
 			return;
 		}
 		if (packet.method === 'item/tool/requestUserInput') {
+			const questions = Array.isArray(params.questions) ? (params.questions as Question[]) : [];
 			const answers: Record<string, { answers: string[] }> = {};
-			for (const question of params.questions as Question[]) {
+			if (approvalPolicy === 'never') {
+				for (const question of questions) {
+					const defaultChoice = question.options?.[0]?.label;
+					answers[question.id] = { answers: [defaultChoice || 'Proceed autonomously with best judgment.'] };
+				}
+				client.write({ jsonrpc: '2.0', id: packet.id, result: { answers } });
+				return;
+			}
+			for (const question of questions) {
 				const answer = question.options?.length
 					? (await vscode.window.showQuickPick(question.options, { title: vscode.l10n.t('Codex — {0}', question.header), placeHolder: `${session.label} (${session.cwd}): ${question.question}`, ignoreFocusOut: true }, token))?.label
 					: await vscode.window.showInputBox({ title: vscode.l10n.t('Codex — {0}', question.header), prompt: `${session.label} (${session.cwd}): ${question.question}`, password: question.isSecret, ignoreFocusOut: true }, token);
@@ -1030,6 +983,9 @@ export class CodexRuntime implements EngineRuntime {
 				slot.loaded.delete(session.id);
 			}
 			if ((key !== SHARED_PURE_SCOPE_KEY && key.includes(`:${session.id}`)) || (key === SHARED_PURE_SCOPE_KEY && slot && slot.loaded.size === 0 && unsubscribeFailed)) {
+				if (key !== SHARED_PURE_SCOPE_KEY) {
+					this.scopeIdentities.delete(key);
+				}
 				await this.disposeSlotAsync(key);
 			}
 		}
@@ -1059,7 +1015,7 @@ export class CodexRuntime implements EngineRuntime {
 		if (token.isCancellationRequested) {
 			return;
 		}
-		const { client } = await raceWithCancellation(
+		const { client, handledRequestIds } = await raceWithCancellation(
 			this.ensureSlot(scopeKey, {
 				sessionId: options?.adeSessionId || session.id,
 				callerRole: options?.callerRole,
@@ -1073,6 +1029,7 @@ export class CodexRuntime implements EngineRuntime {
 		}
 		this.sessionScopeKeys.set(session.id, scopeKey);
 		let turnId: string | undefined;
+		let turnDispatched = false;
 		const mappedEffort = mapReasoningEffort(options?.thinking);
 		const approvalPolicy = this.approvalPolicy(options);
 		const sandboxMode = this.sandboxMode(options);
@@ -1102,15 +1059,81 @@ export class CodexRuntime implements EngineRuntime {
 				preTurnBaseline,
 				model: activeModel,
 			});
+			const seenFailedItemIds = new Set<string>();
+			const activeExternalItemIds = new Set<string>();
 			const listener = client.onPacket(packet => {
 				if (packet.method === 'aexus/connectionClosed') { fail(new Error(String(packet.params?.message))); return; }
 				const params = packet.params as (Notification & { type?: string }) | undefined;
-				if (packet.id !== undefined && params?.threadId && this.belongsTo(params.threadId, session.id)) {
-					const targetSession = this.knownSessions.get(params.threadId) ?? session;
-					void this.handleRequest(client, packet, targetSession, token, approvalPolicy).catch(fail);
+				// Handle JSON-RPC server requests even when `codex app-server` omits `params.threadId` (#95 P1-7),
+				// deduplicating `packet.id` across concurrent pure-worker listeners sharing a client slot (#123 #5).
+				if (packet.id !== undefined && packet.method) {
+					if (!params?.threadId || this.belongsTo(params.threadId, session.id)) {
+						if (handledRequestIds.has(packet.id)) {
+							return;
+						}
+						if (handledRequestIds.size >= 512) {
+							const oldest = handledRequestIds.values().next().value;
+							if (oldest !== undefined) {
+								handledRequestIds.delete(oldest);
+							}
+						}
+						handledRequestIds.add(packet.id);
+						try { options?.onStreamActivity?.(); } catch { /* ignore */ }
+						const targetSession = (params?.threadId ? this.knownSessions.get(params.threadId) : undefined) ?? session;
+						const needsInteractiveWait = approvalPolicy !== 'never';
+						if (needsInteractiveWait) {
+							try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
+						}
+						void this.handleRequest(client, packet, targetSession, token, approvalPolicy)
+							.catch(fail)
+							.finally(() => {
+								if (needsInteractiveWait) {
+									try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+								}
+							});
+					}
 					return;
 				}
 				if (params?.threadId !== session.id) { return; }
+				try { options?.onStreamActivity?.(); } catch { /* ignore */ }
+				if (packet.method === 'turn/started' || packet.method === 'item/started' || packet.method === 'item/agentMessage/delta') {
+					turnDispatched = true;
+				}
+				if (packet.method === 'item/started' && params.item && params.item.type !== 'agentMessage' && params.item.type !== 'userMessage' && params.item.type !== 'reasoning') {
+					if (typeof params.item.id === 'string' && params.item.id && !activeExternalItemIds.has(params.item.id)) {
+						activeExternalItemIds.add(params.item.id);
+						try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
+					}
+				}
+				if (packet.method === 'item/completed' && params.item && params.item.type !== 'agentMessage' && params.item.type !== 'userMessage' && params.item.type !== 'reasoning') {
+					if (typeof params.item.id === 'string' && activeExternalItemIds.delete(params.item.id)) {
+						try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+					}
+					const item = params.item;
+					const exitCode = typeof item.exitCode === 'number' ? item.exitCode : (typeof item.exit_code === 'number' ? item.exit_code : undefined);
+					const itemFailed = (exitCode !== undefined && exitCode !== 0)
+						|| item.status === 'failed'
+						|| item.status === 'error'
+						|| item.isError === true
+						|| Boolean(item.error);
+					if (itemFailed) {
+						const itemKey = typeof item.id === 'string' && item.id ? item.id : undefined;
+						if (!itemKey || !seenFailedItemIds.has(itemKey)) {
+							if (itemKey) {
+								seenFailedItemIds.add(itemKey);
+							}
+							usageTracker.recordToolError();
+							const currentUsage = this.lastTurnUsageBySession.get(session.id);
+							if (currentUsage) {
+								this.lastTurnUsageBySession.set(session.id, {
+									...currentUsage,
+									hadToolError: true,
+									toolErrorCount: Math.max(currentUsage.toolErrorCount ?? 0, usageTracker.getToolErrorCount()),
+								});
+							}
+						}
+					}
+				}
 				if (packet.method === 'thread/tokenUsage/updated' || packet.method === 'turn/completed') {
 					const rawUsage = extractTurnTokenUsage(params.tokenUsage ?? params.usage ?? params.turn?.usage);
 					if (rawUsage) {
@@ -1156,12 +1179,19 @@ export class CodexRuntime implements EngineRuntime {
 					if (params.turn.error) { fail(new Error(params.turn.error.message)); } else { finish(); }
 				}
 			});
+			let interruptAcked = false;
+			let interruptPromise: Promise<void> | undefined;
 			const sendInterrupt = () => {
-				if (turnId) {
-					void client.request('turn/interrupt', { threadId: session.id, turnId }, { timeoutMs: 2500 }).catch(() => { });
+				if (turnId && !interruptPromise) {
+					interruptPromise = client.request('turn/interrupt', { threadId: session.id, turnId }, { timeoutMs: 2500 })
+						.then(() => { interruptAcked = true; })
+						.catch(() => { });
 				}
 			};
+			const onAbort = () => sendInterrupt();
+			options?.abortSignal?.addEventListener('abort', onAbort, { once: true });
 			try {
+				let turnSettled = false;
 				try {
 					const started = await client.request<{ turn: Turn }>('turn/start', {
 						threadId: session.id,
@@ -1171,19 +1201,36 @@ export class CodexRuntime implements EngineRuntime {
 						...(effortOverride ? { effort: effortOverride } : {}),
 					}, { token, cancelGraceMs: 1500 });
 					turnId = started.turn.id;
+					turnDispatched = true;
 					session.provisional = false;
-					if (token.isCancellationRequested) {
+					if (token.isCancellationRequested || options?.abortSignal?.aborted) {
 						sendInterrupt();
 					}
-					await raceWithCancellation(completed, token, 1500, sendInterrupt);
+					await raceWithCancellation(completed.then(() => { turnSettled = true; }), token, 1500, sendInterrupt);
 				} catch (err) {
-					if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
-						await this.killSession(session).catch(() => { });
+					if (token.isCancellationRequested || options?.abortSignal?.aborted || err instanceof vscode.CancellationError) {
+						sendInterrupt();
+						if (interruptPromise && !turnSettled && !interruptAcked) {
+							await Promise.race([
+								interruptPromise,
+								new Promise<void>(resolve => setTimeout(resolve, 400)),
+							]);
+						}
+						// Keep `codex app-server` warm when `turn/interrupt` cleanly settled the turn;
+						// only tear down the daemon if the turn ignored interrupt and stayed wedged!
+						if (!turnSettled && !interruptAcked) {
+							await this.killSession(session).catch(() => { });
+						}
 						return;
 					}
 					throw err;
 				}
 			} finally {
+				for (let rem = activeExternalItemIds.size; rem > 0; rem--) {
+					try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+				}
+				activeExternalItemIds.clear();
+				options?.abortSignal?.removeEventListener('abort', onAbort);
 				listener.dispose();
 			}
 		};
@@ -1193,12 +1240,30 @@ export class CodexRuntime implements EngineRuntime {
 			await runSingleTurn(requestedModel, mappedEffort);
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
-			if ((requestedModel || mappedEffort) && (this.defaultModel || mappedEffort) && /model_not_found|not supported|effort|invalid/i.test(msg)) {
-				if (this.defaultModel) {
-					this.threadModelOverrides.set(session.id, this.defaultModel);
+			// Never replay `turn/start` if the turn already started executing on the thread (#95 P1-7).
+			const fallbacks = !turnDispatched
+				? planCodexTurnFallbacks(requestedModel, mappedEffort, this.defaultModel, msg)
+				: [];
+			if (fallbacks.length > 0) {
+				let lastFallbackErr: unknown = error;
+				for (const attempt of fallbacks) {
+					if (token.isCancellationRequested || turnDispatched) {
+						break;
+					}
+					try {
+						await runSingleTurn(attempt.model, attempt.effort);
+						if (attempt.pinDefaultModel && attempt.model) {
+							this.threadModelOverrides.set(session.id, attempt.model);
+						}
+						return;
+					} catch (retryErr) {
+						lastFallbackErr = retryErr;
+						if (turnDispatched) {
+							break;
+						}
+					}
 				}
-				await runSingleTurn(this.defaultModel, undefined);
-				return;
+				throw lastFallbackErr;
 			}
 			throw error;
 		}
@@ -1448,6 +1513,7 @@ export class CodexRuntime implements EngineRuntime {
 		loaded.delete(session.id);
 		this.sessionScopeKeys.delete(session.id);
 		if (scopeKey !== SHARED_PURE_SCOPE_KEY) {
+			this.scopeIdentities.delete(scopeKey);
 			this.disposeSlot(scopeKey);
 		}
 		this.knownSessions.delete(session.id);
@@ -1463,6 +1529,7 @@ export class CodexRuntime implements EngineRuntime {
 			this.disposeSlot(key);
 		}
 		this.sessionScopeKeys.clear();
+		this.scopeIdentities.clear();
 		this.lastTurnUsageBySession.clear();
 		this.lastRawThreadUsageBySession.clear();
 		this.changed.dispose();

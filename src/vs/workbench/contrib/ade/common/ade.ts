@@ -201,7 +201,7 @@ export interface IAdeProjectsService {
 			readonly parentKey?: string;
 			readonly role?: AdeAgentRole;
 		}[],
-		options?: { readonly projectUri?: URI; readonly ownerTier?: number },
+		options?: { readonly projectUri?: URI; readonly ownerTier?: number; readonly treeType?: AdeWorkTreeType },
 	): { readonly employeeAgentsByNode: Readonly<Record<string, IAdeAgent>>; readonly removedAgents: readonly IAdeAgent[] };
 	clearMissionEmployees?(ownerOrMissionId: string): readonly IAdeAgent[];
 	updateAgentEnginePreferences?(id: string, prefs: {
@@ -238,15 +238,38 @@ export interface IAdeProjectsService {
 	setShowArchived(showArchived: boolean): void;
 }
 
+export interface IAdeEngineeringOpenOptions {
+	readonly side?: boolean;
+	readonly viewMode?: AdeEngineeringViewMode;
+	readonly openSiblingViews?: boolean;
+	readonly focusNodeId?: string;
+	readonly focusTokenId?: string;
+	readonly highlightNodeIds?: readonly string[];
+	readonly preferExistingGroup?: boolean;
+	readonly openPopover?: 'task' | 'token' | 'whiteboard';
+	readonly whiteboardSection?: string;
+	readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
+	readonly openAgentBeside?: boolean;
+}
+
+export interface IAdeCrossViewLinkHint {
+	readonly missionId: string;
+	readonly sourceView: AdeEngineeringViewMode;
+	readonly nodeIds: readonly string[];
+	readonly kind: 'hover' | 'select';
+}
+
 export const IAdeEditorService = createDecorator<IAdeEditorService>('adeEditorService');
 
 export interface IAdeEditorService {
 	readonly _serviceBrand: undefined;
 	readonly activeEditor: EditorInput | undefined;
+	readonly onDidCrossViewLinkHint?: Event<IAdeCrossViewLinkHint>;
+	fireCrossViewLinkHint?(hint: IAdeCrossViewLinkHint): void;
 	getAgentIdForEditor?(editor: EditorInput | undefined): string | undefined;
 	isSessionActive(resource: URI): boolean;
 	openAgent(id: string, options?: { side?: boolean }): Promise<void>;
-	openEngineering?(governorId: string, options?: { side?: boolean; viewMode?: AdeEngineeringViewMode; openSiblingViews?: boolean }): Promise<void>;
+	openEngineering?(governorId: string, options?: IAdeEngineeringOpenOptions): Promise<void>;
 	openCloudHosts?(hostIdOrAlias?: string, options?: { side?: boolean }): Promise<void>;
 	openRoleStudio?(focusRankId?: string, options?: { side?: boolean }): Promise<void>;
 	openAdeConfig?(options?: { side?: boolean }): Promise<void>;

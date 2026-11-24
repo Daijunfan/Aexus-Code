@@ -573,8 +573,8 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 			clearCloudTransportCaches('mock-probe-host');
 			const result = await probeRemoteEngines(makeTarget('mock-probe-host'), true);
 			assert.equal(result.ok, true);
-			assert.equal(result.executables['claude'], fakeClaude);
-			assert.ok(result.executables['codex']);
+			assert.equal(result.executables.claude, fakeClaude);
+			assert.ok(result.executables.codex);
 			assert.equal(typeof result.checkedAt, 'number');
 			assert.ok(result.os === 'linux' || result.os === 'macos');
 		});
@@ -592,8 +592,8 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 			clearCloudTransportCaches('mock-sparse-host');
 			const result = await probeRemoteEngines(makeTarget('mock-sparse-host'), true);
 			assert.equal(result.ok, true);
-			assert.equal(result.executables['claude'], fakeClaude);
-			assert.equal(result.executables['pi'], undefined);
+			assert.equal(result.executables.claude, fakeClaude);
+			assert.equal(result.executables.pi, undefined);
 		} finally {
 			process.env.HOME = prevHome;
 			process.env.PATH = prevPath;
@@ -609,7 +609,7 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 			clearCloudTransportCaches('mock-override-host');
 			const result = await probeRemoteEngines(makeTarget('mock-override-host'), true);
 			assert.equal(result.ok, true);
-			assert.equal(result.executables['claude'], overridePath);
+			assert.equal(result.executables.claude, overridePath);
 		} finally {
 			registerCloudTransportBridge({});
 		}
@@ -631,7 +631,7 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 		try {
 			clearCloudTransportCaches('mock-cache-host');
 			const first = await probeRemoteEngines(makeTarget('mock-cache-host'));
-			assert.equal(first.executables['dsh'], fakeDsh);
+			assert.equal(first.executables.dsh, fakeDsh);
 
 			const cached = await probeRemoteEngines(makeTarget('mock-cache-host'));
 			assert.equal(cached.checkedAt, first.checkedAt);
@@ -640,7 +640,7 @@ describe('Mock-SSH integration', { skip: process.platform === 'win32' ? 'Mock SS
 			clearCloudTransportCaches('mock-cache-host');
 			await new Promise(resolve => setTimeout(resolve, 10));
 			const refreshed = await probeRemoteEngines(makeTarget('mock-cache-host'));
-			assert.equal(refreshed.executables['dsh'], undefined);
+			assert.equal(refreshed.executables.dsh, undefined);
 			assert.ok(refreshed.checkedAt > first.checkedAt);
 		} finally {
 			registerCloudTransportBridge({});
@@ -877,7 +877,7 @@ describe('Remote SSH Reverse Control Bridge & Remote aexus-ade CLI Staging', { s
 			'exec sh -c "$remote"',
 			'',
 		].join('\n'));
-		const payload = Buffer.from("'use strict';\nconsole.log('aexus-ade');\n");
+		const payload = Buffer.from('\'use strict\';\nconsole.log(\'aexus-ade\');\n');
 		const localAdeCliJs = path.join(stageDir, 'adeCli.js');
 		fs.writeFileSync(localAdeCliJs, payload);
 
@@ -1485,6 +1485,74 @@ describe('zero-drift remote control reverse bridge (UDS + atomic metadata fallba
 			disposeAllRemoteControlBridges();
 			await new Promise<void>(resolve => localServer.close(() => resolve()));
 			fs.rmSync(fakeHome, { recursive: true, force: true });
+		}
+	});
+
+	test('ensureRemoteControlReverseBridge does not falsely succeed on slow (>550ms) SSH handshake when UDS forwarding fails afterwards', async () => {
+		const slowDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aex-slow-ssh-'));
+		const fakeHome = path.join(slowDir, 'home');
+		fs.mkdirSync(fakeHome, { recursive: true });
+		// Simulate high-latency SSH handshake (600ms > legacy 450ms timer) that rejects UDS StreamLocal forwarding
+		// after 600ms, while succeeding on dynamic TCP -R forwarding.
+		const slowSsh = writeExecutable(path.join(slowDir, 'slow-ssh.cjs'), `#!/usr/bin/env node
+'use strict';
+const cp = require('node:child_process');
+const net = require('node:net');
+const argv = process.argv.slice(2);
+const sep = argv.indexOf('--');
+const tail = sep >= 0 ? argv.slice(sep + 1) : [];
+const remoteCmd = tail[1];
+const rIdx = argv.indexOf('-R');
+if (rIdx !== -1 && argv.includes('-N')) {
+	const spec = argv[rIdx + 1] || '';
+	if (spec.startsWith('/')) {
+		setTimeout(() => {
+			process.stderr.write('Warning: remote port forwarding failed for listen path ' + spec + '\\n');
+			process.exit(255);
+		}, 600);
+	} else {
+		const m = /^127\\.0\\.0\\.1:(\\d+):127\\.0\\.0\\.1:(\\d+)$/.exec(spec);
+		const srv = net.createServer(c => {
+			const up = net.createConnection({ host: '127.0.0.1', port: Number(m[2]) });
+			c.pipe(up); up.pipe(c);
+			c.on('error', () => up.destroy());
+			up.on('error', () => c.destroy());
+		});
+		setTimeout(() => {
+			srv.listen(Number(m[1]), '127.0.0.1', () => {
+				const port = srv.address().port;
+				process.stderr.write('Allocated port ' + port + ' for remote forward to 127.0.0.1:' + m[2] + '\\n');
+			});
+		}, 150);
+		process.on('SIGTERM', () => srv.close(() => process.exit(0)));
+	}
+} else {
+	const child = cp.spawn('sh', ['-c', remoteCmd], { stdio: 'inherit' });
+	child.on('exit', code => process.exit(code ?? 1));
+}
+`);
+		const localServer = net.createServer(socket => {
+			socket.once('data', d => socket.end(`ok:${d.toString('utf8').trim()}\n`));
+		});
+		await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
+		const localPort = (localServer.address() as net.AddressInfo).port;
+		try {
+			const target = makeTarget('slow-no-uds-host', { sshExecutable: slowSsh, remoteHome: fakeHome });
+			const handle = await ensureRemoteControlReverseBridge(target, localPort);
+			assert.equal(handle.remoteSocketPath, undefined, 'Must NOT falsely report UDS ready at 450ms when sshd rejects UDS at 600ms');
+			assert.ok(handle.remotePort > 0, 'Must cleanly fall back to verified TCP reverse port');
+
+			// Also verify openRemoteControlReverseBridge rejects (instead of resolving dead UDS with 0) when UDS hangs past timeoutMs without __AEX_BRIDGE_READY__ (#67 P1-3)
+			const hangSsh = writeExecutable(path.join(slowDir, 'hang-ssh'), '#!/bin/sh\nsleep 5\n');
+			const hangTarget = makeTarget('hang-uds-host', { sshExecutable: hangSsh, remoteHome: fakeHome });
+			await assert.rejects(
+				() => openRemoteControlReverseBridge(hangTarget, localPort, { remoteSocketPath: path.join(fakeHome, 'dead.sock'), timeoutMs: 120 }),
+				/Timed out establishing SSH reverse control bridge/,
+			);
+		} finally {
+			disposeAllRemoteControlBridges();
+			await new Promise<void>(resolve => localServer.close(() => resolve()));
+			fs.rmSync(slowDir, { recursive: true, force: true });
 		}
 	});
 });

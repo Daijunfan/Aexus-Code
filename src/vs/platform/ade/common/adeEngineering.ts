@@ -157,8 +157,18 @@ export interface IAdeWatchdogTokenSpec {
 		readonly watchFile?: string;
 		/** File mtime (ms on the target host's own clock) captured when blocked, or `null` if file did not exist yet (eliminates cross-host clock drift). */
 		readonly initialFileMtime?: number | null;
+		/** Optional sub-second/metadata file signature (`<mtimeMs>:<size>:<ino>`) for same-second overwrite detection. */
+		readonly initialFileSignature?: string | null;
 		readonly hostAlias?: string;
 	};
+}
+
+export interface IAdeWatchdogBarrierSpec {
+	readonly barrierId: string;
+	readonly parentTokenId: string;
+	readonly ownerNodeId: string;
+	readonly ownerAgentId?: string;
+	readonly deadlineAt: number;
 }
 
 export interface IAdeMissionWatchdogSnapshot {
@@ -167,6 +177,8 @@ export interface IAdeMissionWatchdogSnapshot {
 	readonly silenceTimeoutMinutes: number;
 	readonly tokens: readonly IAdeWatchdogTokenSpec[];
 	readonly triggers: readonly IMissionSourceTrigger[];
+	/** Active orchestration join barriers with explicit deadlines monitored synchronously by Phase 1 watchdog ticks. */
+	readonly barriers?: readonly IAdeWatchdogBarrierSpec[];
 	/** Main-process IPC context (e.g. `window:<id>`) that currently owns watchdog execution for this Mission. */
 	readonly ownerWindowCtx?: string;
 	/** When true (e.g. passive window startup rehydration), keep any existing live owner instead of hijacking it. */
@@ -178,10 +190,24 @@ export interface IAdeWatchdogWakeupEvent {
 	readonly tokenId: string;
 	readonly nodeId: string;
 	readonly holderAgentId?: string;
-	readonly reason: 'silence_timeout' | 'block_expired' | 'pid_exited' | 'file_ready' | 'agent_exited';
+	readonly reason: 'silence_timeout' | 'block_expired' | 'pid_exited' | 'file_ready' | 'agent_exited' | 'barrier_deadline_expired';
+	readonly barrierId?: string;
 	readonly detail?: string;
 	readonly timestamp: number;
 	readonly ownerWindowCtx?: string;
+}
+
+export interface IAdeMissionCheckpointMeta {
+	readonly id: string;
+	readonly missionId: string;
+	readonly label?: string;
+	readonly reason?: string;
+	readonly createdBy?: string;
+	readonly createdAt: number;
+	readonly stateRevision: number;
+	readonly activeTokenCount: number;
+	readonly completedTaskCount: number;
+	readonly totalCostUsd: number;
 }
 
 export interface IAdeSourceTriggerFireEvent {
@@ -271,8 +297,12 @@ export interface IAdeEngineeringBackendService {
 	mutateInbox?(mutation: IAdeInboxMutation): Promise<IAdeInboxItem[]>;
 	loadMissionRecord?(missionId: string): Promise<string | undefined>;
 	loadAllMissionRecords?(): Promise<Readonly<Record<string, string>>>;
-	saveMissionRecord?(missionId: string, payloadJson: string, updatedAt: number, writerId?: string): Promise<void>;
+	saveMissionRecord?(missionId: string, payloadJson: string, updatedAt: number, writerId?: string, expectedRevision?: number): Promise<void>;
 	deleteMissionRecord?(missionId: string, writerId?: string): Promise<void>;
+	saveMissionCheckpoint?(missionId: string, checkpointId: string, payloadJson: string, meta: IAdeMissionCheckpointMeta): Promise<void>;
+	listMissionCheckpoints?(missionId: string): Promise<readonly IAdeMissionCheckpointMeta[]>;
+	loadMissionCheckpoint?(missionId: string, checkpointId: string): Promise<string | undefined>;
+	deleteMissionCheckpoint?(missionId: string, checkpointId: string): Promise<void>;
 	saveOrchestrationBlobs?(missionId: string, blobs: readonly { readonly ptr: string; readonly payloadJson: string }[]): Promise<void>;
 	readOrchestrationBlob?(missionId: string, ptr: string): Promise<string | undefined>;
 	appendOrchestrationArchive?(missionId: string, lines: readonly string[]): Promise<void>;
@@ -280,6 +310,15 @@ export interface IAdeEngineeringBackendService {
 	syncOrchestrationDaemonState?(snapshot: IAdeOrchestrationDaemonMissionSnapshot): Promise<void>;
 	getOrchestrationDaemonState?(missionId?: string): Promise<Readonly<Record<string, IAdeOrchestrationDaemonMissionSnapshot>>>;
 	executeHeadlessOrchestrationControl?(action: string, params: Readonly<Record<string, unknown>>): Promise<IAdeHeadlessControlResult>;
+	/** Tracks connected workbench renderer count so the main-process daemon persists headless watchdog transitions when 0 windows are open. */
+	setActiveRendererWindowCount?(count: number): void;
+	/** Tracks individual live renderer IPC contexts so multi-window ownership checks know which owner windows are alive. */
+	registerLiveRendererContext?(ctxKey: string): void;
+	unregisterLiveRendererContext?(ctxKey: string): void;
+	/** Returns true when a 0-window watchdog wakeup is handled headlessly by the main-process daemon and must not also be queued in IPC pending buffers. */
+	willHandleWatchdogWakeupHeadlessly?(ev: IAdeWatchdogWakeupEvent): boolean;
+	/** Revokes live session capability tokens / headless control authority when a session is archived, deleted, or demoted. */
+	revokeSession?(sessionId: string): Promise<void>;
 	syncApiDocs?(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths>;
 	getApiDocsPaths?(rankCount: number): Promise<IAdeDocsPaths>;
 	readApiDoc?(target: string, config?: IAdeOrganizationConfig): Promise<IAdeApiDocReadResult>;
@@ -289,6 +328,7 @@ export interface IAdeEngineeringBackendService {
 	canRecoverMission?(missionId: string): Promise<boolean>;
 	notifySystemResume?(): Promise<void>;
 	probeFileMtime?(hostAlias: string, filePath: string): Promise<number | null>;
+	probeFileSignature?(hostAlias: string, filePath: string): Promise<string | null>;
 	runDeterministicCheck?(request: IAdeDeterministicCheckRequest): Promise<IAdeDeterministicCheckResponse>;
 }
 

@@ -131,6 +131,7 @@ interface ITokenTabHandles {
 	readonly kind: 'token';
 	node: IMissionDagNode;
 	selectedToken: IMissionToken | undefined;
+	lastGuidanceTokenId: string;
 	readonly emptyHintEl: HTMLElement;
 	readonly contentWrapEl: HTMLElement;
 	readonly waveSwitcherEl: HTMLElement;
@@ -244,29 +245,29 @@ function setTextIfChanged(el: HTMLElement, text: string): void {
 function formatMissionStateBadgeLabel(state: string): string {
 	switch (state) {
 		case 'idle':
-			return adeBi(localize('adeMissionNiStateIdle', "Idle"), "待命");
+			return adeBi(localize('adeMissionNiStateIdle', "Idle"), '待命');
 		case 'active':
 		case 'running':
 			return adeBi(localize('adeMissionNiStateRunning', "Running"), '运行中');
 		case 'queued':
 			return adeBi(localize('adeMissionNiStateQueued', "Queued"), '排队中');
 		case 'blocked':
-			return adeBi(localize('adeMissionNiStateBlocked', "Blocked"), "阻塞等待");
+			return adeBi(localize('adeMissionNiStateBlocked', "Blocked"), '阻塞等待');
 		case 'waiting_gate':
-			return adeBi(localize('adeMissionNiStateGate', "Awaiting Gate"), "等待审批");
+			return adeBi(localize('adeMissionNiStateGate', "Awaiting Gate"), '等待审批');
 		case 'waiting_join':
-			return adeBi(localize('adeMissionNiStateJoin', "Awaiting Join"), "等待汇合");
+			return adeBi(localize('adeMissionNiStateJoin', "Awaiting Join"), '等待汇合');
 		case 'completed':
-			return adeBi(localize('adeMissionNiStateDone', "Completed"), "已完成");
+			return adeBi(localize('adeMissionNiStateDone', "Completed"), '已完成');
 		case 'frozen_failed':
 		case 'failed':
-			return adeBi(localize('adeMissionNiStateFailed', "Failed"), "已失败");
+			return adeBi(localize('adeMissionNiStateFailed', "Failed"), '已失败');
 		case 'paused':
-			return adeBi(localize('adeMissionNiStatePaused', "Paused"), "已暂停");
+			return adeBi(localize('adeMissionNiStatePaused', "Paused"), '已暂停');
 		case 'stopped':
-			return adeBi(localize('adeMissionNiStateStopped', "Stopped"), "已停止");
+			return adeBi(localize('adeMissionNiStateStopped', "Stopped"), '已停止');
 		case 'recalled':
-			return adeBi(localize('adeMissionNiStateRecalled', "Recalled"), "已撤回");
+			return adeBi(localize('adeMissionNiStateRecalled', "Recalled"), '已撤回');
 		default:
 			return state;
 	}
@@ -295,7 +296,7 @@ export class AdeMissionNodeInspector extends Disposable {
 	private isBudgetSliderDragging = false;
 	private selectedTokenIdByNode = new Map<string, string>();
 	private expandedTraceTokenIds = new Set<string>();
-	private readonly retryGuidanceDraftByNode = new Map<string, string>();
+	private readonly retryGuidanceDraftByToken = new Map<string, string>();
 	private readonly distillMemoDraftByNode = new Map<string, string>();
 	private readonly checkFormDraftByNode = new Map<string, ICheckFormDraft>();
 
@@ -310,14 +311,14 @@ export class AdeMissionNodeInspector extends Disposable {
 		super();
 		this.panelEl = append(bodyEl, $('aside.ade-mission-node-inspector', {
 			role: 'complementary',
-			'aria-label': adeBi(localize('adeMissionNodeInspectorAria', "Mission Studio 4-in-1 Inspector"), "任务工坊四合一节点检视器"),
+			'aria-label': adeBi(localize('adeMissionNodeInspectorAria', "Mission Studio 4-in-1 Inspector"), '任务工坊四合一节点检视器'),
 			'data-ade-mission-node-inspector': 'true',
 		}));
 		this.panelEl.hidden = true;
 		this._register(addDisposableListener(this.panelEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
 		this._register(addDisposableListener(this.panelEl, EventType.WHEEL, e => e.stopPropagation()));
 		this._register(onDidChangeAdeLocale(() => {
-			this.panelEl.setAttribute('aria-label', adeBi(localize('adeMissionNodeInspectorAria', "Mission Studio 4-in-1 Inspector"), "任务工坊四合一节点检视器"));
+			this.panelEl.setAttribute('aria-label', adeBi(localize('adeMissionNodeInspectorAria', "Mission Studio 4-in-1 Inspector"), '任务工坊四合一节点检视器'));
 			if (this.isOpen()) {
 				this.shell = undefined;
 				this.activeTabHandles = undefined;
@@ -426,7 +427,7 @@ export class AdeMissionNodeInspector extends Disposable {
 		if (this.lastMissionId && this.lastMissionId !== missionId) {
 			this.selectedTokenIdByNode.clear();
 			this.expandedTraceTokenIds.clear();
-			this.retryGuidanceDraftByNode.clear();
+			this.retryGuidanceDraftByToken.clear();
 			this.distillMemoDraftByNode.clear();
 			this.checkFormDraftByNode.clear();
 		}
@@ -476,7 +477,7 @@ export class AdeMissionNodeInspector extends Disposable {
 			}
 		} else {
 			setTextIfChanged(shell.nodeIdBadgeEl, 'FinOps');
-			const ledgerTitle = adeBi(localize('adeMissionNiMissionLedgerTitle', "Mission Ledger"), "任务费用账本");
+			const ledgerTitle = adeBi(localize('adeMissionNiMissionLedgerTitle', "Mission Ledger"), '任务费用账本');
 			setTextIfChanged(shell.titleEl, ledgerTitle);
 			shell.titleEl.title = '';
 		}
@@ -512,7 +513,7 @@ export class AdeMissionNodeInspector extends Disposable {
 			} else if (!node) {
 				append(shell.bodyScrollEl, $('.ade-mission-ni-muted-hint', {}, adeBi(
 					localize('adeMissionNiPickNodeHint', "Click any node on the Mission Canvas to inspect its state, tokens, and telemetry."),
-					"点击画布上的任意节点，即可查看其运行状态、令牌轨迹与遥测指标。",
+					'点击画布上的任意节点，即可查看其运行状态、令牌轨迹与遥测指标。',
 				)));
 			} else if (this.activeTab === 'token') {
 				this.activeTabHandles = this.mountTokenSkeleton(shell.bodyScrollEl, node);
@@ -553,7 +554,7 @@ export class AdeMissionNodeInspector extends Disposable {
 		const nodeIdBadgeEl = append(titleWrap, $('span.ade-mission-ni-node-id'));
 		const titleEl = append(titleWrap, $('span.ade-mission-ni-title'));
 		const stateBadgeEl = append(head, $('span.ade-mission-token-status-badge'));
-		const closeLabel = adeBi(localize('adeMissionNiClose', "Close Panel"), "关闭面板");
+		const closeLabel = adeBi(localize('adeMissionNiClose', "Close Panel"), '关闭面板');
 		const closeBtn = append(head, $('button.ade-mission-icon-btn', {
 			type: 'button',
 			title: closeLabel,
@@ -565,10 +566,10 @@ export class AdeMissionNodeInspector extends Disposable {
 
 		const tabBar = append(this.panelEl, $('.ade-mission-ni-tabs', { role: 'tablist' }));
 		const tabs: readonly { readonly id: MissionInspectorTab; readonly label: string }[] = [
-			{ id: 'overview', label: adeBi(localize('adeMissionNiTabOverview', "Overview"), "概览") },
-			{ id: 'token', label: adeBi(localize('adeMissionNiTabToken', "Token & Trace"), "令牌轨迹") },
-			{ id: 'distill', label: adeBi(localize('adeMissionNiTabDistill', "Distill & Checks"), "提纯校验") },
-			{ id: 'finops', label: adeBi(localize('adeMissionNiTabFinOps', "FinOps Ledger"), "费用账本") },
+			{ id: 'overview', label: adeBi(localize('adeMissionNiTabOverview', "Overview"), '概览') },
+			{ id: 'token', label: adeBi(localize('adeMissionNiTabToken', "Token & Trace"), '令牌轨迹') },
+			{ id: 'distill', label: adeBi(localize('adeMissionNiTabDistill', "Distill & Checks"), '提纯校验') },
+			{ id: 'finops', label: adeBi(localize('adeMissionNiTabFinOps', "FinOps Ledger"), '费用账本') },
 		];
 		const tabBtns = new Map<MissionInspectorTab, HTMLButtonElement>();
 		for (const t of tabs) {
@@ -628,31 +629,31 @@ export class AdeMissionNodeInspector extends Disposable {
 			gateBtn = append(chatBarEl, $('button.ade-mission-ni-btn.primary', {
 				type: 'button',
 				'data-ade-inspector-open-gate': node.id,
-			}, adeBi(localize('adeMissionNiReviewGate', "Approve / Reject Gate"), "审批通过 / 驳回"))) as HTMLButtonElement;
+			}, adeBi(localize('adeMissionNiReviewGate', "Approve / Reject Gate"), '审批通过 / 驳回'))) as HTMLButtonElement;
 		} else {
 			splitBtn = append(chatBarEl, $('button.ade-mission-ni-btn.primary', {
 				type: 'button',
-				title: adeBi(localize('adeMissionNiSplitChatTip', "Open Agent chat in a split pane beside the Mission Canvas"), "在任务画布旁分屏打开智能体对话"),
+				title: adeBi(localize('adeMissionNiSplitChatTip', "Open Agent chat in a split pane beside the Mission Canvas"), '在任务画布旁分屏打开智能体对话'),
 			})) as HTMLButtonElement;
 			append(splitBtn, $('span.codicon.codicon-split-horizontal', { 'aria-hidden': 'true' }));
-			append(splitBtn, $('span', {}, adeBi(localize('adeMissionNiSplitChat', "Split Chat Beside"), "分屏打开对话")));
+			append(splitBtn, $('span', {}, adeBi(localize('adeMissionNiSplitChat', "Split Chat Beside"), '分屏打开对话')));
 
 			tabBtn = append(chatBarEl, $('button.ade-mission-ni-btn', {
 				type: 'button',
-				title: adeBi(localize('adeMissionNiOpenTabTip', "Switch directly to Agent chat tab (or double-click node)"), "直接切换至智能体对话标签页（或双击节点）"),
+				title: adeBi(localize('adeMissionNiOpenTabTip', "Switch directly to Agent chat tab (or double-click node)"), '直接切换至智能体对话标签页（或双击节点）'),
 			})) as HTMLButtonElement;
 			append(tabBtn, $('span.codicon.codicon-go-to-file', { 'aria-hidden': 'true' }));
-			append(tabBtn, $('span', {}, adeBi(localize('adeMissionNiOpenTab', "Open Tab"), "打开标签页")));
+			append(tabBtn, $('span', {}, adeBi(localize('adeMissionNiOpenTab', "Open Tab"), '打开标签页')));
 
 			const cfgSection = append(body, $('.ade-mission-ni-section'));
-			append(cfgSection, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiConfigTitle', "Node Assignment & Governance"), "节点指派与治理")));
+			append(cfgSection, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiConfigTitle', "Node Assignment & Governance"), '节点指派与治理')));
 			const cfgGrid = append(cfgSection, $('.ade-mission-ni-kv-list'));
 
 			supRow = append(cfgGrid, $('button.ade-mission-ni-kv-row', {
 				type: 'button',
 				'data-ade-inspector-sup-btn': node.id,
 			})) as HTMLButtonElement;
-			append(supRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiSupKey', "Supervisor"), "所属监工")));
+			append(supRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiSupKey', "Supervisor"), '所属监工')));
 			supValEl = append(supRow, $('span.ade-mission-ni-kv-val'));
 			append(supRow, $('span.codicon.codicon-chevron-right.ade-mission-ni-kv-arrow', { 'aria-hidden': 'true' }));
 
@@ -661,10 +662,10 @@ export class AdeMissionNodeInspector extends Disposable {
 				'data-ade-inspector-role-btn': node.id,
 				title: adeBi(
 					localize('adeMissionNiRoleToggleTip', "Click to toggle between Worker (executes task) and Reviewer (in-graph auditor that can reject tokens upstream)"),
-					"点击切换执行角色：普通执行者（负责任务落地）或图内审稿员（可打回上游返工）",
+					'点击切换执行角色：普通执行者（负责任务落地）或图内审稿员（可打回上游返工）',
 				),
 			})) as HTMLButtonElement;
-			append(roleRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiRoleKey', "Node Role"), "节点角色")));
+			append(roleRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiRoleKey', "Node Role"), '节点角色')));
 			const roleVal = append(roleRow, $('span.ade-mission-ni-kv-val'));
 			roleChipEl = append(roleVal, $('span.ade-mission-token-meta-chip'));
 			append(roleRow, $('span.codicon.codicon-arrow-swap.ade-mission-ni-kv-arrow', { 'aria-hidden': 'true' }));
@@ -673,7 +674,7 @@ export class AdeMissionNodeInspector extends Disposable {
 				type: 'button',
 				'data-ade-inspector-emp-btn': node.id,
 			})) as HTMLButtonElement;
-			append(empRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiEmpKey', "Employee"), "执行成员")));
+			append(empRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiEmpKey', "Employee"), '执行成员')));
 			empValEl = append(empRow, $('span.ade-mission-ni-kv-val'));
 			append(empRow, $('span.codicon.codicon-chevron-right.ade-mission-ni-kv-arrow', { 'aria-hidden': 'true' }));
 
@@ -681,7 +682,7 @@ export class AdeMissionNodeInspector extends Disposable {
 				type: 'button',
 				'data-ade-inspector-host-btn': node.id,
 			})) as HTMLButtonElement;
-			append(hostRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiHostKey', "Host"), "运行主机")));
+			append(hostRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiHostKey', "Host"), '运行主机')));
 			hostValEl = append(hostRow, $('span.ade-mission-ni-kv-val'));
 			append(hostRow, $('span.codicon.codicon-chevron-right.ade-mission-ni-kv-arrow', { 'aria-hidden': 'true' }));
 
@@ -689,7 +690,7 @@ export class AdeMissionNodeInspector extends Disposable {
 				type: 'button',
 				'data-ade-inspector-model-btn': node.id,
 			})) as HTMLButtonElement;
-			append(modelRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiModelKey', "Model"), "模型配置")));
+			append(modelRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiModelKey', "Model"), '模型配置')));
 			modelValEl = append(modelRow, $('span.ade-mission-ni-kv-val'));
 			append(modelRow, $('span.codicon.codicon-chevron-right.ade-mission-ni-kv-arrow', { 'aria-hidden': 'true' }));
 
@@ -697,13 +698,13 @@ export class AdeMissionNodeInspector extends Disposable {
 				type: 'button',
 				'data-ade-inspector-engine-btn': node.id,
 			})) as HTMLButtonElement;
-			append(engRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiEngineKey', "Engine / Rank"), "引擎与职级")));
+			append(engRow, $('span.ade-mission-ni-kv-key', {}, adeBi(localize('adeMissionNiEngineKey', "Engine / Rank"), '引擎与职级')));
 			engValEl = append(engRow, $('span.ade-mission-ni-kv-val'));
 			append(engRow, $('span.codicon.codicon-chevron-right.ade-mission-ni-kv-arrow', { 'aria-hidden': 'true' }));
 
 			const promptSection = append(body, $('.ade-mission-ni-section'));
 			const promptHead = append(promptSection, $('.ade-mission-ni-section-head'));
-			append(promptHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiPromptTitle', "Pre-Prompt"), "节点提示词")));
+			append(promptHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiPromptTitle', "Pre-Prompt"), '节点提示词')));
 			editPromptBtn = append(promptHead, $('button.ade-mission-ni-mini-btn', {
 				type: 'button',
 				'data-ade-inspector-prompt-btn': node.id,
@@ -719,17 +720,17 @@ export class AdeMissionNodeInspector extends Disposable {
 		const manageTrigBtn = append(trigHead, $('button.ade-mission-ni-mini-btn', {
 			type: 'button',
 			'data-ade-inspector-triggers-btn': node.id,
-		}, adeBi(localize('adeMissionNiManageTriggers', "Manage"), "管理"))) as HTMLButtonElement;
-		const trigEmptyHintEl = append(trigSectionEl, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionNiNoTriggers', "No automated schedule or event triggers attached yet."), "尚未挂载定时或事件触发器。")));
+		}, adeBi(localize('adeMissionNiManageTriggers', "Manage"), '管理'))) as HTMLButtonElement;
+		const trigEmptyHintEl = append(trigSectionEl, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionNiNoTriggers', "No automated schedule or event triggers attached yet."), '尚未挂载定时或事件触发器。')));
 		const trigChipsEl = append(trigSectionEl, $('.ade-mission-ni-trigger-chips'));
 
 		// Live Runtime & Quick Actions Section
 		const runtimeSection = append(body, $('.ade-mission-ni-section'));
 		const rtHead = append(runtimeSection, $('.ade-mission-ni-section-head'));
-		append(rtHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiRuntimeTitle', "Runtime & Quick Actions"), "运行状态与快捷操作")));
+		append(rtHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiRuntimeTitle', "Runtime & Quick Actions"), '运行状态与快捷操作')));
 		const inspectTokBtn = append(rtHead, $('button.ade-mission-ni-mini-btn', {
 			type: 'button',
-		}, adeBi(localize('adeMissionNiInspectToken', "Token & Trace →"), "令牌与轨迹 →"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionNiInspectToken', "Token & Trace →"), '令牌与轨迹 →'))) as HTMLButtonElement;
 		inspectTokBtn.hidden = true;
 
 		const telemetryLineEl = append(runtimeSection, $('.ade-mission-ni-telemetry-line'));
@@ -749,22 +750,22 @@ export class AdeMissionNodeInspector extends Disposable {
 		const retryBtn = append(actRowEl, $('button.ade-mission-token-action-btn.primary', {
 			type: 'button',
 			'data-ade-ni-retry': node.id,
-		}, adeBi(localize('adeMissionNiRetry', "Retry Node"), "重试节点"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionNiRetry', "Retry Node"), '重试节点'))) as HTMLButtonElement;
 		retryBtn.hidden = true;
 		let distillShortcutBtn: HTMLButtonElement | undefined;
 		if (node.kind !== 'gate') {
 			distillShortcutBtn = append(actRowEl, $('button.ade-mission-token-action-btn', {
 				type: 'button',
 				'data-ade-ni-distill-tab-shortcut': node.id,
-			}, adeBi(localize('adeMissionNiDistillShortcut', "Distill & Refresh"), "提纯换血"))) as HTMLButtonElement;
+			}, adeBi(localize('adeMissionNiDistillShortcut', "Distill & Refresh"), '提纯换血'))) as HTMLButtonElement;
 		}
 		const recallBtn = append(actRowEl, $('button.ade-mission-token-action-btn.danger', {
 			type: 'button',
 			'data-ade-ni-recall': node.id,
-		}, adeBi(localize('adeMissionNiRecall', "Recall"), "撤回"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionNiRecall', "Recall"), '撤回'))) as HTMLButtonElement;
 		recallBtn.hidden = true;
 
-		const noLiveTokenHintEl = append(runtimeSection, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionNiNoLiveToken', "No token has visited this node yet."), "尚未有令牌流经该节点。")));
+		const noLiveTokenHintEl = append(runtimeSection, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionNiNoLiveToken', "No token has visited this node yet."), '尚未有令牌流经该节点。')));
 
 		const handle: IOverviewTabHandles = {
 			kind: 'overview',
@@ -940,7 +941,7 @@ export class AdeMissionNodeInspector extends Disposable {
 						: `${supInfo.label} (${formatTierTag(boundSup.tier)})`;
 					append(h.supValEl, $('span', {}, supText));
 				} else {
-					append(h.supValEl, $('span.is-muted', {}, adeBi(localize('adeMissionNiSupAuto', "Auto (Mission Owner)"), "自动（任务负责人）")));
+					append(h.supValEl, $('span.is-muted', {}, adeBi(localize('adeMissionNiSupAuto', "Auto (Mission Owner)"), '自动（任务负责人）')));
 				}
 			}
 
@@ -956,8 +957,8 @@ export class AdeMissionNodeInspector extends Disposable {
 				setTextIfChanged(
 					h.roleChipEl,
 					currentRoleKind === 'reviewer'
-						? adeBi(localize('adeMissionNiRoleReviewer', "Reviewer · In-Graph Audit"), "审稿员 · 图内审计")
-						: adeBi(localize('adeMissionNiRoleWorker', "Worker · Executor"), "执行者 · 任务节点"),
+						? adeBi(localize('adeMissionNiRoleReviewer', "Reviewer · In-Graph Audit"), '审稿员 · 图内审计')
+						: adeBi(localize('adeMissionNiRoleWorker', "Worker · Executor"), '执行者 · 任务节点'),
 				);
 			}
 
@@ -974,7 +975,7 @@ export class AdeMissionNodeInspector extends Disposable {
 						: '';
 					append(h.empValEl, $('span', {}, `${node.employeeName}${seq}`));
 				} else {
-					append(h.empValEl, $('span.is-muted', {}, adeBi(localize('adeMissionNiEmpStandalone', "Standalone Step"), "独立步骤")));
+					append(h.empValEl, $('span.is-muted', {}, adeBi(localize('adeMissionNiEmpStandalone', "Standalone Step"), '独立步骤')));
 				}
 			}
 
@@ -987,7 +988,7 @@ export class AdeMissionNodeInspector extends Disposable {
 					h.hostValEl,
 					hostInfo.isRemote
 						? `${hostInfo.displayHost} (${hostInfo.osLabel})`
-						: adeBi(localize('adeMissionNiLocalHost', "Local · {0}", hostInfo.osLabel), "本机 · {0}", hostInfo.osLabel),
+						: adeBi(localize('adeMissionNiLocalHost', "Local · {0}", hostInfo.osLabel), '本机 · {0}', hostInfo.osLabel),
 				);
 			}
 
@@ -1016,12 +1017,12 @@ export class AdeMissionNodeInspector extends Disposable {
 				setTextIfChanged(
 					h.editPromptBtn,
 					promptText
-						? adeBi(localize('adeMissionNiEditBtn', "Edit"), "编辑")
-						: adeBi(localize('adeMissionNiAddBtn', "+ Add"), "+ 添加"),
+						? adeBi(localize('adeMissionNiEditBtn', "Edit"), '编辑')
+						: adeBi(localize('adeMissionNiAddBtn', "+ Add"), '+ 添加'),
 				);
 			}
 			if (h.promptBlockEl) {
-				setTextIfChanged(h.promptBlockEl, promptText || adeBi(localize('adeMissionNiNoPrompt', "No pre-prompt configured for this node."), "该节点尚未配置提示词。"));
+				setTextIfChanged(h.promptBlockEl, promptText || adeBi(localize('adeMissionNiNoPrompt', "No pre-prompt configured for this node."), '该节点尚未配置提示词。'));
 			}
 		}
 
@@ -1033,14 +1034,14 @@ export class AdeMissionNodeInspector extends Disposable {
 		h.trigSectionEl.hidden = !isEntryNode;
 		if (isEntryNode) {
 			const nodeTriggers = (rt?.triggers ?? []).filter(t => t.nodeId === node.id);
-			setTextIfChanged(h.trigTitleEl, adeBi(localize('adeMissionNiTriggersTitle', "Source Triggers ({0})", nodeTriggers.length), "自动触发器 ({0})", nodeTriggers.length));
+			setTextIfChanged(h.trigTitleEl, adeBi(localize('adeMissionNiTriggersTitle', "Source Triggers ({0})", nodeTriggers.length), '自动触发器 ({0})', nodeTriggers.length));
 			h.trigEmptyHintEl.hidden = nodeTriggers.length > 0;
 			h.trigChipsEl.hidden = nodeTriggers.length === 0;
 			const trigSig = nodeTriggers.map(t => `${t.id}:${t.enabled ? 1 : 0}:${formatMissionTriggerShortLabel(t)}`).join('|');
 			if (h.lastTrigSignature !== trigSig) {
 				h.lastTrigSignature = trigSig;
 				clearNode(h.trigChipsEl);
-				const offSuffix = adeBi(localize('adeMissionNiTriggerOff', " (off)"), "（已停用）");
+				const offSuffix = adeBi(localize('adeMissionNiTriggerOff', " (off)"), '（已停用）');
 				for (const trig of nodeTriggers) {
 					append(h.trigChipsEl, $(`span.ade-mission-token-meta-chip${trig.enabled ? '.wave' : ''}`, {}, `${formatMissionTriggerShortLabel(trig)}${trig.enabled ? '' : offSuffix}`));
 				}
@@ -1055,8 +1056,8 @@ export class AdeMissionNodeInspector extends Disposable {
 			const ctx = computeMissionNodeContextBreakdown(telemetry, inferModelContextWindowTokens(telModel, { engineId: telEngineId }));
 			h.telemetryLineEl.hidden = false;
 			const costSuffix = telemetry.costUsd > 0
-				? ` · ${formatFinOpsUsd(telemetry.costUsd, { estimated: telemetry.costEstimated })}${telemetry.costEstimated ? adeBi(localize('adeMissionNiTelemetryEstTag', " (est.)"), " (预估)") : ''}`
-				: (telemetry.costLocalFree ? ` · ${adeBi(localize('adeMissionNiTelemetryLocalFree', "Local $0.00"), "本机 $0.00")}` : '');
+				? ` · ${formatFinOpsUsd(telemetry.costUsd, { estimated: telemetry.costEstimated })}${telemetry.costEstimated ? adeBi(localize('adeMissionNiTelemetryEstTag', " (est.)"), ' (预估)') : ''}`
+				: (telemetry.costLocalFree ? ` · ${adeBi(localize('adeMissionNiTelemetryLocalFree', "Local $0.00"), '本机 $0.00')}` : '');
 			setTextIfChanged(h.telemetryLineEl, adeBi(
 				localize(
 					'adeMissionNiTelemetryLine',
@@ -1067,7 +1068,7 @@ export class AdeMissionNodeInspector extends Disposable {
 					telemetry.turns,
 					costSuffix,
 				),
-				"上下文：{0}/{1} ({2}%) · 轮次：{3}{4}",
+				'上下文：{0}/{1} ({2}%) · 轮次：{3}{4}',
 				formatCompactTokenCount(ctx.usedTokens),
 				formatCompactTokenCount(ctx.maxTokens),
 				ctx.usedPct,
@@ -1147,7 +1148,7 @@ export class AdeMissionNodeInspector extends Disposable {
 	private mountTokenSkeleton(body: HTMLElement, node: IMissionDagNode): ITokenTabHandles {
 		const emptyHintEl = append(body, $('.ade-mission-ni-muted-hint', {}, adeBi(
 			localize('adeMissionNiTokenEmpty', "No tokens recorded on node {0} yet. Start the Mission to inspect live token summaries & trace pointers.", node.id),
-			"节点 {0} 尚无令牌流转记录。启动任务后可实时查看令牌总结与轨迹指针。",
+			'节点 {0} 尚无令牌流转记录。启动任务后可实时查看令牌总结与轨迹指针。',
 			node.id,
 		)));
 		emptyHintEl.hidden = true;
@@ -1164,19 +1165,19 @@ export class AdeMissionNodeInspector extends Disposable {
 		const blockedBoxEl = append(contentWrapEl, $('.ade-mission-token-box.is-blocked'));
 		blockedBoxEl.hidden = true;
 		const bHead = append(blockedBoxEl, $('.ade-mission-token-box-head'));
-		append(bHead, $('span.ade-mission-token-box-label', {}, adeBi(localize('adeMissionNiBlockedHead', "Blocked Wait"), "阻塞等待中")));
+		append(bHead, $('span.ade-mission-token-box-label', {}, adeBi(localize('adeMissionNiBlockedHead', "Blocked Wait"), '阻塞等待中')));
 		const blockedCountdownEl = append(bHead, $('span.ade-mission-token-countdown'));
 		const blockedReasonEl = append(blockedBoxEl, $('.ade-mission-token-box-body'));
 		const blockedWatchRowEl = append(blockedBoxEl, $('.ade-mission-token-watch-row'));
 
 		const failedBoxEl = append(contentWrapEl, $('.ade-mission-token-box.is-failed'));
 		failedBoxEl.hidden = true;
-		append(failedBoxEl, $('.ade-mission-token-box-label', {}, adeBi(localize('adeMissionNiFailHead', "Failure & Escalation"), "失败与升级")));
+		append(failedBoxEl, $('.ade-mission-token-box-label', {}, adeBi(localize('adeMissionNiFailHead', "Failure & Escalation"), '失败与升级')));
 		const failedReasonEl = append(failedBoxEl, $('.ade-mission-token-box-body'));
 
 		// Layer 1: Verbatim lastSummary
 		const s1 = append(contentWrapEl, $('.ade-mission-ni-section'));
-		append(s1, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiLastSummaryLabel', "Last Step Summary"), "紧邻上一棒人话总结")));
+		append(s1, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiLastSummaryLabel', "Last Step Summary"), '紧邻上一棒人话总结')));
 		const lastSummaryEl = append(s1, $('.ade-mission-token-text-block.scrollable', {
 			'data-ade-ni-last-summary': 'true',
 		}));
@@ -1184,7 +1185,7 @@ export class AdeMissionNodeInspector extends Disposable {
 		// Layer 2: Rolling compressedHistory
 		const s2 = append(contentWrapEl, $('.ade-mission-ni-section'));
 		const s2Head = append(s2, $('.ade-mission-ni-section-head'));
-		append(s2Head, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiHistoryLabel', "Rolling Compressed History"), "滚动压缩历史")));
+		append(s2Head, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiHistoryLabel', "Rolling Compressed History"), '滚动压缩历史')));
 		const archivedChipEl = append(s2Head, $('span.ade-mission-token-meta-chip'));
 		archivedChipEl.hidden = true;
 		const compressedHistoryEl = append(s2, $('.ade-mission-token-text-block.scrollable', {
@@ -1207,27 +1208,27 @@ export class AdeMissionNodeInspector extends Disposable {
 		// Static Guided Retry Input & Action Buttons (NEVER destroyed during 1Hz telemetry ticks)
 		const guidanceInput = append(contentWrapEl, $('input.ade-mission-emp-popover-input', {
 			type: 'text',
-			placeholder: adeBi(localize('adeMissionNiRetryGuidancePh', "Optional retry guidance..."), "可选：填写指导重试说明..."),
+			placeholder: adeBi(localize('adeMissionNiRetryGuidancePh', "Optional retry guidance..."), '可选：填写指导重试说明...'),
 			'data-ade-ni-retry-guidance': 'true',
 		})) as HTMLInputElement;
-		guidanceInput.value = this.retryGuidanceDraftByNode.get(node.id) ?? '';
 		guidanceInput.hidden = true;
 
 		const actRowEl = append(contentWrapEl, $('.ade-mission-token-actions'));
 		actRowEl.hidden = true;
 		const retryBtn = append(actRowEl, $('button.ade-mission-token-action-btn.primary', {
 			type: 'button',
-		}, adeBi(localize('adeMissionNiTokenRetry', "Retry Node"), "重试节点"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionNiTokenRetry', "Retry Node"), '重试节点'))) as HTMLButtonElement;
 		retryBtn.hidden = true;
 		const recallBtn = append(actRowEl, $('button.ade-mission-token-action-btn.danger', {
 			type: 'button',
-		}, adeBi(localize('adeMissionNiTokenRecall', "Recall"), "撤回"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionNiTokenRecall', "Recall"), '撤回'))) as HTMLButtonElement;
 		recallBtn.hidden = true;
 
 		const handle: ITokenTabHandles = {
 			kind: 'token',
 			node,
 			selectedToken: undefined,
+			lastGuidanceTokenId: '',
 			emptyHintEl,
 			contentWrapEl,
 			waveSwitcherEl,
@@ -1256,10 +1257,12 @@ export class AdeMissionNodeInspector extends Disposable {
 		};
 
 		this.tabDisposables.add(addDisposableListener(guidanceInput, EventType.INPUT, () => {
+			const tokId = handle.lastGuidanceTokenId || (handle.selectedToken?.id ?? '');
+			const draftKey = `${handle.node.id}:${tokId}`;
 			if (guidanceInput.value) {
-				this.retryGuidanceDraftByNode.set(handle.node.id, guidanceInput.value);
+				this.retryGuidanceDraftByToken.set(draftKey, guidanceInput.value);
 			} else {
-				this.retryGuidanceDraftByNode.delete(handle.node.id);
+				this.retryGuidanceDraftByToken.delete(draftKey);
 			}
 		}));
 		this.tabDisposables.add(addDisposableListener(guidanceInput, EventType.KEY_DOWN, (e: KeyboardEvent) => {
@@ -1284,7 +1287,10 @@ export class AdeMissionNodeInspector extends Disposable {
 			}
 			const guidance = guidanceInput.value.trim() || undefined;
 			guidanceInput.value = '';
-			this.retryGuidanceDraftByNode.delete(handle.node.id);
+			this.retryGuidanceDraftByToken.delete(`${handle.node.id}:${tok.id}`);
+			if (handle.lastGuidanceTokenId) {
+				this.retryGuidanceDraftByToken.delete(`${handle.node.id}:${handle.lastGuidanceTokenId}`);
+			}
 			this.delegate.onQuickRetryNode(handle.node, tok, guidance);
 		}));
 		this.tabDisposables.add(addDisposableListener(recallBtn, EventType.CLICK, () => {
@@ -1353,7 +1359,7 @@ export class AdeMissionNodeInspector extends Disposable {
 				append(h.metaRowEl, $('span.ade-mission-token-meta-chip.rework', {}, `↩ ${selectedToken.returnToNodeId}`));
 			}
 			if (selectedToken.nudgeCount > 0) {
-				append(h.metaRowEl, $('span.ade-mission-token-meta-chip.warn', {}, adeBi(localize('adeMissionNiNudgesCount', "Nudges {0}", selectedToken.nudgeCount), "催办 {0} 次", selectedToken.nudgeCount)));
+				append(h.metaRowEl, $('span.ade-mission-token-meta-chip.warn', {}, adeBi(localize('adeMissionNiNudgesCount', "Nudges {0}", selectedToken.nudgeCount), '催办 {0} 次', selectedToken.nudgeCount)));
 			}
 		}
 
@@ -1391,24 +1397,24 @@ export class AdeMissionNodeInspector extends Disposable {
 		}
 
 		// Dual-layer summaries (patched in place only when text actually changes)
-		setTextIfChanged(h.lastSummaryEl, selectedToken.lastSummary?.trim() || adeBi(localize('adeMissionNiEmptySummary', "No step summary reported yet."), "尚未汇报本棒阶段总结。"));
+		setTextIfChanged(h.lastSummaryEl, selectedToken.lastSummary?.trim() || adeBi(localize('adeMissionNiEmptySummary', "No step summary reported yet."), '尚未汇报本棒阶段总结。'));
 		const archivedCount = selectedToken.historyState?.archivedCount ?? 0;
 		if (archivedCount > 0) {
 			h.archivedChipEl.hidden = false;
-			setTextIfChanged(h.archivedChipEl, adeBi(localize('adeMissionNiArchivedHops', "{0} archived", archivedCount), "已归档 {0} 跳", archivedCount));
+			setTextIfChanged(h.archivedChipEl, adeBi(localize('adeMissionNiArchivedHops', "{0} archived", archivedCount), '已归档 {0} 跳', archivedCount));
 		} else {
 			h.archivedChipEl.hidden = true;
 		}
-		setTextIfChanged(h.compressedHistoryEl, selectedToken.compressedHistory?.trim() || adeBi(localize('adeMissionNiEmptyHistory', "Entry wave — no prior compressed history."), "入口首棒，尚无历史压缩记录。"));
+		setTextIfChanged(h.compressedHistoryEl, selectedToken.compressedHistory?.trim() || adeBi(localize('adeMissionNiEmptyHistory', "Entry wave — no prior compressed history."), '入口首棒，尚无历史压缩记录。'));
 
 		// Trace expansion (only rebuild rows when expanded state or trace entries change)
-		setTextIfChanged(h.traceTitleEl, adeBi(localize('adeMissionNiTraceHead', "Trace · {0}", selectedToken.tracePtr), "轨迹指针 · {0}", selectedToken.tracePtr));
+		setTextIfChanged(h.traceTitleEl, adeBi(localize('adeMissionNiTraceHead', "Trace · {0}", selectedToken.tracePtr), '轨迹指针 · {0}', selectedToken.tracePtr));
 		const isExpanded = this.expandedTraceTokenIds.has(selectedToken.id);
 		setTextIfChanged(
 			h.expandTraceBtn,
 			isExpanded
-				? adeBi(localize('adeMissionNiHideTrace', "Hide Trace"), "收起轨迹")
-				: adeBi(localize('adeMissionNiExpandTrace', "Expand Trace"), "展开轨迹"),
+				? adeBi(localize('adeMissionNiHideTrace', "Hide Trace"), '收起轨迹')
+				: adeBi(localize('adeMissionNiExpandTrace', "Expand Trace"), '展开轨迹'),
 		);
 		h.traceListEl.hidden = !isExpanded;
 		if (isExpanded) {
@@ -1418,13 +1424,14 @@ export class AdeMissionNodeInspector extends Disposable {
 				h.lastTraceSignature = traceSig;
 				clearNode(h.traceListEl);
 				if (entries.length === 0) {
-					append(h.traceListEl, $('.ade-mission-token-trace-empty', {}, adeBi(localize('adeMissionNiTraceNone', "No trace entries found."), "暂无轨迹记录。")));
+					append(h.traceListEl, $('.ade-mission-token-trace-empty', {}, adeBi(localize('adeMissionNiTraceNone', "No trace entries found."), '暂无轨迹记录。')));
 				} else {
 					for (const entry of entries) {
+						const safeEvt = String(entry.event).replace(/[^a-z0-9-]+/gi, '-').replace(/^-|-$/g, '') || 'evt';
 						const row = append(h.traceListEl, $('.ade-mission-token-trace-row', {
 							'data-trace-event': entry.event,
 						}));
-						append(row, $(`span.ade-mission-trace-event.evt-${entry.event.replace(/_/g, '-')}`, {}, entry.event));
+						append(row, $(`span.ade-mission-trace-event.evt-${safeEvt}`, {}, entry.event));
 						append(row, $('span.ade-mission-trace-node', {}, entry.nodeId));
 						if (entry.summary) {
 							append(row, $('span.ade-mission-trace-summary', { title: entry.summary }, entry.summary));
@@ -1440,6 +1447,10 @@ export class AdeMissionNodeInspector extends Disposable {
 		const canRetry = selectedToken.status === 'frozen_failed' || selectedToken.status === 'recalled';
 		const canRecall = selectedToken.status === 'active' || selectedToken.status === 'queued' || selectedToken.status === 'blocked' || selectedToken.status === 'waiting_gate' || selectedToken.status === 'waiting_join' || selectedToken.status === 'frozen_failed';
 		if (!this.isControlFocused(h.guidanceInput)) {
+			if (h.lastGuidanceTokenId !== selectedToken.id) {
+				h.lastGuidanceTokenId = selectedToken.id;
+				h.guidanceInput.value = this.retryGuidanceDraftByToken.get(`${node.id}:${selectedToken.id}`) ?? '';
+			}
 			h.guidanceInput.hidden = !canRetry;
 		}
 		h.retryBtn.hidden = !canRetry;
@@ -1457,7 +1468,7 @@ export class AdeMissionNodeInspector extends Disposable {
 		// 1. Dynamic Telemetry Thermal Section (patched in place at 1Hz)
 		const thermalSection = append(body, $('.ade-mission-ni-section'));
 		const tHead = append(thermalSection, $('.ade-mission-ni-section-head'));
-		append(tHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiThermalTitle', "Context Thermal Breakdown"), "上下文热成像切片")));
+		append(tHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiThermalTitle', "Context Thermal Breakdown"), '上下文热成像切片')));
 		const pctBadgeEl = append(tHead, $('span.ade-mission-token-status-badge'));
 
 		const bigTrack = append(thermalSection, $('.ade-mission-ni-thermal-track'));
@@ -1473,24 +1484,24 @@ export class AdeMissionNodeInspector extends Disposable {
 			append(item, $('span.ade-mission-ni-thermal-name', {}, label));
 			return append(item, $('span.ade-mission-ni-thermal-val'));
 		};
-		const initValEl = makeLegendRow('seg-init', adeBi(localize('adeMissionSliceInit', "Initial Context"), "初始化背景"));
-		const tierValEl = makeLegendRow('seg-tier', adeBi(localize('adeMissionSliceTier', "Contract Docs"), "单源契约文档"));
-		const srcValEl = makeLegendRow('seg-source', adeBi(localize('adeMissionSliceSource', "Active Source"), "有效工作源码"));
-		const noiseValEl = makeLegendRow('seg-noise', adeBi(localize('adeMissionSliceNoise', "Error / Rework Noise"), "报错/返工噪音"));
+		const initValEl = makeLegendRow('seg-init', adeBi(localize('adeMissionSliceInit', "Initial Context"), '初始化背景'));
+		const tierValEl = makeLegendRow('seg-tier', adeBi(localize('adeMissionSliceTier', "Contract Docs"), '单源契约文档'));
+		const srcValEl = makeLegendRow('seg-source', adeBi(localize('adeMissionSliceSource', "Active Source"), '有效工作源码'));
+		const noiseValEl = makeLegendRow('seg-noise', adeBi(localize('adeMissionSliceNoise', "Error / Rework Noise"), '报错/返工噪音'));
 
 		// 2. Static One-Click Distill & Refresh Card (mounted ONCE per node; never torn down on telemetry ticks)
 		let memoInput: HTMLInputElement | undefined;
 		let distillBtn: HTMLButtonElement | undefined;
 		if (node.kind !== 'gate') {
 			const distillBox = append(body, $('.ade-mission-ni-distill-card'));
-			append(distillBox, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiDistillCardTitle', "One-Click Distill & Refresh"), "一键提纯换血")));
+			append(distillBox, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionNiDistillCardTitle', "One-Click Distill & Refresh"), '一键提纯换血')));
 			append(distillBox, $('.ade-mission-ni-muted-hint', {}, adeBi(
 				localize('adeMissionNiDistillDesc', "Keep local/remote disk artifacts intact, distill past pitfalls into a high-signal memo, reset the bloated context window, and continue in a fresh session."),
-				"保留本地/云端磁盘既有代码产物，将历史踩坑提炼为高信噪比备忘，重置臃肿上下文窗口并用干净会话继续执行。",
+				'保留本地/云端磁盘既有代码产物，将历史踩坑提炼为高信噪比备忘，重置臃肿上下文窗口并用干净会话继续执行。',
 			)));
 			memoInput = append(distillBox, $('input.ade-mission-emp-popover-input', {
 				type: 'text',
-				placeholder: adeBi(localize('adeMissionNiDistillMemoPh', "Optional: add pitfall memo or architecture notes..."), "可选：补充踩坑备忘或架构指令..."),
+				placeholder: adeBi(localize('adeMissionNiDistillMemoPh', "Optional: add pitfall memo or architecture notes..."), '可选：补充踩坑备忘或架构指令...'),
 				'data-ade-ni-distill-memo': 'true',
 			})) as HTMLInputElement;
 			memoInput.value = this.distillMemoDraftByNode.get(node.id) ?? '';
@@ -1499,7 +1510,7 @@ export class AdeMissionNodeInspector extends Disposable {
 				'data-ade-ni-distill': node.id,
 			})) as HTMLButtonElement;
 			append(distillBtn, $('span.codicon.codicon-sparkle', { 'aria-hidden': 'true' }));
-			append(distillBtn, $('span', {}, adeBi(localize('adeMissionNiDistillBtn', "Distill & Refresh"), "执行提纯换血")));
+			append(distillBtn, $('span', {}, adeBi(localize('adeMissionNiDistillBtn', "Distill & Refresh"), '执行提纯换血')));
 		}
 
 		// 3. Deterministic Verification Checklist Section (list & form live in separate siblings!)
@@ -1510,14 +1521,14 @@ export class AdeMissionNodeInspector extends Disposable {
 		const runChkBtn = append(chkHeadActions, $('button.ade-mission-ni-mini-btn', {
 			type: 'button',
 			'data-ade-ni-run-checks': node.id,
-		}, adeBi(localize('adeMissionNiRunChecks', "Run Checks"), "立即验真"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionNiRunChecks', "Run Checks"), '立即验真'))) as HTMLButtonElement;
 		runChkBtn.hidden = true;
 
 		const chkListEl = append(chkSection, $('.ade-mission-ni-check-list'));
 		const chkListDisposables = this.tabDisposables.add(new DisposableStore());
 		const noChecksHintEl = append(chkSection, $('.ade-mission-ni-muted-hint', {}, adeBi(
 			localize('adeMissionNiNoChecks', "No zero-token command or file verification hooks configured on this node."),
-			"该节点未配置零 Token 确定性命令/文件校验钩子。",
+			'该节点未配置零 Token 确定性命令/文件校验钩子。',
 		)));
 
 		// Static Inline Add Check Hook Form (NEVER torn down or touched by telemetry ticks!)
@@ -1528,38 +1539,38 @@ export class AdeMissionNodeInspector extends Disposable {
 			}));
 			const nameInput = append(form, $('input.ade-mission-emp-popover-input', {
 				type: 'text',
-				placeholder: adeBi(localize('adeMissionChkNamePh', "Hook name (optional, e.g. unit-tests)"), "钩子名称（可选，如 unit-tests）"),
+				placeholder: adeBi(localize('adeMissionChkNamePh', "Hook name (optional, e.g. unit-tests)"), '钩子名称（可选，如 unit-tests）'),
 				'data-ade-check-name-input': 'true',
 			})) as HTMLInputElement;
 			const cmdInput = append(form, $('input.ade-mission-emp-popover-input', {
 				type: 'text',
-				placeholder: adeBi(localize('adeMissionChkCmdPh', "Check command (e.g. pnpm test or pytest -q)"), "校验命令（如 pnpm test 或 pytest -q）"),
+				placeholder: adeBi(localize('adeMissionChkCmdPh', "Check command (e.g. pnpm test or pytest -q)"), '校验命令（如 pnpm test 或 pytest -q）'),
 				'data-ade-check-cmd-input': 'true',
 			})) as HTMLInputElement;
 			const filesInput = append(form, $('input.ade-mission-emp-popover-input', {
 				type: 'text',
-				placeholder: adeBi(localize('adeMissionChkFilesPh', "Required output files (optional, comma-separated, e.g. dist/out.js)"), "必检产物文件（可选，逗号分隔，如 dist/out.js）"),
+				placeholder: adeBi(localize('adeMissionChkFilesPh', "Required output files (optional, comma-separated, e.g. dist/out.js)"), '必检产物文件（可选，逗号分隔，如 dist/out.js）'),
 				'data-ade-check-files-input': 'true',
 			})) as HTMLInputElement;
 			const matchInput = append(form, $('input.ade-mission-emp-popover-input', {
 				type: 'text',
-				placeholder: adeBi(localize('adeMissionChkMatchPh', "Output match keyword or /regex/ (optional)"), "输出匹配关键字或 /正则/（可选）"),
+				placeholder: adeBi(localize('adeMissionChkMatchPh', "Output match keyword or /regex/ (optional)"), '输出匹配关键字或 /正则/（可选）'),
 				'data-ade-check-match-input': 'true',
 			})) as HTMLInputElement;
 			const optsRow = append(form, $('.ade-mission-trigger-form-row'));
 			const onFailSelect = append(optsRow, $('select.ade-mission-config-select', {
 				'data-ade-check-onfail-select': 'true',
-				title: adeBi(localize('adeMissionChkOnFailTip', "Action when verification fails"), "校验失败时的处理策略"),
+				title: adeBi(localize('adeMissionChkOnFailTip', "Action when verification fails"), '校验失败时的处理策略'),
 			})) as HTMLSelectElement;
-			append(onFailSelect, $('option', { value: 'bounce' }, adeBi(localize('adeMissionChkOnFailBounce', "Bounce to assignee (retry)"), "打回原员工重试")));
-			append(onFailSelect, $('option', { value: 'fail' }, adeBi(localize('adeMissionChkOnFailFail', "Route failure edge (fail)"), "触发失败边")));
-			append(onFailSelect, $('option', { value: 'escalate' }, adeBi(localize('adeMissionChkOnFailEscalate', "Escalate to supervisor"), "直接升级监工")));
+			append(onFailSelect, $('option', { value: 'bounce' }, adeBi(localize('adeMissionChkOnFailBounce', "Bounce to assignee (retry)"), '打回原员工重试')));
+			append(onFailSelect, $('option', { value: 'fail' }, adeBi(localize('adeMissionChkOnFailFail', "Route failure edge (fail)"), '触发失败边')));
+			append(onFailSelect, $('option', { value: 'escalate' }, adeBi(localize('adeMissionChkOnFailEscalate', "Escalate to supervisor"), '直接升级监工')));
 			const retriesInput = append(optsRow, $('input.ade-mission-config-input', {
 				type: 'number',
 				min: '0',
 				max: '5',
 				value: draft?.retries ?? '2',
-				title: adeBi(localize('adeMissionChkRetriesTip', "Max auto-retries before escalation (0..5)"), "升级监工前的最大自动重试次数 (0..5)"),
+				title: adeBi(localize('adeMissionChkRetriesTip', "Max auto-retries before escalation (0..5)"), '升级监工前的最大自动重试次数 (0..5)'),
 				'data-ade-check-retries-input': 'true',
 			})) as HTMLInputElement;
 
@@ -1597,12 +1608,12 @@ export class AdeMissionNodeInspector extends Disposable {
 			const addBtn = append(form, $('button.ade-mission-ni-btn.primary', {
 				type: 'button',
 				'data-ade-check-submit': node.id,
-			}, adeBi(localize('adeMissionChkSubmitBtn', "+ Add Verification Hook"), "+ 添加确定性校验钩子"))) as HTMLButtonElement;
+			}, adeBi(localize('adeMissionChkSubmitBtn', "+ Add Verification Hook"), '+ 添加确定性校验钩子'))) as HTMLButtonElement;
 			this.tabDisposables.add(addDisposableListener(addBtn, EventType.CLICK, () => {
 				const command = cmdInput.value.trim() || undefined;
 				const expectFiles = filesInput.value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
 				if (!command && expectFiles.length === 0) {
-					errEl.textContent = adeBi(localize('adeMissionChkNeedCmdOrFile', "Provide at least a check command or a required output file path."), "请至少填写校验命令或必检产物文件路径。");
+					errEl.textContent = adeBi(localize('adeMissionChkNeedCmdOrFile', "Provide at least a check command or a required output file path."), '请至少填写校验命令或必检产物文件路径。');
 					errEl.hidden = false;
 					return;
 				}
@@ -1626,6 +1637,8 @@ export class AdeMissionNodeInspector extends Disposable {
 				cmdInput.value = '';
 				filesInput.value = '';
 				matchInput.value = '';
+				onFailSelect.value = 'bounce';
+				retriesInput.value = '2';
 				this.checkFormDraftByNode.delete(node.id);
 				this.delegate.onUpsertNodeCheck?.(node.id, hook);
 			}));
@@ -1718,7 +1731,7 @@ export class AdeMissionNodeInspector extends Disposable {
 
 		// 2. Check hooks list (rebuilt ONLY when check hook definitions actually change; form sibling untouched!)
 		const checks = this.missionRuntimeService?.getEffectiveNodeChecks(missionId, node.id)[node.id] ?? [];
-		setTextIfChanged(h.chkTitleEl, adeBi(localize('adeMissionNiChecksTitle', "Verification Hooks ({0})", checks.length), "确定性验收钩子 ({0})", checks.length));
+		setTextIfChanged(h.chkTitleEl, adeBi(localize('adeMissionNiChecksTitle', "Verification Hooks ({0})", checks.length), '确定性验收钩子 ({0})', checks.length));
 		h.runChkBtn.hidden = checks.length === 0;
 		h.noChecksHintEl.hidden = checks.length > 0;
 		h.chkListEl.hidden = checks.length === 0;
@@ -1737,7 +1750,7 @@ export class AdeMissionNodeInspector extends Disposable {
 				if (chk.source !== 'mermaid' && this.delegate.onRemoveNodeCheck) {
 					const delBtn = append(row, $('button.ade-mission-icon-btn.danger', {
 						type: 'button',
-						title: adeBi(localize('adeMissionNiCheckDeleteTip', "Remove verification hook"), "移除校验钩子"),
+						title: adeBi(localize('adeMissionNiCheckDeleteTip', "Remove verification hook"), '移除校验钩子'),
 						'data-ade-check-delete': chk.id,
 					})) as HTMLButtonElement;
 					delBtn.appendChild($('span.codicon.codicon-trash'));
@@ -1785,9 +1798,9 @@ export class AdeMissionNodeInspector extends Disposable {
 					'adeMissionFinOpsEstimatedBadgeTip',
 					"One or more engines did not report direct USD billing; spend is automatically estimated from built-in/custom per-million-token rates and enforces the budget circuit-breaker. Override rates or mark zero-cost local models in aexus.ade.finOps.modelPricingOverrides.",
 				),
-				"部分或全部引擎未直接上报美元账单，当前花费按内置/自定义模型 Token 单价自动折算并驱动预算熔断。可在设置 aexus.ade.finOps.modelPricingOverrides 中覆盖单价或标记本地零成本模型。",
+				'部分或全部引擎未直接上报美元账单，当前花费按内置/自定义模型 Token 单价自动折算并驱动预算熔断。可在设置 aexus.ade.finOps.modelPricingOverrides 中覆盖单价或标记本地零成本模型。',
 			),
-		}, adeBi(localize('adeMissionFinOpsEstimatedBadge', "Est."), "预估")));
+		}, adeBi(localize('adeMissionFinOpsEstimatedBadge', "Est."), '预估')));
 		heroEstBadgeEl.hidden = true;
 
 		const heroMeta = append(heroEl, $('.ade-mission-finops-hero-meta'));
@@ -1798,21 +1811,21 @@ export class AdeMissionNodeInspector extends Disposable {
 		trippedAlertEl.hidden = true;
 		append(trippedAlertEl, $('.ade-mission-token-box-body', {}, adeBi(
 			localize('adeMissionFinOpsTrippedMsg', "Budget circuit-breaker tripped: Mission is paused and new token dispatches are blocked. Raise the budget cap to resume."),
-			"预算熔断已触发：任务已自动暂停并阻止新令牌派发。请上调预算上限后恢复运行。",
+			'预算熔断已触发：任务已自动暂停并阻止新令牌派发。请上调预算上限后恢复运行。',
 		)));
 		const raiseResumeBtn = append(trippedAlertEl, $('button.ade-mission-token-action-btn.primary', {
 			type: 'button',
 			'data-ade-finops-raise-resume': 'true',
-		}, adeBi(localize('adeMissionFinOpsRaiseResumeBtn', "Raise Cap (+$5) & Resume"), "上调额度 (+$5) 并恢复"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionFinOpsRaiseResumeBtn', "Raise Cap (+$5) & Resume"), '上调额度 (+$5) 并恢复'))) as HTMLButtonElement;
 
 		// 2. Static Interactive Budget Circuit-Breaker Slider & USD Input (NEVER rebuilt during 1Hz ticks!)
 		const sliderSection = append(body, $('.ade-mission-ni-section'));
 		const slHead = append(sliderSection, $('.ade-mission-ni-section-head'));
-		append(slHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionFinOpsSliderTitle', "Budget Circuit-Breaker Cap ($USD)"), "预算熔断上限 ($USD)")));
+		append(slHead, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionFinOpsSliderTitle', "Budget Circuit-Breaker Cap ($USD)"), '预算熔断上限 ($USD)')));
 		const unlimitedBtn = append(slHead, $('button.ade-mission-ni-mini-btn', {
 			type: 'button',
 			'data-ade-finops-budget-unlimited': 'true',
-		}, adeBi(localize('adeMissionFinOpsSetUnlimited', "Unlimited"), "不设上限"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionFinOpsSetUnlimited', "Unlimited"), '不设上限'))) as HTMLButtonElement;
 
 		const sliderRow = append(sliderSection, $('.ade-mission-finops-slider-row'));
 		const sliderEl = append(sliderRow, $('input.ade-mission-finops-slider', {
@@ -1833,14 +1846,14 @@ export class AdeMissionNodeInspector extends Disposable {
 
 		// 3. Per-Rank Breakdown
 		const tierSection = append(body, $('.ade-mission-ni-section', { 'data-ade-finops-by-tier': 'true' }));
-		append(tierSection, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionFinOpsByTierTitle', "Spend by Dynamic Rank (L1..LN)"), "按动态职级拆解账单 (L1..LN)")));
-		const tierEmptyEl = append(tierSection, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionFinOpsNoSpend', "No runtime spend recorded yet."), "尚无运行花费记录。")));
+		append(tierSection, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionFinOpsByTierTitle', "Spend by Dynamic Rank (L1..LN)"), '按动态职级拆解账单 (L1..LN)')));
+		const tierEmptyEl = append(tierSection, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionFinOpsNoSpend', "No runtime spend recorded yet."), '尚无运行花费记录。')));
 		const tierRowsWrapEl = append(tierSection, $('.ade-mission-finops-rows-wrap'));
 
 		// 4. Per-Host Breakdown
 		const hostSection = append(body, $('.ade-mission-ni-section', { 'data-ade-finops-by-host': 'true' }));
-		append(hostSection, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionFinOpsByHostTitle', "Spend by Cloud / Local Host"), "按跨云/本机算力拆解")));
-		const hostEmptyEl = append(hostSection, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionFinOpsNoHostSpend', "No host spend recorded yet."), "尚无主机算力花费记录。")));
+		append(hostSection, $('.ade-mission-ni-section-title', {}, adeBi(localize('adeMissionFinOpsByHostTitle', "Spend by Cloud / Local Host"), '按跨云/本机算力拆解')));
+		const hostEmptyEl = append(hostSection, $('.ade-mission-ni-muted-hint', {}, adeBi(localize('adeMissionFinOpsNoHostSpend', "No host spend recorded yet."), '尚无主机算力花费记录。')));
 		const hostRowsWrapEl = append(hostSection, $('.ade-mission-finops-rows-wrap'));
 
 		// 5. Top Spender Nodes
@@ -1954,7 +1967,7 @@ export class AdeMissionNodeInspector extends Disposable {
 	): IFinOpsBucketRowHandle[] {
 		const formatBucketLabel = (b: IMissionFinOpsBucket) => adeBi(
 			localize('adeMissionFinOpsBucketLabel', "{0} · {1} node(s)", b.label, b.nodeCount),
-			"{0} · {1} 个节点",
+			'{0} · {1} 个节点',
 			b.label,
 			b.nodeCount,
 		);
@@ -2003,19 +2016,19 @@ export class AdeMissionNodeInspector extends Disposable {
 			h.heroLimitEl,
 			summary.budgetLimitUsd !== undefined
 				? `/ $${summary.budgetLimitUsd.toFixed(2)}`
-				: adeBi(localize('adeMissionFinOpsUnlimitedTag', "/ Unlimited"), "/ 不设上限"),
+				: adeBi(localize('adeMissionFinOpsUnlimitedTag', "/ Unlimited"), '/ 不设上限'),
 		);
 		setTextIfChanged(
 			h.heroTokensEl,
 			adeBi(
 				localize('adeMissionFinOpsTokensCount', "{0} tokens", formatCompactTokenCount(summary.totalTokens)),
-				"{0} 令牌",
+				'{0} 令牌',
 				formatCompactTokenCount(summary.totalTokens),
 			),
 		);
 		setTextIfChanged(
 			h.heroCacheEl,
-			adeBi(localize('adeMissionFinOpsCacheDetail', "Cache Saved {0}%", summary.cacheSavingsPct), "缓存节省 {0}%", summary.cacheSavingsPct),
+			adeBi(localize('adeMissionFinOpsCacheDetail', "Cache Saved {0}%", summary.cacheSavingsPct), '缓存节省 {0}%', summary.cacheSavingsPct),
 		);
 
 		h.trippedAlertEl.hidden = !summary.budgetCircuitTripped;
@@ -2062,7 +2075,7 @@ export class AdeMissionNodeInspector extends Disposable {
 			&& h.topNodeRows.every((r, idx) => r.nodeId === topItems[idx].nodeId);
 		const formatNodeSpend = (item: IMissionFinOpsSummary['byNode'][number]) => {
 			const costText = item.costLocalFree && item.costUsd === 0
-				? adeBi(localize('adeMissionNiTelemetryLocalFree', "Local $0.00"), "本机 $0.00")
+				? adeBi(localize('adeMissionNiTelemetryLocalFree', "Local $0.00"), '本机 $0.00')
 				: formatFinOpsUsd(item.costUsd, { estimated: item.costEstimated });
 			return `${costText} (${formatCompactTokenCount(item.tokens)})`;
 		};

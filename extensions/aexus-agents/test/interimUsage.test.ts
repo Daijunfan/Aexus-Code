@@ -6,6 +6,7 @@
 import * as assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
+	createMultiStepTurnUsageAccumulator,
 	createStreamToolErrorScanner,
 	createTurnInterimUsageTracker,
 	detectToolErrorInProgressText,
@@ -193,5 +194,86 @@ describe('createTurnInterimUsageTracker (multi-engine live streaming usage)', ()
 		assert.equal(real.toolErrorCount, 3);
 		assert.equal(emitted[emitted.length - 1].hadToolError, true);
 		assert.equal(emitted[emitted.length - 1].toolErrorCount, 3);
+	});
+
+	test('createMultiStepTurnUsageAccumulator sums distinct assistant tool-loop steps while deduplicating progressive same-step updates', () => {
+		const acc = createMultiStepTurnUsageAccumulator();
+		// Step 1 streams progressive update then final update for msg_1
+		acc.recordStep('msg_1', {
+			inputTokens: 1200,
+			outputTokens: 80,
+			cacheReadTokens: 500,
+			cacheWriteTokens: 100,
+			totalTokens: 1880,
+			costUsd: 0.004,
+			model: 'claude-sonnet-4-6',
+			estimated: false,
+		});
+		const afterStep1Final = acc.recordStep('msg_1', {
+			inputTokens: 1200,
+			outputTokens: 200,
+			cacheReadTokens: 500,
+			cacheWriteTokens: 100,
+			totalTokens: 2000,
+			costUsd: 0.006,
+			model: 'claude-sonnet-4-6',
+			estimated: false,
+		});
+		assert.equal(acc.stepCount, 1);
+		assert.equal(afterStep1Final.outputTokens, 200);
+
+		// Step 2 (after tool execution) has its own per-call usage
+		const afterStep2 = acc.recordStep('msg_2', {
+			inputTokens: 1500,
+			outputTokens: 350,
+			cacheReadTokens: 1600,
+			cacheWriteTokens: 50,
+			totalTokens: 3500,
+			costUsd: 0.009,
+			model: 'claude-sonnet-4-6',
+			estimated: false,
+		});
+		assert.equal(acc.stepCount, 2);
+		assert.deepEqual(afterStep2, {
+			inputTokens: 2700,
+			outputTokens: 550,
+			cacheReadTokens: 2100,
+			cacheWriteTokens: 150,
+			totalTokens: 5500,
+			costUsd: 0.015,
+			model: 'claude-sonnet-4-6',
+			estimated: false,
+		});
+	});
+
+	test('subtracts cumulative baseline outputTokens and costUsd even when inputTokens dips after context compaction', () => {
+		const preCompactionBaseline: EngineTurnTokenUsage = {
+			inputTokens: 80_000,
+			outputTokens: 12_000,
+			cacheReadTokens: 40_000,
+			cacheWriteTokens: 5_000,
+			totalTokens: 137_000,
+			costUsd: 0.42,
+			estimated: false,
+		};
+		const tracker = createTurnInterimUsageTracker('Post-compaction turn', undefined, {
+			preTurnBaseline: preCompactionBaseline,
+			throttleMs: 0,
+		});
+
+		// After auto-compaction, current prompt inputTokens drops from 80k -> 9k, while cumulative thread outputTokens & costUsd continue growing monotonically!
+		const delta = tracker.recordRealUsage({
+			inputTokens: 9_000,
+			outputTokens: 12_600,
+			cacheReadTokens: 2_000,
+			cacheWriteTokens: 500,
+			totalTokens: 24_100,
+			costUsd: 0.45,
+			estimated: false,
+		}, { cumulativeAcrossThread: true });
+
+		assert.equal(delta.inputTokens, 9_000);
+		assert.equal(delta.outputTokens, 600, 'Must subtract 12,000 baseline outputTokens instead of charging 12,600');
+		assert.equal(delta.costUsd, 0.03, 'Must subtract $0.42 baseline costUsd instead of re-charging historical cost');
 	});
 });

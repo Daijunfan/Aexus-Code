@@ -16,6 +16,7 @@
 import {
 	IMissionDagParseResult,
 	IMissionNodeCheckHook,
+	IMissionTaskCompletionContract,
 	MissionDagDirection,
 	MissionDagEdgeKind,
 	parseMissionMermaidDag,
@@ -28,6 +29,7 @@ import {
 	OrchestrationDirection,
 	OrchestrationLayoutMode,
 	parseOrchestrationGraph,
+	sanitizeMermaidId,
 	serializeOrchestrationGraph,
 } from './adeOrchestrationGraph.js';
 import { normalizeAdeNodeColor } from './adeNodeColors.js';
@@ -88,6 +90,7 @@ export interface IAdeOrchestrationManifestTaskNode {
 	readonly minCompleterTier?: number;
 	readonly allowedCompleterNodeIds?: readonly string[];
 	readonly checks?: readonly IMissionNodeCheckHook[];
+	readonly completionContract?: IMissionTaskCompletionContract;
 	readonly color?: string;
 }
 
@@ -216,6 +219,18 @@ function buildTaskMermaidFromManifest(tasks: IAdeOrchestrationManifestTasks): st
 		if (node.minCompleterTier !== undefined) { metaParts.push(`min_tier=${node.minCompleterTier}`); }
 		if (node.allowedCompleterNodeIds && node.allowedCompleterNodeIds.length > 0) {
 			metaParts.push(`completers=${formatTaskMetaValue(node.allowedCompleterNodeIds.join('|'))}`);
+		}
+		const cc = node.completionContract;
+		if (cc) {
+			if (cc.requireChecksPassed) { metaParts.push('require_checks=true'); }
+			if (cc.requireArtifact) { metaParts.push('require_artifact=true'); }
+			if (cc.requireFiles) { metaParts.push('require_files=true'); }
+			if (cc.requiredWhiteboardIds && cc.requiredWhiteboardIds.length > 0) {
+				metaParts.push(`require_wb=${formatTaskMetaValue(cc.requiredWhiteboardIds.join('|'))}`);
+			}
+			if (cc.minSummaryChars !== undefined && cc.minSummaryChars > 0) {
+				metaParts.push(`min_summary=${Math.min(2000, Math.round(cc.minSummaryChars))}`);
+			}
 		}
 		const taskColor = normalizeAdeNodeColor(node.color);
 		if (taskColor) { metaParts.push(`color=${formatTaskMetaValue(taskColor)}`); }
@@ -474,9 +489,65 @@ export function validateOrchestrationManifest(raw: unknown): IAdeOrchestrationMa
 					const allowedCompleterNodeIds = Array.isArray(rec.allowedCompleterNodeIds)
 						? rec.allowedCompleterNodeIds.filter((s): s is string => typeof s === 'string' && s.trim().length > 0).map(s => s.trim())
 						: undefined;
+					if (allowedCompleterNodeIds) {
+						for (const cid of allowedCompleterNodeIds) {
+							if (!staffIds.has(cid)) {
+								warnings.push(`tasks.nodes[${idx}].allowedCompleterNodeIds "${cid}" does not match any staff node in this manifest.`);
+							}
+						}
+					}
+					let minCompleterTier: number | undefined;
+					if (rec.minCompleterTier !== undefined) {
+						if (typeof rec.minCompleterTier === 'number' && Number.isInteger(rec.minCompleterTier) && rec.minCompleterTier >= 0) {
+							minCompleterTier = rec.minCompleterTier;
+						} else {
+							errors.push(`tasks.nodes[${idx}].minCompleterTier must be a non-negative integer.`);
+						}
+					}
 					const checks = Array.isArray(rec.checks)
 						? rec.checks.map((c, cIdx) => sanitizeCheckHook(c, id, cIdx, errors, `tasks.nodes[${idx}].checks`)).filter((c): c is IMissionNodeCheckHook => Boolean(c))
 						: undefined;
+					let completionContract: IMissionTaskCompletionContract | undefined;
+					if (rec.completionContract !== undefined) {
+						if (!rec.completionContract || typeof rec.completionContract !== 'object' || Array.isArray(rec.completionContract)) {
+							errors.push(`tasks.nodes[${idx}].completionContract must be an object.`);
+						} else {
+							const ccRec = rec.completionContract as Record<string, unknown>;
+							const requireChecksPassed = ccRec.requireChecksPassed === true ? true : undefined;
+							const requireArtifact = ccRec.requireArtifact === true ? true : undefined;
+							const requireFiles = ccRec.requireFiles === true ? true : undefined;
+							let requiredWhiteboardIds: string[] | undefined;
+							if (ccRec.requiredWhiteboardIds !== undefined) {
+								if (!Array.isArray(ccRec.requiredWhiteboardIds)) {
+									errors.push(`tasks.nodes[${idx}].completionContract.requiredWhiteboardIds must be an array of strings.`);
+								} else {
+									requiredWhiteboardIds = [...new Set(
+										ccRec.requiredWhiteboardIds
+											.filter((w): w is string => typeof w === 'string' && w.trim().length > 0)
+											.map(w => w.trim().replace(/^wb:/i, ''))
+											.filter(Boolean),
+									)];
+								}
+							}
+							let minSummaryChars: number | undefined;
+							if (ccRec.minSummaryChars !== undefined) {
+								if (typeof ccRec.minSummaryChars === 'number' && Number.isInteger(ccRec.minSummaryChars) && ccRec.minSummaryChars >= 1 && ccRec.minSummaryChars <= 2000) {
+									minSummaryChars = ccRec.minSummaryChars;
+								} else {
+									errors.push(`tasks.nodes[${idx}].completionContract.minSummaryChars must be an integer between 1 and 2000.`);
+								}
+							}
+							if (requireChecksPassed || requireArtifact || requireFiles || (requiredWhiteboardIds && requiredWhiteboardIds.length > 0) || minSummaryChars !== undefined) {
+								completionContract = {
+									...(requireChecksPassed ? { requireChecksPassed: true } : {}),
+									...(requireArtifact ? { requireArtifact: true } : {}),
+									...(requireFiles ? { requireFiles: true } : {}),
+									...(requiredWhiteboardIds && requiredWhiteboardIds.length > 0 ? { requiredWhiteboardIds } : {}),
+									...(minSummaryChars !== undefined ? { minSummaryChars } : {}),
+								};
+							}
+						}
+					}
 					taskNodes.push({
 						id,
 						title: title || id,
@@ -485,9 +556,10 @@ export function validateOrchestrationManifest(raw: unknown): IAdeOrchestrationMa
 						...(ownerNodeId ? { ownerNodeId } : {}),
 						...(assigneeNodeId ? { assigneeNodeId } : {}),
 						...(typeof rec.department === 'string' && rec.department.trim() ? { department: rec.department.trim() } : {}),
-						...(typeof rec.minCompleterTier === 'number' && Number.isInteger(rec.minCompleterTier) && rec.minCompleterTier >= 0 ? { minCompleterTier: rec.minCompleterTier } : {}),
+						...(minCompleterTier !== undefined ? { minCompleterTier } : {}),
 						...(allowedCompleterNodeIds && allowedCompleterNodeIds.length > 0 ? { allowedCompleterNodeIds } : {}),
 						...(checks && checks.length > 0 ? { checks } : {}),
+						...(completionContract ? { completionContract } : {}),
 						...(typeof rec.color === 'string' && normalizeAdeNodeColor(rec.color) ? { color: normalizeAdeNodeColor(rec.color) } : {}),
 					});
 				});
@@ -505,6 +577,10 @@ export function validateOrchestrationManifest(raw: unknown): IAdeOrchestrationMa
 					const to = typeof rec.to === 'string' ? rec.to.trim() : '';
 					if (!from || !to) {
 						errors.push(`tasks.edges[${idx}] requires "from" and "to".`);
+						return;
+					}
+					if (from === to) {
+						errors.push(`tasks.edges[${idx}] self-loop "${from} -> ${to}" is forbidden in an acyclic task DAG.`);
 						return;
 					}
 					if (!taskIds.has(from) || !taskIds.has(to)) {
@@ -655,7 +731,7 @@ export function compileOrchestrationManifest(manifest: IAdeOrchestrationManifest
 	}
 
 	const departments: IOrchestrationDepartmentGroup[] = (manifest.departments ?? []).map(d => ({
-		id: d.id?.trim() || d.name.trim().replace(/[^A-Za-z0-9_-]+/g, '_'),
+		id: d.id?.trim() ? sanitizeMermaidId(d.id.trim(), 'Dept') : sanitizeMermaidId(d.name.trim(), 'Dept'),
 		name: d.name.trim(),
 		nodeIds: [],
 		whiteboardIds: [],
@@ -684,7 +760,10 @@ export function compileOrchestrationManifest(manifest: IAdeOrchestrationManifest
 				nodePrompts[tn.id] = tn.description.trim();
 			}
 			if (tn.checks && tn.checks.length > 0) {
-				nodeChecks[tn.id] = tn.checks;
+				const existingStaff = staffChecks[tn.id];
+				nodeChecks[tn.id] = existingStaff && existingStaff.length > 0
+					? [...existingStaff, ...tn.checks]
+					: tn.checks;
 			}
 		}
 	}
@@ -834,6 +913,7 @@ export function exportToOrchestrationManifest(input: {
 					...(n.minCompleterTier !== undefined ? { minCompleterTier: n.minCompleterTier } : {}),
 					...(n.allowedCompleterNodeIds && n.allowedCompleterNodeIds.length > 0 ? { allowedCompleterNodeIds: n.allowedCompleterNodeIds } : {}),
 					...(input.nodeChecks?.[n.id]?.length || n.checks?.length ? { checks: input.nodeChecks?.[n.id] ?? n.checks } : {}),
+					...(n.completionContract ? { completionContract: n.completionContract } : {}),
 					...(n.color ? { color: n.color } : {}),
 				})),
 				...(parsedTasks.edges.length > 0

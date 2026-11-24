@@ -3,19 +3,24 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { spawn } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
-import * as path from '../../../base/common/path.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
-import { isWindows } from '../../../base/common/platform.js';
+import * as path from '../../../base/common/path.js';
+import { URI } from '../../../base/common/uri.js';
 import { ADE_API_LATEST_REVISION } from '../common/adeApiRegistry.js';
-import { stripAdeControlEnv } from '../common/adeControl.js';
-import { buildAdeDocsPaths, IAdeDocsPaths, normalizeAdeDocTargetKey } from '../common/adeDocsCatalog.js';
+import type { IAdeCloudHostBackendService } from '../common/adeCloudHosts.js';
+import {
+	isExplicitMissionMemberOrSupervisor,
+	resolveMergedNodeCheckHooks,
+	stripForeignWhiteboardBodiesFromOrchestrationText,
+} from '../common/adeControlPolicy.js';
+import { buildAdeDocsBundle, buildAdeDocsPaths, IAdeDocsPaths, normalizeAdeDocTargetKey } from '../common/adeDocsCatalog.js';
 import {
 	ADE_INBOX_FILE_NAME,
+	buildAdeRemotePersistentPrefix,
 	encodeAdeMissionStorageFileName,
 	IAdeApiDocReadResult,
 	IAdeDeterministicCheckRequest,
@@ -24,171 +29,56 @@ import {
 	IAdeHeadlessControlResult,
 	IAdeInboxItem,
 	IAdeInboxMutation,
+	IAdeMissionCheckpointMeta,
 	IAdeMissionColdChangeEvent,
 	IAdeMissionWatchdogSnapshot,
 	IAdeOrchestrationDaemonMissionSnapshot,
 	IAdeSourceTriggerFireEvent,
+	IAdeWatchdogBarrierSpec,
 	IAdeWatchdogWakeupEvent,
 } from '../common/adeEngineering.js';
-import { parseMissionMermaidDag } from '../common/adeMissionDag.js';
-import { parseDurationMs } from '../common/adeMissionEngine.js';
+import { IMissionNodeCheckHook, parseMissionMermaidDag } from '../common/adeMissionDag.js';
+import { IMissionSourceTrigger } from '../common/adeMissionEngine.js';
 import {
-	abortOrchestrationTokens,
-	blockOrchestrationToken,
 	canCallerAccessWhiteboard,
-	completeOrchestrationToken,
-	failOrchestrationToken,
-	handoffOrchestrationToken,
-	IOrchestrationContextBlobInput,
-	IOrchestrationMintBranch,
+	IMissionTaskStatusRecord,
 	IOrchestrationRuntimeState,
 	IOrchestrationWhiteboard,
-	mintOrchestrationTokens,
-	MissionTaskStatus,
-	mutateDepartmentWhiteboard,
 	ORCHESTRATION_SILENCE_REMINDER_MINUTES,
 	OrchestrationEngineEffect,
-	pauseOrchestration,
-	resumeOrchestration,
-	returnOrchestrationToken,
+	recordOrchestrationSilenceReminder,
 	syncMissionTaskStatusesFromOrchestration,
-	updateMissionTaskNodeStatus,
+	wakeBlockedOrchestrationToken,
 } from '../common/adeOrchestrationEngine.js';
-import { parseOrchestrationGraph, upsertOrchestrationWhiteboardInCode } from '../common/adeOrchestrationGraph.js';
+import { expireOrchestrationJoinBarrier } from '../common/adeOrchestrationLifecycle.js';
+import { IOrchestrationGraphParseResult, parseOrchestrationGraph } from '../common/adeOrchestrationGraph.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, IAdeOrganizationConfig } from '../common/adeRoleSchema.js';
+import { executeAdeDeterministicCheck } from './adeDeterministicCheckRunner.js';
 import { syncAdeApiDocsToDisk } from './adeDocsSync.js';
+import { executeHeadlessMissionMutationAction } from './adeHeadlessControlMutationActions.js';
+import {
+	canHeadlessCallerOperateMission,
+	checkHeadlessMissionRbac,
+	HEADLESS_MUTATING_MISSION_ACTIONS,
+	HEADLESS_SUPPORTED_ACTIONS,
+	IAdeHeadlessBackendHost,
+	IAdeParsedMissionIndexEntry,
+	IHeadlessMissionScopeContext,
+	resolveHeadlessCaller,
+	resolveHeadlessMissionId,
+	tryExecuteHeadlessGlobalAction,
+	tryExecuteHeadlessMissionReadAction,
+} from './adeHeadlessControlReadActions.js';
 import { AdeMissionWatchdogService, IAdeRemoteWatchdogProbe } from './adeMissionWatchdogService.js';
 
-const MAX_CHECK_MEMORY_BYTES = 64 * 1024;
-const MAX_CHECK_TAIL_CHARS = 2_400;
-
-function appendTailBuffer(prev: string, chunk: string, maxChars: number): string {
-	const next = prev + chunk;
-	if (next.length <= maxChars) {
-		return next;
-	}
-	return next.slice(next.length - maxChars);
-}
-
-function formatBoundedOutputTail(raw: string, maxChars = MAX_CHECK_TAIL_CHARS): string {
-	const trimmed = raw.trim();
-	if (trimmed.length <= maxChars) {
-		return trimmed;
-	}
-	const tail = trimmed.slice(trimmed.length - maxChars);
-	const newlineIdx = tail.indexOf('\n');
-	const aligned = newlineIdx >= 0 && newlineIdx < 160 ? tail.slice(newlineIdx + 1) : tail;
-	return `…[truncated ${trimmed.length - aligned.length} chars]\n${aligned}`;
-}
-
-function matchesExpectedOutput(output: string, pattern: string): boolean {
-	const trimmed = pattern.trim();
-	if (!trimmed) {
-		return true;
-	}
-	const regexLiteral = /^\/(.+)\/([a-z]*)$/.exec(trimmed);
-	if (regexLiteral) {
-		try {
-			const re = new RegExp(regexLiteral[1], regexLiteral[2]);
-			return re.test(output);
-		} catch {
-			return output.includes(trimmed);
-		}
-	}
-	return output.includes(trimmed);
-}
-
-function runLocalDeterministicShell(
-	command: string,
-	cwd: string | undefined,
-	timeoutMs: number,
-): Promise<{ readonly exitCode: number; readonly output: string; readonly timedOut: boolean; readonly durationMs: number; readonly error?: string }> {
-	const startedAt = Date.now();
-	return new Promise(resolve => {
-		const shell = isWindows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
-		const shellArgs = isWindows ? ['/d', '/s', '/c', command] : ['-c', command];
-		let child;
-		try {
-			child = spawn(shell, shellArgs, {
-				cwd: cwd || undefined,
-				windowsHide: true,
-				detached: !isWindows,
-				stdio: ['ignore', 'pipe', 'pipe'],
-				env: stripAdeControlEnv(process.env),
-			});
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			resolve({ exitCode: 1, output: msg, timedOut: false, durationMs: Math.max(0, Date.now() - startedAt), error: msg });
-			return;
-		}
-
-		let combined = '';
-		let settled = false;
-		let timedOut = false;
-
-		const killTree = () => {
-			if (!child.pid) {
-				return;
-			}
-			try {
-				if (!isWindows) {
-					process.kill(-child.pid, 'SIGKILL');
-				} else {
-					child.kill('SIGKILL');
-				}
-			} catch {
-				try { child.kill('SIGKILL'); } catch { /* already exited */ }
-			}
-		};
-
-		const timer = setTimeout(() => {
-			if (!settled) {
-				timedOut = true;
-				killTree();
-			}
-		}, timeoutMs);
-
-		const onChunk = (buf: Buffer | string) => {
-			const text = typeof buf === 'string' ? buf : buf.toString('utf8');
-			combined = appendTailBuffer(combined, text, MAX_CHECK_MEMORY_BYTES);
-		};
-		child.stdout?.on('data', onChunk);
-		child.stderr?.on('data', onChunk);
-
-		child.once('error', err => {
-			if (!settled) {
-				settled = true;
-				clearTimeout(timer);
-				const msg = err instanceof Error ? err.message : String(err);
-				resolve({
-					exitCode: timedOut ? 124 : 1,
-					output: combined || msg,
-					timedOut,
-					durationMs: Math.max(0, Date.now() - startedAt),
-					error: msg,
-				});
-			}
-		});
-
-		child.once('close', code => {
-			if (!settled) {
-				settled = true;
-				clearTimeout(timer);
-				resolve({
-					exitCode: timedOut ? 124 : (typeof code === 'number' ? code : 1),
-					output: combined,
-					timedOut,
-					durationMs: Math.max(0, Date.now() - startedAt),
-					...(timedOut ? { error: `Deterministic check timed out after ${timeoutMs}ms` } : {}),
-				});
-			}
-		});
-	});
-}
+const MAX_CHECKPOINTS_PER_MISSION = 20;
+const MAX_REVOKED_SESSION_ENTRIES = 4_096;
 
 export interface IAdeDocsBackendNodeServiceOptions {
 	readonly baseDir?: string;
 	readonly remoteProbe?: IAdeRemoteWatchdogProbe;
+	readonly cloudHostService?: IAdeCloudHostBackendService;
+	readonly onRevokeSession?: (sessionId: string, revokedAt: number) => void;
 	readonly watchdogPollIntervalMs?: number;
 }
 
@@ -197,17 +87,33 @@ export interface IAdeDocsBackendNodeServiceOptions {
  * 1) Single-copy ADE API docs synchronization & lazy read (`<adeHome>/docs/`)
  * 2) ADE Inbox JSON persistence (`<adeHome>/inbox.json`)
  * 3) Local Mission Watchdog Daemon & zero-token Source Trigger Monitor
+ * 4) Cold per-Mission storage with O(1) parsed metadata index, checkpoints ring-buffer, and revision CAS
+ * 5) 0-window headless Orchestration control continuity
  */
-export class AdeDocsBackendNodeService extends Disposable implements IAdeEngineeringBackendService {
+export class AdeDocsBackendNodeService extends Disposable implements IAdeEngineeringBackendService, IAdeHeadlessBackendHost {
 	declare readonly _serviceBrand: undefined;
 
-	private readonly baseDir: string;
+	readonly baseDir: string;
+	readonly cloudHostService?: IAdeCloudHostBackendService;
 	private readonly watchdog: AdeMissionWatchdogService;
 	private readonly remoteProbe?: IAdeRemoteWatchdogProbe;
+	private readonly onRevokeSession?: (sessionId: string, revokedAt: number) => void;
 	private cachedOrgConfig: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG;
 	private orgConfigCacheLoaded = false;
+	private orgConfigWriteChain: Promise<void> = Promise.resolve();
 	private inboxWriteChain: Promise<void> = Promise.resolve();
+	private daemonWriteChain: Promise<void> = Promise.resolve();
+	private daemonStateCache: Record<string, IAdeOrchestrationDaemonMissionSnapshot> | undefined;
+	private daemonStateDirty = false;
 	private readonly missionWriteChains = new Map<string, Promise<void>>();
+	private readonly checkpointWriteChains = new Map<string, Promise<void>>();
+	private readonly missionFileCache = new Map<string, { readonly mtimeMs: number; readonly size: number; readonly id: string; readonly raw: string }>();
+	private readonly parsedMissionIndex = new Map<string, IAdeParsedMissionIndexEntry>();
+	private readonly headlessOrchestrationMissionIds = new Set<string>();
+	private readonly revokedSessionCutoffs = new Map<string, number>();
+	private readonly liveRendererContexts = new Set<string>();
+	private headlessWatchdogQueue: Promise<void> = Promise.resolve();
+	private activeRendererWindowCount = 0;
 	private inboxTmpSeq = 0;
 
 	private readonly _onDidInboxChange = this._register(new Emitter<readonly IAdeInboxItem[]>());
@@ -227,6 +133,8 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		const envHome = process.env.AEXUS_ADE_HOME?.trim();
 		this.baseDir = options?.baseDir || envHome || path.join(os.homedir(), '.aexus-code');
 		this.remoteProbe = options?.remoteProbe;
+		this.cloudHostService = options?.cloudHostService;
+		this.onRevokeSession = options?.onRevokeSession;
 		this.watchdog = this._register(new AdeMissionWatchdogService({
 			remoteProbe: options?.remoteProbe,
 			pollIntervalMs: options?.watchdogPollIntervalMs,
@@ -235,6 +143,69 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		}));
 		this.onDidWatchdogWakeup = this.watchdog.onDidWatchdogWakeup;
 		this.onDidSourceTriggerFire = this.watchdog.onDidSourceTriggerFire;
+		this._register(this.watchdog.onDidWatchdogWakeup(ev => {
+			if (this.activeRendererWindowCount === 0 && !this._store.isDisposed) {
+				const op = () => this.processHeadlessWatchdogWakeup(ev).then(() => undefined, () => undefined);
+				this.headlessWatchdogQueue = this.headlessWatchdogQueue.then(op, op);
+			}
+		}));
+	}
+
+	nextTmpSeq(): number {
+		return ++this.inboxTmpSeq;
+	}
+
+	setActiveRendererWindowCount(count: number): void {
+		this.activeRendererWindowCount = Math.max(0, Math.floor(count));
+		if (this.activeRendererWindowCount === 0) {
+			this.liveRendererContexts.clear();
+		}
+	}
+
+	registerLiveRendererContext(ctx: string): void {
+		const trimmed = ctx.trim();
+		if (trimmed) {
+			this.liveRendererContexts.add(trimmed);
+		}
+	}
+
+	unregisterLiveRendererContext(ctx: string): void {
+		this.liveRendererContexts.delete(ctx.trim());
+	}
+
+	willHandleWatchdogWakeupHeadlessly(ev: IAdeWatchdogWakeupEvent): boolean {
+		return this.activeRendererWindowCount === 0 && this.headlessOrchestrationMissionIds.has(ev.missionId);
+	}
+
+	getCachedOrgConfig(): IAdeOrganizationConfig {
+		return this.cachedOrgConfig;
+	}
+
+	isSessionRevoked(sessionId: string, tokenIat?: number): boolean {
+		const cutoff = this.revokedSessionCutoffs.get(sessionId.trim());
+		return cutoff !== undefined && (tokenIat === undefined || tokenIat <= cutoff);
+	}
+
+	async revokeSession(sessionId: string, revokedAt?: number, options?: { readonly skipNotify?: boolean }): Promise<void> {
+		const sid = sessionId.trim();
+		if (!sid) {
+			return;
+		}
+		const prev = this.revokedSessionCutoffs.get(sid) ?? -1;
+		const now = Date.now();
+		const cutoff = revokedAt !== undefined ? Math.max(prev, revokedAt) : Math.max(prev, now);
+		this.revokedSessionCutoffs.set(sid, cutoff);
+		if (this.revokedSessionCutoffs.size > MAX_REVOKED_SESSION_ENTRIES) {
+			const expiry = now - 24 * 60 * 60 * 1000;
+			for (const [k, ts] of this.revokedSessionCutoffs) {
+				if (ts < expiry) {
+					this.revokedSessionCutoffs.delete(k);
+				}
+			}
+		}
+		if (!options?.skipNotify) {
+			this.onRevokeSession?.(sid, cutoff);
+		}
 	}
 
 	private get inboxPath(): string {
@@ -320,6 +291,10 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		return this.missionFilePath(missionId).replace(/\.json$/i, '.blobs');
 	}
 
+	private missionCheckpointsDir(missionId: string): string {
+		return this.missionFilePath(missionId).replace(/\.json$/i, '.checkpoints');
+	}
+
 	private missionArchivePath(missionId: string): string {
 		return this.missionFilePath(missionId).replace(/\.json$/i, '.archive.jsonl');
 	}
@@ -328,25 +303,127 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		return path.join(this.baseDir, 'orchestration-daemon.json');
 	}
 
-	private sanitizeBlobPtrFileName(ptr: string): string | undefined {
-		const trimmed = ptr.trim();
+	private sanitizeSafeIdFileName(raw: string): string | undefined {
+		const trimmed = raw.trim();
 		if (!trimmed || !/^[A-Za-z0-9_.-]{1,96}$/.test(trimmed) || trimmed.includes('..')) {
 			return undefined;
 		}
 		return `${trimmed}.json`;
 	}
 
-	private enqueueMissionFileOp(missionId: string, op: () => Promise<void>): Promise<void> {
-		const prev = this.missionWriteChains.get(missionId) ?? Promise.resolve();
+	private updateParsedIndexFromRaw(missionId: string, raw: string, mtimeMs: number, size: number): void {
+		try {
+			const rec = JSON.parse(raw) as Record<string, unknown>;
+			if (!rec || typeof rec !== 'object') {
+				return;
+			}
+			const id = typeof rec.id === 'string' && rec.id.trim() ? rec.id.trim() : missionId;
+			const orch = rec.orchestrationRuntime as IOrchestrationRuntimeState | undefined;
+			const tokens = Object.values(orch?.tokens ?? {});
+			const legacyBoundary = (rec.runtime as {
+				readonly boundary?: {
+					readonly supervisors?: ReadonlyArray<{ readonly id: string }>;
+					readonly nodeAssignments?: Readonly<Record<string, { readonly agentId?: string }>>;
+				};
+			} | undefined)?.boundary;
+			const supervisorIds = legacyBoundary?.supervisors?.map(s => s.id).filter(Boolean) ?? [];
+			const nodeAssignmentAgentIds = Object.values(legacyBoundary?.nodeAssignments ?? {})
+				.map(a => a?.agentId)
+				.filter((aid): aid is string => Boolean(aid));
+			this.parsedMissionIndex.set(id, {
+				id,
+				title: typeof rec.title === 'string' && rec.title.trim() ? rec.title.trim() : id,
+				...(typeof rec.ownerSessionId === 'string' && rec.ownerSessionId.trim() ? { ownerSessionId: rec.ownerSessionId.trim() } : {}),
+				...(typeof rec.ownerTier === 'number' && Number.isFinite(rec.ownerTier) ? { ownerTier: Math.floor(rec.ownerTier) } : {}),
+				...(typeof rec.projectUri === 'string' && rec.projectUri.trim() ? { projectUri: rec.projectUri.trim() } : {}),
+				updatedAt: typeof rec.updatedAt === 'number' ? rec.updatedAt : 0,
+				...(orch?.status ? { orchStatus: orch.status } : {}),
+				activeTokenCount: tokens.filter(t => t.status === 'active').length,
+				nodeAgentIds: orch?.nodeAgentIds ?? {},
+				tokenIds: new Set(Object.keys(orch?.tokens ?? {})),
+				tracePtrs: new Set(Object.keys(orch?.traces ?? {})),
+				supervisorIds,
+				nodeAssignmentAgentIds,
+				mtimeMs,
+				size,
+			});
+		} catch {
+			// Skip malformed record
+		}
+	}
+
+	withMissionLock<T>(missionId: string, op: () => Promise<T>): Promise<T> {
+		const key = missionId.trim();
+		const prev = this.missionWriteChains.get(key) ?? Promise.resolve();
 		const next = prev.then(op, op);
 		const settled = next.then(() => undefined, () => undefined);
-		this.missionWriteChains.set(missionId, settled);
+		this.missionWriteChains.set(key, settled);
 		void settled.finally(() => {
-			if (this.missionWriteChains.get(missionId) === settled) {
-				this.missionWriteChains.delete(missionId);
+			if (this.missionWriteChains.get(key) === settled) {
+				this.missionWriteChains.delete(key);
 			}
 		});
 		return next;
+	}
+
+	async saveMissionRecordUnlocked(
+		missionId: string,
+		payloadJson: string,
+		updatedAt: number,
+		writerId?: string,
+		expectedRevision?: number,
+	): Promise<void> {
+		const trimmed = missionId.trim();
+		if (!trimmed || this._store.isDisposed) {
+			return;
+		}
+		if (expectedRevision !== undefined && Number.isFinite(expectedRevision)) {
+			const existingRaw = await this.loadMissionRecord(trimmed);
+			if (existingRaw) {
+				try {
+					const existingParsed = JSON.parse(existingRaw) as { orchestrationRuntime?: { stateRevision?: number } };
+					const onDiskRev = existingParsed?.orchestrationRuntime?.stateRevision;
+					if (typeof onDiskRev === 'number' && Number.isFinite(onDiskRev) && onDiskRev > expectedRevision) {
+						throw new Error(`REVISION_CONFLICT: Mission "${trimmed}" on disk is at stateRevision ${onDiskRev}, expected <= ${expectedRevision}.`);
+					}
+				} catch (err) {
+					if (err instanceof Error && err.message.startsWith('REVISION_CONFLICT:')) {
+						throw err;
+					}
+				}
+			}
+		}
+		await fs.promises.mkdir(this.missionsDir, { recursive: true, mode: 0o700 });
+		if (this._store.isDisposed) {
+			return;
+		}
+		const target = this.missionFilePath(trimmed);
+		const uniqueSuffix = `${process.pid}.${Date.now()}.${++this.inboxTmpSeq}.${crypto.randomBytes(6).toString('hex')}`;
+		const tmp = `${target}.tmp.${uniqueSuffix}`;
+		try {
+			await fs.promises.writeFile(tmp, payloadJson, { encoding: 'utf8', mode: 0o600 });
+			if (this._store.isDisposed) {
+				await fs.promises.unlink(tmp).catch(() => undefined);
+				return;
+			}
+			await fs.promises.rename(tmp, target);
+			try {
+				const st = await fs.promises.stat(target);
+				this.missionFileCache.set(target, { mtimeMs: st.mtimeMs, size: st.size, id: trimmed, raw: payloadJson });
+				this.updateParsedIndexFromRaw(trimmed, payloadJson, st.mtimeMs, st.size);
+			} catch {
+				this.missionFileCache.delete(target);
+				this.parsedMissionIndex.delete(trimmed);
+			}
+		} catch (err) {
+			await fs.promises.unlink(tmp).catch(() => undefined);
+			throw err;
+		}
+		this._onDidMissionRecordChange.fire({
+			missionId: trimmed,
+			updatedAt,
+			...(writerId ? { writerId } : {}),
+		});
 	}
 
 	async loadMissionRecord(missionId: string): Promise<string | undefined> {
@@ -354,11 +431,77 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		if (!trimmed) {
 			return undefined;
 		}
+		const targetPath = this.missionFilePath(trimmed);
 		try {
-			return await fs.promises.readFile(this.missionFilePath(trimmed), 'utf8');
+			const st = await fs.promises.stat(targetPath);
+			const cached = this.missionFileCache.get(targetPath);
+			if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+				if (!this.parsedMissionIndex.has(trimmed)) {
+					this.updateParsedIndexFromRaw(trimmed, cached.raw, st.mtimeMs, st.size);
+				}
+				return cached.raw;
+			}
+			const raw = await fs.promises.readFile(targetPath, 'utf8');
+			this.missionFileCache.set(targetPath, { mtimeMs: st.mtimeMs, size: st.size, id: trimmed, raw });
+			this.updateParsedIndexFromRaw(trimmed, raw, st.mtimeMs, st.size);
+			return raw;
 		} catch {
+			this.missionFileCache.delete(targetPath);
+			this.parsedMissionIndex.delete(trimmed);
 			return undefined;
 		}
+	}
+
+	async getParsedMissionIndex(): Promise<ReadonlyMap<string, IAdeParsedMissionIndexEntry>> {
+		let entries: string[];
+		try {
+			entries = await fs.promises.readdir(this.missionsDir);
+		} catch {
+			this.parsedMissionIndex.clear();
+			return this.parsedMissionIndex;
+		}
+		const seenIds = new Set<string>();
+		const seenPaths = new Set<string>();
+		await Promise.all(entries.map(async name => {
+			if (!name.endsWith('.json') || name.includes('.tmp.')) {
+				return;
+			}
+			const fullPath = path.join(this.missionsDir, name);
+			seenPaths.add(fullPath);
+			try {
+				const st = await fs.promises.stat(fullPath);
+				const cached = this.missionFileCache.get(fullPath);
+				if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+					seenIds.add(cached.id);
+					const existingIdx = this.parsedMissionIndex.get(cached.id);
+					if (!existingIdx || existingIdx.mtimeMs !== st.mtimeMs || existingIdx.size !== st.size) {
+						this.updateParsedIndexFromRaw(cached.id, cached.raw, st.mtimeMs, st.size);
+					}
+					return;
+				}
+				const raw = await fs.promises.readFile(fullPath, 'utf8');
+				const parsed = JSON.parse(raw) as { id?: unknown };
+				if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string' && parsed.id.trim()) {
+					const id = parsed.id.trim();
+					seenIds.add(id);
+					this.missionFileCache.set(fullPath, { mtimeMs: st.mtimeMs, size: st.size, id, raw });
+					this.updateParsedIndexFromRaw(id, raw, st.mtimeMs, st.size);
+				}
+			} catch {
+				// Skip corrupt file
+			}
+		}));
+		for (const cachedPath of this.missionFileCache.keys()) {
+			if (!seenPaths.has(cachedPath)) {
+				this.missionFileCache.delete(cachedPath);
+			}
+		}
+		for (const indexedId of this.parsedMissionIndex.keys()) {
+			if (!seenIds.has(indexedId)) {
+				this.parsedMissionIndex.delete(indexedId);
+			}
+		}
+		return this.parsedMissionIndex;
 	}
 
 	async loadAllMissionRecords(): Promise<Readonly<Record<string, string>>> {
@@ -369,46 +512,54 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		} catch {
 			return out;
 		}
+		const seenPaths = new Set<string>();
+		const seenIds = new Set<string>();
 		await Promise.all(entries.map(async name => {
 			if (!name.endsWith('.json') || name.includes('.tmp.')) {
 				return;
 			}
+			const fullPath = path.join(this.missionsDir, name);
+			seenPaths.add(fullPath);
 			try {
-				const raw = await fs.promises.readFile(path.join(this.missionsDir, name), 'utf8');
+				const st = await fs.promises.stat(fullPath);
+				const cached = this.missionFileCache.get(fullPath);
+				if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+					out[cached.id] = cached.raw;
+					seenIds.add(cached.id);
+					return;
+				}
+				const raw = await fs.promises.readFile(fullPath, 'utf8');
 				const parsed = JSON.parse(raw) as { id?: unknown };
 				if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string' && parsed.id.trim()) {
-					out[parsed.id.trim()] = raw;
+					const id = parsed.id.trim();
+					seenIds.add(id);
+					this.missionFileCache.set(fullPath, { mtimeMs: st.mtimeMs, size: st.size, id, raw });
+					this.updateParsedIndexFromRaw(id, raw, st.mtimeMs, st.size);
+					out[id] = raw;
 				}
 			} catch {
 				// Skip corrupt or half-written file cleanly
 			}
 		}));
+		for (const cachedPath of this.missionFileCache.keys()) {
+			if (!seenPaths.has(cachedPath)) {
+				this.missionFileCache.delete(cachedPath);
+			}
+		}
+		for (const indexedId of this.parsedMissionIndex.keys()) {
+			if (!seenIds.has(indexedId)) {
+				this.parsedMissionIndex.delete(indexedId);
+			}
+		}
 		return out;
 	}
 
-	async saveMissionRecord(missionId: string, payloadJson: string, updatedAt: number, writerId?: string): Promise<void> {
+	async saveMissionRecord(missionId: string, payloadJson: string, updatedAt: number, writerId?: string, expectedRevision?: number): Promise<void> {
 		const trimmed = missionId.trim();
 		if (!trimmed) {
 			return;
 		}
-		return this.enqueueMissionFileOp(trimmed, async () => {
-			await fs.promises.mkdir(this.missionsDir, { recursive: true, mode: 0o700 });
-			const target = this.missionFilePath(trimmed);
-			const uniqueSuffix = `${process.pid}.${Date.now()}.${++this.inboxTmpSeq}.${crypto.randomBytes(6).toString('hex')}`;
-			const tmp = `${target}.tmp.${uniqueSuffix}`;
-			try {
-				await fs.promises.writeFile(tmp, payloadJson, { encoding: 'utf8', mode: 0o600 });
-				await fs.promises.rename(tmp, target);
-			} catch (err) {
-				await fs.promises.unlink(tmp).catch(() => undefined);
-				throw err;
-			}
-			this._onDidMissionRecordChange.fire({
-				missionId: trimmed,
-				updatedAt,
-				...(writerId ? { writerId } : {}),
-			});
-		});
+		return this.withMissionLock(trimmed, () => this.saveMissionRecordUnlocked(trimmed, payloadJson, updatedAt, writerId, expectedRevision));
 	}
 
 	async deleteMissionRecord(missionId: string, writerId?: string): Promise<void> {
@@ -416,9 +567,13 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		if (!trimmed) {
 			return;
 		}
-		return this.enqueueMissionFileOp(trimmed, async () => {
+		return this.withMissionLock(trimmed, async () => {
+			this.headlessOrchestrationMissionIds.delete(trimmed);
+			this.missionFileCache.delete(this.missionFilePath(trimmed));
+			this.parsedMissionIndex.delete(trimmed);
 			await fs.promises.unlink(this.missionFilePath(trimmed)).catch(() => undefined);
 			await fs.promises.rm(this.missionBlobsDir(trimmed), { recursive: true, force: true }).catch(() => undefined);
+			await fs.promises.rm(this.missionCheckpointsDir(trimmed), { recursive: true, force: true }).catch(() => undefined);
 			await fs.promises.unlink(this.missionArchivePath(trimmed)).catch(() => undefined);
 			await this.removeOrchestrationDaemonEntry(trimmed).catch(() => undefined);
 			this._onDidMissionRecordChange.fire({
@@ -430,43 +585,162 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		});
 	}
 
-	async saveOrchestrationBlobs(missionId: string, blobs: readonly { readonly ptr: string; readonly payloadJson: string }[]): Promise<void> {
+	private withCheckpointLock<T>(missionId: string, fn: () => Promise<T>): Promise<T> {
+		const key = missionId.trim();
+		const prev = this.checkpointWriteChains.get(key) ?? Promise.resolve();
+		const next = prev.then(fn, fn);
+		const tail = next.then(() => undefined, () => undefined);
+		this.checkpointWriteChains.set(key, tail);
+		void tail.finally(() => {
+			if (this.checkpointWriteChains.get(key) === tail) {
+				this.checkpointWriteChains.delete(key);
+			}
+		});
+		return next;
+	}
+
+	async saveMissionCheckpoint(
+		missionId: string,
+		checkpointId: string,
+		payloadJson: string,
+		meta: IAdeMissionCheckpointMeta,
+	): Promise<void> {
 		const trimmed = missionId.trim();
-		if (!trimmed || blobs.length === 0) {
+		const fileName = this.sanitizeSafeIdFileName(checkpointId);
+		if (!trimmed || !fileName || this._store.isDisposed) {
 			return;
 		}
-		return this.enqueueMissionFileOp(trimmed, async () => {
-			const dir = this.missionBlobsDir(trimmed);
+		return this.withCheckpointLock(trimmed, async () => {
+			if (this._store.isDisposed) {
+				return;
+			}
+			const dir = this.missionCheckpointsDir(trimmed);
 			await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-			for (const item of blobs) {
-				const fileName = this.sanitizeBlobPtrFileName(item.ptr);
-				if (!fileName) {
-					continue;
-				}
-				const target = path.join(dir, fileName);
-				try {
-					// Content-addressed blobs are immutable; skip re-writing if already persisted on disk.
-					await fs.promises.access(target, fs.constants.F_OK);
-					continue;
-				} catch {
-					// Not present yet -> write atomically
-				}
-				const uniqueSuffix = `${process.pid}.${Date.now()}.${++this.inboxTmpSeq}.${crypto.randomBytes(4).toString('hex')}`;
-				const tmp = `${target}.tmp.${uniqueSuffix}`;
-				try {
-					await fs.promises.writeFile(tmp, item.payloadJson, { encoding: 'utf8', mode: 0o600 });
-					await fs.promises.rename(tmp, target);
-				} catch (err) {
-					await fs.promises.unlink(tmp).catch(() => undefined);
-					throw err;
+			const target = path.join(dir, fileName);
+			const tmp = `${target}.tmp.${process.pid}.${++this.inboxTmpSeq}.${crypto.randomBytes(4).toString('hex')}`;
+			try {
+				await fs.promises.writeFile(tmp, payloadJson, { encoding: 'utf8', mode: 0o600 });
+				await fs.promises.rename(tmp, target);
+			} catch (err) {
+				await fs.promises.unlink(tmp).catch(() => undefined);
+				throw err;
+			}
+			// Maintain bounded ring-buffer index (max 20 checkpoints per mission) under dedicated lock
+			const indexPath = path.join(dir, 'index.json');
+			const existing = await this.listMissionCheckpoints(trimmed);
+			const merged = [meta, ...existing.filter(m => m.id !== meta.id)]
+				.sort((a, b) => b.createdAt - a.createdAt || b.stateRevision - a.stateRevision);
+			const kept = merged.slice(0, MAX_CHECKPOINTS_PER_MISSION);
+			const evicted = merged.slice(MAX_CHECKPOINTS_PER_MISSION);
+			const idxTmp = `${indexPath}.tmp.${process.pid}.${++this.inboxTmpSeq}.${crypto.randomBytes(4).toString('hex')}`;
+			try {
+				await fs.promises.writeFile(idxTmp, JSON.stringify(kept, null, 2), { encoding: 'utf8', mode: 0o600 });
+				await fs.promises.rename(idxTmp, indexPath);
+			} catch {
+				await fs.promises.unlink(idxTmp).catch(() => undefined);
+			}
+			for (const old of evicted) {
+				const oldFile = this.sanitizeSafeIdFileName(old.id);
+				if (oldFile) {
+					await fs.promises.unlink(path.join(dir, oldFile)).catch(() => undefined);
 				}
 			}
 		});
 	}
 
+	async listMissionCheckpoints(missionId: string): Promise<readonly IAdeMissionCheckpointMeta[]> {
+		const trimmed = missionId.trim();
+		if (!trimmed) {
+			return [];
+		}
+		const indexPath = path.join(this.missionCheckpointsDir(trimmed), 'index.json');
+		try {
+			const raw = await fs.promises.readFile(indexPath, 'utf8');
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed as IAdeMissionCheckpointMeta[] : [];
+		} catch {
+			return [];
+		}
+	}
+
+	async loadMissionCheckpoint(missionId: string, checkpointId: string): Promise<string | undefined> {
+		const trimmed = missionId.trim();
+		const fileName = this.sanitizeSafeIdFileName(checkpointId);
+		if (!trimmed || !fileName) {
+			return undefined;
+		}
+		try {
+			return await fs.promises.readFile(path.join(this.missionCheckpointsDir(trimmed), fileName), 'utf8');
+		} catch {
+			return undefined;
+		}
+	}
+
+	async deleteMissionCheckpoint(missionId: string, checkpointId: string): Promise<void> {
+		const trimmed = missionId.trim();
+		const fileName = this.sanitizeSafeIdFileName(checkpointId);
+		if (!trimmed || !fileName) {
+			return;
+		}
+		return this.withCheckpointLock(trimmed, async () => {
+			const dir = this.missionCheckpointsDir(trimmed);
+			await fs.promises.unlink(path.join(dir, fileName)).catch(() => undefined);
+			const existing = await this.listMissionCheckpoints(trimmed);
+			const next = existing.filter(m => m.id !== checkpointId.trim());
+			const indexPath = path.join(dir, 'index.json');
+			const idxTmp = `${indexPath}.tmp.${process.pid}.${++this.inboxTmpSeq}.${crypto.randomBytes(4).toString('hex')}`;
+			try {
+				await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+				await fs.promises.writeFile(idxTmp, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });
+				await fs.promises.rename(idxTmp, indexPath);
+			} catch {
+				await fs.promises.unlink(idxTmp).catch(() => undefined);
+			}
+		});
+	}
+
+	async saveOrchestrationBlobs(missionId: string, blobs: readonly { readonly ptr: string; readonly payloadJson: string }[]): Promise<void> {
+		const trimmed = missionId.trim();
+		if (!trimmed || blobs.length === 0) {
+			return;
+		}
+		return this.withMissionLock(trimmed, async () => {
+			const dir = this.missionBlobsDir(trimmed);
+			await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+			const CONCURRENCY = 8;
+			let cursor = 0;
+			const workers = Array.from({ length: Math.min(CONCURRENCY, blobs.length) }, async () => {
+				while (cursor < blobs.length) {
+					const item = blobs[cursor++];
+					const fileName = this.sanitizeSafeIdFileName(item.ptr);
+					if (!fileName) {
+						continue;
+					}
+					const target = path.join(dir, fileName);
+					try {
+						await fs.promises.access(target, fs.constants.F_OK);
+						continue;
+					} catch {
+						// Not present yet
+					}
+					const uniqueSuffix = `${process.pid}.${Date.now()}.${++this.inboxTmpSeq}.${crypto.randomBytes(4).toString('hex')}`;
+					const tmp = `${target}.tmp.${uniqueSuffix}`;
+					try {
+						await fs.promises.writeFile(tmp, item.payloadJson, { encoding: 'utf8', mode: 0o600 });
+						await fs.promises.rename(tmp, target);
+					} catch (err) {
+						await fs.promises.unlink(tmp).catch(() => undefined);
+						throw err;
+					}
+				}
+			});
+			await Promise.all(workers);
+		});
+	}
+
 	async readOrchestrationBlob(missionId: string, ptr: string): Promise<string | undefined> {
 		const trimmed = missionId.trim();
-		const fileName = this.sanitizeBlobPtrFileName(ptr);
+		const fileName = this.sanitizeSafeIdFileName(ptr);
 		if (!trimmed || !fileName) {
 			return undefined;
 		}
@@ -483,7 +757,7 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		if (!trimmed || nonEmpty.length === 0) {
 			return;
 		}
-		return this.enqueueMissionFileOp(trimmed, async () => {
+		return this.withMissionLock(trimmed, async () => {
 			await fs.promises.mkdir(this.missionsDir, { recursive: true, mode: 0o700 });
 			const archivePath = this.missionArchivePath(trimmed);
 			await fs.promises.appendFile(archivePath, `${nonEmpty.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -531,12 +805,44 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		}
 	}
 
-	private async removeOrchestrationDaemonEntry(missionId: string): Promise<void> {
-		const map = await this.loadDaemonStateMap();
-		if (Object.hasOwn(map, missionId)) {
-			delete map[missionId];
-			await this.writeDaemonStateMap(map);
+	private async ensureDaemonStateCache(): Promise<Record<string, IAdeOrchestrationDaemonMissionSnapshot>> {
+		if (this.daemonStateCache) {
+			return this.daemonStateCache;
 		}
+		const loaded = await this.loadDaemonStateMap();
+		if (!this.daemonStateCache) {
+			this.daemonStateCache = loaded;
+		}
+		return this.daemonStateCache;
+	}
+
+	private flushDaemonStateCache(): Promise<void> {
+		this.daemonStateDirty = true;
+		const writeOp = async () => {
+			if (!this.daemonStateDirty || !this.daemonStateCache) {
+				return;
+			}
+			this.daemonStateDirty = false;
+			await this.writeDaemonStateMap({ ...this.daemonStateCache });
+		};
+		const next = this.daemonWriteChain.then(writeOp, writeOp);
+		this.daemonWriteChain = next.catch(() => undefined);
+		return next;
+	}
+
+	private async removeOrchestrationDaemonEntry(missionId: string): Promise<void> {
+		const op = async () => {
+			const map = await this.ensureDaemonStateCache();
+			if (Object.hasOwn(map, missionId)) {
+				delete map[missionId];
+				this.daemonStateDirty = true;
+				await this.writeDaemonStateMap({ ...map });
+				this.daemonStateDirty = false;
+			}
+		};
+		const next = this.daemonWriteChain.then(op, op);
+		this.daemonWriteChain = next.catch(() => undefined);
+		return next;
 	}
 
 	async syncOrchestrationDaemonState(snapshot: IAdeOrchestrationDaemonMissionSnapshot): Promise<void> {
@@ -544,104 +850,470 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 			return;
 		}
 		const missionId = snapshot.missionId.trim();
-		const map = await this.loadDaemonStateMap();
+		if (snapshot.status === 'running' && ((snapshot.activeTokenCount ?? 0) > 0 || (snapshot.blockedTokenCount ?? 0) > 0 || (snapshot.waitingJoinCount ?? 0) > 0)) {
+			this.headlessOrchestrationMissionIds.add(missionId);
+		} else {
+			this.headlessOrchestrationMissionIds.delete(missionId);
+		}
+		const map = await this.ensureDaemonStateCache();
 		map[missionId] = { ...snapshot, missionId };
-		await this.writeDaemonStateMap(map);
+		await this.flushDaemonStateCache();
 	}
 
 	async getOrchestrationDaemonState(missionId?: string): Promise<Readonly<Record<string, IAdeOrchestrationDaemonMissionSnapshot>>> {
-		const map = await this.loadDaemonStateMap();
+		const map = await this.ensureDaemonStateCache();
 		if (missionId?.trim()) {
 			const entry = map[missionId.trim()];
 			return entry ? { [missionId.trim()]: entry } : {};
 		}
-		return map;
+		return { ...map };
 	}
 
-	/**
-	 * Headless main-process Orchestration control fallback when 0 workbench windows are open:
-	 * serves Orchestration token transitions (`token.current|return|handoff|complete|block|fail|mint|split|read|history`),
-	 * Department Whiteboards (`whiteboard.list|read|create|write`), Mission Task DAG updates (`mission.task.complete|status`),
-	 * and run controls (`orchestration.status|pause|resume|abort`) directly against cold mission storage & daemon,
-	 * durably queueing `pendingHeadlessEffects` so the next workbench window immediately dispatches woken turns & Inbox deliveries.
-	 */
+	syncHeadlessWatchdogForRecord(missionId: string, record: Record<string, unknown>): void {
+		const orch = record.orchestrationRuntime as IOrchestrationRuntimeState | undefined;
+		if (!orch) {
+			this.headlessOrchestrationMissionIds.delete(missionId);
+			this.watchdog.removeMission(missionId);
+			return;
+		}
+		const orchText = typeof record.orchestrationText === 'string' ? record.orchestrationText : '';
+		const parsedGraph = parseOrchestrationGraph(orchText);
+		this.syncHeadlessWatchdogForMission(missionId, orch, record, parsedGraph);
+	}
+
+	private syncHeadlessWatchdogForMission(
+		missionId: string,
+		nextOrch: IOrchestrationRuntimeState,
+		record?: Record<string, unknown>,
+		parsedGraph?: IOrchestrationGraphParseResult,
+	): void {
+		const liveTokens = Object.values(nextOrch.tokens ?? {}).filter(t => t.status === 'active' || t.status === 'blocked');
+		const existingTriggers = Array.isArray(record?.triggers)
+			? (record!.triggers as readonly IMissionSourceTrigger[])
+			: (Array.isArray((record?.runtime as { readonly triggers?: unknown } | undefined)?.triggers)
+				? ((record!.runtime as { readonly triggers: readonly IMissionSourceTrigger[] }).triggers)
+				: []);
+		const deadlineBarriers: IAdeWatchdogBarrierSpec[] = Object.values(nextOrch.joinBarriers ?? {})
+			.filter(b => b.status === 'waiting' && typeof b.deadlineAt === 'number' && Number.isFinite(b.deadlineAt))
+			.map(b => ({
+				barrierId: b.id,
+				parentTokenId: b.parentTokenId,
+				ownerNodeId: b.ownerNodeId,
+				ownerAgentId: nextOrch.nodeAgentIds?.[b.ownerNodeId],
+				deadlineAt: b.deadlineAt!,
+			}));
+		if (
+			nextOrch.status === 'paused'
+			|| nextOrch.status === 'aborted'
+			|| nextOrch.budgetCircuitTripped
+			|| (liveTokens.length === 0 && existingTriggers.length === 0 && deadlineBarriers.length === 0)
+		) {
+			this.headlessOrchestrationMissionIds.delete(missionId);
+			this.watchdog.removeMission(missionId);
+			return;
+		}
+		this.headlessOrchestrationMissionIds.add(missionId);
+		this.watchdog.syncMission({
+			missionId,
+			status: 'running',
+			silenceTimeoutMinutes: nextOrch.silenceReminderMinutes || ORCHESTRATION_SILENCE_REMINDER_MINUTES,
+			tokens: liveTokens.map(t => {
+				const staffNode = parsedGraph?.nodes.find(n => n.id === t.nodeId && n.kind === 'staff');
+				const hostAlias = t.blocked?.hostAlias || staffNode?.hostAlias;
+				const holderAgentId = nextOrch.nodeAgentIds?.[t.nodeId] ?? t.holderAgentId;
+				const remoteSessionPrefix = hostAlias && hostAlias !== 'local' && holderAgentId
+					? buildAdeRemotePersistentPrefix(staffNode?.engineId || 'claude', holderAgentId)
+					: undefined;
+				return {
+					tokenId: t.id,
+					nodeId: t.nodeId,
+					holderAgentId,
+					status: t.status === 'blocked' ? 'blocked' : 'active',
+					lastActivityAt: t.lastActivityAt,
+					lastNudgeAt: t.lastNudgeAt,
+					...(hostAlias && hostAlias !== 'local' ? { hostAlias } : {}),
+					...(remoteSessionPrefix ? { remoteSessionPrefix } : {}),
+					...(t.blocked ? { blocked: t.blocked } : {}),
+				};
+			}),
+			triggers: existingTriggers,
+			...(deadlineBarriers.length > 0 ? { barriers: deadlineBarriers } : {}),
+		});
+	}
+
+	private dedupePendingHeadlessEffects(
+		existing: readonly OrchestrationEngineEffect[],
+		incoming: readonly OrchestrationEngineEffect[],
+	): readonly OrchestrationEngineEffect[] {
+		const merged = [...existing, ...incoming];
+		const out: OrchestrationEngineEffect[] = [];
+		const lastIdxByKey = new Map<string, number>();
+		const keyOf = (eff: OrchestrationEngineEffect): string | undefined => {
+			if (eff.kind === 'silence_reminder' || eff.kind === 'wakeup_blocked' || eff.kind === 'dispatch_token') {
+				return `${eff.kind}:${eff.tokenId}`;
+			}
+			return undefined;
+		};
+		for (let i = 0; i < merged.length; i++) {
+			const k = keyOf(merged[i]);
+			if (k) {
+				lastIdxByKey.set(k, i);
+			}
+		}
+		for (let i = 0; i < merged.length; i++) {
+			const k = keyOf(merged[i]);
+			if (!k || lastIdxByKey.get(k) === i) {
+				out.push(merged[i]);
+			}
+		}
+		return out;
+	}
+
+	async persistHeadlessOrchStateRecord(
+		missionId: string,
+		record: Record<string, unknown>,
+		parsedGraph: IOrchestrationGraphParseResult,
+		nextOrchBase: IOrchestrationRuntimeState,
+		emittedEffects: readonly OrchestrationEngineEffect[],
+		nowTs: number,
+		options?: { readonly alreadyLocked?: boolean },
+	): Promise<IOrchestrationRuntimeState> {
+		const inboxEffects: Array<Extract<OrchestrationEngineEffect, { readonly kind: 'post_inbox' }>> = [];
+		const deferredEffects: OrchestrationEngineEffect[] = [];
+		for (const eff of emittedEffects) {
+			if (eff.kind === 'post_inbox') {
+				inboxEffects.push(eff);
+			} else {
+				deferredEffects.push(eff);
+			}
+		}
+
+		if (inboxEffects.length > 0) {
+			const projectUriStr = typeof record.projectUri === 'string' ? record.projectUri : '';
+			const title = typeof record.title === 'string' && record.title.trim() ? record.title.trim() : missionId;
+			const governorSessionId = typeof record.ownerSessionId === 'string' && record.ownerSessionId.trim()
+				? record.ownerSessionId.trim()
+				: missionId;
+			const batchItems: IAdeInboxItem[] = inboxEffects.map(eff => ({
+				id: `headless-inb-${missionId}-${nowTs}-${++this.inboxTmpSeq}`,
+				kind: 'governor_message',
+				treeType: 'engineering',
+				governorSessionId,
+				governorLabel: title,
+				projectPath: projectUriStr,
+				projectName: title,
+				nodeId: eff.nodeId,
+				title: eff.title,
+				message: eff.message,
+				severity: eff.severity,
+				senderAgentId: eff.senderAgentId,
+				createdAt: nowTs,
+				unread: true,
+				resolved: false,
+			}));
+			const upsertBatchOp = async (): Promise<void> => {
+				const current = await this.loadInbox();
+				const incomingIds = new Set(batchItems.map(i => i.id));
+				const next = [...batchItems, ...current.filter(i => !incomingIds.has(i.id))].sort((a, b) => b.createdAt - a.createdAt);
+				await this.writeInboxFileAtomic(next);
+			};
+			const queued = this.inboxWriteChain.then(upsertBatchOp, upsertBatchOp);
+			this.inboxWriteChain = queued.catch(() => undefined);
+			await queued;
+		}
+
+		const existingPending = nextOrchBase.pendingHeadlessEffects ?? [];
+		const nextOrch: IOrchestrationRuntimeState = deferredEffects.length > 0
+			? { ...nextOrchBase, pendingHeadlessEffects: this.dedupePendingHeadlessEffects(existingPending, deferredEffects) }
+			: nextOrchBase;
+		record.orchestrationRuntime = nextOrch;
+		const mermaidText = typeof record.mermaidText === 'string' ? record.mermaidText : '';
+		if (mermaidText.trim()) {
+			const taskGraph = parseMissionMermaidDag(mermaidText);
+			if (!taskGraph.error && taskGraph.nodes.length > 0) {
+				const synced = syncMissionTaskStatusesFromOrchestration(
+					record.taskStatuses as Readonly<Record<string, IMissionTaskStatusRecord>> | undefined,
+					taskGraph,
+					nextOrch,
+					parsedGraph,
+					nowTs,
+				);
+				if (synced.changed) {
+					record.taskStatuses = synced.taskStatuses;
+				}
+			}
+		}
+		record.updatedAt = nowTs;
+		if (options?.alreadyLocked) {
+			await this.saveMissionRecordUnlocked(missionId, JSON.stringify(record), nowTs, 'headless-daemon');
+		} else {
+			await this.saveMissionRecord(missionId, JSON.stringify(record), nowTs, 'headless-daemon');
+		}
+		const nextTokens = Object.values(nextOrch.tokens ?? {});
+		await this.syncOrchestrationDaemonState({
+			missionId,
+			status: nextOrch.status ?? 'running',
+			activeTokenCount: nextTokens.filter(t => t.status === 'active').length,
+			blockedTokenCount: nextTokens.filter(t => t.status === 'blocked').length,
+			waitingJoinCount: nextTokens.filter(t => t.status === 'waiting_join').length,
+			updatedAt: nowTs,
+			...(nextOrch.pausedReason ? { pausedReason: nextOrch.pausedReason } : {}),
+		});
+		this.syncHeadlessWatchdogForMission(missionId, nextOrch, record, parsedGraph);
+		await this.watchdog.flushPendingWrites();
+		return nextOrch;
+	}
+
+	resolveProjectCwdFromRecord(record: Record<string, unknown>): string | undefined {
+		const raw = typeof record.projectUri === 'string' ? record.projectUri.trim() : '';
+		if (!raw) {
+			return undefined;
+		}
+		if (raw.includes('://')) {
+			try {
+				const uri = URI.parse(raw);
+				if (uri.scheme === 'file' && uri.fsPath) {
+					return uri.fsPath;
+				}
+				return uri.path || undefined;
+			} catch {
+				return undefined;
+			}
+		}
+		return raw;
+	}
+
+	async runHeadlessOrchestrationChecksIfNeeded(
+		record: Record<string, unknown>,
+		parsedGraph: IOrchestrationGraphParseResult,
+		taskGraph: ReturnType<typeof parseMissionMermaidDag> | undefined,
+		nodeId: string,
+		extraTaskNodeIds: readonly string[],
+		skipChecks: boolean,
+		isHumanUser: boolean,
+		tokenId?: string,
+	) {
+		const staffNode = parsedGraph.nodes.find(n => n.id === nodeId && n.kind === 'staff');
+		const nodeChecksMap = (record.nodeChecks && typeof record.nodeChecks === 'object')
+			? record.nodeChecks as Readonly<Record<string, readonly IMissionNodeCheckHook[]>>
+			: undefined;
+		const collected = resolveMergedNodeCheckHooks({
+			nodeIds: [nodeId, ...extraTaskNodeIds],
+			recordNodeChecks: nodeChecksMap,
+			parsedOrch: !parsedGraph.error ? parsedGraph : undefined,
+			parsedDag: taskGraph && !taskGraph.error ? taskGraph : undefined,
+			onlyEnabled: true,
+		});
+		if (collected.length === 0) {
+			return { ok: true, checkCount: 0, totalDurationMs: 0, results: [] };
+		}
+		if (skipChecks) {
+			if (!isHumanUser) {
+				return {
+					ok: false,
+					error: `FORBIDDEN: Only Human User (L-1) may pass --skip-checks to bypass deterministic verification hooks on "${nodeId}".`,
+					checkCount: collected.length,
+					totalDurationMs: 0,
+					results: [],
+				};
+			}
+			return { ok: true, checkCount: 0, totalDurationMs: 0, results: [] };
+		}
+
+		const projectCwd = this.resolveProjectCwdFromRecord(record);
+		const runtimeBoundary = (record.runtime as { readonly boundary?: { readonly nodeAssignments?: Readonly<Record<string, { readonly hostAlias?: string }>> } } | undefined)?.boundary;
+		const defaultHostAlias = staffNode?.hostAlias || runtimeBoundary?.nodeAssignments?.[nodeId]?.hostAlias || 'local';
+		const failures: string[] = [];
+		const results: IAdeDeterministicCheckResponse[] = [];
+		const startedAt = Date.now();
+		for (const chk of collected) {
+			const hostAlias = chk.hostAlias?.trim() || defaultHostAlias;
+			const rawCheckCwd = chk.cwd?.trim();
+			const resolvedCwd = rawCheckCwd
+				? (hostAlias !== 'local'
+					? (rawCheckCwd.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rawCheckCwd) ? rawCheckCwd : (projectCwd ? path.posix.join(projectCwd, rawCheckCwd) : rawCheckCwd))
+					: (path.isAbsolute(rawCheckCwd) ? rawCheckCwd : (projectCwd ? path.resolve(projectCwd, rawCheckCwd) : rawCheckCwd)))
+				: projectCwd;
+			const res = await this.runDeterministicCheck({
+				checkId: chk.id,
+				name: chk.name,
+				command: chk.command,
+				cwd: resolvedCwd,
+				hostAlias,
+				expectExitCode: chk.expectExitCode,
+				expectFiles: chk.expectFiles,
+				expectOutputMatch: chk.expectOutputMatch,
+				timeoutMs: chk.timeoutMs,
+			});
+			results.push(res);
+			if (!res.passed) {
+				const parts: string[] = [`- [${chk.name || chk.id}] FAILED (exit=${res.exitCode}, expected=${res.expectedExitCode}, host=${hostAlias})`];
+				if (res.error) { parts.push(`  error: ${res.error}`); }
+				if (res.missingFiles && res.missingFiles.length > 0) { parts.push(`  missing/empty files: ${res.missingFiles.join(', ')}`); }
+				if (res.outputTail) { parts.push(`  output tail:\n${res.outputTail}`); }
+				failures.push(parts.join('\n'));
+			}
+		}
+		const totalDurationMs = Math.max(0, Date.now() - startedAt);
+		const passedCount = results.filter(r => r.passed).length;
+		const receipt = {
+			passed: failures.length === 0,
+			summary: `${passedCount}/${results.length} check(s) passed on "${nodeId}"`,
+			checkedAt: Date.now(),
+			checkCount: results.length,
+			...(tokenId ? { tokenId } : {}),
+			byNodeId: nodeId,
+		};
+		if (failures.length > 0) {
+			return {
+				ok: false,
+				receipt,
+				checkCount: collected.length,
+				totalDurationMs,
+				results,
+				error: `DETERMINISTIC_CHECK_FAILED on "${nodeId}" (${failures.length}/${collected.length} check(s) failed). Fix the underlying failure before advancing the token:\n${failures.join('\n')}`,
+			};
+		}
+		return { ok: true, receipt, checkCount: collected.length, totalDurationMs, results };
+	}
+
+	async processHeadlessWatchdogWakeup(ev: IAdeWatchdogWakeupEvent): Promise<boolean> {
+		if (this._store.isDisposed) {
+			return false;
+		}
+		return this.withMissionLock(ev.missionId, async () => {
+			if (this._store.isDisposed) {
+				return false;
+			}
+			const rawMission = await this.loadMissionRecord(ev.missionId);
+			if (!rawMission) {
+				return false;
+			}
+			let record: Record<string, unknown>;
+			try {
+				record = JSON.parse(rawMission) as Record<string, unknown>;
+			} catch {
+				return false;
+			}
+			const orch = record.orchestrationRuntime as IOrchestrationRuntimeState | undefined;
+			if (!orch || orch.status === 'paused' || orch.status === 'aborted' || orch.budgetCircuitTripped) {
+				return false;
+			}
+			const nowTs = ev.timestamp || Date.now();
+			const orchestrationText = typeof record.orchestrationText === 'string' ? record.orchestrationText : '';
+			const parsedGraph = parseOrchestrationGraph(orchestrationText);
+
+			if (ev.reason === 'barrier_deadline_expired' && ev.barrierId) {
+				const barrier = orch.joinBarriers?.[ev.barrierId];
+				if (!barrier || barrier.status !== 'waiting') {
+					return false;
+				}
+				const orgConfig = await this.loadCachedOrgConfig();
+				const whiteboards = record.whiteboards as Readonly<Record<string, IOrchestrationWhiteboard>> | undefined;
+				const mermaidText = typeof record.mermaidText === 'string' ? record.mermaidText : '';
+				const taskGraph = mermaidText.trim() ? parseMissionMermaidDag(mermaidText) : undefined;
+				const taskStatuses = record.taskStatuses as Readonly<Record<string, IMissionTaskStatusRecord>> | undefined;
+				const res = expireOrchestrationJoinBarrier(orch, parsedGraph, whiteboards, orgConfig, {
+					barrierId: ev.barrierId,
+					reason: ev.detail,
+					...(taskGraph && !taskGraph.error && taskGraph.nodes.length > 0 ? { taskGraph, taskStatuses } : {}),
+					now: nowTs,
+				});
+				if (!res.ok) {
+					return false;
+				}
+				await this.persistHeadlessOrchStateRecord(ev.missionId, record, parsedGraph, res.state, res.effects, nowTs, { alreadyLocked: true });
+				return true;
+			}
+
+			if (!orch.tokens?.[ev.tokenId]) {
+				return false;
+			}
+			if (ev.reason === 'pid_exited' || ev.reason === 'file_ready' || ev.reason === 'block_expired') {
+				const res = wakeBlockedOrchestrationToken(orch, {
+					tokenId: ev.tokenId,
+					reason: ev.reason,
+					detail: ev.detail,
+					now: nowTs,
+				});
+				if (!res.ok) {
+					return false;
+				}
+				await this.persistHeadlessOrchStateRecord(ev.missionId, record, parsedGraph, res.state, res.effects, nowTs, { alreadyLocked: true });
+				return true;
+			}
+
+			if (ev.reason === 'silence_timeout' || ev.reason === 'agent_exited') {
+				const res = recordOrchestrationSilenceReminder(orch, {
+					tokenId: ev.tokenId,
+					detail: ev.detail,
+					now: nowTs,
+				});
+				if (!res.ok) {
+					return false;
+				}
+				const effects: OrchestrationEngineEffect[] = [...res.effects];
+				const updatedTok = res.state.tokens[ev.tokenId];
+				const nudgeCount = updatedTok?.nudgeCount ?? 0;
+				// Headless 3-strike silence auto-escalation parity with renderer: surface a critical escalation
+				// to ADE Inbox every 3 consecutive unacknowledged reminders so stuck headless workers never loop silently.
+				if (updatedTok && updatedTok.status === 'active' && nudgeCount >= 3 && nudgeCount % 3 === 0) {
+					const superiorNodeId = (updatedTok.returnToNodeId && updatedTok.returnToNodeId !== updatedTok.nodeId)
+						? updatedTok.returnToNodeId
+						: (updatedTok.fromNodeId && updatedTok.fromNodeId !== updatedTok.nodeId ? updatedTok.fromNodeId : undefined);
+					effects.push({
+						kind: 'post_inbox',
+						missionId: ev.missionId,
+						tokenId: updatedTok.id,
+						nodeId: updatedTok.nodeId,
+						senderAgentId: res.state.nodeAgentIds?.[updatedTok.nodeId] ?? updatedTok.holderAgentId,
+						severity: 'critical',
+						title: `Engineering Escalation: "${updatedTok.nodeId}" unresponsive (${nudgeCount}x ${ev.reason})`,
+						message: `Staff node "${updatedTok.nodeId}" remained unresponsive after ${nudgeCount} consecutive watchdog reminders (${ev.reason}) for baton "${updatedTok.id}".${superiorNodeId ? ` Escalated for superior "${superiorNodeId}" / Human intervention.` : ' Human intervention requested.'}`,
+					});
+				}
+				await this.persistHeadlessOrchStateRecord(ev.missionId, record, parsedGraph, res.state, effects, nowTs, { alreadyLocked: true });
+				return true;
+			}
+
+			return false;
+		});
+	}
+
 	async executeHeadlessOrchestrationControl(
 		action: string,
 		params: Readonly<Record<string, unknown>>,
 	): Promise<IAdeHeadlessControlResult> {
-		const SUPPORTED = new Set([
-			'orchestration.status',
-			'orchestration.pause',
-			'orchestration.resume',
-			'orchestration.abort',
-			'token.current',
-			'token.read',
-			'token.history',
-			'token.return',
-			'token.handoff',
-			'token.complete',
-			'token.block',
-			'token.fail',
-			'token.mint',
-			'token.split',
-			'whiteboard.list',
-			'whiteboard.read',
-			'whiteboard.create',
-			'whiteboard.write',
-			'mission.task.complete',
-			'mission.task.status',
-		]);
-		if (!SUPPORTED.has(action)) {
+		if (!HEADLESS_SUPPORTED_ACTIONS.has(action)) {
 			return { handled: false };
 		}
 
-		let missionId = typeof params.missionId === 'string' && params.missionId.trim()
-			? params.missionId.trim()
-			: (typeof params.mission === 'string' && params.mission.trim() ? params.mission.trim() : '');
-		if (!missionId) {
-			if (action === 'orchestration.status') {
-				const daemonState = await this.getOrchestrationDaemonState();
-				return { handled: true, result: { headless: true, daemonMissions: daemonState } };
-			}
-			// Auto-resolve Mission from tokenId or authenticated caller session against cold mission storage.
-			const allCold = await this.loadAllMissionRecords();
-			const lookupTokenId = typeof (params.tokenId ?? params.token ?? params.parentTokenId) === 'string'
-				? String(params.tokenId ?? params.token ?? params.parentTokenId).trim()
-				: '';
-			const verifiedSid = params._verifiedCaller === true && typeof params._callerSessionId === 'string'
-				? params._callerSessionId.trim()
-				: '';
-			const candidateIds: string[] = [];
-			for (const [mid, raw] of Object.entries(allCold)) {
-				try {
-					const rec = JSON.parse(raw) as { ownerSessionId?: string; orchestrationRuntime?: IOrchestrationRuntimeState };
-					if (lookupTokenId && rec.orchestrationRuntime?.tokens?.[lookupTokenId]) {
-						missionId = mid;
-						break;
-					}
-					if (verifiedSid) {
-						const isMember = rec.ownerSessionId === verifiedSid
-							|| Object.values(rec.orchestrationRuntime?.nodeAgentIds ?? {}).includes(verifiedSid);
-						if (isMember) {
-							candidateIds.push(mid);
-						}
-					}
-				} catch {
-					// skip malformed cold record
-				}
-			}
-			if (!missionId) {
-				if (candidateIds.length === 1) {
-					missionId = candidateIds[0];
-				} else if (!verifiedSid && Object.keys(allCold).length === 1) {
-					missionId = Object.keys(allCold)[0];
-				}
-			}
-			if (!missionId) {
-				return { handled: true, error: `Missing --mission <id> for headless "${action}".` };
-			}
+		const preConfig = await this.loadCachedOrgConfig();
+		const globalResult = await tryExecuteHeadlessGlobalAction(this, action, params, preConfig);
+		if (globalResult !== undefined) {
+			return globalResult;
 		}
 
+		const resolved = await resolveHeadlessMissionId(this, action, params);
+		if (resolved.earlyResult) {
+			return resolved.earlyResult;
+		}
+		const missionId = resolved.missionId!;
+
+		const isMutatingMissionAction = HEADLESS_MUTATING_MISSION_ACTIONS.has(action);
+		if (isMutatingMissionAction) {
+			return this.withMissionLock(missionId, () => this.executeHeadlessMissionScopedControl(missionId, action, params, preConfig, true));
+		}
+		return this.executeHeadlessMissionScopedControl(missionId, action, params, preConfig, false);
+	}
+
+	private async executeHeadlessMissionScopedControl(
+		missionId: string,
+		action: string,
+		params: Readonly<Record<string, unknown>>,
+		effectiveOrgConfig: IAdeOrganizationConfig,
+		isLocked: boolean,
+	): Promise<IAdeHeadlessControlResult> {
 		const rawMission = await this.loadMissionRecord(missionId);
 		if (!rawMission) {
 			return { handled: true, error: `Mission "${missionId}" not found in cold storage.` };
@@ -653,52 +1325,19 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 			return { handled: true, error: `Mission "${missionId}" cold record is malformed JSON.` };
 		}
 		const orch = record.orchestrationRuntime as IOrchestrationRuntimeState | undefined;
-		const allowsMissingOrch = action === 'whiteboard.list'
-			|| action === 'whiteboard.read'
-			|| action === 'whiteboard.create'
-			|| action === 'whiteboard.write'
-			|| action === 'mission.task.complete'
-			|| action === 'mission.task.status';
-		if (!orch && !allowsMissingOrch) {
+		const requiresActiveOrch = action === 'orchestration.status'
+			|| action === 'orchestration.pause'
+			|| action === 'orchestration.resume'
+			|| action === 'orchestration.abort'
+			|| action.startsWith('token.');
+		if (!orch && requiresActiveOrch) {
 			return { handled: true, error: `Mission "${missionId}" has no active Orchestration runtime state.` };
 		}
-		const effectiveOrgConfig = await this.loadCachedOrgConfig();
+
 		const orchestrationText = typeof record.orchestrationText === 'string' ? record.orchestrationText : '';
 		const parsedGraph = parseOrchestrationGraph(orchestrationText);
-		const resolveHeadlessCaller = () => {
-			const isVerified = params._verifiedCaller === true;
-			const callerStr = typeof params.caller === 'string' ? params.caller.trim().toLowerCase() : '';
-			const verifiedSessionId = isVerified && typeof params._callerSessionId === 'string' ? params._callerSessionId.trim() : '';
-			const fallbackSessionId = !isVerified && typeof params.callerSessionId === 'string' ? params.callerSessionId.trim() : '';
-			const callerSessionId = verifiedSessionId || fallbackSessionId;
-			const explicitNodeId = !isVerified && typeof params.callerNodeId === 'string' ? params.callerNodeId.trim() : '';
-			if (!isVerified && !callerStr && !callerSessionId && !explicitNodeId) {
-				return { isHumanUser: true, isSecretary: false, callerSessionId: undefined as string | undefined, callerTier: -1 as number | undefined, callerNodeId: undefined as string | undefined };
-			}
-			if (callerStr === 'secretary') {
-				return { isHumanUser: false, isSecretary: true, callerSessionId: '__secretary__', callerTier: 0 as number | undefined, callerNodeId: undefined as string | undefined };
-			}
-			let callerNodeId = explicitNodeId || undefined;
-			if (!callerNodeId && callerSessionId && orch?.nodeAgentIds) {
-				for (const [nid, aid] of Object.entries(orch.nodeAgentIds)) {
-					if (aid === callerSessionId) {
-						callerNodeId = nid;
-						break;
-					}
-				}
-			}
-			const matchedRank = effectiveOrgConfig.ranks.find(
-				r => r.id.toLowerCase() === callerStr || r.name.toLowerCase() === callerStr,
-			);
-			const staffNode = callerNodeId ? parsedGraph.nodes.find(n => n.id === callerNodeId && n.kind === 'staff') : undefined;
-			return {
-				isHumanUser: false,
-				isSecretary: false,
-				callerSessionId: callerSessionId || undefined,
-				callerTier: matchedRank?.tier ?? staffNode?.tier,
-				callerNodeId,
-			};
-		};
+		const caller = resolveHeadlessCaller(params, orch, parsedGraph, effectiveOrgConfig);
+
 		const buildMergedWhiteboards = (): Readonly<Record<string, IOrchestrationWhiteboard>> => {
 			const merged: Record<string, IOrchestrationWhiteboard> = {
 				...((record.whiteboards ?? {}) as Readonly<Record<string, IOrchestrationWhiteboard>>),
@@ -721,607 +1360,134 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 			return merged;
 		};
 
-		if (action === 'whiteboard.list') {
-			const caller = resolveHeadlessCaller();
-			const deptFilter = typeof params.department === 'string' && params.department.trim()
-				? params.department.trim().toLowerCase()
-				: undefined;
-			const allWbs = Object.values(buildMergedWhiteboards())
-				.filter(wb => canCallerAccessWhiteboard(parsedGraph, wb, effectiveOrgConfig, caller))
-				.filter(wb => !deptFilter || wb.department.trim().toLowerCase() === deptFilter);
-			return {
-				handled: true,
-				result: {
-					headless: true,
-					missionId,
-					whiteboards: allWbs.map(wb => ({
-						whiteboardId: wb.id,
-						title: wb.title,
-						department: wb.department,
-						version: wb.version,
-						contentLength: wb.content.length,
-						updatedAt: wb.updatedAt,
-						updatedByLabel: wb.updatedByLabel,
-					})),
-				},
-			};
-		}
-
-		if (action === 'whiteboard.read') {
-			const id = String(params.id ?? params.whiteboardId ?? params.whiteboard ?? '').trim();
-			if (!id) {
-				return { handled: true, error: 'Whiteboard ID is required for whiteboard.read.' };
-			}
-			const wb = buildMergedWhiteboards()[id];
-			if (!wb) {
-				return { handled: true, error: `Department whiteboard "${id}" not found.` };
-			}
-			const caller = resolveHeadlessCaller();
-			if (!canCallerAccessWhiteboard(parsedGraph, wb, effectiveOrgConfig, caller)) {
-				return {
-					handled: true,
-					error: `FORBIDDEN: caller does not belong to department "${wb.department}" and is not connected to whiteboard "${wb.id}".`,
+		const isMissionMember = (c = caller): boolean => {
+			const legacyBoundary = (record.runtime as {
+				readonly boundary?: {
+					readonly supervisors?: ReadonlyArray<{ readonly id: string }>;
+					readonly nodeAssignments?: Readonly<Record<string, { readonly agentId?: string }>>;
 				};
-			}
-			return { handled: true, result: { headless: true, ok: true, missionId, whiteboard: wb } };
-		}
-
-		if (action === 'orchestration.status') {
-			if (!orch) {
-				return { handled: true, error: `Mission "${missionId}" has no active Orchestration runtime state.` };
-			}
-			const tokens = Object.values(orch.tokens ?? {});
-			const activeTokens = tokens.filter(t => t.status === 'active');
-			const blockedTokens = tokens.filter(t => t.status === 'blocked');
-			const waitingJoinTokens = tokens.filter(t => t.status === 'waiting_join');
-			const daemon = (await this.getOrchestrationDaemonState(missionId))[missionId];
-			return {
-				handled: true,
-				result: {
-					headless: true,
-					missionId,
-					status: orch.status ?? 'running',
-					...(orch.pausedAt ? { pausedAt: orch.pausedAt } : {}),
-					...(orch.pausedReason ? { pausedReason: orch.pausedReason } : {}),
-					activeCount: activeTokens.length,
-					blockedCount: blockedTokens.length,
-					waitingJoinCount: waitingJoinTokens.length,
-					activeTokens,
-					blockedTokens,
-					waitingJoinTokens,
-					joinBarriers: orch.joinBarriers ?? {},
-					archivedTokenCount: orch.archivedTokenCount ?? 0,
-					archivedTraceCount: orch.archivedTraceCount ?? 0,
-					...(daemon ? { daemon } : {}),
-					updatedAt: orch.updatedAt,
-				},
-			};
-		}
-
-		if (action === 'token.read') {
-			if (!orch) {
-				return { handled: true, error: `Mission "${missionId}" has no active Orchestration runtime state.` };
-			}
-			const rawPtrs = Array.isArray(params.ptrs)
-				? params.ptrs.map(p => String(p))
-				: (typeof params.ptr === 'string' ? params.ptr.split(',') : []);
-			const whiteboards = buildMergedWhiteboards();
-			const caller = resolveHeadlessCaller();
-			const items: unknown[] = [];
-			for (const rawPtr of rawPtrs) {
-				const ptr = rawPtr.trim();
-				if (!ptr) { continue; }
-				const hotBlob = orch.payloadStore?.[ptr];
-				if (hotBlob) {
-					items.push({ ptr: hotBlob.ptr, ok: true, kind: hotBlob.kind, title: hotBlob.title, version: 1, hop: hotBlob.hop, sizeChars: hotBlob.sizeChars, content: hotBlob.content });
-					continue;
-				}
-				const coldBlobRaw = await this.readOrchestrationBlob(missionId, ptr);
-				if (coldBlobRaw) {
-					try {
-						const parsedBlob = JSON.parse(coldBlobRaw) as { ptr?: string; kind?: string; title?: string; hop?: number; sizeChars?: number; content?: string };
-						items.push({ ptr: parsedBlob.ptr ?? ptr, ok: true, kind: parsedBlob.kind, title: parsedBlob.title, version: 1, hop: parsedBlob.hop, sizeChars: parsedBlob.sizeChars, content: parsedBlob.content, coldBlob: true });
-						continue;
-					} catch {
-						// fall through
-					}
-				}
-				const wbId = ptr.startsWith('wb:') ? ptr.slice(3) : ptr;
-				const wb = whiteboards[wbId];
-				if (wb) {
-					if (!canCallerAccessWhiteboard(parsedGraph, wb, effectiveOrgConfig, caller)) {
-						items.push({ ptr, ok: false, kind: 'whiteboard', error: `FORBIDDEN: caller cannot read whiteboard "${wb.id}" (Department: "${wb.department}").` });
-						continue;
-					}
-					items.push({ ptr: `wb:${wb.id}`, ok: true, kind: 'whiteboard', title: wb.title, version: wb.version, department: wb.department, sizeChars: wb.content.length, content: wb.content });
-					continue;
-				}
-				const tr = orch.traces?.[ptr];
-				if (tr) {
-					items.push({ ptr: tr.ptr, ok: true, kind: 'trace', title: `${tr.event} @ ${tr.nodeId}`, version: 1, content: tr.summary ?? '' });
-					continue;
-				}
-				items.push({ ptr, ok: false, error: ptr.startsWith('wb:') ? `Whiteboard pointer "${ptr}" not found (removed or does not exist).` : `Pointer "${ptr}" not found in hot or cold storage.` });
-			}
-			return { handled: true, result: { headless: true, missionId, items } };
-		}
-
-		if (action === 'token.history') {
-			if (!orch) {
-				return { handled: true, error: `Mission "${missionId}" has no active Orchestration runtime state.` };
-			}
-			const tokenId = typeof params.tokenId === 'string' ? params.tokenId.trim() : '';
-			const tok = tokenId ? orch.tokens?.[tokenId] : undefined;
-			if (tok) {
-				return {
-					handled: true,
-					result: {
-						headless: true,
-						ok: true,
-						tokenId: tok.id,
-						waveId: tok.waveId,
-						nodeId: tok.nodeId,
-						status: tok.status,
-						hopLog: tok.hopLog ?? [],
-						contextRefs: tok.contextRefs ?? [],
-					},
-				};
-			}
-			// Search cold JSONL archive for archived terminal token
-			const archivedLines = await this.readOrchestrationArchive(missionId);
-			for (let i = archivedLines.length - 1; i >= 0; i--) {
-				try {
-					const entry = JSON.parse(archivedLines[i]) as { kind?: string; token?: { id?: string; waveId?: string; nodeId?: string; status?: string; hopLog?: unknown[]; contextRefs?: unknown[] } };
-					if (entry.kind === 'token' && entry.token?.id === tokenId) {
-						return {
-							handled: true,
-							result: {
-								headless: true,
-								archived: true,
-								ok: true,
-								tokenId: entry.token.id,
-								waveId: entry.token.waveId,
-								nodeId: entry.token.nodeId,
-								status: entry.token.status,
-								hopLog: entry.token.hopLog ?? [],
-								contextRefs: entry.token.contextRefs ?? [],
-							},
-						};
-					}
-				} catch {
-					// skip malformed line
-				}
-			}
-			return { handled: true, error: `Orchestration token "${tokenId}" not found.` };
-		}
-
-		const syncHeadlessWatchdog = (nextOrch: IOrchestrationRuntimeState) => {
-			const liveTokens = Object.values(nextOrch.tokens ?? {}).filter(t => t.status === 'active' || t.status === 'blocked');
-			if (nextOrch.status === 'paused' || nextOrch.status === 'aborted' || liveTokens.length === 0) {
-				this.watchdog.removeMission(missionId);
-				return;
-			}
-			this.watchdog.syncMission({
+			} | undefined)?.boundary;
+			const supervisorIds = legacyBoundary?.supervisors?.map(s => s.id) ?? [];
+			const nodeAssignmentAgentIds = Object.values(legacyBoundary?.nodeAssignments ?? {})
+				.map(a => a?.agentId)
+				.filter((id): id is string => Boolean(id));
+			if (isExplicitMissionMemberOrSupervisor({
 				missionId,
-				status: 'running',
-				silenceTimeoutMinutes: nextOrch.silenceReminderMinutes || ORCHESTRATION_SILENCE_REMINDER_MINUTES,
-				tokens: liveTokens.map(t => ({
-					tokenId: t.id,
-					nodeId: t.nodeId,
-					holderAgentId: t.holderAgentId,
-					status: t.status === 'blocked' ? 'blocked' : 'active',
-					lastActivityAt: t.lastActivityAt,
-					lastNudgeAt: t.lastNudgeAt,
-					...(t.blocked ? { blocked: t.blocked } : {}),
-				})),
-				triggers: [],
-			});
+				isHumanUser: c.isHumanUser,
+				isSecretary: c.isSecretary,
+				callerSessionId: c.callerSessionId,
+				ownerSessionId: typeof record.ownerSessionId === 'string' ? record.ownerSessionId.trim() : undefined,
+				supervisorIds,
+				nodeAssignmentAgentIds,
+				orchNodeAgentIds: orch?.nodeAgentIds,
+			})) {
+				return true;
+			}
+			if (params._verifiedCaller !== true && c.callerNodeId && parsedGraph.nodes.some(n => n.id === c.callerNodeId && n.kind === 'staff')) {
+				return true;
+			}
+			return false;
 		};
 
-		const persistHeadlessOrchState = async (
-			nextOrchBase: IOrchestrationRuntimeState,
-			emittedEffects: readonly OrchestrationEngineEffect[],
-			nowTs: number,
-		): Promise<IOrchestrationRuntimeState> => {
-			const existingPending = nextOrchBase.pendingHeadlessEffects ?? [];
-			const nextOrch: IOrchestrationRuntimeState = emittedEffects.length > 0
-				? { ...nextOrchBase, pendingHeadlessEffects: [...existingPending, ...emittedEffects] }
-				: nextOrchBase;
-			record.orchestrationRuntime = nextOrch;
-			const mermaidText = typeof record.mermaidText === 'string' ? record.mermaidText : '';
-			if (mermaidText.trim()) {
-				const taskGraph = parseMissionMermaidDag(mermaidText);
-				if (!taskGraph.error && taskGraph.nodes.length > 0) {
-					const synced = syncMissionTaskStatusesFromOrchestration(
-						record.taskStatuses as Readonly<Record<string, import('../common/adeOrchestrationEngine.js').IMissionTaskStatusRecord>> | undefined,
-						taskGraph,
-						nextOrch,
-						parsedGraph,
-						nowTs,
-					);
-					if (synced.changed) {
-						record.taskStatuses = synced.taskStatuses;
-					}
+		const ctx: IHeadlessMissionScopeContext = {
+			host: this,
+			missionId,
+			action,
+			params,
+			effectiveOrgConfig,
+			isLocked,
+			record,
+			orch,
+			orchestrationText,
+			parsedGraph,
+			caller,
+			buildMergedWhiteboards,
+			isMissionMember,
+			assertMissionMemberOrSupervisor: (c = caller) => isMissionMember(c) ? undefined : `FORBIDDEN: caller is not a member or supervisor of Mission "${missionId}".`,
+			canOperateMission: (c = caller) => canHeadlessCallerOperateMission(record, parsedGraph, effectiveOrgConfig, c),
+			saveCurrentRecord: async (nowTs: number) => {
+				record.updatedAt = nowTs;
+				if (isLocked) {
+					await this.saveMissionRecordUnlocked(missionId, JSON.stringify(record), nowTs, 'headless-daemon');
+				} else {
+					await this.saveMissionRecord(missionId, JSON.stringify(record), nowTs, 'headless-daemon');
 				}
-			}
-			record.updatedAt = nowTs;
-			await this.saveMissionRecord(missionId, JSON.stringify(record), nowTs, 'headless-daemon');
-			const nextTokens = Object.values(nextOrch.tokens ?? {});
-			await this.syncOrchestrationDaemonState({
-				missionId,
-				status: nextOrch.status ?? 'running',
-				activeTokenCount: nextTokens.filter(t => t.status === 'active').length,
-				blockedTokenCount: nextTokens.filter(t => t.status === 'blocked').length,
-				waitingJoinCount: nextTokens.filter(t => t.status === 'waiting_join').length,
-				updatedAt: nowTs,
-				...(nextOrch.pausedReason ? { pausedReason: nextOrch.pausedReason } : {}),
-			});
-			syncHeadlessWatchdog(nextOrch);
-			return nextOrch;
-		};
-
-		if (action === 'whiteboard.create' || action === 'whiteboard.write') {
-			const caller = resolveHeadlessCaller();
-			const wbId = String(params.id ?? params.whiteboardId ?? params.whiteboard ?? '').trim();
-			if (!wbId) {
-				return { handled: true, error: 'Whiteboard ID is required for headless whiteboard write.' };
-			}
-			const existingWbs = buildMergedWhiteboards();
-			const existing = existingWbs[wbId];
-			if (existing && !canCallerAccessWhiteboard(parsedGraph, existing, effectiveOrgConfig, caller)) {
-				return { handled: true, error: `FORBIDDEN: caller cannot write to department "${existing.department}" whiteboard "${existing.id}".` };
-			}
-			const now = Date.now();
-			const rawExpected = params.expectedVersion ?? params.ifVersion;
-			const expectedVersion = rawExpected !== undefined && rawExpected !== null && String(rawExpected).trim() !== ''
-				? Number(rawExpected)
-				: undefined;
-			const callerNode = caller.callerNodeId ? parsedGraph.nodes.find(n => n.id === caller.callerNodeId && n.kind === 'staff') : undefined;
-			const mutated = mutateDepartmentWhiteboard(existingWbs, {
-				id: wbId,
-				title: typeof params.title === 'string' ? params.title : undefined,
-				department: typeof params.department === 'string' ? params.department : (existing?.department ?? callerNode?.department ?? 'General'),
-				content: typeof params.content === 'string' ? params.content : undefined,
-				appendContent: typeof params.appendContent === 'string' ? params.appendContent : undefined,
-				mode: action === 'whiteboard.create' ? 'create' : 'write',
-				...(expectedVersion !== undefined && Number.isInteger(expectedVersion) ? { expectedVersion } : {}),
-				updatedBy: caller.callerSessionId ?? (caller.isHumanUser ? 'human' : undefined),
-				now,
-			});
-			if (!mutated.ok || !mutated.whiteboard || !mutated.whiteboards) {
-				return { handled: true, error: mutated.error ?? 'Failed to write Department Whiteboard.' };
-			}
-			record.whiteboards = mutated.whiteboards;
-			record.orchestrationText = upsertOrchestrationWhiteboardInCode(orchestrationText, {
-				id: mutated.whiteboard.id,
-				title: mutated.whiteboard.title,
-				department: mutated.whiteboard.department,
-				content: mutated.whiteboard.content,
-				version: mutated.whiteboard.version,
-			});
-			record.updatedAt = now;
-			await this.saveMissionRecord(missionId, JSON.stringify(record), now, 'headless-daemon');
-			return {
-				handled: true,
-				result: {
-					headless: true,
-					ok: true,
-					missionId,
-					whiteboard: {
-						whiteboardId: mutated.whiteboard.id,
-						title: mutated.whiteboard.title,
-						department: mutated.whiteboard.department,
-						version: mutated.whiteboard.version,
-						updatedAt: mutated.whiteboard.updatedAt,
-					},
-				},
-			};
-		}
-
-		if (action === 'mission.task.complete' || action === 'mission.task.status') {
-			const caller = resolveHeadlessCaller();
-			const nodeId = String(params.node ?? params.nodeId ?? '').trim();
-			if (!nodeId) {
-				return { handled: true, error: 'Task node ID (--node) is required.' };
-			}
-			const rawStatus = action === 'mission.task.complete' ? 'completed' : String(params.status ?? '').trim().toLowerCase();
-			if (!['pending', 'in_progress', 'completed', 'blocked'].includes(rawStatus)) {
-				return { handled: true, error: `Invalid task status "${rawStatus}".` };
-			}
-			const mermaidText = typeof record.mermaidText === 'string' ? record.mermaidText : '';
-			const taskGraph = parseMissionMermaidDag(mermaidText);
-			const now = Date.now();
-			const res = updateMissionTaskNodeStatus(
-				record.taskStatuses as Readonly<Record<string, import('../common/adeOrchestrationEngine.js').IMissionTaskStatusRecord>> | undefined,
-				taskGraph,
-				effectiveOrgConfig,
-				{
-					nodeId,
-					status: rawStatus as MissionTaskStatus,
-					caller: {
-						isHumanUser: caller.isHumanUser,
-						callerTier: caller.callerTier,
-						callerSessionId: caller.callerSessionId,
-						callerNodeId: caller.callerNodeId,
-					},
-					orchGraph: !parsedGraph.error ? parsedGraph : undefined,
-					force: params.force === true,
-					note: typeof params.note === 'string' ? params.note : undefined,
-					now,
-				},
-			);
-			if (!res.ok) {
-				return { handled: true, error: res.error ?? `Failed to update task "${nodeId}" status.` };
-			}
-			record.taskStatuses = res.taskStatuses;
-			record.updatedAt = now;
-			await this.saveMissionRecord(missionId, JSON.stringify(record), now, 'headless-daemon');
-			return {
-				handled: true,
-				result: { headless: true, ok: true, missionId, nodeId, status: res.taskStatuses[nodeId] },
-			};
-		}
-
-		if (action === 'token.current') {
-			if (!orch) {
-				return { handled: true, error: `Mission "${missionId}" has no active Orchestration runtime state.` };
-			}
-			const caller = resolveHeadlessCaller();
-			const allLive = Object.values(orch.tokens ?? {}).filter(t => t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_join');
-			const filtered = (caller.isHumanUser || caller.isSecretary)
-				? allLive
-				: allLive.filter(t => (caller.callerNodeId && t.nodeId === caller.callerNodeId) || (caller.callerSessionId && (t.holderAgentId === caller.callerSessionId || orch.nodeAgentIds?.[t.nodeId] === caller.callerSessionId)));
-			return { handled: true, result: { headless: true, missionId, tokens: filtered } };
-		}
-
-		if (action === 'token.return' || action === 'token.handoff' || action === 'token.complete' || action === 'token.block' || action === 'token.fail' || action === 'token.mint' || action === 'token.split') {
-			if (!orch) {
-				return { handled: true, error: `Mission "${missionId}" has no active Orchestration runtime state.` };
-			}
-			const caller = resolveHeadlessCaller();
-			const callerAgentId = caller.isHumanUser ? undefined : caller.callerSessionId;
-			const whiteboards = buildMergedWhiteboards();
-			const mermaidText = typeof record.mermaidText === 'string' ? record.mermaidText : '';
-			const taskGraph = mermaidText.trim() ? parseMissionMermaidDag(mermaidText) : undefined;
-			const taskStatuses = record.taskStatuses as Readonly<Record<string, import('../common/adeOrchestrationEngine.js').IMissionTaskStatusRecord>> | undefined;
-			const now = Date.now();
-			const parseStrList = (raw: unknown): readonly string[] | undefined => Array.isArray(raw)
-				? raw.map(v => String(v).trim()).filter(Boolean)
-				: (typeof raw === 'string' && raw.trim() ? raw.split(',').map(s => s.trim()).filter(Boolean) : undefined);
-			const parseBlobList = (raw: unknown): readonly IOrchestrationContextBlobInput[] | undefined => {
-				if (!Array.isArray(raw)) { return undefined; }
-				const out: IOrchestrationContextBlobInput[] = [];
-				for (const item of raw) {
-					if (item && typeof item === 'object' && typeof (item as { content?: unknown }).content === 'string') {
-						out.push({ title: typeof (item as { title?: unknown }).title === 'string' ? (item as { title: string }).title : '', content: (item as { content: string }).content });
-					}
-				}
-				return out.length > 0 ? out : undefined;
-			};
-
-			if (action === 'token.return') {
-				const tokenId = String(params.tokenId ?? params.token ?? params.id ?? '').trim();
-				const summary = String(params.summary ?? params.message ?? '').trim();
-				const res = returnOrchestrationToken(orch, parsedGraph, whiteboards, effectiveOrgConfig, {
-					tokenId,
-					toNodeId: typeof (params.toNodeId ?? params.to ?? params.target) === 'string' ? String(params.toNodeId ?? params.to ?? params.target).trim() : undefined,
-					summary,
-					detail: typeof params.detail === 'string' && params.detail.trim() ? params.detail : undefined,
-					whiteboardIds: parseStrList(params.whiteboardIds ?? params.whiteboards ?? params.whiteboard),
-					artifacts: parseBlobList(params.artifacts),
-					decisions: parseBlobList(params.decisions),
-					refPtrs: parseStrList(params.refPtrs ?? params.refs ?? params.ref),
-					modifiedFiles: parseStrList(params.modifiedFiles ?? params.files),
-					callerAgentId,
-					now,
-				});
-				if (!res.ok) { return { handled: true, error: res.error ?? `Failed to return token ${tokenId}.` }; }
-				await persistHeadlessOrchState(res.state, res.effects, now);
-				return { handled: true, result: { headless: true, ok: true, missionId, queuedEffects: res.effects.length, ...(res.data as Record<string, unknown> ?? {}) } };
-			}
-
-			if (action === 'token.handoff') {
-				const tokenId = String(params.tokenId ?? params.token ?? params.id ?? '').trim();
-				const summary = String(params.summary ?? params.message ?? '').trim();
-				const toNodeIds = parseStrList(params.toNodeIds ?? params.to ?? params.target ?? params.targets) ?? [];
-				const res = handoffOrchestrationToken(orch, parsedGraph, whiteboards, effectiveOrgConfig, {
-					tokenId,
-					toNodeIds,
-					summary,
-					detail: typeof params.detail === 'string' && params.detail.trim() ? params.detail : undefined,
-					taskNodeId: typeof (params.taskNodeId ?? params.task ?? params.taskNode) === 'string' ? String(params.taskNodeId ?? params.task ?? params.taskNode).trim() : undefined,
-					taskNodeIds: parseStrList(params.taskNodeIds ?? params.tasks),
-					...(taskGraph && !taskGraph.error && taskGraph.nodes.length > 0 ? { taskGraph, taskStatuses } : {}),
-					whiteboardIds: parseStrList(params.whiteboardIds ?? params.whiteboards ?? params.whiteboard),
-					artifacts: parseBlobList(params.artifacts),
-					decisions: parseBlobList(params.decisions),
-					refPtrs: parseStrList(params.refPtrs ?? params.refs ?? params.ref),
-					modifiedFiles: parseStrList(params.modifiedFiles ?? params.files),
-					callerAgentId,
-					now,
-				});
-				if (!res.ok) { return { handled: true, error: res.error ?? `Failed to hand off token ${tokenId}.` }; }
-				await persistHeadlessOrchState(res.state, res.effects, now);
-				return { handled: true, result: { headless: true, ok: true, missionId, queuedEffects: res.effects.length, ...(res.data as Record<string, unknown> ?? {}) } };
-			}
-
-			if (action === 'token.complete') {
-				const tokenId = String(params.tokenId ?? params.token ?? params.id ?? '').trim();
-				const summary = String(params.summary ?? params.message ?? '').trim();
-				const res = completeOrchestrationToken(orch, parsedGraph, whiteboards, effectiveOrgConfig, {
-					tokenId,
-					summary,
-					detail: typeof params.detail === 'string' && params.detail.trim() ? params.detail : undefined,
-					toNodeIds: parseStrList(params.toNodeIds ?? params.to ?? params.target),
-					taskNodeId: typeof (params.taskNodeId ?? params.task ?? params.taskNode) === 'string' ? String(params.taskNodeId ?? params.task ?? params.taskNode).trim() : undefined,
-					taskNodeIds: parseStrList(params.taskNodeIds ?? params.tasks),
-					...(taskGraph && !taskGraph.error && taskGraph.nodes.length > 0 ? { taskGraph, taskStatuses } : {}),
-					whiteboardIds: parseStrList(params.whiteboardIds ?? params.whiteboards ?? params.whiteboard),
-					artifacts: parseBlobList(params.artifacts),
-					decisions: parseBlobList(params.decisions),
-					refPtrs: parseStrList(params.refPtrs ?? params.refs ?? params.ref),
-					modifiedFiles: parseStrList(params.modifiedFiles ?? params.files),
-					finish: params.finish === true,
-					callerAgentId,
-					now,
-				});
-				if (!res.ok) { return { handled: true, error: res.error ?? `Failed to complete token ${tokenId}.` }; }
-				await persistHeadlessOrchState(res.state, res.effects, now);
-				return { handled: true, result: { headless: true, ok: true, missionId, queuedEffects: res.effects.length, ...(res.data as Record<string, unknown> ?? {}) } };
-			}
-
-			if (action === 'token.block') {
-				const tokenId = String(params.tokenId ?? params.token ?? params.id ?? '').trim();
-				const maxDurationMs = parseDurationMs((params.maxDuration ?? params.max ?? params.duration) as string | number);
-				if (!maxDurationMs) {
-					return { handled: true, error: 'Valid --duration (e.g. "30m", "2h") is required for token.block.' };
-				}
-				const res = blockOrchestrationToken(orch, {
-					tokenId,
-					reason: String(params.reason ?? params.message ?? '').trim() || 'Long-running task in progress',
-					maxDurationMs,
-					watchPid: typeof params.watchPid === 'number' ? params.watchPid : undefined,
-					watchFile: typeof (params.watchFile ?? params.file) === 'string' ? String(params.watchFile ?? params.file).trim() : undefined,
-					hostAlias: typeof (params.host ?? params.hostAlias) === 'string' ? String(params.host ?? params.hostAlias).trim() : undefined,
-					callerAgentId,
-					now,
-				});
-				if (!res.ok) { return { handled: true, error: res.error ?? `Failed to block token ${tokenId}.` }; }
-				await persistHeadlessOrchState(res.state, res.effects, now);
-				return { handled: true, result: { headless: true, ok: true, missionId, token: res.state.tokens[tokenId] } };
-			}
-
-			if (action === 'token.fail') {
-				const tokenId = String(params.tokenId ?? params.token ?? params.id ?? '').trim();
-				const reason = String(params.reason ?? params.message ?? '').trim();
-				const res = failOrchestrationToken(orch, parsedGraph, whiteboards, effectiveOrgConfig, {
-					tokenId,
-					reason,
-					callerAgentId,
-					now,
-				});
-				if (!res.ok) { return { handled: true, error: res.error ?? `Failed to report failure on token ${tokenId}.` }; }
-				await persistHeadlessOrchState(res.state, res.effects, now);
-				return { handled: true, result: { headless: true, ok: true, missionId, queuedEffects: res.effects.length, ...(res.data as Record<string, unknown> ?? {}) } };
-			}
-
-			// token.mint / token.split
-			const rawParent = String(params.parentTokenId ?? params.tokenId ?? params.token ?? '').trim();
-			const parentTokenId = (!rawParent || rawParent.toLowerCase() === 'root' || rawParent.toLowerCase() === 'new') ? undefined : rawParent;
-			let rawBranches: unknown = params.branches;
-			if (!rawBranches && typeof params.branchesJson === 'string' && params.branchesJson.trim()) {
-				try { rawBranches = JSON.parse(params.branchesJson); } catch (err) {
-					return { handled: true, error: `Invalid --branches-json payload: ${err instanceof Error ? err.message : String(err)}` };
-				}
-			}
-			const branches: IOrchestrationMintBranch[] = [];
-			if (Array.isArray(rawBranches) && rawBranches.length > 0) {
-				for (const item of rawBranches) {
-					if (!item || typeof item !== 'object') { continue; }
-					const b = item as Record<string, unknown>;
-					branches.push({
-						toNodeId: String(b.toNodeId ?? b.to ?? b.target ?? '').trim(),
-						summary: String(b.summary ?? b.message ?? '').trim(),
-						...(typeof b.detail === 'string' && b.detail.trim() ? { detail: b.detail } : {}),
-						...(typeof (b.taskNodeId ?? b.task) === 'string' && String(b.taskNodeId ?? b.task).trim() ? { taskNodeId: String(b.taskNodeId ?? b.task).trim() } : {}),
-						...(parseStrList(b.taskNodeIds ?? b.tasks) ? { taskNodeIds: parseStrList(b.taskNodeIds ?? b.tasks) } : {}),
-						...(parseStrList(b.whiteboardIds ?? b.whiteboards ?? b.whiteboard) ? { whiteboardIds: parseStrList(b.whiteboardIds ?? b.whiteboards ?? b.whiteboard) } : {}),
-						...(parseBlobList(b.artifacts) ? { artifacts: parseBlobList(b.artifacts) } : {}),
-						...(parseBlobList(b.decisions) ? { decisions: parseBlobList(b.decisions) } : {}),
-						...(parseStrList(b.refPtrs ?? b.refs ?? b.ref) ? { refPtrs: parseStrList(b.refPtrs ?? b.refs ?? b.ref) } : {}),
-					});
-				}
-			} else {
-				const targets = parseStrList(params.toNodeIds ?? params.to ?? params.target) ?? [];
-				const summary = String(params.summary ?? params.message ?? '').trim();
-				for (const toNodeId of targets) {
-					branches.push({
-						toNodeId,
-						summary,
-						...(typeof params.detail === 'string' && params.detail.trim() ? { detail: params.detail } : {}),
-						...(typeof (params.taskNodeId ?? params.task ?? params.taskNode) === 'string' && String(params.taskNodeId ?? params.task ?? params.taskNode).trim() ? { taskNodeId: String(params.taskNodeId ?? params.task ?? params.taskNode).trim() } : {}),
-						...(parseStrList(params.taskNodeIds ?? params.tasks) ? { taskNodeIds: parseStrList(params.taskNodeIds ?? params.tasks) } : {}),
-						...(parseStrList(params.whiteboardIds ?? params.whiteboards ?? params.whiteboard) ? { whiteboardIds: parseStrList(params.whiteboardIds ?? params.whiteboards ?? params.whiteboard) } : {}),
-						...(parseBlobList(params.artifacts) ? { artifacts: parseBlobList(params.artifacts) } : {}),
-						...(parseBlobList(params.decisions) ? { decisions: parseBlobList(params.decisions) } : {}),
-						...(parseStrList(params.refPtrs ?? params.refs ?? params.ref) ? { refPtrs: parseStrList(params.refPtrs ?? params.refs ?? params.ref) } : {}),
-					});
-				}
-			}
-			const waitJoin = params.waitJoin !== undefined ? params.waitJoin === true : (action === 'token.split' && params.noWaitJoin !== true);
-			const res = mintOrchestrationTokens(orch, parsedGraph, whiteboards, effectiveOrgConfig, {
-				...(parentTokenId ? { parentTokenId } : {}),
-				...(typeof (params.fromNodeId ?? params.from) === 'string' && String(params.fromNodeId ?? params.from).trim() ? { fromNodeId: String(params.fromNodeId ?? params.from).trim() } : {}),
-				branches,
-				waitJoin,
-				joinMode: params.joinMode === 'any' ? 'any' : 'all',
-				...(taskGraph && !taskGraph.error && taskGraph.nodes.length > 0 ? { taskGraph, taskStatuses } : {}),
-				callerAgentId,
-				now,
-			});
-			if (!res.ok) { return { handled: true, error: res.error ?? 'Failed to mint Orchestration tokens.' }; }
-			await persistHeadlessOrchState(res.state, res.effects, now);
-			return { handled: true, result: { headless: true, ok: true, missionId, queuedEffects: res.effects.length, ...(res.data as Record<string, unknown> ?? {}) } };
-		}
-
-		// Strictly authorize pause / resume / abort in headless daemon mode!
-		if (!orch) {
-			return { handled: true, error: `Mission "${missionId}" has no active Orchestration runtime state.` };
-		}
-		const caller = resolveHeadlessCaller();
-		const ownerSessionId = typeof record.ownerSessionId === 'string' ? record.ownerSessionId.trim() : '';
-		const highestTier = effectiveOrgConfig.ranks.length > 0 ? Math.min(...effectiveOrgConfig.ranks.map(r => r.tier)) : 1;
-		const isAuthorizedForRunControl = Boolean(
-			caller.isHumanUser
-			|| caller.isSecretary
-			|| (ownerSessionId && caller.callerSessionId === ownerSessionId)
-			|| (caller.callerTier !== undefined && caller.callerTier <= highestTier),
-		);
-		if (!isAuthorizedForRunControl) {
-			return {
-				handled: true,
-				error: `FORBIDDEN: only Human User (L-1), Secretary (L0), the Mission owner, or highest-rank role (L${highestTier}) may invoke "${action}".`,
-			};
-		}
-
-		const now = Date.now();
-		const reason = typeof params.reason === 'string' ? params.reason : undefined;
-		const transition = action === 'orchestration.pause'
-			? pauseOrchestration(orch, { reason, now })
-			: action === 'orchestration.resume'
-				? resumeOrchestration(orch, { now })
-				: abortOrchestrationTokens(orch, { reason, now });
-
-		await persistHeadlessOrchState(transition.state, [], now);
-		return {
-			handled: true,
-			result: {
-				headless: true,
-				ok: transition.ok,
-				missionId,
-				status: transition.state.status,
-				...(transition.data ? transition.data as Record<string, unknown> : {}),
 			},
+			collectEffectiveNodeChecks: (filterNodeId?: string) => {
+				const mermaidText = typeof record.mermaidText === 'string' ? record.mermaidText : '';
+				const taskGraph = mermaidText.trim() ? parseMissionMermaidDag(mermaidText) : undefined;
+				const nodeChecksMap = (record.nodeChecks && typeof record.nodeChecks === 'object')
+					? record.nodeChecks as Readonly<Record<string, readonly IMissionNodeCheckHook[]>>
+					: {};
+				const candidateIds = filterNodeId
+					? [filterNodeId]
+					: [...new Set([
+						...parsedGraph.nodes.filter(n => n.kind === 'staff').map(n => n.id),
+						...(taskGraph && !taskGraph.error ? taskGraph.nodes.map(n => n.id) : []),
+						...Object.keys(nodeChecksMap),
+					])];
+				const out: Record<string, readonly IMissionNodeCheckHook[]> = {};
+				for (const nid of candidateIds) {
+					const mergedHooks = resolveMergedNodeCheckHooks({
+						nodeIds: [nid],
+						recordNodeChecks: nodeChecksMap,
+						parsedOrch: !parsedGraph.error ? parsedGraph : undefined,
+						parsedDag: taskGraph && !taskGraph.error ? taskGraph : undefined,
+						onlyEnabled: false,
+					});
+					if (filterNodeId || mergedHooks.length > 0) {
+						out[nid] = mergedHooks;
+					}
+				}
+				return out;
+			},
+			filterWhiteboardsForCaller: (c = caller) => {
+				const merged = buildMergedWhiteboards();
+				const visible = Object.values(merged).filter(wb =>
+					canCallerAccessWhiteboard(parsedGraph, wb, effectiveOrgConfig, { ...c, access: 'read', state: orch }),
+				);
+				const allowedIds = new Set(visible.map(w => w.id));
+				const safeOrchText = (c.isHumanUser || c.isSecretary)
+					? orchestrationText
+					: stripForeignWhiteboardBodiesFromOrchestrationText(orchestrationText, allowedIds);
+				return { visible, allowedIds, safeOrchText };
+			},
+			persistHeadlessOrchState: (nextOrchBase, emittedEffects, nowTs) =>
+				this.persistHeadlessOrchStateRecord(missionId, record, parsedGraph, nextOrchBase, emittedEffects, nowTs, { alreadyLocked: isLocked }),
 		};
+
+		const rbacErr = checkHeadlessMissionRbac(ctx);
+		if (rbacErr) {
+			return { handled: true, error: rbacErr };
+		}
+
+		const readRes = await tryExecuteHeadlessMissionReadAction(ctx);
+		if (readRes !== undefined) {
+			return readRes;
+		}
+		return executeHeadlessMissionMutationAction(ctx);
 	}
 
 	private get orgConfigCachePath(): string {
 		return path.join(this.baseDir, 'org-config.cache.json');
 	}
 
-	private async loadCachedOrgConfig(): Promise<IAdeOrganizationConfig> {
+	async loadCachedOrgConfig(): Promise<IAdeOrganizationConfig> {
 		if (this.orgConfigCacheLoaded) {
 			return this.cachedOrgConfig;
 		}
-		this.orgConfigCacheLoaded = true;
 		try {
 			const raw = await fs.promises.readFile(this.orgConfigCachePath, 'utf8');
 			const parsed = JSON.parse(raw) as IAdeOrganizationConfig;
 			if (parsed && Array.isArray(parsed.ranks) && parsed.ranks.length > 0) {
 				this.cachedOrgConfig = parsed;
+				this.orgConfigCacheLoaded = true;
 			}
-		} catch {
-			// Fall back to default organization config until first syncApiDocs
+		} catch (err) {
+			// Only latch on definitive ENOENT; transient read/rename errors will retry on next call.
+			if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+				this.orgConfigCacheLoaded = true;
+			}
 		}
 		return this.cachedOrgConfig;
 	}
@@ -1329,17 +1495,33 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 	async syncApiDocs(config: IAdeOrganizationConfig): Promise<IAdeDocsPaths> {
 		this.cachedOrgConfig = config;
 		this.orgConfigCacheLoaded = true;
-		void (async () => {
+		const writeCacheOp = async () => {
+			if (this._store.isDisposed) {
+				return;
+			}
 			try {
 				await fs.promises.mkdir(this.baseDir, { recursive: true, mode: 0o700 });
+				if (this._store.isDisposed) {
+					return;
+				}
 				const tmp = `${this.orgConfigCachePath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
 				await fs.promises.writeFile(tmp, JSON.stringify(config), { encoding: 'utf8', mode: 0o600 });
+				if (this._store.isDisposed) {
+					await fs.promises.unlink(tmp).catch(() => undefined);
+					return;
+				}
 				await fs.promises.rename(tmp, this.orgConfigCachePath);
 			} catch {
 				// Non-fatal cache write
 			}
-		})();
-		return syncAdeApiDocsToDisk(this.baseDir, config);
+		};
+		const queuedCache = this.orgConfigWriteChain.then(writeCacheOp, writeCacheOp);
+		this.orgConfigWriteChain = queuedCache.catch(() => undefined);
+		const [paths] = await Promise.all([
+			syncAdeApiDocsToDisk(this.baseDir, config),
+			queuedCache,
+		]);
+		return paths;
 	}
 
 	async getApiDocsPaths(rankCount: number): Promise<IAdeDocsPaths> {
@@ -1348,12 +1530,12 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 
 	async readApiDoc(target: string, config?: IAdeOrganizationConfig): Promise<IAdeApiDocReadResult> {
 		const normalized = (target || '').trim();
-		const effectiveConfig = config ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
+		const effectiveConfig = config ?? await this.loadCachedOrgConfig();
 		const paths = buildAdeDocsPaths(this.baseDir, effectiveConfig.ranks.length);
 
 		const parsedTarget = normalizeAdeDocTargetKey(normalized);
 		let filePath: string | undefined;
-		let canonicalTarget = parsedTarget?.canonicalTarget ?? normalized;
+		const canonicalTarget = parsedTarget?.canonicalTarget ?? normalized;
 
 		if (parsedTarget) {
 			switch (parsedTarget.kind) {
@@ -1387,13 +1569,19 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 			};
 		}
 
-		const expectedFingerprint = [...effectiveConfig.ranks]
-			.sort((a, b) => a.tier - b.tier)
-			.map(r => `${r.tier}:${r.id}:${r.pureExecution ? '1' : '0'}:${r.canHaveSubordinates ? '1' : '0'}:${r.allowedApis.join(',')}`)
-			.join('|');
+		let expectedFingerprint: string | undefined;
+		try {
+			const bundle = buildAdeDocsBundle(effectiveConfig);
+			const parsedBundleManifest = bundle.manifestJson ? JSON.parse(bundle.manifestJson) as { configFingerprint?: unknown } : undefined;
+			if (typeof parsedBundleManifest?.configFingerprint === 'string') {
+				expectedFingerprint = parsedBundleManifest.configFingerprint;
+			}
+		} catch {
+			expectedFingerprint = undefined;
+		}
 
 		let docsUpToDate = false;
-		if (paths.manifestFile) {
+		if (paths.manifestFile && expectedFingerprint) {
 			try {
 				const rawManifest = await fs.promises.readFile(paths.manifestFile, 'utf8');
 				const parsedManifest = JSON.parse(rawManifest) as { currentRevision?: unknown; rankCount?: unknown; configFingerprint?: unknown };
@@ -1420,7 +1608,6 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 			}
 		}
 
-		// Docs missing, stale revision, or rank config drifted: sync single-copy docs to disk before returning.
 		try {
 			await syncAdeApiDocsToDisk(this.baseDir, effectiveConfig);
 			const content = await fs.promises.readFile(filePath, 'utf8');
@@ -1463,7 +1650,39 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		}
 	}
 
+	async probeFileSignature(hostAlias: string, filePath: string): Promise<string | null> {
+		const trimmed = filePath.trim();
+		if (!trimmed) {
+			return null;
+		}
+		const normalizedHost = hostAlias.trim() || 'local';
+		try {
+			if (normalizedHost !== 'local') {
+				if (!this.remoteProbe) {
+					return null;
+				}
+				if (this.remoteProbe.remoteFileStatSignature) {
+					const sig = await this.remoteProbe.remoteFileStatSignature(normalizedHost, trimmed);
+					return sig ?? null;
+				}
+				if (this.remoteProbe.remoteStat) {
+					const st = await this.remoteProbe.remoteStat(normalizedHost, trimmed);
+					return `${Math.round(st.mtime)}:${st.size}`;
+				}
+				const mtime = await this.remoteProbe.remoteFileStatMtime(normalizedHost, trimmed);
+				return typeof mtime === 'number' && Number.isFinite(mtime) ? `${mtime}` : null;
+			}
+			const st = await fs.promises.stat(trimmed);
+			return `${Math.round(st.mtimeMs)}:${st.size}:${st.ino}`;
+		} catch {
+			return null;
+		}
+	}
+
 	async syncMissionWatchdog(snapshot: IAdeMissionWatchdogSnapshot): Promise<void> {
+		if (snapshot.ownerWindowCtx?.trim()) {
+			this.liveRendererContexts.add(snapshot.ownerWindowCtx.trim());
+		}
 		this.watchdog.syncMission(snapshot);
 	}
 
@@ -1475,7 +1694,12 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 		return this.watchdog.getMissionOwnerWindowCtx(missionId);
 	}
 
-	async canRecoverMission(_missionId: string): Promise<boolean> {
+	async canRecoverMission(missionId: string, callerWindowCtx?: string): Promise<boolean> {
+		const ownerCtx = this.watchdog.getMissionOwnerWindowCtx(missionId)?.trim();
+		const caller = callerWindowCtx?.trim();
+		if (ownerCtx && caller && ownerCtx !== caller && this.liveRendererContexts.has(ownerCtx)) {
+			return false;
+		}
 		return true;
 	}
 
@@ -1485,124 +1709,6 @@ export class AdeDocsBackendNodeService extends Disposable implements IAdeEnginee
 	}
 
 	async runDeterministicCheck(request: IAdeDeterministicCheckRequest): Promise<IAdeDeterministicCheckResponse> {
-		const startedAt = Date.now();
-		const hostAlias = request.hostAlias?.trim() || 'local';
-		const isRemote = hostAlias !== 'local';
-		const expectedExitCode = Number.isInteger(request.expectExitCode) ? Number(request.expectExitCode) : 0;
-		const timeoutMs = Math.max(1_000, Math.min(300_000, Math.round(request.timeoutMs ?? 120_000)));
-		const command = request.command?.trim() || undefined;
-		const cwd = request.cwd?.trim() || undefined;
-		const expectFiles = (request.expectFiles ?? []).map(f => f.trim()).filter(Boolean);
-		const expectOutputMatch = request.expectOutputMatch?.trim() || undefined;
-
-		let exitCode = 0;
-		let timedOut = false;
-		let rawOutput = '';
-		let execError: string | undefined;
-
-		if (command) {
-			if (isRemote) {
-				if (!this.remoteProbe?.remoteExecCommand) {
-					return {
-						checkId: request.checkId,
-						name: request.name,
-						command,
-						hostAlias,
-						cwd,
-						passed: false,
-						exitCode: -1,
-						expectedExitCode,
-						durationMs: Math.max(0, Date.now() - startedAt),
-						outputTail: '',
-						error: `Remote deterministic check execution is unavailable for SSH host "${hostAlias}".`,
-					};
-				}
-				const remoteRes = await this.remoteProbe.remoteExecCommand(hostAlias, {
-					command,
-					cwd,
-					timeoutMs,
-					maxOutputChars: MAX_CHECK_TAIL_CHARS,
-				});
-				exitCode = remoteRes.exitCode;
-				rawOutput = remoteRes.outputTail;
-				timedOut = remoteRes.timedOut;
-				execError = remoteRes.error;
-			} else {
-				const localRes = await runLocalDeterministicShell(command, cwd, timeoutMs);
-				exitCode = localRes.exitCode;
-				rawOutput = localRes.output;
-				timedOut = localRes.timedOut;
-				execError = localRes.error;
-			}
-		}
-
-		const exitOk = !timedOut && !execError && (!command || exitCode === expectedExitCode);
-		const outputMatchFailed = Boolean(command && expectOutputMatch && !matchesExpectedOutput(rawOutput, expectOutputMatch));
-
-		const missingFiles: string[] = [];
-		if (expectFiles.length > 0 && exitOk && !outputMatchFailed) {
-			for (const relOrAbs of expectFiles) {
-				const resolvedTarget = isRemote
-					? (relOrAbs.startsWith('/') || /^[A-Za-z]:[\\/]/.test(relOrAbs)
-						? relOrAbs
-						: (cwd ? path.posix.join(cwd, relOrAbs) : relOrAbs))
-					: (path.isAbsolute(relOrAbs) ? relOrAbs : (cwd ? path.resolve(cwd, relOrAbs) : path.resolve(relOrAbs)));
-				let existsOk = false;
-				if (isRemote) {
-					try {
-						if (this.remoteProbe?.remoteStat) {
-							const st = await this.remoteProbe.remoteStat(hostAlias, resolvedTarget);
-							existsOk = st.type === 'directory' || st.size > 0;
-						} else if (this.remoteProbe) {
-							const mtime = await this.remoteProbe.remoteFileStatMtime(hostAlias, resolvedTarget);
-							existsOk = mtime !== undefined;
-						}
-					} catch {
-						existsOk = false;
-					}
-				} else {
-					try {
-						const st = await fs.promises.stat(resolvedTarget);
-						existsOk = st.isDirectory() || st.size > 0;
-					} catch {
-						existsOk = false;
-					}
-				}
-				if (!existsOk) {
-					missingFiles.push(relOrAbs);
-				}
-			}
-		}
-
-		const passed = exitOk && !outputMatchFailed && missingFiles.length === 0;
-		const errorParts: string[] = [];
-		if (execError) {
-			errorParts.push(execError);
-		} else if (command && exitCode !== expectedExitCode) {
-			errorParts.push(`Exit code ${exitCode} (expected ${expectedExitCode})`);
-		}
-		if (outputMatchFailed) {
-			errorParts.push(`Output did not match required pattern "${expectOutputMatch}"`);
-		}
-		if (missingFiles.length > 0) {
-			errorParts.push(`Missing or empty required artifact(s): ${missingFiles.join(', ')}`);
-		}
-
-		return {
-			checkId: request.checkId,
-			...(request.name ? { name: request.name } : {}),
-			...(command ? { command } : {}),
-			hostAlias,
-			...(cwd ? { cwd } : {}),
-			passed,
-			exitCode,
-			expectedExitCode,
-			...(timedOut ? { timedOut: true } : {}),
-			durationMs: Math.max(0, Date.now() - startedAt),
-			...(missingFiles.length > 0 ? { missingFiles } : {}),
-			...(outputMatchFailed ? { outputMatchFailed: true } : {}),
-			outputTail: formatBoundedOutputTail(rawOutput),
-			...(errorParts.length > 0 ? { error: errorParts.join('; ') } : {}),
-		};
+		return executeAdeDeterministicCheck(request, this.remoteProbe);
 	}
 }

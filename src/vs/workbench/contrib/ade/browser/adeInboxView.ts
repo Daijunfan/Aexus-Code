@@ -4,9 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { asCSSUrl } from '../../../../base/browser/cssValue.js';
-import { $, addDisposableListener, append, clearNode, EventType, isHTMLTextAreaElement } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, append, clearNode, EventType, getWindow, isHTMLElement, isHTMLTextAreaElement } from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
@@ -52,6 +52,10 @@ const ADE_INBOX_CLAMP_CHARS = 180;
 
 function lookupInboxRankDefinition(rank: AdeInboxSenderRank, config: IAdeOrganizationConfig = DEFAULT_ADE_ORGANIZATION_CONFIG) {
 	return findRankDefinition(config, rank) ?? findRankDefinition(DEFAULT_ADE_ORGANIZATION_CONFIG, rank);
+}
+
+function toSafeCssSlug(raw: string): string {
+	return String(raw).trim().replace(/[^a-z0-9_-]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'custom';
 }
 
 export function normalizeAdeInboxRank(
@@ -144,9 +148,44 @@ export function formatAdeInboxKindLabel(
 	if (/^\[Circuit Breaker\]/i.test(title) || /Circuit Breaker/i.test(title)) {
 		return localize('adeInboxKindCircuit', "Circuit Breaker");
 	}
+	if (/^\[(?:Engineering |Silence )?Escalation\]/i.test(title) || /\bsilence[_\s-]*timeout\b/i.test(title) || /\bWatchdog\b/i.test(title)) {
+		return localize('adeInboxKindWatchdog', "Watchdog Escalation");
+	}
+	if (/^\[(?:Join |Barrier |Scope )/i.test(title) || /\b(?:Join Barrier|File Conflict|Scope Overlap)\b/i.test(title)) {
+		return localize('adeInboxKindJoinScope', "Join / Scope Alert");
+	}
 	return severity === 'critical'
 		? localize('adeInboxKindCriticalAlert', "Critical Alert")
 		: localize('adeInboxKindGov', "Governor Alert");
+}
+
+function resolveAdeInboxKindVariant(item: Pick<IAdeInboxItem, 'kind' | 'title'>, severity: AdeInboxSeverity): string {
+	if (item.kind === 'user_gate') {
+		return 'gate';
+	}
+	const title = (item.title ?? '').trim();
+	if (/^\[Verify Gate\]/i.test(title) || /Untrusted Verify/i.test(title)) {
+		return 'trust';
+	}
+	if (/^\[Budget Guardrail\]/i.test(title) || /Budget Guardrail/i.test(title)) {
+		return 'budget';
+	}
+	if (/^\[Worktree\b/i.test(title) || /Worktree (?:Merge Conflict|Creation Failed)/i.test(title)) {
+		return 'worktree';
+	}
+	if (/^\[Persist\b/i.test(title) || /Failed to Save (?:Mission|Engineering) State/i.test(title)) {
+		return 'storage';
+	}
+	if (/^\[Circuit Breaker\]/i.test(title) || /Circuit Breaker/i.test(title)) {
+		return 'circuit';
+	}
+	if (/^\[(?:Engineering |Silence )?Escalation\]/i.test(title) || /\bsilence[_\s-]*timeout\b/i.test(title) || /\bWatchdog\b/i.test(title)) {
+		return 'watchdog';
+	}
+	if (/^\[(?:Join |Barrier |Scope )/i.test(title) || /\b(?:Join Barrier|File Conflict|Scope Overlap)\b/i.test(title)) {
+		return 'join';
+	}
+	return severity === 'critical' ? 'critical' : 'gov';
 }
 
 function resolveAdeInboxKindIcon(item: Pick<IAdeInboxItem, 'kind' | 'title'>, severity: AdeInboxSeverity): ThemeIcon {
@@ -159,6 +198,12 @@ function resolveAdeInboxKindIcon(item: Pick<IAdeInboxItem, 'kind' | 'title'>, se
 	}
 	if (/^\[Budget Guardrail\]/i.test(title) || /Budget Guardrail/i.test(title)) {
 		return Codicon.warning;
+	}
+	if (/^\[(?:Engineering |Silence )?Escalation\]/i.test(title) || /\bsilence[_\s-]*timeout\b/i.test(title) || /\bWatchdog\b/i.test(title)) {
+		return Codicon.watch;
+	}
+	if (/^\[(?:Join |Barrier |Scope )/i.test(title) || /\b(?:Join Barrier|File Conflict|Scope Overlap)\b/i.test(title)) {
+		return Codicon.gitMerge;
 	}
 	return severity === 'critical' ? Codicon.error : Codicon.warning;
 }
@@ -189,6 +234,7 @@ export interface IAdeInboxMissionOpenOptions {
 	readonly focusNodeId?: string;
 	readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
 	readonly openAgentBeside?: boolean;
+	readonly viewMode?: 'mission' | 'orchestration';
 }
 
 export interface IAdeInboxMissionBridge {
@@ -220,6 +266,10 @@ export class AdeInboxPanel extends Disposable {
 	private expandedMessageIds = new Set<string>();
 	private resolvedLaneExpanded = false;
 	private errorBannerText: string | undefined;
+	private readonly liveAgeHandles: Array<{ readonly el: HTMLElement; readonly createdAt: number }> = [];
+	private ageRefreshTimer: number | undefined;
+	private pendingRestoreFocusTarget: HTMLElement | undefined;
+	private primaryFocusEl: HTMLElement | undefined;
 
 	private formatRelativeAge(ts: number): string {
 		const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -284,7 +334,41 @@ export class AdeInboxPanel extends Disposable {
 				}
 			}));
 		}
+		this._register(toDisposable(() => this.stopAgeRefreshTimer()));
+		this.syncAgeRefreshTimer();
 		this.render();
+	}
+
+	private syncAgeRefreshTimer(): void {
+		if (this.element.hidden) {
+			this.stopAgeRefreshTimer();
+			return;
+		}
+		if (this.ageRefreshTimer !== undefined) {
+			return;
+		}
+		const win = getWindow(this.element);
+		this.ageRefreshTimer = win.setInterval(() => {
+			if (this.element.hidden) {
+				this.stopAgeRefreshTimer();
+				return;
+			}
+			for (const entry of this.liveAgeHandles) {
+				if (entry.el.isConnected) {
+					const nextText = this.formatRelativeAge(entry.createdAt);
+					if (entry.el.textContent !== nextText) {
+						entry.el.textContent = nextText;
+					}
+				}
+			}
+		}, 60_000);
+	}
+
+	private stopAgeRefreshTimer(): void {
+		if (this.ageRefreshTimer !== undefined) {
+			getWindow(this.element).clearInterval(this.ageRefreshTimer);
+			this.ageRefreshTimer = undefined;
+		}
 	}
 
 	private getRoleConfig(): IAdeOrganizationConfig {
@@ -293,8 +377,15 @@ export class AdeInboxPanel extends Disposable {
 
 	setVisible(visible: boolean): void {
 		this.element.hidden = !visible;
+		this.syncAgeRefreshTimer();
 		if (visible) {
 			this.render();
+		}
+	}
+
+	focus(): void {
+		if (this.primaryFocusEl && this.primaryFocusEl.isConnected) {
+			this.primaryFocusEl.focus({ preventScroll: true });
 		}
 	}
 
@@ -333,13 +424,26 @@ export class AdeInboxPanel extends Disposable {
 	render(): void {
 		const prevScrollTop = this.listEl.scrollTop;
 		const activeEl = this.element.ownerDocument.activeElement;
+		const focusWasInside = isHTMLElement(activeEl) && this.element.contains(activeEl);
 		const activeRollbackCardId = isHTMLTextAreaElement(activeEl)
 			? (activeEl.closest('[data-inbox-id]')?.getAttribute('data-inbox-id') ?? undefined)
 			: undefined;
 		const activeSelectionStart = isHTMLTextAreaElement(activeEl) ? activeEl.selectionStart : null;
 		const activeSelectionEnd = isHTMLTextAreaElement(activeEl) ? activeEl.selectionEnd : null;
+		const focusedRankAttr = focusWasInside && activeEl.classList.contains('ade-inbox-rank-chip')
+			? activeEl.getAttribute('data-rank')
+			: null;
+		const focusedFilterMode = focusWasInside && activeEl.classList.contains('ade-inbox-filter-btn')
+			? activeEl.getAttribute('data-filter-mode')
+			: null;
+		const focusedFocusKey = focusWasInside
+			? activeEl.getAttribute('data-inbox-focus-key')
+			: null;
 
 		this.renderDisposables.clear();
+		this.liveAgeHandles.length = 0;
+		this.pendingRestoreFocusTarget = undefined;
+		this.primaryFocusEl = undefined;
 		clearNode(this.filterBarEl);
 		clearNode(this.rankBarEl);
 		clearNode(this.listEl);
@@ -398,12 +502,20 @@ export class AdeInboxPanel extends Disposable {
 		const leftGroup = append(this.filterBarEl, $('.ade-inbox-toolbar-left'));
 		const pendingToggle = append(leftGroup, $(`button.ade-inbox-filter-btn${!this.showResolved ? '.active' : ''}`, {
 			type: 'button',
+			'data-filter-mode': 'pending',
 			'aria-pressed': String(!this.showResolved),
 		}, localize('adeInboxPendingFilter', "Pending")));
 		const allToggle = append(leftGroup, $(`button.ade-inbox-filter-btn${this.showResolved ? '.active' : ''}`, {
 			type: 'button',
+			'data-filter-mode': 'all',
 			'aria-pressed': String(this.showResolved),
 		}, localize('adeInboxAllFilter', "All")));
+		if (focusedFilterMode === 'pending') {
+			this.pendingRestoreFocusTarget = pendingToggle;
+		} else if (focusedFilterMode === 'all') {
+			this.pendingRestoreFocusTarget = allToggle;
+		}
+		this.primaryFocusEl = !this.showResolved ? pendingToggle : allToggle;
 
 		this.renderDisposables.add(addDisposableListener(pendingToggle, EventType.CLICK, () => {
 			this.showResolved = false;
@@ -441,12 +553,16 @@ export class AdeInboxPanel extends Disposable {
 			const chipTooltip = rank === 'all'
 				? localize('adeInboxRankAllTooltip', "Show messages from all agent ranks")
 				: localize('adeInboxRankSingleTooltip', "Show only {0} {1} messages", getRankTierLabel(rank, roleConfig), getRankFullLabel(rank, roleConfig));
-			const chip = append(this.rankBarEl, $(`button.ade-inbox-rank-chip.rank-${rank}${isActive ? '.active' : ''}${count > 0 ? '.has-items' : ''}`, {
+			const safeRank = toSafeCssSlug(rank);
+			const chip = append(this.rankBarEl, $(`button.ade-inbox-rank-chip.rank-${safeRank}${isActive ? '.active' : ''}${count > 0 ? '.has-items' : ''}`, {
 				type: 'button',
 				'data-rank': rank,
 				'aria-pressed': String(isActive),
 				title: chipTooltip,
 			}));
+			if (focusedRankAttr === rank) {
+				this.pendingRestoreFocusTarget = chip;
+			}
 			if (rank === 'all') {
 				append(chip, $('span.ade-inbox-rank-chip-label', {}, localize('adeInboxRankAllLabel', "All")));
 			} else {
@@ -462,6 +578,9 @@ export class AdeInboxPanel extends Disposable {
 
 		if (filteredFormalItems.length === 0 && filteredUnreadReplies.length === 0) {
 			this.renderEmptyState(rankCounts.all > 0);
+			if (!activeRollbackCardId && this.pendingRestoreFocusTarget && this.pendingRestoreFocusTarget.isConnected) {
+				this.pendingRestoreFocusTarget.focus({ preventScroll: true });
+			}
 			return;
 		}
 
@@ -487,10 +606,13 @@ export class AdeInboxPanel extends Disposable {
 				continue;
 			}
 			for (const item of laneItems) {
-				this.renderCard(item, activeRollbackCardId, activeSelectionStart, activeSelectionEnd);
+				this.renderCard(item, activeRollbackCardId, activeSelectionStart, activeSelectionEnd, focusedFocusKey);
 			}
 		}
 		this.listEl.scrollTop = prevScrollTop;
+		if (!activeRollbackCardId && this.pendingRestoreFocusTarget && this.pendingRestoreFocusTarget.isConnected) {
+			this.pendingRestoreFocusTarget.focus({ preventScroll: true });
+		}
 	}
 
 	private openMissionCanvas(id: string, options?: IAdeInboxMissionOpenOptions): void {
@@ -570,7 +692,8 @@ export class AdeInboxPanel extends Disposable {
 
 	private renderUnreadReplyCard(entry: IUnreadReplyEntry): void {
 		const { agent, rank } = entry;
-		const card = append(this.listEl, $(`div.ade-inbox-card.kind-agent_reply.rank-${rank}.unread`, {
+		const safeRank = toSafeCssSlug(rank);
+		const card = append(this.listEl, $(`div.ade-inbox-card.kind-agent_reply.rank-${safeRank}.unread`, {
 			'data-inbox-agent-id': agent.id,
 			'data-rank': rank,
 			tabindex: '0',
@@ -591,7 +714,7 @@ export class AdeInboxPanel extends Disposable {
 
 		const roleConfig = this.getRoleConfig();
 		const topRow = append(card, $('.ade-inbox-card-top'));
-		const rankPill = append(topRow, $(`span.ade-inbox-rank-pill.rank-${rank}`, { 'data-tier': getRankTierLabel(rank, roleConfig) }));
+		const rankPill = append(topRow, $(`span.ade-inbox-rank-pill.rank-${safeRank}`, { 'data-tier': getRankTierLabel(rank, roleConfig) }));
 		const rankIco = append(rankPill, $('span.ade-inbox-rank-pill-icon', { 'aria-hidden': 'true' }));
 		rankIco.classList.add(...ThemeIcon.asClassNameArray(getRankIcon(rank, roleConfig)));
 		append(rankPill, $('span', {}, `${getRankTierLabel(rank, roleConfig)} ${getRankFullLabel(rank, roleConfig)}`));
@@ -613,7 +736,7 @@ export class AdeInboxPanel extends Disposable {
 			iconEl.style.backgroundImage = asCSSUrl(icon);
 		} else {
 			if (!resolvedEngineIcon) {
-				iconEl.classList.add('ade-tree-item-icon-draft', `role-color-${rankDef.color}`);
+				iconEl.classList.add('ade-tree-item-icon-draft', `role-color-${toSafeCssSlug(rankDef.color)}`);
 			}
 			iconEl.classList.add(...ThemeIcon.asClassNameArray(icon));
 		}
@@ -668,16 +791,24 @@ export class AdeInboxPanel extends Disposable {
 		restoreFocusCardId?: string,
 		restoreSelectionStart?: number | null,
 		restoreSelectionEnd?: number | null,
+		focusedFocusKey?: string | null,
 	): void {
 		const roleConfig = this.getRoleConfig();
 		const severity = resolveAdeInboxSeverity(item);
 		const itemRank = resolveAdeInboxItemRank(item, this.projects, roleConfig);
-		const card = append(this.listEl, $(`div.ade-inbox-card.kind-${item.kind}.sev-${severity}.rank-${itemRank}${item.unread ? '.unread' : ''}${item.resolved ? '.resolved' : ''}`, {
+		const safeKind = toSafeCssSlug(item.kind);
+		const safeRank = toSafeCssSlug(itemRank);
+		const cardFocusKey = `card:${item.id}`;
+		const card = append(this.listEl, $(`div.ade-inbox-card.kind-${safeKind}.sev-${severity}.rank-${safeRank}${item.unread ? '.unread' : ''}${item.resolved ? '.resolved' : ''}`, {
 			'data-inbox-id': item.id,
+			'data-inbox-focus-key': cardFocusKey,
 			'data-severity': severity,
 			'data-rank': itemRank,
 			tabindex: '0',
 		}));
+		if (focusedFocusKey === cardFocusKey) {
+			this.pendingRestoreFocusTarget = card;
+		}
 
 		this.renderDisposables.add(addDisposableListener(card, EventType.CLICK, () => {
 			if (item.unread) {
@@ -692,20 +823,22 @@ export class AdeInboxPanel extends Disposable {
 		}));
 
 		const topRow = append(card, $('.ade-inbox-card-top'));
-		const badge = append(topRow, $(`span.ade-inbox-kind-pill.kind-${item.kind}`));
+		const kindVariant = resolveAdeInboxKindVariant(item, severity);
+		const badge = append(topRow, $(`span.ade-inbox-kind-pill.kind-${safeKind}.variant-${kindVariant}`));
 		badge.classList.add(`sev-${severity}`);
 		const badgeIco = append(badge, $('span'));
 		badgeIco.classList.add(...ThemeIcon.asClassNameArray(resolveAdeInboxKindIcon(item, severity)));
 		append(badge, $('span', {}, this.formatKindLabel(item, severity)));
 
-		append(topRow, $(`span.ade-inbox-rank-pill.compact.rank-${itemRank}`, {
+		append(topRow, $(`span.ade-inbox-rank-pill.compact.rank-${safeRank}`, {
 			title: `${getRankTierLabel(itemRank, roleConfig)} ${getRankFullLabel(itemRank, roleConfig)}`,
 		}, getRankTierLabel(itemRank, roleConfig)));
 
 		if (item.projectName) {
 			append(topRow, $('span.ade-inbox-project-pill', { title: item.projectPath }, item.projectName));
 		}
-		append(topRow, $('span.ade-inbox-age', {}, this.formatRelativeAge(item.createdAt)));
+		const ageEl = append(topRow, $('span.ade-inbox-age', {}, this.formatRelativeAge(item.createdAt)));
+		this.liveAgeHandles.push({ el: ageEl, createdAt: item.createdAt });
 		if (item.unread) {
 			append(topRow, $('span.ade-inbox-unread-dot'));
 		}
@@ -736,9 +869,17 @@ export class AdeInboxPanel extends Disposable {
 		const expanded = this.expandedMessageIds.has(item.id);
 		append(card, $(`div.ade-inbox-card-message${isLong && !expanded ? '.clamped' : ''}`, {}, item.message));
 		if (isLong) {
-			const moreBtn = append(card, $('button.ade-inbox-link-btn.ade-inbox-more', { type: 'button', 'aria-expanded': String(expanded) }, expanded
+			const moreKey = `more:${item.id}`;
+			const moreBtn = append(card, $('button.ade-inbox-link-btn.ade-inbox-more', {
+				type: 'button',
+				'data-inbox-focus-key': moreKey,
+				'aria-expanded': String(expanded),
+			}, expanded
 				? localize('adeInboxShowLess', "Show less")
 				: localize('adeInboxShowMore', "More")));
+			if (focusedFocusKey === moreKey) {
+				this.pendingRestoreFocusTarget = moreBtn;
+			}
 			this.renderDisposables.add(addDisposableListener(moreBtn, EventType.CLICK, e => {
 				e.stopPropagation();
 				if (this.expandedMessageIds.has(item.id)) {
@@ -801,10 +942,15 @@ export class AdeInboxPanel extends Disposable {
 
 			const candidates = item.rollbackCandidates ?? [];
 			if (candidates.length > 0) {
+				const rbKey = `rb:${item.id}`;
 				const rbToggleBtn = append(actionsRow, $('button.ade-inbox-btn.danger-outline', {
 					type: 'button',
+					'data-inbox-focus-key': rbKey,
 					...(isBusy ? { disabled: 'disabled' } : {}),
 				}, localize('adeInboxGateRollbackToggleBtn', "Roll Back...")));
+				if (focusedFocusKey === rbKey) {
+					this.pendingRestoreFocusTarget = rbToggleBtn;
+				}
 				this.renderDisposables.add(addDisposableListener(rbToggleBtn, EventType.CLICK, e => {
 					e.stopPropagation();
 					if (this.expandedRollbackIds.has(item.id)) {

@@ -300,7 +300,7 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 
 		const inGraph = queryApiUpdateDiff(1, 'in_graph');
 		assert.strictEqual(inGraph.scope, 'in_graph');
-		assert.strictEqual(inGraph.added.length, 11);
+		assert.strictEqual(inGraph.added.length, 12);
 		assert.ok(inGraph.added.every(entry => entry.scope === 'in_graph' && entry.addedInRevision >= 2));
 		assert.deepStrictEqual(
 			inGraph.added.map(entry => entry.id).sort(),
@@ -314,6 +314,7 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 				'in_graph.token.mint_split',
 				'in_graph.token.read',
 				'in_graph.token.reject',
+				'in_graph.token.retry',
 				'in_graph.token.return',
 				'in_graph.token.trace',
 			],
@@ -326,6 +327,8 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 			[
 				'mission.boundary',
 				'mission.check',
+				'mission.checkpoint',
+				'mission.diagnostics',
 				'mission.host.bind',
 				'mission.migration',
 				'mission.patch',
@@ -334,39 +337,48 @@ suite('ADE API Registry Revision Diff & Single-Copy Docs Sync', () => {
 				'mission.retry',
 				'mission.task',
 				'mission.task.authoring',
+				'mission.task.status',
 				'mission.trigger',
 				'orchestration.authoring',
+				'orchestration.limits',
 				'orchestration.manifest_and_control',
 				'orchestration.migration',
 				'orchestration.staff.create',
 				'orchestration.topology',
 			],
 		);
-		assert.strictEqual(mission.modified.length, 0);
+		assert.deepStrictEqual(mission.modified.map(entry => entry.id), ['mission.blueprint']);
 
 		const missionFromRev3 = queryApiUpdateDiff(3, 'mission');
 		assert.deepStrictEqual(
 			missionFromRev3.added.map(entry => entry.id).sort(),
-			['mission.check', 'mission.migration', 'mission.task', 'mission.task.authoring', 'orchestration.authoring', 'orchestration.manifest_and_control', 'orchestration.migration', 'orchestration.staff.create', 'orchestration.topology'],
+			['mission.check', 'mission.checkpoint', 'mission.diagnostics', 'mission.migration', 'mission.task', 'mission.task.authoring', 'mission.task.status', 'orchestration.authoring', 'orchestration.limits', 'orchestration.manifest_and_control', 'orchestration.migration', 'orchestration.staff.create', 'orchestration.topology'],
 		);
 		const missionFromRev4 = queryApiUpdateDiff(4, 'mission');
 		assert.deepStrictEqual(
 			missionFromRev4.added.map(entry => entry.id).sort(),
-			['mission.migration', 'mission.task', 'mission.task.authoring', 'orchestration.authoring', 'orchestration.manifest_and_control', 'orchestration.migration', 'orchestration.staff.create', 'orchestration.topology'],
+			['mission.checkpoint', 'mission.diagnostics', 'mission.migration', 'mission.task', 'mission.task.authoring', 'mission.task.status', 'orchestration.authoring', 'orchestration.limits', 'orchestration.manifest_and_control', 'orchestration.migration', 'orchestration.staff.create', 'orchestration.topology'],
 		);
 		const missionFromRev6 = queryApiUpdateDiff(6, 'mission');
 		assert.deepStrictEqual(
 			missionFromRev6.added.map(entry => entry.id).sort(),
-			['mission.migration', 'mission.task.authoring', 'orchestration.authoring', 'orchestration.manifest_and_control', 'orchestration.migration'],
+			['mission.checkpoint', 'mission.diagnostics', 'mission.migration', 'mission.task.authoring', 'mission.task.status', 'orchestration.authoring', 'orchestration.limits', 'orchestration.manifest_and_control', 'orchestration.migration'],
 		);
 		const rev8All = queryApiUpdateDiff(7, 'all');
 		assert.deepStrictEqual(
 			rev8All.added.map(entry => entry.id).sort(),
-			['in_graph.token.mint_split', 'in_graph.token.return', 'mission.task.authoring', 'orchestration.manifest_and_control'],
+			['common.idempotency', 'in_graph.token.mint_split', 'in_graph.token.retry', 'in_graph.token.return', 'mission.checkpoint', 'mission.diagnostics', 'mission.task.authoring', 'mission.task.status', 'off_graph.session.configure', 'orchestration.limits', 'orchestration.manifest_and_control'],
 		);
 		assert.ok(rev8All.modified.some(entry => entry.id === 'orchestration.authoring'));
+		const rev10All = queryApiUpdateDiff(9, 'all');
+		assert.deepStrictEqual(
+			rev10All.added.map(entry => entry.id).sort(),
+			['common.idempotency', 'in_graph.token.retry', 'mission.checkpoint', 'mission.diagnostics', 'mission.task.status', 'off_graph.session.configure', 'orchestration.limits'],
+		);
+		assert.ok(rev10All.modified.some(entry => entry.id === 'in_graph.token.reject'));
+		assert.strictEqual(rev10All.deprecated.length, 0);
 		const commonFromRev4 = queryApiUpdateDiff(4, 'common');
-		assert.deepStrictEqual(commonFromRev4.added.map(entry => entry.id), ['common.whiteboard']);
+		assert.deepStrictEqual(commonFromRev4.added.map(entry => entry.id), ['common.whiteboard', 'common.idempotency']);
 		const inGraphFromRev3 = queryApiUpdateDiff(3, 'in_graph');
 		assert.ok(inGraphFromRev3.modified.some(entry => entry.id === 'in_graph.token.complete'));
 

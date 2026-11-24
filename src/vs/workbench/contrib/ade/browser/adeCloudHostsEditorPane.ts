@@ -21,6 +21,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import {
 	AdeCloudHostOs,
+	AdeOsIconKind,
 	buildCloudProjectUri,
 	IAdeCloudHost,
 	IAdeCloudHostBackendService,
@@ -415,6 +416,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 
 	private readonly renderGridDisposables = this._register(new DisposableStore());
 	private readonly drawerDisposables = this._register(new DisposableStore());
+	private readonly bannerDisposables = this._register(new DisposableStore());
 	private readonly bannerTimer = this._register(new MutableDisposable());
 	private readonly flashTimers = this._register(new DisposableStore());
 
@@ -1275,6 +1277,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		if (!this.bannerHostEl) {
 			return;
 		}
+		this.bannerDisposables.clear();
 		clearNode(this.bannerHostEl);
 		if (!this.statusBanner) {
 			return;
@@ -1287,11 +1290,11 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		append(banner, $('span.ade-ch-banner-text', {}, this.statusBanner.text));
 		const close = append(banner, $('button.ade-ch-banner-close', { type: 'button', 'aria-label': localize('adeChDismissBanner', "Dismiss") })) as HTMLButtonElement;
 		close.classList.add(...ThemeIcon.asClassNameArray(Codicon.close));
-		close.addEventListener('click', () => {
+		this.bannerDisposables.add(addDisposableListener(close, EventType.CLICK, () => {
 			this.statusBanner = undefined;
 			this.bannerTimer.clear();
 			this.renderBanner();
-		}, { once: true });
+		}));
 	}
 
 	//#endregion
@@ -1501,7 +1504,7 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 			appendHint(field.wrap, field.hint);
 			return input;
 		};
-		const segmented = <T extends string>(grid: HTMLElement, label: string, hint: string, options: ReadonlyArray<{ value: T; label: string }>, get: () => T, set: (value: T) => void) => {
+		const segmented = <T extends string>(grid: HTMLElement, label: string, hint: string, options: ReadonlyArray<{ value: T; label: string; osIcon?: AdeOsIconKind }>, get: () => T, set: (value: T) => void) => {
 			const field = makeField(grid, label, hint);
 			const seg = append(field.wrap, $('.ade-ch-seg', { role: 'radiogroup', id: field.id, 'aria-label': label }));
 			const buttons: HTMLElement[] = [];
@@ -1514,7 +1517,12 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 				}
 			};
 			for (const option of options) {
-				const btn = append(seg, $('button.ade-ch-seg-btn', { type: 'button', role: 'radio', 'data-value': option.value }, option.label));
+				const btn = append(seg, $('button.ade-ch-seg-btn', { type: 'button', role: 'radio', 'data-value': option.value }));
+				if (option.osIcon) {
+					const ico = append(btn, $('span.ade-ch-seg-os-ico'));
+					renderAdeOsIcon(ico, option.osIcon, { baseClass: 'ade-ch-seg-os-ico', prefix: 'ade-os' });
+				}
+				append(btn, $('span', {}, option.label));
 				buttons.push(btn);
 				store.add(addDisposableListener(btn, EventType.CLICK, () => {
 					set(option.value);
@@ -1547,9 +1555,9 @@ export class AdeCloudHostsEditorPane extends EditorPane {
 		textInput(connection, localize('adeChFieldUser', "SSH Username"), localize('adeChFieldUserHint', "Login user (e.g. ubuntu, root, djf)"), 'user', 'ubuntu');
 		textInput(connection, localize('adeChFieldPort', "SSH Port"), localize('adeChFieldPortHint', "Default 22"), 'port', '22', { type: 'number' });
 		segmented<AdeCloudHostOs>(connection, localize('adeChFieldOs', "Remote OS Platform"), localize('adeChFieldOsHint', "Selects POSIX shell vs Windows PowerShell"), [
-			{ value: 'linux', label: localize('adeChOsLinux', "Linux") },
-			{ value: 'macos', label: localize('adeChOsMac', "macOS") },
-			{ value: 'windows', label: localize('adeChOsWindows', "Windows") },
+			{ value: 'linux', label: localize('adeChOsLinux', "Linux"), osIcon: 'linux' },
+			{ value: 'macos', label: localize('adeChOsMac', "macOS"), osIcon: 'macos' },
+			{ value: 'windows', label: localize('adeChOsWindows', "Windows"), osIcon: 'windows' },
 		], () => drawer.draft.os, value => { drawer.draft.os = value; });
 
 		// 2. Authentication

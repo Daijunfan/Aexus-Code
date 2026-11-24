@@ -1703,11 +1703,17 @@ registerAction2(class CopyAgentRolePromptAction extends Action2 {
 		} catch {
 			missionRuntime = undefined;
 		}
+		let missionService;
+		try {
+			missionService = accessor.get(IAdeMissionService);
+		} catch {
+			missionService = undefined;
+		}
 		const agent = await pickAgent(accessor, id);
 		if (!agent) {
 			return;
 		}
-		const compiled = buildAdeAgentRoleContext(projects, sessions, agent, roleConfig, docsPaths, missionRuntime);
+		const compiled = buildAdeAgentRoleContext(projects, sessions, agent, roleConfig, docsPaths, missionRuntime, missionService);
 		if (!compiled) {
 			const rankDef = resolveEffectiveRankDefinition(roleConfig, agent.role, projects.hasSubordinates(agent.id));
 			await clipboard.writeText([

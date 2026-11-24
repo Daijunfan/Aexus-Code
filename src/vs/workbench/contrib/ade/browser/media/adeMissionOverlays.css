@@ -1,0 +1,2626 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.monaco-workbench .ade-mission-model-title-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-model-current-pill {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	font-weight: 600;
+	color: #7dd3fc;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: rgba(56, 189, 248, 0.12);
+	border: 1px solid rgba(56, 189, 248, 0.3);
+	max-width: 136px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-vendor-model-lead {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.monaco-workbench .ade-mission-model-presets {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 5px;
+	margin: 4px 0 2px;
+}
+
+.monaco-workbench .ade-mission-model-preset-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: safe center;
+	gap: 4px;
+	min-width: 0;
+	height: 26px;
+	padding: 0 5px;
+	box-sizing: border-box;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 15%, transparent);
+	background: rgba(14, 20, 34, 0.88);
+	color: color-mix(in srgb, var(--vscode-foreground) 88%, #cbd5e1);
+	font-size: 10px;
+	font-weight: 600;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
+}
+
+.monaco-workbench .ade-mission-vendor-btn-label {
+	min-width: 0;
+	flex-shrink: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-mission-model-preset-btn:hover:not(:disabled) {
+	border-color: var(--ade-mission-accent);
+	background: rgba(24, 34, 56, 0.96);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-mission-model-preset-btn.active {
+	border-color: rgba(56, 189, 248, 0.68);
+	background: rgba(56, 189, 248, 0.18);
+	color: #e0f2fe;
+}
+
+.monaco-workbench .ade-mission-model-preset-btn.expanded {
+	border-color: rgba(56, 189, 248, 0.92);
+	background: rgba(56, 189, 248, 0.24);
+	color: #f0f9ff;
+	box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.32), 0 0 10px rgba(56, 189, 248, 0.2);
+}
+
+.monaco-workbench .ade-mission-model-preset-btn.is-unsupported,
+.monaco-workbench .ade-mission-model-preset-btn:disabled {
+	opacity: 0.56;
+	filter: grayscale(0.65);
+	background: rgba(15, 23, 42, 0.58);
+	border-color: rgba(148, 163, 184, 0.24);
+	color: #94a3b8;
+	cursor: not-allowed;
+	box-shadow: none;
+}
+
+.monaco-workbench .ade-mission-vendor-models-pop {
+	margin-top: 3px;
+	padding: 6px;
+	border-radius: 8px;
+	background: rgba(9, 13, 22, 0.94);
+	border: 1px solid rgba(56, 189, 248, 0.36);
+	box-shadow: 0 8px 22px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(125, 211, 252, 0.12);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-vendor-models-pop[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-vendor-models-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	padding: 1px 3px 3px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-vendor-models-lead {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-vendor-models-title {
+	font-size: 10.5px;
+	font-weight: 700;
+	color: #e2e8f0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-vendor-models-count {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	font-weight: 600;
+	color: #7dd3fc;
+	padding: 1px 5px;
+	border-radius: 999px;
+	background: rgba(56, 189, 248, 0.14);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-vendor-models-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	height: 162px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-mission-vendor-model-item {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.monaco-workbench .ade-mission-vendor-model-row-wrap {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	width: 100%;
+}
+
+.monaco-workbench .ade-mission-vendor-model-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	flex: 1 1 auto;
+	min-width: 0;
+	padding: 4px 6px;
+	border-radius: 5px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-foreground);
+	text-align: left;
+	cursor: pointer;
+	transition: background-color 110ms ease, border-color 110ms ease, opacity 110ms ease;
+}
+
+.monaco-workbench .ade-mission-model-cat-btn {
+	flex: 0 0 auto;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border-radius: 5px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	opacity: 0.42;
+	transition: opacity 110ms ease, background-color 110ms ease, border-color 110ms ease, color 110ms ease;
+}
+
+.monaco-workbench .ade-mission-vendor-model-row-wrap:hover .ade-mission-model-cat-btn,
+.monaco-workbench .ade-mission-model-cat-btn:focus-visible,
+.monaco-workbench .ade-mission-model-cat-btn.is-customized,
+.monaco-workbench .ade-mission-model-cat-btn.is-open {
+	opacity: 1;
+}
+
+.monaco-workbench .ade-mission-model-cat-btn:hover,
+.monaco-workbench .ade-mission-model-cat-btn.is-open {
+	background: rgba(56, 189, 248, 0.16);
+	border-color: rgba(56, 189, 248, 0.42);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-mission-model-cat-btn.is-customized {
+	color: #a78bfa;
+}
+
+.monaco-workbench .ade-mission-model-cat-strip {
+	margin: 0 2px 3px;
+	padding: 5px 6px;
+	border-radius: 6px;
+	background: rgba(15, 23, 42, 0.92);
+	border: 1px solid rgba(56, 189, 248, 0.28);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-model-cat-strip-label {
+	font-size: 9.5px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-model-cat-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-model-cat-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	height: 21px;
+	padding: 0 6px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: rgba(10, 15, 28, 0.9);
+	color: color-mix(in srgb, var(--vscode-foreground) 86%, #cbd5e1);
+	font-size: 9.5px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: border-color 100ms ease, background-color 100ms ease, color 100ms ease;
+}
+
+.monaco-workbench .ade-mission-model-cat-chip:hover {
+	border-color: rgba(56, 189, 248, 0.65);
+	background: rgba(56, 189, 248, 0.16);
+	color: #f0f9ff;
+}
+
+.monaco-workbench .ade-mission-model-cat-chip.active {
+	border-color: rgba(56, 189, 248, 0.85);
+	background: rgba(56, 189, 248, 0.24);
+	color: #e0f2fe;
+}
+
+.monaco-workbench .ade-mission-model-cat-chip.is-reset {
+	border-style: dashed;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-vendor-model-row:hover:not(:disabled) {
+	background: rgba(56, 189, 248, 0.12);
+	border-color: rgba(56, 189, 248, 0.28);
+}
+
+.monaco-workbench .ade-mission-vendor-model-row.active {
+	background: rgba(56, 189, 248, 0.2);
+	border-color: rgba(56, 189, 248, 0.56);
+	color: #f0f9ff;
+}
+
+.monaco-workbench .ade-mission-vendor-model-row.is-unsupported,
+.monaco-workbench .ade-mission-vendor-model-row:disabled {
+	opacity: 0.32;
+	filter: grayscale(0.85) brightness(0.7);
+	cursor: not-allowed;
+}
+
+.monaco-workbench .ade-mission-vendor-model-info {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-vendor-model-label {
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1.2;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-vendor-model-id {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	color: var(--vscode-descriptionForeground);
+	line-height: 1.15;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-vendor-model-check {
+	color: #38bdf8;
+	font-size: 12px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-vendor-model-na {
+	font-size: 9px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	padding: 1px 4px;
+	border-radius: 4px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-prompt-popover {
+	width: 396px;
+	padding: 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	box-shadow: 0 18px 42px rgba(0, 0, 0, 0.55);
+}
+
+.monaco-workbench .ade-mission-prompt-pop-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-mission-prompt-pop-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.monaco-workbench .ade-mission-prompt-pop-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-prompt-pop-btn {
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border-radius: 5px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-mission-prompt-pop-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	border-color: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-mission-node-prompt-popover-input {
+	width: 100%;
+	min-height: 148px;
+	max-height: 260px;
+	padding: 8px 10px;
+	box-sizing: border-box;
+	resize: vertical;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background, #0d1118);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-family: var(--vscode-editor-font-family);
+	font-size: 11.5px;
+	line-height: 1.5;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-node-prompt-popover-input:focus {
+	border-color: var(--ade-mission-accent);
+}
+
+.monaco-workbench .ade-mission-thinking-picker {
+	display: flex;
+	gap: 4px;
+	margin-top: 2px;
+}
+
+.monaco-workbench .ade-mission-thinking-opt {
+	flex: 1 1 0;
+	height: 22px;
+	padding: 0 4px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: rgba(15, 20, 32, 0.72);
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .ade-mission-thinking-opt:hover {
+	border-color: var(--ade-mission-accent);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-mission-thinking-opt.active {
+	background: rgba(167, 139, 250, 0.22);
+	border-color: rgba(167, 139, 250, 0.58);
+	color: #e9d5ff;
+}
+
+.monaco-workbench .ade-mission-emp-popover {
+	position: absolute;
+	z-index: 40;
+	width: 264px;
+	padding: 8px;
+	box-sizing: border-box;
+	border-radius: 10px;
+	background: var(--vscode-editorWidget-background, #181c24);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-emp-popover[data-popover-kind="mission-task"] .ade-mission-node-prompt-popover-input {
+	min-height: 86px;
+	max-height: 180px;
+}
+
+.monaco-workbench .ade-mission-emp-popover[data-popover-kind="engine"] {
+	width: 312px;
+}
+
+.monaco-workbench .ade-mission-emp-popover[data-popover-kind="engine"] .ade-mission-emp-popover-list {
+	max-height: 260px;
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-model-popover {
+	width: 348px;
+	padding: 9px;
+	max-height: calc(100% - 24px);
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-model-popover .ade-mission-emp-popover-list {
+	max-height: 112px;
+}
+
+.monaco-workbench .ade-mission-emp-popover[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-emp-popover-title {
+	font-size: 10.5px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	padding: 2px 4px;
+}
+
+.monaco-workbench .ade-mission-emp-popover-input {
+	width: 100%;
+	height: 26px;
+	padding: 0 8px;
+	box-sizing: border-box;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background, #11141a);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 12px;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-emp-popover-input:focus {
+	border-color: var(--ade-mission-accent);
+}
+
+.monaco-workbench .ade-mission-emp-popover-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: 150px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	width: 100%;
+	height: 26px;
+	padding: 0 8px;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	font-size: 11.5px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-emp-popover-item.active {
+	background: rgba(167, 139, 250, 0.16);
+	color: #ddd6fe;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item.is-unavailable,
+.monaco-workbench .ade-mission-emp-popover-item:disabled {
+	opacity: 0.38;
+	filter: grayscale(0.85);
+	color: var(--vscode-descriptionForeground);
+	cursor: not-allowed;
+}
+
+.monaco-workbench .ade-mission-engine-popover-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-engine-popover-head-right {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-engine-host-badge {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	font-weight: 600;
+	color: #93c5fd;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: rgba(59, 130, 246, 0.14);
+	border: 1px solid rgba(59, 130, 246, 0.32);
+	max-width: 112px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-engine-refresh-btn {
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border-radius: 5px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-engine-refresh-btn:hover:not(:disabled) {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-engine-refresh-btn.is-spinning .codicon {
+	animation: codicon-spin 1.1s linear infinite;
+}
+
+.monaco-workbench .ade-mission-engine-probe-error {
+	font-size: 10px;
+	line-height: 1.3;
+	color: #fca5a5;
+	background: rgba(239, 68, 68, 0.12);
+	border: 1px solid rgba(239, 68, 68, 0.3);
+	border-radius: 6px;
+	padding: 4px 6px;
+	word-break: break-word;
+}
+
+.monaco-workbench .ade-mission-engine-loading {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 6px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-engine-option-tail {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-engine-status-badge.is-unavailable {
+	font-size: 9px;
+	font-weight: 600;
+	padding: 1px 5px;
+	border-radius: 4px;
+	color: var(--vscode-descriptionForeground);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+}
+
+.monaco-workbench .ade-mission-engine-pill.is-engine-unavailable {
+	border-color: rgba(245, 158, 11, 0.55);
+	background: rgba(245, 158, 11, 0.1);
+}
+
+.monaco-workbench .ade-mission-engine-warn-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 999px;
+	background: #f59e0b;
+	box-shadow: 0 0 6px rgba(245, 158, 11, 0.75);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item.clear {
+	color: var(--vscode-descriptionForeground);
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	margin-top: 2px;
+	padding-top: 2px;
+}
+
+.monaco-workbench .ade-mission-emp-popover-meta {
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-drawer-config {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 8px 12px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+}
+
+.monaco-workbench .ade-mission-config-field {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-config-input,
+.monaco-workbench .ade-mission-config-select {
+	height: 22px;
+	padding: 0 6px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background, #11141a);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 11px;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-config-input {
+	width: 52px;
+}
+
+.monaco-workbench .ade-mission-config-select.full {
+	width: 100%;
+	height: 26px;
+}
+
+.monaco-workbench .ade-mission-config-input:disabled,
+.monaco-workbench .ade-mission-config-select:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.monaco-workbench .ade-mission-host-section {
+	margin-top: 4px;
+	padding-top: 6px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-gate-rollback-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 4px 0 6px;
+}
+
+.monaco-workbench .ade-mission-gate-rollback-field[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-gate-rollback-label {
+	font-size: 10.5px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-gate-rollback-select {
+	width: 100%;
+	height: 26px;
+	font-size: 11.5px;
+}
+
+.monaco-workbench .ade-mission-gate-actions {
+	display: flex;
+	gap: 6px;
+	margin-top: 4px;
+}
+
+.monaco-workbench .ade-mission-gate-btn {
+	flex: 1;
+	height: 26px;
+	border-radius: 6px;
+	font-size: 11.5px;
+	font-weight: 600;
+	cursor: pointer;
+	border: 1px solid transparent;
+}
+
+.monaco-workbench .ade-mission-gate-btn:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.monaco-workbench .ade-mission-gate-btn.approve {
+	background: rgba(52, 211, 153, 0.18);
+	border-color: rgba(52, 211, 153, 0.45);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-gate-btn.approve:hover:not(:disabled) {
+	background: rgba(52, 211, 153, 0.28);
+}
+
+.monaco-workbench .ade-mission-gate-btn.reject {
+	background: rgba(248, 113, 113, 0.16);
+	border-color: rgba(248, 113, 113, 0.42);
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-mission-gate-btn.reject.is-emphasized {
+	background: rgba(248, 113, 113, 0.24);
+	border-color: rgba(248, 113, 113, 0.72);
+	box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.25);
+}
+
+.monaco-workbench .ade-mission-gate-btn.reject:hover:not(:disabled) {
+	background: rgba(248, 113, 113, 0.28);
+}
+
+.monaco-workbench .ade-mission-token-status-badge.status-queued {
+	border-color: rgba(129, 140, 248, 0.65);
+	background: rgba(99, 102, 241, 0.18);
+	color: #c7d2fe;
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-token-popover {
+	width: 390px;
+	max-width: calc(100% - 24px);
+	max-height: min(520px, calc(100% - 24px));
+	overflow-y: auto;
+	padding: 10px 12px;
+	user-select: text;
+}
+
+.monaco-workbench .ade-mission-token-inspector {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-mission-token-insp-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-token-insp-title-wrap {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.monaco-workbench .ade-mission-token-insp-node-id {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 5px;
+	background: rgba(56, 189, 248, 0.16);
+	border: 1px solid rgba(56, 189, 248, 0.4);
+	color: #7dd3fc;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-token-insp-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-token-status-badge {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	font-weight: 700;
+	padding: 2px 7px;
+	border-radius: 999px;
+	flex-shrink: 0;
+	background: rgba(148, 163, 184, 0.18);
+	color: #cbd5e1;
+}
+
+.monaco-workbench .ade-mission-token-status-badge.status-active {
+	background: rgba(56, 189, 248, 0.2);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-mission-token-status-badge.status-blocked,
+.monaco-workbench .ade-mission-token-status-badge.status-waiting-join,
+.monaco-workbench .ade-mission-token-status-badge.status-waiting-gate {
+	background: rgba(245, 158, 11, 0.22);
+	color: #fde68a;
+}
+
+.monaco-workbench .ade-mission-token-status-badge.status-frozen-failed {
+	background: rgba(248, 113, 113, 0.22);
+	color: #fecaca;
+}
+
+.monaco-workbench .ade-mission-token-status-badge.status-completed {
+	background: rgba(52, 211, 153, 0.2);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-token-wave-switcher {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-token-wave-btn {
+	height: 21px;
+	padding: 0 7px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-token-wave-btn.active {
+	border-color: rgba(56, 189, 248, 0.65);
+	background: rgba(56, 189, 248, 0.18);
+	color: #e0f2fe;
+}
+
+.monaco-workbench .ade-mission-token-meta-row,
+.monaco-workbench .ade-mission-token-watch-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-token-meta-chip {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	padding: 1px 6px;
+	border-radius: 5px;
+	background: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	color: var(--vscode-descriptionForeground);
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-token-meta-chip.wave {
+	color: #93c5fd;
+}
+
+.monaco-workbench .ade-mission-token-meta-chip.rework,
+.monaco-workbench .ade-mission-token-meta-chip.warn {
+	color: #fde68a;
+	border-color: rgba(245, 158, 11, 0.42);
+	background: rgba(245, 158, 11, 0.12);
+}
+
+.monaco-workbench .ade-mission-token-meta-chip.danger {
+	color: #fecaca;
+	border-color: rgba(248, 113, 113, 0.48);
+	background: rgba(248, 113, 113, 0.14);
+}
+
+.monaco-workbench .ade-mission-token-box {
+	padding: 7px 9px;
+	border-radius: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	font-size: 11px;
+}
+
+.monaco-workbench .ade-mission-token-box.is-blocked,
+.monaco-workbench .ade-mission-token-box.is-warn {
+	background: rgba(245, 158, 11, 0.1);
+	border: 1px solid rgba(245, 158, 11, 0.36);
+}
+
+.monaco-workbench .ade-mission-token-box.is-failed {
+	background: rgba(248, 113, 113, 0.1);
+	border: 1px solid rgba(248, 113, 113, 0.4);
+}
+
+.monaco-workbench .ade-mission-token-box-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-token-box-label {
+	font-size: 10.5px;
+	font-weight: 700;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-mission-token-countdown {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	font-weight: 700;
+	color: #fde68a;
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-mission-token-countdown.is-overdue {
+	color: #f87171;
+}
+
+.monaco-workbench .ade-mission-token-box-body {
+	color: var(--vscode-foreground);
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.monaco-workbench .ade-mission-token-esc-list {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding-top: 4px;
+	border-top: 1px solid rgba(248, 113, 113, 0.24);
+	font-size: 10px;
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-mission-token-section {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-token-section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-token-section-title {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	color: var(--vscode-descriptionForeground);
+	text-transform: uppercase;
+}
+
+.monaco-workbench .ade-mission-token-text-block {
+	padding: 6px 8px;
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--vscode-editor-background) 85%, #0c111b);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	font-size: 11px;
+	line-height: 1.48;
+	color: var(--vscode-foreground);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.monaco-workbench .ade-mission-token-text-block.scrollable {
+	max-height: 112px;
+	overflow-y: auto;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+}
+
+.monaco-workbench .ade-mission-token-trace-btn {
+	height: 20px;
+	padding: 0 7px;
+	border-radius: 5px;
+	border: 1px solid rgba(251, 191, 36, 0.44);
+	background: rgba(251, 191, 36, 0.12);
+	color: #fde68a;
+	font-size: 10px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-token-trace-btn:hover {
+	background: rgba(251, 191, 36, 0.22);
+}
+
+.monaco-workbench .ade-mission-token-trace-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-height: 140px;
+	overflow-y: auto;
+	padding: 6px 7px;
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--vscode-editor-background) 90%, #090d16);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-token-trace-list[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-token-trace-row {
+	display: flex;
+	align-items: baseline;
+	gap: 5px;
+	font-size: 10.5px;
+	line-height: 1.35;
+}
+
+.monaco-workbench .ade-mission-trace-event {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 9.5px;
+	font-weight: 700;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: rgba(148, 163, 184, 0.18);
+	color: #cbd5e1;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-trace-event.evt-complete,
+.monaco-workbench .ade-mission-trace-event.evt-gate-approve,
+.monaco-workbench .ade-mission-trace-event.evt-check-passed {
+	background: rgba(52, 211, 153, 0.18);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-trace-event.evt-reject,
+.monaco-workbench .ade-mission-trace-event.evt-fail-route,
+.monaco-workbench .ade-mission-trace-event.evt-fail-escalate,
+.monaco-workbench .ade-mission-trace-event.evt-gate-reject,
+.monaco-workbench .ade-mission-trace-event.evt-check-failed {
+	background: rgba(248, 113, 113, 0.18);
+	color: #fecaca;
+}
+
+.monaco-workbench .ade-mission-trace-event.evt-retry,
+.monaco-workbench .ade-mission-trace-event.evt-join {
+	background: rgba(56, 189, 248, 0.18);
+	color: #7dd3fc;
+}
+
+.monaco-workbench .ade-mission-trace-node {
+	font-family: var(--vscode-editor-font-family);
+	font-weight: 700;
+	color: #93c5fd;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-trace-summary {
+	color: var(--vscode-descriptionForeground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-token-trace-empty {
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-token-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding-top: 2px;
+}
+
+.monaco-workbench .ade-mission-token-action-btn {
+	flex: 1 1 auto;
+	height: 26px;
+	padding: 0 10px;
+	border-radius: 6px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-token-action-btn:hover {
+	background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .ade-mission-token-action-btn.primary {
+	background: rgba(56, 189, 248, 0.18);
+	border-color: rgba(56, 189, 248, 0.5);
+	color: #bae6fd;
+}
+
+.monaco-workbench .ade-mission-token-action-btn.primary:hover {
+	background: rgba(56, 189, 248, 0.28);
+}
+
+.monaco-workbench .ade-mission-token-action-btn.danger {
+	background: rgba(248, 113, 113, 0.16);
+	border-color: rgba(248, 113, 113, 0.44);
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-mission-token-action-btn.danger:hover {
+	background: rgba(248, 113, 113, 0.26);
+}
+
+.monaco-workbench .ade-mission-gate-summary-preview {
+	padding: 6px 8px;
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--vscode-editor-background) 85%, #0c111b);
+	border: 1px solid rgba(245, 185, 66, 0.28);
+	font-size: 11px;
+	line-height: 1.4;
+	color: var(--vscode-foreground);
+	max-height: 76px;
+	overflow-y: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.monaco-workbench .ade-mission-gate-summary-preview[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-node-inspector {
+	position: absolute;
+	top: 58px;
+	right: 14px;
+	bottom: 56px;
+	width: min(352px, calc(100% - 28px));
+	z-index: 28;
+	display: flex;
+	flex-direction: column;
+	border-radius: 12px;
+	overflow: hidden;
+	user-select: text;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #181c24) 94%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	box-shadow: 0 18px 44px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	backdrop-filter: blur(14px);
+}
+
+.monaco-workbench .ade-mission-node-inspector[hidden],
+.monaco-workbench .ade-mission-node-inspector [hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-mission-ni-tab-wrap,
+.monaco-workbench .ade-mission-ni-check-list,
+.monaco-workbench .ade-mission-finops-rows-wrap {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-ni-tab-wrap {
+	gap: 10px;
+}
+
+.monaco-workbench .ade-mission-ni-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 10px 12px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-ni-title-wrap {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.monaco-workbench .ade-mission-ni-node-id {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	font-weight: 700;
+	padding: 1px 6px;
+	border-radius: 5px;
+	background: rgba(56, 189, 248, 0.16);
+	border: 1px solid rgba(56, 189, 248, 0.4);
+	color: #7dd3fc;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-ni-title {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-ni-body {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	padding: 10px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 11px;
+}
+
+.monaco-workbench .ade-mission-ni-chat-bar {
+	display: flex;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-ni-btn {
+	flex: 1 1 auto;
+	height: 28px;
+	padding: 0 9px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	color: var(--vscode-foreground);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	font-size: 11px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-ni-btn:hover {
+	background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .ade-mission-ni-btn.primary {
+	background: rgba(56, 189, 248, 0.18);
+	border-color: rgba(56, 189, 248, 0.52);
+	color: #bae6fd;
+}
+
+.monaco-workbench .ade-mission-ni-btn.primary:hover {
+	background: rgba(56, 189, 248, 0.28);
+}
+
+.monaco-workbench .ade-mission-ni-section {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-ni-section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-ni-section-title {
+	font-size: 10px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-ni-mini-btn {
+	height: 20px;
+	padding: 0 7px;
+	border-radius: 5px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 10px;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-ni-mini-btn:hover {
+	border-color: var(--ade-mission-accent);
+	color: #bae6fd;
+}
+
+.monaco-workbench .ade-mission-ni-kv-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-ni-kv-row {
+	width: 100%;
+	min-height: 28px;
+	padding: 4px 8px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-editor-background) 78%, #0e1320);
+	color: var(--vscode-foreground);
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	font-size: 11px;
+	cursor: pointer;
+	text-align: left;
+}
+
+.monaco-workbench .ade-mission-ni-kv-row:hover:not(:disabled) {
+	border-color: rgba(56, 189, 248, 0.5);
+	background: rgba(56, 189, 248, 0.08);
+}
+
+.monaco-workbench .ade-mission-ni-kv-row:disabled {
+	opacity: 0.65;
+	cursor: default;
+}
+
+.monaco-workbench .ade-mission-ni-kv-key {
+	color: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-ni-kv-val {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+	flex: 1 1 auto;
+	justify-content: flex-end;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-weight: 550;
+}
+
+.monaco-workbench .ade-mission-ni-kv-val .is-muted {
+	color: var(--vscode-descriptionForeground);
+	font-weight: 450;
+}
+
+.monaco-workbench .ade-mission-ni-kv-arrow {
+	font-size: 11px;
+	opacity: 0.55;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-ni-muted-hint {
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-ni-trigger-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-ni-telemetry-line {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-triggers-popover {
+	width: 408px;
+	max-width: calc(100% - 24px);
+	max-height: min(520px, calc(100% - 24px));
+	overflow-y: auto;
+	padding: 10px 12px;
+}
+
+.monaco-workbench .ade-mission-sup-option-lead {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-triggers-studio {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-mission-triggers-list {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	max-height: 170px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-mission-trigger-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 6px 8px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	background: color-mix(in srgb, var(--vscode-editor-background) 85%, #0c111b);
+}
+
+.monaco-workbench .ade-mission-trigger-row.is-disabled {
+	opacity: 0.6;
+}
+
+.monaco-workbench .ade-mission-trigger-row-info {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.monaco-workbench .ade-mission-trigger-row-top {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.monaco-workbench .ade-mission-trigger-row-spec {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	font-weight: 600;
+	color: #fde68a;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-trigger-row-sub {
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-trigger-row-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-trigger-form {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-top: 8px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-trigger-form-row {
+	display: flex;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-mission-trigger-form-row > select {
+	flex: 1 1 0;
+	height: 26px;
+}
+
+.monaco-workbench .ade-mission-trigger-event-fields {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+
+.monaco-workbench .ade-mission-trigger-event-fields[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-trigger-form-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding-top: 2px;
+}
+
+.monaco-workbench .ade-mission-trigger-check {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-ni-tabs {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 3px;
+	padding: 6px 8px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-ni-tab {
+	height: 24px;
+	padding: 0 4px;
+	border-radius: 6px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	font-weight: 600;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-mission-ni-tab:hover {
+	color: var(--vscode-foreground);
+	background: color-mix(in srgb, var(--vscode-foreground) 7%, transparent);
+}
+
+.monaco-workbench .ade-mission-ni-tab.active {
+	border-color: rgba(56, 189, 248, 0.55);
+	background: rgba(56, 189, 248, 0.16);
+	color: #bae6fd;
+}
+
+.monaco-workbench .ade-mission-ni-thermal-track {
+	height: 11px;
+	border-radius: 999px;
+	background: rgba(148, 163, 184, 0.16);
+	overflow: hidden;
+	display: flex;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .ade-mission-ni-thermal-legend {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 2px;
+}
+
+.monaco-workbench .ade-mission-ni-thermal-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11px;
+}
+
+.monaco-workbench .ade-mission-ni-thermal-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 3px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-ni-thermal-dot.seg-init { background: #64748b; }
+.monaco-workbench .ade-mission-ni-thermal-dot.seg-tier { background: #38bdf8; }
+.monaco-workbench .ade-mission-ni-thermal-dot.seg-source { background: #34d399; }
+.monaco-workbench .ade-mission-ni-thermal-dot.seg-noise { background: #f87171; }
+
+.monaco-workbench .ade-mission-ni-thermal-name {
+	color: var(--vscode-foreground);
+	flex: 1 1 auto;
+}
+
+.monaco-workbench .ade-mission-ni-thermal-val {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground);
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-mission-ni-distill-card {
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	padding: 9px 10px;
+	border-radius: 9px;
+	border: 1px solid rgba(56, 189, 248, 0.34);
+	background: linear-gradient(145deg, rgba(16, 34, 54, 0.62), rgba(20, 24, 38, 0.62));
+}
+
+.monaco-workbench .ade-mission-ni-check-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 6px;
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+	font-size: 10.5px;
+}
+
+.monaco-workbench .ade-mission-finops-hero {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 10px 12px;
+	border-radius: 10px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+	background: linear-gradient(145deg, rgba(16, 38, 42, 0.56), rgba(16, 22, 34, 0.72));
+}
+
+.monaco-workbench .ade-mission-finops-hero.severity-warn {
+	border-color: rgba(245, 158, 11, 0.58);
+}
+
+.monaco-workbench .ade-mission-finops-hero.severity-critical,
+.monaco-workbench .ade-mission-finops-hero.severity-tripped {
+	border-color: rgba(248, 113, 113, 0.78);
+	background: linear-gradient(145deg, rgba(64, 18, 24, 0.74), rgba(24, 16, 26, 0.8));
+}
+
+.monaco-workbench .ade-mission-finops-hero-top {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	font-family: var(--vscode-editor-font-family);
+	font-variant-numeric: tabular-nums;
+}
+
+.monaco-workbench .ade-mission-finops-hero-amount {
+	font-size: 22px;
+	font-weight: 800;
+	color: #fef08a;
+	line-height: 1.1;
+}
+
+.monaco-workbench .ade-mission-finops-hero-limit {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-finops-est-badge {
+	margin-left: auto;
+	padding: 1px 6px;
+	border-radius: 999px;
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	color: #fde68a;
+	background: rgba(245, 158, 11, 0.18);
+	border: 1px solid rgba(251, 191, 36, 0.45);
+	cursor: help;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-finops-est-badge[hidden] {
+	display: none;
+}
+
+.monaco-workbench .ade-mission-finops-hero-meta {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10.5px;
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-finops-slider-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-mission-finops-slider {
+	flex: 1 1 auto;
+	accent-color: #f59e0b;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-mission-finops-bar-row {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.monaco-workbench .ade-mission-finops-bar-meta {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	font-size: 10.5px;
+}
+
+.monaco-workbench .ade-mission-finops-bar-label {
+	color: var(--vscode-foreground);
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-finops-bar-val {
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	font-variant-numeric: tabular-nums;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-mission-finops-ledger-track {
+	height: 6px;
+	border-radius: 999px;
+	background: rgba(148, 163, 184, 0.16);
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-mission-finops-ledger-fill {
+	height: 100%;
+	border-radius: 999px;
+}
+
+.monaco-workbench .ade-mission-finops-ledger-fill.tier {
+	background: linear-gradient(90deg, #a78bfa, #38bdf8);
+}
+
+.monaco-workbench .ade-mission-port.port-in.is-pacemaker.has-triggers {
+	border-color: #fde047;
+	box-shadow: 0 0 12px rgba(250, 204, 21, 0.85);
+}
+
+.monaco-workbench .ade-mission-rev-btn.is-live {
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-rev-btn.is-live.active {
+	border-color: rgba(52, 211, 153, 0.72);
+	background: rgba(52, 211, 153, 0.16);
+	color: #a7f3d0;
+}
+
+.monaco-workbench .ade-mission-sup-legend-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 156px;
+}
+
+.monaco-workbench .ade-mission-trigger-badge-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-finops-ledger-fill.host {
+	background: linear-gradient(90deg, #34d399, #22d3ee);
+}
+
+.monaco-workbench .ade-mission-finops-delta-banner {
+	padding: 6px 8px;
+	border-radius: 7px;
+	font-size: 11px;
+	line-height: 1.4;
+	font-variant-numeric: tabular-nums;
+	background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	color: var(--vscode-foreground);
+	margin-bottom: 6px;
+}
+
+.monaco-workbench .ade-mission-finops-delta-banner.is-better {
+	border-color: rgba(52, 211, 153, 0.45);
+	background: rgba(16, 185, 129, 0.12);
+	color: #6ee7b7;
+}
+
+.monaco-workbench .ade-mission-finops-delta-banner.is-worse {
+	border-color: rgba(251, 191, 36, 0.45);
+	background: rgba(245, 158, 11, 0.12);
+	color: #fcd34d;
+}
+
+.monaco-workbench .ade-mission-finops-run-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-mission-finops-run-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	width: 100%;
+	padding: 6px 8px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+	color: var(--vscode-foreground);
+	font-size: 11px;
+	cursor: pointer;
+	text-align: left;
+	transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.monaco-workbench .ade-mission-finops-run-row:hover {
+	border-color: rgba(96, 165, 250, 0.45);
+	background: rgba(59, 130, 246, 0.08);
+}
+
+.monaco-workbench .ade-mission-finops-run-row[data-selected-baseline="true"] {
+	border-color: rgba(56, 189, 248, 0.7);
+	background: rgba(56, 189, 248, 0.14);
+}
+
+.monaco-workbench .ade-mission-finops-run-row.is-live-run {
+	border-style: dashed;
+	cursor: default;
+}
+
+.monaco-workbench .ade-mission-finops-run-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-finops-run-vals {
+	font-variant-numeric: tabular-nums;
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-check-add-form {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 6px;
+	padding: 8px;
+	border-radius: 8px;
+	border: 1px dashed color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-context-menu {
+	width: 184px;
+	padding: 5px;
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-context-menu .ade-mission-emp-popover-item {
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-mission-ctx-menu-sep {
+	height: 1px;
+	margin: 4px 4px;
+	background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.monaco-workbench .ade-mission-emp-popover-item.is-danger {
+	color: #fca5a5;
+}
+
+.monaco-workbench .ade-mission-emp-popover-item.is-danger:hover:not(:disabled) {
+	background: rgba(239, 68, 68, 0.18);
+	color: #fecaca;
+}
+
+.monaco-workbench .ade-mission-task-pop-head-left {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-task-pop-title-input {
+	width: 100%;
+	box-sizing: border-box;
+	height: 28px;
+	padding: 0 9px;
+	margin-top: 6px;
+	border-radius: 7px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: var(--vscode-input-background, #11141a);
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	font-size: 12px;
+	font-weight: 550;
+	outline: none;
+}
+
+.monaco-workbench .ade-mission-task-pop-title-input:focus {
+	border-color: var(--ade-mission-accent, #38bdf8);
+}
+
+.monaco-workbench .ade-mission-task-pop-label {
+	margin-top: 8px;
+	margin-bottom: 4px;
+	font-size: 10.5px;
+	font-weight: 650;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-mission-task-pop-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-mission-task-pop-meta {
+	font-size: 10.5px;
+	color: var(--aexus-studio-muted-ink, #cbd5e1);
+	line-height: 1.35;
+}
+
+.monaco-workbench.vs .ade-mission-task-pop-meta {
+	color: #475569;
+}
+
+.monaco-workbench .ade-orch-token-pointers {
+	margin-top: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.monaco-workbench .ade-orch-ptr-chip {
+	width: 100%;
+	text-align: left;
+	justify-content: flex-start;
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 10.5px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-orch-ptr-preview {
+	margin-top: 8px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 38%, transparent);
+	background: color-mix(in srgb, var(--vscode-editor-background, #0f131a) 92%, var(--ade-mission-accent, #38bdf8) 8%);
+	overflow: hidden;
+}
+
+.monaco-workbench .ade-orch-ptr-preview-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	padding: 5px 8px;
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+}
+
+.monaco-workbench .ade-orch-ptr-preview-title {
+	font-size: 10.5px;
+	font-weight: 650;
+	color: var(--ade-mission-accent, #38bdf8);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.monaco-workbench .ade-orch-ptr-preview-body {
+	margin: 0;
+	padding: 7px 9px;
+	max-height: 156px;
+	overflow: auto;
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 10.5px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-orch-hop-history {
+	margin-top: 8px;
+	padding-top: 7px;
+	border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-height: 148px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-orch-hop-row {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: baseline;
+	gap: 6px;
+	padding: 3px 6px;
+	border-radius: 6px;
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+	font-size: 10.5px;
+	line-height: 1.35;
+}
+
+.monaco-workbench .ade-orch-hop-route {
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 10px;
+	font-weight: 650;
+	color: var(--ade-mission-accent, #38bdf8);
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-orch-hop-headline {
+	color: var(--vscode-foreground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.monaco-workbench .ade-orch-hop-ptr-btn {
+	border: 1px solid color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 40%, transparent);
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 12%, transparent);
+	color: var(--ade-mission-accent, #38bdf8);
+	border-radius: 999px;
+	padding: 0 6px;
+	height: 17px;
+	font-family: var(--monaco-monospace-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+	font-size: 9.5px;
+	font-weight: 650;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-orch-hop-ptr-btn:hover {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 24%, transparent);
+}
+
+.monaco-workbench .ade-orch-token-delta-bar {
+	margin: 4px 0 6px;
+	padding: 4px 8px;
+	border-radius: 6px;
+	font-size: 10.5px;
+	font-weight: 600;
+	line-height: 1.35;
+	color: #fcd34d;
+	background: rgba(245, 158, 11, 0.14);
+	border: 1px solid rgba(245, 158, 11, 0.36);
+}
+
+.monaco-workbench .ade-orch-ptr-chip.is-delta-new {
+	border-color: rgba(52, 211, 153, 0.48);
+	background: rgba(16, 185, 129, 0.11);
+}
+
+.monaco-workbench .ade-orch-ptr-chip.is-seen,
+.monaco-workbench .ade-orch-hop-row.is-seen {
+	opacity: 0.56;
+}
+
+.monaco-workbench .ade-mission-engine-reset-banner {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	margin: 4px 2px 6px;
+	padding: 6px 8px;
+	border-radius: 7px;
+	font-size: 11px;
+	line-height: 1.35;
+	background: rgba(245, 158, 11, 0.14);
+	border: 1px solid rgba(245, 158, 11, 0.42);
+	color: #fde68a;
+}
+
+.monaco-workbench .ade-mission-engine-reset-banner .codicon {
+	flex-shrink: 0;
+	margin-top: 1px;
+	color: #fbbf24;
+}
+
+.monaco-workbench .ade-node-color-picker {
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	padding: 6px 4px 4px;
+}
+
+.monaco-workbench .ade-node-color-picker.is-compact {
+	padding: 5px 6px 6px;
+}
+
+.monaco-workbench .ade-node-color-picker-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.monaco-workbench .ade-node-color-picker-label {
+	font-size: 10px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-node-color-reset {
+	height: 18px;
+	padding: 0 7px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+	color: var(--vscode-descriptionForeground);
+	font-size: 10px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.monaco-workbench .ade-node-color-reset:hover,
+.monaco-workbench .ade-node-color-reset.is-active {
+	background: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 18%, transparent);
+	border-color: color-mix(in srgb, var(--ade-mission-accent, #38bdf8) 55%, transparent);
+	color: var(--vscode-foreground);
+}
+
+.monaco-workbench .ade-node-color-swatches {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+}
+
+.monaco-workbench .ade-node-color-swatch {
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border-radius: 999px;
+	border: 1.5px solid rgba(255, 255, 255, 0.22);
+	background: var(--swatch-hex);
+	box-shadow: 0 0 8px color-mix(in srgb, var(--swatch-hex) 40%, transparent);
+	cursor: pointer;
+	transition: transform 110ms ease, box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-node-color-swatch:hover {
+	transform: scale(1.18);
+	border-color: #ffffff;
+	box-shadow: 0 0 12px color-mix(in srgb, var(--swatch-hex) 78%, transparent);
+}
+
+.monaco-workbench .ade-node-color-swatch.is-active {
+	border: 2px solid #ffffff;
+	transform: scale(1.15);
+	box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.9), 0 0 0 3.5px var(--swatch-hex), 0 0 12px var(--swatch-hex);
+}
+
+.monaco-workbench .ade-node-color-custom-wrap {
+	position: relative;
+	width: 18px;
+	height: 18px;
+	border-radius: 999px;
+	border: 1.5px solid rgba(255, 255, 255, 0.36);
+	background: conic-gradient(from 0deg, #ef4444, #f59e0b, #22c55e, #06b6d4, #6366f1, #ec4899, #ef4444);
+	cursor: pointer;
+	overflow: hidden;
+	transition: transform 110ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-node-color-custom-wrap:hover {
+	transform: scale(1.18);
+	border-color: #ffffff;
+}
+
+.monaco-workbench .ade-node-color-custom-input {
+	position: absolute;
+	inset: -4px;
+	width: 26px;
+	height: 26px;
+	opacity: 0;
+	cursor: pointer;
+}
+
+.monaco-workbench .ade-orch-token-pop-root {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+}
+
+.monaco-workbench .ade-mission-emp-popover.is-prompt-popover {
+	max-width: calc(100% - 16px);
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-mission-token-insp-head > .ade-mission-icon-btn:last-child {
+	margin-left: auto;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-orch-ptr-chip {
+	border: 1px solid rgba(148, 163, 184, 0.24);
+	background: rgba(148, 163, 184, 0.07);
+}
+
+.monaco-workbench .ade-orch-ptr-chip:hover {
+	border-color: rgba(56, 189, 248, 0.55);
+	background: rgba(56, 189, 248, 0.14);
+}
+
+.monaco-workbench.vs .ade-orch-ptr-chip {
+	border: 1px solid rgba(100, 116, 139, 0.26);
+	background: #f8fafc;
+}
+
+.monaco-workbench.vs .ade-orch-ptr-chip:hover {
+	border-color: rgba(2, 132, 199, 0.52);
+	background: #f0f9ff;
+}
+
+.monaco-workbench .ade-pop-rework-list .ade-mission-task-pop-label {
+	margin: 0;
+}
+
+.monaco-workbench .ade-orch-ptr-preview[hidden],
+.monaco-workbench .ade-pop-wb-toc[hidden],
+.monaco-workbench .ade-mission-drawer-status[hidden] {
+	display: none !important;
+}
+
+.monaco-workbench .ade-pop-contract-box,
+.monaco-workbench .ade-pop-receipt-box,
+.monaco-workbench .ade-pop-barrier-box {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+	margin-top: 6px;
+	padding: 7px 9px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3.5%, transparent);
+	font-size: 10.5px;
+	line-height: 1.4;
+}
+
+.monaco-workbench .ade-pop-contract-box.is-focused-section,
+.monaco-workbench .ade-pop-receipt-box.is-focused-section,
+.monaco-workbench .ade-pop-barrier-box.is-focused-section,
+.monaco-workbench .ade-pop-rework-list.is-focused-section {
+	border-color: var(--aexus-studio-accent, #38bdf8);
+	box-shadow: 0 0 12px -4px color-mix(in srgb, var(--aexus-studio-accent, #38bdf8) 38%, transparent);
+}
+
+.monaco-workbench .ade-pop-receipt-box.is-pass {
+	border-color: rgba(52, 211, 153, 0.44);
+	background: rgba(16, 185, 129, 0.09);
+}
+
+.monaco-workbench .ade-pop-receipt-box.is-fail {
+	border-color: rgba(248, 113, 113, 0.50);
+	background: rgba(239, 68, 68, 0.10);
+}
+
+.monaco-workbench .ade-pop-receipt-box.is-stale {
+	border-color: rgba(251, 191, 36, 0.46);
+	background: rgba(245, 158, 11, 0.10);
+}
+
+.monaco-workbench .ade-mission-token-meta-chip.ok {
+	background: rgba(16, 185, 129, 0.16);
+	border-color: rgba(52, 211, 153, 0.44);
+	color: var(--aexus-studio-ok-ink, #6ee7b7);
+}
+
+.monaco-workbench .ade-mission-token-countdown.is-overdue {
+	color: var(--aexus-studio-danger, #f87171);
+	font-weight: 700;
+}
+
+.monaco-workbench .ade-orch-ptr-chip.is-seen,
+.monaco-workbench .ade-orch-hop-row.is-seen {
+	opacity: 0.62;
+}
+
+.monaco-workbench .ade-orch-ptr-chip.is-delta-new {
+	border-color: rgba(56, 189, 248, 0.52);
+	background: rgba(56, 189, 248, 0.11);
+}
+
+.monaco-workbench .ade-pop-wb-toc {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	margin: 4px 0 6px;
+	padding: 5px 6px;
+	border-radius: 7px;
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+	max-height: 68px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-pop-wb-toc-chip {
+	appearance: none;
+	-webkit-appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	height: 20px;
+	max-width: 164px;
+	padding: 0 7px;
+	border-radius: 999px;
+	border: 1px solid rgba(167, 139, 250, 0.42);
+	background: rgba(139, 92, 246, 0.14);
+	color: var(--aexus-studio-violet-ink, #ddd6fe);
+	font-size: 10px;
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+
+.monaco-workbench .ade-pop-wb-toc-chip:hover,
+.monaco-workbench .ade-pop-wb-toc-chip.is-active {
+	background: rgba(139, 92, 246, 0.28);
+	border-color: rgba(196, 181, 253, 0.82);
+}
+
+.monaco-workbench .ade-pop-conflict-row {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 6px;
+	padding: 4px 7px;
+	border-radius: 6px;
+	background: rgba(239, 68, 68, 0.13);
+	border: 1px solid rgba(248, 113, 113, 0.42);
+	color: var(--aexus-studio-danger, #fecaca);
+	font-family: var(--vscode-editor-font-family);
+	font-size: 10px;
+	line-height: 1.35;
+	word-break: break-word;
+}
+
+.monaco-workbench .ade-pop-rework-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 4px;
+	padding: 6px 8px;
+	border-radius: 8px;
+	border: 1px solid color-mix(in srgb, var(--vscode-foreground) 11%, transparent);
+	background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+	max-height: 136px;
+	overflow-y: auto;
+}
+
+.monaco-workbench .ade-pop-rework-row {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 5px 7px;
+	border-radius: 6px;
+	border-left: 2.5px solid var(--aexus-studio-rework, #c084fc);
+	background: color-mix(in srgb, var(--vscode-foreground) 4.5%, transparent);
+	font-size: 10.5px;
+	line-height: 1.35;
+}
+
+.monaco-workbench.vs .ade-mission-emp-popover,
+.monaco-workbench.vs .ade-mission-node-inspector {
+	background: #ffffff;
+	border-color: rgba(71, 85, 105, 0.34);
+	box-shadow: 0 16px 38px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.monaco-workbench.vs .ade-mission-model-preset-btn,
+.monaco-workbench.vs .ade-mission-model-cat-chip,
+.monaco-workbench.vs .ade-mission-thinking-opt {
+	background: #f8fafc;
+	border-color: rgba(100, 116, 139, 0.28);
+	color: #334155;
+}
+
+.monaco-workbench.vs .ade-mission-model-preset-btn:hover:not(:disabled) {
+	background: #f0f9ff;
+	border-color: #0284c7;
+	color: #0f172a;
+}
+
+.monaco-workbench.vs .ade-mission-model-preset-btn.active,
+.monaco-workbench.vs .ade-mission-model-preset-btn.expanded,
+.monaco-workbench.vs .ade-mission-model-cat-chip:hover,
+.monaco-workbench.vs .ade-mission-model-cat-chip.active,
+.monaco-workbench.vs .ade-mission-vendor-model-row.active,
+.monaco-workbench.vs .ade-mission-token-wave-btn.active,
+.monaco-workbench.vs .ade-mission-ni-tab.active,
+.monaco-workbench.vs .ade-mission-ni-btn.primary,
+.monaco-workbench.vs .ade-mission-token-action-btn.primary {
+	background: rgba(2, 132, 199, 0.14);
+	border-color: rgba(2, 132, 199, 0.52);
+	color: #0369a1;
+}
+
+.monaco-workbench.vs .ade-mission-model-preset-btn.is-unsupported,
+.monaco-workbench.vs .ade-mission-model-preset-btn:disabled {
+	background: #f1f5f9;
+	filter: grayscale(0.8);
+	opacity: 0.45;
+}
+
+.monaco-workbench.vs .ade-mission-vendor-models-pop,
+.monaco-workbench.vs .ade-mission-model-cat-strip {
+	background: #f8fafc;
+	border-color: rgba(2, 132, 199, 0.32);
+	box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+}
+
+.monaco-workbench.vs .ade-mission-vendor-models-title {
+	color: #0f172a;
+}
+
+.monaco-workbench.vs .ade-mission-model-current-pill,
+.monaco-workbench.vs .ade-mission-vendor-models-count,
+.monaco-workbench.vs .ade-mission-model-cat-btn:hover,
+.monaco-workbench.vs .ade-mission-model-cat-btn.is-open,
+.monaco-workbench.vs .ade-mission-token-insp-node-id,
+.monaco-workbench.vs .ade-mission-ni-node-id,
+.monaco-workbench.vs .ade-mission-ni-mini-btn:hover,
+.monaco-workbench.vs .ade-mission-engine-host-badge,
+.monaco-workbench.vs .ade-mission-token-meta-chip.wave,
+.monaco-workbench.vs .ade-mission-trace-node {
+	color: #0369a1;
+}
+
+.monaco-workbench.vs .ade-mission-thinking-opt.active,
+.monaco-workbench.vs .ade-mission-emp-popover-item.active,
+.monaco-workbench.vs .ade-pop-wb-toc-chip {
+	background: rgba(124, 58, 237, 0.12);
+	border-color: rgba(124, 58, 237, 0.44);
+	color: #5b21b6;
+}
+
+.monaco-workbench.vs .ade-mission-token-status-badge {
+	background: rgba(100, 116, 139, 0.14);
+	color: #334155;
+}
+
+.monaco-workbench.vs .ade-mission-token-status-badge.status-active,
+.monaco-workbench.vs .ade-mission-token-status-badge.status-in_progress,
+.monaco-workbench.vs .ade-mission-token-status-badge.status-in-progress,
+.monaco-workbench.vs .ade-mission-trace-event.evt-retry,
+.monaco-workbench.vs .ade-mission-trace-event.evt-join {
+	background: rgba(2, 132, 199, 0.14);
+	color: #0369a1;
+}
+
+.monaco-workbench.vs .ade-mission-token-status-badge.status-queued {
+	background: rgba(79, 70, 229, 0.13);
+	color: #3730a3;
+}
+
+.monaco-workbench.vs .ade-mission-token-status-badge.status-blocked,
+.monaco-workbench.vs .ade-mission-token-status-badge.status-waiting-join,
+.monaco-workbench.vs .ade-mission-token-status-badge.status-waiting_join,
+.monaco-workbench.vs .ade-mission-token-status-badge.status-waiting-gate,
+.monaco-workbench.vs .ade-mission-token-meta-chip.rework,
+.monaco-workbench.vs .ade-mission-token-meta-chip.warn,
+.monaco-workbench.vs .ade-orch-token-delta-bar,
+.monaco-workbench.vs .ade-mission-engine-reset-banner,
+.monaco-workbench.vs .ade-mission-token-trace-btn,
+.monaco-workbench.vs .ade-mission-finops-est-badge,
+.monaco-workbench.vs .ade-mission-finops-delta-banner.is-worse {
+	background: rgba(217, 119, 6, 0.12);
+	border-color: rgba(217, 119, 6, 0.38);
+	color: #92400e;
+}
+
+.monaco-workbench.vs .ade-mission-token-countdown,
+.monaco-workbench.vs .ade-mission-trigger-row-spec,
+.monaco-workbench.vs .ade-mission-finops-hero-amount {
+	color: #92400e;
+}
+
+.monaco-workbench.vs .ade-mission-token-countdown.is-overdue {
+	color: #b91c1c;
+}
+
+.monaco-workbench.vs .ade-mission-token-status-badge.status-frozen-failed,
+.monaco-workbench.vs .ade-mission-token-meta-chip.danger,
+.monaco-workbench.vs .ade-mission-engine-probe-error,
+.monaco-workbench.vs .ade-mission-token-action-btn.danger,
+.monaco-workbench.vs .ade-mission-emp-popover-item.is-danger,
+.monaco-workbench.vs .ade-pop-conflict-row,
+.monaco-workbench.vs .ade-mission-trace-event.evt-reject,
+.monaco-workbench.vs .ade-mission-trace-event.evt-fail-route,
+.monaco-workbench.vs .ade-mission-trace-event.evt-fail-escalate,
+.monaco-workbench.vs .ade-mission-trace-event.evt-gate-reject,
+.monaco-workbench.vs .ade-mission-trace-event.evt-check-failed {
+	background: rgba(220, 38, 38, 0.11);
+	border-color: rgba(220, 38, 38, 0.36);
+	color: #991b1b;
+}
+
+.monaco-workbench.vs .ade-mission-token-esc-list {
+	color: #991b1b;
+}
+
+.monaco-workbench.vs .ade-mission-token-status-badge.status-completed,
+.monaco-workbench.vs .ade-mission-token-meta-chip.ok,
+.monaco-workbench.vs .ade-mission-finops-hero-meta,
+.monaco-workbench.vs .ade-mission-finops-delta-banner.is-better,
+.monaco-workbench.vs .ade-mission-trace-event.evt-complete,
+.monaco-workbench.vs .ade-mission-trace-event.evt-gate-approve,
+.monaco-workbench.vs .ade-mission-trace-event.evt-check-passed {
+	background: rgba(5, 150, 105, 0.12);
+	border-color: rgba(5, 150, 105, 0.36);
+	color: #047857;
+}
+
+.monaco-workbench.vs .ade-mission-trace-event {
+	background: rgba(15, 23, 42, 0.07);
+	color: #334155;
+}
+
+.monaco-workbench.vs .ade-mission-ni-kv-row,
+.monaco-workbench.vs .ade-mission-token-text-block,
+.monaco-workbench.vs .ade-mission-token-trace-list,
+.monaco-workbench.vs .ade-mission-gate-summary-preview,
+.monaco-workbench.vs .ade-mission-trigger-row,
+.monaco-workbench.vs .ade-orch-ptr-preview {
+	background: #f8fafc;
+	border-color: rgba(100, 116, 139, 0.22);
+}
+
+.monaco-workbench.vs .ade-mission-ni-distill-card,
+.monaco-workbench.vs .ade-mission-finops-hero {
+	background: linear-gradient(145deg, #f0f9ff, #f8fafc);
+	border-color: rgba(2, 132, 199, 0.26);
+}
+
+.monaco-workbench.vs .ade-mission-finops-hero.severity-critical,
+.monaco-workbench.vs .ade-mission-finops-hero.severity-tripped {
+	background: linear-gradient(145deg, #fef2f2, #fff5f5);
+	border-color: rgba(220, 38, 38, 0.45);
+}
+
+.monaco-workbench.vs .ade-node-color-swatch {
+	border-color: rgba(15, 23, 42, 0.22);
+}
+
+.monaco-workbench.vs .ade-node-color-swatch.is-active {
+	border-color: #ffffff;
+	box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.72), 0 0 0 3.5px var(--swatch-hex);
+}

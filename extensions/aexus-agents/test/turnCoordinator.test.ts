@@ -333,3 +333,150 @@ test('forceRelease cancels, invokes forceKill once, and immediately clears lock'
 	coord.release(lease);
 	assert.equal(coord.isBusy(key), false);
 });
+
+test('Interactive UI turn leapfrogs parked headless waiters without head-of-line blocking', async () => {
+	const coord = new SessionTurnCoordinator();
+	const key = 'claude:leapfrog-session';
+	const order: string[] = [];
+
+	// T1: active headless turn
+	const t1 = await coord.acquire({ key, source: 'headless', createCts: createFakeCts });
+	assert.ok(t1);
+	order.push('t1-start');
+	t1.cts.token.onCancellationRequested(() => {
+		order.push('t1-preempted');
+		setTimeout(() => coord.release(t1), 15);
+	});
+
+	// H2: second headless turn parks in the background queue behind T1
+	const h2Promise = coord.acquire({ key, source: 'headless', createCts: createFakeCts }).then(lease => {
+		if (lease) {
+			order.push('h2-start');
+			coord.release(lease);
+		}
+		return lease;
+	});
+	await delay(15);
+	assert.equal(coord.getQueuedHeadlessCount(key), 1);
+
+	// U3: human interactive UI turn arrives while T1 is active AND H2 is parked!
+	// U3 MUST immediately preempt T1 and acquire BEFORE H2 runs!
+	const u3 = await coord.acquire({
+		key,
+		source: 'ui',
+		createCts: createFakeCts,
+		graceTimeoutMs: 400,
+	});
+	assert.ok(u3);
+	order.push('u3-start');
+	assert.equal(coord.getQueuedHeadlessCount(key), 1, 'H2 must remain parked while U3 runs');
+
+	await delay(15);
+	order.push('u3-end');
+	coord.release(u3);
+
+	const h2 = await h2Promise;
+	assert.ok(h2);
+	assert.deepEqual(order, ['t1-start', 't1-preempted', 'u3-start', 'u3-end', 'h2-start']);
+	assert.equal(coord.isBusy(key), false);
+});
+
+test('stop() and forceRelease() evict parked headless waiters immediately so cancelled sessions do not auto-start queued turns', async () => {
+	const coord = new SessionTurnCoordinator();
+	const key = 'codex:evict-waiters';
+
+	const active = await coord.acquire({ key, source: 'ui', createCts: createFakeCts });
+	assert.ok(active);
+	active.cts.token.onCancellationRequested(() => coord.release(active));
+
+	const parked1 = coord.acquire({ key, source: 'headless', createCts: createFakeCts });
+	const parked2 = coord.acquire({ key, source: 'headless', createCts: createFakeCts });
+	await delay(10);
+	assert.equal(coord.getQueuedHeadlessCount(key), 2);
+
+	const stopped = await coord.stop(key, 200);
+	assert.equal(stopped, true);
+	assert.equal(await parked1, undefined);
+	assert.equal(await parked2, undefined);
+	assert.equal(coord.getQueuedHeadlessCount(key), 0);
+	assert.equal(coord.isBusy(key), false);
+});
+
+test('turnTimeoutMs auto-cancels, aborts abortSignal, and force-kills wedged turns so sessions never deadlock forever', async () => {
+	const coord = new SessionTurnCoordinator();
+	const key = 'kilo:deadline-watchdog';
+	let forceKills = 0;
+	let signalAborted = false;
+
+	const wedged = await coord.acquire({
+		key,
+		source: 'headless',
+		createCts: createFakeCts,
+		turnTimeoutMs: 45,
+		graceTimeoutMs: 30,
+		forceKillTimeoutMs: 200,
+		forceKill: async () => { forceKills += 1; },
+	});
+	assert.ok(wedged);
+	wedged.abortSignal.addEventListener('abort', () => {
+		signalAborted = true;
+	}, { once: true });
+
+	// Do NOT call coord.release(wedged) — watchdog must cancel, abort signal, forceKill, and evict lock!
+	await delay(130);
+	assert.equal(wedged.cts.token.isCancellationRequested, true);
+	assert.equal(signalAborted, true);
+	assert.equal(forceKills, 1);
+	assert.equal(coord.isBusy(key), false);
+});
+
+test('cancelling a middle queued UI waiter preserves uiChains serialization between U1 and U3 (#67 P2-7)', async () => {
+	const coord = new SessionTurnCoordinator();
+	const key = 'claude:ui-chain-cancel';
+	const order: string[] = [];
+
+	const u1 = await coord.acquire({ key, source: 'ui', createCts: createFakeCts });
+	assert.ok(u1);
+	order.push('u1-start');
+
+	// U1 stays active while U1b (waiting on U1) and U2 (cancelled mid-wait) and U3 queue behind it
+	let releaseU1!: () => void;
+	u1.cts.token.onCancellationRequested(() => {
+		setTimeout(() => {
+			order.push('u1-released');
+			coord.release(u1);
+			releaseU1?.();
+		}, 40);
+	});
+
+	const u1bPromise = coord.acquire({ key, source: 'ui', createCts: createFakeCts, graceTimeoutMs: 200 });
+	await delay(5);
+
+	const u2Ext = createFakeCts();
+	const u2Promise = coord.acquire({ key, source: 'ui', createCts: createFakeCts, externalToken: u2Ext.token, graceTimeoutMs: 200 });
+	await delay(5);
+
+	// Cancel U2 while U2 IS THE TAIL WAITER (`uiChains[key] === currentTail_2`) BEFORE U3 arrives (#78 item 2)!
+	// `uiChains[key]` must stay pinned until U1b (`previousTail`) finishes so U3 arriving afterwards still waits behind U1b.
+	u2Ext.cancel();
+	assert.equal(await u2Promise, undefined);
+
+	const u3Promise = coord.acquire({ key, source: 'ui', createCts: createFakeCts, graceTimeoutMs: 200 });
+	await delay(5);
+
+	const u1b = await u1bPromise;
+	assert.ok(u1b);
+	order.push('u1b-acquired');
+	u1b.cts.token.onCancellationRequested(() => {
+		order.push('u1b-preempted-by-u3');
+		coord.release(u1b);
+	});
+
+	const u3 = await u3Promise;
+	assert.ok(u3);
+	order.push('u3-acquired');
+	coord.release(u3);
+
+	assert.deepEqual(order, ['u1-start', 'u1-released', 'u1b-acquired', 'u1b-preempted-by-u3', 'u3-acquired']);
+	assert.equal(coord.isBusy(key), false);
+});

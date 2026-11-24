@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Emitter } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -21,7 +22,7 @@ import { IWorkbenchModeService } from '../../../services/workbenchMode/common/wo
 import { ChatEditorInput } from '../../chat/browser/widgetHosts/editor/chatEditorInput.js';
 import { ChatModeKind } from '../../chat/common/constants.js';
 import { IProjectNavigationService } from '../../files/browser/projectNavigationService.js';
-import { ADE_SECRETARY_ID, AdeEngineeringViewMode, encodeAdeEngineeringInputSpec, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
+import { ADE_SECRETARY_ID, AdeEngineeringViewMode, encodeAdeEngineeringInputSpec, IAdeAgent, IAdeCrossViewLinkHint, IAdeEditorService, IAdeEngineeringOpenOptions, IAdeProjectsService } from '../common/ade.js';
 import { onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { buildAdeRoleSyncSnapshot } from './adeControlHandler.js';
@@ -29,6 +30,7 @@ import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
 import { IAdeMissionService } from './adeMissionStore.js';
 import { AdeCloudHostsEditorInput, AdeCloudHostsEditorPane } from './adeCloudHostsEditorPane.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
+import { IAdePendingMissionNodeFocus, inferEngineeringViewModeForNode } from './adeEngineeringViewLinkage.js';
 import { AdeConfigEditorInput } from './adeConfigEditorPane.js';
 import { AdeRoleStudioEditorInput, AdeRoleStudioEditorPane } from './adeRoleStudioEditorPane.js';
 import { AdeExtensionWebviewEditorInput, AdeSessionEditorInput, AdeSessionWarmupStep, formatAdeAgentLineage } from './adeSessionEditor.js';
@@ -63,6 +65,8 @@ export class AdeLineageChatEditorInput extends ChatEditorInput {
 
 export class AdeEditorService extends Disposable implements IAdeEditorService {
 	declare readonly _serviceBrand: undefined;
+	private readonly _onDidCrossViewLinkHint = this._register(new Emitter<IAdeCrossViewLinkHint>());
+	readonly onDidCrossViewLinkHint = this._onDidCrossViewLinkHint.event;
 	private readonly editorToAgentId = new WeakMap<EditorInput, string>();
 	private readonly agentIdToEditor = new Map<string, EditorInput>();
 	private readonly activeSingletonAgentByView = new Map<string, string>();
@@ -229,15 +233,16 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 				this.roleSchemaService?.getConfig(),
 				this.roleSchemaService?.getDocsPaths?.(),
 				this.tryGetMissionRuntimeService(),
+				this.tryGetMissionService(),
 			);
 			const snapshotKey = JSON.stringify(snapshot);
 			if (!explicitActiveAgentId && snapshotKey === this.lastSyncedSnapshotKey) {
 				return;
 			}
-			this.lastSyncedSnapshotKey = snapshotKey;
 			const extId = new ExtensionIdentifier('aexus.aexus-agents');
 			await this.extensionService.activateById(extId, { startup: false, extensionId: extId, activationEvent: 'api' }).catch(() => undefined);
 			await this.commandService.executeCommand('aexus.agentEngines.syncRoleContext', snapshot);
+			this.lastSyncedSnapshotKey = snapshotKey;
 		} catch {
 			// Ignore synchronization failures when Extension Host is unavailable (e.g. unit tests).
 		}
@@ -416,28 +421,116 @@ export class AdeEditorService extends Disposable implements IAdeEditorService {
 		}
 	}
 
-	async openEngineering(governorId: string, options?: { side?: boolean; viewMode?: AdeEngineeringViewMode; openSiblingViews?: boolean }): Promise<void> {
+	fireCrossViewLinkHint(hint: IAdeCrossViewLinkHint): void {
+		this._onDidCrossViewLinkHint.fire(hint);
+	}
+
+	private findOpenEngineeringEditor(
+		governorId: string,
+		viewMode: AdeEngineeringViewMode,
+		excludeGroup?: IEditorGroup,
+	): { readonly editor: AdeEngineeringEditorInput; readonly group: IEditorGroup } | undefined {
+		for (const group of this.editorGroupsService.mainPart.groups) {
+			if (excludeGroup && group === excludeGroup) {
+				continue;
+			}
+			for (const editor of group.editors) {
+				if (editor instanceof AdeEngineeringEditorInput && !editor.isDisposed() && editor.governorSessionId === governorId && editor.viewMode === viewMode) {
+					return { editor, group };
+				}
+			}
+		}
+		return undefined;
+	}
+
+	async openEngineering(governorId: string, options?: IAdeEngineeringOpenOptions): Promise<void> {
 		const gov = this.projects.getAgent(governorId);
+		const missionRec = this.tryGetMissionService()?.getMission(governorId);
 		if (gov) {
 			this.projects.selectProject(gov.projectUri);
+		} else if (missionRec?.projectUri) {
+			try {
+				this.projects.selectProject(URI.parse(missionRec.projectUri));
+			} catch { /* ignore malformed standalone projectUri */ }
 		}
-		const targetGroup = this.resolveTargetGroup(options?.side);
+
+		const pendingFocus: IAdePendingMissionNodeFocus | undefined = options?.focusNodeId ? {
+			nodeId: options.focusNodeId,
+			focusTokenId: options.focusTokenId,
+			highlightNodeIds: options.highlightNodeIds,
+			openPopover: options.openPopover,
+			whiteboardSection: options.whiteboardSection,
+			inspectorTab: options.inspectorTab,
+			openAgentBeside: options.openAgentBeside,
+		} : undefined;
+
+		const applyUnconsumedFocus = (input: AdeEngineeringEditorInput, pane: unknown): void => {
+			if (!pendingFocus) {
+				return;
+			}
+			const unconsumed = input.consumePendingFocus();
+			const maybeCanvasPane = pane as {
+				focusNode?: (nodeId: string, opts?: Omit<IAdePendingMissionNodeFocus, 'nodeId'>) => void;
+			} | undefined;
+			if (unconsumed && maybeCanvasPane && typeof maybeCanvasPane.focusNode === 'function') {
+				maybeCanvasPane.focusNode(unconsumed.nodeId, {
+					focusTokenId: unconsumed.focusTokenId,
+					highlightNodeIds: unconsumed.highlightNodeIds,
+					openPopover: unconsumed.openPopover,
+					whiteboardSection: unconsumed.whiteboardSection,
+					inspectorTab: unconsumed.inspectorTab,
+					openAgentBeside: unconsumed.openAgentBeside,
+				});
+			}
+		};
+
 		if (options?.openSiblingViews) {
+			const targetGroup = this.resolveTargetGroup(options.side);
 			const missionInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(governorId, 'mission'));
 			const orchInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(governorId, 'orchestration'));
-			const focusView = options.viewMode ?? 'orchestration';
+			const focusView = options.viewMode ?? inferEngineeringViewModeForNode(missionRec, options.focusNodeId, 'orchestration');
+			const focusedInput = focusView === 'mission' ? missionInput : orchInput;
+			if (pendingFocus) {
+				focusedInput.setPendingFocus(pendingFocus);
+			}
 			if (focusView === 'mission') {
 				await this.editorService.openEditor(orchInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup.id);
-				await this.editorService.openEditor(missionInput, { pinned: true }, targetGroup.id);
+				const pane = await this.editorService.openEditor(missionInput, { pinned: true }, targetGroup.id);
+				applyUnconsumedFocus(missionInput, pane);
 			} else {
 				await this.editorService.openEditor(missionInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup.id);
-				await this.editorService.openEditor(orchInput, { pinned: true }, targetGroup.id);
+				const pane = await this.editorService.openEditor(orchInput, { pinned: true }, targetGroup.id);
+				applyUnconsumedFocus(orchInput, pane);
 			}
 			return;
 		}
-		const spec = options?.viewMode ? encodeAdeEngineeringInputSpec(governorId, options.viewMode) : encodeAdeEngineeringInputSpec(governorId, 'orchestration');
+
+		const resolvedViewMode: AdeEngineeringViewMode = options?.viewMode
+			?? inferEngineeringViewModeForNode(missionRec, options?.focusNodeId, 'orchestration');
+
+		if (options?.preferExistingGroup !== false) {
+			const activeGroup = this.editorGroupsService.mainPart.activeGroup;
+			const existing = options?.side
+				? this.findOpenEngineeringEditor(governorId, resolvedViewMode, activeGroup)
+				: this.findOpenEngineeringEditor(governorId, resolvedViewMode);
+			if (existing) {
+				if (pendingFocus) {
+					existing.editor.setPendingFocus(pendingFocus);
+				}
+				const pane = await this.editorService.openEditor(existing.editor, { pinned: true }, existing.group.id);
+				applyUnconsumedFocus(existing.editor, pane);
+				return;
+			}
+		}
+
+		const targetGroup = this.resolveTargetGroup(options?.side);
+		const spec = encodeAdeEngineeringInputSpec(governorId, resolvedViewMode);
 		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, spec);
-		await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
+		if (pendingFocus) {
+			input.setPendingFocus(pendingFocus);
+		}
+		const pane = await this.editorService.openEditor(input, { pinned: true }, targetGroup.id);
+		applyUnconsumedFocus(input, pane);
 	}
 
 	async openCloudHosts(hostIdOrAlias?: string, options?: { side?: boolean }): Promise<void> {

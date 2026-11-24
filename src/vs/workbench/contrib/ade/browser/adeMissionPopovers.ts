@@ -27,10 +27,9 @@ import {
 } from '../../../../platform/ade/common/adeMissionEngine.js';
 import {
 	IMissionTaskStatusRecord,
+	IOrchestrationRuntimeState,
 	IOrchestrationToken,
-	IOrchestrationTokenDeltaView,
 	IOrchestrationWhiteboard,
-	MissionTaskStatus,
 } from '../../../../platform/ade/common/adeOrchestrationEngine.js';
 import { ADE_NODE_COLOR_PRESETS, normalizeAdeNodeColor, resolveAdeNodeColorHex } from '../../../../platform/ade/common/adeNodeColors.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
@@ -65,6 +64,32 @@ import {
 	getMissionSupervisorColorIndex,
 } from './adeMissionCanvasRenderer.js';
 import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
+import {
+	IDeterministicCheckHook,
+	IMissionDetailPopoverHost,
+	IMissionPopoverPointerReadResult,
+	IMissionTaskEditorPopoverCallbacks,
+	IMissionTaskEditorPopoverOptions,
+	IOrchestrationTokenPopoverOptions,
+	IWhiteboardEditorPopoverOptions,
+	renderAddGroupPopover,
+	renderAddStaffPopover,
+	renderAddWhiteboardPopover,
+	renderDispatchRequirementPopover,
+	renderMissionTaskDetailPopover,
+	renderMoveToGroupPopover,
+	renderOrchestrationTokenDetailPopover,
+	renderWhiteboardDetailPopover,
+} from './adeMissionCanvasDetailPopovers.js';
+
+export type {
+	IDeterministicCheckHook,
+	IMissionPopoverPointerReadResult,
+	IMissionTaskEditorPopoverCallbacks,
+	IMissionTaskEditorPopoverOptions,
+	IOrchestrationTokenPopoverOptions,
+	IWhiteboardEditorPopoverOptions,
+};
 
 export interface IMissionPopoversDelegate {
 	getActiveMissionId(): string | undefined;
@@ -110,6 +135,10 @@ export class AdeMissionPopovers extends Disposable {
 	private activePromptClearBtn: HTMLButtonElement | undefined;
 	private activeTokenInspectorId: string | undefined;
 	private activeTokenCountdownEl: HTMLElement | undefined;
+	private activeInlineErrorEl: HTMLElement | undefined;
+	private activeAnchorEl: HTMLElement | undefined;
+	private beforeCloseFlush: (() => void) | undefined;
+	private activeOrchCountdownUpdater: ((now: number, orchState?: IOrchestrationRuntimeState) => void) | undefined;
 
 	constructor(
 		private readonly bodyEl: HTMLElement,
@@ -138,7 +167,17 @@ export class AdeMissionPopovers extends Disposable {
 		return !this.popoverEl.hidden;
 	}
 
-	close(): void {
+	close(reason: 'dismiss' | 'escape' = 'dismiss'): void {
+		const flushHook = this.beforeCloseFlush;
+		this.beforeCloseFlush = undefined;
+		this.activeOrchCountdownUpdater = undefined;
+		if (reason !== 'escape' && flushHook && !this.popoverEl.hidden) {
+			try {
+				flushHook();
+			} catch {
+				// Ignore flush callback errors during teardown
+			}
+		}
 		this.popoverGeneration++;
 		this.popoverDisposables.clear();
 		this.activePromptNodeId = undefined;
@@ -147,7 +186,18 @@ export class AdeMissionPopovers extends Disposable {
 		this.activePromptClearBtn = undefined;
 		this.activeTokenInspectorId = undefined;
 		this.activeTokenCountdownEl = undefined;
-		this.popoverEl.classList.remove('is-model-popover', 'is-prompt-popover', 'is-token-popover', 'is-triggers-popover', 'is-context-menu');
+		this.activeInlineErrorEl = undefined;
+		this.activeAnchorEl = undefined;
+		this.popoverEl.classList.remove(
+			'is-model-popover',
+			'is-prompt-popover',
+			'is-token-popover',
+			'is-triggers-popover',
+			'is-context-menu',
+			'is-color-popover',
+		);
+		this.popoverEl.style.maxWidth = '';
+		this.popoverEl.style.maxHeight = '';
 		delete this.popoverEl.dataset.popoverKind;
 		delete this.popoverEl.dataset.adeCanvasContextMenu;
 		delete this.popoverEl.dataset.popoverNodeId;
@@ -157,7 +207,17 @@ export class AdeMissionPopovers extends Disposable {
 		this.popoverEl.hidden = true;
 	}
 
-	patchOpenTokenCountdown(runtimeState: IMissionRuntimeState | undefined, now = Date.now()): void {
+	patchOpenTokenCountdown(
+		runtimeState: IMissionRuntimeState | undefined,
+		now = Date.now(),
+		orchRuntimeState?: IOrchestrationRuntimeState,
+	): void {
+		if (this.activeOrchCountdownUpdater) {
+			const missionId = runtimeState?.missionId ?? this.delegate.getActiveMissionId();
+			const effectiveOrch = orchRuntimeState
+				?? (missionId ? this.missionRuntimeService?.getOrchestrationState(missionId) : undefined);
+			this.activeOrchCountdownUpdater(now, effectiveOrch);
+		}
 		if (!this.activeTokenInspectorId || !this.activeTokenCountdownEl || !runtimeState) {
 			return;
 		}
@@ -174,9 +234,17 @@ export class AdeMissionPopovers extends Disposable {
 	}
 
 	showInlineError(message: string): void {
-		if (!this.popoverEl.hidden) {
-			append(this.popoverEl, $('.ade-mission-drawer-status.error', {}, message));
+		if (this.popoverEl.hidden) {
+			return;
 		}
+		if (this.activeInlineErrorEl && this.activeInlineErrorEl.isConnected) {
+			this.activeInlineErrorEl.textContent = message;
+			this.activeInlineErrorEl.hidden = false;
+			return;
+		}
+		this.activeInlineErrorEl = append(this.popoverEl, $('.ade-mission-drawer-status.error', {
+			'data-ade-popover-inline-error': 'true',
+		}, message));
 	}
 
 	syncOpenPromptPopover(prompts: Readonly<Record<string, string>>, source?: 'drawer' | 'popover'): void {
@@ -193,19 +261,28 @@ export class AdeMissionPopovers extends Disposable {
 		}
 		if (this.activePromptHintEl) {
 			this.activePromptHintEl.textContent = trimmedLen > 0
-				? localize('adeMissionPromptPopoverSavedHint', "运行到该节点时自动发送 · {0} 字", trimmedLen)
-				: localize('adeMissionPromptPopoverEmptyHint', "运行到该节点时自动发送给该节点 Agent");
+				? adeBi(localize('adeMissionPromptPopoverSavedHint', "Auto-sent when step starts · {0} chars", trimmedLen), '运行到该节点时自动发送 · {0} 字', trimmedLen)
+				: adeBi(localize('adeMissionPromptPopoverEmptyHint', "Auto-sent to this step's Agent when activated"), '运行到该节点时自动发送给该节点 Agent');
 		}
 	}
 
 	private positionNear(anchorEl: HTMLElement, width: number, estimatedHeight?: number, offsetY = 6): { readonly bodyRect: DOMRect; readonly anchorRect: DOMRect } {
+		this.activeAnchorEl = anchorEl;
 		const bodyRect = this.bodyEl.getBoundingClientRect();
 		const anchorRect = anchorEl.getBoundingClientRect();
-		const left = Math.max(12, Math.min(bodyRect.width - width - 12, anchorRect.left - bodyRect.left));
+		const availW = bodyRect.width > 0 ? Math.max(64, bodyRect.width - 16) : width;
+		if (bodyRect.width > 0 && bodyRect.width < width + 24) {
+			this.popoverEl.style.maxWidth = `${Math.floor(availW)}px`;
+		} else {
+			this.popoverEl.style.maxWidth = '';
+		}
+		const effectiveW = Math.min(width, availW);
+		const maxLeft = Math.max(8, bodyRect.width - effectiveW - 8);
+		const left = Math.max(8, Math.min(maxLeft, anchorRect.left - bodyRect.left));
 		const rawTop = anchorRect.bottom - bodyRect.top + offsetY;
-		const top = estimatedHeight !== undefined
-			? Math.max(12, Math.min(bodyRect.height - estimatedHeight, rawTop))
-			: Math.max(12, rawTop);
+		const top = estimatedHeight !== undefined && bodyRect.height > 0
+			? Math.max(8, Math.min(Math.max(8, bodyRect.height - estimatedHeight - 8), rawTop))
+			: Math.max(8, rawTop);
 		this.popoverEl.style.left = `${Math.round(left)}px`;
 		this.popoverEl.style.top = `${Math.round(top)}px`;
 		this.popoverEl.hidden = false;
@@ -216,10 +293,68 @@ export class AdeMissionPopovers extends Disposable {
 		if (this.popoverEl.hidden) {
 			return;
 		}
-		const pRect = this.popoverEl.getBoundingClientRect();
-		const preferredTop = anchorRect.bottom - bodyRect.top + offsetY;
-		const maxTop = Math.max(12, bodyRect.height - pRect.height - 12);
-		this.popoverEl.style.top = `${Math.round(Math.max(12, Math.min(maxTop, preferredTop)))}px`;
+		const freshBody = this.bodyEl.getBoundingClientRect();
+		const liveBody = freshBody.width > 0 && freshBody.height > 0 ? freshBody : bodyRect;
+		if (liveBody.width <= 0 || liveBody.height <= 0) {
+			return;
+		}
+		const maxAvailW = Math.max(64, Math.floor(liveBody.width - 16));
+		const maxAvailH = Math.max(64, Math.floor(liveBody.height - 16));
+		this.popoverEl.style.maxHeight = `${maxAvailH}px`;
+		let pRect = this.popoverEl.getBoundingClientRect();
+		if (pRect.width > maxAvailW) {
+			this.popoverEl.style.maxWidth = `${maxAvailW}px`;
+			pRect = this.popoverEl.getBoundingClientRect();
+		}
+		const freshAnchor = this.activeAnchorEl && this.activeAnchorEl.isConnected
+			? this.activeAnchorEl.getBoundingClientRect()
+			: undefined;
+		const liveAnchor = freshAnchor && (freshAnchor.width > 0 || freshAnchor.height > 0)
+			? freshAnchor
+			: anchorRect;
+		const hasValidAnchor = liveAnchor.width > 0 || liveAnchor.height > 0 || liveAnchor.left !== 0 || liveAnchor.top !== 0;
+
+		const actualW = Math.min(pRect.width, maxAvailW);
+		const maxLeft = Math.max(8, liveBody.width - actualW - 8);
+		const desiredLeft = hasValidAnchor ? (liveAnchor.left - liveBody.left) : (Number.parseFloat(this.popoverEl.style.left) || 8);
+		this.popoverEl.style.left = `${Math.round(Math.max(8, Math.min(maxLeft, desiredLeft)))}px`;
+
+		const maxTop = Math.max(8, liveBody.height - pRect.height - 8);
+		if (!hasValidAnchor) {
+			const curTop = Number.parseFloat(this.popoverEl.style.top) || 8;
+			this.popoverEl.style.top = `${Math.round(Math.max(8, Math.min(maxTop, curTop)))}px`;
+			return;
+		}
+		const belowTop = liveAnchor.bottom - liveBody.top + offsetY;
+		const aboveTop = liveAnchor.top - liveBody.top - pRect.height - offsetY;
+		if (belowTop > maxTop && aboveTop >= 8) {
+			this.popoverEl.style.top = `${Math.round(Math.min(maxTop, aboveTop))}px`;
+		} else {
+			this.popoverEl.style.top = `${Math.round(Math.max(8, Math.min(maxTop, belowTop)))}px`;
+		}
+	}
+
+	private clampClientPointPopover(bodyRect: DOMRect, clientX: number, clientY: number): void {
+		if (this.popoverEl.hidden) {
+			return;
+		}
+		const freshBody = this.bodyEl.getBoundingClientRect();
+		const liveBody = freshBody.width > 0 && freshBody.height > 0 ? freshBody : bodyRect;
+		if (liveBody.width <= 0 || liveBody.height <= 0) {
+			return;
+		}
+		const maxAvailW = Math.max(64, Math.floor(liveBody.width - 16));
+		const maxAvailH = Math.max(64, Math.floor(liveBody.height - 16));
+		this.popoverEl.style.maxHeight = `${maxAvailH}px`;
+		let pRect = this.popoverEl.getBoundingClientRect();
+		if (pRect.width > maxAvailW) {
+			this.popoverEl.style.maxWidth = `${maxAvailW}px`;
+			pRect = this.popoverEl.getBoundingClientRect();
+		}
+		const maxLeft = Math.max(8, liveBody.width - pRect.width - 8);
+		const maxTop = Math.max(8, liveBody.height - pRect.height - 8);
+		this.popoverEl.style.left = `${Math.round(Math.max(8, Math.min(maxLeft, clientX - liveBody.left)))}px`;
+		this.popoverEl.style.top = `${Math.round(Math.max(8, Math.min(maxTop, clientY - liveBody.top)))}px`;
 	}
 
 	async openHostPopover(missionId: string, node: IMissionDagNode, currentHost: string, anchorEl: HTMLElement): Promise<void> {
@@ -234,7 +369,7 @@ export class AdeMissionPopovers extends Disposable {
 		}
 		this.popoverDisposables.clear();
 		clearNode(this.popoverEl);
-		this.positionNear(anchorEl, 276, 260);
+		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 276, 260);
 
 		append(this.popoverEl, $('.ade-mission-emp-popover-title', {}, localize('adeMissionHostQuickPickerTitle', "Execution Host & OS for {0}", node.id)));
 		const list = append(this.popoverEl, $('.ade-mission-emp-popover-list'));
@@ -252,13 +387,26 @@ export class AdeMissionPopovers extends Disposable {
 				append(btn, $('span.codicon.codicon-check', { 'aria-hidden': 'true' }));
 			}
 			this.popoverDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-				void this.missionRuntimeService?.bindNodeHost(missionId, node.id, { hostAlias: alias }).then(() => {
+				void this.missionRuntimeService?.bindNodeHost(missionId, node.id, { hostAlias: alias }).then(res => {
 					if (openGen !== this.popoverGeneration) {
+						return;
+					}
+					if (res && typeof res === 'object' && (res as { readonly ok?: boolean }).ok === false) {
+						const msg = (res as { readonly error?: string }).error ?? localize('adeMissionHostBindFailed', "Failed to bind execution host.");
+						this.showInlineError(msg);
+						this.delegate.onActionFeedback?.(msg, 'error');
 						return;
 					}
 					this.close();
 					this.delegate.onGraphVisualInvalidated(true);
-				}, () => undefined);
+				}, err => {
+					if (openGen !== this.popoverGeneration) {
+						return;
+					}
+					const msg = err instanceof Error ? err.message : localize('adeMissionHostBindFailed', "Failed to bind execution host.");
+					this.showInlineError(msg);
+					this.delegate.onActionFeedback?.(msg, 'error');
+				});
 			}));
 		};
 
@@ -272,6 +420,7 @@ export class AdeMissionPopovers extends Disposable {
 			});
 			addHostOption(h.alias, `${h.alias} (${ADE_OS_ICON_LABELS[hOs]})`, hOs, h.alias.toLowerCase() === currentHost.toLowerCase());
 		}
+		this.clampTopToViewport(bodyRect, anchorRect);
 	}
 
 	async openEnginePopover(
@@ -777,7 +926,7 @@ export class AdeMissionPopovers extends Disposable {
 		const headActions = append(head, $('.ade-mission-prompt-pop-actions'));
 		const openDrawerBtn = append(headActions, $('button.ade-mission-prompt-pop-btn', {
 			type: 'button',
-			title: localize('adeMissionPromptPopOpenDrawerTip', "在完整编辑器中打开"),
+			title: adeBi(localize('adeMissionPromptPopOpenDrawerTip', "Open in full editor"), '在完整编辑器中打开'),
 			'data-ade-prompt-pop-open-drawer': node.id,
 		})) as HTMLButtonElement;
 		append(openDrawerBtn, $('span.codicon.codicon-split-horizontal', { 'aria-hidden': 'true' }));
@@ -805,9 +954,12 @@ export class AdeMissionPopovers extends Disposable {
 
 		const textarea = append(this.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
 			spellcheck: 'false',
-			placeholder: localize(
-				'adeMissionNodePromptPlaceholder',
-				"写明这个节点需要做什么（如任务目标、涉及文件、完成标准等）。\n运行到该节点时会自动发送给对应的 Agent。",
+			placeholder: adeBi(
+				localize(
+					'adeMissionNodePromptPlaceholder',
+					"Describe what this step should accomplish (objectives, files, acceptance criteria).\nAuto-sent to the assigned Agent when this step starts.",
+				),
+				'写明这个节点需要做什么（如任务目标、涉及文件、完成标准等）。\n运行到该节点时会自动发送给对应的 Agent。',
 			),
 			'aria-label': localize('adeMissionNodePromptPopoverAria', "Prompt for {0}", node.id),
 			'data-ade-node-prompt-popover-input': node.id,
@@ -886,6 +1038,7 @@ export class AdeMissionPopovers extends Disposable {
 			append(btn, $('span.ade-mission-emp-popover-meta', {}, localize('adeMissionEmpStepCount', "{0} step(s)", group.nodeIds.length)));
 			this.popoverDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
 				this.delegate.onAssignNodeEmployee(node.id, group.displayName);
+				this.close();
 			}));
 		}
 
@@ -896,6 +1049,7 @@ export class AdeMissionPopovers extends Disposable {
 			}, localize('adeMissionEmpClearBtn', "Detach (Standalone Step)")));
 			this.popoverDisposables.add(addDisposableListener(clearBtn, EventType.CLICK, () => {
 				this.delegate.onAssignNodeEmployee(node.id, undefined);
+				this.close();
 			}));
 		}
 
@@ -924,13 +1078,26 @@ export class AdeMissionPopovers extends Disposable {
 			}).catch(() => undefined);
 			this.popoverDisposables.add(addDisposableListener(hostSelect, EventType.CHANGE, () => {
 				if (this.missionRuntimeService) {
-					void this.missionRuntimeService.bindNodeHost(missionId, node.id, { hostAlias: hostSelect.value }).then(() => {
+					void this.missionRuntimeService.bindNodeHost(missionId, node.id, { hostAlias: hostSelect.value }).then(res => {
 						if (openGen !== this.popoverGeneration) {
+							return;
+						}
+						if (res && typeof res === 'object' && (res as { readonly ok?: boolean }).ok === false) {
+							const msg = (res as { readonly error?: string }).error ?? localize('adeMissionHostBindFailed', "Failed to bind execution host.");
+							this.showInlineError(msg);
+							this.delegate.onActionFeedback?.(msg, 'error');
 							return;
 						}
 						this.close();
 						this.delegate.onGraphVisualInvalidated(true);
-					}, () => undefined);
+					}, err => {
+						if (openGen !== this.popoverGeneration) {
+							return;
+						}
+						const msg = err instanceof Error ? err.message : localize('adeMissionHostBindFailed', "Failed to bind execution host.");
+						this.showInlineError(msg);
+						this.delegate.onActionFeedback?.(msg, 'error');
+					});
 				}
 			}));
 		}
@@ -1040,6 +1207,7 @@ export class AdeMissionPopovers extends Disposable {
 		const tokens = allNodeTokens.length > 0 ? allNodeTokens : [initialToken];
 		let selectedToken: IMissionToken = tokens.find(t => t.id === initialToken.id) ?? tokens[0];
 		let traceExpanded = false;
+		const guidanceDraftByTokenId = new Map<string, string>();
 
 		const contentDisposables = this.popoverDisposables.add(new DisposableStore());
 		const contentRoot = append(this.popoverEl, $('.ade-mission-token-inspector'));
@@ -1194,11 +1362,12 @@ export class AdeMissionPopovers extends Disposable {
 					return;
 				}
 				for (const entry of entries) {
+					const safeEvt = String(entry.event).replace(/[^a-z0-9-]+/gi, '-').replace(/^-|-$/g, '') || 'evt';
 					const row = append(traceListEl, $('.ade-mission-token-trace-row', {
 						'data-trace-ptr': entry.ptr,
 						'data-trace-event': entry.event,
 					}));
-					append(row, $(`span.ade-mission-trace-event.evt-${entry.event.replace(/_/g, '-')}`, {}, entry.event));
+					append(row, $(`span.ade-mission-trace-event.evt-${safeEvt}`, {}, entry.event));
 					append(row, $('span.ade-mission-trace-node', {}, entry.nodeId));
 					if (entry.summary) {
 						append(row, $('span.ade-mission-trace-summary', { title: entry.summary }, entry.summary));
@@ -1232,9 +1401,18 @@ export class AdeMissionPopovers extends Disposable {
 			if (canRetry) {
 				guidanceInput = append(contentRoot, $('input.ade-mission-emp-popover-input', {
 					type: 'text',
+					value: guidanceDraftByTokenId.get(selectedToken.id) ?? '',
 					placeholder: localize('adeMissionTokenRetryGuidancePlaceholder', "Optional retry guidance for the agent..."),
 					'data-ade-token-retry-guidance': 'true',
 				})) as HTMLInputElement;
+				const activeTokId = selectedToken.id;
+				contentDisposables.add(addDisposableListener(guidanceInput, EventType.INPUT, () => {
+					if (guidanceInput && guidanceInput.value) {
+						guidanceDraftByTokenId.set(activeTokId, guidanceInput.value);
+					} else {
+						guidanceDraftByTokenId.delete(activeTokId);
+					}
+				}));
 			}
 
 			const actionRow = append(contentRoot, $('.ade-mission-token-actions'));
@@ -1349,7 +1527,7 @@ export class AdeMissionPopovers extends Disposable {
 		const openGen = ++this.popoverGeneration;
 		this.popoverEl.dataset.popoverKind = 'gate';
 		this.popoverEl.dataset.popoverNodeId = node.id;
-		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 326, 260, 8);
+		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 372, 268, 8);
 
 		const rt = this.missionRuntimeService.getRuntimeState(missionId);
 		const graph = this.delegate.getMissionGraph?.() ?? { nodes: [node], edges: [] };
@@ -1361,11 +1539,21 @@ export class AdeMissionPopovers extends Disposable {
 			: waitingTokens[0]?.id;
 		const selectedRollbackByTokenId = new Map<string, string>();
 
-		append(this.popoverEl, $('.ade-mission-emp-popover-title', {}, adeBi(
+		const gateHead = append(this.popoverEl, $('.ade-mission-token-insp-head'));
+		const gateHeadLeft = append(gateHead, $('.ade-mission-task-pop-head-left'));
+		append(gateHeadLeft, $('span.ade-mission-task-desc-id', {}, node.id));
+		append(gateHeadLeft, $('.ade-mission-emp-popover-title', {}, adeBi(
 			localize('adeMissionGateSignoffTitle', "Human Gate · {0}", node.label),
 			'人工审批门 · {0}',
 			node.label,
 		)));
+		const gateCloseBtn = append(gateHead, $('button.ade-mission-icon-btn', {
+			type: 'button',
+			title: adeBi(localize('adeMissionCloseGatePop', "Close"), '关闭'),
+			'aria-label': adeBi(localize('adeMissionCloseGatePop', "Close"), '关闭'),
+		})) as HTMLButtonElement;
+		gateCloseBtn.appendChild($('span.codicon.codicon-close'));
+		this.popoverDisposables.add(addDisposableListener(gateCloseBtn, EventType.CLICK, () => this.close()));
 
 		const summaryPreviewEl = append(this.popoverEl, $('.ade-mission-gate-summary-preview', {
 			'data-ade-gate-summary': 'true',
@@ -1678,12 +1866,12 @@ export class AdeMissionPopovers extends Disposable {
 				higherCandidates.push({ id: currentSup.parentSupervisorId, label: d.label, tier: d.tier });
 			}
 			const parentSection = append(this.popoverEl, $('.ade-mission-host-section'));
-			append(parentSection, $('.ade-mission-emp-popover-title', {}, localize('adeMissionSupParentTitle', "上级监工 (Escalation Parent)")));
+			append(parentSection, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeMissionSupParentTitle', "Escalation Parent"), '上级监工 (Escalation Parent)')));
 			const parentSelect = append(parentSection, $('select.ade-mission-config-select.full', {
 				'data-ade-sup-parent-select': currentSup.id,
 				'aria-label': localize('adeMissionSupParentAria', "Parent supervisor for {0}", currentSup.id),
 			})) as HTMLSelectElement;
-			const noneOpt = append(parentSelect, $('option', { value: '' }, localize('adeMissionSupParentHumanInbox', "Human Inbox (顶层直报人工)"))) as HTMLOptionElement;
+			const noneOpt = append(parentSelect, $('option', { value: '' }, adeBi(localize('adeMissionSupParentHumanInbox', "Human Inbox (Top-Level Escalation)"), 'Human Inbox (顶层直报人工)'))) as HTMLOptionElement;
 			if (!currentSup.parentSupervisorId) {
 				noneOpt.selected = true;
 			}
@@ -1804,10 +1992,10 @@ export class AdeMissionPopovers extends Disposable {
 					append(topLine, $('span.ade-mission-trigger-row-spec', {}, formatMissionTriggerShortLabel(trig)));
 					const trigState = !trig.enabled ? 'paused' : (missionStatus === 'running' ? 'armed' : 'standby');
 					const trigStateLabel = trigState === 'armed'
-						? localize('adeMissionTrigStateArmed', "● 监听中")
+						? adeBi(localize('adeMissionTrigStateArmed', "● Armed"), '● 监听中')
 						: trigState === 'standby'
-							? localize('adeMissionTrigStateStandby', "◐ 待命")
-							: localize('adeMissionTrigStatePaused', "○ 已暂停");
+							? adeBi(localize('adeMissionTrigStateStandby', "◐ Standby"), '◐ 待命')
+							: adeBi(localize('adeMissionTrigStatePaused', "○ Paused"), '○ 已暂停');
 					append(topLine, $(`span.ade-mission-trigger-state-chip.state-${trigState}`, {
 						'data-ade-trigger-status': trig.id,
 						'data-trigger-state': trigState,
@@ -2100,7 +2288,12 @@ export class AdeMissionPopovers extends Disposable {
 		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 340, 210, 6);
 
 		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, localize('adeMissionGuidedRetryTitle', "带指导重试 · {0} ({1})", node.id, formatMissionWaveTag(token.waveId))));
+		append(head, $('.ade-mission-emp-popover-title', {}, adeBi(
+			localize('adeMissionGuidedRetryTitle', "Guided Retry · {0} ({1})", node.id, formatMissionWaveTag(token.waveId)),
+			'带指导重试 · {0} ({1})',
+			node.id,
+			formatMissionWaveTag(token.waveId),
+		)));
 		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button', title: localize('adeMissionClose', "Close") })) as HTMLButtonElement;
 		closeBtn.appendChild($('span.codicon.codicon-close'));
 		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
@@ -2113,7 +2306,10 @@ export class AdeMissionPopovers extends Disposable {
 
 		const input = append(this.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
 			rows: '3',
-			placeholder: localize('adeMissionGuidedRetryPh', "输入纠偏指导（如：降 batch_size 到 16、先修复类型错误再跑单测…）"),
+			placeholder: adeBi(
+				localize('adeMissionGuidedRetryPh', "Enter corrective guidance (e.g. lower batch_size to 16, fix type errors before running tests…)"),
+				'输入纠偏指导（如：降 batch_size 到 16、先修复类型错误再跑单测…）',
+			),
 			'data-ade-guided-retry-input': 'true',
 		})) as HTMLTextAreaElement;
 
@@ -2121,7 +2317,7 @@ export class AdeMissionPopovers extends Disposable {
 		const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
 			type: 'button',
 			'data-ade-guided-retry-submit': token.id,
-		}, localize('adeMissionGuidedRetrySubmit', "带指导重试"))) as HTMLButtonElement;
+		}, adeBi(localize('adeMissionGuidedRetrySubmit', "Guided Retry"), '带指导重试'))) as HTMLButtonElement;
 
 		const doSubmit = () => {
 			const guidance = input.value.trim() || undefined;
@@ -2306,7 +2502,10 @@ export class AdeMissionPopovers extends Disposable {
 			}
 			const lead = append(btn, $('.ade-mission-engine-option-lead'));
 			if (item.icon) {
-				append(lead, $(`span.codicon.codicon-${item.icon}`, { 'aria-hidden': 'true' }));
+				const safeIcon = item.icon.replace(/[^a-z0-9-]+/gi, '-').replace(/^-|-$/g, '');
+				if (safeIcon) {
+					append(lead, $(`span.codicon.codicon-${safeIcon}`, { 'aria-hidden': 'true' }));
+				}
 			}
 			append(lead, $('span', {}, item.label));
 			if (!item.disabled) {
@@ -2317,204 +2516,93 @@ export class AdeMissionPopovers extends Disposable {
 				}));
 			}
 		}
+		this.clampClientPointPopover(bodyRect, clientX, clientY);
+	}
+
+	private createDetailPopoverHost(): IMissionDetailPopoverHost {
+		return {
+			popoverEl: this.popoverEl,
+			popoverDisposables: this.popoverDisposables,
+			getPopoverGeneration: () => this.popoverGeneration,
+			bumpPopoverGeneration: () => ++this.popoverGeneration,
+			close: (reason?: 'dismiss' | 'escape') => this.close(reason),
+			positionNear: (anchorEl, width, estimatedHeight, offsetY) => this.positionNear(anchorEl, width, estimatedHeight, offsetY),
+			clampToViewport: (bodyRect, anchorRect, offsetY) => this.clampTopToViewport(bodyRect, anchorRect, offsetY),
+			positionAtClientPoint: (clientX, clientY, width, estimatedHeight) => {
+				const bodyRect = this.bodyEl.getBoundingClientRect();
+				this.popoverEl.style.left = `${Math.round(Math.max(8, Math.min(bodyRect.width - width, clientX - bodyRect.left)))}px`;
+				this.popoverEl.style.top = `${Math.round(Math.max(8, Math.min(bodyRect.height - estimatedHeight, clientY - bodyRect.top)))}px`;
+				this.popoverEl.hidden = false;
+				return bodyRect;
+			},
+			clampClientPointToViewport: (bodyRect, clientX, clientY) => this.clampClientPointPopover(bodyRect, clientX, clientY),
+			getOrganizationConfig: () => this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
+			renderNodeColorPickerSection: (parentEl, currentColor, onSelectColor, options) =>
+				this.renderNodeColorPickerSection(parentEl, currentColor, onSelectColor, options),
+			getNodePrompt: (missionId, nodeId) => this.delegate.getNodePrompt(missionId, nodeId),
+			bindPromptEditorHandles: (nodeId, textarea) => {
+				this.activePromptNodeId = nodeId;
+				this.activePromptTextarea = textarea;
+			},
+			setInlineErrorHandle: el => {
+				this.activeInlineErrorEl = el;
+			},
+			setBeforeCloseFlush: fn => {
+				this.beforeCloseFlush = fn;
+			},
+			setOrchCountdownUpdater: fn => {
+				this.activeOrchCountdownUpdater = fn;
+			},
+			resolveOrchestrationTokenDelta: (missionId, tokenId) =>
+				missionId ? this.missionRuntimeService?.getOrchestrationTokenDelta(missionId, tokenId) : undefined,
+			resolveOrchestrationState: missionId =>
+				missionId ? this.missionRuntimeService?.getOrchestrationState(missionId) : undefined,
+			getActiveMissionId: () => this.delegate.getActiveMissionId(),
+		};
 	}
 
 	/**
-	 * Mission View: Clean Task Node Detail & Description Editor Popover.
-	 * Clicking any task node lets the user view/edit its detailed description, rename the title,
-	 * and (as Human / highest-rank authority) mark it Completed or reset status.
+	 * Mission View: Task Node Detail, Contract Guardrails, Verification Receipt & Description Editor Popover.
 	 */
 	openMissionTaskEditorPopover(
 		missionId: string,
 		node: IMissionDagNode,
 		statusRecord: IMissionTaskStatusRecord | undefined,
 		anchorEl: HTMLElement,
-		callbacks: {
-			readonly onRenameTask: (nextTitle: string) => void;
-			readonly onChangeDescription: (nextDesc: string) => void;
-			readonly onSetTaskStatus: (nextStatus: MissionTaskStatus) => void;
-			readonly onChangeColor?: (nextColor: string | null) => void;
-		},
+		callbacks: IMissionTaskEditorPopoverCallbacks,
+		options?: IMissionTaskEditorPopoverOptions,
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-prompt-popover');
-		this.popoverEl.dataset.popoverKind = 'mission-task';
-		this.popoverEl.dataset.popoverNodeId = node.id;
-
-		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 380, 310, 8);
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		const titleLeft = append(head, $('.ade-mission-task-pop-head-left'));
-		append(titleLeft, $('span.ade-mission-task-desc-id', {}, node.id));
-		append(titleLeft, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeTaskPopTitle', "Task Details"), '任务详情')));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		})) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		const titleInput = append(this.popoverEl, $('input.ade-mission-task-pop-title-input', {
-			type: 'text',
-			value: node.label,
-			placeholder: adeBi(localize('adeTaskPopTitlePh', "Task title…"), '任务标题…'),
-			'data-ade-task-title-input': node.id,
-		})) as HTMLInputElement;
-		let lastCommittedTitle = node.label;
-		const commitTitle = () => {
-			const v = titleInput.value.trim();
-			if (v && v !== lastCommittedTitle) {
-				lastCommittedTitle = v;
-				callbacks.onRenameTask(v);
-			}
-		};
-		this.popoverDisposables.add(addDisposableListener(titleInput, EventType.CHANGE, commitTitle));
-		this.popoverDisposables.add(addDisposableListener(titleInput, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				commitTitle();
-				descTextarea.focus();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				this.close();
-			}
-		}));
-
-		const descLabel = append(this.popoverEl, $('.ade-mission-task-pop-label', {}, adeBi(localize('adeTaskPopDescLabel', "Task Description"), '任务详细内容与描述')));
-		void descLabel;
-		const descTextarea = append(this.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
-			rows: '6',
-			spellcheck: 'false',
-			placeholder: adeBi(
-				localize('adeTaskPopDescPh', "Describe concrete objectives, technical constraints, and acceptance criteria…"),
-				'填写任务的具体目标、实现约束、输入输出与达标验收标准…',
-			),
-			'data-ade-task-pop-desc': node.id,
-		})) as HTMLTextAreaElement;
-		descTextarea.value = this.delegate.getNodePrompt(missionId, node.id);
-		this.activePromptNodeId = node.id;
-		this.activePromptTextarea = descTextarea;
-
-		this.popoverDisposables.add(addDisposableListener(descTextarea, EventType.INPUT, () => {
-			callbacks.onChangeDescription(descTextarea.value);
-		}));
-		this.popoverDisposables.add(addDisposableListener(descTextarea, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Escape') {
-				e.preventDefault();
-				this.close();
-			}
-		}));
-
-		const currentStatus = statusRecord?.status ?? 'pending';
-		if (callbacks.onChangeColor) {
-			this.renderNodeColorPickerSection(this.popoverEl, node.color, callbacks.onChangeColor, { compact: true });
-		}
-		const statusRow = append(this.popoverEl, $('.ade-mission-task-pop-footer'));
-		const metaText = statusRecord?.status === 'completed' && statusRecord.completedByLabel
-			? adeBi(localize('adeTaskCompletedByMeta', "Completed by {0}", statusRecord.completedByLabel), '由 {0} 标注完成', statusRecord.completedByLabel)
-			: adeBi(localize('adeTaskHighestRankMeta', "Marked completed by highest-rank role"), '运行中由最高职级角色标注完成');
-		append(statusRow, $('span.ade-mission-task-pop-meta', {}, metaText));
-
-		const toggleBtn = append(statusRow, $(`button.ade-mission-token-action-btn${currentStatus === 'completed' ? '' : '.primary'}`, {
-			type: 'button',
-			'data-ade-task-toggle-complete': node.id,
-		}, currentStatus === 'completed'
-			? adeBi(localize('adeTaskMarkPendingBtn', "Reopen Task"), '重置为待完成')
-			: adeBi(localize('adeTaskMarkCompletedBtn', "Mark Completed ✓"), '标注已完成 ✓'))) as HTMLButtonElement;
-		this.popoverDisposables.add(addDisposableListener(toggleBtn, EventType.CLICK, () => {
-			callbacks.onSetTaskStatus(currentStatus === 'completed' ? 'pending' : 'completed');
-			this.close();
-		}));
-
-		this.clampTopToViewport(bodyRect, anchorRect, 8);
-		descTextarea.focus();
+		renderMissionTaskDetailPopover(
+			this.createDetailPopoverHost(),
+			missionId,
+			node,
+			statusRecord,
+			anchorEl,
+			callbacks,
+			options,
+		);
 	}
 
 	/**
-	 * Orchestration View: Department Shared Whiteboard Live Viewer & Editor Popover.
+	 * Orchestration View: Department Shared Whiteboard Live Viewer, Section TOC & Editor Popover.
 	 */
 	openWhiteboardEditorPopover(
 		whiteboard: IOrchestrationWhiteboard,
 		anchorEl: HTMLElement,
 		onSave: (patch: { readonly title: string; readonly department: string; readonly content: string }) => void,
-		options?: {
-			readonly currentColor?: string;
-			readonly onChangeColor?: (nextColor: string | null) => void;
-		},
+		options?: IWhiteboardEditorPopoverOptions,
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-prompt-popover');
-		this.popoverEl.dataset.popoverKind = 'whiteboard';
-		this.popoverEl.dataset.popoverNodeId = whiteboard.id;
-
-		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 420, 340, 8);
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		const left = append(head, $('.ade-mission-task-pop-head-left'));
-		append(left, $('span.ade-orch-wb-dept-chip', {}, whiteboard.department));
-		append(left, $('.ade-mission-emp-popover-title', {}, `${whiteboard.title} (v${whiteboard.version})`));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionClose', "Close"), '关闭'),
-		})) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		const pointerHint = append(this.popoverEl, $('.ade-mission-task-pop-meta', {}, adeBi(
-			localize('adeWbPointerNote', "Shared department whiteboard · Tokens pass lightweight pointer `{0}` only", whiteboard.id),
-			'部门共享白板 · 令牌流转仅携带轻量指针「{0}」，不直接塞入全文',
-			whiteboard.id,
-		)));
-		void pointerHint;
-
-		const contentArea = append(this.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
-			rows: '9',
-			spellcheck: 'false',
-			placeholder: adeBi(
-				localize('adeWbContentPh', "Write shared department specs, API contracts, decisions, and notes (Markdown)…"),
-				'在此沉淀部门共享规范、接口约定、结论与上下文（支持 Markdown）…',
-			),
-			'data-ade-whiteboard-content-input': whiteboard.id,
-		})) as HTMLTextAreaElement;
-		contentArea.value = whiteboard.content;
-		if (options?.onChangeColor) {
-			this.renderNodeColorPickerSection(this.popoverEl, options.currentColor, options.onChangeColor, { compact: true });
-		}
-
-		const actions = append(this.popoverEl, $('.ade-mission-token-actions'));
-		const saveBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-			type: 'button',
-			'data-ade-whiteboard-save': whiteboard.id,
-		}, adeBi(localize('adeWbSaveBtn', "Save Whiteboard"), '保存白板'))) as HTMLButtonElement;
-
-		const commit = () => {
-			onSave({ title: whiteboard.title, department: whiteboard.department, content: contentArea.value });
-			this.close();
-		};
-		this.popoverDisposables.add(addDisposableListener(saveBtn, EventType.CLICK, commit));
-		this.popoverDisposables.add(addDisposableListener(contentArea, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-				e.preventDefault();
-				commit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				this.close();
-			}
-		}));
-
-		this.clampTopToViewport(bodyRect, anchorRect, 8);
-		contentArea.focus();
+		renderWhiteboardDetailPopover(
+			this.createDetailPopoverHost(),
+			whiteboard,
+			anchorEl,
+			onSave,
+			options,
+		);
 	}
 
 	/**
-	 * Orchestration View: Quick Create Staff / Whiteboard / Dispatch Requirement Popovers.
+	 * Orchestration View: Quick Create Staff / Whiteboard / Group / Dispatch Requirement Popovers.
 	 */
 	openAddStaffPopover(
 		clientX: number,
@@ -2528,81 +2616,7 @@ export class AdeMissionPopovers extends Disposable {
 			readonly subtitle?: string;
 		},
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-prompt-popover');
-		this.popoverEl.dataset.popoverKind = 'add-staff';
-		const bodyRect = this.bodyEl.getBoundingClientRect();
-		this.popoverEl.style.left = `${Math.round(Math.max(12, Math.min(bodyRect.width - 332, clientX - bodyRect.left)))}px`;
-		this.popoverEl.style.top = `${Math.round(Math.max(12, Math.min(bodyRect.height - 260, clientY - bodyRect.top)))}px`;
-		this.popoverEl.hidden = false;
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, options?.title ?? adeBi(localize('adeOrchAddStaffTitle', "New Staff Node"), '新建员工节点')));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button' })) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-		if (options?.subtitle) {
-			append(this.popoverEl, $('.ade-mission-task-pop-meta', {}, options.subtitle));
-		}
-
-		const nameInput = append(this.popoverEl, $('input.ade-mission-task-pop-title-input', {
-			type: 'text',
-			placeholder: adeBi(localize('adeOrchAddStaffNamePh', "Unique employee name (e.g. Alice, BackendLead)…"), '唯一员工姓名（如 Alice、后端主程）…'),
-			'data-ade-orch-staff-name': 'true',
-		})) as HTMLInputElement;
-
-		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const allRanks = [...org.ranks].sort((a, b) => a.tier - b.tier);
-		const filteredRanks = options?.minTier !== undefined ? allRanks.filter(r => r.tier >= options.minTier!) : allRanks;
-		const sortedRanks = filteredRanks.length > 0 ? filteredRanks : allRanks;
-		const rankSelect = append(this.popoverEl, $('select.ade-mission-config-select.full', {
-			'data-ade-orch-staff-rank': 'true',
-		})) as HTMLSelectElement;
-		for (const r of sortedRanks) {
-			append(rankSelect, $('option', { value: `${r.id}:${r.tier}` }, `L${r.tier} · ${r.name}`));
-		}
-
-		const deptInput = append(this.popoverEl, $('input.ade-mission-task-pop-title-input', {
-			type: 'text',
-			value: options?.defaultDepartment ?? '',
-			placeholder: adeBi(localize('adeOrchAddStaffDeptPh', "Department (optional, e.g. Backend, Frontend)…"), '所属部门（可选，如 Backend、Frontend）…'),
-			'data-ade-orch-staff-dept': 'true',
-		})) as HTMLInputElement;
-
-		const actions = append(this.popoverEl, $('.ade-mission-token-actions'));
-		const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-			type: 'button',
-			'data-ade-orch-staff-submit': 'true',
-		}, options?.submitLabel ?? adeBi(localize('adeOrchAddStaffSubmit', "Create Staff"), '创建员工'))) as HTMLButtonElement;
-
-		const doSubmit = () => {
-			const name = nameInput.value.trim();
-			if (!name) {
-				nameInput.focus();
-				return;
-			}
-			const [rankId, tierStr] = (rankSelect.value || `${sortedRanks[0]?.id ?? 'governor'}:1`).split(':');
-			const tier = Number.parseInt(tierStr, 10) || 1;
-			const department = deptInput.value.trim() || undefined;
-			this.close();
-			onCreate({ name, rankId, tier, department });
-		};
-		this.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-		for (const inp of [nameInput, deptInput]) {
-			this.popoverDisposables.add(addDisposableListener(inp, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-				e.stopPropagation();
-				if (e.key === 'Enter') {
-					e.preventDefault();
-					doSubmit();
-				} else if (e.key === 'Escape') {
-					e.preventDefault();
-					this.close();
-				}
-			}));
-		}
-		nameInput.focus();
+		renderAddStaffPopover(this.createDetailPopoverHost(), clientX, clientY, onCreate, options);
 	}
 
 	openAddWhiteboardPopover(
@@ -2611,64 +2625,7 @@ export class AdeMissionPopovers extends Disposable {
 		onCreate: (payload: { readonly department: string; readonly title: string }) => void,
 		options?: { readonly defaultDepartment?: string },
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-prompt-popover');
-		this.popoverEl.dataset.popoverKind = 'add-whiteboard';
-		const bodyRect = this.bodyEl.getBoundingClientRect();
-		this.popoverEl.style.left = `${Math.round(Math.max(12, Math.min(bodyRect.width - 332, clientX - bodyRect.left)))}px`;
-		this.popoverEl.style.top = `${Math.round(Math.max(12, Math.min(bodyRect.height - 210, clientY - bodyRect.top)))}px`;
-		this.popoverEl.hidden = false;
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeOrchAddWbTitle', "New Department Whiteboard"), '新建部门共享白板')));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button' })) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		const deptInput = append(this.popoverEl, $('input.ade-mission-task-pop-title-input', {
-			type: 'text',
-			value: options?.defaultDepartment ?? '',
-			placeholder: adeBi(localize('adeOrchAddWbDeptPh', "Department name (e.g. Backend, QA)…"), '部门名称（如 Backend、QA）…'),
-			'data-ade-orch-wb-dept': 'true',
-		})) as HTMLInputElement;
-		const titleInput = append(this.popoverEl, $('input.ade-mission-task-pop-title-input', {
-			type: 'text',
-			placeholder: adeBi(localize('adeOrchAddWbTitlePh', "Whiteboard title (e.g. API Contract)…"), '白板标题（如 接口规范）…'),
-			'data-ade-orch-wb-title': 'true',
-		})) as HTMLInputElement;
-
-		const actions = append(this.popoverEl, $('.ade-mission-token-actions'));
-		const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-			type: 'button',
-			'data-ade-orch-wb-submit': 'true',
-		}, adeBi(localize('adeOrchAddWbSubmit', "Create Whiteboard"), '创建白板'))) as HTMLButtonElement;
-
-		const doSubmit = () => {
-			const department = deptInput.value.trim() || 'General';
-			const title = titleInput.value.trim() || `${department} Whiteboard`;
-			this.close();
-			onCreate({ department, title });
-		};
-		this.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-		for (const inp of [deptInput, titleInput]) {
-			this.popoverDisposables.add(addDisposableListener(inp, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-				e.stopPropagation();
-				if (e.key === 'Enter') {
-					e.preventDefault();
-					doSubmit();
-				} else if (e.key === 'Escape') {
-					e.preventDefault();
-					this.close();
-				}
-			}));
-		}
-		if (options?.defaultDepartment) {
-			titleInput.focus();
-		} else {
-			deptInput.focus();
-		}
+		renderAddWhiteboardPopover(this.createDetailPopoverHost(), clientX, clientY, onCreate, options);
 	}
 
 	openAddGroupPopover(
@@ -2676,55 +2633,7 @@ export class AdeMissionPopovers extends Disposable {
 		clientY: number,
 		onCreate: (groupName: string) => void,
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-prompt-popover');
-		this.popoverEl.dataset.popoverKind = 'add-group';
-		const bodyRect = this.bodyEl.getBoundingClientRect();
-		this.popoverEl.style.left = `${Math.round(Math.max(12, Math.min(bodyRect.width - 332, clientX - bodyRect.left)))}px`;
-		this.popoverEl.style.top = `${Math.round(Math.max(12, Math.min(bodyRect.height - 170, clientY - bodyRect.top)))}px`;
-		this.popoverEl.hidden = false;
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeOrchAddGroupTitle', "New Group / Department"), '新建部门分组 (Group)')));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button' })) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		const nameInput = append(this.popoverEl, $('input.ade-mission-task-pop-title-input', {
-			type: 'text',
-			placeholder: adeBi(localize('adeOrchAddGroupPh', "Group name (e.g. Platform Backend, Security QA)…"), '分组名称（如 Platform Backend、Security QA）…'),
-			'data-ade-orch-group-name': 'true',
-		})) as HTMLInputElement;
-
-		const actions = append(this.popoverEl, $('.ade-mission-token-actions'));
-		const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-			type: 'button',
-			'data-ade-orch-group-submit': 'true',
-		}, adeBi(localize('adeOrchAddGroupSubmit', "Create Group"), '创建分组'))) as HTMLButtonElement;
-
-		const doSubmit = () => {
-			const name = nameInput.value.trim();
-			if (!name) {
-				nameInput.focus();
-				return;
-			}
-			this.close();
-			onCreate(name);
-		};
-		this.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-		this.popoverDisposables.add(addDisposableListener(nameInput, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				doSubmit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				this.close();
-			}
-		}));
-		nameInput.focus();
+		renderAddGroupPopover(this.createDetailPopoverHost(), clientX, clientY, onCreate);
 	}
 
 	openMoveToGroupPopover(
@@ -2735,222 +2644,24 @@ export class AdeMissionPopovers extends Disposable {
 		groups: ReadonlyArray<{ readonly id: string; readonly name: string }>,
 		onSelect: (targetGroupNameOrId: string | undefined) => void,
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-prompt-popover');
-		this.popoverEl.dataset.popoverKind = 'move-to-group';
-		const bodyRect = this.bodyEl.getBoundingClientRect();
-		this.popoverEl.style.left = `${Math.round(Math.max(12, Math.min(bodyRect.width - 312, clientX - bodyRect.left)))}px`;
-		this.popoverEl.style.top = `${Math.round(Math.max(12, Math.min(bodyRect.height - 280, clientY - bodyRect.top)))}px`;
-		this.popoverEl.hidden = false;
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, adeBi(localize('adeOrchMoveGroupTitle', "Assign Group · {0}", nodeLabel), '归属分组 · {0}', nodeLabel)));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button' })) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		const list = append(this.popoverEl, $('.ade-mission-emp-popover-list'));
-		const curLower = (currentDepartment ?? '').trim().toLowerCase();
-		const noneBtn = append(list, $(`button.ade-mission-emp-popover-item${!curLower ? '.active' : ''}`, {
-			type: 'button',
-			'data-ade-move-group-option': '__none__',
-		}));
-		append(noneBtn, $('span', {}, adeBi(localize('adeOrchNoGroupOpt', "(No Group / Top-Level)"), '（无分组 / 顶层）')));
-		this.popoverDisposables.add(addDisposableListener(noneBtn, EventType.CLICK, () => {
-			this.close();
-			onSelect(undefined);
-		}));
-
-		for (const grp of groups) {
-			const isCur = grp.name.trim().toLowerCase() === curLower;
-			const btn = append(list, $(`button.ade-mission-emp-popover-item${isCur ? '.active' : ''}`, {
-				type: 'button',
-				'data-ade-move-group-option': grp.id,
-			}));
-			append(btn, $('span', {}, grp.name));
-			if (isCur) {
-				append(btn, $('span.codicon.codicon-check', { 'aria-hidden': 'true' }));
-			}
-			this.popoverDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-				this.close();
-				onSelect(grp.id);
-			}));
-		}
-
-		const newInput = append(this.popoverEl, $('input.ade-mission-task-pop-title-input', {
-			type: 'text',
-			placeholder: adeBi(localize('adeOrchMoveNewGroupPh', "Or type a new group name + Enter…"), '或输入新分组名称后按回车…'),
-			'data-ade-move-group-new': 'true',
-		})) as HTMLInputElement;
-		this.popoverDisposables.add(addDisposableListener(newInput, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				const v = newInput.value.trim();
-				if (v) {
-					this.close();
-					onSelect(v);
-				}
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				this.close();
-			}
-		}));
+		renderMoveToGroupPopover(this.createDetailPopoverHost(), clientX, clientY, nodeLabel, currentDepartment, groups, onSelect);
 	}
 
 	openOrchestrationTokenPopover(
 		staffLabel: string,
 		token: IOrchestrationToken,
 		anchorEl: HTMLElement,
-		callbacks?: {
-			readonly delta?: IOrchestrationTokenDeltaView;
-			readonly onOpenWhiteboard?: (whiteboardId: string) => void;
-			readonly onReadPointer?: (ptr: string) => { readonly title?: string; readonly kind?: string; readonly content?: string; readonly error?: string } | undefined;
-		},
+		callbacks?: IOrchestrationTokenPopoverOptions,
+		options?: IOrchestrationTokenPopoverOptions,
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-token-popover');
-		this.popoverEl.dataset.popoverKind = 'orch-token';
-		this.popoverEl.dataset.popoverTokenId = token.id;
-
-		const { bodyRect, anchorRect } = this.positionNear(anchorEl, 392, 380, 6);
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const hopNum = token.hopIndex ?? Math.max(0, (token.hopLog?.length ?? 1) - 1);
-		const delta = callbacks?.delta;
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, `${token.id} · Hop #${hopNum} · ${staffLabel}`));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button' })) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		append(this.popoverEl, $('.ade-mission-task-pop-meta', {},
-			`${token.waveId} · ${token.status}${token.fromNodeId ? ` · from ${token.fromNodeId}` : ''}${token.nudgeCount > 0 ? ` · ${token.nudgeCount}× 5m reminder` : ''}`,
-		));
-		if (delta?.isReentrantVisit) {
-			append(this.popoverEl, $('.ade-orch-token-delta-bar', { 'data-ade-orch-delta-bar': 'true' }, adeBi(
-				localize(
-					'adeOrchDeltaBanner',
-					"Cyclic Re-entry · Delta since Hop #{0}: {1} new/updated ptr · {2} unchanged collapsed",
-					delta.lastSeenHop ?? 0,
-					delta.newOrUpdatedRefs.length,
-					delta.unchangedRefs.length,
-				),
-				'环路重入 · 增量游标（自 Hop #{0}）：{1} 个新增/变更指针 · {2} 个已读折叠去重',
-				delta.lastSeenHop ?? 0,
-				delta.newOrUpdatedRefs.length,
-				delta.unchangedRefs.length,
-			)));
-		}
-
-		const box = append(this.popoverEl, $('.ade-mission-token-box'));
-		append(box, $('.ade-mission-token-box-body', {}, token.lastSummary || '(No headline)'));
-
-		// Lazy on-demand pointer preview pane (hidden until user clicks any hop/artifact/decision pointer!)
-		const previewBox = append(this.popoverEl, $('.ade-orch-ptr-preview', { 'data-ade-ptr-preview': 'true' }));
-		previewBox.hidden = true;
-		const previewHead = append(previewBox, $('.ade-orch-ptr-preview-head'));
-		const previewTitle = append(previewHead, $('span.ade-orch-ptr-preview-title'));
-		const previewHideBtn = append(previewHead, $('button.ade-mission-icon-btn', { type: 'button' })) as HTMLButtonElement;
-		previewHideBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(previewHideBtn, EventType.CLICK, () => {
-			previewBox.hidden = true;
-		}));
-		const previewBody = append(previewBox, $('pre.ade-orch-ptr-preview-body'));
-
-		const inspectPointer = (ptr: string) => {
-			const res = callbacks?.onReadPointer?.(ptr);
-			if (!res) {
-				return;
-			}
-			previewTitle.textContent = res.title ? `${ptr} · ${res.title}` : ptr;
-			previewBody.textContent = res.error ? res.error : (res.content ?? '(empty)');
-			previewBox.hidden = false;
-			this.clampTopToViewport(bodyRect, anchorRect, 6);
-		};
-
-		// Typed split context pointers (Whiteboards, Per-Hop Details, Artifacts, Decisions) — ZERO body pre-loaded!
-		const refs = token.contextRefs ?? [];
-		const legacyWbs = refs.length === 0 ? (token.whiteboardPointers ?? []) : [];
-		const unchangedPtrSet = new Set((delta?.unchangedRefs ?? []).map(r => r.ptr));
-		const newOrUpdatedPtrSet = new Set((delta?.newOrUpdatedRefs ?? []).map(r => r.ptr));
-		if (refs.length > 0 || legacyWbs.length > 0) {
-			const ptrWrap = append(this.popoverEl, $('.ade-orch-token-pointers', { 'data-ade-orch-context-refs': 'true' }));
-			append(ptrWrap, $('.ade-mission-task-pop-label', {}, adeBi(
-				localize('adeOrchCtxPtrsLabel', "Context Pointers (Click to Load On Demand)"),
-				'携带的上下文指针（按需点击展开）',
-			)));
-			// Render new/updated pointers first, then seen/collapsed pointers
-			const orderedRefs = delta?.isReentrantVisit
-				? [...refs.filter(r => !unchangedPtrSet.has(r.ptr)), ...refs.filter(r => unchangedPtrSet.has(r.ptr))]
-				: refs;
-			for (const ref of orderedRefs) {
-				const isWb = ref.kind === 'whiteboard';
-				const wbId = isWb ? (ref.ptr.startsWith('wb:') ? ref.ptr.slice(3) : ref.ptr) : undefined;
-				const kindTag = ref.kind === 'whiteboard' ? '📋' : ref.kind === 'artifact' ? '📦' : ref.kind === 'decision' ? '🧭' : '📝';
-				const sizeTag = ref.sizeChars > 0 ? ` · ${ref.sizeChars}c` : '';
-				const isSeen = Boolean(delta?.isReentrantVisit && unchangedPtrSet.has(ref.ptr));
-				const isNewDelta = Boolean(delta?.isReentrantVisit && newOrUpdatedPtrSet.has(ref.ptr));
-				const deltaTag = isNewDelta ? ' [NEW]' : isSeen ? ' [SEEN]' : '';
-				const btn = append(ptrWrap, $(`button.ade-mission-emp-popover-item.ade-orch-ptr-chip${isSeen ? '.is-seen' : ''}${isNewDelta ? '.is-delta-new' : ''}`, {
-					type: 'button',
-					'data-ade-context-ptr': ref.ptr,
-					'data-ptr-kind': ref.kind,
-					...(wbId ? { 'data-ade-wb-pointer': wbId } : {}),
-				}, `${kindTag} ${ref.ptr} · ${ref.title} (v${ref.version}${sizeTag})${deltaTag}`)) as HTMLButtonElement;
-				this.popoverDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-					if (isWb && wbId) {
-						this.close();
-						callbacks?.onOpenWhiteboard?.(wbId);
-					} else {
-						inspectPointer(ref.ptr);
-					}
-				}));
-			}
-			for (const ptr of legacyWbs) {
-				const btn = append(ptrWrap, $('button.ade-mission-emp-popover-item.ade-orch-ptr-chip', {
-					type: 'button',
-					'data-ade-wb-pointer': ptr.whiteboardId,
-				}, `📋 [${ptr.department}] ${ptr.title} (v${ptr.version})`)) as HTMLButtonElement;
-				this.popoverDisposables.add(addDisposableListener(btn, EventType.CLICK, () => {
-					this.close();
-					callbacks?.onOpenWhiteboard?.(ptr.whiteboardId);
-				}));
-			}
-		}
-
-		// Compact Pass History Trail (hop-by-hop pointers)
-		const hopLog = token.hopLog ?? [];
-		const earlierHopSet = new Set((delta?.earlierHops ?? []).map(h => `${h.tokenId}:${h.hop}`));
-		if (hopLog.length > 0) {
-			const histWrap = append(this.popoverEl, $('.ade-orch-hop-history', { 'data-ade-orch-hop-history': 'true' }));
-			append(histWrap, $('.ade-mission-task-pop-label', {}, adeBi(
-				localize('adeOrchHopHistoryLabel', "Pass History ({0} hops)", hopLog.length),
-				'历史传递记录（{0} 跳）',
-				hopLog.length,
-			)));
-			for (const entry of hopLog) {
-				const isSeenHop = Boolean(delta?.isReentrantVisit && earlierHopSet.has(`${entry.tokenId}:${entry.hop}`));
-				const row = append(histWrap, $(`.ade-orch-hop-row${isSeenHop ? '.is-seen' : ''}`, { 'data-hop-index': String(entry.hop) }));
-				const route = entry.fromNodeId ? `${entry.fromNodeId} → ${entry.toNodeId}` : `User → ${entry.toNodeId}`;
-				append(row, $('span.ade-orch-hop-route', {}, `#${entry.hop} ${route}`));
-				append(row, $('span.ade-orch-hop-headline', {}, entry.headline));
-				if (entry.payloadPtr) {
-					const ptrBtn = append(row, $('button.ade-orch-hop-ptr-btn', {
-						type: 'button',
-						'data-ade-hop-ptr': entry.payloadPtr,
-					}, entry.payloadPtr)) as HTMLButtonElement;
-					this.popoverDisposables.add(addDisposableListener(ptrBtn, EventType.CLICK, () => {
-						inspectPointer(entry.payloadPtr!);
-					}));
-				}
-			}
-		}
-
-		this.clampTopToViewport(bodyRect, anchorRect, 6);
+		renderOrchestrationTokenDetailPopover(
+			this.createDetailPopoverHost(),
+			staffLabel,
+			token,
+			anchorEl,
+			callbacks,
+			options,
+		);
 	}
 
 	openDispatchRequirementPopover(
@@ -2959,62 +2670,6 @@ export class AdeMissionPopovers extends Disposable {
 		targetLabel: string,
 		onDispatch: (requirement: string) => void,
 	): void {
-		this.close();
-		this.popoverGeneration++;
-		this.popoverEl.classList.add('is-prompt-popover');
-		this.popoverEl.dataset.popoverKind = 'orch-dispatch';
-		const bodyRect = this.bodyEl.getBoundingClientRect();
-		this.popoverEl.style.left = `${Math.round(Math.max(12, Math.min(bodyRect.width - 372, clientX - bodyRect.left)))}px`;
-		this.popoverEl.style.top = `${Math.round(Math.max(12, Math.min(bodyRect.height - 230, clientY - bodyRect.top)))}px`;
-		this.popoverEl.hidden = false;
-		this.popoverDisposables.add(addDisposableListener(this.popoverEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const head = append(this.popoverEl, $('.ade-mission-token-insp-head'));
-		append(head, $('.ade-mission-emp-popover-title', {}, adeBi(
-			localize('adeOrchDispatchTitle', "Dispatch Requirement → {0}", targetLabel),
-			'下达总需求 → {0}',
-			targetLabel,
-		)));
-		const closeBtn = append(head, $('button.ade-mission-icon-btn', { type: 'button' })) as HTMLButtonElement;
-		closeBtn.appendChild($('span.codicon.codicon-close'));
-		this.popoverDisposables.add(addDisposableListener(closeBtn, EventType.CLICK, () => this.close()));
-
-		const reqArea = append(this.popoverEl, $('textarea.ade-mission-node-prompt-popover-input', {
-			rows: '5',
-			spellcheck: 'false',
-			placeholder: adeBi(
-				localize('adeOrchDispatchPh', "Describe the overall requirement to dispatch to the highest-rank role as a token baton…"),
-				'输入总需求，系统将以接力令牌形式下达给最高职级角色进行拆解与分发…',
-			),
-			'data-ade-orch-dispatch-input': 'true',
-		})) as HTMLTextAreaElement;
-
-		const actions = append(this.popoverEl, $('.ade-mission-token-actions'));
-		const submitBtn = append(actions, $('button.ade-mission-token-action-btn.primary', {
-			type: 'button',
-			'data-ade-orch-dispatch-submit': 'true',
-		}, adeBi(localize('adeOrchDispatchSubmit', "Dispatch Baton"), '派发接力令牌'))) as HTMLButtonElement;
-
-		const doSubmit = () => {
-			const text = reqArea.value.trim();
-			if (!text) {
-				reqArea.focus();
-				return;
-			}
-			this.close();
-			onDispatch(text);
-		};
-		this.popoverDisposables.add(addDisposableListener(submitBtn, EventType.CLICK, doSubmit));
-		this.popoverDisposables.add(addDisposableListener(reqArea, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			e.stopPropagation();
-			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-				e.preventDefault();
-				doSubmit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				this.close();
-			}
-		}));
-		reqArea.focus();
+		renderDispatchRequirementPopover(this.createDetailPopoverHost(), clientX, clientY, targetLabel, onDispatch);
 	}
 }

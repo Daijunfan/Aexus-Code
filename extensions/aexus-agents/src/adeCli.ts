@@ -3,13 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { execFile } from 'node:child_process';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import {
 	parseMissionDocsCommand,
 	parseRankGroupCommand,
@@ -19,233 +17,115 @@ import {
 	parseApiCommand,
 	parseDocsCommand,
 	parseMissionRuntimeSubcommand,
-	parseOrchestrationGroupCommand,
 	parseOrgCommandIfRuntime,
 	parseTokenGroupCommand,
-	parseWhiteboardGroupCommand,
 	parseWhoamiCommand,
 } from './adeCliMissionRuntime.mjs';
+import {
+	parseOrchestrationGroupCommand,
+	parseWhiteboardGroupCommand,
+} from './adeCliOrchestration.mjs';
+import {
+	ADE_CLI_SCHEMA_VERSION,
+	ADE_CLI_VERSION,
+	ADE_CONTROL_DIR_NAME,
+	ADE_CONTROL_META_NAME,
+	ADE_ENGINE_BASELINE,
+	buildCompletionScript,
+	computeDoctorExitCode,
+	createColorizer,
+	formatDoctorHuman,
+	formatHumanOutput,
+	formatRawBlueprintOutput,
+	HELP_TEXT,
+	isIdempotentReadRequest,
+	MISSION_SUBCOMMANDS,
+	ORCHESTRATION_SUBCOMMANDS,
+	ORG_SUBCOMMANDS,
+	resolveConnection,
+	ROLE_SUBCOMMANDS,
+	runDoctorDiagnostics,
+	sendControlRequestWithRetry,
+	SESSION_SUBCOMMANDS,
+	shouldUseColor,
+	TOKEN_SUBCOMMANDS,
+	TOP_LEVEL_COMMANDS,
+	WHITEBOARD_SUBCOMMANDS,
+	type CompletionShell,
+	type DoctorCheckStatus,
+	type IAdeControlConnectionMetadata,
+	type IAdeControlWireRequest,
+	type IAdeControlWireResponse,
+	type IDoctorCheck,
+	type IDoctorReport,
+} from './adeCliRuntimeSupport.mjs';
 
-const execFileAsync = promisify(execFile);
-
-export const ADE_CONTROL_DIR_NAME = '.aexus-code';
-export const ADE_CONTROL_META_NAME = 'ade-control.json';
-export const ADE_CLI_VERSION = '1.1.0';
-export const ADE_CLI_SCHEMA_VERSION = 1;
-export const ADE_ENGINE_BASELINE = '1.146.0';
+export {
+	ADE_CLI_SCHEMA_VERSION,
+	ADE_CLI_VERSION,
+	ADE_CONTROL_DIR_NAME,
+	ADE_CONTROL_META_NAME,
+	ADE_ENGINE_BASELINE,
+	buildCompletionScript,
+	computeDoctorExitCode,
+	HELP_TEXT,
+	MISSION_SUBCOMMANDS,
+	ORCHESTRATION_SUBCOMMANDS,
+	ORG_SUBCOMMANDS,
+	RANK_SUBCOMMANDS,
+	ROLE_SUBCOMMANDS,
+	SESSION_SUBCOMMANDS,
+	TOKEN_SUBCOMMANDS,
+	TOP_LEVEL_COMMANDS,
+	WHITEBOARD_SUBCOMMANDS,
+	type CompletionShell,
+	type DoctorCheckStatus,
+	type IAdeControlConnectionMetadata,
+	type IAdeControlWireRequest,
+	type IAdeControlWireResponse,
+	type IDoctorCheck,
+	type IDoctorReport,
+};
 
 export type AdeAgentRole = 'governor' | 'manager' | 'employee' | 'subordinate' | (string & {});
-
-export interface IAdeControlConnectionMetadata {
-	readonly socketPath: string;
-	readonly token: string;
-	readonly pid: number;
-	readonly tcpPort?: number;
-}
-
-export interface IAdeControlWireRequest {
-	readonly token: string;
-	readonly action: string;
-	readonly params?: Record<string, unknown>;
-	readonly windowId?: number;
-}
-
-export interface IAdeControlWireResponse<T = unknown> {
-	readonly ok: boolean;
-	readonly result?: T;
-	readonly error?: string;
-}
 
 export interface AdeCliIo {
 	readonly stdout?: (text: string) => void;
 	readonly stderr?: (text: string) => void;
+	readonly stdin?: string;
 	readonly env?: NodeJS.ProcessEnv;
 	readonly cwd?: string;
-	/** Overrides the TTY detection used for color output (defaults to `process.stdout.isTTY`). */
+	/** Overrides the TTY detection used for color and JSON indentation (defaults to `process.stdout.isTTY`). */
 	readonly stdoutIsTTY?: boolean;
 }
-
-export type CompletionShell = 'bash' | 'zsh' | 'fish' | 'powershell';
 
 export interface ParsedCliInvocation {
 	readonly help: boolean;
 	readonly json: boolean;
+	readonly pretty?: boolean;
 	readonly version?: boolean;
 	readonly completion?: CompletionShell;
 	readonly windowId?: number;
+	readonly idempotencyKey?: string;
 	readonly action?: string;
 	readonly fallbackAction?: string;
 	readonly params?: Record<string, unknown>;
 }
 
 const ROLE_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function isValidRoleSlug(val: string | undefined): val is string {
 	return Boolean(val && ROLE_SLUG_RE.test(val.trim()));
 }
 
-export const HELP_TEXT = `Usage: aexus-ade [options] <command> [args]
-
-Control the running Aexus Code ADE workbench over its local control socket.
-
-Global Options:
-  -h, --help                Show this help message and exit
-  -v, --version             Print the CLI and engine baseline version
-  --json                    Print structured JSON output
-  --window <id>             Target a specific workbench window ID
-
-Organizational Ranks (numeric tiers L-1 User > L0 Secretary > L1..LN; live aliases via aexus-ade rank names --json):
-  L1 (default: governor)  Top orchestrator; owns architecture, Engineering Orchestration & Mission Task DAGs, and downward token delegation.
-  L2 (default: manager)   Mid-level lead; splits sub-tasks downward via tokens, manages immediate next-tier staff within department, returns verified results.
-  L3 (default: employee)  Mid-lower orchestrated rank; executes/reviews baton tokens in Engineering or supervises lower tiers top-down.
-  L4 (default: worker)    Pure execution leaf rank; 100% clean native Coding Agent context outside Engineering, token/whiteboard bus inside Engineering.
-
-Commands:
-  status
-  version
-  whoami
-  docs read <common|L0..LN|engineering|paradigm|engineering-api|mission|manifest>
-  api update [--since <rev>] [--scope <all|common|in_graph|off_graph|mission>]
-  doctor [--project <path>] [--strict]
-  completion <bash|zsh|fish|powershell>
-  mode [get | set <ade|ide>]
-  view [status | --archived <true|false|toggle> | --inspector <changes|files|hide> | --refresh]
-
-  rank list
-  rank names
-  rank get <L-1|L0|L1..LN|rankId|alias>
-  rank docs [common|L0|L1..LN|engineering|engineering-api|mission]
-  rank rename <L1..LN|rankId> "<alias>" [--short <tag>]
-  rank set-count <N>
-
-  role list
-  role apis
-  role presets
-  role apply-preset <presetId>    (alias: role preset <presetId>)
-  role set-tier <sessionId> <rankId|worker|none>
-  role reset
-  role studio [rankId]
-
-  project list
-  project add <path|aexus-ssh://host/path|host:/path...> [--name <label>]
-  project select <target>
-  project remove <target>
-  project delete <target> [--sessions] [--files] [--permanent]
-  project focus <target>
-  project home
-  project forward
-  project move <source> (--before <target> | --after <target>)
-  project changes [target]
-  project files [target] [--path <subpath>] [--depth <n>]
-  project open-file <file> [--project <target>] [--side]
-  project open-diff <file> [--project <target>]
-
-  host list
-  host info <alias|id>
-  host add --host <addr> [--name <label>] [--alias <alias>] [--user <user>] [--port <n>] [--os <linux|macos|windows>] [--identity <keyPath>] [--jump <proxyJump>] [--default-dir <remotePath>]
-  host update <alias|id> [--host <addr>] [--name <label>] [--alias <alias>] [--user <user>] [--port <n>] [--os <linux|macos|windows>] [--identity <keyPath>] [--jump <proxyJump>] [--default-dir <remotePath>]
-  host remove <alias|id>
-  host test <alias|id>
-  host browse <alias|id> [--path <remotePath>]
-  host import-vscode
-  host open [alias|id]
-
-  engine list
-  engine sessions <engine> [--project <target>] [--limit <n>]
-
-  session list [--project <p>] [--parent <id|root>] [--role <L1..LN|rankId>] [--engine <e>] [--status <idle|working|pending|draft>] [--unread] [--archived] [--all]
-  session info <id>
-  session subordinates [id] [--recursive]
-  session tree [id]
-  session create [--project <p>] [--engine <e>] [--title <t>] [--parent <id>] [--role <L1..LN|rankId>] [--draft [text]] [--side] [--no-open]
-  session attach --engine <e> --native-id <nativeId> [--project <p>] [--title <t>] [--parent <id>] [--role <L1..LN|rankId>] [--side] [--no-open]
-  session connect <id> --engine <e> [--native-id <nativeId>] [--side] [--no-open]
-  session open <id> [--side]
-  session select <id>
-  session close <id>
-  session mark-read (<id> | --all)
-  session draft <id> [<text> | --clear]
-  session rename <id> <title>
-  session role <id> <L1..LN|rankId|none>
-  session move <id> <parentId|none> [--project <p>]
-  session nest <id> <parentId|none> [--project <p>]
-  session reorder <id> (--before <targetId> | --after <targetId>)
-  session send <id> <prompt> [--wait]
-  session history <id> [--limit <n>]
-  session stop <id>
-  session archive <id>
-  session unarchive <id>
-  session detach|remove <id>
-  session delete <id> [--force]
-
-  secretary [status]
-  secretary open [--side]
-  secretary engine <e>
-  secretary reset [--engine <e>]
-  secretary send <prompt> [--wait]
-  secretary history [--limit <n>]
-  secretary stop
-  secretary draft [<text> | --clear]
-  secretary mark-read
-
-  mission docs
-  mission list [--project <path>]
-  mission init [--mission <id> | --owner <id>] [--title "<name>"] [--open] [--side]
-  mission export [--mission <id>] [--with-positions] [--file <outPath>]
-  mission import [--owner <id>] [--project <path>] [--title "<name>"] (--file <path> | --text <bundleJson>) [--open] [--side]
-  mission open --mission <id> [--view <mission|orchestration|both>] [--side]
-  mission blueprint get --mission <id> [--raw]
-  mission blueprint apply --mission <id> (--file <path> | --text <mermaid>)
-  mission blueprint validate (--file <path> | --text <mermaid>)
-  mission task list|get|create|update|set|remove|complete|status|edge [--mission <id>] [--node <taskId>] [--title <title>] [--description <text>] [--owner <staffId>] [--assignee <staffId>] [--min-tier <n>] [--after <upId>] [--force]
-  mission check list|get|set|remove|run [--mission <id>] [--node <nodeId>] ...
-  mission trigger list|set|remove [--mission <id>] ...
-  mission host bind [--mission <id>] --node <id> --host <local|alias> [--path <remotePath>]
-  mission status [--mission <id>]
-  mission remove --mission <id>
-
-  orchestration get [--mission <id>] [--raw]
-  orchestration validate (--file <path.json|mjs|mmd> | --text <mermaid>)
-  orchestration load [--mission <id>] --file <path.json|mjs|mmd>
-  orchestration apply [--mission <id>] (--file <path> | --text <mermaid>)
-  orchestration export [--mission <id>] [--format mermaid|json] [--with-positions] [--raw] [--file <outPath>]
-  orchestration import [--mission <id>] (--file <path> | --text <mermaid>)
-  orchestration layout set <lr|td|radial|grid> [--mission <id>] [--persist-in-code]
-  orchestration group list|create|rename|assign|remove [--mission <id>] ...
-  orchestration status [--mission <id>]
-  orchestration pause|resume|abort [--mission <id>] [--reason <text>]
-  orchestration dispatch [--mission <id>] --prompt <text> [--detail <text>] [--task <taskId>] [--artifact <title=body>] [--decision <title=body>] [--to <staffNodeId>] [--whiteboard <wbId>]
-  orchestration staff create|rename|config|remove [--mission <id>] ...
-  orchestration edge connect|label|remove [--mission <id>] <fromId> <toId> ...
-
-  whiteboard list [--mission <id>]
-  whiteboard create [--mission <id>] --department <Dept> --title <Title> [--id <wbId>] [--content <text> | --file <path>]
-  whiteboard read <wbId> [--mission <id>]
-  whiteboard write <wbId> [--mission <id>] (--content <text> | --append <text> | --file <path>)
-  whiteboard rename <wbId> "<New Title>" [--department <Dept>] [--mission <id>]
-  whiteboard remove <wbId> [--mission <id>]
-
-  token current [--mission <id>] [--agent <id>]
-  token read <ptr1[,ptr2...]> [--mission <id>] [--token <tokenId>]
-  token history <tokenId> [--mission <id>] [--all | --delta]
-  token mint [parentTokenId] --to <subNodeId> --summary <text> [--detail <text>] [--task <taskId>] [--branches-json <json>] [--wait-join] [--from <staffNodeId>] [--mission <id>]
-  token split [parentTokenId] --branches-json <json> [--no-wait-join] [--join-mode all|any] [--from <staffNodeId>] [--mission <id>]
-  token return <tokenId> --summary <text> [--to <superiorNodeId>] [--detail <text>] [--artifact <title=body>] [--decision <title=body>] [--whiteboard <wbId>] [--mission <id>]
-  token handoff <tokenId> --to <nodeId[,nodeId2]> --summary <text> [--detail <text>] [--task <taskId>] [--artifact <title=body>] [--decision <title=body>] [--ref <ptr[,...]>] [--whiteboard <wbId[,...]>] [--mission <id>]
-  token complete <tokenId> --summary <text> [--detail <text>] [--artifact <title=body>] [--decision <title=body>] [--ref <ptr[,...]>] [--to <nodeId[,...]>] [--whiteboard <wbId[,...]>] [--finish] [--mission <id>]
-  token block <tokenId> --duration <duration> [--reason <text>] [--watch-pid <pid> | --wake-on-pid-exit <pid>] [--watch-file <path> | --wake-on-file <path>] [--host <alias>]
-  token fail <tokenId> --reason <text> [--mission <id>]
-
-  org subordinates [supervisorId] [--mission <id>]
-  org send <nodeOrSessionId> <message> [--mission <id>] [--wait]
-  org context <nodeOrSessionId> [--limit <n>] [--mission <id>]
-  org escalate --reason <text> [--mission <id>] [--token <tokenId>] [--node <nodeId>]
-
-  inbox list [--unread-only] [--governor <id>]
-  inbox post --from <governorId> --message <text> [--title <title>] [--node <nodeId>]
-  inbox resolve --id <msgId> [--resolution <text>]
-  inbox mark-read [--id <msgId> | --all]
-`;
+function validateIdempotencyKey(raw: string, sourceLabel: string): string {
+	const trimmed = raw.trim();
+	if (!IDEMPOTENCY_KEY_RE.test(trimmed)) {
+		throw new CliUsageError(`Invalid ${sourceLabel} "${raw}". Expected 1..128 characters matching [A-Za-z0-9._:-]+.`);
+	}
+	return trimmed;
+}
 
 class CliUsageError extends Error {
 	constructor(message: string) {
@@ -289,8 +169,14 @@ async function canonicalizeParamsPaths(params: Record<string, unknown> | undefin
 	if (action?.startsWith('host.')) {
 		return params;
 	}
+	const hostSpec = typeof params.hostAlias === 'string'
+		? params.hostAlias.trim()
+		: (typeof params.host === 'string' ? params.host.trim() : '');
+	if (hostSpec && hostSpec.toLowerCase() !== 'local') {
+		return params;
+	}
 	const canonicalizeStr = async (val: string): Promise<string> => {
-		if (isCloudOrUriSpec(val) || !path.isAbsolute(val)) {
+		if (val === '-' || isCloudOrUriSpec(val) || !path.isAbsolute(val)) {
 			return val;
 		}
 		try {
@@ -311,23 +197,74 @@ async function canonicalizeParamsPaths(params: Record<string, unknown> | undefin
 	return out;
 }
 
-/** Flags whose next token is opaque user text and must never be treated as a global flag. */
-const FREEFORM_VALUE_FLAGS = new Set<string>(['--message', '--report', '--feedback', '--text', '--draft', '--summary', '--detail', '--artifact', '--decision', '--reason', '--mermaid', '--note', '--prompt', '--guidance', '--pre-prompt', '--description', '--desc', '--content', '--append']);
+/** Flags whose next token is opaque user text and must never be treated as a global flag or positional. */
+const FREEFORM_VALUE_FLAGS = new Set<string>([
+	'--message', '--report', '--feedback', '--text', '--summary', '--detail', '--body',
+	'--artifact', '--decision', '--reason', '--mermaid', '--json-text', '--note', '--notes', '--evidence', '--wave-summary',
+	'--prompt', '--guidance', '--pre-prompt', '--description', '--desc', '--content', '--append',
+	'--title', '--name', '--label', '--edge-label', '--whiteboard-title', '--wb-title',
+	'--department', '--dept', '--new-department', '--new-dept', '--group', '--new-name',
+	'--branches-json', '--branches', '--branch', '--cmd', '--command', '--match', '--expect-output', '--expect-match',
+	'--resolution', '--role-prompt', '--persona', '--alias', '--short', '--short-name',
+]);
+
+/** Non-freeform flags that consume a separate option argument so `positionalCount` never counts flag values. */
+const KNOWN_OPTION_VALUE_FLAGS = new Set<string>([
+	'--mission', '--mission-id', '--governor', '--project', '--parent', '--engine', '--engine-id',
+	'--model', '--thinking', '--effort', '--role', '--rank', '--tier', '--status', '--state',
+	'--limit', '-n', '--before', '--after', '--from', '--to', '--target', '--targets', '--id',
+	'--node', '--node-id', '--token', '--token-id', '--task', '--task-id', '--task-node', '--tasks', '--task-ids',
+	'--owner', '--owner-node', '--assignee', '--assignee-node', '--min-tier', '--completer-tier',
+	'--completers', '--allowed-completers', '--host', '--host-alias', '--hostname',
+	'--path', '--subpath', '--remote-path', '--target-path', '--depth', '--since', '--rev', '--revision',
+	'--scope', '--format', '--view', '--file', '-f', '--out', '-o', '--detail-file', '--body-file',
+	'--branches-file', '--append-file', '--prompt-file', '--message-file',
+	'--whiteboard', '--whiteboards', '--wb', '--ref', '--refs', '--ptr', '--ptrs', '--trace-ptr',
+	'--files', '--modified-files', '--changed-files', '--duration', '--max', '--max-duration',
+	'--watch-pid', '--wake-on-pid-exit', '--pid', '--watch-file', '--wake-on-file',
+	'--timeout', '--timeout-ms', '--minutes', '--silence-timeout', '--kind', '--type',
+	'--fire-at', '--delay', '--interval', '--cron', '--event-type', '--event', '--gpu-threshold',
+	'--trigger', '--trigger-id', '--check', '--check-id', '--cwd', '--dir', '--expect-file', '--expect-files',
+	'--expect-exit', '--exit-code', '--on-fail', '--onfail', '--max-retries', '--retries',
+	'--color', '--accent', '--expected-version', '--if-version', '--max-hops', '--maxHops', '--hops',
+	'--budget', '--budget-limit', '--limit-usd', '--usd', '--total-cost', '--total-cost-usd',
+	'--silence', '--silence-minutes', '--silence-reminder', '--silence-reminder-minutes',
+	'--mode', '--layout', '--quorum', '--quorum-count', '--deadline', '--deadline-at',
+	'--allowed-paths', '--allowed-path', '--allow-path', '--allow-paths', '--paths',
+	'--scope-paths', '--scope-path', '--conflict-policy', '--category', '--section', '--heading',
+	'--max-chars', '--maxChars', '--offset', '--tail', '--tail-chars', '--tailChars',
+	'--checkpoint', '--checkpoint-id', '--against', '--base',
+	'--require-whiteboard', '--require-whiteboards', '--require-wb', '--min-summary', '--min-summary-chars',
+	'--handoff-token', '--mint-token', '--join-mode', '--verdict', '--rollback', '--target-node',
+	'--user', '--port', '--os', '--identity', '--identity-file', '--jump', '--proxy-jump', '--default-dir',
+	'--inspector', '--native-id', '--session-id', '--agent', '--agent-id', '--role-kind', '--node-role',
+	'--off-graph-max-tier', '--cutoff', '--max-tier', '--supervisors-json', '--assignments-json',
+	'--nodes', '--node-ids', '--branch-root', '--from-node', '--origin', '--creator', '--supervisor', '--employee',
+]);
 
 export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): ParsedCliInvocation {
 	let help = false;
 	let json = false;
+	let pretty = false;
 	let version = false;
 	let windowId: number | undefined;
+	let idempotencyKey: string | undefined;
 	const rest: string[] = [];
 	let activeGroup: string | undefined;
 	let sub: string | undefined;
 	let positionalCount = 0;
 
 	const isGlobalFlag = (arg: string): boolean =>
-		arg === '-h' || arg === '--help' || arg === '-v' || arg === '--version' || arg === '--json'
+		arg === '-h' || arg === '--help' || arg === '-v' || arg === '--version'
+		|| arg === '--json' || arg === '--pretty'
 		|| arg === '--window' || arg.startsWith('--window=')
-		|| arg === '--window-id' || arg.startsWith('--window-id=');
+		|| arg === '--window-id' || arg.startsWith('--window-id=')
+		|| arg === '--idempotency-key' || arg.startsWith('--idempotency-key=');
+
+	const isTrailingFreeTextGlobalFlag = (arg: string): boolean =>
+		arg === '--json' || arg === '--pretty'
+		|| arg.startsWith('--window=') || arg.startsWith('--window-id=')
+		|| arg.startsWith('--idempotency-key=');
 
 	const consumeGlobalFlag = (arg: string, index: number): number => {
 		if (arg === '-h' || arg === '--help') {
@@ -336,6 +273,16 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			version = true;
 		} else if (arg === '--json') {
 			json = true;
+		} else if (arg === '--pretty') {
+			pretty = true;
+		} else if (arg === '--idempotency-key') {
+			const next = argv[++index];
+			if (!next || next.startsWith('--')) {
+				throw new CliUsageError('Option --idempotency-key requires a value (1..128 [A-Za-z0-9._:-]+).');
+			}
+			idempotencyKey = validateIdempotencyKey(next, '--idempotency-key');
+		} else if (arg.startsWith('--idempotency-key=')) {
+			idempotencyKey = validateIdempotencyKey(arg.slice('--idempotency-key='.length), '--idempotency-key');
 		} else if (arg === '--window' || arg === '--window-id') {
 			const next = argv[++index];
 			if (!next || !/^\d+$/.test(next)) {
@@ -353,10 +300,14 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		return index;
 	};
 
-	// Free-text payload commands (e.g. `session send <id> <prompt>`) treat everything after the
-	// positional ID as opaque text, so embedded `--json`/`--help` words do not hijack the invocation.
+	const withPretty = <T extends ParsedCliInvocation>(inv: T): T => ({
+		...inv,
+		...(pretty ? { pretty: true } : {}),
+		...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+	});
+
 	const inFreeTextPayload = (): boolean => {
-		if (activeGroup === 'secretary' && sub === 'send') {
+		if (activeGroup === 'secretary' && sub === 'send' && positionalCount >= 1) {
 			return true;
 		}
 		if (activeGroup === 'session' && (sub === 'send' || sub === 'draft') && positionalCount >= 1) {
@@ -368,9 +319,34 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		return false;
 	};
 
+	// Compute start index of any contiguous trailing suffix of safe global flags before `--`
+	// so `session send s1 "hello" --idempotency-key=k1 --json` or `--idempotency-key k1 --pretty`
+	// consumes every trailing global flag without leaking into `params.prompt` (#124 #3).
+	const ddIdx = argv.indexOf('--');
+	const scanEnd = ddIdx >= 0 ? ddIdx : argv.length;
+	let trailingGlobalSuffixStart = scanEnd;
+	while (trailingGlobalSuffixStart > 0) {
+		const candidate = argv[trailingGlobalSuffixStart - 1];
+		if (isTrailingFreeTextGlobalFlag(candidate)) {
+			trailingGlobalSuffixStart -= 1;
+			continue;
+		}
+		if (trailingGlobalSuffixStart >= 2) {
+			const prev = argv[trailingGlobalSuffixStart - 2];
+			if ((prev === '--window' || prev === '--window-id') && /^\d+$/.test(candidate)) {
+				trailingGlobalSuffixStart -= 2;
+				continue;
+			}
+			if (prev === '--idempotency-key' && !candidate.startsWith('--')) {
+				trailingGlobalSuffixStart -= 2;
+				continue;
+			}
+		}
+		break;
+	}
+
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
-		const isLast = i === argv.length - 1;
 		if (arg === '--') {
 			rest.push(...argv.slice(i + 1));
 			break;
@@ -385,21 +361,43 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			continue;
 		}
 		if (inFreeTextPayload()) {
-			if ((activeGroup === 'session' || activeGroup === 'secretary' || activeGroup === 'org') && sub === 'send' && arg === '--wait') {
-				rest.push(arg);
-				continue;
+			if ((activeGroup === 'session' || activeGroup === 'secretary' || activeGroup === 'org') && sub === 'send') {
+				if (arg === '--wait') {
+					rest.push(arg);
+					continue;
+				}
+				if (
+					arg === '--prompt-file' || arg === '--message-file' || arg === '--file'
+					|| arg.startsWith('--prompt-file=') || arg.startsWith('--message-file=') || arg.startsWith('--file=')
+				) {
+					rest.push(arg);
+					if (!arg.includes('=') && i + 1 < argv.length) {
+						rest.push(argv[++i]);
+					}
+					continue;
+				}
 			}
-			// A trailing global flag is unambiguous and still honored (`session send <id> "..." --json`).
-			if (isLast && isGlobalFlag(arg)) {
+			// Consume any contiguous trailing suffix of safe global flags (`--json`, `--pretty`, `--window`, `--idempotency-key`);
+			// `--help`/`-v` stay part of the sent message!
+			if (i >= trailingGlobalSuffixStart && isGlobalFlag(arg) && arg !== '-h' && arg !== '--help' && arg !== '-v' && arg !== '--version') {
 				i = consumeGlobalFlag(arg, i);
 				continue;
 			}
 			rest.push(arg);
 			continue;
 		}
-		if (FREEFORM_VALUE_FLAGS.has(arg)) {
+		if (arg === '--draft') {
 			rest.push(arg);
-			if (i + 1 < argv.length) {
+			if (i + 1 < argv.length && !argv[i + 1].startsWith('--')) {
+				rest.push(argv[++i]);
+			}
+			continue;
+		}
+		const eqIdx = arg.indexOf('=');
+		const flagBase = eqIdx > 0 ? arg.slice(0, eqIdx) : arg;
+		if (FREEFORM_VALUE_FLAGS.has(flagBase)) {
+			rest.push(arg);
+			if (eqIdx < 0 && i + 1 < argv.length) {
 				rest.push(argv[++i]);
 			}
 			continue;
@@ -413,6 +411,13 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			rest.push(arg);
 			continue;
 		}
+		if (eqIdx < 0 && KNOWN_OPTION_VALUE_FLAGS.has(arg)) {
+			rest.push(arg);
+			if (i + 1 < argv.length && !isGlobalFlag(argv[i + 1]) && !argv[i + 1].startsWith('--')) {
+				rest.push(argv[++i]);
+			}
+			continue;
+		}
 		if (!arg.startsWith('-')) {
 			positionalCount++;
 		}
@@ -420,18 +425,18 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 	}
 
 	if (version) {
-		return { help: false, json, version: true, windowId };
+		return withPretty({ help: false, json, version: true, windowId });
 	}
 
 	if (help || rest.length === 0 || rest[0] === 'help') {
-		return { help: true, json, windowId };
+		return withPretty({ help: true, json, windowId });
 	}
 
 	const [group, ...tail] = rest;
 
 	if (group === 'version') {
 		if (tail.length > 0) { throw new CliUsageError(`Unexpected arguments for version: ${tail.join(' ')}`); }
-		return { help: false, json, version: true, windowId };
+		return withPretty({ help: false, json, version: true, windowId });
 	}
 
 	if (group === 'completion') {
@@ -442,36 +447,36 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		if (!shell || tail.length > 1) {
 			throw new CliUsageError('Usage: aexus-ade completion <bash|zsh|fish|powershell>');
 		}
-		return { help: false, json, completion: shell, windowId };
+		return withPretty({ help: false, json, completion: shell, windowId });
 	}
 
 	if (group === 'status') {
 		if (tail.length > 0) { throw new CliUsageError(`Unexpected arguments for status: ${tail.join(' ')}`); }
-		return { help: false, json, windowId, action: 'status', params: {} };
+		return withPretty({ help: false, json, windowId, action: 'status', params: {} });
 	}
 
 	if (group === 'whoami') {
-		return parseWhoamiCommand(tail, json, windowId, msg => new CliUsageError(msg));
+		return withPretty(parseWhoamiCommand(tail, json, windowId, msg => new CliUsageError(msg)));
 	}
 
 	if (group === 'docs' || group === 'doc') {
-		return parseDocsCommand(tail, json, windowId, msg => new CliUsageError(msg));
+		return withPretty(parseDocsCommand(tail, json, windowId, msg => new CliUsageError(msg)));
 	}
 
 	if (group === 'api') {
-		return parseApiCommand(tail, json, windowId, msg => new CliUsageError(msg));
+		return withPretty(parseApiCommand(tail, json, windowId, msg => new CliUsageError(msg)));
 	}
 
 	if (group === 'token' || group === 'tokens') {
-		return parseTokenGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
+		return withPretty(parseTokenGroupCommand(tail, json, windowId, msg => new CliUsageError(msg)));
 	}
 
 	if (group === 'orchestration' || group === 'orch') {
-		return parseOrchestrationGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
+		return withPretty(parseOrchestrationGroupCommand(tail, json, windowId, msg => new CliUsageError(msg)));
 	}
 
 	if (group === 'whiteboard' || group === 'whiteboards' || group === 'wb') {
-		return parseWhiteboardGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
+		return withPretty(parseWhiteboardGroupCommand(tail, json, windowId, msg => new CliUsageError(msg)));
 	}
 
 	if (group === 'doctor') {
@@ -481,7 +486,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			const arg = tail[i];
 			if (arg === '--project') {
 				const next = tail[++i];
-				if (!next) { throw new CliUsageError('Option --project requires a path.'); }
+				if (!next || next.startsWith('--')) { throw new CliUsageError('Option --project requires a path.'); }
 				projectPath = resolvePathIfRelative(next, cwd);
 			} else if (arg.startsWith('--project=')) {
 				const next = arg.slice('--project='.length);
@@ -495,27 +500,27 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				throw new CliUsageError(`Unknown option for doctor: ${arg}`);
 			}
 		}
-		return { help: false, json, windowId, action: 'doctor', params: strict ? { projectPath, strict: true } : { projectPath } };
+		return withPretty({ help: false, json, windowId, action: 'doctor', params: strict ? { projectPath, strict: true } : { projectPath } });
 	}
 
 	if (group === 'mode') {
 		if (tail.length === 0 || (tail.length === 1 && tail[0] === 'get')) {
-			return { help: false, json, windowId, action: 'mode.get', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'mode.get', params: {} });
 		}
 		const modeArg = tail[0] === 'set' ? tail[1] : tail[0];
 		const extra = tail[0] === 'set' ? tail.slice(2) : tail.slice(1);
 		if (!modeArg || (modeArg !== 'ade' && modeArg !== 'ide') || extra.length > 0) {
 			throw new CliUsageError('Usage: aexus-ade mode [get | set <ade|ide>]');
 		}
-		return { help: false, json, windowId, action: 'mode.set', params: { mode: modeArg } };
+		return withPretty({ help: false, json, windowId, action: 'mode.set', params: { mode: modeArg } });
 	}
 
 	if (group === 'view') {
 		if (tail.length === 0 || (tail.length === 1 && (tail[0] === 'status' || tail[0] === 'get'))) {
-			return { help: false, json, windowId, action: 'view.get', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'view.get', params: {} });
 		}
 		if (tail.length === 1 && tail[0] === 'refresh') {
-			return { help: false, json, windowId, action: 'view.refresh', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'view.refresh', params: {} });
 		}
 		let archived: boolean | 'toggle' | undefined;
 		let inspector: string | undefined;
@@ -537,7 +542,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				archived = false;
 			} else if (arg === '--inspector') {
 				inspector = tail[++i];
-				if (!inspector) { throw new CliUsageError('Option --inspector requires changes, files, or hide.'); }
+				if (!inspector || inspector.startsWith('--')) { throw new CliUsageError('Option --inspector requires changes, files, or hide.'); }
 			} else if (arg.startsWith('--inspector=')) {
 				inspector = arg.slice('--inspector='.length);
 			} else if (arg === '--refresh') {
@@ -553,17 +558,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 		if (archived !== undefined) { params.archived = archived; }
 		if (inspector !== undefined) { params.inspector = inspector; }
 		if (refresh) { params.refresh = true; }
-		return { help: false, json, windowId, action: 'view.set', params };
+		return withPretty({ help: false, json, windowId, action: 'view.set', params });
 	}
 
 	if (group === 'project') {
-		const sub = tail[0] ?? 'list';
+		const pSub = tail[0] ?? 'list';
 		const args = tail.slice(1);
-		if (sub === 'list') {
+		if (pSub === 'list') {
 			if (args.length > 0) { throw new CliUsageError(`Unexpected arguments for project list: ${args.join(' ')}`); }
-			return { help: false, json, windowId, action: 'project.list', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'project.list', params: {} });
 		}
-		if (sub === 'add') {
+		if (pSub === 'add') {
 			let customName: string | undefined;
 			const rawPaths: string[] = [];
 			for (let i = 0; i < args.length; i++) {
@@ -573,6 +578,8 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					if (!customName) { throw new CliUsageError(`Option ${arg} requires a value.`); }
 				} else if (arg.startsWith('--name=')) {
 					customName = arg.slice('--name='.length);
+				} else if (arg.startsWith('--label=')) {
+					customName = arg.slice('--label='.length);
 				} else if (!arg.startsWith('-')) {
 					rawPaths.push(arg);
 				} else {
@@ -591,17 +598,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 						: item;
 				return path.resolve(cwd, expanded);
 			});
-			return { help: false, json, windowId, action: 'project.add', params: customName ? { paths, name: customName } : { paths } };
+			return withPretty({ help: false, json, windowId, action: 'project.add', params: customName ? { paths, name: customName } : { paths } });
 		}
-		if (sub === 'select') {
+		if (pSub === 'select') {
 			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade project select <target>'); }
-			return { help: false, json, windowId, action: 'project.select', params: { target: resolvePathIfRelative(args[0], cwd) } };
+			return withPretty({ help: false, json, windowId, action: 'project.select', params: { target: resolvePathIfRelative(args[0], cwd) } });
 		}
-		if (sub === 'remove') {
+		if (pSub === 'remove') {
 			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade project remove <target>'); }
-			return { help: false, json, windowId, action: 'project.remove', params: { target: resolvePathIfRelative(args[0], cwd) } };
+			return withPretty({ help: false, json, windowId, action: 'project.remove', params: { target: resolvePathIfRelative(args[0], cwd) } });
 		}
-		if (sub === 'delete') {
+		if (pSub === 'delete') {
 			let target: string | undefined;
 			let deleteSessions = false;
 			let deleteFiles = false;
@@ -617,27 +624,27 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (!deleteSessions && !deleteFiles) {
 				deleteSessions = true;
 			}
-			return {
+			return withPretty({
 				help: false,
 				json,
 				windowId,
 				action: 'project.delete',
 				params: { target: resolvePathIfRelative(target, cwd), deleteSessions, deleteFiles, ...(permanent ? { permanent: true } : {}) },
-			};
+			});
 		}
-		if (sub === 'focus') {
+		if (pSub === 'focus') {
 			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade project focus <target>'); }
-			return { help: false, json, windowId, action: 'project.focus', params: { target: resolvePathIfRelative(args[0], cwd) } };
+			return withPretty({ help: false, json, windowId, action: 'project.focus', params: { target: resolvePathIfRelative(args[0], cwd) } });
 		}
-		if (sub === 'home') {
+		if (pSub === 'home') {
 			if (args.length > 0) { throw new CliUsageError('Usage: aexus-ade project home'); }
-			return { help: false, json, windowId, action: 'project.home', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'project.home', params: {} });
 		}
-		if (sub === 'forward') {
+		if (pSub === 'forward') {
 			if (args.length > 0) { throw new CliUsageError('Usage: aexus-ade project forward'); }
-			return { help: false, json, windowId, action: 'project.forward', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'project.forward', params: {} });
 		}
-		if (sub === 'move') {
+		if (pSub === 'move') {
 			let source: string | undefined;
 			let before: string | undefined;
 			let after: string | undefined;
@@ -645,12 +652,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--before') {
 					before = args[++i];
-					if (!before) { throw new CliUsageError('Option --before requires a target project.'); }
+					if (!before || before.startsWith('--')) { throw new CliUsageError('Option --before requires a target project.'); }
 				} else if (arg.startsWith('--before=')) {
 					before = arg.slice('--before='.length);
 				} else if (arg === '--after') {
 					after = args[++i];
-					if (!after) { throw new CliUsageError('Option --after requires a target project.'); }
+					if (!after || after.startsWith('--')) { throw new CliUsageError('Option --after requires a target project.'); }
 				} else if (arg.startsWith('--after=')) {
 					after = arg.slice('--after='.length);
 				} else if (!arg.startsWith('-') && source === undefined) {
@@ -665,18 +672,18 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			const resolvedSource = resolvePathIfRelative(source, cwd);
 			if (before !== undefined) {
 				const resolvedTarget = resolvePathIfRelative(before, cwd);
-				return { help: false, json, windowId, action: 'project.move', params: { source: resolvedSource, before: resolvedTarget, target: resolvedTarget, position: 'before' } };
+				return withPretty({ help: false, json, windowId, action: 'project.move', params: { source: resolvedSource, before: resolvedTarget, target: resolvedTarget, position: 'before' } });
 			}
 			const resolvedTarget = resolvePathIfRelative(after!, cwd);
-			return { help: false, json, windowId, action: 'project.move', params: { source: resolvedSource, after: resolvedTarget, target: resolvedTarget, position: 'after' } };
+			return withPretty({ help: false, json, windowId, action: 'project.move', params: { source: resolvedSource, after: resolvedTarget, target: resolvedTarget, position: 'after' } });
 		}
-		if (sub === 'changes') {
+		if (pSub === 'changes') {
 			if (args.length > 1) { throw new CliUsageError('Usage: aexus-ade project changes [target]'); }
 			const params: Record<string, unknown> = {};
 			if (args[0]) { params.target = resolvePathIfRelative(args[0], cwd); }
-			return { help: false, json, windowId, action: 'project.changes', params };
+			return withPretty({ help: false, json, windowId, action: 'project.changes', params });
 		}
-		if (sub === 'files') {
+		if (pSub === 'files') {
 			let target: string | undefined;
 			let subpath: string | undefined;
 			let depth: number | undefined;
@@ -684,7 +691,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--path' || arg === '--subpath') {
 					subpath = args[++i];
-					if (!subpath) { throw new CliUsageError(`Option ${arg} requires a relative path.`); }
+					if (!subpath || subpath.startsWith('--')) { throw new CliUsageError(`Option ${arg} requires a relative path.`); }
 				} else if (arg.startsWith('--path=')) {
 					subpath = arg.slice('--path='.length);
 				} else if (arg === '--depth') {
@@ -705,9 +712,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (target !== undefined) { params.target = resolvePathIfRelative(target, cwd); }
 			if (subpath !== undefined) { params.subpath = subpath; }
 			if (depth !== undefined) { params.depth = depth; }
-			return { help: false, json, windowId, action: 'project.files', params };
+			return withPretty({ help: false, json, windowId, action: 'project.files', params });
 		}
-		if (sub === 'open-file' || sub === 'openFile') {
+		if (pSub === 'open-file' || pSub === 'openFile') {
 			let file: string | undefined;
 			let project: string | undefined;
 			let side = false;
@@ -715,7 +722,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--project') {
 					project = args[++i];
-					if (!project) { throw new CliUsageError('Option --project requires a target project.'); }
+					if (!project || project.startsWith('--')) { throw new CliUsageError('Option --project requires a target project.'); }
 				} else if (arg.startsWith('--project=')) {
 					project = arg.slice('--project='.length);
 				} else if (arg === '--side') {
@@ -723,49 +730,49 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (!arg.startsWith('-') && file === undefined) {
 					file = arg;
 				} else {
-					throw new CliUsageError(`Unexpected argument for project ${sub}: ${arg}`);
+					throw new CliUsageError(`Unexpected argument for project ${pSub}: ${arg}`);
 				}
 			}
 			if (!file) { throw new CliUsageError('Usage: aexus-ade project open-file <file> [--project <target>] [--side]'); }
 			const params: Record<string, unknown> = { file: resolvePathIfRelative(file, cwd) };
 			if (project !== undefined) { params.project = resolvePathIfRelative(project, cwd); }
 			if (side) { params.side = true; }
-			return { help: false, json, windowId, action: 'project.openFile', params };
+			return withPretty({ help: false, json, windowId, action: 'project.openFile', params });
 		}
-		if (sub === 'open-diff' || sub === 'openDiff' || sub === 'diff') {
+		if (pSub === 'open-diff' || pSub === 'openDiff' || pSub === 'diff') {
 			let file: string | undefined;
 			let project: string | undefined;
 			for (let i = 0; i < args.length; i++) {
 				const arg = args[i];
 				if (arg === '--project') {
 					project = args[++i];
-					if (!project) { throw new CliUsageError('Option --project requires a target project.'); }
+					if (!project || project.startsWith('--')) { throw new CliUsageError('Option --project requires a target project.'); }
 				} else if (arg.startsWith('--project=')) {
 					project = arg.slice('--project='.length);
 				} else if (!arg.startsWith('-') && file === undefined) {
 					file = arg;
 				} else {
-					throw new CliUsageError(`Unexpected argument for project ${sub}: ${arg}`);
+					throw new CliUsageError(`Unexpected argument for project ${pSub}: ${arg}`);
 				}
 			}
 			if (!file) { throw new CliUsageError('Usage: aexus-ade project open-diff <file> [--project <target>]'); }
 			const params: Record<string, unknown> = { file: resolvePathIfRelative(file, cwd) };
 			if (project !== undefined) { params.project = resolvePathIfRelative(project, cwd); }
-			return { help: false, json, windowId, action: 'project.openDiff', params };
+			return withPretty({ help: false, json, windowId, action: 'project.openDiff', params });
 		}
-		throw new CliUsageError(`Unknown project subcommand: ${sub}`);
+		throw new CliUsageError(`Unknown project subcommand: ${pSub}`);
 	}
 
 	if (group === 'engine') {
-		const sub = tail[0] ?? 'list';
+		const eSub = tail[0] ?? 'list';
 		const args = tail.slice(1);
-		if (sub === 'list') {
+		if (eSub === 'list') {
 			if (args.length > 0) {
 				throw new CliUsageError('Usage: aexus-ade engine list');
 			}
-			return { help: false, json, windowId, action: 'engine.list', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'engine.list', params: {} });
 		}
-		if (sub === 'sessions') {
+		if (eSub === 'sessions') {
 			let engine: string | undefined;
 			let project: string | undefined;
 			let limit: number | undefined;
@@ -773,7 +780,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--project') {
 					project = args[++i];
-					if (!project) { throw new CliUsageError('Option --project requires a target project.'); }
+					if (!project || project.startsWith('--')) { throw new CliUsageError('Option --project requires a target project.'); }
 				} else if (arg.startsWith('--project=')) {
 					project = arg.slice('--project='.length);
 				} else if (arg === '--limit' || arg === '-n') {
@@ -794,15 +801,15 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			const params: Record<string, unknown> = { engine };
 			if (project !== undefined) { params.project = resolvePathIfRelative(project, cwd); }
 			if (limit !== undefined) { params.limit = limit; }
-			return { help: false, json, windowId, action: 'engine.sessions', params };
+			return withPretty({ help: false, json, windowId, action: 'engine.sessions', params });
 		}
 		throw new CliUsageError('Usage: aexus-ade engine <list | sessions <engine>>');
 	}
 
 	if (group === 'session') {
-		const sub = tail[0] ?? 'list';
+		const sSub = tail[0] ?? 'list';
 		const args = tail.slice(1);
-		if (sub === 'list') {
+		if (sSub === 'list') {
 			let project: string | undefined;
 			let parent: string | undefined;
 			let role: string | undefined;
@@ -816,12 +823,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--project') {
 					project = args[++i];
-					if (!project) { throw new CliUsageError('Option --project requires a target project.'); }
+					if (!project || project.startsWith('--')) { throw new CliUsageError('Option --project requires a target project.'); }
 				} else if (arg.startsWith('--project=')) {
 					project = arg.slice('--project='.length);
 				} else if (arg === '--parent') {
 					parent = args[++i];
-					if (!parent) { throw new CliUsageError('Option --parent requires a parent session ID or "root".'); }
+					if (!parent || parent.startsWith('--')) { throw new CliUsageError('Option --parent requires a parent session ID or "root".'); }
 				} else if (arg.startsWith('--parent=')) {
 					parent = arg.slice('--parent='.length);
 				} else if (arg === '--role') {
@@ -838,12 +845,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					role = val.trim().toLowerCase();
 				} else if (arg === '--engine') {
 					engine = args[++i];
-					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
+					if (!engine || engine.startsWith('--')) { throw new CliUsageError('Option --engine requires an engine ID.'); }
 				} else if (arg.startsWith('--engine=')) {
 					engine = arg.slice('--engine='.length);
 				} else if (arg === '--status') {
 					status = args[++i];
-					if (!status) { throw new CliUsageError('Option --status requires idle, working, pending, or draft.'); }
+					if (!status || status.startsWith('--')) { throw new CliUsageError('Option --status requires idle, working, pending, or draft.'); }
 				} else if (arg.startsWith('--status=')) {
 					status = arg.slice('--status='.length);
 				} else if (arg === '--unread') {
@@ -868,36 +875,36 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (archived) { params.archived = true; }
 			if (archivedOnly) { params.archivedOnly = true; }
 			if (all) { params.all = true; }
-			return { help: false, json, windowId, action: 'session.list', params };
+			return withPretty({ help: false, json, windowId, action: 'session.list', params });
 		}
-		if (sub === 'info' || sub === 'get' || sub === 'show') {
+		if (sSub === 'info' || sSub === 'get' || sSub === 'show') {
 			if (args.length !== 1 || args[0].startsWith('-')) {
-				throw new CliUsageError(`Usage: aexus-ade session ${sub} <id>`);
+				throw new CliUsageError(`Usage: aexus-ade session ${sSub} <id>`);
 			}
-			return { help: false, json, windowId, action: 'session.info', params: { id: args[0] } };
+			return withPretty({ help: false, json, windowId, action: 'session.info', params: { id: args[0] } });
 		}
-		if (sub === 'subordinates' || sub === 'children') {
+		if (sSub === 'subordinates' || sSub === 'children') {
 			let id: string | undefined;
 			let recursive = false;
 			for (const arg of args) {
 				if (arg === '--recursive' || arg === '-r') { recursive = true; }
 				else if (!arg.startsWith('-') && id === undefined) { id = arg; }
-				else { throw new CliUsageError(`Unexpected argument for session ${sub}: ${arg}`); }
+				else { throw new CliUsageError(`Unexpected argument for session ${sSub}: ${arg}`); }
 			}
 			const params: Record<string, unknown> = {};
 			if (id !== undefined) { params.id = id; }
 			if (recursive) { params.recursive = true; }
-			return { help: false, json, windowId, action: 'session.subordinates', params };
+			return withPretty({ help: false, json, windowId, action: 'session.subordinates', params });
 		}
-		if (sub === 'tree' || sub === 'subtree') {
+		if (sSub === 'tree' || sSub === 'subtree') {
 			let id: string | undefined;
 			for (const arg of args) {
 				if (!arg.startsWith('-') && id === undefined) { id = arg; }
-				else { throw new CliUsageError(`Unexpected argument for session ${sub}: ${arg}`); }
+				else { throw new CliUsageError(`Unexpected argument for session ${sSub}: ${arg}`); }
 			}
-			return { help: false, json, windowId, action: 'session.tree', params: id !== undefined ? { id } : {} };
+			return withPretty({ help: false, json, windowId, action: 'session.tree', params: id !== undefined ? { id } : {} });
 		}
-		if (sub === 'create') {
+		if (sSub === 'create') {
 			let project: string | undefined;
 			let engine: string | undefined;
 			let title: string | undefined;
@@ -913,12 +920,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--project') {
 					project = args[++i];
-					if (!project) { throw new CliUsageError('Option --project requires a value.'); }
+					if (!project || project.startsWith('--')) { throw new CliUsageError('Option --project requires a value.'); }
 				} else if (arg.startsWith('--project=')) {
 					project = arg.slice('--project='.length);
 				} else if (arg === '--engine') {
 					engine = args[++i];
-					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
+					if (!engine || engine.startsWith('--')) { throw new CliUsageError('Option --engine requires an engine ID.'); }
 				} else if (arg.startsWith('--engine=')) {
 					engine = arg.slice('--engine='.length);
 				} else if (arg === '--title') {
@@ -928,7 +935,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					title = arg.slice('--title='.length);
 				} else if (arg === '--parent') {
 					parent = args[++i];
-					if (!parent) { throw new CliUsageError('Option --parent requires a parent session ID.'); }
+					if (!parent || parent.startsWith('--')) { throw new CliUsageError('Option --parent requires a parent session ID.'); }
 				} else if (arg.startsWith('--parent=')) {
 					parent = arg.slice('--parent='.length);
 				} else if (arg === '--role') {
@@ -954,13 +961,13 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					draftText = arg.slice('--draft='.length);
 				} else if (arg === '--model') {
 					const val = args[++i];
-					if (!val) { throw new CliUsageError('Option --model requires a model ID.'); }
+					if (!val || val.startsWith('--')) { throw new CliUsageError('Option --model requires a model ID.'); }
 					model = val;
 				} else if (arg.startsWith('--model=')) {
 					model = arg.slice('--model='.length);
 				} else if (arg === '--thinking' || arg === '--effort') {
 					const val = args[++i];
-					if (!val) { throw new CliUsageError(`Option ${arg} requires a thinking level (off|low|medium|high|xhigh|max).`); }
+					if (!val || val.startsWith('--')) { throw new CliUsageError(`Option ${arg} requires a thinking level (off|low|medium|high|xhigh|max).`); }
 					thinking = val;
 				} else if (arg.startsWith('--thinking=')) {
 					thinking = arg.slice('--thinking='.length);
@@ -986,9 +993,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (thinking !== undefined) { params.thinking = thinking; }
 			if (draftOnly) { params.draft = true; }
 			if (draftText !== undefined) { params.draftText = draftText; if (engine === undefined) { params.draft = true; } }
-			return { help: false, json, windowId, action: 'session.create', params };
+			return withPretty({ help: false, json, windowId, action: 'session.create', params });
 		}
-		if (sub === 'configure' || sub === 'prefs') {
+		if (sSub === 'configure' || sSub === 'prefs') {
 			let id: string | undefined;
 			let engine: string | undefined;
 			let model: string | undefined;
@@ -998,17 +1005,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--engine') {
 					engine = args[++i];
-					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
+					if (!engine || engine.startsWith('--')) { throw new CliUsageError('Option --engine requires an engine ID.'); }
 				} else if (arg.startsWith('--engine=')) {
 					engine = arg.slice('--engine='.length);
 				} else if (arg === '--model') {
 					model = args[++i];
-					if (model === undefined) { throw new CliUsageError('Option --model requires a model ID.'); }
+					if (model === undefined || model.startsWith('--')) { throw new CliUsageError('Option --model requires a model ID.'); }
 				} else if (arg.startsWith('--model=')) {
 					model = arg.slice('--model='.length);
 				} else if (arg === '--thinking' || arg === '--effort') {
 					thinking = args[++i];
-					if (!thinking) { throw new CliUsageError(`Option ${arg} requires a thinking level.`); }
+					if (!thinking || thinking.startsWith('--')) { throw new CliUsageError(`Option ${arg} requires a thinking level.`); }
 				} else if (arg.startsWith('--thinking=')) {
 					thinking = arg.slice('--thinking='.length);
 				} else if (arg.startsWith('--effort=')) {
@@ -1039,9 +1046,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (model !== undefined) { params.model = model; }
 			if (thinking !== undefined) { params.thinking = thinking; }
 			if (role !== undefined) { params.role = role; }
-			return { help: false, json, windowId, action: 'session.configure', params };
+			return withPretty({ help: false, json, windowId, action: 'session.configure', params });
 		}
-		if (sub === 'attach' || sub === 'import') {
+		if (sSub === 'attach' || sSub === 'import') {
 			let project: string | undefined;
 			let engine: string | undefined;
 			let nativeId: string | undefined;
@@ -1054,17 +1061,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--project') {
 					project = args[++i];
-					if (!project) { throw new CliUsageError('Option --project requires a value.'); }
+					if (!project || project.startsWith('--')) { throw new CliUsageError('Option --project requires a value.'); }
 				} else if (arg.startsWith('--project=')) {
 					project = arg.slice('--project='.length);
 				} else if (arg === '--engine') {
 					engine = args[++i];
-					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
+					if (!engine || engine.startsWith('--')) { throw new CliUsageError('Option --engine requires an engine ID.'); }
 				} else if (arg.startsWith('--engine=')) {
 					engine = arg.slice('--engine='.length);
 				} else if (arg === '--native-id' || arg === '--session-id') {
 					nativeId = args[++i];
-					if (!nativeId) { throw new CliUsageError(`Option ${arg} requires a native conversation ID.`); }
+					if (!nativeId || nativeId.startsWith('--')) { throw new CliUsageError(`Option ${arg} requires a native conversation ID.`); }
 				} else if (arg.startsWith('--native-id=')) {
 					nativeId = arg.slice('--native-id='.length);
 				} else if (arg === '--title') {
@@ -1074,7 +1081,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					title = arg.slice('--title='.length);
 				} else if (arg === '--parent') {
 					parent = args[++i];
-					if (!parent) { throw new CliUsageError('Option --parent requires a parent session ID.'); }
+					if (!parent || parent.startsWith('--')) { throw new CliUsageError('Option --parent requires a parent session ID.'); }
 				} else if (arg.startsWith('--parent=')) {
 					parent = arg.slice('--parent='.length);
 				} else if (arg === '--role') {
@@ -1106,9 +1113,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (parent !== undefined) { params.parentId = parent; }
 			if (role !== undefined) { params.role = role; }
 			if (side) { params.side = true; }
-			return { help: false, json, windowId, action: 'session.attach', params };
+			return withPretty({ help: false, json, windowId, action: 'session.attach', params });
 		}
-		if (sub === 'connect') {
+		if (sSub === 'connect') {
 			let id: string | undefined;
 			let engine: string | undefined;
 			let nativeId: string | undefined;
@@ -1118,12 +1125,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--engine') {
 					engine = args[++i];
-					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
+					if (!engine || engine.startsWith('--')) { throw new CliUsageError('Option --engine requires an engine ID.'); }
 				} else if (arg.startsWith('--engine=')) {
 					engine = arg.slice('--engine='.length);
 				} else if (arg === '--native-id' || arg === '--session-id') {
 					nativeId = args[++i];
-					if (!nativeId) { throw new CliUsageError(`Option ${arg} requires a native conversation ID.`); }
+					if (!nativeId || nativeId.startsWith('--')) { throw new CliUsageError(`Option ${arg} requires a native conversation ID.`); }
 				} else if (arg.startsWith('--native-id=')) {
 					nativeId = arg.slice('--native-id='.length);
 				} else if (arg === '--no-open') {
@@ -1142,9 +1149,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			const params: Record<string, unknown> = { id, engine, open: !noOpen };
 			if (nativeId !== undefined) { params.nativeId = nativeId; }
 			if (side) { params.side = true; }
-			return { help: false, json, windowId, action: 'session.connect', params };
+			return withPretty({ help: false, json, windowId, action: 'session.connect', params });
 		}
-		if (sub === 'open') {
+		if (sSub === 'open') {
 			let id: string | undefined;
 			let side = false;
 			for (const arg of args) {
@@ -1153,30 +1160,30 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				else { throw new CliUsageError(`Unexpected argument for session open: ${arg}`); }
 			}
 			if (!id) { throw new CliUsageError('Usage: aexus-ade session open <id> [--side]'); }
-			return { help: false, json, windowId, action: 'session.open', params: side ? { id, side: true } : { id } };
+			return withPretty({ help: false, json, windowId, action: 'session.open', params: side ? { id, side: true } : { id } });
 		}
-		if (sub === 'select') {
+		if (sSub === 'select') {
 			if (args.length !== 1 || args[0].startsWith('-')) {
 				throw new CliUsageError('Usage: aexus-ade session select <id>');
 			}
-			return { help: false, json, windowId, action: 'session.select', params: { id: args[0] } };
+			return withPretty({ help: false, json, windowId, action: 'session.select', params: { id: args[0] } });
 		}
-		if (sub === 'close') {
+		if (sSub === 'close') {
 			if (args.length !== 1 || args[0].startsWith('-')) {
 				throw new CliUsageError('Usage: aexus-ade session close <id>');
 			}
-			return { help: false, json, windowId, action: 'session.close', params: { id: args[0] } };
+			return withPretty({ help: false, json, windowId, action: 'session.close', params: { id: args[0] } });
 		}
-		if (sub === 'mark-read' || sub === 'markRead') {
+		if (sSub === 'mark-read' || sSub === 'markRead') {
 			if (args.length === 1 && args[0] === '--all') {
-				return { help: false, json, windowId, action: 'session.markRead', params: { all: true } };
+				return withPretty({ help: false, json, windowId, action: 'session.markRead', params: { all: true } });
 			}
 			if (args.length !== 1 || args[0].startsWith('-')) {
 				throw new CliUsageError('Usage: aexus-ade session mark-read (<id> | --all)');
 			}
-			return { help: false, json, windowId, action: 'session.markRead', params: { id: args[0] } };
+			return withPretty({ help: false, json, windowId, action: 'session.markRead', params: { id: args[0] } });
 		}
-		if (sub === 'draft') {
+		if (sSub === 'draft') {
 			let id: string | undefined;
 			let clear = false;
 			const textParts: string[] = [];
@@ -1189,9 +1196,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			const params: Record<string, unknown> = { id };
 			if (clear) { params.clear = true; }
 			else if (textParts.length > 0) { params.draft = textParts.join(' '); }
-			return { help: false, json, windowId, action: 'session.draft', params };
+			return withPretty({ help: false, json, windowId, action: 'session.draft', params });
 		}
-		if (sub === 'reorder') {
+		if (sSub === 'reorder') {
 			let id: string | undefined;
 			let before: string | undefined;
 			let after: string | undefined;
@@ -1199,12 +1206,12 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				const arg = args[i];
 				if (arg === '--before') {
 					before = args[++i];
-					if (!before) { throw new CliUsageError('Option --before requires a target session ID.'); }
+					if (!before || before.startsWith('--')) { throw new CliUsageError('Option --before requires a target session ID.'); }
 				} else if (arg.startsWith('--before=')) {
 					before = arg.slice('--before='.length);
 				} else if (arg === '--after') {
 					after = args[++i];
-					if (!after) { throw new CliUsageError('Option --after requires a target session ID.'); }
+					if (!after || after.startsWith('--')) { throw new CliUsageError('Option --after requires a target session ID.'); }
 				} else if (arg.startsWith('--after=')) {
 					after = arg.slice('--after='.length);
 				} else if (!arg.startsWith('-') && id === undefined) {
@@ -1216,7 +1223,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (!id || (before === undefined && after === undefined) || (before !== undefined && after !== undefined)) {
 				throw new CliUsageError('Usage: aexus-ade session reorder <id> (--before <targetId> | --after <targetId>)');
 			}
-			return {
+			return withPretty({
 				help: false,
 				json,
 				windowId,
@@ -1224,36 +1231,59 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				params: before !== undefined
 					? { id, before, target: before, position: 'before' }
 					: { id, after, target: after, position: 'after' },
-			};
+			});
 		}
-		if (sub === 'rename') {
+		if (sSub === 'rename') {
 			if (args.length < 2) { throw new CliUsageError('Usage: aexus-ade session rename <id> <title>'); }
 			const id = args[0];
 			const title = args.slice(1).join(' ');
-			return { help: false, json, windowId, action: 'session.rename', params: { id, title } };
+			return withPretty({ help: false, json, windowId, action: 'session.rename', params: { id, title } });
 		}
-		if (sub === 'role') {
+		if (sSub === 'role') {
 			if (args.length !== 2) { throw new CliUsageError('Usage: aexus-ade session role <id> <rankId|worker|none>'); }
 			const [id, rawRoleArg] = args;
 			const roleArg = rawRoleArg.trim().toLowerCase();
 			if (roleArg !== 'none' && !isValidRoleSlug(roleArg)) {
 				throw new CliUsageError('Role must be a valid rank ID (e.g. governor, manager, employee, worker, custom rank ID, or none).');
 			}
-			return { help: false, json, windowId, action: 'session.setRole', params: { id, role: roleArg === 'none' || roleArg === 'worker' ? null : roleArg } };
+			return withPretty({ help: false, json, windowId, action: 'session.setRole', params: { id, role: roleArg === 'none' || roleArg === 'worker' ? null : roleArg } });
 		}
-		if (sub === 'send') {
+		if (sSub === 'send') {
 			let wait = false;
+			let promptFile: string | undefined;
+			let explicitPrompt: string | undefined;
 			const positional: string[] = [];
-			for (const arg of args) {
-				if (arg === '--wait') { wait = true; }
-				else { positional.push(arg); }
+			for (let i = 0; i < args.length; i++) {
+				const arg = args[i];
+				if (arg === '--wait') {
+					wait = true;
+				} else if (arg === '--prompt-file' || arg === '--message-file' || arg === '--file') {
+					promptFile = args[++i];
+					if (!promptFile) { throw new CliUsageError(`Option ${arg} requires a file path or "-".`); }
+				} else if (arg.startsWith('--prompt-file=') || arg.startsWith('--message-file=') || arg.startsWith('--file=')) {
+					promptFile = arg.slice(arg.indexOf('=') + 1);
+					if (!promptFile) { throw new CliUsageError('Option --prompt-file requires a file path or "-".'); }
+				} else if (arg === '--prompt' || arg === '--message') {
+					explicitPrompt = args[++i];
+					if (explicitPrompt === undefined) { throw new CliUsageError(`Option ${arg} requires a value.`); }
+				} else if (arg.startsWith('--prompt=') || arg.startsWith('--message=')) {
+					explicitPrompt = arg.slice(arg.indexOf('=') + 1);
+				} else {
+					positional.push(arg);
+				}
 			}
-			if (positional.length < 2) { throw new CliUsageError('Usage: aexus-ade session send <id> <prompt> [--wait]'); }
 			const id = positional[0];
-			const prompt = positional.slice(1).join(' ');
-			return { help: false, json, windowId, action: 'session.send', params: wait ? { id, prompt, wait: true } : { id, prompt } };
+			const prompt = explicitPrompt !== undefined ? explicitPrompt : positional.slice(1).join(' ');
+			if (!id || (!prompt && !promptFile)) {
+				throw new CliUsageError('Usage: aexus-ade session send <id> (<prompt> | --prompt-file <path|->) [--wait]');
+			}
+			const params: Record<string, unknown> = { id };
+			if (prompt) { params.prompt = prompt; }
+			if (promptFile) { params.promptFile = promptFile; }
+			if (wait) { params.wait = true; }
+			return withPretty({ help: false, json, windowId, action: 'session.send', params });
 		}
-		if (sub === 'history' || sub === 'messages') {
+		if (sSub === 'history' || sSub === 'messages') {
 			let id: string | undefined;
 			let limit: number | undefined;
 			for (let i = 0; i < args.length; i++) {
@@ -1273,105 +1303,137 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (!arg.startsWith('-') && id === undefined) {
 					id = arg;
 				} else {
-					throw new CliUsageError(`Unknown argument for session ${sub}: ${arg}`);
+					throw new CliUsageError(`Unknown argument for session ${sSub}: ${arg}`);
 				}
 			}
-			if (!id) { throw new CliUsageError(`Usage: aexus-ade session ${sub} <id> [--limit <n>]`); }
-			return { help: false, json, windowId, action: 'session.history', params: limit !== undefined ? { id, limit } : { id } };
+			if (!id) { throw new CliUsageError(`Usage: aexus-ade session ${sSub} <id> [--limit <n>]`); }
+			return withPretty({ help: false, json, windowId, action: 'session.history', params: limit !== undefined ? { id, limit } : { id } });
 		}
-		if (sub === 'stop' || sub === 'cancel') {
+		if (sSub === 'stop' || sSub === 'cancel') {
 			if (args.length !== 1 || args[0].startsWith('-')) {
-				throw new CliUsageError(`Usage: aexus-ade session ${sub} <id>`);
+				throw new CliUsageError(`Usage: aexus-ade session ${sSub} <id>`);
 			}
-			return { help: false, json, windowId, action: 'session.stop', params: { id: args[0] } };
+			return withPretty({ help: false, json, windowId, action: 'session.stop', params: { id: args[0] } });
 		}
-		if (sub === 'nest' || sub === 'reparent' || sub === 'move') {
+		if (sSub === 'nest' || sSub === 'reparent' || sSub === 'move') {
 			let project: string | undefined;
 			const positional: string[] = [];
 			for (let i = 0; i < args.length; i++) {
 				const arg = args[i];
 				if (arg === '--project') {
 					project = args[++i];
-					if (!project) { throw new CliUsageError('Option --project requires a target project.'); }
+					if (!project || project.startsWith('--')) { throw new CliUsageError('Option --project requires a target project.'); }
 				} else if (arg.startsWith('--project=')) {
 					project = arg.slice('--project='.length);
 				} else if (!arg.startsWith('-')) {
 					positional.push(arg);
 				} else {
-					throw new CliUsageError(`Unknown option for session ${sub}: ${arg}`);
+					throw new CliUsageError(`Unknown option for session ${sSub}: ${arg}`);
 				}
 			}
-			if (positional.length !== 2) { throw new CliUsageError(`Usage: aexus-ade session ${sub} <id> <parentId|none> [--project <p>]`); }
+			if (positional.length !== 2) { throw new CliUsageError(`Usage: aexus-ade session ${sSub} <id> <parentId|none> [--project <p>]`); }
 			const [id, parentArg] = positional;
 			const params: Record<string, unknown> = {
 				id,
 				parentId: parentArg === 'none' || parentArg === 'root' ? null : parentArg,
 			};
 			if (project !== undefined) { params.project = resolvePathIfRelative(project, cwd); }
-			return { help: false, json, windowId, action: 'session.reparent', params };
+			return withPretty({ help: false, json, windowId, action: 'session.reparent', params });
 		}
-		if (sub === 'archive' || sub === 'unarchive' || sub === 'restore') {
-			if (args.length !== 1) { throw new CliUsageError(`Usage: aexus-ade session ${sub} <id>`); }
-			return { help: false, json, windowId, action: 'session.archive', params: { id: args[0], archived: sub === 'archive' } };
+		if (sSub === 'archive' || sSub === 'unarchive' || sSub === 'restore') {
+			if (args.length !== 1) { throw new CliUsageError(`Usage: aexus-ade session ${sSub} <id>`); }
+			return withPretty({ help: false, json, windowId, action: 'session.archive', params: { id: args[0], archived: sSub === 'archive' } });
 		}
-		if (sub === 'detach' || sub === 'remove') {
-			if (args.length !== 1) { throw new CliUsageError(`Usage: aexus-ade session ${sub} <id>`); }
-			return { help: false, json, windowId, action: 'session.detach', params: { id: args[0] } };
+		if (sSub === 'detach' || sSub === 'remove') {
+			if (args.length !== 1) { throw new CliUsageError(`Usage: aexus-ade session ${sSub} <id>`); }
+			return withPretty({ help: false, json, windowId, action: 'session.detach', params: { id: args[0] } });
 		}
-		if (sub === 'delete') {
+		if (sSub === 'delete') {
+			const force = args.some(arg => arg === '--force' || arg === '-f');
 			const filtered = args.filter(arg => arg !== '--force' && arg !== '-f');
-			if (filtered.length !== 1) { throw new CliUsageError('Usage: aexus-ade session delete <id> [--force]'); }
-			return { help: false, json, windowId, action: 'session.delete', params: { id: filtered[0] } };
+			if (filtered.length !== 1 || filtered[0].startsWith('-')) {
+				throw new CliUsageError('Usage: aexus-ade session delete <id> [--force]');
+			}
+			return withPretty({
+				help: false,
+				json,
+				windowId,
+				action: 'session.delete',
+				params: force ? { id: filtered[0], force: true } : { id: filtered[0] },
+			});
 		}
-		throw new CliUsageError(`Unknown session subcommand: ${sub}`);
+		throw new CliUsageError(`Unknown session subcommand: ${sSub}`);
 	}
 
 	if (group === 'secretary') {
-		const sub = tail[0] ?? 'status';
+		const secSub = tail[0] ?? 'status';
 		const args = tail.slice(1);
-		if (sub === 'status' || sub === 'info') {
-			if (args.length > 0) { throw new CliUsageError(`Usage: aexus-ade secretary [${sub}]`); }
-			return { help: false, json, windowId, action: 'secretary.status', params: {} };
+		if (secSub === 'status' || secSub === 'info') {
+			if (args.length > 0) { throw new CliUsageError(`Usage: aexus-ade secretary [${secSub}]`); }
+			return withPretty({ help: false, json, windowId, action: 'secretary.status', params: {} });
 		}
-		if (sub === 'open') {
+		if (secSub === 'open') {
 			let side = false;
 			for (const arg of args) {
 				if (arg === '--side') { side = true; }
 				else { throw new CliUsageError(`Unknown option for secretary open: ${arg}`); }
 			}
-			return { help: false, json, windowId, action: 'secretary.open', params: side ? { side: true } : {} };
+			return withPretty({ help: false, json, windowId, action: 'secretary.open', params: side ? { side: true } : {} });
 		}
-		if (sub === 'engine') {
+		if (secSub === 'engine') {
 			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade secretary engine <e>'); }
-			return { help: false, json, windowId, action: 'secretary.engine', fallbackAction: 'secretary.setEngine', params: { engine: args[0] } };
+			return withPretty({ help: false, json, windowId, action: 'secretary.engine', fallbackAction: 'secretary.setEngine', params: { engine: args[0] } });
 		}
-		if (sub === 'reset') {
+		if (secSub === 'reset') {
 			let engine: string | undefined;
 			for (let i = 0; i < args.length; i++) {
 				const arg = args[i];
 				if (arg === '--engine') {
 					engine = args[++i];
-					if (!engine) { throw new CliUsageError('Option --engine requires an engine ID.'); }
+					if (!engine || engine.startsWith('--')) { throw new CliUsageError('Option --engine requires an engine ID.'); }
 				} else if (arg.startsWith('--engine=')) {
 					engine = arg.slice('--engine='.length);
 				} else {
 					throw new CliUsageError(`Unknown option for secretary reset: ${arg}`);
 				}
 			}
-			return { help: false, json, windowId, action: 'secretary.reset', params: engine !== undefined ? { engine } : {} };
+			return withPretty({ help: false, json, windowId, action: 'secretary.reset', params: engine !== undefined ? { engine } : {} });
 		}
-		if (sub === 'send') {
+		if (secSub === 'send') {
 			let wait = false;
+			let promptFile: string | undefined;
+			let explicitPrompt: string | undefined;
 			const positional: string[] = [];
-			for (const arg of args) {
-				if (arg === '--wait') { wait = true; }
-				else { positional.push(arg); }
+			for (let i = 0; i < args.length; i++) {
+				const arg = args[i];
+				if (arg === '--wait') {
+					wait = true;
+				} else if (arg === '--prompt-file' || arg === '--message-file' || arg === '--file') {
+					promptFile = args[++i];
+					if (!promptFile) { throw new CliUsageError(`Option ${arg} requires a file path or "-".`); }
+				} else if (arg.startsWith('--prompt-file=') || arg.startsWith('--message-file=') || arg.startsWith('--file=')) {
+					promptFile = arg.slice(arg.indexOf('=') + 1);
+					if (!promptFile) { throw new CliUsageError('Option --prompt-file requires a file path or "-".'); }
+				} else if (arg === '--prompt' || arg === '--message') {
+					explicitPrompt = args[++i];
+					if (explicitPrompt === undefined) { throw new CliUsageError(`Option ${arg} requires a value.`); }
+				} else if (arg.startsWith('--prompt=') || arg.startsWith('--message=')) {
+					explicitPrompt = arg.slice(arg.indexOf('=') + 1);
+				} else {
+					positional.push(arg);
+				}
 			}
-			if (positional.length === 0) { throw new CliUsageError('Usage: aexus-ade secretary send <prompt> [--wait]'); }
-			const prompt = positional.join(' ');
-			return { help: false, json, windowId, action: 'secretary.send', params: wait ? { prompt, wait: true } : { prompt } };
+			const prompt = explicitPrompt !== undefined ? explicitPrompt : positional.join(' ');
+			if (!prompt && !promptFile) {
+				throw new CliUsageError('Usage: aexus-ade secretary send (<prompt> | --prompt-file <path|->) [--wait]');
+			}
+			const params: Record<string, unknown> = {};
+			if (prompt) { params.prompt = prompt; }
+			if (promptFile) { params.promptFile = promptFile; }
+			if (wait) { params.wait = true; }
+			return withPretty({ help: false, json, windowId, action: 'secretary.send', params });
 		}
-		if (sub === 'history' || sub === 'messages') {
+		if (secSub === 'history' || secSub === 'messages') {
 			let limit: number | undefined;
 			for (let i = 0; i < args.length; i++) {
 				const arg = args[i];
@@ -1388,16 +1450,16 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					}
 					limit = Number(val);
 				} else {
-					throw new CliUsageError(`Unknown option for secretary ${sub}: ${arg}`);
+					throw new CliUsageError(`Unknown option for secretary ${secSub}: ${arg}`);
 				}
 			}
-			return { help: false, json, windowId, action: 'secretary.history', params: limit !== undefined ? { limit } : {} };
+			return withPretty({ help: false, json, windowId, action: 'secretary.history', params: limit !== undefined ? { limit } : {} });
 		}
-		if (sub === 'stop' || sub === 'cancel') {
-			if (args.length > 0) { throw new CliUsageError(`Usage: aexus-ade secretary ${sub}`); }
-			return { help: false, json, windowId, action: 'secretary.stop', params: {} };
+		if (secSub === 'stop' || secSub === 'cancel') {
+			if (args.length > 0) { throw new CliUsageError(`Usage: aexus-ade secretary ${secSub}`); }
+			return withPretty({ help: false, json, windowId, action: 'secretary.stop', params: {} });
 		}
-		if (sub === 'draft') {
+		if (secSub === 'draft') {
 			let clear = false;
 			const textParts: string[] = [];
 			for (const arg of args) {
@@ -1407,33 +1469,33 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			const params: Record<string, unknown> = {};
 			if (clear) { params.clear = true; }
 			else if (textParts.length > 0) { params.draft = textParts.join(' '); }
-			return { help: false, json, windowId, action: 'secretary.draft', params };
+			return withPretty({ help: false, json, windowId, action: 'secretary.draft', params });
 		}
-		if (sub === 'mark-read' || sub === 'markRead') {
-			if (args.length > 0) { throw new CliUsageError(`Usage: aexus-ade secretary ${sub}`); }
-			return { help: false, json, windowId, action: 'secretary.markRead', params: {} };
+		if (secSub === 'mark-read' || secSub === 'markRead') {
+			if (args.length > 0) { throw new CliUsageError(`Usage: aexus-ade secretary ${secSub}`); }
+			return withPretty({ help: false, json, windowId, action: 'secretary.markRead', params: {} });
 		}
-		throw new CliUsageError(`Unknown secretary subcommand: ${sub}`);
+		throw new CliUsageError(`Unknown secretary subcommand: ${secSub}`);
 	}
 
 	if (group === 'rank' || group === 'ranks') {
-		return parseRankGroupCommand(tail, json, windowId, msg => new CliUsageError(msg));
+		return withPretty(parseRankGroupCommand(tail, json, windowId, msg => new CliUsageError(msg)));
 	}
 
 	if (group === 'mission') {
 		const missionDocs = parseMissionDocsCommand(tail, json, windowId);
 		if (missionDocs) {
-			return missionDocs;
+			return withPretty(missionDocs);
 		}
 		const missionRuntimeCmd = parseMissionRuntimeSubcommand(tail, json, windowId, msg => new CliUsageError(msg));
 		if (missionRuntimeCmd) {
-			return missionRuntimeCmd;
+			return withPretty(missionRuntimeCmd);
 		}
 
-		const sub = tail[0] ?? 'list';
+		const mSub = tail[0] ?? 'list';
 		const args = tail.slice(1);
 
-		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[]): string => {
+		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[], allowDash = false): string => {
 			const cur = list[iRef.i];
 			const eqIdx = cur.indexOf('=');
 			if (eqIdx >= 0) {
@@ -1443,10 +1505,13 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			}
 			const next = list[++iRef.i];
 			if (next === undefined) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+			if (!allowDash && next.startsWith('--')) {
+				throw new CliUsageError(`Option ${flagName} requires a value, got ${next}.`);
+			}
 			return next;
 		};
 
-		if (sub === 'init') {
+		if (mSub === 'init') {
 			let owner: string | undefined;
 			let title: string | undefined;
 			let project: string | undefined;
@@ -1457,7 +1522,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--owner' || arg.startsWith('--owner=')) {
 					owner = takeOptionVal(ref, '--owner', args);
 				} else if (arg === '--title' || arg.startsWith('--title=')) {
-					title = takeOptionVal(ref, '--title', args);
+					title = takeOptionVal(ref, '--title', args, true);
 				} else if (arg === '--project' || arg.startsWith('--project=')) {
 					project = resolvePathIfRelative(takeOptionVal(ref, '--project', args), cwd);
 				} else if (arg === '--open') {
@@ -1476,10 +1541,41 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (project) { params.project = project; }
 			if (open) { params.open = true; }
 			if (side) { params.side = true; }
-			return { help: false, json, windowId, action: 'mission.init', params };
+			return withPretty({ help: false, json, windowId, action: 'mission.init', params });
 		}
 
-		if (sub === 'list') {
+		if (mSub === 'rename' || mSub === 'set-title') {
+			let missionId: string | undefined;
+			let title: string | undefined;
+			const posTitleParts: string[] = [];
+			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
+				const arg = args[ref.i];
+				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=') || arg === '--id' || arg.startsWith('--id=')) {
+					missionId = takeOptionVal(ref, '--mission', args);
+				} else if (arg === '--title' || arg.startsWith('--title=') || arg === '--name' || arg.startsWith('--name=')) {
+					title = takeOptionVal(ref, '--title', args, true);
+				} else if (!arg.startsWith('-') && !missionId) {
+					missionId = arg;
+				} else if (!arg.startsWith('-')) {
+					posTitleParts.push(arg);
+				} else {
+					throw new CliUsageError(`Unknown option for mission rename: ${arg}`);
+				}
+			}
+			const resolvedTitle = (title ?? posTitleParts.join(' ')).trim();
+			if (!missionId || !resolvedTitle) {
+				throw new CliUsageError('Usage: aexus-ade mission rename <missionId> "<newTitle>"');
+			}
+			return withPretty({
+				help: false,
+				json,
+				windowId,
+				action: 'mission.rename',
+				params: { missionId, title: resolvedTitle },
+			});
+		}
+
+		if (mSub === 'list') {
 			let project: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
@@ -1491,10 +1587,10 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			}
 			const params: Record<string, unknown> = {};
 			if (project) { params.project = project; }
-			return { help: false, json, windowId, action: 'mission.list', params };
+			return withPretty({ help: false, json, windowId, action: 'mission.list', params });
 		}
 
-		if (sub === 'open') {
+		if (mSub === 'open') {
 			let missionId: string | undefined;
 			let view: string | undefined;
 			let side = false;
@@ -1521,10 +1617,10 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			const params: Record<string, unknown> = { missionId };
 			if (view) { params.view = view; }
 			if (side) { params.side = true; }
-			return { help: false, json, windowId, action: 'mission.open', params };
+			return withPretty({ help: false, json, windowId, action: 'mission.open', params });
 		}
 
-		if (sub === 'blueprint') {
+		if (mSub === 'blueprint') {
 			const bpSub = args[0];
 			const bpArgs = args.slice(1);
 			if (bpSub === 'get') {
@@ -1545,7 +1641,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				if (!missionId) {
 					throw new CliUsageError('Usage: aexus-ade mission blueprint get --mission <id> [--raw]');
 				}
-				return { help: false, json, windowId, action: 'mission.blueprint.get', params: raw ? { missionId, raw: true } : { missionId } };
+				return withPretty({ help: false, json, windowId, action: 'mission.blueprint.get', params: raw ? { missionId, raw: true } : { missionId } });
 			}
 			if (bpSub === 'apply') {
 				let missionId: string | undefined;
@@ -1555,47 +1651,53 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 					const arg = bpArgs[ref.i];
 					if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
 						missionId = takeOptionVal(ref, '--mission', bpArgs);
-					} else if (arg === '--file' || arg.startsWith('--file=')) {
-						file = resolvePathIfRelative(takeOptionVal(ref, '--file', bpArgs), cwd);
+					} else if (arg === '--file' || arg.startsWith('--file=') || arg === '-f') {
+						const rawFile = takeOptionVal(ref, '--file', bpArgs, true);
+						file = rawFile.trim() === '-' ? '-' : resolvePathIfRelative(rawFile, cwd);
 					} else if (arg === '--text' || arg.startsWith('--text=')) {
-						text = takeOptionVal(ref, '--text', bpArgs);
+						text = takeOptionVal(ref, '--text', bpArgs, true);
+					} else if (!arg.startsWith('-') && !missionId) {
+						missionId = arg;
 					} else {
 						throw new CliUsageError(`Unknown option for mission blueprint apply: ${arg}`);
 					}
 				}
 				if (!missionId || (!file && text === undefined)) {
-					throw new CliUsageError('Usage: aexus-ade mission blueprint apply --mission <id> (--file <path> | --text <mermaid>)');
+					throw new CliUsageError('Usage: aexus-ade mission blueprint apply --mission <id> (--file <path|-> | --text <mermaid>)');
 				}
 				const params: Record<string, unknown> = { missionId };
 				if (file) { params.file = file; }
 				if (text !== undefined) { params.text = text; }
-				return { help: false, json, windowId, action: 'mission.blueprint.apply', params };
+				return withPretty({ help: false, json, windowId, action: 'mission.blueprint.apply', params });
 			}
 			if (bpSub === 'validate') {
 				let file: string | undefined;
 				let text: string | undefined;
 				for (const ref = { i: 0 }; ref.i < bpArgs.length; ref.i++) {
 					const arg = bpArgs[ref.i];
-					if (arg === '--file' || arg.startsWith('--file=')) {
-						file = resolvePathIfRelative(takeOptionVal(ref, '--file', bpArgs), cwd);
+					if (arg === '--file' || arg.startsWith('--file=') || arg === '-f') {
+						const rawFile = takeOptionVal(ref, '--file', bpArgs, true);
+						file = rawFile.trim() === '-' ? '-' : resolvePathIfRelative(rawFile, cwd);
 					} else if (arg === '--text' || arg.startsWith('--text=')) {
-						text = takeOptionVal(ref, '--text', bpArgs);
+						text = takeOptionVal(ref, '--text', bpArgs, true);
+					} else if (!arg.startsWith('-') && !file) {
+						file = resolvePathIfRelative(arg, cwd);
 					} else {
 						throw new CliUsageError(`Unknown option for mission blueprint validate: ${arg}`);
 					}
 				}
 				if (!file && text === undefined) {
-					throw new CliUsageError('Usage: aexus-ade mission blueprint validate (--file <path> | --text <mermaid>)');
+					throw new CliUsageError('Usage: aexus-ade mission blueprint validate (--file <path|-> | --text <mermaid>)');
 				}
 				const params: Record<string, unknown> = {};
 				if (file) { params.file = file; }
 				if (text !== undefined) { params.text = text; }
-				return { help: false, json, windowId, action: 'mission.blueprint.validate', params };
+				return withPretty({ help: false, json, windowId, action: 'mission.blueprint.validate', params });
 			}
 			throw new CliUsageError('Usage: aexus-ade mission blueprint <get | apply | validate> ...');
 		}
 
-		if (sub === 'run' || sub === 'pause' || sub === 'resume' || sub === 'stop' || sub === 'remove') {
+		if (mSub === 'run' || mSub === 'pause' || mSub === 'resume' || mSub === 'stop' || mSub === 'remove') {
 			let missionId: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
@@ -1604,23 +1706,26 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (!arg.startsWith('-') && !missionId) {
 					missionId = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for mission ${sub}: ${arg}`);
+					throw new CliUsageError(`Unknown option for mission ${mSub}: ${arg}`);
 				}
 			}
-			if (!missionId && sub === 'remove') {
+			if (!missionId && mSub === 'remove') {
 				throw new CliUsageError('Usage: aexus-ade mission remove --mission <id>');
 			}
 			const params: Record<string, unknown> = {};
 			if (missionId) { params.missionId = missionId; }
-			return { help: false, json, windowId, action: `mission.${sub}`, params };
+			return withPretty({ help: false, json, windowId, action: `mission.${mSub}`, params });
 		}
 
-		if (sub === 'status') {
+		if (mSub === 'status') {
 			let missionId: string | undefined;
+			let full = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
 				const arg = args[ref.i];
 				if (arg === '--governor' || arg.startsWith('--governor=') || arg === '--mission' || arg.startsWith('--mission=') || arg === '--mission-id' || arg.startsWith('--mission-id=')) {
 					missionId = takeOptionVal(ref, '--mission', args);
+				} else if (arg === '--full' || arg === '--verbose') {
+					full = true;
 				} else if (!arg.startsWith('-') && !missionId) {
 					missionId = arg;
 				} else {
@@ -1629,10 +1734,11 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			}
 			const params: Record<string, unknown> = {};
 			if (missionId) { params.missionId = missionId; }
-			return { help: false, json, windowId, action: 'mission.status', params };
+			if (full) { params.full = true; }
+			return withPretty({ help: false, json, windowId, action: 'mission.status', params });
 		}
 
-		if (sub === 'gate') {
+		if (mSub === 'gate') {
 			let missionId: string | undefined;
 			let node: string | undefined;
 			let tokenId: string | undefined;
@@ -1648,14 +1754,14 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (arg === '--token' || arg.startsWith('--token=') || arg === '--token-id' || arg.startsWith('--token-id=')) {
 					tokenId = takeOptionVal(ref, '--token', args);
 				} else if (arg === '--decision' || arg.startsWith('--decision=') || arg === '--verdict' || arg.startsWith('--verdict=')) {
-					verdict = takeOptionVal(ref, '--decision', args).toLowerCase();
+					verdict = takeOptionVal(ref, '--decision', args, true).toLowerCase();
 					if (verdict !== 'approve' && verdict !== 'reject' && verdict !== 'pass' && verdict !== 'rollback') {
 						throw new CliUsageError('Option --decision must be approve or reject (aliases: pass, rollback).');
 					}
 				} else if (arg === '--rollback' || arg.startsWith('--rollback=') || arg === '--target-node' || arg.startsWith('--target-node=')) {
 					targetNode = takeOptionVal(ref, '--rollback', args);
 				} else if (arg === '--note' || arg.startsWith('--note=') || arg === '--feedback' || arg.startsWith('--feedback=') || arg === '--reason' || arg.startsWith('--reason=')) {
-					feedback = takeOptionVal(ref, '--note', args);
+					feedback = takeOptionVal(ref, '--note', args, true);
 				} else if (!arg.startsWith('-') && !verdict && (arg.toLowerCase() === 'approve' || arg.toLowerCase() === 'reject' || arg.toLowerCase() === 'pass' || arg.toLowerCase() === 'rollback')) {
 					verdict = arg.toLowerCase();
 				} else {
@@ -1671,17 +1777,17 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (tokenId) { params.tokenId = tokenId; }
 			if (targetNode) { params.rollback = targetNode; }
 			if (feedback !== undefined) { params.note = feedback; }
-			return { help: false, json, windowId, action: 'mission.gate', params };
+			return withPretty({ help: false, json, windowId, action: 'mission.gate', params });
 		}
 
-		throw new CliUsageError(`Unknown mission subcommand: ${sub}`);
+		throw new CliUsageError(`Unknown mission subcommand: ${mSub}`);
 	}
 
 	if (group === 'inbox') {
-		const sub = tail[0] ?? 'list';
+		const iSub = tail[0] ?? 'list';
 		const args = tail.slice(1);
 
-		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[]): string => {
+		const takeOptionVal = (iRef: { i: number }, flagName: string, list: readonly string[], allowDash = false): string => {
 			const cur = list[iRef.i];
 			const eqIdx = cur.indexOf('=');
 			if (eqIdx >= 0) {
@@ -1691,10 +1797,13 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			}
 			const next = list[++iRef.i];
 			if (next === undefined) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+			if (!allowDash && next.startsWith('--')) {
+				throw new CliUsageError(`Option ${flagName} requires a value, got ${next}.`);
+			}
 			return next;
 		};
 
-		if (sub === 'list') {
+		if (iSub === 'list') {
 			let unreadOnly = false;
 			let governor: string | undefined;
 			let includeResolved = true;
@@ -1714,12 +1823,13 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (unreadOnly) { params.unreadOnly = true; }
 			if (!includeResolved) { params.includeResolved = false; }
 			if (governor) { params.governor = governor; }
-			return { help: false, json, windowId, action: 'inbox.list', params };
+			return withPretty({ help: false, json, windowId, action: 'inbox.list', params });
 		}
 
-		if (sub === 'post') {
+		if (iSub === 'post') {
 			let fromGov: string | undefined;
 			let message: string | undefined;
+			let messageFile: string | undefined;
 			let title: string | undefined;
 			let node: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
@@ -1727,25 +1837,29 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				if (arg === '--from' || arg.startsWith('--from=') || arg === '--governor' || arg.startsWith('--governor=')) {
 					fromGov = takeOptionVal(ref, '--from', args);
 				} else if (arg === '--message' || arg.startsWith('--message=')) {
-					message = takeOptionVal(ref, '--message', args);
+					message = takeOptionVal(ref, '--message', args, true);
+				} else if (arg === '--message-file' || arg.startsWith('--message-file=') || arg === '--file' || arg.startsWith('--file=')) {
+					messageFile = takeOptionVal(ref, '--message-file', args, true);
 				} else if (arg === '--title' || arg.startsWith('--title=')) {
-					title = takeOptionVal(ref, '--title', args);
+					title = takeOptionVal(ref, '--title', args, true);
 				} else if (arg === '--node' || arg.startsWith('--node=')) {
 					node = takeOptionVal(ref, '--node', args);
 				} else {
 					throw new CliUsageError(`Unknown option for inbox post: ${arg}`);
 				}
 			}
-			if (!fromGov || !message) {
-				throw new CliUsageError('Usage: aexus-ade inbox post --from <governorId> --message <text> [--title <title>]');
+			if (!fromGov || (!message && !messageFile)) {
+				throw new CliUsageError('Usage: aexus-ade inbox post --from <governorId> (--message <text> | --message-file <path|->) [--title <title>]');
 			}
-			const params: Record<string, unknown> = { from: fromGov, message };
+			const params: Record<string, unknown> = { from: fromGov };
+			if (message) { params.message = message; }
+			if (messageFile) { params.messageFile = messageFile; }
 			if (title) { params.title = title; }
 			if (node) { params.node = node; }
-			return { help: false, json, windowId, action: 'inbox.post', params };
+			return withPretty({ help: false, json, windowId, action: 'inbox.post', params });
 		}
 
-		if (sub === 'resolve') {
+		if (iSub === 'resolve') {
 			let id: string | undefined;
 			let resolution: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
@@ -1753,7 +1867,7 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				if (arg === '--id' || arg.startsWith('--id=')) {
 					id = takeOptionVal(ref, '--id', args);
 				} else if (arg === '--resolution' || arg.startsWith('--resolution=') || arg === '--note' || arg.startsWith('--note=')) {
-					resolution = takeOptionVal(ref, '--resolution', args);
+					resolution = takeOptionVal(ref, '--resolution', args, true);
 				} else if (!arg.startsWith('-') && !id) {
 					id = arg;
 				} else {
@@ -1765,10 +1879,10 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			}
 			const params: Record<string, unknown> = { id };
 			if (resolution) { params.resolution = resolution; }
-			return { help: false, json, windowId, action: 'inbox.resolve', params };
+			return withPretty({ help: false, json, windowId, action: 'inbox.resolve', params });
 		}
 
-		if (sub === 'mark-read' || sub === 'markRead') {
+		if (iSub === 'mark-read' || iSub === 'markRead') {
 			let id: string | undefined;
 			let all = false;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
@@ -1786,16 +1900,16 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (!id && !all) {
 				throw new CliUsageError('Usage: aexus-ade inbox mark-read (<id> | --all)');
 			}
-			return { help: false, json, windowId, action: 'inbox.markRead', params: all ? { all: true } : { id } };
+			return withPretty({ help: false, json, windowId, action: 'inbox.markRead', params: all ? { all: true } : { id } });
 		}
 
-		throw new CliUsageError(`Unknown inbox subcommand: ${sub}`);
+		throw new CliUsageError(`Unknown inbox subcommand: ${iSub}`);
 	}
 
 	if (group === 'host' || group === 'cloud-host') {
-		const sub = tail[0] ?? 'list';
+		const hSub = tail[0] ?? 'list';
 		const args = tail.slice(1);
-		const takeVal = (iRef: { i: number }, flagName: string): string => {
+		const takeVal = (iRef: { i: number }, flagName: string, allowDash = false): string => {
 			const cur = args[iRef.i];
 			const eqIdx = cur.indexOf('=');
 			if (eqIdx >= 0) {
@@ -1805,34 +1919,37 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			}
 			const next = args[++iRef.i];
 			if (next === undefined) { throw new CliUsageError(`Option ${flagName} requires a value.`); }
+			if (!allowDash && next.startsWith('--')) {
+				throw new CliUsageError(`Option ${flagName} requires a value, got ${next}.`);
+			}
 			return next;
 		};
 
-		if (sub === 'list') {
+		if (hSub === 'list') {
 			if (args.length > 0) { throw new CliUsageError(`Unexpected arguments for host list: ${args.join(' ')}`); }
-			return { help: false, json, windowId, action: 'host.list', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'host.list', params: {} });
 		}
-		if (sub === 'info' || sub === 'get') {
-			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade host info <alias|id>'); }
-			return { help: false, json, windowId, action: 'host.get', params: { target: args[0] } };
+		if (hSub === 'info' || hSub === 'get') {
+			if (args.length !== 1 || args[0].startsWith('-')) { throw new CliUsageError('Usage: aexus-ade host info <alias|id>'); }
+			return withPretty({ help: false, json, windowId, action: 'host.get', params: { target: args[0] } });
 		}
-		if (sub === 'remove' || sub === 'delete' || sub === 'rm') {
-			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade host remove <alias|id>'); }
-			return { help: false, json, windowId, action: 'host.delete', params: { target: args[0] } };
+		if (hSub === 'remove' || hSub === 'delete' || hSub === 'rm') {
+			if (args.length !== 1 || args[0].startsWith('-')) { throw new CliUsageError('Usage: aexus-ade host remove <alias|id>'); }
+			return withPretty({ help: false, json, windowId, action: 'host.delete', params: { target: args[0] } });
 		}
-		if (sub === 'test' || sub === 'ping') {
-			if (args.length !== 1) { throw new CliUsageError('Usage: aexus-ade host test <alias|id>'); }
-			return { help: false, json, windowId, action: 'host.test', params: { target: args[0] } };
+		if (hSub === 'test' || hSub === 'ping') {
+			if (args.length !== 1 || args[0].startsWith('-')) { throw new CliUsageError('Usage: aexus-ade host test <alias|id>'); }
+			return withPretty({ help: false, json, windowId, action: 'host.test', params: { target: args[0] } });
 		}
-		if (sub === 'import-vscode' || sub === 'import' || sub === 'sync') {
+		if (hSub === 'import-vscode' || hSub === 'import' || hSub === 'sync') {
 			if (args.length > 0) { throw new CliUsageError('Usage: aexus-ade host import-vscode'); }
-			return { help: false, json, windowId, action: 'host.import', params: {} };
+			return withPretty({ help: false, json, windowId, action: 'host.import', params: {} });
 		}
-		if (sub === 'open') {
+		if (hSub === 'open') {
 			if (args.length > 1) { throw new CliUsageError('Usage: aexus-ade host open [alias|id]'); }
-			return { help: false, json, windowId, action: 'host.open', params: args[0] ? { target: args[0] } : {} };
+			return withPretty({ help: false, json, windowId, action: 'host.open', params: args[0] ? { target: args[0] } : {} });
 		}
-		if (sub === 'browse' || sub === 'ls') {
+		if (hSub === 'browse' || hSub === 'ls') {
 			let target: string | undefined;
 			let remotePath: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
@@ -1846,9 +1963,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				}
 			}
 			if (!target) { throw new CliUsageError('Usage: aexus-ade host browse <alias|id> [--path <remotePath>]'); }
-			return { help: false, json, windowId, action: 'host.browse', params: remotePath ? { target, path: remotePath } : { target } };
+			return withPretty({ help: false, json, windowId, action: 'host.browse', params: remotePath ? { target, path: remotePath } : { target } });
 		}
-		if (sub === 'add' || sub === 'upsert' || sub === 'update' || sub === 'edit') {
+		if (hSub === 'add' || hSub === 'upsert' || hSub === 'update' || hSub === 'edit') {
 			const params: Record<string, unknown> = {};
 			let targetPositional: string | undefined;
 			for (const ref = { i: 0 }; ref.i < args.length; ref.i++) {
@@ -1858,9 +1975,9 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (arg === '--host' || arg === '--hostname' || arg.startsWith('--host=') || arg.startsWith('--hostname=')) {
 					params.hostName = takeVal(ref, '--host');
 				} else if (arg === '--name' || arg.startsWith('--name=')) {
-					params.name = takeVal(ref, '--name');
+					params.name = takeVal(ref, '--name', true);
 				} else if (arg === '--alias' || arg.startsWith('--alias=')) {
-					params.alias = takeVal(ref, '--alias');
+					params.alias = takeVal(ref, '--alias', true);
 				} else if (arg === '--user' || arg.startsWith('--user=')) {
 					params.user = takeVal(ref, '--user');
 				} else if (arg === '--port' || arg.startsWith('--port=')) {
@@ -1882,66 +1999,75 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 				} else if (arg === '--default-dir' || arg.startsWith('--default-dir=')) {
 					params.defaultDirectory = takeVal(ref, '--default-dir');
 				} else if (arg === '--notes' || arg.startsWith('--notes=')) {
-					params.notes = takeVal(ref, '--notes');
+					params.notes = takeVal(ref, '--notes', true);
 				} else if (!arg.startsWith('-') && !targetPositional) {
 					targetPositional = arg;
 				} else {
-					throw new CliUsageError(`Unknown option for host ${sub}: ${arg}`);
+					throw new CliUsageError(`Unknown option for host ${hSub}: ${arg}`);
 				}
 			}
-			if ((sub === 'update' || sub === 'edit') && targetPositional && !params.id && !params.alias) {
-				params.alias = targetPositional;
-			} else if ((sub === 'add' || sub === 'upsert') && targetPositional && !params.hostName) {
-				let spec = targetPositional.trim();
-				if (spec.includes('@')) {
-					const idx = spec.lastIndexOf('@');
-					if (!params.user) { params.user = spec.slice(0, idx); }
-					spec = spec.slice(idx + 1);
-				}
-				const pm = /^([^:]+):(\d+)$/.exec(spec);
-				if (pm) {
-					params.hostName = pm[1];
-					if (!params.port) { params.port = Number(pm[2]); }
+			if ((hSub === 'update' || hSub === 'edit') && targetPositional && !params.id && !params.alias) {
+				params.alias = targetPositional.trim();
+			} else if ((hSub === 'add' || hSub === 'upsert') && targetPositional) {
+				if (params.hostName) {
+					if (!params.alias) {
+						params.alias = targetPositional.trim();
+					}
 				} else {
-					params.hostName = spec;
+					let spec = targetPositional.trim();
+					if (spec.includes('@')) {
+						const idx = spec.lastIndexOf('@');
+						if (!params.user) { params.user = spec.slice(0, idx); }
+						spec = spec.slice(idx + 1);
+					}
+					const pm = /^([^:]+):(\d+)$/.exec(spec);
+					if (pm) {
+						params.hostName = pm[1];
+						if (!params.port) { params.port = Number(pm[2]); }
+					} else {
+						params.hostName = spec;
+					}
 				}
 			}
-			if (!params.hostName && (sub === 'add' || sub === 'upsert')) {
-				throw new CliUsageError('Usage: aexus-ade host add (<user@host[:port]> | --host <addr>) [--name <label>] [--alias <alias>] [--os <linux|macos|windows>]');
+			if (!params.hostName && (hSub === 'add' || hSub === 'upsert')) {
+				throw new CliUsageError('Usage: aexus-ade host add ([alias] --host <addr> | <user@host[:port]>) [--name <label>] [--alias <alias>] [--os <linux|macos|windows>]');
 			}
-			return { help: false, json, windowId, action: 'host.upsert', params };
+			return withPretty({ help: false, json, windowId, action: 'host.upsert', params });
 		}
 
-		throw new CliUsageError(`Unknown host subcommand: ${sub}`);
+		throw new CliUsageError(`Unknown host subcommand: ${hSub}`);
 	}
 
 	if (group === 'org') {
 		const orgRuntimeCmd = parseOrgCommandIfRuntime(tail, json, windowId, msg => new CliUsageError(msg));
 		if (orgRuntimeCmd) {
-			return orgRuntimeCmd;
+			return withPretty(orgRuntimeCmd);
 		}
 	}
 
 	if (group === 'role' || group === 'roles' || group === 'org') {
-		const sub = tail[0] ?? 'list';
+		const rSub = tail[0] ?? 'list';
 		const args = tail.slice(1);
-		if (sub === 'list' || sub === 'schema' || sub === 'get') {
-			return { help: false, json, windowId, action: 'role.schema.get', params: {} };
+		if (rSub === 'list' || rSub === 'schema' || rSub === 'get') {
+			if (args.length > 0) { throw new CliUsageError(`Unexpected arguments for role ${rSub}: ${args.join(' ')}`); }
+			return withPretty({ help: false, json, windowId, action: 'role.schema.get', params: {} });
 		}
-		if (sub === 'apis' || sub === 'primitives') {
-			return { help: false, json, windowId, action: 'role.apis', params: {} };
+		if (rSub === 'apis' || rSub === 'primitives') {
+			if (args.length > 0) { throw new CliUsageError(`Unexpected arguments for role ${rSub}: ${args.join(' ')}`); }
+			return withPretty({ help: false, json, windowId, action: 'role.apis', params: {} });
 		}
-		if (sub === 'presets') {
-			return { help: false, json, windowId, action: 'role.presets', params: {} };
+		if (rSub === 'presets') {
+			if (args.length > 0) { throw new CliUsageError(`Unexpected arguments for role presets: ${args.join(' ')}`); }
+			return withPretty({ help: false, json, windowId, action: 'role.presets', params: {} });
 		}
-		if (sub === 'preset' || sub === 'apply-preset') {
+		if (rSub === 'preset' || rSub === 'apply-preset') {
 			const presetId = args[0]?.trim();
-			if (!presetId) {
+			if (!presetId || presetId.startsWith('-') || args.length > 1) {
 				throw new CliUsageError('Usage: aexus-ade role apply-preset <presetId>');
 			}
-			return { help: false, json, windowId, action: 'role.schema.set', params: { presetId } };
+			return withPretty({ help: false, json, windowId, action: 'role.schema.set', params: { presetId } });
 		}
-		if (sub === 'set-tier') {
+		if (rSub === 'set-tier') {
 			if (args.length !== 2) {
 				throw new CliUsageError('Usage: aexus-ade role set-tier <sessionId> <rankId|worker|none>');
 			}
@@ -1950,864 +2076,23 @@ export function parseCliCommand(argv: readonly string[], cwd = process.cwd()): P
 			if (roleArg !== 'none' && !isValidRoleSlug(roleArg)) {
 				throw new CliUsageError('Role must be a valid rank ID (e.g. governor, manager, employee, worker, custom rank ID, or none).');
 			}
-			return { help: false, json, windowId, action: 'session.setRole', params: { id, role: roleArg === 'none' || roleArg === 'worker' ? null : roleArg } };
+			return withPretty({ help: false, json, windowId, action: 'session.setRole', params: { id, role: roleArg === 'none' || roleArg === 'worker' ? null : roleArg } });
 		}
-		if (sub === 'reset') {
-			return { help: false, json, windowId, action: 'role.schema.reset', params: {} };
+		if (rSub === 'reset') {
+			if (args.length > 0) { throw new CliUsageError(`Unexpected arguments for role reset: ${args.join(' ')}`); }
+			return withPretty({ help: false, json, windowId, action: 'role.schema.reset', params: {} });
 		}
-		if (sub === 'studio' || sub === 'open') {
+		if (rSub === 'studio' || rSub === 'open') {
+			if (args.length > 1 || (args[0] && args[0].startsWith('-'))) {
+				throw new CliUsageError('Usage: aexus-ade role studio [rankId]');
+			}
 			const rankId = args[0]?.trim();
-			return { help: false, json, windowId, action: 'role.studio.open', params: rankId ? { rankId } : {} };
+			return withPretty({ help: false, json, windowId, action: 'role.studio.open', params: rankId ? { rankId } : {} });
 		}
-		throw new CliUsageError(`Unknown role subcommand: ${sub}`);
+		throw new CliUsageError(`Unknown role subcommand: ${rSub}`);
 	}
 
 	throw new CliUsageError(`Unknown command: ${group}`);
-}
-
-function normalizeExplicitSocketPath(raw: string | undefined): string | undefined {
-	if (!raw) {
-		return undefined;
-	}
-	if (process.platform === 'win32' || raw.startsWith('tcp://') || Buffer.byteLength(raw, 'utf8') <= 90) {
-		return raw;
-	}
-	const hash = crypto.createHash('sha256').update(raw, 'utf8').digest('hex').slice(0, 12);
-	return path.join('/tmp', `aexus-ade-${hash}.sock`);
-}
-
-async function readRemoteBridgeFileEndpoint(env: NodeJS.ProcessEnv): Promise<string | undefined> {
-	const bridgeFile = env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim();
-	if (!bridgeFile) {
-		return undefined;
-	}
-	try {
-		const raw = await fs.readFile(bridgeFile, 'utf8');
-		const parsed = JSON.parse(raw) as { socketPath?: unknown; tcpPort?: unknown };
-		if (typeof parsed.socketPath === 'string' && parsed.socketPath.trim()) {
-			return normalizeExplicitSocketPath(parsed.socketPath.trim());
-		}
-		if (typeof parsed.tcpPort === 'number' && Number.isInteger(parsed.tcpPort) && parsed.tcpPort > 0 && parsed.tcpPort <= 65535) {
-			return `tcp://127.0.0.1:${parsed.tcpPort}`;
-		}
-	} catch {
-		// Bridge metadata file may be mid-update or unavailable; fall back to env vars cleanly.
-	}
-	return undefined;
-}
-
-async function resolveConnection(env: NodeJS.ProcessEnv): Promise<{ socketPath: string; token: string; usingSessionToken: boolean }> {
-	const tcpPortRaw = env.AEXUS_ADE_TCP_PORT?.trim();
-	const tcpPort = tcpPortRaw && /^\d+$/.test(tcpPortRaw) ? Number.parseInt(tcpPortRaw, 10) : undefined;
-	const tcpEndpoint = tcpPort && tcpPort > 0 && tcpPort <= 65535 ? `tcp://127.0.0.1:${tcpPort}` : undefined;
-	const envSocketOverride = normalizeExplicitSocketPath(env.AEXUS_ADE_SOCKET?.trim()) || tcpEndpoint;
-	const sessionToken = env.AEXUS_ADE_SESSION_TOKEN?.trim();
-	if (sessionToken) {
-		// Prefer the live remote bridge pointer file (~/.aexus-code/ade-remote-bridge.json) over static env
-		// so long-running cloud agents immediately track healed UDS sockets or reallocated TCP ports!
-		const dynamicBridgeEndpoint = await readRemoteBridgeFileEndpoint(env);
-		const socketOverride = dynamicBridgeEndpoint || envSocketOverride;
-		if (socketOverride) {
-			// Per-session capability token + explicit socket or SSH reverse TCP port: never read master token file.
-			return { socketPath: socketOverride, token: sessionToken, usingSessionToken: true };
-		}
-		const adeHomeDir = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
-		const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(adeHomeDir, ADE_CONTROL_META_NAME);
-		let meta: Partial<IAdeControlConnectionMetadata> | undefined;
-		try {
-			meta = JSON.parse(await fs.readFile(controlFile, 'utf8')) as Partial<IAdeControlConnectionMetadata>;
-		} catch (error) {
-			const detail = (error as NodeJS.ErrnoException).code === 'ENOENT'
-				? `Control metadata file not found at ${controlFile}. Is Aexus Code running?`
-				: `Could not read ${controlFile}: ${(error as Error).message}`;
-			throw new Error(detail);
-		}
-		const socketPath = meta?.socketPath;
-		if (!socketPath) {
-			throw new Error(`No socketPath found in ${controlFile}.`);
-		}
-		// Never substitute meta.token when AEXUS_ADE_SESSION_TOKEN is present.
-		return { socketPath, token: sessionToken, usingSessionToken: true };
-	}
-	const socketOverride = envSocketOverride;
-	const tokenOverride = env.AEXUS_ADE_TOKEN?.trim();
-	if (socketOverride && tokenOverride !== undefined) {
-		return { socketPath: socketOverride, token: tokenOverride, usingSessionToken: false };
-	}
-	const adeHomeDir = env.AEXUS_ADE_HOME?.trim() || path.join(os.homedir(), ADE_CONTROL_DIR_NAME);
-	const controlFile = env.AEXUS_ADE_CONTROL_FILE?.trim() || path.join(adeHomeDir, ADE_CONTROL_META_NAME);
-	let meta: Partial<IAdeControlConnectionMetadata> | undefined;
-	try {
-		meta = JSON.parse(await fs.readFile(controlFile, 'utf8')) as Partial<IAdeControlConnectionMetadata>;
-	} catch (error) {
-		if (!socketOverride) {
-			const detail = (error as NodeJS.ErrnoException).code === 'ENOENT'
-				? `Control metadata file not found at ${controlFile}. Is Aexus Code running?`
-				: `Could not read ${controlFile}: ${(error as Error).message}`;
-			throw new Error(detail);
-		}
-	}
-	const socketPath = socketOverride || meta?.socketPath;
-	const token = tokenOverride ?? meta?.token ?? '';
-	if (!socketPath) {
-		throw new Error(`No socketPath found in ${controlFile}.`);
-	}
-	return { socketPath, token, usingSessionToken: false };
-}
-
-function sendSocketRequest(socketPath: string, payload: IAdeControlWireRequest): Promise<IAdeControlWireResponse> {
-	return new Promise<IAdeControlWireResponse>((resolve, reject) => {
-		const tcpMatch = /^tcp:\/\/(127\.0\.0\.1|localhost):(\d+)$/i.exec(socketPath);
-		const socket = tcpMatch
-			? net.createConnection({ host: tcpMatch[1], port: Number.parseInt(tcpMatch[2], 10) })
-			: net.createConnection(socketPath);
-		let buffer = '';
-		let settled = false;
-		let requestSent = false;
-		const timeoutMs = (payload.action === 'token.complete' || payload.action === 'mission.check.run') ? 315_000 : 125_000;
-		const timer = setTimeout(() => {
-			finish(() => reject(new Error(`ADE control request timed out after ${timeoutMs}ms.`)));
-		}, timeoutMs);
-		const finish = (fn: () => void) => {
-			if (settled) { return; }
-			settled = true;
-			clearTimeout(timer);
-			socket.destroy();
-			fn();
-		};
-		socket.setEncoding('utf8');
-		socket.on('connect', () => {
-			requestSent = true;
-			socket.write(JSON.stringify(payload) + '\n');
-		});
-		socket.on('data', (chunk: string) => {
-			buffer += chunk;
-			const newline = buffer.indexOf('\n');
-			if (newline >= 0) {
-				const line = buffer.slice(0, newline).trim();
-				finish(() => {
-					try {
-						resolve(JSON.parse(line) as IAdeControlWireResponse);
-					} catch (error) {
-						reject(new Error(`Invalid JSON response from ADE socket: ${(error as Error).message}`));
-					}
-				});
-			}
-		});
-		socket.on('end', () => {
-			if (!settled && buffer.trim()) {
-				finish(() => {
-					try {
-						resolve(JSON.parse(buffer.trim()) as IAdeControlWireResponse);
-					} catch (error) {
-						reject(new Error(`Invalid JSON response from ADE socket: ${(error as Error).message}`));
-					}
-				});
-			} else if (!settled) {
-				finish(() => reject(new Error('ADE control socket closed without sending a response.')));
-			}
-		});
-		socket.on('error', error => {
-			const wrapped = new Error(`Could not connect to ADE control socket (${socketPath}): ${error.message}`) as Error & { retryableConnectError?: boolean };
-			// Only mark connect-phase failures (before request bytes were transmitted) as safe to retry,
-			// so non-idempotent mutations (token.complete, mission.gate, mission.check.run) can never double-fire.
-			const code = (error as NodeJS.ErrnoException).code;
-			if (!requestSent && (!code || code === 'ECONNREFUSED' || code === 'ENOENT' || code === 'ENOTSOCK' || code === 'ECONNRESET' || code === 'ETIMEDOUT')) {
-				wrapped.retryableConnectError = true;
-			}
-			finish(() => reject(wrapped));
-		});
-	});
-}
-
-function isTransientBridgeConnectError(error: unknown): boolean {
-	return Boolean(error && typeof error === 'object' && (error as { retryableConnectError?: boolean }).retryableConnectError);
-}
-
-async function sendControlRequestWithRetry(
-	env: NodeJS.ProcessEnv,
-	initialSocketPath: string,
-	payload: IAdeControlWireRequest,
-	allowBridgeRetry: boolean,
-): Promise<IAdeControlWireResponse> {
-	const backoffsMs = allowBridgeRetry ? [350, 750, 1_500, 2_500, 4_000] : [];
-	let currentSocketPath = initialSocketPath;
-	let lastError: unknown;
-	for (let attempt = 0; attempt <= backoffsMs.length; attempt++) {
-		try {
-			return await sendSocketRequest(currentSocketPath, payload);
-		} catch (err) {
-			lastError = err;
-			if (attempt >= backoffsMs.length || !isTransientBridgeConnectError(err)) {
-				throw err;
-			}
-			await new Promise<void>(resolve => setTimeout(resolve, backoffsMs[attempt]));
-			// Re-read dynamic remote bridge metadata file on every retry in case the SSH reverse tunnel healed onto a fresh port/socket!
-			const refreshed = await resolveConnection(env).catch(() => undefined);
-			if (refreshed?.socketPath) {
-				currentSocketPath = refreshed.socketPath;
-			}
-		}
-	}
-	throw lastError;
-}
-
-function formatRawBlueprintOutput(result: unknown): string {
-	if (typeof result === 'string') {
-		return result.endsWith('\n') ? result : `${result}\n`;
-	}
-	if (result && typeof result === 'object') {
-		const record = result as Record<string, unknown>;
-		for (const key of ['text', 'markdown', 'content', 'blueprint']) {
-			const value = record[key];
-			if (typeof value === 'string') {
-				return value.endsWith('\n') ? value : `${value}\n`;
-			}
-		}
-	}
-	return `${formatHumanOutput('mission.blueprint.get', result)}\n`;
-}
-
-function formatHumanOutput(action: string | undefined, result: unknown): string {
-	if (result === undefined || result === null) {
-		return 'OK';
-	}
-	if (typeof result !== 'object') {
-		return String(result);
-	}
-	const record = result as Record<string, unknown>;
-	if (action === 'mission.blueprint.validate' && typeof record.valid === 'boolean') {
-		if (record.valid) {
-			return 'Blueprint is valid.';
-		}
-		const errors = Array.isArray(record.errors)
-			? record.errors.map(error => typeof error === 'string' ? error : JSON.stringify(error))
-			: [];
-		return errors.length > 0
-			? `Blueprint is invalid:\n${errors.map(error => `- ${error}`).join('\n')}`
-			: 'Blueprint is invalid.';
-	}
-	const id = typeof record.detached === 'string' ? record.detached : typeof record.deleted === 'string' ? record.deleted : undefined;
-	const count = record.count;
-	if (id !== undefined && typeof count === 'number') {
-		const verb = action === 'session.delete' ? 'Deleted' : 'Detached';
-		const subordinates = count - 1;
-		if (subordinates > 0) {
-			return `${verb} session '${id}' and removed ${subordinates} subordinate session${subordinates === 1 ? '' : 's'}.`;
-		}
-		return `${verb} session '${id}'.`;
-	}
-	if (action === 'role.schema.get' && Array.isArray(record.ranks)) {
-		const lines = ['Organization Role Schema:'];
-		for (const rawRank of record.ranks as Array<Record<string, unknown>>) {
-			const id = String(rawRank.id ?? '');
-			const name = String(rawRank.name ?? id);
-			const tier = rawRank.tier !== undefined ? `L${rawRank.tier}` : '';
-			const pure = rawRank.pureExecution ? ' [pure: 0 APIs]' : '';
-			const apis = Array.isArray(rawRank.apis) ? ` (${rawRank.apis.length} APIs)` : '';
-			lines.push(`  - ${id}${tier ? ` (${tier})` : ''}: ${name}${pure || apis}`);
-		}
-		return lines.join('\n');
-	}
-	if (action === 'role.presets' && Array.isArray(result)) {
-		const lines = ['Available Organization Presets:'];
-		for (const rawPreset of result as Array<Record<string, unknown>>) {
-			const id = String(rawPreset.id ?? '');
-			const name = String(rawPreset.name ?? id);
-			const desc = typeof rawPreset.description === 'string' && rawPreset.description ? ` — ${rawPreset.description}` : '';
-			lines.push(`  - ${id}: ${name}${desc}`);
-		}
-		return lines.join('\n');
-	}
-	return JSON.stringify(result, null, 2);
-}
-
-export type DoctorCheckStatus = 'ok' | 'warn' | 'fail' | 'error';
-
-export interface IDoctorCheck {
-	readonly id: string;
-	readonly label: string;
-	readonly status: DoctorCheckStatus;
-	readonly detail: string;
-}
-
-interface IDoctorEngineCheck {
-	readonly id: string;
-	readonly label: string;
-	readonly binary: string;
-	readonly installed: boolean;
-	readonly path?: string;
-	readonly installHint: string;
-}
-
-export interface IDoctorReport {
-	readonly schemaVersion: number;
-	readonly aexusVersion: string;
-	readonly platform: NodeJS.Platform;
-	readonly arch: string;
-	readonly nodeVersion: string;
-	readonly projectPath: string;
-	readonly controlPlane: { readonly connected: boolean; readonly socketPath?: string; readonly error?: string };
-	readonly tooling: {
-		readonly git: { readonly installed: boolean; readonly version?: string; readonly worktreeReady: boolean };
-		readonly ssh: { readonly installed: boolean; readonly version?: string };
-	};
-	readonly projectRules: readonly string[];
-	readonly engines: readonly IDoctorEngineCheck[];
-	readonly checks: readonly IDoctorCheck[];
-	readonly summary: { readonly enginesReady: number; readonly enginesTotal: number };
-}
-
-export function computeDoctorExitCode(report: Pick<IDoctorReport, 'checks'>, strict: boolean): number {
-	const hasFailure = report.checks.some(check => check.status === 'fail' || check.status === 'error');
-	if (hasFailure) {
-		return 1;
-	}
-	const hasWarning = report.checks.some(check => check.status === 'warn');
-	if (strict && hasWarning) {
-		return 2;
-	}
-	return 0;
-}
-
-const DOCTOR_ENGINES: readonly { readonly id: string; readonly label: string; readonly binary: string; readonly installHint: string }[] = [
-	{ id: 'claude-code', label: 'Claude Code', binary: 'claude', installHint: 'npm i -g @anthropic-ai/claude-code' },
-	{ id: 'codex', label: 'Codex', binary: 'codex', installHint: 'npm i -g @openai/codex' },
-	{ id: 'antigravity', label: 'Google Antigravity', binary: 'agy', installHint: 'Install Antigravity CLI (agy)' },
-	{ id: 'opencode', label: 'OpenCode', binary: 'opencode', installHint: 'npm i -g opencode-ai' },
-	{ id: 'kilo', label: 'Kilo Code', binary: 'kilo', installHint: 'npm i -g @kilocode/cli' },
-	{ id: 'dsh', label: 'DeepSeek Harness', binary: 'dsh', installHint: 'Install DeepSeek Harness (dsh)' },
-	{ id: 'cline', label: 'Cline', binary: 'cline', installHint: 'npm i -g cline' },
-	{ id: 'pi', label: 'Pi', binary: 'pi', installHint: 'npm i -g @mariozechner/pi-coding-agent' },
-];
-
-const PROJECT_RULE_CANDIDATES: readonly string[] = [
-	'AGENTS.md',
-	'CLAUDE.md',
-	'.cursorrules',
-	'.cursor/rules',
-	'.github/copilot-instructions.md',
-	'.agents/skills',
-	'AEXUS.md',
-];
-
-async function locateExecutable(binary: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
-	const locator = process.platform === 'win32' ? 'where' : 'which';
-	try {
-		const { stdout } = await execFileAsync(locator, [binary], { env, timeout: 3000 });
-		const firstLine = stdout.split(/\r?\n/).map(s => s.trim()).find(Boolean);
-		return firstLine || undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-async function probeCommandVersion(binary: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<string | undefined> {
-	try {
-		const { stdout, stderr } = await execFileAsync(binary, [...args], { env, timeout: 3000 });
-		const line = (stdout || stderr).split(/\r?\n/).map(s => s.trim()).find(Boolean);
-		return line || undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-async function runDoctorDiagnostics(projectPath: string, env: NodeJS.ProcessEnv): Promise<IDoctorReport> {
-	const [engines, gitVersion, sshVersion, controlPlane, detectedRules] = await Promise.all([
-		Promise.all(DOCTOR_ENGINES.map(async e => {
-			const resolved = await locateExecutable(e.binary, env);
-			return {
-				id: e.id,
-				label: e.label,
-				binary: e.binary,
-				installed: Boolean(resolved),
-				...(resolved ? { path: resolved } : {}),
-				installHint: e.installHint,
-			};
-		})),
-		probeCommandVersion('git', ['--version'], env),
-		probeCommandVersion('ssh', ['-V'], env),
-		(async (): Promise<{ readonly connected: boolean; readonly socketPath?: string; readonly error?: string }> => {
-			try {
-				const conn = await resolveConnection(env);
-				const res = await sendSocketRequest(conn.socketPath, { token: conn.token, action: 'status', params: {} });
-				return { connected: Boolean(res.ok), socketPath: conn.socketPath, ...(res.ok ? {} : { error: res.error }) };
-			} catch (err) {
-				return { connected: false, error: (err as Error).message };
-			}
-		})(),
-		Promise.all(PROJECT_RULE_CANDIDATES.map(async rel => {
-			try {
-				await fs.access(path.join(projectPath, rel));
-				return rel;
-			} catch {
-				return undefined;
-			}
-		})),
-	]);
-
-	const projectRules = detectedRules.filter((r): r is string => Boolean(r));
-	const enginesReady = engines.filter(e => e.installed).length;
-	const checks: IDoctorCheck[] = [
-		{
-			id: 'control-plane',
-			label: 'ADE Control Plane',
-			status: controlPlane.connected ? 'ok' : 'fail',
-			detail: controlPlane.connected
-				? (controlPlane.socketPath ?? 'connected')
-				: (controlPlane.error || 'workbench not running'),
-		},
-		{
-			id: 'engines',
-			label: 'Coding Agent Engines',
-			status: enginesReady > 0 ? 'ok' : 'fail',
-			detail: `${enginesReady}/${engines.length} engines installed`,
-		},
-		{
-			id: 'git',
-			label: 'Git Worktree Tooling',
-			status: gitVersion ? 'ok' : 'warn',
-			detail: gitVersion ?? 'git not found (install git for worktree isolation)',
-		},
-		{
-			id: 'ssh',
-			label: 'OpenSSH Client',
-			status: sshVersion ? 'ok' : 'warn',
-			detail: sshVersion ?? 'ssh not found (install OpenSSH for aexus-ssh:// Cloud Hosts)',
-		},
-	];
-	return {
-		schemaVersion: ADE_CLI_SCHEMA_VERSION,
-		aexusVersion: ADE_CLI_VERSION,
-		platform: process.platform,
-		arch: process.arch,
-		nodeVersion: process.version,
-		projectPath,
-		controlPlane,
-		tooling: {
-			git: { installed: Boolean(gitVersion), ...(gitVersion ? { version: gitVersion } : {}), worktreeReady: Boolean(gitVersion) },
-			ssh: { installed: Boolean(sshVersion), ...(sshVersion ? { version: sshVersion } : {}) },
-		},
-		projectRules,
-		engines,
-		checks,
-		summary: { enginesReady, enginesTotal: engines.length },
-	};
-}
-
-interface ICliColorizer {
-	readonly bold: (text: string) => string;
-	readonly dim: (text: string) => string;
-	readonly red: (text: string) => string;
-	readonly green: (text: string) => string;
-	readonly yellow: (text: string) => string;
-	readonly cyan: (text: string) => string;
-}
-
-function shouldUseColor(env: NodeJS.ProcessEnv, isTTY: boolean): boolean {
-	const noColor = env.NO_COLOR;
-	if (noColor !== undefined && noColor !== '') {
-		return false;
-	}
-	const forceColor = env.FORCE_COLOR;
-	if (forceColor !== undefined) {
-		return forceColor !== '0' && forceColor.toLowerCase() !== 'false';
-	}
-	return isTTY;
-}
-
-function createColorizer(enabled: boolean): ICliColorizer {
-	const paint = (code: number, text: string): string => enabled ? `\u001b[${code}m${text}\u001b[0m` : text;
-	return {
-		bold: text => paint(1, text),
-		dim: text => paint(2, text),
-		red: text => paint(31, text),
-		green: text => paint(32, text),
-		yellow: text => paint(33, text),
-		cyan: text => paint(36, text),
-	};
-}
-
-function formatDoctorHuman(report: IDoctorReport, color: ICliColorizer): string {
-	const lines: string[] = [];
-	lines.push(color.bold(color.cyan('Aexus Code · ADE Environment Doctor')));
-	lines.push(color.dim('==================================='));
-	lines.push(`${color.bold('Aexus Version:')} ${report.aexusVersion} (Code - OSS ${ADE_ENGINE_BASELINE})`);
-	lines.push(`${color.bold('Platform:')}      ${report.platform}/${report.arch} (Node ${report.nodeVersion})`);
-	lines.push(`${color.bold('Project:')}       ${report.projectPath}`);
-	lines.push(`${color.bold('Control Plane:')} ${report.controlPlane.connected ? color.green(`CONNECTED (${report.controlPlane.socketPath})`) : color.red(`OFFLINE (${report.controlPlane.error || 'workbench not running'})`)}`);
-	lines.push(`${color.bold('Git Worktree:')}  ${report.tooling.git.installed ? color.green(`READY (${report.tooling.git.version})`) : color.yellow('MISSING (install git for worktree isolation)')}`);
-	lines.push(`${color.bold('OpenSSH:')}       ${report.tooling.ssh.installed ? color.green(`READY (${report.tooling.ssh.version})`) : color.yellow('MISSING (install OpenSSH for aexus-ssh:// Cloud Hosts)')}`);
-	lines.push(`${color.bold('Project Rules:')} ${report.projectRules.length > 0 ? report.projectRules.join(', ') : color.dim('(none detected — supports AGENTS.md, CLAUDE.md, .cursorrules)')}`);
-	lines.push('');
-	lines.push(color.bold(`Native Coding Engines (${report.summary.enginesReady}/${report.summary.enginesTotal} installed):`));
-	for (const e of report.engines) {
-		const mark = e.installed ? color.green('[OK]  ') : color.dim('[--]  ');
-		const detail = e.installed ? (e.path ?? e.binary) : color.yellow(`not found (${e.installHint})`);
-		lines.push(`  ${mark} ${e.label.padEnd(20)} ${e.binary.padEnd(10)} ${detail}`);
-	}
-	return lines.join('\n');
-}
-
-export { RANK_SUBCOMMANDS };
-
-export const TOP_LEVEL_COMMANDS = [
-	'doctor', 'completion', 'status', 'whoami', 'docs', 'api', 'mode', 'view', 'rank', 'role',
-	'project', 'host', 'engine', 'session', 'secretary', 'mission', 'orchestration', 'whiteboard', 'token', 'org', 'inbox', 'version',
-] as const;
-
-export const ROLE_SUBCOMMANDS = [
-	'list', 'apis', 'presets', 'preset', 'apply-preset', 'set-tier', 'reset', 'studio',
-] as const;
-
-export const MISSION_SUBCOMMANDS = [
-	'docs', 'list', 'init', 'export', 'import', 'open', 'blueprint', 'task', 'prompt', 'check', 'start', 'run', 'status', 'pause', 'resume', 'stop',
-	'timeout', 'boundary', 'recall', 'retry', 'patch', 'gate', 'trigger', 'host', 'remove',
-] as const;
-
-export const TOKEN_SUBCOMMANDS = [
-	'current', 'read', 'history', 'trace', 'mint', 'split', 'return', 'handoff', 'complete', 'reject', 'block', 'fail', 'retry',
-] as const;
-
-export const ORG_SUBCOMMANDS = [
-	'subordinates', 'send', 'context', 'escalate',
-] as const;
-
-const COMPLETION_SHELLS = ['bash', 'zsh', 'fish', 'powershell'] as const;
-
-function buildBashCompletion(): string {
-	return [
-		'# bash completion for aexus-ade',
-		'_aexus_ade() {',
-		'\tlocal cur',
-		'\tcur="${COMP_WORDS[COMP_CWORD]}"',
-		'',
-		`\tlocal top_level="${TOP_LEVEL_COMMANDS.join(' ')}"`,
-		`\tlocal rank_subcommands="${RANK_SUBCOMMANDS.join(' ')}"`,
-		`\tlocal role_subcommands="${ROLE_SUBCOMMANDS.join(' ')}"`,
-		`\tlocal mission_subcommands="${MISSION_SUBCOMMANDS.join(' ')}"`,
-		`\tlocal token_subcommands="${TOKEN_SUBCOMMANDS.join(' ')}"`,
-		`\tlocal org_subcommands="${ORG_SUBCOMMANDS.join(' ')}"`,
-		'',
-		'\tcase "${COMP_WORDS[1]}" in',
-		'\t\tcompletion)',
-		`\t\t\tCOMPREPLY=( $(compgen -W "${COMPLETION_SHELLS.join(' ')}" -- "$cur") )`,
-		'\t\t\treturn 0',
-		'\t\t\t;;',
-		'\t\trank|ranks)',
-		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
-		'\t\t\t\tCOMPREPLY=( $(compgen -W "$rank_subcommands" -- "$cur") )',
-		'\t\t\tfi',
-		'\t\t\treturn 0',
-		'\t\t\t;;',
-		'\t\trole|roles)',
-		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
-		'\t\t\t\tCOMPREPLY=( $(compgen -W "$role_subcommands" -- "$cur") )',
-		'\t\t\tfi',
-		'\t\t\treturn 0',
-		'\t\t\t;;',
-		'\t\torg)',
-		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
-		'\t\t\t\tCOMPREPLY=( $(compgen -W "$org_subcommands" -- "$cur") )',
-		'\t\t\tfi',
-		'\t\t\treturn 0',
-		'\t\t\t;;',
-		'\t\ttoken)',
-		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
-		'\t\t\t\tCOMPREPLY=( $(compgen -W "$token_subcommands" -- "$cur") )',
-		'\t\t\tfi',
-		'\t\t\treturn 0',
-		'\t\t\t;;',
-		'\t\tmission)',
-		'\t\t\tif [ "$COMP_CWORD" -eq 2 ]; then',
-		'\t\t\t\tCOMPREPLY=( $(compgen -W "$mission_subcommands" -- "$cur") )',
-		'\t\t\tfi',
-		'\t\t\treturn 0',
-		'\t\t\t;;',
-		'\tesac',
-		'',
-		'\tif [ "$COMP_CWORD" -eq 1 ]; then',
-		'\t\tCOMPREPLY=( $(compgen -W "$top_level" -- "$cur") )',
-		'\tfi',
-		'\treturn 0',
-		'}',
-		'',
-		'complete -F _aexus_ade aexus-ade',
-		'',
-	].join('\n');
-}
-
-function buildZshCompletion(): string {
-	return [
-		'#compdef aexus-ade',
-		'',
-		'_aexus_ade() {',
-		'\tlocal -a top_level rank_subcommands role_subcommands mission_subcommands token_subcommands org_subcommands',
-		'\ttop_level=(',
-		`\t\t'doctor:Diagnose the ADE environment'`,
-		`\t\t'completion:Emit a shell completion script'`,
-		`\t\t'status:Show workbench status'`,
-		`\t\t'whoami:Inspect caller session identity and tier'`,
-		`\t\t'docs:Read single-copy ADE API documentation'`,
-		`\t\t'api:Query immutable API changelog diff'`,
-		`\t\t'mode:Get or set ADE/IDE mode'`,
-		`\t\t'view:Inspect or change the ADE view'`,
-		`\t\t'rank:Inspect or hot-update rank tiers, aliases, and single-copy docs'`,
-		`\t\t'role:Manage organization roles and presets'`,
-		`\t\t'project:Manage projects'`,
-		`\t\t'host:Manage Cloud Hosts'`,
-		`\t\t'engine:List engines and sessions'`,
-		`\t\t'session:Manage sessions'`,
-		`\t\t'secretary:Control the secretary session'`,
-		`\t\t'mission:Manage Missions, Mermaid DAGs, prompts, and runtime'`,
-		`\t\t'token:In-graph Mission Token Bus commands'`,
-		`\t\t'org:Off-graph strictly top-down supervision commands'`,
-		`\t\t'inbox:Manage the ADE Inbox'`,
-		`\t\t'version:Print the CLI version'`,
-		'\t)',
-		'\trank_subcommands=(',
-		`\t\t'list:List L0 and L1..LN live rank directory'`,
-		`\t\t'names:Print hot-updated tier alias map'`,
-		`\t\t'get:Inspect a specific tier or alias'`,
-		`\t\t'docs:Show canonical single-copy docs paths'`,
-		`\t\t'rename:Hot-update display alias for a tier'`,
-		`\t\t'set-count:Resize rank tier count (>= 1)'`,
-		'\t)',
-		'\trole_subcommands=(',
-		`\t\t'list:Show active organization role schema'`,
-		`\t\t'apis:List available ADE control API primitives'`,
-		`\t\t'presets:List built-in organization presets'`,
-		`\t\t'preset:Apply an organization preset'`,
-		`\t\t'apply-preset:Apply an organization preset'`,
-		`\t\t'set-tier:Assign a session role tier'`,
-		`\t\t'reset:Reset organization roles to default'`,
-		`\t\t'studio:Open Organization and Roles Studio'`,
-		'\t)',
-		'\tmission_subcommands=(',
-		`\t\t'docs:Locate sibling MISSION_API.md documentation'`,
-		`\t\t'list:List Missions'`,
-		`\t\t'init:Initialize a Mission'`,
-		`\t\t'open:Open a Mission canvas'`,
-		`\t\t'blueprint:Get, apply, or validate a Mermaid DAG blueprint'`,
-		`\t\t'prompt:List, get, set, or clear per-node pre-prompts'`,
-		`\t\t'check:Configure, inspect, remove, or dry-run zero-cost deterministic verification hooks'`,
-		`\t\t'start:Start Mission execution'`,
-		`\t\t'run:Start Mission execution'`,
-		`\t\t'status:Show live Mission runtime status'`,
-		`\t\t'pause:Pause Mission execution'`,
-		`\t\t'resume:Resume Mission execution'`,
-		`\t\t'stop:Stop Mission execution'`,
-		`\t\t'timeout:Set Watchdog silence timeout in minutes'`,
-		`\t\t'boundary:Get or set off-graph tier boundary and supervisors'`,
-		`\t\t'recall:Recall in-flight tokens in jurisdiction'`,
-		`\t\t'retry:Retry a frozen/failed token in place'`,
-		`\t\t'patch:Atomically patch unfinished DAG topology'`,
-		`\t\t'gate:Approve or reject a waiting Human Gate'`,
-		`\t\t'trigger:List, set, or remove zero-token source triggers'`,
-		`\t\t'host:Bind a Mission node to Local or a Cloud Host'`,
-		`\t\t'remove:Remove a Mission and generated employees'`,
-		'\t)',
-		'\ttoken_subcommands=(',
-		`\t\t'current:Inspect active tokens held by this node'`,
-		`\t\t'read:Batch-dereference lightweight token pointers (hop-N, art-N, dec-N, wb:<id>)'`,
-		`\t\t'history:Inspect pointer-indexed pass history and cyclic delta view'`,
-		`\t\t'trace:Expand a token trace pointer'`,
-		`\t\t'handoff:Hand off an Orchestration baton token along a connected edge'`,
-		`\t\t'complete:Complete a token with a 1-line headline and optional split pointers'`,
-		`\t\t'reject:Reject an upstream token back to a prior node'`,
-		`\t\t'block:Declare a long-running blocked token with optional wakeup watch'`,
-		`\t\t'fail:Report failure on a token'`,
-		`\t\t'retry:Retry a failed token'`,
-		'\t)',
-		'\torg_subcommands=(',
-		`\t\t'subordinates:List managed subordinates and Mission jurisdictions'`,
-		`\t\t'send:Send a top-down directive to a managed subordinate'`,
-		`\t\t'context:Pull recent conversation transcript of a managed subordinate'`,
-		`\t\t'escalate:Escalate an unresolved failure upward'`,
-		'\t)',
-		'',
-		'\tif (( CURRENT == 2 )); then',
-		`\t\t_describe -t commands 'aexus-ade command' top_level`,
-		'\telif [[ ${words[2]} == completion ]]; then',
-		`\t\t_values 'shell' ${COMPLETION_SHELLS.join(' ')}`,
-		'\telif [[ ( ${words[2]} == rank || ${words[2]} == ranks ) && CURRENT == 3 ]]; then',
-		`\t\t_describe -t commands 'rank command' rank_subcommands`,
-		'\telif [[ ( ${words[2]} == role || ${words[2]} == roles ) && CURRENT == 3 ]]; then',
-		`\t\t_describe -t commands 'role command' role_subcommands`,
-		'\telif [[ ${words[2]} == org && CURRENT == 3 ]]; then',
-		`\t\t_describe -t commands 'org command' org_subcommands`,
-		'\telif [[ ${words[2]} == token && CURRENT == 3 ]]; then',
-		`\t\t_describe -t commands 'token command' token_subcommands`,
-		'\telif [[ ${words[2]} == mission && CURRENT == 3 ]]; then',
-		`\t\t_describe -t commands 'mission command' mission_subcommands`,
-		'\tfi',
-		'}',
-		'',
-		`_aexus_ade "$@"`,
-		'',
-	].join('\n');
-}
-
-function buildFishCompletion(): string {
-	const lines = [
-		'# fish completion for aexus-ade',
-		'complete -c aexus-ade -f',
-	];
-	const descriptions: Record<(typeof TOP_LEVEL_COMMANDS)[number], string> = {
-		doctor: 'Diagnose the ADE environment',
-		completion: 'Emit a shell completion script',
-		status: 'Show workbench status',
-		whoami: 'Inspect caller session identity and tier',
-		docs: 'Read single-copy ADE API documentation',
-		api: 'Query immutable API changelog diff',
-		mode: 'Get or set ADE/IDE mode',
-		view: 'Inspect or change the ADE view',
-		rank: 'Inspect or hot-update rank tiers, aliases, and single-copy docs',
-		role: 'Manage organization roles and presets',
-		project: 'Manage projects',
-		host: 'Manage Cloud Hosts',
-		engine: 'List engines and sessions',
-		session: 'Manage sessions',
-		secretary: 'Control the secretary session',
-		mission: 'Manage Engineering Missions, Task DAGs, and runtime',
-		orchestration: 'Manage cyclic all-staff Orchestration topology and dynamic expansion',
-		whiteboard: 'Manage Department Shared Whiteboards (lightweight token pointers)',
-		token: 'Token Bus and Orchestration relay handoff commands',
-		org: 'Off-graph strictly top-down supervision commands',
-		inbox: 'Manage the ADE Inbox',
-		version: 'Print the CLI version',
-	};
-	for (const command of TOP_LEVEL_COMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_use_subcommand' -a ${command} -d '${descriptions[command]}'`);
-	}
-	lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_SHELLS.join(' ')}'`);
-	const rankDescriptions: Record<(typeof RANK_SUBCOMMANDS)[number], string> = {
-		list: 'List L0 and L1..LN live rank directory',
-		names: 'Print hot-updated tier alias map',
-		get: 'Inspect a specific tier or alias',
-		docs: 'Show canonical single-copy docs paths',
-		rename: 'Hot-update display alias for a tier',
-		'set-count': 'Resize rank tier count (>= 1)',
-	};
-	for (const command of RANK_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from rank' -a ${command} -d '${rankDescriptions[command]}'`);
-	}
-	const roleDescriptions: Record<(typeof ROLE_SUBCOMMANDS)[number], string> = {
-		list: 'Show active organization role schema',
-		apis: 'List available ADE control API primitives',
-		presets: 'List built-in organization presets',
-		preset: 'Apply an organization preset',
-		'apply-preset': 'Apply an organization preset',
-		'set-tier': 'Assign a session role tier',
-		reset: 'Reset organization roles to default',
-		studio: 'Open Organization and Roles Studio',
-	};
-	for (const command of ROLE_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from role' -a ${command} -d '${roleDescriptions[command]}'`);
-	}
-	const missionDescriptions: Record<(typeof MISSION_SUBCOMMANDS)[number], string> = {
-		docs: 'Locate sibling MISSION_API.md documentation',
-		list: 'List Missions',
-		init: 'Initialize a Mission',
-		export: 'Export a lossless Engineering bundle (Mission DAG + Orchestration + Whiteboards)',
-		import: 'Import a lossless Engineering bundle into a project/owner session',
-		open: 'Open a Mission canvas',
-		blueprint: 'Get, apply, or validate a Mermaid DAG blueprint',
-		task: 'List, edit, or mark completed Mission Task DAG nodes',
-		prompt: 'List, get, set, or clear per-node pre-prompts',
-		check: 'Configure, inspect, remove, or dry-run zero-cost deterministic verification hooks',
-		start: 'Start Mission execution',
-		run: 'Start Mission execution',
-		status: 'Show live Mission runtime status',
-		pause: 'Pause Mission execution',
-		resume: 'Resume Mission execution',
-		stop: 'Stop Mission execution',
-		timeout: 'Set Watchdog silence timeout in minutes',
-		boundary: 'Get or set off-graph tier boundary and supervisors',
-		recall: 'Recall in-flight tokens in jurisdiction',
-		retry: 'Retry a frozen/failed token in place',
-		patch: 'Atomically patch unfinished DAG topology',
-		gate: 'Approve or reject a waiting Human Gate',
-		trigger: 'List, set, or remove zero-token source triggers',
-		host: 'Bind a Mission node to Local or a Cloud Host',
-		remove: 'Remove a Mission and generated employees',
-	};
-	for (const command of MISSION_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from mission' -a ${command} -d '${missionDescriptions[command]}'`);
-	}
-	const tokenDescriptions: Record<(typeof TOKEN_SUBCOMMANDS)[number], string> = {
-		current: 'Inspect active tokens held by this node',
-		read: 'Batch-dereference lightweight token pointers (hop-N, art-N, dec-N, wb:<id>)',
-		history: 'Inspect pointer-indexed pass history and cyclic delta view',
-		trace: 'Expand a token trace pointer',
-		mint: 'Actively mint heterogeneous sub-task token(s) downward to subordinate(s)',
-		split: 'Split into multiple heterogeneous subordinate branches with join barrier',
-		return: 'Return a completed downward baton upward to its dispatching superior',
-		handoff: 'Hand off an Orchestration baton token to connected staff node(s)',
-		complete: 'Complete a token with a plain-text summary',
-		reject: 'Reject an upstream token back to a prior node',
-		block: 'Declare a long-running blocked token',
-		fail: 'Report failure on a token',
-		retry: 'Retry a failed token',
-	};
-	for (const command of TOKEN_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from token' -a ${command} -d '${tokenDescriptions[command]}'`);
-	}
-	const orgDescriptions: Record<(typeof ORG_SUBCOMMANDS)[number], string> = {
-		subordinates: 'List managed subordinates and Mission jurisdictions',
-		send: 'Send a top-down directive to a managed subordinate',
-		context: 'Pull recent conversation transcript of a managed subordinate',
-		escalate: 'Escalate an unresolved failure upward',
-	};
-	for (const command of ORG_SUBCOMMANDS) {
-		lines.push(`complete -c aexus-ade -n '__fish_seen_subcommand_from org' -a ${command} -d '${orgDescriptions[command]}'`);
-	}
-	lines.push('');
-	return lines.join('\n');
-}
-
-function buildPowerShellCompletion(): string {
-	const quoteList = (items: readonly string[]) => items.map(item => `'${item}'`).join(', ');
-	return [
-		'# PowerShell completion for aexus-ade',
-		`Register-ArgumentCompleter -Native -CommandName aexus-ade -ScriptBlock {`,
-		'\tparam($wordToComplete, $commandAst, $cursorPosition)',
-		'\t$tokens = $commandAst.CommandElements | ForEach-Object { $_.Extent.Text }',
-		`\t$topLevel = @(${quoteList(TOP_LEVEL_COMMANDS)})`,
-		`\t$shells = @(${quoteList(COMPLETION_SHELLS)})`,
-		`\t$roleSubcommands = @(${quoteList(ROLE_SUBCOMMANDS)})`,
-		`\t$rankSubcommands = @(${quoteList(RANK_SUBCOMMANDS)})`,
-		`\t$missionSubcommands = @(${quoteList(MISSION_SUBCOMMANDS)})`,
-		`\t$tokenSubcommands = @(${quoteList(TOKEN_SUBCOMMANDS)})`,
-		`\t$orgSubcommands = @(${quoteList(ORG_SUBCOMMANDS)})`,
-		'\t$candidates = @()',
-		'\tif ($tokens.Count -le 2 -and ($tokens.Count -eq 1 -or $wordToComplete)) {',
-		'\t\t$candidates = $topLevel',
-		'\t} elseif ($tokens.Count -ge 2) {',
-		'\t\tswitch ($tokens[1]) {',
-		'\t\t\t\'completion\' { $candidates = $shells }',
-		'\t\t\t{ $_ -in @(\'rank\', \'ranks\') } { $candidates = $rankSubcommands }',
-		'\t\t\t{ $_ -in @(\'role\', \'roles\') } { $candidates = $roleSubcommands }',
-		'\t\t\t\'org\' { $candidates = $orgSubcommands }',
-		'\t\t\t\'token\' { $candidates = $tokenSubcommands }',
-		'\t\t\t\'mission\' { $candidates = $missionSubcommands }',
-		'\t\t}',
-		'\t}',
-		`\t$candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {`,
-		`\t\t[System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)`,
-		'\t}',
-		'}',
-		'',
-	].join('\n');
-}
-
-export function buildCompletionScript(shell: CompletionShell): string {
-	switch (shell) {
-		case 'bash': return buildBashCompletion();
-		case 'zsh': return buildZshCompletion();
-		case 'fish': return buildFishCompletion();
-		case 'powershell': return buildPowerShellCompletion();
-	}
 }
 
 export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promise<number> {
@@ -2824,9 +2109,16 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		return 1;
 	}
 
+	const effectiveJsonTTY = io.stdoutIsTTY !== undefined
+		? io.stdoutIsTTY
+		: (io.stdout ? false : Boolean(process.stdout.isTTY));
+	const prettyJson = Boolean(parsed.pretty || effectiveJsonTTY);
+	const formatJsonLine = (value: unknown): string =>
+		`${prettyJson ? JSON.stringify(value, null, 2) : JSON.stringify(value)}\n`;
+
 	if (parsed.version) {
 		if (parsed.json) {
-			writeOut(JSON.stringify({ schemaVersion: ADE_CLI_SCHEMA_VERSION, cli: 'aexus-ade', version: ADE_CLI_VERSION, engineBaseline: ADE_ENGINE_BASELINE }, null, 2) + '\n');
+			writeOut(formatJsonLine({ schemaVersion: ADE_CLI_SCHEMA_VERSION, cli: 'aexus-ade', version: ADE_CLI_VERSION, engineBaseline: ADE_ENGINE_BASELINE }));
 		} else {
 			writeOut(`aexus-ade ${ADE_CLI_VERSION} (Aexus Code / Code - OSS ${ADE_ENGINE_BASELINE})\n`);
 		}
@@ -2848,7 +2140,7 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		const strict = parsed.params?.strict === true;
 		const report = await runDoctorDiagnostics(projectPath, env);
 		if (parsed.json) {
-			writeOut(JSON.stringify(report, null, 2) + '\n');
+			writeOut(formatJsonLine(report));
 		} else {
 			const isTTY = io.stdoutIsTTY ?? Boolean(process.stdout.isTTY);
 			writeOut(formatDoctorHuman(report, createColorizer(shouldUseColor(env, isTTY))) + '\n');
@@ -2857,7 +2149,28 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 	}
 
 	try {
-		const { socketPath, token, usingSessionToken } = await resolveConnection(env);
+		let stdinConsumedBy: string | undefined;
+		const readTextInputOnce = async (fileOrDash: string, label: string): Promise<string> => {
+			if (fileOrDash.trim() === '-') {
+				if (stdinConsumedBy) {
+					throw new CliUsageError(`Standard input ("-") cannot be consumed by multiple options (${stdinConsumedBy} and ${label}) in one command.`);
+				}
+				if (io.stdin === undefined && Boolean(process.stdin.isTTY)) {
+					throw new CliUsageError(`Standard input ("-") was requested for ${label}, but stdin is an interactive TTY. Pipe input (e.g. <<'EOF') or pass a file path.`);
+				}
+				stdinConsumedBy = label;
+				if (io.stdin !== undefined) {
+					return io.stdin;
+				}
+				const chunks: Buffer[] = [];
+				for await (const chunk of process.stdin) {
+					chunks.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : Buffer.from(chunk));
+				}
+				return Buffer.concat(chunks).toString('utf8');
+			}
+			return fs.readFile(path.resolve(cwd, fileOrDash), 'utf8');
+		};
+
 		const normalizedParams = await canonicalizeParamsPaths(parsed.params, parsed.action);
 		let exportOutputFile: string | undefined;
 		if (
@@ -2867,71 +2180,145 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			exportOutputFile = path.resolve(cwd, normalizedParams.outputFile.trim());
 			delete normalizedParams.outputFile;
 		}
-		if (
-			(parsed.action === 'token.mint' || parsed.action === 'token.split')
-			&& normalizedParams && typeof normalizedParams.branchesFile === 'string' && normalizedParams.branchesJson === undefined
-		) {
-			normalizedParams.branchesJson = await fs.readFile(path.resolve(cwd, normalizedParams.branchesFile), 'utf8');
-			delete normalizedParams.branchesFile;
-		}
-		if (
-			(parsed.action === 'orchestration.validate' || parsed.action === 'orchestration.load')
-			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.manifest === undefined && normalizedParams.text === undefined
-		) {
-			const resolvedFile = path.resolve(cwd, normalizedParams.file);
-			const ext = path.extname(resolvedFile).toLowerCase();
-			if (ext === '.json') {
-				normalizedParams.manifest = JSON.parse(await fs.readFile(resolvedFile, 'utf8'));
-			} else if (ext === '.mjs' || ext === '.js' || ext === '.cjs') {
-				const { pathToFileURL } = await import('url');
-				const mod = await import(pathToFileURL(resolvedFile).href) as { default?: unknown; manifest?: unknown };
-				const candidate = mod.default ?? mod.manifest ?? mod;
-				normalizedParams.manifest = typeof candidate === 'function' ? await (candidate as () => unknown)() : candidate;
-			} else {
-				const rawText = await fs.readFile(resolvedFile, 'utf8');
-				if (rawText.trimStart().startsWith('{')) {
-					normalizedParams.manifest = JSON.parse(rawText);
+		if (normalizedParams) {
+			if (typeof normalizedParams.detailFile === 'string' && normalizedParams.detail === undefined) {
+				normalizedParams.detail = await readTextInputOnce(normalizedParams.detailFile, '--detail-file');
+				delete normalizedParams.detailFile;
+			} else if (normalizedParams.detail === '-') {
+				normalizedParams.detail = await readTextInputOnce('-', '--detail');
+			}
+			if (
+				(parsed.action === 'token.mint' || parsed.action === 'token.split')
+				&& typeof normalizedParams.branchesFile === 'string' && normalizedParams.branchesJson === undefined
+			) {
+				normalizedParams.branchesJson = await readTextInputOnce(normalizedParams.branchesFile, '--branches-file');
+				delete normalizedParams.branchesFile;
+			} else if (
+				(parsed.action === 'token.mint' || parsed.action === 'token.split')
+				&& normalizedParams.branchesJson === '-'
+			) {
+				normalizedParams.branchesJson = await readTextInputOnce('-', '--branches-json');
+			}
+			if (typeof normalizedParams.promptFile === 'string' && normalizedParams.prompt === undefined) {
+				normalizedParams.prompt = await readTextInputOnce(normalizedParams.promptFile, '--prompt-file');
+				delete normalizedParams.promptFile;
+			} else if (
+				(parsed.action === 'session.send' || parsed.action === 'secretary.send' || parsed.action === 'orchestration.dispatch')
+				&& normalizedParams.prompt === '-'
+			) {
+				normalizedParams.prompt = await readTextInputOnce('-', '--prompt');
+			}
+			if (typeof normalizedParams.messageFile === 'string' && normalizedParams.message === undefined) {
+				normalizedParams.message = await readTextInputOnce(normalizedParams.messageFile, '--message-file');
+				delete normalizedParams.messageFile;
+			} else if (
+				(parsed.action === 'org.send' || parsed.action === 'inbox.post')
+				&& normalizedParams.message === '-'
+			) {
+				normalizedParams.message = await readTextInputOnce('-', '--message');
+			}
+			if (
+				(parsed.action === 'orchestration.validate' || parsed.action === 'orchestration.load')
+				&& typeof normalizedParams.file === 'string' && normalizedParams.manifest === undefined && normalizedParams.text === undefined
+			) {
+				if (normalizedParams.file.trim() === '-') {
+					const rawText = await readTextInputOnce('-', '--file');
+					delete normalizedParams.file;
+					if (rawText.trimStart().startsWith('{')) {
+						normalizedParams.manifest = JSON.parse(rawText);
+					} else {
+						normalizedParams.text = rawText;
+						if (parsed.action === 'orchestration.load') {
+							parsed = { ...parsed, action: 'orchestration.apply' };
+						}
+					}
 				} else {
-					normalizedParams.text = rawText;
-					if (parsed.action === 'orchestration.load') {
-						parsed = { ...parsed, action: 'orchestration.apply' };
+					const resolvedFile = path.resolve(cwd, normalizedParams.file);
+					const ext = path.extname(resolvedFile).toLowerCase();
+					if (ext === '.json') {
+						normalizedParams.manifest = JSON.parse(await fs.readFile(resolvedFile, 'utf8'));
+					} else if (ext === '.mjs' || ext === '.js' || ext === '.cjs') {
+						// eslint-disable-next-line no-restricted-syntax -- dynamic user manifest (.mjs/.js/.cjs) loader
+						const mod = await import(pathToFileURL(resolvedFile).href) as { default?: unknown; manifest?: unknown };
+						const candidate = mod.default ?? mod.manifest ?? mod;
+						normalizedParams.manifest = typeof candidate === 'function' ? await (candidate as () => unknown)() : candidate;
+					} else {
+						const rawText = await fs.readFile(resolvedFile, 'utf8');
+						if (rawText.trimStart().startsWith('{')) {
+							normalizedParams.manifest = JSON.parse(rawText);
+						} else {
+							normalizedParams.text = rawText;
+							if (parsed.action === 'orchestration.load') {
+								parsed = { ...parsed, action: 'orchestration.apply' };
+							}
+						}
 					}
 				}
 			}
+			if (
+				(parsed.action === 'mission.blueprint.apply' || parsed.action === 'mission.blueprint.validate' || parsed.action === 'orchestration.apply' || parsed.action === 'orchestration.import' || parsed.action === 'mission.import')
+			) {
+				if (typeof normalizedParams.file === 'string' && normalizedParams.text === undefined) {
+					normalizedParams.text = await readTextInputOnce(normalizedParams.file, '--file');
+					if (normalizedParams.file.trim() === '-') {
+						delete normalizedParams.file;
+					}
+				} else if (normalizedParams.text === '-') {
+					normalizedParams.text = await readTextInputOnce('-', '--text');
+				}
+			}
+			if (parsed.action === 'mission.patch') {
+				if (typeof normalizedParams.file === 'string' && normalizedParams.mermaid === undefined) {
+					normalizedParams.mermaid = await readTextInputOnce(normalizedParams.file, '--file');
+					if (normalizedParams.file.trim() === '-') {
+						delete normalizedParams.file;
+					}
+				} else if (normalizedParams.mermaid === '-') {
+					normalizedParams.mermaid = await readTextInputOnce('-', '--mermaid');
+				}
+			}
+			if (
+				parsed.action === 'mission.prompt.set'
+				&& normalizedParams.clear !== true
+			) {
+				if (typeof normalizedParams.file === 'string' && normalizedParams.prompt === undefined) {
+					normalizedParams.prompt = await readTextInputOnce(normalizedParams.file, '--file');
+					if (normalizedParams.file.trim() === '-') {
+						delete normalizedParams.file;
+					}
+				} else if (normalizedParams.prompt === '-') {
+					normalizedParams.prompt = await readTextInputOnce('-', '--prompt');
+				}
+			}
+			if (parsed.action === 'mission.task.create' || parsed.action === 'mission.task.set' || parsed.action === 'mission.task.update') {
+				if (typeof normalizedParams.file === 'string' && normalizedParams.description === undefined) {
+					normalizedParams.description = await readTextInputOnce(normalizedParams.file, '--file');
+					if (normalizedParams.file.trim() === '-') {
+						delete normalizedParams.file;
+					}
+				} else if (normalizedParams.description === '-') {
+					normalizedParams.description = await readTextInputOnce('-', '--description');
+				}
+			}
+			if (parsed.action === 'whiteboard.create' || parsed.action === 'whiteboard.write') {
+				if (typeof normalizedParams.appendFile === 'string' && normalizedParams.appendContent === undefined) {
+					normalizedParams.appendContent = await readTextInputOnce(normalizedParams.appendFile, '--append-file');
+					delete normalizedParams.appendFile;
+				} else if (normalizedParams.appendContent === '-') {
+					normalizedParams.appendContent = await readTextInputOnce('-', '--append');
+				}
+				if (typeof normalizedParams.file === 'string' && normalizedParams.content === undefined && normalizedParams.appendContent === undefined) {
+					normalizedParams.content = await readTextInputOnce(normalizedParams.file, '--file');
+					delete normalizedParams.file;
+				} else if (normalizedParams.content === '-') {
+					normalizedParams.content = await readTextInputOnce('-', '--content');
+				}
+			}
 		}
-		if (
-			(parsed.action === 'mission.blueprint.apply' || parsed.action === 'mission.blueprint.validate' || parsed.action === 'orchestration.apply' || parsed.action === 'orchestration.import' || parsed.action === 'mission.import')
-			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.text === undefined
-		) {
-			normalizedParams.text = await fs.readFile(path.resolve(cwd, normalizedParams.file), 'utf8');
-		}
-		if (
-			parsed.action === 'mission.patch'
-			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.mermaid === undefined
-		) {
-			normalizedParams.mermaid = await fs.readFile(normalizedParams.file, 'utf8');
-		}
-		if (
-			parsed.action === 'mission.prompt.set'
-			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.prompt === undefined && normalizedParams.clear !== true
-		) {
-			normalizedParams.prompt = await fs.readFile(normalizedParams.file, 'utf8');
-		}
-		if (
-			(parsed.action === 'mission.task.set' || parsed.action === 'mission.task.update')
-			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.description === undefined
-		) {
-			normalizedParams.description = await fs.readFile(path.resolve(cwd, normalizedParams.file), 'utf8');
-		}
-		if (
-			(parsed.action === 'whiteboard.create' || parsed.action === 'whiteboard.write')
-			&& normalizedParams && typeof normalizedParams.file === 'string' && normalizedParams.content === undefined && normalizedParams.appendContent === undefined
-		) {
-			normalizedParams.content = await fs.readFile(normalizedParams.file, 'utf8');
-		}
+
+		const { socketPath, token, usingSessionToken } = await resolveConnection(env);
 		let effectiveParams: Record<string, unknown> | undefined = normalizedParams;
 		if (usingSessionToken) {
-			// When authenticating with a server-signed capability token, never let CLI flags or env spoof caller.
 			if (effectiveParams) {
 				const sanitized: Record<string, unknown> = { ...effectiveParams };
 				delete sanitized.caller;
@@ -2956,20 +2343,32 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			? Number(envWindowIdRaw)
 			: undefined;
 		const effectiveWindowId = parsed.windowId ?? envWindowId;
-		const makeRequest = (action: string): IAdeControlWireRequest => ({
-			token,
-			action,
-			params: effectiveParams,
-			...(effectiveWindowId !== undefined ? { windowId: effectiveWindowId } : {}),
-		});
+		const envIdempotencyRaw = env.AEXUS_ADE_IDEMPOTENCY_KEY?.trim();
+		const explicitIdempotencyKey = parsed.idempotencyKey
+			?? (envIdempotencyRaw ? validateIdempotencyKey(envIdempotencyRaw, 'AEXUS_ADE_IDEMPOTENCY_KEY') : undefined);
+		const primaryIdempotencyKey = explicitIdempotencyKey
+			?? (!isIdempotentReadRequest(parsed.action, effectiveParams) ? crypto.randomUUID() : undefined);
+		const makeRequest = (action: string, isFallback = false): IAdeControlWireRequest => {
+			let reqKey = primaryIdempotencyKey;
+			if (isFallback && reqKey) {
+				reqKey = reqKey.length <= 125 ? `${reqKey}:fb` : `${reqKey.slice(0, 125)}:fb`;
+			}
+			return {
+				token,
+				action,
+				params: effectiveParams,
+				...(effectiveWindowId !== undefined ? { windowId: effectiveWindowId } : {}),
+				...(reqKey !== undefined ? { idempotencyKey: reqKey } : {}),
+			};
+		};
 		const allowBridgeRetry = Boolean(usingSessionToken && (env.AEXUS_ADE_REMOTE_BRIDGE_FILE?.trim() || env.AEXUS_ADE_TCP_PORT?.trim() || env.AEXUS_ADE_SOCKET?.trim()));
-		let response = await sendControlRequestWithRetry(env, socketPath, makeRequest(parsed.action!), allowBridgeRetry);
+		let response = await sendControlRequestWithRetry(env, socketPath, makeRequest(parsed.action!, false), allowBridgeRetry);
 		if (!response.ok && parsed.fallbackAction && /unknown|unsupported/i.test(response.error ?? '')) {
-			response = await sendControlRequestWithRetry(env, socketPath, makeRequest(parsed.fallbackAction), allowBridgeRetry);
+			response = await sendControlRequestWithRetry(env, socketPath, makeRequest(parsed.fallbackAction, true), allowBridgeRetry);
 		}
 		if (!response.ok) {
 			if (parsed.json) {
-				writeOut(JSON.stringify(response, null, 2) + '\n');
+				writeOut(formatJsonLine(response));
 			} else {
 				writeErr(`Error: ${response.error || 'ADE control command failed.'}\n`);
 			}
@@ -2983,13 +2382,23 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 			const payloadObj = outputPayload && typeof outputPayload === 'object' && !Array.isArray(outputPayload)
 				? outputPayload as Record<string, unknown>
 				: undefined;
+			const isMarkdownMissionExport = parsed.action === 'mission.export'
+				&& (
+					parsed.params?.format === 'markdown'
+					|| parsed.params?.format === 'md'
+					|| payloadObj?.format === 'markdown'
+				);
 			const fileContent = parsed.action === 'orchestration.export'
 				? (typeof outputPayload === 'string'
 					? outputPayload
 					: (payloadObj?.manifest
 						? (JSON.stringify(payloadObj.manifest, null, 2) + '\n')
 						: String(payloadObj?.orchestrationText ?? '')))
-				: (JSON.stringify(outputPayload ?? {}, null, 2) + '\n');
+				: isMarkdownMissionExport
+					? (typeof outputPayload === 'string'
+						? outputPayload
+						: String(payloadObj?.content ?? payloadObj?.markdown ?? payloadObj?.text ?? ''))
+					: (JSON.stringify(outputPayload ?? {}, null, 2) + '\n');
 			await fs.writeFile(exportOutputFile, fileContent.endsWith('\n') ? fileContent : `${fileContent}\n`, 'utf8');
 			const summary = {
 				ok: true,
@@ -3004,14 +2413,14 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 					: {}),
 			};
 			if (parsed.json) {
-				writeOut(JSON.stringify(summary, null, 2) + '\n');
+				writeOut(formatJsonLine(summary));
 			} else {
 				writeOut(`Exported to ${exportOutputFile} (${summary.bytes} bytes)\n`);
 			}
 			return 0;
 		}
 		if (parsed.json) {
-			writeOut(JSON.stringify(outputPayload ?? { ok: true }, null, 2) + '\n');
+			writeOut(formatJsonLine(outputPayload ?? { ok: true }));
 		} else if (parsed.action === 'docs.read' && outputPayload && typeof outputPayload === 'object' && typeof (outputPayload as Record<string, unknown>).content === 'string') {
 			const content = (outputPayload as Record<string, unknown>).content as string;
 			writeOut(content.endsWith('\n') ? content : `${content}\n`);
@@ -3025,8 +2434,10 @@ export async function runCli(argv: readonly string[], io: AdeCliIo = {}): Promis
 		}
 		return 0;
 	} catch (error) {
-		if (parsed.json) {
-			writeOut(JSON.stringify({ ok: false, error: (error as Error).message }, null, 2) + '\n');
+		if (parsed.json && !(error instanceof CliUsageError)) {
+			writeOut(formatJsonLine({ ok: false, error: (error as Error).message }));
+		} else if (parsed.json && error instanceof CliUsageError) {
+			writeOut(formatJsonLine({ ok: false, error: error.message }));
 		} else {
 			writeErr(`Error: ${(error as Error).message}\n`);
 		}

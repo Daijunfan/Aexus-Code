@@ -83,11 +83,25 @@ async function tryUnwrapWindowsCmdNodeShim(cmdPath: string, env: NodeJS.ProcessE
 			const jsEntry = directNodeMatch[2];
 			const [stNode, stJs] = await Promise.all([fs.stat(nodeExe).catch(() => undefined), fs.stat(jsEntry).catch(() => undefined)]);
 			if (stNode?.isFile() && stJs?.isFile()) {
-				return { nodeExe, jsEntry, useElectronAsNode: false };
+				return { nodeExe: nodeExe, jsEntry, useElectronAsNode: false };
 			}
 		}
 	} catch { /* fallback to cmd.exe */ }
 	return undefined;
+}
+
+function killPosixProcessGroup(pid: number, signal: NodeJS.Signals): void {
+	try {
+		process.kill(-pid, signal);
+		return;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
+			return;
+		}
+	}
+	try {
+		process.kill(pid, signal);
+	} catch { /* already exited */ }
 }
 
 async function main(): Promise<void> {
@@ -99,6 +113,7 @@ async function main(): Promise<void> {
 	delete env.NODE_CHANNEL_SERIALIZATION_MODE;
 
 	const executable = await resolveWindowsCommandIfBare(rawExecutable, env);
+	const isPosix = process.platform !== 'win32';
 
 	let child: cp.ChildProcess;
 	if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable)) {
@@ -128,26 +143,105 @@ async function main(): Promise<void> {
 			windowsHide: true,
 		});
 	} else {
+		// Dedicated POSIX process group (`detached: true`) ensures `-child.pid` kills the CLI and ALL
+		// grandchild subshells/compilers without prematurely killing this supervisor before SIGKILL escalation.
 		child = cp.spawn(executable, args, {
 			stdio: 'inherit',
 			env,
 			windowsHide: true,
+			detached: isPosix,
 		});
 	}
 
-	const terminate = () => {
-		if (process.platform === 'win32') {
-			if (!child.pid) { process.exit(1); }
-			const taskkill = cp.spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-			taskkill.on('exit', () => process.exit(0));
-			taskkill.on('error', () => { child.kill(); process.exit(1); });
-		} else if (child.pid) {
-			try { process.kill(-process.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+	if (child.pid && typeof process.send === 'function') {
+		try {
+			process.send({ type: 'spawned', pid: child.pid });
+		} catch { /* parent IPC may have closed */ }
+	}
+
+	let terminating = false;
+	const terminate = (initialSignal: NodeJS.Signals = 'SIGTERM') => {
+		if (!child.pid) {
+			process.exit(1);
+			return;
 		}
+		if (process.platform === 'win32') {
+			if (terminating && initialSignal !== 'SIGKILL') {
+				return;
+			}
+			terminating = true;
+			const taskkill = cp.spawn(
+				path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'),
+				['/PID', String(child.pid), '/T', '/F'],
+				{ windowsHide: true, stdio: 'ignore' },
+			);
+			const hardExit = setTimeout(() => {
+				try { child.kill('SIGKILL'); } catch { /* ignore */ }
+				process.exit(0);
+			}, 2000);
+			hardExit.unref?.();
+			taskkill.on('exit', () => {
+				clearTimeout(hardExit);
+				process.exit(0);
+			});
+			taskkill.on('error', () => {
+				clearTimeout(hardExit);
+				try { child.kill(); } catch { /* ignore */ }
+				process.exit(1);
+			});
+			return;
+		}
+
+		// POSIX: forward signal to child's dedicated PGID and stay alive up to 1.4s to enforce SIGKILL escalation.
+		killPosixProcessGroup(child.pid, initialSignal);
+		if (initialSignal === 'SIGKILL') {
+			const finalExit = setTimeout(() => process.exit(0), 150);
+			finalExit.unref?.();
+			return;
+		}
+		if (terminating) {
+			return;
+		}
+		terminating = true;
+		if (initialSignal === 'SIGINT') {
+			const termTimer = setTimeout(() => {
+				if (child.exitCode === null && child.signalCode === null && child.pid) {
+					killPosixProcessGroup(child.pid, 'SIGTERM');
+				}
+			}, 650);
+			termTimer.unref?.();
+		}
+		const killTimer = setTimeout(() => {
+			if (child.exitCode === null && child.signalCode === null && child.pid) {
+				killPosixProcessGroup(child.pid, 'SIGKILL');
+			}
+			const hardExit = setTimeout(() => process.exit(0), 200);
+			hardExit.unref?.();
+		}, 1400);
+		killTimer.unref?.();
 	};
-	process.on('disconnect', terminate);
-	child.on('error', error => { console.error(error.message); process.exit(1); });
-	child.on('exit', code => process.exit(code ?? 1));
+
+	process.on('SIGTERM', () => terminate('SIGTERM'));
+	process.on('SIGINT', () => terminate('SIGINT'));
+	process.on('SIGHUP', () => terminate('SIGTERM'));
+	process.on('disconnect', () => terminate('SIGTERM'));
+	process.on('message', (msg: unknown) => {
+		if (msg && typeof msg === 'object' && (msg as { type?: unknown }).type === 'terminate') {
+			const sig = (msg as { signal?: unknown }).signal;
+			terminate(sig === 'SIGINT' || sig === 'SIGKILL' ? sig : 'SIGTERM');
+		}
+	});
+	child.on('error', error => {
+		console.error(error.message);
+		process.exit(1);
+	});
+	child.on('exit', (code, signal) => {
+		if (child.pid && isPosix) {
+			// Sweep any lingering background grandchildren in the child's PGID when the main CLI exits.
+			killPosixProcessGroup(child.pid, 'SIGKILL');
+		}
+		process.exit(code ?? (signal ? 1 : 0));
+	});
 }
 
 void main();

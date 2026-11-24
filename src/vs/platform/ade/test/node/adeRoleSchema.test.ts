@@ -226,7 +226,8 @@ suite('ADE Extensible Organization Schema & Core Primitive APIs', () => {
 			supervisor: { id: 'lead-1', label: 'Alice Lead', rankName: 'Tech Lead' },
 		})!;
 
-		assert.ok(compiled.includes('Hello L2 Reviewer on AcmeApp reporting to Alice Lead (Tech Lead).'));
+		assert.ok(compiled.includes('Hello L2 Reviewer on AcmeApp reporting to Tech Lead (Tech Lead).'));
+		assert.ok(compiled.includes('- Supervisor: Alice Lead (id: lead-1, role: Tech Lead)'));
 		assert.ok(compiled.includes('aexus-ade session subordinates rev-1 --json'));
 		assert.ok(compiled.includes('aexus-ade project list --json'));
 		assert.ok(!compiled.includes('aexus-ade session send'), 'Ungranted session.message API must NOT appear in compiled prompt');

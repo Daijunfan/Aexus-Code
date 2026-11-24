@@ -80,6 +80,7 @@ export class AdeMissionFileDrawer extends Disposable {
 	private readonly tasksListEl: HTMLElement;
 	private readonly drawerStatusEl: HTMLElement;
 
+	private readonly layoutMenuDisposables = this._register(new DisposableStore());
 	private readonly taskCardsDisposables = this._register(new DisposableStore());
 	private readonly taskCardById = new Map<string, {
 		readonly cardEl: HTMLElement;
@@ -93,7 +94,9 @@ export class AdeMissionFileDrawer extends Disposable {
 	private layoutMenuOpen = false;
 	private drawerOpen = false;
 	private focusedTaskNodeId: string | undefined;
-	private parseTimer: ReturnType<typeof setTimeout> | undefined;
+	private parseTimer: number | undefined;
+	private pendingDraftText: string | undefined;
+	private pendingExternalCodeText: string | undefined;
 
 	constructor(
 		bodyEl: HTMLElement,
@@ -216,11 +219,23 @@ export class AdeMissionFileDrawer extends Disposable {
 
 		this._register(addDisposableListener(this.codeTextareaEl, EventType.INPUT, () => {
 			const nextText = this.codeTextareaEl.value;
+			this.pendingExternalCodeText = undefined;
 			this.clearParseTimer();
-			this.parseTimer = setTimeout(() => {
+			this.pendingDraftText = nextText;
+			this.parseTimer = getWindow(this.codeTextareaEl).setTimeout(() => {
 				this.parseTimer = undefined;
+				this.pendingDraftText = undefined;
 				this.delegate.onCodeDraftChange(nextText);
 			}, 90);
+		}));
+		this._register(addDisposableListener(this.codeTextareaEl, EventType.BLUR, () => {
+			if (this.pendingExternalCodeText !== undefined && this.parseTimer === undefined) {
+				const pending = this.pendingExternalCodeText;
+				this.pendingExternalCodeText = undefined;
+				if (this.codeTextareaEl.value !== pending) {
+					this.codeTextareaEl.value = pending;
+				}
+			}
 		}));
 		this._register(addDisposableListener(this.codeTextareaEl, EventType.KEY_DOWN, (e: KeyboardEvent) => {
 			if (e.key !== 'Escape') {
@@ -296,6 +311,7 @@ export class AdeMissionFileDrawer extends Disposable {
 	}
 
 	private rebuildLayoutMenuItems(): void {
+		this.layoutMenuDisposables.clear();
 		clearNode(this.layoutMenuEl);
 		this.layoutMenuItemByMode.clear();
 		append(this.layoutMenuEl, $('.ade-orch-layout-menu-header', {}, adeBi(
@@ -348,7 +364,7 @@ export class AdeMissionFileDrawer extends Disposable {
 			append(textCol, $('span.ade-orch-layout-item-desc', {}, opt.desc));
 			const check = append(itemBtn, $('span.ade-orch-layout-item-check', { 'aria-hidden': 'true' }));
 			check.classList.add(...ThemeIcon.asClassNameArray(Codicon.check));
-			this._register(addDisposableListener(itemBtn, EventType.CLICK, e => {
+			this.layoutMenuDisposables.add(addDisposableListener(itemBtn, EventType.CLICK, e => {
 				e.stopPropagation();
 				this.setLayoutMode(opt.mode);
 				this.toggleLayoutMenu(false);
@@ -390,7 +406,7 @@ export class AdeMissionFileDrawer extends Disposable {
 		this.drawerFilenameEl.textContent = isOrch ? 'orchestration.mmd' : 'mission.mmd';
 		this.leftPaneTitleEl.textContent = isOrch
 			? adeBi(localize('adeOrchCodePaneTitle', "Declarative Staff Topology (Cycles & Bidirectional Supported)"), '声明式员工编排代码（支持双向与回路 · 实时双向同步）')
-			: adeBi(localize('adeMissionDagCodeTitle', "Mermaid Task DAG (Strictly Acyclic)"), 'Mermaid 任务流图（严格无环 DAG）');
+			: adeBi(localize('adeMissionDagCodeTitleAcyclic', "Mermaid Task DAG (Strictly Acyclic)"), 'Mermaid 任务流图（严格无环 DAG）');
 		this.rightPaneTitleEl.textContent = adeBi(localize('adeMissionTaskDescsTitle', "Task Descriptions"), '全部任务节点描述');
 		this.codeTextareaEl.placeholder = isOrch ? ORCHESTRATION_CODE_PLACEHOLDER : MISSION_MERMAID_PLACEHOLDER;
 		if (isOrch) {
@@ -411,9 +427,19 @@ export class AdeMissionFileDrawer extends Disposable {
 
 	clearParseTimer(): void {
 		if (this.parseTimer !== undefined) {
-			clearTimeout(this.parseTimer);
+			getWindow(this.codeTextareaEl).clearTimeout(this.parseTimer);
 			this.parseTimer = undefined;
 		}
+		this.pendingDraftText = undefined;
+	}
+
+	flushPendingCodeDraft(): void {
+		if (this.parseTimer === undefined) {
+			return;
+		}
+		const draft = this.pendingDraftText ?? this.codeTextareaEl.value;
+		this.clearParseTimer();
+		this.delegate.onCodeDraftChange(draft);
 	}
 
 	isOpen(): boolean {
@@ -422,9 +448,21 @@ export class AdeMissionFileDrawer extends Disposable {
 
 	setSelectedTaskNodeId(nodeId: string | undefined): void {
 		this.focusedTaskNodeId = nodeId;
+		if (this.drawerOpen && this.viewMode === 'mission') {
+			for (const [id, entry] of this.taskCardById.entries()) {
+				entry.cardEl.classList.toggle('is-focused', id === nodeId);
+			}
+		}
 	}
 
-	setCodeValue(text: string): void {
+	setCodeValue(text: string, force = true): void {
+		const isFocused = getWindow(this.codeTextareaEl).document.activeElement === this.codeTextareaEl;
+		const hasUnsyncedDraft = this.parseTimer !== undefined || this.codeTextareaEl.value !== this.delegate.getCodeText();
+		if (!force && isFocused && hasUnsyncedDraft) {
+			this.pendingExternalCodeText = text;
+			return;
+		}
+		this.pendingExternalCodeText = undefined;
 		this.clearParseTimer();
 		if (this.codeTextareaEl.value !== text) {
 			this.codeTextareaEl.value = text;
@@ -532,11 +570,12 @@ export class AdeMissionFileDrawer extends Disposable {
 				}
 				const badge = formatStatusBadge(task.id);
 				entry.statusEl.className = `ade-mission-task-desc-status ${badge.cls}`;
+				entry.statusEl.setAttribute('data-task-status', statuses[task.id]?.status ?? 'pending');
 				if (entry.statusEl.textContent !== badge.label) {
 					entry.statusEl.textContent = badge.label;
 				}
 				const nextDesc = descriptions[task.id] ?? '';
-				const isFocused = document.activeElement === entry.textareaEl;
+				const isFocused = getWindow(entry.textareaEl).document.activeElement === entry.textareaEl;
 				if ((!preserveActiveTextarea || !isFocused) && entry.textareaEl.value !== nextDesc) {
 					entry.textareaEl.value = nextDesc;
 				}

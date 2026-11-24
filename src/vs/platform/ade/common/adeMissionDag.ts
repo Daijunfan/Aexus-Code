@@ -29,6 +29,7 @@ export {
 	computeNodeDragSnapAlignment,
 	generateNextMissionNodeId,
 	MissionCanvasHistoryStack,
+	parseStrictMinCompleterTier,
 	removeEdgeFromMermaid,
 	removeNodeFromMermaid,
 	removeNodesFromMermaid,
@@ -105,6 +106,14 @@ export interface IMissionNodePosition {
 	readonly y: number;
 }
 
+export interface IMissionTaskCompletionContract {
+	readonly requireChecksPassed?: boolean;
+	readonly requireArtifact?: boolean;
+	readonly requireFiles?: boolean;
+	readonly requiredWhiteboardIds?: readonly string[];
+	readonly minSummaryChars?: number;
+}
+
 export interface IMissionDagNode {
 	readonly id: string;
 	readonly label: string;
@@ -131,6 +140,8 @@ export interface IMissionDagNode {
 	readonly minCompleterTier?: number;
 	/** Optional explicit list of Orchestration staff node IDs authorized to mark this task completed. */
 	readonly allowedCompleterNodeIds?: readonly string[];
+	/** Optional deterministic completion guardrail contract parsed from `%% task <id> [...]` or manifest. */
+	readonly completionContract?: IMissionTaskCompletionContract;
 	/** Optional custom visual accent color preset ID (e.g. 'cyan', 'rose') or `#rrggbb` hex. */
 	readonly color?: string;
 }
@@ -179,6 +190,12 @@ export interface IMissionDagParseResult {
 	/** Deduplicated employee groups (one locked employee session per unique employee, reused across multiple DAG positions). */
 	readonly employees?: readonly IMissionDagEmployeeGroup[];
 	readonly error?: string;
+}
+
+export interface IDualViewBlueprintParseResult {
+	readonly mermaidText: string;
+	readonly orchestrationText?: string;
+	readonly nodePrompts: Readonly<Record<string, string>>;
 }
 
 export interface IMissionEdgeObstacle {
@@ -279,15 +296,261 @@ const MIN_WORLD_WIDTH = 4800;
 const MIN_WORLD_HEIGHT = 3600;
 const WORLD_MARGIN = 640;
 
+function isEscapedAt(input: string, index: number): boolean {
+	let backslashes = 0;
+	for (let i = index - 1; i >= 0 && input[i] === '\\'; i--) {
+		backslashes++;
+	}
+	return (backslashes % 2) === 1;
+}
+
 function stripOuterQuotes(raw: string): string {
 	const t = raw.trim();
-	if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith('\'') && t.endsWith('\''))) {
-		return t.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n');
+	if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith('\'') && t.endsWith('\'')))) {
+		const quote = t[0];
+		return t.slice(1, -1).replace(/\\(.)/g, (_m, ch: string) => {
+			if (ch === 'n') { return '\n'; }
+			if (ch === 't') { return '\t'; }
+			if (ch === 'r') { return '\r'; }
+			if (ch === '\\' || ch === '"' || ch === '\'' || ch === quote) { return ch; }
+			return `\\${ch}`;
+		});
 	}
 	return t;
 }
 
+function findMermaidCommentIndex(rawLine: string): number {
+	let inQuote: '"' | '\'' | undefined;
+	for (let i = 0; i < rawLine.length; i++) {
+		const ch = rawLine[i];
+		if (inQuote) {
+			if (ch === inQuote && !isEscapedAt(rawLine, i)) {
+				inQuote = undefined;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === '\'') {
+			inQuote = ch;
+			continue;
+		}
+		if (ch === '%' && rawLine[i + 1] === '%') {
+			return i;
+		}
+	}
+	return -1;
+}
+
+function extractBalancedBracketSection(input: string, openIdx: number): { readonly content: string; readonly closeIdx: number } | undefined {
+	if (input[openIdx] !== '[') {
+		return undefined;
+	}
+	let depth = 0;
+	let inQuote: '"' | '\'' | undefined;
+	for (let i = openIdx; i < input.length; i++) {
+		const ch = input[i];
+		if (inQuote) {
+			if (ch === inQuote && !isEscapedAt(input, i)) {
+				inQuote = undefined;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === '\'') {
+			inQuote = ch;
+			continue;
+		}
+		if (ch === '[') {
+			depth++;
+		} else if (ch === ']') {
+			depth--;
+			if (depth === 0) {
+				return { content: input.slice(openIdx + 1, i), closeIdx: i };
+			}
+		}
+	}
+	return undefined;
+}
+
+function buildQuoteRanges(input: string): readonly (readonly [number, number])[] {
+	const ranges: [number, number][] = [];
+	let inQuote: '"' | '\'' | undefined;
+	let start = -1;
+	for (let i = 0; i < input.length; i++) {
+		const ch = input[i];
+		if (inQuote) {
+			if (ch === inQuote && !isEscapedAt(input, i)) {
+				ranges.push([start, i + 1]);
+				inQuote = undefined;
+				start = -1;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === '\'') {
+			inQuote = ch;
+			start = i;
+		}
+	}
+	if (inQuote && start >= 0) {
+		ranges.push([start, input.length]);
+	}
+	return ranges;
+}
+
+function isIndexInsideRanges(index: number, ranges: readonly (readonly [number, number])[]): boolean {
+	for (const [start, end] of ranges) {
+		if (index >= start && index < end) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Parses a Dual-View Engineering Blueprint Markdown document into:
+ * - `mermaidText`: 1st Mermaid block (Mission Task DAG; or raw Mermaid text when unfenced)
+ * - `orchestrationText`: optional 2nd Mermaid block (Orchestration Team topology)
+ * - `nodePrompts`: per-task specifications extracted from `### <NodeId>` / `### <NodeId>: ...` sections under `## Task Specifications`
+ */
+export function parseDualViewBlueprintMarkdown(rawText: string): IDualViewBlueprintParseResult {
+	const lines = rawText.split(/\r?\n/);
+	const mermaidBlocks: { readonly content: string; readonly sectionHeading: string }[] = [];
+	const nodePrompts: Record<string, string> = {};
+
+	let currentH2 = '';
+	let inTaskSpecs = false;
+	let activeTaskNodeId: string | undefined;
+	let activeTaskLines: string[] = [];
+
+	let activeFenceKind: 'mermaid' | 'other' | undefined;
+	let activeFenceSection = '';
+	let activeMermaidLines: string[] = [];
+
+	const flushTaskPrompt = () => {
+		if (!activeTaskNodeId) {
+			return;
+		}
+		const body = activeTaskLines.join('\n').trim();
+		if (body) {
+			nodePrompts[activeTaskNodeId] = body;
+		}
+		activeTaskNodeId = undefined;
+		activeTaskLines = [];
+	};
+
+	const isTaskSpecHeading = (heading: string): boolean => /^(?:task\s+spec(?:ification)?s?|node\s+prompts?|task\s+prompts?)\b/i.test(heading.trim());
+
+	for (const rawLine of lines) {
+		const trimmed = rawLine.trim();
+		if (activeFenceKind) {
+			if (/^```\s*$/.test(trimmed)) {
+				if (activeFenceKind === 'mermaid') {
+					mermaidBlocks.push({
+						content: activeMermaidLines.join('\n').trim(),
+						sectionHeading: activeFenceSection,
+					});
+					activeMermaidLines = [];
+				} else if (activeTaskNodeId) {
+					activeTaskLines.push(rawLine);
+				}
+				activeFenceKind = undefined;
+				continue;
+			}
+			if (activeFenceKind === 'mermaid') {
+				activeMermaidLines.push(rawLine);
+			} else if (activeTaskNodeId) {
+				activeTaskLines.push(rawLine);
+			}
+			continue;
+		}
+
+		const fenceStart = /^```([A-Za-z0-9_-]*)\s*$/.exec(trimmed);
+		if (fenceStart) {
+			const lang = fenceStart[1].toLowerCase();
+			if (lang === 'mermaid' && !inTaskSpecs) {
+				activeFenceKind = 'mermaid';
+				activeFenceSection = currentH2;
+				activeMermaidLines = [];
+			} else {
+				activeFenceKind = 'other';
+				if (activeTaskNodeId) {
+					activeTaskLines.push(rawLine);
+				}
+			}
+			continue;
+		}
+
+		const h2Match = /^##\s+(.*)$/.exec(trimmed);
+		if (h2Match) {
+			flushTaskPrompt();
+			currentH2 = h2Match[1].trim();
+			inTaskSpecs = isTaskSpecHeading(currentH2);
+			continue;
+		}
+
+		if (inTaskSpecs) {
+			const h3Match = /^###\s+([A-Za-z0-9_-]+)(?:\s*[:：—–-]\s*.*|\s+.*)?$/.exec(trimmed);
+			if (h3Match) {
+				flushTaskPrompt();
+				activeTaskNodeId = h3Match[1].trim();
+				activeTaskLines = [];
+				continue;
+			}
+			if (activeTaskNodeId) {
+				activeTaskLines.push(rawLine);
+			}
+		}
+	}
+
+	flushTaskPrompt();
+
+	if (mermaidBlocks.length === 0) {
+		return {
+			mermaidText: rawText.trim(),
+			nodePrompts,
+		};
+	}
+
+	if (mermaidBlocks.length === 1) {
+		return {
+			mermaidText: mermaidBlocks[0].content,
+			nodePrompts,
+		};
+	}
+
+	// Respect explicit section headings if author put Orchestration Team before Mission Task DAG
+	const firstLooksOrch = /\b(?:orchestration|team|org(?:anization)?)\b/i.test(mermaidBlocks[0].sectionHeading)
+		&& !/\b(?:mission|task|dag)\b/i.test(mermaidBlocks[0].sectionHeading);
+	const secondLooksMission = /\b(?:mission|task|dag)\b/i.test(mermaidBlocks[1].sectionHeading);
+	const mermaidText = firstLooksOrch && secondLooksMission ? mermaidBlocks[1].content : mermaidBlocks[0].content;
+	const orchestrationText = firstLooksOrch && secondLooksMission ? mermaidBlocks[0].content : mermaidBlocks[1].content;
+
+	return {
+		mermaidText,
+		...(orchestrationText ? { orchestrationText } : {}),
+		nodePrompts,
+	};
+}
+
 function extractMermaidSource(rawText: string): string {
+	const trimmed = rawText.trim();
+	if (/^(?:flowchart|graph)\b/i.test(trimmed) || trimmed.startsWith('%%')) {
+		return trimmed;
+	}
+	const lines = rawText.split(/\r?\n/);
+	let inMermaid = false;
+	const collected: string[] = [];
+	for (const line of lines) {
+		const t = line.trim();
+		if (!inMermaid) {
+			if (/^```mermaid\s*$/i.test(t)) {
+				inMermaid = true;
+			}
+		} else {
+			if (/^```\s*$/.test(t)) {
+				return collected.join('\n').trim();
+			}
+			collected.push(line);
+		}
+	}
 	const fenced = /```mermaid\s*\r?\n([\s\S]*?)```/i.exec(rawText);
 	return (fenced ? fenced[1] : rawText).trim();
 }
@@ -300,7 +563,7 @@ function splitTopLevelByDelimiter(input: string, delimiter: string): string[] {
 		const ch = input[i];
 		if (inQuote) {
 			current += ch;
-			if (ch === inQuote && input[i - 1] !== '\\') {
+			if (ch === inQuote && !isEscapedAt(input, i)) {
 				inQuote = undefined;
 			}
 			continue;
@@ -457,18 +720,32 @@ function parseCheckDirectiveDurationMs(raw: string): number | undefined {
  * Regular `%%` comments that do not match this form are ignored cleanly.
  */
 function parseMermaidCheckDirective(rawLine: string, seqByNode: Map<string, number>): { readonly nodeId: string; readonly hook: IMissionNodeCheckHook } | undefined {
-	const idx = rawLine.indexOf('%%');
+	const idx = findMermaidCommentIndex(rawLine);
 	if (idx < 0) {
 		return undefined;
 	}
 	const commentBody = rawLine.slice(idx + 2).trim();
-	const m = /^(?:check|verify)\s+([A-Za-z0-9_-]+)(?:\s*\[([^\]]*)\])?(?:\s*:\s*(.*))?$/i.exec(commentBody);
-	if (!m) {
+	const headMatch = /^(?:check|verify)\s+([A-Za-z0-9_-]+)/i.exec(commentBody);
+	if (!headMatch) {
 		return undefined;
 	}
-	const nodeId = m[1].trim();
-	const optStr = m[2]?.trim() ?? '';
-	const command = m[3]?.trim() || undefined;
+	const nodeId = headMatch[1].trim();
+	let rest = commentBody.slice(headMatch[0].length).trim();
+	let optStr = '';
+	if (rest.startsWith('[')) {
+		const bracketed = extractBalancedBracketSection(rest, 0);
+		if (!bracketed) {
+			return undefined;
+		}
+		optStr = bracketed.content.trim();
+		rest = rest.slice(bracketed.closeIdx + 1).trim();
+	}
+	let command: string | undefined;
+	if (rest.startsWith(':')) {
+		command = rest.slice(1).trim() || undefined;
+	} else if (rest.length > 0) {
+		return undefined;
+	}
 
 	let id: string | undefined;
 	let name: string | undefined;
@@ -553,25 +830,45 @@ interface IParsedMissionTaskMeta {
 	readonly department?: string;
 	readonly minCompleterTier?: number;
 	readonly allowedCompleterNodeIds?: readonly string[];
+	readonly completionContract?: IMissionTaskCompletionContract;
 	readonly color?: string;
 }
 
+function parseMermaidBoolFlag(raw: string): boolean | undefined {
+	const lower = raw.trim().toLowerCase();
+	if (lower === 'true' || lower === '1' || lower === 'yes') {
+		return true;
+	}
+	if (lower === 'false' || lower === '0' || lower === 'no') {
+		return false;
+	}
+	return undefined;
+}
+
 /**
- * Parses an optional inline Mermaid task permission/ownership/style directive:
- *   `%% task T1 [owner=BE_Lead, assignee=Dev1, dept=Backend, min_tier=2, completers=CEO|BE_Lead, color=cyan]`
+ * Parses an optional inline Mermaid task permission/ownership/contract/style directive:
+ *   `%% task T1 [owner=BE_Lead, assignee=Dev1, dept=Backend, min_tier=2, completers=CEO|BE_Lead, require_checks=true, require_artifact=true, require_files=true, require_wb=WB_A, min_summary=40, color=cyan]`
  */
 function parseMermaidTaskDirective(rawLine: string): { readonly nodeId: string; readonly meta: IParsedMissionTaskMeta } | undefined {
-	const idx = rawLine.indexOf('%%');
+	const idx = findMermaidCommentIndex(rawLine);
 	if (idx < 0) {
 		return undefined;
 	}
 	const commentBody = rawLine.slice(idx + 2).trim();
-	const m = /^task\s+([A-Za-z0-9_-]+)\s*\[([^\]]*)\]$/i.exec(commentBody);
-	if (!m) {
+	const headMatch = /^task\s+([A-Za-z0-9_-]+)\s*/i.exec(commentBody);
+	if (!headMatch) {
 		return undefined;
 	}
-	const nodeId = m[1].trim();
-	const optStr = m[2]?.trim() ?? '';
+	const nodeId = headMatch[1].trim();
+	const rest = commentBody.slice(headMatch[0].length).trim();
+	if (!rest.startsWith('[')) {
+		return undefined;
+	}
+	const bracketed = extractBalancedBracketSection(rest, 0);
+	if (!bracketed || rest.slice(bracketed.closeIdx + 1).trim().length > 0) {
+		return undefined;
+	}
+	const optStr = bracketed.content.trim();
 	if (!optStr) {
 		return undefined;
 	}
@@ -580,6 +877,11 @@ function parseMermaidTaskDirective(rawLine: string): { readonly nodeId: string; 
 	let department: string | undefined;
 	let minCompleterTier: number | undefined;
 	let allowedCompleterNodeIds: string[] | undefined;
+	let requireChecksPassed: boolean | undefined;
+	let requireArtifact: boolean | undefined;
+	let requireFiles: boolean | undefined;
+	let requiredWhiteboardIds: string[] | undefined;
+	let minSummaryChars: number | undefined;
 	let color: string | undefined;
 
 	for (const part of splitTopLevelByDelimiter(optStr, ',')) {
@@ -611,12 +913,52 @@ function parseMermaidTaskDirective(rawLine: string): { readonly nodeId: string; 
 			if (list.length > 0) {
 				allowedCompleterNodeIds = [...new Set(list)];
 			}
+		} else if (key === 'require_checks' || key === 'require_checks_passed' || key === 'checks_required') {
+			const parsedBool = parseMermaidBoolFlag(val);
+			if (parsedBool !== undefined) {
+				requireChecksPassed = parsedBool;
+			}
+		} else if (key === 'require_artifact' || key === 'require_artifacts') {
+			const parsedBool = parseMermaidBoolFlag(val);
+			if (parsedBool !== undefined) {
+				requireArtifact = parsedBool;
+			}
+		} else if (key === 'require_files' || key === 'require_file') {
+			const parsedBool = parseMermaidBoolFlag(val);
+			if (parsedBool !== undefined) {
+				requireFiles = parsedBool;
+			}
+		} else if (key === 'require_wb' || key === 'require_whiteboard' || key === 'require_whiteboards' || key === 'required_whiteboard_ids') {
+			const list = val.split(/[|;,]/).map(s => s.trim().replace(/^wb:/i, '')).filter(Boolean);
+			if (list.length > 0) {
+				requiredWhiteboardIds = [...new Set(list)];
+			}
+		} else if (key === 'min_summary' || key === 'min_summary_chars') {
+			const parsed = Number.parseInt(val, 10);
+			if (Number.isInteger(parsed) && parsed >= 1) {
+				minSummaryChars = Math.min(2_000, parsed);
+			}
 		} else if (key === 'color' || key === 'accent' || key === 'tint') {
 			color = normalizeAdeNodeColor(val);
 		}
 	}
 
-	if (!ownerNodeId && !assigneeNodeId && !department && minCompleterTier === undefined && !allowedCompleterNodeIds && !color) {
+	const hasContract = requireChecksPassed !== undefined
+		|| requireArtifact !== undefined
+		|| requireFiles !== undefined
+		|| (requiredWhiteboardIds && requiredWhiteboardIds.length > 0)
+		|| minSummaryChars !== undefined;
+	const completionContract: IMissionTaskCompletionContract | undefined = hasContract
+		? {
+			...(requireChecksPassed !== undefined ? { requireChecksPassed } : {}),
+			...(requireArtifact !== undefined ? { requireArtifact } : {}),
+			...(requireFiles !== undefined ? { requireFiles } : {}),
+			...(requiredWhiteboardIds && requiredWhiteboardIds.length > 0 ? { requiredWhiteboardIds } : {}),
+			...(minSummaryChars !== undefined ? { minSummaryChars } : {}),
+		}
+		: undefined;
+
+	if (!ownerNodeId && !assigneeNodeId && !department && minCompleterTier === undefined && !allowedCompleterNodeIds && !completionContract && !color) {
 		return undefined;
 	}
 	return {
@@ -627,16 +969,79 @@ function parseMermaidTaskDirective(rawLine: string): { readonly nodeId: string; 
 			...(department ? { department } : {}),
 			...(minCompleterTier !== undefined ? { minCompleterTier } : {}),
 			...(allowedCompleterNodeIds ? { allowedCompleterNodeIds } : {}),
+			...(completionContract ? { completionContract } : {}),
 			...(color ? { color } : {}),
 		},
 	};
 }
 
+const MISSION_DAG_PARSE_CACHE_MAX = 64;
+const MISSION_DAG_CACHE_MAX_TEXT_LEN = 512 * 1024;
+const MISSION_DAG_CACHE_MAX_TOTAL_CHARS = 4 * 1024 * 1024;
+let missionDagMruRaw: string | undefined;
+let missionDagMruResult: IMissionDagParseResult | undefined;
+let missionDagCacheTotalChars = 0;
+const missionDagParseCache = new Map<string, IMissionDagParseResult>();
+
+function deepFreezeDagObject<T>(value: T): T {
+	if (!value || typeof value !== 'object' || Object.isFrozen(value)) {
+		return value;
+	}
+	Object.freeze(value);
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			deepFreezeDagObject(item);
+		}
+	} else {
+		for (const v of Object.values(value as Record<string, unknown>)) {
+			deepFreezeDagObject(v);
+		}
+	}
+	return value;
+}
+
 /**
  * Parses pure Mermaid flowchart / graph syntax into a flat (non-nested) DAG.
  * Empty text returns an empty graph with no error so users can create a Mission first and author Mermaid later.
+ * Memoized via lock-free MRU + byte-bounded frozen LRU cache so repeated hot-path parses run in O(1) safely.
  */
 export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult {
+	if (rawText === missionDagMruRaw && missionDagMruResult) {
+		return missionDagMruResult;
+	}
+	if (rawText.length <= MISSION_DAG_CACHE_MAX_TEXT_LEN) {
+		const cached = missionDagParseCache.get(rawText);
+		if (cached) {
+			missionDagParseCache.delete(rawText);
+			missionDagParseCache.set(rawText, cached);
+			missionDagMruRaw = rawText;
+			missionDagMruResult = cached;
+			return cached;
+		}
+	}
+	const parsed = deepFreezeDagObject(parseMissionMermaidDagUncached(rawText));
+	if (rawText.length <= MISSION_DAG_CACHE_MAX_TEXT_LEN) {
+		while (
+			missionDagParseCache.size > 0
+			&& (missionDagParseCache.size >= MISSION_DAG_PARSE_CACHE_MAX
+				|| missionDagCacheTotalChars + rawText.length > MISSION_DAG_CACHE_MAX_TOTAL_CHARS)
+		) {
+			const oldestKey = missionDagParseCache.keys().next().value;
+			if (oldestKey === undefined) {
+				break;
+			}
+			missionDagParseCache.delete(oldestKey);
+			missionDagCacheTotalChars = Math.max(0, missionDagCacheTotalChars - oldestKey.length);
+		}
+		missionDagParseCache.set(rawText, parsed);
+		missionDagCacheTotalChars += rawText.length;
+		missionDagMruRaw = rawText;
+		missionDagMruResult = parsed;
+	}
+	return parsed;
+}
+
+function parseMissionMermaidDagUncached(rawText: string): IMissionDagParseResult {
 	const source = extractMermaidSource(rawText);
 	if (!source) {
 		return { direction: 'LR', nodes: [], edges: [], employees: [] };
@@ -655,6 +1060,7 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 		department?: string;
 		minCompleterTier?: number;
 		allowedCompleterNodeIds?: readonly string[];
+		completionContract?: IMissionTaskCompletionContract;
 		color?: string;
 	}>();
 	const classEmployeeByNodeId = new Map<string, string>();
@@ -705,7 +1111,8 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 				...taskDirective.meta,
 			});
 		}
-		const noComment = rawLine.replace(/%%.*$/, '').trim();
+		const commentIdx = findMermaidCommentIndex(rawLine);
+		const noComment = (commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine).trim();
 		if (!noComment) {
 			continue;
 		}
@@ -731,10 +1138,14 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 				continue;
 			}
 
+			const quoteRanges = buildQuoteRanges(stmt);
 			EDGE_OP_RE.lastIndex = 0;
 			const matches: { start: number; end: number; label?: string }[] = [];
 			let m: RegExpExecArray | null;
 			while ((m = EDGE_OP_RE.exec(stmt)) !== null) {
+				if (isIndexInsideRanges(m.index, quoteRanges)) {
+					continue;
+				}
 				const rawLabel = (m[1] ?? m[2] ?? m[3])?.trim() || undefined;
 				matches.push({ start: m.index, end: m.index + m[0].length, label: rawLabel });
 			}
@@ -825,6 +1236,12 @@ export function parseMissionMermaidDag(rawText: string): IMissionDagParseResult 
 			if (meta.minCompleterTier !== undefined) { existing.minCompleterTier = meta.minCompleterTier; }
 			if (meta.allowedCompleterNodeIds && meta.allowedCompleterNodeIds.length > 0) {
 				existing.allowedCompleterNodeIds = meta.allowedCompleterNodeIds;
+			}
+			if (meta.completionContract) {
+				existing.completionContract = {
+					...existing.completionContract,
+					...meta.completionContract,
+				};
 			}
 			if (meta.color) { existing.color = meta.color; }
 		}

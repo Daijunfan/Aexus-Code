@@ -294,6 +294,20 @@
 					"scope": "application",
 					"restricted": true,
 					"description": "Enable ADE role context bridging hooks (child_process.spawn / fetch) for third-party Coding Agent extensions. Disable here or set AEXUS_ADE_DISABLE_NATIVE_ROLE_BRIDGE=1 to opt out."
+				},
+				"aexus.ade.turnTimeoutMs": {
+					"type": "number",
+					"default": 900000,
+					"minimum": 30000,
+					"scope": "application",
+					"description": "Hard per-turn execution deadline in milliseconds (default 900000 = 15 minutes; minimum 30000). Prevents wedged agent turns from holding session locks indefinitely."
+				},
+				"aexus.ade.idleStallTimeoutMs": {
+					"type": "number",
+					"default": 180000,
+					"minimum": 0,
+					"scope": "application",
+					"description": "Sliding stream-inactivity stall timeout in milliseconds (default 180000 = 3 minutes; set 0 to disable). Evicts hung engine child processes with zero stdout/SSE/RPC activity while allowing actively streaming turns up to turnTimeoutMs."
 				}
 			}
 		}

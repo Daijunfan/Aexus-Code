@@ -3,31 +3,20 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, addDisposableListener, append, Dimension, EventType, getWindow, getWindows, onDidRegisterWindow } from '../../../../base/browser/dom.js';
+import { $, append, Dimension, getWindow, isHTMLElement } from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
 import { IAdeCloudHostBackendService } from '../../../../platform/ade/common/adeCloudHosts.js';
 import {
-	addEdgeToMermaid,
-	addNodeToMermaid,
-	computeMissionAutoLayout,
 	IMissionDagEdge,
 	IMissionDagNode,
 	IMissionNodePosition,
 	parseMissionMermaidDag,
-	removeEdgeFromMermaid,
-	removeNodeFromMermaid,
-	removeNodesFromMermaid,
-	renameEdgeLabelInMermaid,
-	renameNodeInMermaid,
-	upsertTaskMetadataInMermaid,
 } from '../../../../platform/ade/common/adeMissionDag.js';
-import { formatCompactTokenCount, IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
-import { formatFinOpsUsd } from '../../../../platform/ade/common/adeModelPricing.js';
+import { IMissionRuntimeState } from '../../../../platform/ade/common/adeMissionEngine.js';
 import {
 	buildOrchestrationTokenDeltaView,
 	findHighestRankStaffNode,
@@ -36,31 +25,14 @@ import {
 	IOrchestrationToken,
 	IOrchestrationWhiteboard,
 	MissionTaskStatus,
-	planDynamicSubordinateCreation,
 	updateMissionTaskNodeStatus,
-	upsertDepartmentWhiteboard,
 } from '../../../../platform/ade/common/adeOrchestrationEngine.js';
 import {
-	addOrchestrationGroup,
-	addStaffNodeToOrchestration,
-	addWhiteboardNodeToOrchestration,
-	computeOrchestrationAutoLayout,
-	connectOrchestrationEdge,
-	getOrchestrationNodeSize,
 	IOrchestrationDepartmentGroup,
 	IOrchestrationGraphEdge,
 	IOrchestrationGraphNode,
-	moveOrchestrationNodeToGroup,
 	OrchestrationLayoutMode,
 	parseOrchestrationGraph,
-	removeOrchestrationEdge,
-	removeOrchestrationGroup,
-	removeOrchestrationNode,
-	renameOrchestrationEdgeLabel,
-	renameOrchestrationGroup,
-	renameOrchestrationNode,
-	upsertOrchestrationNodeColorInCode,
-	upsertOrchestrationWhiteboardInCode,
 } from '../../../../platform/ade/common/adeOrchestrationGraph.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, getMissionDisplayName, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -72,7 +44,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext, IEditorSerializer } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
-import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
+import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IExtensionService } from '../../../services/extensions/common/extensions.js';
 import {
 	ADE_ENGINEERING_SCHEME,
@@ -86,35 +58,56 @@ import {
 } from '../common/ade.js';
 import { adeBi, onDidChangeAdeLocale } from '../common/adeLocalization.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
-import { AdeMissionCanvasRenderer, getMissionNodeSize, IMissionCanvasRenderSnapshot } from './adeMissionCanvasRenderer.js';
+import { AdeEngineeringGraphActions } from './adeEngineeringGraphActions.js';
+import {
+	AdePageVisibilityAnimationGuard,
+	buildBlankCanvasContextMenuItems,
+	buildEdgeContextMenuItems,
+	buildGroupContextMenuItems,
+	buildMinimapSyncPayload,
+	buildMissionNodeContextMenuItems,
+	buildOrchestrationAgentMap,
+	buildStaffNodeContextMenuItems,
+	buildWhiteboardNodeContextMenuItems,
+	computeActiveProjectsFingerprint,
+	computeDefaultNewNodeWorldPos,
+	computeGraphWorldBounds,
+	computeMissionTaskStatusesFingerprint,
+	computeOrchestrationAuxiliaryFingerprint,
+	createEngineeringChromeDom,
+	EngineeringHistoryStore,
+	EngineeringViewportMemory,
+	findCanvasSearchMatches,
+	IAdePendingMissionNodeFocus,
+	IEngineeringHistoryEntry,
+	inferEngineeringViewModeForNode,
+	installEngineeringCanvasInteractions,
+	resolveCrossViewLinkedNodeIds,
+	resolveMissionLayoutPositions,
+	resolveOrchestrationLayoutPositions,
+	resolveTaskAssigneeAndTokens,
+	updateEngineeringConsoleBarDom,
+} from './adeEngineeringViewLinkage.js';
+import { AdeMissionCanvasRenderer, getMissionNodeSize, getRenderedOrchestrationNodeSize, IMissionCanvasRenderSnapshot } from './adeMissionCanvasRenderer.js';
 import { AdeMissionFileDrawer } from './adeMissionFileDrawer.js';
 import { AdeMissionHostCatalog } from './adeMissionHostCatalog.js';
 import { AdeMissionMinimap } from './adeMissionMinimap.js';
-import { MissionInspectorTab } from './adeMissionNodeInspector.js';
 import { AdeMissionPopovers } from './adeMissionPopovers.js';
 import { IAdeMissionRuntimeService } from './adeMissionRuntime.js';
 import { IAdeMissionService } from './adeMissionStore.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 import './media/adeMissionCanvas.css';
+import './media/adeMissionEdges.css';
+import './media/adeMissionCards.css';
+import './media/adeMissionOverlays.css';
+
+export { AdePageVisibilityAnimationGuard };
+export type { IAdePendingMissionNodeFocus };
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 2.5;
 const CANVAS_PAN_CLICK_THRESHOLD_PX = 5;
-const MAX_UNDO_HISTORY = 50;
-
-interface IEngineeringHistoryEntry {
-	readonly viewMode: AdeEngineeringViewMode;
-	readonly codeText: string;
-	readonly positions: Record<string, IMissionNodePosition>;
-	readonly nodePrompts: Record<string, string>;
-	readonly label: string;
-}
-
-export interface IAdePendingMissionNodeFocus {
-	readonly nodeId: string;
-	readonly inspectorTab?: MissionInspectorTab;
-	readonly openAgentBeside?: boolean;
-}
+const SMOOTH_CAMERA_GLIDE_MS = 220;
 
 export class AdeEngineeringEditorInput extends EditorInput {
 	static readonly ID = 'workbench.input.adeEngineering';
@@ -188,46 +181,6 @@ export class AdeEngineeringEditorInput extends EditorInput {
 	}
 }
 
-/**
- * Workbench-wide page-visibility animation guardrail for all ADE views.
- * Toggles `html.ade-page-hidden` on every registered VS Code window so ALL
- * infinite CSS animations pause when a window is minimized, hidden, or occluded.
- */
-export class AdePageVisibilityAnimationGuard extends Disposable {
-	static readonly ID = 'workbench.contrib.adePageVisibilityAnimationGuard';
-
-	constructor() {
-		super();
-		const attachToWindow = (win: Window, store: DisposableStore) => {
-			const doc = win.document;
-			const sync = () => {
-				const hidden = Boolean(doc.hidden || doc.visibilityState === 'hidden');
-				doc.documentElement.classList.toggle('ade-page-hidden', hidden);
-			};
-			sync();
-			store.add(addDisposableListener(doc, 'visibilitychange', sync));
-			store.add({
-				dispose: () => {
-					if (!doc.hidden && doc.visibilityState !== 'hidden') {
-						doc.documentElement.classList.remove('ade-page-hidden');
-					}
-				},
-			});
-		};
-
-		for (const { window: win, disposables } of getWindows()) {
-			const localStore = this._register(new DisposableStore());
-			disposables.add(localStore);
-			attachToWindow(win, localStore);
-		}
-		this._register(onDidRegisterWindow(({ window: win, disposables }) => {
-			const localStore = this._register(new DisposableStore());
-			disposables.add(localStore);
-			attachToWindow(win, localStore);
-		}));
-	}
-}
-
 export class AdeEngineeringEditorSerializer implements IEditorSerializer {
 	canSerialize(input: EditorInput): boolean {
 		return input instanceof AdeEngineeringEditorInput;
@@ -268,6 +221,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private readonly roleSchemaService: IAdeRoleSchemaService | undefined;
 	private readonly cloudHostService: IAdeCloudHostBackendService | undefined;
 	private readonly commandService: ICommandService | undefined;
+	private readonly editorGroupsService: IEditorGroupsService | undefined;
 	private readonly hostCatalog: AdeMissionHostCatalog;
 
 	private rootEl!: HTMLElement;
@@ -290,7 +244,6 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private consoleBarEl!: HTMLElement;
 	private viewOrchBtnEl!: HTMLButtonElement;
 	private viewMissionBtnEl!: HTMLButtonElement;
-	private viewSplitBtnEl!: HTMLButtonElement;
 	private consoleTokensEl!: HTMLElement;
 	private consoleSpendEl!: HTMLElement;
 	private consolePauseBtnEl!: HTMLButtonElement;
@@ -302,15 +255,20 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private renderer!: AdeMissionCanvasRenderer;
 	private minimap!: AdeMissionMinimap;
 
-	private undoStack: IEngineeringHistoryEntry[] = [];
-	private redoStack: IEngineeringHistoryEntry[] = [];
+	private readonly historyStore = new EngineeringHistoryStore();
+	private readonly viewportMemory = new EngineeringViewportMemory();
+	private readonly graphActions: AdeEngineeringGraphActions;
 	private preDragHistorySnapshot: IEngineeringHistoryEntry | undefined;
-	private lastCoalescedHistoryAt = 0;
 
 	private viewMode: AdeEngineeringViewMode = 'mission';
 	private activeMissionId: string | undefined;
 	private activePromptEditSource: 'drawer' | 'popover' | undefined;
 	private isDraggingNode = false;
+	private pendingResyncAfterDrag = false;
+	private crossViewHoverIds = new Set<string>();
+	private crossViewSelectIds = new Set<string>();
+	private focusHighlightIds = new Set<string>();
+	private openMissionTaskPopoverNodeId: string | undefined;
 
 	// Mission View (Task DAG) State
 	private mermaidText = '';
@@ -338,11 +296,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private zoom = 1;
 	private transformRafId: number | undefined;
 	private edgeRerouteRafId: number | undefined;
+	private cameraAnimRafId: number | undefined;
 	private pendingDraggedNodeId: string | undefined;
 	private pendingDraggedMultipleNodes = false;
 	private canvasAlertTimer: number | undefined;
 	private abortConfirmUntil = 0;
+	private abortConfirmMissionId: string | undefined;
 	private abortConfirmTimer: number | undefined;
+	private popoverCountdownTimer: number | undefined;
 	private lastProjectsFingerprint = '';
 	private lastTaskStatusFingerprint = '';
 	private lastOrchAuxiliaryFingerprint = '';
@@ -372,6 +333,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.roleSchemaService = tryGet(IAdeRoleSchemaService);
 		this.cloudHostService = tryGet(IAdeCloudHostBackendService);
 		this.commandService = tryGet(ICommandService);
+		this.editorGroupsService = tryGet(IEditorGroupsService);
 
 		this.hostCatalog = this._register(new AdeMissionHostCatalog(
 			storageService,
@@ -380,47 +342,63 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.commandService,
 		));
 
+		this.graphActions = new AdeEngineeringGraphActions({
+			getActiveMissionId: () => this.activeMissionId,
+			getViewMode: () => this.viewMode,
+			isDisposed: () => this.isPaneDisposed,
+			getMermaidText: () => this.mermaidText,
+			getDirection: () => this.direction,
+			getOrchestrationText: () => this.orchestrationText,
+			setOrchestrationText: text => { this.orchestrationText = text; },
+			getOrchDirection: () => this.orchDirection,
+			getOrchNodes: () => this.orchNodes,
+			getOrchEdges: () => this.orchEdges,
+			getNodePosition: nodeId => this.positions.get(nodeId),
+			computeDefaultNewNodeWorldPos: () => this.computeDefaultNewNodeWorldPos(),
+			getOrgConfig: () => this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
+			getActiveWhiteboards: () => this.getActiveWhiteboards(),
+			getMissionService: () => this.missionService,
+			getMissionRuntimeService: () => this.missionRuntimeService,
+			captureHistorySnapshot: label => this.captureHistorySnapshot(label),
+			pushHistory: entry => this.pushHistory(entry),
+			commitCodeMutation: (nextCode, reason, opts) => this.commitCodeMutation(nextCode, reason, opts),
+			syncCodeToDrawer: nextCode => this.fileDrawer?.setCodeValue(nextCode, true),
+			parseAndRenderOrchestrationGraph: (nextCode, force) => this.parseAndRenderOrchestrationGraph(nextCode, force),
+			syncAllNodePromptViews: () => this.syncAllNodePromptViews(),
+			removeDeletedNodeIdsFromSelection: ids => {
+				for (const nid of ids) {
+					this.selectedNodeIds.delete(nid);
+				}
+				this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+				this.syncSelectionHud();
+			},
+			reportFeedback: (msg, kind, opts) => this.reportFeedback(msg, kind, opts),
+		});
+
+		if (this.adeEditorService?.onDidCrossViewLinkHint) {
+			this._register(this.adeEditorService.onDidCrossViewLinkHint(hint => {
+				if (this.isPaneDisposed || !this.activeMissionId || hint.missionId !== this.activeMissionId || hint.sourceView === this.viewMode) {
+					return;
+				}
+				if (hint.kind === 'hover') {
+					this.crossViewHoverIds = new Set(hint.nodeIds);
+				} else {
+					this.crossViewSelectIds = new Set(hint.nodeIds);
+				}
+				this.applyCrossViewLinkHighlights();
+			}));
+		}
+
 		if (this.missionService) {
 			this._register(this.missionService.onDidChange(() => {
 				if (!this.activeMissionId || !this.renderer) {
 					return;
 				}
-				const latest = this.missionService?.getMission(this.activeMissionId);
-				if (!latest) {
+				if (this.isDraggingNode) {
+					this.pendingResyncAfterDrag = true;
 					return;
 				}
-				if (this.viewMode === 'mission') {
-					if (latest.mermaidText !== this.mermaidText) {
-						this.mermaidText = latest.mermaidText;
-						this.fileDrawer?.setCodeValue(this.mermaidText);
-						this.parseAndRenderMissionGraph(this.mermaidText);
-					} else {
-						this.syncAllNodePromptViews(this.activePromptEditSource);
-						const statusFp = this.computeTaskStatusesFingerprint(latest.taskStatuses);
-						if (statusFp !== this.lastTaskStatusFingerprint) {
-							this.lastTaskStatusFingerprint = statusFp;
-							if (!this.isDraggingNode) {
-								this.syncGraphDom();
-							}
-							this.fileDrawer?.syncTaskDescriptionsPane(true);
-						}
-					}
-				} else {
-					const latestOrch = latest.orchestrationText ?? '';
-					if (latestOrch !== this.orchestrationText) {
-						this.orchestrationText = latestOrch;
-						this.fileDrawer?.setCodeValue(this.orchestrationText);
-						this.parseAndRenderOrchestrationGraph(this.orchestrationText);
-					} else {
-						const auxFp = this.computeOrchAuxiliaryFingerprint(latest.whiteboards, latest.orchestrationRuntime);
-						if (auxFp !== this.lastOrchAuxiliaryFingerprint) {
-							this.lastOrchAuxiliaryFingerprint = auxFp;
-							if (!this.isDraggingNode) {
-								this.syncGraphDom();
-							}
-						}
-					}
-				}
+				this.resyncFromMissionStore();
 			}));
 		}
 
@@ -429,9 +407,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				if (!this.activeMissionId || changedMissionId !== this.activeMissionId || !this.renderer) {
 					return;
 				}
-				if (!this.isDraggingNode) {
-					this.syncGraphDom();
+				if (this.isDraggingNode) {
+					this.pendingResyncAfterDrag = true;
+					return;
 				}
+				this.syncGraphDom();
 				if (this.viewMode === 'mission') {
 					this.fileDrawer?.syncTaskDescriptionsPane(true);
 				}
@@ -440,7 +420,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		if (this.projectsService) {
 			this._register(this.projectsService.onDidChange(() => {
-				if (!this.activeMissionId || this.viewMode !== 'orchestration' || this.orchNodes.length === 0 || this.isDraggingNode || !this.renderer) {
+				if (!this.activeMissionId || this.viewMode !== 'orchestration' || this.orchNodes.length === 0 || !this.renderer) {
+					return;
+				}
+				if (this.isDraggingNode) {
+					this.pendingResyncAfterDrag = true;
 					return;
 				}
 				const nextFp = this.computeActiveProjectsFingerprint();
@@ -453,7 +437,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 		if (this.sessionsService) {
 			this._register(this.sessionsService.onDidChangeEngines(() => {
-				if (this.activeMissionId && this.viewMode === 'orchestration' && this.orchNodes.length > 0 && !this.isDraggingNode && this.renderer) {
+				if (this.activeMissionId && this.viewMode === 'orchestration' && this.orchNodes.length > 0 && this.renderer) {
+					if (this.isDraggingNode) {
+						this.pendingResyncAfterDrag = true;
+						return;
+					}
 					this.syncGraphDom();
 					this.prewarmHosts();
 				}
@@ -470,13 +458,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 
 		this._register(themeService.onDidColorThemeChange(() => {
-			if (this.activeMissionId && this.getActiveNodeCount() > 0 && !this.isDraggingNode && this.renderer) {
+			if (this.activeMissionId && this.getActiveNodeCount() > 0 && this.renderer) {
+				if (this.isDraggingNode) {
+					this.pendingResyncAfterDrag = true;
+					return;
+				}
 				this.syncGraphDom();
 			}
 		}));
 
 		this._register(this.hostCatalog.onDidChangeHosts(() => {
-			if (this.activeMissionId && this.viewMode === 'orchestration' && this.orchNodes.length > 0 && !this.isDraggingNode && this.renderer) {
+			if (this.activeMissionId && this.viewMode === 'orchestration' && this.orchNodes.length > 0 && this.renderer) {
+				if (this.isDraggingNode) {
+					this.pendingResyncAfterDrag = true;
+					return;
+				}
 				this.syncGraphDom();
 			}
 		}));
@@ -484,7 +480,11 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this._register(onDidChangeAdeLocale(() => {
 			this.syncEmptyHintCopy();
 			this.updateConsoleBar();
-			if (this.activeMissionId && this.renderer && !this.isDraggingNode) {
+			if (this.activeMissionId && this.renderer) {
+				if (this.isDraggingNode) {
+					this.pendingResyncAfterDrag = true;
+					return;
+				}
 				if (this.viewMode === 'orchestration') {
 					this.parseAndRenderOrchestrationGraph(this.orchestrationText);
 				} else {
@@ -497,9 +497,12 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			dispose: () => {
 				this.isPaneDisposed = true;
 				this.isDraggingNode = false;
+				this.emitCrossViewLinkHint([], 'hover');
+				this.emitCrossViewLinkHint([], 'select');
 				this.cancelScheduledFrames();
 				this.clearCanvasAlertTimer();
 				this.clearAbortConfirmTimer();
+				this.stopPopoverCountdownTimer();
 				const doc = this.rootEl ? getWindow(this.rootEl).document : undefined;
 				if (doc && !doc.hidden && doc.visibilityState !== 'hidden') {
 					doc.documentElement.classList.remove('ade-page-hidden');
@@ -514,7 +517,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	protected createEditor(parent: HTMLElement): void {
 		this.rootEl = append(parent, $('.ade-mission-editor.ade-eng-editor', {
-			tabindex: 0,
+			tabindex: -1,
 			role: 'region',
 			'aria-label': adeBi(localize('adeEngCanvasAria', "Engineering Canvas"), '工程编排画布'),
 		}));
@@ -552,210 +555,50 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}));
 		this.marqueeBoxEl.hidden = true;
 
-		// Top-center floating Global Run Console & Dual-View Switcher (never overlaps top-left drawer button)
-		this.consoleBarEl = append(this.bodyEl, $('.ade-eng-console-bar', {
-			role: 'toolbar',
-			'aria-label': adeBi(localize('adeEngConsoleBarAria', "Engineering Global Console"), '工程编排全局控制台'),
-			'data-ade-eng-console-bar': 'true',
-		}));
-		this._register(addDisposableListener(this.consoleBarEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-
-		const viewSwitch = append(this.consoleBarEl, $('.ade-eng-view-switch', {
-			role: 'tablist',
-			'aria-label': adeBi(localize('adeEngViewSwitchAria', "Switch Engineering View"), '切换工程视图'),
-		}));
-		this.viewOrchBtnEl = append(viewSwitch, $('button.ade-eng-view-btn', {
-			type: 'button',
-			role: 'tab',
-			'data-ade-eng-view-btn': 'orchestration',
-			title: adeBi(localize('adeEngViewOrchTip', "Orchestration · All-Staff Cyclic Topology"), '员工自由编排拓扑视图'),
-		})) as HTMLButtonElement;
-		append(this.viewOrchBtnEl, $('span.codicon.codicon-organization', { 'aria-hidden': 'true' }));
-		append(this.viewOrchBtnEl, $('span', {}, adeBi(localize('adeEngViewOrchLabel', "Staff"), '员工拓扑')));
-		this._register(addDisposableListener(this.viewOrchBtnEl, EventType.CLICK, () => this.switchViewMode('orchestration', false)));
-
-		this.viewMissionBtnEl = append(viewSwitch, $('button.ade-eng-view-btn', {
-			type: 'button',
-			role: 'tab',
-			'data-ade-eng-view-btn': 'mission',
-			title: adeBi(localize('adeEngViewMissionTip', "Mission · Acyclic Task DAG"), '任务有向无环图 (DAG) 视图'),
-		})) as HTMLButtonElement;
-		append(this.viewMissionBtnEl, $('span.codicon.codicon-type-hierarchy-sub', { 'aria-hidden': 'true' }));
-		append(this.viewMissionBtnEl, $('span', {}, adeBi(localize('adeEngViewMissionLabel', "Task DAG"), '任务 DAG')));
-		this._register(addDisposableListener(this.viewMissionBtnEl, EventType.CLICK, () => this.switchViewMode('mission', false)));
-
-		this.viewSplitBtnEl = append(viewSwitch, $('button.ade-eng-view-btn.is-split', {
-			type: 'button',
-			'data-ade-eng-view-split': 'true',
-			title: adeBi(localize('adeEngViewSplitTip', "Open both views side by side"), '同屏分栏对照查看双视图'),
-		})) as HTMLButtonElement;
-		append(this.viewSplitBtnEl, $('span.codicon.codicon-split-horizontal', { 'aria-hidden': 'true' }));
-		this._register(addDisposableListener(this.viewSplitBtnEl, EventType.CLICK, () => {
-			this.switchViewMode(this.viewMode === 'orchestration' ? 'mission' : 'orchestration', true);
-		}));
-
-		append(this.consoleBarEl, $('span.ade-eng-console-sep', { 'aria-hidden': 'true' }));
-
-		this.consoleTokensEl = append(this.consoleBarEl, $('span.ade-eng-console-pill.is-tokens', {
-			'data-ade-eng-console-tokens': 'true',
-		}));
-		this.consoleSpendEl = append(this.consoleBarEl, $('span.ade-eng-console-pill.is-spend', {
-			'data-ade-eng-console-spend': 'true',
-		}));
-		this.consoleSpendEl.hidden = true;
-
-		append(this.consoleBarEl, $('span.ade-eng-console-sep', { 'aria-hidden': 'true' }));
-
-		this.consolePauseBtnEl = append(this.consoleBarEl, $('button.ade-eng-console-btn.is-pause', {
-			type: 'button',
-			'data-ade-eng-pause-btn': 'true',
-		})) as HTMLButtonElement;
-		this._register(addDisposableListener(this.consolePauseBtnEl, EventType.CLICK, () => void this.handleToggleOrchestrationPause()));
-
-		this.consoleAbortBtnEl = append(this.consoleBarEl, $('button.ade-eng-console-btn.is-danger', {
-			type: 'button',
-			'data-ade-eng-abort-btn': 'true',
-		})) as HTMLButtonElement;
-		this._register(addDisposableListener(this.consoleAbortBtnEl, EventType.CLICK, () => void this.handleAbortAllOrchestrationTokens()));
-
-		this.consoleMinimapBtnEl = append(this.consoleBarEl, $('button.ade-eng-console-btn.is-minimap', {
-			type: 'button',
-			'data-ade-eng-minimap-btn': 'true',
-			title: adeBi(localize('adeEngMinimapToggleTip', "Toggle Minimap Overview"), '显示/隐藏拓扑小地图'),
-		})) as HTMLButtonElement;
-		append(this.consoleMinimapBtnEl, $('span.codicon.codicon-map', { 'aria-hidden': 'true' }));
-		this._register(addDisposableListener(this.consoleMinimapBtnEl, EventType.CLICK, () => {
-			this.minimap?.setUserVisible(!this.minimap.isUserVisible());
-			this.updateConsoleBar();
-		}));
+		const chrome = createEngineeringChromeDom(this.bodyEl, this.viewportEl, this._store, {
+			onChromePointerDown: () => this.popovers?.close(),
+			onSwitchViewMode: (mode, side) => this.switchViewMode(mode, side),
+			onToggleSplit: () => this.switchViewMode(this.viewMode === 'orchestration' ? 'mission' : 'orchestration', true),
+			onTogglePause: () => void this.handleToggleOrchestrationPause(),
+			onAbortAll: () => void this.handleAbortAllOrchestrationTokens(),
+			onToggleMinimap: () => {
+				this.minimap?.setUserVisible(!this.minimap.isUserVisible());
+				this.updateConsoleBar();
+			},
+			onSearchInput: () => this.updateCanvasSearchResults(true),
+			onSearchStep: delta => this.stepCanvasSearchMatch(delta),
+			onSearchClose: () => this.closeCanvasSearch(true),
+			onBatchDelete: () => this.deleteSelectedItems(),
+			onClearSelection: () => this.selectNode(undefined),
+			onAlertOpenFile: () => this.toggleFileDrawer(true),
+			onAlertDismiss: () => this.hideCanvasAlert(),
+		});
+		this.consoleBarEl = chrome.consoleBarEl;
+		this.viewOrchBtnEl = chrome.viewOrchBtnEl;
+		this.viewMissionBtnEl = chrome.viewMissionBtnEl;
+		this.consoleTokensEl = chrome.consoleTokensEl;
+		this.consoleSpendEl = chrome.consoleSpendEl;
+		this.consolePauseBtnEl = chrome.consolePauseBtnEl;
+		this.consoleAbortBtnEl = chrome.consoleAbortBtnEl;
+		this.consoleMinimapBtnEl = chrome.consoleMinimapBtnEl;
+		this.searchBarEl = chrome.searchBarEl;
+		this.searchInputEl = chrome.searchInputEl;
+		this.searchCountEl = chrome.searchCountEl;
+		this.selectionHudEl = chrome.selectionHudEl;
+		this.selectionHudLabelEl = chrome.selectionHudLabelEl;
+		this.canvasAlertEl = chrome.canvasAlertEl;
+		this.canvasAlertIconEl = chrome.canvasAlertIconEl;
+		this.canvasAlertTextEl = chrome.canvasAlertTextEl;
+		this.canvasAlertOpenFileBtn = chrome.canvasAlertOpenFileBtn;
+		this.emptyHintEl = chrome.emptyHintEl;
+		this.emptyHintTitleEl = chrome.emptyHintTitleEl;
+		this.emptyHintSubEl = chrome.emptyHintSubEl;
+		this.syncEmptyHintCopy();
 
 		// Interactive Bottom-Right Minimap Overview for Large Topologies
 		this.minimap = this._register(new AdeMissionMinimap(this.bodyEl, {
 			onNavigateToWorldCenter: (worldX, worldY) => this.centerViewportOnWorldPoint(worldX, worldY),
 		}));
-
-		// Floating Node Search Bar (hidden until Cmd/Ctrl+F)
-		this.searchBarEl = append(this.bodyEl, $('.ade-mission-search-bar', {
-			role: 'search',
-			'aria-label': adeBi(localize('adeMissionSearchAria', "Search Canvas Nodes"), '搜索画布节点'),
-			'data-ade-canvas-search': 'true',
-		}));
-		this.searchBarEl.hidden = true;
-		this._register(addDisposableListener(this.searchBarEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-		append(this.searchBarEl, $('span.codicon.codicon-search.ade-mission-search-ico', { 'aria-hidden': 'true' }));
-		this.searchInputEl = append(this.searchBarEl, $('input.ade-mission-search-input', {
-			type: 'text',
-			placeholder: adeBi(localize('adeMissionSearchPlaceholder', "Search nodes… (Enter next)"), '搜索节点 ID / 名称 / 描述… (Enter 下一个)'),
-			'aria-label': localize('adeMissionSearchInputAria', "Filter nodes"),
-			'data-ade-canvas-search-input': 'true',
-		})) as HTMLInputElement;
-		this.searchCountEl = append(this.searchBarEl, $('span.ade-mission-search-count', {
-			'data-ade-canvas-search-count': 'true',
-		}, ''));
-		const searchPrevBtn = append(this.searchBarEl, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionSearchPrevTip', "Previous match (Shift+Enter)"), '上一个匹配 (Shift+Enter)'),
-			'data-ade-canvas-search-prev': 'true',
-		})) as HTMLButtonElement;
-		searchPrevBtn.appendChild($('span.codicon.codicon-arrow-up'));
-		const searchNextBtn = append(this.searchBarEl, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionSearchNextTip', "Next match (Enter)"), '下一个匹配 (Enter)'),
-			'data-ade-canvas-search-next': 'true',
-		})) as HTMLButtonElement;
-		searchNextBtn.appendChild($('span.codicon.codicon-arrow-down'));
-		const searchCloseBtn = append(this.searchBarEl, $('button.ade-mission-vp-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionSearchCloseTip', "Close search (Esc)"), '关闭搜索 (Esc)'),
-			'data-ade-canvas-search-close': 'true',
-		})) as HTMLButtonElement;
-		searchCloseBtn.appendChild($('span.codicon.codicon-close'));
-		this._register(addDisposableListener(this.searchInputEl, EventType.INPUT, () => this.updateCanvasSearchResults(true)));
-		this._register(addDisposableListener(this.searchInputEl, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			if (e.key === 'Enter') {
-				e.preventDefault();
-				e.stopPropagation();
-				this.stepCanvasSearchMatch(e.shiftKey ? -1 : 1);
-			} else if (e.key === 'ArrowDown') {
-				e.preventDefault();
-				e.stopPropagation();
-				this.stepCanvasSearchMatch(1);
-			} else if (e.key === 'ArrowUp') {
-				e.preventDefault();
-				e.stopPropagation();
-				this.stepCanvasSearchMatch(-1);
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				e.stopPropagation();
-				this.closeCanvasSearch(true);
-			}
-		}));
-		this._register(addDisposableListener(searchPrevBtn, EventType.CLICK, () => this.stepCanvasSearchMatch(-1)));
-		this._register(addDisposableListener(searchNextBtn, EventType.CLICK, () => this.stepCanvasSearchMatch(1)));
-		this._register(addDisposableListener(searchCloseBtn, EventType.CLICK, () => this.closeCanvasSearch(true)));
-
-		// Multi-selection Action HUD Pill (hidden unless >= 2 nodes selected)
-		this.selectionHudEl = append(this.bodyEl, $('.ade-mission-selection-hud', {
-			role: 'status',
-			'aria-live': 'polite',
-			'data-ade-selection-hud': 'true',
-		}));
-		this.selectionHudEl.hidden = true;
-		this._register(addDisposableListener(this.selectionHudEl, EventType.POINTER_DOWN, e => e.stopPropagation()));
-		this.selectionHudLabelEl = append(this.selectionHudEl, $('span.ade-mission-selection-hud-label', {
-			'data-ade-selection-hud-label': 'true',
-		}));
-		const batchDelBtn = append(this.selectionHudEl, $('button.ade-mission-selection-hud-btn.danger', {
-			type: 'button',
-			title: adeBi(localize('adeMissionBatchDeleteTip', "Delete selected nodes (Delete / Backspace)"), '删除全部选中节点 (Delete / Backspace)'),
-			'data-ade-selection-batch-delete': 'true',
-		})) as HTMLButtonElement;
-		batchDelBtn.appendChild($('span.codicon.codicon-trash'));
-		append(batchDelBtn, $('span', {}, adeBi(localize('adeMissionBatchDeleteLabel', "Delete"), '删除')));
-		this._register(addDisposableListener(batchDelBtn, EventType.CLICK, () => this.deleteSelectedItems()));
-		const clearSelBtn = append(this.selectionHudEl, $('button.ade-mission-selection-hud-btn', {
-			type: 'button',
-			title: adeBi(localize('adeMissionClearSelectionTip', "Clear selection (Esc)"), '取消多选 (Esc)'),
-			'data-ade-selection-clear': 'true',
-		})) as HTMLButtonElement;
-		clearSelBtn.appendChild($('span.codicon.codicon-close'));
-		this._register(addDisposableListener(clearSelBtn, EventType.CLICK, () => this.selectNode(undefined)));
-
-		// Transient Canvas Alert Toast (hidden unless syntax/action feedback fires)
-		this.canvasAlertEl = append(this.bodyEl, $('.ade-mission-canvas-alert', {
-			role: 'alert',
-			'aria-live': 'assertive',
-			'data-ade-mission-canvas-alert': 'true',
-		}));
-		this.canvasAlertEl.hidden = true;
-		this.canvasAlertIconEl = append(this.canvasAlertEl, $('span.codicon.codicon-error.ade-mission-canvas-alert-icon', { 'aria-hidden': 'true' }));
-		this.canvasAlertTextEl = append(this.canvasAlertEl, $('span.ade-mission-canvas-alert-text', {
-			'data-ade-mission-canvas-alert-text': 'true',
-		}));
-		this.canvasAlertOpenFileBtn = append(this.canvasAlertEl, $('button.ade-mission-canvas-alert-action', {
-			type: 'button',
-			'data-ade-mission-canvas-alert-open-file': 'true',
-		}, adeBi(localize('adeEngAlertOpenSource', "Open Code"), '打开源码'))) as HTMLButtonElement;
-		this.canvasAlertOpenFileBtn.hidden = true;
-		this._register(addDisposableListener(this.canvasAlertOpenFileBtn, EventType.CLICK, () => this.toggleFileDrawer(true)));
-		const alertDismissBtn = append(this.canvasAlertEl, $('button.ade-mission-canvas-alert-close', {
-			type: 'button',
-			title: adeBi(localize('adeMissionAlertDismiss', "Dismiss"), '关闭'),
-			'aria-label': adeBi(localize('adeMissionAlertDismiss', "Dismiss"), '关闭'),
-			'data-ade-mission-canvas-alert-dismiss': 'true',
-		})) as HTMLButtonElement;
-		alertDismissBtn.appendChild($('span.codicon.codicon-close'));
-		this._register(addDisposableListener(alertDismissBtn, EventType.CLICK, () => this.hideCanvasAlert()));
-
-		// Minimalist text-only empty hint (strictly ZERO buttons on canvas!)
-		this.emptyHintEl = append(this.viewportEl, $('.ade-mission-empty-hint.is-minimal', {
-			'data-ade-mission-empty-onboarding': 'true',
-		}));
-		const emptyHero = append(this.emptyHintEl, $('.ade-mission-empty-hero'));
-		append(emptyHero, $('span.codicon.codicon-type-hierarchy-sub', { 'aria-hidden': 'true' }));
-		this.emptyHintTitleEl = append(emptyHero, $('.ade-mission-empty-hint-title'));
-		this.emptyHintSubEl = append(emptyHero, $('.ade-mission-empty-hint-sub'));
-		this.syncEmptyHintCopy();
 
 		this.worldEl = append(this.viewportEl, $('.ade-mission-world.ade-eng-world'));
 
@@ -772,14 +615,32 @@ export class AdeEngineeringEditorPane extends EditorPane {
 						void this.adeEditorService.openAgent(agentId);
 					}
 				},
-				onOpenMissionTaskPopover: (node, anchorEl) => {
-					this.openMissionTaskPopover(node, anchorEl);
+				onOpenMissionTaskPopover: (node, anchorEl, opts) => {
+					this.openMissionTaskPopover(node, anchorEl, opts);
 				},
-				onOpenWhiteboardPopover: (whiteboard, anchorEl) => {
-					this.openWhiteboardPopover(whiteboard, anchorEl);
+				onOpenWhiteboardPopover: (whiteboard, anchorEl, opts) => {
+					this.openWhiteboardPopover(whiteboard, anchorEl, opts);
 				},
-				onOpenOrchestrationTokenPopover: (staffLabel, token, anchorEl) => {
-					this.openOrchestrationTokenPopover(staffLabel, token, anchorEl);
+				onOpenOrchestrationTokenPopover: (staffLabel, token, anchorEl, opts) => {
+					this.openOrchestrationTokenPopover(staffLabel, token, anchorEl, opts);
+				},
+				onJumpToOrchestrationStaff: (staffNodeId, opts) => {
+					this.jumpToCrossViewNode('orchestration', staffNodeId, opts);
+				},
+				onJumpToMissionTask: taskNodeId => {
+					this.jumpToCrossViewNode('mission', taskNodeId);
+				},
+				onJumpToWhiteboard: (whiteboardId, opts) => {
+					this.jumpToWhiteboardNode(whiteboardId, opts?.initialSection);
+				},
+				getEffectiveNodeChecksCount: nodeId => {
+					const rec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
+					const storedChecks = rec?.nodeChecks?.[nodeId];
+					if (storedChecks && storedChecks.length > 0) {
+						return storedChecks.filter(c => c.enabled !== false).length;
+					}
+					const mNode = this.nodes.find(n => n.id === nodeId);
+					return mNode?.checks ? mNode.checks.filter(c => c.enabled !== false).length : 0;
 				},
 				onOpenEmployeePopover: (node, anchorEl) => {
 					this.popovers.openEmployeePopover(this.activeMissionId, node, [], anchorEl);
@@ -905,15 +766,24 @@ export class AdeEngineeringEditorPane extends EditorPane {
 					if (this.isPaneDisposed) {
 						return;
 					}
+					if (this.isDraggingNode) {
+						this.pendingResyncAfterDrag = true;
+						return;
+					}
 					this.syncGraphDom();
 					if (prewarmHosts) {
 						this.prewarmHosts();
 					}
 				},
 				onRuntimeControlsInvalidated: () => {
-					if (!this.isPaneDisposed && !this.isDraggingNode) {
-						this.syncGraphDom();
+					if (this.isPaneDisposed) {
+						return;
 					}
+					if (this.isDraggingNode) {
+						this.pendingResyncAfterDrag = true;
+						return;
+					}
+					this.syncGraphDom();
 				},
 			},
 		));
@@ -960,7 +830,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	private getNodeDimensions(nodeId: string): { readonly width: number; readonly height: number } {
 		if (this.viewMode === 'orchestration') {
 			const oNode = this.orchNodes.find(n => n.id === nodeId);
-			return oNode ? getOrchestrationNodeSize(oNode) : { width: 316, height: 220 };
+			return oNode ? getRenderedOrchestrationNodeSize(oNode) : { width: 344, height: 188 };
 		}
 		const mNode = this.nodes.find(n => n.id === nodeId);
 		return mNode ? getMissionNodeSize(mNode) : getMissionNodeSize({ id: nodeId, label: nodeId, kind: 'task' });
@@ -1022,53 +892,123 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.syncHudLayoutClasses();
 	}
 
+	private resyncFromMissionStore(): void {
+		if (!this.activeMissionId || !this.renderer) {
+			return;
+		}
+		const latest = this.missionService?.getMission(this.activeMissionId);
+		if (!latest) {
+			return;
+		}
+		if (this.viewMode === 'mission') {
+			if (latest.mermaidText !== this.mermaidText) {
+				this.mermaidText = latest.mermaidText;
+				this.fileDrawer?.setCodeValue(this.mermaidText, false);
+				this.parseAndRenderMissionGraph(this.mermaidText);
+			} else {
+				this.syncAllNodePromptViews(this.activePromptEditSource);
+				const statusFp = computeMissionTaskStatusesFingerprint(latest, this.getActiveOrchestrationRuntime());
+				if (statusFp !== this.lastTaskStatusFingerprint) {
+					this.lastTaskStatusFingerprint = statusFp;
+					this.syncGraphDom();
+					this.fileDrawer?.syncTaskDescriptionsPane(true);
+				}
+			}
+		} else {
+			const latestOrch = latest.orchestrationText ?? '';
+			if (latestOrch !== this.orchestrationText) {
+				this.orchestrationText = latestOrch;
+				this.fileDrawer?.setCodeValue(this.orchestrationText, false);
+				this.parseAndRenderOrchestrationGraph(this.orchestrationText);
+			} else {
+				const auxFp = computeOrchestrationAuxiliaryFingerprint(latest, this.getActiveOrchestrationRuntime());
+				if (auxFp !== this.lastOrchAuxiliaryFingerprint) {
+					this.lastOrchAuxiliaryFingerprint = auxFp;
+					this.syncGraphDom();
+				}
+			}
+		}
+	}
+
+	private replayDeferredStoreResync(): void {
+		if (!this.pendingResyncAfterDrag || this.isPaneDisposed || this.isDraggingNode) {
+			return;
+		}
+		this.pendingResyncAfterDrag = false;
+		this.resyncFromMissionStore();
+		this.syncGraphDom();
+	}
+
+	private emitCrossViewLinkHint(sourceNodeIds: readonly string[], kind: 'hover' | 'select'): void {
+		if (!this.activeMissionId || !this.adeEditorService?.fireCrossViewLinkHint) {
+			return;
+		}
+		const rec = this.missionService?.getMission(this.activeMissionId);
+		const linkedIds = sourceNodeIds.length > 0
+			? resolveCrossViewLinkedNodeIds(rec, this.viewMode, sourceNodeIds, this.orchNodes, this.nodes)
+			: [];
+		this.adeEditorService.fireCrossViewLinkHint({
+			missionId: this.activeMissionId,
+			sourceView: this.viewMode,
+			nodeIds: linkedIds,
+			kind,
+		});
+	}
+
+	private applyCrossViewLinkHighlights(): void {
+		const activeSet = new Set<string>([...this.crossViewHoverIds, ...this.crossViewSelectIds, ...this.focusHighlightIds]);
+		this.renderer?.setCrossViewLinkedNodeIds?.(activeSet.size > 0 ? activeSet : undefined);
+	}
+
 	setHoveredNode(nodeId: string | undefined): void {
 		if (!this.renderer || this.renderer.getHoveredNodeId() === nodeId) {
 			return;
 		}
 		const compatNodes: readonly IMissionDagNode[] = this.viewMode === 'orchestration'
-			? this.orchNodes.map(n => ({ id: n.id, label: n.label, kind: 'task' as const }))
+			? this.orchNodes.map(n => ({
+				id: n.id,
+				label: n.label,
+				kind: 'task' as const,
+				department: n.department,
+				employeeName: n.employeeName,
+				employeeKey: n.employeeKey,
+			}))
 			: this.nodes;
 		this.renderer.applyHoverHighlight(nodeId, compatNodes, this.positions);
+		this.emitCrossViewLinkHint(nodeId ? [nodeId] : [], 'hover');
 	}
 
 	fitGraphToViewport(): void {
 		const ids = this.getActiveNodeIds();
-		if (!this.viewportEl || ids.length === 0) {
+		if (!this.viewportEl || (ids.length === 0 && (this.viewMode !== 'orchestration' || this.orchDepartments.length === 0))) {
 			return;
 		}
 		const rect = this.viewportEl.getBoundingClientRect();
 		if (rect.width < 40 || rect.height < 40) {
 			return;
 		}
-		let minX = Infinity;
-		let maxX = -Infinity;
-		let minY = Infinity;
-		let maxY = -Infinity;
-		for (const id of ids) {
-			const pos = this.positions.get(id);
-			if (!pos) {
-				continue;
-			}
-			const size = this.getNodeDimensions(id);
-			minX = Math.min(minX, pos.x - size.width / 2);
-			maxX = Math.max(maxX, pos.x + size.width / 2);
-			minY = Math.min(minY, pos.y - size.height / 2);
-			maxY = Math.max(maxY, pos.y + size.height / 2);
-		}
-		if (!Number.isFinite(minX)) {
+		const bounds = computeGraphWorldBounds(
+			this.viewMode,
+			ids,
+			this.positions,
+			id => this.getNodeDimensions(id),
+			this.orchDepartments,
+			this.viewMode === 'orchestration' ? this.renderer?.getLastDepartmentBounds?.() : undefined,
+		);
+		if (!bounds) {
 			return;
 		}
+		this.cancelCameraAnimation();
 		const padX = 72;
 		const padTop = 80;
 		const padBottom = 60;
 		const availW = Math.max(120, rect.width - padX * 2);
 		const availH = Math.max(120, rect.height - padTop - padBottom);
-		const graphW = Math.max(1, maxX - minX);
-		const graphH = Math.max(1, maxY - minY);
+		const graphW = Math.max(1, bounds.maxX - bounds.minX);
+		const graphH = Math.max(1, bounds.maxY - bounds.minY);
 		this.zoom = Math.round(Math.min(1, Math.max(MIN_ZOOM, Math.min(availW / graphW, availH / graphH))) * 100) / 100;
-		const centerX = (minX + maxX) / 2;
-		const centerY = (minY + maxY) / 2;
+		const centerX = (bounds.minX + bounds.maxX) / 2;
+		const centerY = (bounds.minY + bounds.maxY) / 2;
 		this.panX = Math.round((padX + availW / 2) - centerX * this.zoom);
 		this.panY = Math.round((padTop + availH / 2) - centerY * this.zoom);
 		this.applyWorldTransformNow();
@@ -1076,7 +1016,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 
 	focusNode(
 		nodeId: string,
-		options?: { readonly inspectorTab?: MissionInspectorTab; readonly openAgentBeside?: boolean },
+		options?: Omit<IAdePendingMissionNodeFocus, 'nodeId'>,
 	): void {
 		if (this.isPaneDisposed || !nodeId) {
 			return;
@@ -1086,20 +1026,125 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		this.popovers?.close();
 		if (!this.getActiveNodeIds().includes(nodeId)) {
+			if (this.activeMissionId && this.adeEditorService?.openEngineering) {
+				const rec = this.missionService?.getMission(this.activeMissionId);
+				const inferred = inferEngineeringViewModeForNode(rec, nodeId, this.viewMode);
+				if (inferred !== this.viewMode) {
+					void this.adeEditorService.openEngineering(this.activeMissionId, {
+						viewMode: inferred,
+						focusNodeId: nodeId,
+						focusTokenId: options?.focusTokenId,
+						highlightNodeIds: options?.highlightNodeIds,
+						openPopover: options?.openPopover,
+						whiteboardSection: options?.whiteboardSection,
+						inspectorTab: options?.inspectorTab,
+						openAgentBeside: options?.openAgentBeside,
+						preferExistingGroup: true,
+					});
+				}
+			}
 			return;
 		}
 		this.selectedEdgeKey = undefined;
 		this.renderer?.setSelectedEdgeKey(undefined);
 		this.selectedNodeIds = new Set([nodeId]);
+		this.focusHighlightIds = new Set((options?.highlightNodeIds ?? []).filter(id => id !== nodeId));
 		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+		this.applyCrossViewLinkHighlights();
 		this.syncSelectionHud();
-		this.centerViewportOnNode(nodeId);
-		this.renderer?.pulseFocusNode(nodeId, 3000);
+		this.emitCrossViewLinkHint([nodeId, ...this.focusHighlightIds], 'select');
+		const willOpenPopover = Boolean(
+			options?.openPopover
+			|| (this.viewMode === 'orchestration' && (options?.whiteboardSection || options?.focusTokenId)),
+		);
+		this.centerViewportOnNode(nodeId, { smooth: !willOpenPopover, pulseMs: 2400 });
 
-		if (options?.openAgentBeside && this.adeEditorService && this.viewMode === 'orchestration') {
-			const linkedAgent = this.buildOrchestrationAgentMap().get(nodeId);
-			if (linkedAgent) {
-				void this.adeEditorService.openAgent(linkedAgent.id, { side: true });
+		if (this.viewMode === 'orchestration') {
+			if (options?.openPopover === 'whiteboard' || options?.whiteboardSection) {
+				this.openWhiteboardById(nodeId, options?.whiteboardSection);
+			} else if (options?.openPopover === 'token' || options?.focusTokenId) {
+				const orch = this.getActiveOrchestrationRuntime();
+				const targetTok = (options?.focusTokenId ? orch?.tokens?.[options.focusTokenId] : undefined)
+					?? Object.values(orch?.tokens ?? {}).find(t => t.nodeId === nodeId && (t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_join'));
+				const oNode = this.orchNodes.find(n => n.id === nodeId);
+				if (targetTok && oNode) {
+					const anchor = this.findWorldAnchorByAttr('data-node-id', nodeId, 'ade-mission-token-puck')
+						?? this.findWorldAnchorByAttr('data-node-id', nodeId)
+						?? this.viewportEl;
+					this.openOrchestrationTokenPopover(oNode.label, targetTok, anchor, { staffNodeId: nodeId });
+				}
+			}
+			if (options?.openAgentBeside && this.adeEditorService) {
+				const linkedAgent = this.buildOrchestrationAgentMap().get(nodeId);
+				if (linkedAgent) {
+					void this.adeEditorService.openAgent(linkedAgent.id, { side: true });
+				}
+			}
+		} else if (options?.openPopover === 'task') {
+			const mNode = this.nodes.find(n => n.id === nodeId);
+			if (mNode) {
+				const anchor = this.findWorldAnchorByAttr('data-node-id', nodeId) ?? this.viewportEl;
+				this.openMissionTaskPopover(mNode, anchor);
+			}
+		}
+	}
+
+	protected jumpToCrossViewNode(
+		targetView: AdeEngineeringViewMode,
+		nodeId: string,
+		options?: {
+			readonly focusTokenId?: string;
+			readonly openPopover?: 'task' | 'token' | 'whiteboard';
+			readonly whiteboardSection?: string;
+		},
+	): void {
+		const missionId = this.activeMissionId;
+		if (!missionId || !nodeId) {
+			return;
+		}
+		if (targetView === this.viewMode && this.getActiveNodeIds().includes(nodeId)) {
+			this.focusNode(nodeId, options);
+			return;
+		}
+		void this.adeEditorService?.openEngineering?.(missionId, {
+			viewMode: targetView,
+			focusNodeId: nodeId,
+			focusTokenId: options?.focusTokenId,
+			openPopover: options?.openPopover,
+			whiteboardSection: options?.whiteboardSection,
+			preferExistingGroup: true,
+		});
+	}
+
+	protected jumpToWhiteboardNode(whiteboardId: string, initialSection?: string): void {
+		this.jumpToCrossViewNode('orchestration', whiteboardId, {
+			openPopover: 'whiteboard',
+			whiteboardSection: initialSection,
+		});
+	}
+
+	protected async handleRunMissionTaskChecks(nodeId: string): Promise<void> {
+		const missionId = this.activeMissionId;
+		if (!missionId || !this.missionRuntimeService) {
+			return;
+		}
+		const wasOpenForNode = Boolean(this.popovers?.isOpen() && this.openMissionTaskPopoverNodeId === nodeId);
+		const res = await this.missionRuntimeService.runNodeChecks(missionId, nodeId);
+		if (this.isPaneDisposed || this.activeMissionId !== missionId) {
+			return;
+		}
+		this.syncGraphDom();
+		this.fileDrawer?.syncTaskDescriptionsPane(true);
+		const passed = Boolean(res?.passed);
+		const msg = passed
+			? adeBi(localize('adeMissionChecksRunPass', "Deterministic checks passed for {0}.", nodeId), '任务 {0} 确定性校验已通过。', nodeId)
+			: (res?.summary || adeBi(localize('adeMissionChecksRunFail', "Deterministic checks failed for {0}.", nodeId), '任务 {0} 确定性校验未通过。', nodeId));
+		this.reportFeedback(msg, passed ? 'ok' : 'error');
+		if (wasOpenForNode && this.viewMode === 'mission' && this.popovers?.isOpen()) {
+			const mNode = this.nodes.find(n => n.id === nodeId);
+			if (mNode) {
+				const anchor = this.findWorldAnchorByAttr('data-node-id', nodeId) ?? this.viewportEl;
+				this.openMissionTaskPopover(mNode, anchor, { focusSection: 'checks' });
 			}
 		}
 	}
@@ -1108,25 +1153,52 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	// Mission View: Task Details Popover & Status Authority
 	// =========================================================================
 
-	private openMissionTaskPopover(node: IMissionDagNode, anchorEl: HTMLElement): void {
+	private openMissionTaskPopover(
+		node: IMissionDagNode,
+		anchorEl: HTMLElement,
+		opts?: { readonly focusSection?: 'contract' | 'checks' },
+	): void {
 		const missionId = this.activeMissionId;
 		if (!missionId) {
 			return;
 		}
+		this.openMissionTaskPopoverNodeId = node.id;
 		this.fileDrawer.setSelectedTaskNodeId(node.id);
-		const statusRec = this.getActiveTaskStatuses()[node.id];
+		const missionRec = this.missionService?.getMission(missionId);
+		const statusRec = missionRec?.taskStatuses?.[node.id];
+		const orchRuntime = this.getActiveOrchestrationRuntime();
+		const parsedOrchNodes = this.orchNodes.length > 0
+			? this.orchNodes
+			: (missionRec?.orchestrationText ? parseOrchestrationGraph(missionRec.orchestrationText).nodes : []);
+		const resolved = resolveTaskAssigneeAndTokens(node, statusRec, orchRuntime, parsedOrchNodes);
+		const effectiveChecks = missionRec?.nodeChecks?.[node.id] ?? node.checks;
 		this.popovers.openMissionTaskEditorPopover(missionId, node, statusRec, anchorEl, {
 			onRenameTask: nextTitle => this.renameVisualNode(node.id, nextTitle),
 			onChangeDescription: nextDesc => this.commitNodePromptEdit(missionId, node.id, nextDesc, 'popover'),
-			onSetTaskStatus: nextStatus => void this.handleSetMissionTaskStatus(node.id, nextStatus),
+			onSetTaskStatus: nextStatus => this.handleSetMissionTaskStatusResult(node.id, nextStatus),
 			onChangeColor: nextColor => this.setNodeColorVisual(node.id, nextColor),
+		}, {
+			completionContract: node.completionContract,
+			statusRecord: statusRec,
+			nodeChecks: effectiveChecks,
+			activeTokens: resolved.activeTokens,
+			assigneeNodeId: resolved.assigneeNodeId,
+			assigneeLabel: resolved.assigneeLabel,
+			focusSection: opts?.focusSection,
+			onRunChecks: this.missionRuntimeService ? () => this.handleRunMissionTaskChecks(node.id) : undefined,
+			onJumpToStaff: (staffNodeId, focusTokenId) => this.jumpToCrossViewNode('orchestration', staffNodeId, {
+				focusTokenId,
+				openPopover: focusTokenId ? 'token' : undefined,
+			}),
+			onJumpToWhiteboard: wbId => this.jumpToWhiteboardNode(wbId),
+			onReadPointer: ptr => this.readPointerContentText(ptr),
 		});
 	}
 
-	private handleSetMissionTaskStatus(nodeId: string, nextStatus: MissionTaskStatus): void {
+	private handleSetMissionTaskStatusResult(nodeId: string, nextStatus: MissionTaskStatus): { readonly ok: boolean; readonly error?: string; readonly unmetRequirements?: readonly string[] } {
 		const missionId = this.activeMissionId;
 		if (!missionId) {
-			return;
+			return { ok: false, error: 'No active mission.' };
 		}
 		if (this.missionRuntimeService) {
 			const res = this.missionRuntimeService.setMissionTaskStatus(missionId, {
@@ -1134,14 +1206,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				status: nextStatus,
 				caller: { isHumanUser: true, callerLabel: 'Human' },
 			});
-			if (!res.ok && res.error) {
-				this.reportFeedback(res.error, 'error');
-				return;
+			if (!res.ok) {
+				if (res.error) {
+					this.reportFeedback(res.error, 'error');
+				}
+				return {
+					ok: false,
+					error: res.error,
+					unmetRequirements: (res as { readonly unmetRequirements?: readonly string[] }).unmetRequirements,
+				};
 			}
 		} else if (this.missionService) {
 			const rec = this.missionService.getMission(missionId);
 			const orgConfig = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
 			const parsedTaskDag = parseMissionMermaidDag(this.mermaidText);
+			const hasConfiguredChecks = Boolean((rec?.nodeChecks?.[nodeId] ?? []).some(c => c.enabled !== false));
 			const trans = updateMissionTaskNodeStatus(
 				rec?.taskStatuses ?? {},
 				parsedTaskDag,
@@ -1149,125 +1228,201 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				{
 					nodeId,
 					status: nextStatus,
+					hasConfiguredChecks,
 					caller: { isHumanUser: true, callerLabel: 'Human' },
 				},
 			);
 			if (!trans.ok) {
-				this.reportFeedback(trans.error ?? 'Failed to update task status.', 'error');
-				return;
+				const err = trans.error ?? 'Failed to update task status.';
+				this.reportFeedback(err, 'error');
+				return {
+					ok: false,
+					error: err,
+					unmetRequirements: (trans as { readonly unmetRequirements?: readonly string[] }).unmetRequirements,
+				};
 			}
 			this.missionService.updateTaskStatuses(missionId, trans.taskStatuses);
 		}
 		this.syncGraphDom();
 		this.fileDrawer.syncTaskDescriptionsPane(true);
+		return { ok: true };
+	}
+
+	private handleSetMissionTaskStatus(nodeId: string, nextStatus: MissionTaskStatus): boolean {
+		return this.handleSetMissionTaskStatusResult(nodeId, nextStatus).ok;
 	}
 
 	// =========================================================================
 	// Orchestration View: Whiteboards, Staff Creation, Token Baton & Dispatch
 	// =========================================================================
 
-	private openWhiteboardPopover(whiteboard: IOrchestrationWhiteboard, anchorEl: HTMLElement): void {
+	private openWhiteboardPopover(
+		whiteboard: IOrchestrationWhiteboard,
+		anchorEl: HTMLElement,
+		opts?: { readonly initialSection?: string },
+	): void {
 		const missionId = this.activeMissionId;
 		if (!missionId) {
 			return;
 		}
+		this.openMissionTaskPopoverNodeId = undefined;
 		const liveWb = this.getActiveWhiteboards()[whiteboard.id] ?? whiteboard;
 		const wbGraphNode = this.orchNodes.find(n => n.id === liveWb.id);
 		this.popovers.openWhiteboardEditorPopover(liveWb, anchorEl, patch => {
-			let savedVersion = (liveWb.version ?? 0) + 1;
-			if (this.missionRuntimeService) {
-				const res = this.missionRuntimeService.upsertOrchestrationWhiteboard(missionId, {
-					id: liveWb.id,
-					department: patch.department,
-					title: patch.title,
-					content: patch.content,
-					caller: { isHumanUser: true },
-				});
-				if (!res.ok && res.error) {
-					this.reportFeedback(res.error, 'error');
-					return;
-				}
-				if (res.whiteboard) {
-					savedVersion = res.whiteboard.version;
-				}
-				if (res.orchestrationText && res.orchestrationText !== this.orchestrationText) {
-					this.orchestrationText = res.orchestrationText;
-					this.fileDrawer?.setCodeValue(res.orchestrationText);
-				}
-			} else if (this.missionService) {
-				const cur = this.getActiveWhiteboards();
-				const up = upsertDepartmentWhiteboard(cur, {
-					id: liveWb.id,
-					department: patch.department,
-					title: patch.title,
-					content: patch.content,
-					updatedBy: 'human',
-					updatedByLabel: 'Human',
-				});
-				savedVersion = up.whiteboard.version;
-				this.missionService.updateWhiteboards(missionId, up.whiteboards);
-				const nextCode = upsertOrchestrationWhiteboardInCode(this.orchestrationText, {
-					id: liveWb.id,
-					department: patch.department,
-					title: patch.title,
-					content: patch.content,
-					version: savedVersion,
-				});
-				if (nextCode !== this.orchestrationText) {
-					this.orchestrationText = nextCode;
-					this.fileDrawer?.setCodeValue(nextCode);
-					this.missionService.updateOrchestrationText(missionId, nextCode);
-				}
+			const saved = this.graphActions.saveWhiteboardPatch(missionId, liveWb, patch);
+			if (!saved.ok) {
+				return;
 			}
-			void savedVersion;
-			this.syncGraphDom();
+			if (saved.codeChanged || patch.title !== liveWb.title || patch.department !== liveWb.department) {
+				this.parseAndRenderOrchestrationGraph(this.orchestrationText, false);
+			} else {
+				this.syncGraphDom();
+			}
 			this.reportFeedback(adeBi(localize('adeOrchWbSavedOk', "Saved whiteboard '{0}'.", patch.title), '已保存部门白板「{0}」。', patch.title), 'ok');
 		}, {
 			currentColor: wbGraphNode?.color,
 			onChangeColor: nextColor => this.setNodeColorVisual(liveWb.id, nextColor),
+			initialSection: opts?.initialSection,
+			updatedByLabel: liveWb.updatedByLabel,
+			updatedAt: liveWb.updatedAt,
+			getLatestVersion: () => this.getActiveWhiteboards()[liveWb.id]?.version,
+			getLatestWhiteboard: () => this.getActiveWhiteboards()[liveWb.id],
 		});
 	}
 
-	private openWhiteboardById(whiteboardId: string): void {
+	private findDescendantByClass(root: HTMLElement, className: string): HTMLElement | undefined {
+		const queue: Element[] = Array.from(root.children);
+		for (let i = 0; i < queue.length; i++) {
+			const el = queue[i];
+			if (isHTMLElement(el) && el.classList.contains(className)) {
+				return el;
+			}
+			for (let j = 0; j < el.children.length; j++) {
+				queue.push(el.children[j]);
+			}
+		}
+		return undefined;
+	}
+
+	private findWorldAnchorByAttr(attrName: string, attrValue: string, descendantClass?: string): HTMLElement | undefined {
+		const queue: Element[] = Array.from(this.worldEl.children);
+		for (let i = 0; i < queue.length; i++) {
+			const el = queue[i];
+			if (isHTMLElement(el) && el.getAttribute(attrName) === attrValue) {
+				return descendantClass ? (this.findDescendantByClass(el, descendantClass) ?? el) : el;
+			}
+			for (let j = 0; j < el.children.length; j++) {
+				queue.push(el.children[j]);
+			}
+		}
+		return undefined;
+	}
+
+	private openWhiteboardById(whiteboardId: string, initialSection?: string): void {
 		const wb = this.getActiveWhiteboards()[whiteboardId];
 		if (!wb) {
 			return;
 		}
-		const anchor = this.worldEl.querySelector<HTMLElement>(`[data-whiteboard-id="${whiteboardId}"]`) ?? this.viewportEl;
-		this.openWhiteboardPopover(wb, anchor);
+		const anchor = this.findWorldAnchorByAttr('data-whiteboard-id', whiteboardId) ?? this.viewportEl;
+		this.openWhiteboardPopover(wb, anchor, initialSection ? { initialSection } : undefined);
 	}
 
-	private openOrchestrationTokenPopover(staffLabel: string, token: IOrchestrationToken, anchorEl: HTMLElement): void {
+	private readPointerSync(ptr: string, tokenId?: string): { readonly title?: string; readonly kind?: string; readonly content?: string; readonly error?: string } | undefined {
+		const missionId = this.activeMissionId;
+		if (missionId && this.missionRuntimeService) {
+			const res = this.missionRuntimeService.readOrchestrationTokenPointers(missionId, {
+				ptrs: [ptr],
+				tokenId,
+				caller: { isHumanUser: true },
+			});
+			const item = res.items[0];
+			return item ? { title: item.title, kind: item.kind, content: item.content, error: item.error } : undefined;
+		}
+		const orch = this.getActiveOrchestrationRuntime();
+		const blob = orch?.payloadStore?.[ptr];
+		if (blob) {
+			return { title: blob.title, kind: blob.kind, content: blob.content };
+		}
+		const wbId = ptr.startsWith('wb:') ? ptr.slice(3) : ptr;
+		const wb = this.getActiveWhiteboards()[wbId];
+		if (wb) {
+			return { title: wb.title, kind: 'whiteboard', content: wb.content };
+		}
+		return { error: `Pointer "${ptr}" not found.` };
+	}
+
+	private async readPointerContentText(ptr: string, tokenId?: string): Promise<string> {
+		const syncItem = this.readPointerSync(ptr, tokenId);
+		if (syncItem?.content !== undefined) {
+			return syncItem.content;
+		}
+		if (this.activeMissionId && this.missionRuntimeService?.readOrchestrationTokenPointersAsync) {
+			const res = await this.missionRuntimeService.readOrchestrationTokenPointersAsync(this.activeMissionId, {
+				ptrs: [ptr],
+				tokenId,
+				caller: { isHumanUser: true },
+			});
+			const item = res.items[0];
+			if (item?.content !== undefined) {
+				return item.content;
+			}
+			return item?.error ?? '';
+		}
+		return syncItem?.error ?? '';
+	}
+
+	private stopPopoverCountdownTimer(): void {
+		if (this.popoverCountdownTimer !== undefined && this.rootEl) {
+			getWindow(this.rootEl).clearInterval(this.popoverCountdownTimer);
+			this.popoverCountdownTimer = undefined;
+		}
+	}
+
+	private ensurePopoverCountdownTimer(): void {
+		if (this.popoverCountdownTimer !== undefined || !this.rootEl) {
+			return;
+		}
+		const win = getWindow(this.rootEl);
+		this.popoverCountdownTimer = win.setInterval(() => {
+			if (this.isPaneDisposed || !this.popovers?.isOpen()) {
+				this.stopPopoverCountdownTimer();
+				return;
+			}
+			if (!this.isEditorTabVisible) {
+				return;
+			}
+			this.popovers.patchOpenTokenCountdown(this.getEffectiveRuntimeState(), Date.now(), this.getActiveOrchestrationRuntime());
+		}, 1000);
+	}
+
+	private openOrchestrationTokenPopover(
+		staffLabel: string,
+		token: IOrchestrationToken,
+		anchorEl: HTMLElement,
+		opts?: { readonly focusSection?: 'barrier' | 'scope' | 'rework'; readonly staffNodeId?: string },
+	): void {
+		this.openMissionTaskPopoverNodeId = undefined;
 		const missionId = this.activeMissionId;
 		const orch = this.getActiveOrchestrationRuntime();
-		const delta = (missionId ? this.missionRuntimeService?.getOrchestrationTokenDelta(missionId, token.id) : undefined)
-			?? (orch ? buildOrchestrationTokenDeltaView(orch, token, this.getActiveWhiteboards()) : undefined);
+		const targetNodeId = opts?.staffNodeId ?? token.nodeId;
+		const allStaffTokens = orch
+			? Object.values(orch.tokens).filter(t => t.nodeId === targetNodeId && (t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_join'))
+			: [token];
+		const resolveDelta = (tok: IOrchestrationToken) => (missionId ? this.missionRuntimeService?.getOrchestrationTokenDelta(missionId, tok.id) : undefined)
+			?? (orch ? buildOrchestrationTokenDeltaView(orch, tok, this.getActiveWhiteboards()) : undefined);
+		const joinBarrier = token.joinBarrierId ? orch?.joinBarriers?.[token.joinBarrierId] : undefined;
 		this.popovers.openOrchestrationTokenPopover(staffLabel, token, anchorEl, {
-			delta,
+			delta: resolveDelta(token),
+			getDeltaForToken: resolveDelta,
 			onOpenWhiteboard: wbId => this.openWhiteboardById(wbId),
-			onReadPointer: ptr => {
-				if (missionId && this.missionRuntimeService) {
-					const res = this.missionRuntimeService.readOrchestrationTokenPointers(missionId, {
-						ptrs: [ptr],
-						tokenId: token.id,
-						caller: { isHumanUser: true },
-					});
-					const item = res.items[0];
-					return item ? { title: item.title, kind: item.kind, content: item.content, error: item.error } : undefined;
-				}
-				const orch = this.getActiveOrchestrationRuntime();
-				const blob = orch?.payloadStore?.[ptr];
-				if (blob) {
-					return { title: blob.title, kind: blob.kind, content: blob.content };
-				}
-				const wbId = ptr.startsWith('wb:') ? ptr.slice(3) : ptr;
-				const wb = this.getActiveWhiteboards()[wbId];
-				if (wb) {
-					return { title: wb.title, kind: 'whiteboard', content: wb.content };
-				}
-				return { error: `Pointer "${ptr}" not found.` };
-			},
+			onReadPointer: (ptr, tokId) => this.readPointerSync(ptr, tokId ?? token.id),
+			allStaffTokens: allStaffTokens.length > 0 ? allStaffTokens : [token],
+			joinBarrier,
+			joinBarriers: orch?.joinBarriers,
+			onJumpToTask: taskNodeId => this.jumpToCrossViewNode('mission', taskNodeId),
+			focusSection: opts?.focusSection,
 		});
+		this.ensurePopoverCountdownTimer();
 	}
 
 	private addOrchestrationStaffVisual(payload: {
@@ -1277,34 +1432,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		readonly department?: string;
 		readonly worldPos?: IMissionNodePosition;
 	}): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const rankDef = org.ranks.find(r => r.id === payload.rankId || r.tier === payload.tier);
-		const added = addStaffNodeToOrchestration(this.orchestrationText, {
-			name: payload.name,
-			roleLabel: rankDef?.name,
-			tier: payload.tier,
-			rankId: payload.rankId,
-			department: payload.department,
-			direction: this.orchDirection,
-		});
-		if (!added.ok || !added.orchestrationText || !added.nodeId) {
-			this.reportFeedback(added.error ?? adeBi(localize('adeOrchAddStaffFail', "Failed to add staff node."), '添加员工节点失败。'), 'error');
-			return;
-		}
-		const targetPos = payload.worldPos ?? this.computeDefaultNewNodeWorldPos();
-		this.commitCodeMutation(added.orchestrationText, `Add staff ${payload.name}`, {
-			nodePosition: { nodeId: added.nodeId, pos: targetPos },
-			successMessage: adeBi(
-				localize('adeOrchAddStaffOk', "Added unique staff node '{0}' ({1}).", payload.name, added.nodeId),
-				'已添加唯一员工节点「{0}」({1})。',
-				payload.name,
-				added.nodeId,
-			),
-		});
+		this.graphActions.addOrchestrationStaffVisual(payload);
 	}
 
 	private addOrchestrationSubordinateVisual(
@@ -1316,40 +1444,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			readonly department?: string;
 		},
 	): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const plan = planDynamicSubordinateCreation(this.orchestrationText, org, {
-			callerNodeId: parentNode.id,
-			callerTier: parentNode.tier,
-			name: payload.name,
-			targetRankIdOrTier: payload.rankId || payload.tier,
-			department: payload.department ?? parentNode.department,
-			bidirectional: true,
-		});
-		if (!plan.ok || !plan.orchestrationText || !plan.newNodeId) {
-			this.reportFeedback(plan.error ?? adeBi(localize('adeOrchAddSubFail', "Failed to create subordinate."), '动态创建下级员工失败。'), 'error');
-			return;
-		}
-		const parentPos = this.positions.get(parentNode.id);
-		const targetPos = parentPos
-			? {
-				x: Math.round(parentPos.x + (this.orchDirection === 'TD' ? 0 : 440)),
-				y: Math.round(parentPos.y + (this.orchDirection === 'TD' ? 300 : 120)),
-			}
-			: this.computeDefaultNewNodeWorldPos();
-		this.commitCodeMutation(plan.orchestrationText, `Create subordinate ${payload.name} under ${parentNode.id}`, {
-			nodePosition: { nodeId: plan.newNodeId, pos: targetPos },
-			successMessage: adeBi(
-				localize('adeOrchAddSubOk', "Created subordinate '{0}' ({1}) with bidirectional link {2} ⇄ {1}.", payload.name, plan.newNodeId, parentNode.id),
-				'已动态扩编下级「{0}」({1})，并自动建立双向连线 {2} ⇄ {1}。',
-				payload.name,
-				plan.newNodeId,
-				parentNode.id,
-			),
-		});
+		this.graphActions.addOrchestrationSubordinateVisual(parentNode, payload);
 	}
 
 	private addOrchestrationWhiteboardVisual(payload: {
@@ -1357,49 +1452,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		readonly title: string;
 		readonly worldPos?: IMissionNodePosition;
 	}): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		const added = addWhiteboardNodeToOrchestration(this.orchestrationText, {
-			department: payload.department,
-			title: payload.title,
-			direction: this.orchDirection,
-		});
-		if (!added.ok || !added.orchestrationText || !added.whiteboardId) {
-			this.reportFeedback(added.error ?? adeBi(localize('adeOrchAddWbFail', "Failed to add whiteboard."), '创建部门白板失败。'), 'error');
-			return;
-		}
-		const wbId = added.whiteboardId;
-		const targetPos = payload.worldPos ?? this.computeDefaultNewNodeWorldPos();
-		this.commitCodeMutation(added.orchestrationText, `Add whiteboard ${payload.title}`, {
-			nodePosition: { nodeId: wbId, pos: targetPos },
-			afterApply: () => {
-				if (this.missionRuntimeService) {
-					this.missionRuntimeService.upsertOrchestrationWhiteboard(missionId, {
-						id: wbId,
-						department: payload.department,
-						title: payload.title,
-						content: '',
-						caller: { isHumanUser: true },
-					});
-				} else if (this.missionService) {
-					const up = upsertDepartmentWhiteboard(this.getActiveWhiteboards(), {
-						id: wbId,
-						department: payload.department,
-						title: payload.title,
-						content: '',
-					});
-					this.missionService.updateWhiteboards(missionId, up.whiteboards);
-				}
-			},
-			successMessage: adeBi(
-				localize('adeOrchAddWbOk', "Created department whiteboard '{0}' ({1}).", payload.title, wbId),
-				'已创建部门共享白板「{0}」({1})。',
-				payload.title,
-				wbId,
-			),
-		});
+		this.graphActions.addOrchestrationWhiteboardVisual(payload);
 	}
 
 	private clearAbortConfirmTimer(): void {
@@ -1409,6 +1462,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.abortConfirmTimer = undefined;
 		}
 		this.abortConfirmUntil = 0;
+		this.abortConfirmMissionId = undefined;
 	}
 
 	private switchViewMode(targetMode: AdeEngineeringViewMode, side: boolean): void {
@@ -1419,7 +1473,8 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!side && targetMode === this.viewMode) {
 			return;
 		}
-		void this.adeEditorService.openEngineering(missionId, { viewMode: targetMode, side });
+		this.viewportMemory.save(missionId, this.viewMode, { panX: this.panX, panY: this.panY, zoom: this.zoom });
+		void this.adeEditorService.openEngineering(missionId, { viewMode: targetMode, side, preferExistingGroup: true });
 	}
 
 	private async handleUpdateOrchestrationStaffConfig(
@@ -1501,14 +1556,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 		const now = Date.now();
-		if (now > this.abortConfirmUntil) {
+		if (now > this.abortConfirmUntil || this.abortConfirmMissionId !== missionId) {
 			this.clearAbortConfirmTimer();
 			this.abortConfirmUntil = now + 4000;
+			this.abortConfirmMissionId = missionId;
 			this.updateConsoleBar();
 			if (this.rootEl) {
 				this.abortConfirmTimer = getWindow(this.rootEl).setTimeout(() => {
 					this.abortConfirmTimer = undefined;
 					this.abortConfirmUntil = 0;
+					this.abortConfirmMissionId = undefined;
 					this.updateConsoleBar();
 				}, 4000);
 			}
@@ -1536,107 +1593,31 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (!this.consoleBarEl) {
 			return;
 		}
-		const hasMission = Boolean(this.activeMissionId);
-		this.consoleBarEl.hidden = !hasMission;
-		if (!hasMission) {
-			return;
-		}
-
-		const isOrch = this.viewMode === 'orchestration';
-		this.viewOrchBtnEl.classList.toggle('is-active', isOrch);
-		this.viewOrchBtnEl.setAttribute('aria-selected', String(isOrch));
-		this.viewMissionBtnEl.classList.toggle('is-active', !isOrch);
-		this.viewMissionBtnEl.setAttribute('aria-selected', String(!isOrch));
-
-		const orch = this.getActiveOrchestrationRuntime();
-		const runtimeState = this.getEffectiveRuntimeState();
-		const isPaused = orch?.status === 'paused';
-
-		let activeCount = 0;
-		let blockedCount = 0;
-		let waitingJoinCount = 0;
-		if (orch) {
-			for (const tok of Object.values(orch.tokens)) {
-				if (tok.status === 'active') {
-					activeCount++;
-				} else if (tok.status === 'blocked') {
-					blockedCount++;
-				} else if (tok.status === 'waiting_join') {
-					waitingJoinCount++;
-				}
-			}
-		}
-		const inFlight = activeCount + blockedCount + waitingJoinCount;
-
-		if (isPaused) {
-			this.consoleTokensEl.textContent = adeBi(
-				localize('adeEngConsolePausedText', "PAUSED · {0} in-flight", inFlight),
-				'已暂停 · {0} 在途',
-				inFlight,
-			);
-		} else if (inFlight > 0) {
-			const detailParts: string[] = [];
-			if (activeCount > 0) { detailParts.push(`${activeCount} active`); }
-			if (blockedCount > 0) { detailParts.push(`${blockedCount} blk`); }
-			if (waitingJoinCount > 0) { detailParts.push(`${waitingJoinCount} join`); }
-			this.consoleTokensEl.textContent = adeBi(
-				localize('adeEngConsoleInFlightText', "{0} tokens ({1})", inFlight, detailParts.join(' · ')),
-				'{0} 在途 ({1})',
-				inFlight,
-				detailParts.join(' · '),
-			);
-		} else {
-			this.consoleTokensEl.textContent = adeBi(localize('adeEngConsoleIdleText', "0 in-flight"), '0 在途令牌');
-		}
-		this.consoleTokensEl.classList.toggle('is-paused', isPaused);
-		this.consoleTokensEl.classList.toggle('is-active', !isPaused && inFlight > 0);
-
-		let totalCostUsd = 0;
-		let totalTokens = 0;
-		let anyEstimated = false;
-		if (runtimeState?.nodeTelemetry) {
-			for (const t of Object.values(runtimeState.nodeTelemetry)) {
-				totalCostUsd += t.costUsd ?? 0;
-				totalTokens += t.totalTokens ?? 0;
-				if (t.costEstimated) {
-					anyEstimated = true;
-				}
-			}
-		}
-		if (totalCostUsd > 0 || totalTokens > 0) {
-			const costText = totalCostUsd > 0 ? formatFinOpsUsd(totalCostUsd, { estimated: anyEstimated, compact: true }) : '$0';
-			const tokText = totalTokens > 0 ? formatCompactTokenCount(totalTokens) : '';
-			this.consoleSpendEl.textContent = tokText ? `${costText} · ${tokText}` : costText;
-			this.consoleSpendEl.hidden = false;
-		} else {
-			this.consoleSpendEl.hidden = true;
-		}
-
-		const hasRuntime = Boolean(this.missionRuntimeService);
-		this.consolePauseBtnEl.disabled = !hasRuntime;
-		this.consolePauseBtnEl.classList.toggle('is-paused', isPaused);
-		this.consolePauseBtnEl.textContent = isPaused
-			? adeBi(localize('adeEngConsoleResumeBtn', "Resume"), '恢复流转')
-			: adeBi(localize('adeEngConsolePauseBtn', "Pause"), '暂停流转');
-		this.consolePauseBtnEl.title = isPaused
-			? adeBi(localize('adeEngConsoleResumeTip', "Resume orchestration token dispatch"), '恢复整波令牌流转')
-			: adeBi(localize('adeEngConsolePauseTip', "Pause orchestration token dispatch"), '一键暂停整波流转');
-
-		const isConfirmingAbort = Date.now() <= this.abortConfirmUntil;
-		this.consoleAbortBtnEl.disabled = !hasRuntime || (inFlight === 0 && !isPaused);
-		this.consoleAbortBtnEl.classList.toggle('is-confirming', isConfirmingAbort);
-		this.consoleAbortBtnEl.textContent = isConfirmingAbort
-			? adeBi(localize('adeEngConsoleAbortConfirmBtn', "Confirm Abort?"), '确认终止全部?')
-			: adeBi(localize('adeEngConsoleAbortBtn', "Abort All"), '终止全部');
-		this.consoleAbortBtnEl.title = adeBi(localize('adeEngConsoleAbortTip', "Force-abort all active orchestration tokens (click twice to confirm)"), '强制终止全部在途令牌（点击两次确认）');
-
-		this.consoleMinimapBtnEl.classList.toggle('is-active', Boolean(this.minimap?.isUserVisible()));
+		updateEngineeringConsoleBarDom({
+			consoleBarEl: this.consoleBarEl,
+			viewOrchBtnEl: this.viewOrchBtnEl,
+			viewMissionBtnEl: this.viewMissionBtnEl,
+			consoleTokensEl: this.consoleTokensEl,
+			consoleSpendEl: this.consoleSpendEl,
+			consolePauseBtnEl: this.consolePauseBtnEl,
+			consoleAbortBtnEl: this.consoleAbortBtnEl,
+			consoleMinimapBtnEl: this.consoleMinimapBtnEl,
+		}, {
+			hasMission: Boolean(this.activeMissionId),
+			viewMode: this.viewMode,
+			orch: this.getActiveOrchestrationRuntime(),
+			runtimeState: this.getEffectiveRuntimeState(),
+			hasRuntime: Boolean(this.missionRuntimeService),
+			isConfirmingAbort: Date.now() <= this.abortConfirmUntil && this.abortConfirmMissionId === this.activeMissionId,
+			minimapVisible: Boolean(this.minimap?.isUserVisible()),
+		});
 	}
 
 	private centerViewportOnWorldPoint(worldX: number, worldY: number): void {
 		if (!this.viewportEl) {
 			return;
 		}
+		this.cancelCameraAnimation();
 		const rect = this.viewportEl.getBoundingClientRect();
 		const vpW = rect.width > 40 ? rect.width : 1080;
 		const vpH = rect.height > 40 ? rect.height : 720;
@@ -1651,55 +1632,21 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		const firstSelected = this.selectedNodeIds.size > 0 ? [...this.selectedNodeIds][0] : undefined;
 		const runtimeState = this.getEffectiveRuntimeState();
-		if (this.viewMode === 'orchestration') {
-			const compatNodes: IMissionDagNode[] = this.orchNodes.map(n => ({
-				id: n.id,
-				label: n.label,
-				kind: n.kind === 'whiteboard' ? 'gate' : 'task',
-			}));
-			const compatEdges: IMissionDagEdge[] = this.orchEdges.map(e => ({
-				id: e.id,
-				from: e.from,
-				to: e.to,
-				label: e.label,
-			}));
-			const sizeOverride = new Map<string, { readonly width: number; readonly height: number }>();
-			const nodeColors: Record<string, string | undefined> = {};
-			for (const n of this.orchNodes) {
-				sizeOverride.set(n.id, getOrchestrationNodeSize(n));
-				if (n.color) {
-					nodeColors[n.id] = n.color;
-				}
-			}
-			const orchRuntime = this.getActiveOrchestrationRuntime();
-			this.minimap.syncGraph(compatNodes, compatEdges, this.positions, runtimeState, firstSelected, {
-				nodeStates: orchRuntime?.nodeStates,
-				nodeSizeOverride: sizeOverride,
-				nodeColors,
-			});
-		} else {
-			const taskStatuses = this.getActiveTaskStatuses();
-			const mappedStates: Record<string, string> = {};
-			const nodeColors: Record<string, string | undefined> = {};
-			for (const n of this.nodes) {
-				if (n.color) {
-					nodeColors[n.id] = n.color;
-				}
-			}
-			for (const [nid, rec] of Object.entries(taskStatuses)) {
-				mappedStates[nid] = rec.status === 'in_progress'
-					? 'active'
-					: rec.status === 'completed'
-						? 'completed'
-						: rec.status === 'blocked'
-							? 'blocked'
-							: 'idle';
-			}
-			this.minimap.syncGraph(this.nodes, this.edges, this.positions, runtimeState, firstSelected, {
-				nodeStates: mappedStates,
-				nodeColors,
-			});
-		}
+		const payload = buildMinimapSyncPayload(
+			this.viewMode,
+			this.orchNodes,
+			this.orchEdges,
+			this.nodes,
+			this.edges,
+			this.getActiveOrchestrationRuntime(),
+			this.getActiveTaskStatuses(),
+			{
+				departmentBounds: this.viewMode === 'orchestration' ? this.renderer?.getLastDepartmentBounds?.() : undefined,
+				orchConflictNodeIds: this.viewMode === 'orchestration' ? this.renderer?.getLastOrchConflictNodeIds?.() : undefined,
+				dagDiagnostics: this.viewMode === 'mission' ? this.renderer?.getLastDagDiagnosticsSummary?.() : undefined,
+			},
+		);
+		this.minimap.syncGraph(payload.nodes, payload.edges, this.positions, runtimeState, firstSelected, payload.options);
 		this.syncMinimapViewport();
 	}
 
@@ -1880,19 +1827,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		};
 	}
 
+	private getCurrentHistoryKey(): string | undefined {
+		return this.activeMissionId ? EngineeringHistoryStore.keyFor(this.activeMissionId, this.viewMode) : undefined;
+	}
+
 	private pushHistory(entry: IEngineeringHistoryEntry, coalesceMs = 0): void {
-		const now = Date.now();
-		if (coalesceMs > 0 && this.undoStack.length > 0 && (now - this.lastCoalescedHistoryAt) < coalesceMs) {
-			this.lastCoalescedHistoryAt = now;
-			this.redoStack = [];
+		const key = this.getCurrentHistoryKey();
+		if (!key) {
 			return;
 		}
-		this.lastCoalescedHistoryAt = coalesceMs > 0 ? now : 0;
-		this.undoStack.push(entry);
-		if (this.undoStack.length > MAX_UNDO_HISTORY) {
-			this.undoStack.shift();
-		}
-		this.redoStack = [];
+		this.historyStore.push(key, entry, coalesceMs);
 	}
 
 	private applyHistorySnapshot(snapshot: IEngineeringHistoryEntry, dir: 'undo' | 'redo'): void {
@@ -1910,7 +1854,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.missionService?.updateOrchestrationPositions(missionId, snapshot.positions);
 			}
 			this.orchestrationText = snapshot.codeText;
-			this.fileDrawer.setCodeValue(snapshot.codeText);
+			this.fileDrawer.setCodeValue(snapshot.codeText, true);
 			this.missionService?.updateOrchestrationText(missionId, snapshot.codeText);
 			this.parseAndRenderOrchestrationGraph(snapshot.codeText, false);
 		} else {
@@ -1919,7 +1863,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				this.missionService?.updateNodePositions(missionId, snapshot.positions);
 			}
 			this.mermaidText = snapshot.codeText;
-			this.fileDrawer.setCodeValue(snapshot.codeText);
+			this.fileDrawer.setCodeValue(snapshot.codeText, true);
 			this.missionService?.updateMermaid(missionId, snapshot.codeText);
 			if (this.missionService) {
 				const existingRec = this.missionService.getMission(missionId);
@@ -1950,21 +1894,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private undoCanvasMutation(): void {
-		if (!this.activeMissionId || this.undoStack.length === 0) {
+		const key = this.getCurrentHistoryKey();
+		if (!key) {
 			return;
 		}
-		const prev = this.undoStack.pop()!;
-		this.redoStack.push(this.captureHistorySnapshot(prev.label));
-		this.applyHistorySnapshot(prev, 'undo');
+		const prev = this.historyStore.popUndo(key, label => this.captureHistorySnapshot(label));
+		if (prev) {
+			this.applyHistorySnapshot(prev, 'undo');
+		}
 	}
 
 	private redoCanvasMutation(): void {
-		if (!this.activeMissionId || this.redoStack.length === 0) {
+		const key = this.getCurrentHistoryKey();
+		if (!key) {
 			return;
 		}
-		const next = this.redoStack.pop()!;
-		this.undoStack.push(this.captureHistorySnapshot(next.label));
-		this.applyHistorySnapshot(next, 'redo');
+		const next = this.historyStore.popRedo(key, label => this.captureHistorySnapshot(label));
+		if (next) {
+			this.applyHistorySnapshot(next, 'redo');
+		}
 	}
 
 	private commitCodeMutation(
@@ -2017,257 +1965,31 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private addMissionTaskVisual(worldPos?: IMissionNodePosition): void {
-		const missionId = this.activeMissionId;
-		if (!missionId) {
-			return;
-		}
-		const targetPos = worldPos ?? this.computeDefaultNewNodeWorldPos();
-		const added = addNodeToMermaid(this.mermaidText, {
-			kind: 'task',
-			direction: this.direction,
-		});
-		this.commitCodeMutation(added.mermaidText, `Add task ${added.nodeId}`, {
-			nodePosition: { nodeId: added.nodeId, pos: targetPos },
-			afterApply: () => {
-				if (this.missionService) {
-					const existingRec = this.missionService.getMission(missionId);
-					if (existingRec?.nodePrompts?.[added.nodeId]) {
-						this.missionService.updateNodePrompt(missionId, added.nodeId, '');
-					}
-					this.syncAllNodePromptViews();
-				}
-			},
-			successMessage: adeBi(
-				localize('adeMissionVisualAddTaskOk', "Added task node {0} (click to edit description, drag port to connect).", added.nodeId),
-				'已添加任务节点 {0}（点击编辑描述，拖拽端口连线）。',
-				added.nodeId,
-			),
-		});
+		this.graphActions.addMissionTaskVisual(worldPos);
 	}
 
 	private renameVisualNode(nodeId: string, nextLabel: string): void {
-		if (this.viewMode === 'orchestration') {
-			const nextCode = renameOrchestrationNode(this.orchestrationText, nodeId, nextLabel);
-			if (nextCode === this.orchestrationText) {
-				return;
-			}
-			this.commitCodeMutation(nextCode, `Rename ${nodeId}`, {
-				successMessage: adeBi(localize('adeMissionVisualRenameOk', "Renamed {0} to '{1}'.", nodeId, nextLabel), '已将节点 {0} 重命名为「{1}」。', nodeId, nextLabel),
-			});
-			return;
-		}
-		const nextMermaid = renameNodeInMermaid(this.mermaidText, nodeId, nextLabel);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		this.commitCodeMutation(nextMermaid, `Rename ${nodeId}`, {
-			successMessage: adeBi(localize('adeMissionVisualRenameOk', "Renamed {0} to '{1}'.", nodeId, nextLabel), '已将节点 {0} 重命名为「{1}」。', nodeId, nextLabel),
-		});
+		this.graphActions.renameVisualNode(nodeId, nextLabel);
 	}
 
 	private deleteVisualNodes(nodeIds: readonly string[]): void {
-		const missionId = this.activeMissionId;
-		const uniqueIds = [...new Set(nodeIds.map(id => id.trim()).filter(Boolean))];
-		if (uniqueIds.length === 0) {
-			return;
-		}
-		if (this.viewMode === 'orchestration') {
-			const staffIds = uniqueIds.filter(id => this.orchNodes.some(n => n.id === id && n.kind === 'staff'));
-			const nonStaffIds = uniqueIds.filter(id => !staffIds.includes(id));
-
-			if (missionId && this.missionRuntimeService && staffIds.length > 0) {
-				void (async () => {
-					let removedCount = 0;
-					let reclaimedTotal = 0;
-					let recoveryTotal = 0;
-					const errors: string[] = [];
-					for (const staffId of staffIds) {
-						const res = await this.missionRuntimeService!.removeOrchestrationSubordinate(missionId, {
-							targetNodeId: staffId,
-							isHumanUser: true,
-							force: true,
-							reason: 'Removed from Engineering canvas',
-						});
-						if (res.ok) {
-							removedCount++;
-							reclaimedTotal += res.reclaimedTokenIds?.length ?? 0;
-							recoveryTotal += res.recoveryTokenIds?.length ?? 0;
-						} else if (res.error) {
-							errors.push(`${staffId}: ${res.error}`);
-						}
-					}
-					if (this.isPaneDisposed || this.activeMissionId !== missionId) {
-						return;
-					}
-					const latestText = this.missionService?.getMission(missionId)?.orchestrationText ?? this.orchestrationText;
-					let nextCode = latestText;
-					for (const id of nonStaffIds) {
-						nextCode = removeOrchestrationNode(nextCode, id);
-					}
-					if (nextCode !== latestText) {
-						this.missionService?.updateOrchestrationText(missionId, nextCode);
-						removedCount += nonStaffIds.length;
-					}
-					this.orchestrationText = nextCode;
-					this.fileDrawer?.setCodeValue(nextCode);
-					for (const nid of uniqueIds) {
-						this.selectedNodeIds.delete(nid);
-					}
-					this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-					this.syncSelectionHud();
-					this.parseAndRenderOrchestrationGraph(nextCode, false);
-					if (errors.length > 0) {
-						this.reportFeedback(errors.join(' | '), 'error');
-					} else if (removedCount > 0) {
-						const reclaimNote = reclaimedTotal > 0
-							? adeBi(
-								localize('adeOrchDeleteReclaimNote', " (reclaimed {0} token(s), bounced {1} recovery baton(s))", reclaimedTotal, recoveryTotal),
-								'（已回收 {0} 枚在途令牌，回弹 {1} 枚恢复令牌给上级）',
-								reclaimedTotal,
-								recoveryTotal,
-							)
-							: '';
-						this.reportFeedback(adeBi(
-							localize('adeOrchDeleteOkWithReclaim', "Removed {0} node(s){1}.", removedCount, reclaimNote),
-							'已删除 {0} 个节点{1}。',
-							removedCount,
-							reclaimNote,
-						), 'ok');
-					}
-				})();
-				return;
-			}
-
-			let nextCode = this.orchestrationText;
-			for (const id of uniqueIds) {
-				nextCode = removeOrchestrationNode(nextCode, id);
-			}
-			if (nextCode === this.orchestrationText) {
-				return;
-			}
-			this.commitCodeMutation(nextCode, `Delete ${uniqueIds.join(', ')}`, {
-				afterApply: () => {
-					for (const nid of uniqueIds) {
-						this.selectedNodeIds.delete(nid);
-					}
-					this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-					this.syncSelectionHud();
-				},
-				successMessage: adeBi(localize('adeOrchDeleteOk', "Removed {0} node(s).", uniqueIds.length), '已删除 {0} 个节点。', uniqueIds.length),
-			});
-			return;
-		}
-
-		const nextMermaid = uniqueIds.length === 1
-			? removeNodeFromMermaid(this.mermaidText, uniqueIds[0])
-			: removeNodesFromMermaid(this.mermaidText, uniqueIds);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		this.commitCodeMutation(nextMermaid, `Delete ${uniqueIds.join(', ')}`, {
-			afterApply: () => {
-				if (missionId && this.missionService) {
-					for (const nid of uniqueIds) {
-						this.missionService.updateNodePrompt(missionId, nid, '');
-					}
-					this.syncAllNodePromptViews();
-				}
-				for (const nid of uniqueIds) {
-					this.selectedNodeIds.delete(nid);
-				}
-				this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
-				this.syncSelectionHud();
-			},
-			successMessage: adeBi(localize('adeMissionDeleteTasksOk', "Removed {0} task node(s).", uniqueIds.length), '已删除 {0} 个任务节点。', uniqueIds.length),
-		});
+		this.graphActions.deleteVisualNodes(nodeIds);
 	}
 
 	private renameVisualEdgeLabel(fromId: string, toId: string, nextLabel: string): void {
-		if (this.viewMode === 'orchestration') {
-			const nextCode = renameOrchestrationEdgeLabel(this.orchestrationText, fromId, toId, nextLabel);
-			if (nextCode === this.orchestrationText) {
-				return;
-			}
-			this.commitCodeMutation(nextCode, `Edit edge label ${fromId}->${toId}`);
-			return;
-		}
-		const nextMermaid = renameEdgeLabelInMermaid(this.mermaidText, fromId, toId, nextLabel);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		this.commitCodeMutation(nextMermaid, `Edit edge label ${fromId}->${toId}`);
+		this.graphActions.renameVisualEdgeLabel(fromId, toId, nextLabel);
 	}
 
 	private connectVisualEdge(fromId: string, toId: string, options?: { readonly fail?: boolean; readonly bidirectional?: boolean }): void {
-		if (this.viewMode === 'orchestration') {
-			const res = connectOrchestrationEdge(this.orchestrationText, fromId, toId, {
-				bidirectional: options?.bidirectional,
-			});
-			if (!res.ok || !res.orchestrationText) {
-				this.reportFeedback(res.error ?? adeBi(localize('adeMissionVisualConnectFail', "Cannot create edge."), '无法建立连线。'), 'error');
-				return;
-			}
-			const fromStaff = this.orchNodes.find(n => n.id === fromId && n.kind === 'staff');
-			const toStaff = this.orchNodes.find(n => n.id === toId && n.kind === 'staff');
-			const hasReverse = this.orchEdges.some(e => e.from === toId && e.to === fromId);
-			const isDownwardOneWay = !options?.bidirectional && !hasReverse
-				&& fromStaff?.tier !== undefined && toStaff?.tier !== undefined && fromStaff.tier < toStaff.tier;
-			this.commitCodeMutation(res.orchestrationText, `Connect ${fromId} ${options?.bidirectional ? '<-->' : '-->'} ${toId}`, {
-				successMessage: options?.bidirectional
-					? adeBi(localize('adeOrchConnectBidirOk', "Connected {0} <--> {1}.", fromId, toId), '已建立双向连线 {0} ⇄ {1}。', fromId, toId)
-					: isDownwardOneWay
-						? adeBi(localize('adeOrchConnectOneWayTip', "Connected {0} → {1} (Tip: right-click edge → Make Bidirectional <--> if subordinate must return tokens).", fromId, toId), '已建立单向连线 {0} → {1}（提示：若下级需回传令牌，请右键连线切换为双向 <-->）。', fromId, toId)
-						: adeBi(localize('adeMissionVisualConnectOk', "Connected {0} → {1}.", fromId, toId), '已建立连线 {0} → {1}。', fromId, toId),
-			});
-			return;
-		}
-		const res = addEdgeToMermaid(this.mermaidText, fromId, toId);
-		if (!res.ok || !res.mermaidText) {
-			this.reportFeedback(res.error ?? adeBi(localize('adeMissionVisualConnectFail', "Cannot create edge."), '无法建立连线。'), 'error');
-			return;
-		}
-		this.commitCodeMutation(res.mermaidText, `Connect ${fromId} -> ${toId}`, {
-			successMessage: adeBi(localize('adeMissionVisualConnectOk', "Connected {0} → {1}.", fromId, toId), '已建立任务依赖 {0} → {1}。', fromId, toId),
-		});
+		this.graphActions.connectVisualEdge(fromId, toId, options);
 	}
 
 	private deleteVisualEdge(fromId: string, toId: string): void {
-		if (this.viewMode === 'orchestration') {
-			const nextCode = removeOrchestrationEdge(this.orchestrationText, fromId, toId);
-			if (nextCode === this.orchestrationText) {
-				return;
-			}
-			this.commitCodeMutation(nextCode, `Delete edge ${fromId} -> ${toId}`, {
-				successMessage: adeBi(localize('adeMissionVisualDeleteEdgeOk', "Removed edge {0} → {1}.", fromId, toId), '已删除连线 {0} → {1}。', fromId, toId),
-			});
-			return;
-		}
-		const nextMermaid = removeEdgeFromMermaid(this.mermaidText, fromId, toId);
-		if (nextMermaid === this.mermaidText) {
-			return;
-		}
-		this.commitCodeMutation(nextMermaid, `Delete edge ${fromId} -> ${toId}`, {
-			successMessage: adeBi(localize('adeMissionVisualDeleteEdgeOk', "Removed edge {0} → {1}.", fromId, toId), '已删除连线 {0} → {1}。', fromId, toId),
-		});
+		this.graphActions.deleteVisualEdge(fromId, toId);
 	}
 
 	private toggleOrchestrationEdgeBidirectional(fromId: string, toId: string): void {
-		const hasReverse = this.orchEdges.some(e => e.from === toId && e.to === fromId);
-		if (hasReverse) {
-			const nextCode = removeOrchestrationEdge(this.orchestrationText, toId, fromId);
-			if (nextCode !== this.orchestrationText) {
-				this.commitCodeMutation(nextCode, `Unidirectional ${fromId} -> ${toId}`, {
-					successMessage: adeBi(localize('adeOrchEdgeUnidirOk', "Switched {0} → {1} to one-way.", fromId, toId), '已将连线 {0} → {1} 切换为单向。', fromId, toId),
-				});
-			}
-		} else {
-			const res = connectOrchestrationEdge(this.orchestrationText, toId, fromId);
-			if (res.ok && res.orchestrationText) {
-				this.commitCodeMutation(res.orchestrationText, `Bidirectional ${fromId} <--> ${toId}`, {
-					successMessage: adeBi(localize('adeOrchEdgeBidirOk', "Switched {0} ⇄ {1} to bidirectional.", fromId, toId), '已将连线 {0} ⇄ {1} 切换为双向。', fromId, toId),
-				});
-			}
-		}
+		this.graphActions.toggleOrchestrationEdgeBidirectional(fromId, toId);
 	}
 
 	private deleteSelectedItems(): void {
@@ -2314,39 +2036,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		if (this.viewMode === 'mission') {
 			const st = this.getActiveTaskStatuses()[node.id]?.status ?? 'pending';
 			const isDone = st === 'completed';
-			this.popovers.openCanvasContextMenu(clientX, clientY, [
-				{
-					id: 'edit-task',
-					label: adeBi(localize('adeMissionCtxEditTask', "Edit Task Details"), '编辑任务详情'),
-					icon: 'note',
-					run: () => {
-						const el = this.worldEl.querySelector<HTMLElement>(`[data-node-id="${node.id}"]`) ?? this.viewportEl;
-						this.openMissionTaskPopover(node, el);
-					},
+			this.popovers.openCanvasContextMenu(clientX, clientY, buildMissionNodeContextMenuItems(node, isDone, {
+				onEditTask: () => {
+					const el = this.findWorldAnchorByAttr('data-node-id', node.id) ?? this.viewportEl;
+					this.openMissionTaskPopover(node, el);
 				},
-				{
-					id: 'rename-node',
-					label: adeBi(localize('adeMissionCtxRenameNode', "Rename"), '重命名'),
-					icon: 'edit',
-					run: () => this.renderer.startInlineNodeRename(node.id),
-				},
-				{
-					id: 'toggle-complete',
-					label: isDone
-						? adeBi(localize('adeMissionCtxReopenTask', "Reopen Task"), '重置为待完成')
-						: adeBi(localize('adeMissionCtxCompleteTask', "Mark Completed ✓"), '标注为已完成 ✓'),
-					icon: isDone ? 'discard' : 'check',
-					run: () => void this.handleSetMissionTaskStatus(node.id, isDone ? 'pending' : 'completed'),
-				},
-				{
-					id: 'delete-node',
-					label: adeBi(localize('adeMissionCtxDeleteNode', "Delete {0}", node.id), '删除 {0}', node.id),
-					icon: 'trash',
-					danger: true,
-					separatorBefore: true,
-					run: () => this.deleteVisualNodes([node.id]),
-				},
-			], {
+				onRename: () => this.renderer.startInlineNodeRename(node.id),
+				onToggleComplete: () => { this.handleSetMissionTaskStatus(node.id, isDone ? 'pending' : 'completed'); },
+				onDelete: () => this.deleteVisualNodes([node.id]),
+			}), {
 				colorPicker: {
 					currentColor: node.color,
 					onSelectColor: nextColor => this.setNodeColorVisual(node.id, nextColor),
@@ -2366,39 +2064,17 @@ export class AdeEngineeringEditorPane extends EditorPane {
 				createdAt: Date.now(),
 				updatedAt: Date.now(),
 			};
-			this.popovers.openCanvasContextMenu(clientX, clientY, [
-				{
-					id: 'edit-whiteboard',
-					label: adeBi(localize('adeOrchCtxEditWb', "Edit Whiteboard"), '编辑共享白板'),
-					icon: 'notebook',
-					run: () => {
-						const el = this.worldEl.querySelector<HTMLElement>(`[data-node-id="${oNode.id}"]`) ?? this.viewportEl;
-						this.openWhiteboardPopover(wb, el);
-					},
+			this.popovers.openCanvasContextMenu(clientX, clientY, buildWhiteboardNodeContextMenuItems(node.id, {
+				onEditWhiteboard: () => {
+					const el = this.findWorldAnchorByAttr('data-node-id', oNode.id) ?? this.viewportEl;
+					this.openWhiteboardPopover(wb, el);
 				},
-				{
-					id: 'rename-node',
-					label: adeBi(localize('adeMissionCtxRenameNode', "Rename"), '重命名'),
-					icon: 'edit',
-					run: () => this.renderer.startInlineNodeRename(node.id),
-				},
-				{
-					id: 'move-to-group',
-					label: adeBi(localize('adeOrchCtxMoveToGroup', "Move to Group…"), '移动至分组…'),
-					icon: 'folder',
-					run: () => this.popovers.openMoveToGroupPopover(clientX, clientY, oNode.label, oNode.department, this.orchDepartments, targetGrp => {
-						this.moveOrchestrationNodeToGroupVisual(oNode.id, targetGrp);
-					}),
-				},
-				{
-					id: 'delete-node',
-					label: adeBi(localize('adeMissionCtxDeleteNode', "Delete {0}", node.id), '删除 {0}', node.id),
-					icon: 'trash',
-					danger: true,
-					separatorBefore: true,
-					run: () => this.deleteVisualNodes([node.id]),
-				},
-			], {
+				onRename: () => this.renderer.startInlineNodeRename(node.id),
+				onMoveToGroup: () => this.popovers.openMoveToGroupPopover(clientX, clientY, oNode.label, oNode.department, this.orchDepartments, targetGrp => {
+					this.moveOrchestrationNodeToGroupVisual(oNode.id, targetGrp);
+				}),
+				onDelete: () => this.deleteVisualNodes([node.id]),
+			}), {
 				colorPicker: {
 					currentColor: oNode.color,
 					onSelectColor: nextColor => this.setNodeColorVisual(oNode.id, nextColor),
@@ -2408,94 +2084,55 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 
 		const linkedAgent = this.buildOrchestrationAgentMap().get(node.id);
-		const items: {
-			readonly id: string;
-			readonly label: string;
-			readonly icon?: string;
-			readonly danger?: boolean;
-			readonly separatorBefore?: boolean;
-			readonly run: () => void;
-		}[] = [];
-		if (linkedAgent && this.adeEditorService) {
-			items.push({
-				id: 'open-agent-chat',
-				label: adeBi(localize('adeOrchCtxOpenChat', "Open Employee Chat"), '打开员工会话'),
-				icon: 'comment-discussion',
-				run: () => void this.adeEditorService?.openAgent(linkedAgent.id),
-			});
-		}
-		if (oNode && linkedAgent?.session && this.activeMissionId) {
-			const curEngineId = linkedAgent.session.engineId ?? linkedAgent.preferredEngineId ?? oNode.engineId ?? 'aexus-claude';
-			items.push({
-				id: 'reset-session-switch-engine',
-				label: adeBi(localize('adeOrchCtxResetSwitchEngine', "Reset Session & Switch Engine…"), '重置会话并切换引擎…'),
-				icon: 'refresh',
-				run: () => {
-					if (!this.activeMissionId) {
-						return;
-					}
-					const anchor = this.worldEl.querySelector<HTMLElement>(`[data-node-id="${oNode.id}"] .ade-mission-engine-pill`)
-						?? this.worldEl.querySelector<HTMLElement>(`[data-node-id="${oNode.id}"]`)
-						?? this.viewportEl;
-					void this.popovers.openEnginePopover(this.activeMissionId, oNode.id, linkedAgent, curEngineId, anchor, {
-						staffLabel: oNode.label,
-						hostAlias: oNode.hostAlias,
-					});
-				},
-			});
-		}
 		const org = this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG;
-		const maxTier = org.ranks.reduce((m, r) => Math.max(m, r.tier), 1);
-		const parentTier = oNode?.tier ?? 1;
-		const parentRankDef = org.ranks.find(r => r.tier === parentTier);
-		if (oNode && parentTier < maxTier && (!parentRankDef || parentRankDef.canHaveSubordinates)) {
-			items.push({
-				id: 'create-subordinate',
-				label: adeBi(localize('adeOrchCtxCreateSub', "Create Subordinate…"), '动态创建下级员工…'),
-				icon: 'person-add',
-				run: () => this.popovers.openAddStaffPopover(clientX, clientY, payload => {
+		const items = buildStaffNodeContextMenuItems(node, oNode, linkedAgent, org, {
+			canOpenChat: Boolean(this.adeEditorService),
+			canResetSwitchEngine: Boolean(oNode && linkedAgent?.session && this.activeMissionId),
+			onOpenChat: () => {
+				if (linkedAgent) {
+					void this.adeEditorService?.openAgent(linkedAgent.id);
+				}
+			},
+			onResetSwitchEngine: () => {
+				if (!this.activeMissionId || !oNode || !linkedAgent) {
+					return;
+				}
+				const curEngineId = linkedAgent.session?.engineId ?? linkedAgent.preferredEngineId ?? oNode.engineId ?? 'aexus-claude';
+				const anchor = this.findWorldAnchorByAttr('data-node-id', oNode.id, 'ade-mission-engine-pill')
+					?? this.viewportEl;
+				void this.popovers.openEnginePopover(this.activeMissionId, oNode.id, linkedAgent, curEngineId, anchor, {
+					staffLabel: oNode.label,
+					hostAlias: oNode.hostAlias,
+				});
+			},
+			onCreateSubordinate: minTier => {
+				if (!oNode) {
+					return;
+				}
+				this.popovers.openAddStaffPopover(clientX, clientY, payload => {
 					this.addOrchestrationSubordinateVisual(oNode, payload);
 				}, {
 					title: adeBi(localize('adeOrchSubTitle', "Create Subordinate under {0}", oNode.label), '在「{0}」下动态扩编下级', oNode.label),
 					subtitle: adeBi(localize('adeOrchSubHint', "Auto-wires bidirectional <--> link so tokens can return."), '自动建立双向 <--> 通道，确保下级完成后可回传令牌'),
 					submitLabel: adeBi(localize('adeOrchSubSubmit', "Create & Link <-->"), '创建并双向连线'),
-					minTier: parentTier + 1,
+					minTier,
 					defaultDepartment: oNode.department,
-				}),
-			});
-		}
-		items.push(
-			{
-				id: 'dispatch-requirement',
-				label: adeBi(localize('adeOrchCtxDispatch', "Dispatch Requirement…"), '下达任务需求…'),
-				icon: 'send',
-				run: () => this.popovers.openDispatchRequirementPopover(clientX, clientY, node.label, req => {
-					this.handleDispatchRequirement(req, node.id);
-				}),
+				});
 			},
-			{
-				id: 'rename-node',
-				label: adeBi(localize('adeMissionCtxRenameNode', "Rename"), '重命名'),
-				icon: 'edit',
-				run: () => this.renderer.startInlineNodeRename(node.id),
-			},
-			...(oNode ? [{
-				id: 'move-to-group',
-				label: adeBi(localize('adeOrchCtxMoveToGroup', "Move to Group…"), '移动至分组…'),
-				icon: 'folder',
-				run: () => this.popovers.openMoveToGroupPopover(clientX, clientY, oNode.label, oNode.department, this.orchDepartments, targetGrp => {
+			onDispatchRequirement: () => this.popovers.openDispatchRequirementPopover(clientX, clientY, node.label, req => {
+				this.handleDispatchRequirement(req, node.id);
+			}),
+			onRename: () => this.renderer.startInlineNodeRename(node.id),
+			onMoveToGroup: () => {
+				if (!oNode) {
+					return;
+				}
+				this.popovers.openMoveToGroupPopover(clientX, clientY, oNode.label, oNode.department, this.orchDepartments, targetGrp => {
 					this.moveOrchestrationNodeToGroupVisual(oNode.id, targetGrp);
-				}),
-			}] : []),
-			{
-				id: 'delete-node',
-				label: adeBi(localize('adeMissionCtxDeleteNode', "Delete {0}", node.id), '删除 {0}', node.id),
-				icon: 'trash',
-				danger: true,
-				separatorBefore: true,
-				run: () => this.deleteVisualNodes([node.id]),
+				});
 			},
-		);
+			onDelete: () => this.deleteVisualNodes([node.id]),
+		});
 		this.popovers.openCanvasContextMenu(clientX, clientY, items, {
 			colorPicker: {
 				currentColor: oNode?.color,
@@ -2505,84 +2142,23 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private setNodeColorVisual(nodeId: string, color: string | null): void {
-		if (!this.activeMissionId) {
-			return;
-		}
-		if (this.viewMode === 'mission') {
-			const nextMermaid = upsertTaskMetadataInMermaid(this.mermaidText, nodeId, { color });
-			if (nextMermaid !== this.mermaidText) {
-				this.commitCodeMutation(nextMermaid, `Set node color ${nodeId}`, {
-					successMessage: color
-						? adeBi(localize('adeNodeColorUpdatedOk', "Updated color for {0}.", nodeId), '已更新 {0} 的节点颜色。', nodeId)
-						: adeBi(localize('adeNodeColorResetOk', "Reset color for {0} to default.", nodeId), '已恢复 {0} 为默认配色。', nodeId),
-				});
-			}
-			return;
-		}
-		const res = upsertOrchestrationNodeColorInCode(this.orchestrationText, nodeId, color);
-		if (!res.ok || !res.orchestrationText) {
-			this.reportFeedback(res.error ?? adeBi(localize('adeNodeColorFail', "Failed to update node color."), '更新节点颜色失败。'), 'error');
-			return;
-		}
-		if (res.orchestrationText !== this.orchestrationText) {
-			this.commitCodeMutation(res.orchestrationText, `Set node color ${nodeId}`, {
-				successMessage: color
-					? adeBi(localize('adeNodeColorUpdatedOk', "Updated color for {0}.", nodeId), '已更新 {0} 的节点颜色。', nodeId)
-					: adeBi(localize('adeNodeColorResetOk', "Reset color for {0} to default.", nodeId), '已恢复 {0} 为默认配色。', nodeId),
-			});
-		}
+		this.graphActions.setNodeColorVisual(nodeId, color);
 	}
 
 	private addOrchestrationGroupVisual(name: string, worldPos?: IMissionNodePosition): void {
-		const res = addOrchestrationGroup(this.orchestrationText, {
-			name,
-			direction: this.orchDirection,
-		});
-		if (!res.ok || !res.orchestrationText || !res.groupId) {
-			this.reportFeedback(res.error ?? adeBi(localize('adeOrchAddGroupFail', "Failed to create group."), '创建分组失败。'), 'error');
-			return;
-		}
-		this.commitCodeMutation(res.orchestrationText, `Add group ${name}`, {
-			...(worldPos ? { nodePosition: { nodeId: res.groupId, pos: worldPos } } : {}),
-			successMessage: adeBi(localize('adeOrchAddGroupOk', "Created group '{0}' ({1}).", res.groupName ?? name, res.groupId), '已创建部门分组「{0}」({1})。', res.groupName ?? name, res.groupId),
-		});
+		this.graphActions.addOrchestrationGroupVisual(name, worldPos);
 	}
 
 	private renameOrchestrationGroupVisual(groupId: string, nextName: string): void {
-		const res = renameOrchestrationGroup(this.orchestrationText, groupId, nextName);
-		if (!res.ok || !res.orchestrationText) {
-			this.reportFeedback(res.error ?? adeBi(localize('adeOrchRenameGroupFail', "Failed to rename group."), '重命名分组失败。'), 'error');
-			return;
-		}
-		this.commitCodeMutation(res.orchestrationText, `Rename group ${groupId}`, {
-			successMessage: adeBi(localize('adeOrchRenameGroupOk', "Renamed group to '{0}'.", res.newName ?? nextName), '已将分组重命名为「{0}」。', res.newName ?? nextName),
-		});
+		this.graphActions.renameOrchestrationGroupVisual(groupId, nextName);
 	}
 
 	private moveOrchestrationNodeToGroupVisual(nodeId: string, targetGroupIdOrName: string | undefined): void {
-		const res = moveOrchestrationNodeToGroup(this.orchestrationText, nodeId, targetGroupIdOrName);
-		if (!res.ok || !res.orchestrationText) {
-			this.reportFeedback(res.error ?? adeBi(localize('adeOrchMoveGroupFail', "Failed to move node to group."), '移动节点至分组失败。'), 'error');
-			return;
-		}
-		this.commitCodeMutation(res.orchestrationText, `Move ${nodeId} to ${res.groupName ?? 'top-level'}`, {
-			successMessage: res.groupName
-				? adeBi(localize('adeOrchMoveGroupOk', "Moved {0} into group '{1}'.", nodeId, res.groupName), '已将节点 {0} 移入分组「{1}」。', nodeId, res.groupName)
-				: adeBi(localize('adeOrchUngroupNodeOk', "Removed {0} from its group.", nodeId), '已将节点 {0} 移出分组。', nodeId),
-		});
+		this.graphActions.moveOrchestrationNodeToGroupVisual(nodeId, targetGroupIdOrName);
 	}
 
 	private removeOrchestrationGroupVisual(groupId: string, deleteMembers: boolean): void {
-		const res = removeOrchestrationGroup(this.orchestrationText, groupId, { deleteMembers });
-		if (!res.ok || !res.orchestrationText) {
-			this.reportFeedback(res.error ?? adeBi(localize('adeOrchRemoveGroupFail', "Failed to remove group."), '删除分组失败。'), 'error');
-			return;
-		}
-		this.commitCodeMutation(res.orchestrationText, deleteMembers ? `Delete group ${groupId} & members` : `Ungroup ${groupId}`, {
-			successMessage: deleteMembers
-				? adeBi(localize('adeOrchDeleteGroupMembersOk', "Deleted group '{0}' and {1} member(s).", groupId, res.removedNodeIds?.length ?? 0), '已删除分组「{0}」及其 {1} 个成员。', groupId, res.removedNodeIds?.length ?? 0)
-				: adeBi(localize('adeOrchUngroupOk', "Ungrouped '{0}' (all members preserved).", groupId), '已解散分组「{0}」（已保留全部成员）。', groupId),
-		});
+		this.graphActions.removeOrchestrationGroupVisual(groupId, deleteMembers);
 	}
 
 	private openGroupContextMenu(group: IOrchestrationDepartmentGroup, clientX: number, clientY: number): void {
@@ -2590,95 +2166,29 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 		const worldPos = this.clientToWorldPos(clientX, clientY);
-		this.popovers.openCanvasContextMenu(clientX, clientY, [
-			{
-				id: 'rename-group',
-				label: adeBi(localize('adeOrchCtxRenameGroup', "Rename Group"), '重命名分组'),
-				icon: 'edit',
-				run: () => this.renderer.startInlineGroupRename(group.id),
-			},
-			{
-				id: 'add-staff-to-group',
-				label: adeBi(localize('adeOrchCtxAddStaffToGroup', "Add Staff to '{0}'…", group.name), '在「{0}」中新建员工…', group.name),
-				icon: 'person-add',
-				run: () => this.popovers.openAddStaffPopover(clientX, clientY, payload => {
-					this.addOrchestrationStaffVisual({ ...payload, worldPos });
-				}, { defaultDepartment: group.name }),
-			},
-			{
-				id: 'add-wb-to-group',
-				label: adeBi(localize('adeOrchCtxAddWbToGroup', "Add Whiteboard to '{0}'…", group.name), '在「{0}」中新建白板…', group.name),
-				icon: 'notebook',
-				run: () => this.popovers.openAddWhiteboardPopover(clientX, clientY, payload => {
-					this.addOrchestrationWhiteboardVisual({ ...payload, worldPos });
-				}, { defaultDepartment: group.name }),
-			},
-			{
-				id: 'ungroup',
-				label: adeBi(localize('adeOrchCtxUngroup', "Ungroup (Keep Members)"), '解散分组（保留成员）'),
-				icon: 'ungroup-by-ref-type',
-				separatorBefore: true,
-				run: () => this.removeOrchestrationGroupVisual(group.id, false),
-			},
-			{
-				id: 'delete-group-members',
-				label: adeBi(localize('adeOrchCtxDeleteGroup', "Delete Group & Members"), '删除分组及全部成员'),
-				icon: 'trash',
-				danger: true,
-				run: () => this.removeOrchestrationGroupVisual(group.id, true),
-			},
-		]);
+		this.popovers.openCanvasContextMenu(clientX, clientY, buildGroupContextMenuItems(group, {
+			onRenameGroup: () => this.renderer.startInlineGroupRename(group.id),
+			onAddStaffToGroup: () => this.popovers.openAddStaffPopover(clientX, clientY, payload => {
+				this.addOrchestrationStaffVisual({ ...payload, worldPos });
+			}, { defaultDepartment: group.name }),
+			onAddWbToGroup: () => this.popovers.openAddWhiteboardPopover(clientX, clientY, payload => {
+				this.addOrchestrationWhiteboardVisual({ ...payload, worldPos });
+			}, { defaultDepartment: group.name }),
+			onUngroup: () => this.removeOrchestrationGroupVisual(group.id, false),
+			onDeleteGroupMembers: () => this.removeOrchestrationGroupVisual(group.id, true),
+		}));
 	}
 
 	private openEdgeContextMenu(edge: IMissionDagEdge, clientX: number, clientY: number): void {
 		if (!this.activeMissionId) {
 			return;
 		}
-		if (this.viewMode === 'orchestration') {
-			const hasReverse = this.orchEdges.some(e => e.from === edge.to && e.to === edge.from);
-			this.popovers.openCanvasContextMenu(clientX, clientY, [
-				{
-					id: 'edit-edge-label',
-					label: adeBi(localize('adeMissionCtxEditEdgeLabel', "Edit Label"), '编辑连线标签'),
-					icon: 'edit',
-					run: () => this.renderer.startInlineEdgeLabelEdit(edge.id),
-				},
-				{
-					id: 'toggle-bidir',
-					label: hasReverse
-						? adeBi(localize('adeOrchCtxToUnidir', "Make One-Way (-->)"), '切换为单向 (-->)')
-						: adeBi(localize('adeOrchCtxToBidir', "Make Bidirectional (<-->)"), '切换为双向 (<-->)'),
-					icon: 'arrow-swap',
-					run: () => this.toggleOrchestrationEdgeBidirectional(edge.from, edge.to),
-				},
-				{
-					id: 'delete-edge',
-					label: adeBi(localize('adeMissionCtxDeleteEdge', "Delete Edge"), '删除连线'),
-					icon: 'trash',
-					danger: true,
-					separatorBefore: true,
-					run: () => this.deleteVisualEdge(edge.from, edge.to),
-				},
-			]);
-			return;
-		}
-
-		this.popovers.openCanvasContextMenu(clientX, clientY, [
-			{
-				id: 'edit-edge-label',
-				label: adeBi(localize('adeMissionCtxEditEdgeLabel', "Edit Label"), '编辑连线标签'),
-				icon: 'edit',
-				run: () => this.renderer.startInlineEdgeLabelEdit(edge.id),
-			},
-			{
-				id: 'delete-edge',
-				label: adeBi(localize('adeMissionCtxDeleteEdge', "Delete Edge"), '删除连线'),
-				icon: 'trash',
-				danger: true,
-				separatorBefore: true,
-				run: () => this.deleteVisualEdge(edge.from, edge.to),
-			},
-		]);
+		const hasReverse = this.viewMode === 'orchestration' && this.orchEdges.some(e => e.from === edge.to && e.to === edge.from);
+		this.popovers.openCanvasContextMenu(clientX, clientY, buildEdgeContextMenuItems(this.viewMode, hasReverse, {
+			onEditLabel: () => this.renderer.startInlineEdgeLabelEdit(edge.id),
+			onToggleBidirectional: () => this.toggleOrchestrationEdgeBidirectional(edge.from, edge.to),
+			onDeleteEdge: () => this.deleteVisualEdge(edge.from, edge.to),
+		}));
 	}
 
 	// =========================================================================
@@ -2715,16 +2225,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 
-		const autoPos = computeMissionAutoLayout(parsed);
 		const storedPos = !forceAutoLayout && this.activeMissionId
 			? (this.missionService?.getMission(this.activeMissionId)?.positions ?? {})
 			: {};
-		const nextPositions = new Map<string, IMissionNodePosition>();
-		for (const node of parsed.nodes) {
-			const saved = storedPos[node.id] ?? (!forceAutoLayout ? this.positions.get(node.id) : undefined);
-			nextPositions.set(node.id, saved ?? autoPos.get(node.id) ?? { x: 240, y: 240 });
-		}
-		this.positions = nextPositions;
+		this.positions = resolveMissionLayoutPositions(parsed, storedPos, this.positions, forceAutoLayout, getMissionNodeSize);
 
 		this.fileDrawer.setMeta(adeBi(
 			localize('adeMissionMetaTasksCounts', "{0} tasks · {1} edges", parsed.nodes.length, parsed.edges.length),
@@ -2737,9 +2241,24 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.syncGraphDom();
 		this.reconcileSelectionAndSearch(parsed.nodes.map(n => n.id), parsed.edges.map(e => `${e.from}->${e.to}`));
 		this.fileDrawer.syncTaskDescriptionsPane();
-		if (!hadNodesBefore || forceAutoLayout) {
+		if (forceAutoLayout) {
 			this.fitGraphToViewport();
+		} else if (!hadNodesBefore) {
+			this.restoreViewportOrFit();
 		}
+	}
+
+	private restoreViewportOrFit(): void {
+		this.cancelCameraAnimation();
+		const saved = this.activeMissionId ? this.viewportMemory.get(this.activeMissionId, this.viewMode) : undefined;
+		if (saved) {
+			this.panX = saved.panX;
+			this.panY = saved.panY;
+			this.zoom = saved.zoom;
+			this.applyWorldTransformNow();
+			return;
+		}
+		this.fitGraphToViewport();
 	}
 
 	private parseAndRenderOrchestrationGraph(rawText: string, forceAutoLayout = false): void {
@@ -2776,23 +2295,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			return;
 		}
 
-		const autoPos = computeOrchestrationAutoLayout(parsed, { layoutMode: this.orchLayoutMode });
 		const storedPos = !forceAutoLayout && this.activeMissionId
 			? (this.missionService?.getMission(this.activeMissionId)?.orchestrationPositions ?? {})
 			: {};
-		const codePos = !forceAutoLayout ? (parsed.positions ?? {}) : {};
-		const nextPositions = new Map<string, IMissionNodePosition>();
-		for (const node of parsed.nodes) {
-			const saved = storedPos[node.id] ?? codePos[node.id] ?? (!forceAutoLayout ? this.positions.get(node.id) : undefined);
-			nextPositions.set(node.id, saved ?? autoPos.get(node.id) ?? { x: 260, y: 240 });
-		}
-		for (const dept of parsed.departments) {
-			const savedDept = storedPos[dept.id] ?? codePos[dept.id] ?? (!forceAutoLayout ? this.positions.get(dept.id) : undefined);
-			if (savedDept) {
-				nextPositions.set(dept.id, savedDept);
-			}
-		}
-		this.positions = nextPositions;
+		this.positions = resolveOrchestrationLayoutPositions(parsed, this.orchLayoutMode, storedPos, this.positions, forceAutoLayout);
 
 		const staffCount = parsed.nodes.filter(n => n.kind === 'staff').length;
 		const wbCount = parsed.nodes.filter(n => n.kind === 'whiteboard').length;
@@ -2827,8 +2333,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.syncGraphDom();
 		this.reconcileSelectionAndSearch(parsed.nodes.map(n => n.id), parsed.edges.map(e => `${e.from}->${e.to}`));
 		this.prewarmHosts();
-		if (!hadNodesBefore || forceAutoLayout) {
+		if (forceAutoLayout) {
 			this.fitGraphToViewport();
+		} else if (!hadNodesBefore) {
+			this.restoreViewportOrFit();
 		}
 	}
 
@@ -2868,94 +2376,25 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private buildOrchestrationAgentMap(): Map<string, IAdeAgent> {
-		const map = new Map<string, IAdeAgent>();
-		if (!this.activeMissionId) {
-			return map;
-		}
-		const generatedEmployees = this.missionService?.getGeneratedEmployees(this.activeMissionId) ?? [];
-		const byTreeKey = new Map<string, IAdeAgent>();
-		for (const emp of generatedEmployees) {
-			if (emp.treeNodeId) {
-				byTreeKey.set(emp.treeNodeId, emp);
-			}
-			for (const nid of emp.treeNodeIds ?? []) {
-				map.set(nid, emp);
-			}
-		}
-		const missionRec = this.missionService?.getMission(this.activeMissionId);
-		const ownerAgent = missionRec?.ownerSessionId && missionRec.ownerSessionId !== ADE_SECRETARY_ID
-			? this.projectsService?.getAgent(missionRec.ownerSessionId)
-			: undefined;
-		if (ownerAgent && this.orchNodes.length > 0) {
-			const rootNode = findHighestRankStaffNode({
-				direction: this.orchDirection,
-				nodes: this.orchNodes,
-				edges: this.orchEdges,
-				departments: this.orchDepartments,
-			});
-			if (rootNode && !map.has(rootNode.id)) {
-				map.set(rootNode.id, ownerAgent);
-			}
-		}
-		for (const oNode of this.orchNodes) {
-			if (oNode.kind !== 'staff' || map.has(oNode.id)) {
-				continue;
-			}
-			if (oNode.agentId) {
-				const direct = this.projectsService?.getAgent(oNode.agentId);
-				if (direct) {
-					map.set(oNode.id, direct);
-					continue;
-				}
-			}
-			const fallback = (oNode.employeeKey ? byTreeKey.get(`emp:${oNode.employeeKey}`) : undefined)
-				?? byTreeKey.get(oNode.id);
-			if (fallback) {
-				map.set(oNode.id, fallback);
-			}
-		}
-		return map;
+		const generatedEmployees = this.activeMissionId ? (this.missionService?.getGeneratedEmployees(this.activeMissionId) ?? []) : [];
+		const missionRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
+		return buildOrchestrationAgentMap(
+			this.activeMissionId,
+			this.orchDirection,
+			this.orchNodes,
+			this.orchEdges,
+			this.orchDepartments,
+			generatedEmployees,
+			missionRec,
+			this.projectsService,
+		);
 	}
 
 	private computeActiveProjectsFingerprint(agentByNodeId?: ReadonlyMap<string, IAdeAgent>): string {
 		if (!this.activeMissionId || !this.projectsService) {
 			return '';
 		}
-		const map = agentByNodeId ?? this.buildOrchestrationAgentMap();
-		const parts: string[] = [this.activeMissionId];
-		for (const oNode of this.orchNodes) {
-			if (oNode.kind !== 'staff') {
-				continue;
-			}
-			const a = map.get(oNode.id);
-			parts.push(a
-				? `${oNode.id}:${a.id}|${a.label}|${a.role ?? ''}|${a.session?.engineId ?? ''}|${a.preferredEngineId ?? ''}|${a.preferredModel ?? ''}|${a.preferredThinking ?? ''}`
-				: `${oNode.id}:`);
-		}
-		return parts.join('\x1e');
-	}
-
-	private computeTaskStatusesFingerprint(statuses: Readonly<Record<string, IMissionTaskStatusRecord>> | undefined): string {
-		if (!statuses) {
-			return '';
-		}
-		return Object.keys(statuses).sort().map(k => {
-			const r = statuses[k];
-			return `${k}:${r.status}:${r.completedAt ?? 0}:${r.assigneeNodeId ?? ''}:${r.activeTokenIds?.length ?? 0}:${r.artifactPtrs?.length ?? 0}:${r.lastError ?? ''}`;
-		}).join('|');
-	}
-
-	private computeOrchAuxiliaryFingerprint(
-		whiteboards: Readonly<Record<string, IOrchestrationWhiteboard>> | undefined,
-		runtime: IOrchestrationRuntimeState | undefined,
-	): string {
-		const wbPart = whiteboards
-			? Object.keys(whiteboards).sort().map(k => `${k}:${whiteboards[k].version}:${whiteboards[k].updatedAt}`).join('|')
-			: '';
-		const rtPart = runtime
-			? `${runtime.status ?? 'running'}:${runtime.tokenSeq}:${Object.values(runtime.tokens).map(t => `${t.id}:${t.status}:${t.nudgeCount}`).join(',')}:${Object.values(runtime.joinBarriers ?? {}).map(b => `${b.id}:${b.status}:${Object.keys(b.settledChildren).length}`).join(',')}`
-			: '';
-		return `${wbPart}#${rtPart}`;
+		return computeActiveProjectsFingerprint(this.activeMissionId, this.orchNodes, agentByNodeId ?? this.buildOrchestrationAgentMap());
 	}
 
 	private syncGraphDom(forceFullRebuild = false): void {
@@ -2964,14 +2403,15 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		const missionRec = this.activeMissionId ? this.missionService?.getMission(this.activeMissionId) : undefined;
 		const runtimeState = this.getEffectiveRuntimeState();
+		const orchRuntime = this.getActiveOrchestrationRuntime();
 		const ownerAgent = missionRec?.ownerSessionId ? this.projectsService?.getAgent(missionRec.ownerSessionId) : undefined;
 		const fallbackOwnerEngineId = ownerAgent?.session?.engineId ?? ownerAgent?.preferredEngineId ?? 'aexus-claude';
 		const agentByNodeId = this.viewMode === 'orchestration' ? this.buildOrchestrationAgentMap() : new Map<string, IAdeAgent>();
 		if (this.viewMode === 'orchestration') {
 			this.lastProjectsFingerprint = this.computeActiveProjectsFingerprint(agentByNodeId);
-			this.lastOrchAuxiliaryFingerprint = this.computeOrchAuxiliaryFingerprint(missionRec?.whiteboards, this.getActiveOrchestrationRuntime());
+			this.lastOrchAuxiliaryFingerprint = computeOrchestrationAuxiliaryFingerprint(missionRec, orchRuntime);
 		} else {
-			this.lastTaskStatusFingerprint = this.computeTaskStatusesFingerprint(missionRec?.taskStatuses);
+			this.lastTaskStatusFingerprint = computeMissionTaskStatusesFingerprint(missionRec, orchRuntime);
 		}
 
 		const snapshot: IMissionCanvasRenderSnapshot = {
@@ -2988,7 +2428,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			orchestrationDepartments: this.orchDepartments,
 			orchestrationLayoutMode: this.orchLayoutMode,
 			whiteboards: missionRec?.whiteboards ?? {},
-			orchestrationRuntime: this.getActiveOrchestrationRuntime(),
+			orchestrationRuntime: orchRuntime,
 			agentByNodeId,
 			fallbackOwnerEngineId,
 			orgConfig: this.roleSchemaService?.getConfig() ?? DEFAULT_ADE_ORGANIZATION_CONFIG,
@@ -2999,6 +2439,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			canSwitchHost: Boolean(this.activeMissionId && this.missionRuntimeService && this.cloudHostService),
 		};
 		this.renderer.syncGraph(snapshot, forceFullRebuild);
+		this.applyCrossViewLinkHighlights();
 		this.updateConsoleBar();
 		this.syncMinimap();
 	}
@@ -3038,67 +2479,63 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	private computeDefaultNewNodeWorldPos(): IMissionNodePosition {
-		const ids = this.getActiveNodeIds();
-		if (ids.length === 0) {
-			return { x: 260, y: 200 };
-		}
-		let maxX = -Infinity;
-		let sumY = 0;
-		let count = 0;
-		for (const id of ids) {
-			const pos = this.positions.get(id);
-			if (!pos) {
-				continue;
-			}
-			maxX = Math.max(maxX, pos.x);
-			sumY += pos.y;
-			count++;
-		}
-		if (count === 0 || !Number.isFinite(maxX)) {
-			return { x: 260, y: 200 };
-		}
-		return { x: Math.round(maxX + 320), y: Math.round(sumY / count) };
+		return computeDefaultNewNodeWorldPos(this.getActiveNodeIds(), this.positions);
 	}
 
 	private handleEndNodesDrag(movedNodeIds: readonly string[], movedPx: number): void {
 		const preSnap = this.preDragHistorySnapshot;
 		this.preDragHistorySnapshot = undefined;
-		this.isDraggingNode = false;
-		this.flushEdgeReroute();
-		if (movedPx >= 5 && this.activeMissionId && movedNodeIds.length > 0) {
-			const updates: Record<string, IMissionNodePosition> = {};
-			let anyChanged = false;
-			for (const nid of movedNodeIds) {
-				const pos = this.positions.get(nid);
-				if (!pos) {
-					continue;
+		const hadDeferredResync = this.pendingResyncAfterDrag;
+		this.pendingResyncAfterDrag = false;
+		this.flushEdgeReroute(movedNodeIds.length === 1 ? movedNodeIds[0] : undefined);
+		try {
+			if (movedPx >= 5 && this.activeMissionId && movedNodeIds.length > 0) {
+				const updates: Record<string, IMissionNodePosition> = {};
+				let anyChanged = false;
+				for (const nid of movedNodeIds) {
+					const pos = this.positions.get(nid);
+					if (!pos) {
+						continue;
+					}
+					updates[nid] = { x: pos.x, y: pos.y };
+					const prevPos = preSnap?.positions[nid];
+					if (!prevPos || prevPos.x !== pos.x || prevPos.y !== pos.y) {
+						anyChanged = true;
+					}
 				}
-				updates[nid] = { x: pos.x, y: pos.y };
-				const prevPos = preSnap?.positions[nid];
-				if (!prevPos || prevPos.x !== pos.x || prevPos.y !== pos.y) {
-					anyChanged = true;
+				if (anyChanged && preSnap) {
+					this.pushHistory({ ...preSnap, label: movedNodeIds.length > 1 ? `Move ${movedNodeIds.length} nodes` : `Move ${movedNodeIds[0]}` });
+				}
+				if (Object.keys(updates).length > 0) {
+					if (this.viewMode === 'orchestration') {
+						this.missionService?.updateOrchestrationPositions(this.activeMissionId, updates);
+					} else {
+						this.missionService?.updateNodePositions(this.activeMissionId, updates);
+					}
 				}
 			}
-			if (anyChanged && preSnap) {
-				this.pushHistory({ ...preSnap, label: movedNodeIds.length > 1 ? `Move ${movedNodeIds.length} nodes` : `Move ${movedNodeIds[0]}` });
-			}
-			if (Object.keys(updates).length > 0) {
-				if (this.viewMode === 'orchestration') {
-					this.missionService?.updateOrchestrationPositions(this.activeMissionId, updates);
-				} else {
-					this.missionService?.updateNodePositions(this.activeMissionId, updates);
-				}
-			}
+		} finally {
+			this.isDraggingNode = false;
+			this.pendingResyncAfterDrag = false;
+		}
+		if (hadDeferredResync) {
+			this.pendingResyncAfterDrag = true;
+			this.replayDeferredStoreResync();
 		}
 	}
 
 	private selectNode(nodeId: string | undefined, options?: { readonly toggleMulti?: boolean }): void {
 		this.selectedEdgeKey = undefined;
 		this.renderer?.setSelectedEdgeKey(undefined);
+		if (this.focusHighlightIds.size > 0) {
+			this.focusHighlightIds.clear();
+			this.applyCrossViewLinkHighlights();
+		}
 		if (!nodeId) {
 			this.selectedNodeIds.clear();
 			this.renderer?.setSelectedNodeIds([]);
 			this.syncSelectionHud();
+			this.emitCrossViewLinkHint([], 'select');
 			return;
 		}
 		if (options?.toggleMulti) {
@@ -3113,11 +2550,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
 		this.syncSelectionHud();
+		this.emitCrossViewLinkHint([...this.selectedNodeIds], 'select');
 	}
 
 	private selectNodes(nodeIds: Iterable<string>, options?: { readonly additive?: boolean }): void {
 		this.selectedEdgeKey = undefined;
 		this.renderer?.setSelectedEdgeKey(undefined);
+		if (this.focusHighlightIds.size > 0) {
+			this.focusHighlightIds.clear();
+			this.applyCrossViewLinkHighlights();
+		}
 		const next = options?.additive ? new Set(this.selectedNodeIds) : new Set<string>();
 		for (const id of nodeIds) {
 			next.add(id);
@@ -3125,6 +2567,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.selectedNodeIds = next;
 		this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
 		this.syncSelectionHud();
+		this.emitCrossViewLinkHint([...this.selectedNodeIds], 'select');
 	}
 
 	private selectEdge(edge: IMissionDagEdge | undefined): void {
@@ -3175,7 +2618,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 	}
 
-	private closeCanvasSearch(restoreCanvasFocus = false): void {
+	private closeCanvasSearch(restoreCanvasFocus = false, clearQuery = false): void {
 		if (!this.searchBarEl) {
 			return;
 		}
@@ -3183,6 +2626,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.syncHudLayoutClasses();
 		this.searchMatchIds = [];
 		this.searchActiveIdx = -1;
+		if (clearQuery && this.searchInputEl) {
+			this.searchInputEl.value = '';
+		}
 		if (this.searchCountEl) {
 			this.searchCountEl.textContent = '';
 		}
@@ -3192,26 +2638,76 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		}
 	}
 
-	private centerViewportOnNode(nodeId: string): void {
+	private cancelCameraAnimation(): void {
+		if (this.cameraAnimRafId !== undefined && this.rootEl) {
+			getWindow(this.rootEl).cancelAnimationFrame(this.cameraAnimRafId);
+			this.cameraAnimRafId = undefined;
+		}
+	}
+
+	private centerViewportOnNode(nodeId: string, options?: { readonly smooth?: boolean; readonly pulseMs?: number }): void {
 		const pos = this.positions.get(nodeId);
 		if (!pos || !this.viewportEl) {
 			return;
 		}
+		this.cancelCameraAnimation();
 		const rect = this.viewportEl.getBoundingClientRect();
 		const vpW = rect.width > 40 ? rect.width : 1080;
 		const vpH = rect.height > 40 ? rect.height : 720;
-		if (this.zoom < 0.75) {
-			this.zoom = 0.85;
+		const targetZoom = this.zoom < 0.85 ? 0.85 : this.zoom;
+		const targetPanX = Math.round(vpW / 2 - pos.x * targetZoom);
+		const targetPanY = Math.round(vpH / 2 - pos.y * targetZoom);
+		const pulseMs = options?.pulseMs ?? 1800;
+
+		const win = getWindow(this.viewportEl);
+		const reducedMotion = Boolean(
+			this.rootEl?.classList.contains('ade-animations-paused')
+			|| win.document.documentElement.classList.contains('ade-page-hidden')
+			|| win.document.body.classList.contains('monaco-reduce-motion')
+			|| win.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+		);
+		const dist = Math.hypot(targetPanX - this.panX, targetPanY - this.panY);
+		if (!options?.smooth || reducedMotion || rect.width <= 40 || (dist < 8 && Math.abs(targetZoom - this.zoom) < 0.01)) {
+			this.zoom = targetZoom;
+			this.panX = targetPanX;
+			this.panY = targetPanY;
+			this.applyWorldTransformNow();
+			this.renderer?.pulseFocusNode(nodeId, pulseMs);
+			return;
 		}
-		this.panX = Math.round(vpW / 2 - pos.x * this.zoom);
-		this.panY = Math.round(vpH / 2 - pos.y * this.zoom);
-		this.applyWorldTransformNow();
-		this.renderer?.pulseFocusNode(nodeId, 1800);
+
+		const startPanX = this.panX;
+		const startPanY = this.panY;
+		const startZoom = this.zoom;
+		const startTs = win.performance.now();
+		const step = (now: number) => {
+			if (this.isPaneDisposed) {
+				this.cameraAnimRafId = undefined;
+				return;
+			}
+			const t = Math.min(1, (now - startTs) / SMOOTH_CAMERA_GLIDE_MS);
+			const ease = 1 - Math.pow(1 - t, 3);
+			this.zoom = Math.round((startZoom + (targetZoom - startZoom) * ease) * 100) / 100;
+			this.panX = startPanX + (targetPanX - startPanX) * ease;
+			this.panY = startPanY + (targetPanY - startPanY) * ease;
+			this.applyWorldTransformNow();
+			if (t < 1) {
+				this.cameraAnimRafId = win.requestAnimationFrame(step);
+			} else {
+				this.cameraAnimRafId = undefined;
+				this.zoom = targetZoom;
+				this.panX = targetPanX;
+				this.panY = targetPanY;
+				this.applyWorldTransformNow();
+			}
+		};
+		this.cameraAnimRafId = win.requestAnimationFrame(step);
+		this.renderer?.pulseFocusNode(nodeId, pulseMs);
 	}
 
 	private updateCanvasSearchResults(autoCenter = true): void {
-		const query = (this.searchInputEl?.value ?? '').trim().toLowerCase();
-		if (!query) {
+		const rawQuery = this.searchInputEl?.value ?? '';
+		if (!rawQuery.trim()) {
 			this.searchMatchIds = [];
 			this.searchActiveIdx = -1;
 			if (this.searchCountEl) {
@@ -3220,31 +2716,14 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			this.renderer?.setSearchMatches(undefined, undefined);
 			return;
 		}
-		const matches: string[] = [];
-		if (this.viewMode === 'orchestration') {
-			const wbs = this.getActiveWhiteboards();
-			for (const oNode of this.orchNodes) {
-				const haystack = [
-					oNode.id,
-					oNode.label,
-					oNode.employeeName ?? '',
-					oNode.department ?? '',
-					oNode.rankId ?? '',
-					wbs[oNode.id]?.content ?? '',
-				].join('\n').toLowerCase();
-				if (haystack.includes(query)) {
-					matches.push(oNode.id);
-				}
-			}
-		} else {
-			const prompts = this.getActiveNodePrompts();
-			for (const node of this.nodes) {
-				const haystack = [node.id, node.label, prompts[node.id] ?? ''].join('\n').toLowerCase();
-				if (haystack.includes(query)) {
-					matches.push(node.id);
-				}
-			}
-		}
+		const matches = findCanvasSearchMatches(
+			rawQuery,
+			this.viewMode,
+			this.orchNodes,
+			this.nodes,
+			this.getActiveWhiteboards(),
+			this.getActiveNodePrompts(),
+		);
 		this.searchMatchIds = matches;
 		if (matches.length === 0) {
 			this.searchActiveIdx = -1;
@@ -3284,6 +2763,7 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			win?.cancelAnimationFrame(this.edgeRerouteRafId);
 			this.edgeRerouteRafId = undefined;
 		}
+		this.cancelCameraAnimation();
 		this.pendingDraggedNodeId = undefined;
 		this.pendingDraggedMultipleNodes = false;
 	}
@@ -3314,6 +2794,9 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.viewportEl.style.setProperty('--grid-y', `${ry}px`);
 		this.viewportEl.style.setProperty('--grid-scale', String(this.zoom));
 		this.viewportEl.classList.toggle('zoom-macro', this.zoom < 0.5);
+		if (this.activeMissionId && this.getActiveNodeCount() > 0) {
+			this.viewportMemory.save(this.activeMissionId, this.viewMode, { panX: this.panX, panY: this.panY, zoom: this.zoom });
+		}
 		this.syncMinimapViewport();
 	}
 
@@ -3340,15 +2823,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		});
 	}
 
-	private flushEdgeReroute(): void {
+	private flushEdgeReroute(movedNodeId?: string): void {
 		if (this.edgeRerouteRafId !== undefined && this.rootEl) {
 			getWindow(this.rootEl).cancelAnimationFrame(this.edgeRerouteRafId);
 			this.edgeRerouteRafId = undefined;
 		}
+		const targetNodeId = this.pendingDraggedMultipleNodes ? undefined : (movedNodeId ?? this.pendingDraggedNodeId);
 		this.pendingDraggedNodeId = undefined;
 		this.pendingDraggedMultipleNodes = false;
 		const dir = this.viewMode === 'orchestration' ? this.orchDirection : this.direction;
-		this.renderer?.updateEdgesSvg(this.nodes, this.edges, this.positions, { direction: dir });
+		this.renderer?.updateEdgesSvg(this.nodes, this.edges, this.positions, targetNodeId ? { movedNodeId: targetNodeId, direction: dir } : { direction: dir });
 	}
 
 	private syncAnimationPauseState(): void {
@@ -3368,329 +2852,92 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.renderer?.setAnimationsPaused(paused);
 	}
 
+	private isCanvasShortcutActive(): boolean {
+		const doc = this.rootEl?.ownerDocument;
+		const activeEl = doc?.activeElement as HTMLElement | null;
+		const isMountedInWorkbenchGroup = Boolean(this.editorGroupsService?.mainPart?.groups?.includes(this.group));
+		const isActiveWorkbenchPane = !isMountedInWorkbenchGroup
+			|| (this.editorGroupsService?.activeGroup === this.group && (!this.group.activeEditor || this.group.activeEditor === this.input));
+		const focusWithinCanvas = Boolean(activeEl && this.rootEl.contains(activeEl))
+			|| ((!activeEl || activeEl === doc?.body) && isActiveWorkbenchPane);
+		const isPaneDisplayed = Boolean(this.rootEl?.isConnected && (this.rootEl.offsetWidth > 0 || this.rootEl.offsetHeight > 0));
+		return this.isEditorTabVisible && focusWithinCanvas && isPaneDisplayed && !this.isPaneDisposed && Boolean(this.activeMissionId);
+	}
+
+	private openBlankCanvasContextMenu(clientX: number, clientY: number): void {
+		if (!this.activeMissionId) {
+			return;
+		}
+		const worldPos = this.clientToWorldPos(clientX, clientY);
+		const hasNodes = this.getActiveNodeCount() > 0;
+		const topStaff = this.viewMode === 'orchestration'
+			? findHighestRankStaffNode({
+				direction: this.orchDirection,
+				nodes: this.orchNodes,
+				edges: this.orchEdges,
+				departments: this.orchDepartments,
+			})
+			: undefined;
+		this.popovers.openCanvasContextMenu(clientX, clientY, buildBlankCanvasContextMenuItems(this.viewMode, hasNodes, topStaff?.label, {
+			onAddGroup: () => this.popovers.openAddGroupPopover(clientX, clientY, name => this.addOrchestrationGroupVisual(name, worldPos)),
+			onAddStaff: () => this.popovers.openAddStaffPopover(clientX, clientY, payload => this.addOrchestrationStaffVisual({ ...payload, worldPos })),
+			onAddWhiteboard: () => this.popovers.openAddWhiteboardPopover(clientX, clientY, payload => this.addOrchestrationWhiteboardVisual({ ...payload, worldPos })),
+			onDispatchTopStaff: () => {
+				if (topStaff) {
+					this.popovers.openDispatchRequirementPopover(clientX, clientY, topStaff.label, req => this.handleDispatchRequirement(req, topStaff.id));
+				}
+			},
+			onAddTask: () => this.addMissionTaskVisual(worldPos),
+			onFitView: () => this.fitGraphToViewport(),
+			onAutoLayout: () => this.resetToAutoLayout(),
+		}));
+	}
+
 	private installCanvasInteractions(): void {
-		let panning = false;
-		let panMoved = false;
-		let marqueeSelecting = false;
-		let marqueeAdditive = false;
-		let startClientX = 0;
-		let startClientY = 0;
-		let startPanX = 0;
-		let startPanY = 0;
-
-		const computeMarqueeHitIds = (c1x: number, c1y: number, c2x: number, c2y: number): string[] => {
-			const w1 = this.clientToWorldPos(Math.min(c1x, c2x), Math.min(c1y, c2y));
-			const w2 = this.clientToWorldPos(Math.max(c1x, c2x), Math.max(c1y, c2y));
-			const hits: string[] = [];
-			for (const id of this.getActiveNodeIds()) {
-				const pos = this.positions.get(id);
-				if (!pos) {
-					continue;
-				}
-				const sz = this.getNodeDimensions(id);
-				if (pos.x - sz.width / 2 <= w2.x && pos.x + sz.width / 2 >= w1.x && pos.y - sz.height / 2 <= w2.y && pos.y + sz.height / 2 >= w1.y) {
-					hits.push(id);
-				}
-			}
-			return hits;
-		};
-
-		const updateMarqueeBoxDom = (curX: number, curY: number): void => {
-			const vpRect = this.viewportEl.getBoundingClientRect();
-			this.marqueeBoxEl.style.left = `${Math.round(Math.min(startClientX, curX) - vpRect.left)}px`;
-			this.marqueeBoxEl.style.top = `${Math.round(Math.min(startClientY, curY) - vpRect.top)}px`;
-			this.marqueeBoxEl.style.width = `${Math.round(Math.abs(curX - startClientX))}px`;
-			this.marqueeBoxEl.style.height = `${Math.round(Math.abs(curY - startClientY))}px`;
-		};
-
-		this._register(addDisposableListener(this.viewportEl, EventType.POINTER_DOWN, (e: PointerEvent) => {
-			if (e.button !== 0 && e.button !== 1) {
-				return;
-			}
-			this.popovers.close();
-
-			if (e.button === 0 && e.shiftKey) {
-				e.preventDefault();
-				this.selectEdge(undefined);
-				marqueeSelecting = true;
-				marqueeAdditive = Boolean(e.metaKey || e.ctrlKey);
-				startClientX = e.clientX;
-				startClientY = e.clientY;
-				this.marqueeBoxEl.hidden = false;
-				updateMarqueeBoxDom(e.clientX, e.clientY);
-				this.viewportEl.classList.add('is-marquee-selecting');
-				try {
-					this.viewportEl.setPointerCapture(e.pointerId);
-				} catch { /* synthetic events */ }
-				return;
-			}
-
-			panning = true;
-			panMoved = false;
-			startClientX = e.clientX;
-			startClientY = e.clientY;
-			startPanX = this.panX;
-			startPanY = this.panY;
-			this.viewportEl.classList.add('panning');
-			try {
-				this.viewportEl.setPointerCapture(e.pointerId);
-			} catch { /* synthetic events */ }
-		}));
-
-		this._register(addDisposableListener(this.viewportEl, EventType.POINTER_MOVE, (e: PointerEvent) => {
-			if (marqueeSelecting) {
-				updateMarqueeBoxDom(e.clientX, e.clientY);
-				const hits = computeMarqueeHitIds(startClientX, startClientY, e.clientX, e.clientY);
-				const previewIds = marqueeAdditive ? new Set([...this.selectedNodeIds, ...hits]) : new Set(hits);
-				this.renderer?.setSelectedNodeIds(previewIds);
-				return;
-			}
-			if (!panning) {
-				return;
-			}
-			const dx = e.clientX - startClientX;
-			const dy = e.clientY - startClientY;
-			if (!panMoved && Math.hypot(dx, dy) >= CANVAS_PAN_CLICK_THRESHOLD_PX) {
-				panMoved = true;
-			}
-			this.panX = startPanX + dx;
-			this.panY = startPanY + dy;
-			this.scheduleWorldTransform();
-		}));
-
-		const stopViewportDrag = (e: PointerEvent, cancelled = false) => {
-			if (marqueeSelecting) {
-				marqueeSelecting = false;
-				this.marqueeBoxEl.hidden = true;
-				this.viewportEl.classList.remove('is-marquee-selecting');
-				try {
-					this.viewportEl.releasePointerCapture(e.pointerId);
-				} catch { /* ignore */ }
-				if (!cancelled) {
-					const dist = Math.hypot(e.clientX - startClientX, e.clientY - startClientY);
-					if (dist >= 4) {
-						this.selectNodes(computeMarqueeHitIds(startClientX, startClientY, e.clientX, e.clientY), { additive: marqueeAdditive });
-					} else if (!marqueeAdditive) {
-						this.selectNode(undefined);
-					}
+		installEngineeringCanvasInteractions(this._store, {
+			rootEl: this.rootEl,
+			viewportEl: this.viewportEl,
+			marqueeBoxEl: this.marqueeBoxEl,
+			searchBarEl: this.searchBarEl,
+			searchInputEl: this.searchInputEl,
+			minZoom: MIN_ZOOM,
+			maxZoom: MAX_ZOOM,
+			panClickThresholdPx: CANVAS_PAN_CLICK_THRESHOLD_PX,
+			getPanZoom: () => ({ panX: this.panX, panY: this.panY, zoom: this.zoom }),
+			setPanZoom: (panX, panY, zoom, immediate) => {
+				this.panX = panX;
+				this.panY = panY;
+				this.zoom = zoom;
+				if (immediate) {
+					this.applyWorldTransformNow();
 				} else {
-					this.renderer?.setSelectedNodeIds(this.selectedNodeIds);
+					this.scheduleWorldTransform();
 				}
-				return;
-			}
-			if (!panning) {
-				return;
-			}
-			const wasMoved = panMoved || Math.hypot(e.clientX - startClientX, e.clientY - startClientY) >= CANVAS_PAN_CLICK_THRESHOLD_PX;
-			panning = false;
-			panMoved = false;
-			this.viewportEl.classList.remove('panning');
-			this.applyWorldTransformNow();
-			try {
-				this.viewportEl.releasePointerCapture(e.pointerId);
-			} catch { /* ignore */ }
-			if (!cancelled && !wasMoved) {
-				this.selectEdge(undefined);
-				if (this.selectedNodeIds.size > 0) {
-					this.selectNode(undefined);
-				}
-			}
-		};
-		this._register(addDisposableListener(this.viewportEl, EventType.POINTER_UP, e => stopViewportDrag(e, false)));
-		this._register(addDisposableListener(this.viewportEl, 'pointercancel', e => stopViewportDrag(e, true)));
-
-		// Blank-canvas right-click context menu (preserved interaction to create nodes cleanly!)
-		this._register(addDisposableListener(this.viewportEl, EventType.CONTEXT_MENU, (e: MouseEvent) => {
-			const target = e.target as HTMLElement | null;
-			if (target?.closest('.ade-mission-node, .ade-mission-edge-group, .ade-orch-dept-pill-group')) {
-				return;
-			}
-			if (!this.activeMissionId) {
-				return;
-			}
-			e.preventDefault();
-			const worldPos = this.clientToWorldPos(e.clientX, e.clientY);
-			const hasNodes = this.getActiveNodeCount() > 0;
-
-			if (this.viewMode === 'orchestration') {
-				const topStaff = findHighestRankStaffNode({
-					direction: this.orchDirection,
-					nodes: this.orchNodes,
-					edges: this.orchEdges,
-					departments: this.orchDepartments,
-				});
-				this.popovers.openCanvasContextMenu(e.clientX, e.clientY, [
-					{
-						id: 'add-group',
-						label: adeBi(localize('adeOrchCtxAddGroup', "New Group / Department…"), '新建部门分组 (Group)…'),
-						icon: 'folder',
-						run: () => this.popovers.openAddGroupPopover(e.clientX, e.clientY, name => {
-							this.addOrchestrationGroupVisual(name, worldPos);
-						}),
-					},
-					{
-						id: 'add-staff',
-						label: adeBi(localize('adeOrchCtxAddStaff', "New Staff Node…"), '新建员工节点…'),
-						icon: 'person-add',
-						run: () => this.popovers.openAddStaffPopover(e.clientX, e.clientY, payload => {
-							this.addOrchestrationStaffVisual({ ...payload, worldPos });
-						}),
-					},
-					{
-						id: 'add-whiteboard',
-						label: adeBi(localize('adeOrchCtxAddWhiteboard', "New Department Whiteboard…"), '新建部门共享白板…'),
-						icon: 'notebook',
-						run: () => this.popovers.openAddWhiteboardPopover(e.clientX, e.clientY, payload => {
-							this.addOrchestrationWhiteboardVisual({ ...payload, worldPos });
-						}),
-					},
-					...(topStaff ? [{
-						id: 'dispatch-requirement',
-						label: adeBi(localize('adeOrchCtxDispatchTop', "Dispatch Requirement to {0}…", topStaff.label), '向最高职级 {0} 下达需求…', topStaff.label),
-						icon: 'send',
-						separatorBefore: true,
-						run: () => this.popovers.openDispatchRequirementPopover(e.clientX, e.clientY, topStaff.label, req => {
-							this.handleDispatchRequirement(req, topStaff.id);
-						}),
-					}] : []),
-					{
-						id: 'fit-view',
-						label: adeBi(localize('adeMissionCtxFitView', "Fit View"), '适配视口'),
-						icon: 'screen-full',
-						separatorBefore: true,
-						disabled: !hasNodes,
-						run: () => this.fitGraphToViewport(),
-					},
-					{
-						id: 'auto-layout',
-						label: adeBi(localize('adeMissionCtxAutoLayout', "Auto Layout"), '自动排版'),
-						icon: 'layout',
-						disabled: !hasNodes,
-						run: () => this.resetToAutoLayout(),
-					},
-				]);
-				return;
-			}
-
-			this.popovers.openCanvasContextMenu(e.clientX, e.clientY, [
-				{
-					id: 'add-task',
-					label: adeBi(localize('adeMissionCtxAddTaskNode', "New Task Node"), '新建任务节点'),
-					icon: 'add',
-					run: () => this.addMissionTaskVisual(worldPos),
-				},
-				{
-					id: 'fit-view',
-					label: adeBi(localize('adeMissionCtxFitView', "Fit View"), '适配视口'),
-					icon: 'screen-full',
-					separatorBefore: true,
-					disabled: !hasNodes,
-					run: () => this.fitGraphToViewport(),
-				},
-				{
-					id: 'auto-layout',
-					label: adeBi(localize('adeMissionCtxAutoLayout', "Auto Layout"), '自动排版'),
-					icon: 'layout',
-					disabled: !hasNodes,
-					run: () => this.resetToAutoLayout(),
-				},
-			]);
-		}));
-
-		this._register(addDisposableListener(this.viewportEl, EventType.WHEEL, (e: WheelEvent) => {
-			e.preventDefault();
-			if (e.ctrlKey || e.metaKey) {
-				const rect = this.viewportEl.getBoundingClientRect();
-				const cursorX = e.clientX - rect.left;
-				const cursorY = e.clientY - rect.top;
-				const worldX = (cursorX - this.panX) / this.zoom;
-				const worldY = (cursorY - this.panY) / this.zoom;
-				const factor = e.deltaY < 0 ? 1.08 : 0.92;
-				this.zoom = Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor)) * 100) / 100;
-				this.panX = cursorX - worldX * this.zoom;
-				this.panY = cursorY - worldY * this.zoom;
-			} else {
-				this.panX -= e.deltaX;
-				this.panY -= e.deltaY;
-			}
-			this.applyWorldTransformNow();
-		}, { passive: false }));
-
-		const win = getWindow(this.rootEl);
-		this._register(addDisposableListener(win, EventType.KEY_DOWN, (e: KeyboardEvent) => {
-			const target = e.target as HTMLElement | null;
-			const tag = target?.tagName;
-			const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(target?.isContentEditable);
-			const doc = this.rootEl?.ownerDocument;
-			const activeEl = doc?.activeElement as HTMLElement | null;
-			const focusWithinCanvas = !activeEl || activeEl === doc?.body || this.rootEl.contains(activeEl);
-			const isPaneDisplayed = Boolean(this.rootEl?.isConnected && (this.rootEl.offsetWidth > 0 || this.rootEl.offsetHeight > 0));
-			const canvasActive = focusWithinCanvas && isPaneDisplayed && !this.isPaneDisposed && Boolean(this.activeMissionId);
-			const hasPrimaryMod = (e.metaKey || e.ctrlKey) && !e.altKey;
-			const lowerKey = e.key.toLowerCase();
-
-			if (hasPrimaryMod && !e.shiftKey && lowerKey === 'f' && canvasActive && !this.fileDrawer.isOpen()) {
-				const typingOutsideSearch = isTyping && target !== this.searchInputEl;
-				if (!typingOutsideSearch) {
-					e.preventDefault();
-					e.stopPropagation();
-					this.openCanvasSearch();
-					return;
-				}
-			}
-
-			if (hasPrimaryMod && !isTyping && canvasActive && !this.popovers.isOpen()) {
-				if (lowerKey === 'z') {
-					e.preventDefault();
-					e.stopPropagation();
-					if (e.shiftKey) {
-						this.redoCanvasMutation();
-					} else {
-						this.undoCanvasMutation();
-					}
-					return;
-				}
-				if (lowerKey === 'y' && e.ctrlKey && !e.metaKey && !e.shiftKey) {
-					e.preventDefault();
-					e.stopPropagation();
-					this.redoCanvasMutation();
-					return;
-				}
-				if (lowerKey === 'a' && !e.shiftKey && !this.fileDrawer.isOpen() && this.getActiveNodeCount() > 0) {
-					e.preventDefault();
-					e.stopPropagation();
-					this.selectNodes(this.getActiveNodeIds());
-					return;
-				}
-			}
-
-			if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
-				if (!isTyping && canvasActive && !this.fileDrawer.isOpen() && !this.popovers.isOpen()) {
-					if (this.selectedEdgeKey || this.selectedNodeIds.size > 0) {
-						e.preventDefault();
-						e.stopPropagation();
-						this.deleteSelectedItems();
-						return;
-					}
-				}
-			}
-
-			if (e.key === 'Escape') {
-				if (this.searchBarEl && !this.searchBarEl.hidden) {
-					this.closeCanvasSearch(true);
-				} else if (this.popovers.isOpen()) {
-					this.popovers.close();
-				} else if (this.fileDrawer.isOpen()) {
-					this.fileDrawer.toggle(false);
-				} else if (this.selectedNodeIds.size > 0 || this.selectedEdgeKey) {
-					this.selectNode(undefined);
-				}
-			}
-		}));
-		this._register(addDisposableListener(win.document, 'visibilitychange', () => {
-			this.syncAnimationPauseState();
-		}));
-		this.syncAnimationPauseState();
+			},
+			cancelCameraAnimation: () => this.cancelCameraAnimation(),
+			closePopovers: () => this.popovers.close(),
+			isPopoverOpen: () => this.popovers.isOpen(),
+			isFileDrawerOpen: () => this.fileDrawer.isOpen(),
+			closeFileDrawer: () => this.fileDrawer.toggle(false),
+			isCanvasShortcutActive: () => this.isCanvasShortcutActive(),
+			getActiveNodeIds: () => this.getActiveNodeIds(),
+			getNodePosition: id => this.positions.get(id),
+			getNodeDimensions: id => this.getNodeDimensions(id),
+			clientToWorldPos: (x, y) => this.clientToWorldPos(x, y),
+			getSelectedNodeIds: () => this.selectedNodeIds,
+			hasSelection: () => Boolean(this.selectedEdgeKey || this.selectedNodeIds.size > 0),
+			previewSelectedNodeIds: ids => this.renderer?.setSelectedNodeIds(ids),
+			selectNode: id => this.selectNode(id),
+			selectNodes: (ids, opts) => this.selectNodes(ids, opts),
+			clearEdgeSelection: () => this.selectEdge(undefined),
+			openBlankCanvasContextMenu: (x, y) => this.openBlankCanvasContextMenu(x, y),
+			openSearch: () => this.openCanvasSearch(),
+			closeSearch: restore => this.closeCanvasSearch(restore),
+			undo: () => this.undoCanvasMutation(),
+			redo: () => this.redoCanvasMutation(),
+			deleteSelected: () => this.deleteSelectedItems(),
+			syncAnimationPauseState: () => this.syncAnimationPauseState(),
+		});
 	}
 
 	protected override setEditorVisible(visible: boolean): void {
@@ -3699,26 +2946,41 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		this.syncAnimationPauseState();
 	}
 
-	override async setInput(input: AdeEngineeringEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
-		await super.setInput(input, options, context, token);
+	private resetTransientCanvasState(): void {
 		this.cancelScheduledFrames();
 		this.hideCanvasAlert();
+		this.clearAbortConfirmTimer();
 		this.isDraggingNode = false;
-		this.undoStack = [];
-		this.redoStack = [];
+		this.pendingResyncAfterDrag = false;
 		this.preDragHistorySnapshot = undefined;
 		this.selectedNodeIds.clear();
 		this.selectedEdgeKey = undefined;
+		this.crossViewHoverIds.clear();
+		this.crossViewSelectIds.clear();
+		this.focusHighlightIds.clear();
+		this.openMissionTaskPopoverNodeId = undefined;
 		this.syncSelectionHud();
-		this.closeCanvasSearch(false);
-		this.fileDrawer.clearParseTimer();
-		this.fileDrawer.toggle(false);
-		this.popovers.close();
+		this.closeCanvasSearch(false, true);
+		this.fileDrawer?.clearParseTimer();
+		this.stopPopoverCountdownTimer();
+		this.popovers?.close();
 		this.setHoveredNode(undefined);
-		this.renderer.setSelectedNodeIds([]);
-		this.renderer.setSelectedEdgeKey(undefined);
-		this.renderer.setTraceHighlightEdges(undefined);
-		this.renderer.resetTransitTracking();
+		this.renderer?.setSelectedNodeIds([]);
+		this.renderer?.setSelectedEdgeKey(undefined);
+		this.renderer?.setTraceHighlightEdges(undefined);
+		this.renderer?.resetTransitTracking();
+	}
+
+	override async setInput(input: AdeEngineeringEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		this.fileDrawer?.flushPendingCodeDraft();
+		if (this.activeMissionId && this.getActiveNodeCount() > 0) {
+			this.viewportMemory.save(this.activeMissionId, this.viewMode, { panX: this.panX, panY: this.panY, zoom: this.zoom });
+		}
+		this.emitCrossViewLinkHint([], 'hover');
+		this.emitCrossViewLinkHint([], 'select');
+		await super.setInput(input, options, context, token);
+		this.resetTransientCanvasState();
+		this.fileDrawer.toggle(false);
 
 		this.activeMissionId = input.governorSessionId;
 		this.viewMode = input.viewMode;
@@ -3742,13 +3004,13 @@ export class AdeEngineeringEditorPane extends EditorPane {
 			const parsedInit = parseOrchestrationGraph(this.orchestrationText);
 			this.orchLayoutMode = record?.orchestrationLayoutMode ?? (parsedInit.direction === 'TD' ? 'td' : 'lr');
 			this.fileDrawer.setLayoutMode(this.orchLayoutMode);
-			this.fileDrawer.setCodeValue(this.orchestrationText);
+			this.fileDrawer.setCodeValue(this.orchestrationText, true);
 			this.parseAndRenderOrchestrationGraph(this.orchestrationText);
 			if (this.orchNodes.length === 0) {
 				this.syncGraphDom(true);
 			}
 		} else {
-			this.fileDrawer.setCodeValue(this.mermaidText);
+			this.fileDrawer.setCodeValue(this.mermaidText, true);
 			this.parseAndRenderMissionGraph(this.mermaidText);
 			if (this.nodes.length === 0) {
 				this.syncGraphDom(true);
@@ -3762,6 +3024,10 @@ export class AdeEngineeringEditorPane extends EditorPane {
 		const pendingFocus = input.consumePendingFocus();
 		if (pendingFocus) {
 			this.focusNode(pendingFocus.nodeId, {
+				focusTokenId: pendingFocus.focusTokenId,
+				highlightNodeIds: pendingFocus.highlightNodeIds,
+				openPopover: pendingFocus.openPopover,
+				whiteboardSection: pendingFocus.whiteboardSection,
 				inspectorTab: pendingFocus.inspectorTab,
 				openAgentBeside: pendingFocus.openAgentBeside,
 			});
@@ -3769,27 +3035,16 @@ export class AdeEngineeringEditorPane extends EditorPane {
 	}
 
 	override clearInput(): void {
-		this.cancelScheduledFrames();
-		this.hideCanvasAlert();
-		this.isDraggingNode = false;
-		this.undoStack = [];
-		this.redoStack = [];
-		this.preDragHistorySnapshot = undefined;
-		this.selectedNodeIds.clear();
-		this.selectedEdgeKey = undefined;
-		this.syncSelectionHud();
-		this.closeCanvasSearch(false);
-		this.fileDrawer?.clearParseTimer();
-		this.popovers?.close();
+		this.fileDrawer?.flushPendingCodeDraft();
+		if (this.activeMissionId && this.getActiveNodeCount() > 0) {
+			this.viewportMemory.save(this.activeMissionId, this.viewMode, { panX: this.panX, panY: this.panY, zoom: this.zoom });
+		}
+		this.emitCrossViewLinkHint([], 'hover');
+		this.emitCrossViewLinkHint([], 'select');
+		this.resetTransientCanvasState();
 		this.syncHudLayoutClasses();
 		this.activeMissionId = undefined;
-		this.clearAbortConfirmTimer();
 		this.updateConsoleBar();
-		this.setHoveredNode(undefined);
-		this.renderer?.setSelectedNodeIds([]);
-		this.renderer?.setSelectedEdgeKey(undefined);
-		this.renderer?.setTraceHighlightEdges(undefined);
-		this.renderer?.resetTransitTracking();
 		super.clearInput();
 	}
 

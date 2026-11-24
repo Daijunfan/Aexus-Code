@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from '../../../base/common/path.js';
 import {
@@ -24,7 +25,17 @@ async function writeIfChanged(filePath: string, content: string): Promise<void> 
 	} catch {
 		// File does not exist yet
 	}
-	await fs.promises.writeFile(filePath, content, { encoding: 'utf8', mode: 0o600 });
+	const tmpPath = `${filePath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+	try {
+		await fs.promises.writeFile(tmpPath, content, { encoding: 'utf8', mode: 0o600 });
+		if (process.platform !== 'win32') {
+			await fs.promises.chmod(tmpPath, 0o600).catch(() => undefined);
+		}
+		await fs.promises.rename(tmpPath, filePath);
+	} catch (err) {
+		await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
+		throw err;
+	}
 }
 
 /**

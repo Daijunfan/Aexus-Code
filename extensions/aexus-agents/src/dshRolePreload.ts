@@ -3,14 +3,44 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as fs from 'node:fs/promises';
 import {
+	AEXUS_AGENT_ID_ENV_KEY,
 	injectLlmPayloadSystemPrompt,
 	readRoleSyncSnapshot,
 	resolveActiveEngineAgent,
 	ROLE_STATE_ENV_KEY,
+	type RoleSyncSnapshot,
 } from './roleBridgeShared';
 
 const PRELOAD_GUARD = Symbol.for('aexus.dshRolePreload.installed');
+
+let cachedStatePath: string | undefined;
+let cachedStatSignature = '';
+let cachedSnapshot: RoleSyncSnapshot | undefined;
+
+async function readCachedRoleSyncSnapshot(stateFilePath: string | undefined): Promise<RoleSyncSnapshot | undefined> {
+	if (!stateFilePath) {
+		return undefined;
+	}
+	try {
+		const stat = await fs.stat(stateFilePath);
+		const sig = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+		if (cachedStatePath === stateFilePath && sig === cachedStatSignature) {
+			return cachedSnapshot;
+		}
+		const next = await readRoleSyncSnapshot(stateFilePath);
+		cachedStatePath = stateFilePath;
+		cachedStatSignature = sig;
+		cachedSnapshot = next;
+		return next;
+	} catch {
+		cachedStatePath = stateFilePath;
+		cachedStatSignature = '';
+		cachedSnapshot = undefined;
+		return undefined;
+	}
+}
 
 async function readRequestBodyText(input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<string | undefined> {
 	if (typeof init?.body === 'string') {
@@ -45,9 +75,14 @@ export function installDshRolePreload(): void {
 				: input.url;
 		const method = (init?.method ?? (typeof Request !== 'undefined' && input instanceof Request ? input.method : 'GET')).toUpperCase();
 
-		if (method === 'POST') {
-			const snapshot = await readRoleSyncSnapshot(process.env[ROLE_STATE_ENV_KEY]);
-			const agent = resolveActiveEngineAgent(snapshot, 'dsh');
+		if (method === 'POST' && /\/(?:chat\/completions|messages|responses|models\/[^/?#]+:(?:stream)?generateContent)(?:[?#]|$)/i.test(url)) {
+			const snapshot = await readCachedRoleSyncSnapshot(process.env[ROLE_STATE_ENV_KEY]);
+			const agent = resolveActiveEngineAgent(
+				snapshot,
+				'dsh',
+				process.cwd(),
+				process.env[AEXUS_AGENT_ID_ENV_KEY],
+			);
 			if (agent?.isOrchestrated && agent.rolePrompt) {
 				const rawBody = await readRequestBodyText(input, init);
 				if (rawBody && rawBody.trimStart().startsWith('{')) {

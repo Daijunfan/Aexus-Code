@@ -258,14 +258,14 @@ jobs:
                 continue;
               }
               const content = fs.readFileSync(full, "utf8");
-              for (const token of ["```mermaid", "flowchart LR", "## Node Pre-Prompts"]) {
+              for (const token of ["## Mission Task DAG", "## Orchestration Team", "## Task Specifications", "```mermaid", "flowchart LR", "%% staff "]) {
                 if (!content.includes(token)) {
-                  missing.push(`blueprint ${full} missing required field/section: ${token}`);
+                  missing.push(`blueprint ${full} missing required Dual-View field/section: ${token}`);
                 }
               }
-              for (const legacy of ["## Tree Metadata", "## Auto-Partitioned Managers", "worker="]) {
+              for (const legacy of ["## Node Pre-Prompts", "mission prompt set", "## Tree Metadata", "## Auto-Partitioned Managers", "worker="]) {
                 if (content.includes(legacy)) {
-                  missing.push(`blueprint ${full} still contains legacy token: ${legacy}`);
+                  missing.push(`blueprint ${full} still contains retired legacy token: ${legacy}`);
                 }
               }
             }

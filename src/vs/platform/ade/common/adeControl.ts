@@ -18,6 +18,7 @@ export const ADE_CONTROL_SOCKET_NAME = 'ade-control.sock';
 export const ADE_CONTROL_META_NAME = 'ade-control.json';
 export const ADE_CAPABILITY_TOKEN_PREFIX = 'aexus-cap.';
 export const ADE_MINT_SESSION_TOKEN_ACTION = 'auth.mintSessionToken';
+export const ADE_REVOKE_SESSION_TOKEN_ACTION = 'auth.revokeSessionToken';
 
 export const ADE_CONTROL_ENV_KEYS = [
 	'AEXUS_ADE_CONTROL_FILE',
@@ -57,6 +58,8 @@ export interface IAdeCapabilityTokenPayload {
 	/** Originating workbench window ID pinned into this capability token at mint time. */
 	readonly wid?: number;
 	readonly iat: number;
+	/** Optional absolute expiration timestamp (epoch ms) enforced by AdeControlServer. */
+	readonly exp?: number;
 }
 
 export interface IAdeControlConnectionMetadata {
@@ -71,17 +74,22 @@ export interface IAdeControlWireRequest {
 	readonly action: string;
 	readonly params?: Record<string, unknown>;
 	readonly windowId?: number;
+	/** Optional client-generated idempotency key (`1..128` `[A-Za-z0-9._:-]+`) for safe at-most-once mutation retries. */
+	readonly idempotencyKey?: string;
 }
 
 export interface IAdeControlWireResponse<T = unknown> {
 	readonly ok: boolean;
 	readonly result?: T;
 	readonly error?: string;
+	/** True when `result` was replayed from the control-plane idempotency ledger without re-executing the mutation. */
+	readonly idempotentReplay?: boolean;
 }
 
 export interface IAdeControlDispatchRequest {
 	readonly action: string;
 	readonly params?: Record<string, unknown>;
+	readonly idempotencyKey?: string;
 }
 
 export interface IAdeProjectSummary {
@@ -104,6 +112,8 @@ export interface IAdeSessionSummary {
 	readonly isOrchestrated: boolean;
 	readonly engineId?: string;
 	readonly engineName?: string;
+	readonly preferredModel?: string;
+	readonly preferredThinking?: string;
 	readonly resource?: string;
 	readonly draft?: string;
 	readonly status: 'idle' | 'working' | 'pending' | 'draft';
@@ -178,6 +188,10 @@ export interface IAdeRoleSyncAgentEntry {
 	readonly isWorkTree?: boolean;
 	readonly isMissionNode?: boolean;
 	readonly rolePrompt?: string;
+	/** KV-cache invariant static role charter prefix (omits volatile session title / draft engine labels). */
+	readonly staticRoleCharter?: string;
+	/** Stable hash computed exclusively over `staticRoleCharter` for prompt-cache-friendly role initialization. */
+	readonly staticRoleHash?: string;
 	readonly preferredModel?: string;
 	readonly preferredThinking?: string;
 }

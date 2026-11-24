@@ -18,63 +18,48 @@ import {
 	ADE_CONTROL_META_NAME,
 	ADE_CONTROL_SOCKET_NAME,
 	ADE_MINT_SESSION_TOKEN_ACTION,
+	ADE_REVOKE_SESSION_TOKEN_ACTION,
 	IAdeCapabilityTokenPayload,
 	IAdeControlConnectionMetadata,
 	IAdeControlDispatchRequest,
 	IAdeControlWireRequest,
 	IAdeControlWireResponse,
 } from '../common/adeControl.js';
+import { ADE_PURE_MISSION_NODE_ALLOWED_ACTIONS, parseOrchestrationLimitsRequest, validateIdempotencyKey } from '../common/adeControlPolicy.js';
+import { AdeIdempotencyLedger } from './adeIdempotencyLedger.js';
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const DEFAULT_SOCKET_TIMEOUT_MS = 310_000;
+const DEFAULT_HEADER_TIMEOUT_MS = 15_000;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 300_000;
-const DEFAULT_WAIT_EXECUTION_TIMEOUT_MS = 600_000;
+const DEFAULT_WAIT_EXECUTION_TIMEOUT_MS = 930_000;
+const DEFAULT_MAX_CONCURRENT_SOCKETS = 256;
+const DEFAULT_CAPABILITY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const POST_RESPONSE_DESTROY_DELAY_MS = 5_000;
 const SOCKET_PROBE_TIMEOUT_MS = 300;
 /** macOS limits AF_UNIX sun_path to 104 bytes (Linux 108); keep comfortable margin for `.pid.sock` suffixes. */
 const MAX_UNIX_SOCKET_PATH_BYTES = 90;
+
+function getSecureTmpFallbackDir(): string {
+	const uid = typeof process.getuid === 'function' ? String(process.getuid()) : 'user';
+	return path.join('/tmp', `aexus-ade-${uid}`);
+}
 
 function normalizeUnixSocketPath(candidate: string): string {
 	if (isWindows || Buffer.byteLength(candidate, 'utf8') <= MAX_UNIX_SOCKET_PATH_BYTES) {
 		return candidate;
 	}
 	const hash = crypto.createHash('sha256').update(candidate, 'utf8').digest('hex').slice(0, 12);
-	return path.join('/tmp', `aexus-ade-${hash}.sock`);
+	return path.join(getSecureTmpFallbackDir(), `c-${hash}.sock`);
 }
 const PURE_WORKER_DENIED_ERROR = 'Permission denied: pure execution Worker sessions have no ADE control plane access.';
-const PURE_MISSION_NODE_DENIED_ERROR = 'Permission denied: pure-execution Engineering staff sessions may only invoke token.{current,trace,read,history,handoff,return,complete,reject,block,fail}, mission.task.{list,get}, orchestration.{get,status}, whiteboard.{list,create,read,write}, mission.check.{list,get,run}, rank.{names,list,get}, whoami, docs.read, or api.update.';
-const PURE_MISSION_NODE_ALLOWED_ACTIONS = new Set([
-	'whoami',
-	'docs.read',
-	'api.update',
-	'rank.names',
-	'rank.list',
-	'rank.get',
-	'token.current',
-	'token.trace',
-	'token.read',
-	'token.history',
-	'token.handoff',
-	'token.return',
-	'token.complete',
-	'token.reject',
-	'token.block',
-	'token.fail',
-	'mission.task.list',
-	'mission.task.get',
-	'mission.check.list',
-	'mission.check.get',
-	'mission.check.run',
-	'orchestration.get',
-	'orchestration.status',
-	'whiteboard.list',
-	'whiteboard.create',
-	'whiteboard.read',
-	'whiteboard.write',
-]);
+const PURE_MISSION_NODE_DENIED_ERROR = 'Permission denied: pure-execution Engineering staff sessions may only invoke token.{current,trace,read,history,handoff,return,complete,reject,block,fail}, mission.task.{list,get}, mission.diagnostics, mission.checkpoint.{list,diff}, orchestration.{get,status,validate,limits(read-only)}, whiteboard.{list,read,write}, mission.check.{list,get,run}, org.escalate, rank.{names,list,get,docs}, mission.docs, whoami, docs.read, or api.update.';
 
 export interface IAdeControlDispatchOptions {
 	/** When true, windowId came from a capability token pin rather than explicit `--window`, so gracefully fall back if that window closed. */
 	readonly softWindowPin?: boolean;
+	/** Aborted if the control request exceeds executionTimeoutMs or client disconnects. */
+	readonly signal?: AbortSignal;
 }
 
 export type AdeControlDispatcher = (request: IAdeControlDispatchRequest, windowId?: number, options?: IAdeControlDispatchOptions) => Promise<unknown>;
@@ -86,8 +71,24 @@ export interface IAdeControlServerOptions {
 	readonly logService?: ILogService;
 	readonly maxPayloadBytes?: number;
 	readonly socketTimeoutMs?: number;
+	/** Deadline (ms) to receive the complete newline-delimited request frame before dropping slowloris sockets. */
+	readonly headerTimeoutMs?: number;
+	/** Maximum simultaneous active sockets accepted before rejecting excess connections. */
+	readonly maxConcurrentSockets?: number;
+	/** Capability token lifetime (ms); defaults to 24h. */
+	readonly capabilityTokenTtlMs?: number;
 	/** Hard upper bound (ms) for awaiting the control action dispatcher before failing with a timeout error. */
 	readonly executionTimeoutMs?: number;
+	/** Optional 0o600 JSON file path for mutation idempotency deduplication across restarts. */
+	readonly idempotencyLedgerPath?: string;
+	/** Idempotency ledger entry TTL (ms); defaults to 15 minutes. */
+	readonly idempotencyTtlMs?: number;
+	/** Disable disk persistence for the idempotency ledger (useful for pure in-memory tests). */
+	readonly persistIdempotencyLedger?: boolean;
+	/** Optional clock override for deterministic TTL/revocation tests. */
+	readonly now?: () => number;
+	/** Optional callback notified whenever `revokeSession()` records a new cutoff (for bidirectional headless sync). */
+	readonly onDidRevokeSession?: (sessionId: string, revokedAt: number) => void;
 }
 
 /**
@@ -113,8 +114,15 @@ export class AdeControlServer extends Disposable {
 	private readonly _logService: ILogService | undefined;
 	private readonly _maxPayloadBytes: number;
 	private readonly _socketTimeoutMs: number;
+	private readonly _headerTimeoutMs: number;
+	private readonly _maxConcurrentSockets: number;
+	private readonly _capabilityTokenTtlMs: number;
 	private readonly _executionTimeoutMs: number | undefined;
+	private readonly _now: () => number;
+	private _onDidRevokeSession: ((sessionId: string, revokedAt: number) => void) | undefined;
 	private readonly _sockets = new Set<net.Socket>();
+	private readonly _revokedSessionCutoffs = new Map<string, number>();
+	private readonly _idempotencyLedger: AdeIdempotencyLedger;
 	private readonly _readyPromise: Promise<void>;
 
 	private _server: net.Server | undefined;
@@ -147,9 +155,26 @@ export class AdeControlServer extends Disposable {
 		this._logService = options?.logService;
 		this._maxPayloadBytes = options?.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
 		this._socketTimeoutMs = options?.socketTimeoutMs ?? DEFAULT_SOCKET_TIMEOUT_MS;
+		this._headerTimeoutMs = options?.headerTimeoutMs ?? DEFAULT_HEADER_TIMEOUT_MS;
+		this._maxConcurrentSockets = Math.max(1, options?.maxConcurrentSockets ?? DEFAULT_MAX_CONCURRENT_SOCKETS);
+		this._capabilityTokenTtlMs = Math.max(100, options?.capabilityTokenTtlMs ?? DEFAULT_CAPABILITY_TOKEN_TTL_MS);
 		this._executionTimeoutMs = options?.executionTimeoutMs;
+		this._now = options?.now ?? (() => Date.now());
+		this._onDidRevokeSession = options?.onDidRevokeSession;
+		const ledgerPath = options?.persistIdempotencyLedger === false
+			? undefined
+			: (options?.idempotencyLedgerPath ?? path.join(this._controlDir, 'idempotency-ledger.json'));
+		this._idempotencyLedger = this._register(new AdeIdempotencyLedger({
+			storagePath: ledgerPath,
+			ttlMs: options?.idempotencyTtlMs,
+			now: this._now,
+		}));
 
 		this._readyPromise = this._start();
+	}
+
+	async flushIdempotencyLedger(): Promise<void> {
+		await this._idempotencyLedger.flush();
 	}
 
 	get socketPath(): string {
@@ -176,17 +201,52 @@ export class AdeControlServer extends Disposable {
 		const normalizedSid = sessionId.trim() || 'session';
 		const normalizedRank = pure ? 'worker' : (rank.trim().toLowerCase() || 'worker');
 		const normalizedWid = typeof windowId === 'number' && Number.isInteger(windowId) && windowId > 0 ? windowId : undefined;
+		const prevCutoff = this._revokedSessionCutoffs.get(normalizedSid);
+		const rawNow = this._now();
+		const iat = prevCutoff !== undefined && rawNow <= prevCutoff ? prevCutoff + 1 : rawNow;
 		const payload: IAdeCapabilityTokenPayload = {
 			sid: normalizedSid,
 			rank: normalizedRank,
 			...(pure ? { pure: true } : {}),
 			...(missionNode ? { missionNode: true } : {}),
 			...(normalizedWid !== undefined ? { wid: normalizedWid } : {}),
-			iat: Date.now(),
+			iat,
+			exp: iat + this._capabilityTokenTtlMs,
 		};
 		const encodedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
 		const signatureHex = crypto.createHmac('sha256', this._capabilitySecret).update(encodedPayload, 'utf8').digest('hex');
 		return `${ADE_CAPABILITY_TOKEN_PREFIX}${encodedPayload}.${signatureHex}`;
+	}
+
+	setOnDidRevokeSession(callback: ((sessionId: string, revokedAt: number) => void) | undefined): void {
+		this._onDidRevokeSession = callback;
+	}
+
+	/**
+	 * Immediately revokes all capability tokens previously minted for `sessionId` (with `iat <= revokedAt`).
+	 * Called when a session is archived, deleted, stopped, or demoted so headless/live sockets reject stale tokens.
+	 */
+	revokeSession(sessionId: string, revokedAt = this._now(), options?: { readonly skipNotify?: boolean }): number {
+		const normalizedSid = sessionId.trim();
+		if (!normalizedSid) {
+			return 0;
+		}
+		const prev = this._revokedSessionCutoffs.get(normalizedSid) ?? -1;
+		const nextCutoff = Math.max(prev, revokedAt);
+		this._revokedSessionCutoffs.set(normalizedSid, nextCutoff);
+		// Bound revocation map size for long-lived main processes.
+		if (this._revokedSessionCutoffs.size > 4096) {
+			const cutoffExpiry = this._now() - this._capabilityTokenTtlMs;
+			for (const [sid, ts] of this._revokedSessionCutoffs) {
+				if (ts < cutoffExpiry) {
+					this._revokedSessionCutoffs.delete(sid);
+				}
+			}
+		}
+		if (!options?.skipNotify && nextCutoff > prev) {
+			this._onDidRevokeSession?.(normalizedSid, nextCutoff);
+		}
+		return nextCutoff;
 	}
 
 	async whenReady(): Promise<void> {
@@ -235,7 +295,7 @@ export class AdeControlServer extends Disposable {
 				listenPath = normalizeUnixSocketPath(path.join(path.dirname(listenPath), `ade-control.${process.pid}.sock`));
 				if (listenPath === this._requestedSocketPath) {
 					const hash = crypto.createHash('sha256').update(`${this._requestedSocketPath}:${process.pid}`, 'utf8').digest('hex').slice(0, 12);
-					listenPath = path.join('/tmp', `aexus-ade-${hash}.sock`);
+					listenPath = path.join(getSecureTmpFallbackDir(), `c-${hash}.sock`);
 				}
 				writeGlobalMeta = false;
 				this._logService?.info(`[AdeControlServer] Live ADE control socket already bound at ${this._requestedSocketPath}; falling back to ${listenPath}`);
@@ -249,6 +309,12 @@ export class AdeControlServer extends Disposable {
 
 		if (this._disposed) {
 			return;
+		}
+
+		if (!isWindows) {
+			const activeDir = path.dirname(listenPath);
+			await fs.promises.mkdir(activeDir, { recursive: true, mode: 0o700 });
+			await fs.promises.chmod(activeDir, 0o700).catch(() => undefined);
 		}
 
 		this._activeSocketPath = listenPath;
@@ -403,18 +469,33 @@ export class AdeControlServer extends Disposable {
 			socket.destroy();
 			return;
 		}
+		if (this._sockets.size >= this._maxConcurrentSockets) {
+			this._writeResponse(socket, { ok: false, error: `Too many concurrent ADE control connections (limit ${this._maxConcurrentSockets})` });
+			return;
+		}
 
 		this._sockets.add(socket);
+		socket.setNoDelay(true);
+		let headerTimer: ReturnType<typeof setTimeout> | undefined;
+		const clearHeaderTimer = () => {
+			if (headerTimer !== undefined) {
+				clearTimeout(headerTimer);
+				headerTimer = undefined;
+			}
+		};
 		socket.once('close', () => {
+			clearHeaderTimer();
 			this._sockets.delete(socket);
 		});
 
 		socket.setTimeout(this._socketTimeoutMs);
 		socket.once('timeout', () => {
+			clearHeaderTimer();
 			this._writeResponse(socket, { ok: false, error: 'Control socket request timed out' });
 			socket.destroy();
 		});
 		socket.on('error', err => {
+			clearHeaderTimer();
 			this._logService?.debug('[AdeControlServer] Client socket error', err);
 			socket.destroy();
 		});
@@ -422,6 +503,17 @@ export class AdeControlServer extends Disposable {
 		const chunks: Buffer[] = [];
 		let totalBytes = 0;
 		let handled = false;
+
+		headerTimer = setTimeout(() => {
+			if (!handled) {
+				handled = true;
+				this._writeResponse(socket, { ok: false, error: `Control request header deadline exceeded (${this._headerTimeoutMs}ms)` });
+				socket.destroy();
+			}
+		}, this._headerTimeoutMs);
+		if (typeof (headerTimer as { unref?: () => void }).unref === 'function') {
+			(headerTimer as { unref?: () => void }).unref!();
+		}
 
 		socket.on('data', (chunk: Buffer) => {
 			if (handled) {
@@ -433,11 +525,13 @@ export class AdeControlServer extends Disposable {
 				const slice = chunk.subarray(0, newlineIndex);
 				if (totalBytes + slice.byteLength > this._maxPayloadBytes) {
 					handled = true;
+					clearHeaderTimer();
 					this._writeResponse(socket, { ok: false, error: `Request exceeds maximum payload size (${this._maxPayloadBytes} bytes)` });
 					return;
 				}
 				chunks.push(slice);
 				handled = true;
+				clearHeaderTimer();
 				socket.setTimeout(0);
 				const line = Buffer.concat(chunks).toString('utf8').replace(/\r$/, '');
 				void this._processRequestLine(socket, line);
@@ -447,6 +541,7 @@ export class AdeControlServer extends Disposable {
 			totalBytes += chunk.byteLength;
 			if (totalBytes > this._maxPayloadBytes) {
 				handled = true;
+				clearHeaderTimer();
 				this._writeResponse(socket, { ok: false, error: `Request exceeds maximum payload size (${this._maxPayloadBytes} bytes)` });
 				return;
 			}
@@ -454,6 +549,7 @@ export class AdeControlServer extends Disposable {
 		});
 
 		socket.once('end', () => {
+			clearHeaderTimer();
 			if (!handled) {
 				handled = true;
 				if (totalBytes === 0) {
@@ -536,6 +632,36 @@ export class AdeControlServer extends Disposable {
 			this._writeResponse(socket, { ok: true, result: { token } });
 			return;
 		}
+		if (req.action === ADE_REVOKE_SESSION_TOKEN_ACTION) {
+			if (!isMasterToken) {
+				this._writeResponse(socket, { ok: false, error: 'Permission denied: auth.revokeSessionToken requires master control token' });
+				return;
+			}
+			const rawSessionId = typeof req.params?.sessionId === 'string' ? req.params.sessionId.trim() : '';
+			if (!rawSessionId) {
+				this._writeResponse(socket, { ok: false, error: 'Invalid request: auth.revokeSessionToken requires sessionId' });
+				return;
+			}
+			this.revokeSession(rawSessionId);
+			this._writeResponse(socket, { ok: true, result: { revoked: true, sessionId: rawSessionId } });
+			return;
+		}
+
+		const topIdemp = validateIdempotencyKey(req.idempotencyKey);
+		if (!topIdemp.ok) {
+			this._writeResponse(socket, { ok: false, error: topIdemp.error });
+			return;
+		}
+		const paramIdemp = validateIdempotencyKey(req.params?.idempotencyKey);
+		if (!paramIdemp.ok) {
+			this._writeResponse(socket, { ok: false, error: paramIdemp.error });
+			return;
+		}
+		if (topIdemp.key && paramIdemp.key && topIdemp.key !== paramIdemp.key) {
+			this._writeResponse(socket, { ok: false, error: 'INVALID_IDEMPOTENCY_KEY: top-level idempotencyKey and params.idempotencyKey must match when both are provided.' });
+			return;
+		}
+		const idempotencyKey = topIdemp.key ?? paramIdemp.key;
 
 		let effectiveParams = req.params;
 		if (capabilityPayload) {
@@ -544,7 +670,9 @@ export class AdeControlServer extends Disposable {
 					this._writeResponse(socket, { ok: false, error: PURE_WORKER_DENIED_ERROR });
 					return;
 				}
-				if (!PURE_MISSION_NODE_ALLOWED_ACTIONS.has(req.action)) {
+				const isReadOnlyLimits = req.action === 'orchestration.limits'
+					&& parseOrchestrationLimitsRequest(req.params ?? {}, { isHumanUser: false }).isReadOnlyQuery;
+				if (!ADE_PURE_MISSION_NODE_ALLOWED_ACTIONS.has(req.action) && !isReadOnlyLimits) {
 					this._writeResponse(socket, { ok: false, error: PURE_MISSION_NODE_DENIED_ERROR });
 					return;
 				}
@@ -554,47 +682,98 @@ export class AdeControlServer extends Disposable {
 				caller: capabilityPayload.rank,
 				_verifiedCaller: true,
 				_callerSessionId: capabilityPayload.sid,
+				_callerTokenIat: capabilityPayload.iat,
 			};
-		} else if (req.params && (Object.prototype.hasOwnProperty.call(req.params, '_verifiedCaller') || Object.prototype.hasOwnProperty.call(req.params, '_callerSessionId'))) {
+		} else if (req.params && (
+			Object.prototype.hasOwnProperty.call(req.params, '_verifiedCaller')
+			|| Object.prototype.hasOwnProperty.call(req.params, '_callerSessionId')
+			|| Object.prototype.hasOwnProperty.call(req.params, '_callerTokenIat')
+		)) {
 			const sanitized: Record<string, unknown> = { ...req.params };
 			delete sanitized._verifiedCaller;
 			delete sanitized._callerSessionId;
+			delete sanitized._callerTokenIat;
 			effectiveParams = sanitized;
 		}
 
 		const isWaitAction = Boolean(effectiveParams && effectiveParams.wait === true);
+		const requestedWaitTimeoutMs = isWaitAction
+			&& effectiveParams
+			&& typeof effectiveParams.timeoutMs === 'number'
+			&& Number.isFinite(effectiveParams.timeoutMs)
+			&& effectiveParams.timeoutMs > 0
+			? effectiveParams.timeoutMs + 30_000
+			: 0;
 		const rawTimeoutMs = this._executionTimeoutMs !== undefined
 			? this._executionTimeoutMs
-			: (isWaitAction ? DEFAULT_WAIT_EXECUTION_TIMEOUT_MS : DEFAULT_EXECUTION_TIMEOUT_MS);
+			: (isWaitAction ? Math.max(DEFAULT_WAIT_EXECUTION_TIMEOUT_MS, requestedWaitTimeoutMs) : DEFAULT_EXECUTION_TIMEOUT_MS);
 		const executionTimeoutMs = Number.isFinite(rawTimeoutMs)
 			? Math.max(50, Math.min(2_147_483_647, Math.floor(rawTimeoutMs)))
 			: DEFAULT_WAIT_EXECUTION_TIMEOUT_MS;
 
 		let execTimer: ReturnType<typeof setTimeout> | undefined;
 		let timedOut = false;
+		const abortController = new AbortController();
+		const onSocketClose = () => {
+			if (!abortController.signal.aborted) {
+				abortController.abort(new Error('ADE control client disconnected'));
+			}
+		};
+		// For idempotent requests, decouple the shared in-flight execution from Request 1's socket
+		// lifecycle so a concurrent retry coalescing onto the same idempotencyKey is not aborted
+		// when Request 1 disconnects.
+		if (!idempotencyKey) {
+			socket.once('close', onSocketClose);
+		}
 		try {
 			const effectiveWindowId = req.windowId ?? capabilityPayload?.wid;
-			const dispatchOptions: IAdeControlDispatchOptions | undefined = req.windowId === undefined && capabilityPayload?.wid !== undefined
-				? { softWindowPin: true }
-				: undefined;
-			const dispatchPromise = this._dispatcher({ action: req.action, params: effectiveParams }, effectiveWindowId, dispatchOptions);
+			const isSoftPin = req.windowId === undefined && capabilityPayload?.wid !== undefined;
+			const dispatchOptions: IAdeControlDispatchOptions = isSoftPin
+				? { softWindowPin: true, signal: abortController.signal }
+				: { signal: abortController.signal };
+			const dispatchReq: IAdeControlDispatchRequest = {
+				action: req.action,
+				params: effectiveParams,
+			};
+			const principalId = capabilityPayload ? `cap:${capabilityPayload.sid}` : 'master';
+			const executePromise: Promise<{ readonly result: unknown; readonly replayed: boolean }> = idempotencyKey
+				? this._idempotencyLedger.execute(
+					{
+						principalId,
+						action: req.action,
+						idempotencyKey,
+						params: effectiveParams,
+						// Hash only explicit caller-requested --window, never soft-pinned token wid
+						// which changes across window reloads and would trigger false IDEMPOTENCY_CONFLICT.
+						windowId: req.windowId,
+						timeoutMs: executionTimeoutMs,
+					},
+					() => this._dispatcher(dispatchReq, effectiveWindowId, dispatchOptions),
+				)
+				: this._dispatcher(dispatchReq, effectiveWindowId, dispatchOptions).then(result => ({ result, replayed: false }));
 			// Prevent unhandled rejection if dispatcher rejects after timeout already settled the socket.
-			dispatchPromise.catch(() => undefined);
-			const result = await new Promise<unknown>((resolve, reject) => {
+			executePromise.catch(() => undefined);
+			const outcome = await new Promise<{ readonly result: unknown; readonly replayed: boolean }>((resolve, reject) => {
 				execTimer = setTimeout(() => {
 					timedOut = true;
-					reject(new Error(`ADE control action "${req.action}" timed out after ${executionTimeoutMs}ms`));
+					const timeoutErr = new Error(`ADE control action "${req.action}" timed out after ${executionTimeoutMs}ms`);
+					abortController.abort(timeoutErr);
+					reject(timeoutErr);
 				}, executionTimeoutMs);
 				if (typeof (execTimer as { unref?: () => void }).unref === 'function') {
 					(execTimer as { unref?: () => void }).unref!();
 				}
-				dispatchPromise.then(resolve, reject);
+				executePromise.then(resolve, reject);
 			});
 			if (execTimer !== undefined) {
 				clearTimeout(execTimer);
 			}
 			if (!timedOut) {
-				this._writeResponse(socket, { ok: true, result });
+				this._writeResponse(socket, {
+					ok: true,
+					result: outcome.result,
+					...(outcome.replayed ? { idempotentReplay: true } : {}),
+				});
 			}
 		} catch (err) {
 			if (execTimer !== undefined) {
@@ -612,6 +791,8 @@ export class AdeControlServer extends Disposable {
 					(forceCloseTimer as { unref?: () => void }).unref!();
 				}
 			}
+		} finally {
+			socket.removeListener('close', onSocketClose);
 		}
 	}
 
@@ -648,16 +829,31 @@ export class AdeControlServer extends Disposable {
 				|| (parsed.pure !== undefined && typeof parsed.pure !== 'boolean')
 				|| (parsed.missionNode !== undefined && typeof parsed.missionNode !== 'boolean')
 				|| (parsed.wid !== undefined && (typeof parsed.wid !== 'number' || !Number.isInteger(parsed.wid) || parsed.wid <= 0))
+				|| (parsed.exp !== undefined && (typeof parsed.exp !== 'number' || !Number.isFinite(parsed.exp)))
 			) {
 				return undefined;
 			}
+			const sid = parsed.sid.trim();
+			const iat = typeof parsed.iat === 'number' && Number.isFinite(parsed.iat) ? parsed.iat : 0;
+			const now = this._now();
+			if (parsed.exp !== undefined && now > parsed.exp) {
+				return undefined;
+			}
+			if (iat > 0 && now - iat > this._capabilityTokenTtlMs) {
+				return undefined;
+			}
+			const revokedCutoff = this._revokedSessionCutoffs.get(sid);
+			if (revokedCutoff !== undefined && iat <= revokedCutoff) {
+				return undefined;
+			}
 			return {
-				sid: parsed.sid.trim(),
+				sid,
 				rank: parsed.rank.trim().toLowerCase(),
 				...(parsed.pure === true ? { pure: true } : {}),
 				...(parsed.missionNode === true ? { missionNode: true } : {}),
 				...(typeof parsed.wid === 'number' ? { wid: parsed.wid } : {}),
-				iat: typeof parsed.iat === 'number' && Number.isFinite(parsed.iat) ? parsed.iat : 0,
+				iat,
+				...(typeof parsed.exp === 'number' ? { exp: parsed.exp } : {}),
 			};
 		} catch {
 			return undefined;
@@ -688,6 +884,15 @@ export class AdeControlServer extends Disposable {
 			payload = JSON.stringify(fallback) + '\n';
 		}
 		socket.end(payload, 'utf8');
+		const destroyTimer = setTimeout(() => {
+			if (!socket.destroyed) {
+				socket.destroy();
+			}
+		}, POST_RESPONSE_DESTROY_DELAY_MS);
+		if (typeof (destroyTimer as { unref?: () => void }).unref === 'function') {
+			(destroyTimer as { unref?: () => void }).unref!();
+		}
+		socket.once('close', () => clearTimeout(destroyTimer));
 	}
 
 	override dispose(): void {

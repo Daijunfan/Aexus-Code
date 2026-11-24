@@ -88,7 +88,7 @@ export async function executeAdeRankOrDocsAction(
 			const rawSince = params.since ?? params.from ?? params.revision;
 			const sinceNum = typeof rawSince === 'number'
 				? rawSince
-				: (typeof rawSince === 'string' && rawSince.trim() ? Number(rawSince) : 0);
+				: (typeof rawSince === 'string' && rawSince.trim() ? Number(rawSince) : ADE_API_LATEST_REVISION);
 			const scope = typeof params.scope === 'string' ? params.scope : undefined;
 			return queryApiUpdateDiff(sinceNum, scope);
 		}
@@ -206,7 +206,34 @@ export async function executeAdeRankOrDocsAction(
 			const rankDef = resolveEffectiveRankDefinition(config, agent?.role ?? caller.rankRaw, hasSubs);
 			const tierTag = formatTierTag(rankDef.tier);
 			const missionHit = sid ? ctx.missionRuntimeService?.findMissionForAgent(sid) : undefined;
-			const currentTokens = sid ? (ctx.missionRuntimeService?.getCurrentTokens(sid, missionHit?.mission.id) ?? []) : [];
+			const orchTokens = sid ? (ctx.missionRuntimeService?.getCurrentOrchestrationTokens(sid, missionHit?.mission.id) ?? []) : [];
+			const legacyTokens = sid ? (ctx.missionRuntimeService?.getCurrentTokens(sid, missionHit?.mission.id) ?? []) : [];
+			const seenTokIds = new Set<string>();
+			const currentTokens: Array<{ readonly id: string; readonly missionId: string; readonly nodeId: string; readonly waveId: string; readonly status: string }> = [];
+			for (const t of orchTokens) {
+				if (!seenTokIds.has(t.id)) {
+					seenTokIds.add(t.id);
+					currentTokens.push({
+						id: t.id,
+						missionId: t.missionId ?? missionHit?.mission.id ?? '',
+						nodeId: t.nodeId,
+						waveId: t.waveId,
+						status: t.status,
+					});
+				}
+			}
+			for (const t of legacyTokens) {
+				if (!seenTokIds.has(t.id)) {
+					seenTokIds.add(t.id);
+					currentTokens.push({
+						id: t.id,
+						missionId: t.missionId,
+						nodeId: t.nodeId,
+						waveId: t.waveId,
+						status: t.status,
+					});
+				}
+			}
 			const offGraphMax = missionHit?.runtime.boundary.offGraphMaxTier ?? Math.max(0, Math.min(1, config.ranks.length - 1));
 			const factorySide = missionHit
 				? (missionHit.isOffGraphSupervisor ? 'off_graph' : 'in_graph')
@@ -227,13 +254,7 @@ export async function executeAdeRankOrDocsAction(
 					...(missionHit.managedNodeIds ? { managedNodeIds: missionHit.managedNodeIds } : {}),
 				} : {}),
 				currentTokenIds: currentTokens.map(t => t.id),
-				currentTokens: currentTokens.map(t => ({
-					id: t.id,
-					missionId: t.missionId,
-					nodeId: t.nodeId,
-					waveId: t.waveId,
-					status: t.status,
-				})),
+				currentTokens,
 				latestApiRevision: ADE_API_LATEST_REVISION,
 				docsEntry: buildDocsEntry(tierTag),
 			};
@@ -293,6 +314,9 @@ export async function executeAdeRankOrDocsAction(
 			}
 			if (parsedKey?.kind === 'mission') {
 				return { target: 'mission', docPath: docs.missionDoc, docsRoot: docs.docsRoot, missionDir: docs.missionDir };
+			}
+			if (parsedKey?.kind === 'manifest') {
+				return { target: 'manifest', docPath: docs.manifestFile, docsRoot: docs.docsRoot };
 			}
 			const tierNum = parseTierNumber(rawTarget);
 			if (tierNum === 0 || rawTarget.toLowerCase() === 'secretary') {

@@ -26,12 +26,15 @@ import {
 	terminateRemotePersistentSession,
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
+import { isClaudeEffortRejectedError, isOversizedClaudeUserEchoLine, isSafeAdeBashCommand, mapClaudeEffortArg as mapClaudeEffortArgHelper, mapClaudeThinkingTokens as mapClaudeThinkingTokensHelper, truncateToolPreview } from './engineAdapterHelpers';
+import { LineByteAccumulator } from './lineByteAccumulator';
 import { isPathWithinOrEqual, ROLE_INIT_MARKER, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
 import { capture, emitThinkingProgress, EngineAttachment, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineThinkingLevel, EngineTurnTokenUsage, HistoryEntry, isAutonomousModeEnabled, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, REMOTE_REATTACH_BACKOFFS_MS, spawnEngine, stopEngine, stopEngineWithFallback, waitForBackoffOrResume } from './runtime';
+import { createMultiStepTurnUsageAccumulator, normalizeProviderTokenUsage } from './usageTracker';
 
 interface ContentPart { type: string; text?: string; source?: { type: 'base64'; media_type: string; data: string } }
-interface ContentBlock { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }
-interface UsagePayload { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
+interface ContentBlock { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean; content?: unknown }
+interface UsagePayload { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; total_tokens?: number }
 interface ClaudeEvent {
 	type: string;
 	parent_tool_use_id?: string | null;
@@ -48,6 +51,7 @@ interface ClaudeEvent {
 	event?: { type: string; delta?: { type?: string; text?: string; thinking?: string }; content_block?: ContentBlock };
 	request_id?: string;
 	request?: { subtype: string; tool_name: string; input: object };
+	tool_use_result?: unknown;
 	result?: string;
 	is_error?: boolean;
 	slash_commands?: unknown;
@@ -107,22 +111,37 @@ export function extractClaudeUserLabel(rawText: string): string | undefined {
 	return firstLine ? firstLine.slice(0, 100) : undefined;
 }
 
-function turnUsageFromPayload(usage: UsagePayload | undefined, durationMs?: number, costUsd?: number, model?: string): EngineTurnTokenUsage {
-	const inputTokens = usage?.input_tokens ?? 0;
-	const outputTokens = usage?.output_tokens ?? 0;
-	const cacheReadTokens = usage?.cache_read_input_tokens ?? 0;
-	const cacheWriteTokens = usage?.cache_creation_input_tokens ?? 0;
-	return {
-		inputTokens,
-		outputTokens,
-		cacheReadTokens,
-		cacheWriteTokens,
-		totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+function turnUsageFromPayload(
+	usage: UsagePayload | undefined,
+	durationMs?: number,
+	costUsd?: number,
+	model?: string,
+	toolErrorCount = 0,
+): EngineTurnTokenUsage {
+	const normalized = normalizeProviderTokenUsage(usage ?? {}, {
 		durationMs,
 		costUsd,
+		model,
+		allowZeroTotal: true,
+	}) ?? {
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		totalTokens: 0,
+		...(durationMs !== undefined ? { durationMs } : {}),
+		...(costUsd !== undefined ? { costUsd } : {}),
 		...(model ? { model } : {}),
 		estimated: false,
 	};
+	if (toolErrorCount > 0) {
+		return {
+			...normalized,
+			hadToolError: true,
+			toolErrorCount,
+		};
+	}
+	return normalized;
 }
 
 function stringList(value: unknown): string[] {
@@ -309,11 +328,11 @@ function isSafeAdeOrchestratorToolCall(
 	if (toolName === 'Write' || toolName === 'Edit') {
 		const fp = typeof input.file_path === 'string' ? input.file_path : '';
 		if (!fp) { return false; }
-		return fp.startsWith('/tmp/') || fp.startsWith('/private/tmp/') || isPathWithinOrEqual(fp, os.tmpdir());
+		return isPathWithinOrEqual(fp, '/tmp') || isPathWithinOrEqual(fp, '/private/tmp') || isPathWithinOrEqual(fp, os.tmpdir());
 	}
 	if (toolName === 'Bash') {
-		const cmd = typeof input.command === 'string' ? input.command.trim() : '';
-		return /^(?:[A-Z_][A-Z0-9_]*=\S+\s+)*aexus-ade(?:\.(?:cmd|exe|ps1|bat))?(?:\s|$)/i.test(cmd);
+		const cmd = typeof input.command === 'string' ? input.command : '';
+		return isSafeAdeBashCommand(cmd);
 	}
 	return false;
 }
@@ -814,6 +833,7 @@ export class ClaudeRuntime implements EngineRuntime {
 		try {
 			for await (const line of lines) {
 				if (token.isCancellationRequested) { break; }
+				if (!line.includes('"user"') && !line.includes('"assistant"')) { continue; }
 				let event: ClaudeEvent;
 				try { event = JSON.parse(line) as ClaudeEvent; } catch { continue; }
 				const text = messageText(event);
@@ -824,44 +844,11 @@ export class ClaudeRuntime implements EngineRuntime {
 	}
 
 	private mapClaudeThinkingTokens(thinking?: EngineThinkingLevel): string | undefined {
-		switch (thinking) {
-			case 'off':
-			case 'none':
-				return '0';
-			case 'low':
-			case 'minimal':
-				return '4096';
-			case 'medium':
-				return '10000';
-			case 'high':
-				return '20000';
-			case 'xhigh':
-			case 'extra-high':
-				return '32000';
-			case 'max':
-				return '31999';
-			default:
-				return undefined;
-		}
+		return mapClaudeThinkingTokensHelper(thinking);
 	}
 
 	private mapClaudeEffortArg(thinking?: EngineThinkingLevel): string | undefined {
-		switch (thinking) {
-			case 'minimal':
-			case 'low':
-				return 'low';
-			case 'medium':
-				return 'medium';
-			case 'high':
-				return 'high';
-			case 'xhigh':
-			case 'extra-high':
-				return 'xhigh';
-			case 'max':
-				return 'max';
-			default:
-				return undefined;
-		}
+		return mapClaudeEffortArgHelper(thinking);
 	}
 
 	private async resolvePermissionMode(options?: EngineSendOptions): Promise<string | undefined> {
@@ -1135,11 +1122,27 @@ export class ClaudeRuntime implements EngineRuntime {
 		let sawResult = false;
 		let sessionMissing = false;
 		let interimUsage: UsagePayload | undefined;
+		const stepUsageAccumulator = createMultiStepTurnUsageAccumulator();
+		let assistantStepSeq = 0;
 		let lastInterimReportAt = 0;
 		let lastInterimReportedTotal = 0;
 		let stdoutBytesReceived = 0;
 		let activeChild: ReturnType<typeof spawnEngine> | undefined;
 		const seenToolUses = new Set<string>();
+		let structuredToolErrorCount = 0;
+		const seenErrorToolUseIds = new Set<string>();
+		let anonClaudeToolSeq = 0;
+		const activeClaudeToolIds = new Set<string>();
+		const drainActiveClaudeTools = () => {
+			if (activeClaudeToolIds.size === 0) {
+				return;
+			}
+			const pendingCount = activeClaudeToolIds.size;
+			activeClaudeToolIds.clear();
+			for (let i = 0; i < pendingCount; i++) {
+				try { options?.onExternalWaitEnd?.(); } catch { /* External-wait hook must never break the turn. */ }
+			}
+		};
 
 		const maxAttachAttempts = remotePersistentId ? REMOTE_REATTACH_BACKOFFS_MS.length + 1 : 1;
 		try {
@@ -1168,13 +1171,45 @@ export class ClaudeRuntime implements EngineRuntime {
 				}
 				sessionSet.add(child);
 
-				// Track exact UTF-8 bytes of COMPLETE newline-delimited lines only so reattaching after
-				// a mid-line SSH cut starts cleanly at byte 0 of the interrupted JSON line without losing events.
-				let stdoutByteCarry: Buffer = Buffer.alloc(0);
+				// Track exact UTF-8 bytes of COMPLETE newline-delimited lines via O(N) chunk framing so reattaching after
+				// a mid-line SSH cut starts cleanly at byte 0 of the interrupted JSON line without O(N^2) Buffer.concat churn.
+				const stdoutLineAcc = new LineByteAccumulator();
 				const handleLine = (line: string) => {
+					if (!line || isOversizedClaudeUserEchoLine(line)) {
+						return;
+					}
 					let event: ClaudeEvent;
 					try { event = JSON.parse(line) as ClaudeEvent; } catch { return; }
+					try { options?.onStreamActivity?.(); } catch { /* Activity hook must never break the turn. */ }
 					const fromChild = typeof event.parent_tool_use_id === 'string';
+					if (event.type === 'user') {
+						let matchedBlockError = false;
+						if (Array.isArray(event.message?.content)) {
+							for (const block of event.message.content) {
+								if (!fromChild && block && block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.tool_use_id) {
+									if (activeClaudeToolIds.delete(block.tool_use_id)) {
+										try { options?.onExternalWaitEnd?.(); } catch { /* External-wait hook must never break the turn. */ }
+									}
+								}
+								if (block && block.type === 'tool_result' && block.is_error === true) {
+									const errId = typeof block.tool_use_id === 'string' && block.tool_use_id ? block.tool_use_id : undefined;
+									if (!errId || !seenErrorToolUseIds.has(errId)) {
+										if (errId) {
+											seenErrorToolUseIds.add(errId);
+										}
+										structuredToolErrorCount += 1;
+									}
+									matchedBlockError = true;
+								}
+							}
+						}
+						if (!matchedBlockError && event.tool_use_result && typeof event.tool_use_result === 'object') {
+							const tur = event.tool_use_result as Record<string, unknown>;
+							if (tur.is_error === true || tur.isError === true || (typeof tur.exitCode === 'number' && tur.exitCode !== 0)) {
+								structuredToolErrorCount += 1;
+							}
+						}
+					}
 					if (!fromChild && event.type === 'system' && event.subtype === 'init') {
 						session.provisional = false;
 						this.recordInit(session.id, event);
@@ -1189,6 +1224,7 @@ export class ClaudeRuntime implements EngineRuntime {
 						} catch { /* Compaction callback must never break the turn. */ }
 					}
 					if (!fromChild && !token.isCancellationRequested && event.type === 'stream_event') {
+						drainActiveClaudeTools();
 						const delta = event.event?.delta;
 						if (delta?.type === 'text_delta' && delta.text) {
 							wroteText = true;
@@ -1207,20 +1243,38 @@ export class ClaudeRuntime implements EngineRuntime {
 							}
 						}
 					}
+					if (!fromChild && event.type === 'assistant') {
+						drainActiveClaudeTools();
+						const allContent = event.message?.content;
+						if (Array.isArray(allContent) && !token.isCancellationRequested) {
+							for (const block of allContent) {
+								if (block && block.type === 'tool_use') {
+									const toolTrackId = typeof block.id === 'string' && block.id ? block.id : `anon_tool:${++anonClaudeToolSeq}`;
+									if (!activeClaudeToolIds.has(toolTrackId)) {
+										activeClaudeToolIds.add(toolTrackId);
+										try { options?.onExternalWaitStart?.(); } catch { /* External-wait hook must never break the turn. */ }
+									}
+								}
+							}
+						}
+					}
 					if (!fromChild && !token.isCancellationRequested && event.type === 'assistant') {
 						const assistantUsage = event.message?.usage;
 						if (assistantUsage) {
 							interimUsage = assistantUsage;
+							const interimModel = event.message?.model ?? this.initBySession.get(session.id)?.model ?? (options?.model && options.model !== 'default' ? options.model : undefined);
+							const stepSnapshot = turnUsageFromPayload(assistantUsage, undefined, undefined, interimModel, structuredToolErrorCount);
+							const rawMsgId = (event.message as { id?: unknown } | undefined)?.id;
+							const stepKey = typeof rawMsgId === 'string' && rawMsgId ? rawMsgId : `step:${++assistantStepSeq}`;
+							const aggregatedSnapshot = stepUsageAccumulator.recordStep(stepKey, stepSnapshot);
 							const onInterimUsage = options?.onInterimUsage;
 							if (onInterimUsage) {
-								const interimModel = event.message?.model ?? this.initBySession.get(session.id)?.model ?? (options?.model && options.model !== 'default' ? options.model : undefined);
-								const snapshot = turnUsageFromPayload(assistantUsage, undefined, undefined, interimModel);
 								const now = Date.now();
-								if (snapshot.totalTokens > lastInterimReportedTotal && now - lastInterimReportAt >= 1000) {
+								if (aggregatedSnapshot.totalTokens > lastInterimReportedTotal && now - lastInterimReportAt >= 1000) {
 									lastInterimReportAt = now;
-									lastInterimReportedTotal = snapshot.totalTokens;
+									lastInterimReportedTotal = aggregatedSnapshot.totalTokens;
 									try {
-										onInterimUsage(snapshot);
+										onInterimUsage(aggregatedSnapshot);
 									} catch { /* Live usage reporting must never break the turn. */ }
 								}
 							}
@@ -1232,7 +1286,7 @@ export class ClaudeRuntime implements EngineRuntime {
 									emitThinkingProgress(stream, block.thinking, 'claude-thinking');
 								}
 								if (block.type === 'tool_use' && block.name) {
-									const key = block.id ?? `${block.name}:${JSON.stringify(block.input ?? {})}`;
+									const key = block.id ?? `${block.name}:${seenToolUses.size}:${truncateToolPreview(JSON.stringify(block.input ?? {}), 120)}`;
 									if (!seenToolUses.has(key)) {
 										seenToolUses.add(key);
 										stream.progress(toolProgressText(block.name, block.input));
@@ -1251,18 +1305,23 @@ export class ClaudeRuntime implements EngineRuntime {
 							return;
 						}
 						const allow = vscode.l10n.t('Allow Once');
-						void vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], { title: vscode.l10n.t('Claude Code requests permission'), placeHolder: `${session.cwd}: ${request.tool_name}: ${JSON.stringify(request.input)}`, ignoreFocusOut: true }, token).then(result => {
+						const previewInput = truncateToolPreview(JSON.stringify(request.input ?? {}), 240);
+						try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
+						void Promise.resolve(vscode.window.showQuickPick([allow, vscode.l10n.t('Deny')], { title: vscode.l10n.t('Claude Code requests permission'), placeHolder: `${session.cwd}: ${request.tool_name}: ${previewInput}`, ignoreFocusOut: true }, token)).then(result => {
 							const targetChild = activeChild;
 							if (targetChild && !targetChild.stdin.destroyed) {
 								targetChild.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: event.request_id, response: result === allow ? { behavior: 'allow', updatedInput: request.input } : { behavior: 'deny', message: vscode.l10n.t('Denied by the user.') } } }) + '\n');
 							}
+						}).finally(() => {
+							try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
 						});
 					}
 					if (!fromChild && event.type === 'result') {
+						drainActiveClaudeTools();
 						sawResult = true;
 						this.recordUsage(session.id, event);
 						const resultModel = event.model ?? this.initBySession.get(session.id)?.model ?? (options?.model && options.model !== 'default' ? options.model : undefined);
-						this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd), resultModel));
+						this.lastTurnUsageBySession.set(session.id, turnUsageFromPayload(event.usage, numberOrUndefined(event.duration_ms), numberOrUndefined(event.total_cost_usd), resultModel, structuredToolErrorCount));
 						if (event.is_error) { resultError = event.result || vscode.l10n.t('Claude Code could not complete this request.'); }
 						if (!event.is_error) { session.provisional = false; }
 						child.stdin.end();
@@ -1274,16 +1333,16 @@ export class ClaudeRuntime implements EngineRuntime {
 					}
 				};
 				child.stdout.on('data', (chunk: Buffer | string) => {
-					const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-					stdoutByteCarry = stdoutByteCarry.length > 0 ? Buffer.concat([stdoutByteCarry, buf]) : buf;
-					let nlIdx: number;
-					while ((nlIdx = stdoutByteCarry.indexOf(0x0a)) >= 0) {
-						const lineBuf = stdoutByteCarry.subarray(0, nlIdx);
-						stdoutByteCarry = stdoutByteCarry.subarray(nlIdx + 1);
-						stdoutBytesReceived += nlIdx + 1;
-						const rawLine = lineBuf.toString('utf8');
-						handleLine(rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine);
-					}
+					stdoutLineAcc.push(
+						chunk,
+						(line, rawBytes) => {
+							stdoutBytesReceived += rawBytes;
+							handleLine(line);
+						},
+						droppedBytes => {
+							stdoutBytesReceived += droppedBytes;
+						},
+					);
 				});
 				child.stderr.on('data', data => errorText = (errorText + String(data)).slice(-8000));
 				const stopChild = () => {
@@ -1344,11 +1403,16 @@ export class ClaudeRuntime implements EngineRuntime {
 					});
 				} finally {
 					cancellation.dispose();
-					if (stdoutByteCarry.length > 0 && closeCode === 0) {
-						const tailLine = stdoutByteCarry.toString('utf8');
-						stdoutBytesReceived += stdoutByteCarry.length;
-						stdoutByteCarry = Buffer.alloc(0);
-						handleLine(tailLine.endsWith('\r') ? tailLine.slice(0, -1) : tailLine);
+					if (stdoutLineAcc.pendingBytes > 0 && closeCode === 0) {
+						stdoutLineAcc.flushTail(
+							(tailLine, rawBytes) => {
+								stdoutBytesReceived += rawBytes;
+								handleLine(tailLine);
+							},
+							droppedBytes => {
+								stdoutBytesReceived += droppedBytes;
+							},
+						);
 					}
 					this.running.delete(child);
 					sessionSet.delete(child);
@@ -1368,7 +1432,19 @@ export class ClaudeRuntime implements EngineRuntime {
 				await healAllRemoteControlBridges().catch(() => undefined);
 			}
 		} finally {
+			drainActiveClaudeTools();
 			this.untrackPersistentId(session.id, remotePersistentId);
+		}
+		if (!sawResult) {
+			const agg = stepUsageAccumulator.getAggregatedUsage();
+			if (agg && agg.totalTokens > 0) {
+				this.lastTurnUsageBySession.set(
+					session.id,
+					structuredToolErrorCount > 0
+						? { ...agg, hadToolError: true, toolErrorCount: Math.max(agg.toolErrorCount ?? 0, structuredToolErrorCount) }
+						: agg,
+				);
+			}
 		}
 		return { sawResult, interimUsage, sessionMissing };
 	}
@@ -1388,19 +1464,45 @@ export class ClaudeRuntime implements EngineRuntime {
 			session.provisional = false;
 		}
 
-		const runOnce = async (useModelOverride: boolean, forceResume = false): Promise<void> => {
+		const runOnce = async (useModelOverride: boolean, forceResume = false, includeEffort = true, includeSystemPromptFlag = true): Promise<void> => {
 			if (token.isCancellationRequested) {
 				return;
 			}
+			if (!forceResume && session.provisional && await this.hasPersistedTranscript(session.id)) {
+				session.provisional = false;
+			}
 			const useResume = forceResume || !session.provisional;
 			const isAutoEng = Boolean(options?.automatedEngineering);
-			const effortArg = this.mapClaudeEffortArg(options?.thinking);
+			const effortArg = includeEffort ? this.mapClaudeEffortArg(options?.thinking) : undefined;
 			const bypassPermissions = permissionMode === 'bypassPermissions';
+			const rawSysPrompt = options?.appendSystemPrompt?.trim();
+			let tempSysPromptFile: string | undefined;
+			let sysPromptArgs: string[] = [];
+			if (includeSystemPromptFlag && rawSysPrompt) {
+				if (!this.remoteTarget && (process.platform === 'win32' || rawSysPrompt.length > 7_000)) {
+					const candidate = path.join(os.tmpdir(), `aexus-claude-sys-${process.pid}-${randomUUID().slice(0, 8)}.txt`);
+					const wrote = await fs.writeFile(candidate, rawSysPrompt, { encoding: 'utf8', mode: 0o600 }).then(() => true, () => false);
+					if (wrote) {
+						tempSysPromptFile = candidate;
+						sysPromptArgs = ['--append-system-prompt-file', candidate];
+					} else {
+						sysPromptArgs = ['--append-system-prompt', rawSysPrompt];
+					}
+				} else {
+					sysPromptArgs = ['--append-system-prompt', rawSysPrompt];
+				}
+			}
+			const effectiveUserMessage = (!includeSystemPromptFlag && rawSysPrompt)
+				? (typeof userMessage === 'string'
+					? `${rawSysPrompt}\n\n<!-- /AEXUS_ADE_PREAMBLE -->\n\n${userMessage}`
+					: [{ type: 'text', text: `${rawSysPrompt}\n\n<!-- /AEXUS_ADE_PREAMBLE -->` }, ...userMessage])
+				: userMessage;
 			const args = [
 				'--print', '--verbose',
 				'--input-format', 'stream-json',
 				'--output-format', 'stream-json',
 				'--include-partial-messages',
+				...sysPromptArgs,
 				...(permissionMode ? ['--permission-mode', permissionMode] : []),
 				...(bypassPermissions ? ['--permission-prompts', 'none'] : ['--permission-prompts', 'host']),
 				...(useModelOverride && resolvedModel ? ['--model', resolvedModel] : []),
@@ -1432,41 +1534,65 @@ export class ClaudeRuntime implements EngineRuntime {
 			const remotePersistentId = this.remoteTarget && this.remoteTarget.os !== 'windows'
 				? `${buildRemotePersistentPrefix(this.id, session.id)}-${randomUUID().slice(0, 8)}`
 				: undefined;
-			const userLinePayload = JSON.stringify({ type: 'user', session_id: session.id, parent_tool_use_id: null, message: { role: 'user', content: userMessage } }) + '\n';
-			const { sawResult, interimUsage } = await this.streamPersistentClaudeRun(session, {
-				args,
-				customEnv,
-				remotePersistentId,
-				userLinePayload,
-				bypassPermissions,
-				isAutoEng,
-				stream,
-				token,
-				options,
-			});
-			if (!sawResult && interimUsage) {
-				const fallbackUsage = turnUsageFromPayload(interimUsage);
-				if (fallbackUsage.totalTokens > 0) {
-					this.lastTurnUsageBySession.set(session.id, fallbackUsage);
+			const userLinePayload = JSON.stringify({ type: 'user', session_id: session.id, parent_tool_use_id: null, message: { role: 'user', content: effectiveUserMessage } }) + '\n';
+			try {
+				const { sawResult, interimUsage } = await this.streamPersistentClaudeRun(session, {
+					args,
+					customEnv,
+					remotePersistentId,
+					userLinePayload,
+					bypassPermissions,
+					isAutoEng,
+					stream,
+					token,
+					options,
+				});
+				if (!sawResult && interimUsage && !this.lastTurnUsageBySession.has(session.id)) {
+					const fallbackModel = resolvedModel ?? this.initBySession.get(session.id)?.model;
+					const fallbackUsage = turnUsageFromPayload(interimUsage, undefined, undefined, fallbackModel);
+					if (fallbackUsage.totalTokens > 0) {
+						this.lastTurnUsageBySession.set(session.id, fallbackUsage);
+					}
+				}
+			} finally {
+				if (tempSysPromptFile) {
+					await fs.rm(tempSysPromptFile, { force: true }).catch(() => { });
 				}
 			}
 		};
 
-		try {
-			await runOnce(Boolean(resolvedModel));
-		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			if (/already in use|already exists/i.test(msg)) {
-				session.provisional = false;
-				await runOnce(Boolean(resolvedModel), true);
+		const hasEffortFlag = Boolean(this.mapClaudeEffortArg(options?.thinking));
+		const hasSysPromptFlag = Boolean(options?.appendSystemPrompt?.trim());
+		let useModelOverride = Boolean(resolvedModel);
+		let forceResume = false;
+		let includeEffort = true;
+		let includeSystemPromptFlag = true;
+		for (let retryStep = 0; retryStep < 5; retryStep++) {
+			try {
+				await runOnce(useModelOverride, forceResume, includeEffort, includeSystemPromptFlag);
 				return;
+			} catch (error) {
+				const msg = error instanceof Error ? error.message : String(error);
+				if (!forceResume && /already in use|already exists/i.test(msg)) {
+					session.provisional = false;
+					forceResume = true;
+					continue;
+				}
+				if (includeSystemPromptFlag && hasSysPromptFlag && /(?:unknown|invalid|unsupported|unrecognized)[ _-]*(?:option|argument|flag)?[^\n]*--append-system-prompt/i.test(msg)) {
+					includeSystemPromptFlag = false;
+					continue;
+				}
+				if (includeEffort && hasEffortFlag && isClaudeEffortRejectedError(msg)) {
+					includeEffort = false;
+					continue;
+				}
+				if (useModelOverride && resolvedModel && /(?:unknown|invalid|unsupported)[ _-]*model|model.*(?:not[ _-]?found|does not exist)/i.test(msg)) {
+					stream.progress(vscode.l10n.t('Model "{0}" was rejected by Claude Code; retrying with default model…', resolvedModel));
+					useModelOverride = false;
+					continue;
+				}
+				throw error;
 			}
-			if (resolvedModel && /(?:unknown|invalid|unsupported)[ _-]*model|model.*(?:not[ _-]?found|does not exist)/i.test(msg)) {
-				stream.progress(vscode.l10n.t('Model "{0}" was rejected by Claude Code; retrying with default model…', resolvedModel));
-				await runOnce(false);
-				return;
-			}
-			throw error;
 		}
 	}
 

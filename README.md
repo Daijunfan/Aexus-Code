@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Open-Source Organizational IDE &amp; Visual Multi-Agent Control Plane</strong><br/>
-  Visual Mermaid Mission DAG Canvas · 8 Native BYO-CLI Engines with Unified FinOps · Zero-Server SSH Cloud Hosts · Factory Wall &amp; Token Bus
+  Dual-View Cyclic Orchestration &amp; Sculpted Mission Task DAG · 8 Native BYO-CLI Engines with FinOps Guardrails · Zero-Server SSH Cloud Hosts · Main-Process Headless Daemon &amp; Pointer-Native Baton Bus
 </p>
 
 <p align="center">
@@ -26,14 +26,14 @@
 
 > [!TIP]
 > **Get Started Visually in Minutes:**
-> 1. **Author & Inspect on a Minimalist Mission Canvas**: Open any Mission canvas, right-click anywhere to add Task / Reviewer / Human Gate nodes, or click the top-left **Mermaid Source & Prompts Drawer** to edit `mission.mmd` and per-node pre-prompts side-by-side with **50-step Undo/Redo (`Cmd/Ctrl+Z`)**, marquee multi-select, magnetic snap guides, and `Cmd/Ctrl+F` node search.
-> 2. **Run Across 8 Native BYO-CLI Engines & Zero-Server SSH Cloud Hosts**: Assign nodes to **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, or **Pi** locally or over SSH, then click **Start** to orchestrate parallel fan-out, Check Hook auto-bounce, fail-edge self-healing, and interactive Human Gate sign-off.
-> 3. **Inspect Live FinOps & Flip `ADE ⇄ IDE` Instantly**: Open the docked **Node Inspector** for live token traces, Check Hooks, and multi-run FinOps budget ledgers, or press `Alt+Cmd+A` (`Alt+Ctrl+A`) to switch instantly between **`ADE`** and **`IDE`**.
+> 1. **Dual-View Engineering Canvas (Orchestration + Sculpted Task DAG)**: Author your persistent all-staff cyclic **Orchestration** team (department wings, `<-->` review loops, folded shared whiteboards, radial/LR/TD/grid layouts) alongside a strictly acyclic sculpted **Mission Task DAG**, complete with **50-step Undo/Redo (`Cmd/Ctrl+Z`)**, marquee multi-select, magnetic snap guides, and `Cmd/Ctrl+F` search.
+> 2. **Run Across 8 Native BYO-CLI Engines & Zero-Server SSH Cloud Hosts**: Assign staff nodes to **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, or **Pi** locally or over SSH. Chat directly with your `L1` lead (auto-minting a root `otok-*` baton) or run `aexus-ade orchestration dispatch` to drive parallel `token split --wait-join`, Check Hook auto-verification, cyclic review bounces, and verified Task DAG sign-off.
+> 3. **Inspect Live Batons, Whiteboards & FinOps — Flip `ADE ⇄ IDE` Instantly**: Click any card, chip, or live baton comet to inspect pointer-only baton traces, Department Whiteboards, Completion Contracts, and `maxHops` / FinOps budget circuit-breakers, or press `Alt+Cmd+A` (`Alt+Ctrl+A`) to switch instantly between **`ADE`** and **`IDE`**.
 
 <p align="center">
-  <img src="docs/promo/aexus-01-full-ade-workbench-hero.png" width="100%" alt="Aexus Code Full ADE Workbench — Multi-Host Multi-Project Sidebar, Radial Orchestration, Circular Mission Task DAG &amp; Simultaneous Multi-Cloud Terminals" />
+  <img src="docs/promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code Flagship ADE Command Center — 6-OS Multi-Project Sidebar, Widescreen Staff Orchestration, Sculpted Mission Task DAG &amp; Simultaneous Multi-Cloud SSH Terminals" />
   <br/>
-  <sub><strong>Full ADE Workbench:</strong> Curated Multi-OS/Multi-Cloud Sidebar ➔ Dual-View Radial Orchestration &amp; Circular Mission Task DAG ➔ Simultaneous Multi-Cloud SSH Terminals · <a href="docs/gallery.md">Explore Full 8-Shot 2x Retina Visual Gallery →</a></sub>
+  <sub><strong>Flagship ADE Command Center:</strong> 6-OS Multi-Project Sidebar ➔ Dual-View Widescreen Staff Orchestration &amp; Sculpted Mission Task DAG ➔ Simultaneous Multi-Cloud SSH Terminals · <a href="docs/gallery.md">Explore Full 24-Shot 2x Retina Visual Gallery →</a></sub>
 </p>
 
 ---
@@ -44,53 +44,52 @@ Most AI developer setups force you to choose between a closed-source single-agen
 
 **Aexus Code** (`v1.1.0`) is a 100% open-source (**MIT**), local-first desktop workbench supercharged on `Code - OSS` (`1.146.0`) with [Open VSX](https://open-vsx.org/) VS Code extensions compatibility and zero bundled Copilot telemetry, unifying a full-parity **IDE (`IDE`)** and an extensible **Agent Development Environment (`ADE`)**:
 
-1. **Distraction-Free Infinite-Canvas DAG Editor & Non-Colliding HUD** — Minimalist top-left **Mermaid Source Drawer + Start/Pause/Stop** controls, built-in **50-step Undo/Redo**, Shift-drag marquee multi-select & batch drag, smart magnetic alignment snap guides, `Delete`/`Backspace` removal, `Cmd/Ctrl+F` large-DAG node search, double-click inline edge label editing, wide-screen dual-drawer coexistence, and zero-teardown live Node Inspector.
+1. **Dual-View Cyclic Orchestration + Sculpted Mission Task DAG** — Place every rank (`L1..LN`) on one widescreen cyclic **Orchestration** canvas (`344×188` staff pods, 1-to-1 unique employees, `<-->` bidirectional loops, `276×164` folded Department Shared Whiteboards, radial/LR/TD/grid layouts) linked live to a strictly acyclic sculpted **Mission Task DAG** (`280×154` contract-guarded task pods, Sovereign Human Gates, upstream dependency gating, 50-step Undo/Redo, marquee multi-select, and interactive detail popovers).
+2. **Unified Pointer-Native `otok-*` Baton Bus & Main-Process 0-Window Headless Daemon** — Heterogeneous `token mint|split --wait-join` with per-branch `scopePaths` conflict detection & `all|any|quorum` + `--deadline` convergence, deterministic task `completionContract` guardrails, TOC/section-sliced whiteboards, provenance `token return`, cyclic `token handoff|reject`, `token fail|retry`, Temporal-grade mutation `idempotencyKey` deduplication, durable `mission checkpoint` snapshots, `mission diagnostics`, `maxHops` cycle circuit-breakers, 429/502 transient retry, and main-process headless continuity that survives window reloads.
 3. **8 Native BYO-CLI Coding Engines + Unified Multi-Engine FinOps Budget Breaker** — Orchestrate **Claude Code**, **Codex**, **Google Antigravity**, **Kilo Code**, **OpenCode**, **DeepSeek Harness**, **Cline**, and **Pi** locally or over SSH with official brand icons, unified per-model input/output/cache pricing (with `~$` estimated tags, custom overrides & local `$0` detection), and hard FinOps budget circuit-breakers across all 8 engines.
 4. **One Panel for Multi-Project, Multi-OS Workspaces (`macOS` · `Ubuntu` · `Kali` · `Windows`) & Multi-Cloud Terminals** — Manage local `file://` repositories and zero-server `aexus-ssh://` cloud projects side-by-side with simultaneous split local + remote SSH terminals and zero `vscode-server` installation or `~/.ssh/config` mutation.
-5. **Extensible Multi-Tier Organizations ("Everything is Extensible") & Factory Wall** — Start from **5 presets** (`Enterprise 4-Tier`, `Agile 3-Tier Startup`, `AI Research Lab`, `Security Red/Blue Audit`, `2-Tier Flat Swarm`) or resize `1..N` tiers, enforce server-signed HMAC capability tokens, `@Employee:` context reuse, zero-token Watchdog probes, Check Hooks, and atomic live `mission.patch`.
+5. **Extensible Multi-Tier Organizations ("Everything is Extensible") & Native + Engineering APIs** — Start from **5 presets** (`Enterprise 4-Tier`, `Agile 3-Tier Startup`, `AI Research Lab`, `Security Red/Blue Audit`, `2-Tier Flat Swarm`) or resize `1..N` tiers, with native core employee APIs (`session.*`) for regular ADE hierarchies and Engineering-exclusive canvas staffing APIs (`orchestration staff create|config|remove`) with server-signed HMAC tokens & zero-token Watchdog probes.
 6. **Full-Parity Native VS Code IDE & Open VSX Extension Compatibility** — Press `Alt+Cmd+A` (`Alt+Ctrl+A`) to flip instantly between **`ADE`** and **`IDE`** with 100% native `Code - OSS` editing, Git diffs, debugging, terminals, and live **Open VSX** marketplace compatibility.
 
 ---
 
-## How the Mission Factory Wall, Token Bus & Capability Airgap Work
+## How Dual-View Orchestration, Pointer-Native Batons & Capability Airgap Work
 
-### Factory Wall & Token Bus Choreography
+### Dual-View Orchestration & Unified `otok-*` Baton Bus
 
-Every Mission enforces a clean **Factory Wall** (`offGraphMaxTier`) separating off-graph supervisors (`L1` Governor / `L2` Manager) from in-graph execution nodes (`token.*`):
+Every Engineering workspace pairs an **all-staff cyclic Orchestration canvas** (zero off-graph wall, persistent unique employees, Department Whiteboards) with a strictly acyclic **Mission Task DAG** (live status/assignee sync + superior sign-off gated by upstream dependencies):
 
 ```mermaid
 flowchart LR
-    OFF["Off-Graph Supervisors<br/>(L1 Governor / L2 Manager)<br/>org.* · mission.patch · mission.recall"] -->|"Top-down guidance &amp;<br/>live topology patch"| BUS["Mission Runtime &amp; Token Bus<br/>(AdeMissionRuntimeService)"]
-    BUS -->|"1. Dispatch token + pre-prompt<br/>(Local or bound SSH host)"| NODE["In-Graph Mission Node<br/>(@Employee context reuse)<br/>token.complete | reject | block | fail"]
-    NODE -->|"token.block (PID / file / timer)"| WD["Zero-Token Watchdog<br/>(Local / SSH liveness probe)"]
-    WD -->|"Silence timeout escalation"| OFF
-    NODE -->|"token.complete (success edge)"| GATE{{"Human Acceptance Gate (U1)<br/>Approve or Directed Rollback"}}
-    NODE -->|"token.reject / fail (fail edge)"| NODE
-    GATE -->|"mission.gate reject --rollback"| NODE
-    GATE -->|"mission.gate approve"| DONE["Downstream Track / Release"]
+    USER["Human User (L-1)<br/>Direct Chat to L1 or orchestration.dispatch"] -->|"Auto-mints root otok-* baton"| L1["Top Orchestrator (L1)<br/>token.split --wait-join · mission.task.complete<br/>orchestration.staff.create/remove"]
+    L1 -->|"Heterogeneous downward batons<br/>(--task T1..TN · --whiteboard WB)"| TEAM["Persistent Cyclic Staff (L2..LN)<br/>token.handoff | return | reject | block | fail<br/>O(1) Delta Cursor + Pointer Read"]
+    TEAM -->|"token.block (PID / file / timer)<br/>5-min silence reminder"| WD["Zero-Token Watchdog &amp;<br/>Main-Process Headless Daemon<br/>(maxHops &amp; FinOps Breakers)"]
+    TEAM -->|"token.return (settles join barrier)"| L1
+    L1 -->|"Verified upstream DAG sign-off<br/>(INCOMPLETE_DEPENDENCIES guard)"| DAG["Sculpted Mission Task DAG<br/>(T1 → T2 ∥ T3 → U1)"]
+    L1 -->|"token.complete --finish"| INBOX["ADE Inbox Completion Report"]
 ```
 
 ### Local Control Plane & Pure-Worker Airgap Architecture
 
-All agent orchestration flows through a main-process local IPC server (+ loopback TCP bridge) enforcing server-derived HMAC identity, strictly top-down subtree lineage (`canRankSupervise`), and airgapped subprocess scrubbing:
+All agent orchestration flows through a main-process local IPC server (+ loopback TCP bridge & 0-window headless daemon) enforcing server-derived HMAC identity, strictly top-down subtree/department lineage (`canRankSupervise`), and airgapped subprocess scrubbing:
 
 ```mermaid
 flowchart TB
-    subgraph Main["Electron Main Process (Local IPC + 127.0.0.1 Loopback Bridge)"]
+    subgraph Main["Electron Main Process (Local IPC + 127.0.0.1 Loopback Bridge + Headless Daemon)"]
         CS["AdeControlServer<br/>0600 Unix Socket / Win32 Named Pipe<br/>In-Memory 32-Byte HMAC Secret"]
-        RBAC["AdeControlHandler &amp; AdeMissionControlHandler<br/>Live Session Check · canRankSupervise Top-Down Lineage<br/>Factory Wall · High-Privilege API Splits"]
+        RBAC["AdeControlHandler &amp; Modular Mission Control<br/>Live Session Check · canRankSupervise Lineage<br/>Native session.* vs Engineering orchestration staff *"]
         CS <--> RBAC
     end
 
     HUMAN["Human Terminal CLI (aexus-ade)<br/>0600 Per-Instance Control File"] -->|"32-byte instance token"| CS
-    ORCH["Off-Graph Orchestrators &amp; In-Graph Nodes<br/>(Claude · Codex · Agy · Kilo · OpenCode · DSH · Cline · Pi)"] -->|"HMAC AEXUS_ADE_SESSION_TOKEN<br/>(AEXUS_ADE_CONTROL_FILE stripped)"| CS
+    ORCH["ADE Ranks &amp; Engineering Staff<br/>(Claude · Codex · Agy · Kilo · OpenCode · DSH · Cline · Pi)"] -->|"HMAC AEXUS_ADE_SESSION_TOKEN<br/>(AEXUS_ADE_CONTROL_FILE stripped)"| CS
 
     subgraph Airgap["Airgapped Execution Boundary (stripAdeControlEnv)"]
-        PURE["Pure Executor (Worker / Builder / Agent)<br/>0 Orchestration APIs · missionNode tokens limited strictly to token.*/whoami/docs.read"]
+        PURE["Pure Executor (Worker / Builder / Agent)<br/>0 Native Control APIs · Engineering staff tokens strictly scoped to token.*/whiteboard.*/whoami/docs.read"]
         SUB["OpenSSH · Watchdog Probes · sqlite3<br/>AEXUS_ADE_* stripped · SSH -F effective_ssh_config (global ~/.ssh/config untouched)"]
     end
 
-    PURE -.->|"Non-token actions blocked by server"| CS
+    PURE -.->|"Unauthorized actions blocked by server"| CS
     SUB -.->|"Zero control-plane env inherited"| CS
 ```
 
@@ -103,9 +102,9 @@ flowchart TB
 Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**, **Kali Linux**, and **Windows** in one unified sidebar — and drive multiple local + cloud terminals side-by-side without juggling windows or installing remote daemons:
 
 <p align="center">
-  <img src="docs/promo/aexus-06-cross-host-fleet-and-terminals.png" width="100%" alt="Zero-Server Multi-OS Cloud Host Studio &amp; 4-Host Simultaneous Cloud SSH Terminal Matrix (Linux H100 GPU, Ubuntu EU Prod, Kali Audit, Windows CI)" />
+  <img src="docs/promo/aexus-07-cloud-host-studio-multi-os-fleet-dark.png" width="100%" alt="Zero-Server Multi-OS Cloud Host Studio &amp; 4-Host Simultaneous Cloud SSH Terminal Matrix (macOS, Ubuntu, Linux H100 GPU, Debian, Windows 11, Kali)" />
   <br/>
-  <sub><strong>One Panel, Multi-OS Cloud Fleet &amp; 4-Host Simultaneous SSH Terminals:</strong> Manage macOS, Linux H100 GPU, Ubuntu, Kali &amp; Windows projects alongside a live 2×2 multi-cloud terminal matrix.</sub>
+  <sub><strong>One Panel, Multi-OS Cloud Fleet &amp; 4-Host Simultaneous SSH Terminals:</strong> Manage macOS, Linux H100 GPU, Ubuntu, Debian, Kali &amp; Windows projects alongside a live 2×2 multi-cloud terminal matrix.</sub>
 </p>
 
 - **Zero Path & OS Friction**: Mix local `file://` projects and zero-server `aexus-ssh://` hosts in the same tree with automatic platform icons (`macOS`, `Ubuntu`, `Kali`, `Windows`), pinned `✦ Secretary`, Smart Calm hover-bloom mode, and a **1-click full-badge toggle**.
@@ -118,9 +117,9 @@ Manage local repositories and remote cloud projects across **macOS**, **Ubuntu**
 Define the exact multi-agent organization your team wants instead of being locked into one fixed hierarchy:
 
 <p align="center">
-  <img src="docs/promo/aexus-02-orchestration-radial-constellation.png" width="100%" alt="Radial Multi-Tier Agent Orchestration Constellation — L1 Gold Chief Architect Center, 4 Department Wings, 4 Shared Whiteboards, 5 Hosts, 5 Agent Engines &amp; 6 Models" />
+  <img src="docs/promo/aexus-03-cross-cloud-multi-engine-orchestration-dark.png" width="100%" alt="Cross-Cloud Multi-Tier Agent Orchestration Panorama — L1 Sovereign Architect, 3 Cloud Department Subgraphs, Folded Whiteboards, 6 OS Hosts &amp; 6 Native Agent Engines" />
   <br/>
-  <sub><strong>Radial Multi-Tier Agent Orchestration Constellation:</strong> L1 Chief Architect centered with 4 jewel-colored department wings, 4 shared whiteboards, 5 hosts, 5 agent engines, 6 models, live baton comets &amp; join barriers.</sub>
+  <sub><strong>Cross-Cloud Multi-Tier Agent Orchestration:</strong> L1 Sovereign Architect coordinating 3 cloud department wings, folded shared whiteboards, 6 OS hosts, 6 agent engines, live baton comets &amp; join barriers.</sub>
 </p>
 
 | Starter Preset | Rank Ladder (Top → Leaf Pure Executor) | Structural Slot Mapping (`orch / seg / rev / exec`) |
@@ -134,56 +133,56 @@ Define the exact multi-agent organization your team wants instead of being locke
 - **Fill-in-the-Blank Custom Ranks & `{{variables}}` Prompt Templates**: Edit rank names, colors, icons, and dynamic prompt templates (`{{rank.name}}`, `{{rank.tier}}`, `{{project.name}}`, `{{supervisor.label}}`, `{{hierarchy.ladder}}`) inside a real dirty-tracked VS Code editor (`Cmd/Ctrl+S` save & revert, live session migration on rank ID rename), or hot-resize and hot-rename tiers via `aexus-ade rank set-count` / `rank rename`.
 - **Rank × Fixed Kernel API Permission Matrix**: Toggle coarse-grained kernel APIs per rank (`session.read_context`, `session.message`, `session.manage`, `project.read`, `host.access`, `inbox.post`, `mission.read`, `mission.design`, plus separated high-privilege **`project.manage`**, **`host.manage`**, **`mission.control`**, and **`mission.destroy`**).
 - **Lineage-Enforced Server-Signed Capability Tokens**: Every orchestrated agent receives an HMAC-SHA256 `AEXUS_ADE_SESSION_TOKEN` minted in main-process memory. On every call, `AdeControlHandler` validates live session state and enforces strictly top-down `canRankSupervise` + subtree ownership.
-- **Zero-Warmup Inline Turn-1 Injection + Single-Copy Tier Docs**: Rank charters inject inline on Turn 1, re-inject automatically on prompt-hash change or context compaction, and link single-copy tier manuals (`docs/ranks/L0..LN.md` & `docs/mission/MISSION_API.md`).
+- **Zero-Warmup KV-Cache-Stable Turn-1 Injection + Single-Copy Tier Docs**: Rank charters place the 100% static core charter prefix first (isolating dynamic bindings under `### Live Role Bindings` so auto-titles and subordinate spawns never bust prompt-hash caches), re-inject only on true charter changes or context compaction, and link single-copy tier manuals (`docs/ranks/L0..LN.md` & `docs/mission/MISSION_API.md`).
 - **Workspace Prompt-Injection Protection**: `aexus.ade.organization` is `application`-scoped and `restricted: true` — `.vscode/settings.json` inside cloned repositories cannot modify agent prompts or API grants.
 
 ---
 
-### 3. Visual Mission DAG Canvas, Synchronized Pre-Prompts & 6 Blueprint Recipes
+### 3. Dual-View Engineering Canvas (Sculpted Mission Task DAG + Cyclic Orchestration) & 6 Blueprint Recipes
 
-Author pure Mermaid flowcharts visually or via CLI (`aexus-ade mission ...`), assign hosts, engines, categorized models, thinking levels, and per-node pre-prompts, and orchestrate parallel local + SSH cloud tracks:
+Pair a strictly acyclic sculpted **Mission Task DAG** with a persistent cyclic **Orchestration** team visually or via CLI (`aexus-ade orchestration ...` / `aexus-ade mission task ...`), configure per-staff hosts, engines, models, thinking levels, and Department Shared Whiteboards, and orchestrate parallel local + SSH cloud collaboration:
 
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/promo/aexus-03-circular-mission-dag-hero.png" width="100%" alt="Circular Mission Task DAG — Luminous Radial Task Orbs, Live Baton Packets, Assignee Chips &amp; Circular Minimap" />
-      <p align="center"><sub><strong>Circular Mission Task DAG:</strong> Luminous <code>176×176</code> radial task orbs, jewel custom colors, live baton packets, assignee/pointer badges &amp; circular minimap.</sub></p>
+      <img src="docs/promo/aexus-05-mission-task-dag-contracts-dark.png" width="100%" alt="Sculpted Mission Task DAG — 280x154 Contract-Guarded Task Pods, Check Receipts, Sovereign Gate &amp; Semantic Minimap" />
+      <p align="center"><sub><strong>Sculpted Mission Task DAG:</strong> <code>280×154</code> task pods with Completion Contract guardrails, deterministic Check Receipts, Ready Frontier &amp; Sovereign Gate.</sub></p>
     </td>
     <td width="50%">
-      <img src="docs/promo/aexus-05-dual-view-orch-dag-sync.png" width="100%" alt="Dual-View Live Linkage — Radial Orchestration Synchronized Side-by-Side with Circular Mission Task DAG" />
-      <p align="center"><sub><strong>Dual-View Live Linkage:</strong> Radial Orchestration staff batons synchronized live with circular Mission Task DAG deliverables.</sub></p>
+      <img src="docs/promo/aexus-11-dual-view-lineage-spotlight-dark.png" width="100%" alt="Dual-View Live Linkage — Widescreen Orchestration Synchronized Side-by-Side with Sculpted Mission Task DAG" />
+      <p align="center"><sub><strong>Dual-View Live Linkage:</strong> Widescreen Orchestration staff batons synchronized 1:1 with Mission Task DAG deliverables &amp; hover spotlight.</sub></p>
     </td>
   </tr>
 </table>
 
-- **Same-Employee Context Reuse (`@Employee:`)**: Reuse one continuous agent session across multiple DAG positions (`N1["@Architect: Spec"]` → … → `N5["@Architect: Verify"]`) with shared orthogonal context-reuse ribbons on hover.
-- **Synchronized Per-Node Pre-Prompts**: Click the prompt icon on any node card or open the top-left File split drawer to inspect and edit pre-prompts — both surfaces and `aexus-ade mission prompt get|set` read/write the exact same Mission store.
-- **Proactive Engine Availability & Vendor-Grouped Model Picker**: Opening a Mission automatically probes local and bound SSH hosts to disable unavailable agent engines upfront. Clicking a node's big center icon opens a vendor-grouped Model & Thinking selector (with case-insensitive auto-classification and persistent user recategorization), allowing live model changes during a run while locking engine swaps.
-- **Zero-Token Watchdog, Live Topology Patching & Source Triggers**: Set per-Mission silence timeouts (`mission timeout`), inspect liveness without spending LLM tokens, recall/retry branches (`mission recall`, `mission retry`), atomically patch running DAGs (`mission patch`), and attach cron/interval/file triggers (`mission trigger set`).
+- **All-Staff Cyclic Collaboration & Zero Pre-Prompts**: Every participating rank (`L1..LN`) lives on the Orchestration canvas with 1-to-1 employee uniqueness, `<-->` review cycles, and pointer-native `otok-*` batons (`--summary`, `--detail`, `--artifact`, `--decision`, `--whiteboard`). Employees stay alive across waves and re-enter cycles with O(1) delta pointers instead of repeating history.
+- **Live Task DAG Binding & Hard Upstream Completion Gate**: Binding tokens via `--task <taskId>` updates circular Task DAG orbs in real time (status, assignee, elapsed time, artifact pointers) while reserving `completed` for authorized superior sign-off (`mission task complete`) only after all upstream prerequisites complete.
+- **Proactive Engine Availability & Vendor-Grouped Model Picker**: Opening an Engineering workspace automatically probes local and bound SSH hosts to disable unavailable agent engines upfront. Clicking any staff node's center icon opens a vendor-grouped Model & Thinking selector, allowing live model switches during a run while locking engine swaps.
+- **Zero-Token Watchdog, Main-Process Headless Continuity & Guardrails**: Automatic 5-minute baton silence reminders, zero-token PID/file `token block` wakeups, `maxHops` cycle circuit-breakers, FinOps hard budget breakers (`orchestration limits`), deterministic `%% check` hooks, 429/502 transient retries, and 0-window main-process daemon persistence.
 
 <p align="center">
-  <img src="docs/promo/aexus-04-interactive-whiteboard-and-baton.png" width="100%" alt="Interactive Orchestration — Department Shared Whiteboard Live Editor, 12-Color Node Palette &amp; Pointer-Only Baton Token Inspector" />
+  <img src="docs/promo/aexus-14-baton-inspector-join-barrier-conflict-dark.png" width="100%" alt="Pointer-Native Baton Lifecycle, Join Barrier, Scope Conflict Detection &amp; Folded Department Whiteboard" />
   <br/>
-  <sub><strong>Interactive Whiteboards, Node Palette &amp; Pointer-Only Baton Protocol:</strong> Edit department shared whiteboards, customize per-node jewel colors, and inspect cyclic re-entry deltas, on-demand pointer diffs &amp; hop trails live.</sub>
+  <sub><strong>Pointer-Native Baton Inspector, Join Barriers &amp; Shared Whiteboards:</strong> Inspect Write Scope globs, DP scope conflict alerts, quorum SLA timers, rework ledgers, and on-demand context pointers.</sub>
 </p>
 
-| Curated Blueprint Recipe | Topology | Employee Context Reuse | Ideal Use Case |
+| Curated Dual-View Blueprint | Mission Task DAG | Orchestration Staff Roles | Ideal Use Case |
 | :--- | :--- | :--- | :--- |
-| **[`feature-ship`](examples/blueprints/feature-ship.md)** | `N1 → (N2 ∥ N3 ∥ N4) → U1 → N5` | `@Architect`, `@Backend`, `@Frontend`, `@QA` | Contract-first full-stack delivery with backend/UI/test tracks + Release Gate |
-| **[`bug-hunt-fix`](examples/blueprints/bug-hunt-fix.md)** | `N1 → (N2 ∥ N3) → N4 → U1` | `@Debugger`, `@QA`, `@Auditor` | Repro-first root-cause debugging + surgical fix & regression suite |
-| **[`security-audit-swarm`](examples/blueprints/security-audit-swarm.md)** | `(N1 ∥ N2 ∥ N3) → N4 → U1 → N5` | `@AuthAudit`, `@IpcAudit`, `@SupplyAudit`, `@Hardening` | Multi-engine auth, IPC & supply-chain audit converging into hardened patches |
-| **[`safe-migration`](examples/blueprints/safe-migration.md)** | `N1 → (N2 ∥ N3) → U1 → N4` | `@Architect`, `@CoreDev`, `@CallerDev` | Characterization-tested refactor with rollback gate & legacy cleanup |
-| **[`deep-research-lab`](examples/blueprints/deep-research-lab.md)** | `R1 → (R2 ∥ R3 ∥ R4) → U1 → R5` | `@PI`, `@TrackA`, `@TrackB`, `@Bench` | Multi-track hypothesis probing, quantitative benchmarks & peer-reviewed synthesis |
-| **[`arch-teardown`](examples/blueprints/arch-teardown.md)** | `R1 → (R2 ∥ R3) → R4 → U1` | `@Systems`, `@UX`, `@Architect` | Parallel systems + UX teardown converging into an Engineering RFC |
+| **[`feature-ship`](examples/blueprints/feature-ship.md)** | `T1 → (T2 ∥ T3 ∥ T4) → U1 → T5` | `Architect (L1)`, `Backend (L2)`, `Frontend (L2)`, `QA (L3)` | Contract-first full-stack delivery with backend/UI/test tracks + Release Gate |
+| **[`bug-hunt-fix`](examples/blueprints/bug-hunt-fix.md)** | `T1 → (T2 ∥ T3) → T4 → U1` | `LeadDebugger (L1)`, `FixDev (L2)`, `QA (L3)`, `Auditor (L2)` | Repro-first root-cause debugging + surgical fix & regression suite |
+| **[`security-audit-swarm`](examples/blueprints/security-audit-swarm.md)** | `(T1 ∥ T2 ∥ T3) → T4 → U1 → T5` | `AuditLead (L1)`, `AuthAudit/IpcAudit/SupplyAudit (L2)`, `Hardening (L3)` | Multi-engine auth, IPC & supply-chain audit converging into hardened patches |
+| **[`safe-migration`](examples/blueprints/safe-migration.md)** | `T1 → (T2 ∥ T3) → U1 → T4` | `Architect (L1)`, `CoreDev (L2)`, `CallerDev (L2)`, `Verifier (L3)` | Characterization-tested refactor with rollback gate & legacy cleanup |
+| **[`deep-research-lab`](examples/blueprints/deep-research-lab.md)** | `R1 → (R2 ∥ R3 ∥ R4) → U1 → R5` | `PI (L1)`, `TrackA (L2)`, `TrackB (L2)`, `Bench (L3)` | Multi-track hypothesis probing, quantitative benchmarks & peer-reviewed synthesis |
+| **[`arch-teardown`](examples/blueprints/arch-teardown.md)** | `R1 → (R2 ∥ R3) → R4 → U1` | `Architect (L1)`, `Systems (L2)`, `UX (L2)`, `Reviewer (L3)` | Parallel systems + UX teardown converging into an Engineering RFC |
 
 ---
 
 ### 4. Smart Calm Sidebar & Rank-Filtered Inbox
 
 <p align="center">
-  <img src="docs/promo/aexus-07-ade-focus-mode-multi-engine.png" width="100%" alt="ADE Project Focus Mode — Sticky Cloud Focus Banner, Cross-Engine Multi-Model Collaboration &amp; Right Files/Git Diff Inspector" />
+  <img src="docs/promo/aexus-21-project-focus-mode-and-live-diff-dark.png" width="100%" alt="ADE Project Focus Mode — Sticky Cloud Focus Banner, Cross-Engine Collaboration &amp; Remote SSH Git Diff Inspector" />
   <br/>
-  <sub><strong>Project Focus Mode, Cross-Engine Collaboration &amp; Live Git Changes Inspector:</strong> Scope the multi-project sidebar to a single cloud workspace while collaborating across Claude, Codex, Gemini &amp; DeepSeek with live diff inspection.</sub>
+  <sub><strong>Project Focus Mode, Cross-Engine Collaboration &amp; Live Git Changes Inspector:</strong> Scope the multi-project sidebar to a single cloud workspace while collaborating across Claude, Antigravity &amp; DeepSeek with live diff inspection.</sub>
 </p>
 
 - **Smart Calm Sidebar**: Session rows default to compact hover-bloom rank/engine indicators with non-clipping badges, paired with a **1-click full-badge toggle** when you want every rank and status pill visible simultaneously, plus the pinned viewport-aware **`✦ Secretary`** (`/mission`, `/status`, `/sessions`, `/projects`).
@@ -196,16 +195,16 @@ Author pure Mermaid flowcharts visually or via CLI (`aexus-ade mission ...`), as
 Aexus Code keeps 100% of native `Code - OSS` IDE ergonomics intact — Explorer, split editors, side-by-side diffs, multi-OS terminals, decoupled **Plugins** & **Agent Engine** header buttons, and live **[Open VSX](https://open-vsx.org/)** compatibility — while adding a Zero-Server SSH Cloud Host Studio:
 
 <p align="center">
-  <img src="docs/promo/aexus-08-ide-mode-multi-project-terminals.png" width="100%" alt="Instant ADE to IDE Mirror Symmetry — Multi-Root Local and Cloud SSH Explorer, TypeScript Code Editor, Live Circular Mission DAG &amp; Multi-Cloud Terminals" />
+  <img src="docs/promo/aexus-24-ade-ide-mirror-symmetry-dark.png" width="100%" alt="Instant ADE to IDE Mirror Symmetry — 6 Mirrored Local and Cloud SSH Roots, TypeScript Editor, Live Sculpted Mission Task DAG &amp; Multi-Cloud Terminals" />
   <br/>
-  <sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry (<code>Alt+Cmd+A</code>):</strong> Manage the same local + cloud SSH multi-project workspace in native IDE mode with syntax-highlighted editing, live circular Task DAG preview &amp; split cloud terminals.</sub>
+  <sub><strong>Instant <code>ADE ⇄ IDE</code> Mirror Symmetry (<code>Alt+Cmd+A</code>):</strong> Manage the same local + cloud SSH multi-project workspace in native IDE mode with syntax-highlighted editing, live sculpted Task DAG sync &amp; split cloud terminals.</sub>
 </p>
 
 - **Zero Remote Daemon**: Edit remote files, view Git `HEAD` diffs, discover & attach remote Claude Code / Codex / OpenCode sessions, bind Mission DAG nodes to cloud hosts (`mission host bind`), and open remote SSH PTY terminals right beside local folders with **no `vscode-server` installed on remote hosts**.
 - **Non-Destructive `~/.ssh/config` Guarantee**: `syncUserSshDir` defaults to **`false`** — Aexus Code passes `-F <userDataDir>/ssh/effective_ssh_config` exclusively to its own SSH sessions/terminals and **never prepends `Include` or modifies your global `~/.ssh/config`**.
 - **OpenSSH Transport**: Uses **OpenSSH `ControlMaster` multiplexing on macOS/Linux** and **direct OpenSSH on Windows**. Background filesystem, Git, and probe operations run with **`BatchMode=yes`**, requiring key-based / `ssh-agent` authentication (private keys are never read or copied).
 - **Non-Destructive VS Code Migration**: Imports `~/.ssh/config` (including recursive `Include` directives) and VS Code remote host/directory history via `aexus-ade host import-vscode` (read-only import).
-- **Full Visual Gallery**: See [`docs/gallery.md`](docs/gallery.md) for the complete 8-shot 2x Retina showcase gallery.
+- **Full Visual Gallery**: See [`docs/gallery.md`](docs/gallery.md) for the complete 24-shot 2x Retina showcase gallery.
 
 ---
 
@@ -240,41 +239,49 @@ aexus-ade --version
 aexus-ade doctor --project . --json
 eval "$(aexus-ade completion zsh)"   # also supports bash | fish | powershell
 
-# 1. Inspect or customize organization presets, dynamic ranks & API docs
+# 1. Inspect or customize organization presets, dynamic ranks & single-copy API docs
 aexus-ade role list --json
 aexus-ade role apply-preset startup-3tier
 aexus-ade rank names --json
-aexus-ade docs read mission
+aexus-ade docs read engineering       # Dual-View working paradigm & token rules
+aexus-ade docs read engineering-api   # Engineering CLI cookbook
 
-# 2. Initialize a Mission, apply a curated Mermaid blueprint, set pre-prompts & start
-GOV_ID=$(aexus-ade session create --project . --engine claude --role governor --title "Release Lead" --no-open --json | jq -r .id)
-MISSION_ID=$(aexus-ade mission init --governor "$GOV_ID" --title "Feature Ship" --open --json | jq -r .id)
-aexus-ade mission blueprint validate --file ./examples/blueprints/feature-ship.md
+# 2. Native ADE employee session creation (built-in core ADE — NOT Engineering-only!)
+aexus-ade session create --project . --engine claude --role governor --title "Release Lead" --no-open --json
+
+# 3. Initialize a Dual-View Engineering workspace, apply Task DAG + Orchestration Team + Task Specs, and set guardrails
+MISSION_ID=$(aexus-ade mission init --title "Feature Ship" --open --json | jq -r .id)
+aexus-ade mission blueprint validate --file ./examples/blueprints/feature-ship.md --json
 aexus-ade mission blueprint apply --mission "$MISSION_ID" --file ./examples/blueprints/feature-ship.md
-aexus-ade mission prompt set --mission "$MISSION_ID" --node N1 --text "Define shared TypeScript contracts and ownership boundaries."
-aexus-ade mission start --mission "$MISSION_ID" --timeout 15
+aexus-ade orchestration limits --mission "$MISSION_ID" --max-hops 48 --budget 15 --json
 
-# 3. Monitor runtime status, inspect inbox escalations & approve a human gate
-aexus-ade mission status --mission "$MISSION_ID" --json
+# 4. Add a new employee NODE inside the Engineering Orchestration canvas (Engineering-exclusive API!)
+aexus-ade orchestration staff create --mission "$MISSION_ID" --name "Perf Engineer" --rank L3 --department Backend --engine codex --json
+
+# 5. Dispatch a requirement wave (or chat directly with your L1 lead), inspect compact status & approve Human Gate U1
+aexus-ade orchestration dispatch --mission "$MISSION_ID" --prompt "Ship Feature X per T1..T5" --task T1 --json
+aexus-ade orchestration status --mission "$MISSION_ID" --json
 aexus-ade inbox list --unread-only
-aexus-ade mission gate approve --mission "$MISSION_ID" --node U1 --note "All tracks verified"
+aexus-ade mission task complete --mission "$MISSION_ID" --node U1 --note "Release gate approved by User"
 ```
 
 | Command Group | Subcommands |
 | :--- | :--- |
 | `doctor` / `completion` | `doctor [--project <path>] [--strict] [--json]` *(emits `schemaVersion: 1` & `aexusVersion`)* · `completion <bash\|zsh\|fish\|powershell>` · `--version` *(standalone without a running window)* |
-| `whoami` / `docs` / `api` | `whoami [--json]` · `docs read <L0..LN\|common\|mission>` · `api update [--since <v>] [--scope <s\|all>]` |
+| `whoami` / `docs` / `api` | `whoami [--json]` · `docs read <common\|L0..LN\|engineering\|engineering-api\|mission\|manifest>` · `api update [--since <v>] [--scope <s\|all>]` |
 | `role` *(alias `roles`)* | `list [--json]` / `schema` · `apis` / `primitives` · `presets [--json]` · `preset <id>` / `apply-preset <id>` · `set-tier <sessionId> <rankId>` · `reset` · `studio [rankId]` |
 | `rank` *(alias `ranks`)* | `list` · `names` · `get <tier\|alias>` · `docs [tier]` · `rename <tier\|alias> <newName>` · `set-count <n>` · `mission-name <name>` |
 | `status` / `mode` / `view` | `status [--json]` · `mode [get \| set <ade\|ide>]` · `view [--archived] [--inspector <changes\|files\|hide>] [--refresh]` |
 | `project` | `list` · `add <path\|host:/path>` · `select` · `remove` · `delete` · `focus` · `home` · `forward` · `move` · `changes` · `files` · `open-file` · `open-diff` |
 | `host` *(alias `cloud-host`)* | `list` · `info` · `add` · `update` · `remove` · `test` · `browse` · `import-vscode` · `open` |
 | `engine` | `list` · `sessions <engine> [--project <p>] [--limit <n>]` |
-| `session` | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `configure` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete` |
+| `session` *(Native Core ADE)* | `list` · `info` · `subordinates` · `tree` · `create` · `attach` · `connect` · `open` · `select` · `close` · `send [--wait]` · `history` · `mark-read` · `draft` · `reorder` · `rename` · `role` · `configure` · `move` · `stop` · `archive` · `unarchive` · `detach` · `delete [--force]` |
 | `secretary` | `status` · `open` · `engine` · `reset` · `send [--wait]` · `history` · `stop` · `draft` · `mark-read` |
-| `mission` | `list` · `init` · `open` · `docs` · `rename` · `blueprint <get\|apply\|validate>` · `prompt <list\|get\|set\|clear>` · `start` / `run` · `pause` · `resume` · `stop` · `status` · `timeout` · `boundary <get\|set>` · `recall` · `retry` · `patch` · `gate <approve\|reject>` · `trigger <list\|set\|remove>` · `host bind` · `remove` |
-| `token` | `current` · `trace <ptr>` · `complete <id>` · `reject <id>` · `block <id>` · `fail <id>` |
-| `org` | `subordinates` · `send <target> <msg>` · `context <target>` · `escalate` |
+| `orchestration` *(Engineering Canvas)* | `get` · `status [--full]` · `validate` · `load` · `apply` · `export` · `import` · `layout set` · `group <list\|create\|rename\|assign\|remove>` · **`staff <create\|rename\|config\|remove>`** *(Engineering canvas employee nodes)* · `edge <connect\|label\|remove>` · `dispatch [--ref]` · `pause` · `resume` · `abort` · `limits [--max-hops] [--budget] [--silence]` |
+| `mission` *(Task DAG & Lifecycle)* | `list [--project <p>]` · `init` · `open [--view <orchestration\|mission\|both>]` · `docs` · `rename <id> <title>` · `blueprint <get\|apply\|validate>` · `task <list\|get\|set\|create\|update\|remove\|edge\|complete\|status>` · `check <list\|get\|set\|remove\|run>` · `diagnostics` · `checkpoint <list\|create\|diff\|restore>` · `export [--format json\|markdown]` · `import` · `host bind` · `trigger <list\|set\|remove>` · `remove` |
+| `token` *(Unified `otok-*` Bus)* | `current [--full]` · `read <ptrs> [--toc\|--section <h>\|--tail <n>]` · `history <id> [--delta\|--all]` · `mint` · `split [--wait-join] [--scope-paths] [--join-mode all\|any\|quorum] [--branches-json -]` · `return <id> [--complete-task]` · `handoff <id>` · `reject <id> [--category]` · `fail <id> [--category]` · `retry <id>` · `block <id>` · `complete <id> [--finish] [--complete-task]` |
+| `whiteboard` | `list` · `create` · `read <wbId> [--toc\|--section <h>\|--max-chars <n>\|--tail <n>]` · `write <wbId> [--section <h>] [--expected-version <n>]` · `rename` · `remove` |
+| `org` | `subordinates` · `send <target> <msg>` · `context <target> [--limit <n>] [--full]` · `escalate` |
 | `inbox` | `list [--unread-only]` · `post` · `resolve` · `mark-read` |
 
 ---
@@ -288,8 +295,8 @@ Different tools optimize for different workflows. Here is an honest architectura
 | **License & Extension Registry** | MIT · [Open VSX](https://open-vsx.org/) | Closed-source | Mixed OSS / commercial | Open-source extension | Mixed OSS / hosted |
 | **Native Desktop IDE Core** | Full `Code - OSS` (`ADE ⇄ IDE`) | Full proprietary VS Code fork | External launcher around editors/terminals | Runs inside host IDE | Standalone web / server UI |
 | **Multi-Engine BYO-CLI Orchestration** | 8 native local/SSH CLIs side by side | Primarily own managed runtime | Launches external CLI panes | Single extension runtime (multi-LLM APIs) | API / SDK graph nodes |
-| **Extensible Org Roles & Kernel API Matrix** | Custom `1..N` ranks + Factory Wall + lineage HMAC tokens | Fixed agent / subagent modes | Manual task assignment | Custom mode prompts | Code-defined graph roles |
-| **Visual Mission DAG + Token Bus + Context Reuse** | Built-in Mermaid DAG, `@Employee:` context reuse, synchronized pre-prompts, Watchdog | Background agents (no visual DAG) | Kanban boards (no native diff/LSP) | Sequential / mode loops | Generic graphs (detached from local CLIs) |
+| **Extensible Org Roles & Kernel API Matrix** | Custom `1..N` ranks + Native `session.*` vs Engineering `orchestration staff *` + lineage HMAC tokens | Fixed agent / subagent modes | Manual task assignment | Custom mode prompts | Code-defined graph roles |
+| **Dual-View Orchestration + Circular Task DAG** | Cyclic all-staff canvas, circular Task DAG, pointer-native `otok-*` Split/Join/Reject, Whiteboards & Headless Daemon | Background agents (no visual DAG) | Kanban boards (no native diff/LSP) | Sequential / mode loops | Generic graphs (detached from local CLIs) |
 | **Zero-Server SSH Multi-Root (`aexus-ssh://`)** | OpenSSH (no remote daemon, `~/.ssh/config` untouched) | Remote server extension | Local-first | Depends on host IDE | Server-hosted |
 
 ---
@@ -375,5 +382,5 @@ We prefer telling engineers the exact rough edges upfront:
 ## Community, Security & License
 
 - **Architecture & Contributing**: Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`CHANGELOG.md`](CHANGELOG.md).
-- **Security Policy & Threat Model**: Read [`SECURITY.md`](SECURITY.md) for full details on Safe vs Autonomous mode, Factory Wall & lineage-scoped HMAC capability tokens, scrubbed subprocess execution, non-destructive SSH config (`syncUserSshDir: false`), and opting out of third-party extension role bridging.
+- **Security Policy & Threat Model**: Read [`SECURITY.md`](SECURITY.md) for full details on Safe vs Autonomous mode, Dual-View boundaries & lineage-scoped HMAC capability tokens, scrubbed subprocess execution, non-destructive SSH config (`syncUserSshDir: false`), and opting out of third-party extension role bridging.
 - **License & Attribution**: Derived from Microsoft [`Code - OSS`](https://github.com/microsoft/vscode) under the **[MIT License](LICENSE.txt)** with all upstream copyright notices preserved, using the open-source [Open VSX Registry](https://open-vsx.org/). Microsoft and Visual Studio Code are trademarks of Microsoft Corporation.

@@ -505,7 +505,7 @@ describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
 		}
 		const tmpDir = await fs.mkdtemp(path.join('/tmp', 'ade-cap-'));
 		const sockPath = path.join(tmpDir, 'ade.sock');
-		const received: Array<{ token?: string; action?: string; params?: Record<string, unknown> }> = [];
+		const received: Array<{ token?: string; action?: string; params?: Record<string, unknown>; idempotencyKey?: string; caller?: string }> = [];
 		const srv = net.createServer(sock => {
 			let buf = '';
 			sock.setEncoding('utf8');
@@ -513,7 +513,7 @@ describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
 				buf += chunk;
 				const idx = buf.indexOf('\n');
 				if (idx >= 0) {
-					received.push(JSON.parse(buf.slice(0, idx)) as { token?: string; action?: string; params?: Record<string, unknown> });
+					received.push(JSON.parse(buf.slice(0, idx)) as { token?: string; action?: string; params?: Record<string, unknown>; idempotencyKey?: string; caller?: string });
 					sock.end(JSON.stringify({ ok: true, result: { status: 'ok' } }) + '\n');
 				}
 			});
@@ -537,13 +537,12 @@ describe('runCli AEXUS_ADE_SESSION_TOKEN capability auth', () => {
 				cwd: tmpDir,
 			});
 			assert.strictEqual(code, 0, stderr || stdout);
-			assert.deepStrictEqual(received, [
-				{
-					token: capToken,
-					action: 'mission.run',
-					params: { missionId: 'gov-1' },
-				},
-			]);
+			assert.strictEqual(received.length, 1);
+			assert.strictEqual(received[0].token, capToken);
+			assert.strictEqual(received[0].action, 'mission.run');
+			assert.deepStrictEqual(received[0].params, { missionId: 'gov-1' });
+			assert.strictEqual(received[0].caller, undefined);
+			assert.match(received[0].idempotencyKey ?? '', /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 		} finally {
 			await new Promise<void>(resolve => srv.close(() => resolve()));
 			await fs.rm(tmpDir, { recursive: true, force: true });
@@ -1856,20 +1855,200 @@ describe('parseCliCommand rank & unified mission commands', () => {
 			{ help: false, json: true, windowId: undefined, action: 'token.mint', params: { toNodeIds: ['BE_Lead'], summary: 'Build auth', fromNodeId: 'CEO', waitJoin: true, missionId: 'eng-1' } },
 		);
 		assert.deepStrictEqual(
-			parseCliCommand(['--json', 'token', 'return', 'otok-3', '--summary', 'Done', '--files', 'src/backend/a.ts,tests/backend/a.test.ts', '--mission', 'eng-1'], CWD),
-			{ help: false, json: true, windowId: undefined, action: 'token.return', params: { tokenId: 'otok-3', summary: 'Done', modifiedFiles: ['src/backend/a.ts', 'tests/backend/a.test.ts'], missionId: 'eng-1' } },
+			parseCliCommand(['--json', 'token', 'return', 'otok-3', '--summary', 'Done', '--task-id', 'T2', '--complete-task', '--files', 'src/backend/a.ts,tests/backend/a.test.ts', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.return', params: { tokenId: 'otok-3', summary: 'Done', taskNodeId: 'T2', completeTask: true, modifiedFiles: ['src/backend/a.ts', 'tests/backend/a.test.ts'], missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'complete', 'otok-9', '--summary', 'Verified', '--task-id', 'T2', '--finish', '--complete-task', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.complete', params: { tokenId: 'otok-9', summary: 'Verified', taskNodeId: 'T2', finish: true, completeTask: true, missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'reject', 'otok-2', '--reason', 'Missing null check', '--target', 'Dev1,QA1', '--detail', 'Line 42 crashes on empty input', '--whiteboard', 'WB_BE', '--no-wait-join', '--mission', 'eng-1'], CWD),
+			{
+				help: false,
+				json: true,
+				windowId: undefined,
+				action: 'token.reject',
+				params: {
+					tokenId: 'otok-2',
+					reason: 'Missing null check',
+					targetNodeIds: ['Dev1', 'QA1'],
+					targetNodeId: 'Dev1',
+					detail: 'Line 42 crashes on empty input',
+					whiteboardIds: ['WB_BE'],
+					waitJoin: false,
+					noWaitJoin: true,
+					missionId: 'eng-1',
+				},
+			},
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'fail', 'otok-4', '--reason', 'Build failed', '--detail', 'Exit code 2 in tsc', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.fail', params: { tokenId: 'otok-4', reason: 'Build failed', detail: 'Exit code 2 in tsc', missionId: 'eng-1' } },
 		);
 		assert.deepStrictEqual(
 			parseCliCommand(['--json', 'orchestration', 'staff', 'create', '--mission', 'eng-1', '--name', 'Nova', '--role', 'L2', '--allow-path', 'src/ai', '--color', 'cyan', '--bidirectional'], CWD),
 			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.create', params: { missionId: 'eng-1', name: 'Nova', rank: 'L2', allowedPaths: ['src/ai'], color: 'cyan', bidirectional: true } },
 		);
 		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'create', '--mission', 'eng-1', '--name', 'QA Lead', '--rank', 'L2', '--new-department', 'QA & Audit', '--create-whiteboard', '--whiteboard-title', 'QA Shared Board', '--engine', 'claude', '--model', 'deepseek-flash[1m]', '--thinking', 'medium'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.create', params: { missionId: 'eng-1', name: 'QA Lead', rank: 'L2', department: 'QA & Audit', createWhiteboard: true, whiteboardTitle: 'QA Shared Board', engineId: 'claude', model: 'deepseek-flash[1m]', thinking: 'medium' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'staff', 'create', '--mission', 'eng-1', '--name', 'Sec Lead', '--rank', 'L2', '--new-dept', 'Security', '--create-whiteboard=Security Board'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.create', params: { missionId: 'eng-1', name: 'Sec Lead', rank: 'L2', department: 'Security', createWhiteboard: true, whiteboardTitle: 'Security Board' } },
+		);
+		assert.deepStrictEqual(
 			parseCliCommand(['--json', 'orchestration', 'staff', 'config', '--mission', 'eng-1', '--node', 'Nova', '--allow-path', 'src/ai,tests/ai'], CWD),
 			{ help: false, json: true, windowId: undefined, action: 'orchestration.staff.configure', params: { missionId: 'eng-1', nodeId: 'Nova', allowedPaths: ['src/ai', 'tests/ai'] } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'limits', '--mission', 'eng-1', '--max-hops', '32', '--budget', '15.5'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.limits', params: { missionId: 'eng-1', maxHops: 32, budgetLimitUsd: 15.5 } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'orchestration', 'limits', '--mission', 'eng-1', '--max-hops', 'none', '--budget', 'none'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'orchestration.limits', params: { missionId: 'eng-1', maxHops: null, budgetLimitUsd: null } },
 		);
 		assert.ok(HELP_TEXT.includes('token mint'));
 		assert.ok(HELP_TEXT.includes('token return'));
 		assert.ok(HELP_TEXT.includes('orchestration validate'));
 		assert.ok(HELP_TEXT.includes('orchestration pause'));
+		assert.ok(HELP_TEXT.includes('orchestration limits'));
+	});
+
+	test('supports shell-safe --detail-file, --detail -, --append-file, and --append - across token and whiteboard commands', () => {
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'mint', 'otok-1', '--to', 'Eng1', '--summary', 'Fix D1', '--detail-file', '/tmp/spec.md', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.mint', params: { parentTokenId: 'otok-1', toNodeIds: ['Eng1'], summary: 'Fix D1', detailFile: '/tmp/spec.md', missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'return', 'otok-2', '--summary', 'Fixed', '--detail', '-', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.return', params: { tokenId: 'otok-2', summary: 'Fixed', detail: '-', missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'token', 'reject', 'otok-3', '--reason', 'Broken edge case', '--detail-file', 'notes.md', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'token.reject', params: { tokenId: 'otok-3', reason: 'Broken edge case', detailFile: 'notes.md', missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'write', 'wb-cli', '--append', '-', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'whiteboard.write', params: { id: 'wb-cli', appendContent: '-', missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'write', 'wb-cli', '--append-file', 'addendum.md', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'whiteboard.write', params: { id: 'wb-cli', appendFile: 'addendum.md', missionId: 'eng-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['--json', 'whiteboard', 'append', 'wb-cli', '--file', 'addendum.md', '--mission', 'eng-1'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'whiteboard.write', params: { id: 'wb-cli', appendFile: 'addendum.md', missionId: 'eng-1' } },
+		);
+	});
+
+	test('covers Phase 2 CLI parser & completion parity: freeform flags, next-flag guards, --role= symmetry, strict --min-tier, session delete --force, host add alias, rank mission-name, mission rename, read-only limits & --full', async () => {
+		// 1. Freeform flags (--title, --name, --branches-json, --cmd) never let --help/--json hijack parsing; --flag=value works too
+		assert.deepStrictEqual(
+			parseCliCommand(['mission', 'init', '--title', 'Fix --help & -v handling', '--json'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'mission.init', params: { title: 'Fix --help & -v handling' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['mission', 'init', '--title=--json title', '--json'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'mission.init', params: { title: '--json title' } },
+		);
+
+		// 2. Non-positional flags before positional IDs do NOT corrupt positionalCount (`org send --mission m-1 --json emp-1 ...`)
+		assert.deepStrictEqual(
+			parseCliCommand(['org', 'send', '--mission', 'm-1', '--json', 'emp-1', 'run', 'tool', '--help'], CWD),
+			{ help: false, json: true, windowId: undefined, action: 'org.send', params: { missionId: 'm-1', target: 'emp-1', message: 'run tool --help' } },
+		);
+		// Trailing `--help` inside `session send <id> ...` stays part of prompt text instead of printing CLI help
+		assert.deepStrictEqual(
+			parseCliCommand(['session', 'send', 's-1', 'check', '--help'], CWD),
+			{ help: false, json: false, windowId: undefined, action: 'session.send', params: { id: 's-1', prompt: 'check --help' } },
+		);
+
+		// 3. takeOptVal rejects swallowing next `--flag` when value was omitted
+		assert.throws(() => parseCliCommand(['token', 'handoff', 'otok-1', '--to', '--summary', 'oops'], CWD), /requires a value, got --summary/);
+		assert.throws(() => parseCliCommand(['docs', 'read', 'common', 'extra-arg'], CWD), /Usage: aexus-ade docs read/);
+
+		// 4. `--role=L2` and `--role L2` behave symmetrically in `orchestration staff create`, plus `--bidirectional=false`
+		assert.deepStrictEqual(
+			parseCliCommand(['orchestration', 'staff', 'create', '--mission', 'm-1', '--name', 'Lead', '--role=L2', '--bidirectional=false'], CWD),
+			{ help: false, json: false, windowId: undefined, action: 'orchestration.staff.create', params: { missionId: 'm-1', name: 'Lead', rank: 'L2', bidirectional: false } },
+		);
+
+		// 5. Strict `--min-tier` enforces 1..99 (L1..L99) and accepts clear/off/none on update
+		assert.throws(() => parseCliCommand(['mission', 'task', 'create', '--title', 'T', '--min-tier', 'L'], CWD), /Invalid --min-tier/);
+		assert.throws(() => parseCliCommand(['mission', 'task', 'create', '--title', 'T', '--min-tier', 'L2x'], CWD), /Invalid --min-tier/);
+		assert.throws(() => parseCliCommand(['mission', 'task', 'create', '--title', 'T', '--min-tier', '-1'], CWD), /Invalid --min-tier/);
+		assert.throws(() => parseCliCommand(['mission', 'task', 'create', '--title', 'T', '--min-tier', '0'], CWD), /Invalid --min-tier/);
+		assert.throws(() => parseCliCommand(['mission', 'task', 'create', '--title', 'T', '--min-tier', '100'], CWD), /Invalid --min-tier/);
+		assert.deepStrictEqual(
+			parseCliCommand(['mission', 'task', 'update', 'T1', '--min-tier', 'L2'], CWD).params,
+			{ nodeId: 'T1', minCompleterTier: 2 },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['mission', 'task', 'update', 'T1', '--min-tier', 'clear'], CWD).params,
+			{ nodeId: 'T1', minCompleterTier: null },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['mission', 'task', 'update', 'T1', '--min-tier', 'off'], CWD).params,
+			{ nodeId: 'T1', minCompleterTier: null },
+		);
+
+		// 6. `session delete <id> --force`, `host add <alias> --host <addr>`, `rank mission-name`, `mission rename` (no wrong fallbackAction), read-only & full `orchestration limits`, `token split` quorum/fail-fast/deadline, `orchestration dispatch --ref`, and `--full`
+		assert.deepStrictEqual(
+			parseCliCommand(['session', 'delete', 's-9', '--force'], CWD),
+			{ help: false, json: false, windowId: undefined, action: 'session.delete', params: { id: 's-9', force: true } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['host', 'add', 'gpu1', '--host', '10.0.0.5', '--user', 'ubuntu'], CWD),
+			{ help: false, json: false, windowId: undefined, action: 'host.upsert', params: { alias: 'gpu1', hostName: '10.0.0.5', user: 'ubuntu' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['rank', 'mission-name', 'Campaign'], CWD),
+			{ help: false, json: false, windowId: undefined, action: 'rank.setMissionName', params: { name: 'Campaign' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['mission', 'rename', 'm-1', 'Payments', 'v2'], CWD),
+			{ help: false, json: false, windowId: undefined, action: 'mission.rename', params: { missionId: 'm-1', title: 'Payments v2' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['orchestration', 'limits', '--mission', 'm-1'], CWD),
+			{ help: false, json: false, windowId: undefined, action: 'orchestration.limits', params: { missionId: 'm-1' } },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['orchestration', 'limits', '--mission', 'm-1', '--max-hops', 'off', '--budget', 'inf', '--silence', '30', '--total-cost', '1.5'], CWD).params,
+			{ missionId: 'm-1', maxHops: null, budgetLimitUsd: null, silenceReminderMinutes: 30, totalCostUsd: 1.5 },
+		);
+		const splitQuorum = parseCliCommand(['token', 'split', 'otok-1', '--branches-json', '[{"to":"Dev1","summary":"A"},{"to":"Dev2","summary":"B"}]', '--join-mode', 'quorum', '--quorum', '2', '--fail-fast', '--deadline', '1700000000000'], CWD);
+		assert.strictEqual(splitQuorum.params?.joinMode, 'quorum');
+		assert.strictEqual(splitQuorum.params?.quorumCount, 2);
+		assert.strictEqual(splitQuorum.params?.failFast, true);
+		assert.strictEqual(splitQuorum.params?.deadlineAt, 1700000000000);
+		const splitRelDeadline = parseCliCommand(['token', 'mint', 'otok-1', '--to', 'Dev1', '--summary', 'Run', '--deadline', '15m'], CWD);
+		assert.ok(typeof splitRelDeadline.params?.deadlineAt === 'number' && (splitRelDeadline.params.deadlineAt as number) > Date.now() + 800_000);
+		assert.deepStrictEqual(
+			parseCliCommand(['orchestration', 'dispatch', '--mission', 'm-1', '--prompt', 'Start', '--ref', 'art-1,dec-2'], CWD).params,
+			{ missionId: 'm-1', prompt: 'Start', refPtrs: ['art-1', 'dec-2'] },
+		);
+		assert.strictEqual(parseCliCommand(['orchestration', 'status', '--mission', 'm-1', '--full'], CWD).params?.full, true);
+		assert.strictEqual(parseCliCommand(['token', 'current', '--full'], CWD).params?.full, true);
+		assert.strictEqual(parseCliCommand(['org', 'context', 'emp-1', '--full'], CWD).params?.full, true);
+		assert.strictEqual(parseCliCommand(['mission', 'task', 'list', '--full'], CWD).params?.full, true);
+		assert.deepStrictEqual(
+			parseCliCommand(['token', 'reject', 'otok-5', '--summary', 'Missing edge case', '--to', 'Dev1'], CWD).params,
+			{ tokenId: 'otok-5', reason: 'Missing edge case', targetNodeId: 'Dev1' },
+		);
+		assert.deepStrictEqual(
+			parseCliCommand(['token', 'retry', 'otok-6', '--guidance', 'Re-run with clean env', '--wait-join', '--mission', 'm-1'], CWD).params,
+			{ tokenId: 'otok-6', guidance: 'Re-run with clean env', waitJoin: true, missionId: 'm-1' },
+		);
+
+		// 7. Zsh completion includes orchestration, whiteboard, mission task/export/import/rename, rank mission-name, token mint/split/return, session configure
+		let zsh = '';
+		await runCli(['completion', 'zsh'], { stdout: s => { zsh += s; }, stderr: () => { }, env: {} });
+		for (const expected of ['orchestration:', 'whiteboard:', 'mission-name:', 'mint:', 'split:', 'return:', 'configure:', 'export:', 'import:', 'task:']) {
+			assert.ok(zsh.includes(expected), `Zsh completion missing ${expected}`);
+		}
 	});
 });

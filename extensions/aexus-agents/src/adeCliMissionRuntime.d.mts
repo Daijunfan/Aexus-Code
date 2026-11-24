@@ -47,6 +47,14 @@ export declare function parseMissionRuntimeSubcommand(
 	usageError: (message: string) => Error,
 ): IRankMissionParsedInvocation | undefined;
 
+export declare function parseCheckpointGroupCommand(
+	args: readonly string[],
+	json: boolean,
+	windowId: number | undefined,
+	usageError: (message: string) => Error,
+	actionPrefix?: string,
+): IRankMissionParsedInvocation;
+
 export declare function parseOrchestrationGroupCommand(
 	tail: readonly string[],
 	json: boolean,

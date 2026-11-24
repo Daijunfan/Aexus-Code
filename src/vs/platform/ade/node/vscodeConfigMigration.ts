@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { Database } from '@vscode/sqlite3';
+import * as crypto from 'crypto';
 import { constants as fsConstants, promises as fs } from 'fs';
 import * as os from 'os';
 import { parse, ParseError, ParseOptions } from '../../../base/common/json.js';
@@ -182,7 +183,7 @@ function mergeMissingJsonObject(target: Record<string, unknown>, source: Record<
 
 async function writeTextAtomic(filePath: string, content: string): Promise<void> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+	const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 	await fs.writeFile(tempPath, content, 'utf8');
 	await fs.rename(tempPath, filePath);
 }
@@ -551,14 +552,15 @@ async function readExtensionsJson(extensionsDir: string): Promise<IExtensionRegi
 	}
 }
 
-async function copyExtensionDirectory(srcDir: string, dstDir: string): Promise<void> {
+async function copyExtensionDirectory(srcDir: string, dstDir: string, rootDstDir: string = dstDir): Promise<void> {
 	await fs.mkdir(dstDir, { recursive: true });
+	const normalizedRoot = path.resolve(rootDstDir);
 	const entries = await fs.readdir(srcDir, { withFileTypes: true });
 	for (const entry of entries) {
 		const srcPath = path.join(srcDir, entry.name);
 		const dstPath = path.join(dstDir, entry.name);
 		if (entry.isDirectory()) {
-			await copyExtensionDirectory(srcPath, dstPath);
+			await copyExtensionDirectory(srcPath, dstPath, normalizedRoot);
 		} else if (entry.isFile()) {
 			await fs.copyFile(srcPath, dstPath);
 			const stat = await fs.lstat(srcPath);
@@ -566,7 +568,11 @@ async function copyExtensionDirectory(srcDir: string, dstDir: string): Promise<v
 		} else if (entry.isSymbolicLink()) {
 			const linkTarget = await fs.readlink(srcPath);
 			if (!path.isAbsolute(linkTarget)) {
-				await fs.symlink(linkTarget, dstPath).catch(() => undefined);
+				const resolvedTarget = path.resolve(path.dirname(dstPath), linkTarget);
+				const rel = path.relative(normalizedRoot, resolvedTarget);
+				if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+					await fs.symlink(linkTarget, dstPath).catch(() => undefined);
+				}
 			}
 		}
 	}
@@ -616,7 +622,7 @@ async function migrateMissingCodingAgentExtensions(
 
 		const srcExtDir = path.join(vsCodeExtensionsDir, relLocation);
 		const dstExtDir = path.join(aexusExtensionsDir, relLocation);
-		const tempExtDir = path.join(aexusExtensionsDir, `.${relLocation}.${process.pid}.${Date.now()}.tmp`);
+		const tempExtDir = path.join(aexusExtensionsDir, `.${relLocation}.${process.pid}.${Date.now()}.${crypto.randomBytes(6).toString('hex')}.tmp`);
 
 		try {
 			await copyExtensionDirectory(srcExtDir, tempExtDir);

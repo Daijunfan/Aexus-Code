@@ -701,13 +701,15 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		}
 	}
 
-	private enqueuePersist(): Promise<void> {
+	private enqueuePersist(syncSshConfig = true): Promise<void> {
 		const next = this.writeQueue.then(async () => {
 			await fs.mkdir(path.dirname(this.storageFilePath), { recursive: true });
-			const tmp = `${this.storageFilePath}.${process.pid}.${Date.now()}.tmp`;
+			const tmp = `${this.storageFilePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 			await fs.writeFile(tmp, JSON.stringify(this.hosts, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
 			await fs.rename(tmp, this.storageFilePath);
-			await this.syncSshConfigFiles();
+			if (syncSshConfig) {
+				await this.syncSshConfigFiles();
+			}
 		});
 		this.writeQueue = next.catch(err => {
 			this.logService?.warn(`[AdeCloudHosts] Failed to persist cloud-hosts.json: ${err}`);
@@ -797,7 +799,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		const blocks = this.hosts.map(h => this.formatManagedHostBlock(h)).join('\n\n');
 		const managedContent = blocks ? `${header}${blocks}\n` : header;
 
-		const tmpManaged = `${this.managedSshConfPath}.${process.pid}.${Date.now()}.tmp`;
+		const tmpManaged = `${this.managedSshConfPath}.${process.pid}.${Date.now()}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 		await fs.writeFile(tmpManaged, managedContent, { encoding: 'utf8', mode: 0o600 });
 		await fs.rename(tmpManaged, this.managedSshConfPath);
 
@@ -815,7 +817,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		// Fallback only when neither managed host config nor user ~/.ssh/config specifies StrictHostKeyChecking.
 		// Because OpenSSH uses first-match-wins, any StrictHostKeyChecking in user ~/.ssh/config takes precedence.
 		effectiveLines.push('', 'Host *', '    StrictHostKeyChecking accept-new');
-		const tmpEffective = `${this.effectiveSshConfPath}.${process.pid}.${Date.now()}.tmp`;
+		const tmpEffective = `${this.effectiveSshConfPath}.${process.pid}.${Date.now()}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 		await fs.writeFile(tmpEffective, effectiveLines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
 		await fs.rename(tmpEffective, this.effectiveSshConfPath);
 
@@ -827,7 +829,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				const userCreatedOrEdited = this.hosts.filter(h => h.source === 'user' || h.source === 'aexus-legacy');
 				if (userCreatedOrEdited.length > 0) {
 					const userBlocks = userCreatedOrEdited.map(h => this.formatManagedHostBlock(h)).join('\n\n');
-					const tmpUser = `${userAexusConf}.${process.pid}.${Date.now()}.tmp`;
+					const tmpUser = `${userAexusConf}.${process.pid}.${Date.now()}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 					await fs.writeFile(tmpUser, `${header}${userBlocks}\n`, { encoding: 'utf8', mode: 0o600 });
 					await fs.rename(tmpUser, userAexusConf);
 
@@ -838,7 +840,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 						const existingMainCfg = await fs.readFile(targetCfgPath, 'utf8');
 						if (!existingMainCfg.includes('aexus-code-hosts.conf')) {
 							const includeLine = `Include "${userAexusConf}"\n\n`;
-							const tmpCfg = `${targetCfgPath}.${process.pid}.${Date.now()}.tmp`;
+							const tmpCfg = `${targetCfgPath}.${process.pid}.${Date.now()}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 							await fs.writeFile(tmpCfg, includeLine + existingMainCfg, { encoding: 'utf8', mode: 0o600 });
 							await fs.rename(tmpCfg, targetCfgPath);
 						}
@@ -1357,43 +1359,104 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 	): Promise<{ code: number; stdout: Buffer; stderr: string }> {
 		const release = await this.acquireHostSshSlot(target);
 		try {
-			return await this.spawnSshRaw(target, remoteCommand, options);
+			const res = await this.spawnSshRaw(target, remoteCommand, options);
+			// Transparently recover once from stale OpenSSH ControlMaster mux sockets after sleep/network drop.
+			if (
+				process.platform !== 'win32'
+				&& res.code === 255
+				&& /ControlSocket|mux_client|Broken pipe|Connection reset|Connection closed by remote/i.test(res.stderr)
+			) {
+				await this.clearStaleMuxControlSocket(target, options.host);
+				return await this.spawnSshRaw(target, remoteCommand, options);
+			}
+			return res;
 		} finally {
 			release();
 		}
 	}
 
+	private cachedMuxDir: string | null | undefined;
+
+	private async resolveMuxDir(): Promise<string | undefined> {
+		if (process.platform === 'win32') {
+			return undefined;
+		}
+		if (this.cachedMuxDir !== undefined) {
+			return this.cachedMuxDir ?? undefined;
+		}
+		const myUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+		const uidTag = myUid !== undefined ? String(myUid) : 'u';
+		// Use /tmp instead of macOS's long /var/folders/... TMPDIR so ControlPath + %C + temp suffix stays well under the 104-byte sockaddr_un limit.
+		const muxDir = `/tmp/aexus-cm-${uidTag}`;
+		try {
+			await fs.mkdir(muxDir, { recursive: true, mode: 0o700 });
+			const st = await fs.lstat(muxDir);
+			if (st.isDirectory() && !st.isSymbolicLink() && (myUid === undefined || st.uid === myUid)) {
+				await fs.chmod(muxDir, 0o700).catch(() => undefined);
+				this.cachedMuxDir = muxDir;
+				return muxDir;
+			}
+		} catch {
+			// Proceed without ControlMaster if private mux directory cannot be secured
+		}
+		this.cachedMuxDir = null;
+		return undefined;
+	}
+
+	private async clearStaleMuxControlSocket(target: string, host?: IAdeCloudHost): Promise<void> {
+		const muxDir = await this.resolveMuxDir();
+		if (!muxDir) {
+			return;
+		}
+		const exitArgs: string[] = [
+			'-F', this.effectiveSshConfPath,
+			'-o', 'BatchMode=yes',
+			'-o', `ControlPath=${muxDir}/%C`,
+			'-O', 'exit',
+		];
+		if (host?.strictHostKeyChecking === 'yes' || host?.strictHostKeyChecking === 'accept-new' || host?.strictHostKeyChecking === 'no') {
+			exitArgs.push('-o', `StrictHostKeyChecking=${host.strictHostKeyChecking}`);
+		}
+		exitArgs.push('--', target);
+		await new Promise<void>(resolve => {
+			const child = spawn(this.sshExecutable, exitArgs, {
+				windowsHide: true,
+				stdio: 'ignore',
+				env: { ...stripAdeControlEnv(process.env), SSH_ASKPASS_REQUIRE: 'never', DISPLAY: '' },
+			});
+			const timer = setTimeout(() => {
+				try { child.kill('SIGKILL'); } catch { /* ignore */ }
+				resolve();
+			}, 2_000);
+			if (typeof (timer as { unref?: () => void }).unref === 'function') {
+				(timer as { unref?: () => void }).unref!();
+			}
+			child.once('error', () => { clearTimeout(timer); resolve(); });
+			child.once('close', () => { clearTimeout(timer); resolve(); });
+		});
+	}
+
 	private async spawnSshRaw(
 		target: string,
 		remoteCommand: string,
-		options: { stdin?: Buffer; timeoutMs?: number; host?: IAdeCloudHost } = {},
+		options: { stdin?: Buffer; timeoutMs?: number; host?: IAdeCloudHost; maxOutputBytes?: number } = {},
 	): Promise<{ code: number; stdout: Buffer; stderr: string }> {
 		const timeoutMs = options.timeoutMs ?? 20_000;
+		const maxOutputBytes = Math.max(64 * 1024, options.maxOutputBytes ?? 16 * 1024 * 1024);
+		const maxStderrChars = 256 * 1024;
 		const sshArgs: string[] = [
 			'-F', this.effectiveSshConfPath,
 			'-T',
 			'-o', 'BatchMode=yes',
 			'-o', 'ConnectTimeout=8',
 		];
-		if (process.platform !== 'win32') {
-			const myUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-			const uidTag = myUid !== undefined ? String(myUid) : 'u';
-			// Use /tmp instead of macOS's long /var/folders/... TMPDIR so ControlPath + %C + temp suffix stays well under the 104-byte sockaddr_un limit.
-			const muxDir = `/tmp/aexus-cm-${uidTag}`;
-			try {
-				await fs.mkdir(muxDir, { recursive: true, mode: 0o700 });
-				const st = await fs.lstat(muxDir);
-				if (st.isDirectory() && !st.isSymbolicLink() && (myUid === undefined || st.uid === myUid)) {
-					await fs.chmod(muxDir, 0o700).catch(() => undefined);
-					sshArgs.push(
-						'-o', 'ControlMaster=auto',
-						'-o', `ControlPath=${muxDir}/%C`,
-						'-o', 'ControlPersist=120s',
-					);
-				}
-			} catch {
-				// Proceed without ControlMaster if private mux directory cannot be secured
-			}
+		const muxDir = await this.resolveMuxDir();
+		if (muxDir) {
+			sshArgs.push(
+				'-o', 'ControlMaster=auto',
+				'-o', `ControlPath=${muxDir}/%C`,
+				'-o', 'ControlPersist=120s',
+			);
 		}
 		if (options.host?.strictHostKeyChecking === 'yes' || options.host?.strictHostKeyChecking === 'accept-new' || options.host?.strictHostKeyChecking === 'no') {
 			sshArgs.push('-o', `StrictHostKeyChecking=${options.host.strictHostKeyChecking}`);
@@ -1415,6 +1478,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			});
 
 			const outChunks: Buffer[] = [];
+			let totalOutBytes = 0;
 			let stderr = '';
 			let settled = false;
 
@@ -1426,9 +1490,26 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				}
 			}, timeoutMs);
 
-			child.stdout.on('data', (chunk: Buffer) => outChunks.push(chunk));
+			child.stdout.on('data', (chunk: Buffer) => {
+				if (settled) {
+					return;
+				}
+				totalOutBytes += chunk.byteLength;
+				if (totalOutBytes > maxOutputBytes) {
+					settled = true;
+					clearTimeout(timer);
+					child.kill('SIGKILL');
+					reject(new Error(`SSH output exceeded maximum buffer limit (${maxOutputBytes} bytes) on ${target}`));
+					return;
+				}
+				outChunks.push(chunk);
+			});
 			child.stderr.setEncoding('utf8');
-			child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+			child.stderr.on('data', (chunk: string) => {
+				if (stderr.length < maxStderrChars) {
+					stderr += chunk.slice(0, maxStderrChars - stderr.length);
+				}
+			});
 
 			child.once('error', err => {
 				if (!settled) {
@@ -2536,6 +2617,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		readonly remoteNowMs?: number;
 		readonly pidAlive: Readonly<Record<number, boolean>>;
 		readonly fileMtime: Readonly<Record<string, number | undefined>>;
+		readonly fileSignature?: Readonly<Record<string, string | undefined>>;
 		readonly gitHead: Readonly<Record<string, string | undefined>>;
 		readonly persistentSessions: Readonly<Record<string, { readonly aliveCount: number; readonly exitedCodes: readonly number[] }>>;
 		readonly gpuUtilPct?: number;
@@ -2580,7 +2662,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			}
 			for (let i = 0; i < filePaths.length; i++) {
 				const winP = toRemoteNativePath(normalizeRemoteProjectPath(filePaths[i], 'windows'), 'windows').replace(/'/g, `''`);
-				psLines.push(`if (Test-Path -LiteralPath '${winP}') { $it=Get-Item -LiteralPath '${winP}' -Force; Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + [int64]([DateTimeOffset]$it.LastWriteTimeUtc).ToUnixTimeMilliseconds()) } else { Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + 'MISSING') }`);
+				psLines.push(`if (Test-Path -LiteralPath '${winP}') { $it=Get-Item -LiteralPath '${winP}' -Force; $sz=if ($it.PSIsContainer) { 0 } else { [int64]$it.Length }; Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + [int64]([DateTimeOffset]$it.LastWriteTimeUtc).ToUnixTimeMilliseconds() + ':' + $sz) } else { Write-Output ('FILE' + [char]9 + '${i}' + [char]9 + 'MISSING') }`);
 			}
 			for (let i = 0; i < gitPaths.length; i++) {
 				const winG = toRemoteNativePath(normalizeRemoteProjectPath(gitPaths[i], 'windows'), 'windows').replace(/'/g, `''`);
@@ -2594,6 +2676,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			if (res.code !== 0) {
 				throw new Error(`Remote batch probe failed on ${authority} (exit ${res.code}): ${res.stderr.trim()}`);
 			}
+			const fileSignature: Record<string, string | undefined> = {};
 			const gpuVals: number[] = [];
 			for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
 				const parts = rawLine.trim().split('\t');
@@ -2604,8 +2687,15 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 				} else if (parts[0] === 'FILE' && /^\d+$/.test(parts[1] ?? '')) {
 					const idx = Number.parseInt(parts[1], 10);
 					const fp = filePaths[idx];
-					if (fp) {
-						fileMtime[fp] = parts[2] && /^\d+$/.test(parts[2]) ? Number.parseInt(parts[2], 10) : undefined;
+					const rawField = parts[2] ?? '';
+					if (fp && rawField && rawField !== 'MISSING') {
+						const fieldParts = rawField.split(':');
+						const ms = /^\d+$/.test(fieldParts[0] ?? '') ? Number.parseInt(fieldParts[0], 10) : undefined;
+						fileMtime[fp] = ms;
+						if (ms !== undefined) {
+							const sizePart = fieldParts[1] && /^\d+$/.test(fieldParts[1]) ? fieldParts[1] : undefined;
+							fileSignature[fp] = sizePart !== undefined ? `${ms}:${sizePart}` : `${ms}`;
+						}
 					}
 				} else if (parts[0] === 'GIT' && /^\d+$/.test(parts[1] ?? '')) {
 					const idx = Number.parseInt(parts[1], 10);
@@ -2621,7 +2711,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			if (gpuVals.length > 0) {
 				gpuUtilPct = Math.max(...gpuVals);
 			}
-			return { ...(remoteNowMs !== undefined ? { remoteNowMs } : {}), pidAlive, fileMtime, gitHead, persistentSessions, ...(gpuUtilPct !== undefined ? { gpuUtilPct } : {}) };
+			return { ...(remoteNowMs !== undefined ? { remoteNowMs } : {}), pidAlive, fileMtime, fileSignature, gitHead, persistentSessions, ...(gpuUtilPct !== undefined ? { gpuUtilPct } : {}) };
 		}
 
 		// POSIX single-SSH batch probe
@@ -2633,7 +2723,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		}
 		for (let i = 0; i < filePaths.length; i++) {
 			const q = posixQuote(normalizeRemoteProjectPath(filePaths[i], hostOs));
-			lines.push(`_f=${q}; if [ -e "$_f" ] || [ -L "$_f" ]; then _m=$(stat -c "%Y" "$_f" 2>/dev/null || stat -f "%m" "$_f" 2>/dev/null || echo MISSING); printf 'FILE\\t${i}\\t%s\\n' "$_m"; else printf 'FILE\\t${i}\\tMISSING\\n'; fi`);
+			lines.push(`_f=${q}; if [ -e "$_f" ] || [ -L "$_f" ]; then _m=$(stat -c "%.3Y:%s:%i" "$_f" 2>/dev/null || stat -c "%Y:%s:%i" "$_f" 2>/dev/null || stat -f "%Fm:%z:%i" "$_f" 2>/dev/null || stat -f "%m:%z:%i" "$_f" 2>/dev/null || echo MISSING); printf 'FILE\\t${i}\\t%s\\n' "$_m"; else printf 'FILE\\t${i}\\tMISSING\\n'; fi`);
 		}
 		for (let i = 0; i < gitPaths.length; i++) {
 			const q = posixQuote(normalizeRemoteProjectPath(gitPaths[i], hostOs));
@@ -2665,6 +2755,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		if (res.code !== 0) {
 			throw new Error(`Remote batch probe failed on ${authority} (exit ${res.code}): ${res.stderr.trim()}`);
 		}
+		const fileSignature: Record<string, string | undefined> = {};
 		const gpuVals: number[] = [];
 		for (const rawLine of res.stdout.toString('utf8').split(/\r?\n/)) {
 			const parts = rawLine.trim().split('\t');
@@ -2676,9 +2767,20 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			} else if (parts[0] === 'FILE' && /^\d+$/.test(parts[1] ?? '')) {
 				const idx = Number.parseInt(parts[1], 10);
 				const fp = filePaths[idx];
-				if (fp) {
-					const sec = parts[2] && /^\d+$/.test(parts[2]) ? Number.parseInt(parts[2], 10) : 0;
-					fileMtime[fp] = sec > 0 ? sec * 1000 : undefined;
+				const rawField = parts[2] ?? '';
+				if (fp && rawField && rawField !== 'MISSING') {
+					const fieldParts = rawField.split(':');
+					const rawSec = fieldParts[0] ?? '';
+					const parsedSec = /^\d+(?:\.\d+)?$/.test(rawSec) ? Number.parseFloat(rawSec) : 0;
+					const ms = parsedSec > 0 ? Math.round(parsedSec * 1000) : undefined;
+					fileMtime[fp] = ms;
+					if (ms !== undefined) {
+						const sizePart = fieldParts[1] && /^\d+$/.test(fieldParts[1]) ? fieldParts[1] : undefined;
+						const inoPart = fieldParts[2] && /^\d+$/.test(fieldParts[2]) ? fieldParts[2] : undefined;
+						fileSignature[fp] = sizePart !== undefined
+							? (inoPart !== undefined ? `${ms}:${sizePart}:${inoPart}` : `${ms}:${sizePart}`)
+							: `${ms}`;
+					}
 				}
 			} else if (parts[0] === 'GIT' && /^\d+$/.test(parts[1] ?? '')) {
 				const idx = Number.parseInt(parts[1], 10);
@@ -2709,6 +2811,7 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 			...(remoteNowMs !== undefined ? { remoteNowMs } : {}),
 			pidAlive,
 			fileMtime,
+			fileSignature,
 			gitHead,
 			persistentSessions,
 			...(gpuUtilPct !== undefined ? { gpuUtilPct } : {}),
@@ -2719,6 +2822,19 @@ export class AdeCloudHostNodeService extends Disposable implements IAdeCloudHost
 		try {
 			const stat = await this.remoteStat(authority, remotePath);
 			return stat.mtime;
+		} catch {
+			return undefined;
+		}
+	}
+
+	async remoteFileStatSignature(authority: string, remotePath: string): Promise<string | undefined> {
+		const trimmed = remotePath.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		try {
+			const batch = await this.remoteBatchProbe(authority, { filePaths: [trimmed] });
+			return batch.fileSignature?.[trimmed];
 		} catch {
 			return undefined;
 		}

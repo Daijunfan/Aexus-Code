@@ -30,7 +30,7 @@ import { isIMenuItem, MenuId, MenuRegistry } from '../../../../../platform/actio
 import { AEXUS_SSH_SCHEME, IAdeCloudHost, IAdeCloudHostBackendService } from '../../../../../platform/ade/common/adeCloudHosts.js';
 import { ADE_API_LATEST_REVISION } from '../../../../../platform/ade/common/adeApiRegistry.js';
 import { IAdeEngineeringBackendService, IAdeInboxItem, IAdeInboxService, resolveAdeInboxSeverity } from '../../../../../platform/ade/common/adeEngineering.js';
-import { IAdeOrganizationConfig } from '../../../../../platform/ade/common/adeRoleSchema.js';
+import { DEFAULT_ADE_ORGANIZATION_CONFIG, IAdeOrganizationConfig } from '../../../../../platform/ade/common/adeRoleSchema.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
@@ -2996,7 +2996,8 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 		assert.deepStrictEqual({
 			hasFixedPrimitivesAndPresets: fixedApis.length >= 10 && presets.length >= 5,
 			ctoCompiledCustomPrompt: ctoPrompt.includes('You are L1 CTO owning Alpha.') && ctoPrompt.includes('aexus-ade session send'),
-			qaCompiledReadOnlyPrompt: qaPrompt.includes('Audit diffs for Alpha under Chief Tech Officer (CTO).')
+			qaCompiledReadOnlyPrompt: (qaPrompt.includes('Audit diffs for Alpha under Chief Tech Officer (CTO).')
+				|| (qaPrompt.includes('Audit diffs for Alpha under CTO (CTO).') && qaPrompt.includes('Supervisor: Chief Tech Officer')))
 				&& qaPrompt.includes('aexus-ade project list --json')
 				&& !qaPrompt.includes('aexus-ade session send'),
 			coderPureLeafClean: coderPrompt === undefined,
@@ -6265,13 +6266,14 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(host.querySelector('[data-ade-mission-sup-legend]'), null);
 			assert.strictEqual(host.querySelector('[data-ade-mission-revision-bar]'), null);
 			assert.strictEqual(host.querySelectorAll('.ade-mission-node[data-node-kind="mission-task"]').length, 3);
-			// Verify circular Mission Task DAG orb UI (176x176 circular orb + centered circle core, zero rectangular corner clamps)
+			// Verify sculpted Mission Task DAG card UI (recessed well + structured footer, zero rectangular corner clamps)
 			const firstTaskNode = host.querySelector<HTMLElement>('.ade-mission-node[data-node-kind="mission-task"]')!;
 			const firstTaskCard = firstTaskNode.querySelector<HTMLElement>('.ade-mission-node-card')!;
-			assert.strictEqual(firstTaskNode.getAttribute('data-node-shape'), 'circle', 'Mission Task node uses circular DAG shape');
-			assert.strictEqual(firstTaskCard.classList.contains('is-circular-task'), true, 'Mission Task card uses circular orb styling');
-			assert.strictEqual(firstTaskCard.querySelectorAll('.ade-mission-clamp').length, 0, 'Circular Mission Task orb omits rectangular corner clamps');
-			assert.ok(firstTaskCard.querySelector('.ade-mission-task-circle-core'), 'Circular Mission Task orb renders centered circle core');
+			assert.strictEqual(firstTaskNode.getAttribute('data-node-shape'), 'sculpted-card', 'Mission Task node uses sculpted card DAG shape');
+			assert.strictEqual(firstTaskCard.classList.contains('is-sculpted-task'), true, 'Mission Task card uses sculpted card styling');
+			assert.strictEqual(firstTaskCard.querySelectorAll('.ade-mission-clamp').length, 0, 'Sculpted Mission Task card omits rectangular corner clamps');
+			assert.ok(firstTaskCard.querySelector('.ade-mission-task-well'), 'Sculpted Mission Task card renders recessed task well');
+			assert.ok(firstTaskCard.querySelector('.ade-mission-task-footer'), 'Sculpted Mission Task card renders structured footer');
 
 			// Clicking top-left button opens strictly 2-area drawer: (a) Mermaid editor + (b) All task node descriptions
 			host.querySelector<HTMLButtonElement>('button[data-ade-mission-file-btn="true"]')!.click();
@@ -7151,9 +7153,10 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			});
 			assert.ok(syncedDaemonSnapshots.some(s => s.missionId === missionId && s.activeTokenCount === 1), 'commitOrchestrationState synced live daemon snapshot');
 
+			// Root token with no prior sender requires explicit --target for token.reject (no longer fails with LEGACY_API_REMOVED)
 			await assert.rejects(
-				() => h.control('token.reject', { ...govCaller, mission: missionId, tokenId: disp.tokenId, reason: 'legacy reject' }),
-				/LEGACY_API_REMOVED/i,
+				() => h.control('token.reject', { ...govCaller, mission: missionId, tokenId: disp.tokenId, reason: 'missing target' }),
+				/Specify --target/i,
 			);
 
 			const mint1 = await h.control<{ readonly mintedTokenIds: readonly string[]; readonly joinBarrierId?: string }>('token.mint', {
@@ -7299,20 +7302,20 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(ceoPuck.getAttribute('data-token-status'), 'waiting_join', 'CEO displays live waiting_join baton badge');
 			assert.ok(host.querySelector('[data-ade-orch-live-puck="CEO->AI"]'), 'Active token dispatch wire renders persistent glowing baton packet comet');
 
-			// 4. Switch to Mission view & verify circular Task DAG orbs (176x176, 50% radius, circular minimap) + pick 'rose' on Task T1 via context menu
+			// 4. Switch to Mission view & verify sculpted Task DAG cards (280x154, 14px radius, rectangular minimap) + pick 'rose' on Task T1 via context menu
 			const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'mission')));
 			await pane.setInput(missionInput, undefined, {}, CancellationToken.None);
 			const t1El = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T1"]')!;
-			assert.strictEqual(t1El.getAttribute('data-node-shape'), 'circle', 'Mission Task DAG node renders with circular shape attribute');
-			const t1Card = t1El.querySelector<HTMLElement>('.ade-mission-node-card.is-task-card.is-circular-task')!;
-			assert.ok(t1Card, 'Mission Task DAG card uses circular task orb class');
+			assert.strictEqual(t1El.getAttribute('data-node-shape'), 'sculpted-card', 'Mission Task DAG node renders with sculpted card shape attribute');
+			const t1Card = t1El.querySelector<HTMLElement>('.ade-mission-node-card.is-task-card.is-sculpted-task')!;
+			assert.ok(t1Card, 'Mission Task DAG card uses sculpted task class');
 			const t1CardStyle = mainWindow.getComputedStyle(t1Card);
-			assert.strictEqual(t1CardStyle.width, '176px');
-			assert.strictEqual(t1CardStyle.height, '176px');
-			assert.strictEqual(t1CardStyle.borderRadius, '50%');
-			assert.strictEqual(t1Card.querySelectorAll('.ade-mission-clamp').length, 0, 'Circular task orb omits rectangular corner clamps');
+			assert.strictEqual(t1CardStyle.width, '280px');
+			assert.strictEqual(t1CardStyle.height, '154px');
+			assert.strictEqual(t1CardStyle.borderRadius, '14px');
+			assert.strictEqual(t1Card.querySelectorAll('.ade-mission-clamp').length, 0, 'Sculpted task card omits rectangular corner clamps');
 			const t1Minimap = host.querySelector<SVGRectElement>('[data-minimap-node="T1"]');
-			assert.strictEqual(t1Minimap?.getAttribute('data-minimap-shape'), 'circle', 'Minimap reflects circular Mission Task DAG node');
+			assert.strictEqual(t1Minimap?.getAttribute('data-minimap-shape'), 'rect', 'Minimap reflects rectangular Mission Task DAG node');
 			t1El.dispatchEvent(new mainWindow.MouseEvent('contextmenu', { clientX: 280, clientY: 220, bubbles: true, cancelable: true }));
 			host.querySelector<HTMLButtonElement>('[data-ade-node-color-picker="true"] button[data-ade-color-swatch="rose"]')!.click();
 			const updatedT1 = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T1"]')!;
@@ -7388,9 +7391,9 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			});
 			const missionId = created.id;
 			const orchState0 = missionRuntime.getOrchestrationState(missionId);
-			const beLeadAgentId = orchState0.nodeAgentIds['BE_Lead']!;
-			const feLeadAgentId = orchState0.nodeAgentIds['FE_Lead']!;
-			const beDevAgentId = orchState0.nodeAgentIds['BE_Dev']!;
+			const beLeadAgentId = orchState0.nodeAgentIds.BE_Lead!;
+			const feLeadAgentId = orchState0.nodeAgentIds.FE_Lead!;
+			const beDevAgentId = orchState0.nodeAgentIds.BE_Dev!;
 			assert.ok(beLeadAgentId && feLeadAgentId && beDevAgentId, 'All Orchestration staff synced to unique agents');
 
 			// 1. Verify staff node rolePrompt & allowedPaths are injected directly into resolveAdePromptContext (not wakeup-only!)
@@ -7421,6 +7424,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				readonly ok: boolean;
 				readonly parentTokenId: string;
 				readonly createdRootParent?: boolean;
+				readonly reusedActiveRootParent?: boolean;
 				readonly joinBarrierId?: string;
 				readonly branches: readonly { readonly tokenId: string; readonly toNodeId: string; readonly payloadPtr?: string }[];
 			}>('token.split', {
@@ -7433,7 +7437,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				waitJoin: true,
 			});
 			assert.strictEqual(splitRes.ok, true);
-			assert.strictEqual(splitRes.createdRootParent, true);
+			assert.strictEqual(splitRes.reusedActiveRootParent, true, 'Omitted parentTokenId seamlessly adopts the active root baton auto-minted by User chat (zero orphan leak)');
 			assert.ok(splitRes.joinBarrierId);
 			const rootTokId = splitRes.parentTokenId;
 			const beLeadTokId = splitRes.branches.find(b => b.toNodeId === 'BE_Lead')!.tokenId;
@@ -7472,7 +7476,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			);
 			await assert.rejects(
 				() => h.control('mission.task.set', { ...beDevCaller, mission: missionId, node: 'T_BE', description: 'Worker hijack' }),
-				/FORBIDDEN/i,
+				/FORBIDDEN|Permission denied/i,
 			);
 
 			// 5. Pure-execution L4 worker can call read-only rank.names as documented in ENGINEERING_API.md!
@@ -7573,12 +7577,12 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				text: created.orchestrationText!,
 			});
 			const orch0 = missionRuntime.getOrchestrationState(missionId);
-			const beLeadAgentId = orch0.nodeAgentIds['BE_Lead']!;
+			const beLeadAgentId = orch0.nodeAgentIds.BE_Lead!;
 			const beLeadAgent = h.projects.getAgent(beLeadAgentId)!;
 			assert.strictEqual(beLeadAgent.preferredEngineId, 'aexus-codex', 'Short engine alias normalized to aexus-codex on cold staff');
 			assert.strictEqual(beLeadAgent.preferredModel, 'gpt-5', 'Cold subordinate inherits model from orchestration config');
 			assert.strictEqual(beLeadAgent.preferredThinking, 'medium', 'Cold subordinate inherits thinking from orchestration config');
-			assert.strictEqual(missionRuntime.getRuntimeState(missionId).boundary.nodeAssignments['BE_Lead']?.hostAlias, 'gpu-cluster', 'Non-local hostAlias binds onto mission nodeAssignments');
+			assert.strictEqual(missionRuntime.getRuntimeState(missionId).boundary.nodeAssignments.BE_Lead?.hostAlias, 'gpu-cluster', 'Non-local hostAlias binds onto mission nodeAssignments');
 
 			const beLeadCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: beLeadAgentId };
 
@@ -7625,7 +7629,7 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 			assert.strictEqual(beSubAgent.preferredEngineId, 'aexus-claude', 'Dynamic recruit normalizes engine alias');
 			assert.strictEqual(beSubAgent.preferredModel, 'claude-sonnet-4-6');
 			assert.strictEqual(beSubAgent.preferredThinking, 'high');
-			assert.strictEqual(missionRuntime.getRuntimeState(missionId).boundary.nodeAssignments['BE_Sub']?.hostAlias, 'gpu-sub-1');
+			assert.strictEqual(missionRuntime.getRuntimeState(missionId).boundary.nodeAssignments.BE_Sub?.hostAlias, 'gpu-sub-1');
 
 			// 3. Mid-tier L2 supervisor can configure Orchestration staff host & checks and escalate upward via org.escalate!
 			const hostRebind = await h.control<{ readonly ok: boolean; readonly assignment?: { readonly hostAlias?: string } }>('mission.host.bind', {
@@ -7727,6 +7731,910 @@ suite('ADE Prompt Context, Control Handler, Inspector & Sidebar View', () => {
 				undefined,
 				'pendingHeadlessEffects must be cleared after draining',
 			);
+		});
+
+		test('Standalone User-created Orchestration: L1 has full blueprint apply/orchestrator slot, zero legacy prompt fallback & direct User chat auto-mints root otok baton', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+
+			// 1. Human User creates a standalone Engineering workspace (ownerSessionId = undefined, ownerTier = -1)
+			const created = await h.control<{ readonly id: string; readonly ownerSessionId?: string; readonly ownerTier: number }>('mission.init', {
+				title: 'User Standalone Org',
+				project: alpha.toString(),
+			});
+			assert.strictEqual(created.ownerSessionId, undefined, 'Standalone User workspace starts with empty ownerSessionId');
+			assert.strictEqual(created.ownerTier, -1, 'Standalone User workspace starts with L-1 ownerTier');
+
+			const orchMermaid = [
+				'flowchart TD',
+				'  CEO["@Aria · Chief Architect (L1)"] <--> BE["@Orion · Backend Lead (L2)"]',
+				'  BE <--> W1["@Sora · Ledger Worker (L4)"]',
+			].join('\n');
+			const appliedOrch = await h.control<{ readonly ok: boolean }>('orchestration.apply', {
+				mission: created.id,
+				text: orchMermaid,
+			});
+			assert.strictEqual(appliedOrch.ok, true);
+
+			const employees = missionStore.getGeneratedEmployees(created.id);
+			const ceoAgent = employees.find(e => e.treeNodeId === 'CEO' || e.label.includes('Aria'))!;
+			const beAgent = employees.find(e => e.treeNodeId === 'BE' || e.label.includes('Orion'))!;
+			const workerAgent = employees.find(e => e.treeNodeId === 'W1' || e.label.includes('Sora'))!;
+			assert.ok(ceoAgent && beAgent && workerAgent, 'All 3 standalone Orchestration staff synced to sidebar');
+			assert.strictEqual(ceoAgent.treeType, 'engineering', 'Orchestration staff synced with treeType=engineering');
+			assert.strictEqual(ceoAgent.role, 'governor', 'L1 CEO keeps governor rank without cutoff demotion');
+			assert.strictEqual(beAgent.role, 'manager', 'L2 Backend Lead keeps manager rank');
+
+			// 2. Prompt injection: ZERO fallback to legacy minimal `[Aexus ADE · Mission Node Employee]`, and ZERO L1 slot downgrade!
+			const sessionsSvc = h.instantiation.get(IAdeSessionsService);
+			const ceoPromptWithRuntime = buildAdeAgentRoleContext(h.projects, sessionsSvc, ceoAgent, DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, missionRuntime, missionStore);
+			const ceoPromptStoreOnly = buildAdeAgentRoleContext(h.projects, sessionsSvc, ceoAgent, DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, undefined, missionStore);
+			const bePrompt = buildAdeAgentRoleContext(h.projects, sessionsSvc, beAgent, DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, undefined, missionStore);
+			const workerPrompt = buildAdeAgentRoleContext(h.projects, sessionsSvc, workerAgent, DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, undefined, missionStore);
+
+			for (const p of [ceoPromptWithRuntime, ceoPromptStoreOnly]) {
+				assert.ok(p?.includes('[Aexus Orchestrated Role Context]'), 'L1 receives full Orchestrated Role Context');
+				assert.ok(!p?.includes('[Aexus ADE · Mission Node Employee]'), 'L1 must NEVER fall back to legacy minimal mission node prompt');
+				assert.ok(p?.includes('Top Orchestrator'), 'L1 on standalone User Orchestration keeps top orchestrator slot (no segment_owner downgrade)');
+				assert.ok(p?.includes(`mission blueprint apply --mission ${created.id}`), 'L1 prompt advertises full Task DAG blueprint apply capability');
+			}
+			assert.ok(bePrompt?.includes('[Aexus Orchestrated Role Context]') && !bePrompt?.includes('[Aexus ADE · Mission Node Employee]'), 'L2 receives full Engineering Orchestration prompt without legacy fallback');
+			assert.ok(workerPrompt?.includes('[Aexus ADE · Engineering Staff Context]') && !workerPrompt?.includes('[Aexus ADE · Mission Node Employee]'), 'L4 leaf receives new Engineering Staff Context without legacy fallback');
+
+			// 3. L1 on standalone User workspace CAN run mission.blueprint.apply (even omitting --mission!), mission.blueprint.get, mission.open & sees canOperate=true!
+			const listAsCeo = await h.control<readonly { readonly id: string; readonly canOperate: boolean; readonly canRead: boolean }[]>('mission.list', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+			});
+			const ceoMissionRow = listAsCeo.find(m => m.id === created.id);
+			assert.strictEqual(ceoMissionRow?.canOperate, true, 'L1 top-rank staff sees canOperate=true on standalone User Orchestration');
+			assert.strictEqual(ceoMissionRow?.canRead, true, 'L1 top-rank staff sees canRead=true on standalone User Orchestration');
+
+			const bpApplyRes = await h.control<{ readonly id: string; readonly nodeCount: number }>('mission.blueprint.apply', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+				text: 'flowchart LR\n  T1["Design Billing API"] --> T2["Implement & Test"]',
+			});
+			assert.strictEqual(bpApplyRes.id, created.id, 'L1 resolves standalone mission automatically even when --mission is omitted');
+			assert.strictEqual(bpApplyRes.nodeCount, 2, 'L1 applies Mission Task DAG blueprint with zero FORBIDDEN error');
+
+			const bpGetAsCeo = await h.control<{ readonly id: string; readonly canOperate: boolean; readonly mermaidText: string }>('mission.blueprint.get', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+			});
+			assert.strictEqual(bpGetAsCeo.id, created.id);
+			assert.strictEqual(bpGetAsCeo.canOperate, true);
+			assert.ok(bpGetAsCeo.mermaidText.includes('Design Billing API'));
+
+			// L2 subordinate must still be denied structural blueprint.apply overwrite
+			await assert.rejects(
+				() => h.control('mission.blueprint.apply', {
+					caller: 'manager',
+					_verifiedCaller: true,
+					_callerSessionId: beAgent.id,
+					mission: created.id,
+					text: 'flowchart LR\n  X1["Unauthorized"]',
+				}),
+				/Permission denied|FORBIDDEN/i,
+				'Non-top-rank L2 staff must remain blocked from overwriting standalone mission blueprint',
+			);
+
+			// 4. Direct interactive User chat to L1 auto-mints a real root `otok-*` baton token!
+			const firstTurn = missionRuntime.beginInteractiveTurn(ceoAgent.id, {
+				userPrompt: 'Refactor billing module and run regression suite',
+				isDirectUserChat: true,
+			});
+			assert.ok(firstTurn?.tokenId?.startsWith('otok-'), 'Direct User chat to L1 auto-mints a real root otok-* baton');
+			assert.strictEqual(firstTurn?.autoMintedRootToken, true);
+			assert.strictEqual(firstTurn?.missionId, created.id);
+			assert.strictEqual(firstTurn?.nodeId, 'CEO');
+
+			// Calling beginInteractiveTurn again while active reuses the active root baton (zero duplicate minting)
+			const secondTurn = missionRuntime.beginInteractiveTurn(ceoAgent.id, {
+				userPrompt: 'Also include edge cases',
+				isDirectUserChat: true,
+			});
+			assert.strictEqual(secondTurn?.tokenId, firstTurn?.tokenId, 'Active root baton is reused on follow-up turn without double-minting');
+			assert.strictEqual(secondTurn?.autoMintedRootToken, undefined);
+
+			// L1 immediately sees the auto-minted root baton via `token.current` and can `token.split` downward from it!
+			const currentTokens = await h.control<{ readonly tokens: readonly { readonly id: string; readonly nodeId: string }[] }>('token.current', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+			});
+			assert.ok(currentTokens.tokens.some(t => t.id === firstTurn!.tokenId && t.nodeId === 'CEO'), 'L1 sees auto-minted root baton via token.current');
+
+			const splitRes = await h.control<{ readonly ok: boolean; readonly mintedTokenIds: readonly string[]; readonly parentTokenId: string }>('token.split', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+				parentTokenId: firstTurn!.tokenId,
+				to: ['BE'],
+				summary: 'Implement billing refactor on T2',
+				task: 'T2',
+			});
+			assert.strictEqual(splitRes.ok, true, 'L1 delegates downward directly from auto-minted root baton');
+			assert.strictEqual(splitRes.parentTokenId, firstTurn!.tokenId);
+			assert.strictEqual(splitRes.mintedTokenIds.length, 1);
+
+			// L1 can also run full orchestration lifecycle controls (pause/resume) on standalone User workspace
+			const paused = await h.control<{ readonly ok: boolean; readonly status?: string }>('orchestration.pause', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+			});
+			assert.strictEqual(paused.ok, true, 'L1 can pause standalone User Orchestration without FORBIDDEN');
+			const resumed = await h.control<{ readonly ok: boolean; readonly status?: string }>('orchestration.resume', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+			});
+			assert.strictEqual(resumed.ok, true, 'L1 can resume standalone User Orchestration without FORBIDDEN');
+
+			// 5. L2 returns child baton -> Join Barrier wakes L1 CEO -> L1 completes root baton -> Human User CLI `session.send` auto-mints a new root baton & embeds it in the User envelope!
+			await h.control('token.return', {
+				caller: 'manager',
+				_verifiedCaller: true,
+				_callerSessionId: beAgent.id,
+				tokenId: splitRes.mintedTokenIds[0],
+				summary: 'Billing refactor implemented and verified',
+			});
+			await h.control('token.complete', {
+				caller: 'governor',
+				_verifiedCaller: true,
+				_callerSessionId: ceoAgent.id,
+				tokenId: firstTurn!.tokenId,
+				summary: 'First wave delivered and verified',
+			});
+			h.projects.bindSession(ceoAgent.id, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/standalone-ceo-session') });
+			const userSendRes = await h.control<{ readonly status: string }>('session.send', {
+				id: ceoAgent.id,
+				message: 'Start phase 2 audit',
+			});
+			assert.strictEqual(userSendRes.status, 'sent');
+			const deliveredPrompt = h.sentChatRequests[h.sentChatRequests.length - 1]?.message ?? '';
+			assert.ok(deliveredPrompt.includes('[Aexus System · Message from User (L-1)]'), 'Human session.send wraps with User envelope');
+			assert.ok(deliveredPrompt.includes('Root Baton Issued: `otok-'), 'Human session.send to L1 embeds auto-minted root otok-* baton in User envelope');
+
+			// Direct User chat to non-top-rank L2 does NOT mint a root baton
+			const beDirectTurn = missionRuntime.beginInteractiveTurn(beAgent.id, {
+				userPrompt: 'Quick status question',
+				isDirectUserChat: true,
+			});
+			assert.strictEqual(beDirectTurn?.autoMintedRootToken, undefined, 'Direct chat to L2 does not auto-mint a new root baton');
+		});
+
+		test('Unified otok Split/Join + Peer-Forwarded Barrier Continuity + First-Class token.reject (3 directions) + token.fail/retry + zero dual-track tok-* leakage', async () => {
+			const { h, missionStore, missionRuntime } = createMissionHarness();
+
+			const created = await h.control<{ readonly id: string }>('mission.init', {
+				title: 'Unified Token Bus E2E',
+				project: alpha.toString(),
+			});
+			const missionId = created.id;
+			await h.control('orchestration.apply', {
+				mission: missionId,
+				text: [
+					'flowchart TD',
+					'  CEO["@Aria · Chief Architect (L1)"] <--> BE_Lead["@Bob · Backend Lead (L2)"]',
+					'  CEO <--> FE_Lead["@Carol · Frontend Lead (L2)"]',
+					'  subgraph Backend["Backend"]',
+					'    BE_Lead <--> Dev["@Dave · Backend Dev (L4)"]',
+					'    Dev <--> QA["@Eve · Backend QA (L4)"]',
+					'    QA <--> BE_Lead',
+					'  end',
+				].join('\n'),
+			});
+			await h.control('mission.blueprint.apply', {
+				mission: missionId,
+				text: [
+					'flowchart LR',
+					'  T_BE["Backend API"] --> T_SHIP["Release"]',
+					'  T_FE["Frontend UI"] --> T_SHIP',
+				].join('\n'),
+			});
+
+			const orch0 = missionRuntime.getOrchestrationState(missionId);
+			const ceoId = orch0.nodeAgentIds.CEO!;
+			const beLeadId = orch0.nodeAgentIds.BE_Lead!;
+			const feLeadId = orch0.nodeAgentIds.FE_Lead!;
+			const devId = orch0.nodeAgentIds.Dev!;
+			const qaId = orch0.nodeAgentIds.QA!;
+			const ceoCaller = { caller: 'governor', _verifiedCaller: true, _callerSessionId: ceoId };
+			const beCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: beLeadId };
+			const feCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: feLeadId };
+			const devCaller = { caller: 'worker', _verifiedCaller: true, _callerSessionId: devId };
+			const qaCaller = { caller: 'worker', _verifiedCaller: true, _callerSessionId: qaId };
+
+			// 1. Heterogeneous Split from L1 (`parentTokenId: 'new'`) creates root parent + Join Barrier across BE_Lead & FE_Lead
+			const split = await h.control<{
+				readonly ok: boolean;
+				readonly parentTokenId: string;
+				readonly createdRootParent?: boolean;
+				readonly joinBarrierId?: string;
+				readonly branches: readonly { readonly tokenId: string; readonly toNodeId: string; readonly taskNodeId?: string }[];
+			}>('token.split', {
+				...ceoCaller,
+				mission: missionId,
+				parentTokenId: 'new',
+				branchesJson: JSON.stringify([
+					{ toNodeId: 'BE_Lead', summary: 'Implement payment ledger API', taskNodeId: 'T_BE' },
+					{ toNodeId: 'FE_Lead', summary: 'Implement checkout UI', taskNodeId: 'T_FE' },
+				]),
+				waitJoin: true,
+			});
+			assert.strictEqual(split.ok, true);
+			assert.strictEqual(split.createdRootParent, true);
+			assert.ok(split.joinBarrierId);
+			const beTokId = split.branches.find(b => b.toNodeId === 'BE_Lead')!.tokenId;
+			const feTokId = split.branches.find(b => b.toNodeId === 'FE_Lead')!.tokenId;
+
+			// 2. BE_Lead delegates downward to Dev with waitJoin -> Dev hands off to peer QA -> QA calls `token.reject` back to Dev!
+			const devMint = await h.control<{ readonly mintedTokenIds: readonly string[]; readonly joinBarrierId?: string }>('token.mint', {
+				...beCaller,
+				mission: missionId,
+				parentTokenId: beTokId,
+				to: 'Dev',
+				summary: 'Code ledger endpoint',
+				waitJoin: true,
+			});
+			const devTok1 = devMint.mintedTokenIds[0];
+			const toQa = await h.control<{ readonly nextTokenIds: readonly string[] }>('token.handoff', {
+				...devCaller,
+				mission: missionId,
+				tokenId: devTok1,
+				to: 'QA',
+				summary: 'Ready for review',
+			});
+			const qaTok1 = toQa.nextTokenIds[0];
+
+			// Peer bounce via `token.reject` (auto-targets fromNodeId=Dev, preserves BE_Lead's Join Barrier!)
+			const qaReject = await h.control<{
+				readonly ok: boolean;
+				readonly mode: string;
+				readonly targetNodeId: string;
+				readonly bouncedTokenId: string;
+			}>('token.reject', {
+				...qaCaller,
+				mission: missionId,
+				tokenId: qaTok1,
+				reason: 'Missing idempotency key validation on retry',
+			});
+			assert.strictEqual(qaReject.ok, true);
+			assert.strictEqual(qaReject.mode, 'peer_bounce');
+			assert.strictEqual(qaReject.targetNodeId, 'Dev');
+			const devTok2 = qaReject.bouncedTokenId;
+			assert.strictEqual(
+				missionRuntime.getOrchestrationState(missionId).tokens[devTok2].parentJoinBarrierId,
+				devMint.joinBarrierId,
+				'Peer handoff + peer reject preserve upstream Join Barrier without deadlock',
+			);
+
+			// Unauthorized upward reject from Dev directly to CEO is blocked (`UPWARD_TOKEN_FORBIDDEN`)
+			await assert.rejects(
+				() => h.control('token.reject', { ...devCaller, mission: missionId, tokenId: devTok2, target: 'CEO', reason: 'Bypass manager' }),
+				/UPWARD_TOKEN_FORBIDDEN/i,
+			);
+
+			// 3. Dev reports failure via `token.fail` (settling BE_Lead's barrier -> waking BE_Lead!) then BE_Lead retries via `token.retry`!
+			const devFail = await h.control<{ readonly ok: boolean; readonly barrierSatisfied?: boolean }>('token.fail', {
+				...devCaller,
+				mission: missionId,
+				tokenId: devTok2,
+				reason: 'Missing Stripe webhook test secret',
+			});
+			assert.strictEqual(devFail.ok, true);
+			assert.strictEqual(devFail.barrierSatisfied, true, 'Failed child settles waiting Join Barrier so superior wakes up');
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).tokens[beTokId].status, 'active');
+
+			// BE_Lead invokes `token.retry` on the failed `otok-*` token with guidance (NO LEGACY_API_REMOVED!)
+			const retryRes = await h.control<{ readonly ok: boolean; readonly tokenId: string; readonly nodeId: string; readonly retriedFromTokenId: string }>('token.retry', {
+				...beCaller,
+				mission: missionId,
+				tokenId: devTok2,
+				guidance: 'Use local mock webhook signer in tests/fixtures',
+			});
+			assert.strictEqual(retryRes.ok, true);
+			assert.strictEqual(retryRes.retriedFromTokenId, devTok2);
+			assert.strictEqual(retryRes.nodeId, 'Dev');
+			const devTok3 = retryRes.tokenId;
+
+			// Dev finishes and returns -> merges cleanly into BE_Lead's active baton!
+			const devDone = await h.control<{ readonly ok: boolean; readonly returnedTokenId?: string }>('token.return', {
+				...devCaller,
+				mission: missionId,
+				tokenId: devTok3,
+				summary: 'Implemented idempotency check with mock signer',
+			});
+			assert.strictEqual(devDone.ok, true);
+			assert.strictEqual(devDone.returnedTokenId, beTokId);
+
+			// 4. BE_Lead rejects downward to Dev via `token.reject` (downward_rework) — preserving BE_Lead's OWN `parentJoinBarrierId` to CEO!
+			const leadReject = await h.control<{
+				readonly ok: boolean;
+				readonly mode: string;
+				readonly targetNodeId: string;
+				readonly bouncedTokenId: string;
+				readonly joinBarrierId?: string;
+			}>('token.reject', {
+				...beCaller,
+				mission: missionId,
+				tokenId: beTokId,
+				reason: 'Add edge-case test for duplicate currency code',
+			});
+			assert.strictEqual(leadReject.ok, true);
+			assert.strictEqual(leadReject.mode, 'downward_rework');
+			assert.strictEqual(leadReject.targetNodeId, 'Dev', 'BE_Lead downward reject auto-targets latest returning subordinate Dev');
+			assert.ok(leadReject.joinBarrierId);
+			assert.strictEqual(
+				missionRuntime.getOrchestrationState(missionId).tokens[beTokId].parentJoinBarrierId,
+				split.joinBarrierId,
+				'Downward reject preserves BE_Lead upstream Join Barrier to CEO',
+			);
+
+			// Dev fixes & returns -> wakes BE_Lead -> BE_Lead & FE_Lead both return -> CEO Join Barrier converges 2/2!
+			const devFixRet = await h.control<{ readonly barrierSatisfied?: boolean }>('token.return', {
+				...devCaller,
+				mission: missionId,
+				tokenId: leadReject.bouncedTokenId,
+				summary: 'Added duplicate currency edge-case test; suite green',
+			});
+			assert.strictEqual(devFixRet.barrierSatisfied, true);
+
+			await h.control('token.return', { ...beCaller, mission: missionId, tokenId: beTokId, summary: 'Backend API verified & green' });
+			const feRet = await h.control<{ readonly barrierSatisfied?: boolean }>('token.return', {
+				...feCaller,
+				mission: missionId,
+				tokenId: feTokId,
+				summary: 'Checkout UI verified & green',
+			});
+			assert.strictEqual(feRet.barrierSatisfied, true, 'Top-level CEO Join Barrier converges cleanly after full reject/fail/retry rework cycle');
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).tokens[split.parentTokenId].status, 'active');
+
+			// 5. `token.trace` resolves `otrc-*` even when `--mission` is omitted, and `token.current` returns ONLY `otok-*` (zero dual-track leakage)
+			const ceoTok = missionRuntime.getOrchestrationState(missionId).tokens[split.parentTokenId];
+			const traceRes = await h.control<{ readonly missionId: string; readonly count: number }>('token.trace', {
+				...ceoCaller,
+				tracePtr: ceoTok.tracePtr,
+			});
+			assert.strictEqual(traceRes.missionId, missionId);
+			assert.ok(traceRes.count >= 1, 'token.trace expands otrc-* cleanly without --mission');
+
+			const curRes = await h.control<{ readonly tokens: readonly { readonly id: string }[] }>('token.current', {
+				...ceoCaller,
+				mission: missionId,
+			});
+			assert.ok(curRes.tokens.length === 1 && curRes.tokens[0].id === split.parentTokenId);
+			assert.ok(curRes.tokens.every(t => t.id.startsWith('otok-')), 'Orchestration token.current returns pure otok-* tokens with zero legacy tok-* leakage');
+			assert.ok(missionStore.getMission(missionId), 'Mission state committed cleanly');
+		});
+
+		test('Orchestration fault-tolerance guardrails: maxHops breaker, FinOps budget hard stop + resume gate, real pause/resume session stop & re-wake, bound Task DAG deterministic checks, and 429/502 transient retry', async () => {
+			const h = createHarness([alpha]);
+			h.modes.setMode('ade');
+
+			const stoppedResources: string[] = [];
+			const baseSessions = h.instantiation.get(IAdeSessionsService);
+			h.instantiation.stub(IAdeSessionsService, Object.assign(Object.create(Object.getPrototypeOf(baseSessions)), baseSessions, {
+				async stop(session: IAdeEngineSession): Promise<void> {
+					stoppedResources.push(session.resource.toString());
+				},
+			}));
+
+			let checkShouldPass = false;
+			const executedChecks: string[] = [];
+			h.instantiation.stub(IAdeEngineeringBackendService, upcastPartial<IAdeEngineeringBackendService>({
+				_serviceBrand: undefined,
+				onDidInboxChange: Event.None,
+				onDidWatchdogWakeup: Event.None,
+				onDidSourceTriggerFire: Event.None,
+				onDidMissionRecordChange: Event.None,
+				onDidSystemResume: Event.None,
+				runDeterministicCheck: async req => {
+					executedChecks.push(req.checkId);
+					return {
+						checkId: req.checkId,
+						name: req.name,
+						command: req.command,
+						hostAlias: req.hostAlias ?? 'local',
+						cwd: req.cwd,
+						passed: checkShouldPass,
+						exitCode: checkShouldPass ? 0 : 1,
+						expectedExitCode: 0,
+						durationMs: 5,
+						outputTail: checkShouldPass ? 'ALL_TESTS_PASS' : 'FAIL: missing migration',
+					};
+				},
+			}));
+
+			let transientFailCount = 0;
+			const dispatchedTurns: Array<{ readonly resource: string; readonly prompt: string }> = [];
+			h.instantiation.stub(ICommandService, {
+				onWillExecuteCommand: Event.None,
+				onDidExecuteCommand: Event.None,
+				executeCommand: async <T>(id: string, ...args: unknown[]): Promise<T> => {
+					if (id === 'aexus.agentEngines.dispatchEngineeringTurn') {
+						dispatchedTurns.push({ resource: String(args[0]), prompt: String(args[1]) });
+						if (transientFailCount > 0) {
+							transientFailCount--;
+							throw new Error('HTTP 502 Bad Gateway: upstream overloaded (429)');
+						}
+						return { reply: 'ok', usage: { inputTokens: 200, outputTokens: 100, totalTokens: 300, turns: 1 } } as T;
+					}
+					const registered = CommandsRegistry.getCommand(id);
+					if (registered) {
+						return h.instantiation.invokeFunction(registered.handler, ...args) as T;
+					}
+					return undefined as T;
+				},
+			});
+
+			const inboxItems: IAdeInboxItem[] = [];
+			const onInboxChanged = store.add(new Emitter<void>());
+			let inboxSeq = 0;
+			h.instantiation.stub(IAdeInboxService, upcastPartial<IAdeInboxService>({
+				_serviceBrand: undefined,
+				get items(): readonly IAdeInboxItem[] { return inboxItems; },
+				get unreadCount(): number { return inboxItems.filter(i => i.unread && !i.resolved).length; },
+				onDidChange: onInboxChanged.event,
+				list: () => [...inboxItems],
+				async postGovernorMessage(input): Promise<IAdeInboxItem> {
+					const item: IAdeInboxItem = {
+						id: `inb-ft-${++inboxSeq}`,
+						kind: 'governor_message',
+						treeType: 'engineering',
+						governorSessionId: input.governorSessionId,
+						governorLabel: 'Owner',
+						projectPath: alpha.fsPath,
+						projectName: 'alpha',
+						nodeId: input.nodeId,
+						title: input.title ?? 'Alert',
+						message: input.message,
+						severity: input.severity,
+						senderAgentId: input.senderAgentId,
+						createdAt: Date.now(),
+						unread: true,
+						resolved: false,
+					};
+					inboxItems.push(item);
+					onInboxChanged.fire();
+					return item;
+				},
+			}));
+
+			const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+			h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+			missionRuntime.setTransientRetryBackoffsForTesting([15, 25]);
+
+			const created = await h.control<{ readonly id: string }>('mission.init', {
+				title: 'Fault-Tolerance Orchestration',
+				project: alpha.toString(),
+			});
+			const missionId = created.id;
+			await h.control('orchestration.apply', {
+				mission: missionId,
+				text: [
+					'flowchart TD',
+					'  CEO["@Aria · Chief Architect (L1)"] <--> Dev["@Dave · Backend Dev (L2)"]',
+					'  Dev <--> QA["@Eve · QA Eng (L2)"]',
+					'  QA <--> CEO',
+				].join('\n'),
+			});
+			await h.control('mission.blueprint.apply', {
+				mission: missionId,
+				text: 'flowchart LR\n  T_API["Implement API"] --> T_SHIP["Release"]',
+			});
+			// Attach deterministic check onto bound Task DAG node T_API!
+			await h.control('mission.check.set', {
+				mission: missionId,
+				nodeId: 'T_API',
+				command: 'npm test',
+				label: 'API unit tests',
+			});
+
+			const orch0 = missionRuntime.getOrchestrationState(missionId);
+			const ceoId = orch0.nodeAgentIds.CEO!;
+			const devId = orch0.nodeAgentIds.Dev!;
+			const qaId = orch0.nodeAgentIds.QA!;
+			h.projects.bindSession(ceoId, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/ft-ceo') });
+			h.projects.bindSession(devId, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/ft-dev') });
+			h.projects.bindSession(qaId, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/ft-qa') });
+			const ceoCaller = { caller: 'governor', _verifiedCaller: true, _callerSessionId: ceoId };
+			const devCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: devId };
+			const qaCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: qaId };
+
+			// 1. 429/502 transient retry automatically retries failing Orchestration dispatch and recovers!
+			transientFailCount = 1;
+			const beforeRetryDispatches = dispatchedTurns.length;
+			const disp = await h.control<{ readonly ok: boolean; readonly tokenId: string }>('orchestration.dispatch', {
+				mission: missionId,
+				target: 'CEO',
+				prompt: 'Ship payments API',
+			});
+			assert.strictEqual(disp.ok, true);
+			await timeout(60);
+			assert.strictEqual(
+				dispatchedTurns.length - beforeRetryDispatches,
+				2,
+				'Transient 502/429 dispatch error must auto-retry and succeed without failing the otok-* baton',
+			);
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).tokens[disp.tokenId].status, 'active');
+
+			// 2. Deterministic verification check on bound Task DAG node T_API blocks Dev token.return until passing!
+			const split = await h.control<{ readonly mintedTokenIds: readonly string[] }>('token.split', {
+				...ceoCaller,
+				mission: missionId,
+				parentTokenId: disp.tokenId,
+				to: 'Dev',
+				summary: 'Build T_API',
+				task: 'T_API',
+				waitJoin: true,
+			});
+			const devTokId = split.mintedTokenIds[0];
+
+			checkShouldPass = false;
+			await assert.rejects(
+				() => h.control('token.return', { ...devCaller, mission: missionId, tokenId: devTokId, summary: 'Ready without tests' }),
+				/AUTOMATED_CHECK_FAILED|DETERMINISTIC_CHECK_FAILED/i,
+				'Bound Task DAG deterministic check must block Orchestration token.return when failing',
+			);
+			assert.ok(executedChecks.length >= 1, 'Deterministic check hook actually executed');
+
+			// 3. Real pause stops live active otok-* LLM session while keeping token active; real resume re-wakes active holder!
+			stoppedResources.length = 0;
+			const paused = await h.control<{ readonly ok: boolean; readonly status: string }>('orchestration.pause', {
+				...ceoCaller,
+				mission: missionId,
+				reason: 'Manual inspection pause',
+			});
+			assert.strictEqual(paused.ok, true);
+			assert.strictEqual(paused.status, 'paused');
+			assert.ok(stoppedResources.includes('aexus-claude:/ft-dev'), 'Pause must actively stop live otok-* agent session');
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).tokens[devTokId].status, 'active');
+
+			const beforeResumeDispatches = dispatchedTurns.length;
+			const resumed = await h.control<{ readonly ok: boolean; readonly status: string }>('orchestration.resume', {
+				...ceoCaller,
+				mission: missionId,
+			});
+			assert.strictEqual(resumed.ok, true);
+			assert.strictEqual(resumed.status, 'running');
+			await timeout(20);
+			assert.ok(
+				dispatchedTurns.slice(beforeResumeDispatches).some(d => d.resource === 'aexus-claude:/ft-dev' && d.prompt.includes('Orchestration Resumed')),
+				'Resume must re-wake idle active otok-* token holders immediately',
+			);
+
+			// 4. FinOps budget hard circuit-breaker trips on recordNodeTurnUsage -> stops live otok-* session, hard-pauses, blocks resume until budget raised!
+			stoppedResources.length = 0;
+			await h.control('orchestration.limits', { mission: missionId, budgetLimitUsd: 1.0 });
+			missionRuntime.recordNodeTurnUsage(missionId, 'Dev', { inputTokens: 1000, outputTokens: 500, totalTokens: 1500, turns: 1, costUsd: 1.25 });
+			await timeout(20);
+			const orchAfterBudget = missionRuntime.getOrchestrationState(missionId);
+			assert.strictEqual(orchAfterBudget.budgetCircuitTripped, true);
+			assert.strictEqual(orchAfterBudget.status, 'paused');
+			assert.ok(stoppedResources.includes('aexus-claude:/ft-dev'), 'FinOps budget trip must stop live otok-* session');
+			assert.ok(inboxItems.some(i => i.severity === 'critical' && /Budget Circuit-?Breaker/i.test(i.title)), 'Budget trip alerts Inbox');
+
+			await assert.rejects(
+				() => h.control('orchestration.resume', { ...ceoCaller, mission: missionId }),
+				/BUDGET_EXCEEDED/,
+				'Cannot resume Orchestration while FinOps budget circuit breaker is tripped',
+			);
+
+			// Raise budget ceiling -> unlatches breaker -> resume works!
+			await h.control('orchestration.limits', { mission: missionId, budgetLimitUsd: 25.0 });
+			const resumedAfterRaise = await h.control<{ readonly ok: boolean; readonly status: string }>('orchestration.resume', {
+				...ceoCaller,
+				mission: missionId,
+			});
+			assert.strictEqual(resumedAfterRaise.ok, true);
+			assert.strictEqual(resumedAfterRaise.status, 'running');
+
+			// 5. maxHops cycle circuit-breaker freezes runaway Dev <-> QA bounce and alerts Inbox!
+			checkShouldPass = true;
+			await h.control('orchestration.limits', { mission: missionId, maxHops: 2 });
+			// devTokId is at hop 1 -> handoff to QA is hop 2 (ok) -> QA rejects to Dev is hop 3 (> maxHops=2 -> TRIPS!)
+			const toQa = await h.control<{ readonly nextTokenIds: readonly string[] }>('token.handoff', {
+				...devCaller,
+				mission: missionId,
+				tokenId: devTokId,
+				to: 'QA',
+				summary: 'Review hop 2',
+			});
+			const qaTokId = toQa.nextTokenIds[0];
+			await assert.rejects(
+				() => h.control('token.reject', { ...qaCaller, mission: missionId, tokenId: qaTokId, reason: 'Bounce hop 3 exceeds maxHops=2' }),
+				/MAX_HOPS_EXCEEDED/,
+				'Cyclic Dev <-> QA bounce exceeding maxHops must trip circuit breaker',
+			);
+			const orchAfterCycle = missionRuntime.getOrchestrationState(missionId);
+			assert.strictEqual(orchAfterCycle.tokens[qaTokId].status, 'failed');
+			assert.strictEqual(orchAfterCycle.tokens[disp.tokenId].status, 'active', 'Waiting CEO Join Barrier wakes up cleanly when cycle breaker trips');
+			assert.ok(inboxItems.some(i => i.severity === 'critical' && /Cycle Circuit-Breaker/i.test(i.title)), 'Max-hops trip alerts Inbox');
+		});
+
+		test('Dual-view taskId binding & upstream completion guard + org.context/org.subordinates across Chinese/custom L1 subgraphs & intra-dept peer hops + zero-leak dynamic staff removal (staff.remove & orchestration.apply)', async () => {
+			const h = createHarness([alpha]);
+			h.modes.setMode('ade');
+
+			const stoppedResources: string[] = [];
+			const deletedResources: string[] = [];
+			const baseSessions = h.instantiation.get(IAdeSessionsService);
+			h.instantiation.stub(IAdeSessionsService, Object.assign(Object.create(Object.getPrototypeOf(baseSessions)), baseSessions, {
+				async stop(session: IAdeEngineSession): Promise<void> {
+					stoppedResources.push(session.resource.toString());
+				},
+				async delete(session: IAdeEngineSession): Promise<void> {
+					deletedResources.push(session.resource.toString());
+				},
+			}));
+
+			const roleSchema = store.add(h.instantiation.createInstance(AdeRoleSchemaService));
+			h.instantiation.stub(IAdeRoleSchemaService, roleSchema);
+			const missionStore = store.add(h.instantiation.createInstance(AdeMissionStoreService));
+			h.instantiation.stub(IAdeMissionService, missionStore);
+			const missionRuntime = store.add(h.instantiation.createInstance(AdeMissionRuntimeService));
+			h.instantiation.stub(IAdeMissionRuntimeService, missionRuntime);
+
+			// Topology puts L1 CEO inside a Chinese executive subgraph ("管理层"), BE_Lead -> Dev -> QA (same-tier peer chain in Backend), and FE_Lead in Frontend!
+			const created = await h.control<{ readonly id: string }>('mission.init', {
+				title: 'Dual-View & Org Authority E2E',
+				project: alpha.toString(),
+			});
+			const missionId = created.id;
+			await h.control('orchestration.apply', {
+				mission: missionId,
+				text: [
+					'flowchart TD',
+					'  subgraph Exec["管理层"]',
+					'    CEO["@Aria · CTO (L1)"]',
+					'  end',
+					'  subgraph Backend["Backend Dept"]',
+					'    BE_Lead["@Bob · Backend Lead (L2)"]',
+					'    Dev["@Dave · Backend Dev (L3)"]',
+					'    QA["@Eve · Backend QA (L3)"]',
+					'    WB_BE[("Whiteboard: Backend Spec")]',
+					'    BE_Lead <--> Dev',
+					'    Dev <--> QA',
+					'  end',
+					'  subgraph Frontend["Frontend Dept"]',
+					'    FE_Lead["@Carol · Frontend Lead (L2)"]',
+					'    FE_Dev["@Frank · Frontend Dev (L3)"]',
+					'    FE_Lead <--> FE_Dev',
+					'  end',
+					'  CEO <--> BE_Lead',
+					'  CEO <--> FE_Lead',
+					'  %% staff CEO [tier=1, rank=governor, dept="管理层"]',
+					'  %% staff BE_Lead [tier=2, rank=manager, dept="Backend Dept"]',
+					'  %% staff Dev [tier=3, rank=employee, dept="Backend Dept"]',
+					'  %% staff QA [tier=3, rank=employee, dept="Backend Dept"]',
+					'  %% staff FE_Lead [tier=2, rank=manager, dept="Frontend Dept"]',
+					'  %% staff FE_Dev [tier=3, rank=employee, dept="Frontend Dept"]',
+					'  %% whiteboard WB_BE [dept="Backend Dept", title="Backend Spec", version=1]',
+				].join('\n'),
+			});
+			await h.control('mission.blueprint.apply', {
+				mission: missionId,
+				text: [
+					'flowchart LR',
+					'  T1["Schema Migration"] --> T2["Billing Endpoint"]',
+					'  %% task T1 [owner=BE_Lead, dept="Backend Dept"]',
+					'  %% task T2 [owner=BE_Lead, dept="Backend Dept"]',
+				].join('\n'),
+			});
+
+			const orch0 = missionRuntime.getOrchestrationState(missionId);
+			const ceoId = orch0.nodeAgentIds.CEO!;
+			const beLeadId = orch0.nodeAgentIds.BE_Lead!;
+			const devId = orch0.nodeAgentIds.Dev!;
+			const qaId = orch0.nodeAgentIds.QA!;
+			const feDevId = orch0.nodeAgentIds.FE_Dev!;
+			h.projects.bindSession(devId, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/dv-dev') });
+			h.projects.bindSession(qaId, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/dv-qa') });
+			const ceoCaller = { caller: 'governor', _verifiedCaller: true, _callerSessionId: ceoId };
+			const beCaller = { caller: 'manager', _verifiedCaller: true, _callerSessionId: beLeadId };
+
+			// 1. Bind otok-* via `taskId` alias -> live sync updates Mission Task DAG immediately!
+			const disp = await h.control<{ readonly ok: boolean; readonly tokenId: string }>('orchestration.dispatch', {
+				mission: missionId,
+				target: 'BE_Lead',
+				prompt: 'Work on Billing Endpoint',
+				taskId: 'T2',
+			});
+			assert.strictEqual(disp.ok, true);
+			const taskAfterDisp = missionStore.getMission(missionId)?.taskStatuses?.T2;
+			assert.strictEqual(taskAfterDisp?.status, 'in_progress');
+			assert.strictEqual(taskAfterDisp?.assigneeNodeId, 'BE_Lead');
+			assert.deepStrictEqual(taskAfterDisp?.activeTokenIds, [disp.tokenId]);
+
+			// Premature terminal token.complete (both plain --finish AND --complete-task) MUST fail with INCOMPLETE_DEPENDENCIES while upstream T1 is incomplete!
+			await assert.rejects(
+				() => h.control('token.complete', { ...beCaller, mission: missionId, tokenId: disp.tokenId, summary: 'Done T2 early', finish: true }),
+				/INCOMPLETE_DEPENDENCIES/i,
+				'Cannot close otok-* bound to T2 while upstream T1 is incomplete',
+			);
+			await assert.rejects(
+				() => h.control('token.complete', { ...beCaller, mission: missionId, tokenId: disp.tokenId, summary: 'Done T2 early', finish: true, completeTask: true }),
+				/INCOMPLETE_DEPENDENCIES/i,
+				'--complete-task must also reject while upstream T1 is incomplete',
+			);
+
+			// Complete upstream T1 -> now T2 token.complete --finish --complete-task succeeds & atomically marks T2 completed!
+			await h.control('mission.task.complete', { ...beCaller, mission: missionId, node: 'T1', note: 'Schema done' });
+			const okDone = await h.control<{ readonly ok: boolean; readonly completedTaskIds?: readonly string[] }>('token.complete', {
+				...beCaller,
+				mission: missionId,
+				tokenId: disp.tokenId,
+				summary: 'Billing endpoint delivered & verified',
+				finish: true,
+				completeTask: true,
+			});
+			assert.strictEqual(okDone.ok, true);
+			assert.deepStrictEqual(okDone.completedTaskIds, ['T2']);
+			assert.strictEqual(missionStore.getMission(missionId)?.taskStatuses?.T2?.status, 'completed');
+
+			// 2. org.context & org.subordinates: L1 CEO inside Chinese subgraph "管理层" has ZERO false cross-department denials!
+			const ceoSubs = await h.control<{ readonly orchestrationSubordinates?: readonly { readonly nodeId: string }[] }>('org.subordinates', { ...ceoCaller });
+			const ceoSubNodeIds = (ceoSubs.orchestrationSubordinates ?? []).map(s => s.nodeId);
+			assert.ok(ceoSubNodeIds.includes('BE_Lead') && ceoSubNodeIds.includes('QA') && ceoSubNodeIds.includes('FE_Dev'), 'L1 in "管理层" sees all lower-tier staff across departments');
+
+			const ceoCtxQa = await h.control<{
+				readonly agentId: string;
+				readonly nodeId?: string;
+				readonly department?: string;
+				readonly missionId?: string;
+				readonly heldTokens: readonly { readonly id: string }[];
+				readonly whiteboardIds?: readonly string[];
+			}>('org.context', { ...ceoCaller, target: 'QA' });
+			assert.strictEqual(ceoCtxQa.agentId, qaId);
+			assert.strictEqual(ceoCtxQa.nodeId, 'QA');
+			assert.strictEqual(ceoCtxQa.department, 'Backend Dept');
+			assert.strictEqual(ceoCtxQa.missionId, missionId);
+			assert.ok(ceoCtxQa.whiteboardIds?.includes('WB_BE'), 'org.context surfaces accessible department whiteboards');
+
+			// L2 BE_Lead can inspect intra-department peer-chained QA (BE_Lead -> Dev -> QA), while cross-department FE_Dev is strictly OUT_OF_JURISDICTION!
+			const beSubs = await h.control<{ readonly orchestrationSubordinates?: readonly { readonly nodeId: string }[] }>('org.subordinates', { ...beCaller });
+			const beSubIds = (beSubs.orchestrationSubordinates ?? []).map(s => s.nodeId);
+			assert.ok(beSubIds.includes('Dev') && beSubIds.includes('QA'), 'BE_Lead sees Dev AND peer-chained QA in Backend Dept');
+			assert.ok(!beSubIds.includes('FE_Dev'), 'BE_Lead does NOT see cross-department FE_Dev');
+
+			const beCtxQa = await h.control<{ readonly agentId: string; readonly nodeId?: string }>('org.context', { ...beCaller, target: 'QA' });
+			assert.strictEqual(beCtxQa.agentId, qaId);
+			assert.strictEqual(beCtxQa.nodeId, 'QA');
+
+			await assert.rejects(
+				() => h.control('org.context', { ...beCaller, target: feDevId }),
+				/OUT_OF_JURISDICTION/i,
+				'L2 Backend Lead remains strictly blocked from cross-department Frontend Dev',
+			);
+
+			// Human User omitting --mission can resolve Orchestration staff node ID directly via org.context!
+			const humanCtxDev = await h.control<{ readonly agentId: string; readonly nodeId?: string }>('org.context', { target: 'Dev' });
+			assert.strictEqual(humanCtxDev.agentId, devId);
+			assert.strictEqual(humanCtxDev.nodeId, 'Dev');
+
+			// 3. Dynamic staff removal (`orchestration.staff.remove`) cleans up active session, in-flight otok-*, checks, positions, legacy assignments & Task DAG state with ZERO residue!
+			await h.control('mission.check.set', { mission: missionId, nodeId: 'Dev', command: 'echo ok', label: 'Dev check' });
+			await h.control('mission.host.bind', { mission: missionId, nodeId: 'Dev', hostAlias: 'gpu-dev-box' });
+			missionStore.updateOrchestrationPositions(missionId, { Dev: { x: 120, y: 240 } });
+
+			const splitWork = await h.control<{ readonly parentTokenId: string; readonly mintedTokenIds: readonly string[]; readonly joinBarrierId?: string }>('token.split', {
+				...beCaller,
+				mission: missionId,
+				parentTokenId: 'new',
+				to: 'Dev',
+				summary: 'Active work on Dev before removal',
+				waitJoin: true,
+			});
+			const devLiveTok = splitWork.mintedTokenIds[0];
+
+			stoppedResources.length = 0;
+			deletedResources.length = 0;
+			const remRes = await h.control<{
+				readonly ok: boolean;
+				readonly removedNodeId: string;
+				readonly reclaimedTokenIds: readonly string[];
+				readonly settledBarrierIds: readonly string[];
+				readonly stoppedAgentIds: readonly string[];
+			}>('orchestration.staff.remove', {
+				...beCaller,
+				mission: missionId,
+				node: 'Dev',
+				reason: 'Reassigning workload',
+			});
+			assert.strictEqual(remRes.ok, true);
+			assert.strictEqual(remRes.removedNodeId, 'Dev');
+			assert.deepStrictEqual(remRes.reclaimedTokenIds, [devLiveTok]);
+			assert.strictEqual(remRes.settledBarrierIds.length, 1, 'Waiting superior barrier settled cleanly on removal');
+			assert.ok(stoppedResources.includes('aexus-claude:/dv-dev'), 'Active LLM session stopped on staff removal');
+			assert.ok(deletedResources.includes('aexus-claude:/dv-dev'), 'Engine session deleted on staff removal');
+			assert.strictEqual(h.projects.getAgent(devId), undefined, 'Removed staff agent purged from sidebar');
+
+			const afterRec = missionStore.getMission(missionId)!;
+			const afterOrch = missionRuntime.getOrchestrationState(missionId);
+			assert.strictEqual(afterOrch.nodeAgentIds.Dev, undefined, 'nodeAgentIds purged');
+			assert.strictEqual(afterOrch.nodeStates.Dev, undefined, 'nodeStates purged');
+			assert.strictEqual(afterOrch.tokens[devLiveTok].status, 'reclaimed', 'In-flight token reclaimed');
+			assert.strictEqual(afterRec.nodeChecks?.Dev, undefined, 'nodeChecks residue purged');
+			assert.strictEqual(afterRec.orchestrationPositions?.Dev, undefined, 'orchestrationPositions residue purged');
+			assert.strictEqual(afterRec.runtime?.boundary?.nodeAssignments?.Dev, undefined, 'Legacy nodeAssignments residue purged');
+
+			// 4. Blueprint-level staff removal (`orchestration.apply` dropping QA) ALSO stops active session & purges all state!
+			stoppedResources.length = 0;
+			await h.control('orchestration.apply', {
+				mission: missionId,
+				text: [
+					'flowchart TD',
+					'  subgraph Exec["管理层"]',
+					'    CEO["@Aria · CTO (L1)"]',
+					'  end',
+					'  subgraph Backend["Backend Dept"]',
+					'    BE_Lead["@Bob · Backend Lead (L2)"]',
+					'  end',
+					'  CEO <--> BE_Lead',
+				].join('\n'),
+			});
+			assert.ok(stoppedResources.includes('aexus-claude:/dv-qa'), 'Blueprint orchestration.apply removing QA stops active session');
+			assert.strictEqual(missionRuntime.getOrchestrationState(missionId).nodeAgentIds.QA, undefined, 'Blueprint removal purges QA from nodeAgentIds');
+			assert.strictEqual(h.projects.getAgent(qaId), undefined, 'Blueprint removal purges QA from sidebar');
+		});
+
+		test('Mission DAG Sculpted Task & Gate Cards render upstream readiness, department pills, and ready/completed edge states without overlap', async () => {
+			const { h, missionStore } = createMissionHarness();
+			const gov = h.projects.addSession(alpha, { engineId: 'aexus-claude', resource: URI.parse('aexus-claude:/sculpted-gov') }, 'Sculpted Gov', { role: 'governor' });
+			const created = missionStore.createMission({
+				title: 'Sculpted Task Cards',
+				ownerSessionId: gov.id,
+				ownerTier: 1,
+				projectUri: alpha.toString(),
+				mermaidText: [
+					'flowchart LR',
+					'  T_A["Spec Freeze"] --> T_C{{"QA Gate"}}',
+					'  T_B["Core Impl"] --> T_C',
+					'  %% task T_A [owner=CEO, dept="Arch", min_tier=1]',
+					'  %% task T_B [owner=Dev, dept="Core", min_tier=2]',
+				].join('\n'),
+			});
+
+			const host = append(document.body, $('.monaco-workbench.ade-eng-mission-dualview-host'));
+			host.style.width = '1280px';
+			host.style.height = '760px';
+			store.add({ dispose: () => host.remove() });
+			const pane = store.add(h.instantiation.createInstance(AdeEngineeringEditorPane, upcastPartial<IEditorGroup>({ id: 1, index: 0 })));
+			pane.create(host);
+			pane.layout(new Dimension(1280, 760));
+			const missionInput = store.add(h.instantiation.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(created.id, 'mission')));
+			await pane.setInput(missionInput, undefined, {}, CancellationToken.None);
+
+			// Sculpted task card renders shape, department pill, and tier pill
+			const tAEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T_A"]')!;
+			assert.strictEqual(tAEl.getAttribute('data-node-shape'), 'sculpted-card');
+			assert.strictEqual(host.querySelector<HTMLElement>('[data-ade-task-dept="T_A"]')?.textContent, 'Arch');
+			assert.strictEqual(tAEl.querySelector<HTMLElement>('.ade-mission-task-tier-pill')?.textContent, '≤L1');
+
+			// Gate card renders gate shape, four corner clamps, and upstream readiness 0/2
+			const tCEl = host.querySelector<HTMLElement>('.ade-mission-node[data-node-id="T_C"]')!;
+			assert.strictEqual(tCEl.getAttribute('data-dag-node-kind'), 'gate');
+			assert.strictEqual(tCEl.getAttribute('data-node-shape'), 'gate-card');
+			assert.strictEqual(tCEl.classList.contains('is-gate-task'), true);
+			assert.strictEqual(tCEl.querySelectorAll('.ade-mission-clamp').length, 4);
+			assert.ok(host.querySelector<HTMLElement>('[data-ade-task-deps="T_C"]')?.textContent?.includes('0/2'));
+
+			// Completing T_A promotes readiness to 1/2 and lights the T_A -> T_C edge as ready
+			tAEl.dispatchEvent(new mainWindow.PointerEvent('pointerdown', { button: 0, pointerId: 811, clientX: 200, clientY: 200, bubbles: true }));
+			mainWindow.dispatchEvent(new mainWindow.PointerEvent('pointerup', { button: 0, pointerId: 811, clientX: 200, clientY: 200, bubbles: true }));
+			host.querySelector<HTMLButtonElement>('button[data-ade-task-toggle-complete="T_A"]')!.click();
+			await timeout(30);
+			assert.ok(host.querySelector<HTMLElement>('[data-ade-task-deps="T_C"]')?.textContent?.includes('1/2'));
+			assert.strictEqual(host.querySelector('[data-from="T_A"][data-to="T_C"]')?.getAttribute('data-edge-state'), 'ready');
 		});
 
 	});

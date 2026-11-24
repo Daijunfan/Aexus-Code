@@ -5,7 +5,7 @@
 
 import { asCSSUrl } from '../../../../base/browser/cssValue.js';
 import { IDragAndDropData } from '../../../../base/browser/dnd.js';
-import { $, addDisposableListener, addStandardDisposableListener, append, clearNode, EventHelper, EventType } from '../../../../base/browser/dom.js';
+import { $, addDisposableListener, addStandardDisposableListener, append, clearNode, EventHelper, EventType, isHTMLElement } from '../../../../base/browser/dom.js';
 import { Button } from '../../../../base/browser/ui/button/button.js';
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { ListDragOverEffectPosition, ListDragOverEffectType } from '../../../../base/browser/ui/list/list.js';
@@ -387,7 +387,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		}
 	}
 
-	private applyProjectOsIcon(iconNode: HTMLElement, project: IAdeProject): void {
+	private applyProjectOsIcon(iconNode: HTMLElement, project: IAdeProject): AdeOsIconKind {
 		const isCloud = isCloudProjectUri(project.uri);
 		let osKind: AdeOsIconKind;
 		let tooltip: string;
@@ -409,6 +409,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			prefix: 'ade-os',
 			tooltip,
 		});
+		return osKind;
 	}
 
 	private applyStatusIndicator(element: HTMLElement, kind: 'working' | 'pending' | 'unread' | 'none', isBubble = false): void {
@@ -459,7 +460,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			const rootCount = this.projects.agents.filter(agent =>
 				!agent.parentId
 				&& this.uriIdentity.extUri.isEqual(agent.projectUri, item.project.uri)
-				&& Boolean(agent.archived) === this.projects.showArchived
+				&& Boolean(this.projects.isArchived(agent.id)) === this.projects.showArchived
 			).length;
 			if (rootCount > 0) {
 				template.countBadge.textContent = String(rootCount);
@@ -469,13 +470,14 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			}
 
 			const isCloud = isCloudProjectUri(item.project.uri);
-			this.applyProjectOsIcon(template.iconNode, item.project);
+			const projectOsKind = this.applyProjectOsIcon(template.iconNode, item.project);
 			template.row.setAttribute('data-child-rank', 'governor');
 			template.row.setAttribute('data-child-label', localize('adeDropTopLevelPreview', "→ Top-Level"));
 			if (isCloud) {
 				const cloudHostLabel = this.getCloudHostMeta(item.project.uri.authority)?.alias ?? item.project.uri.authority;
 				template.row.classList.add('ade-cloud-project');
 				template.cloudBadge.className = 'ade-cloud-host-badge';
+				template.cloudBadge.dataset.os = projectOsKind;
 				if (item.project.name.trim().toLowerCase() === cloudHostLabel.trim().toLowerCase()) {
 					template.cloudBadge.classList.add('is-same-as-name');
 				}
@@ -487,9 +489,10 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 				template.editDisposables.add(this.hoverService.setupManagedHover(
 					getDefaultHoverDelegate('mouse'),
 					template.cloudBadge,
-					localize('adeCloudProjectTooltip', "SSH Cloud Host Project ({0})", formatProjectDisplayPath(item.project.uri)),
+					localize('adeCloudProjectTooltip', "{0} · {1} ({2})", ADE_OS_ICON_LABELS[projectOsKind], cloudHostLabel, formatProjectDisplayPath(item.project.uri)),
 				));
 			} else {
+				delete template.cloudBadge.dataset.os;
 				template.cloudBadge.className = 'ade-cloud-host-badge';
 				template.cloudBadge.replaceChildren();
 				template.cloudBadge.hidden = true;
@@ -515,6 +518,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 			return;
 		}
 
+		delete template.cloudBadge.dataset.os;
 		template.cloudBadge.className = 'ade-cloud-host-badge';
 		template.cloudBadge.textContent = '';
 		template.cloudBadge.hidden = true;
@@ -542,7 +546,9 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		const session = agent.session;
 		const effectiveEngineId = session?.engineId ?? agent.preferredEngineId;
 		const orchestrated = this.projects.isOrchestrated(agent);
-		template.row.classList.add(orchestrated ? 'ade-orchestrated-agent' : 'ade-pure-worker', 'ade-agent-row', `rank-${rank}`, `depth-${Math.min(Math.max(1, node.depth - 1), ADE_MAX_STYLED_DEPTH)}`);
+		const safeRankSlug = String(rank).trim().replace(/[^a-z0-9_-]/gi, '-') || 'custom';
+		const safeColorSlug = String(rankDef.color).trim().replace(/[^a-z0-9_-]/gi, '-') || 'indigo';
+		template.row.classList.add(orchestrated ? 'ade-orchestrated-agent' : 'ade-pure-worker', 'ade-agent-row', `rank-${safeRankSlug}`, `depth-${Math.min(Math.max(1, node.depth - 1), ADE_MAX_STYLED_DEPTH)}`);
 		template.row.classList.add(agent.status === 'working' ? 'is-working' : 'is-idle');
 		if (isLocked) {
 			template.row.classList.add('ade-worktree-locked');
@@ -571,7 +577,7 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 		this.applyItemIcon(
 			template.iconNode,
 			icon,
-			isUnboundFallback ? `ade-tree-item-icon-draft role-color-${rankDef.color}` : undefined,
+			isUnboundFallback ? `ade-tree-item-icon-draft role-color-${safeColorSlug}` : undefined,
 		);
 		template.label.setResource({
 			name: agent.label,
@@ -609,17 +615,21 @@ class AdeTreeRenderer implements ITreeRenderer<AdeTreeItem, FuzzyScore, IAdeTree
 				}
 			}));
 		} else {
+			template.workTreeBadge.removeAttribute('role');
+			template.workTreeBadge.removeAttribute('tabindex');
 			template.workTreeBadge.hidden = true;
 		}
 
-		template.roleBadge.className = `ade-role-badge role-${rank} role-color-${rankDef.color}${rankDef.pureExecution ? ' pure-leaf' : ''}${isLocked ? ' locked' : ''}`;
+		template.roleBadge.className = `ade-role-badge role-${safeRankSlug} role-color-${safeColorSlug}${rankDef.pureExecution ? ' pure-leaf' : ''}${isLocked ? ' locked' : ''}`;
 		template.roleBadge.setAttribute('data-tier', getAdeRankTier(rank, roleSchema));
 		const rankIcon = $('span.ade-role-badge-icon', { 'aria-hidden': 'true' });
 		rankIcon.classList.add(...ThemeIcon.asClassNameArray(getAdeRankIcon(rank, roleSchema)));
 		template.roleBadge.replaceChildren(rankIcon, $('span.ade-badge-label', {}, badgeLabel));
 		template.roleBadge.hidden = false;
 		const roleTooltip = isLocked
-			? localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel)
+			? (agent.treeNodeId
+				? localize('adeLockedRoleBadgeNodeTooltip', "Role: {0} · Node [{1}] (Locked by Engineering Blueprint)", badgeLabel, agent.treeNodeId)
+				: localize('adeLockedRoleBadgeTooltip', "Role: {0} (Locked by Engineering Blueprint)", badgeLabel))
 			: rankDef.pureExecution
 				? localize('adeWorkerBadgeTooltip', "Role: {0} (Clean Native Context) — Click to change role", badgeLabel)
 				: localize('adeStaffBadgeTooltip', "Role: {0} — Click to change role", badgeLabel);
@@ -824,12 +834,18 @@ export class AdeProjectsView extends ViewPane {
 		if (onDidActiveEditorChange) {
 			this._register(onDidActiveEditorChange(() => this.updateSecretaryActiveState()));
 		}
+		this._register(this.onDidChangeBodyVisibility(visible => {
+			this.hasExplicitBodyVisibility = true;
+			this.inboxPanel?.setVisible(visible && this.sidebarMode === 'inbox');
+		}));
 	}
 
 	get selectedAgent(): IAdeAgent | undefined {
 		const selected = this.tree?.getFocus()[0] ?? this.tree?.getSelection()[0];
 		return selected?.kind === 'agent' ? selected.agent : undefined;
 	}
+
+	private hasExplicitBodyVisibility = false;
 
 	get isEditing(): boolean {
 		return this.editingAgentId !== undefined;
@@ -995,6 +1011,13 @@ export class AdeProjectsView extends ViewPane {
 		this._register(addStandardDisposableListener(treeContainer, EventType.KEY_DOWN, event => {
 			if (this.editingAgentId) {
 				return;
+			}
+			let targetNode: Node | null = event.target as Node | null;
+			while (targetNode && targetNode !== treeContainer) {
+				if (isHTMLElement(targetNode) && (targetNode.tagName === 'BUTTON' || targetNode.getAttribute('role') === 'button')) {
+					return;
+				}
+				targetNode = targetNode.parentNode;
 			}
 			const focused = tree.getFocus()[0];
 			if (!focused) {
@@ -1393,7 +1416,8 @@ export class AdeProjectsView extends ViewPane {
 		if (mode === 'inbox') {
 			if (this.treeHost) { this.treeHost.hidden = true; }
 			if (this.emptyStateHost) { this.emptyStateHost.hidden = true; }
-			this.inboxPanel?.setVisible(true);
+			const shouldShowInbox = !this.hasExplicitBodyVisibility || this.isBodyVisible();
+			this.inboxPanel?.setVisible(shouldShowInbox);
 		} else {
 			this.inboxPanel?.setVisible(false);
 			void this.refresh();
@@ -1606,7 +1630,11 @@ export class AdeProjectsView extends ViewPane {
 				toAction({
 					id: 'ade.mission.openParent',
 					label: localize('adeOpenParentMissionMenu', "Open {0} (Mission & Orchestration)", missionAlias),
-					run: () => this.commandService.executeCommand(ADE_OPEN_MISSION_COMMAND_ID, owningMissionTargetId),
+					run: () => this.commandService.executeCommand(
+						ADE_OPEN_MISSION_COMMAND_ID,
+						owningMissionTargetId,
+						...(agent.treeNodeId ? [{ focusNodeId: agent.treeNodeId }] : []),
+					),
 				}),
 				toAction({
 					id: 'ade.mission.openParentMission',
@@ -1616,7 +1644,11 @@ export class AdeProjectsView extends ViewPane {
 				toAction({
 					id: 'ade.mission.openParentOrchestration',
 					label: localize('adeOpenOrchestrationViewMenu', "Open Orchestration View (Staff Topology)"),
-					run: () => this.commandService.executeCommand(ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID, owningMissionTargetId),
+					run: () => this.commandService.executeCommand(
+						ADE_OPEN_ENGINEERING_ORCHESTRATION_COMMAND_ID,
+						owningMissionTargetId,
+						...(agent.treeNodeId ? [{ focusNodeId: agent.treeNodeId }] : []),
+					),
 				}),
 				new Separator(),
 			] : [])),
@@ -2028,6 +2060,10 @@ export class AdeProjectsView extends ViewPane {
 	}
 
 	override focus(): void {
+		if (this.sidebarMode === 'inbox' && this.inboxPanel) {
+			this.inboxPanel.focus();
+			return;
+		}
 		this.tree?.domFocus();
 	}
 
@@ -2038,10 +2074,12 @@ export class AdeProjectsView extends ViewPane {
 	}
 
 	override setVisible(visible: boolean): void {
+		this.hasExplicitBodyVisibility = true;
 		if (!visible) {
 			this.saveTreeState();
 		}
 		super.setVisible(visible);
+		this.inboxPanel?.setVisible(visible && this.sidebarMode === 'inbox');
 	}
 
 	override dispose(): void {

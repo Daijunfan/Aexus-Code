@@ -3,11 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-export declare const RANK_SUBCOMMANDS: readonly ['list', 'names', 'get', 'docs', 'rename', 'set-count'];
+export declare const RANK_SUBCOMMANDS: readonly ['list', 'names', 'get', 'docs', 'rename', 'mission-name', 'set-count'];
 
 export interface IRankMissionParsedInvocation {
 	readonly help: boolean;
 	readonly json: boolean;
+	readonly pretty?: boolean;
 	readonly windowId?: number;
 	readonly action?: string;
 	readonly fallbackAction?: string;

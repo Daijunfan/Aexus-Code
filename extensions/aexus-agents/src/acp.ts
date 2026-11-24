@@ -27,9 +27,10 @@ import {
 	terminateRemotePersistentSessionsByPrefix,
 } from './cloudTransport';
 import { AgentChildIdentity, ROLE_INIT_MARKER, SHARED_PURE_SCOPE_KEY, stripAdeControlEnv, stripInjectedAdeContextFromUserTurn } from './roleBridgeShared';
-import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, RpcPacket, withTimeout } from './runtime';
+import { agentIdentityScopeKey, capture, createTurnInterimUsageTracker, emitThinkingProgress, EngineRuntime, EngineRuntimeCapabilities, EngineSendOptions, EngineTurnTokenUsage, findExecutable, getConfiguredEngineTurnTimeoutMs, HistoryEntry, isAutonomousModeEnabled, JsonLineClient, NativeSession, normalizeProviderTokenUsage, prepareAgentChildEnv, prepareRemoteAgentChildEnv, raceWithCancellation, readJsonOutput, RpcPacket, withTimeout } from './runtime';
 
 const execFile = promisify(cp.execFile);
+const zstdDecompressAsync = promisify(zlib.zstdDecompress);
 
 interface AcpCapabilities {
 	loadSession?: boolean;
@@ -53,6 +54,13 @@ interface AcpContentBlock {
 interface AcpSessionUpdate {
 	sessionUpdate?: string;
 	type?: string;
+	toolCallId?: string;
+	id?: string;
+	status?: string;
+	isError?: boolean;
+	is_error?: boolean;
+	exitCode?: number;
+	error?: unknown;
 	content?: AcpContentBlock | AcpContentBlock[];
 	text?: string;
 	title?: string | null;
@@ -64,80 +72,8 @@ interface AcpSessionUpdate {
 	usage?: unknown;
 }
 
-function readTokenCount(record: Record<string, unknown>, ...keys: string[]): number {
-	for (const key of keys) {
-		const value = record[key];
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			return value;
-		}
-	}
-	return 0;
-}
-
-function readAcpPositiveCostUsd(record: Record<string, unknown>): number | undefined {
-	for (const key of ['costUsd', 'cost_usd', 'totalCostUsd', 'total_cost_usd', 'totalCost', 'cost']) {
-		const val = record[key];
-		if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
-			return val;
-		}
-		if (val && typeof val === 'object') {
-			const total = (val as Record<string, unknown>).total;
-			if (typeof total === 'number' && Number.isFinite(total) && total > 0) {
-				return total;
-			}
-		}
-	}
-	return undefined;
-}
-
-function readAcpModelString(record: Record<string, unknown>): string | undefined {
-	for (const key of ['model', 'modelId', 'model_id']) {
-		const val = record[key];
-		if (typeof val === 'string' && val.trim() && val.trim().toLowerCase() !== 'default') {
-			return val.trim();
-		}
-	}
-	return undefined;
-}
-
-function extractAcpTurnUsage(value: unknown, depth = 0): EngineTurnTokenUsage | undefined {
-	if (!value || typeof value !== 'object' || depth > 3) {
-		return undefined;
-	}
-	const record = value as Record<string, unknown>;
-	const outerCostUsd = readAcpPositiveCostUsd(record);
-	const outerModel = readAcpModelString(record);
-	for (const key of ['usage', 'tokenUsage', 'token_usage', 'tokens']) {
-		const nested = record[key];
-		if (nested && typeof nested === 'object') {
-			const usage = extractAcpTurnUsage(nested, depth + 1);
-			if (usage) {
-				return {
-					...usage,
-					...(usage.costUsd === undefined && outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
-					...(usage.model === undefined && outerModel !== undefined ? { model: outerModel } : {}),
-				};
-			}
-		}
-	}
-	const inputTokens = readTokenCount(record, 'inputTokens', 'input_tokens', 'input');
-	const outputTokens = readTokenCount(record, 'outputTokens', 'output_tokens', 'output');
-	const cacheReadTokens = readTokenCount(record, 'cacheReadTokens', 'cache_read_input_tokens', 'cachedInputTokens', 'cacheRead');
-	const cacheWriteTokens = readTokenCount(record, 'cacheWriteTokens', 'cache_creation_input_tokens', 'cacheWrite');
-	const totalTokens = readTokenCount(record, 'totalTokens', 'total_tokens', 'total') || inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-	if (totalTokens <= 0) {
-		return undefined;
-	}
-	return {
-		inputTokens,
-		outputTokens,
-		cacheReadTokens,
-		cacheWriteTokens,
-		totalTokens,
-		...(outerCostUsd !== undefined ? { costUsd: outerCostUsd } : {}),
-		...(outerModel !== undefined ? { model: outerModel } : {}),
-		estimated: false,
-	};
+function extractAcpTurnUsage(value: unknown): EngineTurnTokenUsage | undefined {
+	return normalizeProviderTokenUsage(value);
 }
 
 interface AcpSessionSetupResult {
@@ -353,11 +289,21 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 	}
 
+	protected readonly scopeIdentities = new Map<string, { readonly identity: AgentChildIdentity; readonly cwd?: string; readonly persistentOwnerId?: string }>();
+
 	protected async buildSpawnEnv(): Promise<NodeJS.ProcessEnv | undefined> {
 		return undefined;
 	}
 
 	protected ensureClientSlot(scopeKey = SHARED_PURE_SCOPE_KEY, identity?: AgentChildIdentity, cwd?: string, persistentOwnerId?: string): Promise<{ readonly slot: AcpClientSlot; readonly client: JsonLineClient }> {
+		if (scopeKey !== SHARED_PURE_SCOPE_KEY && identity) {
+			this.scopeIdentities.set(scopeKey, { identity, cwd, persistentOwnerId });
+		}
+		const storedMeta = scopeKey !== SHARED_PURE_SCOPE_KEY ? this.scopeIdentities.get(scopeKey) : undefined;
+		const effectiveIdentity = identity ?? storedMeta?.identity;
+		const effectiveCwd = cwd ?? storedMeta?.cwd;
+		const effectiveOwnerId = persistentOwnerId ?? storedMeta?.persistentOwnerId;
+
 		let slot = this.clientPool.get(scopeKey);
 		if (slot?.client && !slot.client.isClosed && slot.ready) {
 			const existingSlot = slot;
@@ -373,19 +319,19 @@ export abstract class AcpRuntime implements EngineRuntime {
 		currentSlot.ready = (async () => {
 			const baseEnv = await this.buildSpawnEnv();
 			const childEnv = this.remoteTarget
-				? { ...(baseEnv ?? {}), ...(await prepareRemoteAgentChildEnv(this.remoteTarget, identity ?? { sessionId: `${this.id}-pure`, pureWorker: true })) }
-				: await prepareAgentChildEnv(identity ?? { sessionId: `${this.id}-pure`, pureWorker: true }, baseEnv);
-			const persistentKey = scopeKey === SHARED_PURE_SCOPE_KEY
-				? `${buildRemotePersistentPrefix(this.id, SHARED_PURE_SCOPE_KEY)}-${randomUUID().slice(0, 8)}`
-				: `${buildRemotePersistentPrefix(this.id, persistentOwnerId || scopeKey)}-${randomUUID().slice(0, 8)}`;
+				? { ...(baseEnv ?? {}), ...(await prepareRemoteAgentChildEnv(this.remoteTarget, effectiveIdentity ?? { sessionId: `${this.id}-pure`, pureWorker: true })) }
+				: await prepareAgentChildEnv(effectiveIdentity ?? { sessionId: `${this.id}-pure`, pureWorker: true }, baseEnv);
+			const persistentKey = scopeKey !== SHARED_PURE_SCOPE_KEY
+				? `${buildRemotePersistentPrefix(this.id, effectiveOwnerId || scopeKey)}-${randomUUID().slice(0, 8)}`
+				: undefined;
 			const client = new JsonLineClient(
 				this.executable,
 				[...this.args],
-				cwd,
+				effectiveCwd,
 				childEnv,
 				this.remoteTarget,
 				this.remoteTarget && this.remoteTarget.os !== 'windows'
-					? { persistentSessionId: persistentKey }
+					? (persistentKey ? { persistentSessionId: persistentKey } : { killOnStdinClose: true })
 					: undefined,
 			);
 			if (this.clientPool.get(scopeKey) !== currentSlot) {
@@ -434,7 +380,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		const existingKey = this.sessionScopeKeys.get(sessionId);
 		if (existingKey) {
 			const slot = this.clientPool.get(existingKey);
-			if (slot?.client && !slot.client.isClosed && slot.ready) {
+			if ((slot?.client && !slot.client.isClosed && slot.ready) || this.scopeIdentities.has(existingKey)) {
 				return existingKey;
 			}
 		}
@@ -478,6 +424,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		this.sessionScopeKeys.delete(sessionId);
 		this.probedSessionTimestamps.delete(sessionId);
 		if (scopeKey && scopeKey !== SHARED_PURE_SCOPE_KEY) {
+			this.scopeIdentities.delete(scopeKey);
 			await this.resetClient(scopeKey);
 		} else if (closeFailedOnShared) {
 			const sharedSlot = this.clientPool.get(SHARED_PURE_SCOPE_KEY);
@@ -530,7 +477,10 @@ export abstract class AcpRuntime implements EngineRuntime {
 			this.knownSessions.set(session.id, session);
 			return session;
 		} catch {
-			void this.resetClient(SHARED_PURE_SCOPE_KEY).catch(() => { });
+			const sharedSlot = this.clientPool.get(SHARED_PURE_SCOPE_KEY);
+			if (sharedSlot && sharedSlot.openSessions.size === 0 && sharedSlot.loadingSessions.size === 0) {
+				void this.resetClient(SHARED_PURE_SCOPE_KEY).catch(() => { });
+			}
 			return {
 				id: randomUUID(),
 				cwd,
@@ -572,6 +522,11 @@ export abstract class AcpRuntime implements EngineRuntime {
 		if (resolvedScopeKey !== scopeKey && this.clientPool.get(scopeKey) === slot && !this.clientPool.has(resolvedScopeKey)) {
 			this.clientPool.delete(scopeKey);
 			this.clientPool.set(resolvedScopeKey, slot);
+			const savedIdentity = this.scopeIdentities.get(scopeKey);
+			this.scopeIdentities.delete(scopeKey);
+			if (savedIdentity) {
+				this.scopeIdentities.set(resolvedScopeKey, savedIdentity);
+			}
 		}
 		slot.openSessions.add(session.id);
 		this.sessionScopeKeys.set(session.id, resolvedScopeKey);
@@ -645,7 +600,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 			}
 		});
 		try {
-			const loaded = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] });
+			const loaded = await client.request<Partial<AcpSessionSetupResult> | undefined>('session/load', { sessionId: session.id, cwd: session.cwd, mcpServers: [] }, { timeoutMs: 30_000, token });
 			this.ingestSessionSetup(loaded);
 			slot.openSessions.add(session.id);
 		} finally {
@@ -948,9 +903,6 @@ export abstract class AcpRuntime implements EngineRuntime {
 					await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
 				} else {
 					await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }, cfgReqOpts).catch(() => { });
-					if (this.cachedConfigOptionIds.has('model')) {
-						await client.request('session/set_config_option', { sessionId: session.id, configId: 'model', value: normalizedModel }, cfgReqOpts).catch(() => { });
-					}
 				}
 			} else {
 				await client.request('session/set_model', { sessionId: session.id, modelId: normalizedModel }, cfgReqOpts).catch(() => { });
@@ -1039,28 +991,45 @@ export abstract class AcpRuntime implements EngineRuntime {
 			preTurnBaseline: this.lastRawSessionUsageBySession.get(session.id),
 			model: activeAcpModel,
 		});
+		const seenFailedToolCallIds = new Set<string>();
 		const listener = client.onPacket(packet => {
 			const params = packet.params ?? {};
 			if (packet.id !== undefined && packet.method) {
 				const targetSessionId = typeof params.sessionId === 'string' ? params.sessionId : undefined;
 				if (!targetSessionId || targetSessionId === session.id) {
-					if (packet.method === 'session/request_permission' && autoApprove) {
-						const permOpts = Array.isArray(params.options) ? (params.options as AcpPermissionOption[]) : [];
-						const allowOpt = permOpts.find(opt => opt.kind === 'allow_always')
-							?? permOpts.find(opt => opt.kind === 'allow_once')
-							?? permOpts.find(opt => typeof opt.kind === 'string' && !opt.kind.startsWith('reject'));
-						if (allowOpt) {
-							client.write({ jsonrpc: '2.0', id: packet.id, result: { outcome: { outcome: 'selected', optionId: allowOpt.optionId } } });
+					try { options?.onStreamActivity?.(); } catch { /* ignore */ }
+					if (autoApprove) {
+						if (packet.method === 'session/request_permission') {
+							const permOpts = Array.isArray(params.options) ? (params.options as AcpPermissionOption[]) : [];
+							const allowOpt = permOpts.find(opt => opt.kind === 'allow_always')
+								?? permOpts.find(opt => opt.kind === 'allow_once')
+								?? permOpts.find(opt => typeof opt.kind === 'string' && !opt.kind.startsWith('reject'))
+								?? permOpts.find(opt => !/reject|deny|cancel/i.test(`${opt.kind ?? ''} ${opt.optionId ?? ''} ${opt.name ?? ''}`));
+							client.write({
+								jsonrpc: '2.0',
+								id: packet.id,
+								result: { outcome: allowOpt ? { outcome: 'selected', optionId: allowOpt.optionId } : { outcome: 'cancelled' } },
+							});
+							return;
+						}
+						if (packet.method === 'elicitation/create') {
+							client.write({ jsonrpc: '2.0', id: packet.id, result: { action: 'cancel' } });
 							return;
 						}
 					}
-					void this.handleServerRequest(client, packet, session, token).catch(() => { });
+					try { options?.onExternalWaitStart?.(); } catch { /* ignore */ }
+					void this.handleServerRequest(client, packet, session, token)
+						.catch(() => { })
+						.finally(() => {
+							try { options?.onExternalWaitEnd?.(); } catch { /* ignore */ }
+						});
 				}
 				return;
 			}
 			if (packet.method !== 'session/update' || params.sessionId !== session.id || slot.loadingSessions.has(session.id)) {
 				return;
 			}
+			try { options?.onStreamActivity?.(); } catch { /* ignore */ }
 			const update = (params.update ?? params) as AcpSessionUpdate;
 			const updateUsage = extractAcpTurnUsage(update.usage ?? params.usage);
 			if (updateUsage) {
@@ -1086,10 +1055,37 @@ export abstract class AcpRuntime implements EngineRuntime {
 					emitThinkingProgress(stream, thought, `${this.id}-thinking`);
 					usageTracker.recordStreamDelta(thought, { skipToolErrorScan: true });
 				}
-			} else if (!token.isCancellationRequested && (kind === 'tool_call' || kind === 'tool_call_update')) {
-				const toolTitle = typeof update.title === 'string' && update.title.trim() ? update.title.trim() : undefined;
-				if (toolTitle || kind === 'tool_call') {
-					stream.progress(toolTitle ?? vscode.l10n.t('{0} is working…', this.name));
+			} else if (kind === 'tool_call' || kind === 'tool_call_update') {
+				const toolFailed = update.status === 'failed'
+					|| update.status === 'error'
+					|| update.isError === true
+					|| update.is_error === true
+					|| Boolean(update.error)
+					|| (typeof update.exitCode === 'number' && update.exitCode !== 0);
+				if (toolFailed) {
+					const tcId = typeof update.toolCallId === 'string' && update.toolCallId
+						? update.toolCallId
+						: (typeof update.id === 'string' && update.id ? update.id : undefined);
+					if (!tcId || !seenFailedToolCallIds.has(tcId)) {
+						if (tcId) {
+							seenFailedToolCallIds.add(tcId);
+						}
+						usageTracker.recordToolError();
+						const currentUsage = this.lastTurnUsageBySession.get(session.id);
+						if (currentUsage) {
+							this.lastTurnUsageBySession.set(session.id, {
+								...currentUsage,
+								hadToolError: true,
+								toolErrorCount: Math.max(currentUsage.toolErrorCount ?? 0, usageTracker.getToolErrorCount()),
+							});
+						}
+					}
+				}
+				if (!token.isCancellationRequested) {
+					const toolTitle = typeof update.title === 'string' && update.title.trim() ? update.title.trim() : undefined;
+					if (toolTitle || kind === 'tool_call') {
+						stream.progress(toolTitle ?? vscode.l10n.t('{0} is working…', this.name));
+					}
 				}
 			} else if (kind === 'available_commands_update' || kind === 'config_option_update' || kind === 'config_options_update') {
 				this.ingestSessionUpdateMetadata(update);
@@ -1125,15 +1121,19 @@ export abstract class AcpRuntime implements EngineRuntime {
 			if (token.isCancellationRequested) {
 				return;
 			}
+			const effectiveTimeoutMs = options?.timeoutMs ?? getConfiguredEngineTurnTimeoutMs();
+			const onAbort = () => sendCancelNotification();
+			options?.abortSignal?.addEventListener('abort', onAbort, { once: true });
 			try {
 				await client.request('session/prompt', { sessionId: session.id, prompt: promptParts }, {
+					timeoutMs: effectiveTimeoutMs,
 					token,
 					cancelGraceMs: 1500,
 					onCancel: sendCancelNotification,
 				});
 				session.provisional = false;
 			} catch (err) {
-				if (token.isCancellationRequested || err instanceof vscode.CancellationError) {
+				if (token.isCancellationRequested || options?.abortSignal?.aborted || err instanceof vscode.CancellationError) {
 					// If the ACP server did not settle `session/prompt` within the cancel grace window,
 					// recycle this session/client so the next prompt never collides with a wedged turn.
 					slot.openSessions.delete(session.id);
@@ -1148,6 +1148,8 @@ export abstract class AcpRuntime implements EngineRuntime {
 					return;
 				}
 				throw err;
+			} finally {
+				options?.abortSignal?.removeEventListener('abort', onAbort);
 			}
 		} finally {
 			listener.dispose();
@@ -1169,6 +1171,7 @@ export abstract class AcpRuntime implements EngineRuntime {
 		}
 		this.clientPool.clear();
 		this.sessionScopeKeys.clear();
+		this.scopeIdentities.clear();
 		this.lastTurnUsageBySession.clear();
 		this.lastRawSessionUsageBySession.clear();
 	}
@@ -1248,6 +1251,58 @@ export function decodeDshLogBuffer(buffer: Buffer, maxFrames = Number.POSITIVE_I
 		offset = frameEnd;
 	}
 	return Buffer.concat(chunks).toString('utf8');
+}
+
+export async function decodeDshLogBufferAsync(buffer: Buffer, maxFrames = Number.POSITIVE_INFINITY): Promise<string> {
+	if (buffer.length < 4) {
+		return buffer.toString('utf8');
+	}
+	const firstMagic = buffer.readUInt32LE(0);
+	if (firstMagic !== ZSTD_MAGIC && (firstMagic < ZSTD_SKIPPABLE_MIN || firstMagic > ZSTD_SKIPPABLE_MAX)) {
+		return buffer.toString('utf8');
+	}
+	const chunks: Buffer[] = [];
+	let offset = 0;
+	let frames = 0;
+	while (offset + 4 <= buffer.length && frames < maxFrames) {
+		const magic = buffer.readUInt32LE(offset);
+		if (magic >= ZSTD_SKIPPABLE_MIN && magic <= ZSTD_SKIPPABLE_MAX) {
+			if (offset + 8 > buffer.length) { break; }
+			const skip = buffer.readUInt32LE(offset + 4);
+			offset += 8 + skip;
+			continue;
+		}
+		if (magic !== ZSTD_MAGIC) { break; }
+		const frameEnd = findZstdFrameEnd(buffer, offset);
+		if (frameEnd === undefined) {
+			if (chunks.length === 0) {
+				try { return (await zstdDecompressAsync(buffer)).toString('utf8'); } catch { return ''; }
+			}
+			break;
+		}
+		try {
+			chunks.push(await zstdDecompressAsync(buffer.subarray(offset, frameEnd)));
+			frames++;
+		} catch {
+			if (chunks.length === 0) {
+				try { return (await zstdDecompressAsync(buffer)).toString('utf8'); } catch { return ''; }
+			}
+			break;
+		}
+		offset = frameEnd;
+	}
+	return Buffer.concat(chunks).toString('utf8');
+}
+
+async function readFilePrefix(filePath: string, maxBytes: number): Promise<Buffer> {
+	const fh = await fs.open(filePath, 'r');
+	try {
+		const buf = Buffer.allocUnsafe(maxBytes);
+		const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
+		return bytesRead < maxBytes ? buf.subarray(0, bytesRead) : buf;
+	} finally {
+		await fh.close().catch(() => undefined);
+	}
 }
 
 interface DshProjCacheRow<T = unknown> {
@@ -1486,14 +1541,18 @@ export class DshRuntime extends AcpRuntime {
 
 		const projMap = new Map<string, DshProjCacheFile['record']>();
 		try {
-			const projEntries = await fs.readdir(projDir);
-			await Promise.all(projEntries.filter(name => name.endsWith('.json')).map(async name => {
-				try {
-					const raw = JSON.parse(await fs.readFile(path.join(projDir, name), 'utf8')) as DshProjCacheFile;
-					const id = name.slice(0, -'.json'.length);
-					projMap.set(id, raw.record ?? (raw as DshProjCacheFile['record']));
-				} catch { /* Ignore unreadable cache entry. */ }
-			}));
+			const projEntries = (await fs.readdir(projDir)).filter(name => name.endsWith('.json'));
+			const batchSize = 32;
+			for (let i = 0; i < projEntries.length; i += batchSize) {
+				if (token.isCancellationRequested) { break; }
+				await Promise.all(projEntries.slice(i, i + batchSize).map(async name => {
+					try {
+						const raw = JSON.parse(await fs.readFile(path.join(projDir, name), 'utf8')) as DshProjCacheFile;
+						const id = name.slice(0, -'.json'.length);
+						projMap.set(id, raw.record ?? (raw as DshProjCacheFile['record']));
+					} catch { /* Ignore unreadable cache entry. */ }
+				}));
+			}
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { throw error; }
 		}
@@ -1552,7 +1611,8 @@ export class DshRuntime extends AcpRuntime {
 
 			if ((!cwd || !title) && loc?.logFile) {
 				try {
-					const decoded = decodeDshLogBuffer(await fs.readFile(loc.logFile), 8);
+					const prefixBuf = await readFilePrefix(loc.logFile, 160 * 1024);
+					const decoded = await decodeDshLogBufferAsync(prefixBuf, 8);
 					for (const line of decoded.split('\n')) {
 						if (!line) { continue; }
 						let event: DshEvent;
@@ -1632,10 +1692,11 @@ export class DshRuntime extends AcpRuntime {
 			if (!res || res.code !== 0) { return []; }
 			const b64 = res.stdout.toString('utf8').trim();
 			if (!b64) { return []; }
-			const text = decodeDshLogBuffer(Buffer.from(b64, 'base64'));
+			const text = await decodeDshLogBufferAsync(Buffer.from(b64, 'base64'));
 			const entries: HistoryEntry[] = [];
 			for (const line of text.split('\n')) {
 				if (token.isCancellationRequested || !line) { continue; }
+				if (!line.includes('"user/message"') && !line.includes('"assistant/message"')) { continue; }
 				let event: DshEvent;
 				try { event = JSON.parse(line) as DshEvent; } catch { continue; }
 				if (event.type === 'user/message' && event.data?.source?.kind === 'user') {
@@ -1660,11 +1721,11 @@ export class DshRuntime extends AcpRuntime {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') { return []; }
 			throw error;
 		}
-		const text = decodeDshLogBuffer(buffer);
+		const text = await decodeDshLogBufferAsync(buffer);
 		const entries: HistoryEntry[] = [];
 		for (const line of text.split('\n')) {
 			if (token.isCancellationRequested) { break; }
-			if (!line) { continue; }
+			if (!line || (!line.includes('"user/message"') && !line.includes('"assistant/message"'))) { continue; }
 			let event: DshEvent;
 			try { event = JSON.parse(line) as DshEvent; } catch { continue; }
 			if (event.type === 'user/message' && event.data?.source?.kind === 'user') {
@@ -2072,6 +2133,28 @@ export class AntigravityRuntime extends AcpRuntime {
 		await this.closeSession(session.id);
 		this.knownSessions.delete(session.id);
 		if (this.remoteTarget) {
+			if (/^[0-9a-f-]+$/i.test(session.id)) {
+				const safeId = session.id;
+				const posixCleanup = [
+					`for root in "$HOME/.gemini/antigravity" "$HOME/.antigravity"; do`,
+					`  [ -d "$root" ] || continue`,
+					`  rm -rf -- "$root/conversations/${safeId}.db" "$root/conversations/${safeId}.db-wal" "$root/conversations/${safeId}.db-shm" "$root/conversations/${safeId}.pb" "$root/brain/${safeId}" 2>/dev/null || true`,
+					`  if [ -f "$root/conversation_summaries.db" ]; then`,
+					`    if command -v sqlite3 >/dev/null 2>&1; then sqlite3 -bail "$root/conversation_summaries.db" "DELETE FROM conversation_summaries WHERE conversation_id = '${safeId}';" 2>/dev/null || true`,
+					`    elif command -v python3 >/dev/null 2>&1; then python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('DELETE FROM conversation_summaries WHERE conversation_id=?',(sys.argv[2],)); c.commit(); c.close()" "$root/conversation_summaries.db" '${safeId}' 2>/dev/null || true; fi`,
+					`  fi`,
+					`done`,
+				].join('\n');
+				const winCleanup = [
+					`$roots = @(Join-Path $env:USERPROFILE '.gemini\\antigravity'), @(Join-Path $env:USERPROFILE '.antigravity')`,
+					`foreach ($r in $roots) {`,
+					`  if (Test-Path -LiteralPath $r) {`,
+					`    Remove-Item -LiteralPath (Join-Path $r 'conversations\\${safeId}.db'), (Join-Path $r 'conversations\\${safeId}.db-wal'), (Join-Path $r 'conversations\\${safeId}.db-shm'), (Join-Path $r 'conversations\\${safeId}.pb'), (Join-Path $r 'brain\\${safeId}') -Recurse -Force -ErrorAction SilentlyContinue`,
+					`  }`,
+					`}`,
+				].join('; ');
+				await execRemoteShell(this.remoteTarget, posixCleanup, winCleanup, { timeoutMs: 12_000 }).catch(() => undefined);
+			}
 			return;
 		}
 		const sqliteBin = await this.resolveSqliteExecutable();

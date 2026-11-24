@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from '../../../../base/common/path.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
+import { parseOrchestrationGraph } from '../../common/adeOrchestrationGraph.js';
 import {
 	addEdgeToMermaid,
 	addNodeToMermaid,
@@ -21,13 +22,37 @@ import {
 	measureMissionEdgeLabelTextWidth,
 	MISSION_TASK_NODE_HEIGHT,
 	MISSION_TASK_NODE_WIDTH,
+	parseDualViewBlueprintMarkdown,
 	parseMissionMermaidDag,
+	parseStrictMinCompleterTier,
 	removeEdgeFromMermaid,
 	removeNodeFromMermaid,
 	renameNodeInMermaid,
 	setNodeEmployeeInMermaid,
 	toggleEdgeFailInMermaid,
+	upsertTaskMetadataInMermaid,
 } from '../../common/adeMissionDag.js';
+import {
+	applySafeMissionPatch,
+	blockMissionToken,
+	completeMissionToken,
+	createInitialMissionRuntimeState,
+	distillMissionNodeContext,
+	failMissionToken,
+	IMissionRuntimeState,
+	matchesCronExpression,
+	pauseMissionRun,
+	recordMissionNodeTurnUsage,
+	recordWatchdogWakeup,
+	rejectMissionToken,
+	resolveMissionGate,
+	setMissionBudgetLimit,
+	startMissionRun,
+	stopMissionRun,
+	validateCronExpression,
+	validateSourceTrigger,
+} from '../../common/adeMissionEngine.js';
+import { estimateTokenCostUsd, normalizeNonCachedInputTokens, resolveModelTokenPricingRate } from '../../common/adeModelPricing.js';
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, getMissionDisplayName } from '../../common/adeRoleSchema.js';
 import { renameMissionAlias } from '../../common/adeRankResize.js';
 import { AdeDocsBackendNodeService } from '../../node/adeDocsBackendService.js';
@@ -280,7 +305,7 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.ok(unknownAfterEdge.error && unknownAfterEdge.error.length > 0, 'unknown statement after a valid edge must surface an error');
 	});
 
-	test('parses every official blueprint in examples/blueprints/*.md cleanly without legacy worker= syntax or swallowed metadata', () => {
+	test('parses every official Dual-View blueprint in examples/blueprints/*.md cleanly without legacy syntax', () => {
 		const blueprintsDir = path.resolve(process.cwd(), 'examples', 'blueprints');
 		const required = [
 			'feature-ship.md',
@@ -294,21 +319,32 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 			const fullPath = path.join(blueprintsDir, fileName);
 			assert.ok(fs.existsSync(fullPath), `Missing official blueprint: ${fullPath}`);
 			const content = fs.readFileSync(fullPath, 'utf8');
-			assert.ok(content.includes('```mermaid'), `${fileName} must contain a fenced mermaid block`);
-			assert.ok(content.includes('## Node Pre-Prompts'), `${fileName} must contain ## Node Pre-Prompts`);
+			assert.ok(content.includes('## Mission Task DAG'), `${fileName} must contain ## Mission Task DAG`);
+			assert.ok(content.includes('## Orchestration Team'), `${fileName} must contain ## Orchestration Team`);
+			assert.ok(content.includes('## Task Specifications'), `${fileName} must contain ## Task Specifications`);
+			assert.ok(!content.includes('## Node Pre-Prompts'), `${fileName} must not contain retired ## Node Pre-Prompts`);
+			assert.ok(!content.includes('mission prompt set'), `${fileName} must not reference retired mission prompt set`);
 			assert.ok(!content.includes('## Tree Metadata'), `${fileName} must not contain legacy ## Tree Metadata`);
 			assert.ok(!content.includes('## Auto-Partitioned Managers'), `${fileName} must not contain legacy ## Auto-Partitioned Managers`);
 			assert.ok(!/worker=[a-z0-9_-]+:/i.test(content), `${fileName} must not contain legacy worker=engine:thinking syntax`);
 
-			const parsed = parseMissionMermaidDag(content);
-			assert.strictEqual(parsed.error, undefined, `${fileName} failed to parse: ${parsed.error}`);
-			assert.ok(parsed.nodes.length >= 4, `${fileName} should define at least 4 DAG nodes`);
-			assert.ok(parsed.edges.length >= 4, `${fileName} should define at least 4 DAG edges`);
-			assert.ok(parsed.nodes.some(n => n.kind === 'gate'), `${fileName} should include a human gate node`);
-			for (const node of parsed.nodes) {
+			const fences = [...content.matchAll(/```mermaid\r?\n([\s\S]*?)```/g)].map(m => m[1]);
+			assert.ok(fences.length >= 2, `${fileName} must define both Mission Task DAG and Orchestration Team mermaid blocks`);
+
+			const parsedDag = parseMissionMermaidDag(fences[0]);
+			assert.strictEqual(parsedDag.error, undefined, `${fileName} Task DAG failed to parse: ${parsedDag.error}`);
+			assert.ok(parsedDag.nodes.length >= 4, `${fileName} should define at least 4 Task DAG nodes`);
+			assert.ok(parsedDag.edges.length >= 4, `${fileName} should define at least 4 Task DAG edges`);
+			assert.ok(parsedDag.nodes.some(n => n.kind === 'gate'), `${fileName} should include a human gate node`);
+			for (const node of parsedDag.nodes) {
 				assert.ok(!node.label.includes('worker='), `${fileName} node ${node.id} leaked legacy syntax: ${node.label}`);
 				assert.ok(!node.label.includes('|'), `${fileName} node ${node.id} contains pipe syntax: ${node.label}`);
 			}
+
+			const parsedOrch = parseOrchestrationGraph(fences[1]);
+			assert.strictEqual(parsedOrch.error, undefined, `${fileName} Orchestration Team failed to parse: ${parsedOrch.error}`);
+			assert.ok(parsedOrch.nodes.filter(n => n.kind === 'staff').length >= 3, `${fileName} Orchestration Team should define at least 3 staff nodes`);
+			assert.ok(parsedOrch.edges.length >= 2, `${fileName} Orchestration Team should define collaboration edges`);
 		}
 	});
 
@@ -466,5 +502,353 @@ suite('ADE Pure-Frontend Mission Mermaid DAG, Flat Auto-Layout & Draw.io Orthogo
 		assert.strictEqual(parsedNodeRemoved.edges.length, 0, 'Incident edges removed with R1');
 		assert.strictEqual(parsedNodeRemoved.nodes.find(n => n.id === 'N1')?.checks?.length, 1, 'Surviving node N1 check preserved');
 		assert.ok(!nodeRemoved.includes('%% check R1'), 'Deleted node check directive pruned');
+	});
+
+	test('parseDualViewBlueprintMarkdown extracts Task DAG, Orchestration Team, heading swaps, Task Specifications, and single-Mermaid fallback', () => {
+		const dualDoc = [
+			'# Feature Delivery',
+			'',
+			'## Mission Task DAG',
+			'```mermaid',
+			'flowchart LR',
+			'  T1["Spec & Design"] --> T2["Implement"]',
+			'```',
+			'',
+			'## Orchestration Team',
+			'```mermaid',
+			'flowchart LR',
+			'  Gov["L1 Governor"] <--> Dev["L2 Developer"]',
+			'```',
+			'',
+			'## Task Specifications',
+			'',
+			'### T1: Spec & Design',
+			'Produce API contract and data models.',
+			'',
+			'### T2',
+			'Implement endpoints and unit tests.',
+		].join('\n');
+		const parsed = parseDualViewBlueprintMarkdown(dualDoc);
+		assert.ok(parsed.mermaidText.includes('T1["Spec & Design"]'));
+		assert.ok(parsed.orchestrationText?.includes('Gov["L1 Governor"]'));
+		assert.strictEqual(parsed.nodePrompts.T1, 'Produce API contract and data models.');
+		assert.strictEqual(parsed.nodePrompts.T2, 'Implement endpoints and unit tests.');
+
+		// Swapped heading order (Orchestration first, Task DAG second) must still classify both views accurately
+		const swappedDoc = [
+			'## Orchestration Team',
+			'```mermaid',
+			'flowchart LR',
+			'  Lead["Lead"] <--> Eng["Engineer"]',
+			'```',
+			'## Mission Task DAG',
+			'```mermaid',
+			'flowchart LR',
+			'  A["Alpha"] --> B["Beta"]',
+			'```',
+		].join('\n');
+		const swapped = parseDualViewBlueprintMarkdown(swappedDoc);
+		assert.ok(swapped.mermaidText.includes('A["Alpha"]'));
+		assert.ok(swapped.orchestrationText?.includes('Lead["Lead"]'));
+
+		// Single-Mermaid fallback
+		const single = parseDualViewBlueprintMarkdown('```mermaid\nflowchart LR\n  X["Only"] --> Y["One"]\n```');
+		assert.ok(single.mermaidText.includes('X["Only"]'));
+		assert.strictEqual(single.orchestrationText, undefined);
+		assert.deepStrictEqual(single.nodePrompts, {});
+	});
+
+	test('parser handles quoted %%, brackets, --> inside labels, escaped quotes, frozen cache immutability, and strict minCompleterTier', () => {
+		const mermaid = [
+			'flowchart LR',
+			'  N1["100%% Ready --> Build \\"v2\\""] --> N2["Verify [fast]"]',
+			'  %% check N1 [name=regex, match="/foo[0-9]+/i", expect_file="a.txt"]: echo "100%% ok"',
+			'  %% task N2 [owner=Lead, min_tier=2]',
+		].join('\n');
+		const parsed = parseMissionMermaidDag(mermaid);
+		assert.strictEqual(parsed.error, undefined, parsed.error);
+		const n1 = parsed.nodes.find(n => n.id === 'N1');
+		const n2 = parsed.nodes.find(n => n.id === 'N2');
+		assert.strictEqual(n1?.label, '100%% Ready --> Build "v2"');
+		assert.strictEqual(n1?.checks?.[0].expectOutputMatch, '/foo[0-9]+/i');
+		assert.strictEqual(n1?.checks?.[0].command, 'echo "100%% ok"');
+		assert.strictEqual(n2?.minCompleterTier, 2);
+
+		// Cached parse results must be deeply frozen so caller mutation cannot poison the LRU cache
+		assert.strictEqual(Object.isFrozen(parsed), true);
+		assert.strictEqual(Object.isFrozen(parsed.nodes), true);
+		assert.strictEqual(Object.isFrozen(parsed.nodes[0]), true);
+
+		// Strict minCompleterTier parser accepts L0..LN and rejects malformed strings like "L2abc" or negative values
+		assert.strictEqual(parseStrictMinCompleterTier('L2'), 2);
+		assert.strictEqual(parseStrictMinCompleterTier('3'), 3);
+		assert.strictEqual(parseStrictMinCompleterTier('0'), 0);
+		assert.strictEqual(parseStrictMinCompleterTier('L2abc'), undefined);
+		assert.strictEqual(parseStrictMinCompleterTier(-1), undefined);
+
+		// upsertTaskMetadataInMermaid persists valid min_tier & drops negative tier cleanly
+		const upserted = upsertTaskMetadataInMermaid('flowchart LR\n  N1["A"]', 'N1', { ownerNodeId: 'Gov', minCompleterTier: 2 });
+		assert.ok(upserted.includes('min_tier=2'));
+		const droppedInvalid = upsertTaskMetadataInMermaid(upserted, 'N1', { minCompleterTier: -1 });
+		assert.ok(!droppedInvalid.includes('min_tier='), 'Negative minCompleterTier must be dropped rather than serialized');
+	});
+
+	test('Mission Engine hardens run reset, nested returnStack rework, paused gate resolution, anti-dangling fail edges, FinOps pricing, and cron validation', () => {
+		// 1. startMissionRun resets previous run's tokens while keeping monotonic sequences
+		const linearGraph = parseMissionMermaidDag('flowchart LR\n  A["Plan"] --> B["Code"] --> C["Review"]');
+		assert.strictEqual(linearGraph.error, undefined);
+		const boundary = {
+			offGraphMaxTier: 1,
+			supervisors: [{ id: 'sup-1', tier: 1, managedNodeIds: ['A', 'B', 'C'] }],
+			nodeAssignments: {
+				A: { tier: 2, agentId: 'ag-a' },
+				B: { tier: 2, agentId: 'ag-b' },
+				C: { tier: 2, agentId: 'ag-c' },
+			},
+		};
+		let st: IMissionRuntimeState = {
+			...createInitialMissionRuntimeState('mis-hardening', DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, linearGraph.nodes.map(n => n.id)),
+			boundary,
+		};
+		st = startMissionRun(st, linearGraph, DEFAULT_ADE_ORGANIZATION_CONFIG, { now: 1_100 }).state;
+		const aTok1 = Object.values(st.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+		const failedRun1 = failMissionToken(st, linearGraph, { tokenId: aTok1.id, reason: 'Run 1 crash', now: 1_200 });
+		assert.strictEqual(failedRun1.ok, true);
+		assert.strictEqual(failedRun1.state.tokens[aTok1.id].status, 'frozen_failed');
+		const stoppedRun1 = stopMissionRun(failedRun1.state, 1_500);
+		assert.strictEqual(stoppedRun1.ok, true);
+		assert.ok(stoppedRun1.state.tokens[aTok1.id], 'Stopped run retains Run 1 token until next run starts');
+
+		const run2 = startMissionRun(stoppedRun1.state, linearGraph, DEFAULT_ADE_ORGANIZATION_CONFIG, { now: 2_000 });
+		assert.strictEqual(run2.ok, true, run2.error);
+		assert.strictEqual(run2.state.tokens[aTok1.id], undefined, 'Run 2 must clear stale Run 1 tokens');
+		assert.ok(run2.state.tokenSeq > failedRun1.state.tokenSeq, 'tokenSeq must remain strictly monotonic across runs');
+
+		// 2. Nested rejection preserves outer returnToNodeId via returnStack (C rejects to A -> A finishes to B -> B rejects to A -> A->B->C completes cleanly)
+		let s = run2.state;
+		const tA1 = Object.values(s.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+		s = completeMissionToken(s, linearGraph, { tokenId: tA1.id, summary: 'A1', now: 2_100 }).state;
+		const tB1 = Object.values(s.tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
+		s = completeMissionToken(s, linearGraph, { tokenId: tB1.id, summary: 'B1', now: 2_200 }).state;
+		const tC1 = Object.values(s.tokens).find(t => t.nodeId === 'C' && t.status === 'active')!;
+		const origWaveId = tC1.waveId;
+		s = rejectMissionToken(s, linearGraph, { tokenId: tC1.id, targetNodeId: 'A', reason: 'Fix spec', now: 2_300 }).state;
+		const tA2 = Object.values(s.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+		assert.strictEqual(tA2.returnToNodeId, 'C');
+		s = completeMissionToken(s, linearGraph, { tokenId: tA2.id, summary: 'A2', now: 2_400 }).state;
+		const tB2 = Object.values(s.tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
+		assert.strictEqual(tB2.returnToNodeId, 'C');
+		// Nested rejection from B back to A while already inside C's rework wave!
+		s = rejectMissionToken(s, linearGraph, { tokenId: tB2.id, targetNodeId: 'A', reason: 'Missing edge case', now: 2_500 }).state;
+		const tA3 = Object.values(s.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+		assert.strictEqual(tA3.returnToNodeId, 'B');
+		assert.strictEqual(tA3.returnStack?.length, 1);
+		assert.strictEqual(tA3.returnStack?.[0].nodeId, 'C');
+		s = completeMissionToken(s, linearGraph, { tokenId: tA3.id, summary: 'A3', now: 2_600 }).state;
+		const tB3 = Object.values(s.tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
+		assert.strictEqual(tB3.returnToNodeId, 'C', 'Reaching inner return target B must pop outer return target C');
+		assert.strictEqual(tB3.returnWaveId, origWaveId);
+		s = completeMissionToken(s, linearGraph, { tokenId: tB3.id, summary: 'B3', now: 2_700 }).state;
+		const tC2 = Object.values(s.tokens).find(t => t.nodeId === 'C' && t.status === 'active')!;
+		assert.strictEqual(tC2.waveId, origWaveId, 'Completing outer rework restores original waveId on C');
+		assert.strictEqual(tC2.returnToNodeId, undefined);
+
+		// 3. resolveMissionGate succeeds while mission is paused and queues deferred dispatch cleanly
+		const gateGraph = parseMissionMermaidDag('flowchart LR\n  A["Work"] --> G{{"Human Gate"}} --> B["Ship"]');
+		let gState: IMissionRuntimeState = {
+			...createInitialMissionRuntimeState('mis-gate-paused', DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, gateGraph.nodes.map(n => n.id)),
+			boundary: { offGraphMaxTier: 1, supervisors: [], nodeAssignments: { A: { tier: 2, agentId: 'a1' }, B: { tier: 2, agentId: 'b1' } } },
+		};
+		gState = startMissionRun(gState, gateGraph, DEFAULT_ADE_ORGANIZATION_CONFIG, { now: 3_100 }).state;
+		const gTokA = Object.values(gState.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+		gState = completeMissionToken(gState, gateGraph, { tokenId: gTokA.id, summary: 'Ready for signoff', now: 3_200 }).state;
+		gState = pauseMissionRun(gState, 3_300).state;
+		const resolvedPaused = resolveMissionGate(gState, gateGraph, { nodeId: 'G', decision: 'approve', note: 'Approved while paused', now: 3_400 });
+		assert.strictEqual(resolvedPaused.ok, true, resolvedPaused.error);
+		assert.ok(resolvedPaused.state.deferredEffects?.some(e => e.kind === 'dispatch_token' && e.nodeId === 'B'));
+
+		// 4. applySafeMissionPatch anti-dangling rejects node reachable ONLY via a dead fail edge from an already-completed node
+		const patchGraph = parseMissionMermaidDag('flowchart LR\n  A["Done"] --> B["Live"]\n  A -->|fail| C["Fallback"]\n  B --> D["End"]\n  C --> D');
+		let pState: IMissionRuntimeState = {
+			...createInitialMissionRuntimeState('mis-patch', DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, patchGraph.nodes.map(n => n.id)),
+			boundary: { offGraphMaxTier: 1, supervisors: [{ id: 'sup-1', tier: 1, managedNodeIds: ['A', 'B', 'C', 'D'] }], nodeAssignments: { A: { tier: 2, agentId: 'a' }, B: { tier: 2, agentId: 'b' }, C: { tier: 2, agentId: 'c' }, D: { tier: 2, agentId: 'd' } } },
+		};
+		pState = startMissionRun(pState, patchGraph, DEFAULT_ADE_ORGANIZATION_CONFIG, { now: 4_100 }).state;
+		const pTokA = Object.values(pState.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+		pState = completeMissionToken(pState, patchGraph, { tokenId: pTokA.id, summary: 'A ok', now: 4_200 }).state;
+		const badPatch = applySafeMissionPatch(pState, patchGraph, {
+			caller: { isHumanUser: true },
+			newMermaidText: 'flowchart LR\n  A["Done"] -->|fail| D["End"]',
+			reason: 'Try to leave D only on dead fail edge of completed A',
+			now: 4_300,
+		});
+		assert.strictEqual(badPatch.ok, false);
+		assert.strictEqual(badPatch.code, 'DANGLING_NODE_VIOLATION');
+
+		// 5. Model pricing & FinOps hardening
+		// 5a. Context-window-only override on ollama/* stays local_free ($0)
+		const ollamaOverride = resolveModelTokenPricingRate('ollama/qwen3:32b', 'aexus-opencode', { 'ollama/*': { contextWindowTokens: 65_536 } });
+		assert.strictEqual(ollamaOverride.isLocalFree, true);
+		assert.strictEqual(ollamaOverride.source, 'local_free');
+		// 5b. Short patterns o1/o3 require token boundaries (no false match on foo1-bar or studio3)
+		const foo1 = resolveModelTokenPricingRate('custom/foo1-bar');
+		const studio3 = resolveModelTokenPricingRate('custom/studio3');
+		assert.strictEqual(foo1.source, 'fallback', 'foo1-bar must not falsely match OpenAI o1');
+		assert.strictEqual(studio3.source, 'fallback', 'studio3 must not falsely match OpenAI o3');
+		assert.strictEqual(resolveModelTokenPricingRate('openai/o3-2025').matchedPattern, 'o3');
+		// 5c. OpenAI/Codex inclusive inputTokens detected even when totalTokens is omitted
+		const codexNoTotal = estimateTokenCostUsd({
+			inputTokens: 1_000_000,
+			outputTokens: 100_000,
+			cacheReadTokens: 800_000,
+			model: 'gpt-5.3-codex',
+			engineId: 'aexus-codex',
+		});
+		// Non-cached input = 200k * 1.75 ($0.35) + cacheRead = 800k * 0.175 ($0.14) + output = 100k * 14.0 ($1.40) = $1.89
+		assert.strictEqual(codexNoTotal.costUsd, 1.89);
+		// 5d. Paid model reporting placeholder costUsd: 0 with billable tokens falls back to estimation & trips budget
+		let finState = setMissionBudgetLimit(run2.state, 0.50, 5_000);
+		finState = recordMissionNodeTurnUsage(finState, 'A', {
+			inputTokens: 200_000,
+			outputTokens: 50_000,
+			costUsd: 0,
+			model: 'claude-sonnet-4-6',
+			engineId: 'aexus-claude',
+			timestamp: 5_100,
+		});
+		assert.ok((finState.nodeTelemetry?.A?.costUsd ?? 0) > 0.50, 'Placeholder costUsd: 0 on paid cloud model must fall back to token estimation');
+		assert.strictEqual(finState.budgetCircuitTripped, true);
+
+		// 6. Cron strict validation, N/step, and wrap-around dow ranges
+		assert.strictEqual(validateCronExpression('5/15 9-17 * * 5-1'), undefined);
+		assert.ok(validateCronExpression('abc * * * *'), 'Must reject non-numeric cron tokens');
+		assert.ok(validateCronExpression('99 * * * *'), 'Must reject out-of-range minute 99');
+		assert.ok(validateCronExpression('*/0 * * * *'), 'Must reject zero step');
+		assert.ok(validateSourceTrigger(linearGraph, { nodeId: 'A', kind: 'cron', cronExpr: '99 * * * *' }));
+		assert.strictEqual(matchesCronExpression('5/15 * * * *', new Date(2026, 0, 1, 10, 5)), true);
+		assert.strictEqual(matchesCronExpression('5/15 * * * *', new Date(2026, 0, 1, 10, 20)), true);
+		assert.strictEqual(matchesCronExpression('5/15 * * * *', new Date(2026, 0, 1, 10, 15)), false);
+		// Wrap-around Fri..Mon (`5-1`): 2026-01-02 is Fri(5), 01-03 Sat(6), 01-04 Sun(0), 01-05 Mon(1), 01-06 Tue(2)
+		assert.strictEqual(matchesCronExpression('0 9 * * 5-1', new Date(2026, 0, 2, 9, 0)), true);
+		assert.strictEqual(matchesCronExpression('0 9 * * 5-1', new Date(2026, 0, 4, 9, 0)), true);
+		assert.strictEqual(matchesCronExpression('0 9 * * 5-1', new Date(2026, 0, 5, 9, 0)), true);
+		assert.strictEqual(matchesCronExpression('0 9 * * 5-1', new Date(2026, 0, 6, 9, 0)), false);
+		assert.strictEqual(matchesCronExpression('abc * * * *', new Date(2026, 0, 1, 0, 0)), false);
+	});
+
+	test('Round 2 C4 completionContract Mermaid directives & Mission Engine P0-C/P1-8/P2 hardening', () => {
+		// 1. Parse & roundtrip %% task [...] completionContract directives
+		const mmd = [
+			'flowchart LR',
+			'  N1["Implement API"] --> N2["Release"]',
+			'  %% task N1 [owner=BE_Lead, require_checks=true, require_artifact=true, require_files=true, require_wb=WB_BE|wb:WB_ARCH, min_summary=40]',
+		].join('\n');
+		const parsed = parseMissionMermaidDag(mmd);
+		assert.strictEqual(parsed.error, undefined, parsed.error);
+		const n1 = parsed.nodes.find(n => n.id === 'N1')!;
+		assert.deepStrictEqual(n1.completionContract, {
+			requireChecksPassed: true,
+			requireArtifact: true,
+			requireFiles: true,
+			requiredWhiteboardIds: ['WB_BE', 'WB_ARCH'],
+			minSummaryChars: 40,
+		});
+
+		const updated = upsertTaskMetadataInMermaid(mmd, 'N2', {
+			ownerNodeId: 'CEO',
+			completionContract: {
+				requireChecksPassed: true,
+				requireArtifact: true,
+				requiredWhiteboardIds: ['wb:WB_REL'],
+				minSummaryChars: 25,
+			},
+		});
+		const reparsed = parseMissionMermaidDag(updated);
+		assert.strictEqual(reparsed.error, undefined, reparsed.error);
+		assert.deepStrictEqual(reparsed.nodes.find(n => n.id === 'N2')?.completionContract, {
+			requireChecksPassed: true,
+			requireArtifact: true,
+			requiredWhiteboardIds: ['WB_REL'],
+			minSummaryChars: 25,
+		});
+
+		// 2. P0-C: distillMissionNodeContext and recordWatchdogWakeup always emit [Aexus System · Baton Token] on line 1
+		const g = parseMissionMermaidDag('flowchart LR\n  A["Code"] --> B["Review"]');
+		let st: IMissionRuntimeState = {
+			...createInitialMissionRuntimeState('mis-r2-dag', DEFAULT_ADE_ORGANIZATION_CONFIG, undefined, ['A', 'B']),
+			boundary: {
+				offGraphMaxTier: 1,
+				supervisors: [{ id: 'sup-1', tier: 1, managedNodeIds: ['A', 'B'] }],
+				nodeAssignments: { A: { tier: 2, agentId: 'ag-a' }, B: { tier: 2, agentId: 'ag-b' } },
+			},
+		};
+		st = startMissionRun(st, g, DEFAULT_ADE_ORGANIZATION_CONFIG, { now: 1_000 }).state;
+		const tokA = Object.values(st.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!;
+
+		const distilled = distillMissionNodeContext(st, g, 'A', { now: 1_200 });
+		assert.strictEqual(distilled.ok, true, distilled.error);
+		const distillDispatch = distilled.effects.find(e => e.kind === 'dispatch_token');
+		assert.ok(distillDispatch && distillDispatch.kind === 'dispatch_token');
+		assert.ok(distillDispatch.prompt.startsWith('[Aexus System · Baton Token]'), 'Distill prompt must start with canonical system envelope');
+		assert.ok(distillDispatch.prompt.includes('[Context Distilled & Session Refreshed]'));
+
+		const nudge = recordWatchdogWakeup(distilled.state, { tokenId: tokA.id, reason: 'silence_timeout', now: 1_500 });
+		assert.strictEqual(nudge.ok, true, nudge.error);
+		const nudgeEff = nudge.effects.find(e => e.kind === 'wakeup_agent');
+		assert.ok(nudgeEff && nudgeEff.kind === 'wakeup_agent');
+		assert.ok(nudgeEff.message.startsWith('[Aexus System · Baton Token]'), 'Silence wakeup must start with canonical system envelope');
+
+		// 3. P2: blockMissionToken rejects NaN / non-positive maxDurationMs; wakeBlocked emits canonical system envelope
+		assert.strictEqual(blockMissionToken(st, { tokenId: tokA.id, reason: 'bad', maxDurationMs: Number.NaN, now: 1_600 }).code, 'INVALID_STATE');
+		assert.strictEqual(blockMissionToken(st, { tokenId: tokA.id, reason: 'bad', maxDurationMs: -10, now: 1_600 }).code, 'INVALID_STATE');
+		const blockedOk = blockMissionToken(st, { tokenId: tokA.id, reason: 'training', maxDurationMs: 60_000, now: 1_600 });
+		assert.strictEqual(blockedOk.ok, true);
+		const woken = recordWatchdogWakeup(blockedOk.state, { tokenId: tokA.id, reason: 'block_expired', now: 62_000 });
+		assert.strictEqual(woken.ok, true);
+		const wakeEff = woken.effects.find(e => e.kind === 'wakeup_agent');
+		assert.ok(wakeEff && wakeEff.kind === 'wakeup_agent' && wakeEff.message.startsWith('[Aexus System · Baton Token]'));
+
+		// 4. P2: rejectMissionToken enforces per-edge bounce ceiling
+		let rejState = completeMissionToken(st, g, { tokenId: tokA.id, summary: 'A done', now: 2_000 }).state;
+		for (let i = 0; i < 2; i++) {
+			const bTok = Object.values(rejState.tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
+			const rej = rejectMissionToken(rejState, g, { tokenId: bTok.id, reason: `fix-${i}`, maxRejectBouncesPerEdge: 2, now: 2_100 + i * 10 });
+			assert.strictEqual(rej.ok, true, rej.error);
+			rejState = completeMissionToken(rej.state, g, {
+				tokenId: Object.values(rej.state.tokens).find(t => t.nodeId === 'A' && t.status === 'active')!.id,
+				summary: `A rework ${i}`,
+				now: 2_105 + i * 10,
+			}).state;
+		}
+		const bTok3 = Object.values(rejState.tokens).find(t => t.nodeId === 'B' && t.status === 'active')!;
+		const rejCapped = rejectMissionToken(rejState, g, { tokenId: bTok3.id, reason: 'fix-2', maxRejectBouncesPerEdge: 2, now: 2_200 });
+		assert.strictEqual(rejCapped.ok, false);
+		assert.ok(rejCapped.error?.includes('MAX_REJECT_BOUNCES_EXCEEDED'));
+
+		// 5. P1-8: normalizeNonCachedInputTokens separates inclusive OpenAI/Codex cache reads cleanly without breaking DSH
+		const normCodex = normalizeNonCachedInputTokens({
+			inputTokens: 100_000,
+			outputTokens: 20_000,
+			cacheReadTokens: 80_000,
+			totalTokens: 120_000,
+			model: 'gpt-5.3-codex',
+			engineId: 'aexus-codex',
+		});
+		assert.strictEqual(normCodex.inputIncludedCacheRead, true);
+		assert.strictEqual(normCodex.inputTokens, 20_000);
+		assert.strictEqual(normCodex.totalTokens, 120_000);
+
+		const telState = recordMissionNodeTurnUsage(st, 'A', {
+			inputTokens: 100_000,
+			outputTokens: 20_000,
+			cacheReadTokens: 80_000,
+			totalTokens: 120_000,
+			model: 'gpt-5.3-codex',
+			engineId: 'aexus-codex',
+			timestamp: 3_000,
+		});
+		assert.strictEqual(telState.nodeTelemetry?.A?.inputTokens, 20_000, 'Non-cached inputTokens must not double-count cacheReadTokens');
+		assert.strictEqual(telState.nodeTelemetry?.A?.cacheReadTokens, 80_000);
+		assert.strictEqual(telState.nodeTelemetry?.A?.totalTokens, 120_000);
 	});
 });

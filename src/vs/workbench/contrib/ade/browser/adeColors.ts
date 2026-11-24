@@ -105,3 +105,31 @@ export const ADE_STUDIO_RESEARCH_SECONDARY = registerColor('ade.studio.researchS
 	hcDark: '#F9A8D4',
 	hcLight: '#9D174D'
 }, localize('ade.studio.researchSecondary', "Secondary accent for Research Mode canvases in the ADE Studio."));
+
+export const ADE_STUDIO_ACCENT = registerColor('ade.studio.accent', {
+	dark: '#38BDF8',
+	light: '#0369A1',
+	hcDark: '#7DD3FC',
+	hcLight: '#075985'
+}, localize('ade.studio.accent', "Primary interactive accent in the ADE Engineering & Research Studio."));
+
+export const ADE_STUDIO_DANGER = registerColor('ade.studio.danger', {
+	dark: '#F87171',
+	light: '#B91C1C',
+	hcDark: '#FF8080',
+	hcLight: '#991B1B'
+}, localize('ade.studio.danger', "Danger and conflict accent in the ADE Engineering & Research Studio."));
+
+export const ADE_STUDIO_REWORK = registerColor('ade.studio.rework', {
+	dark: '#C084FC',
+	light: '#6D28D9',
+	hcDark: '#E9D5FF',
+	hcLight: '#5B21B6'
+}, localize('ade.studio.rework', "Rework and retry accent in the ADE Engineering & Research Studio."));
+
+export const ADE_STUDIO_MUTED_INK = registerColor('ade.studio.mutedInk', {
+	dark: '#CBD5E1',
+	light: '#334155',
+	hcDark: '#FFFFFF',
+	hcLight: '#000000'
+}, localize('ade.studio.mutedInk', "Muted secondary text ink meeting WCAG AA contrast in the ADE Studio."));

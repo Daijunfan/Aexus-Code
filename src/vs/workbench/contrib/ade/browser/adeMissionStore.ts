@@ -26,11 +26,13 @@ import { ADE_SECRETARY_TIER, ADE_USER_TIER } from '../../../../platform/ade/comm
 import { DEFAULT_ADE_ORGANIZATION_CONFIG, normalizeAdeEngineId, resolveEffectiveRankDefinition } from '../../../../platform/ade/common/adeRoleSchema.js';
 import { createDecorator, IInstantiationService, ServiceIdentifier } from '../../../../platform/instantiation/common/instantiation.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { IWorkbenchModeService } from '../../../services/workbenchMode/common/workbenchMode.js';
 import { ADE_SECRETARY_ID, AdeEngineeringViewMode, encodeAdeEngineeringInputSpec, IAdeAgent, IAdeEditorService, IAdeProjectsService } from '../common/ade.js';
 import { IAdeRoleSchemaService } from '../common/adeRoleSchemaService.js';
 import { AdeEngineeringEditorInput } from './adeEngineeringEditorPane.js';
+import { IAdePendingMissionNodeFocus, inferEngineeringViewModeForNode } from './adeEngineeringViewLinkage.js';
 import { IAdeSessionsService } from './adeSessionsService.js';
 
 /** Legacy monolithic single-key storage (auto-migrated to v2 hot index + cold per-Mission files). */
@@ -105,6 +107,10 @@ export interface IAdeMissionCaller {
 	readonly isHumanUser: boolean;
 	readonly isSecretary?: boolean;
 	readonly callerSessionId?: string;
+	/** True when the caller is the top-rank staff member (e.g. L1) bound to this Mission's Orchestration canvas. */
+	readonly isTopRankOrchestrationStaff?: boolean;
+	/** True when the caller is any staff member bound to this Mission's Orchestration canvas. */
+	readonly isOrchestrationMember?: boolean;
 }
 
 export interface IAdeMissionRemoveResult {
@@ -115,12 +121,20 @@ export interface IAdeMissionRemoveResult {
 
 /**
  * Enforces strict Mission ownership authority for destructive / structural blueprint writes:
- * Whichever session (at any rank L0 or L1..LN) created a Mission is the ONLY agent session
- * permitted to overwrite/delete its Mission orchestration; Human User (L-1) always retains full authority.
+ * - Human User (L-1) always retains full authority.
+ * - On User-created standalone Orchestration workspaces (`ownerSessionId` empty or `ownerTier <= L-1`),
+ *   the highest-rank staff role on that Orchestration canvas (e.g. L1 Chief Architect / Governor)
+ *   holds full operational authority (including `mission.blueprint.apply`, `mission.open`, `mission.rename`).
+ * - Otherwise, only the exact owner session (L0 or L1..LN) may overwrite/delete its Mission orchestration.
  */
 export function canCallerOperateMission(mission: IAdeMissionRecord, caller: IAdeMissionCaller): boolean {
 	if (caller.isHumanUser) {
 		return true;
+	}
+	if (caller.isTopRankOrchestrationStaff && Boolean(mission.orchestrationText?.trim())) {
+		if (!mission.ownerSessionId || mission.ownerTier <= ADE_USER_TIER || (caller.callerSessionId && caller.callerSessionId === mission.ownerSessionId)) {
+			return true;
+		}
 	}
 	if (mission.ownerTier <= ADE_USER_TIER || !mission.ownerSessionId) {
 		return false;
@@ -133,15 +147,15 @@ export function canCallerOperateMission(mission: IAdeMissionRecord, caller: IAde
 
 /**
  * Authorizes read-only Mission topology inspection (`mission.get`, `mission.blueprint.get`):
- * Human User (L-1), Secretary (L0), the Mission owner, and any bound off-graph supervisor of the Mission
- * may inspect its Mermaid DAG so off-graph supervisors can review topology before issuing scoped patches.
+ * Human User (L-1), Secretary (L0), the Mission owner, any Orchestration staff member bound to
+ * this workspace, and any bound off-graph supervisor of the Mission may inspect its Mermaid DAG.
  */
 export function canCallerReadMission(
 	mission: IAdeMissionRecord,
 	caller: IAdeMissionCaller,
 	runtime?: Pick<IMissionRuntimeState, 'boundary'>,
 ): boolean {
-	if (caller.isHumanUser || caller.isSecretary || canCallerOperateMission(mission, caller)) {
+	if (caller.isHumanUser || caller.isSecretary || caller.isOrchestrationMember || canCallerOperateMission(mission, caller)) {
 		return true;
 	}
 	const callerId = caller.callerSessionId;
@@ -163,6 +177,11 @@ export interface IAdeMissionOpenOptions {
 	readonly viewMode?: AdeEngineeringViewMode;
 	readonly openSiblingViews?: boolean;
 	readonly focusNodeId?: string;
+	readonly focusTokenId?: string;
+	readonly highlightNodeIds?: readonly string[];
+	readonly preferExistingGroup?: boolean;
+	readonly openPopover?: 'task' | 'token' | 'whiteboard';
+	readonly whiteboardSection?: string;
 	readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops';
 	readonly openAgentBeside?: boolean;
 }
@@ -202,15 +221,18 @@ export interface IAdeMissionService {
 	updateMermaid(id: string, mermaidText: string): IAdeMissionRecord | undefined;
 	updateNodePrompt(id: string, nodeId: string, prompt: string): IAdeMissionRecord | undefined;
 	updateNodePrompts(id: string, prompts: Readonly<Record<string, string>>): IAdeMissionRecord | undefined;
-	updateTaskStatuses(id: string, taskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>>): IAdeMissionRecord | undefined;
+	replaceNodePrompts?(id: string, prompts: Readonly<Record<string, string>> | undefined): IAdeMissionRecord | undefined;
+	updateTaskStatuses(id: string, taskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>>, options?: { readonly deferPersist?: boolean; readonly silent?: boolean }): IAdeMissionRecord | undefined;
 	updateOrchestrationText(id: string, orchestrationText: string, options?: { readonly replaceWhiteboards?: boolean; readonly replacePositions?: boolean }): IAdeMissionRecord | undefined;
 	updateOrchestrationLayoutMode?(id: string, layoutMode: OrchestrationLayoutMode): IAdeMissionRecord | undefined;
 	ensureOrchestrationStaffSynced?(id: string): void;
 	updateOrchestrationPositions(id: string, positions: Readonly<Record<string, IMissionNodePosition>>): IAdeMissionRecord | undefined;
+	removeOrchestrationPositions?(id: string, nodeIds: readonly string[]): IAdeMissionRecord | undefined;
 	clearOrchestrationPositions(id: string): IAdeMissionRecord | undefined;
 	updateWhiteboards(id: string, whiteboards: Readonly<Record<string, IOrchestrationWhiteboard>>): IAdeMissionRecord | undefined;
-	updateOrchestrationRuntime(id: string, orchestrationRuntime: IOrchestrationRuntimeState | undefined, options?: { readonly deferPersist?: boolean }): IAdeMissionRecord | undefined;
+	updateOrchestrationRuntime(id: string, orchestrationRuntime: IOrchestrationRuntimeState | undefined, options?: { readonly deferPersist?: boolean; readonly silent?: boolean }): IAdeMissionRecord | undefined;
 	updateNodeChecks(id: string, nodeId: string, checks: readonly IMissionNodeCheckHook[]): IAdeMissionRecord | undefined;
+	replaceAllNodeChecks?(id: string, checks: Readonly<Record<string, readonly IMissionNodeCheckHook[]>> | undefined): IAdeMissionRecord | undefined;
 	upsertNodeCheck(id: string, nodeId: string, check: IMissionNodeCheckHook): IAdeMissionRecord | undefined;
 	removeNodeCheck(id: string, nodeId: string, checkId?: string): IAdeMissionRecord | undefined;
 	updateRuntime(id: string, runtime: IMissionRuntimeState | undefined, options?: { readonly deferPersist?: boolean }): IAdeMissionRecord | undefined;
@@ -220,6 +242,8 @@ export interface IAdeMissionService {
 	deleteMission(id: string): boolean;
 	removeMissionWithEmployees(id: string, options?: { readonly deleteEngineHistory?: boolean }): Promise<IAdeMissionRemoveResult>;
 	openMissionEditor(id: string, options?: IAdeMissionOpenOptions): Promise<void>;
+	batch?<T>(fn: () => T): T;
+	flushPersist?(): Promise<void>;
 }
 
 export class AdeMissionStoreService extends Disposable implements IAdeMissionService {
@@ -237,6 +261,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 	private readonly _onDidChangeExternal = this._register(new Emitter<void>());
 	readonly onDidChangeExternal = this._onDidChangeExternal.event;
 	private isPersisting = false;
+	private batchDepth = 0;
+	private batchNeedsPersist = false;
+	private readonly pendingColdOps = new Set<Promise<void>>();
 	/** Compact 64-bit content fingerprints for O(1) self-echo filtering without retaining full JSON copies in RAM. */
 	private readonly recentSavedFingerprints = new Set<string>();
 	private deferredPersistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -309,6 +336,41 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		return this.coldHydrationPromise ?? Promise.resolve();
 	}
 
+	batch<T>(fn: () => T): T {
+		this.batchDepth++;
+		try {
+			return fn();
+		} finally {
+			this.batchDepth = Math.max(0, this.batchDepth - 1);
+			if (this.batchDepth === 0 && (this.batchNeedsPersist || this.dirtyMissionIds.size > 0 || this.deletedMissionIds.size > 0)) {
+				this.batchNeedsPersist = false;
+				this.persist();
+			}
+		}
+	}
+
+	async flushPersist(): Promise<void> {
+		if (this.batchDepth === 0 && (this.deferredPersistTimer !== undefined || this.dirtyMissionIds.size > 0 || this.deletedMissionIds.size > 0)) {
+			this.persist();
+		}
+		if (this.pendingColdOps.size > 0) {
+			await Promise.allSettled([...this.pendingColdOps]);
+		}
+	}
+
+	private trackColdMissionOp(op: () => Promise<void>): void {
+		let promise: Promise<void>;
+		try {
+			promise = Promise.resolve(op()).catch(() => undefined);
+		} catch {
+			return;
+		}
+		this.pendingColdOps.add(promise);
+		void promise.finally(() => {
+			this.pendingColdOps.delete(promise);
+		});
+	}
+
 	private attachColdBackendAndHydrate(): void {
 		if (this.coldHydrationPromise || this._store.isDisposed) {
 			return;
@@ -332,7 +394,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 				if (this._store.isDisposed || ev.writerId === this.writerId) {
 					return;
 				}
-				void this.handleExternalColdFileChange(ev.missionId, ev.updatedAt, Boolean(ev.deleted));
+				void this.handleExternalColdFileChange(ev.missionId, ev.updatedAt, Boolean(ev.deleted), ev.writerId);
 			}));
 		}
 		this.coldHydrationPromise = this.hydrateFromColdFiles(backend).catch(() => undefined);
@@ -452,7 +514,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		}
 	}
 
-	private async handleExternalColdFileChange(missionId: string, updatedAt: number, deleted: boolean): Promise<void> {
+	private async handleExternalColdFileChange(missionId: string, updatedAt: number, deleted: boolean, writerId?: string): Promise<void> {
 		if (deleted) {
 			const localRec = this.records.get(missionId);
 			if (this.dirtyMissionIds.has(missionId) && localRec && localRec.updatedAt > updatedAt) {
@@ -482,10 +544,39 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			return;
 		}
 		const localRec = this.records.get(extRec.id);
-		if (localRec && !this.indexOnlyIds.has(extRec.id) && extRec.updatedAt < localRec.updatedAt) {
-			return;
+		const isHeadlessDaemon = writerId === 'headless-daemon';
+		if (localRec && !this.indexOnlyIds.has(extRec.id)) {
+			const skewToleranceMs = isHeadlessDaemon && !this.dirtyMissionIds.has(extRec.id) ? 5_000 : 0;
+			if (extRec.updatedAt + skewToleranceMs < localRec.updatedAt) {
+				return;
+			}
 		}
-		if (this.dirtyMissionIds.has(extRec.id) && localRec && localRec.updatedAt >= extRec.updatedAt) {
+		if (this.dirtyMissionIds.has(extRec.id) && localRec) {
+			if (localRec.updatedAt >= extRec.updatedAt) {
+				return;
+			}
+			// Preserve unpersisted local structural edits (canvas/prompts/checks/whiteboards) while adopting
+			// fresher external runtime/orchestration/task progress, and keep the record dirty for flush.
+			const merged: IAdeMissionRecord = {
+				...extRec,
+				title: localRec.title,
+				mermaidText: localRec.mermaidText,
+				orchestrationText: localRec.orchestrationText,
+				positions: localRec.positions,
+				orchestrationPositions: localRec.orchestrationPositions,
+				orchestrationLayoutMode: localRec.orchestrationLayoutMode,
+				nodePrompts: localRec.nodePrompts,
+				nodeChecks: localRec.nodeChecks,
+				whiteboards: localRec.whiteboards,
+				updatedAt: Math.max(localRec.updatedAt, extRec.updatedAt) + 1,
+			};
+			this.indexOnlyIds.delete(extRec.id);
+			this.records.set(extRec.id, merged);
+			this.hydratedColdIds.add(extRec.id);
+			this.dirtyMissionIds.add(extRec.id);
+			this.persist();
+			this._onDidChangeExternal.fire();
+			this._onDidChange.fire();
 			return;
 		}
 		this.dirtyMissionIds.delete(extRec.id);
@@ -529,10 +620,10 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			}
 		}
 
-		// Drive deletions from explicit `removedIds` tombstones when incremental metadata is present so a
-		// slightly stale index from another window never drops a concurrently created local Mission.
-		const hasDeltaMeta = (envelope.updatedIds && envelope.updatedIds.length > 0) || (envelope.removedIds && envelope.removedIds.length > 0);
-		if (hasDeltaMeta) {
+		// Drive deletions strictly from explicit `removedIds` tombstones whenever delta metadata arrays
+		// are present (including empty `[]`), so a slightly stale peer index never wipes concurrently created local Missions.
+		const hasExplicitTombstones = Array.isArray(envelope.removedIds) || Array.isArray(envelope.updatedIds);
+		if (hasExplicitTombstones) {
 			for (const removedId of envelope.removedIds ?? []) {
 				if (!preservedDirty.has(removedId)) {
 					this.records.delete(removedId);
@@ -540,7 +631,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 					this.indexOnlyIds.delete(removedId);
 				}
 			}
-		} else {
+		} else if (envelope.entries.length > 0) {
 			const indexIds = new Set(envelope.entries.map(e => e.id));
 			for (const existingId of [...this.records.keys()]) {
 				if (!indexIds.has(existingId) && !preservedDirty.has(existingId)) {
@@ -551,7 +642,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			}
 		}
 		if (envelope.coldBackend === 'file' && this.hasColdFileBackend()) {
-			const changedIds = envelope.updatedIds && envelope.updatedIds.length > 0
+			const changedIds = Array.isArray(envelope.updatedIds)
 				? envelope.updatedIds
 				: envelope.entries.map(e => e.id);
 			for (const entry of envelope.entries) {
@@ -737,7 +828,11 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 	}
 
 	private toIndexEntry(record: IAdeMissionRecord): IAdeMissionIndexEntry {
-		const totalCostUsd = record.runtime ? computeMissionTotalCostUsd(record.runtime) : undefined;
+		const legacyCost = record.runtime ? computeMissionTotalCostUsd(record.runtime) : 0;
+		const orchCost = typeof record.orchestrationRuntime?.totalCostUsd === 'number' && Number.isFinite(record.orchestrationRuntime.totalCostUsd)
+			? record.orchestrationRuntime.totalCostUsd
+			: 0;
+		const totalCostUsd = Math.max(legacyCost, orchCost);
 		const runCount = record.runtime
 			? ((record.runtime.runHistory?.length ?? 0) + (record.runtime.startedAt !== undefined ? 1 : 0))
 			: 0;
@@ -856,6 +951,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 						...(artifactPtrs && artifactPtrs.length > 0 ? { artifactPtrs } : {}),
 						...(typeof r.blockedReason === 'string' && r.blockedReason.trim() ? { blockedReason: r.blockedReason.trim() } : {}),
 						...(typeof r.lastError === 'string' && r.lastError.trim() ? { lastError: r.lastError.trim() } : {}),
+						...(r.lastCheckReceipt && typeof r.lastCheckReceipt === 'object' ? { lastCheckReceipt: r.lastCheckReceipt as never } : {}),
 						updatedAt: typeof r.updatedAt === 'number' && Number.isFinite(r.updatedAt) ? r.updatedAt : Date.now(),
 					};
 				}
@@ -1058,8 +1154,8 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			version: 2,
 			writerId: this.writerId,
 			coldBackend,
-			...(updatedIds.length > 0 ? { updatedIds } : {}),
-			...(removedIds.length > 0 ? { removedIds } : {}),
+			updatedIds: [...updatedIds],
+			removedIds: [...removedIds],
 			entries: [...this.records.values()].map(rec => this.toIndexEntry(rec)),
 		};
 		const indexSerialized = JSON.stringify(envelope);
@@ -1081,6 +1177,10 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 	 * - `IStorageService` retains ONLY a tiny metadata hot index (`aexus.ade.missions.index.v2`).
 	 */
 	private persist(): void {
+		if (this.batchDepth > 0) {
+			this.batchNeedsPersist = true;
+			return;
+		}
 		if (this.deferredPersistTimer !== undefined) {
 			clearTimeout(this.deferredPersistTimer);
 			this.deferredPersistTimer = undefined;
@@ -1109,22 +1209,34 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 					? { ...record, runtime: this.compactRuntimeForStorage(record.runtime) }
 					: record;
 				const payloadJson = JSON.stringify(compactRecord);
+				const updatedAt = record.updatedAt;
 				persistedColdIds.push(id);
-				void backend.saveMissionRecord(id, payloadJson, record.updatedAt, this.writerId).catch(() => {
-					if (!this._store.isDisposed && this.records.has(id)) {
-						this.dirtyMissionIds.add(id);
-						this.scheduleDeferredPersist(1500);
+				this.trackColdMissionOp(async () => {
+					try {
+						await backend.saveMissionRecord!(id, payloadJson, updatedAt, this.writerId);
+					} catch {
+						if (!this._store.isDisposed && this.records.has(id)) {
+							this.dirtyMissionIds.add(id);
+							this.scheduleDeferredPersist(1500);
+						}
 					}
 				});
 			}
 			for (const id of removedIds) {
 				this.indexOnlyIds.delete(id);
-				void backend.deleteMissionRecord?.(id, this.writerId).catch(() => {
-					if (!this._store.isDisposed && !this.records.has(id)) {
-						this.deletedMissionIds.add(id);
-						this.scheduleDeferredPersist(1500);
+				this.trackColdMissionOp(async () => {
+					try {
+						await backend.deleteMissionRecord?.(id, this.writerId);
+					} catch {
+						if (!this._store.isDisposed && !this.records.has(id)) {
+							this.deletedMissionIds.add(id);
+							this.scheduleDeferredPersist(1500);
+						}
 					}
 				});
+			}
+			if (persistedColdIds.length === 0 && removedIds.length === 0) {
+				return;
 			}
 			this.writeHotIndexOnly(persistedColdIds, removedIds, 'file');
 			return;
@@ -1278,6 +1390,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			const syncRes = projects.syncMissionMermaidEmployees?.(ownerKey, staffSpecs, {
 				projectUri: parsedProjectUri,
 				ownerTier: ownerAgent ? Math.max(0, record.ownerTier) : 0,
+				treeType: 'engineering',
 			});
 			if (syncRes) {
 				for (const node of subordinateStaff) {
@@ -1290,12 +1403,20 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 						: (node.tier !== undefined ? schema.ranks.find(r => r.tier === node.tier) : undefined);
 					if (targetRank && agent.role !== targetRank.id) {
 						projects.setAgentRole(agent.id, targetRank.id, { allowLockedMissionEmployee: true });
+						void this.backendService?.revokeSession?.(agent.id).catch(() => undefined);
 					}
 					if (node.engineId || node.model || node.thinking) {
 						applyStaffEnginePrefs(agent, node);
 					}
 				}
 				if (syncRes.removedAgents.length > 0) {
+					for (const removedAgent of syncRes.removedAgents) {
+						void this.backendService?.revokeSession?.(removedAgent.id).catch(() => undefined);
+						if (removedAgent.session && this.sessionsService?.stop) {
+							const hostAlias = removedAgent.projectUri.scheme === AEXUS_SSH_SCHEME ? removedAgent.projectUri.authority : undefined;
+							void this.sessionsService.stop(removedAgent.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
+						}
+					}
 					const editors = this.adeEditorsService;
 					if (editors) {
 						void editors.closeAgents(syncRes.removedAgents).catch(() => undefined);
@@ -1329,6 +1450,13 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			ownerTier: Math.max(record.ownerTier, record.runtime?.boundary.offGraphMaxTier ?? record.ownerTier),
 		});
 		if (syncRes && syncRes.removedAgents.length > 0) {
+			for (const removedAgent of syncRes.removedAgents) {
+				void this.backendService?.revokeSession?.(removedAgent.id).catch(() => undefined);
+				if (removedAgent.session && this.sessionsService?.stop) {
+					const hostAlias = removedAgent.projectUri.scheme === AEXUS_SSH_SCHEME ? removedAgent.projectUri.authority : undefined;
+					void this.sessionsService.stop(removedAgent.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
+				}
+			}
 			const editors = this.adeEditorsService;
 			if (editors) {
 				void editors.closeAgents(syncRes.removedAgents).catch(() => undefined);
@@ -1546,7 +1674,55 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		return updated;
 	}
 
-	updateTaskStatuses(id: string, taskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>>): IAdeMissionRecord | undefined {
+	replaceNodePrompts(id: string, prompts: Readonly<Record<string, string>> | undefined): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const clean: Record<string, string> = {};
+		for (const [k, v] of Object.entries(prompts ?? {})) {
+			const trimmedKey = k.trim();
+			if (trimmedKey && typeof v === 'string' && v.trim().length > 0) {
+				clean[trimmedKey] = v;
+			}
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			nodePrompts: Object.keys(clean).length > 0 ? clean : undefined,
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	replaceAllNodeChecks(id: string, checks: Readonly<Record<string, readonly IMissionNodeCheckHook[]>> | undefined): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing) {
+			return undefined;
+		}
+		const clean: Record<string, readonly IMissionNodeCheckHook[]> = {};
+		for (const [k, v] of Object.entries(checks ?? {})) {
+			const trimmedKey = k.trim();
+			if (trimmedKey && Array.isArray(v) && v.length > 0) {
+				clean[trimmedKey] = [...v];
+			}
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			nodeChecks: Object.keys(clean).length > 0 ? clean : undefined,
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		this._onDidChange.fire();
+		return updated;
+	}
+
+	updateTaskStatuses(id: string, taskStatuses: Readonly<Record<string, IMissionTaskStatusRecord>>, options?: { readonly deferPersist?: boolean; readonly silent?: boolean }): IAdeMissionRecord | undefined {
 		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
 		if (!existing) {
 			return undefined;
@@ -1558,8 +1734,14 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		};
 		this.records.set(existing.id, updated);
 		this.markRecordDirty(existing.id);
-		this.persist();
-		this._onDidChange.fire();
+		if (options?.deferPersist) {
+			this.scheduleDeferredPersist(250);
+		} else {
+			this.persist();
+		}
+		if (!options?.silent) {
+			this._onDidChange.fire();
+		}
 		return updated;
 	}
 
@@ -1692,6 +1874,35 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		return updated;
 	}
 
+	removeOrchestrationPositions(id: string, nodeIds: readonly string[]): IAdeMissionRecord | undefined {
+		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
+		if (!existing || !existing.orchestrationPositions || nodeIds.length === 0) {
+			return existing;
+		}
+		const drop = new Set(nodeIds.map(s => s.trim()).filter(Boolean));
+		let removedAny = false;
+		const nextPos: Record<string, IMissionNodePosition> = {};
+		for (const [k, v] of Object.entries(existing.orchestrationPositions)) {
+			if (drop.has(k)) {
+				removedAny = true;
+			} else {
+				nextPos[k] = v;
+			}
+		}
+		if (!removedAny) {
+			return existing;
+		}
+		const updated: IAdeMissionRecord = {
+			...existing,
+			orchestrationPositions: Object.keys(nextPos).length > 0 ? nextPos : undefined,
+			updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
+		};
+		this.records.set(existing.id, updated);
+		this.markRecordDirty(existing.id);
+		this.persist();
+		return updated;
+	}
+
 	clearOrchestrationPositions(id: string): IAdeMissionRecord | undefined {
 		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
 		if (!existing) {
@@ -1726,7 +1937,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		return updated;
 	}
 
-	updateOrchestrationRuntime(id: string, orchestrationRuntime: IOrchestrationRuntimeState | undefined, options?: { readonly deferPersist?: boolean }): IAdeMissionRecord | undefined {
+	updateOrchestrationRuntime(id: string, orchestrationRuntime: IOrchestrationRuntimeState | undefined, options?: { readonly deferPersist?: boolean; readonly silent?: boolean }): IAdeMissionRecord | undefined {
 		const existing = this.records.get(id) ?? this.getMissionByLinkedSession(id);
 		if (!existing) {
 			return undefined;
@@ -1743,7 +1954,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		} else {
 			this.persist();
 		}
-		this._onDidChange.fire();
+		if (!options?.silent) {
+			this._onDidChange.fire();
+		}
 		return updated;
 	}
 
@@ -1885,7 +2098,16 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		this.deletedMissionIds.add(existing.id);
 		this.persist();
 		this._onDidChange.fire();
+		void this.backendService?.removeMissionWatchdog?.(existing.id).catch(() => undefined);
 		if (removedAgents.length > 0) {
+			const sessions = this.sessionsService;
+			for (const agent of removedAgents) {
+				void this.backendService?.revokeSession?.(agent.id).catch(() => undefined);
+				if (agent.session && sessions?.stop) {
+					const hostAlias = agent.projectUri.scheme === AEXUS_SSH_SCHEME ? agent.projectUri.authority : undefined;
+					void sessions.stop(agent.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
+				}
+			}
 			const editors = this.adeEditorsService;
 			if (editors) {
 				void editors.closeAgents(removedAgents).catch(() => undefined);
@@ -1912,6 +2134,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		}
 		const toStop = [...generatedWithSubtrees.values()];
 		for (const member of toStop) {
+			void this.backendService?.revokeSession?.(member.id).catch(() => undefined);
 			if (member.session) {
 				const hostAlias = member.projectUri.scheme === AEXUS_SSH_SCHEME ? member.projectUri.authority : undefined;
 				await sessions?.stop?.(member.session, hostAlias ? { hostAlias } : undefined).catch(() => undefined);
@@ -1922,6 +2145,9 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		}
 
 		const removed = projects?.clearMissionEmployees?.(ownerKey) ?? [];
+		for (const member of removed) {
+			void this.backendService?.revokeSession?.(member.id).catch(() => undefined);
+		}
 		const deleted = existing ? this.records.delete(existing.id) : false;
 		if (deleted && existing) {
 			this.dirtyMissionIds.delete(existing.id);
@@ -1929,6 +2155,7 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 			this.deletedMissionIds.add(existing.id);
 			this.persist();
 		}
+		void this.backendService?.removeMissionWatchdog?.(targetId).catch(() => undefined);
 		const closeList = removed.length > 0 ? removed : toStop;
 		if (closeList.length > 0 && editors) {
 			await editors.closeAgents(closeList).catch(() => undefined);
@@ -1948,44 +2175,89 @@ export class AdeMissionStoreService extends Disposable implements IAdeMissionSer
 		const rec = this.ensureMission(id);
 		this.modeService.setMode('ade');
 		const targetGroup = options?.side ? SIDE_GROUP : undefined;
-		if (options?.openSiblingViews) {
-			const missionInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(rec.id, 'mission'));
-			const orchInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(rec.id, 'orchestration'));
-			const focusView: AdeEngineeringViewMode = options.viewMode ?? 'orchestration';
-			if (focusView === 'mission') {
-				await this.editorService.openEditor(orchInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup);
-				await this.editorService.openEditor(missionInput, { pinned: true }, targetGroup);
-			} else {
-				await this.editorService.openEditor(missionInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup);
-				await this.editorService.openEditor(orchInput, { pinned: true }, targetGroup);
+		const pendingFocus: IAdePendingMissionNodeFocus | undefined = options?.focusNodeId ? {
+			nodeId: options.focusNodeId,
+			focusTokenId: options.focusTokenId,
+			highlightNodeIds: options.highlightNodeIds,
+			openPopover: options.openPopover,
+			whiteboardSection: options.whiteboardSection,
+			inspectorTab: options.inspectorTab,
+			openAgentBeside: options.openAgentBeside,
+		} : undefined;
+
+		const applyUnconsumedFocus = (input: AdeEngineeringEditorInput, pane: unknown): void => {
+			if (!pendingFocus) {
+				return;
 			}
-			return;
-		}
-		const spec = options?.viewMode
-			? encodeAdeEngineeringInputSpec(rec.id, options.viewMode)
-			: encodeAdeEngineeringInputSpec(rec.id, 'orchestration');
-		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, spec);
-		if (options?.focusNodeId) {
-			input.setPendingFocus({
-				nodeId: options.focusNodeId,
-				inspectorTab: options.inspectorTab,
-				openAgentBeside: options.openAgentBeside,
-			});
-		}
-		const pane = await this.editorService.openEditor(input, { pinned: true }, targetGroup);
-		if (options?.focusNodeId) {
 			const unconsumed = input.consumePendingFocus();
 			const maybeCanvasPane = pane as {
-				focusNode?: (nodeId: string, opts?: { readonly inspectorTab?: 'overview' | 'token' | 'distill' | 'finops'; readonly openAgentBeside?: boolean }) => void;
+				focusNode?: (nodeId: string, opts?: Omit<IAdePendingMissionNodeFocus, 'nodeId'>) => void;
 			} | undefined;
 			// Only invoke focusNode directly when VS Code reused an already-open AdeEngineeringEditorPane
 			// (so setInput did NOT run and consume pendingFocus), preventing duplicate openAgent/warm-up calls.
 			if (unconsumed && maybeCanvasPane && typeof maybeCanvasPane.focusNode === 'function') {
 				maybeCanvasPane.focusNode(unconsumed.nodeId, {
+					focusTokenId: unconsumed.focusTokenId,
+					highlightNodeIds: unconsumed.highlightNodeIds,
+					openPopover: unconsumed.openPopover,
+					whiteboardSection: unconsumed.whiteboardSection,
 					inspectorTab: unconsumed.inspectorTab,
 					openAgentBeside: unconsumed.openAgentBeside,
 				});
 			}
+		};
+
+		if (options?.openSiblingViews) {
+			const missionInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(rec.id, 'mission'));
+			const orchInput = this.instantiationService.createInstance(AdeEngineeringEditorInput, encodeAdeEngineeringInputSpec(rec.id, 'orchestration'));
+			const focusView: AdeEngineeringViewMode = options.viewMode
+				?? inferEngineeringViewModeForNode(rec, options.focusNodeId, 'orchestration');
+			const focusedInput = focusView === 'mission' ? missionInput : orchInput;
+			if (pendingFocus) {
+				focusedInput.setPendingFocus(pendingFocus);
+			}
+			if (focusView === 'mission') {
+				await this.editorService.openEditor(orchInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup);
+				const pane = await this.editorService.openEditor(missionInput, { pinned: true }, targetGroup);
+				applyUnconsumedFocus(missionInput, pane);
+			} else {
+				await this.editorService.openEditor(missionInput, { pinned: true, inactive: true, preserveFocus: true }, targetGroup);
+				const pane = await this.editorService.openEditor(orchInput, { pinned: true }, targetGroup);
+				applyUnconsumedFocus(orchInput, pane);
+			}
+			return;
 		}
+
+		const resolvedViewMode: AdeEngineeringViewMode = options?.viewMode
+			?? inferEngineeringViewModeForNode(rec, options?.focusNodeId, 'orchestration');
+
+		if (options?.preferExistingGroup !== false) {
+			const editorGroupsService = this.tryGet(IEditorGroupsService);
+			const groups = editorGroupsService?.mainPart?.groups ?? [];
+			const activeGroup = editorGroupsService?.mainPart?.activeGroup;
+			for (const group of groups) {
+				if (options?.side && activeGroup && group === activeGroup) {
+					continue;
+				}
+				for (const editor of group.editors) {
+					if (editor instanceof AdeEngineeringEditorInput && !editor.isDisposed() && editor.governorSessionId === rec.id && editor.viewMode === resolvedViewMode) {
+						if (pendingFocus) {
+							editor.setPendingFocus(pendingFocus);
+						}
+						const pane = await this.editorService.openEditor(editor, { pinned: true }, group.id);
+						applyUnconsumedFocus(editor, pane);
+						return;
+					}
+				}
+			}
+		}
+
+		const spec = encodeAdeEngineeringInputSpec(rec.id, resolvedViewMode);
+		const input = this.instantiationService.createInstance(AdeEngineeringEditorInput, spec);
+		if (pendingFocus) {
+			input.setPendingFocus(pendingFocus);
+		}
+		const pane = await this.editorService.openEditor(input, { pinned: true }, targetGroup);
+		applyUnconsumedFocus(input, pane);
 	}
 }

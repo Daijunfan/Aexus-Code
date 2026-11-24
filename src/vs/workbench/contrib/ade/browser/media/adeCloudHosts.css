@@ -145,15 +145,15 @@
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-btn.primary {
-	background: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
-	border-color: var(--vscode-button-border, transparent);
-	box-shadow: var(--aexus-shadow-1), inset 0 1px 0 rgb(255 255 255 / 0.12);
+	background: #0369a1;
+	color: #ffffff;
+	border-color: rgba(125, 211, 252, 0.28);
+	box-shadow: var(--aexus-shadow-1), inset 0 1px 0 rgb(255 255 255 / 0.16);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-btn.primary:hover:not(:disabled) {
-	background: var(--vscode-button-hoverBackground);
-	border-color: var(--vscode-button-border, transparent);
+	background: #0284c7;
+	border-color: rgba(125, 211, 252, 0.42);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-btn.ghost {
@@ -213,11 +213,11 @@
 		'ico meta';
 	column-gap: 12px;
 	align-items: center;
-	padding: 12px 14px;
-	border-radius: var(--ch-radius);
-	border: var(--aexus-hairline-width) solid var(--ch-border);
+	padding: 13px 16px;
+	border-radius: 12px;
+	border: 1px solid var(--ch-border);
 	background: var(--ch-surface);
-	box-shadow: var(--aexus-highlight-top);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
 	min-width: 0;
 }
 
@@ -521,8 +521,8 @@
 
 .monaco-workbench .ade-ch-console .ade-ch-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-	gap: 12px;
+	grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+	gap: 14px;
 	align-content: start;
 }
 
@@ -534,53 +534,28 @@
 	position: relative;
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
+	gap: 12px;
 	min-width: 0;
-	padding: 14px;
-	border-radius: var(--ch-radius);
-	border: var(--aexus-hairline-width) solid var(--ch-border);
+	padding: 16px 18px;
+	border-radius: 12px;
+	border: 1px solid var(--ch-border);
 	background: var(--ch-card);
-	box-shadow: var(--aexus-highlight-top), var(--aexus-shadow-1);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 2px 10px -3px rgb(0 0 0 / 0.24);
 	cursor: default;
 	outline: none;
 	animation: aexus-enter var(--aexus-dur-base) var(--aexus-ease-out);
 	transition: border-color var(--aexus-dur-fast) var(--aexus-ease-out), box-shadow var(--aexus-dur-base) var(--aexus-ease-out), transform var(--aexus-dur-base) var(--aexus-ease-out);
 }
 
-.monaco-workbench .ade-ch-console .ade-ch-card::before {
-	/* Status rail: status is carried by dots/rails, never by the card fill. */
-	content: '';
-	position: absolute;
-	top: 12px;
-	bottom: 12px;
-	left: -1px;
-	width: 2px;
-	border-radius: 0 2px 2px 0;
-	background: transparent;
-	transition: background-color var(--aexus-dur-fast) var(--aexus-ease-out);
-}
-
-.monaco-workbench .ade-ch-console .ade-ch-card[data-status="ok"]::before {
-	background: var(--ch-ok);
-}
-
-.monaco-workbench .ade-ch-console .ade-ch-card[data-status="err"]::before {
-	background: var(--ch-err);
-}
-
-.monaco-workbench .ade-ch-console .ade-ch-card[data-status="testing"]::before {
-	background: var(--ch-accent);
-}
-
 .monaco-workbench .ade-ch-console .ade-ch-card:hover {
-	border-color: color-mix(in srgb, var(--ch-accent) 40%, var(--ch-border));
-	box-shadow: var(--aexus-highlight-top), var(--aexus-shadow-2);
+	border-color: color-mix(in srgb, var(--ch-cloud) 36%, var(--ch-border));
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 8px 22px -8px rgb(0 0 0 / 0.34);
 	transform: translateY(-1px);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-card[aria-current="true"] {
-	border-color: var(--ch-accent);
-	box-shadow: var(--aexus-highlight-top), var(--aexus-shadow-2), inset 0 0 0 1px var(--ch-accent);
+	border-color: color-mix(in srgb, var(--ch-cloud) 64%, var(--ch-border));
+	box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ch-cloud) 28%, rgb(255 255 255 / 0.08)), 0 10px 26px -8px rgb(0 0 0 / 0.34);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-card:focus-visible {
@@ -596,84 +571,79 @@
 .monaco-workbench .ade-ch-console .ade-ch-card-head {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	gap: 11px;
 	min-width: 0;
 }
 
-/* OS badges — unified with Sidebar & Terminal colorful brand OS icons */
+/* OS badges — unified with Sidebar & Terminal authentic brand OS vectors inside soft-tinted glass squircles */
 .monaco-workbench .ade-ch-console .ade-ch-os-badge {
 	flex-shrink: 0;
 	display: grid;
 	place-items: center;
-	width: 30px;
-	height: 30px;
-	border-radius: var(--aexus-radius-lg);
-	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+	width: 32px;
+	height: 32px;
+	border-radius: 9px;
+	background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
 	color: var(--vscode-foreground);
-	box-shadow: var(--aexus-highlight-top);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-foreground) 9%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge .ade-ch-os-glyph {
-	width: 20px;
-	height: 20px;
+	width: 22px;
+	height: 22px;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	border-radius: 4px;
-	overflow: hidden;
+	border-radius: 5px;
+	overflow: visible;
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge .ade-ch-os-glyph > svg {
-	width: 18px;
-	height: 18px;
+	width: 20px;
+	height: 20px;
 	display: block;
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-macos {
-	background: color-mix(in srgb, #f5f7fa 12%, transparent);
+	background: color-mix(in srgb, #f5f7fa 10%, transparent);
 	color: #f5f7fa;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #f5f7fa 16%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench.vs .ade-ch-console .ade-ch-os-badge.os-kind-macos {
-	background: color-mix(in srgb, #1d1d1f 9%, transparent);
+	background: color-mix(in srgb, #1d1d1f 7%, transparent);
 	color: #1d1d1f;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #1d1d1f 13%, transparent);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-ubuntu {
-	background: color-mix(in srgb, #e95420 16%, transparent);
+	background: color-mix(in srgb, #e95420 13%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #e95420 24%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-kali {
-	background: color-mix(in srgb, #2563eb 18%, transparent);
-}
-
-.monaco-workbench .ade-ch-console .ade-ch-os-badge .ade-ch-os-glyph.ade-os-kali {
-	border-radius: 50%;
-	background: linear-gradient(145deg, #38bdf8 0%, #2563eb 52%, #1d4ed8 100%);
-	box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.32);
-	padding: 2px;
-	box-sizing: border-box;
-}
-
-.monaco-workbench .ade-ch-console .ade-ch-os-badge .ade-ch-os-glyph.ade-os-kali > svg {
-	width: 16px;
-	height: 16px;
+	background: color-mix(in srgb, #2563eb 14%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #38bdf8 24%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-debian {
-	background: color-mix(in srgb, #d70a53 16%, transparent);
+	background: color-mix(in srgb, #d70a53 13%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #d70a53 24%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-windows {
-	background: color-mix(in srgb, #0078d4 16%, transparent);
+	background: color-mix(in srgb, #0078d4 13%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #0078d4 24%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-enterprise-linux {
-	background: color-mix(in srgb, #38bdf8 14%, transparent);
+	background: color-mix(in srgb, #cc0000 13%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #cc0000 24%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-os-badge.os-kind-linux {
-	background: color-mix(in srgb, #f5c211 18%, transparent);
+	background: color-mix(in srgb, #94a3b8 14%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #94a3b8 24%, transparent), var(--aexus-highlight-top);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-card-titles {
@@ -816,19 +786,20 @@
 .monaco-workbench .ade-ch-console .ade-ch-card-target {
 	display: flex;
 	align-items: center;
-	gap: 4px;
+	gap: 6px;
 	min-width: 0;
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-target-badge {
 	min-width: 0;
-	padding: 2px 8px;
-	border-radius: var(--aexus-radius-md);
+	padding: 3px 9px;
+	border-radius: 6px;
 	background: var(--vscode-textCodeBlock-background, var(--aexus-surface-sunken));
-	border: var(--aexus-hairline-width) solid var(--aexus-hairline-subtle);
+	border: 1px solid var(--aexus-hairline-subtle);
 	font-family: var(--aexus-font-mono);
-	font-size: var(--aexus-text-xs);
-	line-height: var(--aexus-lh-xs);
+	font-size: 11.5px;
+	line-height: 16px;
+	letter-spacing: 0.01em;
 	font-variant-numeric: var(--aexus-numeric);
 	white-space: nowrap;
 	overflow: hidden;
@@ -848,14 +819,15 @@
 .monaco-workbench .ade-ch-console .ade-ch-jump-ico,
 .monaco-workbench .ade-ch-console .ade-ch-jump-arrow {
 	font-size: 12px;
-	opacity: 0.8;
+	opacity: 0.72;
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-jump-hop {
-	max-width: 120px;
-	padding: 1px 7px;
+	max-width: 124px;
+	padding: 1px 8px;
 	border-radius: var(--aexus-radius-pill);
-	border: 1px dashed var(--ch-border-strong);
+	border: 1px solid color-mix(in srgb, var(--ch-cloud) 26%, var(--ch-border));
+	background: color-mix(in srgb, var(--ch-cloud) 7%, transparent);
 	color: var(--vscode-foreground);
 	font-family: var(--aexus-font-mono);
 	white-space: nowrap;
@@ -864,8 +836,8 @@
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-jump-hop.is-target {
-	border-style: solid;
 	border-color: var(--ch-border);
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
 	color: var(--vscode-descriptionForeground);
 }
 
@@ -919,15 +891,47 @@
 	font-variant-numeric: var(--aexus-numeric);
 }
 
-/* Card actions */
+/* Card actions — quiet-luxury tinted glass terminal CTA; header New Host remains the single solid primary CTA */
 .monaco-workbench .ade-ch-console .ade-ch-card-actions {
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
 	gap: 6px;
 	margin-top: auto;
-	padding-top: 10px;
-	border-top: var(--aexus-hairline-width) solid var(--aexus-hairline-subtle);
+	padding-top: 12px;
+	border-top: 1px solid var(--aexus-hairline-subtle);
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-terminal-btn {
+	background: color-mix(in srgb, var(--ch-cloud) 13%, var(--aexus-surface-2));
+	color: color-mix(in srgb, var(--ch-cloud) 88%, #ffffff);
+	border-color: color-mix(in srgb, var(--ch-cloud) 34%, transparent);
+	box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08);
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-terminal-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--ch-cloud) 22%, var(--aexus-surface-2));
+	color: #e0f2fe;
+	border-color: color-mix(in srgb, var(--ch-cloud) 52%, transparent);
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-add-project-btn {
+	background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+	border-color: var(--ch-border);
+	box-shadow: none;
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-add-project-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--vscode-foreground) 9%, transparent);
+	border-color: var(--ch-border-strong);
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-test-btn {
+	color: var(--vscode-descriptionForeground);
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-test-btn:hover:not(:disabled) {
+	color: var(--vscode-foreground);
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-card-checked {
@@ -1004,29 +1008,23 @@
 
 .monaco-workbench .ade-ch-console[data-view="list"] .ade-ch-card[aria-current="true"] {
 	background: var(--vscode-list-inactiveSelectionBackground);
-	box-shadow: inset 2px 0 0 var(--ch-accent);
-}
-
-.monaco-workbench .ade-ch-console[data-view="list"] .ade-ch-card::before {
-	top: 8px;
-	bottom: 8px;
-	left: 0;
+	box-shadow: inset 2px 0 0 var(--ch-cloud);
 }
 
 .monaco-workbench .ade-ch-console[data-view="list"] .ade-ch-os-badge {
-	width: 24px;
-	height: 24px;
-	border-radius: var(--aexus-radius-md);
+	width: 26px;
+	height: 26px;
+	border-radius: 7px;
 }
 
 .monaco-workbench .ade-ch-console[data-view="list"] .ade-ch-os-badge .ade-ch-os-glyph {
-	width: 16px;
-	height: 16px;
+	width: 17px;
+	height: 17px;
 }
 
 .monaco-workbench .ade-ch-console[data-view="list"] .ade-ch-os-badge .ade-ch-os-glyph > svg {
-	width: 14px;
-	height: 14px;
+	width: 16px;
+	height: 16px;
 }
 
 .monaco-workbench .ade-ch-console[data-view="list"] .ade-ch-jump-chain {
@@ -1120,10 +1118,15 @@
 	position: absolute;
 	inset: 0;
 	z-index: var(--aexus-z-popover);
-	background: rgb(0 0 0 / 0.18);
+	background: rgb(2 6 23 / 0.46);
+	backdrop-filter: blur(2px);
 	opacity: 0;
 	pointer-events: none;
 	transition: opacity var(--aexus-dur-slow) var(--aexus-ease-out);
+}
+
+.monaco-workbench.vs .ade-ch-console .ade-ch-drawer-scrim {
+	background: rgb(15 23 42 / 0.24);
 }
 
 .monaco-workbench .ade-ch-console[data-drawer-open] .ade-ch-drawer-scrim {
@@ -1337,7 +1340,11 @@
 
 .monaco-workbench .ade-ch-console .ade-ch-seg-btn {
 	flex: 1 1 0;
-	height: 22px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	height: 24px;
 	padding: 0 6px;
 	border: var(--aexus-hairline-width) solid transparent;
 	border-radius: var(--aexus-radius-sm);
@@ -1348,6 +1355,21 @@
 	white-space: nowrap;
 	cursor: pointer;
 	transition: background-color var(--aexus-dur-fast) var(--aexus-ease-out), color var(--aexus-dur-fast) var(--aexus-ease-out);
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-seg-os-ico {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	flex-shrink: 0;
+}
+
+.monaco-workbench .ade-ch-console .ade-ch-seg-os-ico > svg {
+	width: 13px;
+	height: 13px;
+	display: block;
 }
 
 .monaco-workbench .ade-ch-console .ade-ch-seg-btn:hover {
@@ -1504,6 +1526,42 @@
 
 /* ---------- Light theme ---------- */
 
+.monaco-workbench.vs .ade-ch-console .ade-ch-kpi {
+	box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+}
+
+.monaco-workbench.vs .ade-ch-console .ade-ch-card {
+	box-shadow: 0 1px 3px rgb(15 23 42 / 0.05), 0 4px 12px -4px rgb(15 23 42 / 0.04);
+}
+
+.monaco-workbench.vs .ade-ch-console .ade-ch-card:hover {
+	border-color: color-mix(in srgb, var(--ch-cloud) 44%, var(--ch-border));
+	box-shadow: 0 6px 18px -6px rgb(15 23 42 / 0.12);
+}
+
+.monaco-workbench.vs .ade-ch-console .ade-ch-card[aria-current="true"] {
+	border-color: color-mix(in srgb, var(--ch-cloud) 64%, var(--ch-border));
+	box-shadow: 0 8px 22px -8px rgb(15 23 42 / 0.14), 0 0 0 3px color-mix(in srgb, var(--ch-cloud) 14%, transparent);
+}
+
+.monaco-workbench.vs .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-terminal-btn {
+	background: color-mix(in srgb, var(--ch-cloud) 11%, #ffffff);
+	color: #0369a1;
+	border-color: color-mix(in srgb, var(--ch-cloud) 34%, transparent);
+	box-shadow: none;
+}
+
+.monaco-workbench.vs .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-terminal-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--ch-cloud) 18%, #ffffff);
+	color: #0c4a6e;
+	border-color: color-mix(in srgb, var(--ch-cloud) 50%, transparent);
+}
+
+.monaco-workbench.vs .ade-ch-console .ade-ch-os-badge.os-kind-linux {
+	background: color-mix(in srgb, #475569 10%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, #475569 20%, transparent);
+}
+
 .monaco-workbench.vs .ade-ch-console .ade-ch-drawer-scrim {
 	background: rgb(15 23 42 / 0.08);
 }
@@ -1549,6 +1607,14 @@
 .monaco-workbench.hc-light .ade-ch-console .ade-ch-os-badge {
 	background: transparent;
 	box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.monaco-workbench.hc-black .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-terminal-btn,
+.monaco-workbench.hc-light .ade-ch-console .ade-ch-card-actions .ade-ch-btn.ade-ch-terminal-btn {
+	background: transparent;
+	color: var(--vscode-foreground);
+	border-color: var(--vscode-contrastBorder);
+	box-shadow: none;
 }
 
 .monaco-workbench.hc-black .ade-ch-console .ade-ch-drawer,

@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import * as path from '../../../base/common/path.js';
+import { stripAdeControlEnv } from '../common/adeControl.js';
 import {
 	IAdeMissionWatchdogSnapshot,
 	IAdeSourceTriggerFireEvent,
@@ -29,6 +30,7 @@ export interface IAdeRemoteBatchProbeResult {
 	readonly remoteNowMs?: number;
 	readonly pidAlive: Readonly<Record<number, boolean>>;
 	readonly fileMtime: Readonly<Record<string, number | undefined>>;
+	readonly fileSignature?: Readonly<Record<string, string | undefined>>;
 	readonly gitHead: Readonly<Record<string, string | undefined>>;
 	readonly persistentSessions: Readonly<Record<string, { readonly aliveCount: number; readonly exitedCodes: readonly number[] }>>;
 	readonly gpuUtilPct?: number;
@@ -37,6 +39,7 @@ export interface IAdeRemoteBatchProbeResult {
 export interface IAdeRemoteWatchdogProbe {
 	remoteIsPidAlive(authority: string, pid: number): Promise<boolean>;
 	remoteFileStatMtime(authority: string, remotePath: string): Promise<number | undefined>;
+	remoteFileStatSignature?(authority: string, remotePath: string): Promise<string | undefined>;
 	remoteGitHeadCommit(authority: string, projectPath: string): Promise<string | undefined>;
 	remoteGpuUtilizationPct(authority: string): Promise<number | undefined>;
 	remoteCheckPersistentSessions?(authority: string, idPrefix: string): Promise<{ readonly aliveCount: number; readonly exitedCodes: readonly number[] } | undefined>;
@@ -60,6 +63,7 @@ export interface IAdeRemoteWatchdogProbe {
 export interface IAdeLocalWatchdogProbe {
 	isPidAlive(pid: number): Promise<boolean>;
 	fileStatMtime(filePath: string): Promise<number | undefined>;
+	fileStatSignature?(filePath: string): Promise<string | undefined>;
 	gitHeadCommit(projectPath: string): Promise<string | undefined>;
 	gpuUtilizationPct(): Promise<number | undefined>;
 }
@@ -142,7 +146,7 @@ async function runWithConcurrency(tasks: readonly (() => Promise<void>)[], concu
 
 function runExecFile(file: string, args: readonly string[], timeoutMs = 8_000): Promise<{ code: number; stdout: string }> {
 	return new Promise(resolve => {
-		execFile(file, [...args], { timeout: timeoutMs, windowsHide: true }, (err, stdout) => {
+		execFile(file, [...args], { timeout: timeoutMs, windowsHide: true, env: stripAdeControlEnv(process.env) }, (err, stdout) => {
 			if (err) {
 				resolve({ code: typeof (err as NodeJS.ErrnoException).code === 'number' ? Number((err as NodeJS.ErrnoException).code) : 1, stdout: String(stdout ?? '') });
 				return;
@@ -175,6 +179,14 @@ function createDefaultLocalProbe(): IAdeLocalWatchdogProbe {
 				return undefined;
 			}
 		},
+		async fileStatSignature(filePath: string): Promise<string | undefined> {
+			try {
+				const st = await fs.promises.stat(filePath);
+				return `${Math.round(st.mtimeMs)}:${st.size}:${st.ino}`;
+			} catch {
+				return undefined;
+			}
+		},
 		async gitHeadCommit(projectPath: string): Promise<string | undefined> {
 			const res = await runExecFile('git', ['-C', projectPath, 'rev-parse', 'HEAD'], 8_000);
 			const sha = res.stdout.trim();
@@ -198,6 +210,7 @@ interface ITriggerMonitorMemory {
 	lastFiredAt?: number;
 	lastCronMinuteBucket?: number;
 	firedOnce?: boolean;
+	rearmedFireAt?: number;
 	fileExisted?: boolean;
 	lastFileMtime?: number;
 	lastGitHead?: string;
@@ -222,6 +235,7 @@ export class AdeMissionWatchdogService extends Disposable {
 	private readonly lastSilenceWakeupAt = new Map<string, number>();
 	private readonly lastAgentExitWakeupAt = new Map<string, number>();
 	private readonly blockedWakeupNotified = new Set<string>();
+	private readonly barrierDeadlineNotifiedAt = new Map<string, number>();
 	private readonly triggerMemory = new Map<string, ITriggerMonitorMemory>();
 
 	private readonly localProbe: IAdeLocalWatchdogProbe;
@@ -235,7 +249,10 @@ export class AdeMissionWatchdogService extends Disposable {
 	private readonly remoteSessionExitCooldownMs: number;
 	private readonly nowFn: () => number;
 
-	private readonly inFlightProbeKeys = new Set<string>();
+	private readonly inFlightProbeKeys = new Map<string, number>();
+	private probeSeq = 0;
+	private tickInFlight: Promise<void> | undefined;
+	private tickPendingRerun = false;
 	private triggerPersistChain: Promise<void> = Promise.resolve();
 	private snapshotPersistChain: Promise<void> = Promise.resolve();
 	private triggerStateLoadPromise: Promise<void> | undefined;
@@ -243,9 +260,13 @@ export class AdeMissionWatchdogService extends Disposable {
 	private triggerStateHydrated = false;
 	private snapshotStateHydrated = false;
 	private triggerMemoryDirty = false;
+	private triggerMutationSeq = 0;
 	private snapshotDirty = false;
+	private snapshotMutationSeq = 0;
 	private readonly explicitlyRemovedMissionIds = new Set<string>();
 	private timer: ReturnType<typeof setInterval> | undefined;
+	private snapshotFlushTimer: ReturnType<typeof setTimeout> | undefined;
+	private disposed = false;
 
 	constructor(options?: IAdeMissionWatchdogServiceOptions) {
 		super();
@@ -305,20 +326,63 @@ export class AdeMissionWatchdogService extends Disposable {
 		return this.snapshotStateLoadPromise;
 	}
 
+	private scheduleSnapshotPersist(immediate: boolean): void {
+		if (!this.snapshotStatePath || this._store.isDisposed) {
+			return;
+		}
+		if (immediate) {
+			if (this.snapshotFlushTimer !== undefined) {
+				clearTimeout(this.snapshotFlushTimer);
+				this.snapshotFlushTimer = undefined;
+			}
+			void this.persistSnapshotsIfDirty();
+			return;
+		}
+		if (this.snapshotFlushTimer !== undefined) {
+			return;
+		}
+		this.snapshotFlushTimer = setTimeout(() => {
+			this.snapshotFlushTimer = undefined;
+			if (!this._store.isDisposed) {
+				void this.persistSnapshotsIfDirty();
+			}
+		}, 3_000);
+		if (typeof (this.snapshotFlushTimer as { unref?: () => void }).unref === 'function') {
+			(this.snapshotFlushTimer as { unref?: () => void }).unref!();
+		}
+	}
+
+	/**
+	 * Awaits any in-flight snapshot or trigger-memory disk writes (useful before disposal / headless teardown).
+	 */
+	async flushPendingWrites(): Promise<void> {
+		if (this.snapshotFlushTimer !== undefined) {
+			clearTimeout(this.snapshotFlushTimer);
+			this.snapshotFlushTimer = undefined;
+		}
+		await Promise.all([
+			this.persistSnapshotsIfDirty(),
+			this.persistTriggerMemoryIfDirty(),
+		]);
+	}
+
 	private persistSnapshotsIfDirty(): Promise<void> {
-		if (!this.snapshotStatePath) {
-			return Promise.resolve();
+		if (!this.snapshotStatePath || this._store.isDisposed) {
+			return this.snapshotPersistChain;
 		}
 		if (!this.snapshotDirty) {
 			return this.snapshotPersistChain;
 		}
 		const targetPath = this.snapshotStatePath;
 		const writeOp = async () => {
-			await this.ensureSnapshotsLoaded();
-			if (!this.snapshotDirty) {
+			if (this._store.isDisposed) {
 				return;
 			}
-			this.snapshotDirty = false;
+			await this.ensureSnapshotsLoaded();
+			if (this._store.isDisposed || !this.snapshotDirty) {
+				return;
+			}
+			const capturedSeq = this.snapshotMutationSeq;
 			const payloadObj: Record<string, IAdeMissionWatchdogSnapshot> = {};
 			for (const [missionId, snap] of this.snapshots.entries()) {
 				if (snap.status === 'running') {
@@ -326,11 +390,29 @@ export class AdeMissionWatchdogService extends Disposable {
 				}
 			}
 			const serialized = JSON.stringify(payloadObj, null, 2);
+			if (this._store.isDisposed) {
+				return;
+			}
 			await fs.promises.mkdir(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+			if (this._store.isDisposed) {
+				return;
+			}
 			const tmp = `${targetPath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
 			try {
 				await fs.promises.writeFile(tmp, serialized, { encoding: 'utf8', mode: 0o600 });
+				if (this.disposed || this._store.isDisposed) {
+					await fs.promises.unlink(tmp).catch(() => undefined);
+					return;
+				}
 				await fs.promises.rename(tmp, targetPath);
+				if (this.disposed || this._store.isDisposed) {
+					return;
+				}
+				if (this.snapshotMutationSeq === capturedSeq) {
+					this.snapshotDirty = false;
+				} else if (!this.disposed && !this._store.isDisposed) {
+					this.scheduleSnapshotPersist(false);
+				}
 			} catch {
 				await fs.promises.unlink(tmp).catch(() => undefined);
 			}
@@ -380,29 +462,48 @@ export class AdeMissionWatchdogService extends Disposable {
 	}
 
 	private persistTriggerMemoryIfDirty(): Promise<void> {
-		if (!this.triggerStatePath) {
-			return Promise.resolve();
+		if (!this.triggerStatePath || this._store.isDisposed) {
+			return this.triggerPersistChain;
 		}
 		if (!this.triggerMemoryDirty) {
 			return this.triggerPersistChain;
 		}
 		const targetPath = this.triggerStatePath;
 		const writeOp = async () => {
-			await this.ensureTriggerMemoryLoaded();
-			if (!this.triggerMemoryDirty) {
+			if (this._store.isDisposed) {
 				return;
 			}
-			this.triggerMemoryDirty = false;
+			await this.ensureTriggerMemoryLoaded();
+			if (this._store.isDisposed || !this.triggerMemoryDirty) {
+				return;
+			}
+			const capturedSeq = this.triggerMutationSeq;
 			const payloadObj: Record<string, ITriggerMonitorMemory> = {};
 			for (const [k, v] of this.triggerMemory.entries()) {
 				payloadObj[k] = { ...v };
 			}
 			const serialized = JSON.stringify(payloadObj, null, 2);
+			if (this._store.isDisposed) {
+				return;
+			}
 			await fs.promises.mkdir(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+			if (this._store.isDisposed) {
+				return;
+			}
 			const tmp = `${targetPath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
 			try {
 				await fs.promises.writeFile(tmp, serialized, { encoding: 'utf8', mode: 0o600 });
+				if (this.disposed || this._store.isDisposed) {
+					await fs.promises.unlink(tmp).catch(() => undefined);
+					return;
+				}
 				await fs.promises.rename(tmp, targetPath);
+				if (this.disposed || this._store.isDisposed) {
+					return;
+				}
+				if (this.triggerMutationSeq === capturedSeq) {
+					this.triggerMemoryDirty = false;
+				}
 			} catch {
 				await fs.promises.unlink(tmp).catch(() => undefined);
 			}
@@ -412,7 +513,81 @@ export class AdeMissionWatchdogService extends Disposable {
 		return next;
 	}
 
+	private isStructuralSnapshotChange(prev: IAdeMissionWatchdogSnapshot | undefined, next: IAdeMissionWatchdogSnapshot): boolean {
+		if (!prev) {
+			return true;
+		}
+		const prevBarriers = prev.barriers ?? [];
+		const nextBarriers = next.barriers ?? [];
+		if (
+			prev.status !== next.status
+			|| prev.silenceTimeoutMinutes !== next.silenceTimeoutMinutes
+			|| prev.ownerWindowCtx !== next.ownerWindowCtx
+			|| prev.tokens.length !== next.tokens.length
+			|| prev.triggers.length !== next.triggers.length
+			|| prevBarriers.length !== nextBarriers.length
+		) {
+			return true;
+		}
+		for (let i = 0; i < next.tokens.length; i++) {
+			const a = prev.tokens[i];
+			const b = next.tokens[i];
+			if (
+				a.tokenId !== b.tokenId
+				|| a.nodeId !== b.nodeId
+				|| a.status !== b.status
+				|| a.blocked?.startedAt !== b.blocked?.startedAt
+				|| a.blocked?.expiresAt !== b.blocked?.expiresAt
+			) {
+				return true;
+			}
+		}
+		for (let i = 0; i < next.triggers.length; i++) {
+			const a = prev.triggers[i];
+			const b = next.triggers[i];
+			if (a.id !== b.id || a.enabled !== b.enabled || a.fireAt !== b.fireAt || a.cronExpr !== b.cronExpr || a.intervalMs !== b.intervalMs) {
+				return true;
+			}
+		}
+		for (let i = 0; i < nextBarriers.length; i++) {
+			const a = prevBarriers[i];
+			const b = nextBarriers[i];
+			if (a.barrierId !== b.barrierId || a.parentTokenId !== b.parentTokenId || a.deadlineAt !== b.deadlineAt) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private markSnapshotDirty(): void {
+		this.snapshotDirty = true;
+		this.snapshotMutationSeq++;
+	}
+
+	private markTriggerMemoryDirty(): void {
+		this.triggerMemoryDirty = true;
+		this.triggerMutationSeq++;
+	}
+
+	private reserveProbeKey(key: string): number | undefined {
+		if (this.inFlightProbeKeys.has(key)) {
+			return undefined;
+		}
+		const seq = ++this.probeSeq;
+		this.inFlightProbeKeys.set(key, seq);
+		return seq;
+	}
+
+	private releaseProbeKey(key: string, seq: number): void {
+		if (this.inFlightProbeKeys.get(key) === seq) {
+			this.inFlightProbeKeys.delete(key);
+		}
+	}
+
 	syncMission(snapshot: IAdeMissionWatchdogSnapshot): void {
+		if (this._store.isDisposed) {
+			return;
+		}
 		this.explicitlyRemovedMissionIds.delete(snapshot.missionId);
 		const existing = this.snapshots.get(snapshot.missionId);
 		const effectiveOwnerWindowCtx = snapshot.preserveExistingOwner && existing?.ownerWindowCtx
@@ -422,16 +597,21 @@ export class AdeMissionWatchdogService extends Disposable {
 			...snapshot,
 			...(effectiveOwnerWindowCtx ? { ownerWindowCtx: effectiveOwnerWindowCtx } : {}),
 		};
+		const structuralChange = this.isStructuralSnapshotChange(existing, storedSnapshot);
 		this.snapshots.set(snapshot.missionId, storedSnapshot);
-		this.snapshotDirty = true;
-		void this.persistSnapshotsIfDirty();
+		this.markSnapshotDirty();
+		// Debounce pure activity-heartbeat syncs (every 5s) to prevent SSD write storms,
+		// while immediately persisting structural state transitions (status/tokens/triggers).
+		this.scheduleSnapshotPersist(structuralChange);
 
 		// Clean stale per-token trackers for this mission.
+		const prevTokensById = new Map((existing?.tokens ?? []).map(t => [t.tokenId, t]));
 		const liveTokenKeys = new Set<string>();
 		for (const token of snapshot.tokens) {
 			const key = `${snapshot.missionId}:${token.tokenId}`;
 			liveTokenKeys.add(key);
-			if (token.status !== 'blocked') {
+			const prevTok = prevTokensById.get(token.tokenId);
+			if (token.status !== 'blocked' || (prevTok?.blocked?.startedAt !== undefined && token.blocked?.startedAt !== prevTok.blocked.startedAt)) {
 				this.blockedWakeupNotified.delete(key);
 			}
 			if (token.status !== 'active') {
@@ -455,17 +635,49 @@ export class AdeMissionWatchdogService extends Disposable {
 			}
 		}
 
-		// Clean stale trigger trackers for this mission.
+		// Clean stale / extended barrier deadline notifications.
+		const prevBarriersById = new Map((existing?.barriers ?? []).map(b => [b.barrierId, b]));
+		const liveBarrierKeys = new Set<string>();
+		for (const barrier of snapshot.barriers ?? []) {
+			const bKey = `${snapshot.missionId}:${barrier.barrierId}`;
+			liveBarrierKeys.add(bKey);
+			const prevBarrier = prevBarriersById.get(barrier.barrierId);
+			if (prevBarrier && barrier.deadlineAt > prevBarrier.deadlineAt) {
+				this.barrierDeadlineNotifiedAt.delete(bKey);
+			}
+		}
+		for (const key of Array.from(this.barrierDeadlineNotifiedAt.keys())) {
+			if (key.startsWith(`${snapshot.missionId}:`) && !liveBarrierKeys.has(key)) {
+				this.barrierDeadlineNotifiedAt.delete(key);
+			}
+		}
+
+		// Clean stale trigger trackers & reset re-armed `once` triggers when fireAt/fireCount changes.
+		const prevTriggersById = new Map((existing?.triggers ?? []).map(t => [t.id, t]));
+		let triggerMemMutated = false;
+		for (const trig of snapshot.triggers) {
+			if (trig.kind === 'once') {
+				const prevTrig = prevTriggersById.get(trig.id);
+				const trigKey = `${snapshot.missionId}:${trig.id}`;
+				const mem = this.triggerMemory.get(trigKey);
+				if (prevTrig && (prevTrig.fireAt !== trig.fireAt || (trig.fireCount === 0 && prevTrig.fireCount > 0))) {
+					const nextMem = mem ?? {};
+					nextMem.firedOnce = false;
+					nextMem.rearmedFireAt = trig.fireAt;
+					this.triggerMemory.set(trigKey, nextMem);
+					triggerMemMutated = true;
+				}
+			}
+		}
 		const liveTriggerKeys = new Set(snapshot.triggers.map(t => `${snapshot.missionId}:${t.id}`));
-		let removedAnyTrigger = false;
 		for (const key of Array.from(this.triggerMemory.keys())) {
 			if (key.startsWith(`${snapshot.missionId}:`) && !liveTriggerKeys.has(key)) {
 				this.triggerMemory.delete(key);
-				removedAnyTrigger = true;
+				triggerMemMutated = true;
 			}
 		}
-		if (removedAnyTrigger) {
-			this.triggerMemoryDirty = true;
+		if (triggerMemMutated) {
+			this.markTriggerMemoryDirty();
 			void this.persistTriggerMemoryIfDirty();
 		}
 
@@ -475,7 +687,7 @@ export class AdeMissionWatchdogService extends Disposable {
 	removeMission(missionId: string): void {
 		this.explicitlyRemovedMissionIds.add(missionId);
 		this.snapshots.delete(missionId);
-		this.snapshotDirty = true;
+		this.markSnapshotDirty();
 		void this.persistSnapshotsIfDirty();
 		const prefix = `${missionId}:`;
 		for (const key of Array.from(this.lastSilenceWakeupAt.keys())) {
@@ -493,6 +705,11 @@ export class AdeMissionWatchdogService extends Disposable {
 				this.blockedWakeupNotified.delete(key);
 			}
 		}
+		for (const key of Array.from(this.barrierDeadlineNotifiedAt.keys())) {
+			if (key.startsWith(prefix)) {
+				this.barrierDeadlineNotifiedAt.delete(key);
+			}
+		}
 		let removedAnyTrigger = false;
 		for (const key of Array.from(this.triggerMemory.keys())) {
 			if (key.startsWith(prefix)) {
@@ -501,7 +718,7 @@ export class AdeMissionWatchdogService extends Disposable {
 			}
 		}
 		if (removedAnyTrigger) {
-			this.triggerMemoryDirty = true;
+			this.markTriggerMemoryDirty();
 			void this.persistTriggerMemoryIfDirty();
 		}
 		this.reconcileTimer();
@@ -550,6 +767,27 @@ export class AdeMissionWatchdogService extends Disposable {
 	 *    `hostAlias` into ONE single multiplexed SSH invocation per tick!
 	 */
 	async runTick(): Promise<void> {
+		if (this.tickInFlight) {
+			this.tickPendingRerun = true;
+			return this.tickInFlight;
+		}
+		const loop = (async () => {
+			do {
+				this.tickPendingRerun = false;
+				await this.executeTickOnce();
+			} while (this.tickPendingRerun && !this._store.isDisposed);
+		})();
+		this.tickInFlight = loop;
+		try {
+			await loop;
+		} finally {
+			if (this.tickInFlight === loop) {
+				this.tickInFlight = undefined;
+			}
+		}
+	}
+
+	private async executeTickOnce(): Promise<void> {
 		await Promise.all([
 			this.ensureTriggerMemoryLoaded(),
 			this.ensureSnapshotsLoaded(),
@@ -596,7 +834,33 @@ export class AdeMissionWatchdogService extends Disposable {
 				t.status === 'active' || t.status === 'blocked' || t.status === 'waiting_join' || t.status === 'waiting_gate',
 			);
 
-			// Phase 1a: Synchronous zero-I/O token checks (silence timeouts + expired blocked windows).
+			// Phase 1a: Synchronous zero-I/O token checks (silence timeouts + expired blocked windows + join barrier deadlines).
+			const BARRIER_DEADLINE_RETRY_COOLDOWN_MS = 60_000;
+			for (const barrier of snapshot.barriers ?? []) {
+				if (!barrier.barrierId || typeof barrier.deadlineAt !== 'number' || !Number.isFinite(barrier.deadlineAt)) {
+					continue;
+				}
+				const bKey = `${snapshot.missionId}:${barrier.barrierId}`;
+				const lastNotifiedAt = this.barrierDeadlineNotifiedAt.get(bKey);
+				if (lastNotifiedAt !== undefined && now - lastNotifiedAt < BARRIER_DEADLINE_RETRY_COOLDOWN_MS) {
+					continue;
+				}
+				if (now >= barrier.deadlineAt) {
+					this.barrierDeadlineNotifiedAt.set(bKey, now);
+					this._onDidWatchdogWakeup.fire({
+						missionId: snapshot.missionId,
+						tokenId: barrier.parentTokenId,
+						nodeId: barrier.ownerNodeId,
+						holderAgentId: barrier.ownerAgentId,
+						reason: 'barrier_deadline_expired',
+						barrierId: barrier.barrierId,
+						detail: `Join barrier ${barrier.barrierId} deadline expired at ${new Date(barrier.deadlineAt).toISOString()}`,
+						timestamp: now,
+						...(snapshot.ownerWindowCtx ? { ownerWindowCtx: snapshot.ownerWindowCtx } : {}),
+					});
+				}
+			}
+
 			for (const token of snapshot.tokens) {
 				if (token.status === 'active') {
 					this.checkActiveSilenceTimeout(snapshot.missionId, token, silenceMs, now, snapshot.ownerWindowCtx);
@@ -609,13 +873,16 @@ export class AdeMissionWatchdogService extends Disposable {
 							});
 						} else if (this.remoteProbe?.remoteCheckPersistentSessions) {
 							const livenessKey = `rem:${snapshot.missionId}:${token.tokenId}`;
-							if (!this.inFlightProbeKeys.has(livenessKey)) {
-								this.inFlightProbeKeys.add(livenessKey);
+							const seq = this.reserveProbeKey(livenessKey);
+							if (seq !== undefined) {
 								asyncTasks.push(async () => {
 									const probePromise = this.checkRemoteActiveSessionLiveness(snapshot.missionId, token, now, snapshot.ownerWindowCtx)
 										.catch(() => undefined);
-									void probePromise.finally(() => this.inFlightProbeKeys.delete(livenessKey));
-									await raceWithTimeout(probePromise, this.probeTimeoutMs, livenessKey).catch(() => undefined);
+									try {
+										await raceWithTimeout(probePromise, this.probeTimeoutMs, livenessKey).catch(() => undefined);
+									} finally {
+										this.releaseProbeKey(livenessKey, seq);
+									}
 								});
 							}
 						}
@@ -654,14 +921,16 @@ export class AdeMissionWatchdogService extends Disposable {
 						});
 					} else {
 						const probeKey = `blk:${snapshot.missionId}:${token.tokenId}`;
-						if (!this.inFlightProbeKeys.has(probeKey)) {
-							// Reserve key synchronously at enqueue time so overlapping ticks cannot duplicate-queue probes.
-							this.inFlightProbeKeys.add(probeKey);
+						const seq = this.reserveProbeKey(probeKey);
+						if (seq !== undefined) {
 							asyncTasks.push(async () => {
 								const probePromise = this.checkBlockedWakeup(snapshot.missionId, token, now, snapshot.ownerWindowCtx)
 									.catch(() => undefined);
-								void probePromise.finally(() => this.inFlightProbeKeys.delete(probeKey));
-								await raceWithTimeout(probePromise, this.probeTimeoutMs, probeKey).catch(() => undefined);
+								try {
+									await raceWithTimeout(probePromise, this.probeTimeoutMs, probeKey).catch(() => undefined);
+								} finally {
+									this.releaseProbeKey(probeKey, seq);
+								}
 							});
 						}
 					}
@@ -699,13 +968,16 @@ export class AdeMissionWatchdogService extends Disposable {
 						});
 					} else {
 						const trigKey = `trg:${snapshot.missionId}:${trigger.id}`;
-						if (!this.inFlightProbeKeys.has(trigKey)) {
-							this.inFlightProbeKeys.add(trigKey);
+						const seq = this.reserveProbeKey(trigKey);
+						if (seq !== undefined) {
 							asyncTasks.push(async () => {
 								const trigPromise = this.evaluateTrigger(snapshot.missionId, trigger, now, snapshot.ownerWindowCtx, missionHasLiveWave)
 									.catch(() => undefined);
-								void trigPromise.finally(() => this.inFlightProbeKeys.delete(trigKey));
-								await raceWithTimeout(trigPromise, this.probeTimeoutMs, trigKey).catch(() => undefined);
+								try {
+									await raceWithTimeout(trigPromise, this.probeTimeoutMs, trigKey).catch(() => undefined);
+								} finally {
+									this.releaseProbeKey(trigKey, seq);
+								}
 							});
 						}
 					}
@@ -723,10 +995,10 @@ export class AdeMissionWatchdogService extends Disposable {
 			const batchFn = this.remoteProbe.remoteBatchProbe.bind(this.remoteProbe);
 			for (const [hostAlias, bucket] of hostBuckets.entries()) {
 				const hostKey = `host-batch:${hostAlias}`;
-				if (this.inFlightProbeKeys.has(hostKey)) {
+				const seq = this.reserveProbeKey(hostKey);
+				if (seq === undefined) {
 					continue;
 				}
-				this.inFlightProbeKeys.add(hostKey);
 				asyncTasks.push(async () => {
 					const probePromise = batchFn(hostAlias, {
 						pids: [...bucket.pids],
@@ -739,8 +1011,11 @@ export class AdeMissionWatchdogService extends Disposable {
 							try { consume(result); } catch { /* Isolate per-consumer failure */ }
 						}
 					}).catch(() => undefined);
-					void probePromise.finally(() => this.inFlightProbeKeys.delete(hostKey));
-					await raceWithTimeout(probePromise, this.probeTimeoutMs, hostKey).catch(() => undefined);
+					try {
+						await raceWithTimeout(probePromise, this.probeTimeoutMs, hostKey).catch(() => undefined);
+					} finally {
+						this.releaseProbeKey(hostKey, seq);
+					}
 				});
 			}
 		}
@@ -822,8 +1097,9 @@ export class AdeMissionWatchdogService extends Disposable {
 		const watchFile = blocked.watchFile?.trim();
 		if (watchFile) {
 			const mtime = batch.fileMtime[watchFile];
+			const signature = batch.fileSignature?.[watchFile];
 			const clockOffsetMs = typeof batch.remoteNowMs === 'number' ? batch.remoteNowMs - now : 0;
-			if (this.isBlockedFileReady(blocked, mtime, clockOffsetMs)) {
+			if (this.isBlockedFileReady(blocked, mtime, clockOffsetMs, signature)) {
 				this.blockedWakeupNotified.add(key);
 				this._onDidWatchdogWakeup.fire({
 					missionId,
@@ -843,12 +1119,19 @@ export class AdeMissionWatchdogService extends Disposable {
 		blocked: NonNullable<IAdeWatchdogTokenSpec['blocked']>,
 		mtime: number | undefined,
 		remoteClockOffsetMs = 0,
+		signature?: string,
 	): boolean {
-		if (mtime === undefined) {
+		if (mtime === undefined && signature === undefined) {
 			return false;
 		}
-		if (blocked.initialFileMtime === null) {
+		if (blocked.initialFileSignature === null || blocked.initialFileMtime === null) {
 			return true;
+		}
+		if (typeof blocked.initialFileSignature === 'string' && signature !== undefined) {
+			return signature !== blocked.initialFileSignature;
+		}
+		if (mtime === undefined) {
+			return false;
 		}
 		if (typeof blocked.initialFileMtime === 'number') {
 			return mtime !== blocked.initialFileMtime;
@@ -992,27 +1275,47 @@ export class AdeMissionWatchdogService extends Disposable {
 			}
 		}
 
-		// 3. Early wakeup on file arrival/update (local or remote SSH, clock-drift safe via target-host baseline mtime)
+		// 3. Early wakeup on file arrival/update (local or remote SSH, clock-drift safe via target-host baseline mtime/signature)
 		if (blocked.watchFile && blocked.watchFile.trim()) {
 			let mtime: number | undefined;
+			let signature: string | undefined;
 			try {
 				if (isRemote && this.remoteProbe && blocked.hostAlias) {
-					mtime = await raceWithTimeout(
-						this.remoteProbe.remoteFileStatMtime(blocked.hostAlias, blocked.watchFile),
-						this.probeTimeoutMs,
-						`remoteFileStatMtime:${blocked.hostAlias}:${blocked.watchFile}`,
-					);
+					if (typeof blocked.initialFileSignature === 'string' && this.remoteProbe.remoteFileStatSignature) {
+						signature = await raceWithTimeout(
+							this.remoteProbe.remoteFileStatSignature(blocked.hostAlias, blocked.watchFile),
+							this.probeTimeoutMs,
+							`remoteFileStatSignature:${blocked.hostAlias}:${blocked.watchFile}`,
+						);
+					}
+					if (signature === undefined) {
+						mtime = await raceWithTimeout(
+							this.remoteProbe.remoteFileStatMtime(blocked.hostAlias, blocked.watchFile),
+							this.probeTimeoutMs,
+							`remoteFileStatMtime:${blocked.hostAlias}:${blocked.watchFile}`,
+						);
+					}
 				} else if (!isRemote) {
-					mtime = await raceWithTimeout(
-						this.localProbe.fileStatMtime(blocked.watchFile),
-						this.probeTimeoutMs,
-						`localFileStatMtime:${blocked.watchFile}`,
-					);
+					if (typeof blocked.initialFileSignature === 'string' && this.localProbe.fileStatSignature) {
+						signature = await raceWithTimeout(
+							this.localProbe.fileStatSignature(blocked.watchFile),
+							this.probeTimeoutMs,
+							`localFileStatSignature:${blocked.watchFile}`,
+						);
+					}
+					if (signature === undefined) {
+						mtime = await raceWithTimeout(
+							this.localProbe.fileStatMtime(blocked.watchFile),
+							this.probeTimeoutMs,
+							`localFileStatMtime:${blocked.watchFile}`,
+						);
+					}
 				}
 			} catch {
 				mtime = undefined;
+				signature = undefined;
 			}
-			if (this.isBlockedFileReady(blocked, mtime, 0)) {
+			if (this.isBlockedFileReady(blocked, mtime, 0, signature)) {
 				this.blockedWakeupNotified.add(key);
 				this._onDidWatchdogWakeup.fire({
 					missionId,
@@ -1038,13 +1341,15 @@ export class AdeMissionWatchdogService extends Disposable {
 		const lastFiredAt = Math.max(trigger.lastFiredAt ?? 0, mem.lastFiredAt ?? 0);
 
 		if (trigger.kind === 'once') {
-			if (trigger.fireCount > 0 || mem.firedOnce) {
+			const isRearmed = mem.rearmedFireAt !== undefined && mem.rearmedFireAt === trigger.fireAt;
+			if (mem.firedOnce || (trigger.fireCount > 0 && !isRearmed)) {
 				return;
 			}
 			if (typeof trigger.fireAt === 'number' && now >= trigger.fireAt) {
 				mem.firedOnce = true;
+				mem.rearmedFireAt = undefined;
 				mem.lastFiredAt = now;
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 				this.emitTriggerFire(missionId, trigger, now, `One-shot schedule reached (${new Date(trigger.fireAt).toISOString()})`, ownerWindowCtx);
 			}
 			return;
@@ -1057,12 +1362,12 @@ export class AdeMissionWatchdogService extends Disposable {
 			const intervalMs = trigger.intervalMs;
 			if (lastFiredAt === 0) {
 				mem.lastFiredAt = now;
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 				return;
 			}
 			if (now - lastFiredAt >= intervalMs) {
 				mem.lastFiredAt = now;
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 				this.emitTriggerFire(missionId, trigger, now, `Interval trigger (${intervalMs}ms)`, ownerWindowCtx);
 			}
 			return;
@@ -1079,7 +1384,7 @@ export class AdeMissionWatchdogService extends Disposable {
 			if (matchesCronExpression(trigger.cronExpr, new Date(now))) {
 				mem.lastCronMinuteBucket = minuteBucket;
 				mem.lastFiredAt = now;
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 				this.emitTriggerFire(missionId, trigger, now, `Cron matched (${trigger.cronExpr})`, ownerWindowCtx);
 			}
 		}
@@ -1122,19 +1427,19 @@ export class AdeMissionWatchdogService extends Disposable {
 			const existedBefore = mem.fileExisted;
 			if (mem.fileExisted !== existsNow) {
 				mem.fileExisted = existsNow;
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 			}
 			if (existedBefore === undefined) {
 				if (existsNow) {
 					mem.lastFileMtime = mtime;
 				}
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 				return;
 			}
 			if (!existedBefore && existsNow) {
 				mem.lastFileMtime = mtime;
 				mem.lastFiredAt = now;
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 				this.emitTriggerFire(missionId, trigger, now, `File created: ${trigger.targetPath}`, ownerWindowCtx);
 			}
 			return;
@@ -1146,13 +1451,13 @@ export class AdeMissionWatchdogService extends Disposable {
 		}
 		if (mem.lastFileMtime === undefined) {
 			mem.lastFileMtime = mtime;
-			this.triggerMemoryDirty = true;
+			this.markTriggerMemoryDirty();
 			return;
 		}
 		if (mtime !== mem.lastFileMtime) {
 			mem.lastFileMtime = mtime;
 			mem.lastFiredAt = now;
-			this.triggerMemoryDirty = true;
+			this.markTriggerMemoryDirty();
 			this.emitTriggerFire(missionId, trigger, now, `File changed: ${trigger.targetPath}`, ownerWindowCtx);
 		}
 	}
@@ -1170,14 +1475,14 @@ export class AdeMissionWatchdogService extends Disposable {
 		}
 		if (mem.lastGitHead === undefined) {
 			mem.lastGitHead = sha;
-			this.triggerMemoryDirty = true;
+			this.markTriggerMemoryDirty();
 			return;
 		}
 		if (sha !== mem.lastGitHead) {
 			const prev = mem.lastGitHead;
 			mem.lastGitHead = sha;
 			mem.lastFiredAt = now;
-			this.triggerMemoryDirty = true;
+			this.markTriggerMemoryDirty();
 			this.emitTriggerFire(missionId, trigger, now, `Git HEAD changed ${prev.slice(0, 7)} -> ${sha.slice(0, 7)}`, ownerWindowCtx);
 		}
 	}
@@ -1208,7 +1513,7 @@ export class AdeMissionWatchdogService extends Disposable {
 			// GPU became genuinely busy -> re-arm edge detector for the next busy -> idle transition!
 			if (mem.gpuIdleDisarmed) {
 				mem.gpuIdleDisarmed = false;
-				this.triggerMemoryDirty = true;
+				this.markTriggerMemoryDirty();
 			}
 			return;
 		}
@@ -1221,7 +1526,7 @@ export class AdeMissionWatchdogService extends Disposable {
 		const hostLabel = trigger.hostAlias && trigger.hostAlias !== 'local' ? trigger.hostAlias : 'local';
 		mem.gpuIdleDisarmed = true;
 		mem.lastFiredAt = now;
-		this.triggerMemoryDirty = true;
+		this.markTriggerMemoryDirty();
 		this.emitTriggerFire(missionId, trigger, now, `GPU idle on ${hostLabel} (${utilPct}% <= ${threshold}%)`, ownerWindowCtx);
 	}
 
@@ -1300,10 +1605,53 @@ export class AdeMissionWatchdogService extends Disposable {
 	}
 
 	override dispose(): void {
+		this.disposed = true;
 		if (this.timer) {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
+		if (this.snapshotFlushTimer !== undefined) {
+			clearTimeout(this.snapshotFlushTimer);
+			this.snapshotFlushTimer = undefined;
+		}
+		if (this.snapshotDirty && this.snapshotStatePath) {
+			try {
+				const payloadObj: Record<string, IAdeMissionWatchdogSnapshot> = {};
+				for (const [missionId, snap] of this.snapshots.entries()) {
+					if (snap.status === 'running') {
+						payloadObj[missionId] = snap;
+					}
+				}
+				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must flush pending watchdog snapshots before shutdown.
+				fs.mkdirSync(path.dirname(this.snapshotStatePath), { recursive: true, mode: 0o700 });
+				const tmp = `${this.snapshotStatePath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must flush pending watchdog snapshots before shutdown.
+				fs.writeFileSync(tmp, JSON.stringify(payloadObj, null, 2), { encoding: 'utf8', mode: 0o600 });
+				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and commits watchdog snapshots atomically before shutdown.
+				fs.renameSync(tmp, this.snapshotStatePath);
+			} catch {
+				// Best-effort flush on teardown
+			}
+		}
+		if (this.triggerMemoryDirty && this.triggerStatePath) {
+			try {
+				const payloadObj: Record<string, ITriggerMonitorMemory> = {};
+				for (const [k, v] of this.triggerMemory.entries()) {
+					payloadObj[k] = { ...v };
+				}
+				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must flush pending trigger state before shutdown.
+				fs.mkdirSync(path.dirname(this.triggerStatePath), { recursive: true, mode: 0o700 });
+				const tmp = `${this.triggerStatePath}.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`;
+				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and must flush pending trigger state before shutdown.
+				fs.writeFileSync(tmp, JSON.stringify(payloadObj, null, 2), { encoding: 'utf8', mode: 0o600 });
+				// eslint-disable-next-line local/code-no-sync-fs -- IDisposable.dispose() is synchronous and commits trigger state atomically before shutdown.
+				fs.renameSync(tmp, this.triggerStatePath);
+			} catch {
+				// Best-effort flush on teardown
+			}
+		}
+		this.snapshotDirty = false;
+		this.triggerMemoryDirty = false;
 		super.dispose();
 	}
 }
