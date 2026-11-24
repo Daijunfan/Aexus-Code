@@ -31,9 +31,9 @@
 > 3. **原位检视接力令牌、共享白板与 FinOps，瞬切 `ADE ⇄ IDE`**：点击任意卡片、胶囊或在途彗星即可原位展开指针接力轨迹、部门白板章节目录、结单契约与多轮 FinOps 预算账本；随时按 `Alt+Cmd+A`（`Alt+Ctrl+A`）瞬切 **`ADE ⇄ IDE`**。
 
 <p align="center">
-  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code ADE 旗舰指挥中心 — 多系统多项目侧栏（macOS、Ubuntu、Kali、Windows）、宽屏 Orchestration 编排、雕琢级 Mission Task DAG 与多云主机并发终端" />
+  <img src="promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code ADE 旗舰指挥中心 — 4 大系统跨云协作（macOS、Ubuntu H100、Kali、Windows 11）、旗舰大模型（Claude Opus 4.6、GPT-5.4、Gemini 3.1 Pro、DeepSeek R1）、高亮协作链路与 4 主机并发 SSH 终端" />
   <br/>
-  <sub><strong>ADE 旗舰指挥中心视图：</strong>本地 + 多云 4 大系统（<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>）项目同屏管理 ➔ 宽屏 Orchestration 与雕琢级 Mission Task DAG 双视图实时联动 ➔ 多云主机并发 SSH 终端 · <a href="gallery.md">浏览完整 24 张 2x Retina 旗舰图集 →</a></sub>
+  <sub><strong>一个面板掌控多云端与多引擎旗舰 Agent 协同作业：</strong>4 大系统侧栏（<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>）➔ 跨云高亮协作拓扑（<code>Claude Opus 4.6</code> · <code>GPT-5.4</code> · <code>Gemini 3.1 Pro</code> · <code>DeepSeek R1</code>）⇄ 实时联动任务 DAG ➔ 4 台跨系统并发 SSH 终端 · <a href="gallery.md">浏览完整 30 张 2x Retina 旗舰图集 →</a></sub>
 </p>
 
 ---
@@ -175,6 +175,33 @@ flowchart TB
 | **[`deep-research-lab`](../examples/blueprints/deep-research-lab.md)** | `R1 → (R2 ∥ R3 ∥ R4) → U1 → R5` | `PI (L1)`, `TrackA (L2)`, `TrackB (L2)`, `Bench (L3)` | 多轨假设探索、反证基线、定量基准与同行评审报告 |
 | **[`arch-teardown`](../examples/blueprints/arch-teardown.md)** | `R1 → (R2 ∥ R3) → R4 → U1` | `Architect (L1)`, `Systems (L2)`, `UX (L2)`, `Reviewer (L3)` | 系统并发与开发体验双轨架构拆解，产出可执行 RFC |
 
+#### 多领域跨云多智能体实战场景一览
+
+无论是红蓝对抗安全集群、多机多卡 AI 科研实验、三云端实时会话接力还是全引擎 FinOps 成本治理，均可在一个面板内统一调度：
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="promo/aexus-25-cybersec-red-blue-cross-cloud-audit-dark.png" width="100%" alt="红蓝对抗跨云安全集群 — Kali、Ubuntu、Windows 11 与 macOS 协同攻防" />
+      <p align="center"><sub><strong>红蓝对抗跨云安全集群：</strong><code>Kali</code> DeepSeek R1 漏洞复现 ⇄ <code>Ubuntu</code> GPT-5.4 热修复 ⇄ <code>Win11</code> Gemini 3.1 Pro 域控回归校验。</sub></p>
+    </td>
+    <td width="50%">
+      <img src="promo/aexus-26-ai-research-lab-multi-gpu-cluster-dark.png" width="100%" alt="分布式多 GPU AI 科研实验室 — 8xH100 + 8xH200 + Win11 DirectML 并行消融实验" />
+      <p align="center"><sub><strong>多 GPU AI 科研实验室：</strong><code>8×H100</code> FP8 算子、<code>8×H200</code> 稀疏 MoE 与 <code>Win11</code> DirectML 消融实验跨云并行汇聚。</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="promo/aexus-28-three-cloud-simultaneous-agent-streams-dark.png" width="100%" alt="三云端多引擎实时流式协同 — Claude Opus 4.6、GPT-5.4 与 DeepSeek R1 同屏接力" />
+      <p align="center"><sub><strong>三云端多引擎同屏实时流：</strong>本机 <code>macOS</code> Claude Opus 4.6 拆分令牌，与远端 <code>Ubuntu</code> GPT-5.4 及 <code>Kali</code> DeepSeek R1 同屏实时流转。</sub></p>
+    </td>
+    <td width="50%">
+      <img src="promo/aexus-30-finops-budget-governance-and-checkpoints-dark.png" width="100%" alt="8 大引擎 FinOps 预算熔断、KV 缓存监控与时光回溯检查点" />
+      <p align="center"><sub><strong>全引擎 FinOps 与状态检查点：</strong>8 大引擎旗舰模型统一计费、81% 缓存命中省费、硬预算熔断与一键回滚检查点。</sub></p>
+    </td>
+  </tr>
+</table>
+
 ---
 
 ### 4. Smart Calm 侧栏与按职级过滤的 `ADE Inbox`
@@ -204,7 +231,7 @@ Aexus Code 完整保留原生 `Code - OSS` IDE 的全部生产力——资源管
 - **非破坏性 `~/.ssh/config` 保证**：`syncUserSshDir` 默认为 **`false`**——Aexus Code 仅向自身的 SSH 会话与终端传入 `-F <userDataDir>/ssh/effective_ssh_config`，**绝不修改或向用户全局 `~/.ssh/config` 头部插入 `Include`**。
 - **OpenSSH 传输行为**：macOS / Linux 使用 OpenSSH `ControlMaster` 连接复用，Windows 使用直连 OpenSSH；后台文件、Git 与探针操作使用 `BatchMode=yes`（需密钥或 `ssh-agent` 免交互鉴权，Aexus Code 从不读取或复制私钥内容）。
 - **无损迁移 VS Code 配置**：通过 `aexus-ade host import-vscode` 只读解析 `~/.ssh/config`（含递归 `Include`）及 VS Code 远端目录历史。
-- **完整 2x Retina 宣传图集**：请前往 [`docs/gallery.md`](gallery.md) 查看全部 24 张旗舰高清界面展示。
+- **完整 2x Retina 宣传图集**：请前往 [`docs/gallery.md`](gallery.md) 查看全部 30 张旗舰高清界面展示。
 
 ---
 

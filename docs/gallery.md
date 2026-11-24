@@ -1,6 +1,6 @@
-# Aexus Code Visual Gallery (24-Shot 2× Retina Showcase)
+# Aexus Code Visual Gallery (30-Shot 2× Retina Showcase)
 
-A curated 2× Retina (`2880×1800`) showcase of **Aexus Code** across Dark and Daylight themes: one unified desktop command center managing **multiple local & SSH cloud repositories**, **8 native BYO-CLI coding engines**, **multi-vendor frontier models**, **widescreen cyclic Staff Orchestration (`344×188`)**, **sculpted Mission Task DAGs (`280×154`)**, **folded Department Shared Whiteboards (`276×164`)**, **Zero-Server Multi-OS Cloud Host Studio**, **live multi-engine sessions**, and **instant `ADE ⇄ IDE` mirror symmetry**.
+A curated 2× Retina (`2880×1800`) showcase of **Aexus Code** across Dark and Daylight themes: one unified desktop command center managing **multiple local & SSH cloud repositories (`macOS` · `Ubuntu` · `Kali` · `Windows`)**, **8 native BYO-CLI coding engines**, **frontier models (`Claude Opus 4.6`, `GPT-5.4`, `Gemini 3.1 Pro`, `DeepSeek R1`, `Qwen3-Max`, `Kimi K2.5`, `Grok 4`)**, **highlighted cross-cloud Staff Orchestration (`344×188`)**, **sculpted Mission Task DAGs (`280×154`)**, **folded Department Shared Whiteboards (`276×164`)**, **Zero-Server Multi-OS Cloud Host Studio**, **simultaneous multi-cloud agent streams**, **FinOps & Checkpoints**, and **instant `ADE ⇄ IDE` mirror symmetry**.
 
 ---
 
@@ -157,6 +157,43 @@ A curated 2× Retina (`2880×1800`) showcase of **Aexus Code** across Dark and D
     <td width="50%">
       <img src="promo/aexus-24-ade-ide-mirror-symmetry-dark.png" width="100%" alt="Instant ADE to IDE Mirror Symmetry &amp; Multi-Cloud FinOps (Dark)" />
       <p align="center"><sub><strong>24. Instant <code>ADE ⇄ IDE</code> Mirror Symmetry:</strong> Flip to native IDE mode managing the same 6 mirrored local + SSH roots, TypeScript editor, live synced Task DAG, and 3-host SSH terminals.</sub></p>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 6. Multi-Domain Cross-Cloud Collaboration, Live Streams & FinOps (`25`–`30`)
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="promo/aexus-25-cybersec-red-blue-cross-cloud-audit-dark.png" width="100%" alt="Red/Blue Offensive-Defensive Security Swarm Across Kali, Ubuntu, Windows 11 &amp; macOS (Dark)" />
+      <p align="center"><sub><strong>25. Red/Blue Offensive-Defensive Security Swarm:</strong> <code>Security Red/Blue Audit</code> preset coordinating <code>Kali</code> DeepSeek R1 exploit verification ⇄ <code>Ubuntu</code> GPT-5.4 hotfix ⇄ <code>Win11</code> Gemini 3.1 Pro AD checks under <code>macOS</code> Opus 4.6 CISO.</sub></p>
+    </td>
+    <td width="50%">
+      <img src="promo/aexus-26-ai-research-lab-multi-gpu-cluster-dark.png" width="100%" alt="Distributed Multi-GPU AI Research Lab Across 8xH100, 8xH200 &amp; Win11 DirectML (Dark)" />
+      <p align="center"><sub><strong>26. Distributed Multi-GPU AI Research Lab:</strong> <code>AI Research Lab</code> preset running parallel <code>8×H100</code> FP8 FlashAttn-3, <code>8×H200</code> Sparse MoE, and <code>Win11</code> DirectML ablation tracks with synced DAG &amp; GPU terminals.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="promo/aexus-27-fullstack-polyglot-release-pipeline-dark.png" width="100%" alt="4-OS Polyglot Full-Stack Release Train — macOS, Ubuntu, Windows 11 &amp; Kali (Dark)" />
+      <p align="center"><sub><strong>27. 4-OS Polyglot Full-Stack Release Train:</strong> <code>Agile 3-Tier Startup</code> preset converging macOS universal build, Ubuntu Rust gateway, Win11 MSI installer, and Kali SLSA-3 attestation into one release gate.</sub></p>
+    </td>
+    <td width="50%">
+      <img src="promo/aexus-28-three-cloud-simultaneous-agent-streams-dark.png" width="100%" alt="3-Cloud Simultaneous Multi-Engine Live Agent Streams — Claude Opus 4.6, GPT-5.4 &amp; DeepSeek R1 (Dark)" />
+      <p align="center"><sub><strong>28. 3-Cloud Simultaneous Live Agent Streams:</strong> Watch <code>macOS</code> Claude Opus 4.6, <code>Ubuntu</code> Codex GPT-5.4, and <code>Kali</code> DeepSeek R1 stream patches, reasoning traces, and baton handoffs side by side.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="promo/aexus-29-supervisor-xray-beams-and-cloud-territories-dark.png" width="100%" alt="Supervisor X-Ray Ownership Beams &amp; Multi-Cloud Territory Zones (Dark)" />
+      <p align="center"><sub><strong>29. Supervisor X-Ray Beams &amp; Cloud Territories:</strong> Hold <code>Tab</code> to illuminate color-coded supervisor ownership enclosures, X-Ray lineage beams, and critical-path traces across multi-cloud DAG nodes.</sub></p>
+    </td>
+    <td width="50%">
+      <img src="promo/aexus-30-finops-budget-governance-and-checkpoints-dark.png" width="100%" alt="8-Engine FinOps Budget Breaker, KV-Cache Telemetry &amp; Time-Travel Checkpoints (Dark)" />
+      <p align="center"><sub><strong>30. 8-Engine FinOps &amp; Time-Travel Checkpoints:</strong> Unified frontier model spend ledger, 81.4% KV-cache savings, hard budget circuit-breaker, and SQLite WAL checkpoint diff/restore.</sub></p>
     </td>
   </tr>
 </table>

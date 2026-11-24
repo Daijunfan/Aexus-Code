@@ -31,9 +31,9 @@
 > 3. **Inspect Live Batons, Whiteboards & FinOps — Flip `ADE ⇄ IDE` Instantly**: Click any card, chip, or live baton comet to inspect pointer-only baton traces, Department Whiteboards, Completion Contracts, and `maxHops` / FinOps budget circuit-breakers, or press `Alt+Cmd+A` (`Alt+Ctrl+A`) to switch instantly between **`ADE`** and **`IDE`**.
 
 <p align="center">
-  <img src="docs/promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code Flagship ADE Command Center — 4-OS Multi-Project Sidebar, Widescreen Staff Orchestration, Sculpted Mission Task DAG &amp; Simultaneous Multi-Cloud SSH Terminals" />
+  <img src="docs/promo/aexus-01-flagship-command-center-dark.png" width="100%" alt="Aexus Code Flagship ADE Command Center — 4-OS Cross-Cloud Collaboration (macOS, Ubuntu H100, Kali, Windows 11), Frontier Models (Claude Opus 4.6, GPT-5.4, Gemini 3.1 Pro, DeepSeek R1), Highlighted Collaboration Lineage &amp; 4-Host Simultaneous SSH Terminals" />
   <br/>
-  <sub><strong>Flagship ADE Command Center:</strong> Multi-OS Multi-Project Sidebar (<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>) ➔ Dual-View Widescreen Staff Orchestration &amp; Sculpted Mission Task DAG ➔ Simultaneous Multi-Cloud SSH Terminals · <a href="docs/gallery.md">Explore Full 24-Shot 2x Retina Visual Gallery →</a></sub>
+  <sub><strong>One Panel Controlling Multi-Cloud Hosts &amp; Frontier Agents:</strong> 4-OS Multi-Project Sidebar (<code>macOS</code> · <code>Ubuntu</code> · <code>Kali</code> · <code>Windows</code>) ➔ Highlighted Cross-Cloud Staff Collaboration (<code>Claude Opus 4.6</code> · <code>GPT-5.4</code> · <code>Gemini 3.1 Pro</code> · <code>DeepSeek R1</code>) ⇄ Synced Mission Task DAG ➔ 4-Host Simultaneous Live SSH Terminals · <a href="docs/gallery.md">Explore Full 30-Shot 2x Retina Visual Gallery →</a></sub>
 </p>
 
 ---
@@ -175,6 +175,33 @@ Pair a strictly acyclic sculpted **Mission Task DAG** with a persistent cyclic *
 | **[`deep-research-lab`](examples/blueprints/deep-research-lab.md)** | `R1 → (R2 ∥ R3 ∥ R4) → U1 → R5` | `PI (L1)`, `TrackA (L2)`, `TrackB (L2)`, `Bench (L3)` | Multi-track hypothesis probing, quantitative benchmarks & peer-reviewed synthesis |
 | **[`arch-teardown`](examples/blueprints/arch-teardown.md)** | `R1 → (R2 ∥ R3) → R4 → U1` | `Architect (L1)`, `Systems (L2)`, `UX (L2)`, `Reviewer (L3)` | Parallel systems + UX teardown converging into an Engineering RFC |
 
+#### Multi-Domain Cross-Cloud Collaboration in Action
+
+From offensive/defensive security swarms and multi-GPU AI research labs to simultaneous multi-cloud agent streams and FinOps budget governance — coordinate heterogeneous engines, frontier models, and remote OS hosts from a single workbench:
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/promo/aexus-25-cybersec-red-blue-cross-cloud-audit-dark.png" width="100%" alt="Red/Blue Offensive-Defensive Security Swarm Across Kali, Ubuntu, Windows 11 &amp; macOS" />
+      <p align="center"><sub><strong>Red/Blue Cybersec Swarm:</strong> <code>Kali</code> DeepSeek R1 exploit repro ⇄ <code>Ubuntu</code> GPT-5.4 patcher ⇄ <code>Win11</code> Gemini 3.1 Pro AD verifier under <code>macOS</code> Opus 4.6 CISO.</sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/promo/aexus-26-ai-research-lab-multi-gpu-cluster-dark.png" width="100%" alt="Distributed Multi-GPU AI Research Lab Across 8xH100, 8xH200 &amp; Win11 DirectML" />
+      <p align="center"><sub><strong>Multi-GPU AI Research Lab:</strong> Parallel <code>8×H100</code> FP8 FlashAttn-3 + <code>8×H200</code> Sparse MoE + <code>Win11</code> DirectML ablation coordinated via quorum join barriers.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/promo/aexus-28-three-cloud-simultaneous-agent-streams-dark.png" width="100%" alt="3-Cloud Simultaneous Multi-Engine Live Agent Streams — Claude Opus 4.6, GPT-5.4 &amp; DeepSeek R1" />
+      <p align="center"><sub><strong>3-Cloud Simultaneous Agent Streams:</strong> <code>macOS</code> Claude Opus 4.6 splitting live batons to <code>Ubuntu</code> Codex GPT-5.4 &amp; <code>Kali</code> DeepSeek R1 side by side.</sub></p>
+    </td>
+    <td width="50%">
+      <img src="docs/promo/aexus-30-finops-budget-governance-and-checkpoints-dark.png" width="100%" alt="8-Engine FinOps Budget Breaker, KV-Cache Telemetry &amp; Time-Travel Checkpoints" />
+      <p align="center"><sub><strong>8-Engine FinOps &amp; Checkpoints:</strong> Unified frontier pricing, 81% KV-cache savings, hard budget circuit-breaker, and SQLite WAL time-travel checkpoints.</sub></p>
+    </td>
+  </tr>
+</table>
+
 ---
 
 ### 4. Smart Calm Sidebar & Rank-Filtered Inbox
@@ -204,7 +231,7 @@ Aexus Code keeps 100% of native `Code - OSS` IDE ergonomics intact — Explorer,
 - **Non-Destructive `~/.ssh/config` Guarantee**: `syncUserSshDir` defaults to **`false`** — Aexus Code passes `-F <userDataDir>/ssh/effective_ssh_config` exclusively to its own SSH sessions/terminals and **never prepends `Include` or modifies your global `~/.ssh/config`**.
 - **OpenSSH Transport**: Uses **OpenSSH `ControlMaster` multiplexing on macOS/Linux** and **direct OpenSSH on Windows**. Background filesystem, Git, and probe operations run with **`BatchMode=yes`**, requiring key-based / `ssh-agent` authentication (private keys are never read or copied).
 - **Non-Destructive VS Code Migration**: Imports `~/.ssh/config` (including recursive `Include` directives) and VS Code remote host/directory history via `aexus-ade host import-vscode` (read-only import).
-- **Full Visual Gallery**: See [`docs/gallery.md`](docs/gallery.md) for the complete 24-shot 2x Retina showcase gallery.
+- **Full Visual Gallery**: See [`docs/gallery.md`](docs/gallery.md) for the complete 30-shot 2x Retina showcase gallery.
 
 ---
 
